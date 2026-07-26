@@ -42,4 +42,45 @@ void main() {
     expect(tester.getSize(find.text('Search')).height, greaterThan(48));
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('custom multi-line title height matches reported height', (
+    tester,
+  ) async {
+    const titleContentHeight = 64.0;
+    late double reportedHeight;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.light(),
+        home: Builder(
+          builder: (context) {
+            reportedHeight = frostedAppBarHeight(
+              context,
+              titleContentHeight: titleContentHeight,
+            );
+            return const Stack(
+              children: [
+                FrostedAppBar(
+                  titleContentHeight: titleContentHeight,
+                  title: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [Text('Title'), Text('Subtitle')],
+                  ),
+                ),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final clip = find.descendant(
+      of: find.byType(FrostedAppBar),
+      matching: find.byType(ClipRect),
+    );
+    expect(tester.getSize(clip).height, closeTo(reportedHeight, 0.01));
+    expect(reportedHeight, closeTo(titleContentHeight + Grid.xs + 1, 0.01));
+    expect(tester.takeException(), isNull);
+  });
 }

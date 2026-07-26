@@ -16,13 +16,20 @@ TextStyle _effectiveTitleStyle(BuildContext context, TextStyle? titleStyle) {
   return baseStyle.copyWith(fontWeight: FontWeight.w600).merge(titleStyle);
 }
 
-double _barContentHeight(BuildContext context, TextStyle? titleStyle) {
+double _barContentHeight(
+  BuildContext context,
+  TextStyle? titleStyle,
+  double titleContentHeight,
+) {
   final style = _effectiveTitleStyle(context, titleStyle);
   final scaledFontSize = MediaQuery.textScalerOf(
     context,
   ).scale(style.fontSize ?? 20);
   final scaledTitleHeight = scaledFontSize * (style.height ?? 1);
-  final accessibleHeight = Grid.xxs + scaledTitleHeight + Grid.xxs;
+  final effectiveTitleHeight = titleContentHeight > scaledTitleHeight
+      ? titleContentHeight
+      : scaledTitleHeight;
+  final accessibleHeight = Grid.xxs + effectiveTitleHeight + Grid.xxs;
   return accessibleHeight > _kBarContentMinHeight
       ? accessibleHeight
       : _kBarContentMinHeight;
@@ -31,14 +38,16 @@ double _barContentHeight(BuildContext context, TextStyle? titleStyle) {
 /// Returns the total height of the [FrostedAppBar] including safe area padding.
 ///
 /// Use this to add top spacing to body content so it starts below the bar.
-/// Pass the same [titleStyle] to the bar and this helper when customizing it.
+/// Pass the same [titleStyle] and [titleContentHeight] to the bar and this
+/// helper when customizing them.
 double frostedAppBarHeight(
   BuildContext context, {
   double bottomHeight = 0,
   TextStyle? titleStyle,
+  double titleContentHeight = 0,
 }) {
   return MediaQuery.paddingOf(context).top +
-      _barContentHeight(context, titleStyle) +
+      _barContentHeight(context, titleStyle, titleContentHeight) +
       bottomHeight +
       _kBottomBorderWidth;
 }
@@ -57,6 +66,11 @@ class FrostedAppBar extends StatelessWidget {
 
   /// Optional style merged over the default title style.
   final TextStyle? titleStyle;
+
+  /// Scaled height needed by a custom title with multiple text lines.
+  ///
+  /// Pass the same value to [frostedAppBarHeight] when spacing body content.
+  final double titleContentHeight;
 
   /// Optional content displayed below the title row in the same surface.
   final Widget? bottom;
@@ -83,6 +97,7 @@ class FrostedAppBar extends StatelessWidget {
     this.leading,
     this.title,
     this.titleStyle,
+    this.titleContentHeight = 0,
     this.bottom,
     this.bottomHeight = 0,
     this.actions = const [],
@@ -96,7 +111,11 @@ class FrostedAppBar extends StatelessWidget {
     final topPadding = MediaQuery.paddingOf(context).top;
     final canPop = Navigator.canPop(context);
     final effectiveTitleStyle = _effectiveTitleStyle(context, titleStyle);
-    final barContentHeight = _barContentHeight(context, titleStyle);
+    final barContentHeight = _barContentHeight(
+      context,
+      titleStyle,
+      titleContentHeight,
+    );
 
     final effectiveLeading =
         leading ??
