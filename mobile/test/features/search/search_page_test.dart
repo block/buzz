@@ -105,6 +105,45 @@ void main() {
 
     expect(padding.bottom, Grid.xl + keyboardInset);
   });
+
+  testWidgets('keeps no-results feedback above the keyboard', (tester) async {
+    const keyboardInset = 300.0;
+    tester.view.physicalSize = const Size(320, 640);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    const query = 'missing';
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          searchProvider.overrideWith(
+            () => _FakeSearchNotifier(const SearchState(query: query)),
+          ),
+          profileProvider.overrideWith(() => _FakeProfileNotifier()),
+        ],
+        child: Builder(
+          builder: (context) => MediaQuery(
+            data: MediaQuery.of(context).copyWith(
+              viewInsets: const EdgeInsets.only(bottom: keyboardInset),
+            ),
+            child: const SearchPage(),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final noResults = find.byKey(const Key('search-no-results-state'));
+    final message = find.text("No results for '$query'");
+    final keyboardTop =
+        tester.view.physicalSize.height / tester.view.devicePixelRatio -
+        keyboardInset;
+
+    expect(noResults, findsOneWidget);
+    expect(tester.getBottomLeft(message).dy, lessThan(keyboardTop));
+    expect(tester.takeException(), isNull);
+  });
 }
 
 class _FakeSearchNotifier extends SearchNotifier {

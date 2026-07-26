@@ -223,11 +223,17 @@ class _SearchBody extends ConsumerWidget {
         state.messageResults.isNotEmpty;
 
     if (!state.isLoading && !hasAnyResults) {
-      return Center(
-        child: Text(
-          "No results for '${state.query}'",
-          style: context.textTheme.bodyMedium?.copyWith(
-            color: context.colors.onSurfaceVariant,
+      return Padding(
+        key: const Key('search-no-results-state'),
+        padding: EdgeInsets.only(
+          bottom: MediaQuery.viewInsetsOf(context).bottom,
+        ),
+        child: Center(
+          child: Text(
+            "No results for '${state.query}'",
+            style: context.textTheme.bodyMedium?.copyWith(
+              color: context.colors.onSurfaceVariant,
+            ),
           ),
         ),
       );
