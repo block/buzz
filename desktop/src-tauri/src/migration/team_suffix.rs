@@ -113,12 +113,15 @@ pub(super) fn strip_baked_team_instructions_in_dir(base_dir: &Path) -> Result<us
 
     // Pre-migration backup, taken ONCE (same contract as the B5 backfill): a
     // re-run after a partial failure must not replace the pristine backup with
-    // a half-migrated snapshot.
-    let bak_path = base_dir.join("managed-agents.json.pre-team-suffix-strip.bak");
-    if !bak_path.exists() {
-        std::fs::write(&bak_path, &content)
-            .map_err(|e| format!("failed to write pre-strip backup: {e}"))?;
-    }
+    // a half-migrated snapshot. Owner-only from the initial open, and sited next
+    // to the resolved store — see `create_restricted_backup_once` and
+    // `resolved_backup_path`.
+    let bak_path = super::resolved_backup_path(
+        &agents_path,
+        "managed-agents.json.pre-team-suffix-strip.bak",
+    );
+    super::create_restricted_backup_once(&bak_path, content.as_bytes())
+        .map_err(|e| format!("failed to write pre-strip backup: {e}"))?;
 
     let payload = serde_json::to_vec_pretty(&all)
         .map_err(|e| format!("failed to serialize managed-agents.json: {e}"))?;

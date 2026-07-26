@@ -378,3 +378,72 @@ fn strip_leaves_an_already_drifted_instance_pin_alone() {
         "real drift must keep its signal"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn strip_creates_the_backup_owner_only() {
+    // The backup is a verbatim copy of a store that carries plaintext agent
+    // nsecs whenever the keyring is unreachable, so it must be owner-only from
+    // the initial open — a post-write chmod would leave a umask window in which
+    // the secret is world-readable.
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut record = agent_json("Alia", Some(&format!("Alia prompt.{DELIMITER}roster")));
+    record["private_key_nsec"] = serde_json::json!("nsec1exampleplaintextkey");
+    write_agents_json(dir.path(), &serde_json::json!([record]));
+
+    assert_eq!(
+        strip_baked_team_instructions_in_dir(&base(dir.path())).unwrap(),
+        1
+    );
+
+    let bak = base(dir.path()).join("managed-agents.json.pre-team-suffix-strip.bak");
+    let mode = std::fs::metadata(&bak).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "backup of an inline nsec must be owner-only");
+    assert!(
+        std::fs::read_to_string(&bak)
+            .unwrap()
+            .contains("nsec1exampleplaintextkey"),
+        "the fixture really did carry an inline key"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn strip_backs_up_beside_the_symlink_target() {
+    // Dev worktrees symlink `agents/managed-agents.json` to a shared data dir
+    // (`sync_shared_agent_data`). The sole recovery copy must land next to the
+    // real data, not in whichever worktree booted first.
+    let shared = tempfile::tempdir().unwrap();
+    let worktree = tempfile::tempdir().unwrap();
+    write_agents_json(
+        shared.path(),
+        &serde_json::json!([agent_json("Alia", Some(&format!("Alia.{DELIMITER}roster")))]),
+    );
+    std::fs::create_dir_all(base(worktree.path())).unwrap();
+    std::os::unix::fs::symlink(
+        base(shared.path()).join("managed-agents.json"),
+        base(worktree.path()).join("managed-agents.json"),
+    )
+    .unwrap();
+
+    assert_eq!(
+        strip_baked_team_instructions_in_dir(&base(worktree.path())).unwrap(),
+        1
+    );
+
+    assert!(
+        base(shared.path())
+            .join("managed-agents.json.pre-team-suffix-strip.bak")
+            .exists(),
+        "backup belongs beside the shared store"
+    );
+    assert!(
+        !base(worktree.path())
+            .join("managed-agents.json.pre-team-suffix-strip.bak")
+            .exists(),
+        "no orphan backup in the worktree data dir"
+    );
+    assert_eq!(prompt_of(shared.path(), "Alia").as_deref(), Some("Alia."));
+}
