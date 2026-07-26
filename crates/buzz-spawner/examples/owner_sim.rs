@@ -13,6 +13,15 @@
 //!   --owner-nsec <nsec> \
 //!   --slug fizz-prod
 //! ```
+//!
+//! Pass `--verify-prompt-update` to additionally exercise the prompt-edit
+//! path once the agent reaches `Running`: it pushes an
+//! [`AttestationFrame::PromptUpdate`] with a changed model, then asserts the
+//! next `Running` status reports `prompt_hash == PromptMaterial::hash()` for
+//! the pushed material. It also logs (best-effort, not asserted) whether it
+//! observed an intermediate non-`Running` phase in between — kind:30179 is
+//! NIP-33 replaceable, so a fast restart can coalesce before a client's
+//! subscription ever sees the transient. Panics if the hash does not match.
 
 use std::{collections::HashMap, time::Duration};
 
@@ -21,7 +30,7 @@ use buzz_core::kind::{KIND_SPAWNER_AGENT_STATUS, KIND_SPAWNER_ATTESTATION};
 use buzz_sdk::nip_oa;
 use buzz_sdk::spawner::{
     build_spawner_agent_spec, build_spawner_attestation, status_from_event, AttestationFrame,
-    RespondTo, SpawnerAgentSpec,
+    PromptMaterial, RespondTo, SpawnPhase, SpawnerAgentSpec,
 };
 use buzz_ws_client::{connection::NostrWsConnection, message::RelayMessage};
 use nostr::{Keys, PublicKey};
@@ -121,6 +130,11 @@ async fn main() -> Result<()> {
     println!("\nwatching (Ctrl-C to stop)…\n");
 
     let mut seen_status: HashMap<String, String> = HashMap::new();
+    // Prompt-update verification leg (`--verify-prompt-update`): once the agent
+    // first reaches `Running`, push a `PromptUpdate` with a changed model and
+    // confirm the spawner both restarts the container and reports the new
+    // material's hash on a subsequent status.
+    let mut prompt_update: Option<PromptUpdateCheck> = None;
     loop {
         let msg = match conn.next_event(Duration::from_secs(30)).await {
             Ok(msg) => msg,
@@ -150,13 +164,25 @@ async fn main() -> Result<()> {
             let Ok(status) = status_from_event(&event) else {
                 continue;
             };
+            // This owner pubkey may have other slugs' agents running
+            // concurrently (e.g. from an earlier invocation against the same
+            // relay) — their statuses share the `#p` filter above, so only
+            // react to the slug this run actually published.
+            if buzz_sdk::spawner::spec_slug_from_event(&event).as_deref() != Some(&args.slug) {
+                continue;
+            }
             let line = format!(
-                "{:?}{}{}",
+                "{:?}{}{}{}",
                 status.phase,
                 status
                     .agent_pubkey
                     .as_deref()
                     .map(|a| format!(" agent={}", &a[..12]))
+                    .unwrap_or_default(),
+                status
+                    .prompt_hash
+                    .as_deref()
+                    .map(|h| format!(" prompt_hash={}", &h[..12]))
                     .unwrap_or_default(),
                 status
                     .error
@@ -169,8 +195,101 @@ async fn main() -> Result<()> {
                 println!("  status: {line}");
                 seen_status.insert(args.slug.clone(), line);
             }
+
+            if args.verify_prompt_update {
+                if let Some(agent) = status.agent_pubkey.clone() {
+                    match &mut prompt_update {
+                        None if status.phase == SpawnPhase::Running => {
+                            // First time we see the agent running: push the
+                            // updated prompt material and start watching for
+                            // the restart + hash-matching status that follows.
+                            let material = PromptMaterial {
+                                system_prompt: Some(
+                                    "You are a test agent running on a Buzz spawner.".into(),
+                                ),
+                                team_instructions: None,
+                                model: Some("verify-prompt-update-model".into()),
+                                provider: None,
+                            };
+                            let expected_hash = material.hash();
+                            let frame = AttestationFrame::PromptUpdate {
+                                spec_slug: args.slug.clone(),
+                                agent_pubkey: agent.clone(),
+                                prompt: material,
+                            };
+                            let ciphertext = nostr::nips::nip44::encrypt(
+                                keys.secret_key(),
+                                &spawner,
+                                serde_json::to_string(&frame)?,
+                                nostr::nips::nip44::Version::V2,
+                            )
+                            .context("encrypt prompt update")?;
+                            let out = build_spawner_attestation(&spawner.to_hex(), &ciphertext)?
+                                .sign_with_keys(&keys)?;
+                            let ok = conn.send_event(out).await?;
+                            if !ok.accepted {
+                                bail!("relay rejected the prompt update: {}", ok.message);
+                            }
+                            println!(
+                                "→ sent PromptUpdate for agent {} (expecting hash {})",
+                                &agent[..12],
+                                &expected_hash[..12]
+                            );
+                            prompt_update = Some(PromptUpdateCheck {
+                                expected_hash,
+                                saw_restart: false,
+                                confirmed: false,
+                            });
+                        }
+                        Some(check) if !check.confirmed => {
+                            if status.phase != SpawnPhase::Running {
+                                // A non-running phase after the push is the
+                                // restart cycling back through reconciliation.
+                                // Best-effort only: kind:30179 is NIP-33
+                                // replaceable, so a fast restart can flip
+                                // Running -> Starting -> Running between two
+                                // deliveries and this transient is never seen
+                                // over the wire. The hash assertion below is
+                                // the reliable signal that the update actually
+                                // took effect (apply_prompt_update only stores
+                                // the new material after clearing spec_hash,
+                                // which forces the restart).
+                                check.saw_restart = true;
+                            } else if status.phase == SpawnPhase::Running {
+                                if !check.saw_restart {
+                                    println!(
+                                        "  (no intermediate restart phase observed over the \
+                                         wire — likely coalesced; hash check below is the \
+                                         authoritative signal)"
+                                    );
+                                }
+                                assert_eq!(
+                                    status.prompt_hash.as_deref(),
+                                    Some(check.expected_hash.as_str()),
+                                    "status prompt_hash does not match the pushed \
+                                     PromptMaterial::hash()"
+                                );
+                                check.confirmed = true;
+                                println!(
+                                    "✓ prompt update verified: status.prompt_hash matches \
+                                     the pushed PromptMaterial::hash()"
+                                );
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
         }
     }
+}
+
+/// Tracks the `--verify-prompt-update` leg's expectations across the
+/// subsequent stream of status events.
+struct PromptUpdateCheck {
+    expected_hash: String,
+    saw_restart: bool,
+    confirmed: bool,
 }
 
 /// Answer a spawner's attestation request. Returns the attested agent pubkey.
@@ -275,6 +394,7 @@ struct Args {
     delete: bool,
     persona: Option<String>,
     share_persona: bool,
+    verify_prompt_update: bool,
 }
 
 impl Args {
@@ -288,6 +408,7 @@ impl Args {
         let mut delete = false;
         let mut persona = None;
         let mut share_persona = false;
+        let mut verify_prompt_update = false;
 
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -303,6 +424,7 @@ impl Args {
                 "--delete" => delete = true,
                 "--persona" => persona = Some(args.next().context("--persona needs a value")?),
                 "--share-persona" => share_persona = true,
+                "--verify-prompt-update" => verify_prompt_update = true,
                 other => bail!("unknown argument {other}"),
             }
         }
@@ -317,6 +439,7 @@ impl Args {
             delete,
             persona,
             share_persona,
+            verify_prompt_update,
         })
     }
 }
