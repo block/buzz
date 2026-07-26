@@ -12,6 +12,7 @@ void main() {
       final session = _PendingPublishRelaySession();
       final localMessages = <NostrEvent>[];
       final removedIds = <String>[];
+      final completedIds = <String>[];
       final send = SendMessage(
         signedEventRelay: SignedEventRelay(
           session: session,
@@ -20,6 +21,7 @@ void main() {
         fetchMembers: (_) async => const [],
         readUserCache: () => const {},
         addLocalMessage: (_, event) => localMessages.add(event),
+        completeLocalMessage: (_, eventId) => completedIds.add(eventId),
         removeLocalMessage: (_, eventId) => removedIds.add(eventId),
       );
 
@@ -34,6 +36,7 @@ void main() {
 
       session.accept();
       await result;
+      expect(completedIds, [localMessages.single.id]);
       expect(removedIds, isEmpty);
     },
   );
@@ -41,6 +44,7 @@ void main() {
   test('rolls back the signed local message when publish fails', () async {
     final session = _PendingPublishRelaySession();
     final localMessages = <NostrEvent>[];
+    final completedIds = <String>[];
     final removedIds = <String>[];
     final send = SendMessage(
       signedEventRelay: SignedEventRelay(
@@ -50,6 +54,7 @@ void main() {
       fetchMembers: (_) async => const [],
       readUserCache: () => const {},
       addLocalMessage: (_, event) => localMessages.add(event),
+      completeLocalMessage: (_, eventId) => completedIds.add(eventId),
       removeLocalMessage: (_, eventId) => removedIds.add(eventId),
     );
 
@@ -58,6 +63,7 @@ void main() {
     session.reject();
 
     await expectLater(result, throwsException);
+    expect(completedIds, isEmpty);
     expect(removedIds, [localMessages.single.id]);
   });
 }

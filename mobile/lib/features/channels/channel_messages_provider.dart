@@ -162,7 +162,12 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   );
 
   void _handleLiveEvent(NostrEvent event, {bool authoritative = true}) {
-    if (authoritative) _confirmLocalMessages([event.id]);
+    // Reply ownership and its thread-local overlay must transition together.
+    // The authoritative thread query performs both confirmations after it
+    // contains the reply; a live echo only triggers that query below.
+    if (authoritative && event.threadReference.parentId == null) {
+      _confirmLocalMessages([event.id]);
+    }
     if (_usingChannelWindow) {
       _handleWindowLiveEvent(event);
     } else {
@@ -269,6 +274,13 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       );
     }
     _handleLiveEvent(event, authoritative: false);
+  }
+
+  /// Releases rollback ownership after the publish future succeeds. The
+  /// optimistic row (and any thread overlay) remains visible until relay data
+  /// replaces it, because OK and EVENT delivery are unordered.
+  void completeLocalMessage(String eventId) {
+    _confirmLocalMessages([eventId]);
   }
 
   /// Rolls back a local message when its publish is rejected or times out.

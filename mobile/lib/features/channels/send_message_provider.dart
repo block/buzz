@@ -13,6 +13,7 @@ class SendMessage {
   final Future<List<ChannelMember>> Function(String channelId) _fetchMembers;
   final Map<String, UserProfile> Function() _readUserCache;
   final void Function(String channelId, NostrEvent event) _addLocalMessage;
+  final void Function(String channelId, String eventId) _completeLocalMessage;
   final void Function(String channelId, String eventId) _removeLocalMessage;
 
   SendMessage({
@@ -21,11 +22,14 @@ class SendMessage {
     fetchMembers,
     required Map<String, UserProfile> Function() readUserCache,
     required void Function(String channelId, NostrEvent event) addLocalMessage,
+    required void Function(String channelId, String eventId)
+    completeLocalMessage,
     required void Function(String channelId, String eventId) removeLocalMessage,
   }) : _signedEventRelay = signedEventRelay,
        _fetchMembers = fetchMembers,
        _readUserCache = readUserCache,
        _addLocalMessage = addLocalMessage,
+       _completeLocalMessage = completeLocalMessage,
        _removeLocalMessage = removeLocalMessage;
 
   /// Send a text message to a channel.
@@ -76,6 +80,8 @@ class SendMessage {
           _addLocalMessage(channelId, event);
         },
       );
+      final event = localMessage;
+      if (event != null) _completeLocalMessage(channelId, event.id);
     } catch (_) {
       final event = localMessage;
       if (event != null) _removeLocalMessage(channelId, event.id);
@@ -167,6 +173,9 @@ final sendMessageProvider = Provider<SendMessage>((ref) {
     addLocalMessage: (channelId, event) => ref
         .read(channelMessagesProvider(channelId).notifier)
         .addLocalMessage(event),
+    completeLocalMessage: (channelId, eventId) => ref
+        .read(channelMessagesProvider(channelId).notifier)
+        .completeLocalMessage(eventId),
     removeLocalMessage: (channelId, eventId) => ref
         .read(channelMessagesProvider(channelId).notifier)
         .removeLocalMessage(eventId),

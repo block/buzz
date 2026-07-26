@@ -178,6 +178,35 @@ void main() {
     },
   );
 
+  test(
+    'legacy websocket echo retires ownership without duplicating the row',
+    () async {
+      final relaySession = _RecordingRelaySessionNotifier();
+      final container = _buildContainer(relaySession);
+      addTearDown(container.dispose);
+
+      container.read(channelMessagesProvider(_channelId));
+      await relaySession.subscribed;
+      final notifier = container.read(
+        channelMessagesProvider(_channelId).notifier,
+      );
+      final local = _event(id: 'local', createdAt: 20);
+      notifier.addLocalMessage(local);
+
+      relaySession.emit(local);
+      await _pumpEventQueue();
+
+      expect(container.read(pendingLocalMessagesProvider(_channelId)), isEmpty);
+      expect(
+        container
+            .read(channelMessagesProvider(_channelId))
+            .value
+            ?.map((event) => event.id),
+        ['local'],
+      );
+    },
+  );
+
   test('adds and rolls back a local message in the channel window', () async {
     final relaySession = _RecordingRelaySessionNotifier(
       queryResults: [
@@ -336,6 +365,97 @@ void main() {
             .value
             ?.map((event) => event.id),
         ['reply'],
+      );
+    },
+  );
+
+  test(
+    'thread live echo keeps ownership until the authoritative refetch succeeds',
+    () async {
+      final relaySession = _RecordingRelaySessionNotifier(
+        queryResults: [
+          [_event(id: 'history', createdAt: 10), _bounds()],
+          <NostrEvent>[],
+          Exception('thread refetch failed'),
+        ],
+      );
+      final container = _buildContainer(relaySession);
+      addTearDown(container.dispose);
+
+      container.read(channelMessagesProvider(_channelId));
+      await relaySession.subscribed;
+      await _pumpEventQueue();
+      const args = ThreadRepliesArgs(channelId: _channelId, rootId: 'root');
+      container.read(threadRepliesWithLocalProvider(args));
+      await _pumpEventQueue();
+      final notifier = container.read(
+        channelMessagesProvider(_channelId).notifier,
+      );
+      final reply = _event(
+        id: 'reply',
+        createdAt: 20,
+        extraTags: const [
+          ['e', 'root', '', 'reply'],
+        ],
+      );
+      notifier.addLocalMessage(reply);
+
+      relaySession.emit(reply);
+      await _pumpEventQueue();
+
+      expect(container.read(pendingLocalMessagesProvider(_channelId)).keys, [
+        'reply',
+      ]);
+      expect(
+        container
+            .read(threadLocalRepliesProvider(args))
+            .map((event) => event.id),
+        ['reply'],
+      );
+      expect(
+        container
+            .read(threadRepliesWithLocalProvider(args))
+            .value
+            ?.map((event) => event.id),
+        ['reply'],
+      );
+    },
+  );
+
+  test(
+    'successful never-echoed send releases ownership but keeps its row across reconnect',
+    () async {
+      final relaySession = _RecordingRelaySessionNotifier(
+        queryResults: [
+          [_event(id: 'history', createdAt: 10), _bounds()],
+          [_event(id: 'history', createdAt: 10), _bounds()],
+        ],
+      );
+      final container = _buildContainer(relaySession);
+      addTearDown(container.dispose);
+
+      container.read(channelMessagesProvider(_channelId));
+      await relaySession.subscribed;
+      await _pumpEventQueue();
+      final notifier = container.read(
+        channelMessagesProvider(_channelId).notifier,
+      );
+      notifier.addLocalMessage(_event(id: 'local', createdAt: 20));
+      notifier.completeLocalMessage('local');
+
+      expect(container.read(pendingLocalMessagesProvider(_channelId)), isEmpty);
+      relaySession.setConnected(false);
+      await _pumpEventQueue();
+      relaySession.setConnected(true);
+      await _pumpEventQueue();
+
+      expect(container.read(pendingLocalMessagesProvider(_channelId)), isEmpty);
+      expect(
+        container
+            .read(channelMessagesProvider(_channelId))
+            .value
+            ?.map((event) => event.id),
+        ['history', 'local'],
       );
     },
   );
