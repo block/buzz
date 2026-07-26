@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  allOnboardingRuntimesAreReady,
   getReadyOnboardingRuntimes,
   getVisibleOnboardingRuntimes,
   runtimeIsReadyForOnboarding,
@@ -66,5 +67,28 @@ test("ready onboarding runtimes exclude hidden ready harnesses", () => {
   assert.deepEqual(
     getReadyOnboardingRuntimes(runtimes).map(({ id }) => id),
     ["claude"],
+  );
+});
+
+test("all onboarding runtimes are ready only when both Claude and Codex are ready", () => {
+  assert.equal(
+    allOnboardingRuntimesAreReady([
+      runtime("claude", "available", "logged_in"),
+      runtime("codex", "available", "logged_in"),
+    ]),
+    true,
+  );
+  assert.equal(
+    allOnboardingRuntimesAreReady([
+      runtime("claude", "available", "logged_in"),
+      runtime("codex", "available", "logged_out"),
+    ]),
+    false,
+  );
+  assert.equal(
+    allOnboardingRuntimesAreReady([
+      runtime("claude", "available", "logged_in"),
+    ]),
+    false,
   );
 });

@@ -37,3 +37,14 @@ export function getReadyOnboardingRuntimes(
     runtimeIsReadyForOnboarding,
   );
 }
+
+export function allOnboardingRuntimesAreReady(
+  runtimes: readonly AcpRuntimeCatalogEntry[],
+) {
+  return ONBOARDING_RUNTIME_ORDER.every((runtimeId) =>
+    runtimes.some(
+      (runtime) =>
+        runtime.id === runtimeId && runtimeIsReadyForOnboarding(runtime),
+    ),
+  );
+}

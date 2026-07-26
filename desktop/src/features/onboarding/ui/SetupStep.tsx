@@ -18,6 +18,7 @@ import { FlappingBee } from "@/shared/ui/buzz-logo/FlappingBee";
 import { Spinner } from "@/shared/ui/spinner";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import {
+  allOnboardingRuntimesAreReady,
   getReadyOnboardingRuntimes,
   getVisibleOnboardingRuntimes,
   runtimeIsReadyForOnboarding,
@@ -663,6 +664,9 @@ function SetupStepContent({
       ),
     [runtimeProviders.items],
   );
+  const areAllRuntimesReady = allOnboardingRuntimesAreReady(
+    runtimeProviders.items,
+  );
   const readyRuntimeIdsKey = readyRuntimeIds.join("\0");
   // The key prevents catalog object refreshes from creating an effect loop
   // when the detected ready IDs have not changed.
@@ -695,15 +699,17 @@ function SetupStepContent({
           Next
         </Button>
 
-        <Button
-          className="h-9 rounded-full bg-foreground/10 px-6 text-sm hover:bg-foreground/15"
-          data-testid="onboarding-setup-skip"
-          onClick={() => actions.next([])}
-          type="button"
-          variant="ghost"
-        >
-          Skip for now
-        </Button>
+        {!areAllRuntimesReady ? (
+          <Button
+            className="h-9 rounded-full bg-foreground/10 px-6 text-sm hover:bg-foreground/15"
+            data-testid="onboarding-setup-skip"
+            onClick={() => actions.next([])}
+            type="button"
+            variant="ghost"
+          >
+            Skip for now
+          </Button>
+        ) : null}
 
         <Button
           className="h-9 rounded-full bg-foreground/10 px-6 text-sm hover:bg-foreground/15"

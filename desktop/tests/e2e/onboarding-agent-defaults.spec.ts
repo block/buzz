@@ -144,7 +144,34 @@ test("ready state is detected and enables Next without persisting a default", as
     page.getByTestId("onboarding-runtime-checkmark-codex"),
   ).toHaveCount(0);
   await expect(page.getByTestId("onboarding-setup-next")).toBeEnabled();
+  await expect(page.getByTestId("onboarding-setup-skip")).toBeVisible();
   expect(await readSavedRuntime(page)).toBeNull();
+});
+
+test("setup hides Skip for now when both harnesses are ready", async ({
+  page,
+}) => {
+  await installMockBridge(
+    page,
+    {
+      acpRuntimesCatalog: [
+        runtime("claude", "available", { status: "logged_in" }),
+        runtime("codex", "available", { status: "logged_in" }),
+      ],
+    },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+  await navigateToSetupPage(page);
+
+  await expect(
+    page.getByTestId("onboarding-runtime-ready-claude"),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId("onboarding-runtime-ready-codex"),
+  ).toBeVisible();
+  await expect(page.getByTestId("onboarding-setup-next")).toBeEnabled();
+  await expect(page.getByTestId("onboarding-setup-skip")).toHaveCount(0);
 });
 
 test("setup shows runtime discovery loading before rendering harnesses", async ({
