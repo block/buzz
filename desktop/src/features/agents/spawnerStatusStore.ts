@@ -8,6 +8,7 @@ import {
   type SpawnerAgentStatus,
 } from "@/shared/api/spawnerRelay";
 import type { RelayEvent } from "@/shared/api/types";
+import { ackSpawnerPromptUpdate } from "@/features/agents/spawnerPromptUpdateQueue";
 
 /**
  * Live status for this owner's server-hosted agents, keyed by
@@ -78,6 +79,10 @@ function handleStatusEvent(event: RelayEvent): void {
   }
   statuses = next;
   notify();
+
+  // A `prompt_hash` echoed back on status is the spawner confirming it
+  // applied the last prompt sent for this agent — clear the pending entry.
+  if (status) ackSpawnerPromptUpdate(event.pubkey, slug, status.promptHash);
 }
 
 /** Open the status subscription. Idempotent. */
