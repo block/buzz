@@ -95,6 +95,41 @@ void main() {
       expect(rows.map((r) => r.id).toList(), ['new', 'old']);
     });
 
+    test('groups ordinary top-level DM messages into one row per DM', () {
+      bool isDm(String channelId) => channelId == 'dm1';
+      final rows = buildInboxItems([
+        // Three top-level messages (no thread tags) in the same DM.
+        item(id: 'd1', createdAt: 10, channelId: 'dm1', category: 'activity'),
+        item(id: 'd2', createdAt: 20, channelId: 'dm1', category: 'activity'),
+        item(id: 'd3', createdAt: 30, channelId: 'dm1', category: 'activity'),
+        // Ordinary top-level channel posts still group per event.
+        item(id: 'c1', createdAt: 40, channelId: 'ch1'),
+        item(id: 'c2', createdAt: 50, channelId: 'ch1'),
+      ], isDmChannel: isDm);
+
+      expect(rows, hasLength(3));
+      final dmRow = rows.singleWhere((r) => r.conversationId == 'dm:dm1');
+      expect(dmRow.groupItems, hasLength(3));
+      expect(dmRow.id, 'd3'); // latest DM message represents the row
+      expect(dmRow.latestActivityAt, 30);
+    });
+
+    test('thread replies inside a DM still group by thread root', () {
+      bool isDm(String channelId) => channelId == 'dm1';
+      final rows = buildInboxItems([
+        item(id: 'top', createdAt: 10, channelId: 'dm1'),
+        item(
+          id: 'reply',
+          createdAt: 20,
+          channelId: 'dm1',
+          tags: replyTags('top', 'top'),
+        ),
+      ], isDmChannel: isDm);
+
+      expect(rows, hasLength(2));
+      expect(rows.map((r) => r.conversationId).toSet(), {'dm:dm1', 'top'});
+    });
+
     test('categories are priority sorted and set isActionRequired', () {
       final rows = buildInboxItems([
         item(

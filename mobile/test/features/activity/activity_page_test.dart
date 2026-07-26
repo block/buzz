@@ -100,6 +100,7 @@ void main() {
     ActivityNotifier Function()? activityNotifier,
     Map<String, UserProfile>? users,
     Map<String, int> readContexts = const {},
+    List<Channel>? channels,
   }) async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
@@ -110,7 +111,7 @@ void main() {
           activityNotifier ?? () => _FakeActivityNotifier(feed ?? testFeed),
         ),
         channelsProvider.overrideWith(
-          () => _FakeChannelsNotifier(testChannels),
+          () => _FakeChannelsNotifier(channels ?? testChannels),
         ),
         userCacheProvider.overrideWith(
           () => _FakeUserCacheNotifier(users ?? testUsers),
@@ -191,6 +192,53 @@ void main() {
       senderText.style!.fontSize!,
       lessThan(textTheme.titleSmall!.fontSize!),
     );
+  });
+
+  testWidgets('multiple top-level messages in one DM render one row', (
+    tester,
+  ) async {
+    final dmChannel = Channel(
+      id: 'dm1',
+      name: 'dm',
+      channelType: 'dm',
+      visibility: 'private',
+      description: '',
+      createdBy: 'x',
+      createdAt: DateTime(2025),
+      memberCount: 2,
+      isMember: true,
+      participants: const ['Alice'],
+    );
+    FeedItem dmMessage(String id, int age) => FeedItem(
+      id: id,
+      kind: 9,
+      pubkey: 'alice_pk',
+      content: 'dm body $id',
+      createdAt: now - age,
+      channelId: 'dm1',
+      channelName: '',
+      tags: const [],
+      category: 'activity',
+    );
+
+    await tester.pumpWidget(
+      await buildTestable(
+        feed: HomeFeedResponse(
+          mentions: const [],
+          needsAction: const [],
+          activity: [dmMessage('dm-a', 300), dmMessage('dm-b', 200)],
+          agentActivity: const [],
+        ),
+        channels: [...testChannels, dmChannel],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // One conversation row for the DM, represented by the latest message.
+    expect(find.byKey(const ValueKey('inbox-row-dm-b')), findsOneWidget);
+    expect(find.byKey(const ValueKey('inbox-row-dm-a')), findsNothing);
+    expect(find.textContaining('dm body dm-b'), findsOneWidget);
+    expect(find.textContaining('dm body dm-a'), findsNothing);
   });
 
   testWidgets('unread rows show a dot; read rows do not', (tester) async {
