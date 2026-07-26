@@ -86,15 +86,25 @@ function contrastRatio(first: string, second: string): number {
   return (lighter + 0.05) / (darker + 0.05);
 }
 
-function ensureTextContrast(foreground: string, background: string): string {
-  if (contrastRatio(foreground, background) >= MINIMUM_TEXT_CONTRAST) {
+function ensureTextContrast(foreground: string, backgrounds: string[]): string {
+  const meetsMinimum = (color: string) =>
+    backgrounds.every(
+      (background) => contrastRatio(color, background) >= MINIMUM_TEXT_CONTRAST,
+    );
+
+  if (meetsMinimum(foreground)) {
     return foreground;
   }
 
   const black = "#000000";
   const white = "#ffffff";
   const target =
-    contrastRatio(black, background) > contrastRatio(white, background)
+    Math.min(
+      ...backgrounds.map((background) => contrastRatio(black, background)),
+    ) >
+    Math.min(
+      ...backgrounds.map((background) => contrastRatio(white, background)),
+    )
       ? black
       : white;
   let low = 0;
@@ -104,10 +114,7 @@ function ensureTextContrast(foreground: string, background: string): string {
   // normal text, preserving as much of the theme-provided color as possible.
   for (let i = 0; i < 20; i++) {
     const factor = (low + high) / 2;
-    if (
-      contrastRatio(mix(foreground, target, factor), background) >=
-      MINIMUM_TEXT_CONTRAST
-    ) {
+    if (meetsMinimum(mix(foreground, target, factor))) {
       high = factor;
     } else {
       low = factor;
@@ -245,20 +252,21 @@ export function createThemeVars(
   const hoverBg = elevate(0.06);
   const popoverBg = elevate(0.08);
   const menuSurfaceBg = mix(primaryBg, hoverBg, 0.2);
+  const focusedMenuSurfaceBg = mix(menuSurfaceBg, hoverBg, 0.5);
 
   // Git/accent colors with fallbacks. Deleted colors are also used as
   // destructive foreground text, but some syntax themes provide pale diff
-  // background tints here. Guard against the mixed menu surface used by
-  // popoverSurface.ts, where destructive actions render.
+  // background tints here. Guard against both resting and focused menu
+  // surfaces, where destructive actions render.
   const fallbackGreen = isDark ? "#3fb950" : "#1a7f37";
   const fallbackRed = isDark ? "#f85149" : "#cf222e";
   const fallbackOrange = isDark ? "#d29922" : "#9a6700";
 
   const accentGreen = gitColors?.added ?? fallbackGreen;
-  const accentRed = ensureTextContrast(
-    gitColors?.deleted ?? fallbackRed,
+  const accentRed = ensureTextContrast(gitColors?.deleted ?? fallbackRed, [
     menuSurfaceBg,
-  );
+    focusedMenuSurfaceBg,
+  ]);
   const accentOrange = fallbackOrange;
 
   // Derived colors

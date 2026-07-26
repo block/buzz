@@ -89,11 +89,19 @@ function menuSurface(vars) {
   );
 }
 
+function focusedMenuSurface(vars) {
+  return mix(menuSurface(vars), hslComponentsToHex(vars["--muted"]), 0.5);
+}
+
 test("destructive text meets WCAG AA contrast in GitHub Light", () => {
   const vars = lightThemeVars("#d73a49");
 
   assert.ok(
     contrastRatio(vars["--status-deleted"], menuSurface(vars)) >=
+      MINIMUM_TEXT_CONTRAST,
+  );
+  assert.ok(
+    contrastRatio(vars["--status-deleted"], focusedMenuSurface(vars)) >=
       MINIMUM_TEXT_CONTRAST,
   );
 });
@@ -103,6 +111,10 @@ test("pale deleted-background tints become readable destructive text", () => {
 
   assert.ok(
     contrastRatio(vars["--status-deleted"], menuSurface(vars)) >=
+      MINIMUM_TEXT_CONTRAST,
+  );
+  assert.ok(
+    contrastRatio(vars["--status-deleted"], focusedMenuSurface(vars)) >=
       MINIMUM_TEXT_CONTRAST,
   );
 });
