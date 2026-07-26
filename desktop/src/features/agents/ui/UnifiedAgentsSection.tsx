@@ -345,8 +345,10 @@ function AgentPersonaCard({
       }}
       statusBadge={
         <>
-          {agent?.relocatedToSpawner != null && promptUpdatePending ? (
-            <ServerUpdatePendingChip />
+          {promptUpdatePending ? (
+            <ServerUpdatePendingChip
+              delivered={promptUpdatePending.delivered}
+            />
           ) : null}
           {agent?.personaOrphaned ? (
             <Badge className="gap-1" variant="warning">
@@ -427,8 +429,10 @@ function StandaloneAgentCard({
       }}
       statusBadge={
         <>
-          {agent.relocatedToSpawner != null && promptUpdatePending ? (
-            <ServerUpdatePendingChip />
+          {promptUpdatePending ? (
+            <ServerUpdatePendingChip
+              delivered={promptUpdatePending.delivered}
+            />
           ) : null}
           {agent.personaOrphaned ? (
             <Badge className="gap-1" variant="warning">
