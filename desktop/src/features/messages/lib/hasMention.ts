@@ -153,3 +153,106 @@ export function getMentionOffset(text: string, name: string): number | null {
 export function hasMention(text: string, name: string): boolean {
   return getMentionOffset(text, name) !== null;
 }
+
+type MentionOccurrence = {
+  end: number;
+  name: string;
+  preferred: boolean;
+  start: number;
+};
+
+function mentionOccurrences(
+  maskedText: string,
+  name: string,
+  preferred: boolean,
+): MentionOccurrence[] {
+  const escaped = escapeRegExp(name);
+  const pattern = new RegExp(
+    `(^|\\s|\\(|[*_]{1,3}|\\|\\|)(@${escaped})(?=\\|\\||[\\s,;.!?:)\\]}*_]|$)`,
+    "gi",
+  );
+  const occurrences: MentionOccurrence[] = [];
+
+  for (
+    let match = pattern.exec(maskedText);
+    match;
+    match = pattern.exec(maskedText)
+  ) {
+    const start = match.index + match[1].length;
+    occurrences.push({
+      end: start + match[2].length,
+      name,
+      preferred,
+      start,
+    });
+  }
+
+  return occurrences;
+}
+
+/**
+ * Resolve display names represented by outgoing mention spans.
+ *
+ * Autocomplete-selected names take precedence over overlapping candidates.
+ * Otherwise the longest exact display name wins within a span. Independent
+ * spans remain independent, so a short and a long shared-prefix name can both
+ * be intentionally mentioned in one message.
+ */
+export function resolveMentionedNames(
+  text: string,
+  names: readonly string[],
+  preferredNames: readonly string[] = [],
+): string[] {
+  const preferred = new Set(
+    preferredNames.map((name) => name.trim().toLowerCase()).filter(Boolean),
+  );
+  const uniqueNames = new Map<string, string>();
+  for (const name of names) {
+    const trimmed = name.trim();
+    const key = trimmed.toLowerCase();
+    if (trimmed && !uniqueNames.has(key)) uniqueNames.set(key, trimmed);
+  }
+
+  const maskedText = maskMarkdownCode(text);
+  const occurrences = [...uniqueNames.entries()].flatMap(([key, name]) => {
+    const matches = mentionOccurrences(maskedText, name, false);
+    // A name-only autocomplete record cannot identify which occurrence was
+    // selected after later edits. Restrict that preference to an unambiguous
+    // single occurrence so it cannot suppress a longer independent span.
+    const isUnambiguousPreference = preferred.has(key) && matches.length === 1;
+    return matches.map((match) => ({
+      ...match,
+      preferred: isUnambiguousPreference,
+    }));
+  });
+  occurrences.sort(
+    (left, right) =>
+      Number(right.preferred) - Number(left.preferred) ||
+      right.name.length - left.name.length ||
+      left.start - right.start ||
+      left.name.localeCompare(right.name),
+  );
+
+  const selected: MentionOccurrence[] = [];
+  for (const occurrence of occurrences) {
+    const overlaps = selected.some(
+      (current) =>
+        occurrence.start < current.end && occurrence.end > current.start,
+    );
+    if (!overlaps) selected.push(occurrence);
+  }
+  selected.sort(
+    (left, right) => left.start - right.start || right.end - left.end,
+  );
+
+  const resolved: string[] = [];
+  const seen = new Set<string>();
+  for (const occurrence of selected) {
+    const key = occurrence.name.toLowerCase();
+    if (!seen.has(key)) {
+      resolved.push(occurrence.name);
+      seen.add(key);
+    }
+  }
+  return resolved;
+}

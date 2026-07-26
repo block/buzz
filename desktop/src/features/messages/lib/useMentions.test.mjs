@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { getMentionOffset, hasMention } from "./hasMention.ts";
+import {
+  getMentionOffset,
+  hasMention,
+  resolveMentionedNames,
+} from "./hasMention.ts";
 
 // ── Plain @mention ────────────────────────────────────────────────────
 
@@ -134,4 +138,53 @@ test("does not treat escaped or unclosed backticks as code", () => {
 test("requires matching inline-code delimiter lengths", () => {
   assert.equal(hasMention("`` @Alice ` still code ``", "Alice"), false);
   assert.equal(hasMention("`` @Alice `", "Alice"), true);
+});
+
+// ── Overlapping candidate names ──────────────────────────────────────
+
+function resolvedNames(text, names, preferredNames = []) {
+  return resolveMentionedNames(text, names, preferredNames);
+}
+
+test("prefers the longest display name for one overlapping mention span", () => {
+  assert.deepEqual(
+    resolvedNames("@OriginalName copy please respond", [
+      "OriginalName",
+      "OriginalName copy",
+    ]),
+    ["OriginalName copy"],
+  );
+});
+
+test("preserves separate intentional short and long mentions", () => {
+  assert.deepEqual(
+    resolvedNames("@OriginalName then @OriginalName copy", [
+      "OriginalName",
+      "OriginalName copy",
+    ]),
+    ["OriginalName", "OriginalName copy"],
+  );
+});
+
+test("prefers an explicit autocomplete selection over a longer overlap", () => {
+  assert.deepEqual(
+    resolvedNames(
+      "@OriginalName copy please respond",
+      ["OriginalName", "OriginalName copy"],
+      ["OriginalName"],
+    ),
+    ["OriginalName"],
+  );
+});
+
+test("resolves three shared prefixes and punctuation collisions deterministically", () => {
+  assert.deepEqual(
+    resolvedNames("@Agent.copy and @Agent copy senior", [
+      "Agent",
+      "Agent.copy",
+      "Agent copy",
+      "Agent copy senior",
+    ]),
+    ["Agent.copy", "Agent copy senior"],
+  );
 });
