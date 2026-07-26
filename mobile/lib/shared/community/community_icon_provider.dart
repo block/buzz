@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'dart:convert';
 
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -13,29 +12,16 @@ final communityIconHttpClientProvider = Provider<http.Client>((ref) {
   return client;
 });
 
-/// Controls how often visible community icons retry and refresh.
-///
-/// Tests can override this provider to exercise the refresh lifecycle without
-/// waiting for the production interval.
-final communityIconRefreshIntervalProvider = Provider<Duration>(
-  (ref) => const Duration(seconds: 30),
-);
-
 /// Reads a community's icon from its public NIP-11 relay information document.
 ///
 /// The lookup does not depend on the active relay session, so icons can render
-/// for every paired community in the switcher. Visible icons refresh
-/// periodically so transient failures and relay metadata updates are observed.
+/// for every paired community in the switcher. Callers explicitly invalidate
+/// this family when opening the switcher so transient failures and relay
+/// metadata updates can be retried without background polling.
 final communityIconProvider = FutureProvider.autoDispose
     .family<String?, String>((ref, relayUrl) async {
       final uri = _relayInfoUri(relayUrl);
       if (uri == null) return null;
-
-      final refreshTimer = Timer(
-        ref.watch(communityIconRefreshIntervalProvider),
-        ref.invalidateSelf,
-      );
-      ref.onDispose(refreshTimer.cancel);
 
       try {
         final response = await ref

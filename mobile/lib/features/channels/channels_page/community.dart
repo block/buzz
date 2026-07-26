@@ -22,14 +22,16 @@ class _CommunitySwitcherSheet extends HookConsumerWidget {
               Grid.gutter,
               Grid.xxs,
             ),
-            child: SizedBox(
-              height: 32,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(minHeight: 32),
               child: Row(
                 children: [
                   Expanded(
                     child: Text(
                       'Switch Community',
                       key: const Key('community-switcher-title'),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                       style: context.textTheme.titleLarge?.copyWith(
                         fontWeight: FontWeight.w600,
                       ),
@@ -37,13 +39,16 @@ class _CommunitySwitcherSheet extends HookConsumerWidget {
                   ),
                   Padding(
                     padding: const EdgeInsets.only(right: Grid.half),
-                    child: SizedBox(
+                    child: ConstrainedBox(
                       key: const Key('community-switcher-edit'),
-                      width: 48,
-                      height: 32,
+                      constraints: const BoxConstraints(
+                        minWidth: 48,
+                        minHeight: 32,
+                      ),
                       child: TextButton(
                         onPressed: () => isEditing.value = !isEditing.value,
                         style: TextButton.styleFrom(
+                          minimumSize: Size.zero,
                           padding: const EdgeInsets.symmetric(
                             horizontal: Grid.half,
                           ),

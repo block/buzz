@@ -26,15 +26,18 @@ void main() {
     double keyboardInset = 0,
     bool disableAnimations = false,
     Map<String, String?> communityIcons = const {},
+    ValueChanged<String>? onCommunityIconLoad,
+    TextScaler textScaler = TextScaler.noScaling,
   }) {
     return ProviderScope(
       overrides: [
         // Provide a fake profile and presence so the avatar doesn't hit the network.
         profileProvider.overrideWith(() => _FakeProfileNotifier()),
         presenceProvider.overrideWith(() => _FakePresenceNotifier()),
-        communityIconProvider.overrideWith(
-          (ref, relayUrl) async => communityIcons[relayUrl],
-        ),
+        communityIconProvider.overrideWith((ref, relayUrl) async {
+          onCommunityIconLoad?.call(relayUrl);
+          return communityIcons[relayUrl];
+        }),
         dmDirectoryPreviewEnabledProvider.overrideWith(
           (ref) => previewDirectory,
         ),
@@ -45,6 +48,7 @@ void main() {
         builder: (context, child) => MediaQuery(
           data: MediaQuery.of(context).copyWith(
             disableAnimations: disableAnimations,
+            textScaler: textScaler,
             viewInsets: EdgeInsets.only(bottom: keyboardInset),
           ),
           child: child!,
@@ -314,6 +318,72 @@ void main() {
     expect(
       find.byKey(const Key('community-switcher-selection-alpha')),
       findsOneWidget,
+    );
+  });
+
+  testWidgets('opening the community switcher refreshes visible icons', (
+    tester,
+  ) async {
+    final community = Community(
+      id: 'alpha',
+      name: 'Alpha',
+      relayUrl: 'wss://alpha.example.com',
+      addedAt: DateTime(2025),
+    );
+    var iconLoads = 0;
+
+    await tester.pumpWidget(
+      buildTestable(
+        onCommunityIconLoad: (_) => iconLoads++,
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+          communityListProvider.overrideWith(
+            () => _FakeCommunityListNotifier([community]),
+          ),
+          activeCommunityProvider.overrideWith((ref) async => community),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    final initialIconLoads = iconLoads;
+
+    await tester.tap(find.text('Alpha'));
+    await tester.pumpAndSettle();
+
+    expect(iconLoads, greaterThan(initialIconLoads));
+  });
+
+  testWidgets('community switcher header grows with accessible text', (
+    tester,
+  ) async {
+    final community = Community(
+      id: 'alpha',
+      name: 'Alpha',
+      relayUrl: 'wss://alpha.example.com',
+      addedAt: DateTime(2025),
+    );
+
+    await tester.pumpWidget(
+      buildTestable(
+        textScaler: TextScaler.linear(2),
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+          communityListProvider.overrideWith(
+            () => _FakeCommunityListNotifier([community]),
+          ),
+          activeCommunityProvider.overrideWith((ref) async => community),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Alpha'));
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+    expect(
+      tester.getSize(find.byKey(const Key('community-switcher-title'))).height,
+      greaterThan(32),
     );
   });
 

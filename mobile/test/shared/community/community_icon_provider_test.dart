@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:buzz/shared/community/community_icon_provider.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -59,9 +57,8 @@ void main() {
     expect(icon, isNull);
   });
 
-  test('refreshes a transient failure while the icon is visible', () async {
+  test('refreshes a transient failure when explicitly invalidated', () async {
     var requestCount = 0;
-    final refreshedIcon = Completer<String>();
     final client = http_testing.MockClient((_) async {
       requestCount++;
       if (requestCount == 1) {
@@ -73,30 +70,24 @@ void main() {
       );
     });
     final container = ProviderContainer(
-      overrides: [
-        communityIconHttpClientProvider.overrideWithValue(client),
-        communityIconRefreshIntervalProvider.overrideWithValue(
-          const Duration(milliseconds: 10),
-        ),
-      ],
+      overrides: [communityIconHttpClientProvider.overrideWithValue(client)],
     );
     final provider = communityIconProvider('https://relay.example.com');
-    final subscription = container.listen(provider, (_, next) {
-      final icon = next.value;
-      if (icon != null && !refreshedIcon.isCompleted) {
-        refreshedIcon.complete(icon);
-      }
-    });
+    final subscription = container.listen(provider, (_, _) {});
     addTearDown(() {
       subscription.close();
       container.dispose();
     });
 
     expect(await container.read(provider.future), isNull);
+    expect(requestCount, 1);
+
+    container.invalidate(provider);
+
     expect(
-      await refreshedIcon.future.timeout(const Duration(seconds: 1)),
+      await container.read(provider.future),
       'https://relay.example.com/icon.png',
     );
-    expect(requestCount, greaterThanOrEqualTo(2));
+    expect(requestCount, 2);
   });
 }
