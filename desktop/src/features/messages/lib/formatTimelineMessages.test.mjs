@@ -88,6 +88,19 @@ function huddleStarted(overrides = {}) {
   };
 }
 
+function systemMessage(type, overrides = {}) {
+  return {
+    id: HEX64_B,
+    pubkey: PUBKEY_B,
+    kind: 40099,
+    created_at: 1_700_000_001,
+    content: JSON.stringify({ type }),
+    tags: [["h", CHANNEL_ID]],
+    sig: "sig",
+    ...overrides,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Keystone regression: aux events (edits/deletions) apply by `#e` reference,
 // NOT by time-window overlap. This is the invariant the split-query +
@@ -151,6 +164,33 @@ test("kind:9005 (NIP-29 / Buzz-native) deletion hides the target message", () =>
     0,
     "the kind:9 message should be filtered out by the kind:9005 deletion",
   );
+});
+
+test("message deletion notices do not render as timeline rows", () => {
+  const notice = systemMessage("message_deleted", {
+    content: JSON.stringify({
+      type: "message_deleted",
+      actor: PUBKEY_B,
+      target_event_id: HEX64_A,
+      public_reason: "Removed by community moderators",
+    }),
+  });
+
+  assert.deepEqual(formatTimelineMessages([notice], null, undefined, null), []);
+  assert.equal(countTopLevelTimelineRows([notice]), 0);
+  assert.deepEqual(collectMessageAuthorPubkeys([notice]), []);
+});
+
+test("other system messages and malformed payloads remain visible", () => {
+  const memberJoined = systemMessage("member_joined");
+  const malformed = systemMessage("ignored", { content: "not json" });
+
+  assert.equal(
+    formatTimelineMessages([memberJoined, malformed], null, undefined, null)
+      .length,
+    2,
+  );
+  assert.equal(countTopLevelTimelineRows([memberJoined, malformed]), 2);
 });
 
 test("non-deletion event kinds do NOT hide the target message", () => {

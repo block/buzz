@@ -62,6 +62,22 @@ export function isTimelineContentEvent(event: RelayEvent) {
   );
 }
 
+function isMessageDeletionNotice(event: RelayEvent) {
+  if (event.kind !== KIND_SYSTEM_MESSAGE) return false;
+
+  try {
+    const payload: unknown = JSON.parse(event.content);
+    return (
+      typeof payload === "object" &&
+      payload !== null &&
+      "type" in payload &&
+      payload.type === "message_deleted"
+    );
+  } catch {
+    return false;
+  }
+}
+
 function getDeletionTargets(tags: string[][]) {
   return tags
     .filter(
@@ -104,7 +120,11 @@ export function countTopLevelTimelineRows(events: RelayEvent[]): number {
 
   let count = 0;
   for (const event of events) {
-    if (!isTimelineContentEvent(event) || deletedEventIds.has(event.id)) {
+    if (
+      !isTimelineContentEvent(event) ||
+      isMessageDeletionNotice(event) ||
+      deletedEventIds.has(event.id)
+    ) {
       continue;
     }
     const { parentId } = getThreadReference(event.tags);
@@ -252,7 +272,10 @@ export function formatTimelineMessages(
   }
 
   const visibleEvents = events.filter(
-    (event) => isTimelineContentEvent(event) && !deletedEventIds.has(event.id),
+    (event) =>
+      isTimelineContentEvent(event) &&
+      !isMessageDeletionNotice(event) &&
+      !deletedEventIds.has(event.id),
   );
   const eventsById = new Map(visibleEvents.map((event) => [event.id, event]));
   const reactionPresence = new Map<
@@ -551,7 +574,7 @@ export function collectMessageAuthorPubkeys(
   const pubkeys = new Set<string>();
 
   for (const event of events) {
-    if (!isTimelineContentEvent(event)) {
+    if (!isTimelineContentEvent(event) || isMessageDeletionNotice(event)) {
       continue;
     }
 
