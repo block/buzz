@@ -20,20 +20,30 @@ import { finalizeEvent, generateSecretKey, getPublicKey } from "nostr-tools";
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const specsRoot = join(packageRoot, "..", "..", "specs");
 const signedEvent = JSON.parse(
-  readFileSync(join(specsRoot, "fixtures/local-relay/signed-message.json"), "utf8"),
+  readFileSync(
+    join(specsRoot, "fixtures/local-relay/signed-message.json"),
+    "utf8",
+  ),
 );
 const coreFixture = JSON.parse(
-  readFileSync(join(specsRoot, "fixtures/portable-relay/core-v0.1.json"), "utf8"),
+  readFileSync(
+    join(specsRoot, "fixtures/portable-relay/core-v0.1.json"),
+    "utf8",
+  ),
 );
 
 const [baseArg, label, ...rest] = process.argv.slice(2);
 if (!baseArg || !label) {
-  console.error("usage: tier3-conformance.mjs <http-base-url> <label> [--mode full|recovery] [--out FILE]");
+  console.error(
+    "usage: tier3-conformance.mjs <http-base-url> <label> [--mode full|recovery] [--out FILE]",
+  );
   process.exit(1);
 }
 const httpBase = baseArg.replace(/\/$/, "");
 const wsBase = httpBase.replace(/^http/, "ws");
-const mode = rest.includes("--mode") ? rest[rest.indexOf("--mode") + 1] : "full";
+const mode = rest.includes("--mode")
+  ? rest[rest.indexOf("--mode") + 1]
+  : "full";
 const outFile = rest.includes("--out") ? rest[rest.indexOf("--out") + 1] : null;
 const FRAME_TIMEOUT_MS = 5_000;
 const SILENCE_WINDOW_MS = 1_500;
@@ -41,7 +51,9 @@ const SILENCE_WINDOW_MS = 1_500;
 const results = [];
 function record(check, pass, detail) {
   results.push({ check, outcome: pass ? "pass" : "fail", detail });
-  console.log(`${pass ? "PASS" : "FAIL"}  ${check}${detail ? ` — ${detail}` : ""}`);
+  console.log(
+    `${pass ? "PASS" : "FAIL"}  ${check}${detail ? ` — ${detail}` : ""}`,
+  );
 }
 
 // Envelope exactness means identical fields and values; JSON key order is
@@ -59,7 +71,8 @@ function canonical(value) {
   }
   return value;
 }
-const deepEqual = (a, b) => JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
+const deepEqual = (a, b) =>
+  JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
 const normalize = (event) => JSON.parse(JSON.stringify(event));
 
 async function post(path, body) {
@@ -131,7 +144,9 @@ function openSocket() {
           }),
       }),
     );
-    socket.addEventListener("error", () => reject(new Error("WebSocket failed to connect")));
+    socket.addEventListener("error", () =>
+      reject(new Error("WebSocket failed to connect")),
+    );
   });
 }
 
@@ -160,8 +175,12 @@ async function checkDurableHistory(stage) {
   );
   const socket = await openSocket();
   socket.send(["REQ", "t3-history", coreFixture.operations.query.filters[0]]);
-  const history = await socket.next((frame) => frame[0] === "EVENT" && frame[1] === "t3-history");
-  const eose = await socket.next((frame) => frame[0] === "EOSE" && frame[1] === "t3-history");
+  const history = await socket.next(
+    (frame) => frame[0] === "EVENT" && frame[1] === "t3-history",
+  );
+  const eose = await socket.next(
+    (frame) => frame[0] === "EOSE" && frame[1] === "t3-history",
+  );
   record(
     `${stage}: WebSocket history precedes EOSE`,
     deepEqual(history[2], signedEvent) && eose[1] === "t3-history",
@@ -170,14 +189,21 @@ async function checkDurableHistory(stage) {
 }
 
 async function runFull() {
-  const health = await fetch(`${httpBase}/health`).then((response) => response.json());
-  record("health endpoint responds", health.status === "ok", JSON.stringify(health));
+  const health = await fetch(`${httpBase}/health`).then((response) =>
+    response.json(),
+  );
+  record(
+    "health endpoint responds",
+    health.status === "ok",
+    JSON.stringify(health),
+  );
 
   const submit = await post("/events", signedEvent);
   record(
     "fixture event accepted as stored",
     submit.status === 200 &&
-      submit.json?.accepted === coreFixture.operations.submit.expected.accepted &&
+      submit.json?.accepted ===
+        coreFixture.operations.submit.expected.accepted &&
       submit.json?.message === "stored",
     `${submit.status} ${JSON.stringify(submit.json)}`,
   );
@@ -191,7 +217,11 @@ async function runFull() {
 
   await checkDurableHistory("initial");
 
-  const tampered = freshEvent({ kind: 1, created_at: 400, content: "attested" });
+  const tampered = freshEvent({
+    kind: 1,
+    created_at: 400,
+    content: "attested",
+  });
   const forged = { ...tampered.event, content: "tampered after signing" };
   const rejected = await post("/events", forged);
   record(
@@ -203,12 +233,20 @@ async function runFull() {
   const absent = await post("/query", [{ ids: [tampered.event.id] }]);
   record(
     "rejected event absent from durable history",
-    absent.status === 200 && Array.isArray(absent.json) && absent.json.length === 0,
+    absent.status === 200 &&
+      Array.isArray(absent.json) &&
+      absent.json.length === 0,
   );
 
   const search = await post("/query", [{ search: "owner-attested" }]);
-  record("NIP-50 search fails explicitly", search.status === 400, `status ${search.status}`);
-  const unknownField = await post("/query", [{ kinds: [1], unknown_extension: 1 }]);
+  record(
+    "NIP-50 search fails explicitly",
+    search.status === 400,
+    `status ${search.status}`,
+  );
+  const unknownField = await post("/query", [
+    { kinds: [1], unknown_extension: 1 },
+  ]);
   record(
     "unknown filter field fails closed",
     unknownField.status === 400,
@@ -216,11 +254,19 @@ async function runFull() {
   );
 
   const replaceKey = generateSecretKey();
-  const newer = freshEvent({ kind: 10_000, created_at: 200, content: "newer" }, replaceKey);
-  const older = freshEvent({ kind: 10_000, created_at: 100, content: "older" }, replaceKey);
+  const newer = freshEvent(
+    { kind: 10_000, created_at: 200, content: "newer" },
+    replaceKey,
+  );
+  const older = freshEvent(
+    { kind: 10_000, created_at: 100, content: "older" },
+    replaceKey,
+  );
   const newerResult = await post("/events", newer.event);
   const olderResult = await post("/events", older.event);
-  const effective = await post("/query", [{ kinds: [10_000], authors: [newer.pubkey] }]);
+  const effective = await post("/query", [
+    { kinds: [10_000], authors: [newer.pubkey] },
+  ]);
   record(
     "replaceable stream keeps deterministic winner",
     newerResult.json?.message === "stored" &&
@@ -229,24 +275,36 @@ async function runFull() {
     `${newerResult.json?.message}/${olderResult.json?.message}`,
   );
 
-  const ephemeral = freshEvent({ kind: 20_001, created_at: 300, content: "live only" });
+  const ephemeral = freshEvent({
+    kind: 20_001,
+    created_at: 300,
+    content: "live only",
+  });
   const ephemeralResult = await post("/events", ephemeral.event);
   const ephemeralQuery = await post("/query", [{ ids: [ephemeral.event.id] }]);
   record(
     "ephemeral event is live-only",
-    ephemeralResult.json?.message === "ephemeral" && ephemeralQuery.json?.length === 0,
+    ephemeralResult.json?.message === "ephemeral" &&
+      ephemeralQuery.json?.length === 0,
     ephemeralResult.json?.message,
   );
 
-  const live = freshEvent({ kind: 1, created_at: 500, content: "tier-3 live delivery" });
+  const live = freshEvent({
+    kind: 1,
+    created_at: 500,
+    content: "tier-3 live delivery",
+  });
   const socket = await openSocket();
   socket.send(["REQ", "t3-live", { kinds: [1], authors: [live.pubkey] }]);
   await socket.next((frame) => frame[0] === "EOSE" && frame[1] === "t3-live");
   const submitLive = await post("/events", live.event);
-  const liveFrame = await socket.next((frame) => frame[0] === "EVENT" && frame[1] === "t3-live");
+  const liveFrame = await socket.next(
+    (frame) => frame[0] === "EVENT" && frame[1] === "t3-live",
+  );
   record(
     "live delivery reaches an open subscription",
-    submitLive.json?.message === "stored" && deepEqual(liveFrame[2], live.event),
+    submitLive.json?.message === "stored" &&
+      deepEqual(liveFrame[2], live.event),
   );
 
   socket.send(["CLOSE", "t3-live"]);
@@ -257,7 +315,11 @@ async function runFull() {
   const silencePromise = socket.silence();
   await post("/events", afterClose.event);
   const strayFrame = await silencePromise;
-  record("CLOSE stops later delivery", strayFrame === null, strayFrame ? JSON.stringify(strayFrame) : "silent");
+  record(
+    "CLOSE stops later delivery",
+    strayFrame === null,
+    strayFrame ? JSON.stringify(strayFrame) : "silent",
+  );
   socket.socket.close(1000, "done");
 }
 
@@ -273,7 +335,10 @@ const evidence = {
   adapter: label,
   base_url: httpBase,
   mode,
-  fixtures: ["local-relay/signed-message.json", "portable-relay/core-v0.1.json"],
+  fixtures: [
+    "local-relay/signed-message.json",
+    "portable-relay/core-v0.1.json",
+  ],
   recorded_at: new Date().toISOString(),
   results,
   pass: results.every((result) => result.outcome === "pass"),
@@ -281,5 +346,7 @@ const evidence = {
 if (outFile) {
   writeFileSync(outFile, `${JSON.stringify(evidence, null, 2)}\n`);
 }
-console.log(`\n${evidence.pass ? "TIER PASS" : "TIER FAIL"}: ${label} (${mode}) — ${results.length} checks`);
+console.log(
+  `\n${evidence.pass ? "TIER PASS" : "TIER FAIL"}: ${label} (${mode}) — ${results.length} checks`,
+);
 process.exit(evidence.pass ? 0 : 1);

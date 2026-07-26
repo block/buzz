@@ -8,6 +8,14 @@ import {
   type Filter,
 } from "nostr-tools";
 import {
+  authorizeDirect,
+  eventVisibleToReader,
+  PROOF_RETENTION_SECS,
+  verifyNip42At,
+  verifyNip98At,
+  type DenialCode,
+} from "./identity";
+import {
   eventFromUnknown,
   filtersFromUnknown,
   ProtocolInputError,
@@ -52,6 +60,24 @@ interface ConnectionAttachment {
   connectionId: string;
 }
 
+interface ConnectionRow extends Record<string, SqlStorageValue> {
+  connection_id: string;
+  challenge: string;
+  audience: string;
+  principal_pubkey: string | null;
+}
+
+/** NIP-98 evidence captured by the Worker for one HTTP request. */
+export interface HttpAuthEvidence {
+  authorization: string | null;
+  url: string;
+  method: string;
+  payloadSha256Hex: string;
+}
+
+/** RPC outcome: either an identity denial or the operation result. */
+export type RpcOutcome<T> = { denied: DenialCode } | { result: T };
+
 /**
  * Durable state boundary for one normalized portable relay node.
  */
@@ -95,6 +121,23 @@ export class RelayNode extends DurableObject<Env> {
         PRIMARY KEY (connection_id, subscription_id)
       ) WITHOUT ROWID, STRICT
     `);
+    // Security state is object-local and never event history. Consumed
+    // proofs are durable so a replayed proof fails closed even after
+    // eviction reconstructs this object within the freshness window.
+    this.#sql.exec(`
+      CREATE TABLE IF NOT EXISTS consumed_proofs (
+        proof_id TEXT PRIMARY KEY,
+        consumed_at INTEGER NOT NULL
+      ) WITHOUT ROWID, STRICT
+    `);
+    this.#sql.exec(`
+      CREATE TABLE IF NOT EXISTS connections (
+        connection_id TEXT PRIMARY KEY,
+        challenge TEXT NOT NULL,
+        audience TEXT NOT NULL,
+        principal_pubkey TEXT
+      ) WITHOUT ROWID, STRICT
+    `);
   }
 
   /**
@@ -135,25 +178,126 @@ export class RelayNode extends DurableObject<Env> {
   /**
    * Verifies and applies one portable signed event behind SQLite's output gate.
    */
-  submitEvent(stableNodeKey: string, event: Event): WriteResult {
+  submitEvent(
+    stableNodeKey: string,
+    event: Event,
+    auth?: HttpAuthEvidence,
+  ): RpcOutcome<WriteResult> {
     this.initializeNode(stableNodeKey);
-    return this.#applyEvent(event);
+    const outcome = this.#authenticateHttp(auth);
+    if ("denied" in outcome) {
+      return outcome;
+    }
+    if (outcome.principal !== null) {
+      const denial = authorizeDirect(outcome.principal, event);
+      if (denial !== null) {
+        return { denied: denial };
+      }
+    }
+    return { result: this.#applyEvent(event) };
   }
 
   /**
    * Returns the effective event set selected by NIP-01 filters.
    */
-  queryEvents(stableNodeKey: string, filters: Filter[]): Event[] {
+  queryEvents(
+    stableNodeKey: string,
+    filters: Filter[],
+    auth?: HttpAuthEvidence,
+  ): RpcOutcome<Event[]> {
     this.initializeNode(stableNodeKey);
-    return this.#queryEffective(filters);
+    const outcome = this.#authenticateHttp(auth);
+    if ("denied" in outcome) {
+      return outcome;
+    }
+    return { result: this.#queryEffective(filters, outcome.principal) };
   }
 
   /**
    * Counts effective events matching any supplied NIP-01 filter.
    */
-  countEvents(stableNodeKey: string, filters: Filter[]): number {
+  countEvents(
+    stableNodeKey: string,
+    filters: Filter[],
+    auth?: HttpAuthEvidence,
+  ): RpcOutcome<number> {
     this.initializeNode(stableNodeKey);
-    return this.#countEffective(filters);
+    const outcome = this.#authenticateHttp(auth);
+    if ("denied" in outcome) {
+      return outcome;
+    }
+    return { result: this.#countEffective(filters, outcome.principal) };
+  }
+
+  #authRequired(): boolean {
+    const value: string = this.env.BUZZ_REQUIRE_AUTH ?? "";
+    return value === "1" || value === "true" || value === "yes";
+  }
+
+  /**
+   * Resolves the HTTP principal: `null` when this node does not require
+   * authentication, the pubkey on success, or a denial outcome.
+   */
+  #authenticateHttp(
+    auth?: HttpAuthEvidence,
+  ): { principal: string | null } | { denied: DenialCode } {
+    if (!this.#authRequired()) {
+      return { principal: null };
+    }
+    const encoded = auth?.authorization?.startsWith("Nostr ")
+      ? auth.authorization.slice("Nostr ".length)
+      : null;
+    if (auth === undefined || encoded === null) {
+      return { denied: "authentication_required" };
+    }
+    let proof: Event;
+    try {
+      proof = eventFromUnknown(JSON.parse(atob(encoded)));
+    } catch {
+      return { denied: "invalid_evidence" };
+    }
+    const verified = verifyNip98At(
+      proof,
+      {
+        url: auth.url,
+        method: auth.method,
+        payloadSha256Hex: auth.payloadSha256Hex,
+      },
+      nowSecs(),
+    );
+    if (!verified.ok) {
+      return { denied: verified.code };
+    }
+    const replay = this.#consumeProof(verified.proofId);
+    if (replay !== null) {
+      return { denied: replay };
+    }
+    return { principal: verified.pubkey };
+  }
+
+  #consumeProof(proofId: string): DenialCode | null {
+    const now = nowSecs();
+    const existing = Array.from(
+      this.#sql.exec(
+        "SELECT 1 FROM consumed_proofs WHERE proof_id = ?",
+        proofId,
+      ),
+    );
+    if (existing.length > 0) {
+      return "replay_detected";
+    }
+    this.ctx.storage.transactionSync(() => {
+      this.#sql.exec(
+        "INSERT INTO consumed_proofs (proof_id, consumed_at) VALUES (?, ?)",
+        proofId,
+        now,
+      );
+      this.#sql.exec(
+        "DELETE FROM consumed_proofs WHERE consumed_at < ?",
+        now - PROOF_RETENTION_SECS,
+      );
+    });
+    return null;
   }
 
   #applyEvent(event: Event): WriteResult {
@@ -240,12 +384,12 @@ export class RelayNode extends DurableObject<Env> {
     };
   }
 
-  #queryEffective(filters: Filter[]): Event[] {
+  #queryEffective(filters: Filter[], reader: string | null = null): Event[] {
     if (filters.length === 0) {
       return [];
     }
 
-    const ordered = sortEvents(this.#effectiveEvents());
+    const ordered = sortEvents(this.#readableEvents(reader));
     const selected = new Map<string, Event>();
     for (const filter of filters) {
       const limit = Math.min(
@@ -270,13 +414,21 @@ export class RelayNode extends DurableObject<Env> {
     return sortEvents(Array.from(selected.values()));
   }
 
-  #countEffective(filters: Filter[]): number {
+  #countEffective(filters: Filter[], reader: string | null = null): number {
     if (filters.length === 0) {
       return 0;
     }
-    return this.#effectiveEvents().filter((event) =>
+    return this.#readableEvents(reader).filter((event) =>
       matchFilters(filters, event),
     ).length;
+  }
+
+  #readableEvents(reader: string | null): Event[] {
+    const events = this.#effectiveEvents();
+    if (reader === null) {
+      return events;
+    }
+    return events.filter((event) => eventVisibleToReader(reader, event));
   }
 
   /**
@@ -297,10 +449,23 @@ export class RelayNode extends DurableObject<Env> {
 
     const [client, server] = Object.values(new WebSocketPair());
     this.ctx.acceptWebSocket(server);
+    const connectionId = crypto.randomUUID();
     server.serializeAttachment({
       version: 1,
-      connectionId: crypto.randomUUID(),
+      connectionId,
     } satisfies ConnectionAttachment);
+    if (this.#authRequired()) {
+      const challenge = randomChallenge();
+      const audience = new URL(request.url).origin.replace(/^http/, "ws") + "/";
+      this.#sql.exec(
+        `INSERT INTO connections (connection_id, challenge, audience, principal_pubkey)
+         VALUES (?, ?, ?, NULL)`,
+        connectionId,
+        challenge,
+        audience,
+      );
+      this.#send(server, ["AUTH", challenge]);
+    }
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -325,6 +490,10 @@ export class RelayNode extends DurableObject<Env> {
       return;
     }
 
+    if (frame[0] === "AUTH") {
+      this.#handleWebSocketAuth(ws, frame);
+      return;
+    }
     if (frame[0] === "EVENT") {
       this.#handleWebSocketEvent(ws, frame);
       return;
@@ -372,9 +541,65 @@ export class RelayNode extends DurableObject<Env> {
     return row === undefined ? null : (JSON.parse(row.event_json) as Event);
   }
 
+  #handleWebSocketAuth(ws: WebSocket, frame: unknown[]): void {
+    let event: Event;
+    try {
+      event = eventFromUnknown(frame[1]);
+    } catch {
+      this.#send(ws, ["OK", "", false, "invalid_evidence"]);
+      return;
+    }
+    if (!this.#authRequired()) {
+      this.#send(ws, ["OK", event.id, false, "authentication_not_enabled"]);
+      return;
+    }
+    const connection = this.#connectionRow(ws);
+    if (connection === null) {
+      this.#send(ws, ["OK", event.id, false, "authentication_required"]);
+      return;
+    }
+    if (connection.principal_pubkey !== null) {
+      this.#send(ws, ["OK", event.id, false, "replay_detected"]);
+      return;
+    }
+    const verified = verifyNip42At(
+      event,
+      connection.challenge,
+      connection.audience,
+      nowSecs(),
+    );
+    if (!verified.ok) {
+      this.#send(ws, ["OK", event.id, false, verified.code]);
+      return;
+    }
+    const replay = this.#consumeProof(verified.proofId);
+    if (replay !== null) {
+      this.#send(ws, ["OK", event.id, false, replay]);
+      return;
+    }
+    this.#sql.exec(
+      "UPDATE connections SET principal_pubkey = ? WHERE connection_id = ?",
+      verified.pubkey,
+      connection.connection_id,
+    );
+    this.#send(ws, ["OK", event.id, true, "authenticated"]);
+  }
+
   #handleWebSocketEvent(ws: WebSocket, frame: unknown[]): void {
     try {
       const event = eventFromUnknown(frame[1]);
+      if (this.#authRequired()) {
+        const principal = this.#connectionRow(ws)?.principal_pubkey ?? null;
+        if (principal === null) {
+          this.#send(ws, ["OK", event.id, false, "authentication_required"]);
+          return;
+        }
+        const denial = authorizeDirect(principal, event);
+        if (denial !== null) {
+          this.#send(ws, ["OK", event.id, false, denial]);
+          return;
+        }
+      }
       const result = this.#applyEvent(event);
       this.#send(ws, ["OK", result.event_id, result.accepted, result.message]);
     } catch (error) {
@@ -423,6 +648,14 @@ export class RelayNode extends DurableObject<Env> {
       ]);
       return;
     }
+    let reader: string | null = null;
+    if (this.#authRequired()) {
+      reader = this.#connectionRow(ws)?.principal_pubkey ?? null;
+      if (reader === null) {
+        this.#send(ws, ["CLOSED", subscriptionId, "authentication_required"]);
+        return;
+      }
+    }
     const connectionId = attachment.connectionId;
     const existing = this.#subscriptionCount(connectionId);
     const replacing = this.#hasSubscription(connectionId, subscriptionId);
@@ -442,7 +675,7 @@ export class RelayNode extends DurableObject<Env> {
       JSON.stringify(filters),
     );
 
-    for (const event of this.#queryEffective(filters)) {
+    for (const event of this.#queryEffective(filters, reader)) {
       if (!this.#send(ws, ["EVENT", subscriptionId, event])) {
         return;
       }
@@ -469,10 +702,17 @@ export class RelayNode extends DurableObject<Env> {
   }
 
   #publishLive(event: Event): void {
+    const authRequired = this.#authRequired();
     for (const ws of this.ctx.getWebSockets()) {
       const attachment = this.#attachmentOrNull(ws);
       if (attachment === null) {
         continue;
+      }
+      if (authRequired) {
+        const reader = this.#connectionRow(ws)?.principal_pubkey ?? null;
+        if (reader === null || !eventVisibleToReader(reader, event)) {
+          continue;
+        }
       }
       const subscriptions = this.#sql.exec<SubscriptionRow>(
         `SELECT subscription_id, filters_json
@@ -507,6 +747,26 @@ export class RelayNode extends DurableObject<Env> {
       "DELETE FROM subscriptions WHERE connection_id = ?",
       attachment.connectionId,
     );
+    this.#sql.exec(
+      "DELETE FROM connections WHERE connection_id = ?",
+      attachment.connectionId,
+    );
+  }
+
+  #connectionRow(ws: WebSocket): ConnectionRow | null {
+    const attachment = this.#attachmentOrNull(ws);
+    if (attachment === null) {
+      return null;
+    }
+    const row = Array.from(
+      this.#sql.exec<ConnectionRow>(
+        `SELECT connection_id, challenge, audience, principal_pubkey
+         FROM connections
+         WHERE connection_id = ?`,
+        attachment.connectionId,
+      ),
+    )[0];
+    return row === undefined ? null : row;
   }
 
   #subscriptionCount(connectionId: string): number {
@@ -564,6 +824,17 @@ function verifySafely(event: Event): boolean {
   } catch {
     return false;
   }
+}
+
+function nowSecs(): number {
+  return Math.floor(Date.now() / 1000);
+}
+
+function randomChallenge(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(
+    "",
+  );
 }
 
 function isEphemeralKind(kind: number): boolean {

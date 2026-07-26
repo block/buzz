@@ -3,6 +3,11 @@
   "name": "buzz-portable-relay",
   "main": "src/index.ts",
   "compatibility_date": "2026-07-25",
+  // Opt-in identity, mirroring the laptop adapter's --require-auth flag.
+  // Set to "1" (or deploy with --var) to require NIP-42/NIP-98 identity.
+  "vars": {
+    "BUZZ_REQUIRE_AUTH": ""
+  },
   "durable_objects": {
     "bindings": [
       {

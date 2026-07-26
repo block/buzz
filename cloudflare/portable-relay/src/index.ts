@@ -1,4 +1,10 @@
-import { RelayNode, STABLE_NODE_KEY_HEADER } from "./relay-node";
+import { httpStatusForDenial, type DenialCode } from "./identity";
+import {
+  RelayNode,
+  STABLE_NODE_KEY_HEADER,
+  type HttpAuthEvidence,
+  type RpcOutcome,
+} from "./relay-node";
 import {
   eventFromUnknown,
   filtersFromUnknown,
@@ -59,27 +65,38 @@ export default {
     }
 
     let body: unknown;
+    let bytes: ArrayBuffer;
     try {
-      body = await readJson(request);
+      bytes = await readBody(request);
+      body = parseJson(bytes);
     } catch (error) {
       if (!(error instanceof ProtocolInputError)) {
         throw error;
       }
       return json({ error: "invalid_request", message: error.message }, 400);
     }
+    const auth: HttpAuthEvidence = {
+      authorization: request.headers.get("authorization"),
+      url: request.url,
+      method: request.method,
+      payloadSha256Hex: await sha256Hex(bytes),
+    };
 
     try {
       if (url.pathname === "/events") {
-        return json(
-          await node.submitEvent(stableNodeKey, eventFromUnknown(body)),
+        return unwrap(
+          await node.submitEvent(stableNodeKey, eventFromUnknown(body), auth),
         );
       }
 
       const filters = filtersFromUnknown(body);
       if (url.pathname === "/query") {
-        return json(await node.queryEvents(stableNodeKey, filters));
+        return unwrap(await node.queryEvents(stableNodeKey, filters, auth));
       }
-      return json({ count: await node.countEvents(stableNodeKey, filters) });
+      const counted = await node.countEvents(stableNodeKey, filters, auth);
+      return "denied" in counted
+        ? denialResponse(counted.denied)
+        : json({ count: counted.result });
     } catch (error) {
       if (error instanceof ProtocolInputError) {
         return json({ error: "invalid_request", message: error.message }, 400);
@@ -95,7 +112,7 @@ export default {
   },
 } satisfies ExportedHandler<Env>;
 
-async function readJson(request: Request): Promise<unknown> {
+async function readBody(request: Request): Promise<ArrayBuffer> {
   const declaredLength = request.headers.get("Content-Length");
   if (
     declaredLength !== null &&
@@ -108,11 +125,32 @@ async function readJson(request: Request): Promise<unknown> {
   if (bytes.byteLength > MAX_HTTP_BODY_BYTES) {
     throw new ProtocolInputError("request body exceeds 256 KiB");
   }
+  return bytes;
+}
+
+function parseJson(bytes: ArrayBuffer): unknown {
   try {
     return JSON.parse(new TextDecoder().decode(bytes));
   } catch {
     throw new ProtocolInputError("request body is not valid JSON");
   }
+}
+
+async function sha256Hex(bytes: ArrayBuffer): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest), (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
+}
+
+function unwrap<T>(outcome: RpcOutcome<T>): Response {
+  return "denied" in outcome
+    ? denialResponse(outcome.denied)
+    : json(outcome.result);
+}
+
+function denialResponse(code: DenialCode): Response {
+  return json({ error: "identity_denied", code }, httpStatusForDenial(code));
 }
 
 function json(
