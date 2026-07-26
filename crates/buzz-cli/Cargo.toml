@@ -18,6 +18,7 @@ path = "src/main.rs"
 [dependencies]
 # CLI argument parsing — derive macros + env var support (BUZZ_API_TOKEN auto-wired)
 clap = { version = "4", features = ["derive", "env"] }
+clap_complete = "4"
 
 # HTTP client — async REST calls to the relay
 reqwest = { workspace = true, features = ["json"] }

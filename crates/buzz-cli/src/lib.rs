@@ -4,7 +4,7 @@ mod commands;
 mod error;
 mod validate;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use client::BuzzClient;
 use error::CliError;
 use nostr::Keys;
@@ -236,6 +236,11 @@ enum Cmd {
     /// Community moderation — reports queue, bans, timeouts, audit trail
     #[command(subcommand)]
     Moderation(ModerationCmd),
+    /// Generate shell completion scripts
+    Completions {
+        /// Shell to generate completions for (bash, zsh, fish, powershell, elvish)
+        shell: clap_complete::Shell,
+    },
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -1733,7 +1738,13 @@ pub enum ModerationCmd {
 async fn run(cli: Cli) -> Result<(), CliError> {
     let relay_url = client::normalize_relay_url(&cli.relay);
 
-    // Pack commands are local-only — no relay connection needed.
+    // Local-only commands — no relay connection needed.
+    if let Cmd::Completions { shell } = cli.command {
+        let mut cmd = Cli::command();
+        clap_complete::generate(shell, &mut cmd, "buzz", &mut std::io::stdout());
+        return Ok(());
+    }
+
     if let Cmd::Pack(ref sub) = cli.command {
         return match sub {
             PackCmd::Validate { path } => commands::pack::cmd_validate(path),
@@ -1788,7 +1799,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Upload(sub) => commands::upload::dispatch(sub, &client).await,
         Cmd::Mem(sub) => commands::mem::dispatch(sub, &client).await,
         Cmd::Moderation(sub) => commands::moderation::dispatch(sub, &client, &cli.format).await,
-        Cmd::Pack(_) => unreachable!("handled above"),
+        Cmd::Pack(_) | Cmd::Completions { .. } => unreachable!("handled above"),
     }
 }
 
@@ -1809,6 +1820,7 @@ mod tests {
             "agents",
             "canvas",
             "channels",
+            "completions",
             "dms",
             "emoji",
             "feed",
