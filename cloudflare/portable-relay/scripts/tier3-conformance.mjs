@@ -12,6 +12,7 @@
 // `recovery` mode checks only that previously accepted durable history is
 // still served exactly (used after an eviction, isolate change, or redeploy).
 
+import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -323,15 +324,268 @@ async function runFull() {
   socket.socket.close(1000, "done");
 }
 
+function nip98Header(secretKey, url, body) {
+  const payload = createHash("sha256").update(body).digest("hex");
+  const proof = finalizeEvent(
+    {
+      kind: 27_235,
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [
+        ["u", url],
+        ["method", "POST"],
+        ["payload", payload],
+        ["nonce", crypto.randomUUID()],
+      ],
+      content: "",
+    },
+    secretKey,
+  );
+  return `Nostr ${Buffer.from(JSON.stringify(proof)).toString("base64")}`;
+}
+
+async function authedPost(secretKey, path, body, headerOverride = null) {
+  const url = `${httpBase}${path}`;
+  const serialized = JSON.stringify(body);
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      authorization: headerOverride ?? nip98Header(secretKey, url, serialized),
+      "content-type": "application/json",
+    },
+    body: serialized,
+  });
+  let json = null;
+  try {
+    json = await response.json();
+  } catch {
+    // non-JSON bodies count as protocol failures at the call sites
+  }
+  return { status: response.status, json };
+}
+
+async function runIdentity() {
+  const author = freshEvent({ kind: 1, created_at: 1, content: "unused" });
+  const note = freshEvent(
+    { kind: 1, created_at: nowSecs(), content: "identity-bound over HTTP" },
+    author.secretKey,
+  );
+
+  const anonymous = await post("/events", note.event);
+  record(
+    "anonymous submit fails closed",
+    anonymous.status === 401 &&
+      anonymous.json?.code === "authentication_required",
+    `status ${anonymous.status} code ${anonymous.json?.code}`,
+  );
+
+  const url = `${httpBase}/events`;
+  const serialized = JSON.stringify(note.event);
+  const header = nip98Header(author.secretKey, url, serialized);
+  const stored = await authedPost(
+    author.secretKey,
+    "/events",
+    note.event,
+    header,
+  );
+  record(
+    "authenticated author submit is stored",
+    stored.status === 200 && stored.json?.message === "stored",
+    `${stored.status} ${stored.json?.message}`,
+  );
+
+  const replayed = await authedPost(
+    author.secretKey,
+    "/events",
+    note.event,
+    header,
+  );
+  record(
+    "replayed proof fails closed",
+    replayed.status === 401 && replayed.json?.code === "replay_detected",
+    `status ${replayed.status} code ${replayed.json?.code}`,
+  );
+
+  const other = freshEvent({ kind: 1, created_at: 1, content: "unused" });
+  const mismatched = await authedPost(other.secretKey, "/events", note.event);
+  record(
+    "mismatched author fails closed",
+    mismatched.status === 403 && mismatched.json?.code === "author_mismatch",
+    `status ${mismatched.status} code ${mismatched.json?.code}`,
+  );
+
+  const authKindEvent = freshEvent(
+    {
+      kind: 22_242,
+      created_at: nowSecs(),
+      content: "",
+      tags: [
+        ["challenge", "c".repeat(64)],
+        ["relay", `${wsBase}/`],
+      ],
+    },
+    author.secretKey,
+  );
+  const scopeDenied = await authedPost(
+    author.secretKey,
+    "/events",
+    authKindEvent.event,
+  );
+  record(
+    "authentication kinds are denied direct append",
+    scopeDenied.status === 403 && scopeDenied.json?.code === "scope_denied",
+    `status ${scopeDenied.status} code ${scopeDenied.json?.code}`,
+  );
+  const journal = await authedPost(author.secretKey, "/query", [
+    { kinds: [22_242, 27_235], authors: [author.pubkey] },
+  ]);
+  record(
+    "authentication events never enter the journal",
+    journal.status === 200 &&
+      Array.isArray(journal.json) &&
+      journal.json.length === 0,
+  );
+
+  const recipient = freshEvent({ kind: 1, created_at: 1, content: "unused" });
+  const attacker = freshEvent({ kind: 1, created_at: 1, content: "unused" });
+  const giftWrap = freshEvent({
+    kind: 1_059,
+    created_at: nowSecs(),
+    content: "ciphertext",
+    tags: [["p", recipient.pubkey]],
+  });
+  const wrapStored = await authedPost(
+    author.secretKey,
+    "/events",
+    giftWrap.event,
+  );
+  const wrapFilters = [{ ids: [giftWrap.event.id] }];
+  const recipientQuery = await authedPost(
+    recipient.secretKey,
+    "/query",
+    wrapFilters,
+  );
+  const attackerQuery = await authedPost(
+    attacker.secretKey,
+    "/query",
+    wrapFilters,
+  );
+  record(
+    "gift-wrap disclosure binds to the tagged recipient",
+    wrapStored.status === 200 &&
+      deepEqual(recipientQuery.json, [giftWrap.event]) &&
+      Array.isArray(attackerQuery.json) &&
+      attackerQuery.json.length === 0,
+  );
+  const recipientCount = await authedPost(
+    recipient.secretKey,
+    "/count",
+    wrapFilters,
+  );
+  const attackerCount = await authedPost(
+    attacker.secretKey,
+    "/count",
+    wrapFilters,
+  );
+  record(
+    "count applies the same disclosure rule",
+    recipientCount.json?.count === 1 && attackerCount.json?.count === 0,
+    `${recipientCount.json?.count}/${attackerCount.json?.count}`,
+  );
+
+  const socket = await openSocket();
+  const challengeFrame = await socket.next((frame) => frame[0] === "AUTH");
+  record(
+    "WebSocket issues an AUTH challenge",
+    typeof challengeFrame[1] === "string" && challengeFrame[1].length > 0,
+  );
+
+  const wsKeys = freshEvent({ kind: 1, created_at: 1, content: "unused" });
+  const early = freshEvent(
+    { kind: 1, created_at: nowSecs(), content: "too early" },
+    wsKeys.secretKey,
+  );
+  socket.send(["EVENT", early.event]);
+  const earlyDenied = await socket.next(
+    (frame) => frame[0] === "OK" && frame[1] === early.event.id,
+  );
+  record(
+    "unauthenticated WebSocket EVENT fails closed",
+    earlyDenied[2] === false && earlyDenied[3] === "authentication_required",
+    String(earlyDenied[3]),
+  );
+  socket.send(["REQ", "t3-id-early", { kinds: [1] }]);
+  const earlyClosed = await socket.next(
+    (frame) => frame[0] === "CLOSED" && frame[1] === "t3-id-early",
+  );
+  record(
+    "unauthenticated WebSocket REQ fails closed",
+    String(earlyClosed[2]).startsWith("authentication_required"),
+    String(earlyClosed[2]),
+  );
+
+  const authEvent = freshEvent(
+    {
+      kind: 22_242,
+      created_at: nowSecs(),
+      content: "",
+      tags: [
+        ["challenge", challengeFrame[1]],
+        ["relay", `${wsBase}/`],
+      ],
+    },
+    wsKeys.secretKey,
+  );
+  socket.send(["AUTH", authEvent.event]);
+  const authOk = await socket.next(
+    (frame) => frame[0] === "OK" && frame[1] === authEvent.event.id,
+  );
+  record(
+    "NIP-42 proof authenticates the WebSocket",
+    authOk[2] === true && authOk[3] === "authenticated",
+    String(authOk[3]),
+  );
+
+  socket.send(["REQ", "t3-id-live", { kinds: [1], authors: [wsKeys.pubkey] }]);
+  await socket.next(
+    (frame) => frame[0] === "EOSE" && frame[1] === "t3-id-live",
+  );
+  const liveNote = freshEvent(
+    { kind: 1, created_at: nowSecs(), content: "identity-bound live delivery" },
+    wsKeys.secretKey,
+  );
+  const liveStored = await authedPost(
+    wsKeys.secretKey,
+    "/events",
+    liveNote.event,
+  );
+  const liveFrame = await socket.next(
+    (frame) => frame[0] === "EVENT" && frame[1] === "t3-id-live",
+  );
+  record(
+    "authenticated live delivery works end to end",
+    liveStored.status === 200 && deepEqual(liveFrame[2], liveNote.event),
+  );
+  socket.socket.close(1000, "done");
+}
+
+function nowSecs() {
+  return Math.floor(Date.now() / 1000);
+}
+
 if (mode === "full") {
   await runFull();
+} else if (mode === "identity") {
+  await runIdentity();
 } else {
   await checkDurableHistory("recovery");
 }
 
 const evidence = {
   capability: "portable-relay-cloudflare-v0.1",
-  profile: "portable-relay-core-v0.1",
+  profile:
+    mode === "identity"
+      ? "portable-relay-identity-v0.1"
+      : "portable-relay-core-v0.1",
   adapter: label,
   base_url: httpBase,
   mode,
