@@ -5,6 +5,8 @@ import {
   BUZZ_AGENT_MAX_CONTEXT_TOKENS,
   BUZZ_AGENT_MAX_OUTPUT_TOKENS,
   BUZZ_AGENT_MAX_ROUNDS,
+  BUZZ_AGENT_SERVICE_TIER,
+  BUZZ_AGENT_SERVICE_TIER_VALUES,
   BUZZ_AGENT_THINKING_EFFORT,
   BUZZ_AGENT_THINKING_EFFORT_VALUES,
   getProviderEffortConfig,
@@ -36,6 +38,16 @@ test("env var key constants match expected BUZZ_AGENT_* names", () => {
   assert.equal(BUZZ_AGENT_MAX_OUTPUT_TOKENS, "BUZZ_AGENT_MAX_OUTPUT_TOKENS");
   assert.equal(BUZZ_AGENT_MAX_CONTEXT_TOKENS, "BUZZ_AGENT_MAX_CONTEXT_TOKENS");
   assert.equal(BUZZ_AGENT_MAX_ROUNDS, "BUZZ_AGENT_MAX_ROUNDS");
+  assert.equal(BUZZ_AGENT_SERVICE_TIER, "BUZZ_AGENT_SERVICE_TIER");
+});
+
+test("BUZZ_AGENT_SERVICE_TIER_VALUES contains the OpenAI service tiers", () => {
+  assert.deepEqual([...BUZZ_AGENT_SERVICE_TIER_VALUES], [
+    "auto",
+    "default",
+    "flex",
+    "priority",
+  ]);
 });
 
 // ---------------------------------------------------------------------------
@@ -127,6 +139,14 @@ test("clearing max rounds removes the key", () => {
   const initial = { [BUZZ_AGENT_MAX_ROUNDS]: "50" };
   const result = applyEnvVarChange(initial, BUZZ_AGENT_MAX_ROUNDS, "");
   assert.equal(Object.hasOwn(result, BUZZ_AGENT_MAX_ROUNDS), false);
+});
+
+test("setting and clearing service tier uses the inheritable env-var shape", () => {
+  const set = applyEnvVarChange({}, BUZZ_AGENT_SERVICE_TIER, "flex");
+  assert.equal(set[BUZZ_AGENT_SERVICE_TIER], "flex");
+
+  const cleared = applyEnvVarChange(set, BUZZ_AGENT_SERVICE_TIER, "");
+  assert.equal(Object.hasOwn(cleared, BUZZ_AGENT_SERVICE_TIER), false);
 });
 
 test("changing one field does not disturb other env vars", () => {
