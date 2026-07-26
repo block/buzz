@@ -134,6 +134,38 @@ function createPlayer(scheduler) {
   });
 }
 
+test("suspends an idle context that starts running without playback", async () => {
+  const scheduler = createScheduler();
+  const player = createPlayer(scheduler);
+  let state = "suspended";
+  let stateChange = null;
+  let suspendCalls = 0;
+  const context = {
+    addEventListener(event, listener) {
+      if (event === "statechange") stateChange = listener;
+    },
+    get state() {
+      return state;
+    },
+    suspend() {
+      suspendCalls += 1;
+      state = "suspended";
+      return Promise.resolve();
+    },
+  };
+
+  player.armIdleSuspend(context);
+  assert.equal(scheduler.pendingCount(), 0);
+
+  state = "running";
+  stateChange();
+  assert.equal(scheduler.pendingCount(), 1);
+
+  scheduler.runAll();
+  await Promise.resolve();
+  assert.equal(suspendCalls, 1);
+});
+
 test("disconnects finished source and gain nodes, then suspends when idle", async () => {
   const scheduler = createScheduler();
   const audio = createAudioHarness();

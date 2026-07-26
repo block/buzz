@@ -60,7 +60,10 @@ function getPoofOrigin(target: Element, pointer?: PoofPointer) {
 
 function getPoofAudioContext() {
   try {
-    poofAudioContext ??= new AudioContext({ latencyHint: "interactive" });
+    if (!poofAudioContext) {
+      poofAudioContext = new AudioContext({ latencyHint: "interactive" });
+      poofAudioPlayer.armIdleSuspend(poofAudioContext);
+    }
     return poofAudioContext;
   } catch {
     return null;

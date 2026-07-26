@@ -61,6 +61,18 @@ export function createPoofAudioPlayer({
     }, idleDelayMs);
   }
 
+  function armIdleSuspend(context: AudioContext) {
+    // WebKit may start an autoplay-enabled context without any playback.
+    const scheduleIfIdle = () => {
+      if (context.state !== "running" || activePlaybacks !== 0) return;
+      cancelPendingSuspend();
+      scheduleSuspend(context);
+    };
+
+    context.addEventListener("statechange", scheduleIfIdle);
+    scheduleIfIdle();
+  }
+
   function play(
     context: AudioContext,
     buffer: AudioBuffer,
@@ -133,5 +145,5 @@ export function createPoofAudioPlayer({
     }
   }
 
-  return { play };
+  return { armIdleSuspend, play };
 }
