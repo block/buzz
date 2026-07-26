@@ -53,8 +53,9 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
 
     final session = ref.read(relaySessionProvider.notifier);
 
-    // DM channels come from the already-cached channel list when available;
-    // a missing list only skips the DM source for this refresh.
+    // DM channels come from the channel list; while it is still loading the
+    // DM source is skipped, and build() rebuilds when it resolves (see the
+    // channelsProvider watch above).
     final dmChannelIds = [
       for (final channel
           in ref.read(channelsProvider).asData?.value ?? const <Channel>[])
