@@ -38,6 +38,7 @@ import {
 import { Button } from "@/shared/ui/button";
 import { Separator } from "@/shared/ui/separator";
 import type { VideoReviewContext } from "@/shared/ui/VideoPlayer";
+import { ComposerActivityAccessory } from "./ComposerActivityAccessory";
 import { MessageComposer } from "./MessageComposer";
 import { ThreadMessageSkeleton } from "./MessageThreadPanelSkeleton";
 import { MessageRow, type ThreadDepthGuideAction } from "./MessageRow";
@@ -243,6 +244,10 @@ export function MessageThreadPanel({
   const threadHeadId = threadHead?.id ?? null;
   useEscapeKey(onClose, isOverlay || isSinglePanelView || isFocusMode);
   const hasConstrainedColumn = columnMaxWidthPx != null;
+  // Whether the composer dock trades its quiet-state spacer for the
+  // conditional activity accessory (agent working and/or someone typing).
+  const hasComposerBottomActivity =
+    Boolean(toolbarExtraActions) || threadTypingPubkeys.length > 0;
   useComposerHeightPadding(
     threadBodyRef,
     threadComposerWrapperRef,
@@ -821,7 +826,10 @@ export function MessageThreadPanel({
       >
         <div
           className={cn(
-            "composer-overlay-corner-masks pointer-events-auto",
+            "composer-overlay-corner-masks relative pointer-events-auto transition-[padding-bottom] duration-200 ease-[cubic-bezier(0.23,1,0.32,1)] motion-reduce:transition-none",
+            hasComposerBottomActivity
+              ? "composer-overlay-corner-masks--with-activity pb-8.5"
+              : "pb-5",
             hasConstrainedColumn && THREAD_PANEL_COLUMN_CLASS,
           )}
           style={
@@ -837,7 +845,8 @@ export function MessageThreadPanel({
             channelId={channelId}
             channelName={channelName}
             channelType={channel?.channelType ?? null}
-            containerClassName={THREAD_PANEL_COMPOSER_GUTTER_CLASS}
+            containerClassName={cn(THREAD_PANEL_COMPOSER_GUTTER_CLASS, "pb-0")}
+            bottomAccessoryVisible={hasComposerBottomActivity}
             disabled={disabled || isSending || !channelId}
             draftKey={`thread:${threadHead.id}`}
             autoSubmitDraftKey={autoSendDraftKey}
@@ -856,13 +865,14 @@ export function MessageThreadPanel({
             typingParentEventId={threadHead.id}
             typingRootEventId={threadHead.rootId}
           />
-          <div
-            className={cn(
-              "min-h-8 bg-background pb-1.5 pt-0",
-              THREAD_PANEL_COMPOSER_GUTTER_CLASS,
-            )}
+          {/* The activity accessory is anchored in the dock's reserved bottom
+              rail, so fading it cannot change the observed overlay height or
+              move the conversation. Its natural content height remains responsive. */}
+          <ComposerActivityAccessory
+            className={THREAD_PANEL_COMPOSER_GUTTER_CLASS}
+            visible={hasComposerBottomActivity}
           >
-            <div className="mx-auto flex h-full w-full max-w-4xl items-center gap-2 overflow-visible">
+            <div className="mx-auto flex w-full max-w-4xl items-center gap-2 overflow-visible pl-2">
               {toolbarExtraActions ? (
                 <div className="flex min-w-0 flex-1 overflow-visible">
                   {toolbarExtraActions}
@@ -879,7 +889,7 @@ export function MessageThreadPanel({
                 />
               ) : null}
             </div>
-          </div>
+          </ComposerActivityAccessory>
         </div>
       </div>
     </>
