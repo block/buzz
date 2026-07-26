@@ -363,6 +363,7 @@ export type ManagedAgent = {
   systemPrompt: string | null;
   avatarUrl: string | null;
   model: string | null;
+  modelSource: "definition" | "global" | "instance_legacy" | null;
   /** LLM inference provider, from the agent's pinned record snapshot. */
   provider: string | null;
   /**
@@ -548,6 +549,8 @@ export type AcpRuntimeCatalogEntry = {
   installHint: string;
   installInstructionsUrl: string;
   canAutoInstall: boolean;
+  /** True when the runtime depends on a separately installed vendor CLI. */
+  requiresExternalCli: boolean;
   underlyingCliPath: string | null;
   /** True when an npm adapter step is pending but Node.js / npm is absent. */
   nodeRequired: boolean;

@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.4.26
+
+- Style mobile pairing QR codes ([#2775](https://github.com/block/buzz/pull/2775)) ([`50655ac09`](https://github.com/block/buzz/commit/50655ac097fbf1a7db1a5284dccc7e2a0b0f1bfc))
+- Refine community management flows ([#2738](https://github.com/block/buzz/pull/2738)) ([`384c72dee`](https://github.com/block/buzz/commit/384c72dee6336234beae3c1a0fec305044815245))
+- docs: replace VPN-vendor references with generic wording ([#2805](https://github.com/block/buzz/pull/2805)) ([`bcca885ba`](https://github.com/block/buzz/commit/bcca885ba92b74df77e36b8e6c45a54dafc291f9))
+- fix(desktop): explain macOS local network access ([#2263](https://github.com/block/buzz/pull/2263)) ([`e527d74f0`](https://github.com/block/buzz/commit/e527d74f069de5d706714d63d99a494389e824af))
+- fix(desktop): clarify CLI runtime setup ([#2680](https://github.com/block/buzz/pull/2680)) ([`b8510ede1`](https://github.com/block/buzz/commit/b8510ede1b52ebe87ed3cf18cf0b2590a86b2245))
+
+
+## v0.4.25
+
+- fix(discovery): spawn PowerShell install commands natively on Windows ([#2750](https://github.com/block/buzz/pull/2750)) ([`f3981dbfe`](https://github.com/block/buzz/commit/f3981dbfefc09e6a888ada489badb7dafdf122cf))
+- fix(desktop): use augmented PATH for model discovery subprocess ([#2753](https://github.com/block/buzz/pull/2753)) ([`3bd3a014c`](https://github.com/block/buzz/commit/3bd3a014c6ed3f8c8c6c6ea359fee9a7e98dd670))
+- Improve huddle audio failure handling ([#2578](https://github.com/block/buzz/pull/2578)) ([`fb4a801ad`](https://github.com/block/buzz/commit/fb4a801adf82677b242399f10b1d95b554bb8ad0))
+- fix(onboarding): show real install errors and fix concurrent install state ([#2658](https://github.com/block/buzz/pull/2658)) ([`9731cd818`](https://github.com/block/buzz/commit/9731cd818b21c7a3e1f56a319272eac6dada0555))
+- feat(node): add Windows managed Node.js fallback (win-x64 + win-arm64) ([#2661](https://github.com/block/buzz/pull/2661)) ([`596386ee5`](https://github.com/block/buzz/commit/596386ee55d1516bc3d88922c44b9067a113a28e))
+- fix(desktop): parse runtime team instructions section ([#2645](https://github.com/block/buzz/pull/2645)) ([`269ef357f`](https://github.com/block/buzz/commit/269ef357f75a0cbcc71973db1b891d6ff87fac67))
+- Match create-channel template selector styling ([#2654](https://github.com/block/buzz/pull/2654)) ([`72bbaece4`](https://github.com/block/buzz/commit/72bbaece4ba9b3b8a5c2b8561ef82150b22b1cc4))
+- feat(desktop): make pull request reviews actionable ([#2510](https://github.com/block/buzz/pull/2510)) ([`9081ab0ec`](https://github.com/block/buzz/commit/9081ab0ec9c5d91548c7f5ff52eba6cca4788dd0))
+- fix(desktop): shared-compute usability — share toggle, usage indicator, model resync ([#2448](https://github.com/block/buzz/pull/2448)) ([`9cc9652c7`](https://github.com/block/buzz/commit/9cc9652c7dec9145b0bf0ce2c4b46c8191d215f8))
+- fix(desktop): refine focused thread dismissal targets ([#2644](https://github.com/block/buzz/pull/2644)) ([`c86c4f59c`](https://github.com/block/buzz/commit/c86c4f59c4d800f170a36761da2fa2f0d12ddbb2))
+- Clarify agent harness defaults in create flow ([#2601](https://github.com/block/buzz/pull/2601)) ([`76aeae703`](https://github.com/block/buzz/commit/76aeae703664a6a6741b82771df67c546886aafd))
+- fix: expose community icon control on open relays ([#2640](https://github.com/block/buzz/pull/2640)) ([`e341b09cb`](https://github.com/block/buzz/commit/e341b09cb9ed0f9dd626b74b9440e4180c15b435))
+
+
 ## v0.4.24
 
 - fix(desktop): suppress Windows console flashes and reject WSL bash alias ([#2587](https://github.com/block/buzz/pull/2587)) ([`5afa16157`](https://github.com/block/buzz/commit/5afa16157a63c71f2cd8a80aa7276de28ce1c54c))

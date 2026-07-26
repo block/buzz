@@ -30,11 +30,25 @@ class FrostedAppBar extends StatelessWidget {
   /// Widgets displayed on the trailing (right) side.
   final List<Widget> actions;
 
+  /// Horizontal inset for the app bar's leading, title, and actions.
+  final double horizontalInset;
+
+  /// Color applied to icons in the app bar.
+  final Color? iconColor;
+
+  /// Paints over the frosted fill instead of the default translucent surface.
+  /// Used by the Buzz themes to carry their branded gradient across the app's
+  /// top section — see [buzzTopSectionGradient].
+  final Gradient? gradient;
+
   const FrostedAppBar({
     super.key,
     this.leading,
     this.title,
     this.actions = const [],
+    this.horizontalInset = Grid.quarter,
+    this.iconColor,
+    this.gradient,
   });
 
   @override
@@ -50,6 +64,7 @@ class FrostedAppBar extends StatelessWidget {
                 height: 48,
                 child: IconButton(
                   onPressed: () => Navigator.of(context).pop(),
+                  color: iconColor,
                   icon: const Icon(LucideIcons.chevronLeft),
                   tooltip: 'Back',
                 ),
@@ -66,7 +81,12 @@ class FrostedAppBar extends StatelessWidget {
           child: Container(
             padding: EdgeInsets.only(top: topPadding),
             decoration: BoxDecoration(
-              color: context.colors.surface.withValues(alpha: 0.5),
+              // A gradient and a color cannot both paint, so the gradient
+              // replaces the frosted surface fill when one is supplied.
+              color: gradient == null
+                  ? context.colors.surface.withValues(alpha: 0.5)
+                  : null,
+              gradient: gradient,
               border: Border(
                 bottom: BorderSide(
                   color: context.colors.outlineVariant.withValues(alpha: 0.3),
@@ -76,35 +96,38 @@ class FrostedAppBar extends StatelessWidget {
             child: SizedBox(
               height: _kBarContentHeight,
               child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: Grid.quarter),
-                child: Row(
-                  children: [
-                    ?effectiveLeading,
-                    if (title != null)
-                      Expanded(
-                        child: Padding(
-                          padding: EdgeInsets.only(
-                            left: effectiveLeading != null
-                                ? 0
-                                : Grid.gutter - Grid.quarter,
-                            right: actions.isEmpty
-                                ? Grid.gutter - Grid.quarter
-                                : 0,
-                          ),
-                          child: DefaultTextStyle.merge(
-                            style: context.textTheme.titleMedium?.copyWith(
-                              fontWeight: FontWeight.w600,
+                padding: EdgeInsets.symmetric(horizontal: horizontalInset),
+                child: IconTheme.merge(
+                  data: IconThemeData(color: iconColor),
+                  child: Row(
+                    children: [
+                      ?effectiveLeading,
+                      if (title != null)
+                        Expanded(
+                          child: Padding(
+                            padding: EdgeInsets.only(
+                              left: effectiveLeading != null
+                                  ? 0
+                                  : Grid.gutter - Grid.quarter,
+                              right: actions.isEmpty
+                                  ? Grid.gutter - Grid.quarter
+                                  : 0,
                             ),
-                            overflow: TextOverflow.ellipsis,
-                            maxLines: 1,
-                            child: title!,
+                            child: DefaultTextStyle.merge(
+                              style: context.textTheme.titleMedium?.copyWith(
+                                fontWeight: FontWeight.w600,
+                              ),
+                              overflow: TextOverflow.ellipsis,
+                              maxLines: 1,
+                              child: title!,
+                            ),
                           ),
-                        ),
-                      )
-                    else
-                      const Spacer(),
-                    ...actions,
-                  ],
+                        )
+                      else
+                        const Spacer(),
+                      ...actions,
+                    ],
+                  ),
                 ),
               ),
             ),

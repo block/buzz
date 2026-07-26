@@ -2,7 +2,7 @@
 
 [package]
 name = "buzz-desktop"
-version = "0.4.24"
+version = "0.4.26"
 description = "Buzz desktop app"
 authors = ["you"]
 edition = "2021"
@@ -107,7 +107,11 @@ tauri-plugin-global-shortcut = "2"
 tauri-plugin-notification = "2.3.3"
 uuid = { version = "1", features = ["v4", "v5"] }
 png = "0.18"
-arboard = "3"
+# wayland-data-control: without it arboard is X11-only on Linux, so copies made
+# in a Wayland session land in XWayland's clipboard where Wayland-native apps
+# never see them (set_text still returns Ok). The backing wl-clipboard-rs dep is
+# target-gated inside arboard; at runtime X11 sessions still fall back to X11.
+arboard = { version = "3", features = ["wayland-data-control"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
 zip = "8"
 flate2 = "1"

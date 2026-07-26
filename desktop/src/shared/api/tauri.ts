@@ -132,6 +132,7 @@ export type RawManagedAgent = {
   system_prompt: string | null;
   avatar_url?: string | null;
   model: string | null;
+  model_source?: ManagedAgent["modelSource"];
   provider: string | null;
   persona_out_of_date: boolean;
   persona_orphaned: boolean;
@@ -184,6 +185,8 @@ export type RawAcpRuntimeCatalogEntry = {
   install_hint: string;
   install_instructions_url: string;
   can_auto_install: boolean;
+  /** Optional only for older E2E fixtures; the Rust catalog always supplies it. */
+  requires_external_cli?: boolean;
   underlying_cli_path: string | null;
   node_required: boolean;
   /** Tagged union with snake_case status values — same shape as `AuthStatus`. */
@@ -699,6 +702,8 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     systemPrompt: agent.system_prompt,
     avatarUrl: agent.avatar_url ?? null,
     model: agent.model,
+    modelSource: agent.model_source ?? null,
+    // Fallbacks for pre-feature mocks/fixtures. Real records always carry them.
     provider: agent.provider ?? null,
     personaOutOfDate: agent.persona_out_of_date ?? false,
     personaOrphaned: agent.persona_orphaned ?? false,
@@ -743,6 +748,7 @@ function fromRawAcpRuntimeCatalogEntry(
     installHint: entry.install_hint,
     installInstructionsUrl: entry.install_instructions_url,
     canAutoInstall: entry.can_auto_install,
+    requiresExternalCli: entry.requires_external_cli ?? false,
     underlyingCliPath: entry.underlying_cli_path,
     nodeRequired: entry.node_required,
     authStatus: entry.auth_status,

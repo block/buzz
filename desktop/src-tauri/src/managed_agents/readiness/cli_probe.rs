@@ -2,8 +2,10 @@ use std::path::Path;
 
 use crate::managed_agents::runtime::build_augmented_path;
 
-/// Build the augmented PATH for CLI probes, including nvm's default Node.js
-/// bin directory so `#!/usr/bin/env node` shims (e.g. codex-acp) resolve.
+/// Build the augmented PATH for CLI probes and other native child processes
+/// (auth commands, `buzz-acp models` discovery), including nvm's default
+/// Node.js bin directory so `#!/usr/bin/env node` shims (e.g. codex-acp)
+/// resolve.
 pub(crate) fn augmented_path() -> Option<String> {
     let home = dirs::home_dir();
     let nvm_bin = home

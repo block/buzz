@@ -805,6 +805,9 @@ async fn call_webhook_impl(
     // different address than the one validated above (DNS rebinding TOCTOU).
     let client = Client::builder()
         .timeout(Duration::from_secs(10))
+        // A system proxy would resolve the original hostname itself, bypassing
+        // the validated and pinned address above.
+        .no_proxy()
         // Disable redirects — a redirect to an internal host bypasses the SSRF check.
         .redirect(reqwest::redirect::Policy::none())
         .resolve(host, std::net::SocketAddr::new(safe_ip, port))

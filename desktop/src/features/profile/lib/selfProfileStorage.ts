@@ -1,7 +1,7 @@
 /**
  * Cached self-profile store for relay-unreachable scenarios.
  *
- * When the relay is unreachable (e.g. WARP VPN needs reauth), the app cannot
+ * When the relay is unreachable (e.g. corporate VPN needs reauth), the app cannot
  * fetch the user's kind-0 profile. This module persists the last successfully
  * fetched profile — including a base64 avatar snapshot — so the UI can render
  * the user's identity even when offline.

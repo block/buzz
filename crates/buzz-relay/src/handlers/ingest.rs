@@ -1021,16 +1021,42 @@ fn validate_engram_envelope(event: &Event) -> Result<(), String> {
 /// Enforces:
 /// * exactly one `d` tag with a non-empty value matching the slug grammar
 ///   `^[a-z0-9][a-z0-9_-]{0,63}$`.
+/// * at most one `shared` tag; if present, its value must be exactly `"true"`.
 ///
-/// Without this, an empty d-tag collapses every persona into the
+/// Without the `d`-tag check, an empty d-tag collapses every persona into the
 /// `(pubkey, 30175, "")` slot — last-write-wins data loss.
+///
+/// The `shared` tag rule ensures no ambiguous heads: either an event has no
+/// `shared` tag (author-only) or exactly `["shared", "true"]` (community-
+/// readable). Any other value (`"false"`, `"1"`, extra tags) is rejected at
+/// ingest so read-path helpers can treat stored events as unambiguously one or
+/// the other.
 fn validate_persona_envelope(event: &Event) -> Result<(), String> {
     let mut d_tags: Vec<&str> = Vec::new();
+    let mut shared_count = 0usize;
     for tag in event.tags.iter() {
         let parts = tag.as_slice();
         if parts.len() >= 2 && parts[0].as_str() == "d" {
             d_tags.push(&parts[1]);
         }
+        if !parts.is_empty() && parts[0].as_str() == "shared" {
+            // Exact shape required: ["shared", "true"] — exactly two elements,
+            // second element exactly "true". Extra elements are rejected so that
+            // a three-element tag like ["shared","true","extra"] cannot be stored
+            // and later misread as shared by the SQL-level visibility clause.
+            if parts.len() != 2 || parts[1].as_str() != "true" {
+                return Err(format!(
+                    "persona event `shared` tag must be exactly [\"shared\",\"true\"] (got {:?})",
+                    parts.iter().map(|s| s.as_str()).collect::<Vec<_>>()
+                ));
+            }
+            shared_count += 1;
+        }
+    }
+    if shared_count > 1 {
+        return Err(format!(
+            "persona event must have at most one `shared` tag (got {shared_count})"
+        ));
     }
     if d_tags.len() != 1 {
         return Err(format!(
@@ -3532,6 +3558,89 @@ mod tests {
         let ev = make_persona(&[&["d", "has.dot"]]);
         let err = validate_persona_envelope(&ev).unwrap_err();
         assert!(err.contains("`d` tag"), "got: {err}");
+    }
+
+    // ─── persona shared-tag envelope tests ───────────────────────────────────
+
+    #[test]
+    fn persona_envelope_accepts_shared_true() {
+        // A persona event with exactly one ["shared","true"] tag must be accepted.
+        let ev = make_persona(&[&["d", "my-persona"], &["shared", "true"]]);
+        assert!(validate_persona_envelope(&ev).is_ok());
+    }
+
+    #[test]
+    fn persona_envelope_accepts_no_shared_tag() {
+        // The shared tag is optional; omitting it is the author-only default.
+        let ev = make_persona(&[&["d", "my-persona"]]);
+        assert!(validate_persona_envelope(&ev).is_ok());
+    }
+
+    #[test]
+    fn persona_envelope_rejects_shared_false() {
+        let ev = make_persona(&[&["d", "my-persona"], &["shared", "false"]]);
+        let err = validate_persona_envelope(&ev).unwrap_err();
+        assert!(
+            err.contains("\"true\""),
+            "expected 'true' in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn persona_envelope_rejects_shared_wrong_value() {
+        let ev = make_persona(&[&["d", "my-persona"], &["shared", "yes"]]);
+        let err = validate_persona_envelope(&ev).unwrap_err();
+        assert!(
+            err.contains("\"true\""),
+            "expected 'true' in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn persona_envelope_rejects_shared_missing_value() {
+        // A "shared" tag with no value argument must be rejected.
+        let ev = make_event_with_tags(
+            KIND_PERSONA,
+            r#"{"display_name":"x"}"#,
+            &[&["d", "slug"], &["shared"]],
+        );
+        let err = validate_persona_envelope(&ev).unwrap_err();
+        assert!(
+            err.contains("\"true\""),
+            "expected 'true' in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn persona_envelope_rejects_duplicate_shared_tags() {
+        // More than one shared tag, even if both are "true", must be rejected.
+        let ev = make_persona(&[
+            &["d", "my-persona"],
+            &["shared", "true"],
+            &["shared", "true"],
+        ]);
+        let err = validate_persona_envelope(&ev).unwrap_err();
+        assert!(
+            err.contains("at most one"),
+            "expected 'at most one' in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn persona_envelope_rejects_shared_three_elements() {
+        // ["shared","true","extra"] must be rejected — only exactly two elements
+        // are valid so the SQL containment check tags @> '[["shared","true"]]'
+        // cannot match a three-element stored tag.
+        let ev = make_event_with_tags(
+            KIND_PERSONA,
+            r#"{"display_name":"x"}"#,
+            &[&["d", "slug"], &["shared", "true", "extra"]],
+        );
+        let err = validate_persona_envelope(&ev).unwrap_err();
+        assert!(
+            err.contains("[\"shared\",\"true\"]"),
+            "expected exact-shape error, got: {err}"
+        );
     }
 
     // ─── agent_turn_metric envelope tests ────────────────────────────────────

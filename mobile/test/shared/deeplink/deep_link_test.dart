@@ -104,6 +104,23 @@ void _inviteTests() {
       );
     });
 
+    test('normalizes trailing slash in buzz join handoff', () {
+      final link = parseInviteDeepLink(
+        Uri.parse(
+          'buzz://join?relay=wss%3A%2F%2Frelay.example.com%2F&code=abc123',
+        ),
+      );
+      expect(link?.relayUrl, 'wss://relay.example.com');
+    });
+
+    test('rejects plaintext public buzz join handoff', () {
+      final relay = Uri.encodeQueryComponent('ws://relay.example.com');
+      expect(
+        parseInviteDeepLink(Uri.parse('buzz://join?relay=$relay&code=abc')),
+        isNull,
+      );
+    });
+
     test('preserves policy receipt in buzz join handoff', () {
       final link = parseInviteDeepLink(
         Uri.parse(
@@ -175,6 +192,18 @@ void _inviteTests() {
         parseInviteDeepLink(Uri.parse('buzz://connect?relay=wss://x')),
         isNull,
       );
+    });
+
+    test('rejects non-public invite relay destinations', () {
+      for (final url in [
+        'https://127.0.0.1/invite/abc',
+        'https://169.254.169.254/invite/abc',
+        'https://192.168.1.1/invite/abc',
+        'https://[::1]/invite/abc',
+        'https://[::ffff:127.0.0.1]/invite/abc',
+      ]) {
+        expect(parseInviteDeepLink(Uri.parse(url)), isNull, reason: url);
+      }
     });
 
     test('rejects buzz join with dangerous relay schemes', () {
