@@ -806,10 +806,12 @@ export function useMentions(
     (text: string): PersonaMentionTarget[] =>
       resolveOutgoingMentionPersonas({
         activePersonaById,
+        candidates: mentionCandidates,
+        selectedMentions: mentionMapRef.current,
         selectedPersonaMentions: personaMentionMapRef.current,
         text,
       }),
-    [activePersonaById],
+    [activePersonaById, mentionCandidates],
   );
 
   const cancelMentionAutocomplete = React.useCallback(() => {

@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { resolveOutgoingMentionPubkeys } from "./outgoingMentionResolution.ts";
+import {
+  resolveOutgoingMentionPersonas,
+  resolveOutgoingMentionPubkeys,
+} from "./outgoingMentionResolution.ts";
 
 function candidate(displayName, pubkey) {
   return { displayName, isMember: true, pubkey };
@@ -67,5 +70,23 @@ test("pasted shared-prefix mentions resolve to the longest member name", () => {
       text: "@Agent.copy please respond",
     }),
     ["copy-pubkey"],
+  );
+});
+
+test("a longer pubkey mention suppresses a selected persona prefix", () => {
+  const persona = { id: "short-persona" };
+
+  assert.deepEqual(
+    resolveOutgoingMentionPersonas({
+      activePersonaById: new Map([[persona.id, persona]]),
+      candidates: [
+        candidate("OriginalName", "short-pubkey"),
+        candidate("OriginalName copy", "long-pubkey"),
+      ],
+      selectedMentions: new Map([["OriginalName copy", "long-pubkey"]]),
+      selectedPersonaMentions: new Map([["OriginalName", "short-persona"]]),
+      text: "@OriginalName copy please respond",
+    }),
+    [],
   );
 });

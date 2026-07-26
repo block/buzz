@@ -70,20 +70,33 @@ export function resolveOutgoingMentionPubkeys({
 
 type OutgoingMentionPersonaOptions = {
   activePersonaById: ReadonlyMap<string, AgentPersona>;
+  candidates: readonly Pick<MentionCandidate, "displayName">[];
+  selectedMentions: ReadonlyMap<string, string>;
   selectedPersonaMentions: ReadonlyMap<string, string>;
   text: string;
 };
 
 export function resolveOutgoingMentionPersonas({
   activePersonaById,
+  candidates,
+  selectedMentions,
   selectedPersonaMentions,
   text,
 }: OutgoingMentionPersonaOptions): PersonaMentionTarget[] {
   const targets: PersonaMentionTarget[] = [];
   const seen = new Set<string>();
-  const displayNames = [...selectedPersonaMentions.keys()];
+  const selectedNames = [
+    ...selectedMentions.keys(),
+    ...selectedPersonaMentions.keys(),
+  ];
+  const displayNames = [
+    ...selectedNames,
+    ...candidates.flatMap((candidate) =>
+      candidate.displayName ? [candidate.displayName] : [],
+    ),
+  ];
   const resolvedDisplayNames = new Set(
-    resolveMentionedNames(text, displayNames, displayNames).map((name) =>
+    resolveMentionedNames(text, displayNames, selectedNames).map((name) =>
       name.toLowerCase(),
     ),
   );
