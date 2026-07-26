@@ -250,6 +250,12 @@ function AgentSummary({
                 Out of date
               </Badge>
             ) : null}
+            {agent.profileSyncPending ? (
+              <Badge className="gap-1" variant="warning">
+                <AlertTriangle className="h-3 w-3" />
+                Profile out of sync
+              </Badge>
+            ) : null}
           </div>
           <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
             <PubKey pubkey={agent.pubkey} />
@@ -271,6 +277,12 @@ function AgentSummary({
             <p className="mt-1.5 text-xs text-amber-600 dark:text-amber-400">
               Template updated since this agent was created. Respawn to apply
               the new configuration.
+            </p>
+          ) : null}
+          {agent.profileSyncPending ? (
+            <p className="mt-1.5 text-xs text-amber-600 dark:text-amber-400">
+              Relay profile sync failed — the relay may show an outdated name.
+              It will be retried automatically.
             </p>
           ) : null}
           {channelNames.length > 0 ? (

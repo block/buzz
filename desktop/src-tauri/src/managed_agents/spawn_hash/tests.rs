@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 fn record() -> ManagedAgentRecord {
     ManagedAgentRecord {
+        profile_sync_pending: false,
         pubkey: "p".repeat(64),
         name: "agent".into(),
         persona_id: None,

@@ -432,6 +432,7 @@ pub async fn confirm_agent_snapshot_import(
             display_name: None,
             slug: None,
             persona_id: Some(persona_id.clone()),
+            profile_sync_pending: false,
             private_key_nsec: private_key_nsec.clone(),
             auth_tag: auth_tag.clone(),
             relay_url: String::new(), // resolves to workspace relay at runtime

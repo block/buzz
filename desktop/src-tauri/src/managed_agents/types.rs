@@ -88,6 +88,7 @@ impl AgentDefinition {
             pubkey: String::new(),
             name: self.display_name.clone(),
             persona_id: None,
+            profile_sync_pending: false,
             private_key_nsec: String::new(),
             auth_tag: None,
             relay_url: String::new(),
@@ -398,6 +399,15 @@ pub struct ManagedAgentRecord {
     /// they are rewritten with this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_mesh: Option<RelayMeshConfig>,
+    /// `true` when the agent's kind:0 profile sync failed at create time and
+    /// has not yet been confirmed published on the relay. Drives boot-time
+    /// reconciliation so a stopped agent self-heals its relay profile without a
+    /// manual restart — otherwise the relay keeps a stale/missing name
+    /// indefinitely (the reconcile-on-start path only runs for spawned agents).
+    /// Cleared by `reconcile_agent_profile` once the relay profile matches.
+    /// `#[serde(default)]` so pre-existing records deserialize as `false`.
+    #[serde(default)]
+    pub profile_sync_pending: bool,
 }
 
 /// Typed relay-mesh configuration carried on a [`ManagedAgentRecord`].
@@ -498,6 +508,10 @@ pub struct ManagedAgentSummary {
     /// would." Always `false` for stopped agents and for processes adopted
     /// via a persisted `runtime_pid` (their spawn config is unknown).
     pub needs_restart: bool,
+    /// `true` when the agent's kind:0 relay profile sync failed and hasn't
+    /// been confirmed published. Surface a persistent "profile out of sync"
+    /// marker; it clears once reconciliation succeeds.
+    pub profile_sync_pending: bool,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env_vars: BTreeMap<String, String>,
     pub backend: BackendKind,

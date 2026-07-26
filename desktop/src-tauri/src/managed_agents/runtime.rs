@@ -1514,6 +1514,7 @@ pub fn build_managed_agent_summary(
         persona_out_of_date,
         persona_orphaned,
         needs_restart,
+        profile_sync_pending: record.profile_sync_pending,
         env_vars: record.env_vars.clone(),
         backend: record.backend.clone(),
         backend_agent_id: record.backend_agent_id.clone(),

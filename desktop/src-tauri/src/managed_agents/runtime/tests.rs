@@ -130,6 +130,7 @@ fn fixture(
     auth_tag: Option<String>,
 ) -> ManagedAgentRecord {
     ManagedAgentRecord {
+        profile_sync_pending: false,
         pubkey: "p".into(),
         name: "n".into(),
         persona_id: None,

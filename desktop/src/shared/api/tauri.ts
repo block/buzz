@@ -136,6 +136,7 @@ export type RawManagedAgent = {
   persona_out_of_date: boolean;
   persona_orphaned: boolean;
   needs_restart: boolean;
+  profile_sync_pending: boolean;
   env_vars?: Record<string, string>;
   status: ManagedAgent["status"];
   pid: number | null;
@@ -705,6 +706,7 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     personaOutOfDate: agent.persona_out_of_date ?? false,
     personaOrphaned: agent.persona_orphaned ?? false,
     needsRestart: agent.needs_restart ?? false,
+    profileSyncPending: agent.profile_sync_pending ?? false,
     envVars: agent.env_vars ?? {},
     status: agent.status,
     pid: agent.pid,

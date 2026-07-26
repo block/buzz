@@ -385,6 +385,12 @@ export type ManagedAgent = {
    * Always `false` for stopped agents.
    */
   needsRestart: boolean;
+  /**
+   * `true` when the agent's kind:0 relay profile sync failed and hasn't been
+   * confirmed published. The relay may show an outdated name; reconciliation
+   * retries automatically and clears this flag on success.
+   */
+  profileSyncPending: boolean;
   /** Per-agent env vars. Layered on top of persona envVars. */
   envVars: Record<string, string>;
   status: "running" | "stopped" | "deployed" | "not_deployed";

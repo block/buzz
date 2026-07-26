@@ -137,6 +137,9 @@ pub(crate) async fn reconcile_agent_profile(
     };
 
     if !profile_needs_sync(existing.as_ref(), &data.name, expected_avatar.as_deref()) {
+        // The published profile already matches — clear any stale pending flag
+        // left by an earlier failed sync so the UI badge clears.
+        let _ = clear_profile_sync_pending(state, app, &data.pubkey);
         return Ok(());
     }
 
@@ -150,7 +153,7 @@ pub(crate) async fn reconcile_agent_profile(
         return Ok(());
     }
 
-    sync_managed_agent_profile(
+    let result = sync_managed_agent_profile(
         state,
         &relay_url,
         &agent_keys,
@@ -158,7 +161,12 @@ pub(crate) async fn reconcile_agent_profile(
         expected_avatar.as_deref(),
         data.auth_tag.as_deref(),
     )
-    .await
+    .await;
+    if result.is_ok() {
+        // The relay profile now matches — clear the pending flag.
+        let _ = clear_profile_sync_pending(state, app, &data.pubkey);
+    }
+    result
 }
 
 /// Decide whether a published profile is missing or stale relative to the
@@ -177,6 +185,28 @@ pub(super) fn profile_needs_sync(
             !name_matches || !picture_matches
         }
     }
+}
+
+/// Clear the persisted `profile_sync_pending` flag once the relay profile has
+/// been confirmed in sync. No-op (and skips the disk write) when the flag was
+/// already clear, so calling this on every successful reconcile is cheap.
+fn clear_profile_sync_pending(
+    state: &AppState,
+    app: &AppHandle,
+    pubkey: &str,
+) -> Result<(), String> {
+    let _store_guard = state
+        .managed_agents_store_lock
+        .lock()
+        .map_err(|e| e.to_string())?;
+    let mut records = load_managed_agents(app)?;
+    if let Some(record) = records.iter_mut().find(|r| r.pubkey == pubkey) {
+        if record.profile_sync_pending {
+            record.profile_sync_pending = false;
+            save_managed_agents(app, &records)?;
+        }
+    }
+    Ok(())
 }
 
 // Async so the blocking body (disk reads/writes + process termination) runs off
