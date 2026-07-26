@@ -64,3 +64,23 @@ export function useServerAgentEditContext(input: {
     modelOptions: (ai?.models ?? []).map((id) => ({ label: id, value: id })),
   };
 }
+
+/**
+ * Append the current value as a "(current)" row when the spawner's catalog does
+ * not list it.
+ *
+ * A spawner advertises what it can run today; an agent may already be
+ * configured with something outside that list (an older catalog, a value set
+ * from another device). Dropping it would render the field blank and make an
+ * unrelated edit silently rewrite the value.
+ */
+export function withCurrentValueOption(
+  options: PersonaDropdownOption[],
+  value: string,
+): PersonaDropdownOption[] {
+  const trimmed = value.trim();
+  if (!trimmed || options.some((option) => option.value === trimmed)) {
+    return options;
+  }
+  return [...options, { label: `${trimmed} (current)`, value: trimmed }];
+}
