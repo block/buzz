@@ -13,7 +13,7 @@ import { Dialog } from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
 import { Textarea } from "@/shared/ui/textarea";
 import { AgentCreationPreview } from "./AgentCreationPreview";
-import { enqueueSpawnerPromptUpdate } from "../spawnerPromptUpdateQueue";
+import { pushServerPromptUpdateAfterSubmit } from "./serverPromptUpdatePush";
 import type { EnvVarsValue } from "./EnvVarsEditor";
 import { PersonaAdvancedFields } from "./PersonaAdvancedFields";
 import { PersonaModelField } from "./PersonaModelField";
@@ -383,25 +383,7 @@ export function AgentDefinitionDialog({
           publishCatalogUpdates: publishCatalogUpdatesOnSave && hasUserChanges,
         },
       );
-      if (serverContext && result !== false) {
-        try {
-          await enqueueSpawnerPromptUpdate({
-            spawnerPubkey: serverContext.spawnerPubkey,
-            specSlug: serverContext.specSlug,
-            agentPubkey: serverContext.agentPubkey,
-            prompt: {
-              system_prompt: baseInput.systemPrompt || undefined,
-              model: baseInput.model || undefined,
-              provider: baseInput.provider || undefined,
-            },
-          });
-        } catch (error) {
-          console.debug(
-            "[AgentDefinitionDialog] enqueueSpawnerPromptUpdate failed:",
-            error,
-          );
-        }
-      }
+      await pushServerPromptUpdateAfterSubmit(serverContext, result, baseInput);
       return;
     }
 
