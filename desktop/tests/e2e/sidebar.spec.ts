@@ -171,12 +171,6 @@ test("supports API tokens without cluttering the default join form", async ({
   page,
 }) => {
   await installMockBridge(page, { applyCommunityDelayMs: 1_000 });
-  await page.route(
-    "https://token.example.com/api/join-policy",
-    async (route) => {
-      await route.fulfill({ status: 404 });
-    },
-  );
   await page.goto("/");
 
   await openAddCommunityDialog(page);
