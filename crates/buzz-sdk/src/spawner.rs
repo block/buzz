@@ -446,6 +446,14 @@ impl PromptMaterial {
     ///
     /// Serialization skips `None` fields, so two materials with the same set
     /// values hash identically regardless of construction order.
+    ///
+    /// # Never add a credential field to this struct
+    ///
+    /// This hash is published world-readable as `prompt_hash` on the spawner's
+    /// kind:30179 status so a client can confirm its update landed. A secret
+    /// added to `PromptMaterial` would therefore be offered up for offline
+    /// guessing by anyone reading the relay. Prompts and model ids are not
+    /// secrets; API keys, tokens, and nsecs must never be fields here.
     pub fn hash(&self) -> String {
         use sha2::{Digest, Sha256};
         let json = serde_json::to_string(self).unwrap_or_default();

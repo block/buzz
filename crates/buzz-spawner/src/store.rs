@@ -47,6 +47,17 @@ pub struct AgentRecord {
     /// there is nowhere to fetch it from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<buzz_sdk::spawner::PromptMaterial>,
+    /// Team instructions carried forward across prompt updates.
+    ///
+    /// A prompt update from the desktop only carries the fields its edit dialog
+    /// owns (system prompt, model, provider), so replacing [`Self::prompt`]
+    /// wholesale would wipe the agent's team instructions on the next restart.
+    /// They are kept here rather than merged back into [`Self::prompt`] because
+    /// that field must stay byte-identical to the frame the owner sent: its
+    /// hash is what the status event echoes and what the client matches to
+    /// confirm the update landed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carried_team_instructions: Option<String>,
     /// Consecutive failed start attempts, driving backoff.
     #[serde(default)]
     pub restart_count: u32,
@@ -242,6 +253,7 @@ mod tests {
             prompt: None,
             restart_count: 0,
             last_failure_at: None,
+            carried_team_instructions: None,
         }
     }
 
