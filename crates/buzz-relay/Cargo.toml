@@ -62,6 +62,7 @@ base64 = "0.22"
 buzz-sdk = { workspace = true }
 buzz-workflow = { workspace = true, features = ["reqwest"] }
 buzz-media = { workspace = true }
+sonar-stickers = { workspace = true }
 s3 = { version = "0.37", package = "rust-s3", default-features = false, features = ["tokio-rustls-tls", "fail-on-err", "tags"] }
 tempfile = "3"
 bytes = "1"

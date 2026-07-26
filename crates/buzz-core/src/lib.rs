@@ -32,6 +32,8 @@ pub mod pairing;
 pub mod presence;
 /// Canonical relay runtime identities.
 pub mod relay;
+/// Sonar sticker event and message-reference validation.
+pub mod stickers;
 /// Tenant identity — the server-resolved community key carried on scoped paths.
 pub mod tenant;
 /// Schnorr signature and event ID verification.

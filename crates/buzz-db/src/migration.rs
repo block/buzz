@@ -560,7 +560,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 24);
+        assert_eq!(migrations.len(), 25);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -879,6 +879,13 @@ mod tests {
             .to_lowercase()
             .contains("for update"));
         assert!(ttl_shared.contains("NEW.kind <> 9007"));
+
+        // Sticker curation pins an exact pack revision per community.
+        assert_eq!(migrations[24].version, 25);
+        let sticker_catalog = migrations[24].sql.as_str();
+        assert!(sticker_catalog.contains("CREATE TABLE sticker_catalog_approvals"));
+        assert!(sticker_catalog.contains("PRIMARY KEY (community_id, coordinate)"));
+        assert!(sticker_catalog.contains("approved_event_id BYTEA"));
     }
 
     #[test]

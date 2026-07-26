@@ -113,6 +113,7 @@ png = "0.18"
 # target-gated inside arboard; at runtime X11 sessions still fall back to X11.
 arboard = { version = "3", features = ["wayland-data-control"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
+sonar-stickers = { git = "https://github.com/hedwig-corp/bitchat-to-sonar", rev = "eea8ada304517d6a3ea6c81d6ffa57ce00504bcd", package = "sonar-stickers", features = ["signal-import"] }
 zip = "8"
 flate2 = "1"
 sherpa-onnx = "1.12"

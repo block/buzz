@@ -43,6 +43,8 @@ pub mod reaction;
 pub mod relay_members;
 /// Replica freshness fence for keyset-cursor read routing.
 pub mod replica_fence;
+/// Revision-pinned workspace sticker catalog persistence.
+pub mod sticker_catalog;
 /// Thread metadata persistence.
 pub mod thread;
 /// Per-community usage rollup queries for Prometheus gauges.

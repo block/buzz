@@ -1,6 +1,6 @@
-//! NIP-43 relay membership admin command handler (kinds 9030–9032).
+//! Relay-level admin command handler (kinds 9030–9034).
 //!
-//! These events are processed directly — they mutate the `relay_members` table
+//! These events are processed directly — they mutate normalized relay state
 //! and return without being stored as regular Nostr events.
 //!
 //! ## Permission matrix
@@ -11,6 +11,7 @@
 //! | 9031 | Remove member   | admin or owner       |
 //! | 9032 | Change role     | owner only           |
 //! | 9033 | Set workspace profile (icon) | admin or owner |
+//! | 9034 | Curate a sticker pack revision | admin or owner |
 
 use std::sync::Arc;
 
@@ -18,14 +19,15 @@ use nostr::Event;
 use tracing::{info, warn};
 
 use buzz_core::kind::{
-    RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER,
-    RELAY_ADMIN_SET_WORKSPACE_PROFILE,
+    RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_CURATE_STICKER_PACK,
+    RELAY_ADMIN_REMOVE_MEMBER, RELAY_ADMIN_SET_WORKSPACE_PROFILE,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_db::relay_members::RemoveResult;
 
 use crate::handlers::side_effects::{
     publish_nip43_member_added, publish_nip43_member_removed, publish_nip43_membership_list,
+    publish_sticker_catalog_mutation,
 };
 use crate::state::AppState;
 
@@ -54,6 +56,111 @@ fn extract_tag_value(event: &Event, name: &str) -> Option<String> {
         }
     }
     None
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StickerCatalogCommand {
+    coordinate: String,
+    pack_author: [u8; 32],
+    identifier: String,
+    approved_event_id: Option<[u8; 32]>,
+}
+
+fn decode_lower_hex_32(value: &str, label: &str) -> Result<[u8; 32], String> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(format!("{label} must be 64 lowercase hex characters"));
+    }
+    let decoded = hex::decode(value).map_err(|_| format!("invalid {label}"))?;
+    decoded
+        .try_into()
+        .map_err(|_| format!("{label} must decode to 32 bytes"))
+}
+
+/// Parse kind:9034. Approval deliberately uses a three-field `a` tag so the
+/// admin pins a reviewed revision; removal uses exactly `["a", coordinate]`.
+fn parse_sticker_catalog_command(event: &Event) -> Result<StickerCatalogCommand, String> {
+    let action_tags: Vec<_> = event
+        .tags
+        .iter()
+        .filter(|tag| tag.as_slice().first().is_some_and(|part| part == "action"))
+        .collect();
+    if action_tags.len() != 1 {
+        return Err("expected exactly one action tag".to_string());
+    }
+    let action = action_tags[0].as_slice();
+    if action.len() != 2 || !matches!(action[1].as_str(), "approve" | "remove") {
+        return Err("action tag must be exactly [action, approve|remove]".to_string());
+    }
+
+    let address_tags: Vec<_> = event
+        .tags
+        .iter()
+        .filter(|tag| tag.as_slice().first().is_some_and(|part| part == "a"))
+        .collect();
+    if address_tags.len() != 1 {
+        return Err("expected exactly one a tag".to_string());
+    }
+    let address = address_tags[0].as_slice();
+    let expected_len = if action[1] == "approve" { 3 } else { 2 };
+    if address.len() != expected_len {
+        return Err(if action[1] == "approve" {
+            "approve requires exactly [a, coordinate, event_id]".to_string()
+        } else {
+            "remove requires exactly [a, coordinate]".to_string()
+        });
+    }
+
+    let coordinate = address[1].to_string();
+    if coordinate.len() > 512 {
+        return Err("sticker pack coordinate is too long".to_string());
+    }
+    let mut parts = coordinate.splitn(3, ':');
+    if parts.next() != Some("30031") {
+        return Err("sticker pack coordinate must use kind 30031".to_string());
+    }
+    let author_hex = parts
+        .next()
+        .ok_or_else(|| "sticker pack coordinate is missing author".to_string())?;
+    let identifier = parts
+        .next()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "sticker pack coordinate is missing identifier".to_string())?
+        .to_string();
+    if identifier.len() > 80
+        || !identifier
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err(
+            "sticker pack identifier must be 1..80 ASCII alnum, dot, underscore, or dash"
+                .to_string(),
+        );
+    }
+    let pack_author = decode_lower_hex_32(author_hex, "sticker pack author")?;
+    // Rebuilding catches extra/missing delimiters and non-canonical spellings.
+    if coordinate != format!("30031:{author_hex}:{identifier}") {
+        return Err("sticker pack coordinate is not canonical".to_string());
+    }
+
+    let approved_event_id = if action[1] == "approve" {
+        Some(decode_lower_hex_32(
+            address[2].as_str(),
+            "approved event id",
+        )?)
+    } else {
+        None
+    };
+
+    Ok(StickerCatalogCommand {
+        coordinate,
+        pack_author,
+        identifier,
+        approved_event_id,
+    })
 }
 
 /// Maximum accepted workspace icon https URL length.
@@ -94,7 +201,7 @@ fn validate_workspace_icon(icon: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Validate and execute a relay admin command (kinds 9030–9033).
+/// Validate and execute a relay admin command (kinds 9030–9034).
 ///
 /// The handler:
 /// 1. Extracts the target pubkey from the `["p", ...]` tag.
@@ -162,6 +269,36 @@ pub async fn handle_relay_admin_event(
             .map_err(|e| format!("failed to store workspace icon: {e}"))?;
 
         info!(sender = %sender_hex, icon_len = icon.len(), "workspace profile updated");
+        return Ok(());
+    }
+
+    // kind:9034 — Curate an exact sticker pack revision. Handled before
+    // p-tag extraction because it targets an addressable event, not a member.
+    if kind == RELAY_ADMIN_CURATE_STICKER_PACK {
+        if sender_role != "admin" && sender_role != "owner" {
+            return Err("actor not authorized: must be admin or owner".to_string());
+        }
+        let command = parse_sticker_catalog_command(event)?;
+        let actor = event.pubkey.to_bytes();
+        let (changed, approval_count) = publish_sticker_catalog_mutation(
+            tenant,
+            state,
+            &command.coordinate,
+            command.pack_author.as_slice(),
+            &command.identifier,
+            command.approved_event_id.as_ref().map(<[u8; 32]>::as_slice),
+            actor.as_slice(),
+        )
+        .await
+        .map_err(|error| format!("failed to update sticker catalog: {error}"))?;
+
+        info!(
+            sender = %sender_hex,
+            coordinate = %command.coordinate,
+            changed,
+            approval_count,
+            "workspace sticker catalog updated"
+        );
         return Ok(());
     }
 
@@ -464,5 +601,71 @@ mod tests {
         assert!(validate_workspace_icon(&long_url).is_err());
         let long_data = format!("data:image/png;base64,{}", "A".repeat(98_304));
         assert!(validate_workspace_icon(&long_data).is_err());
+    }
+
+    #[test]
+    fn sticker_catalog_approve_pins_exact_revision() {
+        let author = "a".repeat(64);
+        let event_id = "b".repeat(64);
+        let coordinate = format!("30031:{author}:animals");
+        let event = make_test_event(
+            9034,
+            vec![
+                vec!["action", "approve"],
+                vec![
+                    "a",
+                    Box::leak(coordinate.clone().into_boxed_str()),
+                    Box::leak(event_id.into_boxed_str()),
+                ],
+            ],
+        );
+        let parsed = parse_sticker_catalog_command(&event).expect("valid command");
+        assert_eq!(parsed.coordinate, coordinate);
+        assert_eq!(parsed.pack_author, [0xaa; 32]);
+        assert_eq!(parsed.approved_event_id, Some([0xbb; 32]));
+    }
+
+    #[test]
+    fn sticker_catalog_remove_requires_coordinate_only() {
+        let coordinate = format!("30031:{}:animals", "a".repeat(64));
+        let valid = make_test_event(
+            9034,
+            vec![
+                vec!["action", "remove"],
+                vec!["a", Box::leak(coordinate.into_boxed_str())],
+            ],
+        );
+        assert!(parse_sticker_catalog_command(&valid).is_ok());
+
+        let invalid = make_test_event(
+            9034,
+            vec![
+                vec!["action", "remove"],
+                vec!["a", "30031:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:animals", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+            ],
+        );
+        assert!(parse_sticker_catalog_command(&invalid).is_err());
+    }
+
+    #[test]
+    fn sticker_catalog_rejects_uppercase_author_and_duplicate_tags() {
+        let uppercase = make_test_event(
+            9034,
+            vec![
+                vec!["action", "remove"],
+                vec!["a", "30031:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA:animals"],
+            ],
+        );
+        assert!(parse_sticker_catalog_command(&uppercase).is_err());
+
+        let duplicate = make_test_event(
+            9034,
+            vec![
+                vec!["action", "remove"],
+                vec!["action", "remove"],
+                vec!["a", "30031:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:animals"],
+            ],
+        );
+        assert!(parse_sticker_catalog_command(&duplicate).is_err());
     }
 }

@@ -88,6 +88,10 @@ pub fn is_private_ip(ip: &std::net::IpAddr) -> bool {
                     && segments[2] == 1) // 64:ff9b:1::/48 local-use NAT64
                 || (segments[0] == 0x2001 && segments[1] == 0) // 2001::/32 Teredo
                 || segments[0] == 0x2002 // 2002::/16 6to4
+                || segments[0] & 0xffc0 == 0xfec0 // fec0::/10 deprecated site-local
+                || (segments[0] == 0x0100 && segments[1] == 0 && segments[2] == 0 && segments[3] == 0) // 100::/64 discard (RFC 6666)
+                || (segments[0] == 0x2001 && segments[1] <= 0x01ff) // 2001::/23 IETF protocol-assignment
+                || segments[0] == 0x3fff || segments[0] == 0x5f00
                 // RFC 3849 — documentation range, should never appear in production
                 || (segments[0] == 0x2001 && segments[1] == 0x0db8)
         }

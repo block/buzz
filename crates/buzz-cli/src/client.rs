@@ -1097,6 +1097,112 @@ impl BuzzClient {
 
     /// Upload a file to the relay's Blossom endpoint.
     /// Returns a BlobDescriptor on success.
+    pub async fn upload_bytes(
+        &self,
+        bytes: Vec<u8>,
+        mime: &str,
+    ) -> Result<BlobDescriptor, CliError> {
+        if !ALLOWED_MIMES.contains(&mime) {
+            return Err(CliError::Usage(format!("unsupported file type: {mime}")));
+        }
+
+        // 3. Size check
+        let max = if mime.starts_with("video/") {
+            MAX_VIDEO_BYTES
+        } else {
+            MAX_IMAGE_BYTES
+        };
+        if bytes.len() as u64 > max {
+            return Err(CliError::Usage(format!(
+                "file too large: {} bytes (max {})",
+                bytes.len(),
+                max
+            )));
+        }
+
+        // 4. SHA-256
+        let sha256 = hex::encode(Sha256::digest(&bytes));
+
+        // 5. Sign Blossom auth event (kind:24242)
+        use nostr::Timestamp;
+        let now = Timestamp::now().as_secs();
+        let expiry = if mime.starts_with("video/") {
+            3600
+        } else {
+            600
+        };
+        let exp_str = (now + expiry).to_string();
+
+        let mut blossom_tags = vec![
+            Tag::parse(["t", "upload"]).map_err(|e| CliError::Other(e.to_string()))?,
+            Tag::parse(["x", &sha256]).map_err(|e| CliError::Other(e.to_string()))?,
+            Tag::parse(["expiration", &exp_str]).map_err(|e| CliError::Other(e.to_string()))?,
+        ];
+        // Extract server domain from relay URL for BUD-11 server tag
+        if let Some(domain) = relay_server_tag(&self.relay_url) {
+            blossom_tags
+                .push(Tag::parse(["server", &domain]).map_err(|e| CliError::Other(e.to_string()))?);
+        }
+
+        let auth_event = EventBuilder::new(Kind::from(24242), "Upload file")
+            .tags(blossom_tags)
+            .sign_with_keys(&self.keys)
+            .map_err(|e| CliError::Other(format!("signing failed: {e}")))?;
+
+        // 6. Base64url encode the auth event for the header
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let auth_header = format!(
+            "Nostr {}",
+            URL_SAFE_NO_PAD.encode(auth_event.as_json().as_bytes())
+        );
+
+        // 7. PUT request to the BUD-02 /upload endpoint with a generous timeout.
+        let upload_timeout = if mime.starts_with("video/") {
+            Duration::from_secs(600)
+        } else {
+            Duration::from_secs(120)
+        };
+        let url = format!("{}/upload", self.relay_url);
+        let upload_body = bytes::Bytes::from(bytes);
+        let req = self
+            .http
+            .put(&url)
+            .timeout(upload_timeout)
+            .header("Authorization", &auth_header)
+            .header("Content-Type", mime)
+            .header("X-SHA-256", &sha256);
+
+        let mut resp = self
+            .with_auth_tag(req)
+            .body(upload_body.clone())
+            .send()
+            .await?;
+        if should_retry_legacy_upload(resp.status()) {
+            let legacy_url = format!("{}/media/upload", self.relay_url);
+            let legacy_req = self
+                .http
+                .put(&legacy_url)
+                .timeout(upload_timeout)
+                .header("Authorization", &auth_header)
+                .header("Content-Type", mime)
+                .header("X-SHA-256", &sha256);
+            resp = self
+                .with_auth_tag(legacy_req)
+                .body(upload_body)
+                .send()
+                .await?;
+        }
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(CliError::Relay { status, body });
+        }
+
+        resp.json::<BlobDescriptor>()
+            .await
+            .map_err(|e| CliError::Other(format!("invalid upload response: {e}")))
+    }
+
     pub async fn upload_file(&self, file_path: &str) -> Result<BlobDescriptor, CliError> {
         // 1. Read file — validate it exists and is a regular file
         let metadata = std::fs::metadata(file_path)

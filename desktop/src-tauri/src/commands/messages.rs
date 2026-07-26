@@ -426,8 +426,6 @@ pub async fn get_event(event_id: String, state: State<'_, AppState>) -> Result<S
     serde_json::to_string(ev).map_err(|e| format!("serialize event: {e}"))
 }
 
-// ── Writes ──────────────────────────────────────────────────────────────────
-
 /// Fetch a parent event and extract the thread root from its NIP-10 e-tags.
 async fn resolve_thread_ref(
     parent_event_id: &str,
@@ -450,7 +448,6 @@ async fn resolve_thread_ref(
         .first()
         .ok_or_else(|| "parent event not found".to_string())?;
 
-    // Walk tags looking for NIP-10 root/reply markers.
     let (mut root, mut reply) = (None, None);
     for tag in parent.tags.iter() {
         let s = tag.as_slice();
@@ -486,6 +483,7 @@ pub async fn send_channel_message(
     media_tags: Option<Vec<Vec<String>>>,
     emoji_tags: Option<Vec<Vec<String>>>,
     mention_tags: Option<Vec<Vec<String>>>,
+    sticker_tags: Option<Vec<Vec<String>>>,
     mention_pubkeys: Option<Vec<String>>,
     kind: Option<u32>,
     state: State<'_, AppState>,
@@ -497,10 +495,10 @@ pub async fn send_channel_message(
     let media = media_tags.unwrap_or_default();
     let emoji = emoji_tags.unwrap_or_default();
     let mention_refs_only = mention_tags.unwrap_or_default();
+    let sticker_refs = sticker_tags.unwrap_or_default();
     let kind_num = kind.unwrap_or(buzz_core_pkg::kind::KIND_STREAM_MESSAGE);
 
     let mut resolved_root: Option<String> = None;
-
     let builder = match kind_num {
         buzz_core_pkg::kind::KIND_FORUM_POST => events::build_forum_post(
             channel_uuid,
@@ -541,6 +539,7 @@ pub async fn send_channel_message(
                 &media,
                 &emoji,
                 &mention_refs_only,
+                &sticker_refs,
             )?
         }
     };
@@ -704,6 +703,7 @@ fn build_managed_agent_channel_message(
         content,
         thread_ref,
         &mention_refs,
+        &[],
         &[],
         &[],
         &[],

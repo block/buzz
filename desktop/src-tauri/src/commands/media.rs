@@ -455,7 +455,7 @@ async fn send_upload_attempt(
     response.map_err(|error| classify_request_error(&error))
 }
 
-async fn do_upload(
+pub(crate) async fn do_upload(
     body: Vec<u8>,
     mime: &str,
     state: &State<'_, AppState>,

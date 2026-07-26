@@ -27,6 +27,7 @@ mod relay_admission;
 mod reset;
 mod secret_store;
 mod shutdown;
+mod sticker_events;
 mod templates;
 mod util;
 use app_state::{build_app_state, resolve_persisted_identity, AppState};
@@ -57,10 +58,8 @@ use mesh_llm_stubs::*;
 #[cfg(all(feature = "mesh-llm", target_os = "macos"))]
 use shutdown::{hard_exit_after_mesh_shutdown, relaunch_after_mesh_shutdown};
 use shutdown::{is_restart_request, shut_down_app};
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 #[cfg(target_os = "macos")]
 use tauri::Listener;
 use tauri::{Emitter, Manager, RunEvent};
@@ -151,10 +150,8 @@ pub fn run() {
             // Keep the runtime alive for the process lifetime; dropping it
             // would shut down the workers Tauri now depends on.
             std::mem::forget(runtime);
-            eprintln!(
-                "buzz-mesh: installed tokio runtime with {} MiB worker stacks",
-                crate::mesh_llm::MESH_WORKER_STACK_SIZE / (1024 * 1024)
-            );
+            let stack_mib = crate::mesh_llm::MESH_WORKER_STACK_SIZE / (1024 * 1024);
+            eprintln!("buzz-mesh: installed tokio runtime with {stack_mib} MiB worker stacks");
         }
         Err(error) => {
             // Fall back to Tauri's default runtime: the app still works,
@@ -753,6 +750,8 @@ pub fn run() {
             upload_media,
             pick_and_upload_media,
             pick_and_upload_image,
+            pick_and_upload_sticker_image,
+            import_signal_sticker_pack,
             upload_media_bytes,
             download_image,
             save_png_data_url,

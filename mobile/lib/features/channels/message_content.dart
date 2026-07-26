@@ -13,6 +13,8 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../../shared/clipboard_utils.dart';
 import '../../shared/relay/relay.dart';
+import '../../shared/stickers/sticker_preview.dart';
+import '../../shared/stickers/sticker_reference.dart';
 import '../../shared/syntax_highlight.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
@@ -119,6 +121,7 @@ class MessageContent extends HookConsumerWidget {
       customEmojiFromTags(tags),
       ref.watch(customEmojiListProvider),
     );
+    final stickerTag = parseStickerReference(tags);
 
     final finalContent = useMemoized(() {
       // Convert autolinks and bare URLs to standard markdown links,
@@ -188,7 +191,7 @@ class MessageContent extends HookConsumerWidget {
       return result;
     }, [content, mentionNames]);
 
-    return GptMarkdown(
+    final markdown = GptMarkdown(
       finalContent,
       style: style,
       followLinkColor: false,
@@ -208,6 +211,25 @@ class MessageContent extends HookConsumerWidget {
         CustomEmojiMd(customEmoji),
         _ChannelLinkMd(channelNames: channelNames, onChannelTap: onChannelTap),
         ...MarkdownComponent.inlineComponents,
+      ],
+    );
+
+    if (stickerTag.status == StickerTagStatus.absent) return markdown;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        StickerPreview(
+          stickerTag: stickerTag,
+          size: maxLines == null
+              ? stickerPreviewSize
+              : compactStickerPreviewSize,
+        ),
+        if (stickerTag.status != StickerTagStatus.valid &&
+            content.isNotEmpty) ...[
+          const SizedBox(height: Grid.half),
+          markdown,
+        ],
       ],
     );
   }

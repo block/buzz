@@ -12,11 +12,14 @@ abstract final class EventKind {
   static const reaction = 7;
   static const streamMessage = 9;
   static const nip29DeleteEvent = 9005;
+  static const userStickerPacks = 10031;
+  static const stickerCatalog = 13536;
   static const presenceUpdate = 20001;
   static const typingIndicator = 20002;
   static const auth = 22242;
   static const agentObserverFrame = 24200;
   static const huddleReaction = 24810;
+  static const stickerPack = 30031;
   static const readState = 30078;
   static const userStatus = 30315;
   static const dmVisibility = 30622;

@@ -298,7 +298,7 @@ pub(crate) fn spawn_transcription_task(
 
             let p_tags: Vec<&str> = agent_pubkeys.iter().map(|s| s.as_str()).collect();
             let builder =
-                match events::build_message(channel_uuid, &t, None, &p_tags, &[], &[], &[]) {
+                match events::build_message(channel_uuid, &t, None, &p_tags, &[], &[], &[], &[]) {
                     Ok(b) => b,
                     Err(e) => {
                         eprintln!("buzz-desktop: STT build_message: {e}");

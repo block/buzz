@@ -667,16 +667,17 @@ const MENTION_REF = [
   "1111111111111111111111111111111111111111111111111111111111111111",
 ];
 
-test("splitOutgoingTags: undefined input yields three empty arrays", () => {
+test("splitOutgoingTags: undefined input yields four empty arrays", () => {
   assert.deepEqual(splitOutgoingTags(undefined), {
     mediaTags: [],
     emojiTags: [],
     mentionTags: [],
+    stickerTags: [],
   });
 });
 
 test("splitOutgoingTags: separates emoji tags from imeta tags", () => {
-  const { mediaTags, emojiTags, mentionTags } = splitOutgoingTags([
+  const { mediaTags, emojiTags, mentionTags, stickerTags } = splitOutgoingTags([
     IMETA,
     EMOJI_A,
     EMOJI_B,
@@ -684,17 +685,21 @@ test("splitOutgoingTags: separates emoji tags from imeta tags", () => {
   assert.deepEqual(mediaTags, [IMETA]);
   assert.deepEqual(emojiTags, [EMOJI_A, EMOJI_B]);
   assert.deepEqual(mentionTags, []);
+  assert.deepEqual(stickerTags, []);
 });
 
 test("splitOutgoingTags: emoji-only set leaves mediaTags empty", () => {
-  const { mediaTags, emojiTags, mentionTags } = splitOutgoingTags([EMOJI_A]);
+  const { mediaTags, emojiTags, mentionTags, stickerTags } = splitOutgoingTags([
+    EMOJI_A,
+  ]);
   assert.deepEqual(mediaTags, []);
   assert.deepEqual(emojiTags, [EMOJI_A]);
   assert.deepEqual(mentionTags, []);
+  assert.deepEqual(stickerTags, []);
 });
 
 test("splitOutgoingTags: separates reference-only mention tags", () => {
-  const { mediaTags, emojiTags, mentionTags } = splitOutgoingTags([
+  const { mediaTags, emojiTags, mentionTags, stickerTags } = splitOutgoingTags([
     IMETA,
     MENTION_REF,
     EMOJI_A,
@@ -702,25 +707,41 @@ test("splitOutgoingTags: separates reference-only mention tags", () => {
   assert.deepEqual(mediaTags, [IMETA]);
   assert.deepEqual(emojiTags, [EMOJI_A]);
   assert.deepEqual(mentionTags, [MENTION_REF]);
+  assert.deepEqual(stickerTags, []);
 });
 
 test("splitOutgoingTags: unknown prefixes stay with mediaTags (injection defense)", () => {
   // A forged ["p", ...] must NOT be misrouted to the emoji channel; it stays on
   // mediaTags where the server-side imeta guard rejects it.
   const forged = ["p", "deadbeef"];
-  const { mediaTags, emojiTags, mentionTags } = splitOutgoingTags([
+  const { mediaTags, emojiTags, mentionTags, stickerTags } = splitOutgoingTags([
     forged,
     EMOJI_A,
   ]);
   assert.deepEqual(mediaTags, [forged]);
   assert.deepEqual(emojiTags, [EMOJI_A]);
   assert.deepEqual(mentionTags, []);
+  assert.deepEqual(stickerTags, []);
 });
 
 test("splitOutgoingTags is the inverse of mergeOutgoingTags", () => {
   const merged = mergeOutgoingTags([IMETA], [EMOJI_A, EMOJI_B]);
-  const { mediaTags, emojiTags, mentionTags } = splitOutgoingTags(merged);
+  const { mediaTags, emojiTags, mentionTags, stickerTags } =
+    splitOutgoingTags(merged);
   assert.deepEqual(mediaTags, [IMETA]);
   assert.deepEqual(emojiTags, [EMOJI_A, EMOJI_B]);
   assert.deepEqual(mentionTags, []);
+  assert.deepEqual(stickerTags, []);
+});
+
+test("splitOutgoingTags routes Sonar sticker references to the dedicated lane", () => {
+  const sticker = [
+    "sticker",
+    `30031:${"a".repeat(64)}:pack`,
+    "wave",
+    "b".repeat(64),
+  ];
+  const split = splitOutgoingTags([IMETA, sticker]);
+  assert.deepEqual(split.mediaTags, [IMETA]);
+  assert.deepEqual(split.stickerTags, [sticker]);
 });
