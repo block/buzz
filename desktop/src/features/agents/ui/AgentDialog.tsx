@@ -15,12 +15,17 @@ import {
   AgentDefinitionDialog,
   type AgentDefinitionSubmitOptions,
 } from "./AgentDefinitionDialog";
+import { AgentRunsOnSection } from "./AgentRunsOnSection";
 import { WhereToRunSection } from "./WhereToRunSection";
 import {
   canSubmitWhereToRun,
   emptyWhereToRunDraft,
   resolveBackendIntent,
 } from "./whereToRunIntent";
+import {
+  useDefaultAgentLocation,
+  type AgentLocation,
+} from "@/features/agents/agentLocation";
 
 type AgentDialogCreateProps = {
   mode: "definition";
@@ -34,6 +39,7 @@ type AgentDialogCreateProps = {
     input: CreatePersonaInput | UpdatePersonaInput,
     intent: AgentCreateIntent,
     backendIntent: BackendIntent | null,
+    location: AgentLocation,
   ) => Promise<boolean>;
 };
 
@@ -116,6 +122,15 @@ function AgentCreateDialogRouter({
   onSubmitDefinition,
 }: AgentDialogCreateProps) {
   const [runDraft, setRunDraft] = React.useState(emptyWhereToRunDraft);
+  // Until the user picks, the dialog *inherits* the stored default rather than
+  // snapshotting it — so a spawner that connects (or the default changing)
+  // while the dialog is open is still reflected, and the built-ins that carry
+  // no location of their own follow it too.
+  const [chosenLocation, setChosenLocation] =
+    React.useState<AgentLocation | null>(null);
+  const defaultLocation = useDefaultAgentLocation();
+  const location = chosenLocation ?? defaultLocation;
+  const isLocal = location.kind === "local";
   const initialValues = React.useMemo(
     () => providedInitialValues ?? createPersonaDialogState().initialValues,
     [providedInitialValues],
@@ -126,13 +141,24 @@ function AgentCreateDialogRouter({
   return (
     <AgentDefinitionDialog
       createRunSection={
-        <WhereToRunSection
-          draft={runDraft}
-          isPending={isDefinitionPending}
-          onDraftChange={setRunDraft}
-        />
+        <div className="space-y-4">
+          <AgentRunsOnSection
+            isPending={isDefinitionPending}
+            location={location}
+            onLocationChange={setChosenLocation}
+          />
+          {/* A local backend provider only has meaning for a local agent: on a
+              spawner the host owns the process and its key. */}
+          {isLocal ? (
+            <WhereToRunSection
+              draft={runDraft}
+              isPending={isDefinitionPending}
+              onDraftChange={setRunDraft}
+            />
+          ) : null}
+        </div>
       }
-      createSubmitBlocked={!canSubmitWhereToRun(runDraft)}
+      createSubmitBlocked={isLocal && !canSubmitWhereToRun(runDraft)}
       description={copy.description}
       error={definitionError}
       initialValues={initialValues}
@@ -142,7 +168,8 @@ function AgentCreateDialogRouter({
         const submitted = await onSubmitDefinition(
           input,
           "definition_start",
-          resolveBackendIntent(runDraft),
+          isLocal ? resolveBackendIntent(runDraft) : null,
+          location,
         );
         if (submitted) {
           onOpenChange(false);

@@ -1,0 +1,106 @@
+# syntax=docker/dockerfile:1.7
+#
+# The agent runtime image: one `buzz-acp` harness per container, spawned by
+# `buzz-spawner`. This is the server-side equivalent of what the desktop app
+# launches locally via `managed_agents/runtime.rs::spawn_agent_child`.
+#
+# `sprig` is a multicall binary (crates/sprig/src/main.rs) that dispatches on
+# argv[0], so one build produces the harness, the built-in agent, and the dev
+# MCP tools. The symlinks below are how the harness finds them — it spawns its
+# ACP agent by name over stdio.
+ARG RUST_VERSION=1.95
+ARG DEBIAN_VERSION=bookworm
+
+FROM rust:${RUST_VERSION}-${DEBIAN_VERSION} AS chef
+RUN cargo install cargo-chef --locked --version 0.1.71
+WORKDIR /build
+
+FROM chef AS planner
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS builder
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=planner /build/recipe.json recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json
+COPY . .
+RUN cargo build --release --locked -p sprig --bin sprig \
+    && cargo build --release --locked -p buzz-cli --bin buzz \
+    && strip target/release/sprig target/release/buzz
+
+FROM debian:${DEBIAN_VERSION}-slim AS runtime
+LABEL org.opencontainers.image.title="Buzz ACP Agent" \
+      org.opencontainers.image.description="buzz-acp harness runtime for server-hosted Buzz agents" \
+      org.opencontainers.image.source="https://github.com/block/buzz" \
+      org.opencontainers.image.licenses="Apache-2.0"
+
+# git and ca-certificates are not optional: agents clone and push repositories
+# through the relay's smart-HTTP transport, authenticated by git-credential-nostr.
+#
+# node and curl exist for the optional Claude Code runtime below: the ACP adapter
+# ships as an npm package and the CLI installs via a shell script.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl git \
+    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 1000 agent \
+    && useradd --system --uid 1000 --gid 1000 --home-dir /home/agent --create-home --shell /bin/bash agent
+
+COPY --from=builder /build/target/release/sprig /usr/local/bin/sprig
+COPY --from=builder /build/target/release/buzz /usr/local/bin/buzz
+
+# Multicall dispatch: sprig routes on argv[0].
+RUN for name in buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr git-sign-nostr; do \
+        ln -s /usr/local/bin/sprig "/usr/local/bin/$name"; \
+    done
+
+# Claude Code and its ACP adapter, for running agents on a Claude subscription
+# instead of a metered API key.
+#
+# # Authentication in a container
+#
+# The subscription flow is browser-based and interactive, which a container
+# cannot do. The non-interactive equivalent is a long-lived token from
+# `claude setup-token` (run once on a machine with a browser), supplied as
+# `CLAUDE_CODE_OAUTH_TOKEN`. `buzz-acp` does not clear the environment when it
+# spawns the adapter, so the token reaches the CLI unchanged.
+#
+# Forward it with the spawner's own passthrough, which takes variable *names*:
+#
+#   BUZZ_SPAWNER_AGENT_ENV=CLAUDE_CODE_OAUTH_TOKEN
+#   BUZZ_SPAWNER_AGENT_COMMAND=claude-agent-acp
+#
+# The alternative — bind-mounting a pre-authenticated `~/.claude` — is not
+# supported by the spawner and would share one credential store across every
+# agent on the host.
+ARG CLAUDE_ACP_VERSION=0.62.0
+# The installer takes only [stable|latest|VERSION] and always installs into
+# $HOME/.local/bin, so it runs with HOME pointed at the agent's home (this RUN
+# is root, whose $HOME the agent user cannot read) and the result is symlinked
+# onto PATH. `HOME=... bash` rather than `HOME=... curl`: the variable has to
+# reach the shell that does the installing, not the download.
+RUN npm install -g "@agentclientprotocol/claude-agent-acp@${CLAUDE_ACP_VERSION}" \
+    && npm cache clean --force \
+    && curl -fsSL https://claude.ai/install.sh | HOME=/home/agent bash -s -- stable \
+    && ln -sf /home/agent/.local/bin/claude /usr/local/bin/claude \
+    && chown -R agent:agent /home/agent \
+    && /usr/local/bin/claude --version
+
+# The nest. buzz-spawner mounts a per-agent named volume here, so an agent's
+# workspace survives restarts and config changes but is invisible to every
+# other agent on the host.
+#
+# `.claude` is created up front and owned by the agent: the CLI writes state
+# there, and it must not fall back to a root-owned path or a read-only home.
+RUN mkdir -p /home/agent/.buzz /home/agent/.claude && chown -R agent:agent /home/agent
+
+USER agent:agent
+WORKDIR /home/agent/.buzz
+ENV HOME=/home/agent
+# Default to the in-house agent, which needs only an API key. Override with
+# BUZZ_SPAWNER_AGENT_COMMAND=claude-agent-acp to use a Claude subscription.
+ENV BUZZ_ACP_AGENT_COMMAND=buzz-agent
+ENTRYPOINT ["/usr/local/bin/buzz-acp"]

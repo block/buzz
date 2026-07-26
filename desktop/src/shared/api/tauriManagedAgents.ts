@@ -50,6 +50,27 @@ export async function setManagedAgentAutoRestart(
   return fromRawManagedAgent(response);
 }
 
+/**
+ * Record where a managed agent's identity lives.
+ *
+ * Pass the spawner pubkey right after a successful attestation hand-off, or
+ * `null` to move the agent back to this device. The backend refuses every
+ * local start (manual, restore, reconcile, auto-restart) while it is set.
+ */
+export async function setManagedAgentRelocated(
+  pubkey: string,
+  relocatedToSpawner: string | null,
+): Promise<ManagedAgent> {
+  const response = await invokeTauri<RawManagedAgent>(
+    "set_managed_agent_relocated",
+    {
+      pubkey,
+      relocatedToSpawner,
+    },
+  );
+  return fromRawManagedAgent(response);
+}
+
 export async function listManagedAgentRuntimes(): Promise<
   ManagedAgentRuntimeStatus[]
 > {

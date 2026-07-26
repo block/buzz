@@ -23,6 +23,9 @@ import {
 } from "@/features/agents/activeAgentTurnsStore";
 import { resetAgentWorkingSignal } from "@/features/agents/agentWorkingSignal";
 import { resetAgentObserverStore } from "@/features/agents/observerRelayStore";
+import { resetSpawnerAttestationStore } from "@/features/agents/spawnerAttestationStore";
+import { resetSpawnerDirectoryStore } from "@/features/agents/spawnerDirectoryStore";
+import { resetSpawnerStatusStore } from "@/features/agents/spawnerStatusStore";
 import { resetAvatarPresentations } from "@/features/profile/avatarPresentationStore";
 import { resetAvatarProfileSync } from "@/features/profile/avatarProfileSync";
 import { resetSidebarRelayConnectionCardState } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
@@ -52,6 +55,13 @@ function resetCommunityState({
   clearAllDrafts();
   resetAgentObserverStore();
   resetActiveAgentTurnsStore();
+  // Attestation prompts are identity-scoped: showing one after a switch would
+  // ask the user to sign with the wrong key. Status is community-scoped too.
+  resetSpawnerAttestationStore();
+  resetSpawnerStatusStore();
+  // The spawner directory is community-scoped: announcements come from the
+  // relay we just left.
+  resetSpawnerDirectoryStore();
   resetAgentWorkingSignal();
   if (resetAvatarState) {
     resetAvatarProfileSync();
