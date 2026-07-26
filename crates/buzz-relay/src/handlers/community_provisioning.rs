@@ -361,7 +361,18 @@ mod tests {
 
     #[test]
     fn host_valid_with_port() {
-        assert!(validate_host("localhost:3000").is_ok());
+        assert!(validate_host("127.0.0.1:3000").is_ok());
+        assert!(validate_host("relay.example:3000").is_ok());
+    }
+
+    #[test]
+    fn host_rejects_unfolded_loopback_spelling() {
+        // Loopback folds to 127.0.0.1, so `localhost:3000` is not the
+        // normalized form. Provisioning stays strict about receiving the
+        // canonical host, and the error names it — same contract already
+        // applied to uppercase and trailing-dot spellings.
+        let error = validate_host("localhost:3000").expect_err("must reject unfolded loopback");
+        assert!(error.contains("127.0.0.1:3000"), "error was: {error}");
     }
 
     #[test]
@@ -421,7 +432,8 @@ mod tests {
 
     #[test]
     fn host_accepts_ipv6_bracket_literal() {
-        assert!(validate_host("[::1]:3000").is_ok());
+        // Non-loopback literal keeps its brackets and is accepted as-is.
+        assert!(validate_host("[2001:db8::1]:3000").is_ok());
     }
 
     #[test]
