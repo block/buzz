@@ -71,8 +71,18 @@ async fn main() -> anyhow::Result<()> {
     let address = parse_bind_address(&config.bind_address)
         .with_context(|| format!("invalid bind address {:?}", config.bind_address))?;
     let relay = if config.require_auth {
-        LocalRelay::open_with_identity(config.storage, Arc::new(LocalIdentityAdapter::new()))
-            .await?
+        // A durable relay also persists consumed-proof replay state, so a
+        // restart within the proof freshness window still rejects replays.
+        let adapter = match &config.storage {
+            StorageMode::Durable(event_log) => {
+                let mut proof_store = event_log.clone().into_os_string();
+                proof_store.push(".auth-proofs");
+                LocalIdentityAdapter::with_proof_store(PathBuf::from(proof_store))
+                    .context("failed to open authentication proof store")?
+            }
+            StorageMode::Ephemeral => LocalIdentityAdapter::new(),
+        };
+        LocalRelay::open_with_identity(config.storage, Arc::new(adapter)).await?
     } else {
         LocalRelay::open(config.storage).await?
     };

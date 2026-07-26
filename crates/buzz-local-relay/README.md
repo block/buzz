@@ -50,7 +50,9 @@ intentional local-network experiment, not an internet deployment.
 - Optional laptop identity adapter (`--require-auth`):
   - NIP-42 challenge authentication for WebSocket connections
   - payload-bound NIP-98 authentication for HTTP writes, queries, and counts
-  - one-use, in-memory proof replay protection
+  - one-use proof replay protection, persisted beside a durable event log
+    (`<data>.auth-proofs`) so restarts inside the freshness window still
+    reject replayed evidence
   - direct writes bound to the authenticated event author, with the narrow
     NIP-59 gift-wrap exception
   - equivalent result-level disclosure policy for query, count, historical
@@ -65,7 +67,7 @@ no Postgres, Redis, MinIO, external identity provider, or DID resolver.
 ## Not implemented
 
 - NIP-29 membership policy, delegated append authority, or public-read grants
-- persistent authentication replay state or dynamic DID resolution
+- dynamic DID resolution
 - Postgres FTS or indexed search filters
 - Redis or multi-node fan-out
 - automatic peer discovery or a continuous relay-to-relay transport

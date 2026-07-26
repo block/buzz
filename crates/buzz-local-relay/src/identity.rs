@@ -4,7 +4,9 @@
 //! binds direct writes to their authors, protects private read kinds, and binds
 //! configured replication streams to stable relay-node principals.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use buzz_auth::{verify_nip42_event_at, verify_nip98_event_at, AuthError};
@@ -22,6 +24,11 @@ use nostr::{Alphabet, Event, EventId, Filter, PublicKey, SingleLetterTag, TagKin
 use thiserror::Error;
 
 const LOCAL_DESTINATION_SCOPE: &str = "local";
+
+/// How long a consumed proof ID is retained. Anything older is unusable by
+/// freshness alone, so retention only needs to comfortably exceed the
+/// NIP-42/NIP-98 timestamp tolerance.
+const PROOF_RETENTION_SECS: u64 = 600;
 
 /// Authentication evidence understood by the laptop adapter.
 #[derive(Debug, Clone)]
@@ -105,13 +112,81 @@ impl LocalIdentityError {
     }
 }
 
+/// Consumed-proof replay state, optionally persisted beside the event log.
+///
+/// The persisted record contains proof IDs and consumption times only —
+/// never challenges, signatures, or other reusable material — and is
+/// separate security state, not event history.
+struct ProofLedger {
+    consumed: HashMap<EventId, u64>,
+    store_path: Option<PathBuf>,
+}
+
+impl ProofLedger {
+    fn load(store_path: Option<PathBuf>) -> Result<Self, LocalIdentityError> {
+        let mut consumed = HashMap::new();
+        if let Some(path) = store_path.as_ref() {
+            if path.exists() {
+                let contents = std::fs::read_to_string(path)
+                    .map_err(|error| LocalIdentityError::Internal(error.to_string()))?;
+                for line in contents.lines().filter(|line| !line.is_empty()) {
+                    let (id, timestamp) = line.split_once(' ').ok_or_else(|| {
+                        LocalIdentityError::Internal("malformed proof store line".to_string())
+                    })?;
+                    let id = EventId::from_hex(id)
+                        .map_err(|error| LocalIdentityError::Internal(error.to_string()))?;
+                    let timestamp = timestamp
+                        .parse::<u64>()
+                        .map_err(|error| LocalIdentityError::Internal(error.to_string()))?;
+                    consumed.insert(id, timestamp);
+                }
+            }
+        }
+        Ok(Self {
+            consumed,
+            store_path,
+        })
+    }
+
+    fn consume(
+        &mut self,
+        event_id: EventId,
+        evaluation_time: Timestamp,
+    ) -> Result<(), LocalIdentityError> {
+        let now = evaluation_time.as_secs();
+        self.consumed
+            .retain(|_, consumed_at| *consumed_at + PROOF_RETENTION_SECS >= now);
+        if self.consumed.contains_key(&event_id) {
+            return Err(LocalIdentityError::denied(
+                IdentityDenialCode::ReplayDetected,
+            ));
+        }
+        // The durable record must exist before the proof is accepted, so a
+        // crash or restart inside the freshness window still fails closed.
+        if let Some(path) = self.store_path.as_ref() {
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .map_err(|error| LocalIdentityError::Internal(error.to_string()))?;
+            file.write_all(format!("{} {now}\n", event_id.to_hex()).as_bytes())
+                .and_then(|()| file.sync_data())
+                .map_err(|error| LocalIdentityError::Internal(error.to_string()))?;
+        }
+        self.consumed.insert(event_id, now);
+        Ok(())
+    }
+}
+
 /// Laptop reference implementation of portable identity ports.
 ///
-/// The adapter is intentionally in-memory: authentication replay state and
-/// peer trust apply to this single laptop process. It introduces no database,
-/// external identity provider, or DID resolver.
+/// Peer trust is in-memory deployment configuration. Consumed-proof replay
+/// state is in-memory by default and durable when a proof store path is
+/// supplied, so a relay restart within the proof freshness window still
+/// rejects replayed evidence. No database, external identity provider, or
+/// DID resolver is introduced.
 pub struct LocalIdentityAdapter {
-    consumed_proofs: Mutex<HashSet<EventId>>,
+    consumed_proofs: Mutex<ProofLedger>,
     peer_trust: HashMap<ReplicationSourceId, RelayPeerTrust>,
 }
 
@@ -119,15 +194,29 @@ impl LocalIdentityAdapter {
     /// Creates a secured local adapter with no trusted replication peers.
     pub fn new() -> Self {
         Self {
-            consumed_proofs: Mutex::new(HashSet::new()),
+            consumed_proofs: Mutex::new(ProofLedger {
+                consumed: HashMap::new(),
+                store_path: None,
+            }),
             peer_trust: HashMap::new(),
         }
+    }
+
+    /// Creates an adapter whose consumed-proof state persists at `path`.
+    pub fn with_proof_store(path: impl AsRef<Path>) -> Result<Self, LocalIdentityError> {
+        Ok(Self {
+            consumed_proofs: Mutex::new(ProofLedger::load(Some(path.as_ref().to_path_buf()))?),
+            peer_trust: HashMap::new(),
+        })
     }
 
     /// Creates an adapter with explicit destination-controlled peer bindings.
     pub fn with_peer_trust(peer_trust: impl IntoIterator<Item = RelayPeerTrust>) -> Self {
         Self {
-            consumed_proofs: Mutex::new(HashSet::new()),
+            consumed_proofs: Mutex::new(ProofLedger {
+                consumed: HashMap::new(),
+                store_path: None,
+            }),
             peer_trust: peer_trust
                 .into_iter()
                 .map(|trust| (trust.source.clone(), trust))
@@ -146,7 +235,7 @@ impl LocalIdentityAdapter {
             LocalAuthenticationEvidence::Nip42 { event, challenge } => {
                 verify_nip42_event_at(&event, &challenge, audience, evaluation_time)
                     .map_err(map_nip42_error)?;
-                self.consume_proof(event.id)?;
+                self.consume_proof(event.id, evaluation_time)?;
                 Ok(authenticated_nostr_principal(
                     event.pubkey,
                     AuthenticationMethod::Nip42,
@@ -175,7 +264,7 @@ impl LocalIdentityAdapter {
                     evaluation_time,
                 )
                 .map_err(map_nip98_error)?;
-                self.consume_proof(event.id)?;
+                self.consume_proof(event.id, evaluation_time)?;
                 Ok(authenticated_nostr_principal(
                     pubkey,
                     AuthenticationMethod::Nip98,
@@ -210,7 +299,7 @@ impl LocalIdentityAdapter {
             .verification_methods
             .get(&evidence.event.pubkey)
             .ok_or_else(|| LocalIdentityError::denied(IdentityDenialCode::SourceMismatch))?;
-        self.consume_proof(evidence.event.id)?;
+        self.consume_proof(evidence.event.id, evaluation_time)?;
         Ok(ReplicationPeerBinding {
             source: source.clone(),
             relay_node_principal: trust.relay_node_principal.clone(),
@@ -252,17 +341,16 @@ impl LocalIdentityAdapter {
         self.authorize_event_delivery(principal, operation, event, LOCAL_DESTINATION_SCOPE)
     }
 
-    fn consume_proof(&self, event_id: EventId) -> Result<(), LocalIdentityError> {
-        let mut consumed = self
+    fn consume_proof(
+        &self,
+        event_id: EventId,
+        evaluation_time: Timestamp,
+    ) -> Result<(), LocalIdentityError> {
+        let mut ledger = self
             .consumed_proofs
             .lock()
             .map_err(|error| LocalIdentityError::Internal(error.to_string()))?;
-        if !consumed.insert(event_id) {
-            return Err(LocalIdentityError::denied(
-                IdentityDenialCode::ReplayDetected,
-            ));
-        }
-        Ok(())
+        ledger.consume(event_id, evaluation_time)
     }
 }
 

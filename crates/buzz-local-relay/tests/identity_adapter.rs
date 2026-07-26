@@ -141,6 +141,51 @@ fn fixed_nip42_vector_authenticates_and_replay_fails_closed() {
     );
 }
 
+#[test]
+fn consumed_proof_state_survives_adapter_restart() {
+    let vector = identity_vector();
+    let proof = &vector["authentication_evidence"];
+    let event: Event = serde_json::from_value(proof["event"].clone()).expect("proof event parses");
+    let evaluation_time = Timestamp::from(
+        proof["evaluation_time"]
+            .as_u64()
+            .expect("evaluation time is u64"),
+    );
+    let audience = proof["audience"].as_str().expect("audience is string");
+    let challenge = proof["challenge"]
+        .as_str()
+        .expect("challenge is string")
+        .to_string();
+    let store = std::env::temp_dir().join(format!("buzz-proof-store-{}", Uuid::new_v4()));
+
+    let adapter = LocalIdentityAdapter::with_proof_store(&store).expect("proof store opens");
+    adapter
+        .authenticate_at(
+            LocalAuthenticationEvidence::Nip42 {
+                event: event.clone(),
+                challenge: challenge.clone(),
+            },
+            audience,
+            evaluation_time,
+        )
+        .expect("fresh proof authenticates");
+    drop(adapter);
+
+    let restarted = LocalIdentityAdapter::with_proof_store(&store).expect("proof store reloads");
+    let replay = restarted
+        .authenticate_at(
+            LocalAuthenticationEvidence::Nip42 { event, challenge },
+            audience,
+            evaluation_time,
+        )
+        .expect_err("replay after restart fails closed within the freshness window");
+    assert_eq!(
+        replay.denial_code(),
+        Some(IdentityDenialCode::ReplayDetected)
+    );
+    std::fs::remove_file(store).ok();
+}
+
 #[tokio::test]
 async fn secured_http_binds_author_rejects_replay_and_never_journals_auth() {
     let (relay, address, server) = start_secured_relay(Arc::new(LocalIdentityAdapter::new())).await;
