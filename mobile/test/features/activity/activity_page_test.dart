@@ -181,6 +181,16 @@ void main() {
     // Message previews.
     expect(find.textContaining('Hey check this out'), findsOneWidget);
     expect(find.textContaining('Deployed the fix'), findsOneWidget);
+
+    // Sender uses the compact label scale (labelMedium), not a
+    // headline-like title scale.
+    final senderText = tester.widget<Text>(find.text('Alice'));
+    final textTheme = Theme.of(tester.element(find.text('Alice'))).textTheme;
+    expect(senderText.style?.fontSize, textTheme.labelMedium?.fontSize);
+    expect(
+      senderText.style!.fontSize!,
+      lessThan(textTheme.titleSmall!.fontSize!),
+    );
   });
 
   testWidgets('unread rows show a dot; read rows do not', (tester) async {

@@ -589,7 +589,10 @@ class _InboxRow extends ConsumerWidget {
                       Expanded(
                         child: Text(
                           senderLabel,
-                          style: context.textTheme.titleSmall?.copyWith(
+                          // Compact label scale — matches the old
+                          // "@ Mention" headline treatment while staying
+                          // the row's primary label.
+                          style: context.textTheme.labelMedium?.copyWith(
                             fontWeight: FontWeight.w600,
                           ),
                           overflow: TextOverflow.ellipsis,
