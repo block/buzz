@@ -40,8 +40,10 @@ Buzz is a Rust monorepo, licensed Apache 2.0 under Block, Inc.
 │                                             │ /count             │ │
 │  ┌──────────────────────────────────────┐   │ /hooks/{id}        │ │
 │  │       SubscriptionRegistry           │   │ /media/*           │ │
-│  │  DashMap: (channel_id, kind) → conns │   │ /git/*             │ │
-│  └──────────────────────────────────────┘   │ /info, NIP-05      │ │
+│  │  DashMap: (community, channel, kind) │   │ /git/*             │ │
+│  │            → conns                   │   │ /operator/*        │ │
+│  └──────────────────────────────────────┘   │ /moderation/*      │ │
+│                                             │ /info, NIP-05      │ │
 │                                             └─────────────────────┘ │
 └──────────┬──────────────┬──────────────────────────────────────────┘
            │              │
@@ -92,7 +94,16 @@ buzz-media          (Blossom/S3 media storage)
 buzz-cli            (agent-first CLI)
 buzz-admin          (operator CLI: relay membership + key generation)
 buzz-test-client    (integration test harness + manual CLI)
+
+buzz-relay-mesh     (inter-relay QUIC mesh over iroh — transport, membership, fenced wire contract)
+buzz-push-gateway   (blind, capability-gated NIP-PL push gateway; separate binary)
+buzz-conformance    (runtime trace schema + replay checker for MultiTenantRelay.tla)
 ```
+
+`buzz-conformance` deliberately depends on **no** production Buzz crate — it
+carries its own opaque `CommunityLabel` newtype rather than reusing
+`buzz_core::CommunityId`, so the checker cannot inherit a bug from the code it
+is checking. The relay converts at the seam (`crates/buzz-relay/src/conformance/`).
 
 **Key architectural principle:** The relay is the single source of truth. `buzz-relay` orchestrates all subsystems by calling them directly — it imports `buzz-db`, `buzz-auth`, `buzz-pubsub`, `buzz-search`, `buzz-audit`, and `buzz-workflow`. However, those subsystems are isolated from each other: `buzz-workflow` never calls `buzz-pubsub`, `buzz-search` never calls `buzz-db`, etc. Cross-subsystem coordination happens only through the relay. In multi-community mode, the relay also owns propagation of `TenantContext`; service crates should receive community-scoped inputs rather than independently deriving tenancy from client-controlled event tags.
 
@@ -139,9 +150,9 @@ The `kind` integer is the only dispatch switch. The relay routes, stores, and fa
 | 46001–46012 | KIND_WORKFLOW_* | Workflow execution events |
 | 20001 | KIND_PRESENCE_UPDATE | Ephemeral presence heartbeat |
 
-`buzz-core` defines all 81 kinds as `pub const KIND_*: u32` and exports `ALL_KINDS: &[u32]`. Kinds are `u32` (NIP-01 specifies unsigned integer; `u32` covers the full range). Buzz uses both standard Nostr kinds (e.g., kind 7 for reactions) and custom ranges (40000+).
+`buzz-core` defines kinds as `pub const KIND_*: u32` (plus the `RELAY_ADMIN_*` command constants) and exports `ALL_KINDS: &[u32]` — currently 127 entries, with `KIND_AUTH` deliberately excluded because it is never stored. Kinds are `u32` (NIP-01 specifies unsigned integer; `u32` covers the full range). Buzz uses both standard Nostr kinds (e.g., kind 7 for reactions) and custom ranges (40000+).
 
-Note: `KIND_AUTH` (22242) is `pub const KIND_AUTH: u32` in `buzz-core/src/kind.rs` and imported by `buzz-relay/src/handlers/event.rs`. `KIND_CANVAS` (40100) is likewise `pub const KIND_CANVAS: u32` in `buzz-core/src/kind.rs`.
+Note: `KIND_AUTH` (22242) is `pub const KIND_AUTH: u32` in `buzz-core/src/kind.rs`; the rejection gate lives in `buzz-relay/src/handlers/ingest.rs`. `KIND_CANVAS` (40100) is likewise `pub const KIND_CANVAS: u32` in `buzz-core/src/kind.rs`.
 
 ### Wire Protocol (NIP-01 messages)
 
@@ -158,7 +169,7 @@ Note: `KIND_AUTH` (22242) is `pub const KIND_AUTH: u32` in `buzz-core/src/kind.r
 | Relay → Client | `["NOTICE", "message"]` | Informational message |
 | Relay → Client | `["AUTH", <challenge>]` | Authentication challenge |
 
-Max frame size: 65,536 bytes. Max subscriptions per connection: 1024. Max historical results per filter: 500.
+Max frame size: 512 KiB (`BUZZ_MAX_FRAME_BYTES`). Max subscriptions per connection: 1024. Max historical results per filter: 2,000.
 
 ---
 
@@ -220,32 +231,85 @@ On disconnect (any cause):
 
 ## 4. Event Pipeline
 
-When the relay receives `["EVENT", <event>]`, the handler in `handlers/event.rs` runs this pipeline in order:
+Event ingestion is **transport-neutral**: the WebSocket `["EVENT", <event>]`
+frame and `POST /events` converge on `ingest_event` in `handlers/ingest.rs` —
+two doors, one room. Transport-specific auth is normalized into an `IngestAuth`
+enum (`Nip42` / `Http`) at the door.
+
+Ephemeral events never reach that room. The WebSocket handler branches first:
 
 ```
-1. AUTH CHECK        — AuthState::Authenticated? MessagesWrite scope?
-2. PUBKEY MATCH      — event.pubkey == auth_context.pubkey?
-3. KIND_AUTH REJECT  — kind == 22242 (AUTH events never stored)
-4. EPHEMERAL ROUTE   — kind 20000–29999 → ephemeral sub-pipeline (see below)
-5. VERIFY            — spawn_blocking(verify_event) — Schnorr sig + ID hash
-6. MEMBERSHIP        — channel_id in event tags? → check_channel_membership
-7. DB INSERT         — db.insert_event (ON CONFLICT DO NOTHING — idempotent)
-8. REDIS PUBLISH     — pubsub.publish_event (if channel-scoped)
-9. FAN-OUT           — sub_registry.fan_out → conn_manager.send_to
-10. SEARCH INDEX     — search_index_tx.send (bounded worker queue, non-blocking)
-11. AUDIT LOG        — audit.log (spawned async, non-blocking)
-12. WORKFLOW TRIGGER — wf.on_event (spawned async, excludes kinds 46001–46012)
+WebSocket ["EVENT", …]                         POST /events (NIP-98)
+        │                                             │
+        ▼                                             │
+handlers/event.rs::handle_event                       │
+  • read AuthState → pubkey, scopes, channel_ids      │
+  • kind 20000–29999 → handle_ephemeral_event()       │
+    (local dispatch; never reaches ingest)            │
+        │                                             │
+        └──────────► handlers/ingest.rs ◄─────────────┘
+                        ingest_event()
 ```
 
-Steps 10–12 are fire-and-forget. Search indexing is sent to a bounded worker queue (`search_index_tx`, capacity 1000); audit and workflow triggers are spawned as independent async tasks. A failure in any of these does not fail the event submission. The client receives `["OK", <id>, true, ""]` at the end of the pipeline, not immediately after DB insert.
+`ingest_event` then runs, in order:
 
-Step 9 (fan-out) explicitly **excludes** global subscriptions (no `channel_id` constraint) from channel-scoped events — global subscriptions do NOT receive events from private channels, regardless of filter match. This is a deliberate security boundary: only subscriptions scoped to an accessible `channel_id` receive those events.
+```
+ 1. KIND GATES        — reject KIND_AUTH (22242), relay-signed membership
+                        notifications, and relay-only kinds; gift wraps and
+                        presence are rejected over HTTP (WebSocket-only)
+ 2. VERIFY            — spawn_blocking(verify_event) — Schnorr sig + ID hash
+ 3. TIMESTAMP DRIFT   — reject if |event.created_at - now| > 900s (±15 min)
+ 4. CONTENT SIZE      — reject content > 256 KB
+ 5. AUTH / SCOPE      — per-kind scope allowlist; pubkey match against the
+                        authenticated principal (the WS handler's earlier
+                        check is re-verified here, so HTTP gets it too)
+ 6. COMMAND ROUTING   — moderation (9040–9044), relay-admin, NIP-56 reports,
+                        and product feedback are sidecarred to their own
+                        tables — never stored as ordinary events, never
+                        fanned out
+ 7. BAN / TIMEOUT     — durable write-block backstop (see below)
+ 8. MEMBERSHIP        — channel row prefetched once, then membership +
+                        archived + join-visibility gates
+ 9. DB INSERT         — db.insert_event (ON CONFLICT DO NOTHING — idempotent)
+10. MARK LOCAL        — mark_local_event (echo dedup for the Redis round-trip)
+11. REDIS PUBLISH     — pubsub.publish_event (channel or global topic)
+12. FAN-OUT           — sub_registry.fan_out_scoped → conn_manager.send_to
+13. AUDIT LOG         — bounded audit_tx queue (awaited enqueue only)
+14. WORKFLOW TRIGGER  — wf.on_event (spawned async, excludes kinds 46001–46012)
+```
+
+The whole call is wrapped in an `EmitGuard` that records a conformance trace
+step on every exit path; a request that returns without emitting is recorded as
+an `ImplBug`, which the replay checker treats as a coverage breach.
+
+**Search has no indexing step.** The searchable row *is* the persisted event
+row — `events.search_tsv` is a generated `tsvector` column populated by the
+`insert_event` write itself. The former `search_index_tx` worker queue was
+removed along with the Typesense backend.
+
+Audit enqueue is awaited (the queue is bounded and the audit advisory lock
+already serializes writes to at most one in-flight); the rest of the tail —
+fan-out, Redis publish, workflow triggering — runs in a spawned task. A failure
+in the tail does not fail the event submission. The client receives
+`["OK", <id>, true, ""]` at the end of the pipeline, not immediately after DB insert.
+
+Step 12 (fan-out) explicitly **excludes** global subscriptions (no `channel_id` constraint) from channel-scoped events — global subscriptions do NOT receive events from private channels, regardless of filter match. This is a deliberate security boundary: only subscriptions scoped to an accessible `channel_id` receive those events.
+
+**Ban/timeout write-block (step 7):** a timeout blocks writes only — the socket
+stays open and content writes are refused with `restricted: you are timed out
+until <ts>` so clients can render a countdown. Bans are normally enforced at the
+auth seam, but an already-authenticated connection never re-auths, so the ban is
+re-checked here as the durable backstop that the best-effort live-disconnect
+fan-out relies on. Moderation commands are routed *before* this gate so a
+timed-out admin can still lift a timeout.
 
 Workflow loop prevention: workflow execution kinds (46001–46012), relay-signed messages with `buzz:workflow` tag, and `KIND_GIFT_WRAP` are excluded from triggering workflows. All other stored events (including kind 9 stream messages) trigger workflow evaluation.
 
 ### Ephemeral Sub-Pipeline (kinds 20000–29999)
 
-Ephemeral events bypass DB storage, audit, and search. Two sub-paths:
+Handled by `handle_ephemeral_event` in `handlers/event.rs` — the WebSocket path
+only, since `POST /events` rejects presence and gift wraps outright. Ephemeral
+events bypass DB storage, audit, and search. Two sub-paths:
 
 **Presence events (kind 20001):**
 ```
@@ -281,8 +345,11 @@ The subscription registry is a DashMap-backed structure in `subscription.rs`:
 ```rust
 pub struct SubscriptionRegistry {
     subs: DashMap<ConnId, HashMap<SubId, SubEntry>>,
-    channel_kind_index: DashMap<IndexKey, Vec<(ConnId, SubId)>>,
-    channel_wildcard_index: DashMap<Uuid, Vec<(ConnId, SubId)>>,
+    channel_kind_index: DashMap<(CommunityId, IndexKey), Vec<(ConnId, SubId)>>,
+    channel_wildcard_index: DashMap<(CommunityId, Uuid), Vec<(ConnId, SubId)>>,
+    global_kind_index: DashMap<(CommunityId, Kind), Vec<(ConnId, SubId)>>,
+    global_p_kind_index: DashMap<GlobalPKindIndexKey, Vec<(ConnId, SubId)>>,
+    global_wildcard_index: DashMap<CommunityId, Vec<(ConnId, SubId)>>,
 }
 
 pub struct IndexKey {
@@ -291,17 +358,30 @@ pub struct IndexKey {
 }
 ```
 
-### Three-Tier Fan-Out
+**Every index is keyed by `CommunityId`.** Fan-out enters through
+`fan_out_scoped(community_id, stored)` — a subscription registered on one
+community can never be reached by an event from another.
 
-When an event arrives, `fan_out` consults three indexes in order:
+### Fan-Out Indexes
 
-| Tier | Index | Key | Use Case |
-|------|-------|-----|---------|
-| 1 | `channel_kind_index` | `(channel_id, kind)` | Subs with explicit channel + kind filter — O(1) lookup |
-| 2 | `channel_wildcard_index` | `channel_id` | Subs with channel but no `kinds` constraint |
-| 3 | `subs` (linear scan) | — | Global subs (no channel_id) — fallback scan |
+When an event arrives, `fan_out_scoped` consults the index matching the event's
+scope. Global subscriptions are indexed (by kind, by `#p` + kind, or wildcard)
+rather than linearly scanned:
 
-Global subs (tier 3) are checked for non-channel-scoped events only. Channel-scoped events are delivered exclusively to subscriptions that carry a matching `channel_id` — global subscriptions are explicitly excluded from channel fan-out as a security boundary.
+| Index | Key | Use Case |
+|-------|-----|---------|
+| `channel_kind_index` | `(community, channel_id, kind)` | Channel + kind filter — O(1) lookup |
+| `channel_wildcard_index` | `(community, channel_id)` | Channel with no `kinds` constraint |
+| `global_kind_index` | `(community, kind)` | Global subs with a `kinds` filter |
+| `global_p_kind_index` | `(community, kind, #p)` | Global subs filtered by recipient pubkey |
+| `global_wildcard_index` | `community` | Global subs with no `kinds` constraint |
+
+Channel-scoped events are delivered exclusively to subscriptions carrying a
+matching `channel_id` — global subscriptions are explicitly excluded from
+channel fan-out as a security boundary. Matches are then passed through
+`filter_fanout_by_access()`, which re-checks channel visibility before delivery
+(a cached `private` verdict wins over a prefetched row, and a missing row
+fails closed rather than defaulting to open).
 
 ### NIP-01 Edge Cases
 
@@ -323,7 +403,7 @@ This prevents a race where a non-member receives live fan-out events from a priv
 
 ### Historical Query (EOSE)
 
-After registering, the REQ handler queries Postgres for stored events matching the filters (up to 500 per filter, hard cap). These are sent as `["EVENT", sub_id, event]` frames before `["EOSE", sub_id]`. New events arriving after EOSE are delivered via the fan-out path.
+After registering, the REQ handler queries Postgres for stored events matching the filters (up to 2,000 per filter, hard cap). These are sent as `["EVENT", sub_id, event]` frames before `["EOSE", sub_id]`. New events arriving after EOSE are delivered via the fan-out path.
 
 ---
 
@@ -343,8 +423,13 @@ pub struct StoredEvent {
     verified: bool,          // private — use is_verified()
 }
 
-pub const ALL_KINDS: &[u32]  // 80 entries (KIND_AUTH excluded — never stored)
+pub const ALL_KINDS: &[u32]  // 127 entries (KIND_AUTH excluded — never stored)
 ```
+
+`buzz-core` also owns the tenancy primitives (`tenant.rs`): `CommunityId`,
+`TenantContext`, and `normalize_host`. `CommunityId` deliberately implements
+neither `Serde` nor `From<Uuid>` — the "no parse from client" fence that keeps a
+community from ever being constructed out of client-controlled input.
 
 **Key functions:**
 
@@ -387,7 +472,33 @@ pub trait RateLimiter: Send + Sync { ... }
 - NIP-42 timestamp tolerance: ±60 seconds.
 - Dev-only key derivation: `SHA-256("buzz-test-key:{username}")` — gated behind `#[cfg(any(test, feature = "dev"))]`. The `dev` feature must not be enabled in production relay deployments.
 
-**Does NOT:** implement `RateLimiter` beyond a test stub (`AlwaysAllowRateLimiter`, gated behind `#[cfg(any(test, feature = "test-utils"))]`). No Redis-backed rate limiter exists anywhere in the codebase — rate limiting is not currently enforced. `RateLimitConfig` defines 4 tiers (human, agent-standard, agent-elevated, agent-platform) as a design target.
+**Rate limiting:** `buzz-auth` owns the `RateLimiter` trait, the `LimitType`
+enum (`Messages`, `ApiCalls`, `WsEvents`, `IpConnections`), `RateLimitConfig`
+(4 tiers: human, agent-standard, agent-elevated, agent-platform), and the
+community-scoped key builders. The production implementation is
+`RedisRateLimiter` in `buzz-pubsub` — a single Lua script that atomically
+`INCR`s and conditionally `EXPIRE`s, closing the crash window where a key could
+exist without a TTL. It is enforced at five seams:
+
+| Seam | Limiter | Location |
+|------|---------|----------|
+| WebSocket admission | `admission_rate_limiter` | `connection.rs` |
+| HTTP bridge | `admission_rate_limiter` | `api/bridge.rs` |
+| Observer events | `observer_rate_limiter` | `handlers/event.rs` |
+| Media upload | `media_upload_rate_limiter` | `api/media.rs` |
+| Invite claim | `invite_claim_rate_limiter` | `api/invites.rs` |
+
+WebSocket admission uses a 5-second burst window (`ws_admission_budget`) so
+desktop startup — which opens several live subscriptions at once — preserves the
+configured average rate while allowing that bounded burst.
+
+⚠️ These are **fixed windows**, which allow up to 2× burst at a window
+boundary. A sliding window or token bucket would be a better long-term fit.
+
+**Does NOT:** implement the limiter itself — `buzz-auth` holds only the trait
+and the `AlwaysAllowRateLimiter` test stub (gated behind
+`#[cfg(any(test, feature = "test-utils"))]`); the Redis-backed implementation
+lives in `buzz-pubsub`.
 
 ---
 
@@ -408,6 +519,16 @@ All database access. Uses `sqlx::query()` (runtime, not compile-time macros) —
 | `reaction.rs` | Reaction storage and retrieval |
 | `thread.rs` | Thread/reply tracking |
 | `user.rs` | User profile storage |
+| `moderation.rs`, `admin_moderation.rs` | Report queue, bans/timeouts, moderation audit |
+| `relay_members.rs` | NIP-43 relay membership roster |
+| `git_repo.rs` | Git repository records |
+| `push.rs` | NIP-PL push leases, match queue, endpoint state |
+| `archived_identities.rs` | Identity archive / unarchive state |
+| `product_feedback.rs` | Product feedback sidecar table |
+| `api_token.rs` | API token storage and scopes |
+| `usage.rs` | Per-community usage accounting |
+| `replica_fence.rs` | Read-replica staleness fence |
+| `migration.rs` | Startup migration runner |
 | `error.rs` | Database error types |
 
 **Channel types:** `Stream`, `Forum`, `Dm`, `Workflow`  
@@ -571,30 +692,109 @@ Real-time voice lives inside `buzz-relay` (`src/audio/`), not a separate crate. 
 
 ---
 
+### buzz-relay-mesh — Inter-Relay QUIC Mesh
+
+Transport, membership, and the fenced wire contract for relay-to-relay
+communication over [iroh](https://iroh.computer/) QUIC. Gated behind the
+`BUZZ_MESH` env seam: `boot_mesh` (`buzz-relay/src/mesh_boot.rs`) is the only
+place the relay constructs mesh machinery, and it returns `None` — touching
+nothing — when `BUZZ_MESH=off`, so mesh-off deployments stay byte-identical to a
+relay built before the module existed.
+
+When enabled, boot binds the iroh endpoint (a boot-unique keypair yields a
+boot-unique `RuntimeId`), publishes a relay-key-attested `ReadyRecord` to a Redis
+ready registry, starts the readiness-gated heartbeat and the `MeshRuntime` loops
+(accept, reconcile/dial, gossip), and spawns a drain watcher — on shutdown,
+membership gossips `draining=true`, locally-owned huddle leases are
+generation-fenced drained, and the heartbeat clears the registry record.
+
+Consumers reach the mesh exclusively through `MeshHandle` via `AppState::mesh()`;
+`None` means "behave exactly like a single-instance relay." The relay-side
+session layer (`buzz-relay/src/tunnel/`) owns Redis-fenced ownership, strict
+generation validation, and profile-specific routing.
+
+---
+
+### buzz-push-gateway — NIP-PL Push
+
+A **separate binary** implementing a blind, capability-gated push gateway for
+the mobile app. "Blind" is the design constraint: the gateway relays
+notifications without learning message content.
+
+The relay side is `push_runtime.rs` — a durable matcher and delivery worker
+backed by Postgres (`push_leases`, `push_match_queue`, `push_endpoint_state`).
+The matcher claims batches (≤64, 30s claim), evaluates stored subscription
+filters via `filters_match` + `reader_authorized_for_event`, and backs off
+between an idle floor of 250 ms and a ceiling of 2 s so an idle relay is not
+issuing a claim transaction four times a second forever. Delivery retries up to
+8 attempts, with a poison-job sweep every 30 s kept off the claim path. Both
+tasks are enabled as one unit and stay dark without an exact configured gateway
+URL, so an undeliverable configuration cannot advertise or accumulate work.
+
+---
+
 ### buzz-relay — The Server
 
 Axum WebSocket server. Ties all other crates together. The only crate that imports and orchestrates all subsystems.
+
+**Module map** — the relay hosts several subsystems that have no separate crate:
+
+| Module | Responsibility |
+|--------|---------------|
+| `handlers/ingest.rs` | Transport-neutral event ingestion (see §4) |
+| `handlers/event.rs` | WebSocket EVENT entry, ephemeral dispatch, fan-out helpers |
+| `handlers/req.rs`, `close.rs`, `count.rs` | REQ / CLOSE / COUNT |
+| `handlers/moderation_*.rs` | Moderation commands, authz, and notices |
+| `handlers/relay_admin.rs` | NIP-43 relay admin commands |
+| `handlers/push_lease.rs` | NIP-PL subscription leases |
+| `handlers/side_effects.rs` | NIP-29 / NIP-25 post-storage side effects |
+| `handlers/community_provisioning.rs` | Community creation and lifecycle |
+| `handlers/identity_archive.rs` | Identity archive / unarchive |
+| `api/git/` | Git smart HTTP, pack cache, CAS publish, policy hook |
+| `api/media.rs` | Blossom upload/download |
+| `api/invites.rs`, `operator.rs`, `admin/` | Invites, operator APIs, admin console |
+| `audio/` | Huddle Opus relay |
+| `tunnel/` | Mesh session layer (Redis-fenced ownership, generation validation) |
+| `push_runtime.rs` | NIP-PL matcher + delivery worker |
+| `mesh_boot.rs` | `BUZZ_MESH` seam — the only place mesh machinery is constructed |
+| `tenant.rs` | Row-zero host → community binding |
+| `conformance/` | Runtime trace emission for the TLA+ replay checker |
+| `storage_sweep.rs`, `metrics.rs`, `telemetry.rs` | Retention sweep, Prometheus, tracing |
 
 **`AppState`** (Arc-wrapped, shared across all connections — key fields shown, not exhaustive):
 
 ```rust
 pub struct AppState {
     pub db: Db,
-    pub audit: Arc<AuditService>,
+    pub audit: Option<Arc<AuditService>>,
     pub pubsub: Arc<PubSubManager>,
     pub auth: Arc<AuthService>,
     pub search: Arc<SearchService>,
     pub sub_registry: Arc<SubscriptionRegistry>,
     pub conn_manager: Arc<ConnectionManager>,
+    pub community_connections: Arc<CommunityConnectionRegistry>,
     pub workflow_engine: Arc<WorkflowEngine>,
-    pub conn_semaphore: Arc<Semaphore>,       // connection limit
-    pub handler_semaphore: Arc<Semaphore>,    // 1024 concurrent handlers
-    pub relay_keypair: nostr::Keys,           // relay identity
-    pub local_event_ids: moka::sync::Cache,   // local-echo dedup
-    pub search_index_tx: mpsc::Sender,        // bounded search worker queue
-    // + config, redis_pool, membership_cache, media_storage, shutdown state
+    pub conn_semaphore: Arc<Semaphore>,        // connection limit
+    pub handler_semaphore: Arc<Semaphore>,     // 1024 concurrent handlers
+    pub git_semaphore: Arc<Semaphore>,
+    pub media_upload_semaphore: Arc<Semaphore>,
+    pub relay_keypair: nostr::Keys,            // relay identity
+    pub admission_rate_limiter: Arc<RedisRateLimiter>,
+    pub observer_rate_limiter: Arc<ScopedRateLimiter>,
+    pub media_upload_rate_limiter: Arc<ScopedRateLimiter>,
+    pub audit_tx: Option<mpsc::Sender<buzz_audit::NewAuditEntry>>,
+    pub tracer: Arc<dyn buzz_conformance::Tracer>,
+    pub mesh: Arc<OnceLock<MeshHandle>>,       // None when BUZZ_MESH=off
+    // Community-keyed moka caches (local-echo dedup, membership,
+    // accessible channels, channel visibility, observer/author type):
+    pub local_event_ids: Arc<moka::sync::Cache<(CommunityId, [u8; 32]), ()>>,
+    pub membership_cache: Arc<moka::sync::Cache<(CommunityId, Uuid, Vec<u8>), bool>>,
+    // + config, redis_pool, git_store, media_storage, audio_rooms, shutdown state
 }
 ```
+
+Every cache key leads with `CommunityId` — caches are infrastructure shared
+across tenants, never a shared *result* space.
 
 **`ConnectionState`** (per-connection):
 
@@ -621,21 +821,41 @@ pub enum AuthState { Pending { challenge: String }, Authenticated(AuthContext), 
 | POST | `/query` | Query Nostr events over HTTP with NIP-01 filters |
 | POST | `/count` | Count Nostr events over HTTP with NIP-45 filters |
 | POST | `/hooks/{id}` | Workflow webhook trigger (secret-authenticated) |
-| PUT | `/media/upload` | Upload media blob (Blossom, 50 MB limit) |
+| PUT | `/upload`, `/media/upload` | Upload media blob (Blossom) |
 | GET/HEAD | `/media/{sha256_ext}` | Retrieve/probe media blob |
 | GET | `/git/{owner}/{repo}/info/refs` | Git smart HTTP advertisement |
 | POST | `/git/{owner}/{repo}/git-upload-pack` | Git smart HTTP fetch |
 | POST | `/git/{owner}/{repo}/git-receive-pack` | Git smart HTTP push |
 | POST | `/internal/git/policy` | Internal git hook policy check |
+| GET | `/huddle/{channel_id}/audio` | Huddle audio WebSocket (NIP-42 + membership) |
+| GET/POST | `/operator/communities` | List owned / provision communities |
+| POST | `/operator/communities/archive`, `/unarchive`, `/transfer` | Community lifecycle |
+| GET | `/operator/communities/availability` | Host availability check |
+| POST | `/api/invites` | Mint a relay invite (owner/admin) |
+| POST | `/api/invites/claim` | Claim an invite (membership-gate exempt) |
+| POST | `/api/invites/accept-policy` | Record join-policy acceptance |
+| GET | `/api/join-policy`, `/terms`, `/privacy` | Join policy + standalone policy pages |
+| GET | `/moderation/reports`, `/audit`, `/restricted` | Moderation queue reads (NIP-98 + mod-authz) |
+| GET | `/api/admin/v1/reports`, `/reports/{id}` | Admin console: report queue |
+| GET | `/api/admin/v1/feedback`, `/feedback/{id}`, `/feedback/{id}/attachments/{sha256}` | Admin console: product feedback |
+
+The admin surface under `/api/admin/v1` is mounted only when
+`config.admin` is set, is host-checked (`is_admin_host`) ahead of the public web
+bundle so it can never fall through to it, and carries a 1 KB body limit plus
+`security_headers` middleware. A separate health-only router (no CORS, no
+metrics, no body limit) serves `/_liveness`, `/_readiness`, `/_status`, and
+`/_mesh` on the dedicated health port.
 
 **Constants:**
 
-| Constant | Value | Purpose |
-|----------|-------|---------|
-| `MAX_FRAME_BYTES` | 65,536 | Max WebSocket frame size |
-| `MAX_SUBSCRIPTIONS` | 1024 | Per-connection subscription limit |
-| `MAX_HISTORICAL_LIMIT` | 500 | Per-filter historical query cap |
-| `handler_semaphore` capacity | 1024 | Concurrent EVENT/REQ handlers |
+| Constant | Default | Env override | Purpose |
+|----------|---------|--------------|---------|
+| `DEFAULT_MAX_FRAME_BYTES` | 512 KiB | `BUZZ_MAX_FRAME_BYTES` | Max WebSocket frame size |
+| `MAX_SUBSCRIPTIONS` | 1024 | — | Per-connection subscription limit |
+| `MAX_HISTORICAL_LIMIT` | 2,000 | — | Per-filter historical query cap |
+| `max_concurrent_handlers` | 1024 | `BUZZ_MAX_CONCURRENT_HANDLERS` | Concurrent EVENT/REQ handlers |
+| `max_connections` | 10,000 | `BUZZ_MAX_CONNECTIONS` | Connection semaphore capacity |
+| `send_buffer_size` | 1,000 | `BUZZ_SEND_BUFFER` | Per-connection send channel depth |
 
 **Does NOT:** implement business logic — delegates to the appropriate crate for every operation.
 
@@ -699,12 +919,24 @@ The `buzz-admin` binary is shipped in the relay Docker image (`/usr/local/bin/bu
 
 | File | Tests | Scope |
 |------|-------|-------|
-| `tests/e2e_relay.rs` | 27 | WebSocket protocol (auth, subscriptions, filters, limits, NIP-11) |
+| `tests/e2e_relay.rs` | 38 | WebSocket protocol (auth, subscriptions, filters, limits, NIP-11) |
+| `tests/e2e_event_reminder.rs` | 29 | Event reminders |
+| `tests/e2e_nostr_interop.rs` | 25 | Nostr interop: NIP-50 search, NIP-10 threads, NIP-17 gift wraps, DM discovery |
+| `tests/e2e_persona.rs` | 24 | Persona packs |
+| `tests/e2e_media_extended.rs` | 21 | Extended media scenarios |
+| `tests/e2e_human_edit_agent_content.rs` | 19 | Human edits of agent-authored content |
+| `tests/conformance_multitenant.rs` | 18 | Multi-community conformance replay |
+| `tests/e2e_long_form.rs` | 8 | Long-form content |
 | `tests/e2e_media.rs` | 7 | Media upload/download (Blossom) |
-| `tests/e2e_media_extended.rs` | 18 | Extended media scenarios |
-| `tests/e2e_nostr_interop.rs` | 15 | Nostr interoperability: NIP-50 search, NIP-10 threads, NIP-17 gift wraps, DM discovery |
+| `tests/e2e_media_video.rs` | 7 | Video media |
+| `tests/e2e_managed_agent.rs` | 5 | Managed agent lifecycle |
+| `tests/e2e_user_status.rs` | 5 | User status |
+| `tests/e2e_mesh_llm.rs` | 4 | Mesh LLM routing |
+| `tests/nip42_host_binding_live.rs` | 4 | NIP-42 host/community binding |
+| `tests/e2e_team.rs` | 3 | Teams |
+| `tests/e2e_git.rs` | 2 | Git smart HTTP |
 
-All e2e tests are `#[ignore]` — require a running relay. Total: **134 e2e tests**.
+Most e2e tests are `#[ignore]` — they require a running relay. Total: **219 e2e tests**.
 
 `src/main.rs` is a manual testing CLI (`buzz-test-cli`) with `--send`, `--subscribe`, `--channel`, `--url`, `--kind` flags.
 
@@ -730,7 +962,9 @@ Every security-sensitive operation uses an explicit, verified pattern. No implic
 |---------|-----------|
 | Schnorr signatures | `verify_event()` in `buzz-core` — every event verified before storage |
 | Event ID | SHA-256 of canonical serialization verified independently of signature |
-| Frame size | `MAX_FRAME_BYTES = 65,536` — oversized frames rejected, connection closed |
+| Frame size | `max_frame_bytes` (default 512 KiB) — oversized frames rejected, connection closed |
+| Event content | 256 KB cap, enforced in `ingest_event` |
+| Timestamp drift | ±15 minutes from server time, enforced in `ingest_event` |
 | Search event IDs | 64-char hex validation before URL construction — prevents path injection |
 | Workflow step IDs | Alphanumeric + underscore only — prevents evalexpr variable injection |
 | Partition names | Allowlist of table names + strict suffix/date validators — prevents DDL injection |
@@ -776,7 +1010,9 @@ Docker Compose provides the full local development stack. All services include h
 | Postgres | `postgres:17-alpine` | 5432 | Primary event store — events, channels, tokens, workflows, audit; full-text search (`search_tsv` GIN) |
 | Redis | `redis:7-alpine` | 6379 | Pub/sub fan-out, presence (SET EX), typing (sorted sets) |
 | Adminer | `adminer` | 8082 | DB web UI (dev only) |
+| Keycloak | `quay.io/keycloak/keycloak:26.0` | 8180 → 8080 | OIDC provider, `start-dev` with in-memory DB (dev only) |
 | MinIO | `minio/minio` | 9000 (API), 9001 (console) | S3-compatible object storage (media) |
+| `minio-init` | `minio/mc` | — | One-shot bucket bootstrap for MinIO |
 | Prometheus | `prom/prometheus` | 9090 | Metrics collection |
 
 ### Postgres Schema (key tables)
@@ -820,7 +1056,7 @@ These are verified gaps in the current implementation — not design aspirations
 | # | Limitation | Detail |
 |---|-----------|--------|
 | 1 | **No sqlx offline query cache** | Uses `sqlx::query()` (runtime) not `sqlx::query!()` (compile-time). No `.sqlx/` directory. Queries are not validated at compile time. |
-| 2 | **No rate limiting implementation** | `RateLimiter` trait exists in `buzz-auth`. Only implementation is `AlwaysAllowRateLimiter` (test stub, gated behind `#[cfg(any(test, feature = "test-utils"))]`). `RateLimitConfig` defines 4 tiers (human, agent-standard, agent-elevated, agent-platform) but none are enforced. |
+| 2 | **Rate limiting uses fixed windows** | `RedisRateLimiter` (`buzz-pubsub`) is enforced at the WebSocket, HTTP bridge, observer, media-upload, and invite-claim seams. The windows are fixed, so up to 2× burst is possible at a boundary; a sliding window or token bucket would be stricter. |
 | 3 | **No dedicated typing REST endpoint** | Typing indicators (kind 20002) are delivered via both local fan-out and Redis pub/sub (cross-node). There is no REST endpoint to query current typers — `/api/presence` returns online/away status only, not typing state. |
 | 4 | **Huddle recording/tracks not built** | Voice, room lifecycle, and join/leave/end events are wired (see Huddle Audio above). Recording and per-track publishing have reserved kinds but no producer yet. |
 | 5 | **Approval gates not wired end-to-end** | The executor returns `StepResult::Suspended` and the relay has grant/deny API endpoints with DB CRUD, but the engine intercepts before creating `WaitingApproval` rows — runs that hit an approval gate are marked as Failed (🚧 WF-08). |
