@@ -140,6 +140,7 @@ export function ChannelScreen({
     widthPx: threadPanelWidthPx,
   } = useThreadPanelWidth();
   const [isMembersSidebarOpen, setIsMembersSidebarOpen] = React.useState(false);
+  const [allAgentsActivityOpen, setAllAgentsActivityOpen] = React.useState(false);
   const [isAddBotOpen, setIsAddBotOpen] = React.useState(false);
   const [channelContentRef, channelContentWidthPx] =
     useElementWidth<HTMLDivElement>();
@@ -604,6 +605,37 @@ export function ChannelScreen({
     setThreadReplyTargetId,
     setThreadScrollTargetId,
   });
+  const handleCloseAllAgentsActivity = React.useCallback(() => {
+    setAllAgentsActivityOpen(false);
+  }, []);
+  const handleOpenAllAgentsActivity = React.useCallback(() => {
+    setOpenThreadHeadId(null);
+    setExpandedThreadReplyIds(new Set());
+    setThreadScrollTargetId(null);
+    setThreadReplyTargetId(null);
+    setChannelManagementOpen(false);
+    handleCloseAgentSession();
+    setProfilePanelPubkey(null);
+    setAllAgentsActivityOpen(true);
+  }, [
+    handleCloseAgentSession,
+    setChannelManagementOpen,
+    setExpandedThreadReplyIds,
+    setOpenThreadHeadId,
+    setProfilePanelPubkey,
+    setThreadReplyTargetId,
+    setThreadScrollTargetId,
+  ]);
+  const handleOpenAgentSessionFromChannel = React.useCallback(
+    (pubkey: string, channelId?: string | null) => {
+      setAllAgentsActivityOpen(false);
+      handleOpenAgentSession(pubkey, channelId);
+    },
+    [handleOpenAgentSession],
+  );
+  React.useEffect(() => {
+    setAllAgentsActivityOpen(false);
+  }, [activeChannelId]);
   const { handleOpenProfilePanel, handleCloseProfilePanel, handleOpenDm } =
     useChannelProfilePanel({
       closeAgentSession: handleCloseAgentSession,
@@ -693,7 +725,8 @@ export function ChannelScreen({
     effectiveOpenThreadHeadId ||
       openAgentSessionPubkey ||
       profilePanelPubkey ||
-      channelManagementOpen,
+      channelManagementOpen ||
+      allAgentsActivityOpen,
   );
   const displayedThreadHeadMessage = threadPanelData.threadHead;
   const displayedThreadAllMessages = threadPanelData.messages;
@@ -796,7 +829,7 @@ export function ChannelScreen({
     ],
   );
   return (
-    <AgentSessionProvider onOpenAgentSession={handleOpenAgentSession}>
+    <AgentSessionProvider onOpenAgentSession={handleOpenAgentSessionFromChannel}>
       <ProfilePanelProvider onOpenProfilePanel={handleOpenProfilePanel}>
         <WelcomeAgentCreateDialog
           guideName={welcomeGuideAgent?.name ?? "your welcome guide"}
@@ -932,7 +965,10 @@ export function ChannelScreen({
                   onMarkUnread={handleMessageMarkUnread}
                   onMarkRead={handleMessageMarkRead}
                   onExpandThreadReplies={handleExpandThreadReplies}
-                  onOpenAgentSession={handleOpenAgentSession}
+                  onOpenAgentSession={handleOpenAgentSessionFromChannel}
+                  onOpenAllAgentsActivity={handleOpenAllAgentsActivity}
+                  onCloseAllAgentsActivity={handleCloseAllAgentsActivity}
+                  allAgentsActivityOpen={allAgentsActivityOpen}
                   onOpenDm={handleOpenDm}
                   onOpenProfilePanel={handleOpenProfilePanel}
                   onResetThreadPanelWidth={handleThreadPanelWidthReset}
@@ -989,7 +1025,7 @@ export function ChannelScreen({
           currentPubkey={currentPubkey}
           open={isMembersSidebarOpen}
           onOpenChange={setIsMembersSidebarOpen}
-          onViewActivity={handleOpenAgentSession}
+          onViewActivity={handleOpenAgentSessionFromChannel}
           relayUrl={activeCommunity?.relayUrl}
         />
       </ProfilePanelProvider>

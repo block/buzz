@@ -93,6 +93,9 @@ export type ChannelPaneProps = {
   onExpandThreadReplies: (message: TimelineMessage) => void;
   onJoinChannel?: () => Promise<void>;
   onOpenAgentSession: (pubkey: string, channelId?: string | null) => void;
+  onOpenAllAgentsActivity?: () => void;
+  onCloseAllAgentsActivity?: () => void;
+  allAgentsActivityOpen?: boolean;
   onOpenDm?: (pubkeys: string[]) => Promise<void> | void;
   onOpenMembers?: () => void;
   onOpenProfilePanel: (pubkey: string) => void;
