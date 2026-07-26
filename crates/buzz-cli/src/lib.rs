@@ -9,6 +9,7 @@ mod error;
 mod federated_identity;
 mod help_tree;
 mod links;
+mod managed_agent_publish;
 mod validate;
 
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
