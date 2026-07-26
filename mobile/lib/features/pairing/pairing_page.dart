@@ -71,7 +71,7 @@ class PairingPage extends HookConsumerWidget {
 
     final isVerifyingSas = pairingState.status == PairingStatus.confirmingSas;
     final themedSystemOverlayStyle =
-        (Theme.of(context).brightness == Brightness.dark
+        (context.theme.brightness == Brightness.dark
                 ? SystemUiOverlayStyle.light
                 : SystemUiOverlayStyle.dark)
             .copyWith(statusBarColor: Colors.transparent);

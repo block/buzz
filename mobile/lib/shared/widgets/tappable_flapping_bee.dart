@@ -2,12 +2,13 @@ import 'dart:math' show cos, min, pi;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 /// The Buzz mark with wings that flutter twice when the user taps it.
 ///
 /// The geometry and wing tuck match the desktop loading bee. When reduced
 /// motion is enabled, the mark stays static.
-class TappableFlappingBee extends HookWidget {
+class TappableFlappingBee extends HookConsumerWidget {
   /// The rendered width of the complete bee mark.
   final double width;
 
@@ -21,7 +22,7 @@ class TappableFlappingBee extends HookWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final animation = useAnimationController(
       duration: const Duration(milliseconds: 480),
     );
