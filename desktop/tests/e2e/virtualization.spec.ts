@@ -252,6 +252,29 @@ test.describe("list virtualization", () => {
       });
       await page.waitForTimeout(150);
       const before = await sampleVisibleAnchor();
+      const ctrlWheelPromise =
+        pageIndex === 0
+          ? timeline.evaluate(
+              (scroller) =>
+                new Promise<boolean>((resolve) => {
+                  const s = scroller as HTMLElement;
+                  const observer = new MutationObserver(() => {
+                    observer.disconnect();
+                    // Ctrl+wheel is browser zoom, not reader scroll intent. Fire
+                    // it synchronously with the prepend DOM commit, before the
+                    // ResizeObserver measurement batch reconciles estimated rows.
+                    s.dispatchEvent(
+                      new WheelEvent("wheel", { ctrlKey: true, deltaY: -100 }),
+                    );
+                    resolve(true);
+                  });
+                  observer.observe(s.firstElementChild ?? s, {
+                    childList: true,
+                    subtree: true,
+                  });
+                }),
+            )
+          : Promise.resolve(false);
       const wheelTracePromise = timeline.evaluate(async (scroller) => {
         const s = scroller as HTMLElement;
         let previousScrollTop = s.scrollTop;
@@ -297,25 +320,8 @@ test.describe("list virtualization", () => {
       });
       const committedAnchor = await sampleVisibleAnchor(before.id);
       const motion = await timeline.evaluate(
-        async (scroller, { anchorId, anchorTop, oldHeight, testCtrlWheel }) => {
+        async (scroller, { anchorId, anchorTop, oldHeight }) => {
           const s = scroller as HTMLElement;
-          let ctrlWheelDispatched = false;
-          const mutationObserver = testCtrlWheel
-            ? new MutationObserver(() => {
-                if (ctrlWheelDispatched) return;
-                ctrlWheelDispatched = true;
-                // Ctrl+wheel is browser zoom, not reader scroll intent. Fire it
-                // synchronously with the prepend DOM commit, before the
-                // ResizeObserver measurement batch reconciles estimated rows.
-                s.dispatchEvent(
-                  new WheelEvent("wheel", { ctrlKey: true, deltaY: -100 }),
-                );
-              })
-            : null;
-          mutationObserver?.observe(s.firstElementChild ?? s, {
-            childList: true,
-            subtree: true,
-          });
           let maxDrift = 0;
           let sawPrepend = false;
           let sawAnchorAfterPrepend = false;
@@ -343,20 +349,16 @@ test.describe("list virtualization", () => {
             if (sawAnchorAfterPrepend && stableFrames >= 8) break;
             await new Promise((resolve) => requestAnimationFrame(resolve));
           }
-          mutationObserver?.disconnect();
-          return { ctrlWheelDispatched, maxDrift, sawPrepend };
+          return { maxDrift, sawPrepend };
         },
         {
           anchorId: committedAnchor.id,
           anchorTop: committedAnchor.top,
           oldHeight: before.scrollHeight,
-          // Exercise browser-zoom input once while a real prepend transaction
-          // still owns its measurement reconciliation.
-          testCtrlWheel: pageIndex === 0,
         },
       );
       expect(motion.sawPrepend).toBe(true);
-      if (pageIndex === 0) expect(motion.ctrlWheelDispatched).toBe(true);
+      if (pageIndex === 0) expect(await ctrlWheelPromise).toBe(true);
       expect(motion.maxDrift).toBeLessThan(5);
 
       await expect

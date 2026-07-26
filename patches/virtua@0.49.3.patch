@@ -54,11 +54,13 @@ index e02dfd0b3db60faff2cc705d7ce0aa51cb958f5a..b12677a356f748ebccf6e16cb781efe1
              }
              l && (d = 1 + (2147483647 & d), o && z && ($ += z, z = 0), O.forEach(([e, t]) => {
                  l & e && t(n);
-@@ -186,6 +198,7 @@ const r = null, {min: n, max: s, abs: i, floor: l} = Math, c = (e, t, o) => n(o,
+@@ -186,6 +198,8 @@ const r = null, {min: n, max: s, abs: i, floor: l} = Math, c = (e, t, o) => n(o,
          c = l(), d && (a = !0), i && e.q(6, i()), e.q(1, n()), h();
      }, p = t => {
-         if (f || !e.M() || t.ctrlKey) return;
+-        if (f || !e.M() || t.ctrlKey) return;
++        if (!e.M() || t.ctrlKey) return;
 +        e.q(9);
++        if (f) return;
          const r = l() - c;
          150 > r && 50 < r && (o ? t.deltaX : t.deltaY) && (f = !0);
      }, v = () => {
@@ -150,11 +152,13 @@ index 110ac3858a002a6cdb698da2b56350bc1bf609d2..db83efc83fb3b6d7aa07d83b7463d6ed
              }
              d && (i = 1 + (2147483647 & i), o && p && (g += p, p = 0), O.forEach(([e, t]) => {
                  d & e && t(n);
-@@ -190,6 +202,7 @@ const u = null, {min: d, max: a, abs: h, floor: g} = Math, p = (e, t, o) => d(o,
+@@ -190,6 +202,8 @@ const u = null, {min: d, max: a, abs: h, floor: g} = Math, p = (e, t, o) => d(o,
          l = i(), d && (a = !0), s && e.B(6, s()), e.B(1, n()), h();
      }, p = t => {
-         if (c || !e.M() || t.ctrlKey) return;
+-        if (c || !e.M() || t.ctrlKey) return;
++        if (!e.M() || t.ctrlKey) return;
 +        e.B(9);
++        if (c) return;
          const n = i() - l;
          150 > n && 50 < n && (o ? t.deltaX : t.deltaY) && (c = !0);
      }, v = () => {

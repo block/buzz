@@ -21,7 +21,17 @@ test("reader wheel retires Virtua shift mode without publishing scroll end", () 
       .filter(Boolean),
   );
   assert.deepEqual(addedActionBodies, [["I = 0;"], ["w = 0;"]]);
-  assert.match(patch, /\+\s+e\.q\(9\);/);
-  assert.match(patch, /\+\s+e\.B\(9\);/);
+  assert.match(
+    patch,
+    /if \(!e\.M\(\) \|\| t\.ctrlKey\) return;\n\+\s+e\.q\(9\);\n\+\s+if \(f\) return;/,
+  );
+  assert.match(
+    patch,
+    /if \(!e\.M\(\) \|\| t\.ctrlKey\) return;\n\+\s+e\.B\(9\);\n\+\s+if \(c\) return;/,
+  );
+  assert.doesNotMatch(
+    patch,
+    /\+\s+if \((?:f|c) \|\| !e\.M\(\) \|\| t\.ctrlKey\) return;/,
+  );
   assert.doesNotMatch(patch, /\+\s+e\.(?:q|B)\(2\);/);
 });
