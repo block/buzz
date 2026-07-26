@@ -87,6 +87,43 @@ type RawSpawnerAttestationResponse = {
 };
 
 /**
+ * Build a signed prompt-update event for a server-hosted agent, plus the
+ * hash of the prompt material it carries.
+ *
+ * Rust builds and signs the event so the returned `promptHash` is always
+ * computed over the same bytes that got published — the renderer never
+ * recomputes it independently. The caller is responsible for publishing the
+ * returned event over the WebSocket; see `sendSpawnerPromptUpdate` in
+ * `spawnerRelay.ts`.
+ */
+export async function buildSpawnerPromptUpdate(input: {
+  spawnerPubkey: string;
+  specSlug: string;
+  agentPubkey: string;
+  prompt: SpawnerPromptMaterial;
+}): Promise<{ event: RelayEvent; promptHash: string }> {
+  const raw = await invokeTauri<RawSpawnerPromptUpdate>(
+    "send_spawner_prompt_update",
+    {
+      spawnerPubkey: input.spawnerPubkey,
+      specSlug: input.specSlug,
+      agentPubkey: input.agentPubkey,
+      prompt: input.prompt,
+    },
+  );
+  return {
+    event: JSON.parse(raw.eventJson) as RelayEvent,
+    promptHash: raw.promptHash,
+  };
+}
+
+/** Wire shape of `send_spawner_prompt_update`. */
+type RawSpawnerPromptUpdate = {
+  eventJson: string;
+  promptHash: string;
+};
+
+/**
  * The signed answer, plus whether it handed over an existing agent's key.
  *
  * `relocatedAgentPubkey` is set by Rust — not by the renderer — when the

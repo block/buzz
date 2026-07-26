@@ -1,4 +1,6 @@
 import { signRelayEvent } from "@/shared/api/tauri";
+import { buildSpawnerPromptUpdate } from "@/shared/api/tauriSpawner";
+import type { SpawnerPromptMaterial } from "@/shared/api/tauriSpawner";
 import type { RelayEvent } from "@/shared/api/types";
 import {
   KIND_SPAWNER_AGENT_SPEC,
@@ -18,6 +20,12 @@ import { relayClient } from "./relayClient";
  */
 const ATTESTATION_LOOKBACK_SECS = 120;
 
+/** One AI provider a spawner can run agents against, from kind:10180 `ai`. */
+export type SpawnerAiProvider = {
+  id: string;
+  models: string[];
+};
+
 /** A spawner advertising itself, from kind:10180. */
 export type SpawnerAnnouncement = {
   /** Announcing pubkey — the verified event author, not a content field. */
@@ -31,6 +39,8 @@ export type SpawnerAnnouncement = {
   agentsRunning: number;
   maxCpuMillis?: number;
   maxMemoryMib?: number;
+  /** AI providers/models this spawner can run agents against, when advertised. */
+  ai?: SpawnerAiProvider[];
 };
 
 /**
@@ -75,6 +85,7 @@ export function parseSpawnerAnnouncement(
         typeof raw.max_cpu_millis === "number" ? raw.max_cpu_millis : undefined,
       maxMemoryMib:
         typeof raw.max_memory_mib === "number" ? raw.max_memory_mib : undefined,
+      ai: asOptionalAiCatalog(raw.ai),
     };
   } catch {
     return null;
@@ -96,6 +107,8 @@ export type SpawnerAgentStatus = {
   specHash?: string;
   error?: string;
   restartCount: number;
+  /** Hash of the prompt material last acknowledged by this agent, when reported. */
+  promptHash?: string;
 };
 
 /** Inbound author gate for a spawned agent, mirroring `RespondTo` in Rust. */
@@ -257,6 +270,34 @@ export async function respondToSpawnerAttestation(
   );
 }
 
+/**
+ * Build and publish a prompt update for a server-hosted agent, over the same
+ * WebSocket path as `respondToSpawnerAttestation`.
+ *
+ * The event is built by Rust (see `buildSpawnerPromptUpdate` in
+ * `tauriSpawner.ts`), which is where the encrypted prompt material is
+ * assembled and where the returned `promptHash` is computed — the renderer
+ * never sees the plaintext prompt material re-derived independently.
+ *
+ * Returns the prompt hash so the caller can correlate it with the
+ * `prompt_hash` the spawner later reports on kind:30179 status.
+ */
+export async function sendSpawnerPromptUpdate(input: {
+  spawnerPubkey: string;
+  specSlug: string;
+  agentPubkey: string;
+  prompt: SpawnerPromptMaterial;
+}): Promise<string> {
+  const { event, promptHash } = await buildSpawnerPromptUpdate(input);
+  await relayClient.preconnect();
+  await relayClient.publishEvent(
+    event,
+    "Timed out sending the prompt update.",
+    "Failed to send the prompt update.",
+  );
+  return promptHash;
+}
+
 /** Parse a kind:30179 content body, returning null when it is unusable. */
 export function parseSpawnerStatus(content: string): SpawnerAgentStatus | null {
   if (!content.trim()) return null;
@@ -271,6 +312,7 @@ export function parseSpawnerStatus(content: string): SpawnerAgentStatus | null {
       error: asOptionalString(raw.error),
       restartCount:
         typeof raw.restart_count === "number" ? raw.restart_count : 0,
+      promptHash: asOptionalString(raw.prompt_hash),
     };
   } catch {
     return null;
@@ -329,4 +371,26 @@ function isSpawnPhase(value: unknown): value is SpawnPhase {
 
 function asOptionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+/**
+ * Parse the `ai` catalog field, returning `undefined` for anything malformed.
+ *
+ * A spawner advertising a broken catalog is treated the same as one
+ * advertising none at all — the picker just shows no models, rather than
+ * guessing at a partial or corrupted list.
+ */
+function asOptionalAiCatalog(value: unknown): SpawnerAiProvider[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const providers: SpawnerAiProvider[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "object" || entry === null) return undefined;
+    const { id, models } = entry as Record<string, unknown>;
+    if (typeof id !== "string" || !id) return undefined;
+    if (!Array.isArray(models) || !models.every((m) => typeof m === "string")) {
+      return undefined;
+    }
+    providers.push({ id, models });
+  }
+  return providers;
 }
