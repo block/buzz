@@ -324,17 +324,18 @@ pub async fn restore_managed_agents_on_launch(
                                 } else {
                                     match super::terminate_untracked_pair_runtime(app, &key)
                                         .and_then(|()| {
-                                            // F1: restore spawns lazy, matching
-                                            // reconcile and manual start. Eager on
-                                            // restore buys nothing — a crashed
-                                            // mid-turn session is not resumed by an
-                                            // eager child — and silently reintroduces
-                                            // N idle brains on every launch.
+                                            // F1: all spawns are lazy — the
+                                            // parameter was removed once the
+                                            // last eager caller flipped. Eager
+                                            // on restore bought nothing — a
+                                            // crashed mid-turn session is not
+                                            // resumed by an eager child — and
+                                            // silently reintroduced N idle
+                                            // brains on every launch.
                                             spawn_agent_child(
                                                 app,
                                                 record,
                                                 &key.relay_url,
-                                                true,
                                                 owner_hex_ref,
                                             )
                                         }) {

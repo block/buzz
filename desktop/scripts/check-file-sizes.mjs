@@ -178,7 +178,10 @@ const overrides = new Map([
   // configure_runtime_cli (fix #2397). Test-only growth; queued to split.
   // +7 (1041 -> 1048): rebase onto main — this PR's resolver tests land on top
   // of main's #2397 Windows shim tests. Test-only; queued to split.
-  ["src-tauri/src/managed_agents/runtime/tests.rs", 1055],
+  // +43 (1055 -> 1098): spawn_lazy_pool_env_writes_literal_true_once — source
+  // contract pinning one literal BUZZ_ACP_LAZY_POOL=true write site (#3039).
+  // Test-only; queued to split.
+  ["src-tauri/src/managed_agents/runtime/tests.rs", 1098],
   // applyWorkspace reposDir parameter plus the validateReposDir binding,
   // threaded through Tauri invokes for configurable repos_dir, plus the
   // harness-persona-sync `harnessOverride` create-input bit — load-bearing

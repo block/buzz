@@ -1052,3 +1052,46 @@ fn restart_eligible_false_when_orphan_has_no_drift() {
 fn restart_eligible_false_when_non_orphan_has_no_drift() {
     assert!(!super::restart_eligible(false, false, false));
 }
+
+// ── all Desktop spawns are lazy (BUZZ_ACP_LAZY_POOL) ─────────────────
+//
+// Eager pool init (`BUZZ_ACP_LAZY_POOL=false`) made buzz-acp serially
+// initialize the FULL worker pool before connecting to the relay. For a
+// slow-starting harness that is minutes of startup, and any mention sent
+// in that window predates the startup watermark and can be missed
+// permanently. The fix removed the `lazy` parameter entirely from
+// `spawn_agent_child` and `start_pair`, so no Desktop caller can choose
+// eager — THAT structural deletion is the primary guard, enforced by the
+// compiler, not by this test.
+//
+// This test pins the two residual regressions a line scanner CAN catch
+// (the function spawns a real OS process, so the contract can't be
+// exercised under `cargo test`):
+//   1. the literal flipping to "false" (or any non-"true" value), and
+//   2. a second BUZZ_ACP_LAZY_POOL write site appearing in runtime.rs.
+//
+// Known, accepted limitation: a scanner that trims single lines cannot
+// see surrounding control flow — wrapping the write in a conditional
+// while keeping the line byte-identical passes this test. Guarding that
+// shape needs syntax-aware analysis, which is disproportionate here;
+// the parameter deletion plus review is the defense for it.
+#[test]
+fn spawn_lazy_pool_env_writes_literal_true_once() {
+    let source = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/managed_agents/runtime.rs"
+    ));
+    let writes: Vec<&str> = source
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.contains("BUZZ_ACP_LAZY_POOL") && !line.starts_with("//"))
+        .collect();
+    assert_eq!(
+        writes,
+        vec![r#"command.env("BUZZ_ACP_LAZY_POOL", "true");"#],
+        "BUZZ_ACP_LAZY_POOL must be written exactly once in runtime.rs, \
+         with the literal \"true\" — all Desktop spawns are lazy. See \
+         this test's doc comment (and its stated limitation) before \
+         changing."
+    );
+}
