@@ -33,6 +33,7 @@ test("parsesARunningStatusFromTheSnakeCaseWire", () => {
     specHash: "abc123",
     error: undefined,
     restartCount: 0,
+    promptHash: undefined,
   });
 });
 
@@ -164,4 +165,46 @@ test("emptyStatusContentParsesAsNullSoTombstonesAreDistinguishable", () => {
   // told apart from malformed content, which means "ignore this event".
   assert.equal(parseSpawnerStatus(""), null);
   assert.equal(parseSpawnerStatus("   "), null);
+});
+
+test("parseSpawnerAnnouncementSurfacesTheAiCatalog", () => {
+  const a = parseSpawnerAnnouncement(
+    announcementEvent({
+      name: "vps",
+      max_agents: 4,
+      agents_running: 1,
+      ai: [{ id: "anthropic", models: ["claude-opus-5"] }],
+    }),
+  );
+  assert.deepEqual(a.ai, [{ id: "anthropic", models: ["claude-opus-5"] }]);
+});
+
+test("parseSpawnerAnnouncementOmitsAiWhenAbsentOrMalformed", () => {
+  const noAi = parseSpawnerAnnouncement(announcementEvent({ name: "vps" }));
+  assert.equal(noAi.ai, undefined);
+
+  const badAi = parseSpawnerAnnouncement(
+    announcementEvent({ name: "vps", ai: "not-an-array" }),
+  );
+  assert.equal(badAi.ai, undefined);
+
+  const badEntry = parseSpawnerAnnouncement(
+    announcementEvent({
+      name: "vps",
+      ai: [{ id: "anthropic", models: "not-an-array" }, { models: ["x"] }],
+    }),
+  );
+  assert.equal(badEntry.ai, undefined);
+});
+
+test("parseSpawnerStatusSurfacesPromptHash", () => {
+  const s = parseSpawnerStatus(
+    JSON.stringify({ phase: "running", prompt_hash: "ab".repeat(32) }),
+  );
+  assert.equal(s.promptHash, "ab".repeat(32));
+});
+
+test("parseSpawnerStatusOmitsPromptHashWhenAbsent", () => {
+  const s = parseSpawnerStatus(JSON.stringify({ phase: "running" }));
+  assert.equal(s.promptHash, undefined);
 });
