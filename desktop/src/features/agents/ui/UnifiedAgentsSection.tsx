@@ -27,6 +27,8 @@ import { AgentRuntimeAvatarControl } from "./AgentRuntimeAvatarControl";
 import { CreateIdentityCard } from "./CreateIdentityCard";
 import { PersonaActionsMenu } from "./PersonaActionsMenu";
 import { buildUnifiedGroups, pickProfileAgent } from "./unifiedAgentGroups";
+import { usePendingSpawnerPromptUpdate } from "../spawnerPromptUpdateQueue";
+import { ServerUpdatePendingChip } from "./ServerRunsOnBanner";
 
 type UnifiedAgentsSectionProps = {
   defaultModel: string;
@@ -287,6 +289,9 @@ function AgentPersonaCard({
     ? friendlyAgentLastError(agent.lastError, agent.lastErrorCode)?.copy
     : null;
   const opensRuntimeTab = Boolean(agent && friendlyError && !isActive);
+  const promptUpdatePending = usePendingSpawnerPromptUpdate(
+    agent?.pubkey ?? "",
+  );
 
   return (
     <AgentIdentityCard
@@ -339,17 +344,22 @@ function AgentPersonaCard({
         onOpenPersonaProfile(persona);
       }}
       statusBadge={
-        agent?.personaOrphaned ? (
-          <Badge className="gap-1" variant="warning">
-            <AlertTriangle className="h-3 w-3" />
-            Configuration missing
-          </Badge>
-        ) : agent?.needsRestart ? (
-          <Badge className="gap-1" variant="warning">
-            <RefreshCw className="h-3 w-3" />
-            Restart required
-          </Badge>
-        ) : null
+        <>
+          {agent?.relocatedToSpawner != null && promptUpdatePending ? (
+            <ServerUpdatePendingChip />
+          ) : null}
+          {agent?.personaOrphaned ? (
+            <Badge className="gap-1" variant="warning">
+              <AlertTriangle className="h-3 w-3" />
+              Configuration missing
+            </Badge>
+          ) : agent?.needsRestart ? (
+            <Badge className="gap-1" variant="warning">
+              <RefreshCw className="h-3 w-3" />
+              Restart required
+            </Badge>
+          ) : null}
+        </>
       }
     />
   );
@@ -379,6 +389,7 @@ function StandaloneAgentCard({
   )?.copy;
   const isActive = isManagedAgentActive(agent);
   const opensRuntimeTab = Boolean(friendlyError && !isActive);
+  const promptUpdatePending = usePendingSpawnerPromptUpdate(agent.pubkey);
 
   return (
     <AgentIdentityCard
@@ -415,17 +426,22 @@ function StandaloneAgentCard({
         );
       }}
       statusBadge={
-        agent.personaOrphaned ? (
-          <Badge className="gap-1" variant="warning">
-            <AlertTriangle className="h-3 w-3" />
-            Configuration missing
-          </Badge>
-        ) : agent.needsRestart ? (
-          <Badge className="gap-1" variant="warning">
-            <RefreshCw className="h-3 w-3" />
-            Restart required
-          </Badge>
-        ) : null
+        <>
+          {agent.relocatedToSpawner != null && promptUpdatePending ? (
+            <ServerUpdatePendingChip />
+          ) : null}
+          {agent.personaOrphaned ? (
+            <Badge className="gap-1" variant="warning">
+              <AlertTriangle className="h-3 w-3" />
+              Configuration missing
+            </Badge>
+          ) : agent.needsRestart ? (
+            <Badge className="gap-1" variant="warning">
+              <RefreshCw className="h-3 w-3" />
+              Restart required
+            </Badge>
+          ) : null}
+        </>
       }
     />
   );

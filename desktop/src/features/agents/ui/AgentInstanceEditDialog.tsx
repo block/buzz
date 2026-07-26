@@ -89,6 +89,13 @@ import {
   runtimeDropdownAction,
   usePendingHarnessSelection,
 } from "./addCustomHarness";
+import { useServerAgents } from "../useServerAgents";
+import { slugFromName } from "../spawnerPreference";
+import { EditAgentRuntimeSection } from "./EditAgentRuntimeSection";
+import { LlmProviderField } from "./LlmProviderField";
+import { ServerModelField } from "./ServerModelField";
+import { ServerRunsOnBanner } from "./ServerRunsOnBanner";
+import { useServerAgentEditContext } from "./useServerAgentEditContext";
 
 const ADVANCED_FIELDS_MOTION_TRANSITION = {
   duration: 0.18,
@@ -839,6 +846,26 @@ export function AgentInstanceEditDialog({
     { label: "Custom provider...", value: CUSTOM_PROVIDER_DROPDOWN_VALUE },
   ];
 
+  // Server residency: a relocated agent is configured on the spawner, so the
+  // harness is not this device's to choose and the model catalog is whatever
+  // the spawner advertises.
+  const { agents: serverAgents } = useServerAgents();
+  const serverSpecSlug = React.useMemo(() => {
+    const matched = serverAgents.find(
+      (candidate) => candidate.status.agentPubkey === agent.pubkey,
+    );
+    return matched?.slug ?? slugFromName(agent.name);
+  }, [serverAgents, agent.pubkey, agent.name]);
+  const server = useServerAgentEditContext({
+    relocatedToSpawner: agent.relocatedToSpawner,
+    deployedSpawnerPubkey: null,
+    agentPubkey: agent.pubkey,
+    slug: serverSpecSlug,
+    provider,
+  });
+  const serverContext = server.context;
+  const serverAi = server.ai;
+
   const previewLabel = name.trim() || "Agent name";
   const previewAvatarUrl = avatarUrl.trim() || null;
   const advancedFieldsTransition = shouldReduceMotion
@@ -907,6 +934,14 @@ export function AgentInstanceEditDialog({
             )}
           </div>
           <div className="space-y-5">
+            {serverContext ? (
+              <ServerRunsOnBanner
+                pending={server.pending}
+                runtime={server.runtime}
+                spawnerName={serverContext.spawnerName}
+              />
+            ) : null}
+
             {/* Agent name */}
             <div className="space-y-1.5">
               <label
@@ -946,116 +981,45 @@ export function AgentInstanceEditDialog({
               variant="persona"
             />
 
-            {/* Provider (runtime) */}
-            <div className="space-y-1.5">
-              <label
-                className="text-sm font-medium text-foreground"
-                htmlFor="edit-agent-runtime"
-              >
-                Provider
-              </label>
-              <PersonaDropdownField
+            {/* Provider (runtime) — the spawner owns this for a server agent. */}
+            {serverContext ? null : (
+              <EditAgentRuntimeSection
+                agentCommand={agentCommand}
                 disabled={updateMutation.isPending}
-                id="edit-agent-runtime"
-                onValueChange={handleRuntimeDropdownChange}
-                options={runtimeDropdownOptions}
-                placeholder="Choose a provider"
-                value={runtimeDropdownValue}
+                onAgentCommandChange={setAgentCommand}
+                onRuntimeChange={handleRuntimeDropdownChange}
+                runtimeDropdownOptions={runtimeDropdownOptions}
+                runtimeDropdownValue={runtimeDropdownValue}
+                selectedRuntime={selectedRuntime}
+                showCommandField={
+                  selectedRuntimeId === "custom" && !inheritHarness
+                }
               />
-              {selectedRuntime ? (
-                <p className="text-xs text-muted-foreground">
-                  Detected at{" "}
-                  <span className="font-medium">
-                    {selectedRuntime.binaryPath ??
-                      selectedRuntime.command ??
-                      selectedRuntime.id}
-                  </span>
-                </p>
-              ) : null}
-              <AddCustomHarnessDialog
-                onOpenChange={setIsAddHarnessOpen}
-                onSaved={selectSavedHarness}
-                open={isAddHarnessOpen}
-              />
-            </div>
-            {selectedRuntimeId === "custom" && !inheritHarness ? (
-              <div className="space-y-1.5">
-                <label
-                  className="text-sm font-medium text-foreground"
-                  htmlFor="edit-agent-command"
-                >
-                  Agent command
-                </label>
-                <div
-                  className={cn(
-                    "flex min-h-11 items-center px-3",
-                    PERSONA_FIELD_SHELL_CLASS,
-                  )}
-                >
-                  <Input
-                    autoCorrect="off"
-                    className={cn(
-                      "h-8 px-0 py-0 leading-6",
-                      PERSONA_FIELD_CONTROL_CLASS,
-                    )}
-                    disabled={updateMutation.isPending}
-                    id="edit-agent-command"
-                    onChange={(event) => setAgentCommand(event.target.value)}
-                    placeholder="Full path or shell command"
-                    value={agentCommand}
-                  />
-                </div>
-              </div>
-            ) : null}
+            )}
+            <AddCustomHarnessDialog
+              onOpenChange={setIsAddHarnessOpen}
+              onSaved={selectSavedHarness}
+              open={isAddHarnessOpen}
+            />
             {/* LLM provider */}
-            {llmProviderFieldVisible ? (
-              <div className="space-y-1.5">
-                <label
-                  className="text-sm font-medium text-foreground"
-                  htmlFor="edit-agent-llm-provider"
-                >
-                  LLM provider
-                  {providerRequired ? (
-                    <span className="ml-1 text-destructive" aria-hidden="true">
-                      *
-                    </span>
-                  ) : (
-                    <span className={PERSONA_LABEL_OPTIONAL_CLASS}>
-                      Optional
-                    </span>
-                  )}
-                </label>
-                <PersonaDropdownField
-                  disabled={updateMutation.isPending}
-                  id="edit-agent-llm-provider"
-                  onValueChange={handleProviderDropdownChange}
-                  options={providerDropdownOptions}
-                  placeholder="Default (auto)"
-                  value={providerSelectValue}
-                />
-                {isCustomProviderEditing ? (
-                  <div
-                    className={cn(
-                      "mt-2 flex min-h-11 items-center px-3",
-                      PERSONA_FIELD_SHELL_CLASS,
-                    )}
-                  >
-                    <Input
-                      aria-label="Custom provider ID"
-                      autoCorrect="off"
-                      className={cn(
-                        "h-8 px-0 py-0 leading-6",
-                        PERSONA_FIELD_CONTROL_CLASS,
-                      )}
-                      disabled={updateMutation.isPending}
-                      id="edit-agent-custom-provider"
-                      onChange={(event) => setProvider(event.target.value)}
-                      placeholder="Custom provider ID"
-                      value={provider}
-                    />
-                  </div>
-                ) : null}
-              </div>
+            {(serverContext ? serverAi !== null : llmProviderFieldVisible) ? (
+              <LlmProviderField
+                customInputId="edit-agent-custom-provider"
+                disabled={updateMutation.isPending}
+                id="edit-agent-llm-provider"
+                isRequired={providerRequired}
+                onProviderTextChange={setProvider}
+                onValueChange={handleProviderDropdownChange}
+                options={
+                  serverContext && serverAi
+                    ? server.providerOptions
+                    : providerDropdownOptions
+                }
+                placeholder="Default (auto)"
+                providerValue={provider}
+                selectValue={providerSelectValue}
+                showCustomInput={isCustomProviderEditing}
+              />
             ) : null}
 
             {llmProviderFieldVisible && topLevelSecretEnvVar ? (
@@ -1094,15 +1058,28 @@ export function AgentInstanceEditDialog({
                   <span className={PERSONA_LABEL_OPTIONAL_CLASS}>Optional</span>
                 )}
               </label>
-              <PersonaDropdownField
-                disabled={updateMutation.isPending || modelDiscoveryLoading}
-                id="edit-agent-model"
-                onValueChange={handleModelDropdownChange}
-                options={modelDropdownOptions}
-                placeholder="Default model"
-                value={modelSelectValue}
-              />
-              {showCustomModelInput ? (
+              {serverContext && !serverAi ? (
+                <ServerModelField
+                  disabled={updateMutation.isPending}
+                  id="edit-agent-model"
+                  onChange={setModel}
+                  value={model}
+                />
+              ) : (
+                <PersonaDropdownField
+                  disabled={updateMutation.isPending || modelDiscoveryLoading}
+                  id="edit-agent-model"
+                  onValueChange={handleModelDropdownChange}
+                  options={
+                    serverContext && serverAi
+                      ? server.modelOptions
+                      : modelDropdownOptions
+                  }
+                  placeholder="Default model"
+                  value={serverContext && serverAi ? model : modelSelectValue}
+                />
+              )}
+              {!serverContext && showCustomModelInput ? (
                 <div
                   className={cn(
                     "mt-2 flex min-h-11 items-center px-3",
@@ -1124,12 +1101,18 @@ export function AgentInstanceEditDialog({
                   />
                 </div>
               ) : null}
-              {modelStatusMessage ? (
+              {!serverContext && modelStatusMessage ? (
                 <p className="text-xs text-muted-foreground">
                   {modelStatusMessage}
                 </p>
               ) : null}
             </div>
+
+            {serverContext ? (
+              <p className="text-xs text-muted-foreground">
+                Applied on the server. Saving restarts the agent.
+              </p>
+            ) : null}
 
             <AgentAiDefaultsNotice
               onEditDefaults={() => setAiDefaultsOpen(true)}
