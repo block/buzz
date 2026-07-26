@@ -253,6 +253,45 @@ test.describe("global agent config screenshots", () => {
     expect(saved).toMatchObject({ preferred_runtime: "codex" });
   });
 
+  test("defaults honor credentials set in the harness config file", async ({
+    page,
+  }) => {
+    await installMockBridge(page, {
+      globalAgentConfig: {
+        preferred_runtime: "goose",
+        provider: "databricks_v2",
+        model: "goose-claude-4-6-opus",
+        env_vars: {},
+      },
+      runtimeFileConfigs: {
+        goose: {
+          provider: "databricks_v2",
+          model: "goose-claude-4-6-opus",
+          satisfiedEnvKeys: ["DATABRICKS_HOST"],
+        },
+      },
+    });
+
+    await openAiDefaultsSettings(page);
+
+    const advanced = page.getByTestId("global-agent-advanced-toggle");
+    await expect(advanced).toHaveAttribute("aria-expanded", "false");
+    await expect(
+      page.getByTestId("global-agent-advanced-required-badge"),
+    ).toHaveCount(0);
+
+    await page.getByTestId("global-agent-model").click();
+    await page.getByTestId("global-agent-model-option-gpt-5.5").click();
+    await expect(
+      page.getByRole("button", { name: "Save defaults" }),
+    ).toBeEnabled();
+
+    await advanced.click();
+    await expect(page.getByTestId("env-vars-file-satisfied-key")).toHaveText(
+      "DATABRICKS_HOST",
+    );
+  });
+
   test("02-create-global-provider-shows-top-level-api-key", async ({
     page,
   }) => {
@@ -267,6 +306,11 @@ test.describe("global agent config screenshots", () => {
     await openCreateDialog(page);
     await customizeAgentAi(page);
 
+    await expect(
+      page
+        .getByTestId("agent-custom-configuration-section")
+        .locator("#persona-runtime"),
+    ).toBeVisible();
     await expect(page.getByLabel("Anthropic API Key")).toBeVisible({
       timeout: 10_000,
     });
@@ -274,6 +318,27 @@ test.describe("global agent config screenshots", () => {
       page.getByRole("button", { name: "Advanced", exact: true }),
     ).toHaveAttribute("aria-expanded", "false");
     await expect(page.getByTestId("env-vars-required-key")).not.toBeVisible();
+
+    await waitForAnimations(page);
+    await page.getByRole("dialog").screenshot({
+      path: `${SHOTS}/02-create-custom-agent-configuration.png`,
+    });
+
+    const advanced = page.getByRole("button", {
+      name: "Advanced",
+      exact: true,
+    });
+    await selectDropdownOption(
+      page,
+      page.locator("#persona-llm-provider"),
+      "Databricks v2",
+    );
+    await expect(advanced).toHaveAttribute("aria-expanded", "false");
+    await expect(
+      page.getByTestId("persona-advanced-required-badge"),
+    ).toHaveText("Required");
+    await advanced.click();
+    await expect(advanced).toHaveAttribute("aria-expanded", "true");
   });
 
   test("03-global-env-satisfies-required-key", async ({ page }) => {
@@ -360,6 +425,11 @@ test.describe("global agent config screenshots", () => {
           value: "high",
           masked: false,
         },
+        {
+          key: "ANTHROPIC_API_KEY",
+          value: "sk-ant-baked-test",
+          masked: true,
+        },
       ],
     });
 
@@ -390,13 +460,99 @@ test.describe("global agent config screenshots", () => {
       timeout: 10_000,
     });
 
-    // The footer must explain WHY it is disabled (regression guard for the
-    // submitBlockReason wiring, not just the boolean gate): defaults mode with
-    // no resolvable provider names the missing piece and points to Settings.
-    const reason = page.getByTestId("persona-dialog-submit-reason");
-    await expect(reason).toBeVisible({ timeout: 10_000 });
-    await expect(reason).toContainText("provider");
-    await expect(reason).toContainText("Settings → AI defaults");
+    const defaults = page.getByTestId("agent-ai-defaults-notice");
+    await expect(defaults).toContainText("Global defaults not set");
+    await expect(defaults.getByText("Harness", { exact: true })).toHaveCount(0);
+    await expect(defaults.getByText("Provider", { exact: true })).toHaveCount(
+      0,
+    );
+    await expect(defaults.getByText("Model", { exact: true })).toHaveCount(0);
+
+    const setDefaults = defaults.getByRole("button", {
+      name: "Set",
+    });
+    await expect(setDefaults).toBeVisible();
+    await expect(page.getByTestId("persona-dialog-submit-reason")).toHaveCount(
+      0,
+    );
+
+    await setDefaults.click();
+    const defaultsDialog = page.getByTestId("agent-ai-defaults-dialog");
+    await expect(defaultsDialog).toBeVisible();
+    await expect(
+      defaultsDialog.getByTestId("global-agent-config-fields"),
+    ).toBeVisible();
+    await expect(defaultsDialog.getByTestId("global-agent-model")).toHaveCount(
+      0,
+    );
+
+    const harness = defaultsDialog.getByTestId("global-agent-default-harness");
+    await expect(harness).toHaveText("Buzz Agent");
+    const provider = defaultsDialog.getByTestId("global-agent-provider");
+    await expect(provider).toBeVisible();
+    await waitForAnimations(page);
+    const providerHeight = (await defaultsDialog.boundingBox())?.height ?? 0;
+
+    await provider.click();
+    await page.getByTestId("global-agent-provider-option-anthropic").click();
+    await expect(
+      defaultsDialog.getByTestId("global-agent-model"),
+    ).toBeVisible();
+    for (const field of [
+      harness,
+      provider,
+      defaultsDialog.getByTestId("global-agent-model"),
+      defaultsDialog.getByTestId("global-agent-thinking-effort-select"),
+    ]) {
+      await expect(field).toHaveClass(/h-11/);
+      await expect(field).toHaveClass(/rounded-xl/);
+      await expect(field).toHaveClass(/bg-muted\/40/);
+      await expect(field).toHaveClass(/shadow-none/);
+    }
+    await waitForAnimations(page);
+    const configuredHeight = (await defaultsDialog.boundingBox())?.height ?? 0;
+    expect(configuredHeight).toBeGreaterThan(providerHeight);
+    await expect(
+      defaultsDialog.getByTestId("global-agent-config-fields"),
+    ).not.toHaveClass(/bg-muted\/20/);
+    const harnessBox = await defaultsDialog
+      .getByTestId("global-agent-default-harness")
+      .boundingBox();
+    const providerBox = await defaultsDialog
+      .getByTestId("global-agent-provider")
+      .boundingBox();
+    expect(harnessBox?.x).toBe(providerBox?.x);
+    expect(harnessBox?.width).toBe(providerBox?.width);
+    await waitForAnimations(page);
+    await defaultsDialog.screenshot({
+      path: `${SHOTS}/04-global-defaults-dialog-flat.png`,
+    });
+    const advanced = defaultsDialog.getByTestId("global-agent-advanced-toggle");
+    await provider.click();
+    await page
+      .getByTestId("global-agent-provider-option-databricks_v2")
+      .click();
+    await expect(advanced).toHaveAttribute("aria-expanded", "false");
+    const saveDefaults = defaultsDialog.getByRole("button", {
+      name: "Save defaults",
+    });
+    await expect(
+      defaultsDialog.getByTestId("global-agent-advanced-required-badge"),
+    ).toHaveText("Required");
+    await expect(saveDefaults).toBeDisabled();
+    await advanced.click();
+    await expect(advanced).toHaveAttribute("aria-expanded", "true");
+    await defaultsDialog
+      .getByLabel("Value for DATABRICKS_HOST")
+      .fill("https://databricks.example.test");
+    await expect(saveDefaults).toBeEnabled();
+    await defaultsDialog
+      .getByRole("button", {
+        name: "Close",
+      })
+      .click();
+    await page.getByRole("button", { name: "Discard changes" }).click();
+    await expect(defaultsDialog).not.toBeVisible();
 
     await waitForAnimations(page);
 
@@ -404,6 +560,166 @@ test.describe("global agent config screenshots", () => {
     await dialog.screenshot({
       path: `${SHOTS}/04-create-blocked-no-provider-no-global.png`,
     });
+  });
+
+  test("unset defaults persist the visible Buzz Agent fallback", async ({
+    page,
+  }) => {
+    await installMockBridge(page);
+    await openCreateDialog(page);
+    await page
+      .getByTestId("agent-ai-defaults-notice")
+      .getByRole("button", { name: "Set" })
+      .click();
+
+    const defaultsDialog = page.getByTestId("agent-ai-defaults-dialog");
+    await expect(
+      defaultsDialog.getByTestId("global-agent-default-harness"),
+    ).toHaveText("Buzz Agent");
+
+    await defaultsDialog.getByTestId("global-agent-provider").click();
+    await page.getByTestId("global-agent-provider-option-anthropic").click();
+    await defaultsDialog.getByLabel("Anthropic API Key").fill("sk-ant-test");
+    await expect(
+      defaultsDialog.getByRole("button", { name: "Save defaults" }),
+    ).toBeEnabled();
+    await defaultsDialog.getByRole("button", { name: "Save defaults" }).click();
+    await expect(defaultsDialog).not.toBeVisible();
+
+    const saved = await page.evaluate(async () =>
+      (
+        window as typeof window & {
+          __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
+            command: string,
+            payload: unknown,
+          ) => Promise<unknown>;
+        }
+      ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__?.("get_global_agent_config", null),
+    );
+    expect(saved).toMatchObject({
+      preferred_runtime: "buzz-agent",
+      provider: "anthropic",
+    });
+  });
+
+  test("create defaults follow a preferred harness saved while open", async ({
+    page,
+  }) => {
+    await installMockBridge(page, {
+      acpRuntimesCatalog: CATALOG_WITH_CLAUDE,
+      globalAgentConfig: {
+        preferred_runtime: "buzz-agent",
+        provider: "anthropic",
+        model: "claude-opus-4-5",
+        env_vars: { ANTHROPIC_API_KEY: "sk-ant-global-value" },
+      },
+    });
+    await openCreateDialog(page);
+
+    const defaults = page.getByTestId("agent-ai-defaults-notice");
+    await expect(defaults).toContainText("Buzz Agent");
+    await defaults
+      .getByRole("button", { name: "Edit global defaults" })
+      .click();
+
+    const defaultsDialog = page.getByTestId("agent-ai-defaults-dialog");
+    const harness = defaultsDialog.getByTestId("global-agent-default-harness");
+    await harness.press("Enter");
+    await page
+      .getByTestId("global-agent-default-harness-option-claude")
+      .click();
+    await defaultsDialog.getByRole("button", { name: "Save defaults" }).click();
+    await expect(defaultsDialog).not.toBeVisible();
+
+    const harnessDefaults = page.getByTestId("agent-harness-defaults-notice");
+    await expect(harnessDefaults).toContainText("Claude Code");
+    await expect(page.getByTestId("persona-dialog-submit")).toBeEnabled();
+    await page.getByTestId("persona-dialog-submit").click();
+
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const log = (
+            window as Window & {
+              __BUZZ_E2E_COMMAND_LOG__?: Array<{
+                command: string;
+                payload: { input?: Record<string, unknown> };
+              }>;
+            }
+          ).__BUZZ_E2E_COMMAND_LOG__;
+          const createPayload = log?.find(
+            (entry) => entry.command === "create_persona",
+          )?.payload.input;
+          return createPayload?.runtime;
+        }),
+      )
+      .toBe("claude");
+  });
+
+  test("missing global credentials show the unset defaults notice", async ({
+    page,
+  }) => {
+    await installMockBridge(page, {
+      globalAgentConfig: {
+        preferred_runtime: "buzz-agent",
+        provider: "anthropic",
+        model: "claude-opus-4-5",
+        env_vars: {},
+      },
+    });
+    await openCreateDialog(page);
+
+    const defaults = page.getByTestId("agent-ai-defaults-notice");
+    await expect(defaults).toContainText("Global defaults not set");
+    await expect(defaults.getByRole("button", { name: "Set" })).toBeVisible();
+    await expect(defaults.getByText("Harness", { exact: true })).toHaveCount(0);
+    await expect(defaults.getByText("Provider", { exact: true })).toHaveCount(
+      0,
+    );
+    await expect(defaults.getByText("Model", { exact: true })).toHaveCount(0);
+    await expect(page.getByTestId("persona-dialog-submit")).toBeDisabled();
+  });
+
+  test("create exposes setup guidance when no harness is available", async ({
+    page,
+  }) => {
+    await installMockBridge(page, {
+      acpRuntimesCatalog: CATALOG_NONE_AVAILABLE,
+    });
+    await openCreateDialog(page);
+
+    const customSection = page.getByTestId(
+      "agent-custom-configuration-section",
+    );
+    const harness = customSection.locator("#persona-runtime");
+    await expect(harness).toBeVisible();
+    await expect(harness).toContainText("Choose a harness");
+
+    await selectDropdownOption(page, harness, "Buzz Agent (not installed)");
+    await expect(
+      customSection
+        .locator("p")
+        .filter({ hasText: "Buzz Agent is not installed." }),
+    ).toContainText(
+      "Buzz Agent is not installed. Visit Settings > Agents to set it up.",
+    );
+    await expect(page.getByTestId("persona-dialog-submit")).toBeDisabled();
+  });
+
+  test("create with a missing name has no footer message", async ({ page }) => {
+    await installMockBridge(page);
+
+    await page.goto("/");
+    await page.getByTestId("open-agents-view").click();
+    await page.getByTestId("new-agent-card").click();
+    await page.getByRole("menuitem", { name: "Create from scratch" }).click();
+
+    await expect(page.getByTestId("persona-dialog-submit")).toBeDisabled({
+      timeout: 10_000,
+    });
+    await expect(page.getByTestId("persona-dialog-submit-reason")).toHaveCount(
+      0,
+    );
   });
 
   // Shot 05: Create gate ENABLED — global provider = anthropic provides a
@@ -418,6 +734,20 @@ test.describe("global agent config screenshots", () => {
     });
 
     await openCreateDialog(page);
+
+    const defaultsSection = page.getByTestId(
+      "agent-defaults-configuration-section",
+    );
+    await expect(defaultsSection.locator("#persona-runtime")).toHaveCount(0);
+    await expect(
+      defaultsSection.getByTestId("agent-ai-defaults-notice"),
+    ).toBeVisible();
+    await expect(
+      defaultsSection.getByText("Harness", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      defaultsSection.getByText("Buzz Agent", { exact: true }),
+    ).toBeVisible();
 
     // Global provider satisfies the provider-default rule → submit enabled.
     await expect(page.getByTestId("persona-dialog-submit")).toBeEnabled({
@@ -449,12 +779,14 @@ test.describe("global agent config screenshots", () => {
 
     await openCreateDialog(page);
 
-    // Switch the auto-selected buzz-agent runtime to the CLI-login runtime.
+    // Harness selection belongs to the per-agent customization flow.
+    await customizeAgentAi(page);
     await selectDropdownOption(
       page,
       page.locator("#persona-runtime"),
       "Claude Code",
     );
+    await page.getByRole("tab", { name: "Use harness defaults" }).click();
 
     // Provider picker hidden — the runtime drives its own provider.
     await expect(page.locator("#persona-llm-provider")).not.toBeVisible();
@@ -636,12 +968,10 @@ test.describe("global agent config screenshots", () => {
     await expect(page.getByTestId("persona-dialog-submit")).toBeDisabled({
       timeout: 10_000,
     });
-    // … and the reason must be the Customize-pair provider gate, not the
-    // global-defaults gate (which would say "Settings → AI defaults").
-    const reason = page.getByTestId("persona-dialog-submit-reason");
-    await expect(reason).toBeVisible({ timeout: 10_000 });
-    await expect(reason).toContainText("Select a provider");
-    await expect(reason).not.toContainText("Settings → AI defaults");
+    // Disabled-state guidance belongs with the fields, not in the modal footer.
+    await expect(page.getByTestId("persona-dialog-submit-reason")).toHaveCount(
+      0,
+    );
 
     await waitForAnimations(page);
 

@@ -48,7 +48,7 @@ export function useThreadViewModeSwitch({
   >(null);
 
   const changeThreadViewMode = React.useCallback(
-    (mode: ThreadViewMode) => {
+    (mode: ThreadViewMode, restoreFocus: boolean) => {
       const body = document.querySelector<HTMLElement>(
         '[data-testid="message-thread-body"]',
       );
@@ -61,7 +61,9 @@ export function useThreadViewModeSwitch({
         requestAnimationFrame(() => {
           document
             .querySelector<HTMLElement>(
-              '[data-testid="thread-view-mode-toggle"]',
+              restoreFocus
+                ? '[data-testid="thread-view-mode-toggle"]'
+                : '[data-testid="message-thread-body"]',
             )
             ?.focus({ preventScroll: true });
         });

@@ -1,5 +1,12 @@
 use crate::managed_agents::known_acp_runtime;
 
+// ── desktop binary name tests ───────────────────────────────────────────
+
+#[test]
+fn appimage_binary_matches_truncated_linux_comm_name() {
+    assert!(super::is_desktop_binary("buzz-desktop.bi"));
+}
+
 // ── buffer_contains_identifier tests ────────────────────────────────────
 
 #[test]
@@ -616,6 +623,63 @@ fn codex_spawn_does_not_set_a_claude_executable() {
     assert!(!command
         .get_envs()
         .any(|(key, _)| key == "CLAUDE_CODE_EXECUTABLE"));
+}
+
+/// On Windows, `.cmd` and `.bat` batch shims must NOT be assigned to
+/// `CLAUDE_CODE_EXECUTABLE` — `CreateProcess` cannot exec them directly and
+/// returns EINVAL (issue #2397). The adapter must fall back to its own PATH
+/// lookup instead.
+///
+/// These tests exercise `is_batch_shim` directly — a pure path predicate with
+/// no global PATH or resolve_command cache involvement — so they run on every
+/// host and cannot be poisoned by the `claude_spawn_uses_the_probed_cli_executable`
+/// test that runs before them.
+#[test]
+fn batch_shim_cmd_extension_is_rejected() {
+    assert!(
+        super::path::is_batch_shim(std::path::Path::new("claude.cmd")),
+        "claude.cmd must be identified as a batch shim"
+    );
+}
+
+#[test]
+fn batch_shim_cmd_extension_uppercase_is_rejected() {
+    assert!(
+        super::path::is_batch_shim(std::path::Path::new("claude.CMD")),
+        "claude.CMD must be identified as a batch shim (case-insensitive)"
+    );
+}
+
+#[test]
+fn batch_shim_bat_extension_is_rejected() {
+    assert!(
+        super::path::is_batch_shim(std::path::Path::new("claude.bat")),
+        "claude.bat must be identified as a batch shim"
+    );
+}
+
+#[test]
+fn batch_shim_bat_extension_uppercase_is_rejected() {
+    assert!(
+        super::path::is_batch_shim(std::path::Path::new("claude.BAT")),
+        "claude.BAT must be identified as a batch shim (case-insensitive)"
+    );
+}
+
+#[test]
+fn batch_shim_exe_extension_is_not_rejected() {
+    assert!(
+        !super::path::is_batch_shim(std::path::Path::new("claude.exe")),
+        "claude.exe must not be identified as a batch shim"
+    );
+}
+
+#[test]
+fn batch_shim_no_extension_is_not_rejected() {
+    assert!(
+        !super::path::is_batch_shim(std::path::Path::new("claude")),
+        "claude (no extension) must not be identified as a batch shim"
+    );
 }
 
 // ── PGID-based orphan sweep tests ───────────────────────────────────────

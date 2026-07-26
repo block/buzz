@@ -22,7 +22,7 @@ require_canonical_repository() {
 }
 
 require_release_tag_ruleset() {
-  local ruleset_endpoint state can_bypass bypass_actors rule_types includes excludes
+  local ruleset_endpoint state can_bypass rule_types includes excludes
 
   command -v gh >/dev/null 2>&1 || fail_release_ruleset "gh is required" || return 1
   ruleset_endpoint="repos/block/buzz/rulesets/$RELEASE_TAG_RULESET_ID"
@@ -36,11 +36,6 @@ require_release_tag_ruleset() {
     fail_release_ruleset "could not verify the release App's tag-ruleset bypass" || return 1
   [[ "$can_bypass" == "always" ]] || \
     fail_release_ruleset "release App cannot always bypass Release tag ruleset $RELEASE_TAG_RULESET_ID (reported '$can_bypass')" || return 1
-
-  bypass_actors="$(gh api "$ruleset_endpoint" --jq '[.bypass_actors[] | [.actor_type, (.actor_id | tostring), .bypass_mode] | join(":")] | sort | join(",")')" || \
-    fail_release_ruleset "could not verify Release tag ruleset $RELEASE_TAG_RULESET_ID bypass actors" || return 1
-  [[ "$bypass_actors" == "Integration:4349119:always" ]] || \
-    fail_release_ruleset "Release tag ruleset $RELEASE_TAG_RULESET_ID has unexpected bypass actors: '$bypass_actors'" || return 1
 
   rule_types="$(gh api "$ruleset_endpoint" --jq '[.rules[].type] | sort | join(",")')" || \
     fail_release_ruleset "could not verify Release tag ruleset $RELEASE_TAG_RULESET_ID rules" || return 1

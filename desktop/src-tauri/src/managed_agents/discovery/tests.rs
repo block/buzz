@@ -1104,16 +1104,18 @@ fn test_cli_install_commands_for_os_non_empty_for_claude_codex() {
     );
 }
 
-/// On Windows, Claude and Codex select the PowerShell install commands.
+/// On Windows, every vendor CLI selects its official PowerShell installer.
 #[cfg(windows)]
 #[test]
 fn test_cli_install_commands_for_os_selects_powershell_on_windows() {
     let claude = super::known_acp_runtime_exact("claude").unwrap();
     let codex = super::known_acp_runtime_exact("codex").unwrap();
+    let goose = super::known_acp_runtime_exact("goose").unwrap();
 
     // Windows must select the PowerShell commands, not the curl|bash ones.
     let claude_cmds = claude.cli_install_commands_for_os();
     let codex_cmds = codex.cli_install_commands_for_os();
+    let goose_cmds = goose.cli_install_commands_for_os();
 
     assert_ne!(
         claude_cmds, claude.cli_install_commands,
@@ -1123,6 +1125,7 @@ fn test_cli_install_commands_for_os_selects_powershell_on_windows() {
         codex_cmds, codex.cli_install_commands,
         "Windows must NOT use the default curl|bash commands for codex"
     );
+    assert_eq!(goose_cmds, goose.cli_install_commands_windows);
 
     // Verify they are the PowerShell installers.
     assert!(
@@ -1133,13 +1136,9 @@ fn test_cli_install_commands_for_os_selects_powershell_on_windows() {
         codex_cmds.iter().any(|c| c.contains("powershell")),
         "codex Windows install must use powershell; got: {codex_cmds:?}"
     );
-
-    // Goose and buzz-agent must NOT use Windows-specific commands.
-    let goose = super::known_acp_runtime_exact("goose").unwrap();
-    assert_eq!(
-        goose.cli_install_commands_for_os(),
-        goose.cli_install_commands,
-        "goose must use the same commands on all platforms"
+    assert!(
+        goose_cmds.iter().any(|c| c.contains("download_cli.ps1")),
+        "Goose Windows install must use download_cli.ps1; got: {goose_cmds:?}"
     );
 }
 

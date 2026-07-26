@@ -12,6 +12,8 @@ use crate::{
     relay::query_relay,
 };
 
+mod post_install_verification;
+
 fn active_installs() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
     use std::collections::HashSet;
     use std::sync::{Mutex, OnceLock};
@@ -42,11 +44,19 @@ pub(crate) fn plan_adapter_install<'c>(
     runtime_id: &str,
     adapter_path: Option<&std::path::Path>,
     adapter_install_commands: &'c [&'c str],
+    adapter_probe_path: Option<&str>,
 ) -> Option<Vec<&'c str>> {
     match adapter_path {
         // Adapter present and current — no install needed.
         Some(_) if runtime_id != "codex" => None,
-        Some(path) if !crate::managed_agents::codex_adapter_is_outdated(path) => None,
+        Some(path)
+            if !crate::managed_agents::codex_adapter_is_outdated_with_path(
+                path,
+                adapter_probe_path,
+            ) =>
+        {
+            None
+        }
         // Codex adapter is outdated: uninstall the old package first so npm
         // doesn't hit EEXIST on the shared `codex-acp` bin-link, then install.
         Some(_) => Some(vec![
@@ -174,10 +184,12 @@ fn install_acp_runtime_blocking(runtime_id: &str) -> Result<InstallRuntimeResult
         .commands
         .iter()
         .find_map(|cmd| crate::managed_agents::resolve_command(cmd));
+    let adapter_probe_path = crate::managed_agents::readiness::cli_probe::augmented_path();
     if let Some(cmds) = plan_adapter_install(
         runtime_id,
         adapter_path.as_deref(),
         runtime.adapter_install_commands,
+        adapter_probe_path.as_deref(),
     ) {
         let use_managed_npm =
             cmds.iter().any(|cmd| is_npm_global_install(cmd)) && managed_node_runtime_supported();
@@ -229,11 +241,10 @@ fn install_acp_runtime_blocking(runtime_id: &str) -> Result<InstallRuntimeResult
         }
     }
 
-    // Clear the resolve cache so the next discovery picks up new binaries.
-    crate::managed_agents::clear_resolve_cache();
+    post_install_verification::run(runtime_id, &mut steps);
 
     Ok(InstallRuntimeResult {
-        success: true,
+        success: steps.iter().all(|step| step.success),
         steps,
         restarted_count: 0,
         failed_restart_count: 0,
@@ -552,32 +563,35 @@ fn install_shell_command(command: &str) -> Result<std::process::Command, String>
     let mut cmd = std::process::Command::new(&shell);
     cmd.args(["-l", "-c", command]);
 
-    // Strip hermit env vars so npm/node use the user's normal registry rather
-    // than the project-local hermit-managed paths, then give npm defaults for
-    // Buzz-owned app data. Adapter install commands also pass --prefix
-    // explicitly; these env vars keep subprocesses/cache/corepack aligned.
-    cmd.env_remove("NPM_CONFIG_PREFIX");
-    cmd.env_remove("NPM_CONFIG_CACHE");
-    cmd.env_remove("COREPACK_HOME");
+    // Strip hermit vars and set managed npm paths (see apply_npm_env).
+    apply_npm_env(&mut cmd);
 
-    if let Some(prefix) = crate::managed_agents::buzz_managed_npm_prefix() {
-        cmd.env("NPM_CONFIG_PREFIX", &prefix);
-        cmd.env("npm_config_prefix", &prefix);
-        cmd.env("COREPACK_HOME", prefix.join("corepack"));
-        cmd.env("NPM_CONFIG_CACHE", prefix.join("cache"));
-        cmd.env("npm_config_cache", prefix.join("cache"));
-    }
-
-    let mut path_parts = Vec::new();
-    if let Some(managed_node_bin) = crate::managed_agents::buzz_managed_node_bin_dir() {
-        path_parts.push(managed_node_bin);
-    }
-    if let Some(managed_bin) = crate::managed_agents::buzz_managed_npm_bin_dir() {
-        path_parts.push(managed_bin);
-    }
-    if let Some(ref path) = crate::managed_agents::login_shell_path() {
-        path_parts.extend(std::env::split_paths(path));
-    }
+    // Compose the PATH for the install shell using the same kernel as the
+    // runtime/probe path so the two can never drift.  managed entries first
+    // (Node/npm bins keep precedence); login-shell entries next; inherited
+    // process PATH appended last on Windows when no login-shell PATH exists
+    // (login_shell_path() always returns None on Windows — Git Bash paths are
+    // POSIX-shaped and poison native children; cmd.env("PATH", …) replaces
+    // rather than extends, so without inherited the install shell loses npm).
+    let login_path = crate::managed_agents::login_shell_path();
+    let had_login = login_path.is_some();
+    let managed: Vec<std::path::PathBuf> = [
+        crate::managed_agents::buzz_managed_node_bin_dir(),
+        crate::managed_agents::buzz_managed_npm_bin_dir(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let login: Vec<std::path::PathBuf> = login_path
+        .as_deref()
+        .map(|p| std::env::split_paths(p).collect())
+        .unwrap_or_default();
+    let inherited: Vec<std::path::PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    let use_inherited = crate::managed_agents::should_use_inherited(had_login, true, cfg!(windows));
+    let path_parts =
+        crate::managed_agents::compose_path_entries(managed, login, inherited, use_inherited);
     if !path_parts.is_empty() {
         if let Ok(path) = std::env::join_paths(path_parts) {
             cmd.env("PATH", path);
@@ -599,12 +613,7 @@ fn install_shell_command(command: &str) -> Result<std::process::Command, String>
     }
 
     // Suppress the console window on Windows.
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
+    apply_no_window(&mut cmd);
 
     Ok(cmd)
 }
@@ -705,8 +714,161 @@ fn annotate_retry_attempts(mut result: InstallStepResult, attempts: u32) -> Inst
     result
 }
 
+/// Returns `true` when `command` is a Windows-native PowerShell invocation
+/// (i.e. begins with `powershell.exe`). These commands must NOT be routed
+/// through Git Bash: the Bash login shell prepends POSIX dirs to PATH, so
+/// bare `tar` inside the PowerShell script resolves to GNU tar
+/// (`/usr/bin/tar`) instead of Windows bsdtar. GNU tar parses the drive
+/// letter in `C:\…` as a remote host and fails with "Cannot connect to C:
+/// resolve failed", which is the exact failure Will observed in the Codex
+/// PowerShell installer. Non-PowerShell commands (e.g. `npm install -g …`
+/// adapter steps) are unaffected.
+///
+/// The check is case-insensitive because Windows file-system conventions do
+/// not mandate casing, and the install command constants could change.
+#[cfg(windows)]
+fn is_powershell_command(command: &str) -> bool {
+    command
+        .split_ascii_whitespace()
+        .next()
+        .is_some_and(|tok| tok.eq_ignore_ascii_case("powershell.exe"))
+}
+
+/// Apply the shared npm env cleanup and managed-prefix setup to an install child.
+/// Strips hermit-managed vars and establishes the Buzz-managed npm prefix so adapters
+/// installed via either path (shell or native PowerShell) land in the same location.
+fn apply_npm_env(cmd: &mut std::process::Command) {
+    cmd.env_remove("NPM_CONFIG_PREFIX");
+    cmd.env_remove("NPM_CONFIG_CACHE");
+    cmd.env_remove("COREPACK_HOME");
+
+    if let Some(prefix) = crate::managed_agents::buzz_managed_npm_prefix() {
+        cmd.env("NPM_CONFIG_PREFIX", &prefix);
+        cmd.env("npm_config_prefix", &prefix);
+        cmd.env("COREPACK_HOME", prefix.join("corepack"));
+        cmd.env("NPM_CONFIG_CACHE", prefix.join("cache"));
+        cmd.env("npm_config_cache", prefix.join("cache"));
+    }
+}
+
+/// Suppress the console window for an install child on Windows (no-op elsewhere).
+fn apply_no_window(_cmd: &mut std::process::Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        _cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+}
+
+/// Build a native `powershell.exe` [`Command`][std::process::Command] for the given command
+/// string, bypassing Git Bash so POSIX PATH entries never leak into the child.
+///
+/// Finds the first `-Command` token (case-insensitive, token-boundary match), passes preceding
+/// tokens as individual flags, and passes the rest as a single body arg. One outer double-quote
+/// pair is stripped from the body — the catalog strings (`discovery.rs:107`, `:138`) wrap it for
+/// Bash serialization; stripping here delivers the bare pipeline to PowerShell. Tokens with no
+/// `-Command` are forwarded individually. Only called from [`build_install_command`] on Windows.
+#[cfg(windows)]
+fn install_powershell_command(command: &str) -> std::process::Command {
+    // Strip the leading `powershell.exe` token.
+    let after_exe = command
+        .split_once(|c: char| c.is_ascii_whitespace())
+        .map(|(_, rest)| rest.trim())
+        .unwrap_or("");
+
+    let mut cmd = std::process::Command::new("powershell.exe");
+
+    // Walk tokens to find -Command on a token boundary (not as a substring of
+    // a preceding argument). The comparison is case-insensitive because
+    // PowerShell itself is case-insensitive for parameters.
+    let mut rest = after_exe;
+    let mut found_command_flag = false;
+    loop {
+        let trimmed = rest.trim_start();
+        if trimmed.is_empty() {
+            break;
+        }
+        // Find the end of the current token.
+        let tok_end = trimmed
+            .find(|c: char| c.is_ascii_whitespace())
+            .unwrap_or(trimmed.len());
+        let tok = &trimmed[..tok_end];
+        if tok.eq_ignore_ascii_case("-command") {
+            // Everything after this token (trimmed) is the body.
+            let body_raw = trimmed[tok_end..].trim();
+            // Strip one matching outer double-quote pair inserted by the
+            // Bash-layer catalog serialization. PowerShell does not need them.
+            let body =
+                if body_raw.starts_with('"') && body_raw.ends_with('"') && body_raw.len() >= 2 {
+                    &body_raw[1..body_raw.len() - 1]
+                } else {
+                    body_raw
+                };
+            cmd.arg("-Command");
+            if !body.is_empty() {
+                cmd.arg(body);
+            }
+            found_command_flag = true;
+            break;
+        }
+        cmd.arg(tok);
+        rest = &trimmed[tok_end..];
+    }
+
+    if !found_command_flag {
+        // No -Command boundary — forward remaining tokens individually.
+        for arg in rest.split_ascii_whitespace() {
+            cmd.arg(arg);
+        }
+    }
+
+    apply_npm_env(&mut cmd);
+
+    // Compose PATH: managed Buzz dirs first, then inherited process PATH.
+    // No login-shell path: login_shell_path() always returns None on Windows,
+    // and we deliberately skip it here to avoid POSIX-shaped entries.
+    let managed: Vec<std::path::PathBuf> = [
+        crate::managed_agents::buzz_managed_node_bin_dir(),
+        crate::managed_agents::buzz_managed_npm_bin_dir(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let inherited: Vec<std::path::PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    // No login path → should_use_inherited returns true so inherited appended.
+    let path_parts = crate::managed_agents::compose_path_entries(managed, vec![], inherited, true);
+    if !path_parts.is_empty() {
+        if let Ok(path) = std::env::join_paths(path_parts) {
+            cmd.env("PATH", path);
+        }
+    }
+
+    apply_no_window(&mut cmd);
+    cmd
+}
+
+/// Select the right [`Command`][std::process::Command] builder for `command`.
+///
+/// On Windows, PowerShell-prefixed commands are spawned natively (via
+/// [`install_powershell_command`]) to avoid the Git Bash PATH poisoning that
+/// causes GNU `tar` to be resolved instead of Windows bsdtar.  All other
+/// commands — including `npm install -g …` adapter steps — keep the existing
+/// Git Bash path via [`install_shell_command`].
+///
+/// On non-Windows this is always `install_shell_command`.
+fn build_install_command(command: &str) -> Result<std::process::Command, String> {
+    #[cfg(windows)]
+    if is_powershell_command(command) {
+        return Ok(install_powershell_command(command));
+    }
+    install_shell_command(command)
+}
+
 fn run_install_command(step: &str, command: &str) -> InstallStepResult {
-    let mut cmd = match install_shell_command(command) {
+    let mut cmd = match build_install_command(command) {
         Ok(cmd) => cmd,
         Err(hint) => {
             return InstallStepResult {
@@ -1028,7 +1190,7 @@ mod tests {
             .expect("chmod script");
 
         let install_cmds = &["npm install -g @agentclientprotocol/codex-acp"];
-        let plan = plan_adapter_install("codex", Some(&bin), install_cmds);
+        let plan = plan_adapter_install("codex", Some(&bin), install_cmds, Some("/usr/bin:/bin"));
 
         assert!(
             plan.is_some(),
@@ -1063,7 +1225,7 @@ mod tests {
             .expect("chmod script");
 
         let install_cmds = &["npm install -g @agentclientprotocol/codex-acp"];
-        let plan = plan_adapter_install("codex", Some(&bin), install_cmds);
+        let plan = plan_adapter_install("codex", Some(&bin), install_cmds, Some("/usr/bin:/bin"));
 
         assert!(
             plan.is_none(),
@@ -1074,7 +1236,7 @@ mod tests {
     #[test]
     fn test_plan_adapter_install_returns_catalog_cmds_when_no_adapter_path() {
         let install_cmds = &["npm install -g @agentclientprotocol/codex-acp"];
-        let plan = plan_adapter_install("codex", None, install_cmds);
+        let plan = plan_adapter_install("codex", None, install_cmds, None);
         assert!(plan.is_some(), "missing adapter must trigger install plan");
         // Missing arm: use the catalog's install commands directly (no prior
         // package to uninstall — fresh install, not a reinstall).
@@ -1098,7 +1260,7 @@ mod tests {
             .expect("chmod script");
 
         let install_cmds = &["npm install -g @block/goose-acp"];
-        let plan = plan_adapter_install("goose", Some(&bin), install_cmds);
+        let plan = plan_adapter_install("goose", Some(&bin), install_cmds, None);
         assert!(
             plan.is_none(),
             "non-codex runtime with resolved binary must not trigger reinstall"
@@ -1296,6 +1458,45 @@ mod tests {
         );
     }
 
+    /// On Windows, `install_shell_command` must set PATH to a value that
+    /// includes the inherited process PATH, so node/npm are visible inside
+    /// the install shell even when no managed Node runtime is present.
+    #[cfg(windows)]
+    #[test]
+    fn test_install_shell_command_includes_process_path_on_windows() {
+        let _guard = crate::managed_agents::lock_path_mutex();
+        let previous = std::env::var_os("PATH");
+        // Plant a sentinel in the process PATH that the test can detect.
+        let sentinel = r"C:\TestSentinel\bin";
+        std::env::set_var("PATH", sentinel);
+
+        let result = super::install_shell_command("echo test");
+
+        match previous {
+            Some(p) => std::env::set_var("PATH", p),
+            None => std::env::remove_var("PATH"),
+        }
+
+        let cmd = result.expect("install_shell_command must succeed on Windows with Git");
+        let path_value = cmd
+            .get_envs()
+            .find(|(key, _)| *key == "PATH")
+            .and_then(|(_, val)| val)
+            .map(|v| v.to_string_lossy().into_owned())
+            .expect("install_shell_command must always set a PATH env var on Windows");
+
+        // The sentinel (inherited process PATH) must appear in the composed PATH.
+        assert!(
+            path_value.contains(sentinel),
+            "install_shell_command PATH must include the inherited process PATH; got: {path_value}"
+        );
+        // The sentinel must appear LAST — managed Buzz dirs must have precedence.
+        assert!(
+            path_value.ends_with(sentinel),
+            "inherited process PATH must be appended LAST so managed dirs keep precedence; got: {path_value}"
+        );
+    }
+
     // ── Phase B: per-OS install commands ──────────────────────────────────────
 
     /// On non-Windows, cli_install_commands_for_os returns the default commands.
@@ -1310,17 +1511,6 @@ mod tests {
         );
     }
 
-    /// Goose install commands are the same on all platforms (script is Windows-aware).
-    #[test]
-    fn test_goose_install_commands_same_on_all_platforms() {
-        let goose = crate::managed_agents::known_acp_runtime_exact("goose").unwrap();
-        assert_eq!(
-            goose.cli_install_commands_for_os(),
-            goose.cli_install_commands,
-            "goose install commands must be identical across platforms"
-        );
-    }
-
     /// buzz-agent has no install commands on any platform.
     #[test]
     fn test_buzz_agent_has_no_install_commands() {
@@ -1328,6 +1518,186 @@ mod tests {
         assert!(
             buzz.cli_install_commands_for_os().is_empty(),
             "buzz-agent ships with the app — must never have install commands"
+        );
+    }
+
+    // ── PowerShell routing ────────────────────────────────────────────────────
+
+    /// Commands beginning with `powershell.exe` (any casing) must be identified
+    /// as PowerShell commands; all others must not.
+    #[cfg(windows)]
+    #[test]
+    fn test_is_powershell_command_detects_powershell_commands() {
+        assert!(
+            super::is_powershell_command(
+                r#"powershell.exe -NoProfile -NonInteractive -Command "irm https://chatgpt.com/codex/install.ps1 | iex""#
+            ),
+            "canonical codex install command must be detected as PowerShell"
+        );
+        assert!(
+            super::is_powershell_command("POWERSHELL.EXE -Command foo"),
+            "is_powershell_command must be case-insensitive"
+        );
+        assert!(
+            !super::is_powershell_command("npm install -g @agentclientprotocol/claude-agent-acp"),
+            "npm commands must NOT be detected as PowerShell"
+        );
+        assert!(
+            !super::is_powershell_command(r"curl -fsSL https://example.com | bash"),
+            "bash pipe commands must NOT be detected as PowerShell"
+        );
+        assert!(
+            !super::is_powershell_command(""),
+            "empty string must not be detected as PowerShell"
+        );
+    }
+
+    /// On Windows, `build_install_command` must return a `Command` whose
+    /// program is `powershell.exe` (not `bash.exe`) for PowerShell commands.
+    #[cfg(windows)]
+    #[test]
+    fn test_build_install_command_uses_powershell_natively_on_windows() {
+        let ps_command = r#"powershell.exe -NoProfile -NonInteractive -Command "irm https://chatgpt.com/codex/install.ps1 | iex""#;
+        let result = super::build_install_command(ps_command);
+        assert!(
+            result.is_ok(),
+            "build_install_command must succeed for a PowerShell command; got: {:?}",
+            result.err()
+        );
+        let cmd = result.unwrap();
+        let program = cmd.get_program().to_string_lossy().to_lowercase();
+        assert!(
+            program.contains("powershell"),
+            "PowerShell install command must use powershell.exe, not bash; got: {program}"
+        );
+        assert!(
+            !program.contains("bash"),
+            "PowerShell install command must NOT go through bash; got: {program}"
+        );
+    }
+
+    /// On Windows, `build_install_command` must route non-PowerShell commands
+    /// through Git Bash (program must be bash.exe).
+    #[cfg(windows)]
+    #[test]
+    fn test_build_install_command_uses_git_bash_for_non_powershell_on_windows() {
+        let npm_command = "npm install -g @agentclientprotocol/claude-agent-acp";
+        let result = super::build_install_command(npm_command);
+        assert!(
+            result.is_ok(),
+            "build_install_command must succeed for an npm command on Windows with Git; got: {:?}",
+            result.err()
+        );
+        let cmd = result.unwrap();
+        let program = cmd.get_program().to_string_lossy().to_lowercase();
+        assert!(
+            program.contains("bash"),
+            "non-PowerShell install command must still use bash.exe on Windows; got: {program}"
+        );
+    }
+
+    /// On non-Windows, `build_install_command` must always use the Unix shell
+    /// (zsh or bash), never powershell.exe.
+    #[cfg(not(windows))]
+    #[test]
+    fn test_build_install_command_uses_unix_shell_on_non_windows() {
+        let command = r"curl -fsSL https://example.com/install.sh | bash";
+        let result = super::build_install_command(command);
+        assert!(
+            result.is_ok(),
+            "build_install_command must succeed on Unix; got: {:?}",
+            result.err()
+        );
+        let cmd = result.unwrap();
+        let program = cmd.get_program().to_string_lossy();
+        assert!(
+            program.contains("bash") || program.contains("zsh"),
+            "Unix install command must use bash or zsh, got: {program}"
+        );
+    }
+
+    /// On Windows, `install_powershell_command` must build an exact argv:
+    /// flags before `-Command` forwarded, body unquoted (outer catalog quotes stripped),
+    /// no bash flags, and `-Command` found on token boundary not as substring.
+    #[cfg(windows)]
+    #[test]
+    fn test_powershell_command_argv_exact() {
+        // Catalog format: body wrapped in one outer double-quote pair (Bash-layer serialization).
+        let body = "irm https://chatgpt.com/codex/install.ps1 | iex";
+        let cmd = super::install_powershell_command(&format!(
+            r#"powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "{body}""#
+        ));
+        assert_eq!(
+            cmd.get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            vec!["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", body],
+            "argv must be exact with outer quotes stripped"
+        );
+    }
+
+    /// Token that merely contains `-command` as a substring must not be treated
+    /// as the `-Command` boundary; only an exact token match (case-insensitive) counts.
+    #[cfg(windows)]
+    #[test]
+    fn test_powershell_command_token_boundary_not_substring() {
+        let cmd = super::install_powershell_command(
+            r#"powershell.exe -x-command-y -Command "echo hello""#,
+        );
+        assert_eq!(
+            cmd.get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            vec!["-x-command-y", "-Command", "echo hello"],
+            "substring must not consume -Command boundary early"
+        );
+    }
+
+    /// Claude Code catalog command (discovery.rs:107) must dequote to the bare pipeline.
+    #[cfg(windows)]
+    #[test]
+    fn test_powershell_command_claude_catalog_dequoted() {
+        let cmd = super::install_powershell_command(
+            r#"powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "irm https://claude.ai/install.ps1 | iex""#,
+        );
+        assert_eq!(
+            cmd.get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            vec![
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                "irm https://claude.ai/install.ps1 | iex",
+            ],
+            "Claude catalog command must be dequoted correctly"
+        );
+    }
+
+    /// Goose Windows catalog command (discovery.rs:78) must dequote to a bare pipeline
+    /// with a literal `$env:` prefix — no backslash before the dollar sign.
+    /// This proves the `\$` → `$` escape fix: post-#2750 the spawn is native and
+    /// PowerShell receives the body verbatim, so a residual `\` would produce
+    /// `\$env:CONFIGURE='false'` which is a malformed statement.
+    #[cfg(windows)]
+    #[test]
+    fn test_powershell_command_goose_catalog_dequoted() {
+        let cmd = super::install_powershell_command(
+            r#"powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$env:CONFIGURE='false'; irm https://raw.githubusercontent.com/aaif-goose/goose/main/download_cli.ps1 | iex""#,
+        );
+        assert_eq!(
+            cmd.get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            vec![
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                "$env:CONFIGURE='false'; irm https://raw.githubusercontent.com/aaif-goose/goose/main/download_cli.ps1 | iex",
+            ],
+            "Goose catalog command must dequote with bare $env: (no backslash before $)"
         );
     }
 

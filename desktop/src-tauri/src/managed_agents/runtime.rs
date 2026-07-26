@@ -16,6 +16,9 @@ use crate::{
 
 mod path;
 pub(in crate::managed_agents) use path::build_augmented_path;
+pub(crate) use path::compose_path_entries;
+pub(crate) use path::should_skip_claude_executable;
+pub(crate) use path::should_use_inherited;
 
 mod stop;
 pub(crate) use stop::managed_agent_runtime_keys;
@@ -852,7 +855,14 @@ pub(crate) fn collect_same_instance_orphans(
 
 /// Binary names for the Buzz desktop/Tauri process. Used by dead-instance
 /// detection to confirm the owning desktop is still alive.
-const DESKTOP_BINARY_NAMES: &[&str] = &["Buzz", "buzz-desktop", "buzz_desktop"];
+const DESKTOP_BINARY_NAMES: &[&str] = &[
+    "Buzz",
+    "buzz-desktop",
+    "buzz_desktop",
+    // Linux limits /proc/<pid>/comm to 15 visible bytes, truncating the
+    // AppImage shim's real executable name, `buzz-desktop.bin`.
+    "buzz-desktop.bi",
+];
 
 /// Check if a process name matches a known Buzz desktop binary.
 fn is_desktop_binary(name: &str) -> bool {
@@ -1602,6 +1612,15 @@ pub(crate) fn configure_runtime_cli(
         return;
     }
     if let Some(cli_path) = runtime.underlying_cli.and_then(resolve_command) {
+        // On Windows, `.cmd` and `.bat` files are batch shims — they cannot be
+        // passed directly to `CreateProcess` and cause EINVAL when the Claude
+        // adapter tries to spawn them (issue #2397). Skip setting
+        // `CLAUDE_CODE_EXECUTABLE` for shim paths so the adapter falls back to
+        // its own PATH lookup and finds the real binary instead.
+        // Non-Windows: `.cmd`/`.bat` are valid executables and must be assigned.
+        if should_skip_claude_executable(&cli_path, cfg!(windows)) {
+            return;
+        }
         command.env("CLAUDE_CODE_EXECUTABLE", cli_path);
     }
 }

@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import { EditorContent } from "@tiptap/react";
+import { ChevronDown } from "lucide-react";
 import { buildOutgoingMessage } from "@/features/messages/lib/imetaMediaMarkdown";
 import { useChannelLinks } from "@/features/messages/lib/useChannelLinks";
 import type { ChannelSuggestion } from "@/features/messages/lib/useChannelLinks";
@@ -20,6 +21,13 @@ import type { MentionSuggestion } from "@/features/messages/ui/MentionAutocomple
 import { MessageComposerToolbar } from "@/features/messages/ui/MessageComposerToolbar";
 import { Button } from "@/shared/ui/button";
 import { cn } from "@/shared/lib/cn";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuTrigger,
+} from "@/shared/ui/dropdown-menu";
 import type { ForumComposerProps } from "./ForumComposer.types";
 import { ForumComposerAutocompletes } from "./ForumComposerAutocompletes";
 import { ForumComposerCompactLayout } from "./ForumComposerCompactLayout";
@@ -35,7 +43,9 @@ export function ForumComposer({
   header,
   isSending,
   onCancel,
+  onSecondarySubmit,
   onSubmit,
+  secondarySubmitLabel,
   compact = false,
   autocompleteBelow = false,
   profiles,
@@ -47,6 +57,9 @@ export function ForumComposer({
   const [isCompactExpanded, setIsCompactExpanded] = React.useState(!compact);
   const [isEmojiPickerOpen, setIsEmojiPickerOpen] = React.useState(false);
   const [isFormattingOpen, setIsFormattingOpen] = React.useState(false);
+  const [submitMode, setSubmitMode] = React.useState<"primary" | "secondary">(
+    "primary",
+  );
 
   const handleFormattingToggle = React.useCallback((pressed: boolean) => {
     if (pressed) setIsEmojiPickerOpen(false);
@@ -70,10 +83,14 @@ export function ForumComposer({
   const isSendingRef = React.useRef(isSending);
   const isUploadingRef = React.useRef(media.isUploading);
   const onSubmitRef = React.useRef(onSubmit);
+  const onSecondarySubmitRef = React.useRef(onSecondarySubmit);
+  const submitModeRef = React.useRef(submitMode);
   disabledRef.current = disabled;
   isSendingRef.current = isSending;
   isUploadingRef.current = media.isUploading;
   onSubmitRef.current = onSubmit;
+  onSecondarySubmitRef.current = onSecondarySubmit;
+  submitModeRef.current = onSecondarySubmit ? submitMode : "primary";
 
   const isAutocompleteOpenRef = React.useRef(false);
   isAutocompleteOpenRef.current =
@@ -193,78 +210,90 @@ export function ForumComposer({
   ]);
 
   // ── Submit ──────────────────────────────────────────────────────────
-  const submitMessage = React.useCallback(() => {
-    const trimmed = contentRef.current.trim();
-    const currentPendingImeta = media.pendingImetaRef.current;
-    const hasMedia = currentPendingImeta.length > 0;
+  const submitMessage = React.useCallback(
+    (submitter = onSubmitRef.current) => {
+      const trimmed = contentRef.current.trim();
+      const currentPendingImeta = media.pendingImetaRef.current;
+      const hasMedia = currentPendingImeta.length > 0;
 
-    if (
-      (!trimmed && !hasMedia) ||
-      disabledRef.current ||
-      isSendingRef.current ||
-      isUploadingRef.current
-    ) {
-      return;
-    }
+      if (
+        (!trimmed && !hasMedia) ||
+        disabledRef.current ||
+        isSendingRef.current ||
+        isUploadingRef.current
+      ) {
+        return;
+      }
 
-    const pubkeys = mentions.extractMentionPubkeys(trimmed);
+      const pubkeys = mentions.extractMentionPubkeys(trimmed);
 
-    // Reuse the shared send-path builder so forum/notes posts emit the same
-    // body + imeta as chat: generic files become `[filename](url)` links with a
-    // `filename` imeta tag (FileCard renderer), images/video stay inline. Send
-    // semantics use `undefined` for "no attachments" (no imeta tags emitted).
-    const { content: finalContent, mediaTags } = buildOutgoingMessage(
-      trimmed,
-      currentPendingImeta,
+      // Reuse the shared send-path builder so forum/notes posts emit the same
+      // body + imeta as chat: generic files become `[filename](url)` links with a
+      // `filename` imeta tag (FileCard renderer), images/video stay inline. Send
+      // semantics use `undefined` for "no attachments" (no imeta tags emitted).
+      const { content: finalContent, mediaTags } = buildOutgoingMessage(
+        trimmed,
+        currentPendingImeta,
+      );
+
+      // Save draft state so we can restore on failure.
+      const savedContent = contentRef.current;
+      const savedImeta = [...currentPendingImeta];
+
+      setContent("");
+      contentRef.current = "";
+      richText.clearContent();
+      media.setPendingImeta([]);
+      mentions.clearMentions();
+      channelLinks.clearChannels();
+      setIsEmojiPickerOpen(false);
+
+      const result = submitter(finalContent, pubkeys, mediaTags);
+      const completeSubmission = () => {
+        setSubmitMode("primary");
+        if (compact) setIsCompactExpanded(false);
+      };
+
+      // If onSubmit returns a promise, restore draft on failure.
+      if (result && typeof result.then === "function") {
+        result.then(completeSubmission).catch(() => {
+          setContent(savedContent);
+          contentRef.current = savedContent;
+          richText.setContent(savedContent);
+          media.setPendingImeta(savedImeta);
+          if (compact) setIsCompactExpanded(true);
+        });
+      } else {
+        completeSubmission();
+      }
+    },
+    [
+      compact,
+      media.pendingImetaRef,
+      media.setPendingImeta,
+      mentions.extractMentionPubkeys,
+      mentions.clearMentions,
+      channelLinks.clearChannels,
+      richText.clearContent,
+      richText.setContent,
+    ],
+  );
+  const submitSelectedMessage = React.useCallback(() => {
+    const secondarySubmit = onSecondarySubmitRef.current;
+    submitMessage(
+      submitModeRef.current === "secondary" && secondarySubmit
+        ? secondarySubmit
+        : onSubmitRef.current,
     );
-
-    // Save draft state so we can restore on failure.
-    const savedContent = contentRef.current;
-    const savedImeta = [...currentPendingImeta];
-
-    setContent("");
-    contentRef.current = "";
-    richText.clearContent();
-    media.setPendingImeta([]);
-    mentions.clearMentions();
-    channelLinks.clearChannels();
-    setIsEmojiPickerOpen(false);
-
-    const result = onSubmitRef.current(finalContent, pubkeys, mediaTags);
-    const collapseCompactComposer = () => {
-      if (compact) setIsCompactExpanded(false);
-    };
-
-    // If onSubmit returns a promise, restore draft on failure.
-    if (result && typeof result.then === "function") {
-      result.then(collapseCompactComposer).catch(() => {
-        setContent(savedContent);
-        contentRef.current = savedContent;
-        richText.setContent(savedContent);
-        media.setPendingImeta(savedImeta);
-        if (compact) setIsCompactExpanded(true);
-      });
-    } else {
-      collapseCompactComposer();
-    }
-  }, [
-    compact,
-    media.pendingImetaRef,
-    media.setPendingImeta,
-    mentions.extractMentionPubkeys,
-    mentions.clearMentions,
-    channelLinks.clearChannels,
-    richText.clearContent,
-    richText.setContent,
-  ]);
-  submitMessageRef.current = submitMessage;
+  }, [submitMessage]);
+  submitMessageRef.current = submitSelectedMessage;
 
   const handleSubmit = React.useCallback(
     (event: React.FormEvent<HTMLFormElement>) => {
       event.preventDefault();
-      submitMessage();
+      submitSelectedMessage();
     },
-    [submitMessage],
+    [submitSelectedMessage],
   );
 
   // ── Keyboard handling ───────────────────────────────────────────────
@@ -479,16 +508,56 @@ export function ForumComposer({
               composerDisabled={disabled ?? false}
               editor={richText.editor}
               extraActions={
-                onCancel ? (
-                  <Button
-                    disabled={isSending}
-                    onClick={onCancel}
-                    size="sm"
-                    type="button"
-                    variant="ghost"
-                  >
-                    Cancel
-                  </Button>
+                onCancel || (onSecondarySubmit && secondarySubmitLabel) ? (
+                  <>
+                    {onCancel ? (
+                      <Button
+                        disabled={isSending}
+                        onClick={onCancel}
+                        size="sm"
+                        type="button"
+                        variant="ghost"
+                      >
+                        Cancel
+                      </Button>
+                    ) : null}
+                    {onSecondarySubmit && secondarySubmitLabel ? (
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button
+                            className={cn(
+                              submitMode === "secondary" &&
+                                "border-amber-500/40 text-amber-700 hover:bg-amber-500/10 hover:text-amber-800 dark:text-amber-400 dark:hover:text-amber-300",
+                            )}
+                            disabled={disabled || isSending}
+                            size="sm"
+                            type="button"
+                            variant="outline"
+                          >
+                            {submitMode === "secondary"
+                              ? secondarySubmitLabel
+                              : "Comment"}
+                            <ChevronDown className="h-3.5 w-3.5" />
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end">
+                          <DropdownMenuRadioGroup
+                            onValueChange={(value) =>
+                              setSubmitMode(value as "primary" | "secondary")
+                            }
+                            value={submitMode}
+                          >
+                            <DropdownMenuRadioItem value="primary">
+                              Comment
+                            </DropdownMenuRadioItem>
+                            <DropdownMenuRadioItem value="secondary">
+                              {secondarySubmitLabel}
+                            </DropdownMenuRadioItem>
+                          </DropdownMenuRadioGroup>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    ) : null}
+                  </>
                 ) : undefined
               }
               formattingDisabled={disabled ?? false}

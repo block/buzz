@@ -60,6 +60,10 @@ test.describe("community rail", () => {
     // The active community is marked via aria-current.
     await expect(buttonA).toHaveAttribute("aria-current", "true");
     await expect(buttonB).not.toHaveAttribute("aria-current", "true");
+    await expect(buttonA.locator(":scope > span").first()).toHaveCSS(
+      "opacity",
+      "1",
+    );
 
     // The add-community affordance lives at the bottom of the rail.
     await expect(page.getByTestId("community-rail-add")).toBeVisible();
@@ -81,6 +85,7 @@ test.describe("community rail", () => {
     await expect(
       page.getByRole("dialog", { name: "Edit Community" }),
     ).toBeVisible();
+    await expect(page.getByTestId("community-icon-settings")).toBeVisible();
     await page.mouse.click(0, 0);
 
     await expect(
@@ -97,6 +102,185 @@ test.describe("community rail", () => {
       .toBe(COMMUNITY_B.id);
   });
 
+  test("lets community admins open invite controls from the rail", async ({
+    page,
+  }) => {
+    await installMockBridge(
+      page,
+      {
+        relayRequiresMembership: true,
+        relayRole: "admin",
+      },
+      { skipCommunitySeed: true },
+    );
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.goto("/");
+
+    await page
+      .getByTestId(`community-rail-button-${COMMUNITY_A.id}`)
+      .click({ button: "right" });
+    const railMenu = page.getByTestId(`community-rail-menu-${COMMUNITY_A.id}`);
+    await expect(railMenu.getByRole("separator")).toHaveCount(1);
+    await expect(railMenu.getByRole("menuitem")).toHaveText([
+      "Mark all as read",
+      "Copy community URL",
+      "Invite to community",
+      "Community settings",
+    ]);
+    await page.getByRole("menuitem", { name: "Invite to community" }).click();
+
+    await expect(page).toHaveURL(/#\/settings\?section=community-members$/);
+    await expect(page.getByTestId("settings-community-members")).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: "Invites", exact: true }),
+    ).toBeVisible();
+    await expect(page.getByTestId("community-icon-settings")).toHaveCount(0);
+    await expect(
+      page.getByTestId("community-invite-dialog-trigger"),
+    ).toBeVisible();
+    await expect(page.getByTestId("community-invite-email-field")).toHaveCount(
+      0,
+    );
+    await page.getByTestId("community-invite-dialog-trigger").click();
+    await expect(page.getByTestId("community-invite-email-field")).toHaveCount(
+      0,
+    );
+    await expect(page.getByTestId("copy-invite-link")).toBeVisible();
+  });
+
+  test("hides rail invite controls from community members", async ({
+    page,
+  }) => {
+    await installMockBridge(
+      page,
+      {
+        relayRequiresMembership: true,
+        relayRole: "member",
+      },
+      { skipCommunitySeed: true },
+    );
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.goto("/");
+
+    await page
+      .getByTestId(`community-rail-button-${COMMUNITY_A.id}`)
+      .click({ button: "right" });
+
+    await expect(
+      page.getByRole("menuitem", { name: "Invite to community" }),
+    ).toHaveCount(0);
+    await page.getByRole("menuitem", { name: "Community settings" }).click();
+    await expect(
+      page.getByRole("dialog", { name: "Edit Community" }),
+    ).toBeVisible();
+    await expect(page.getByTestId("community-icon-settings")).toHaveCount(0);
+  });
+
+  test("shows active community actions instead of another switcher in the profile menu", async ({
+    page,
+  }) => {
+    await installMockBridge(
+      page,
+      {
+        relayRequiresMembership: true,
+        relayRole: "admin",
+      },
+      { skipCommunitySeed: true },
+    );
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.goto("/");
+
+    await page.getByTestId("sidebar-profile-avatar-button").click();
+    const communityTrigger = page.getByTestId("community-switcher");
+    const feedback = page.getByTestId("profile-popover-send-feedback");
+    const settings = page.getByTestId("profile-popover-settings");
+    const communityBox = await communityTrigger.boundingBox();
+    const feedbackBox = await feedback.boundingBox();
+    const settingsBox = await settings.boundingBox();
+    expect(communityBox).not.toBeNull();
+    expect(feedbackBox).not.toBeNull();
+    expect(settingsBox).not.toBeNull();
+    expect(communityBox?.y).toBeLessThan(feedbackBox?.y ?? 0);
+    expect(feedbackBox?.y).toBeLessThan(settingsBox?.y ?? 0);
+
+    await page.getByTestId("community-switcher").click();
+
+    const menu = page.getByRole("menu", { name: "Community actions" });
+    await expect(menu).toBeVisible();
+    await expect(
+      menu.getByRole("menuitem", { name: "Copy community URL" }),
+    ).toBeVisible();
+    await expect(
+      menu.getByRole("menuitem", { name: "Copy community URL" }),
+    ).not.toBeFocused();
+    await expect(
+      menu.getByRole("menuitem", { name: "Invite to community" }),
+    ).toBeVisible();
+    await expect(
+      menu.getByRole("menuitem", { name: "Community settings" }),
+    ).toBeVisible();
+    await expect(
+      menu.getByRole("menuitem", { name: "Add a community" }),
+    ).toBeVisible();
+    await expect(menu.getByRole("separator")).toHaveCount(1);
+    await expect(menu.getByRole("menuitem", { name: "Alpha" })).toHaveCount(0);
+    await expect(menu.getByRole("menuitem", { name: "Bravo" })).toHaveCount(0);
+
+    await menu.getByRole("menuitem", { name: "Invite to community" }).click();
+    await expect(page).toHaveURL(/#\/settings\?section=community-members$/);
+  });
+
+  test("keeps profile community actions available to members without invite access", async ({
+    page,
+  }) => {
+    await page
+      .context()
+      .grantPermissions(["clipboard-read", "clipboard-write"], {
+        origin: "http://127.0.0.1:4173",
+      });
+    await installMockBridge(
+      page,
+      {
+        relayRequiresMembership: true,
+        relayRole: "member",
+      },
+      { skipCommunitySeed: true },
+    );
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.goto("/");
+
+    await page.getByTestId("sidebar-profile-avatar-button").click();
+    await page.getByTestId("community-switcher").click();
+
+    const menu = page.getByRole("menu", { name: "Community actions" });
+    await expect(
+      menu.getByRole("menuitem", { name: "Invite to community" }),
+    ).toHaveCount(0);
+    await expect(
+      menu.getByRole("menuitem", { name: "Copy community URL" }),
+    ).toBeVisible();
+    await expect(
+      menu.getByRole("menuitem", { name: "Add a community" }),
+    ).toBeVisible();
+
+    await menu.getByRole("menuitem", { name: "Copy community URL" }).click();
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          return (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).findLast(
+            (entry) => entry.command === "copy_text_to_clipboard",
+          )?.payload;
+        }),
+      )
+      .toEqual({ text: COMMUNITY_A.relayUrl });
+
+    await page.getByTestId("community-switcher").click();
+    await menu.getByRole("menuitem", { name: "Community settings" }).click();
+    await expect(
+      page.getByRole("dialog", { name: "Edit Community" }),
+    ).toBeVisible();
+  });
+
   test("switches the active community on click", async ({ page }) => {
     await installMockBridge(page, undefined, { skipCommunitySeed: true });
     await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
@@ -107,6 +291,278 @@ test.describe("community rail", () => {
 
     // Switching persists the newly active community id (the app then remounts
     // against that relay via the existing community-init path).
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          window.localStorage.getItem("buzz-active-community-id"),
+        ),
+      )
+      .toBe(COMMUNITY_B.id);
+  });
+
+  test("restores the last Home or channel destination per community", async ({
+    page,
+  }) => {
+    await installMockBridge(page, undefined, { skipCommunitySeed: true });
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.goto("/");
+
+    await page.getByTestId("channel-general").click();
+    await expect(page).toHaveURL(/#\/channels\//);
+    const generalUrl = page.url();
+
+    await page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`).click();
+    await expect(page).toHaveURL(/#\/$/);
+
+    await page.getByTestId("channel-random").click();
+    await expect(page).toHaveURL(/#\/channels\//);
+    const randomUrl = page.url();
+
+    await page.getByTestId(`community-rail-button-${COMMUNITY_A.id}`).click();
+    await expect(page).toHaveURL(generalUrl);
+
+    await page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`).click();
+    await expect(page).toHaveURL(randomUrl);
+
+    await page.getByRole("button", { name: "Inbox" }).click();
+    await expect(page).toHaveURL(/#\/$/);
+    await page.getByTestId(`community-rail-button-${COMMUNITY_A.id}`).click();
+    await expect(page).toHaveURL(generalUrl);
+    await page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`).click();
+    await expect(page).toHaveURL(/#\/$/);
+  });
+
+  test("enters a remembered channel before live validation completes", async ({
+    page,
+  }) => {
+    await installMockBridge(page, undefined, { skipCommunitySeed: true });
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.goto("/");
+    await expect(page.getByTestId("app-sidebar")).toBeVisible();
+    const rememberedChannelId = await page.evaluate((communityId) => {
+      const source = window.localStorage.getItem(
+        "buzz-channels.v1:ws://localhost:3000",
+      );
+      if (!source) throw new Error("missing source channel snapshot");
+      const snapshot = JSON.parse(source) as {
+        channels: Array<{ id: string; name: string }>;
+      };
+      const generalChannel = snapshot.channels.find(
+        (channel) => channel.name === "general",
+      );
+      if (!generalChannel) throw new Error("missing general channel snapshot");
+      window.localStorage.setItem(
+        "buzz-channels.v1:ws://localhost:3001",
+        source,
+      );
+      window.localStorage.setItem(
+        "buzz-community-destinations",
+        JSON.stringify({
+          [communityId]: {
+            kind: "channel",
+            channelId: generalChannel.id,
+          },
+        }),
+      );
+      return generalChannel.id;
+    }, COMMUNITY_B.id);
+
+    await page.evaluate(() => {
+      const testWindow = window as typeof window & {
+        __BUZZ_E2E__?: { mock?: { channelsReadDelayMs?: number } };
+      };
+      if (!testWindow.__BUZZ_E2E__) {
+        throw new Error("missing E2E config");
+      }
+      testWindow.__BUZZ_E2E__.mock = {
+        ...testWindow.__BUZZ_E2E__.mock,
+        channelsReadDelayMs: 800,
+      };
+    });
+    await page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`).click();
+
+    await expect(page).toHaveURL(
+      new RegExp(`#/channels/${rememberedChannelId}$`),
+      { timeout: 700 },
+    );
+    await expect(page.getByTestId("message-timeline")).toBeVisible({
+      timeout: 700,
+    });
+  });
+
+  test("clears a remembered channel that is unavailable after switching", async ({
+    page,
+  }) => {
+    await installMockBridge(page, undefined, { skipCommunitySeed: true });
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.addInitScript((communityId) => {
+      window.localStorage.setItem(
+        "buzz-community-destinations",
+        JSON.stringify({
+          [communityId]: { kind: "channel", channelId: "missing-channel" },
+        }),
+      );
+    }, COMMUNITY_B.id);
+
+    await page.goto("/");
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          window.localStorage.getItem("buzz-channels.v1:ws://localhost:3000"),
+        ),
+      )
+      .not.toBeNull();
+    await page.evaluate(() => {
+      const source = window.localStorage.getItem(
+        "buzz-channels.v1:ws://localhost:3000",
+      );
+      if (!source) throw new Error("missing source channel snapshot");
+      const snapshot = JSON.parse(source);
+      snapshot.channels = snapshot.channels.map(
+        (channel: Record<string, unknown>, index: number) =>
+          index === 0 ? { ...channel, id: "missing-channel" } : channel,
+      );
+      window.localStorage.setItem(
+        "buzz-channels.v1:ws://localhost:3001",
+        JSON.stringify(snapshot),
+      );
+    });
+    await page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`).click();
+
+    await expect(page).not.toHaveURL(/#\/channels\//);
+    await expect
+      .poll(() =>
+        page.evaluate((communityId) => {
+          const raw = window.localStorage.getItem(
+            "buzz-community-destinations",
+          );
+          if (!raw) return null;
+          return JSON.parse(raw)[communityId];
+        }, COMMUNITY_B.id),
+      )
+      .toEqual({ kind: "home" });
+  });
+
+  test("does not repair a remembered channel until live validation succeeds", async ({
+    page,
+  }) => {
+    await installMockBridge(
+      page,
+      {
+        channelsReadDelayMs: 300,
+        channelsReadErrors: [null, "temporary channel read failure"],
+      },
+      { skipCommunitySeed: true },
+    );
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.addInitScript((communityId) => {
+      window.localStorage.setItem(
+        "buzz-community-destinations",
+        JSON.stringify({
+          [communityId]: { kind: "channel", channelId: "general" },
+        }),
+      );
+    }, COMMUNITY_B.id);
+    await page.goto("/");
+    await expect(page.getByTestId("app-sidebar")).toBeVisible();
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          window.localStorage.getItem("buzz-channels.v1:ws://localhost:3000"),
+        ),
+      )
+      .not.toBeNull();
+    await page.evaluate(() => {
+      const source = window.localStorage.getItem(
+        "buzz-channels.v1:ws://localhost:3000",
+      );
+      if (!source) throw new Error("missing source channel snapshot");
+      const snapshot = JSON.parse(source);
+      snapshot.channels = snapshot.channels.filter(
+        (channel: { id: string }) => channel.id !== "general",
+      );
+      window.localStorage.setItem(
+        "buzz-channels.v1:ws://localhost:3001",
+        JSON.stringify(snapshot),
+      );
+    });
+
+    await page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`).click();
+    await expect(page).toHaveURL(/#\/channels\/general$/);
+    await expect
+      .poll(() =>
+        page.evaluate((communityId) => {
+          const raw = window.localStorage.getItem(
+            "buzz-community-destinations",
+          );
+          return raw ? JSON.parse(raw)[communityId] : null;
+        }, COMMUNITY_B.id),
+      )
+      .toEqual({ kind: "channel", channelId: "general" });
+    await page.waitForTimeout(400);
+    await expect
+      .poll(() =>
+        page.evaluate((communityId) => {
+          const raw = window.localStorage.getItem(
+            "buzz-community-destinations",
+          );
+          return raw ? JSON.parse(raw)[communityId] : null;
+        }, COMMUNITY_B.id),
+      )
+      .toEqual({ kind: "channel", channelId: "general" });
+
+    await expect(page.getByTestId("channel-general")).toBeVisible();
+    await expect
+      .poll(() =>
+        page.evaluate((communityId) => {
+          const raw = window.localStorage.getItem(
+            "buzz-community-destinations",
+          );
+          return raw ? JSON.parse(raw)[communityId] : null;
+        }, COMMUNITY_B.id),
+      )
+      .toEqual({ kind: "channel", channelId: "general" });
+  });
+
+  test("does not restore a remembered destination on cold boot", async ({
+    page,
+  }) => {
+    await installMockBridge(page, undefined, { skipCommunitySeed: true });
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.addInitScript((communityId) => {
+      window.localStorage.setItem(
+        "buzz-community-destinations",
+        JSON.stringify({
+          [communityId]: { kind: "channel", channelId: "general" },
+        }),
+      );
+    }, COMMUNITY_A.id);
+
+    await page.goto("/");
+
+    await expect(page).not.toHaveURL(/#\/channels\//);
+  });
+
+  test("removing the active community restores the fallback destination", async ({
+    page,
+  }) => {
+    await installMockBridge(page, undefined, { skipCommunitySeed: true });
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.goto("/");
+
+    await page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`).click();
+    await page.getByTestId("channel-random").click();
+    const randomUrl = page.url();
+    await page.getByTestId(`community-rail-button-${COMMUNITY_A.id}`).click();
+    await page.getByTestId("channel-general").click();
+
+    await page
+      .getByTestId(`community-rail-button-${COMMUNITY_A.id}`)
+      .click({ button: "right" });
+    await page.getByRole("menuitem", { name: "Community settings" }).click();
+    await page.getByRole("button", { name: "Remove Community" }).click();
+
+    await expect(page).toHaveURL(randomUrl);
     await expect
       .poll(() =>
         page.evaluate(() =>

@@ -221,8 +221,9 @@ release App because strict tag protection denies direct human creation. The App
 must be installed on `block/buzz`, have Contents write and Metadata read, and
 retain an `always` bypass on the immutable `mobile-v*` tag rules. It does not
 require GitHub Releases permissions, repository Administration permission, or a
-mobile release-branch ruleset. The publisher validates both the App token's
-effective `current_user_can_bypass` value and the exact ruleset bypass actor set.
+mobile release-branch ruleset. The publisher validates the App token's effective
+`current_user_can_bypass` value rather than reading the ruleset's hidden bypass
+actor list.
 
 ---
 

@@ -31,6 +31,7 @@ pub async fn cmd_open_pr(
     euc: Option<&str>,
     labels: &[String],
     to: &[String],
+    channel: Option<&str>,
     revision_of: Option<&str>,
 ) -> Result<(), CliError> {
     validate_hex64(repo_owner)?;
@@ -44,6 +45,7 @@ pub async fn cmd_open_pr(
     let meta = GitPullRequestMeta {
         euc: euc.map(str::to_string),
         recipients: to.to_vec(),
+        channel_id: channel.map(str::to_string),
         subject: subject.to_string(),
         labels: labels.to_vec(),
         commit: commit.to_string(),
@@ -227,6 +229,7 @@ pub async fn dispatch(cmd: crate::PrCmd, client: &BuzzClient) -> Result<(), CliE
             euc,
             label,
             to,
+            channel,
             revision_of,
         } => {
             cmd_open_pr(
@@ -243,6 +246,7 @@ pub async fn dispatch(cmd: crate::PrCmd, client: &BuzzClient) -> Result<(), CliE
                 euc.as_deref(),
                 &label,
                 &to,
+                channel.as_deref(),
                 revision_of.as_deref(),
             )
             .await

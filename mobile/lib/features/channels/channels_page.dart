@@ -1,8 +1,11 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' show pi;
+import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
+import 'package:flutter/physics.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -44,6 +47,8 @@ part 'channels_page/channel_tile.dart';
 part 'channels_page/sheets.dart';
 part 'channels_page/badges.dart';
 part 'channels_page/community.dart';
+part 'channels_page/quick_actions.dart';
+part 'channels_page/quick_actions_launcher.dart';
 
 enum _QuickAction { createChannel, newDm }
 
@@ -57,8 +62,6 @@ const double _kChannelLabelGap = Grid.xxs;
 const double _kChannelRowVerticalPadding = Grid.xxs + Grid.quarter;
 const double _kChannelLabelInset =
     _kChannelSectionInset + _kChannelLeadingWidth + _kChannelLabelGap;
-const double _kCommunityAvatarInset =
-    _kChannelSectionInset - Grid.quarter; // FrostedAppBar adds Grid.quarter.
 const Duration _kSectionExpandDuration = Duration(milliseconds: 220);
 const Duration _kSectionCollapseDuration = Duration(milliseconds: 170);
 const Curve _kSectionExpandCurve = Cubic(0.23, 1, 0.32, 1);
@@ -155,7 +158,6 @@ class ChannelsPage extends HookConsumerWidget {
       cachedChannels.value = data;
     }
     final channels = cachedChannels.value;
-
     Future<void> openChannel(Channel channel) async {
       if (!context.mounted) return;
       await Navigator.of(context).push(
@@ -163,42 +165,6 @@ class ChannelsPage extends HookConsumerWidget {
           builder: (_) => ChannelDetailPage(channel: channel),
         ),
       );
-    }
-
-    Future<void> openQuickActions() async {
-      final action = await showModalBottomSheet<_QuickAction>(
-        context: context,
-        showDragHandle: true,
-        builder: (_) => const _QuickActionsSheet(),
-      );
-
-      if (!context.mounted || action == null) {
-        return;
-      }
-
-      switch (action) {
-        case _QuickAction.createChannel:
-          final created = await showModalBottomSheet<Channel>(
-            context: context,
-            isScrollControlled: true,
-            showDragHandle: true,
-            builder: (_) => const _CreateChannelSheet(channelType: 'stream'),
-          );
-          if (created != null && context.mounted) {
-            await openChannel(created);
-          }
-        case _QuickAction.newDm:
-          final opened = await showModalBottomSheet<Channel>(
-            context: context,
-            isScrollControlled: true,
-            showDragHandle: true,
-            builder: (_) =>
-                _NewDirectMessageSheet(currentPubkey: currentPubkey),
-          );
-          if (opened != null && context.mounted) {
-            await openChannel(opened);
-          }
-      }
     }
 
     // Only surface fetch errors while the relay is stably connected. During a
@@ -242,6 +208,7 @@ class ChannelsPage extends HookConsumerWidget {
 
     return FrostedScaffold(
       appBar: FrostedAppBar(
+        horizontalInset: _kChannelSectionInset,
         leading: _CommunityIndicator(
           onTap: () => showModalBottomSheet<void>(
             context: context,
@@ -256,17 +223,7 @@ class ChannelsPage extends HookConsumerWidget {
               MaterialPageRoute<void>(builder: (_) => const SettingsPage()),
             ),
           ),
-          const SizedBox(width: Grid.twelve + Grid.quarter),
         ],
-      ),
-      floatingActionButton: FloatingActionButton(
-        heroTag: 'channels-fab',
-        onPressed: openQuickActions,
-        tooltip: 'Create or start conversation',
-        backgroundColor: context.colors.primary,
-        foregroundColor: context.colors.onPrimary,
-        shape: const CircleBorder(),
-        child: const Icon(LucideIcons.plus),
       ),
       body: _ChannelsBody(
         channels: channels,

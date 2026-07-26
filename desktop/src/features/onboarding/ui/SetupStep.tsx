@@ -384,8 +384,11 @@ function runtimeDetailText(runtime: AcpRuntimeCatalogEntry): string {
   if (runtime.availability === "adapter_outdated") {
     return "ACP adapter detected but outdated — reinstall required.";
   }
-  if (runtime.availability === "cli_missing") {
-    return "ACP adapter detected; CLI missing.";
+  if (
+    runtime.availability === "cli_missing" ||
+    runtime.availability === "not_installed"
+  ) {
+    return "CLI not detected; the desktop app alone isn’t enough.";
   }
   return "";
 }
@@ -463,18 +466,55 @@ function RuntimeAuthError({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
 }
 
 function RuntimeCard({
-  installError,
-  isInstalling,
-  onInstall,
+  installResults,
+  onInstallResultsChange,
   runtime,
 }: {
-  installError: string | null;
-  isInstalling: boolean;
-  onInstall: () => void;
+  installResults: InstallResultsState;
+  onInstallResultsChange: React.Dispatch<
+    React.SetStateAction<InstallResultsState>
+  >;
   runtime: AcpRuntimeCatalogEntry;
 }) {
+  // Each card owns its own mutation instance so concurrent installs on
+  // different cards each track their own isPending state and callbacks
+  // independently (react-query v5 per-mutate callbacks only fire for the
+  // latest mutate() call on a shared instance, silently dropping earlier ones).
+  const installMutation = useInstallAcpRuntimeMutation();
+  const installError = installResults[runtime.id]?.error ?? null;
+  const isInstalling = installMutation.isPending;
   const isAvailable = runtime.availability === "available";
   const isReady = runtimeIsReadyForOnboarding(runtime);
+
+  function handleInstall() {
+    onInstallResultsChange((current) => ({
+      ...current,
+      [runtime.id]: { error: null, success: false },
+    }));
+
+    installMutation.mutate(runtime.id, {
+      onSuccess: (result) => {
+        onInstallResultsChange((current) => ({
+          ...current,
+          [runtime.id]: result.success
+            ? { error: null, success: true }
+            : {
+                error: getInstallErrorMessage(result.steps),
+                success: false,
+              },
+        }));
+      },
+      onError: (error) => {
+        onInstallResultsChange((current) => ({
+          ...current,
+          [runtime.id]: {
+            error: error instanceof Error ? error.message : "Install failed.",
+            success: false,
+          },
+        }));
+      },
+    });
+  }
 
   return (
     <Card
@@ -499,7 +539,7 @@ function RuntimeCard({
         <RuntimeStatus
           installError={installError}
           isInstalling={isInstalling}
-          onInstall={onInstall}
+          onInstall={handleInstall}
           runtime={runtime}
         />
         {!isAvailable && runtimeDetailText(runtime) ? (
@@ -517,7 +557,7 @@ function RuntimeCard({
       {installError ? (
         <RuntimeErrorTooltip
           className="absolute inset-x-3 bottom-2 flex min-w-0 items-center justify-center gap-1.5 overflow-hidden whitespace-nowrap text-xs leading-4 text-destructive"
-          detail="Installation couldn’t be completed. Try again."
+          detail={installError}
           label="Installation failed"
           showIcon
           testId={`onboarding-runtime-error-${runtime.id}`}
@@ -560,34 +600,6 @@ function RuntimeProvidersSection({
 }) {
   const { errorMessage, isChecking, items } = runtimeProviders;
   const orderedItems = getVisibleOnboardingRuntimes(items);
-  const installMutation = useInstallAcpRuntimeMutation();
-
-  function handleInstall(runtimeId: string) {
-    onInstallResultsChange((current) => ({
-      ...current,
-      [runtimeId]: { error: null, success: false },
-    }));
-
-    installMutation.mutate(runtimeId, {
-      onSuccess: (result) => {
-        onInstallResultsChange((current) => ({
-          ...current,
-          [runtimeId]: result.success
-            ? { error: null, success: true }
-            : { error: getInstallErrorMessage(result.steps), success: false },
-        }));
-      },
-      onError: (error) => {
-        onInstallResultsChange((current) => ({
-          ...current,
-          [runtimeId]: {
-            error: error instanceof Error ? error.message : "Install failed.",
-            success: false,
-          },
-        }));
-      },
-    });
-  }
 
   return (
     <section className="flex min-h-full w-full flex-col items-center">
@@ -596,8 +608,8 @@ function RuntimeProvidersSection({
           Set up your agent harnesses
         </h1>
         <p className="mx-auto mt-3 max-w-[760px] text-sm leading-6 text-foreground/90">
-          Buzz detected the harnesses available on this machine. Install or sign
-          in to at least one to continue.
+          Buzz checks for command-line harnesses on this machine. Install the
+          CLI or sign in to at least one to continue.
         </p>
       </div>
 
@@ -606,13 +618,9 @@ function RuntimeProvidersSection({
           <div className="grid min-w-0 w-full max-w-[592px] grid-cols-1 gap-4 md:grid-cols-2">
             {orderedItems.map((runtime) => (
               <RuntimeCard
-                installError={installResults[runtime.id]?.error ?? null}
-                isInstalling={
-                  installMutation.isPending &&
-                  installMutation.variables === runtime.id
-                }
+                installResults={installResults}
                 key={runtime.id}
-                onInstall={() => handleInstall(runtime.id)}
+                onInstallResultsChange={onInstallResultsChange}
                 runtime={runtime}
               />
             ))}
@@ -624,8 +632,8 @@ function RuntimeProvidersSection({
             className="max-w-[560px] rounded-2xl bg-white/70 px-6 py-6 text-sm text-muted-foreground"
             data-testid="onboarding-acp-empty"
           >
-            No supported agent harnesses were detected yet. Install Claude Code
-            or Codex, then check again.
+            No supported command-line harnesses were detected yet. Install a
+            supported CLI, then check again.
           </p>
         )}
 
