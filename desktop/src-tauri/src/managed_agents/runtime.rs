@@ -46,6 +46,8 @@ pub(crate) const KNOWN_AGENT_BINARIES: &[&str] = &[
     "codex-acp",
     "codex_acp",
     "goose",
+    // Grok Build (native ACP via `grok agent stdio`).
+    "grok",
     // buzz-dev-mcp's multicall personalities (rg, tree, buzz,
     // git-credential-nostr, git-sign-nostr) are short-lived per-tool-call
     // invocations — not listed here.

@@ -47,7 +47,9 @@ export function resolveAgentReadiness(
   }
 
   if (
-    (preferredRuntime.id === "claude" || preferredRuntime.id === "codex") &&
+    (preferredRuntime.id === "claude" ||
+      preferredRuntime.id === "codex" ||
+      preferredRuntime.id === "grok") &&
     (preferredRuntime.authStatus.status === "logged_in" ||
       preferredRuntime.authStatus.status === "not_applicable")
   ) {

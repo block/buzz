@@ -247,6 +247,8 @@ impl AgentReadiness {
 /// * **claude**: a successful `claude auth status` probe.
 /// * **codex**: a successful `codex login status` probe (checks the codex
 ///   credential store — NOT `OPENAI_API_KEY`).
+/// * **grok**: no stable CLI auth-status probe yet — use `grok login` / `XAI_API_KEY`
+///   (auth_probe_args is None; status reports not_applicable when installed).
 /// * **unknown / custom command**: always `Ready` (no requirements known).
 ///
 /// Databricks note: `DATABRICKS_TOKEN` is `.unwrap_or_default()` in
