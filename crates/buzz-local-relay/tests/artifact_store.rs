@@ -131,3 +131,67 @@ async fn artifact_store_round_trips_and_fails_closed() {
     std::fs::remove_dir_all(&artifacts_dir).ok();
     server.abort();
 }
+
+#[tokio::test]
+async fn head_probe_reports_presence_without_transfer() {
+    let artifacts_dir =
+        std::env::temp_dir().join(format!("buzz-artifacts-head-{}", Uuid::new_v4()));
+    let relay = LocalRelay::open_full(
+        StorageMode::Ephemeral,
+        Arc::new(ReplicationDisabled),
+        Some(Arc::new(LocalIdentityAdapter::new())),
+        Some(artifacts_dir.clone()),
+    )
+    .await
+    .expect("relay opens");
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener binds");
+    let address = listener.local_addr().expect("address available");
+    let server = tokio::spawn(async move {
+        serve(listener, relay).await.expect("relay serves");
+    });
+    let keys = Keys::generate();
+    let client = reqwest::Client::new();
+    let content = b"walker existence probe".to_vec();
+    let hash = Sha256Hash::hash(&content).to_string();
+    let head_url = format!("http://{address}/artifacts/{hash}");
+
+    let absent = client
+        .head(&head_url)
+        .header(
+            "authorization",
+            nip98_header(&keys, HttpMethod::GET, &head_url, b""),
+        )
+        .send()
+        .await
+        .expect("absent probe completes");
+    assert_eq!(absent.status(), StatusCode::NOT_FOUND);
+
+    let upload_url = format!("http://{address}/artifacts");
+    client
+        .post(&upload_url)
+        .header(
+            "authorization",
+            nip98_header(&keys, HttpMethod::POST, &upload_url, &content),
+        )
+        .body(content.clone())
+        .send()
+        .await
+        .expect("upload completes");
+
+    let present = client
+        .head(&head_url)
+        .header(
+            "authorization",
+            nip98_header(&keys, HttpMethod::GET, &head_url, b""),
+        )
+        .send()
+        .await
+        .expect("present probe completes");
+    assert_eq!(present.status(), StatusCode::OK);
+    assert_eq!(present.bytes().await.expect("no body").len(), 0);
+
+    std::fs::remove_dir_all(&artifacts_dir).ok();
+    server.abort();
+}

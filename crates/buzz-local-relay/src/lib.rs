@@ -723,7 +723,10 @@ pub fn router(relay: Arc<LocalRelay>) -> Router {
             "/artifacts",
             post(artifact_upload).layer(DefaultBodyLimit::max(MAX_ARTIFACT_BYTES)),
         )
-        .route("/artifacts/{sha256}", get(artifact_fetch))
+        .route(
+            "/artifacts/{sha256}",
+            get(artifact_fetch).head(artifact_head),
+        )
         .with_state(relay)
 }
 
@@ -919,6 +922,42 @@ async fn artifact_upload(
         "size": body.len(),
         "url": format!("/artifacts/{hash}"),
     })))
+}
+
+/// Cheap existence probe: reports whether a blob is present without reading or
+/// transferring it, so a sync walker can skip content it already holds.
+async fn artifact_head(
+    State(relay): State<Arc<LocalRelay>>,
+    UrlPath(sha256): UrlPath<String>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let Some(dir) = relay.artifacts_dir.clone() else {
+        return Err(ApiError::NotFound("artifact store is not enabled".into()));
+    };
+    if sha256.len() != 64 || !sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(ApiError::BadRequest(
+            "artifact ID must be 64 hex characters".into(),
+        ));
+    }
+    let sha256 = sha256.to_ascii_lowercase();
+    // A HEAD is a metadata-only GET; the same GET-signed NIP-98 proof (URL +
+    // empty-payload binding) authorizes it, so callers need no HEAD variant.
+    authenticate_http_method(
+        &relay,
+        &headers,
+        "GET",
+        &format!("/artifacts/{sha256}"),
+        b"",
+    )
+    .await?;
+    if tokio::fs::try_exists(dir.join(&sha256))
+        .await
+        .map_err(StoreError::Io)?
+    {
+        Ok(StatusCode::OK.into_response())
+    } else {
+        Err(ApiError::NotFound(format!("unknown artifact {sha256}")))
+    }
 }
 
 /// Serves one blob by content hash, re-verifying the bytes before disclosure

@@ -51,7 +51,7 @@ intentional local-network experiment, not an internet deployment.
   `--require-auth` plus a `--peer-trust` binding for the source stream)
 - Content-addressed artifact store (`POST /artifacts`, `GET /artifacts/{sha256}`;
   NIP-98 payload binding doubles as an integrity commitment, and reads
-  re-verify content before disclosure)
+  re-verify content before disclosure; HEAD probes existence without transfer)
 - Optional laptop identity adapter (`--require-auth`):
   - NIP-42 challenge authentication for WebSocket connections
   - payload-bound NIP-98 authentication for HTTP writes, queries, and counts
