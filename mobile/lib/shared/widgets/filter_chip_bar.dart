@@ -107,21 +107,35 @@ class FilterChipBar<T> extends StatelessWidget {
     );
     final label = item.icon != null
         ? Row(
-            mainAxisSize: MainAxisSize.min,
+            mainAxisSize: fillWidth ? MainAxisSize.max : MainAxisSize.min,
+            mainAxisAlignment: MainAxisAlignment.center,
             children: [
               Icon(item.icon, size: 14, color: fg),
               const SizedBox(width: Grid.half),
-              Text(text, style: labelStyle),
+              if (fillWidth)
+                Flexible(
+                  child: Text(
+                    text,
+                    textAlign: TextAlign.center,
+                    style: labelStyle,
+                  ),
+                )
+              else
+                Text(text, style: labelStyle),
             ],
           )
-        : Text(text, style: labelStyle);
+        : Text(
+            text,
+            textAlign: fillWidth ? TextAlign.center : TextAlign.start,
+            style: labelStyle,
+          );
     final chip = FilterChip(
       selected: isSelected,
       showCheckmark: false,
       label: fillWidth
           ? SizedBox(
               width: double.infinity,
-              child: FittedBox(fit: BoxFit.scaleDown, child: label),
+              child: Center(child: label),
             )
           : label,
       onSelected: (_) => onSelected(item.id),
