@@ -132,10 +132,9 @@ fn behavior_defaults_match(definition: &AgentDefinition, record: &ManagedAgentRe
 }
 
 fn snapshot_field_matches(definition_value: Option<&str>, record_value: Option<&str>) -> bool {
-    definition_value
-        .filter(|value| !value.trim().is_empty())
-        .map(|value| record_value == Some(value))
-        .unwrap_or(true)
+    let definition_value = definition_value.filter(|value| !value.trim().is_empty());
+    let record_value = record_value.filter(|value| !value.trim().is_empty());
+    definition_value == record_value
 }
 
 fn folded_definition_matches(definition: &AgentDefinition, record: &ManagedAgentRecord) -> bool {
@@ -155,8 +154,8 @@ fn folded_definition_matches(definition: &AgentDefinition, record: &ManagedAgent
         // uploaded that avatar and stored its media URL. Snapshot application
         // never overwrites the instance avatar, so it is not an identity key.
         && runtime_matches(definition, record)
-        // Snapshot application preserves the record when either optional
-        // definition field is absent or blank.
+        // Definition-linked events omit these fields, so adoption is safe only
+        // when the definition carries the same effective values as the record.
         && snapshot_field_matches(definition.model.as_deref(), record.model.as_deref())
         && snapshot_field_matches(definition.provider.as_deref(), record.provider.as_deref())
         // Definition env is layered under per-instance overrides. Only adopt

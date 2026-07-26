@@ -241,7 +241,7 @@ fn backfill_does_not_adopt_when_definition_would_add_effective_env() {
 }
 
 #[test]
-fn backfill_adopts_when_optional_definition_config_is_absent() {
+fn backfill_manufactures_definition_when_folded_definition_omits_model_or_provider() {
     for (field, marker) in [("model", "c"), ("provider", "d")] {
         let dir = tempfile::tempdir().unwrap();
         let pubkey = marker.repeat(64);
@@ -263,13 +263,20 @@ fn backfill_adopts_when_optional_definition_config_is_absent() {
             "{field}"
         );
         let records = load_typed(dir.path());
-        assert_eq!(records.len(), 2, "{field}");
+        assert_eq!(records.len(), 3, "{field}");
         let instance = records.iter().find(|r| !r.pubkey.is_empty()).unwrap();
         assert_eq!(
             instance.persona_id.as_deref(),
-            Some(folded_slug.as_str()),
+            Some(pubkey.as_str()),
             "{field}"
         );
+        let manufactured = records
+            .iter()
+            .find(|record| record.slug.as_deref() == Some(pubkey.as_str()))
+            .and_then(ManagedAgentRecord::to_definition_view)
+            .unwrap();
+        assert_eq!(manufactured.model.as_deref(), Some("gpt-x"), "{field}");
+        assert_eq!(manufactured.provider.as_deref(), Some("openai"), "{field}");
     }
 }
 
