@@ -1,0 +1,23 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "buzz-portable-relay",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-25",
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "RELAY_NODES",
+        "class_name": "RelayNode"
+      }
+    ]
+  },
+  "exports": {
+    "RelayNode": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
+  },
+  "observability": {
+    "enabled": true
+  }
+}

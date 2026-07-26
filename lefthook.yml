@@ -70,3 +70,6 @@ pre-push:
     mobile-test:
       glob: ["mobile/**"]
       run: just mobile-test
+    cloudflare-check:
+      glob: ["cloudflare/**", "pnpm-lock.yaml"]
+      run: just cloudflare-check

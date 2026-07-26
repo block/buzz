@@ -27,6 +27,7 @@ jobs:
       desktop-rust: ${{ steps.filter.outputs.desktop-rust }}
       web: ${{ steps.filter.outputs.web }}
       mobile: ${{ steps.filter.outputs.mobile }}
+      cloudflare: ${{ steps.filter.outputs.cloudflare }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -68,6 +69,9 @@ jobs:
               - 'scripts/test-mobile-worktree-overrides.sh'
               - '.github/workflows/mobile-release-candidate.yml'
               - '.github/workflows/ci.yml'
+            cloudflare:
+              - 'cloudflare/**'
+              - 'pnpm-lock.yaml'
       - name: Release workflow source contract
         run: scripts/test-release-ref-contract.sh
       - name: Mobile release contract
@@ -766,6 +770,37 @@ jobs:
         run: just web-check
       - name: Web build
         run: just web-build
+      - name: Save pnpm store cache
+        if: github.event_name == 'push'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
+
+  cloudflare:
+    name: Cloudflare Portable Relay
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [changes]
+    if: github.event_name == 'push' || needs.changes.outputs.cloudflare == 'true'
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+      - name: Get pnpm store directory
+        id: pnpm-cache
+        run: echo "STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+      - name: Restore pnpm store cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: pnpm-${{ runner.os }}-
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Cloudflare adapter checks
+        run: just cloudflare-check
       - name: Save pnpm store cache
         if: github.event_name == 'push'
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5

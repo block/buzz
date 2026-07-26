@@ -92,7 +92,7 @@ build-release:
     cargo build --workspace --release
 
 # Run repo lint and formatting checks
-check: fmt-check clippy desktop-check desktop-tauri-fmt-check desktop-tauri-clippy web-check mobile-check
+check: fmt-check clippy desktop-check desktop-tauri-fmt-check desktop-tauri-clippy web-check mobile-check cloudflare-check
 
 # Format all Rust code
 fmt:
@@ -602,6 +602,14 @@ web-build:
 # Run web browser smoke tests
 web-e2e-smoke:
     cd {{web_dir}} && pnpm test:e2e:smoke
+
+# ─── Cloudflare ──────────────────────────────────────────────────────────────
+
+cloudflare_dir := "cloudflare/portable-relay"
+
+# Run Cloudflare portable-relay checks (binding types, typecheck, lint, tests)
+cloudflare-check:
+    cd {{cloudflare_dir}} && pnpm run check
 
 # ─── Mobile ──────────────────────────────────────────────────────────────────
 

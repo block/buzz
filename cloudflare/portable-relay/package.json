@@ -1,0 +1,25 @@
+{
+  "name": "@buzz/portable-relay-cloudflare",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "pnpm types:check && pnpm typecheck && pnpm lint && pnpm test",
+    "dev": "wrangler dev",
+    "lint": "biome check .",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit && tsc --project test/tsconfig.json --noEmit",
+    "types": "wrangler types src/worker-configuration.d.ts --include-runtime false",
+    "types:check": "wrangler types src/worker-configuration.d.ts --include-runtime false --check"
+  },
+  "dependencies": {
+    "nostr-tools": "^2.23.3"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.18.8",
+    "@cloudflare/workers-types": "5.20260724.1",
+    "typescript": "~6.0.0",
+    "vitest": "^4.1.10",
+    "wrangler": "^4.114.0"
+  }
+}

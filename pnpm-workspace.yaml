@@ -2,8 +2,10 @@ packages:
   - "desktop"
   - "web"
   - "admin-web"
+  - "cloudflare/portable-relay"
 allowBuilds:
   esbuild: true
+  workerd: true
 overrides:
   # Force a single copy of the dismissable-layer. Radix packages otherwise
   # resolve different versions (react-menu pulled 1.1.11, react-dialog 1.1.15),
