@@ -697,6 +697,7 @@ pub fn run() {
             discover_acp_auth_methods,
             decode_spawner_attestation,
             respond_to_spawner_attestation,
+            send_spawner_prompt_update,
             discover_acp_providers,
             discover_git_bash_prerequisite,
             install_acp_runtime,
