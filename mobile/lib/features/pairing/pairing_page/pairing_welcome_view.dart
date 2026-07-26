@@ -94,7 +94,7 @@ class _PairingWelcomeView extends StatelessWidget {
                                 )
                               : const Text('Scan a QR code'),
                         ),
-                        const SizedBox(height: Grid.twelve),
+                        const SizedBox(height: Grid.xxs),
                         TextButton(
                           style: _onboardingSecondaryButtonStyle,
                           onPressed: isBusy ? null : onTogglePairingCode,
@@ -238,8 +238,11 @@ final _inputBorder = OutlineInputBorder(
 );
 
 final _onboardingButtonStyle = FilledButton.styleFrom(
-  minimumSize: const Size(0, 38),
-  padding: const EdgeInsets.symmetric(horizontal: Grid.sm),
+  minimumSize: const Size(0, 48),
+  padding: const EdgeInsets.symmetric(
+    horizontal: Grid.lg,
+    vertical: Grid.twelve,
+  ),
   backgroundColor: _onboardingInk,
   foregroundColor: _onboardingCtaLabel,
   disabledBackgroundColor: _onboardingInk.withValues(alpha: 0.38),
@@ -248,8 +251,8 @@ final _onboardingButtonStyle = FilledButton.styleFrom(
 );
 
 final _onboardingSecondaryButtonStyle = TextButton.styleFrom(
-  minimumSize: const Size(0, 36),
-  padding: const EdgeInsets.symmetric(horizontal: Grid.gutter),
+  minimumSize: const Size(0, 44),
+  padding: const EdgeInsets.symmetric(horizontal: Grid.md, vertical: Grid.xxs),
   backgroundColor: _onboardingInk.withValues(alpha: 0.1),
   foregroundColor: _onboardingInk,
   disabledBackgroundColor: _onboardingInk.withValues(alpha: 0.05),
