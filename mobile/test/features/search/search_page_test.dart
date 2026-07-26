@@ -40,10 +40,20 @@ void main() {
 
     final emptyState = find.byKey(const Key('search-empty-state'));
     final message = find.text('Search messages, channels, and people');
+    final searchField = find.byKey(const Key('search-field-container'));
+    final searchFieldContext = tester.element(searchField);
+    final bodyStyle = Theme.of(searchFieldContext).textTheme.bodyMedium!;
+    final scaledLineHeight =
+        MediaQuery.textScalerOf(searchFieldContext).scale(bodyStyle.fontSize!) *
+        bodyStyle.height!;
 
     expect(
       find.descendant(of: emptyState, matching: find.byType(FittedBox)),
       findsNothing,
+    );
+    expect(
+      tester.getSize(searchField).height,
+      greaterThanOrEqualTo(scaledLineHeight + Grid.xxs * 2),
     );
     expect(tester.getSize(message).height, greaterThan(32));
     expect(tester.takeException(), isNull);

@@ -23,7 +23,22 @@ import 'search_provider.dart';
 
 enum _SearchFilter { all, messages, channels, people }
 
-const _searchHeaderBottomHeight = 48.0;
+const _searchFieldMinHeight = 36.0;
+const _searchFieldVerticalPadding = Grid.xxs;
+
+double _searchFieldHeight(BuildContext context) {
+  final style =
+      context.textTheme.bodyMedium ??
+      const TextStyle(fontSize: 14, height: 1.3);
+  final scaledFontSize = MediaQuery.textScalerOf(
+    context,
+  ).scale(style.fontSize ?? 14);
+  final contentHeight =
+      scaledFontSize * (style.height ?? 1) + _searchFieldVerticalPadding * 2;
+  return contentHeight > _searchFieldMinHeight
+      ? contentHeight
+      : _searchFieldMinHeight;
+}
 
 class SearchPage extends HookConsumerWidget {
   const SearchPage({super.key});
@@ -55,6 +70,8 @@ class SearchPage extends HookConsumerWidget {
       fontSize: 22,
       fontWeight: FontWeight.w600,
     );
+    final searchFieldHeight = _searchFieldHeight(context);
+    final searchHeaderBottomHeight = searchFieldHeight + Grid.twelve;
 
     return FrostedScaffold(
       // Keep the empty state centered in the page rather than the portion left
@@ -64,7 +81,7 @@ class SearchPage extends HookConsumerWidget {
         gradient: context.appColors.topSectionGradient,
         title: const Text('Search'),
         titleStyle: headerTitleStyle,
-        bottomHeight: _searchHeaderBottomHeight,
+        bottomHeight: searchHeaderBottomHeight,
         bottom: Padding(
           padding: const EdgeInsets.fromLTRB(
             Grid.gutter,
@@ -73,7 +90,8 @@ class SearchPage extends HookConsumerWidget {
             Grid.twelve,
           ),
           child: Container(
-            height: 36,
+            key: const Key('search-field-container'),
+            height: searchFieldHeight,
             padding: const EdgeInsets.symmetric(horizontal: Grid.half),
             decoration: BoxDecoration(
               color: searchSurfaceColor,
@@ -96,7 +114,9 @@ class SearchPage extends HookConsumerWidget {
                 enabledBorder: InputBorder.none,
                 focusedBorder: InputBorder.none,
                 isDense: true,
-                contentPadding: const EdgeInsets.symmetric(vertical: Grid.xxs),
+                contentPadding: const EdgeInsets.symmetric(
+                  vertical: _searchFieldVerticalPadding,
+                ),
               ),
               style: context.textTheme.bodyMedium,
               onChanged: (value) =>
@@ -121,7 +141,7 @@ class SearchPage extends HookConsumerWidget {
           SizedBox(
             height: frostedAppBarHeight(
               context,
-              bottomHeight: _searchHeaderBottomHeight,
+              bottomHeight: searchHeaderBottomHeight,
               titleStyle: headerTitleStyle,
             ),
           ),
