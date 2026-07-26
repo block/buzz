@@ -349,8 +349,9 @@ const MAX_CONSECUTIVE_TIMEOUTS: u32 = 5;
 ///
 /// 1. **channels** — if not `"all"`, the event's channel UUID must be in the list.
 /// 2. **kinds** — if non-empty, the event kind must be in the list.
-/// 3. **require_mention** — if `true` and the channel is not a confirmed DM, a
-///    `p` tag matching `agent_pubkey_hex` must exist. Tag kind is checked via
+/// 3. **require_mention** — if `true` and `mention_exempt` is false, a `p` tag
+///    matching `agent_pubkey_hex` must exist. The caller sets the exemption
+///    only for owner-authored DM events. Tag kind is checked via
 ///    `tag.as_slice()` for stable, library-independent access.
 /// 4. **filter** — if `Some`, the evalexpr expression must evaluate to `true`.
 ///
@@ -370,7 +371,7 @@ pub async fn match_event(
     channel_id: uuid::Uuid,
     rules: &[SubscriptionRule],
     agent_pubkey_hex: &str,
-    is_confirmed_dm: bool,
+    mention_exempt: bool,
 ) -> Option<MatchedRule> {
     let filter_ctx = FilterContext::from_event(event, channel_id);
 
@@ -388,7 +389,7 @@ pub async fn match_event(
         // 3. Mention check — look for a `p` tag whose first element equals
         //    agent_pubkey_hex. Uses tag.as_slice() for stable, library-independent
         //    access — avoids relying on the Display impl of tag kind.
-        if rule.require_mention && !is_confirmed_dm {
+        if rule.require_mention && !mention_exempt {
             let mentioned = event.tags.iter().any(|tag| {
                 let s = tag.as_slice();
                 s.first().map(|k| k.as_str()) == Some("p")
@@ -669,7 +670,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_match_event_confirmed_dm_does_not_require_mention() {
+    async fn test_match_event_owner_dm_does_not_require_mention() {
         let agent_pubkey = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
         let event = make_event(9, "hello");
         let channel_id = any_channel();
@@ -684,9 +685,31 @@ mod tests {
 
         let matched = match_event(&event, channel_id, &rules, agent_pubkey, true)
             .await
-            .expect("confirmed DM should not require a mention");
+            .expect("owner-authored DM should not require a mention");
 
         assert_eq!(matched.prompt_tag, "direct-message");
+    }
+
+    #[tokio::test]
+    async fn test_match_event_sibling_dm_still_requires_mention() {
+        let agent_pubkey = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+        let event = make_event(9, "hello from sibling");
+        let channel_id = any_channel();
+        let rules = vec![make_rule(
+            "mention-only",
+            ChannelScope::All("all".into()),
+            vec![],
+            true,
+            None,
+            Some("direct-message"),
+        )];
+
+        let matched = match_event(&event, channel_id, &rules, agent_pubkey, false).await;
+
+        assert!(
+            matched.is_none(),
+            "unmentioned sibling-agent DM must not trigger a turn"
+        );
     }
 
     #[tokio::test]

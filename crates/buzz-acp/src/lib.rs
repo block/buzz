@@ -257,6 +257,20 @@ async fn author_allowed(
     }
 }
 
+/// Whether this event may bypass a subscription rule's mention requirement.
+///
+/// Relay subscriptions are widened for all confirmed DMs so plain owner
+/// messages reach the harness. Per-event triggering is narrower: only the
+/// configured owner is exempt. Same-owner sibling agents must still mention
+/// the target agent, preserving the anti-loop invariant.
+fn owner_dm_mention_exempt(
+    is_confirmed_dm: bool,
+    author: &str,
+    owner_pubkey: Option<&str>,
+) -> bool {
+    is_confirmed_dm && owner_pubkey == Some(author)
+}
+
 /// Resolve whether `channel_id` is a DM, for the inbound author gate.
 ///
 /// Resolution order:
@@ -2163,8 +2177,8 @@ async fn tokio_main() -> Result<()> {
                             let is_confirmed_dm = resolved_channel_info
                                 .as_ref()
                                 .is_some_and(|info| info.channel_type == "dm");
+                            let author = buzz_event.event.pubkey.to_hex();
                             {
-                                let author = buzz_event.event.pubkey.to_hex();
                                 // DM hardening: resolve channel type (fail-closed
                                 // to DM) so allowlist/anyone modes cannot be
                                 // exercised by non-owner authors inside DMs.
@@ -2190,7 +2204,7 @@ async fn tokio_main() -> Result<()> {
                                 if !allowed {
                                     tracing::debug!(
                                         channel_id = %buzz_event.channel_id,
-                                        author = %buzz_event.event.pubkey.to_hex(),
+                                        author = %author,
                                         mode = %config.respond_to,
                                         is_dm,
                                         "inbound author gate — dropping event"
@@ -2199,12 +2213,17 @@ async fn tokio_main() -> Result<()> {
                                 }
                             }
 
+                            let mention_exempt = owner_dm_mention_exempt(
+                                is_confirmed_dm,
+                                &author,
+                                owner_cache.get(),
+                            );
                             let matched = filter::match_event(
                                 &buzz_event.event,
                                 buzz_event.channel_id,
                                 &rules,
                                 &pubkey_hex,
-                                is_confirmed_dm,
+                                mention_exempt,
                             )
                             .await;
                             let prompt_tag = match matched {
@@ -4354,6 +4373,14 @@ mod owner_cache_tests {
     fn get_returns_cached_value() {
         let cache = OwnerCache::new(Some("ab".repeat(32)));
         assert_eq!(cache.get(), Some("ab".repeat(32)).as_deref());
+    }
+
+    #[test]
+    fn mention_exemption_requires_confirmed_dm_from_owner() {
+        assert!(owner_dm_mention_exempt(true, "owner", Some("owner")));
+        assert!(!owner_dm_mention_exempt(true, "sibling", Some("owner")));
+        assert!(!owner_dm_mention_exempt(false, "owner", Some("owner")));
+        assert!(!owner_dm_mention_exempt(true, "owner", None));
     }
 }
 

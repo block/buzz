@@ -1316,8 +1316,8 @@ pub fn resolve_dynamic_channel_filter(
 /// Allow plain messages to reach the ACP harness in confirmed DM channels.
 ///
 /// Mention filtering remains unchanged for streams and channels whose type
-/// could not be resolved. The harness performs the same confirmed-DM check
-/// before matching subscription rules.
+/// could not be resolved. This only widens relay delivery; the harness still
+/// exempts only owner-authored DM events from its per-event mention check.
 pub(crate) fn exempt_confirmed_dm_from_mentions(filter: &mut ChannelFilter, is_confirmed_dm: bool) {
     if is_confirmed_dm {
         filter.require_mention = false;
