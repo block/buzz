@@ -2817,6 +2817,67 @@ test("new DM picker pages people search beyond the first 50 results", async ({
   );
 });
 
+test("members sidebar filters members with People and Agents tabs", async ({
+  page,
+}) => {
+  // Profile-only agent "mira" (see e2eBridge PROFILE_ONLY_AGENT_PUBKEY): a
+  // general member whose role is plain "member" but whose backend is_agent
+  // flag is true — classification must come from the flag, not the role.
+  const profileOnlyAgentPubkey =
+    "8f83d6b7f3d74f7d933ae3a54dd8c6cc85c7f98e531c16e5a827b953441a8d67";
+  const alicePubkey = TEST_IDENTITIES.alice.pubkey;
+  const bobPubkey = TEST_IDENTITIES.bob.pubkey;
+
+  await installMockBridge(page);
+  await page.goto("/");
+  await openMembersSidebar(page, "general");
+
+  // Default All tab: everyone is visible, tab labels carry the split counts.
+  await expect(page.getByTestId("members-type-tab-all")).toHaveText("All · 4");
+  await expect(page.getByTestId("members-type-tab-people")).toHaveText(
+    "People · 2",
+  );
+  await expect(page.getByTestId("members-type-tab-agents")).toHaveText(
+    "Agents · 2",
+  );
+  await expect(
+    page.getByTestId(`sidebar-member-${MOCK_IDENTITY_PUBKEY}`),
+  ).toBeVisible();
+  await expect(page.getByTestId(`sidebar-member-${alicePubkey}`)).toBeVisible();
+
+  await page.getByTestId("members-type-tab-agents").click();
+  await expect(page.getByText("Agents · 2")).toHaveCount(2);
+  await expect(page.getByTestId(`sidebar-member-${alicePubkey}`)).toBeVisible();
+  await expect(
+    page.getByTestId(`sidebar-member-${profileOnlyAgentPubkey}`),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId(`sidebar-member-${MOCK_IDENTITY_PUBKEY}`),
+  ).not.toBeVisible();
+  await expect(
+    page.getByTestId(`sidebar-member-${bobPubkey}`),
+  ).not.toBeVisible();
+
+  await page.getByTestId("members-type-tab-people").click();
+  await expect(
+    page.getByTestId(`sidebar-member-${MOCK_IDENTITY_PUBKEY}`),
+  ).toBeVisible();
+  await expect(page.getByTestId(`sidebar-member-${bobPubkey}`)).toBeVisible();
+  await expect(
+    page.getByTestId(`sidebar-member-${alicePubkey}`),
+  ).not.toBeVisible();
+  await expect(
+    page.getByTestId(`sidebar-member-${profileOnlyAgentPubkey}`),
+  ).not.toBeVisible();
+
+  // Reopening the dialog resets the filter to All.
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("members-sidebar")).not.toBeVisible();
+  await openMembersSidebar(page, "general");
+  await expect(page.getByTestId(`sidebar-member-${bobPubkey}`)).toBeVisible();
+  await expect(page.getByTestId(`sidebar-member-${alicePubkey}`)).toBeVisible();
+});
+
 test("member people search starts at two characters", async ({ page }) => {
   const jmPubkey =
     "abababababababababababababababababababababababababababababababab";
