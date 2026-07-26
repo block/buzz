@@ -126,8 +126,8 @@ async fn main() -> anyhow::Result<()> {
     info!(
         bind_addr = %config.bind_addr,
         relay_url = %config.relay_url,
-        health_port = config.health_port,
-        metrics_port = config.metrics_port,
+        health_addr = %config.health_addr,
+        metrics_addr = %config.metrics_addr,
         max_frame_bytes = config.max_frame_bytes,
         audit_enabled = config.audit_enabled,
         "Config loaded"
@@ -135,10 +135,10 @@ async fn main() -> anyhow::Result<()> {
 
     let usage_interval_secs = usage_metrics_interval_secs();
     let usage_idle_timeout_secs = usage_metrics_idle_timeout_secs(usage_interval_secs);
-    relay_metrics::install(config.metrics_port, usage_idle_timeout_secs);
+    relay_metrics::install(config.metrics_addr, usage_idle_timeout_secs);
     metrics::gauge!("buzz_audit_enabled").set(if config.audit_enabled { 1.0 } else { 0.0 });
     info!(
-        port = config.metrics_port,
+        address = %config.metrics_addr,
         idle_timeout_secs = usage_idle_timeout_secs,
         "Prometheus metrics exporter started"
     );
@@ -1102,8 +1102,8 @@ async fn run_periodic_until_cancelled<Tick, TickFuture>(
 /// ┌─────────────────────────────────────────────────────────┐
 /// │  Listener 1: TCP BUZZ_BIND_ADDR:3000  (app router)   │
 /// │  Listener 2: UDS BUZZ_UDS_PATH        (app, optional)│
-/// │  Listener 3: TCP 0.0.0.0:8080           (health only)  │
-/// │  Listener 4: TCP 0.0.0.0:9102           (metrics, via  │
+/// │  Listener 3: TCP BUZZ_HEALTH_ADDR        (health only)  │
+/// │  Listener 4: TCP BUZZ_METRICS_ADDR       (metrics, via  │
 /// │              PrometheusBuilder — already bound)         │
 /// │                                                         │
 /// │  SIGTERM → shutting_down=true → readiness 503           │
@@ -1117,10 +1117,12 @@ async fn serve(
 ) -> anyhow::Result<()> {
     let config = &state.config;
 
-    let health_listener = tokio::net::TcpListener::bind(("0.0.0.0", config.health_port))
+    let health_listener = tokio::net::TcpListener::bind(config.health_addr)
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to bind health port {}: {e}", config.health_port))?;
-    info!(port = config.health_port, "Health probe listener started");
+        .map_err(|e| {
+            anyhow::anyhow!("Failed to bind health address {}: {e}", config.health_addr)
+        })?;
+    info!(address = %config.health_addr, "Health probe listener started");
     tokio::spawn(async move {
         axum::serve(health_listener, health_router).await.ok();
     });

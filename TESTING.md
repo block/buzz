@@ -270,7 +270,9 @@ out of the box with `just setup` or `just relay`. Common overrides:
 | Variable                          | Default                     | Notes |
 |-----------------------------------|-----------------------------|-------|
 | `BUZZ_BIND_ADDR`                | `0.0.0.0:3000`              | Main app port |
+| `BUZZ_HEALTH_ADDR`              | unset                       | Full health listener address; overrides `BUZZ_HEALTH_PORT` |
 | `BUZZ_HEALTH_PORT`              | `8080`                      | `/_liveness`, `/_readiness` |
+| `BUZZ_METRICS_ADDR`             | unset                       | Full metrics listener address; overrides `BUZZ_METRICS_PORT` |
 | `BUZZ_METRICS_PORT`             | `9102`                      | Prometheus `/metrics` |
 | `RELAY_URL`                       | `ws://localhost:3000`       | Advertised in NIP-11 / NIP-42 challenges. **Note: no `BUZZ_` prefix.** |
 | `DATABASE_URL`                    | `postgres://buzz:buzz_dev@localhost:5432/buzz` | |

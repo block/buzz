@@ -415,8 +415,10 @@ dev *ARGS: bootstrap _ensure-sidecar-stubs _ensure-migrations
     export PATH="{{justfile_directory()}}/bin:$PATH"
     bind_addr="${BUZZ_BIND_ADDR:-0.0.0.0:3000}"
     relay_port="${bind_addr##*:}"; [[ -n "$relay_port" ]] || relay_port=3000
-    health_port="${BUZZ_HEALTH_PORT:-8080}"
-    metrics_port="${BUZZ_METRICS_PORT:-9102}"
+    health_addr="${BUZZ_HEALTH_ADDR:-0.0.0.0:${BUZZ_HEALTH_PORT:-8080}}"
+    health_port="${health_addr##*:}"; [[ -n "$health_port" ]] || health_port=8080
+    metrics_addr="${BUZZ_METRICS_ADDR:-0.0.0.0:${BUZZ_METRICS_PORT:-9102}}"
+    metrics_port="${metrics_addr##*:}"; [[ -n "$metrics_port" ]] || metrics_port=9102
     if command -v lsof >/dev/null 2>&1; then
         for spec in "relay:$relay_port" "health:$health_port" "metrics:$metrics_port"; do
             name="${spec%%:*}"; port="${spec##*:}"

@@ -93,11 +93,11 @@ pub struct Config {
     /// Optional Unix Domain Socket path. When set, the relay also listens on this
     /// UDS for traffic (e.g. service mesh sidecar). Health probes still use TCP.
     pub uds_path: Option<String>,
-    /// TCP port for the health-only router (`/_liveness`, `/_readiness`, `/_status`).
+    /// Address for the health-only router (`/_liveness`, `/_readiness`, `/_status`).
     /// Separate from the app router so K8s probes bypass Istio and auth middleware.
-    pub health_port: u16,
-    /// TCP port for the Prometheus metrics exporter (`GET /metrics`).
-    pub metrics_port: u16,
+    pub health_addr: SocketAddr,
+    /// Address for the Prometheus metrics exporter (`GET /metrics`).
+    pub metrics_addr: SocketAddr,
 
     /// When true, NIP-42 pubkey-only authentication (no API token) is
     /// restricted to pubkeys in the `pubkey_allowlist` table. Users with valid
@@ -265,6 +265,24 @@ pub struct Config {
 fn parse_bind_addr(raw: &str) -> Result<SocketAddr, ConfigError> {
     raw.parse::<SocketAddr>()
         .map_err(|e| ConfigError::InvalidBindAddr(e.to_string()))
+}
+
+fn listener_addr(
+    address_setting: &str,
+    port_setting: &str,
+    default_port: u16,
+) -> Result<SocketAddr, ConfigError> {
+    if let Ok(raw) = std::env::var(address_setting) {
+        return raw.parse().map_err(|_| {
+            ConfigError::InvalidValue(format!("{address_setting} must be a valid socket address"))
+        });
+    }
+
+    let port = std::env::var(port_setting)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default_port);
+    Ok(SocketAddr::from(([0, 0, 0, 0], port)))
 }
 
 fn positive_u64_from_env(name: &str, default: u64) -> Result<u64, ConfigError> {
@@ -606,15 +624,8 @@ impl Config {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
 
-        let health_port = std::env::var("BUZZ_HEALTH_PORT")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(8080);
-
-        let metrics_port = std::env::var("BUZZ_METRICS_PORT")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(9102);
+        let health_addr = listener_addr("BUZZ_HEALTH_ADDR", "BUZZ_HEALTH_PORT", 8080)?;
+        let metrics_addr = listener_addr("BUZZ_METRICS_ADDR", "BUZZ_METRICS_PORT", 9102)?;
 
         let media = buzz_media::MediaConfig {
             s3_endpoint: std::env::var("BUZZ_S3_ENDPOINT")
@@ -887,8 +898,8 @@ impl Config {
             cors_origins,
             relay_private_key,
             uds_path,
-            health_port,
-            metrics_port,
+            health_addr,
+            metrics_addr,
             pubkey_allowlist_enabled,
             require_relay_membership,
             huddle_audio_available,
@@ -1270,6 +1281,48 @@ mod tests {
         assert!(matches!(
             parse_bind_addr("not-an-addr"),
             Err(ConfigError::InvalidBindAddr(_))
+        ));
+    }
+
+    #[test]
+    fn listener_addresses_can_be_constrained_to_loopback() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("BUZZ_HEALTH_ADDR", "127.0.0.1:8180");
+        std::env::set_var("BUZZ_METRICS_ADDR", "127.0.0.1:9202");
+        let config = Config::from_env().expect("config");
+        std::env::remove_var("BUZZ_HEALTH_ADDR");
+        std::env::remove_var("BUZZ_METRICS_ADDR");
+        assert_eq!(
+            config.health_addr,
+            "127.0.0.1:8180".parse::<SocketAddr>().unwrap()
+        );
+        assert_eq!(
+            config.metrics_addr,
+            "127.0.0.1:9202".parse::<SocketAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn listener_address_overrides_legacy_port_setting() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("BUZZ_HEALTH_ADDR", "127.0.0.1:8180");
+        std::env::set_var("BUZZ_HEALTH_PORT", "8088");
+        let config = Config::from_env().expect("config");
+        std::env::remove_var("BUZZ_HEALTH_ADDR");
+        std::env::remove_var("BUZZ_HEALTH_PORT");
+        assert_eq!(config.health_addr.port(), 8180);
+    }
+
+    #[test]
+    fn invalid_listener_address_is_rejected() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("BUZZ_HEALTH_ADDR", "not-an-address");
+        let result = Config::from_env();
+        std::env::remove_var("BUZZ_HEALTH_ADDR");
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidValue(ref message))
+                if message.contains("BUZZ_HEALTH_ADDR")
         ));
     }
 
