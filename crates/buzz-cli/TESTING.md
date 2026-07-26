@@ -140,6 +140,10 @@ buzz channels update --channel "$CHANNEL_ID" --name "test-cli-updated" \
   --description "Updated" | jq .
 # Expected: {"event_id":"...","accepted":true,"message":"..."}
 
+# channels update (visibility — requires channel owner/admin)
+buzz channels update --channel "$CHANNEL_ID" --visibility open | jq .
+# Expected: {"event_id":"...","accepted":true,"message":"..."}
+
 # channels topic
 buzz channels topic --channel "$CHANNEL_ID" --topic "Test topic" | jq .
 # Expected: {"event_id":"...","accepted":true,"message":"..."}
