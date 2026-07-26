@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use crate::managed_agents::discovery::{AuthProbe, AuthProbeSuccess};
 use crate::managed_agents::runtime::build_augmented_path;
 
 /// Build the augmented PATH for CLI probes and other native child processes
@@ -29,6 +30,9 @@ pub(crate) enum ProbeOutcome {
     /// The CLI exited non-zero without a config-parse signal — treat as
     /// "not authenticated."
     LoggedOut,
+    /// The probe process succeeded, but its structured response did not satisfy
+    /// the runtime's declared authentication contract.
+    Unknown,
     /// The CLI exited non-zero and its stderr contains a config-parse error
     /// (e.g. from `~/.codex/config.toml`). The user needs to fix their
     /// config, not re-run login.
@@ -55,18 +59,18 @@ const CONFIG_PARSE_SIGNALS: &[&str] = &["error loading configuration", "unknown 
 /// such as node/python when the app was launched with a bare GUI PATH.
 pub(crate) fn login_probe(
     binary_path: &Path,
-    probe_args: &[&str],
+    probe: AuthProbe,
     augmented_path: Option<&str>,
 ) -> ProbeOutcome {
     let mut command = std::process::Command::new(binary_path);
-    command.args(&probe_args[1..]);
+    command.args(&probe.args[1..]);
     if let Some(path) = augmented_path {
         command.env("PATH", path);
     }
     crate::util::configure_no_window(&mut command);
 
     match command.output() {
-        Ok(o) => classify_probe_output(&o.stdout, &o.stderr, o.status.success()),
+        Ok(o) => classify_probe_output(&o.stdout, &o.stderr, o.status.success(), probe.success),
         Err(_) => ProbeOutcome::LoggedOut,
     }
 }
@@ -80,20 +84,22 @@ pub(crate) fn classify_probe_output(
     stdout_bytes: &[u8],
     stderr_bytes: &[u8],
     exit_success: bool,
+    success_contract: AuthProbeSuccess,
 ) -> ProbeOutcome {
     if exit_success {
-        // Some CLIs (notably Qoder) return a successful process exit even
-        // when authentication is absent, and expose the real state as JSON.
-        // Honor that structured signal when present while preserving the
-        // exit-code contract for every existing probe.
-        if serde_json::from_slice::<serde_json::Value>(stdout_bytes)
-            .ok()
-            .and_then(|value| value.get("logged_in")?.as_bool())
-            == Some(false)
-        {
-            return ProbeOutcome::LoggedOut;
+        match success_contract {
+            AuthProbeSuccess::ExitStatus => return ProbeOutcome::LoggedIn,
+            AuthProbeSuccess::JsonBoolean { field } => {
+                return match serde_json::from_slice::<serde_json::Value>(stdout_bytes)
+                    .ok()
+                    .and_then(|value| value.get(field)?.as_bool())
+                {
+                    Some(true) => ProbeOutcome::LoggedIn,
+                    Some(false) => ProbeOutcome::LoggedOut,
+                    None => ProbeOutcome::Unknown,
+                };
+            }
         }
-        return ProbeOutcome::LoggedIn;
     }
     let stderr = String::from_utf8_lossy(stderr_bytes);
     let stderr_lower = stderr.to_lowercase();
@@ -113,11 +119,19 @@ pub(crate) fn classify_probe_output(
 #[cfg(test)]
 mod tests {
     use super::{ProbeOutcome, CONFIG_PARSE_SIGNALS};
+    use crate::managed_agents::discovery::{AuthProbe, AuthProbeSuccess};
+
+    const EXIT_STATUS_PROBE: AuthProbe = AuthProbe {
+        args: &["fake-codex", "login", "status"],
+        success: AuthProbeSuccess::ExitStatus,
+    };
+    const JSON_PROBE_SUCCESS: AuthProbeSuccess =
+        AuthProbeSuccess::JsonBoolean { field: "logged_in" };
 
     #[test]
     fn successful_json_probe_honors_logged_in_false() {
         assert_eq!(
-            super::classify_probe_output(br#"{"logged_in":false}"#, b"", true),
+            super::classify_probe_output(br#"{"logged_in":false}"#, b"", true, JSON_PROBE_SUCCESS,),
             ProbeOutcome::LoggedOut
         );
     }
@@ -125,7 +139,35 @@ mod tests {
     #[test]
     fn successful_json_probe_honors_logged_in_true() {
         assert_eq!(
-            super::classify_probe_output(br#"{"logged_in":true}"#, b"", true),
+            super::classify_probe_output(br#"{"logged_in":true}"#, b"", true, JSON_PROBE_SUCCESS,),
+            ProbeOutcome::LoggedIn
+        );
+    }
+
+    #[test]
+    fn successful_json_probe_rejects_malformed_or_missing_state() {
+        for stdout in [
+            &b"not-json"[..],
+            &br#"{}"#[..],
+            &br#"{"logged_in":"yes"}"#[..],
+        ] {
+            assert_eq!(
+                super::classify_probe_output(stdout, b"", true, JSON_PROBE_SUCCESS),
+                ProbeOutcome::Unknown,
+                "structured probes must not fail open for {stdout:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn successful_exit_status_probe_preserves_existing_contract() {
+        assert_eq!(
+            super::classify_probe_output(
+                b"non-json output",
+                b"",
+                true,
+                AuthProbeSuccess::ExitStatus
+            ),
             ProbeOutcome::LoggedIn
         );
     }
@@ -180,11 +222,7 @@ mod tests {
             std::env::join_paths([interpreter_dir.as_path()]).expect("join augmented PATH");
         let augmented_path = augmented_path.to_string_lossy().into_owned();
         assert_eq!(
-            super::login_probe(
-                &script_path,
-                &["fake-codex", "login", "status"],
-                Some(&augmented_path),
-            ),
+            super::login_probe(&script_path, EXIT_STATUS_PROBE, Some(&augmented_path),),
             ProbeOutcome::LoggedIn,
             "the injected augmented PATH should allow /usr/bin/env to find the interpreter"
         );
@@ -215,7 +253,10 @@ mod tests {
 
         let outcome = super::login_probe(
             &script_path,
-            &["fake-codex-bad-config", "login", "status"],
+            AuthProbe {
+                args: &["fake-codex-bad-config", "login", "status"],
+                success: AuthProbeSuccess::ExitStatus,
+            },
             None,
         );
         assert!(
@@ -253,7 +294,10 @@ mod tests {
 
         let outcome = super::login_probe(
             &script_path,
-            &["fake-codex-logged-out", "login", "status"],
+            AuthProbe {
+                args: &["fake-codex-logged-out", "login", "status"],
+                success: AuthProbeSuccess::ExitStatus,
+            },
             None,
         );
         assert_eq!(

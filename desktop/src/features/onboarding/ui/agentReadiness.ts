@@ -12,9 +12,10 @@ export type AgentReadinessResult =
 /**
  * Determine whether the user has a working agent path configured.
  *
- * CLI path: the preferred Claude or Codex runtime is available and logged in.
- * Provider path: the preferred Buzz Agent or Goose runtime has provider and
- * model set, plus all required credential env vars for that provider.
+ * CLI path: the preferred catalog runtime has no Buzz-managed provider field
+ * and is available and authenticated.
+ * Provider path: the preferred runtime has a provider field, provider and model
+ * set, plus all required credential env vars for that provider.
  *
  * Returns enough info for the UI to say which path matched, or that neither did.
  */
@@ -25,12 +26,7 @@ export function resolveAgentReadiness(
 ): AgentReadinessResult {
   if (scope === "any") {
     for (const runtime of runtimes) {
-      if (runtime.id === "buzz-agent") continue;
-      if (
-        runtime.availability === "available" &&
-        (runtime.authStatus.status === "logged_in" ||
-          runtime.authStatus.status === "not_applicable")
-      ) {
+      if (isReadyCliRuntime(runtime)) {
         return { ready: true, reason: "cli", runtimeLabel: runtime.label };
       }
     }
@@ -46,11 +42,7 @@ export function resolveAgentReadiness(
     return { ready: false };
   }
 
-  if (
-    (preferredRuntime.id === "claude" || preferredRuntime.id === "codex") &&
-    (preferredRuntime.authStatus.status === "logged_in" ||
-      preferredRuntime.authStatus.status === "not_applicable")
-  ) {
+  if (isReadyCliRuntime(preferredRuntime)) {
     return {
       ready: true,
       reason: "cli",
@@ -58,7 +50,7 @@ export function resolveAgentReadiness(
     };
   }
 
-  if (preferredRuntime.id !== "buzz-agent" && preferredRuntime.id !== "goose") {
+  if (preferredRuntime.providerEnvVar === null) {
     return { ready: false };
   }
 
@@ -75,4 +67,13 @@ export function resolveAgentReadiness(
   }
 
   return { ready: false };
+}
+
+function isReadyCliRuntime(runtime: AcpRuntimeCatalogEntry): boolean {
+  return (
+    runtime.providerEnvVar === null &&
+    runtime.availability === "available" &&
+    (runtime.authStatus.status === "logged_in" ||
+      runtime.authStatus.status === "not_applicable")
+  );
 }

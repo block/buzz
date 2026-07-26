@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   resolveInheritedRuntimeSubmission,
+  resolveProviderUpdate,
   resolveRuntimeProviderCapability,
   shouldClearModelForRuntimeChange,
 } from "./personaRuntimeModel.ts";
@@ -186,26 +187,64 @@ test("resolveInheritedRuntimeSubmission yields a null model on the inherit-trans
   assert.equal(result.model, null);
 });
 
-test("resolveRuntimeProviderCapability classifies provider-capable runtimes as capable", () => {
-  assert.equal(resolveRuntimeProviderCapability("buzz-agent", true), "capable");
-  assert.equal(resolveRuntimeProviderCapability("goose", true), "capable");
-});
-
-test("resolveRuntimeProviderCapability classifies known CLI-login runtimes as locked before the catalog loads", () => {
-  // The core fix: a not-yet-loaded catalog must not force these to "unknown".
-  assert.equal(resolveRuntimeProviderCapability("claude", false), "locked");
-  assert.equal(resolveRuntimeProviderCapability("codex", false), "locked");
-  assert.equal(resolveRuntimeProviderCapability(" claude ", false), "locked");
-});
-
-test("resolveRuntimeProviderCapability leaves genuinely unknown/custom runtimes as unknown", () => {
-  // Preserves the tri-state's "omit rather than destructively write" behavior
-  // for ids we can't statically classify (custom command, empty, unknown).
-  assert.equal(resolveRuntimeProviderCapability("custom", false), "unknown");
-  assert.equal(resolveRuntimeProviderCapability("", false), "unknown");
+test("resolveRuntimeProviderCapability classifies catalog provider metadata", () => {
   assert.equal(
-    resolveRuntimeProviderCapability("some-vendor-cli", false),
-    "unknown",
+    resolveRuntimeProviderCapability({
+      providerEnvVar: "BUZZ_AGENT_PROVIDER",
+      providerLocked: false,
+    }),
+    "capable",
+  );
+  assert.equal(
+    resolveRuntimeProviderCapability({
+      providerEnvVar: "IGNORED_PROVIDER",
+      providerLocked: true,
+    }),
+    "locked",
+  );
+  assert.equal(
+    resolveRuntimeProviderCapability({
+      providerEnvVar: null,
+      providerLocked: false,
+    }),
+    "locked",
+  );
+});
+
+test("resolveRuntimeProviderCapability classifies Qoder as locked from the catalog", () => {
+  assert.equal(
+    resolveRuntimeProviderCapability({
+      providerEnvVar: null,
+      providerLocked: true,
+    }),
+    "locked",
+  );
+});
+
+test("resolveRuntimeProviderCapability treats unavailable catalog metadata as unknown", () => {
+  assert.equal(resolveRuntimeProviderCapability(undefined), "unknown");
+});
+
+test("resolveProviderUpdate clears stale providers for Qoder and preserves unknown states", () => {
+  const qoderCapability = resolveRuntimeProviderCapability({
+    providerEnvVar: null,
+    providerLocked: true,
+  });
+  assert.equal(
+    resolveProviderUpdate({
+      capability: qoderCapability,
+      provider: null,
+      originalProvider: "anthropic",
+    }),
+    null,
+  );
+  assert.equal(
+    resolveProviderUpdate({
+      capability: "unknown",
+      provider: null,
+      originalProvider: "anthropic",
+    }),
+    undefined,
   );
 });
 

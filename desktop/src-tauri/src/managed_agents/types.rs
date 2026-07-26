@@ -580,6 +580,8 @@ pub struct AcpRuntimeCatalogEntry {
     pub model_env_var: Option<String>,
     /// Environment variable used to apply the selected LLM provider, when supported.
     pub provider_env_var: Option<String>,
+    /// Whether the runtime owns its provider and must not retain a Buzz-selected value.
+    pub provider_locked: bool,
     /// Environment variable used to apply thinking effort, when supported.
     pub thinking_env_var: Option<String>,
     pub install_hint: String,

@@ -105,7 +105,7 @@ export function deriveAgentConfigFieldModel({
   const fields: AgentConfigFieldDescriptor[] = [];
   const omissions: AgentConfigOmission[] = [];
 
-  if (runtime?.providerEnvVar) {
+  if (runtime?.providerEnvVar && !runtime.providerLocked) {
     fields.push({
       kind: "provider",
       optionSource: "providerCatalog",

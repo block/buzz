@@ -39,6 +39,7 @@ pub(crate) fn read_config_surface(
     let model_env_var = runtime_meta.and_then(|m| m.model_env_var);
     let provider_env_var = runtime_meta.and_then(|m| m.provider_env_var);
     let provider_locked = runtime_meta.is_some_and(|m| m.provider_locked);
+    let provider_locked_label = runtime_meta.and_then(|m| m.provider_locked_label);
     let thinking_env_var = runtime_meta.and_then(|m| m.thinking_env_var);
     let supports_acp_native = runtime_meta.is_some_and(|m| m.supports_acp_native_config);
     let required_fields: &[&str] = runtime_meta
@@ -86,6 +87,7 @@ pub(crate) fn read_config_surface(
             &file_config.provider,
             provider_env_var,
             provider_locked,
+            provider_locked_label,
             required_fields.contains(&"provider"),
         ),
         mode: build_mode_field(&file_config.mode, &acp_mode, is_pre_spawn, session_cache),
@@ -361,11 +363,13 @@ fn build_provider_field(
     file_provider: &Option<String>,
     provider_env_var: Option<&str>,
     provider_locked: bool,
+    provider_locked_label: Option<&str>,
     is_required: bool,
 ) -> Option<NormalizedField> {
     if provider_locked {
+        let label = provider_locked_label.unwrap_or("Provider");
         return Some(NormalizedField {
-            value: Some("Anthropic (locked)".to_string()),
+            value: Some(format!("{label} (locked)")),
             origin: ConfigOrigin::HarnessConstraint,
             write_via: ConfigWriteMechanism::ReadOnly,
             overridden_value: None,

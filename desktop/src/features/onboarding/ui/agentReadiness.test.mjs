@@ -15,6 +15,10 @@ function makeRuntime(overrides = {}) {
     binaryPath: "/usr/local/bin/goose",
     defaultArgs: [],
     mcpCommand: null,
+    modelEnvVar: null,
+    providerEnvVar: "GOOSE_PROVIDER",
+    providerLocked: false,
+    thinkingEnvVar: null,
     installHint: "",
     installInstructionsUrl: "https://example.com",
     canAutoInstall: false,
@@ -40,7 +44,14 @@ function makeConfig(overrides = {}) {
 // ---------------------------------------------------------------------------
 
 test("resolveAgentReadiness_cli_returns_ready_when_preferred_cli_runtime_is_logged_in", () => {
-  const runtimes = [makeRuntime({ id: "claude", label: "Claude" })];
+  const runtimes = [
+    makeRuntime({
+      id: "claude",
+      label: "Claude",
+      providerEnvVar: null,
+      providerLocked: true,
+    }),
+  ];
   const result = resolveAgentReadiness(
     runtimes,
     makeConfig({ preferred_runtime: "claude" }),
@@ -54,7 +65,12 @@ test("resolveAgentReadiness_cli_returns_ready_when_preferred_cli_runtime_is_logg
 
 test("resolveAgentReadiness_uses_only_the_preferred_runtime", () => {
   const runtimes = [
-    makeRuntime({ id: "claude", label: "Claude" }),
+    makeRuntime({
+      id: "claude",
+      label: "Claude",
+      providerEnvVar: null,
+      providerLocked: true,
+    }),
     makeRuntime({ id: "goose", label: "Goose" }),
   ];
   const result = resolveAgentReadiness(runtimes, makeConfig(), "preferred");
@@ -71,6 +87,28 @@ test("resolveAgentReadiness_cli_skips_logged_out_runtimes", () => {
   ];
   const result = resolveAgentReadiness(runtimes, makeConfig(), "preferred");
   assert.equal(result.ready, false);
+});
+
+test("resolveAgentReadiness_recognizes_authenticated_Qoder_from_catalog_capabilities", () => {
+  const runtimes = [
+    makeRuntime({
+      id: "qoder",
+      label: "Qoder",
+      providerEnvVar: null,
+      providerLocked: true,
+      authStatus: { status: "logged_in" },
+    }),
+  ];
+  const result = resolveAgentReadiness(
+    runtimes,
+    makeConfig({ preferred_runtime: "qoder" }),
+    "preferred",
+  );
+  assert.deepEqual(result, {
+    ready: true,
+    reason: "cli",
+    runtimeLabel: "Qoder",
+  });
 });
 
 test("resolveAgentReadiness_goose_requires_provider_and_model", () => {
@@ -132,6 +170,7 @@ test("resolveAgentReadiness_cli_ignores_buzz_agent_runtime", () => {
     makeRuntime({
       id: "buzz-agent",
       label: "buzz-agent",
+      providerEnvVar: "BUZZ_AGENT_PROVIDER",
       authStatus: { status: "not_applicable" },
     }),
   ];
@@ -146,7 +185,13 @@ test("resolveAgentReadiness_cli_ignores_buzz_agent_runtime", () => {
 test("resolveAgentReadiness_buzz_agent_ready_when_provider_model_and_key_set", () => {
   // anthropic requires ANTHROPIC_API_KEY
   const result = resolveAgentReadiness(
-    [makeRuntime({ id: "buzz-agent", label: "Buzz Agent" })],
+    [
+      makeRuntime({
+        id: "buzz-agent",
+        label: "Buzz Agent",
+        providerEnvVar: "BUZZ_AGENT_PROVIDER",
+      }),
+    ],
     makeConfig({
       preferred_runtime: "buzz-agent",
       provider: "anthropic",
@@ -197,7 +242,14 @@ test("resolveAgentReadiness_neither_returns_not_ready", () => {
 });
 
 test("resolveAgentReadiness_welcome_readiness_uses_ready_cli_without_preference", () => {
-  const runtimes = [makeRuntime({ id: "claude", label: "Claude" })];
+  const runtimes = [
+    makeRuntime({
+      id: "claude",
+      label: "Claude",
+      providerEnvVar: null,
+      providerLocked: true,
+    }),
+  ];
   const result = resolveAgentReadiness(
     runtimes,
     makeConfig({ preferred_runtime: null }),

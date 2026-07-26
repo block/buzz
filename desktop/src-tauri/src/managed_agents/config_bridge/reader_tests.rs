@@ -5,7 +5,7 @@
 use std::{collections::BTreeMap, path::Path, sync::Mutex};
 
 use super::*;
-use crate::managed_agents::discovery::KnownAcpRuntime;
+use crate::managed_agents::discovery::{known_acp_runtime_exact, KnownAcpRuntime};
 use crate::managed_agents::types::ManagedAgentRecord;
 
 static GOOSE_PATH_ROOT_LOCK: Mutex<()> = Mutex::new(());
@@ -49,6 +49,7 @@ fn test_runtime() -> &'static KnownAcpRuntime {
         model_env_var: Some("GOOSE_MODEL"),
         provider_env_var: Some("GOOSE_PROVIDER"),
         provider_locked: false,
+        provider_locked_label: None,
         default_env: &[],
         config_file_path: Some("~/.config/goose/config.yaml"),
         config_file_format: Some("yaml"),
@@ -58,7 +59,7 @@ fn test_runtime() -> &'static KnownAcpRuntime {
         context_limit_env_var: Some("GOOSE_CONTEXT_LIMIT"),
         required_normalized_fields: &["model", "provider"],
         login_hint: None,
-        auth_probe_args: None,
+        auth_probe: None,
     }
 }
 
@@ -208,15 +209,26 @@ fn record_model_overrides_file_model() {
 }
 
 #[test]
-fn provider_locked_shows_locked() {
+fn provider_locked_uses_catalog_label() {
     let record = test_record();
     let runtime = &KnownAcpRuntime {
         provider_locked: true,
+        provider_locked_label: Some("Anthropic"),
         ..*test_runtime()
     };
     let surface = read_config_surface(&record, Some(runtime), None, None);
     let provider = surface.normalized.provider.unwrap();
     assert_eq!(provider.value.as_deref(), Some("Anthropic (locked)"));
+    assert_eq!(provider.origin, ConfigOrigin::HarnessConstraint);
+}
+
+#[test]
+fn qoder_provider_constraint_is_not_labeled_anthropic() {
+    let record = test_record();
+    let runtime = known_acp_runtime_exact("qoder").expect("Qoder runtime");
+    let surface = read_config_surface(&record, Some(runtime), None, None);
+    let provider = surface.normalized.provider.expect("provider constraint");
+    assert_eq!(provider.value.as_deref(), Some("Qoder (locked)"));
     assert_eq!(provider.origin, ConfigOrigin::HarnessConstraint);
 }
 
@@ -625,6 +637,7 @@ fn buzz_agent_runtime() -> &'static KnownAcpRuntime {
         model_env_var: Some("BUZZ_AGENT_MODEL"),
         provider_env_var: Some("BUZZ_AGENT_PROVIDER"),
         provider_locked: false,
+        provider_locked_label: None,
         default_env: &[],
         config_file_path: None,
         config_file_format: None,
@@ -634,7 +647,7 @@ fn buzz_agent_runtime() -> &'static KnownAcpRuntime {
         context_limit_env_var: Some("BUZZ_AGENT_MAX_CONTEXT_TOKENS"),
         required_normalized_fields: &["model", "provider"],
         login_hint: None,
-        auth_probe_args: None,
+        auth_probe: None,
     }
 }
 
@@ -764,7 +777,7 @@ fn buzz_agent_thinking_effort_env_var_not_double_surfaced_in_advanced() {
 
 #[test]
 fn missing_required_provider_still_returns_dropdown_field() {
-    let provider = build_provider_field(&None, &None, Some("GOOSE_PROVIDER"), false, true)
+    let provider = build_provider_field(&None, &None, Some("GOOSE_PROVIDER"), false, None, true)
         .expect("required provider field should be surfaced even when empty");
 
     assert_eq!(provider.value, None);
@@ -774,5 +787,7 @@ fn missing_required_provider_still_returns_dropdown_field() {
 
 #[test]
 fn missing_optional_provider_stays_hidden() {
-    assert!(build_provider_field(&None, &None, Some("GOOSE_PROVIDER"), false, false).is_none());
+    assert!(
+        build_provider_field(&None, &None, Some("GOOSE_PROVIDER"), false, None, false).is_none()
+    );
 }

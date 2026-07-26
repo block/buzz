@@ -1,42 +1,50 @@
+import type { AcpRuntimeCatalogEntry } from "@/shared/api/types";
+
 /** Runtime provider-capability tri-state used by the submit path. */
 export type ProviderRuntimeCapability = "capable" | "locked" | "unknown";
 
 /**
- * Classify a runtime id's provider-selection capability as a tri-state,
- * independent of whether the runtime catalog has loaded yet.
+ * Classify a runtime's provider-selection capability from the Rust catalog.
  *
  * The submit path keys its provider write on this: "capable" persists the
  * provider, "locked" clears it, and "unknown" OMITS the field so a transient
  * loading/error state (or a genuinely unknown/custom command) never becomes a
  * destructive write.
  *
- * Before the catalog loads, `prospectiveRuntimeId` can already be a known
- * persona runtime string (e.g. `buzz-agent`). A catalog lookup then returns
- * `undefined`, which would misclassify a provider-backed runtime as "unknown"
- * and omit the provider while still clearing the command override / writing env
- * — leaving the record inheriting a provider-backed runtime with a null
- * provider. To avoid that, we resolve capability STATICALLY for known ids:
- *
- * - buzz-agent / goose → "capable" (`isProviderCapable`, id-based).
- * - claude / codex → "locked" (CLI-login runtimes; no LLM provider selection).
- * - anything else (custom, empty, genuinely unknown) → "unknown".
- *
- * `isProviderCapable` is the caller-supplied {@link
- * runtimeSupportsLlmProviderSelection} result, kept as the single source of
- * truth for the capable set rather than re-hardcoding it here.
+ * An absent catalog entry is deliberately "unknown": loading failures must not
+ * clear saved state. Any catalog-known runtime without an unlocked provider env
+ * key is "locked", including native-provider runtimes such as Qoder.
  */
 export function resolveRuntimeProviderCapability(
-  runtimeId: string,
-  isProviderCapable: boolean,
+  runtime:
+    | Pick<AcpRuntimeCatalogEntry, "providerEnvVar" | "providerLocked">
+    | undefined,
 ): ProviderRuntimeCapability {
-  if (isProviderCapable) {
+  if (!runtime) {
+    return "unknown";
+  }
+  if (runtime.providerEnvVar !== null && !runtime.providerLocked) {
     return "capable";
   }
-  const id = runtimeId.trim();
-  if (id === "claude" || id === "codex") {
-    return "locked";
+  return "locked";
+}
+
+/** Resolve the tri-state provider field sent by the instance edit mutation. */
+export function resolveProviderUpdate(input: {
+  capability: ProviderRuntimeCapability;
+  provider: string | null;
+  originalProvider: string | null;
+}): string | null | undefined {
+  switch (input.capability) {
+    case "capable":
+      return input.provider !== input.originalProvider
+        ? input.provider
+        : undefined;
+    case "locked":
+      return input.originalProvider !== null ? null : undefined;
+    case "unknown":
+      return undefined;
   }
-  return "unknown";
 }
 
 export function shouldClearModelForRuntimeChange(

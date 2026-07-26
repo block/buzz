@@ -1,3 +1,21 @@
+/// How a successful authentication probe communicates the login state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AuthProbeSuccess {
+    /// A zero exit status means authenticated.
+    ExitStatus,
+    /// A zero exit status only means the command ran; the named JSON field is
+    /// authoritative and must contain a boolean.
+    JsonBoolean { field: &'static str },
+}
+
+/// Static authentication-probe metadata for a known ACP runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AuthProbe {
+    /// `args[0]` is the binary name; the remainder are the subcommand arguments.
+    pub args: &'static [&'static str],
+    pub success: AuthProbeSuccess,
+}
+
 /// Static capabilities and installation metadata for a known ACP runtime.
 pub(crate) struct KnownAcpRuntime {
     pub id: &'static str,
@@ -41,6 +59,8 @@ pub(crate) struct KnownAcpRuntime {
     pub model_env_var: Option<&'static str>,
     pub provider_env_var: Option<&'static str>,
     pub provider_locked: bool,
+    /// Provider name displayed when `provider_locked` is true.
+    pub provider_locked_label: Option<&'static str>,
     pub default_env: &'static [(&'static str, &'static str)],
     pub config_file_path: Option<&'static str>,
     #[allow(dead_code)] // reserved for format-based dispatch when readers are unified
@@ -59,9 +79,9 @@ pub(crate) struct KnownAcpRuntime {
     /// Human-readable hint shown in Doctor when the runtime is available but not
     /// authenticated. `None` for runtimes that have no login step (goose, buzz-agent).
     pub login_hint: Option<&'static str>,
-    /// CLI args for probing authentication status. `args[0]` is the binary name;
-    /// the remainder are the subcommand. `None` for runtimes with no login step.
-    pub auth_probe_args: Option<&'static [&'static str]>,
+    /// Authentication probe and its success contract. `None` for runtimes with
+    /// no login step.
+    pub auth_probe: Option<AuthProbe>,
 }
 
 impl KnownAcpRuntime {
@@ -128,9 +148,13 @@ mod tests {
         );
         assert!(qoder.adapter_install_commands.is_empty());
         assert_eq!(
-            qoder.auth_probe_args,
-            Some(&["qodercli", "status", "-o", "json"][..])
+            qoder.auth_probe,
+            Some(super::AuthProbe {
+                args: &["qodercli", "status", "-o", "json"],
+                success: super::AuthProbeSuccess::JsonBoolean { field: "logged_in" },
+            })
         );
         assert_eq!(qoder.skill_dir, Some(".qoder/skills"));
+        assert_eq!(qoder.provider_locked_label, Some("Qoder"));
     }
 }

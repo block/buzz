@@ -3,7 +3,7 @@ import { installMockBridge } from "../helpers/bridge";
 import { passThroughBackupStep } from "../helpers/onboarding";
 
 function runtime(
-  id: "buzz-agent" | "claude" | "codex" | "goose",
+  id: "buzz-agent" | "claude" | "codex" | "goose" | "qoder",
   availability: string,
   authStatus: Record<string, unknown>,
   overrides: Record<string, unknown> = {},
@@ -17,7 +17,9 @@ function runtime(
           ? "Claude Code"
           : id === "codex"
             ? "Codex"
-            : "Goose",
+            : id === "qoder"
+              ? "Qoder"
+              : "Goose",
     avatar_url: "",
     availability,
     command: availability === "available" ? id : null,
@@ -57,9 +59,7 @@ async function readSavedRuntime(page: Parameters<typeof installMockBridge>[0]) {
   });
 }
 
-test("setup shows only Claude Code and Codex as detected harnesses", async ({
-  page,
-}) => {
+test("setup shows the supported CLI harnesses", async ({ page }) => {
   await installMockBridge(
     page,
     {
@@ -68,6 +68,16 @@ test("setup shows only Claude Code and Codex as detected harnesses", async ({
         runtime("goose", "available", { status: "not_applicable" }),
         runtime("codex", "available", { status: "logged_in" }),
         runtime("claude", "available", { status: "logged_in" }),
+        runtime(
+          "qoder",
+          "available",
+          { status: "logged_in" },
+          {
+            command: "qodercli",
+            binary_path: "/usr/local/bin/qodercli",
+            provider_locked: true,
+          },
+        ),
       ],
     },
     { skipCommunitySeed: true, skipOnboardingSeed: true },
@@ -77,6 +87,7 @@ test("setup shows only Claude Code and Codex as detected harnesses", async ({
 
   await expect(page.getByTestId("onboarding-runtime-claude")).toBeVisible();
   await expect(page.getByTestId("onboarding-runtime-codex")).toBeVisible();
+  await expect(page.getByTestId("onboarding-runtime-qoder")).toBeVisible();
   await expect(page.getByTestId("onboarding-runtime-goose")).toHaveCount(0);
   await expect(page.getByTestId("onboarding-runtime-buzz-agent")).toHaveCount(
     0,
@@ -145,6 +156,47 @@ test("ready state is detected and enables Next without persisting a default", as
   ).toHaveCount(0);
   await expect(page.getByTestId("onboarding-setup-next")).toBeEnabled();
   expect(await readSavedRuntime(page)).toBeNull();
+});
+
+test("authenticated Qoder can continue and become the default harness", async ({
+  page,
+}) => {
+  await installMockBridge(
+    page,
+    {
+      acpRuntimesCatalog: [
+        runtime(
+          "qoder",
+          "available",
+          { status: "logged_in" },
+          {
+            command: "qodercli",
+            binary_path: "/usr/local/bin/qodercli",
+            provider_locked: true,
+          },
+        ),
+      ],
+      globalAgentConfig: {
+        env_vars: {},
+        provider: "anthropic",
+        model: null,
+        preferred_runtime: null,
+      },
+    },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+  await navigateToSetupPage(page);
+
+  await expect(page.getByTestId("onboarding-runtime-ready-qoder")).toHaveText(
+    "READY",
+  );
+  await expect(page.getByTestId("onboarding-setup-next")).toBeEnabled();
+  await page.getByTestId("onboarding-setup-next").click();
+  await expect(page.getByTestId("global-agent-default-harness")).toHaveText(
+    "Qoder",
+  );
+  await expect.poll(() => readSavedRuntime(page)).toBe("qoder");
 });
 
 test("setup shows runtime discovery loading before rendering harnesses", async ({

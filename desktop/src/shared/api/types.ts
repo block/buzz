@@ -543,6 +543,8 @@ export type AcpRuntimeCatalogEntry = {
   modelEnvVar: string | null;
   /** Environment variable used to apply the selected LLM provider, when supported. */
   providerEnvVar: string | null;
+  /** True when the harness owns provider selection and Buzz must clear any saved provider. */
+  providerLocked: boolean;
   /** Environment variable used to apply thinking effort, when supported. */
   thinkingEnvVar: string | null;
   installHint: string;

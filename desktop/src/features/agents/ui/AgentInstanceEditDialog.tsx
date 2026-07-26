@@ -38,7 +38,6 @@ import {
   PERSONA_FIELD_CONTROL_CLASS,
   PERSONA_FIELD_SHELL_CLASS,
   PERSONA_LABEL_OPTIONAL_CLASS,
-  runtimeSupportsLlmProviderSelection,
   shouldClearKnownModelForSelectionScope,
   sortPersonaRuntimes,
   type PersonaDropdownOption,
@@ -53,6 +52,7 @@ import {
   isEditAgentProviderSaveValid,
   resolveAgentCommandUpdate,
   resolveInheritedRuntimeSubmission,
+  resolveProviderUpdate,
   resolveRuntimeProviderCapability,
 } from "./personaRuntimeModel";
 import {
@@ -254,7 +254,7 @@ export function AgentInstanceEditDialog({
     const matched =
       runtimes.find((r) => r.command?.trim() === originalCommand) ??
       runtimes.find((r) => r.id === originalCommand);
-    return runtimeSupportsLlmProviderSelection(matched?.id ?? "");
+    return resolveRuntimeProviderCapability(matched) === "capable";
   }, [runtimes, originalAgentCommand]);
 
   // The runtime id that will actually be active after submit. When inheriting,
@@ -295,8 +295,13 @@ export function AgentInstanceEditDialog({
     selectedRuntimeId,
   ]);
 
-  const llmProviderFieldVisible =
-    runtimeSupportsLlmProviderSelection(prospectiveRuntimeId);
+  const prospectiveRuntime = React.useMemo(
+    () => runtimes.find((runtime) => runtime.id === prospectiveRuntimeId),
+    [prospectiveRuntimeId, runtimes],
+  );
+  const providerRuntimeCapability =
+    resolveRuntimeProviderCapability(prospectiveRuntime);
+  const llmProviderFieldVisible = providerRuntimeCapability === "capable";
 
   // One-shot focus: when the dialog opens from a card deep-link, scroll and
   // focus the relevant field. The effect re-runs when `llmProviderFieldVisible`
@@ -524,9 +529,8 @@ export function AgentInstanceEditDialog({
       selectionOnRuntimeChange(selection, {
         previousRuntime: previousRuntimeId,
         nextRuntime: nextRuntime?.id ?? nextRuntimeId,
-        nextRuntimeCanChooseProvider: runtimeSupportsLlmProviderSelection(
-          nextRuntime?.id ?? nextRuntimeId,
-        ),
+        nextRuntimeCanChooseProvider:
+          resolveRuntimeProviderCapability(nextRuntime) === "capable",
         lockedRuntimeReset: "full",
       }),
     );
@@ -613,19 +617,6 @@ export function AgentInstanceEditDialog({
         agentCommandOverride: agent.agentCommandOverride ?? null,
       });
 
-      // Classify the effective post-submit runtime's provider capability as a
-      // tri-state: "capable" persists the provider, "locked" clears it (only
-      // when we KNOW it's provider-locked, e.g. Claude), "unknown" OMITS it so a
-      // transient/custom state never becomes a destructive write. Resolved
-      // STATICALLY (by id) so a not-yet-loaded catalog can't misclassify a known
-      // runtime as "unknown" — see resolveRuntimeProviderCapability. The runtime
-      // id is the shared prospectiveRuntimeId, so submit and the block-save gate
-      // always agree on which runtime is being saved.
-      const providerRuntimeCapability = resolveRuntimeProviderCapability(
-        prospectiveRuntimeId,
-        runtimeSupportsLlmProviderSelection(prospectiveRuntimeId),
-      );
-
       // Provider + env to persist — the shared inherited-submission snapshot
       // (same values the credential gate validates), so gate ↔ record ↔ spawn
       // all agree. See resolveInheritedRuntimeSubmission.
@@ -669,16 +660,11 @@ export function AgentInstanceEditDialog({
         //   "locked"   → clear: send null if provider was set, else omit.
         //   "unknown"  → omit always (never send null for a transient state).
         // llmProviderFieldVisible is for UX visibility only; not used here.
-        provider:
-          providerRuntimeCapability === "capable"
-            ? normalizedSubmitProvider !== (agent.provider ?? null)
-              ? normalizedSubmitProvider
-              : undefined
-            : providerRuntimeCapability === "locked"
-              ? (agent.provider ?? null) !== null
-                ? null
-                : undefined
-              : undefined, // "unknown" → omit always
+        provider: resolveProviderUpdate({
+          capability: providerRuntimeCapability,
+          provider: normalizedSubmitProvider,
+          originalProvider: agent.provider ?? null,
+        }),
         envVars: envVarsEqual(submitEnvVars, agent.envVars)
           ? undefined
           : submitEnvVars,

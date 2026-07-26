@@ -10,6 +10,7 @@ import {
   hasMissingRequiredEnvKey,
   resolveAgentCommandUpdate,
   resolveInheritedRuntimeSubmission,
+  resolveProviderUpdate,
   resolveRuntimeProviderCapability,
 } from "./personaRuntimeModel.ts";
 
@@ -28,8 +29,27 @@ import {
 // re-host that re-derives any seam independently fails here.
 
 const runtimes = [
-  { id: "buzz-agent", command: "buzz-agent-cmd", defaultArgs: [] },
-  { id: "claude", command: "claude-cmd", defaultArgs: [] },
+  {
+    id: "buzz-agent",
+    command: "buzz-agent-cmd",
+    defaultArgs: [],
+    providerEnvVar: "BUZZ_AGENT_PROVIDER",
+    providerLocked: false,
+  },
+  {
+    id: "claude",
+    command: "claude-cmd",
+    defaultArgs: [],
+    providerEnvVar: null,
+    providerLocked: true,
+  },
+  {
+    id: "qoder",
+    command: "qodercli",
+    defaultArgs: [],
+    providerEnvVar: null,
+    providerLocked: true,
+  },
 ];
 
 // Mirrors the component's prospectiveRuntimeId memo: when inheriting, resolve
@@ -209,20 +229,35 @@ test("rehost_submit_persistsToggleAsCommandClear_andOmitsHarnessOverride", () =>
   const { prospectiveRuntimeId, inheritedSubmission } =
     inheritTransitionState();
   const capability = resolveRuntimeProviderCapability(
-    prospectiveRuntimeId,
-    runtimeSupportsLlmProviderSelection(prospectiveRuntimeId),
+    runtimes.find((runtime) => runtime.id === prospectiveRuntimeId),
   );
   assert.equal(capability, "capable");
-  const providerUpdate =
-    capability === "capable"
-      ? inheritedSubmission.provider !== (pinnedAgent.provider ?? null)
-        ? inheritedSubmission.provider
-        : undefined
-      : undefined;
+  const providerUpdate = resolveProviderUpdate({
+    capability,
+    provider: inheritedSubmission.provider,
+    originalProvider: pinnedAgent.provider ?? null,
+  });
   assert.equal(
     providerUpdate,
     "anthropic",
     "submit must persist the gate-validated submission provider for the prospective runtime",
+  );
+});
+
+test("rehost_submit_switchingToQoder_clearsStaleProvider", () => {
+  const qoder = runtimes.find((runtime) => runtime.id === "qoder");
+  const capability = resolveRuntimeProviderCapability(qoder);
+  const providerUpdate = resolveProviderUpdate({
+    capability,
+    provider: null,
+    originalProvider: "anthropic",
+  });
+
+  assert.equal(capability, "locked");
+  assert.equal(
+    providerUpdate,
+    null,
+    "switching from a provider-backed runtime to Qoder must clear the stale provider",
   );
 });
 

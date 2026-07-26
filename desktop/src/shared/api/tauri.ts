@@ -180,6 +180,8 @@ export type RawAcpRuntimeCatalogEntry = {
   mcp_command: string | null;
   model_env_var?: string | null;
   provider_env_var?: string | null;
+  /** Optional only for older E2E fixtures; the Rust catalog always supplies it. */
+  provider_locked?: boolean;
   thinking_env_var?: string | null;
   install_hint: string;
   install_instructions_url: string;
@@ -741,6 +743,7 @@ function fromRawAcpRuntimeCatalogEntry(
     mcpCommand: entry.mcp_command,
     modelEnvVar: entry.model_env_var ?? null,
     providerEnvVar: entry.provider_env_var ?? null,
+    providerLocked: entry.provider_locked ?? false,
     thinkingEnvVar: entry.thinking_env_var ?? null,
     installHint: entry.install_hint,
     installInstructionsUrl: entry.install_instructions_url,

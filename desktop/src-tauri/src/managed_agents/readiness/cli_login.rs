@@ -2,7 +2,7 @@ use std::path::Path;
 
 use crate::managed_agents::{
     discovery::{
-        classify_runtime, codex_adapter_availability, find_command, resolve_command,
+        classify_runtime, codex_adapter_availability, find_command, resolve_command, AuthProbe,
         KnownAcpRuntime,
     },
     AcpAvailabilityStatus,
@@ -12,10 +12,11 @@ use super::{cli_probe, Requirement};
 
 /// Requirements for runtimes whose catalog metadata declares a CLI login probe.
 pub(super) fn requirements(
-    probe_args: &[&str],
+    probe: AuthProbe,
     setup_copy: &str,
     runtime: &KnownAcpRuntime,
 ) -> Vec<Requirement> {
+    let probe_args = probe.args;
     let adapter_result = runtime
         .commands
         .iter()
@@ -47,7 +48,7 @@ pub(super) fn requirements(
                 )];
             };
             let augmented_path = cli_probe::augmented_path();
-            match cli_probe::login_probe(&binary_path, probe_args, augmented_path.as_deref()) {
+            match cli_probe::login_probe(&binary_path, probe, augmented_path.as_deref()) {
                 cli_probe::ProbeOutcome::LoggedIn => vec![],
                 cli_probe::ProbeOutcome::LoggedOut => vec![missing_requirement(
                     probe_args,
@@ -61,6 +62,11 @@ pub(super) fn requirements(
                         diagnostic: stderr_excerpt,
                     }]
                 }
+                cli_probe::ProbeOutcome::Unknown => vec![missing_requirement(
+                    probe_args,
+                    setup_copy,
+                    AcpAvailabilityStatus::Available,
+                )],
             }
         }
         other => vec![missing_requirement(probe_args, setup_copy, other)],

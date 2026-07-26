@@ -13,7 +13,7 @@ mod agent_args;
 mod runtime_metadata;
 
 pub use agent_args::normalize_agent_args;
-pub(crate) use runtime_metadata::KnownAcpRuntime;
+pub(crate) use runtime_metadata::{AuthProbe, AuthProbeSuccess, KnownAcpRuntime};
 
 const GOOSE_AVATAR_URL: &str = "https://goose-docs.ai/img/logo_dark.png";
 const CLAUDE_CODE_AVATAR_URL: &str = "https://anthropic.gallerycdn.vsassets.io/extensions/anthropic/claude-code/2.1.77/1773707456892/Microsoft.VisualStudio.Services.Icons.Default";
@@ -89,6 +89,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         model_env_var: Some("GOOSE_MODEL"),
         provider_env_var: Some("GOOSE_PROVIDER"),
         provider_locked: false,
+        provider_locked_label: None,
         default_env: &[("GOOSE_MODE", "auto")],
         config_file_path: Some("~/.config/goose/config.yaml"),
         config_file_format: Some("yaml"),
@@ -98,7 +99,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         context_limit_env_var: Some("GOOSE_CONTEXT_LIMIT"),
         required_normalized_fields: &["model", "provider"],
         login_hint: None,
-        auth_probe_args: None,
+        auth_probe: None,
     },
     KnownAcpRuntime {
         id: "claude",
@@ -121,6 +122,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         model_env_var: None,
         provider_env_var: None,
         provider_locked: true,
+        provider_locked_label: Some("Anthropic"),
         default_env: &[],
         config_file_path: Some("~/.claude/settings.json"),
         config_file_format: Some("json"),
@@ -130,7 +132,10 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         context_limit_env_var: None,
         required_normalized_fields: &[],
         login_hint: Some("Run the Claude CLI to complete authentication."),
-        auth_probe_args: Some(&["claude", "auth", "status"]),
+        auth_probe: Some(AuthProbe {
+            args: &["claude", "auth", "status"],
+            success: AuthProbeSuccess::ExitStatus,
+        }),
     },
     KnownAcpRuntime {
         id: "codex",
@@ -153,6 +158,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         model_env_var: None,
         provider_env_var: None,
         provider_locked: false,
+        provider_locked_label: None,
         default_env: &[],
         config_file_path: Some("~/.codex/config.toml"),
         config_file_format: Some("toml"),
@@ -163,7 +169,10 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         required_normalized_fields: &[],
         login_hint: Some("Run `codex login` to authenticate."),
         // Verified: `codex login status` exits 0 when logged in, non-zero otherwise.
-        auth_probe_args: Some(&["codex", "login", "status"]),
+        auth_probe: Some(AuthProbe {
+            args: &["codex", "login", "status"],
+            success: AuthProbeSuccess::ExitStatus,
+        }),
     },
     KnownAcpRuntime {
         id: "qoder",
@@ -186,6 +195,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         model_env_var: None,
         provider_env_var: None,
         provider_locked: true,
+        provider_locked_label: Some("Qoder"),
         default_env: &[],
         config_file_path: Some("~/.qoder/settings.json"),
         config_file_format: Some("json"),
@@ -196,7 +206,10 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         required_normalized_fields: &[],
         login_hint: Some("Run `qodercli login` to authenticate."),
         // Qoder always exits 0; the JSON `logged_in` field carries auth state.
-        auth_probe_args: Some(&["qodercli", "status", "-o", "json"]),
+        auth_probe: Some(AuthProbe {
+            args: &["qodercli", "status", "-o", "json"],
+            success: AuthProbeSuccess::JsonBoolean { field: "logged_in" },
+        }),
     },
     KnownAcpRuntime {
         id: "buzz-agent",
@@ -219,6 +232,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         model_env_var: Some("BUZZ_AGENT_MODEL"),
         provider_env_var: Some("BUZZ_AGENT_PROVIDER"),
         provider_locked: false,
+        provider_locked_label: None,
         default_env: &[],
         config_file_path: None,
         config_file_format: None,
@@ -228,7 +242,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         context_limit_env_var: Some("BUZZ_AGENT_MAX_CONTEXT_TOKENS"),
         required_normalized_fields: &["model", "provider"],
         login_hint: None,
-        auth_probe_args: None,
+        auth_probe: None,
     },
 ];
 
@@ -915,13 +929,13 @@ pub(crate) fn is_npm_global_install(cmd: &str) -> bool {
 /// background threads to prevent pipe-buffer deadlock. On timeout the child is
 /// killed and `Unknown` is returned; no orphaned threads or processes are left
 /// behind. Returns `Unknown` on timeout.
-fn probe_auth_status(binary_path: &Path, probe_args: &[&str]) -> AuthStatus {
+fn probe_auth_status(binary_path: &Path, probe: AuthProbe) -> AuthStatus {
     use crate::managed_agents::readiness::cli_probe;
 
     let augmented_path = cli_probe::augmented_path();
 
     let mut command = std::process::Command::new(binary_path);
-    command.args(&probe_args[1..]);
+    command.args(&probe.args[1..]);
     if let Some(ref path) = augmented_path {
         command.env("PATH", path);
     }
@@ -1000,9 +1014,15 @@ fn probe_auth_status(binary_path: &Path, probe_args: &[&str]) -> AuthStatus {
     let stdout_bytes = stdout_thread.join().unwrap_or_default();
     let stderr_bytes = stderr_thread.join().unwrap_or_default();
 
-    match cli_probe::classify_probe_output(&stdout_bytes, &stderr_bytes, exit_status.success()) {
+    match cli_probe::classify_probe_output(
+        &stdout_bytes,
+        &stderr_bytes,
+        exit_status.success(),
+        probe.success,
+    ) {
         cli_probe::ProbeOutcome::LoggedIn => AuthStatus::LoggedIn,
         cli_probe::ProbeOutcome::LoggedOut => AuthStatus::LoggedOut,
+        cli_probe::ProbeOutcome::Unknown => AuthStatus::Unknown,
         cli_probe::ProbeOutcome::ConfigInvalid { stderr_excerpt } => AuthStatus::ConfigInvalid {
             diagnostic: stderr_excerpt,
         },
@@ -1281,6 +1301,7 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime) -> PartialEntr
             mcp_command: runtime.mcp_command.map(str::to_string),
             model_env_var: runtime.model_env_var.map(str::to_string),
             provider_env_var: runtime.provider_env_var.map(str::to_string),
+            provider_locked: runtime.provider_locked,
             thinking_env_var: runtime.thinking_env_var.map(str::to_string),
             install_hint,
             install_instructions_url: install_instructions_url.to_string(),
@@ -1321,15 +1342,11 @@ pub fn discover_acp_runtimes() -> Vec<AcpRuntimeCatalogEntry> {
             if partial.entry.availability != AcpAvailabilityStatus::Available {
                 return None;
             }
-            let probe_args = partial.runtime.auth_probe_args?;
+            let probe = partial.runtime.auth_probe?;
             // Need the resolved binary path for the CLI (e.g. the actual `claude` binary).
-            let binary_path = resolve_command(probe_args[0])?;
-            let probe_args_owned: Vec<String> = probe_args.iter().map(|s| s.to_string()).collect();
+            let binary_path = resolve_command(probe.args[0])?;
 
-            let handle = std::thread::spawn(move || {
-                let refs: Vec<&str> = probe_args_owned.iter().map(String::as_str).collect();
-                probe_auth_status(&binary_path, &refs)
-            });
+            let handle = std::thread::spawn(move || probe_auth_status(&binary_path, probe));
             Some((idx, handle))
         })
         .collect();
@@ -1352,7 +1369,7 @@ pub fn discover_acp_runtimes() -> Vec<AcpRuntimeCatalogEntry> {
         if partial.entry.auth_status == AuthStatus::Unknown {
             partial.entry.auth_status = if partial.entry.availability
                 == AcpAvailabilityStatus::Available
-                && partial.runtime.auth_probe_args.is_none()
+                && partial.runtime.auth_probe.is_none()
             {
                 AuthStatus::NotApplicable
             } else {

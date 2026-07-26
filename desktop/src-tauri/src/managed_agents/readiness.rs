@@ -282,9 +282,9 @@ fn collect_missing_requirements(
             let file_cfg = read_goose_file_config();
             goose_requirements(effective, file_cfg.as_ref())
         }
-        _ => match rt.auth_probe_args {
-            Some(probe_args) => cli_login::requirements(
-                probe_args,
+        _ => match rt.auth_probe {
+            Some(probe) => cli_login::requirements(
+                probe,
                 rt.login_hint.unwrap_or("Complete CLI authentication."),
                 rt,
             ),
@@ -491,7 +491,14 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::managed_agents::discovery::known_acp_runtime_exact;
+    use crate::managed_agents::discovery::{known_acp_runtime_exact, AuthProbe, AuthProbeSuccess};
+
+    fn exit_status_probe(args: &'static [&'static str]) -> AuthProbe {
+        AuthProbe {
+            args,
+            success: AuthProbeSuccess::ExitStatus,
+        }
+    }
 
     /// Build a minimal `EffectiveAgentEnv` with the given env map and command.
     fn make_env(command: &str, env: BTreeMap<String, String>) -> EffectiveAgentEnv {
@@ -833,7 +840,11 @@ mod tests {
         // Use a not-installed runtime so the requirement is always emitted
         // regardless of whether codex is on the test machine's PATH.
         let rt = make_cli_runtime(&["__buzz_nonexistent_adapter_xyz789__"], None);
-        let reqs = cli_login::requirements(&["codex", "login", "status"], "run `codex login`", &rt);
+        let reqs = cli_login::requirements(
+            exit_status_probe(&["codex", "login", "status"]),
+            "run `codex login`",
+            &rt,
+        );
         // Whether codex is installed or not, the copy (if any) must not mention OPENAI_API_KEY.
         for req in &reqs {
             if let Requirement::CliLogin { setup_copy, .. } = req {
@@ -880,6 +891,7 @@ mod tests {
             model_env_var: None,
             provider_env_var: None,
             provider_locked: false,
+            provider_locked_label: None,
             default_env: &[],
             supports_acp_native_config: false,
             thinking_env_var: None,
@@ -887,7 +899,7 @@ mod tests {
             context_limit_env_var: None,
             required_normalized_fields: &[],
             login_hint: None,
-            auth_probe_args: None,
+            auth_probe: None,
         }
     }
 
@@ -917,7 +929,7 @@ mod tests {
             Some("__buzz_nonexistent_cli_abc123__"),
         );
         let reqs = cli_login::requirements(
-            &["__buzz_nonexistent_binary_abc123__", "status"],
+            exit_status_probe(&["__buzz_nonexistent_binary_abc123__", "status"]),
             "install the tool first",
             &rt,
         );
@@ -950,7 +962,11 @@ mod tests {
         // → AdapterMissing state → no probe run → CliLogin{AdapterMissing}.
         let exe = present_binary_str();
         let rt = make_cli_runtime(&["__buzz_nonexistent_adapter_xyz789__"], Some(exe));
-        let reqs = cli_login::requirements(&[exe, "--list"], "install the adapter", &rt);
+        let reqs = cli_login::requirements(
+            exit_status_probe(static_commands(vec![exe, "--list"])),
+            "install the adapter",
+            &rt,
+        );
         assert!(
             !reqs.is_empty(),
             "adapter missing must produce a CliLogin requirement"
@@ -977,7 +993,11 @@ mod tests {
             static_commands(vec![exe]),              // adapter found via absolute path
             Some("__buzz_nonexistent_cli_abc123__"), // underlying CLI missing
         );
-        let reqs = cli_login::requirements(&[exe, "--list"], "install the CLI", &rt);
+        let reqs = cli_login::requirements(
+            exit_status_probe(static_commands(vec![exe, "--list"])),
+            "install the CLI",
+            &rt,
+        );
         assert!(
             !reqs.is_empty(),
             "CLI missing must produce a CliLogin requirement"
@@ -1003,7 +1023,7 @@ mod tests {
         let exe = present_binary_str();
         let rt = make_cli_runtime(static_commands(vec![exe]), Some(exe));
         let reqs = cli_login::requirements(
-            &[exe, "--list"],
+            exit_status_probe(static_commands(vec![exe, "--list"])),
             "this should not show (probe exits 0)",
             &rt,
         );
@@ -1023,8 +1043,11 @@ mod tests {
         // → CliLogin{Available} (tooling installed, needs login).
         let exe = present_binary_str();
         let rt = make_cli_runtime(static_commands(vec![exe]), Some(exe));
-        let reqs =
-            cli_login::requirements(&[exe, "--buzz-probe-fail-xyz"], "run `tool login`", &rt);
+        let reqs = cli_login::requirements(
+            exit_status_probe(static_commands(vec![exe, "--buzz-probe-fail-xyz"])),
+            "run `tool login`",
+            &rt,
+        );
         assert!(
             !reqs.is_empty(),
             "non-zero probe must produce a CliLogin requirement (logged out)"
@@ -1075,6 +1098,7 @@ mod tests {
             model_env_var: None,
             provider_env_var: None,
             provider_locked: false,
+            provider_locked_label: None,
             default_env: &[],
             supports_acp_native_config: false,
             thinking_env_var: None,
@@ -1082,7 +1106,7 @@ mod tests {
             context_limit_env_var: None,
             required_normalized_fields: &[],
             login_hint: None,
-            auth_probe_args: None,
+            auth_probe: None,
         }
     }
 
@@ -1137,7 +1161,7 @@ mod tests {
             Some(exe),
         );
         let reqs = cli_login::requirements(
-            &[exe, "--buzz-probe-must-not-run-xyz"],
+            exit_status_probe(static_commands(vec![exe, "--buzz-probe-must-not-run-xyz"])),
             "run `codex login`",
             &rt,
         );
@@ -1177,7 +1201,7 @@ mod tests {
             Some(exe),
         );
         let reqs = cli_login::requirements(
-            &[exe, "--buzz-probe-must-not-run-xyz"],
+            exit_status_probe(static_commands(vec![exe, "--buzz-probe-must-not-run-xyz"])),
             "run `codex login`",
             &rt,
         );

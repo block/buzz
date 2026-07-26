@@ -22,6 +22,7 @@ function runtime(id, metadata = {}) {
     mcpCommand: null,
     modelEnvVar: null,
     providerEnvVar: null,
+    providerLocked: false,
     thinkingEnvVar: null,
     installHint: "",
     installInstructionsUrl: "",
@@ -124,6 +125,22 @@ test("Codex omits separate effort because model IDs own it", () => {
   assert.deepEqual(model.omissions, [
     { kind: "effort", reason: "ownedByModelId" },
   ]);
+});
+
+test("provider-locked catalog metadata suppresses a contradictory provider env key", () => {
+  const model = deriveAgentConfigFieldModel({
+    config,
+    runtime: runtime("qoder", {
+      providerEnvVar: "SHOULD_NOT_BE_USED",
+      providerLocked: true,
+    }),
+    scope: "global",
+  });
+
+  assert.deepEqual(
+    model.fields.map((item) => item.kind),
+    ["model"],
+  );
 });
 
 test("catalog mismatch cleanup is named and restricted to onboarding", () => {

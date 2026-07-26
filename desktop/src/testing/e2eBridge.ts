@@ -6911,6 +6911,7 @@ function withMockRuntimeConfigMetadata(
           : runtime.id === "goose"
             ? "GOOSE_PROVIDER"
             : null,
+    provider_locked: runtime.provider_locked ?? false,
     thinking_env_var:
       "thinking_env_var" in runtime
         ? runtime.thinking_env_var
