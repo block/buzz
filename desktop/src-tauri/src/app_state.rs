@@ -12,7 +12,7 @@ use tauri::{AppHandle, Manager};
 #[cfg(feature = "mesh-llm")]
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::huddle::HuddleState;
+use crate::huddle::{tts_settings::TtsSettings, HuddleState};
 use crate::managed_agents::config_bridge::SessionConfigCache;
 use crate::managed_agents::{ManagedAgentPairRuntime, ManagedAgentRuntimeKey};
 pub struct AppState {
@@ -57,6 +57,8 @@ pub struct AppState {
     /// Selected audio output device name. `None` = system default.
     /// Used by `connect_audio_relay` and TTS pipeline when opening sinks.
     pub audio_output_device: Mutex<Option<String>>,
+    /// Persisted text-to-speech backend and voice selection.
+    pub tts_settings: Mutex<TtsSettings>,
     /// Port of the localhost media streaming proxy (set during setup).
     pub media_proxy_port: AtomicU16,
     /// Set when identity resolution detected a "keyring-locked" state: the
@@ -213,6 +215,7 @@ pub fn build_app_state() -> AppState {
         huddle_state: Mutex::new(HuddleState::default()),
         app_handle: Mutex::new(None),
         audio_output_device: Mutex::new(None),
+        tts_settings: Mutex::new(TtsSettings::default()),
         media_proxy_port: AtomicU16::new(0),
         prevent_sleep: Arc::new(Mutex::new(
             crate::prevent_sleep::PreventSleepState::default(),
@@ -1048,16 +1051,13 @@ fn load_key_file(path: &std::path::Path) -> Result<Keys, String> {
 /// 4. Calls fsync on the parent directory
 ///
 /// On Unix, the file is created with mode 0600 (owner read/write only).
-/// On Windows, default ACLs apply — the app data directory is already
-/// per-user, so the key is not world-readable in practice.
+/// On Windows, the per-user app data directory's default ACLs keep it private.
 pub(crate) fn save_key_file(path: &std::path::Path, keys: &Keys) -> Result<(), String> {
     use atomic_write_file::AtomicWriteFile;
-
     let nsec = keys
         .secret_key()
         .to_bech32()
         .map_err(|e| format!("encode nsec: {e}"))?;
-
     let mut file = AtomicWriteFile::open(path)
         .map_err(|e| format!("open identity.key for atomic write: {e}"))?;
 

@@ -33,10 +33,12 @@ pub mod pocket;
 pub mod preprocessing;
 pub mod reconnect;
 pub mod relay_api;
+pub mod siri_tts;
 pub mod state;
 pub mod stt;
 pub mod transcription;
 pub mod tts;
+pub mod tts_settings;
 pub mod wire;
 
 // ── Shared utilities ──────────────────────────────────────────────────────────
@@ -63,6 +65,9 @@ pub(super) fn drain_until_shutdown<T>(
 
 pub use state::{HuddleJoinInfo, HuddlePhase, HuddleState, VoiceInputMode};
 pub use transcription::{set_huddle_transcription_enabled, start_stt_pipeline};
+pub use tts_settings::{
+    download_siri_tts_voice, get_tts_settings, list_siri_tts_voices, set_tts_settings,
+};
 
 // ── Imports ───────────────────────────────────────────────────────────────────
 

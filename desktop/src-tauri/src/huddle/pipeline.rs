@@ -183,13 +183,39 @@ pub(crate) async fn maybe_start_stt_pipeline(
 /// leaks ~200MB of ONNX sessions. The sentinel is set under the lock before
 /// releasing it for the expensive construction step.
 pub(crate) async fn maybe_start_tts_pipeline(state: &AppState) -> Result<bool, String> {
-    if !models::is_tts_ready() {
-        return Ok(false); // TTS model not downloaded yet — TTS unavailable.
+    let settings = state
+        .tts_settings
+        .lock()
+        .map_err(|error| error.to_string())?
+        .clone();
+    if settings.backend == super::tts_settings::TtsBackend::Siri {
+        let candidate = settings.clone();
+        tokio::task::spawn_blocking(move || candidate.validate())
+            .await
+            .map_err(|error| format!("Siri TTS validation task failed: {error}"))??;
     }
-
-    let model_dir = match models::tts_model_dir() {
-        Some(d) => d,
-        None => return Ok(false),
+    let engine_config = match settings.backend {
+        super::tts_settings::TtsBackend::Pocket => {
+            if !models::is_tts_ready() {
+                return Ok(false);
+            }
+            let Some(model_dir) = models::tts_model_dir() else {
+                return Ok(false);
+            };
+            tts::TtsEngineConfig::Pocket {
+                model_dir,
+                voice: super::pocket::DEFAULT_VOICE.into(),
+            }
+        }
+        super::tts_settings::TtsBackend::Siri => tts::TtsEngineConfig::Siri {
+            voice: settings
+                .siri_voice
+                .ok_or_else(|| "Siri TTS voice is not configured".to_string())?,
+            language: settings
+                .siri_language
+                .ok_or_else(|| "Siri TTS language is not configured".to_string())?,
+            rate: settings.siri_rate,
+        },
     };
 
     // Atomically check preconditions and claim the construction slot.
@@ -217,7 +243,7 @@ pub(crate) async fn maybe_start_tts_pipeline(state: &AppState) -> Result<bool, S
         .unwrap_or_else(|e| e.into_inner())
         .clone();
     let constructed = tokio::task::spawn_blocking(move || {
-        tts::TtsPipeline::new(model_dir, tts_active, tts_cancel, output_device)
+        tts::TtsPipeline::new_with_config(engine_config, tts_active, tts_cancel, output_device)
     })
     .await;
     let pipeline = match constructed {

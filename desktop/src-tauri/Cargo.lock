@@ -1023,6 +1023,7 @@ dependencies = [
  "buzz-sdk",
  "bytes",
  "bzip2 0.6.1",
+ "cc",
  "chrono",
  "ctrlc",
  "dirs",

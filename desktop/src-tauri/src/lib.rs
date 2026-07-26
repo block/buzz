@@ -41,10 +41,11 @@ use huddle::audio_output::{
 };
 use huddle::reconnect::reconnect_huddle_audio;
 use huddle::{
-    add_agent_to_huddle, check_pipeline_hotstart, confirm_huddle_active, download_voice_models,
-    end_huddle, get_huddle_agent_pubkeys, get_huddle_state, get_model_status, get_voice_input_mode,
-    join_huddle, leave_huddle, push_audio_pcm, set_huddle_transcription_enabled, set_tts_enabled,
-    set_voice_input_mode, speak_agent_message, start_huddle, start_stt_pipeline,
+    add_agent_to_huddle, check_pipeline_hotstart, confirm_huddle_active, download_siri_tts_voice,
+    download_voice_models, end_huddle, get_huddle_agent_pubkeys, get_huddle_state,
+    get_model_status, get_tts_settings, get_voice_input_mode, join_huddle, leave_huddle,
+    list_siri_tts_voices, push_audio_pcm, set_huddle_transcription_enabled, set_tts_enabled,
+    set_tts_settings, set_voice_input_mode, speak_agent_message, start_huddle, start_stt_pipeline,
 };
 use managed_agents::{
     backfill_persona_snapshots, ensure_nest, list_managed_agent_runtimes,
@@ -443,6 +444,9 @@ pub fn run() {
             // through every call site.
             if let Ok(mut guard) = state.app_handle.lock() {
                 *guard = Some(app_handle.clone());
+            }
+            if let Ok(mut settings) = state.tts_settings.lock() {
+                *settings = crate::huddle::tts_settings::load_settings(&app_handle);
             }
 
             // Bring up the runtime-owned shared-compute coordinator before
@@ -858,6 +862,10 @@ pub fn run() {
             download_voice_models,
             get_model_status,
             set_tts_enabled,
+            get_tts_settings,
+            set_tts_settings,
+            list_siri_tts_voices,
+            download_siri_tts_voice,
             speak_agent_message,
             add_agent_to_huddle,
             check_pipeline_hotstart,

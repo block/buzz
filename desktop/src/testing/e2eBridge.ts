@@ -9162,6 +9162,43 @@ export function maybeInstallE2eTauriMocks() {
     window.__BUZZ_E2E_COMMAND_LOG__?.push({ command, payload });
 
     switch (command) {
+      case "get_tts_settings":
+        return {
+          backend: "pocket",
+          siri_voice: "Aaron",
+          siri_language: "en-US",
+          siri_rate: 1,
+        };
+      case "set_tts_settings":
+        return null;
+      case "list_siri_tts_voices":
+        return [
+          {
+            name: "Aaron",
+            language: "en-US",
+            identifier: "com.apple.siri.natural.Aaron",
+            size_bytes: 280_000_000,
+            availability: "installed",
+            version: 1,
+          },
+          {
+            name: "Nora",
+            language: "en-US",
+            identifier: "com.apple.siri.natural.Nora",
+            size_bytes: 310_000_000,
+            availability: "available",
+            version: null,
+          },
+        ];
+      case "download_siri_tts_voice":
+        return {
+          name: (payload as { name: string }).name,
+          language: (payload as { language: string }).language,
+          identifier: "com.apple.siri.natural.mock",
+          size_bytes: 300_000_000,
+          availability: "installed",
+          version: 1,
+        };
       case "get_builderlab_auth":
         return activeConfig?.mock?.builderlabAuth ?? null;
       case "start_builderlab_login": {

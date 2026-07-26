@@ -9,6 +9,7 @@
 //!   cargo run --release --example pocket_bench /path/to/pocket-tts
 
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use sherpa_onnx::{
@@ -17,8 +18,7 @@ use sherpa_onnx::{
 };
 
 const SAMPLE_RATE: u32 = 24_000;
-const TEST_TEXT: &str =
-    "Hello, this is a test of the new Pocket TTS engine running on sherpa-onnx.";
+const TEST_TEXT: &str = ". This sentence has five words.";
 
 fn main() {
     let model_dir = std::env::args()
@@ -33,10 +33,10 @@ fn main() {
     let cfg = OfflineTtsConfig {
         model: OfflineTtsModelConfig {
             pocket: OfflineTtsPocketModelConfig {
-                lm_main: Some(p("lm_main.int8.onnx")),
-                lm_flow: Some(p("lm_flow.int8.onnx")),
+                lm_main: Some(p("lm_main.onnx")),
+                lm_flow: Some(p("lm_flow.onnx")),
                 encoder: Some(p("encoder.onnx")),
-                decoder: Some(p("decoder.int8.onnx")),
+                decoder: Some(p("decoder.onnx")),
                 text_conditioner: Some(p("text_conditioner.onnx")),
                 vocab_json: Some(p("vocab.json")),
                 token_scores_json: Some(p("token_scores.json")),
@@ -90,6 +90,38 @@ fn main() {
     println!(
         "Warm synth:       {warm_ms:.1} ms  → {warm_audio_ms:.1} ms audio  → {warm_rtf_x:.2}× realtime"
     );
+
+    println!("\nWarm first-sample callback trials:");
+    for trial in 1..=7 {
+        let started = Instant::now();
+        let first = Arc::new(Mutex::new(None));
+        let callback_first = Arc::clone(&first);
+        let _audio = engine
+            .generate_with_config(
+                TEST_TEXT,
+                &gen(),
+                Some(move |samples: &[f32], progress: f32| {
+                    if !samples.is_empty() {
+                        let mut value = callback_first.lock().expect("callback mutex");
+                        if value.is_none() {
+                            *value = Some((started.elapsed(), samples.len(), progress));
+                        }
+                    }
+                    true
+                }),
+            )
+            .expect("callback synth");
+        let value = first
+            .lock()
+            .expect("result mutex")
+            .expect("at least one non-empty callback");
+        println!(
+            "  {trial}: {:.1} ms ({} cumulative samples, progress {:.3})",
+            value.0.as_secs_f64() * 1000.0,
+            value.1,
+            value.2
+        );
+    }
 
     let out_path = "/tmp/pocket_bench_out.wav";
     let ok = sherpa_onnx::write(out_path, warm.samples(), SAMPLE_RATE as i32);

@@ -133,6 +133,7 @@ const SHORT_PROMPT_WORD_THRESHOLD: usize = 4;
 /// synthesized sacrificial text and trimmed it with an amplitude threshold;
 /// that threshold sat in soft-onset territory and could eat real word starts.
 /// Whitespace needs no fragile audio trimming.
+#[cfg_attr(not(test), allow(dead_code))]
 const PROMPT_PAD_SPACES: usize = 8;
 
 /// sherpa-onnx's documented `frames_after_eos` default. We deliberately do
@@ -252,6 +253,7 @@ pub fn load_text_to_speech(model_dir: &str) -> Result<PocketTts, String> {
 ///
 /// Production uses [`PromptPrefix::Period`]. The other strategies are exposed
 /// to the standalone quality harness for controlled listening comparisons.
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PromptPrefix {
     /// Leading spaces, matching Pocket TTS's short-prompt mitigation.
@@ -308,6 +310,7 @@ pub(crate) struct PreparedPrompt {
 ///
 /// Returns `None` only if the input is empty after trimming — caller should
 /// skip synthesis in that case.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn prepare_pocket_prompt(input: &str) -> Option<PreparedPrompt> {
     prepare_pocket_prompt_with_prefix(input, &PromptPrefix::Period)
 }
@@ -425,6 +428,33 @@ impl PocketTts {
         self.synth_chunk_with_prefix(text, lang, style, steps, &PromptPrefix::Period)
     }
 
+    /// Synthesise `text` while reporting the cumulative audio generated so far.
+    ///
+    /// Pocket emits progress in coarse batches (currently about 1.2 seconds of
+    /// audio per callback). Callers can enqueue each newly generated suffix for
+    /// playback instead of waiting for the complete utterance. Returning
+    /// `false` from `callback` cancels generation.
+    pub fn synth_chunk_streaming<F>(
+        &self,
+        text: &str,
+        lang: &str,
+        style: &VoiceStyle,
+        steps: usize,
+        callback: F,
+    ) -> Result<Vec<f32>, String>
+    where
+        F: FnMut(&[f32], f32) -> bool + 'static,
+    {
+        self.synth_chunk_with_prefix_and_callback(
+            text,
+            lang,
+            style,
+            steps,
+            &PromptPrefix::Period,
+            Some(callback),
+        )
+    }
+
     /// Synthesize one chunk with an explicit cold-start prefix strategy.
     ///
     /// This is used by the standalone quality harness for A/B comparisons;
@@ -437,6 +467,28 @@ impl PocketTts {
         _steps: usize,
         prefix: &PromptPrefix,
     ) -> Result<Vec<f32>, String> {
+        self.synth_chunk_with_prefix_and_callback(
+            text,
+            _lang,
+            style,
+            _steps,
+            prefix,
+            None::<fn(&[f32], f32) -> bool>,
+        )
+    }
+
+    fn synth_chunk_with_prefix_and_callback<F>(
+        &self,
+        text: &str,
+        _lang: &str,
+        style: &VoiceStyle,
+        _steps: usize,
+        prefix: &PromptPrefix,
+        callback: Option<F>,
+    ) -> Result<Vec<f32>, String>
+    where
+        F: FnMut(&[f32], f32) -> bool + 'static,
+    {
         // Mirror upstream pocket-tts prompt prep — without this short or
         // unpunctuated inputs can cause the LM's EOS logit to never trip,
         // producing up to 40 s of "monster breathing" garbage on the first
@@ -465,13 +517,9 @@ impl PocketTts {
             ..Default::default()
         };
 
-        // No progress callback — synthesis is fast enough that returning the
-        // whole buffer at once keeps the lookahead pipelining in `tts.rs`
-        // simple. `None::<fn(...) -> bool>` pins the callback type for the
-        // `generate_with_config` generic parameter.
         let audio = self
             .inner
-            .generate_with_config(&prepared.text, &cfg, None::<fn(&[f32], f32) -> bool>)
+            .generate_with_config(&prepared.text, &cfg, callback)
             .ok_or_else(|| {
                 format!(
                     "Pocket TTS synthesis failed for text ({} chars)",

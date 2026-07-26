@@ -5,15 +5,14 @@
 //! ```text
 //! caller: pipeline.speak("Hello world. How are you?")
 //!   → bounded sync_channel (TEXT_QUEUE_DEPTH = 8)
-//!   → tts_worker thread (owns 1 Pocket TTS engine + 1 persistent Player)
-//!       1. Preprocess text
-//!       2. Split into sentences
-//!       3. Synthesize each sentence individually → f32 PCM
-//!       4. Clamp to full scale + fade out each sentence
-//!       5. Append each buffer to the persistent rodio Player (gapless)
-//!       6. While audio is draining, keep pulling queued text items and
-//!          synthesizing ahead — playback of item N overlaps synthesis of
-//!          item N+1
+//!   → tts_worker thread (owns the selected engine + 1 persistent Player)
+//!       Pocket: preprocess, chunk, stream cumulative inference callbacks,
+//!               then clamp/fade and append callback deltas gaplessly.
+//!       Siri:   validate the selected system voice before construction,
+//!               decode incremental sirittsd PCM/Opus packets in the native
+//!               bridge, and append normalized float PCM as it arrives.
+//!       Both:   keep pulling queued text while prior audio drains so playback
+//!               of item N overlaps synthesis of item N+1.
 //!   → tts_active = true while audio is queued/playing, false when idle
 //!   → cancel flag: a 10 ms barge-in monitor thread silences the player and
 //!     releases tts_active on the flag's rising edge (~15 ms flag-to-silence,
@@ -48,6 +47,19 @@ use std::{
 
 use super::pocket::{load_text_to_speech, load_voice_style, SAMPLE_RATE, VOICE_FILE_EXT};
 use super::preprocessing::{preprocess_for_tts, split_sentences};
+
+#[derive(Clone, Debug)]
+pub enum TtsEngineConfig {
+    Pocket {
+        model_dir: PathBuf,
+        voice: String,
+    },
+    Siri {
+        voice: String,
+        language: String,
+        rate: f32,
+    },
+}
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -128,47 +140,16 @@ pub struct TtsPipeline {
     pub tts_active: Arc<AtomicBool>,
     /// Signals the worker thread to stop.
     shutdown: Arc<AtomicBool>,
-    /// Cancel flag: worker drains the queue and stops current playback.
-    /// Kept alive here so the Arc isn't dropped — the worker holds a clone.
-    #[allow(dead_code)]
-    cancel: Arc<AtomicBool>,
-    /// Voice name (e.g. "reference_sample"). Stored for future voice-switching support.
-    #[allow(dead_code)]
-    voice: String,
     /// Worker thread handle — taken on drop to join cleanly.
     thread: Option<thread::JoinHandle<()>>,
 }
 
 impl TtsPipeline {
-    /// Spawn the TTS pipeline thread using the default voice.
-    ///
-    /// `model_dir` must contain the Pocket TTS files declared by `huddle::models`
-    /// (the five ONNX sessions, the two JSON tables, and `<voice>.wav`).
-    ///
-    /// `tts_active` is set to `true` while audio is playing and `false` when idle.
-    /// Pass the same `Arc` to the STT pipeline to gate microphone input.
-    ///
-    /// `cancel` is the shared barge-in flag from `HuddleState.tts_cancel`. Pass the
-    /// same `Arc` to the STT pipeline so both sides reference the same flag for the
-    /// entire huddle session — no stale references after pipeline restarts.
-    pub fn new(
-        model_dir: PathBuf,
+    /// Spawn the configured engine on its dedicated synthesis thread.
+    pub fn new_with_config(
+        config: TtsEngineConfig,
         tts_active: Arc<AtomicBool>,
         cancel: Arc<AtomicBool>,
-        output_device: Option<String>,
-    ) -> Result<Self, String> {
-        use super::pocket::DEFAULT_VOICE;
-        Self::new_with_voice(model_dir, tts_active, cancel, DEFAULT_VOICE, output_device)
-    }
-
-    /// Spawn the TTS pipeline thread with a specific voice name. Today only the
-    /// bundled default voice (see `pocket::DEFAULT_VOICE`) is shipped; other
-    /// names will surface a clear error from `load_voice_style`.
-    pub fn new_with_voice(
-        model_dir: PathBuf,
-        tts_active: Arc<AtomicBool>,
-        cancel: Arc<AtomicBool>,
-        voice: &str,
         output_device: Option<String>,
     ) -> Result<Self, String> {
         let (text_tx, text_rx) = mpsc::sync_channel::<String>(TEXT_QUEUE_DEPTH);
@@ -178,21 +159,32 @@ impl TtsPipeline {
         let shutdown_worker = Arc::clone(&shutdown);
         let cancel_worker = Arc::clone(&cancel);
         let tts_active_worker = Arc::clone(&tts_active);
-        let voice_name = voice.to_string();
-        let model_dir_worker = model_dir.clone();
-
         let handle = thread::Builder::new()
             .name("tts-worker".into())
-            .spawn(move || {
-                tts_worker(
-                    model_dir_worker,
-                    voice_name,
+            .spawn(move || match config {
+                TtsEngineConfig::Pocket { model_dir, voice } => pocket_tts_worker(
+                    model_dir,
+                    voice,
                     text_rx,
                     tts_active_worker,
                     shutdown_worker,
                     cancel_worker,
                     output_device,
-                )
+                ),
+                TtsEngineConfig::Siri {
+                    voice,
+                    language,
+                    rate,
+                } => super::siri_tts::run_worker(
+                    voice,
+                    language,
+                    rate,
+                    text_rx,
+                    tts_active_worker,
+                    shutdown_worker,
+                    cancel_worker,
+                    output_device,
+                ),
             })
             .map_err(|e| format!("failed to spawn tts-worker thread: {e}"))?;
 
@@ -200,8 +192,6 @@ impl TtsPipeline {
             text_tx,
             tts_active,
             shutdown,
-            cancel,
-            voice: voice.to_string(),
             thread: Some(handle),
         })
     }
@@ -242,7 +232,7 @@ impl Drop for TtsPipeline {
 
 // ── Worker thread ─────────────────────────────────────────────────────────────
 
-fn tts_worker(
+fn pocket_tts_worker(
     model_dir: PathBuf,
     voice_name: String,
     text_rx: mpsc::Receiver<String>,
@@ -521,21 +511,85 @@ fn tts_worker(
                 continue;
             }
 
-            match engine.synth_chunk(text, "en", &style, SYNTH_STEPS) {
+            // Keep enough unqueued audio to apply the sentence-end fade after
+            // generation completes. Progress callbacks are cumulative, so each
+            // callback appends only the newly available suffix before this tail.
+            let streamed_samples = Arc::new(Mutex::new(0usize));
+            let streamed_samples_callback = Arc::clone(&streamed_samples);
+            let player_callback = Arc::clone(&player);
+            let player_ops_callback = Arc::clone(&player_ops);
+            let cancel_callback = Arc::clone(&cancel);
+            let tts_active_callback = Arc::clone(&tts_active);
+            let callback = move |samples: &[f32], _progress: f32| {
+                if cancel_callback.load(Ordering::Acquire) {
+                    return false;
+                }
+
+                // apply_fade_out uses at most half its input. Retaining twice
+                // the fade length guarantees the full fade remains available.
+                let stream_end = samples.len().saturating_sub(FADE_OUT_SAMPLES * 2);
+                let mut emitted = lock_player_ops(&streamed_samples_callback);
+                if stream_end <= *emitted {
+                    return true;
+                }
+
+                // The period prefix that stabilizes Pocket's first phoneme can
+                // produce a variable amount of leading silence. Do not queue
+                // that silence; retain 50 ms before the detected onset so soft
+                // consonants and breaths remain intact.
+                let stream_start = if *emitted == 0 {
+                    leading_audio_start(&samples[..stream_end])
+                } else {
+                    *emitted
+                };
+                let mut buffer = Vec::with_capacity(
+                    stream_end - stream_start
+                        + usize::from(*emitted == 0) * SENTENCE_LEAD_IN_SAMPLES,
+                );
+                if *emitted == 0 {
+                    buffer.extend(std::iter::repeat_n(0.0_f32, SENTENCE_LEAD_IN_SAMPLES));
+                }
+                buffer.extend(
+                    samples[stream_start..stream_end]
+                        .iter()
+                        .map(|sample| sample.clamp(-1.0, 1.0)),
+                );
+
+                let _ops = lock_player_ops(&player_ops_callback);
+                if cancel_callback.load(Ordering::Acquire) {
+                    return false;
+                }
+                player_callback.append(SamplesBuffer::new(channels, rate, buffer));
+                tts_active_callback.store(true, Ordering::Release);
+                *emitted = stream_end;
+                true
+            };
+
+            match engine.synth_chunk_streaming(text, "en", &style, SYNTH_STEPS, callback) {
                 Ok(samples) if !samples.is_empty() => {
-                    let mut audio = clamp_to_full_scale(samples);
+                    let emitted = *lock_player_ops(&streamed_samples);
+
+                    // The callback can observe cancellation while generation is
+                    // blocked. Do not append its retained tail afterward.
+                    if cancel.load(Ordering::Acquire) {
+                        break;
+                    }
+
+                    let mut audio = clamp_to_full_scale(samples[emitted..].to_vec());
                     // Fade-out only — fading-in would attenuate the consonant
                     // onset (see `apply_fade_out` docstring + the
                     // 2026-05-18 "first little sound is missing" regression).
                     apply_fade_out(&mut audio);
 
-                    // Build one contiguous buffer per synthesized sentence:
-                    // lead-in cushion + audio + trailing gap. Keeping this as
-                    // a single rodio source preserves the original queue/drain
-                    // semantics (one append per sentence) while still giving
-                    // every chunk a quiet device warm-up window.
-                    let buf =
-                        build_sentence_append_buffer(&mut first_append, audio, silence_buf_len);
+                    let buf = if emitted == 0 {
+                        build_sentence_append_buffer(&mut first_append, audio, silence_buf_len)
+                    } else {
+                        first_append = false;
+                        let trailing_silence_len =
+                            silence_buf_len.saturating_sub(SENTENCE_LEAD_IN_SAMPLES);
+                        audio.extend(std::iter::repeat_n(0.0_f32, trailing_silence_len));
+                        audio
+                    };
 
                     // Check-and-append under `player_ops`, serialized with
                     // the monitor: a barge-in may have arrived during
@@ -636,11 +690,10 @@ fn handle_cancel_or_shutdown(
 
 /// Acquire the `player_ops` lock, recovering from poison.
 ///
-/// The data under the mutex is `()` — it only serializes Player mutations —
-/// so a panicked holder leaves nothing inconsistent to observe and recovery
-/// is always safe. Without this, a worker panic would wedge the monitor (or
-/// vice versa) on `unwrap()`.
-fn lock_player_ops(ops: &Mutex<()>) -> MutexGuard<'_, ()> {
+/// The guarded values are either the stateless Player-mutation token or a
+/// monotonic emitted-sample count. Recovering either after a panic is safe and
+/// avoids wedging the monitor (or vice versa) on `unwrap()`.
+fn lock_player_ops<T>(ops: &Mutex<T>) -> MutexGuard<'_, T> {
     ops.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
@@ -687,6 +740,37 @@ fn apply_fade_out(samples: &mut [f32]) {
     for i in 0..fade {
         samples[len - 1 - i] *= i as f32 / fade as f32;
     }
+}
+
+/// Find the first sustained audio in a Pocket progress batch.
+///
+/// The stabilizing period prefix sometimes yields almost a second of leading
+/// silence. A 10 ms RMS window rejects isolated numerical noise, while the
+/// retained 50 ms of pre-roll protects soft word onsets.
+fn leading_audio_start(samples: &[f32]) -> usize {
+    const WINDOW: usize = SAMPLE_RATE as usize / 100;
+    const RETAIN: usize = SAMPLE_RATE as usize / 20;
+
+    let peak = samples
+        .iter()
+        .map(|sample| sample.abs())
+        .fold(0.0_f32, f32::max);
+    let threshold = (peak * 0.02).max(0.002);
+    let threshold_squared = threshold * threshold;
+    let mut energy = 0.0_f32;
+
+    for (index, sample) in samples.iter().enumerate() {
+        energy += sample * sample;
+        if index >= WINDOW {
+            let expired = samples[index - WINDOW];
+            energy -= expired * expired;
+        }
+        if index + 1 >= WINDOW && energy / WINDOW as f32 >= threshold_squared {
+            return (index + 1 - WINDOW).saturating_sub(RETAIN);
+        }
+    }
+
+    0
 }
 
 /// Build the single buffer appended to the rodio `Player` for one synthesised
@@ -776,3 +860,7 @@ use super::drain_until_shutdown;
 #[cfg(test)]
 #[path = "tts_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tts_onset_tests.rs"]
+mod onset_tests;

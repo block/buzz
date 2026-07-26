@@ -1136,6 +1136,50 @@ export const setPreventSleepActive = (active: boolean) =>
 export const setAgentManagedProfiles = (enabled: boolean) =>
   invokeTauri("set_agent_managed_profiles", { enabled });
 
+export type TtsBackend = "pocket" | "siri";
+
+export type TtsSettings = {
+  backend: TtsBackend;
+  siri_voice: string | null;
+  siri_language: string | null;
+  siri_rate: number;
+};
+
+export type SiriTtsVoice = {
+  name: string;
+  language: string;
+  identifier: string;
+  size_bytes: number;
+  availability: "installed" | "available";
+  version: number | null;
+};
+
+export function getTtsSettings(): Promise<TtsSettings> {
+  return invokeTauri<TtsSettings>("get_tts_settings");
+}
+
+export function setTtsSettings(settings: TtsSettings): Promise<void> {
+  return invokeTauri("set_tts_settings", { settings });
+}
+
+export function listSiriTtsVoices(
+  languagePrefix = "en",
+): Promise<SiriTtsVoice[]> {
+  return invokeTauri<SiriTtsVoice[]>("list_siri_tts_voices", {
+    languagePrefix,
+  });
+}
+
+export function downloadSiriTtsVoice(
+  name: string,
+  language: string,
+): Promise<SiriTtsVoice> {
+  return invokeTauri<SiriTtsVoice>("download_siri_tts_voice", {
+    name,
+    language,
+  });
+}
+
 /** Returns true on macOS, Windows, and Linux AppImage installs.
  *  Returns false on Linux non-AppImage packages (e.g. .deb) where
  *  Tauri's updater cannot swap the binary. */
