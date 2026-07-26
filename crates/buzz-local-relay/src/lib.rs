@@ -136,6 +136,9 @@ pub enum QueryError {
     /// NIP-50 requires a search engine rather than core NIP-01 matching.
     #[error("NIP-50 search filters require the production relay")]
     SearchUnsupported,
+    /// The filter used a field outside the supported NIP-01 subset.
+    #[error("unsupported filter field: {0}")]
+    UnsupportedFilterField(String),
 }
 
 /// Errors returned while reading the laptop relay's replication stream.
@@ -687,8 +690,7 @@ async fn query_events(
     body: Bytes,
 ) -> Result<Json<Vec<Event>>, ApiError> {
     let principal = authenticate_http(&relay, &headers, "/query", &body).await?;
-    let filters: Vec<Filter> = serde_json::from_slice(&body)
-        .map_err(|error| ApiError::BadRequest(format!("invalid filter JSON: {error}")))?;
+    let filters = parse_filter_body(&body)?;
     Ok(Json(
         relay
             .query_for(principal.as_ref(), ReadOperation::Query, &filters)
@@ -702,8 +704,7 @@ async fn count_events(
     body: Bytes,
 ) -> Result<Json<Value>, ApiError> {
     let principal = authenticate_http(&relay, &headers, "/count", &body).await?;
-    let filters: Vec<Filter> = serde_json::from_slice(&body)
-        .map_err(|error| ApiError::BadRequest(format!("invalid filter JSON: {error}")))?;
+    let filters = parse_filter_body(&body)?;
     let count = relay.count_for(principal.as_ref(), &filters).await?;
     Ok(Json(json!({ "count": count })))
 }
@@ -1044,10 +1045,17 @@ where
         .is_ok();
     }
 
-    let filters: Result<Vec<Filter>, _> = parts
-        .iter()
-        .skip(2)
-        .cloned()
+    let filter_values: Vec<Value> = parts.iter().skip(2).cloned().collect();
+    if let Err(error) = validate_filter_fields(&filter_values) {
+        return send_json(
+            sender,
+            json!(["CLOSED", subscription_id, error.to_string()]),
+        )
+        .await
+        .is_ok();
+    }
+    let filters: Result<Vec<Filter>, _> = filter_values
+        .into_iter()
         .map(serde_json::from_value)
         .collect();
     let filters = match filters {
@@ -1213,6 +1221,40 @@ fn validate_filters(filters: &[Filter]) -> Result<(), QueryError> {
     Ok(())
 }
 
+/// Filter fields the portable subset accepts; `search` stays listed so it
+/// reaches [`validate_filters`] and fails with its dedicated denial.
+const SUPPORTED_FILTER_FIELDS: [&str; 7] = [
+    "ids", "authors", "kinds", "since", "until", "limit", "search",
+];
+
+/// Rejects filter fields outside the supported NIP-01 subset.
+///
+/// Serde silently drops unknown fields, which would broaden a query the
+/// caller believed was narrower. This check runs on the raw JSON before
+/// deserialization so unsupported extensions fail closed instead.
+fn validate_filter_fields(filters: &[Value]) -> Result<(), QueryError> {
+    for filter in filters {
+        let Some(object) = filter.as_object() else {
+            continue;
+        };
+        for field in object.keys() {
+            if !field.starts_with('#') && !SUPPORTED_FILTER_FIELDS.contains(&field.as_str()) {
+                return Err(QueryError::UnsupportedFilterField(field.clone()));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Parses an HTTP filter body, failing closed on unsupported filter fields.
+fn parse_filter_body(body: &[u8]) -> Result<Vec<Filter>, ApiError> {
+    let values: Vec<Value> = serde_json::from_slice(body)
+        .map_err(|error| ApiError::BadRequest(format!("invalid filter JSON: {error}")))?;
+    validate_filter_fields(&values)?;
+    serde_json::from_value(Value::Array(values))
+        .map_err(|error| ApiError::BadRequest(format!("invalid filter JSON: {error}")))
+}
+
 /// Parses the bind address used by the local relay binary.
 pub fn parse_bind_address(raw: &str) -> Result<SocketAddr, std::net::AddrParseError> {
     raw.parse()
@@ -1343,6 +1385,21 @@ mod tests {
             .await
             .expect_err("search must not silently return unfiltered events");
         assert!(matches!(error, QueryError::SearchUnsupported));
+    }
+
+    #[test]
+    fn filter_field_validation_fails_closed_on_unknown_fields() {
+        assert!(validate_filter_fields(&[
+            json!({ "ids": ["a"], "authors": ["b"], "kinds": [1], "#t": ["x"], "limit": 5 })
+        ])
+        .is_ok());
+
+        let error = validate_filter_fields(&[json!({ "kinds": [1], "unknown_extension": 1 })])
+            .expect_err("unknown filter fields must not silently broaden a query");
+        assert!(matches!(
+            error,
+            QueryError::UnsupportedFilterField(field) if field == "unknown_extension"
+        ));
     }
 
     #[tokio::test]
