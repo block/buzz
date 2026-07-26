@@ -44,6 +44,9 @@ export function ModelPicker({
 
   const isRunning = agent.status === "running" || agent.status === "deployed";
   const activeTurns = useActiveAgentTurns(agent.pubkey);
+  // Catalog-derived startup-only runtimes persist a selection for the next
+  // process launch; active sessions cannot switch through ACP.
+  const startupOnlyModelRuntime = agent.startupModelArg != null;
   // A live switch rides the agent's running session(s) instead of persisting a
   // new default. It applies only to a persona-linked running agent with at
   // least one active turn — those are the channels the desktop can name in the
@@ -54,7 +57,10 @@ export function ModelPicker({
   // running but wholly idle has no nameable channel here, so it falls through
   // to persisting the default (the only reachable lever from this surface).
   const isLiveSwitch =
-    agent.personaId !== null && isRunning && activeTurns.length > 0;
+    !startupOnlyModelRuntime &&
+    agent.personaId !== null &&
+    isRunning &&
+    activeTurns.length > 0;
 
   const fetchModels = React.useCallback(async () => {
     setLoading(true);

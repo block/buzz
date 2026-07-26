@@ -62,6 +62,11 @@ pub(crate) struct KnownAcpRuntime {
     /// CLI args for probing authentication status. `args[0]` is the binary name;
     /// the remainder are the subcommand. `None` for runtimes with no login step.
     pub auth_probe_args: Option<&'static [&'static str]>,
+    /// True when the vendor CLI itself speaks ACP; no separate adapter or
+    /// vendor CLI dependency is required.
+    pub native_acp: bool,
+    /// Optional CLI flag used to pin the model when the process starts.
+    pub startup_model_arg: Option<&'static str>,
 }
 
 impl KnownAcpRuntime {
@@ -73,6 +78,11 @@ impl KnownAcpRuntime {
     pub fn cli_install_commands_for_os(&self) -> &[&str] {
         #[cfg(windows)]
         {
+            if self.id == "cursor" {
+                // Cursor is supported on Windows through WSL only; never run
+                // the Unix installer in the native Windows shell.
+                return &[];
+            }
             if !self.cli_install_commands_windows.is_empty() {
                 return self.cli_install_commands_windows;
             }
@@ -120,5 +130,13 @@ mod tests {
         );
         assert!(codex.adapter_install_instructions_url.contains("codex-acp"));
         assert!(codex.cli_install_hint.contains("desktop app alone"));
+
+        let cursor = known_acp_runtime_exact("cursor").unwrap();
+        assert_eq!(cursor.avatar_url, "https://cursor.com/brand/icon.svg");
+        assert_eq!(cursor.commands, &["agent", "cursor-agent"]);
+        assert!(cursor.adapter_install_commands.is_empty());
+        assert!(cursor.cli_install_instructions_url.contains("cursor"));
+        assert!(cursor.cli_install_hint.contains("WSL"));
+        assert_eq!(cursor.startup_model_arg, Some("--model"));
     }
 }

@@ -355,6 +355,8 @@ export type ManagedAgent = {
    */
   agentCommandOverride: string | null;
   agentArgs: string[];
+  /** Catalog-derived startup model flag; non-null runtimes are not live-switchable. */
+  startupModelArg?: string | null;
   mcpCommand: string;
   turnTimeoutSeconds: number;
   idleTimeoutSeconds: number | null;
@@ -557,6 +559,8 @@ export type AcpRuntimeCatalogEntry = {
   authStatus: AuthStatus;
   /** Hint for completing authentication; null when not applicable or already logged in. */
   loginHint: string | null;
+  /** Optional startup flag used to pin a model before ACP starts. */
+  startupModelArg: string | null;
 };
 
 /** An AcpRuntimeCatalogEntry that is confirmed available — command and binaryPath are non-null. */

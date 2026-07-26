@@ -39,7 +39,12 @@ pub(super) async fn run_agent_models_command(
         cmd.arg("models")
             .arg("--json")
             .env("BUZZ_ACP_AGENT_COMMAND", &agent_command)
-            .env("BUZZ_ACP_AGENT_ARGS", agent_args.join(","));
+            .env("BUZZ_ACP_AGENT_ARGS", agent_args.join(","))
+            .env(
+                "BUZZ_ACP_AGENT_ARGS_JSON",
+                serde_json::to_string(&agent_args)
+                    .map_err(|error| format!("failed to encode agent args: {error}"))?,
+            );
         if let Some(meta) = known_acp_runtime(&agent_command) {
             for (key, value) in meta.default_env {
                 if std::env::var(key).is_err() {

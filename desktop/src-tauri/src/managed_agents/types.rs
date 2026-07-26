@@ -466,6 +466,9 @@ pub struct ManagedAgentSummary {
     /// concrete pin (`agent_command` above is the resolved/effective command).
     pub agent_command_override: Option<String>,
     pub agent_args: Vec<String>,
+    /// Catalog-derived startup flag for runtimes that pin model selection in
+    /// process argv instead of supporting ACP live switching.
+    pub startup_model_arg: Option<String>,
     /// Catalog-derived from the effective harness (not the record's stored
     /// field), so the UI always shows what a spawn would actually use.
     pub mcp_command: String,
@@ -596,6 +599,8 @@ pub struct AcpRuntimeCatalogEntry {
     /// Hint for completing authentication, shown when `auth_status` is not `logged_in`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub login_hint: Option<String>,
+    /// Optional startup flag used by runtimes such as Cursor to pin a model.
+    pub startup_model_arg: Option<String>,
 }
 
 /// Result of a single install step (CLI or adapter).

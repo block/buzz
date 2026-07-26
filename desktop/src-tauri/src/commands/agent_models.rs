@@ -19,7 +19,8 @@ use crate::{
     managed_agents::{
         build_managed_agent_summary, current_instance_id, discovery_env_with_baked_floor,
         find_managed_agent_mut, known_acp_runtime, load_managed_agents, load_personas,
-        managed_agent_avatar_url, missing_command_message, normalize_agent_args, resolve_command,
+        managed_agent_avatar_url, missing_command_message, normalize_agent_args, resolve_agent_launch,
+        resolve_command,
         save_managed_agents, sync_managed_agent_processes, try_regenerate_nest, AgentModelInfo,
         AgentModelsResponse, UpdateManagedAgentRequest, UpdateManagedAgentResponse,
         DEFAULT_ACP_COMMAND,
@@ -79,11 +80,8 @@ pub async fn get_agent_models(
         let personas = load_personas(&app).unwrap_or_default();
         let effective_command = crate::managed_agents::record_agent_command(record, &personas);
 
-        let args = normalize_agent_args(&effective_command, record.agent_args.clone());
-
-        let resolved_agent = resolve_command(&effective_command)
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| effective_command.clone());
+        let normalized_args = normalize_agent_args(&effective_command, record.agent_args.clone());
+        let (resolved_agent, args) = resolve_agent_launch(&effective_command, normalized_args)?;
 
         // ModelPicker can persist a selected model but not rewrite the saved
         // provider/env snapshot, and runtime spawn reads that same snapshot.
@@ -226,12 +224,9 @@ pub async fn discover_agent_models(
     if agent_command.is_empty() {
         return Err("agent command is required for model discovery".to_string());
     }
-    let agent_args = normalize_agent_args(agent_command, input.agent_args);
-    let resolved_agent = resolve_command(agent_command)
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| agent_command.to_string());
-
     let runtime_meta = known_acp_runtime(agent_command);
+    let normalized_args = normalize_agent_args(agent_command, input.agent_args);
+    let (resolved_agent, agent_args) = resolve_agent_launch(agent_command, normalized_args)?;
     let mut derived_env = BTreeMap::new();
     if let Some(meta) = runtime_meta {
         let provider = input

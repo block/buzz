@@ -124,6 +124,7 @@ export type RawManagedAgent = {
   agent_command: string;
   agent_command_override?: string | null;
   agent_args: string[];
+  startup_model_arg?: string | null;
   mcp_command: string;
   turn_timeout_seconds: number;
   idle_timeout_seconds: number | null;
@@ -191,6 +192,7 @@ export type RawAcpRuntimeCatalogEntry = {
   /** Tagged union with snake_case status values — same shape as `AuthStatus`. */
   auth_status: AuthStatus;
   login_hint?: string;
+  startup_model_arg?: string | null;
 };
 
 export type RawInstallStepResult = {
@@ -693,6 +695,7 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     agentCommand: agent.agent_command,
     agentCommandOverride: agent.agent_command_override ?? null,
     agentArgs: agent.agent_args,
+    startupModelArg: agent.startup_model_arg ?? null,
     mcpCommand: agent.mcp_command,
     turnTimeoutSeconds: agent.turn_timeout_seconds,
     idleTimeoutSeconds: agent.idle_timeout_seconds,
@@ -750,6 +753,7 @@ function fromRawAcpRuntimeCatalogEntry(
     nodeRequired: entry.node_required,
     authStatus: entry.auth_status,
     loginHint: entry.login_hint ?? null,
+    startupModelArg: entry.startup_model_arg ?? null,
   };
 }
 

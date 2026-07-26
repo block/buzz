@@ -964,23 +964,28 @@ fn handle_switch_model_control(
         .any(|m| m.channel_id == Some(channel_id));
 
     let status = if turn_in_flight {
-        // Busy path: deliver over the oneshot. `false` means the oneshot was
-        // already consumed this turn (a prior cancel/interrupt) — the turn is
-        // already ending, so the switch cannot land on it.
-        if signal_in_flight_task(
-            pool,
-            channel_id,
-            ControlSignal::SwitchModel(model_id.to_string()),
-        ) {
-            "sent"
+        if pool.startup_model_only() {
+            "unsupported_model"
         } else {
-            "turn_ending"
+            // Busy path: deliver over the oneshot. `false` means the oneshot was
+            // already consumed this turn (a prior cancel/interrupt) — the turn is
+            // already ending, so the switch cannot land on it.
+            if signal_in_flight_task(
+                pool,
+                channel_id,
+                ControlSignal::SwitchModel(model_id.to_string()),
+            ) {
+                "sent"
+            } else {
+                "turn_ending"
+            }
         }
     } else {
         // Idle path: validate against the cached catalog before invalidating.
         match pool.switch_idle_agent_model(channel_id, model_id) {
             IdleSwitchResult::Switched => "switched",
             IdleSwitchResult::UnsupportedModel => "unsupported_model",
+            IdleSwitchResult::UnsupportedRuntime => "unsupported_model",
             IdleSwitchResult::NoIdleAgent => "no_active_turn",
         }
     };
@@ -1315,7 +1320,9 @@ async fn tokio_main() -> Result<()> {
     }
 
     let mut pool = if config.lazy_pool {
-        AgentPool::from_slots((0..config.agents).map(|_| None).collect())
+        let mut pool = AgentPool::from_slots((0..config.agents).map(|_| None).collect());
+        pool.set_startup_model_only(pool::startup_model_only_command(&config.agent_command));
+        pool
     } else {
         initialize_agent_pool(&PoolStartup::from_config(&config, observer.clone()), None).await?
     };
@@ -1793,6 +1800,7 @@ async fn tokio_main() -> Result<()> {
                         model_capabilities: None,
                         desired_model: config.model.clone(),
                         model_overridden: false,
+                        startup_model_only: pool::startup_model_only_command(&config.agent_command),
                         agent_name,
                         goose_system_prompt_supported: None,
                         protocol_version,
@@ -3799,6 +3807,9 @@ async fn initialize_agent_pool(
                             model_capabilities: None,
                             desired_model: startup.model.clone(),
                             model_overridden: false,
+                            startup_model_only: pool::startup_model_only_command(
+                                &startup.agent_command,
+                            ),
                             agent_name,
                             goose_system_prompt_supported: None,
                             protocol_version,
@@ -3837,7 +3848,9 @@ async fn initialize_agent_pool(
         );
     }
     tracing::info!("agent_pool_ready agents={}", live_count);
-    Ok(AgentPool::from_slots(agent_slots))
+    let mut pool = AgentPool::from_slots(agent_slots);
+    pool.set_startup_model_only(pool::startup_model_only_command(&startup.agent_command));
+    Ok(pool)
 }
 
 // ── spawn_and_init ────────────────────────────────────────────────────────────
@@ -3883,7 +3896,10 @@ async fn spawn_and_init(
 }
 
 async fn spawn_auth_client(agent: &AuthAgentArgs) -> Result<AcpClient, acp::AcpError> {
-    let agent_args = config::normalize_agent_args(&agent.agent_command, agent.agent_args.clone());
+    let agent_args = config::normalize_agent_args(
+        &agent.agent_command,
+        config::agent_args_from_transport(agent.agent_args.clone(), agent.agent_args_json.clone()),
+    );
     AcpClient::spawn(&agent.agent_command, &agent_args, &[], false).await
 }
 
@@ -4005,7 +4021,10 @@ async fn run_authenticate(args: AuthenticateArgs) -> Result<()> {
 async fn run_models(args: ModelsArgs) -> Result<()> {
     use acp::{extract_model_config_options, extract_model_state};
 
-    let agent_args = config::normalize_agent_args(&args.agent.agent_command, args.agent.agent_args);
+    let agent_args = config::normalize_agent_args(
+        &args.agent.agent_command,
+        config::agent_args_from_transport(args.agent.agent_args, args.agent.agent_args_json),
+    );
     let cwd = std::env::current_dir()
         .unwrap_or_else(|_| std::path::PathBuf::from("/"))
         .to_string_lossy()
@@ -5182,6 +5201,7 @@ mod error_outcome_emission_tests {
             model_capabilities: None,
             desired_model: None,
             model_overridden: false,
+            startup_model_only: false,
             agent_name: "unknown".into(),
             goose_system_prompt_supported: None,
             // Error branches under test never read this; 1 is the legacy

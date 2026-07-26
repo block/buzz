@@ -8,6 +8,7 @@ use crate::{
     managed_agents::{
         append_log_marker, known_acp_runtime, login_shell_path, managed_agent_log_path,
         missing_command_message, normalize_agent_args, open_log_file, resolve_command,
+        resolve_runtime_launch,
         spawn_key_refusal, KnownAcpRuntime, ManagedAgentPairRuntime, ManagedAgentRecord,
         ManagedAgentRuntimeKey, ManagedAgentSummary,
     },
@@ -1483,10 +1484,10 @@ pub fn build_managed_agent_summary(
             hash_drift || availability_drift
         });
 
-    // Resolve the effective harness the same way, then derive args/mcp from it,
-    // so the UI reflects the persona's current harness (or an explicit pin).
     let effective_command = crate::managed_agents::record_agent_command(record, personas);
     let effective_args = normalize_agent_args(&effective_command, record.agent_args.clone());
+    let startup_model_arg = known_acp_runtime(&effective_command)
+        .and_then(|runtime| runtime.startup_model_arg.map(str::to_string));
     let effective_mcp_command = known_acp_runtime(&effective_command)
         .and_then(|r| r.mcp_command)
         .unwrap_or("")
@@ -1502,6 +1503,7 @@ pub fn build_managed_agent_summary(
         agent_command: effective_command,
         agent_command_override: record.agent_command_override.clone(),
         agent_args: effective_args,
+        startup_model_arg,
         mcp_command: effective_mcp_command,
         turn_timeout_seconds: record.turn_timeout_seconds,
         idle_timeout_seconds: record.idle_timeout_seconds,
@@ -1657,18 +1659,14 @@ pub fn spawn_agent_child(
     let stderr = stdout
         .try_clone()
         .map_err(|error| format!("failed to clone log handle: {error}"))?;
-    // Resolve the effective harness (agent command) from the linked persona, so
-    // persona harness edits propagate on the next spawn; an explicit per-agent
-    // override wins. `agent_args` and `mcp_command` are pure derivations of the
-    // command, so we recompute them from the effective value rather than the
-    // frozen record snapshot. Mirrors the model resolution below.
     let personas = super::load_personas(app).unwrap_or_default();
     let teams = super::load_teams(app).unwrap_or_default();
     // Load global config once; used for runtime_metadata_env_vars (model/provider fallback)
     // and for the env-var merge at spawn time.
     let global = crate::managed_agents::load_global_agent_config(app).unwrap_or_default();
+    let (effective_model, effective_provider) = crate::managed_agents::resolve_effective_model_provider(record, &personas, &global);
     let effective_command = super::record_agent_command(record, &personas);
-    let agent_args = normalize_agent_args(&effective_command, record.agent_args.clone());
+    let runtime_meta = known_acp_runtime(&effective_command);
     let resolved_acp_command = resolve_command(&record.acp_command)
         .ok_or_else(|| missing_command_message(&record.acp_command, "ACP harness command"))?;
     let effective_mcp_command = known_acp_runtime(&effective_command)
@@ -1687,20 +1685,15 @@ pub fn spawn_agent_child(
             }
         }
     };
-    // Resolve agent command to a full path (DMG launches have minimal PATH).
-    let resolved_agent_command = resolve_command(&effective_command)
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| effective_command.clone());
+    let (resolved_agent_command, agent_args) = resolve_runtime_launch(
+        runtime_meta,
+        &effective_command,
+        normalize_agent_args(&effective_command, record.agent_args.clone()),
+        effective_model.as_deref(),
+    )
+    .ok_or_else(|| missing_command_message(&effective_command, "agent CLI"))?;
 
-    // The caller supplies the explicit canonical pair relay. This is the only
-    // relay this child may connect to, regardless of the record/workspace default.
     let effective_relay_url = runtime_key.relay_url.clone();
-
-    // Augment PATH for DMG launches so child processes can find:
-    //   - bundled CLI via ~/.local/bin symlink
-    //   - nvm-managed node/npm (nvm initializes only in interactive shells)
-    //   - bundled sidecars (buzz, buzz-acp, etc.) via exe parent (Contents/MacOS/)
-    //   - runtimes (node, python, etc.) via login shell PATH
     let nvm_bin = dirs::home_dir()
         .as_deref()
         .and_then(super::find_nvm_default_bin);
@@ -1729,6 +1722,7 @@ pub fn spawn_agent_child(
     command.env("BUZZ_ACP_LAZY_POOL", if lazy { "true" } else { "false" });
     command.env("BUZZ_ACP_AGENT_COMMAND", &resolved_agent_command);
     command.env("BUZZ_ACP_AGENT_ARGS", agent_args.join(","));
+    command.env("BUZZ_ACP_AGENT_ARGS_JSON", serde_json::to_string(&agent_args).map_err(|error| error.to_string())?);
     match &resolved_mcp_command {
         Some(mcp_cmd) => {
             command.env("BUZZ_ACP_MCP_COMMAND", mcp_cmd);
@@ -1739,7 +1733,6 @@ pub fn spawn_agent_child(
     }
     // Enable MCP hook tools (_Stop, _PostCompact) for agents that need them.
     // Uses "*" because build_mcp_servers() hard-codes the server name to "buzz-mcp".
-    let runtime_meta = known_acp_runtime(&effective_command);
     if runtime_meta.is_some_and(|r| r.mcp_hooks) {
         command.env("MCP_HOOK_SERVERS", "*");
     }
@@ -1888,9 +1881,6 @@ pub fn spawn_agent_child(
     // resolver: agent → persona → global → None, so a global-default-only agent
     // spawns with the correct provider/model env.
     let effective_prompt = super::spawn_hash::effective_spawn_prompt(record);
-    let (effective_model, effective_provider) =
-        crate::managed_agents::resolve_effective_model_provider(record, &personas, &global);
-
     if let Some(prompt) = &effective_prompt {
         command.env("BUZZ_ACP_SYSTEM_PROMPT", prompt);
     } else {

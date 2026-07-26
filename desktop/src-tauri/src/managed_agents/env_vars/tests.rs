@@ -165,6 +165,7 @@ fn reserved_keys_include_code_execution_surface() {
     for key in [
         "BUZZ_ACP_AGENT_COMMAND",
         "BUZZ_ACP_AGENT_ARGS",
+        "BUZZ_ACP_AGENT_ARGS_JSON",
         "BUZZ_ACP_MCP_COMMAND",
     ] {
         assert!(is_reserved_env_key(key), "{key} should be reserved");

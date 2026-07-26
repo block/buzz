@@ -7,6 +7,7 @@ pub(crate) use agent_env::{
 };
 mod backend;
 pub(crate) mod config_bridge;
+mod cursor_launch;
 mod discovery;
 mod env_vars;
 pub(crate) mod git_bash;
@@ -45,6 +46,11 @@ pub(crate) fn lock_path_mutex() -> std::sync::MutexGuard<'static, ()> {
 
 pub use backend::*;
 pub use discovery::*;
+pub(crate) use cursor_launch::{
+    classify_acp_runtime, native_auth_probe_args, resolve_agent_launch,
+    resolve_known_runtime_launch, resolve_runtime_adapter,
+    resolve_runtime_launch, runtime_launch_args, startup_model_args,
+};
 pub use env_vars::*;
 #[cfg(windows)]
 pub(crate) use git_bash::git_bash_available;

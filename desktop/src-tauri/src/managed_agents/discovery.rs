@@ -10,7 +10,9 @@ use crate::managed_agents::{
 };
 
 mod runtime_metadata;
+mod cursor_runtime;
 
+pub(crate) use cursor_runtime::CURSOR_AVATAR_URL;
 pub(crate) use runtime_metadata::KnownAcpRuntime;
 
 const GOOSE_AVATAR_URL: &str = "https://goose-docs.ai/img/logo_dark.png";
@@ -96,6 +98,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         required_normalized_fields: &["model", "provider"],
         login_hint: None,
         auth_probe_args: None,
+        native_acp: false, startup_model_arg: None,
     },
     KnownAcpRuntime {
         id: "claude",
@@ -128,6 +131,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         required_normalized_fields: &[],
         login_hint: Some("Run the Claude CLI to complete authentication."),
         auth_probe_args: Some(&["claude", "auth", "status"]),
+        native_acp: false, startup_model_arg: None,
     },
     KnownAcpRuntime {
         id: "codex",
@@ -161,6 +165,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         login_hint: Some("Run `codex login` to authenticate."),
         // Verified: `codex login status` exits 0 when logged in, non-zero otherwise.
         auth_probe_args: Some(&["codex", "login", "status"]),
+        native_acp: false, startup_model_arg: None,
     },
     KnownAcpRuntime {
         id: "buzz-agent",
@@ -193,7 +198,9 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         required_normalized_fields: &["model", "provider"],
         login_hint: None,
         auth_probe_args: None,
+        native_acp: false, startup_model_arg: None,
     },
+    cursor_runtime::CURSOR_ACP_RUNTIME,
 ];
 
 /// Skill discovery directories declared by known runtimes.
@@ -219,7 +226,7 @@ fn executable_basename(command: &str) -> String {
     }
 }
 
-fn normalize_command_identity(command: &str) -> String {
+pub(crate) fn normalize_command_identity(command: &str) -> String {
     let normalized = command.trim().replace('\\', "/");
     let basename = normalized.rsplit('/').next().unwrap_or(normalized.as_str());
     let lower = basename
@@ -348,7 +355,7 @@ pub use overrides::{apply_agent_command_update, create_time_agent_command_overri
 
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_command_identity(command).as_str() {
-        "goose" => Some(vec!["acp".to_string()]),
+        "goose" | "agent" | "cursor-agent" => Some(vec!["acp".to_string()]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
         _ => None,
@@ -1179,21 +1186,17 @@ pub(crate) fn codex_adapter_is_outdated_with_path(
 struct PartialEntry {
     runtime: &'static KnownAcpRuntime,
     entry: AcpRuntimeCatalogEntry,
+    launch_command: Option<&'static str>,
 }
 
 fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime) -> PartialEntry {
-    let adapter_result = runtime
-        .commands
-        .iter()
-        .find_map(|command| find_command(command).map(|path| (*command, path)));
-
+    let adapter_result = super::resolve_runtime_adapter(runtime);
     let underlying_cli_found = runtime
         .underlying_cli
         .map(|cli| find_command(cli).is_some())
         .unwrap_or(false);
     let (mut availability, command, binary_path) =
-        classify_runtime(adapter_result, runtime.underlying_cli, underlying_cli_found);
-
+        super::classify_acp_runtime(runtime, adapter_result.as_ref(), underlying_cli_found);
     // For codex-acp: when the adapter resolves as Available, probe the
     // version. An adapter with major version < 1 is treated as outdated —
     // the CODEX_CONFIG spawn contract requires 1.x.
@@ -1205,22 +1208,29 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime) -> PartialEntr
             availability = codex_adapter_availability(&PathBuf::from(path_str));
         }
     }
-
     // Warm the adapter-availability cache for the badge fallback.
     // The cache is scoped to the codex runtime; other runtimes leave it
     // unchanged. Invalidated by `clear_resolve_cache`.
     if runtime.id == "codex" {
         cache_adapter_availability(availability.clone());
     }
-
     let underlying_cli_path = runtime
         .underlying_cli
         .and_then(find_command)
         .map(|p| p.display().to_string());
-
     let default_args = command
         .as_deref()
-        .map(|cmd| normalize_agent_args(cmd, Vec::new()))
+        .map(|cmd| {
+            super::runtime_launch_args(
+                runtime,
+                cmd,
+                adapter_result
+                    .as_ref()
+                    .map(|adapter| adapter.launch_command)
+                    .unwrap_or(cmd),
+                normalize_agent_args(cmd, Vec::new()),
+            )
+        })
         .unwrap_or_default();
 
     let can_auto_install = !runtime.cli_install_commands_for_os().is_empty()
@@ -1265,6 +1275,7 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime) -> PartialEntr
 
     PartialEntry {
         runtime,
+        launch_command: adapter_result.as_ref().map(|adapter| adapter.launch_command),
         entry: AcpRuntimeCatalogEntry {
             id: runtime.id.to_string(),
             label: runtime.label.to_string(),
@@ -1280,12 +1291,13 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime) -> PartialEntr
             install_hint,
             install_instructions_url: install_instructions_url.to_string(),
             can_auto_install,
-            requires_external_cli: runtime.underlying_cli.is_some(),
+            requires_external_cli: runtime.underlying_cli.is_some() || runtime.native_acp,
             underlying_cli_path,
             node_required,
             // Filled in by the auth-probe phase in full catalog discovery.
             auth_status: AuthStatus::Unknown,
             login_hint: None,
+            startup_model_arg: runtime.startup_model_arg.map(str::to_string),
         },
     }
 }
@@ -1306,7 +1318,6 @@ pub fn discover_acp_runtimes() -> Vec<AcpRuntimeCatalogEntry> {
         .iter()
         .map(discover_acp_runtime_phase1)
         .collect();
-
     // Phase 2: run auth probes in parallel for entries that need them.
     // Spawn one thread per probeable entry; total cost = max(probe latency).
     let probe_handles: Vec<(usize, std::thread::JoinHandle<AuthStatus>)> = partials
@@ -1316,10 +1327,22 @@ pub fn discover_acp_runtimes() -> Vec<AcpRuntimeCatalogEntry> {
             if partial.entry.availability != AcpAvailabilityStatus::Available {
                 return None;
             }
-            let probe_args = partial.runtime.auth_probe_args?;
-            // Need the resolved binary path for the CLI (e.g. the actual `claude` binary).
-            let binary_path = resolve_command(probe_args[0])?;
-            let probe_args_owned: Vec<String> = probe_args.iter().map(|s| s.to_string()).collect();
+            let (binary_path, probe_args_owned) = if let Some(probe_args) = partial.runtime.auth_probe_args {
+                // Need the resolved binary path for the CLI (e.g. the actual `claude` binary).
+                (resolve_command(probe_args[0])?, probe_args.iter().map(|s| s.to_string()).collect())
+            } else if partial.runtime.native_acp {
+                let command = partial.entry.command.as_deref()?;
+                let binary_path = PathBuf::from(partial.entry.binary_path.as_deref()?);
+                (
+                    binary_path,
+                    super::native_auth_probe_args(
+                        command,
+                        partial.launch_command.unwrap_or("agent"),
+                    ),
+                )
+            } else {
+                return None;
+            };
 
             let handle = std::thread::spawn(move || {
                 let refs: Vec<&str> = probe_args_owned.iter().map(String::as_str).collect();

@@ -199,6 +199,11 @@ pub struct AuthAgentArgs {
         value_delimiter = ','
     )]
     pub agent_args: Vec<String>,
+
+    /// Lossless argv transport used by desktop launchers. The legacy comma
+    /// separated variable remains supported for backwards compatibility.
+    #[arg(long, env = "BUZZ_ACP_AGENT_ARGS_JSON")]
+    pub agent_args_json: Option<String>,
 }
 
 /// CLI args for `buzz-acp auth-methods` — query adapter-advertised login methods.
@@ -257,6 +262,10 @@ pub struct CliArgs {
         value_delimiter = ','
     )]
     pub agent_args: Vec<String>,
+
+    /// Lossless argv transport used when an argument can contain commas.
+    #[arg(long, env = "BUZZ_ACP_AGENT_ARGS_JSON")]
+    pub agent_args_json: Option<String>,
 
     #[arg(long, env = "BUZZ_ACP_MCP_COMMAND", default_value = "")]
     pub mcp_command: String,
@@ -702,6 +711,24 @@ pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<Strin
     normalized
 }
 
+/// Decode the lossless desktop argv transport, falling back to the legacy
+/// clap-delimited vector when it is absent or malformed.
+pub fn agent_args_from_transport(
+    legacy_args: Vec<String>,
+    json_args: Option<String>,
+) -> Vec<String> {
+    let Some(json_args) = json_args else {
+        return legacy_args;
+    };
+    match serde_json::from_str::<Vec<String>>(&json_args) {
+        Ok(args) => args,
+        Err(error) => {
+            tracing::warn!(%error, "ignoring malformed BUZZ_ACP_AGENT_ARGS_JSON");
+            legacy_args
+        }
+    }
+}
+
 /// Propagate legacy env-var aliases to their canonical names.
 ///
 /// Must be called **before** the tokio runtime starts — i.e. from the sync
@@ -810,7 +837,10 @@ impl Config {
             ));
         }
 
-        let agent_args = normalize_agent_args(&agent_command, args.agent_args);
+        let agent_args = normalize_agent_args(
+            &agent_command,
+            agent_args_from_transport(args.agent_args, args.agent_args_json),
+        );
 
         if let Some(ref channels) = args.channels {
             for ch in channels {
@@ -1489,6 +1519,24 @@ mod tests {
         assert_eq!(
             normalize_agent_args("buzz-agent", vec!["acp".into()]),
             Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn decodes_lossless_agent_args_transport() {
+        let encoded = serde_json::to_string(&vec![
+            "--model".to_string(),
+            "provider/model,with-comma".to_string(),
+            "acp".to_string(),
+        ])
+        .expect("encode args");
+        assert_eq!(
+            agent_args_from_transport(vec!["broken".into()], Some(encoded)),
+            vec!["--model", "provider/model,with-comma", "acp"]
+        );
+        assert_eq!(
+            agent_args_from_transport(vec!["legacy".into()], Some("not-json".into())),
+            vec!["legacy"]
         );
     }
 

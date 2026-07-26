@@ -52,6 +52,19 @@ test("resolveAgentReadiness_cli_returns_ready_when_preferred_cli_runtime_is_logg
   });
 });
 
+test("resolveAgentReadiness_cursor_returns_ready_when_preferred_cli_is_logged_in", () => {
+  const result = resolveAgentReadiness(
+    [makeRuntime({ id: "cursor", label: "Cursor Agent" })],
+    makeConfig({ preferred_runtime: "cursor" }),
+    "preferred",
+  );
+  assert.deepEqual(result, {
+    ready: true,
+    reason: "cli",
+    runtimeLabel: "Cursor Agent",
+  });
+});
+
 test("resolveAgentReadiness_uses_only_the_preferred_runtime", () => {
   const runtimes = [
     makeRuntime({ id: "claude", label: "Claude" }),

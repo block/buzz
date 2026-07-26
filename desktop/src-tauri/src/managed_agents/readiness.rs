@@ -289,6 +289,11 @@ fn collect_missing_requirements(
             rt,
         ),
         "codex" => cli_login::requirements(&["codex", "login", "status"], "run `codex login`", rt),
+        "cursor" => cli_login::requirements(
+            &["agent", "status"],
+            "run `agent login` (or `cursor-agent login`) to authenticate with Cursor",
+            rt,
+        ),
         _ => vec![],
     }
 }
@@ -888,6 +893,8 @@ mod tests {
             required_normalized_fields: &[],
             login_hint: None,
             auth_probe_args: None,
+            native_acp: false,
+            startup_model_arg: None,
         }
     }
 
@@ -1083,6 +1090,8 @@ mod tests {
             required_normalized_fields: &[],
             login_hint: None,
             auth_probe_args: None,
+            native_acp: false,
+            startup_model_arg: None,
         }
     }
 

@@ -20,6 +20,22 @@ use crate::usage::{TurnUsage, UsageTracker};
 /// Lines exceeding this limit are rejected to prevent OOM from rogue agents.
 const MAX_LINE_SIZE: usize = 10_000_000; // 10 MB
 
+const BUZZ_CHILD_SECRET_ENV_KEYS: &[&str] = &[
+    "BUZZ_PRIVATE_KEY",
+    "BUZZ_ACP_PRIVATE_KEY",
+    "BUZZ_RELAY_URL",
+    "BUZZ_AUTH_TAG",
+    "BUZZ_API_TOKEN",
+    "BUZZ_ACP_API_TOKEN",
+    "NOSTR_PRIVATE_KEY",
+];
+
+fn scrub_buzz_child_secrets(command: &mut tokio::process::Command) {
+    for key in BUZZ_CHILD_SECRET_ENV_KEYS {
+        command.env_remove(key);
+    }
+}
+
 /// An MCP server configuration passed to `session/new`.
 ///
 /// Corresponds to the `McpServerStdio` variant in the ACP schema.
@@ -417,11 +433,17 @@ impl AcpClient {
         cmd.args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            // Inherit stderr so agent logs are visible in the harness terminal.
-            .stderr(Stdio::inherit())
+            // Vendor stderr may contain OAuth URLs, device codes, or account
+            // diagnostics. Keep it out of Buzz logs; login is launched in a
+            // visible terminal by the desktop auth flow.
+            .stderr(Stdio::null())
             // Ensure the child is killed when the AcpClient is dropped (best-effort).
             // Callers MUST still call shutdown().await for guaranteed cleanup.
             .kill_on_drop(true);
+
+        // Relay keys and Buzz auth material are delivered only to Buzz's MCP
+        // server through ACP session/new, never through the vendor child.
+        scrub_buzz_child_secrets(&mut cmd);
 
         // Per-persona env vars (e.g., GOOSE_PROVIDER, BUZZ_AGENT_PROVIDER).
         // For most keys, operator precedence wins: skip injection if already set
@@ -448,6 +470,9 @@ impl AcpClient {
         let codex_merge_active = codex_config_value.is_some();
 
         for (key, value) in extra_env {
+            if BUZZ_CHILD_SECRET_ENV_KEYS.contains(&key.as_str()) {
+                continue;
+            }
             if key == "CODEX_CONFIG" && codex_merge_active {
                 // Handled by build_codex_config_env; skip here to avoid double-setting.
                 continue;

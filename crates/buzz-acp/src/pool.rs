@@ -40,6 +40,13 @@ use crate::queue::{
 };
 use crate::relay::{ChannelInfo, RestClient};
 
+pub(crate) fn startup_model_only_command(command: &str) -> bool {
+    matches!(
+        crate::config::normalize_agent_command_identity(command).as_str(),
+        "agent" | "cursor-agent" | "wsl"
+    )
+}
+
 /// Window within which agent activity before a hard-cap death qualifies
 /// the turn as "recently active" (eligible for requeue instead of dead-letter).
 const RECENT_ACTIVITY_WINDOW: Duration = Duration::from_secs(60);
@@ -160,6 +167,9 @@ pub struct OwnedAgent {
     /// desktop reader to distinguish a genuine runtime override from a stale
     /// session whose persona model was edited. Reset on spawn/restart.
     pub model_overridden: bool,
+    /// Cursor pins the model in its process argv; ACP live switching is not
+    /// supported for that runtime.
+    pub startup_model_only: bool,
     /// Normalized agent name from initialize (`agentInfo.name`/`serverInfo.name`).
     pub agent_name: String,
     /// Whether Goose accepted its custom system-prompt method. `None` probes on
@@ -215,6 +225,7 @@ pub struct AgentPool {
     result_rx: mpsc::UnboundedReceiver<PromptResult>,
     pub join_set: JoinSet<()>,
     task_map: HashMap<tokio::task::Id, TaskMeta>,
+    startup_model_only: bool,
 }
 
 /// Result returned by a completed prompt task.
@@ -540,13 +551,24 @@ impl AgentPool {
     /// the index invariant.
     pub fn from_slots(slots: Vec<Option<OwnedAgent>>) -> Self {
         let (result_tx, result_rx) = mpsc::unbounded_channel();
+        let startup_model_only = slots.iter().flatten().any(|agent| agent.startup_model_only);
         Self {
             agents: slots,
             result_tx,
             result_rx,
             join_set: JoinSet::new(),
             task_map: HashMap::new(),
+            startup_model_only,
         }
+    }
+
+    /// True when the vendor runtime can only apply a model at process start.
+    pub fn startup_model_only(&self) -> bool {
+        self.startup_model_only
+    }
+
+    pub fn set_startup_model_only(&mut self, enabled: bool) {
+        self.startup_model_only = enabled;
     }
 
     /// Try to claim an idle agent for the given channel (or heartbeat if `None`).
@@ -743,6 +765,10 @@ impl AgentPool {
             return IdleSwitchResult::NoIdleAgent;
         };
 
+        if agent.startup_model_only {
+            return IdleSwitchResult::UnsupportedRuntime;
+        }
+
         // Pre-cancel guard against the cached catalog. None = catalog not yet
         // populated (no session ever created); defer validation to apply time.
         if let Some(caps) = agent.model_capabilities.as_ref() {
@@ -770,6 +796,8 @@ pub enum IdleSwitchResult {
     /// Desired model is not in the agent's cached catalog — pick rejected,
     /// session untouched.
     UnsupportedModel,
+    /// The runtime accepts a model only as a process-start argument.
+    UnsupportedRuntime,
     /// No idle agent available (all checked out / none spawned).
     NoIdleAgent,
 }
@@ -869,7 +897,9 @@ async fn create_session_and_apply_model(
     // Apply desired_model if set, matching against the fresh session/new response.
     // Track whether the switch succeeded so session_config_captured reflects
     // the post-switch state (not the pre-switch desired state).
-    let switch_succeeded = if let Some(ref desired) = agent.desired_model {
+    let switch_succeeded = if agent.startup_model_only {
+        false
+    } else if let Some(ref desired) = agent.desired_model {
         match resolve_model_switch_method(&resp.raw, desired) {
             Some(method) => {
                 apply_model_switch(&mut agent.acp, &resp.session_id, desired, &method).await?;

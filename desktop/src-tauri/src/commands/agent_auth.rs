@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::managed_agents::{
     default_agent_workdir, known_acp_runtime_exact, normalize_agent_args, resolve_command,
+    resolve_runtime_adapter, runtime_launch_args,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -70,11 +71,95 @@ pub async fn connect_acp_runtime(
 fn discover_acp_auth_methods_blocking(runtime_id: &str) -> Result<AcpAuthMethodsResult, String> {
     let output = run_buzz_acp_auth_command(runtime_id, ["auth-methods", "--json"])?;
     if !output.status.success() {
+        if is_native_auth_required_failure(runtime_id, &output)
+            || native_cli_status_requires_login(runtime_id)
+        {
+            return Ok(AcpAuthMethodsResult {
+                methods: native_cli_login_fallback(runtime_id).into_iter().collect(),
+            });
+        }
         return Err(command_error("buzz-acp auth-methods", &output));
     }
 
-    serde_json::from_slice::<AcpAuthMethodsResult>(&output.stdout)
-        .map_err(|error| format!("failed to parse auth methods JSON: {error}"))
+    let mut result = serde_json::from_slice::<AcpAuthMethodsResult>(&output.stdout)
+        .map_err(|error| format!("failed to parse auth methods JSON: {error}"))?;
+    // Cursor's native ACP currently does not advertise an ACP authenticate
+    // method. Keep login vendor-owned by exposing a fixed terminal fallback
+    // only when the adapter returned a valid, empty method list.
+    if result.methods.is_empty() {
+        if let Some(method) = native_cli_login_fallback(runtime_id) {
+            result.methods.push(method);
+        }
+    }
+    Ok(result)
+}
+
+fn native_cli_status_requires_login(runtime_id: &str) -> bool {
+    let Some(runtime) = known_acp_runtime_exact(runtime_id).filter(|runtime| runtime.id == "cursor")
+    else {
+        return false;
+    };
+    let Some(adapter) = resolve_runtime_adapter(runtime) else {
+        return false;
+    };
+    let probe_args = if adapter.command == "wsl.exe" {
+        vec![
+            adapter.command,
+            "--cd",
+            "~",
+            "--",
+            adapter.launch_command,
+            "status",
+        ]
+    } else {
+        vec![adapter.command, "status"]
+    };
+    let refs: Vec<&str> = probe_args;
+    matches!(
+        crate::managed_agents::readiness::cli_probe::login_probe(
+            &adapter.path,
+            &refs,
+            crate::managed_agents::readiness::cli_probe::augmented_path().as_deref(),
+        ),
+        crate::managed_agents::readiness::cli_probe::ProbeOutcome::LoggedOut
+    )
+}
+
+fn native_cli_login_fallback(runtime_id: &str) -> Option<AcpAuthMethod> {
+    known_acp_runtime_exact(runtime_id)
+        .filter(|runtime| runtime.id == "cursor" && runtime.native_acp)
+        .map(|_| AcpAuthMethod {
+            id: "cursor-cli-login".to_string(),
+            name: "Sign in with Cursor CLI".to_string(),
+            description: Some("Opens Cursor's vendor-owned OAuth login flow.".to_string()),
+            method_type: Some("terminal".to_string()),
+            args: vec!["login".to_string()],
+            command: Vec::new(),
+            meta: None,
+        })
+}
+
+fn is_native_auth_required_failure(runtime_id: &str, output: &std::process::Output) -> bool {
+    if native_cli_login_fallback(runtime_id).is_none() {
+        return false;
+    }
+    let diagnostic = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+    .to_ascii_lowercase();
+    [
+        "authentication required",
+        "not authenticated",
+        "login required",
+        "please log in",
+        "please login",
+        "must log in",
+        "unauthorized",
+    ]
+    .iter()
+    .any(|marker| diagnostic.contains(marker))
 }
 
 fn connect_acp_runtime_blocking(
@@ -113,10 +198,7 @@ fn run_buzz_acp_auth_command<const N: usize>(
 ) -> Result<std::process::Output, String> {
     let runtime = known_acp_runtime_exact(runtime_id)
         .ok_or_else(|| format!("unknown ACP runtime: {runtime_id}"))?;
-    let adapter_command = runtime
-        .commands
-        .iter()
-        .find_map(|command| resolve_command(command).map(|path| (*command, path)))
+    let adapter_command = resolve_runtime_adapter(runtime)
         .ok_or_else(|| format!("{} ACP adapter is not installed", runtime.label))?;
 
     let acp_path = std::env::current_exe()
@@ -128,9 +210,11 @@ fn run_buzz_acp_auth_command<const N: usize>(
 
     let augmented_path = auth_command_path();
     run_buzz_acp_auth_command_with_paths(
+        runtime,
         &acp_path,
-        adapter_command.0,
-        &adapter_command.1,
+        adapter_command.command,
+        adapter_command.launch_command,
+        &adapter_command.path,
         args,
         augmented_path.as_deref(),
     )
@@ -174,18 +258,29 @@ fn append_inherited_path(augmented: Option<String>, inherited: Option<String>) -
 }
 
 fn run_buzz_acp_auth_command_with_paths<const N: usize>(
+    runtime: &crate::managed_agents::KnownAcpRuntime,
     acp_path: &Path,
     adapter_name: &str,
+    launch_command: &str,
     adapter_path: &Path,
     args: [&str; N],
     augmented_path: Option<&str>,
 ) -> Result<std::process::Output, String> {
-    let agent_args = normalize_agent_args(adapter_name, Vec::new());
+    let agent_args = runtime_launch_args(
+        runtime,
+        adapter_name,
+        launch_command,
+        normalize_agent_args(adapter_name, Vec::new()),
+    );
     let mut command = Command::new(acp_path);
     command
         .args(args)
         .env("BUZZ_ACP_AGENT_COMMAND", adapter_path.as_os_str())
         .env("BUZZ_ACP_AGENT_ARGS", agent_args.join(","))
+        .env(
+            "BUZZ_ACP_AGENT_ARGS_JSON",
+            serde_json::to_string(&agent_args).map_err(|error| error.to_string())?,
+        )
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     if let Some(workdir) = default_agent_workdir() {
@@ -202,7 +297,7 @@ fn run_buzz_acp_auth_command_with_paths<const N: usize>(
 }
 
 fn command_error(label: &str, output: &std::process::Output) -> String {
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stderr = sanitize_diagnostic(&String::from_utf8_lossy(&output.stderr));
     if stderr.is_empty() {
         format!(
             "{label} failed (exit {})",
@@ -214,6 +309,31 @@ fn command_error(label: &str, output: &std::process::Output) -> String {
             output.status.code().unwrap_or(-1)
         )
     }
+}
+
+fn sanitize_diagnostic(diagnostic: &str) -> String {
+    let lines = diagnostic
+        .lines()
+        .take(3)
+        .map(|line| {
+            line.split_whitespace()
+                .map(|word| {
+                    if word.starts_with("http://") || word.starts_with("https://") {
+                        "<redacted-url>"
+                    } else {
+                        word
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect::<Vec<_>>();
+    let mut result = lines.join(" ");
+    if result.len() > 1200 {
+        result.truncate(1200);
+        result.push_str("...");
+    }
+    result
 }
 
 fn is_claude_subscription_login(runtime_id: &str, method: &AcpAuthMethod) -> bool {
@@ -249,13 +369,21 @@ fn run_claude_subscription_login(runtime_id: &str, method: &AcpAuthMethod) -> Re
 fn launch_terminal_auth(runtime_id: &str, method: &AcpAuthMethod) -> Result<(), String> {
     let runtime = known_acp_runtime_exact(runtime_id)
         .ok_or_else(|| format!("unknown ACP runtime: {runtime_id}"))?;
-    let adapter_command = runtime
-        .commands
-        .iter()
-        .find_map(|command| resolve_command(command).map(|path| (*command, path)))
+    let adapter_command = resolve_runtime_adapter(runtime)
         .ok_or_else(|| format!("{} ACP adapter is not installed", runtime.label))?;
-    let fallback_command = adapter_command.1.display().to_string();
-    let argv = adapter_terminal_argv(runtime.label, method, &fallback_command)?;
+    let fallback_command = adapter_command.path.display().to_string();
+    let argv = if runtime.native_acp && adapter_command.command == "wsl.exe" {
+        vec![
+            fallback_command,
+            "--cd".to_string(),
+            "~".to_string(),
+            "--".to_string(),
+            adapter_command.launch_command.to_string(),
+            "login".to_string(),
+        ]
+    } else {
+        adapter_terminal_argv(runtime.label, method, &fallback_command)?
+    };
     launch_visible_terminal(&argv)
 }
 
@@ -462,9 +590,19 @@ fn shell_escape(arg: &str) -> String {
 mod tests {
     use super::{
         adapter_terminal_argv, append_inherited_path, is_claude_subscription_login,
-        run_buzz_acp_auth_command_with_paths, shell_escape, shell_join, uses_terminal_auth,
-        windows_terminal_args, AcpAuthMethod,
+        native_cli_login_fallback, run_buzz_acp_auth_command_with_paths, shell_escape, shell_join,
+        uses_terminal_auth, windows_terminal_args, AcpAuthMethod,
     };
+
+    #[test]
+    fn cursor_empty_auth_methods_use_vendor_login_fallback() {
+        let method = native_cli_login_fallback("cursor").expect("cursor fallback");
+        assert_eq!(method.id, "cursor-cli-login");
+        assert_eq!(method.method_type.as_deref(), Some("terminal"));
+        assert_eq!(method.args, vec!["login"]);
+        assert!(method.command.is_empty());
+        assert!(native_cli_login_fallback("claude").is_none());
+    }
 
     /// Windows regression: the augmented PATH there holds only Buzz-managed
     /// dirs and the exe parent (no login-shell PATH, no managed Node), so the
@@ -537,7 +675,9 @@ mod tests {
             .to_string_lossy()
             .into_owned();
         let output = run_buzz_acp_auth_command_with_paths(
+            known_acp_runtime_exact("claude").expect("Claude metadata"),
             &acp_path,
+            "claude-agent-acp",
             "claude-agent-acp",
             &adapter_path,
             ["auth-methods", "--json"],
