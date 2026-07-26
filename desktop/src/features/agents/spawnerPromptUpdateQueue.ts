@@ -106,15 +106,38 @@ export function shouldRetryPromptUpdate(
   return now - entry.lastSentAt >= REDELIVER_FLOOR_MS;
 }
 
+/**
+ * Storage key for the *current* relay.
+ *
+ * Resolved on every read and write, never captured: the cached relay origin is
+ * still null at module-import time, so a key computed once at import would read
+ * from a bare, community-less key and write to the real one — pending updates
+ * would never survive a restart.
+ */
 function storageKey(): string {
   return `buzz:spawner-prompt-queue:${getCachedRelayOrigin() ?? ""}`;
 }
 
 const listeners = new Set<() => void>();
 
-let queue: ReadonlyMap<string, QueueEntry> = readStored();
+let queue: ReadonlyMap<string, QueueEntry> = new Map();
+/**
+ * Whether {@link queue} reflects storage for the current relay. Cleared by
+ * {@link resetSpawnerPromptUpdateQueue} so the next access rehydrates from the
+ * new community's key rather than carrying the old one's entries.
+ */
+let hydrated = false;
 
 const EMPTY: ReadonlyMap<string, QueueEntry> = new Map();
+
+/** The live queue, hydrating from storage on first access after a reset. */
+function currentQueue(): ReadonlyMap<string, QueueEntry> {
+  if (!hydrated) {
+    queue = readStored();
+    hydrated = true;
+  }
+  return queue;
+}
 
 function readStored(): ReadonlyMap<string, QueueEntry> {
   try {
@@ -140,7 +163,7 @@ function persist(): void {
 }
 
 function dispatch(action: QueueAction): void {
-  const next = queueReducer(queue, action);
+  const next = queueReducer(currentQueue(), action);
   if (next === queue) return;
   queue = next;
   persist();
@@ -191,22 +214,47 @@ export async function enqueueSpawnerPromptUpdate(input: {
 }
 
 /**
+ * Which pending entry a status event is acking.
+ *
+ * Matched on the agent pubkey the spawner reports, because that is what the
+ * spawner itself routes prompt updates by. The slug is only a fallback for a
+ * status that carries no agent pubkey yet: the slug a client queued under can
+ * legitimately differ from the spawner's (it falls back to a name-derived slug
+ * when the spec has not loaded, and a rename changes it), and matching on it
+ * alone lets an ack be missed forever — which means an endless resend and a
+ * container restart every few minutes.
+ *
+ * Exported for tests; pure over the queue map.
+ */
+export function findAckKey(
+  state: ReadonlyMap<string, QueueEntry>,
+  spawnerPubkey: string,
+  agentPubkey: string | null | undefined,
+  specSlug: string,
+): string | null {
+  let slugMatch: string | null = null;
+  for (const [key, entry] of state) {
+    if (entry.spawnerPubkey !== spawnerPubkey) continue;
+    if (agentPubkey && entry.agentPubkey === agentPubkey) return key;
+    if (slugMatch === null && entry.specSlug === specSlug) slugMatch = key;
+  }
+  return agentPubkey ? null : slugMatch;
+}
+
+/**
  * Clear a pending entry once the spawner's status echoes back the matching
  * `prompt_hash`. A stale or mismatched hash (an older status revision, or a
  * hash from a since-superseded edit) leaves the entry pending.
  */
 export function ackSpawnerPromptUpdate(
   spawnerPubkey: string,
+  agentPubkey: string | null | undefined,
   specSlug: string,
   promptHash: string | null | undefined,
 ): void {
   if (!promptHash) return;
-  for (const [key, entry] of queue) {
-    if (entry.spawnerPubkey === spawnerPubkey && entry.specSlug === specSlug) {
-      dispatch({ type: "ack", key, promptHash });
-      return;
-    }
-  }
+  const key = findAckKey(currentQueue(), spawnerPubkey, agentPubkey, specSlug);
+  if (key) dispatch({ type: "ack", key, promptHash });
 }
 
 /**
@@ -222,7 +270,7 @@ export function ackSpawnerPromptUpdate(
  */
 export async function retryPendingSpawnerPromptUpdates(): Promise<void> {
   const now = Date.now();
-  for (const [key, entry] of queue) {
+  for (const [key, entry] of currentQueue()) {
     if (!shouldRetryPromptUpdate(entry, now)) continue;
     try {
       const promptHash = await sendSpawnerPromptUpdate({
@@ -247,9 +295,19 @@ export async function retryPendingSpawnerPromptUpdates(): Promise<void> {
   }
 }
 
-/** Tear down the queue. Community-scoped: pending edits belong to that relay. */
+/**
+ * Tear down the in-memory queue at a community boundary.
+ *
+ * Deliberately does *not* persist: the pending entries belong to the relay
+ * being left, and writing an empty map under its key would delete edits that
+ * still need delivering when the user switches back. Storage is left untouched
+ * and the next access rehydrates from whichever relay is then current.
+ */
 export function resetSpawnerPromptUpdateQueue(): void {
-  dispatch({ type: "reset" });
+  hydrated = false;
+  if (queue.size === 0) return;
+  queue = new Map();
+  for (const listener of listeners) listener();
 }
 
 function subscribe(listener: () => void): () => void {
@@ -260,17 +318,24 @@ function subscribe(listener: () => void): () => void {
 }
 
 function getSnapshot(): ReadonlyMap<string, QueueEntry> {
-  return queue;
+  return currentQueue();
 }
 
 function getServerSnapshot(): ReadonlyMap<string, QueueEntry> {
   return EMPTY;
 }
 
-/** Reactive pending state for one agent's prompt update, or null when none. */
+/**
+ * Reactive pending state for one agent's prompt update, or null when none.
+ *
+ * `delivered` distinguishes the normal "sent, awaiting the spawner's status
+ * echo" window from an entry whose send never left this device (`promptHash`
+ * is `""`), which is the only case the UI may describe as the server being
+ * unreachable.
+ */
 export function usePendingSpawnerPromptUpdate(
   agentPubkey: string,
-): { pending: boolean; queuedAt: number } | null {
+): { pending: boolean; delivered: boolean; queuedAt: number } | null {
   const snapshot = React.useSyncExternalStore(
     subscribe,
     getSnapshot,
@@ -278,7 +343,11 @@ export function usePendingSpawnerPromptUpdate(
   );
   for (const entry of snapshot.values()) {
     if (entry.agentPubkey === agentPubkey) {
-      return { pending: true, queuedAt: entry.queuedAt };
+      return {
+        pending: true,
+        delivered: entry.promptHash !== "",
+        queuedAt: entry.queuedAt,
+      };
     }
   }
   return null;

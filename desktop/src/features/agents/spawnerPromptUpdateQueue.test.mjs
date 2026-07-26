@@ -2,9 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  findAckKey,
   queueReducer,
   shouldRetryPromptUpdate,
 } from "./spawnerPromptUpdateQueue.ts";
+
+function pending(entries) {
+  return new Map(entries.map((entry) => [entry.key, entry]));
+}
 
 test("enqueue is latest-write-wins per agent", () => {
   let s = queueReducer(new Map(), {
@@ -75,6 +80,32 @@ test("reset clears every pending entry", () => {
   });
   s = queueReducer(s, { type: "reset" });
   assert.equal(s.size, 0);
+});
+
+test("an ack matches on agent pubkey even when the slug differs", () => {
+  // The slug a client queues under falls back to one derived from the agent's
+  // name, so it can drift from the spawner's after a rename or a late spec
+  // load. Matching on slug alone would never ack, resending forever.
+  const state = pending([
+    { key: "sp:ag", spawnerPubkey: "sp", agentPubkey: "ag", specSlug: "old" },
+  ]);
+  assert.equal(findAckKey(state, "sp", "ag", "renamed"), "sp:ag");
+});
+
+test("an ack falls back to the slug only when no agent pubkey is reported", () => {
+  const state = pending([
+    { key: "sp:ag", spawnerPubkey: "sp", agentPubkey: "ag", specSlug: "fizz" },
+  ]);
+  assert.equal(findAckKey(state, "sp", null, "fizz"), "sp:ag");
+  // A reported-but-unknown agent pubkey is a different agent, not a slug hint.
+  assert.equal(findAckKey(state, "sp", "other", "fizz"), null);
+});
+
+test("an ack never crosses spawners", () => {
+  const state = pending([
+    { key: "sp:ag", spawnerPubkey: "sp", agentPubkey: "ag", specSlug: "fizz" },
+  ]);
+  assert.equal(findAckKey(state, "other-sp", "ag", "fizz"), null);
 });
 
 test("a delivered, unacked entry is not retried immediately", () => {
