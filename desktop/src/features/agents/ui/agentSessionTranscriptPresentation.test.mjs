@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  clampHeadline,
   getActivityHeadline,
   isMeaningfulItem,
   isSpineItem,
@@ -47,6 +48,59 @@ test("getActivityHeadline formats tool titles and assistant text", () => {
     "First line",
   );
   assert.equal(getActivityHeadline(makeMessage({ text: "   " })), "Responding");
+});
+
+test("getActivityHeadline clamps long shell and generic tool previews", () => {
+  const longCommand = `printf '${"x".repeat(200)}' > /tmp/out.txt`;
+  const shellHeadline = getActivityHeadline(
+    makeTool({
+      title: "Shell",
+      toolName: "dev__shell",
+      buzzToolName: null,
+      args: { command: longCommand },
+      descriptor: {
+        renderClass: "shell",
+        label: "Ran command",
+        preview: longCommand,
+        source: "harness",
+        groupKey: "shell:command",
+      },
+    }),
+  );
+  assert.ok(shellHeadline);
+  assert.ok(shellHeadline.length <= 72);
+  assert.ok(shellHeadline.endsWith("…"));
+  assert.ok(shellHeadline.startsWith("Ran command ·"));
+
+  const longContent = "A".repeat(120);
+  const genericHeadline = getActivityHeadline(
+    makeTool({
+      title: "Tool",
+      toolName: "dev__generic",
+      buzzToolName: null,
+      args: { content: longContent },
+      descriptor: {
+        renderClass: "generic",
+        label: "Ran tool",
+        preview: longContent,
+        source: "harness",
+        groupKey: "generic",
+      },
+    }),
+  );
+  assert.ok(genericHeadline);
+  assert.ok(genericHeadline.length <= 72);
+  assert.ok(genericHeadline.endsWith("…"));
+});
+
+test("clampHeadline collapses whitespace and ellipsizes", () => {
+  assert.equal(clampHeadline("short"), "short");
+  assert.equal(clampHeadline("line one\nline two with more"), "line one");
+  assert.equal(clampHeadline("  lots   of\tspace  "), "lots of space");
+  const long = "y".repeat(100);
+  const clamped = clampHeadline(long);
+  assert.ok(clamped.length <= 72);
+  assert.equal(clamped, `${"y".repeat(69)}…`);
 });
 
 test("isMeaningfulItem ignores lifecycle noise and raw JSON-RPC metadata", () => {

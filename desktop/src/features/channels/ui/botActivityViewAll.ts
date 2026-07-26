@@ -1,23 +1,11 @@
-import type { ManagedAgent } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
 import type { BotActivityAgent } from "./BotActivityBar";
+import type { ManagedAgent } from "@/shared/api/types";
 
 export type ChannelActivityAgent = BotActivityAgent & {
   status?: ManagedAgent["status"];
 };
-
-/** Harness is live in this channel (local running or deployed/remote). */
-export function isActiveChannelAgent(agent: ChannelActivityAgent): boolean {
-  if (!agent.status) {
-    return true;
-  }
-  return agent.status === "running" || agent.status === "deployed";
-}
-
-export function countActiveChannelAgents(agents: ChannelActivityAgent[]): number {
-  return agents.filter(isActiveChannelAgent).length;
-}
 
 export function countWorkingChannelAgents(
   agents: ChannelActivityAgent[],
@@ -26,12 +14,11 @@ export function countWorkingChannelAgents(
   const working = new Set(
     workingBotPubkeys.map((pubkey) => normalizePubkey(pubkey)),
   );
-  return agents.filter((agent) =>
-    working.has(normalizePubkey(agent.pubkey)),
-  ).length;
+  return agents.filter((agent) => working.has(normalizePubkey(agent.pubkey)))
+    .length;
 }
 
-/** View all when two or more agents are running in channel or actively working. */
+/** View all when two or more agents are actively working in this channel. */
 export function shouldShowViewAllAgentActivity({
   agents,
   workingBotPubkeys,
@@ -39,12 +26,10 @@ export function shouldShowViewAllAgentActivity({
   agents: ChannelActivityAgent[];
   workingBotPubkeys: readonly string[];
 }): boolean {
-  return (
-    countActiveChannelAgents(agents) >= 2 ||
-    countWorkingChannelAgents(agents, workingBotPubkeys) >= 2
-  );
+  return countWorkingChannelAgents(agents, workingBotPubkeys) >= 2;
 }
 
+/** Only agents currently working — idle harnesses stay out of View all. */
 export function agentsForAllActivityPanel({
   agents,
   workingBotPubkeys,
@@ -55,9 +40,5 @@ export function agentsForAllActivityPanel({
   const working = new Set(
     workingBotPubkeys.map((pubkey) => normalizePubkey(pubkey)),
   );
-  return agents.filter(
-    (agent) =>
-      working.has(normalizePubkey(agent.pubkey)) ||
-      isActiveChannelAgent(agent),
-  );
+  return agents.filter((agent) => working.has(normalizePubkey(agent.pubkey)));
 }
