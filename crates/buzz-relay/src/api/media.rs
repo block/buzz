@@ -780,8 +780,14 @@ async fn resolve_approved_sticker(
     })
 }
 
-async fn fetch_sticker_bytes(url: &str) -> Result<Vec<u8>, StickerAssetError> {
-    let parsed = reqwest::Url::parse(url).map_err(|_| StickerAssetError::InvalidAsset)?;
+/// Maximum upstream redirect hops followed when materializing a sticker.
+/// Blossom servers commonly 302 to a CDN (e.g. blossom.primal.net → r2a),
+/// so zero redirects breaks real packs; a small bound still prevents loops.
+const MAX_STICKER_REDIRECTS: usize = 3;
+
+/// Validate a candidate sticker origin URL (initial or redirect target):
+/// HTTPS only, no credentials, default port. Returns the host to pin.
+fn validate_sticker_origin(parsed: &reqwest::Url) -> Result<&str, StickerAssetError> {
     let host = parsed.host_str().ok_or(StickerAssetError::InvalidAsset)?;
     if parsed.scheme() != "https"
         || parsed.username() != ""
@@ -790,7 +796,13 @@ async fn fetch_sticker_bytes(url: &str) -> Result<Vec<u8>, StickerAssetError> {
     {
         return Err(StickerAssetError::InvalidAsset);
     }
+    Ok(host)
+}
 
+/// Resolve `host` and pin the first address, rejecting any resolution that
+/// includes a private IP (DNS-rebinding guard). Runs on every redirect hop,
+/// so a redirect can never smuggle the fetch to a private destination.
+async fn pin_sticker_host(host: &str) -> Result<std::net::SocketAddr, StickerAssetError> {
     let addresses: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host, 443))
         .await
         .map_err(|_| StickerAssetError::Upstream)?
@@ -802,22 +814,51 @@ async fn fetch_sticker_bytes(url: &str) -> Result<Vec<u8>, StickerAssetError> {
     {
         return Err(StickerAssetError::InvalidAsset);
     }
-    let pinned = addresses[0];
-    let client = reqwest::Client::builder()
-        // Environment-configured HTTP(S) proxies would bypass the DNS pin and
-        // let the proxy resolve a different (possibly private) destination.
-        .no_proxy()
-        .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_secs(20))
-        .redirect(reqwest::redirect::Policy::none())
-        .resolve(host, pinned)
-        .build()
-        .map_err(|_| StickerAssetError::Internal)?;
-    let mut response = client
-        .get(parsed)
-        .send()
-        .await
-        .map_err(|_| StickerAssetError::Upstream)?;
+    Ok(addresses[0])
+}
+
+async fn fetch_sticker_bytes(url: &str) -> Result<Vec<u8>, StickerAssetError> {
+    let mut parsed = reqwest::Url::parse(url).map_err(|_| StickerAssetError::InvalidAsset)?;
+    let mut response = {
+        let mut hops = 0usize;
+        loop {
+            let host = validate_sticker_origin(&parsed)?.to_string();
+            let pinned = pin_sticker_host(&host).await?;
+            let client = reqwest::Client::builder()
+                // Environment-configured HTTP(S) proxies would bypass the DNS
+                // pin and let the proxy resolve a different (possibly
+                // private) destination.
+                .no_proxy()
+                .connect_timeout(Duration::from_secs(5))
+                .timeout(Duration::from_secs(20))
+                // Redirects are followed manually below so every hop repeats
+                // the HTTPS/credential/port validation and DNS pinning.
+                .redirect(reqwest::redirect::Policy::none())
+                .resolve(&host, pinned)
+                .build()
+                .map_err(|_| StickerAssetError::Internal)?;
+            let response = client
+                .get(parsed.clone())
+                .send()
+                .await
+                .map_err(|_| StickerAssetError::Upstream)?;
+            if !response.status().is_redirection() {
+                break response;
+            }
+            hops += 1;
+            if hops > MAX_STICKER_REDIRECTS {
+                return Err(StickerAssetError::Upstream);
+            }
+            let location = response
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .ok_or(StickerAssetError::Upstream)?;
+            parsed = parsed
+                .join(location)
+                .map_err(|_| StickerAssetError::InvalidAsset)?;
+        }
+    };
     if !response.status().is_success() {
         return Err(StickerAssetError::Upstream);
     }
@@ -1268,6 +1309,39 @@ fn extract_blossom_auth(headers: &HeaderMap) -> Result<nostr::Event, MediaError>
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[test]
+    fn sticker_origin_validation_rejects_non_https_and_credentials() {
+        let ok = reqwest::Url::parse("https://blossom.example.com/abc.webp").unwrap();
+        assert_eq!(validate_sticker_origin(&ok).unwrap(), "blossom.example.com");
+
+        for bad in [
+            "http://blossom.example.com/abc.webp",
+            "https://user@blossom.example.com/abc.webp",
+            "https://user:pw@blossom.example.com/abc.webp",
+            "https://blossom.example.com:8443/abc.webp",
+        ] {
+            let parsed = reqwest::Url::parse(bad).unwrap();
+            assert!(
+                validate_sticker_origin(&parsed).is_err(),
+                "must reject {bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn sticker_redirect_join_resolves_relative_locations() {
+        let base = reqwest::Url::parse("https://blossom.example.com/abc.webp").unwrap();
+        let joined = base.join("/cdn/abc.webp").unwrap();
+        assert_eq!(joined.as_str(), "https://blossom.example.com/cdn/abc.webp");
+        let absolute = base
+            .join("https://r2a.example.net/uploads/abc.webp")
+            .unwrap();
+        assert_eq!(
+            validate_sticker_origin(&absolute).unwrap(),
+            "r2a.example.net"
+        );
+    }
 
     use axum::{
         body::Body,
