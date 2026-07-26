@@ -95,7 +95,10 @@ import { EditAgentRuntimeSection } from "./EditAgentRuntimeSection";
 import { LlmProviderField } from "./LlmProviderField";
 import { ServerModelField } from "./ServerModelField";
 import { ServerRunsOnBanner } from "./ServerRunsOnBanner";
-import { useServerAgentEditContext } from "./useServerAgentEditContext";
+import {
+  useServerAgentEditContext,
+  withCurrentValueOption,
+} from "./useServerAgentEditContext";
 
 const ADVANCED_FIELDS_MOTION_TRANSITION = {
   duration: 0.18,
@@ -458,10 +461,31 @@ export function AgentInstanceEditDialog({
     secretEnvVar: topLevelSecretEnvVar,
     value: apiKeyValue,
   } = apiKeyFieldState;
+  // Server residency: a relocated agent is configured on the spawner, so the
+  // harness is not this device's to choose and the model catalog is whatever
+  // the spawner advertises.
+  const { agents: serverAgents } = useServerAgents();
+  const serverSpecSlug = React.useMemo(() => {
+    const matched = serverAgents.find(
+      (candidate) => candidate.status.agentPubkey === agent.pubkey,
+    );
+    return matched?.slug ?? slugFromName(agent.name);
+  }, [serverAgents, agent.pubkey, agent.name]);
+  const server = useServerAgentEditContext({
+    relocatedToSpawner: agent.relocatedToSpawner,
+    deployedSpawnerPubkey: null,
+    agentPubkey: agent.pubkey,
+    slug: serverSpecSlug,
+    provider,
+  });
+  const serverContext = server.context;
+  const serverAi = server.ai;
+
   // Clear model when provider scope changes and current model is no longer valid.
   React.useEffect(() => {
     if (
       !open ||
+      serverContext ||
       isCustomModelEditing ||
       !shouldClearKnownModelForSelectionScope({
         model,
@@ -481,6 +505,7 @@ export function AgentInstanceEditDialog({
     providerForDiscovery,
     selectedRuntime,
     selectedRuntimeId,
+    serverContext,
   ]);
 
   const selection: RuntimeModelProviderSelection = {
@@ -846,26 +871,6 @@ export function AgentInstanceEditDialog({
     { label: "Custom provider...", value: CUSTOM_PROVIDER_DROPDOWN_VALUE },
   ];
 
-  // Server residency: a relocated agent is configured on the spawner, so the
-  // harness is not this device's to choose and the model catalog is whatever
-  // the spawner advertises.
-  const { agents: serverAgents } = useServerAgents();
-  const serverSpecSlug = React.useMemo(() => {
-    const matched = serverAgents.find(
-      (candidate) => candidate.status.agentPubkey === agent.pubkey,
-    );
-    return matched?.slug ?? slugFromName(agent.name);
-  }, [serverAgents, agent.pubkey, agent.name]);
-  const server = useServerAgentEditContext({
-    relocatedToSpawner: agent.relocatedToSpawner,
-    deployedSpawnerPubkey: null,
-    agentPubkey: agent.pubkey,
-    slug: serverSpecSlug,
-    provider,
-  });
-  const serverContext = server.context;
-  const serverAi = server.ai;
-
   const previewLabel = name.trim() || "Agent name";
   const previewAvatarUrl = avatarUrl.trim() || null;
   const advancedFieldsTransition = shouldReduceMotion
@@ -1012,13 +1017,15 @@ export function AgentInstanceEditDialog({
                 onValueChange={handleProviderDropdownChange}
                 options={
                   serverContext && serverAi
-                    ? server.providerOptions
+                    ? withCurrentValueOption(server.providerOptions, provider)
                     : providerDropdownOptions
                 }
                 placeholder="Default (auto)"
                 providerValue={provider}
-                selectValue={providerSelectValue}
-                showCustomInput={isCustomProviderEditing}
+                selectValue={
+                  serverContext ? provider.trim() : providerSelectValue
+                }
+                showCustomInput={!serverContext && isCustomProviderEditing}
               />
             ) : null}
 
@@ -1072,11 +1079,13 @@ export function AgentInstanceEditDialog({
                   onValueChange={handleModelDropdownChange}
                   options={
                     serverContext && serverAi
-                      ? server.modelOptions
+                      ? withCurrentValueOption(server.modelOptions, model)
                       : modelDropdownOptions
                   }
                   placeholder="Default model"
-                  value={serverContext && serverAi ? model : modelSelectValue}
+                  value={
+                    serverContext && serverAi ? model.trim() : modelSelectValue
+                  }
                 />
               )}
               {!serverContext && showCustomModelInput ? (
@@ -1114,14 +1123,17 @@ export function AgentInstanceEditDialog({
               </p>
             ) : null}
 
-            <AgentAiDefaultsNotice
-              onEditDefaults={() => setAiDefaultsOpen(true)}
-              triggerRef={aiDefaultsTriggerRef}
-              explicitModel={inheritedSubmission.model ?? ""}
-              explicitProvider={inheritedSubmission.provider ?? ""}
-              inheritedModel={inheritedModelDefault}
-              inheritedProvider={inheritedProviderDefault}
-            />
+            {/* Local AI defaults are this device's — meaningless on a server. */}
+            {serverContext ? null : (
+              <AgentAiDefaultsNotice
+                onEditDefaults={() => setAiDefaultsOpen(true)}
+                triggerRef={aiDefaultsTriggerRef}
+                explicitModel={inheritedSubmission.model ?? ""}
+                explicitProvider={inheritedSubmission.provider ?? ""}
+                inheritedModel={inheritedModelDefault}
+                inheritedProvider={inheritedProviderDefault}
+              />
+            )}
 
             <AgentDefaultsDialog
               onOpenChange={setAiDefaultsOpen}
