@@ -366,6 +366,22 @@ export function autoConnectDefaultRelayEnabled(): Promise<boolean> {
   return invokeTauri<boolean>("auto_connect_default_relay_enabled");
 }
 
+/** Which Claude account the app's spawned agents authenticate as. */
+export type AgentClaudeAccount = {
+  /** "oauth" (logged-in account), "apiKey" (ANTHROPIC_API_KEY set), or "none". */
+  source: "oauth" | "apiKey" | "none";
+  /** Account email for the "oauth" source; null otherwise. */
+  email: string | null;
+  /** Organization name for the "oauth" source; null otherwise. */
+  org: string | null;
+  /** The config directory the agent reads. */
+  configDir: string;
+};
+
+export function getAgentClaudeAccount(): Promise<AgentClaudeAccount> {
+  return invokeTauri<AgentClaudeAccount>("get_agent_claude_account");
+}
+
 export function isSharedIdentity(): Promise<boolean> {
   return invokeTauri<boolean>("is_shared_identity");
 }

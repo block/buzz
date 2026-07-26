@@ -1,5 +1,6 @@
 import { AgentDefaultsEditor } from "@/features/agents/ui/AgentDefaultsEditor";
 import { SectionHeader } from "@/shared/ui/PageHeader";
+import { ClaudeAgentAccountRow } from "./ClaudeAgentAccountRow";
 
 export function AgentDefaultsSettingsCard() {
   return (
@@ -11,6 +12,7 @@ export function AgentDefaultsSettingsCard() {
         title="Agent defaults"
         description="Provider, model, effort, and environment settings inherited by local agents. Agent-specific settings always take priority."
       />
+      <ClaudeAgentAccountRow />
       <AgentDefaultsEditor />
     </section>
   );

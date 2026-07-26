@@ -54,6 +54,79 @@ pub fn get_default_relay_url() -> String {
     relay::relay_ws_url()
 }
 
+/// Which Claude account the app's spawned agents authenticate as.
+///
+/// Derived from the Claude Code config the agent subprocess inherits:
+/// `CLAUDE_CONFIG_DIR` when set, otherwise `$HOME`. Carries only the account
+/// email and organization (or a flag that an API key is in use) — never any
+/// token or secret.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentClaudeAccount {
+    /// `"oauth"` (a logged-in account), `"apiKey"` (`ANTHROPIC_API_KEY` set), or
+    /// `"none"` (no resolvable account).
+    source: String,
+    /// Account email for the `oauth` source; `None` otherwise.
+    email: Option<String>,
+    /// Organization name for the `oauth` source; `None` otherwise.
+    org: Option<String>,
+    /// The config directory the agent reads, shown for transparency.
+    config_dir: String,
+}
+
+/// Report the Claude account backing the app's agents by inspecting the Claude
+/// Code config directory the agent runtime inherits. An `ANTHROPIC_API_KEY`
+/// takes precedence over any stored login, mirroring the runtime's own
+/// resolution order. Returns account email + organization for a logged-in
+/// account without exposing credentials.
+#[tauri::command]
+pub fn get_agent_claude_account() -> AgentClaudeAccount {
+    let config_dir = std::env::var("CLAUDE_CONFIG_DIR")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_default();
+
+    // An API key overrides any stored OAuth login for the agent runtime, so
+    // report it as the effective account when present.
+    if std::env::var("ANTHROPIC_API_KEY")
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+    {
+        return AgentClaudeAccount {
+            source: "apiKey".to_string(),
+            email: None,
+            org: None,
+            config_dir,
+        };
+    }
+
+    let config_path = std::path::Path::new(&config_dir).join(".claude.json");
+    let (email, org) = std::fs::read_to_string(&config_path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|json| {
+            let account = json.get("oauthAccount")?;
+            let email = account
+                .get("emailAddress")
+                .and_then(|value| value.as_str())
+                .map(str::to_string);
+            let org = account
+                .get("organizationName")
+                .and_then(|value| value.as_str())
+                .map(str::to_string);
+            Some((email, org))
+        })
+        .unwrap_or((None, None));
+
+    let source = if email.is_some() { "oauth" } else { "none" };
+
+    AgentClaudeAccount {
+        source: source.to_string(),
+        email,
+        org,
+        config_dir,
+    }
+}
+
 #[tauri::command]
 pub fn auto_connect_default_relay_enabled() -> bool {
     option_env!("BUZZ_DESKTOP_BUILD_AUTO_CONNECT_DEFAULT_RELAY").is_some()
