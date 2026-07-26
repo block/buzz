@@ -752,6 +752,7 @@ pub fn run() {
             pick_and_upload_image,
             pick_and_upload_sticker_image,
             import_signal_sticker_pack,
+            import_nostr_sticker_pack,
             upload_media_bytes,
             download_image,
             save_png_data_url,

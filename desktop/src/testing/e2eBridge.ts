@@ -10704,6 +10704,13 @@ export function maybeInstallE2eTauriMocks() {
           stickers: [],
           skippedStickerIds: [],
         };
+      case "import_nostr_sticker_pack":
+        return {
+          identifier: "mock-nostr-pack",
+          title: "Mock Nostr Pack",
+          stickers: [],
+          skippedStickerIds: [],
+        };
       case "upload_media_bytes":
         return (await resolveMockUploadDescriptors(activeConfig))[0];
       case "fetch_media_bytes": {

@@ -24,6 +24,7 @@ import {
   useStickerCatalogQuery,
 } from "@/features/stickers/hooks";
 import {
+  importNostrStickerPack,
   importSignalStickerPack,
   pickAndUploadStickerImage,
 } from "@/shared/api/stickersTauri";
@@ -86,7 +87,7 @@ function PackAuthorForm({ onPublished }: { onPublished: () => void }) {
   const [license, setLicense] = React.useState("");
   const [cover, setCover] = React.useState<StickerPack["cover"]>();
   const [stickers, setStickers] = React.useState<StickerAsset[]>([]);
-  const [signalLink, setSignalLink] = React.useState("");
+  const [packLink, setPackLink] = React.useState("");
   const [isWorking, setIsWorking] = React.useState(false);
 
   const loadPack = React.useCallback((pack: StickerPack) => {
@@ -161,18 +162,27 @@ function PackAuthorForm({ onPublished }: { onPublished: () => void }) {
     }
   }, []);
 
-  const importSignal = React.useCallback(async () => {
-    if (!signalLink.trim()) return;
+  const importPack = React.useCallback(async () => {
+    const link = packLink.trim();
+    if (!link) return;
+    // Signal links carry a secret pack key; Sonar links are public metadata.
+    const isSignal = link.includes("signal.art/addstickers");
     setIsWorking(true);
     try {
-      const imported = await importSignalStickerPack(signalLink);
+      const imported = isSignal
+        ? await importSignalStickerPack(link)
+        : await importNostrStickerPack(link);
       setIdentifier(imported.identifier);
       setTitle(imported.title);
       setDescription(
-        imported.author
-          ? `Imported from Signal · ${imported.author}`
-          : "Imported from Signal",
+        imported.description ??
+          (isSignal
+            ? imported.author
+              ? `Imported from Signal · ${imported.author}`
+              : "Imported from Signal"
+            : ""),
       );
+      setLicense(imported.license ?? "");
       setCover(
         imported.cover
           ? {
@@ -185,6 +195,11 @@ function PackAuthorForm({ onPublished }: { onPublished: () => void }) {
           : undefined,
       );
       setStickers(imported.stickers);
+      if (!isSignal) {
+        toast.success(
+          `Imported ${imported.stickers.length} sticker(s) from "${imported.title}". Publish the pack to add it to this community.`,
+        );
+      }
       if (imported.skippedStickerIds.length > 0) {
         toast.warning(
           `Skipped ${imported.skippedStickerIds.length} unavailable sticker(s).`,
@@ -194,14 +209,15 @@ function PackAuthorForm({ onPublished }: { onPublished: () => void }) {
       toast.error(
         error instanceof Error
           ? error.message
-          : "Could not import Signal pack.",
+          : `Could not import ${isSignal ? "Signal" : "Nostr"} pack.`,
       );
     } finally {
-      // The secret-bearing link exists only for the duration of this invoke.
-      setSignalLink("");
+      // The link exists only for the duration of this invoke (Signal links
+      // carry a secret pack key and are zeroized in trusted Rust).
+      setPackLink("");
       setIsWorking(false);
     }
-  }, [signalLink]);
+  }, [packLink]);
 
   const publish = React.useCallback(async () => {
     setIsWorking(true);
@@ -309,20 +325,20 @@ function PackAuthorForm({ onPublished }: { onPublished: () => void }) {
       </div>
       <div className="flex gap-2">
         <Input
-          aria-label="Signal sticker link"
+          aria-label="Sticker pack link"
           autoComplete="off"
-          onChange={(event) => setSignalLink(event.target.value)}
-          placeholder="https://signal.art/addstickers/#pack_id=…"
+          onChange={(event) => setPackLink(event.target.value)}
+          placeholder="Signal or Sonar pack link (https://…)"
           type="password"
-          value={signalLink}
+          value={packLink}
         />
         <Button
-          disabled={isWorking || !signalLink.trim()}
-          onClick={() => void importSignal()}
+          disabled={isWorking || !packLink.trim()}
+          onClick={() => void importPack()}
           type="button"
           variant="secondary"
         >
-          Import Signal
+          Import pack
         </Button>
       </div>
       <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">

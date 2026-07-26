@@ -66,6 +66,8 @@ export type ImportedStickerDraft = {
   identifier: string;
   title: string;
   author?: string;
+  description?: string;
+  license?: string;
   cover?: StickerAsset;
   stickers: StickerAsset[];
   skippedStickerIds: number[];
