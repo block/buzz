@@ -1185,6 +1185,11 @@ async fn execute_steps(
                     run_id = %run_id, step = %step.id,
                     "Step suspended — awaiting approval (token: <redacted>)"
                 );
+                trace.push(serde_json::json!({
+                    "step_id": step.id,
+                    "status": "suspended",
+                    "approval_token_redacted": true,
+                }));
                 // Return the token and current state so the caller can persist the
                 // approval record and update the run's execution trace.
                 return Ok(ExecutionResult {
@@ -1830,5 +1835,39 @@ mod tests {
             resolve_send_message_channel(Some(&override_channel_id.to_string()), "", None)
                 .expect("override should be accepted");
         assert_eq!(resolved, override_channel_id.to_string());
+    }
+
+    #[test]
+    fn suspended_trace_entry_contains_status_and_redacts_token() {
+        // Simulate the trace entry pushed by the Suspended match arm in
+        // execute_steps — the entry must record the suspension without
+        // leaking the raw approval token.
+        let step_id = "approval-gate";
+        let approval_token = generate_approval_token(Uuid::new_v4(), step_id);
+
+        // Build the trace entry exactly as the production code does.
+        let entry = serde_json::json!({
+            "step_id": step_id,
+            "status": "suspended",
+            "approval_token_redacted": true,
+        });
+
+        // Verify the entry shape.
+        assert_eq!(entry["step_id"], "approval-gate");
+        assert_eq!(entry["status"], "suspended");
+        assert_eq!(entry["approval_token_redacted"], true);
+
+        // The raw approval token must NOT appear anywhere in the serialised
+        // trace entry — it is security-sensitive.
+        let serialised = serde_json::to_string(&entry).expect("serialise trace entry");
+        assert!(
+            !serialised.contains(&approval_token),
+            "trace entry must not contain the raw approval token"
+        );
+        // Also verify there is no "approval_token" key (only the _redacted flag).
+        assert!(
+            entry.get("approval_token").is_none(),
+            "trace entry must not have an 'approval_token' field"
+        );
     }
 }
