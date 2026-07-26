@@ -105,6 +105,20 @@ pub struct SpawnerAnnouncement {
     /// Per-agent memory ceiling, mebibytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_memory_mib: Option<u32>,
+    /// Providers/models this host can run, so a client scopes its picker to
+    /// what the server actually supports. Self-reported, like every field here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai: Option<Vec<SpawnerAiProvider>>,
+}
+
+/// One inference provider a spawner host can run, with its model ids.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpawnerAiProvider {
+    /// Provider id, e.g. "anthropic".
+    pub id: String,
+    /// Model ids this host can run for the provider.
+    #[serde(default)]
+    pub models: Vec<String>,
 }
 
 impl SpawnerAnnouncement {
@@ -353,6 +367,11 @@ pub struct SpawnerAgentStatus {
     /// Consecutive failed start attempts, for surfacing backoff in a UI.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub restart_count: u32,
+    /// Hash of the prompt material this agent is running with (see
+    /// [`PromptMaterial::hash`]), so a client can tell whether a pushed
+    /// prompt update has been applied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_hash: Option<String>,
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -421,6 +440,21 @@ impl PromptMaterial {
             && self.team_instructions.is_none()
             && self.model.is_none()
             && self.provider.is_none()
+    }
+
+    /// Lowercase sha256 hex of this material's JSON serialization.
+    ///
+    /// Serialization skips `None` fields, so two materials with the same set
+    /// values hash identically regardless of construction order.
+    pub fn hash(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let json = serde_json::to_string(self).unwrap_or_default();
+        let mut h = Sha256::new();
+        h.update(json.as_bytes());
+        h.finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
     }
 }
 
@@ -869,6 +903,7 @@ mod tests {
             spec_hash: None,
             error: None,
             restart_count: 3,
+            prompt_hash: None,
         };
         assert!(status.validate().is_err());
         status.error = Some("image pull failed".into());
@@ -886,6 +921,7 @@ mod tests {
             spec_hash: Some("abc123".into()),
             error: None,
             restart_count: 0,
+            prompt_hash: None,
         };
         let event = build_spawner_agent_status("fizz-prod", &owner.public_key().to_hex(), &status)
             .unwrap()
@@ -903,10 +939,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn announcement_round_trips_through_an_event() {
-        let keys = Keys::generate();
-        let announcement = SpawnerAnnouncement {
+    fn sample_announcement() -> SpawnerAnnouncement {
+        SpawnerAnnouncement {
             name: "prod-vps".into(),
             description: Some("Hetzner CX42, Frankfurt".into()),
             agent_image: Some("ghcr.io/block/buzz-acp:main".into()),
@@ -915,12 +949,69 @@ mod tests {
             agents_running: 3,
             max_cpu_millis: Some(4000),
             max_memory_mib: Some(8192),
-        };
+            ai: None,
+        }
+    }
+
+    #[test]
+    fn announcement_round_trips_through_an_event() {
+        let keys = Keys::generate();
+        let announcement = sample_announcement();
         let event = build_spawner_announcement(&announcement)
             .unwrap()
             .sign_with_keys(&keys)
             .unwrap();
         assert_eq!(announcement_from_event(&event).unwrap(), announcement);
+    }
+
+    #[test]
+    fn announcement_ai_catalog_round_trips() {
+        let mut a = sample_announcement();
+        a.ai = Some(vec![SpawnerAiProvider {
+            id: "anthropic".into(),
+            models: vec!["claude-opus-5".into(), "claude-sonnet-5".into()],
+        }]);
+        let json = serde_json::to_string(&a).unwrap();
+        let back: SpawnerAnnouncement = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.ai, a.ai);
+        // Old announcements without the field still parse.
+        let legacy: SpawnerAnnouncement =
+            serde_json::from_str(r#"{"name":"x","max_agents":1,"agents_running":0}"#).unwrap();
+        assert!(legacy.ai.is_none());
+    }
+
+    #[test]
+    fn prompt_material_hash_is_stable_and_content_sensitive() {
+        let a = PromptMaterial {
+            model: Some("m1".into()),
+            ..Default::default()
+        };
+        let b = PromptMaterial {
+            model: Some("m1".into()),
+            ..Default::default()
+        };
+        let c = PromptMaterial {
+            model: Some("m2".into()),
+            ..Default::default()
+        };
+        assert_eq!(a.hash(), b.hash());
+        assert_ne!(a.hash(), c.hash());
+        assert_eq!(a.hash().len(), 64);
+    }
+
+    #[test]
+    fn status_prompt_hash_round_trips() {
+        let s = SpawnerAgentStatus {
+            phase: SpawnPhase::Running,
+            agent_pubkey: None,
+            spec_hash: None,
+            error: None,
+            restart_count: 0,
+            prompt_hash: Some("ab".repeat(32)),
+        };
+        let back: SpawnerAgentStatus =
+            serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back.prompt_hash, s.prompt_hash);
     }
 
     #[test]
@@ -934,6 +1025,7 @@ mod tests {
             agents_running: 1,
             max_cpu_millis: None,
             max_memory_mib: None,
+            ai: None,
         };
         assert!(!a.is_full());
         a.agents_running = 2;
@@ -956,6 +1048,7 @@ mod tests {
             agents_running: 0,
             max_cpu_millis: None,
             max_memory_mib: None,
+            ai: None,
         };
         assert!(a.validate().is_err());
     }
