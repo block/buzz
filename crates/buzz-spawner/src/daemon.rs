@@ -335,7 +335,7 @@ impl Daemon {
             agents_running: agents_running as u32,
             max_cpu_millis: Some(self.config.max_cpu_millis),
             max_memory_mib: Some(self.config.max_memory_mib),
-            ai: None,
+            ai: self.config.ai_catalog.clone(),
         };
         self.relay.publish_announcement(&announcement).await
     }
@@ -790,16 +790,24 @@ impl Daemon {
         error: Option<String>,
         restart_count: u32,
     ) -> Result<()> {
+        let prompt_hash = prompt_hash_for(self.store.get(owner_pubkey, slug));
         let status = SpawnerAgentStatus {
             phase,
             agent_pubkey: agent_pubkey.map(str::to_string),
             spec_hash: spec_hash.map(str::to_string),
             error,
             restart_count,
-            prompt_hash: None,
+            prompt_hash,
         };
         self.relay.publish_status(slug, owner_pubkey, &status).await
     }
+}
+
+/// Hash of a record's cached prompt material, if any, for `prompt_hash` on the
+/// published status. Split out as a pure function so it is testable without a
+/// running daemon.
+fn prompt_hash_for(record: Option<&AgentRecord>) -> Option<String> {
+    record.and_then(|r| r.prompt.as_ref()).map(|p| p.hash())
 }
 
 /// Truncate on a char boundary so a multi-byte log tail cannot panic.
@@ -864,6 +872,41 @@ mod tests {
             volume_name(&"s".repeat(64), &owner, "fizz"),
             volume_name(&"t".repeat(64), &owner, "fizz")
         );
+    }
+
+    fn test_record(prompt: Option<buzz_sdk::spawner::PromptMaterial>) -> AgentRecord {
+        AgentRecord {
+            slug: "fizz".into(),
+            owner_pubkey: "a".repeat(64),
+            agent_pubkey: "b".repeat(64),
+            private_key_nsec: String::new(),
+            auth_tag: None,
+            pending_nonce: None,
+            attestation_sent_at: None,
+            spec_hash: None,
+            prompt,
+            restart_count: 0,
+            last_failure_at: None,
+        }
+    }
+
+    #[test]
+    fn prompt_hash_for_present_prompt_matches_material_hash() {
+        let material = buzz_sdk::spawner::PromptMaterial {
+            system_prompt: Some("be Fizz".into()),
+            team_instructions: None,
+            model: None,
+            provider: None,
+        };
+        let record = test_record(Some(material.clone()));
+        assert_eq!(prompt_hash_for(Some(&record)), Some(material.hash()));
+    }
+
+    #[test]
+    fn prompt_hash_for_absent_prompt_is_none() {
+        let record = test_record(None);
+        assert_eq!(prompt_hash_for(Some(&record)), None);
+        assert_eq!(prompt_hash_for(None), None);
     }
 
     #[test]
