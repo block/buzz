@@ -6,6 +6,7 @@ import {
   syncActiveAgentTurnsFromObserver,
   getActiveTurnsForAgent,
   getActiveTurnsByChannel,
+  getLastCompletedTurnForAgent,
   resetActiveAgentTurnsStore,
   subscribeActiveAgentTurns,
   saveActiveAgentTurnsForCommunity,
@@ -82,6 +83,81 @@ describe("activeAgentTurnsStore", () => {
       const channels = channelIdsOf(getActiveTurnsForAgent(AGENT));
       assert.equal(channels.size, 1);
       assert.ok(channels.has("c1"));
+    });
+  });
+
+  describe("last completed turn", () => {
+    it("records only real turn_completed events", () => {
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({
+          seq: 1,
+          kind: "turn_error",
+          channelId: "failed-channel",
+          timestamp: "2024-01-01T00:00:01Z",
+        }),
+      ]);
+      assert.equal(getLastCompletedTurnForAgent(AGENT), null);
+
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({
+          seq: 2,
+          kind: "turn_completed",
+          channelId: "completed-channel",
+          timestamp: "2024-01-01T00:00:02Z",
+        }),
+      ]);
+      assert.equal(
+        getLastCompletedTurnForAgent(AGENT)?.channelId,
+        "completed-channel",
+      );
+    });
+
+    it("ignores stale out-of-order completions", () => {
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({
+          seq: 20,
+          kind: "turn_completed",
+          channelId: "newest-channel",
+          timestamp: "2024-01-01T00:00:20Z",
+        }),
+      ]);
+      const newest = getLastCompletedTurnForAgent(AGENT);
+
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({
+          seq: 10,
+          kind: "turn_completed",
+          channelId: "stale-channel",
+          timestamp: "2024-01-01T00:00:10Z",
+        }),
+      ]);
+
+      assert.equal(
+        getLastCompletedTurnForAgent(AGENT),
+        newest,
+        "a stale completion must not replace the newest stable summary",
+      );
+      assert.equal(newest?.channelId, "newest-channel");
+    });
+
+    it("keeps the last completion across a community save and restore", () => {
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({
+          seq: 1,
+          kind: "turn_completed",
+          channelId: "saved-channel",
+          timestamp: "2024-01-01T00:00:01Z",
+        }),
+      ]);
+      saveActiveAgentTurnsForCommunity("completion-community");
+      resetActiveAgentTurnsStore();
+      assert.equal(getLastCompletedTurnForAgent(AGENT), null);
+
+      restoreActiveAgentTurnsForCommunity("completion-community");
+      assert.equal(
+        getLastCompletedTurnForAgent(AGENT)?.channelId,
+        "saved-channel",
+      );
     });
   });
 

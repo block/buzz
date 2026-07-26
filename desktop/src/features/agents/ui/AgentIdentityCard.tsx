@@ -6,6 +6,7 @@ import { IdentityInitialsAvatar } from "./IdentityInitialsAvatar";
 
 type AgentIdentityCardProps = {
   actions?: ReactNode;
+  activity?: ReactNode;
   ariaLabel: string;
   avatar?: ReactNode;
   avatarUrl?: string | null;
@@ -19,6 +20,7 @@ type AgentIdentityCardProps = {
 
 export function AgentIdentityCard({
   actions,
+  activity,
   ariaLabel,
   avatar,
   avatarUrl,
@@ -78,6 +80,9 @@ export function AgentIdentityCard({
           </span>
         ) : null}
         {statusBadge}
+        {activity ? (
+          <div className="pointer-events-auto mt-1 min-w-0">{activity}</div>
+        ) : null}
       </div>
     </div>
   );

@@ -46,6 +46,12 @@ export type ActiveTurnSummary = {
   anchorAt: number;
 };
 
+/** Most recent real turn completion surfaced to agent cards. */
+export type CompletedTurnSummary = {
+  channelId: string | null;
+  completedAt: number;
+};
+
 /** One channel with active agent work, aggregated across agents. */
 export type ActiveChannelTurnSummary = {
   channelId: string;
@@ -57,6 +63,10 @@ export type ActiveChannelTurnSummary = {
 
 // Module-level state: agentPubkey → turnId → ActiveTurn
 const activeTurnsByAgent = new Map<string, Map<string, ActiveTurn>>();
+const lastCompletedByAgent = new Map<
+  string,
+  { channelId: string | null; completedAt: number }
+>();
 const listeners = new Set<() => void>();
 
 // Per-agent clock offset: the desktop clock minus the agent-host clock, in
@@ -79,6 +89,7 @@ const clockOffsetByAgent = new Map<string, number>();
 // Cached snapshots for useSyncExternalStore reference stability.
 // Only regenerated when the underlying turn map for an agent actually changes.
 const cachedTurnSummaries = new Map<string, ActiveTurnSummary[]>();
+const cachedCompletedTurnSummaries = new Map<string, CompletedTurnSummary>();
 let cachedChannelTurnSummaries: ActiveChannelTurnSummary[] | null = null;
 
 // Composite watermark per agent: the newest observer event processed, by
@@ -99,6 +110,7 @@ let pruneInterval: ReturnType<typeof setInterval> | null = null;
 
 function invalidateCache(agentKey: string) {
   cachedTurnSummaries.delete(agentKey);
+  cachedCompletedTurnSummaries.delete(agentKey);
   cachedChannelTurnSummaries = null;
 }
 
@@ -233,6 +245,19 @@ function recordTerminal(agentKey: string, turnId: string, terminalAt: number) {
   }
 }
 
+function recordCompletedTurn(
+  agentPubkey: string,
+  channelId: string | null,
+  completedAt: number,
+) {
+  if (!Number.isFinite(completedAt)) return;
+  const key = normalizePubkey(agentPubkey);
+  const previous = lastCompletedByAgent.get(key);
+  if (previous && previous.completedAt >= completedAt) return;
+  lastCompletedByAgent.set(key, { channelId, completedAt });
+  invalidateCache(key);
+}
+
 function endTurn(
   agentPubkey: string,
   turnId: string | null,
@@ -355,6 +380,19 @@ function processEvent(agentPubkey: string, event: ObserverEvent) {
       }
       break;
     case "turn_completed":
+      recordCompletedTurn(
+        agentPubkey,
+        event.channelId ?? null,
+        Date.parse(event.timestamp),
+      );
+      endTurn(
+        agentPubkey,
+        event.turnId ?? null,
+        event.channelId ?? null,
+        Date.parse(event.timestamp),
+      );
+      notifyListeners();
+      return;
     case "turn_error":
     case "agent_panic":
       endTurn(
@@ -452,6 +490,30 @@ export function getActiveTurnsForAgent(
   return result;
 }
 
+/**
+ * Returns the newest real `turn_completed` event for an agent. The completion
+ * clock is translated into desktop time with the same skew estimate used by
+ * active-turn elapsed counters.
+ */
+export function getLastCompletedTurnForAgent(
+  agentPubkey: string | null | undefined,
+): CompletedTurnSummary | null {
+  if (!agentPubkey) return null;
+  const key = normalizePubkey(agentPubkey);
+  const completed = lastCompletedByAgent.get(key);
+  if (!completed) return null;
+
+  const cached = cachedCompletedTurnSummaries.get(key);
+  if (cached) return cached;
+
+  const summary = {
+    channelId: completed.channelId,
+    completedAt: completed.completedAt + (clockOffsetByAgent.get(key) ?? 0),
+  };
+  cachedCompletedTurnSummaries.set(key, summary);
+  return summary;
+}
+
 const EMPTY_TURNS: ActiveTurnSummary[] = [];
 const EMPTY_CHANNEL_TURNS: ActiveChannelTurnSummary[] = [];
 
@@ -531,6 +593,17 @@ export function useActiveAgentTurns(
   return React.useSyncExternalStore(subscribeActiveAgentTurns, getSnapshot);
 }
 
+/** Hook: returns the newest real `turn_completed` event for one agent. */
+export function useLastCompletedTurn(
+  agentPubkey: string | null | undefined,
+): CompletedTurnSummary | null {
+  const getSnapshot = React.useCallback(
+    () => getLastCompletedTurnForAgent(agentPubkey),
+    [agentPubkey],
+  );
+  return React.useSyncExternalStore(subscribeActiveAgentTurns, getSnapshot);
+}
+
 /**
  * Hook: returns channels with active agent work across all tracked agents.
  * Re-renders when the channel set changes — not when the clock ticks.
@@ -575,15 +648,17 @@ export function useActiveAgentTurnsBridge(
 }
 
 /**
- * Clears all live turn state (active turns, offsets, watermarks, tombstones).
- * Intentionally preserves `savedByCommunity` — community-switch snapshots
- * must survive the reset that runs between save and restore.
+ * Clears all derived turn state (active turns, last completion, offsets,
+ * watermarks, tombstones). Intentionally preserves `savedByCommunity` —
+ * community-switch snapshots must survive the reset between save and restore.
  */
 export function resetActiveAgentTurnsStore() {
   activeTurnsByAgent.clear();
+  lastCompletedByAgent.clear();
   lastProcessed.clear();
   clockOffsetByAgent.clear();
   cachedTurnSummaries.clear();
+  cachedCompletedTurnSummaries.clear();
   cachedChannelTurnSummaries = null;
   terminalAtByAgent.clear();
   notifyListeners();
@@ -595,6 +670,7 @@ export function resetActiveAgentTurnsStore() {
 
 type TurnsStoreSnapshot = {
   turns: Map<string, Map<string, ActiveTurn>>;
+  completions: Map<string, { channelId: string | null; completedAt: number }>;
   offsets: Map<string, number>;
   watermarks: Map<string, ObserverEvent>;
   terminals: Map<string, Map<string, number>>;
@@ -605,15 +681,19 @@ const savedByCommunity = new Map<string, TurnsStoreSnapshot>();
 
 /**
  * Snapshot the current active-turns state under `communityId` so it can be
- * restored when the user switches back.  If both the turns map and the
- * tombstone map are empty there is nothing worth restoring — discard any
- * previously-saved snapshot instead.
+ * restored when the user switches back. If the active, completion, and
+ * tombstone maps are all empty there is nothing worth restoring — discard any
+ * previously saved snapshot instead.
  *
- * Deep-clones all four maps so subsequent mutations on the live maps do not
+ * Clones all five maps so subsequent mutations on the live maps do not
  * corrupt the snapshot.
  */
 export function saveActiveAgentTurnsForCommunity(communityId: string): void {
-  if (activeTurnsByAgent.size === 0 && terminalAtByAgent.size === 0) {
+  if (
+    activeTurnsByAgent.size === 0 &&
+    lastCompletedByAgent.size === 0 &&
+    terminalAtByAgent.size === 0
+  ) {
     savedByCommunity.delete(communityId);
     return;
   }
@@ -632,6 +712,7 @@ export function saveActiveAgentTurnsForCommunity(communityId: string): void {
   // Shallow-clone scalar maps (primitives as values).
   const offsets = new Map(clockOffsetByAgent);
   const watermarks = new Map(lastProcessed);
+  const completions = new Map(lastCompletedByAgent);
 
   // Deep-clone terminalAtByAgent: outer map + inner per-agent maps.
   const terminals = new Map<string, Map<string, number>>();
@@ -639,14 +720,20 @@ export function saveActiveAgentTurnsForCommunity(communityId: string): void {
     terminals.set(agentKey, new Map(tombstones));
   }
 
-  savedByCommunity.set(communityId, { turns, offsets, watermarks, terminals });
+  savedByCommunity.set(communityId, {
+    turns,
+    completions,
+    offsets,
+    watermarks,
+    terminals,
+  });
 }
 
 /**
  * Restore a previously saved active-turns snapshot for `communityId` into the
  * module maps.  No-op when no snapshot exists.
  *
- * Clears all four module maps before writing so the function is
+ * Clears all five module maps before writing so the function is
  * self-contained — it replaces rather than merging, regardless of whether the
  * caller pre-cleared.  At the primary call site (`useCommunityInit`) the maps
  * are already empty after `resetCommunityState()`, but this guard makes the
@@ -667,6 +754,7 @@ export function restoreActiveAgentTurnsForCommunity(communityId: string): void {
 
   // Clear before writing so this is a replace, not a merge.
   activeTurnsByAgent.clear();
+  lastCompletedByAgent.clear();
   clockOffsetByAgent.clear();
   lastProcessed.clear();
   terminalAtByAgent.clear();
@@ -685,6 +773,10 @@ export function restoreActiveAgentTurnsForCommunity(communityId: string): void {
     clockOffsetByAgent.set(agentKey, offset);
   }
 
+  for (const [agentKey, completion] of snap.completions) {
+    lastCompletedByAgent.set(agentKey, { ...completion });
+  }
+
   for (const [agentKey, event] of snap.watermarks) {
     lastProcessed.set(agentKey, event);
   }
@@ -694,6 +786,7 @@ export function restoreActiveAgentTurnsForCommunity(communityId: string): void {
   }
 
   cachedTurnSummaries.clear();
+  cachedCompletedTurnSummaries.clear();
   cachedChannelTurnSummaries = null;
   notifyListeners();
 }

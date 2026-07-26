@@ -1,14 +1,29 @@
 import * as React from "react";
 import { ChevronDown, ChevronRight, RefreshCw } from "lucide-react";
 
+import { useChannelsQuery } from "@/features/channels/hooks";
+import { isChannelOpenable } from "@/features/agents/useOpenAgentActivity";
+import {
+  useAgentWorking,
+  type AgentWorkingChannel,
+} from "@/features/agents/agentWorkingSignal";
+import { useLastCompletedTurn } from "@/features/agents/activeAgentTurnsStore";
+import { useOpenAgentActivity } from "@/features/agents/useOpenAgentActivity";
+import {
+  type AgentCardStatus,
+  deriveAgentCardStatus,
+  formatAgentCardActivityChannel,
+} from "@/features/agents/lib/agentCardStatus";
 import { formatAgentModelLabel } from "@/features/agents/lib/formatAgentModelLabel";
 import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
+import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
 import { useUserProfileQuery } from "@/features/profile/hooks";
 import type { AgentPersona, ManagedAgent } from "@/shared/api/types";
 import type { ProfilePanelOpenOptions } from "@/shared/context/ProfilePanelContext";
 import { useFeedbackToasts } from "@/shared/hooks/useToastEffect";
 import { useFileImportZone } from "@/shared/hooks/useFileImportZone";
+import { useNow } from "@/shared/lib/useNow";
 import { Badge } from "@/shared/ui/badge";
 import {
   DropdownMenu,
@@ -274,10 +289,12 @@ function AgentPersonaCard({
     ? friendlyAgentLastError(agent.lastError, agent.lastErrorCode)?.copy
     : null;
   const opensRuntimeTab = Boolean(agent && friendlyError && !isActive);
+  const cardRuntime = useAgentCardRuntime(agent, Boolean(friendlyError));
 
   return (
     <AgentIdentityCard
       actions={actions}
+      activity={cardRuntime.activity}
       ariaLabel={`${title} agent profile`}
       avatar={
         agent ? (
@@ -322,12 +339,10 @@ function AgentPersonaCard({
         onOpenPersonaProfile(persona);
       }}
       statusBadge={
-        agent?.needsRestart ? (
-          <Badge className="gap-1" variant="warning">
-            <RefreshCw className="h-3 w-3" />
-            Restart required
-          </Badge>
-        ) : null
+        <AgentCardStatusBadges
+          needsRestart={agent?.needsRestart ?? false}
+          status={cardRuntime.status}
+        />
       }
     />
   );
@@ -357,9 +372,11 @@ function StandaloneAgentCard({
   )?.copy;
   const isActive = isManagedAgentActive(agent);
   const opensRuntimeTab = Boolean(friendlyError && !isActive);
+  const cardRuntime = useAgentCardRuntime(agent, Boolean(friendlyError));
 
   return (
     <AgentIdentityCard
+      activity={cardRuntime.activity}
       ariaLabel={`${title} agent profile`}
       avatar={
         <AgentRuntimeAvatarControl
@@ -392,14 +409,183 @@ function StandaloneAgentCard({
         );
       }}
       statusBadge={
-        agent.needsRestart ? (
-          <Badge className="gap-1" variant="warning">
-            <RefreshCw className="h-3 w-3" />
-            Restart required
-          </Badge>
-        ) : null
+        <AgentCardStatusBadges
+          needsRestart={agent.needsRestart}
+          status={cardRuntime.status}
+        />
       }
     />
+  );
+}
+
+function useAgentCardRuntime(
+  agent: ManagedAgent | undefined,
+  hasError: boolean,
+) {
+  const working = useAgentWorking(agent?.pubkey);
+  const lastCompleted = useLastCompletedTurn(agent?.pubkey);
+  const channelsQuery = useChannelsQuery();
+  const { openAgentActivity } = useOpenAgentActivity();
+  const visibleChannelNames = React.useMemo(
+    () =>
+      new Map(
+        (channelsQuery.data ?? [])
+          .filter((channel) => isChannelOpenable(channel))
+          .map((channel) => [channel.id, channel.name]),
+      ),
+    [channelsQuery.data],
+  );
+  const status = deriveAgentCardStatus({
+    hasError,
+    isWorking: working.working,
+    status: agent?.status ?? null,
+  });
+
+  const activeChannel =
+    working.channels.find((channel) =>
+      visibleChannelNames.has(channel.channelId),
+    ) ?? working.channels[0];
+  const activity =
+    agent && status === "working" && activeChannel ? (
+      <AgentCardCurrentActivity
+        agentPubkey={agent.pubkey}
+        channel={activeChannel}
+        channelName={visibleChannelNames.get(activeChannel.channelId)}
+        onOpen={openAgentActivity}
+      />
+    ) : agent && lastCompleted ? (
+      <AgentCardLastActivity
+        agentPubkey={agent.pubkey}
+        channelId={lastCompleted.channelId}
+        channelName={
+          lastCompleted.channelId
+            ? visibleChannelNames.get(lastCompleted.channelId)
+            : undefined
+        }
+        completedAt={lastCompleted.completedAt}
+        onOpen={openAgentActivity}
+      />
+    ) : null;
+
+  return { activity, status };
+}
+
+function AgentCardStatusBadges({
+  needsRestart,
+  status,
+}: {
+  needsRestart: boolean;
+  status: AgentCardStatus;
+}) {
+  const statusPresentation = {
+    working: { label: "Bezig", variant: "default" as const },
+    available: { label: "Beschikbaar", variant: "success" as const },
+    error: { label: "Fout", variant: "destructive" as const },
+    off: { label: "Uit", variant: "secondary" as const },
+  }[status];
+
+  return (
+    <div className="mt-1 flex flex-wrap gap-1">
+      <Badge
+        className={
+          status === "working" ? "motion-safe:animate-pulse" : undefined
+        }
+        data-testid={`agent-card-status-${status}`}
+        variant={statusPresentation.variant}
+      >
+        {statusPresentation.label}
+      </Badge>
+      {needsRestart ? (
+        <Badge className="gap-1" variant="warning">
+          <RefreshCw className="h-3 w-3" />
+          Restart required
+        </Badge>
+      ) : null}
+    </div>
+  );
+}
+
+function AgentCardCurrentActivity({
+  agentPubkey,
+  channel,
+  channelName,
+  onOpen,
+}: {
+  agentPubkey: string;
+  channel: AgentWorkingChannel;
+  channelName: string | undefined;
+  onOpen: (pubkey: string, options?: { channelId?: string | null }) => boolean;
+}) {
+  const now = useNow(1000);
+  return (
+    <AgentCardActivityButton
+      channelId={channel.channelId}
+      label={`Nu: ${formatAgentCardActivityChannel(channelName)} · ${formatElapsed(now - channel.anchorAt)}`}
+      testId="agent-card-current-activity"
+      onOpen={() =>
+        onOpen(agentPubkey, {
+          channelId: channel.channelId,
+        })
+      }
+    />
+  );
+}
+
+function AgentCardLastActivity({
+  agentPubkey,
+  channelId,
+  channelName,
+  completedAt,
+  onOpen,
+}: {
+  agentPubkey: string;
+  channelId: string | null;
+  channelName: string | undefined;
+  completedAt: number;
+  onOpen: (pubkey: string, options?: { channelId?: string | null }) => boolean;
+}) {
+  return (
+    <AgentCardActivityButton
+      channelId={channelId}
+      label={`Laatst: ${formatAgentCardActivityChannel(channelName)} · ${new Intl.DateTimeFormat(
+        undefined,
+        { hour: "2-digit", minute: "2-digit" },
+      ).format(completedAt)}`}
+      testId="agent-card-last-activity"
+      onOpen={() =>
+        onOpen(agentPubkey, {
+          channelId,
+        })
+      }
+    />
+  );
+}
+
+function AgentCardActivityButton({
+  channelId,
+  label,
+  testId,
+  onOpen,
+}: {
+  channelId: string | null;
+  label: string;
+  testId: string;
+  onOpen: () => void;
+}) {
+  return (
+    <button
+      className="block w-full truncate rounded-sm text-left text-xs text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+      data-testid={testId}
+      disabled={!channelId}
+      onClick={(event) => {
+        event.stopPropagation();
+        onOpen();
+      }}
+      title={label}
+      type="button"
+    >
+      {label}
+    </button>
   );
 }
 
