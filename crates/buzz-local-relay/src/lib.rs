@@ -625,6 +625,12 @@ impl ReplicationSinkPort for LocalRelay {
                 "ephemeral events are not part of durable replication".to_string(),
             ));
         }
+        let kind = u32::from(record.event.kind.as_u16());
+        if kind == buzz_core::kind::KIND_AUTH || kind == buzz_core::kind::KIND_HTTP_AUTH {
+            return Ok(rejected(
+                "authentication events are never journaled".to_string(),
+            ));
+        }
 
         let result = self.submit(record.event).await?;
         let outcome = if !result.accepted {
@@ -660,6 +666,7 @@ pub fn router(relay: Arc<LocalRelay>) -> Router {
         .route("/events", post(submit_event))
         .route("/query", post(query_events))
         .route("/count", post(count_events))
+        .route("/replication", post(replication_ingest))
         .with_state(relay)
 }
 
@@ -745,6 +752,65 @@ async fn authenticate_http(
         )
         .await?;
     Ok(Some(principal))
+}
+
+/// Peer-bound replication sink over HTTP, mirroring the Cloudflare adapter:
+/// mandatory payload-bound NIP-98 evidence whose signing key must be a
+/// destination-configured verification key for the batch's source stream.
+async fn replication_ingest(
+    State(relay): State<Arc<LocalRelay>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<Vec<ReplicationReceipt>>, ApiError> {
+    if relay.identity.is_none() {
+        return Err(LocalIdentityError::denied(IdentityDenialCode::AuthenticationRequired).into());
+    }
+    let principal = authenticate_http(&relay, &headers, "/replication", &body)
+        .await?
+        .ok_or_else(|| LocalIdentityError::denied(IdentityDenialCode::AuthenticationRequired))?;
+    let records: Vec<ReplicationRecord> = serde_json::from_slice(&body)
+        .map_err(|error| ApiError::BadRequest(format!("invalid replication JSON: {error}")))?;
+    let Some(first) = records.first() else {
+        return Ok(Json(Vec::new()));
+    };
+    let source = first.source.clone();
+    let identity = relay.identity.as_ref().expect("checked above");
+    let pubkey = principal
+        .principal
+        .nostr_pubkey()
+        .ok_or_else(|| LocalIdentityError::denied(IdentityDenialCode::PeerUnbound))?;
+    identity.bind_peer_key(&source, pubkey)?;
+
+    let mut receipts = Vec::with_capacity(records.len());
+    for record in records {
+        if record.source != source {
+            receipts.push(ReplicationReceipt {
+                source: record.source.clone(),
+                cursor: record.cursor.clone(),
+                event_id: record.event.id.to_hex(),
+                outcome: ReplicationIngestOutcome::Rejected {
+                    reason: "record source does not match the authenticated batch".to_string(),
+                },
+            });
+            break;
+        }
+        let receipt = relay
+            .ingest_replication(record)
+            .await
+            .map_err(|error| match error {
+                ReplicationSinkError::Identity(identity_error) => {
+                    ApiError::Identity(identity_error)
+                }
+                ReplicationSinkError::Store(store_error) => ApiError::Store(store_error),
+                other => ApiError::BadRequest(other.to_string()),
+            })?;
+        let rejected = !receipt.checkpoint_safe();
+        receipts.push(receipt);
+        if rejected {
+            break;
+        }
+    }
+    Ok(Json(receipts))
 }
 
 async fn websocket_upgrade(

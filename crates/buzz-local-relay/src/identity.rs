@@ -204,9 +204,47 @@ impl LocalIdentityAdapter {
 
     /// Creates an adapter whose consumed-proof state persists at `path`.
     pub fn with_proof_store(path: impl AsRef<Path>) -> Result<Self, LocalIdentityError> {
+        Self::with_peer_trust_and_proof_store([], Some(path))
+    }
+
+    /// Creates an adapter with peer bindings and optional durable proof state.
+    pub fn with_peer_trust_and_proof_store(
+        peer_trust: impl IntoIterator<Item = RelayPeerTrust>,
+        proof_store: Option<impl AsRef<Path>>,
+    ) -> Result<Self, LocalIdentityError> {
         Ok(Self {
-            consumed_proofs: Mutex::new(ProofLedger::load(Some(path.as_ref().to_path_buf()))?),
-            peer_trust: HashMap::new(),
+            consumed_proofs: Mutex::new(ProofLedger::load(
+                proof_store.map(|path| path.as_ref().to_path_buf()),
+            )?),
+            peer_trust: peer_trust
+                .into_iter()
+                .map(|trust| (trust.source.clone(), trust))
+                .collect(),
+        })
+    }
+
+    /// Binds an already-authenticated verification key to a source stream.
+    ///
+    /// Used by transports whose request evidence (for example payload-bound
+    /// NIP-98) has independently proven control of `pubkey`; this applies the
+    /// destination-controlled trust configuration only.
+    pub fn bind_peer_key(
+        &self,
+        source: &ReplicationSourceId,
+        pubkey: &PublicKey,
+    ) -> Result<ReplicationPeerBinding, LocalIdentityError> {
+        let trust = self
+            .peer_trust
+            .get(source)
+            .ok_or_else(|| LocalIdentityError::denied(IdentityDenialCode::PeerUnbound))?;
+        let verification_method = trust
+            .verification_methods
+            .get(pubkey)
+            .ok_or_else(|| LocalIdentityError::denied(IdentityDenialCode::SourceMismatch))?;
+        Ok(ReplicationPeerBinding {
+            source: source.clone(),
+            relay_node_principal: trust.relay_node_principal.clone(),
+            verification_method: verification_method.clone(),
         })
     }
 

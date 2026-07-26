@@ -2,8 +2,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{bail, Context};
-use buzz_local_relay::identity::LocalIdentityAdapter;
-use buzz_local_relay::{parse_bind_address, serve, LocalRelay, StorageMode};
+use buzz_core::replication::ReplicationSourceId;
+use buzz_local_relay::identity::{LocalIdentityAdapter, RelayPeerTrust};
+use buzz_local_relay::{
+    parse_bind_address, serve, LocalRelay, ReplicationSourceAllowlist, StorageMode,
+};
+use nostr::PublicKey;
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 
@@ -14,6 +18,7 @@ struct Config {
     bind_address: String,
     storage: StorageMode,
     require_auth: bool,
+    peer_trust: Option<PathBuf>,
 }
 
 impl Config {
@@ -26,6 +31,9 @@ impl Config {
         let mut ephemeral = false;
         let mut require_auth = std::env::var("BUZZ_LOCAL_RELAY_REQUIRE_AUTH")
             .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes"));
+        let mut peer_trust = std::env::var("BUZZ_LOCAL_RELAY_PEER_TRUST")
+            .ok()
+            .map(PathBuf::from);
         let mut args = std::env::args().skip(1);
 
         while let Some(arg) = args.next() {
@@ -38,6 +46,11 @@ impl Config {
                 }
                 "--ephemeral" => ephemeral = true,
                 "--require-auth" => require_auth = true,
+                "--peer-trust" => {
+                    peer_trust = Some(PathBuf::from(
+                        args.next().context("--peer-trust requires a file path")?,
+                    ));
+                }
                 "-h" | "--help" => {
                     print_help();
                     std::process::exit(0);
@@ -55,6 +68,7 @@ impl Config {
             bind_address,
             storage,
             require_auth,
+            peer_trust,
         })
     }
 }
@@ -70,19 +84,43 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::from_args()?;
     let address = parse_bind_address(&config.bind_address)
         .with_context(|| format!("invalid bind address {:?}", config.bind_address))?;
+    let peer_trust = config
+        .peer_trust
+        .as_ref()
+        .map(load_peer_trust)
+        .transpose()?
+        .unwrap_or_default();
+    if !peer_trust.is_empty() && !config.require_auth {
+        bail!(
+            "--peer-trust requires --require-auth: replication peers are bound cryptographically"
+        );
+    }
     let relay = if config.require_auth {
         // A durable relay also persists consumed-proof replay state, so a
         // restart within the proof freshness window still rejects replays.
-        let adapter = match &config.storage {
+        let proof_store = match &config.storage {
             StorageMode::Durable(event_log) => {
-                let mut proof_store = event_log.clone().into_os_string();
-                proof_store.push(".auth-proofs");
-                LocalIdentityAdapter::with_proof_store(PathBuf::from(proof_store))
-                    .context("failed to open authentication proof store")?
+                let mut path = event_log.clone().into_os_string();
+                path.push(".auth-proofs");
+                Some(PathBuf::from(path))
             }
-            StorageMode::Ephemeral => LocalIdentityAdapter::new(),
+            StorageMode::Ephemeral => None,
         };
-        LocalRelay::open_with_identity(config.storage, Arc::new(adapter)).await?
+        let sources: Vec<ReplicationSourceId> = peer_trust
+            .iter()
+            .map(|(source, _)| source.clone())
+            .collect();
+        let adapter = LocalIdentityAdapter::with_peer_trust_and_proof_store(
+            peer_trust.into_iter().map(|(_, trust)| trust),
+            proof_store,
+        )
+        .context("failed to open authentication proof store")?;
+        LocalRelay::open_with_adapters(
+            config.storage,
+            Arc::new(ReplicationSourceAllowlist::new(sources)),
+            Some(Arc::new(adapter)),
+        )
+        .await?
     } else {
         LocalRelay::open(config.storage).await?
     };
@@ -101,6 +139,43 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Parses destination-controlled peer trust:
+/// `{"<source>": {"principal": "...", "verification_keys": ["<pubkey hex>"]}}`.
+fn load_peer_trust(path: &PathBuf) -> anyhow::Result<Vec<(ReplicationSourceId, RelayPeerTrust)>> {
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read peer trust file {}", path.display()))?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(&raw).context("peer trust file is not valid JSON")?;
+    let object = parsed
+        .as_object()
+        .context("peer trust file must be a JSON object keyed by source ID")?;
+    let mut entries = Vec::with_capacity(object.len());
+    for (source, config) in object {
+        let principal = config["principal"]
+            .as_str()
+            .with_context(|| format!("source {source:?} requires a string principal"))?;
+        let keys = config["verification_keys"]
+            .as_array()
+            .with_context(|| format!("source {source:?} requires verification_keys"))?
+            .iter()
+            .map(|value| {
+                let hex = value
+                    .as_str()
+                    .context("verification key must be a string")?;
+                let pubkey = PublicKey::from_hex(hex)
+                    .with_context(|| format!("invalid verification key {hex:?}"))?;
+                Ok((pubkey, format!("{principal}#nostr-key")))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let source_id = ReplicationSourceId::new(source.clone());
+        entries.push((
+            source_id.clone(),
+            RelayPeerTrust::new(source_id, principal, keys),
+        ));
+    }
+    Ok(entries)
+}
+
 fn print_help() {
     println!(
         "\
@@ -108,16 +183,19 @@ buzz-local-relay — durable single-process Buzz relay
 
 Usage:
   buzz-local-relay [--bind IP:PORT] [--data PATH] [--ephemeral] [--require-auth]
+                   [--peer-trust PATH]
 
 Options:
   --bind IP:PORT  Listener address (default: {DEFAULT_BIND_ADDRESS})
   --data PATH     Append-only event log (default: {DEFAULT_EVENT_LOG})
   --ephemeral     Keep events in memory only
   --require-auth  Require NIP-42 WebSocket and NIP-98 HTTP authentication
+  --peer-trust PATH  JSON trust config admitting replication peers (needs --require-auth)
 
 Environment:
   BUZZ_LOCAL_RELAY_BIND_ADDR
   BUZZ_LOCAL_RELAY_DATA
-  BUZZ_LOCAL_RELAY_REQUIRE_AUTH"
+  BUZZ_LOCAL_RELAY_REQUIRE_AUTH
+  BUZZ_LOCAL_RELAY_PEER_TRUST"
     );
 }

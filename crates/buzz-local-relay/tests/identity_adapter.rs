@@ -434,6 +434,104 @@ async fn websocket_requires_nip42_and_binds_direct_event_author() {
 }
 
 #[tokio::test]
+async fn http_replication_sink_binds_peer_and_fails_closed() {
+    let source = ReplicationSourceId::new("laptop-a/coherence");
+    let peer = Keys::generate();
+    let stranger = Keys::generate();
+    let trust = RelayPeerTrust::new(
+        source.clone(),
+        "did:example:buzz-relay-a",
+        [(
+            peer.public_key(),
+            "did:example:buzz-relay-a#node-key-1".to_string(),
+        )],
+    );
+    let identity = Arc::new(LocalIdentityAdapter::with_peer_trust([trust]));
+    let relay = LocalRelay::open_with_adapters(
+        StorageMode::Ephemeral,
+        Arc::new(ReplicationSourceAllowlist::new([source.clone()])),
+        Some(identity),
+    )
+    .await
+    .expect("destination opens");
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener binds");
+    let address = listener.local_addr().expect("address available");
+    let server_relay = Arc::clone(&relay);
+    let server = tokio::spawn(async move {
+        serve(listener, server_relay).await.expect("relay serves");
+    });
+    let url = format!("http://{address}/replication");
+
+    let note = EventBuilder::new(Kind::TextNote, "replicated over HTTP")
+        .sign_with_keys(&Keys::generate())
+        .expect("event signs");
+    let auth_kind = EventBuilder::new(Kind::Authentication, "")
+        .sign_with_keys(&Keys::generate())
+        .expect("event signs");
+    let record = |cursor: &str, event: &Event| ReplicationRecord {
+        source: source.clone(),
+        cursor: ReplicationCursor::new(cursor),
+        event: event.clone(),
+    };
+    let batch = serde_json::to_vec(&[record("peer:1", &note), record("peer:2", &auth_kind)])
+        .expect("batch serializes");
+
+    let anonymous = reqwest::Client::new()
+        .post(&url)
+        .header("content-type", "application/json")
+        .body(batch.clone())
+        .send()
+        .await
+        .expect("anonymous request completes");
+    assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+
+    let denied = authenticated_post(&stranger, &url, &batch).await;
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        denied.json::<Value>().await.expect("denial parses")["code"],
+        "source_mismatch"
+    );
+
+    let accepted = authenticated_post(&peer, &url, &batch).await;
+    assert_eq!(accepted.status(), StatusCode::OK);
+    let receipts: Value = accepted.json().await.expect("receipts parse");
+    assert_eq!(receipts[0]["outcome"]["status"], "stored");
+    assert_eq!(receipts[1]["outcome"]["status"], "rejected");
+    // Auth kinds sit in the ephemeral range, so the ephemeral guard subsumes
+    // the dedicated never-journal check on both reference adapters.
+    assert_eq!(
+        receipts[1]["outcome"]["reason"],
+        "ephemeral events are not part of durable replication"
+    );
+
+    let unknown_source_batch = serde_json::to_vec(&[ReplicationRecord {
+        source: ReplicationSourceId::new("unknown/stream"),
+        cursor: ReplicationCursor::new("x:1"),
+        event: note.clone(),
+    }])
+    .expect("batch serializes");
+    let unbound = authenticated_post(&peer, &url, &unknown_source_batch).await;
+    assert_eq!(unbound.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        unbound.json::<Value>().await.expect("denial parses")["code"],
+        "peer_unbound"
+    );
+
+    assert_eq!(
+        relay
+            .store()
+            .query(&[Filter::new().id(note.id)])
+            .await
+            .expect("query succeeds")
+            .len(),
+        1
+    );
+    server.abort();
+}
+
+#[tokio::test]
 async fn replication_peer_must_match_destination_source_binding() {
     let source = ReplicationSourceId::new("laptop-a/coherence");
     let peer = Keys::generate();
