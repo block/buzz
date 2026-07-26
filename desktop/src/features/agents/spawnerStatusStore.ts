@@ -82,7 +82,17 @@ function handleStatusEvent(event: RelayEvent): void {
 
   // A `prompt_hash` echoed back on status is the spawner confirming it
   // applied the last prompt sent for this agent — clear the pending entry.
-  if (status) ackSpawnerPromptUpdate(event.pubkey, slug, status.promptHash);
+  // Acked by agent pubkey — the slug this client queued under can differ from
+  // the spawner's (name-derived fallback, or a rename), and the spawner routes
+  // prompt updates by agent pubkey anyway.
+  if (status) {
+    ackSpawnerPromptUpdate(
+      event.pubkey,
+      status.agentPubkey,
+      slug,
+      status.promptHash,
+    );
+  }
 }
 
 /** Open the status subscription. Idempotent. */
