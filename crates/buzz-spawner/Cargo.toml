@@ -1,0 +1,36 @@
+[package]
+name = "buzz-spawner"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Reconciles Nostr agent specs into Docker-isolated buzz-acp containers"
+
+[[bin]]
+name = "buzz-spawner"
+path = "src/main.rs"
+
+[dependencies]
+buzz-core = { workspace = true }
+buzz-sdk = { workspace = true }
+buzz-ws-client = { workspace = true }
+
+nostr = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+hex = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
+futures-util = { workspace = true }
+chrono = { workspace = true }
+async-trait = "0.1"
+bollard = "0.21"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

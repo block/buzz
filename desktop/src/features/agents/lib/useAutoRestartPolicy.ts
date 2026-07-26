@@ -72,6 +72,7 @@ export function useAutoRestartPolicy() {
         workingSource: working.source,
         connected: observer.connectionState === "open",
         isLocalBackend: agent.backend.type === "local",
+        isRelocated: agent.relocatedToSpawner !== null,
         isRunning,
         edgeConsumed: edge.consumed,
         quiescentForMs: edge.armedAt === null ? 0 : now - edge.armedAt,
@@ -104,6 +105,7 @@ export function useAutoRestartPolicy() {
           if (
             !current?.needsRestart ||
             !current.autoRestartOnConfigChange ||
+            current.relocatedToSpawner !== null ||
             current.status !== "running" ||
             getAgentWorkingState(agent.pubkey).source !== "none"
           ) {

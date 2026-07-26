@@ -1502,6 +1502,7 @@ mod tests {
             env_vars,
             start_on_app_launch: false,
             auto_restart_on_config_change: true,
+            relocated_to_spawner: None,
             runtime_pid: None,
             backend: Default::default(),
             backend_agent_id: None,

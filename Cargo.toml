@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/buzz-relay",
+    "crates/buzz-spawner",
     "crates/buzz-core",
     "crates/buzz-conformance",
     "crates/buzz-push-gateway",
