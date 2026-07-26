@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/features/pairing/pairing_page.dart';
@@ -22,6 +23,21 @@ void main() {
       expect(find.text('Use pairing code'), findsOneWidget);
       expect(find.text('Connect'), findsNothing);
       expect(find.byType(TextField), findsNothing);
+    });
+
+    testWidgets('uses dark status-bar icons on the onboarding surface', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        WidgetHelpers.testable(child: const PairingPage()),
+      );
+
+      final overlay = tester.widget<AnnotatedRegion<SystemUiOverlayStyle>>(
+        find.byKey(const Key('pairing-onboarding-system-overlay')),
+      );
+
+      expect(overlay.value.statusBarIconBrightness, Brightness.dark);
+      expect(overlay.value.statusBarColor, Colors.transparent);
     });
 
     testWidgets('reveals pairing code field and connect action', (

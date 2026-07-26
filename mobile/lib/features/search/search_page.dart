@@ -211,7 +211,10 @@ class _SearchBody extends ConsumerWidget {
     }
 
     return ListView(
-      padding: const EdgeInsets.only(bottom: Grid.xl),
+      key: const Key('search-results-list'),
+      padding: EdgeInsets.only(
+        bottom: Grid.xl + MediaQuery.viewInsetsOf(context).bottom,
+      ),
       children: [
         if (showChannels && state.channelResults.isNotEmpty)
           _ChannelsSection(channels: state.channelResults),

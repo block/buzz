@@ -109,28 +109,34 @@ class PairingPage extends HookConsumerWidget {
               ),
             ),
           )
-        : _OnboardingBackground(
-            child: Scaffold(
-              backgroundColor: Colors.transparent,
-              appBar: pairingAppBar,
-              body: SafeArea(
-                child: _PairingWelcomeView(
-                  codeController: codeController,
-                  isBusy: isBusy,
-                  pairingCodeExpanded: pairingCodeExpanded.value,
-                  errorMessage: pairingState.status == PairingStatus.error
-                      ? pairingState.errorMessage
-                      : null,
-                  onScan: openScanner,
-                  onTogglePairingCode: () {
-                    pairingCodeExpanded.value = !pairingCodeExpanded.value;
-                  },
-                  onConnect: () {
-                    final code = codeController.text.trim();
-                    if (code.isNotEmpty) {
-                      ref.read(pairingProvider.notifier).pair(code);
-                    }
-                  },
+        : AnnotatedRegion<SystemUiOverlayStyle>(
+            key: const Key('pairing-onboarding-system-overlay'),
+            value: SystemUiOverlayStyle.dark.copyWith(
+              statusBarColor: Colors.transparent,
+            ),
+            child: _OnboardingBackground(
+              child: Scaffold(
+                backgroundColor: Colors.transparent,
+                appBar: pairingAppBar,
+                body: SafeArea(
+                  child: _PairingWelcomeView(
+                    codeController: codeController,
+                    isBusy: isBusy,
+                    pairingCodeExpanded: pairingCodeExpanded.value,
+                    errorMessage: pairingState.status == PairingStatus.error
+                        ? pairingState.errorMessage
+                        : null,
+                    onScan: openScanner,
+                    onTogglePairingCode: () {
+                      pairingCodeExpanded.value = !pairingCodeExpanded.value;
+                    },
+                    onConnect: () {
+                      final code = codeController.text.trim();
+                      if (code.isNotEmpty) {
+                        ref.read(pairingProvider.notifier).pair(code);
+                      }
+                    },
+                  ),
                 ),
               ),
             ),
