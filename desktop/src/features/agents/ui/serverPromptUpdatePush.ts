@@ -32,9 +32,9 @@ export async function pushServerPromptUpdate(
       specSlug: context.specSlug,
       agentPubkey: context.agentPubkey,
       prompt: {
-        system_prompt: saved.systemPrompt || undefined,
-        model: saved.model || undefined,
-        provider: saved.provider || undefined,
+        system_prompt: saved.systemPrompt?.trim() || undefined,
+        model: saved.model?.trim() || undefined,
+        provider: saved.provider?.trim() || undefined,
       },
     });
   } catch (error) {
