@@ -18,6 +18,7 @@ import { toast } from "sonner";
 import { MemorySection } from "@/features/agent-memory/ui/MemorySection";
 import { useAgentWorking } from "@/features/agents/agentWorkingSignal";
 import { getManagedAgentPrimaryActionLabel } from "@/features/agents/lib/managedAgentControlActions";
+import { AgentHealthCard } from "@/features/agents/ui/AgentHealthCard";
 import { ManagedAgentLogPanel } from "@/features/agents/ui/ManagedAgentLogPanel";
 import { AgentConfigPanel } from "@/features/agents/ui/AgentConfigPanel";
 import { getPresenceLabel } from "@/features/presence/lib/presence";
@@ -73,6 +74,7 @@ export type ProfileSummaryViewProps = {
   channelIdToName: Record<string, string>;
   channels: ProfileChannelLink[];
   channelsLoading: boolean;
+  channelsError: boolean;
   displayName: string;
   followMutation: ReturnType<typeof useFollowMutation>;
   canInstantiateAgent: boolean;
@@ -105,6 +107,7 @@ export type ProfileSummaryViewProps = {
   onOpenInstructions: () => void;
   onTabChange: (tab: ProfilePanelTab, options?: { replace?: boolean }) => void;
   onOpenDm?: (pubkeys: string[]) => Promise<void> | void;
+  presenceLoaded: boolean;
   presenceStatus: "online" | "away" | "offline" | undefined;
   profile: ReturnType<typeof useUserProfileQuery>["data"];
   pubkey: string | null;
@@ -186,6 +189,7 @@ export function ProfileSummaryView({
   channelIdToName,
   channels,
   channelsLoading,
+  channelsError,
   displayName,
   followMutation,
   canInstantiateAgent,
@@ -218,6 +222,7 @@ export function ProfileSummaryView({
   onOpenInstructions,
   onTabChange,
   onOpenDm,
+  presenceLoaded,
   presenceStatus,
   profile,
   pubkey,
@@ -414,6 +419,16 @@ export function ProfileSummaryView({
           ) : null}
           {activeTab === "runtime" ? (
             <>
+              {isOwner === true && managedAgent !== undefined ? (
+                <AgentHealthCard
+                  agent={managedAgent}
+                  channels={channels}
+                  channelsError={channelsError}
+                  channelsLoading={channelsLoading}
+                  presenceLoaded={presenceLoaded}
+                  presenceStatus={presenceStatus}
+                />
+              ) : null}
               <ProfileRuntimeTabContent
                 agentInstruction={agentInstruction}
                 autoRestartEnabled={

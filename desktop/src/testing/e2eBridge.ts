@@ -69,6 +69,10 @@ type MockManagedAgentSeed = {
   pubkey: string;
   name: string;
   avatarUrl?: string | null;
+  agentCommand?: string;
+  systemPrompt?: string | null;
+  model?: string | null;
+  provider?: string | null;
   personaId?: string | null;
   status?: RawManagedAgent["status"];
   channelNames?: string[];
@@ -1987,16 +1991,17 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     persona_id: seed.personaId ?? null,
     relay_url: DEFAULT_RELAY_WS_URL,
     acp_command: "buzz-acp",
-    agent_command: "goose",
+    agent_command: seed.agentCommand ?? "goose",
     agent_args: ["acp"],
     mcp_command: "",
     turn_timeout_seconds: 320,
     idle_timeout_seconds: null,
     max_turn_duration_seconds: null,
     parallelism: 1,
-    system_prompt: null,
+    system_prompt: seed.systemPrompt ?? null,
     avatar_url: seed.avatarUrl ?? null,
-    model: null,
+    model: seed.model ?? null,
+    provider: seed.provider ?? null,
     env_vars: {},
     status,
     pid: status === "running" ? 42000 + mockManagedAgents.length : null,

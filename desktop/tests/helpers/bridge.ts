@@ -46,6 +46,11 @@ type MockCommandAvailability = {
 type MockManagedAgentSeed = {
   pubkey: string;
   name: string;
+  avatarUrl?: string | null;
+  agentCommand?: string;
+  systemPrompt?: string | null;
+  model?: string | null;
+  provider?: string | null;
   personaId?: string | null;
   status?: "running" | "stopped" | "deployed" | "not_deployed";
   channelNames?: string[];

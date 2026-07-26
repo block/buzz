@@ -791,6 +791,7 @@ export function UserProfilePanel({
           channelCount={profileChannels.length}
           channelIdToName={channelIdToName}
           channels={profileChannels}
+          channelsError={channelsQuery.isError}
           channelsLoading={channelsQuery.isLoading}
           displayName={displayName}
           followMutation={followMutation}
@@ -824,6 +825,7 @@ export function UserProfilePanel({
           onOpenInstructions={() => setView("instructions")}
           onTabChange={setTab}
           onOpenDm={onOpenDm}
+          presenceLoaded={presenceQuery.isSuccess}
           presenceStatus={presenceStatus}
           profile={profile}
           pubkey={effectivePubkey}
