@@ -171,15 +171,82 @@ fn derive_git_email(pubkey_hex: &str) -> String {
     format!("{pubkey_hex}@{host}")
 }
 
+/// Stable identity contract for git attribution: the bare agent display name,
+/// never channel-qualified, safe to embed in commit history.
+///
+/// Deliberately distinct from `BUZZ_ACP_SESSION_TITLE`, which is per-session UI
+/// chrome and may be composed (`Agent · #channel`) by consumers. Commits
+/// outlive sessions, so git attribution must not follow a mutable title.
+///
+/// Nothing writes this yet — when unset, [`build_git_env`] falls back to the
+/// npub, which is byte-for-byte today's behavior.
+const DISPLAY_NAME_ENV_VAR: &str = "BUZZ_ACP_DISPLAY_NAME";
+
+/// Max characters in a git author name. Nostr display names are unbounded.
+const MAX_GIT_USER_NAME_CHARS: usize = 80;
+
+/// Characters git's `ident.c` treats as "crud": stripped from both ends of a
+/// name, and — when a name is *nothing but* these — rejected outright with
+/// `fatal: name consists only of disallowed characters`.
+///
+/// Verified empirically against git 2.54.0 by committing with each ASCII byte
+/// 32..=126 as the entire `user.name`: exactly space, `"`, `'`, `,`, `:`, `;`,
+/// `<`, `>`, and `\` abort. Control characters abort too (the predicate is
+/// `c <= 32`). Note `.` is *not* crud in this version despite older lore.
+fn is_git_crud(c: char) -> bool {
+    c <= ' ' || matches!(c, '"' | '\'' | ',' | ':' | ';' | '<' | '>' | '\\')
+}
+
+/// Normalize a Buzz display name into a git author name, or `None` to fall
+/// back to the npub.
+///
+/// Strips control characters and angle brackets, collapses whitespace runs,
+/// trims, and caps at [`MAX_GIT_USER_NAME_CHARS`] by `chars()` so a multi-byte
+/// name cannot be split mid-UTF-8. Angle brackets go because git silently
+/// drops them rather than erroring — `Duncan <evil@x.com>` would render as
+/// `Duncan evil@x.com <hex@relay>`, which forges nothing but reads as though
+/// it might.
+///
+/// Returns `None` unless at least one non-crud character survives. A bare
+/// emptiness check is not sufficient: git rejects a name built only of crud,
+/// so a display name of `;;` or `""` would abort **every commit** the agent
+/// makes. Falling back to the npub keeps the agent able to commit.
+fn sanitize_git_user_name(raw: &str) -> Option<String> {
+    let collapsed = raw
+        .split_whitespace()
+        .map(|word| {
+            word.chars()
+                .filter(|c| !c.is_control() && *c != '<' && *c != '>')
+                .collect::<String>()
+        })
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let name: String = collapsed
+        .chars()
+        .take(MAX_GIT_USER_NAME_CHARS)
+        .collect::<String>()
+        .trim_end()
+        .to_string();
+    name.chars().any(|c| !is_git_crud(c)).then_some(name)
+}
+
 /// Build GIT_CONFIG_COUNT/KEY/VALUE env vars for ephemeral nostr git config.
 /// Composes with any existing GIT_CONFIG_COUNT in the environment. When launched
 /// via buzz-agent (which clears env), the base is always 0 — composition only
 /// matters when dev-mcp is run directly with pre-existing GIT_CONFIG vars.
 fn build_git_env(info: &KeyInfo) -> Vec<(String, String)> {
     let email = derive_git_email(&info.pubkey_hex);
+    // Display name for humans reading `git log`; the pubkey stays in the email,
+    // which is what NIP-98 auth, NIP-GS signing, and contributor matching key on.
+    let user_name = std::env::var(DISPLAY_NAME_ENV_VAR)
+        .ok()
+        .as_deref()
+        .and_then(sanitize_git_user_name)
+        .unwrap_or_else(|| info.npub.clone());
     let entries: Vec<(&str, String)> = vec![
-        // Identity — npub as display name, NIP-05-style email
-        ("user.name", info.npub.clone()),
+        // Identity — Buzz display name (npub fallback), NIP-05-style email
+        ("user.name", user_name),
         ("user.email", email),
         // Nostr credential helper is additive — it silently declines non-Buzz
         // remotes (exits 0, no credential), so git falls through to system
@@ -245,4 +312,208 @@ pub fn artifact_dir(session_root: &Path) -> PathBuf {
     let p = session_root.join("artifacts");
     let _ = std::fs::create_dir_all(&p);
     p
+}
+
+#[cfg(test)]
+mod git_user_name_tests {
+    use super::{
+        build_git_env, is_git_crud, sanitize_git_user_name, KeyInfo, MAX_GIT_USER_NAME_CHARS,
+    };
+    use std::sync::Mutex;
+
+    /// Env-var-touching tests must run serially — env vars are process-global.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    const PUBKEY_HEX: &str = "dcfd242e557282d7a1e2cf2e6877522682f1e5c6156dc92ca7d90eaedd3b0f95";
+    const NPUB: &str = "npub1mn7jgtj4w2pd0g0zeuhxsa6jy6p0rewxz4kujt98my82ahfmp72sxjexk7";
+
+    fn key_info() -> KeyInfo {
+        KeyInfo {
+            keyfile_path: "/tmp/.nostr-key".into(),
+            pubkey_hex: PUBKEY_HEX.into(),
+            npub: NPUB.into(),
+        }
+    }
+
+    /// Read a git config value back out of the flat GIT_CONFIG_KEY_n/VALUE_n pairs.
+    fn git_config(env: &[(String, String)], key: &str) -> Option<String> {
+        let idx = env
+            .iter()
+            .find(|(k, v)| k.starts_with("GIT_CONFIG_KEY_") && v == key)?
+            .0
+            .strip_prefix("GIT_CONFIG_KEY_")?
+            .to_owned();
+        env.iter()
+            .find(|(k, _)| *k == format!("GIT_CONFIG_VALUE_{idx}"))
+            .map(|(_, v)| v.clone())
+    }
+
+    #[test]
+    fn test_ordinary_name_passes_through_unchanged() {
+        assert_eq!(sanitize_git_user_name("Duncan"), Some("Duncan".into()));
+    }
+
+    #[test]
+    fn test_angle_brackets_are_stripped_so_no_second_email_is_rendered() {
+        // git drops the brackets itself and renders `Duncan evil@x.com
+        // <hex@relay>` — no forgery, but a confusing author line.
+        assert_eq!(
+            sanitize_git_user_name("Duncan <evil@x.com>"),
+            Some("Duncan evil@x.com".into())
+        );
+    }
+
+    #[test]
+    fn test_whitespace_control_characters_become_a_single_separator() {
+        // Newline, tab and carriage return are whitespace: they collapse to one
+        // space like any other run, so a multi-line name stays readable.
+        assert_eq!(
+            sanitize_git_user_name("Dun\ncan\tThe\r\nIdaho"),
+            Some("Dun can The Idaho".into())
+        );
+    }
+
+    #[test]
+    fn test_non_whitespace_control_characters_are_dropped_outright() {
+        // NUL is the important one: an interior NUL makes `Command::env` fail
+        // the entire spawn upstream, so it must never survive to git config.
+        let got = sanitize_git_user_name("Idaho\0Blade\u{7}").expect("non-empty");
+        assert_eq!(got, "IdahoBlade");
+        assert!(!got.chars().any(char::is_control));
+    }
+
+    #[test]
+    fn test_internal_whitespace_runs_collapse_to_one_space() {
+        assert_eq!(
+            sanitize_git_user_name("  Duncan   Idaho  "),
+            Some("Duncan Idaho".into())
+        );
+    }
+
+    #[test]
+    fn test_whitespace_only_name_falls_back_to_npub() {
+        assert_eq!(sanitize_git_user_name("   \t\n  "), None);
+    }
+
+    #[test]
+    fn test_empty_name_falls_back_to_npub() {
+        assert_eq!(sanitize_git_user_name(""), None);
+    }
+
+    #[test]
+    fn test_crud_only_name_falls_back_rather_than_aborting_every_commit() {
+        // git rejects a name built only of crud with `fatal: name consists
+        // only of disallowed characters`, which would break EVERY commit the
+        // agent makes. Verified against git 2.54.0.
+        for raw in ["<>", ";;", "\"\"", "''", ",", ":", "\\", ",;:"] {
+            assert_eq!(
+                sanitize_git_user_name(raw),
+                None,
+                "crud-only name {raw:?} must fall back to the npub"
+            );
+        }
+    }
+
+    #[test]
+    fn test_crud_mixed_with_real_characters_is_kept() {
+        // Legitimate names contain crud; only an all-crud result is fatal.
+        assert_eq!(sanitize_git_user_name("O'Brien"), Some("O'Brien".into()));
+        assert_eq!(
+            sanitize_git_user_name("Smith, Jr."),
+            Some("Smith, Jr.".into())
+        );
+    }
+
+    #[test]
+    fn test_over_length_name_is_truncated_to_the_cap() {
+        let long = "a".repeat(200);
+        let got = sanitize_git_user_name(&long).expect("non-empty");
+        assert_eq!(got.chars().count(), MAX_GIT_USER_NAME_CHARS);
+    }
+
+    #[test]
+    fn test_truncation_never_splits_a_multibyte_character() {
+        let long = "🐝".repeat(200);
+        let got = sanitize_git_user_name(&long).expect("non-empty");
+        assert_eq!(got.chars().count(), MAX_GIT_USER_NAME_CHARS);
+        assert!(got.chars().all(|c| c == '🐝'), "no replacement chars");
+    }
+
+    #[test]
+    fn test_truncation_does_not_leave_a_trailing_space() {
+        // Cutting mid-word would otherwise strand the separator at the end.
+        let raw = format!("{} tail", "a".repeat(MAX_GIT_USER_NAME_CHARS - 1));
+        let got = sanitize_git_user_name(&raw).expect("non-empty");
+        assert!(!got.ends_with(' '), "got {got:?}");
+    }
+
+    #[test]
+    fn test_non_ascii_names_survive() {
+        assert_eq!(
+            sanitize_git_user_name("Élodie 🐝"),
+            Some("Élodie 🐝".into())
+        );
+    }
+
+    #[test]
+    fn test_build_git_env_uses_display_name_and_leaves_email_on_the_pubkey() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("BUZZ_ACP_DISPLAY_NAME", "Duncan");
+        std::env::remove_var("BUZZ_RELAY_URL");
+        std::env::remove_var("GIT_CONFIG_COUNT");
+        let env = build_git_env(&key_info());
+        std::env::remove_var("BUZZ_ACP_DISPLAY_NAME");
+
+        assert_eq!(git_config(&env, "user.name").as_deref(), Some("Duncan"));
+        // The pubkey — the thing NIP-98 auth, NIP-GS signing, and contributor
+        // matching key on — must stay in the email untouched.
+        assert_eq!(
+            git_config(&env, "user.email").as_deref(),
+            Some(format!("{PUBKEY_HEX}@buzz").as_str())
+        );
+        assert_eq!(
+            git_config(&env, "user.signingkey").as_deref(),
+            Some(PUBKEY_HEX)
+        );
+    }
+
+    #[test]
+    fn test_build_git_env_falls_back_to_npub_when_display_name_unset() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("BUZZ_ACP_DISPLAY_NAME");
+        std::env::remove_var("BUZZ_RELAY_URL");
+        std::env::remove_var("GIT_CONFIG_COUNT");
+        let env = build_git_env(&key_info());
+
+        // Today's behavior, and what every agent gets until a writer for
+        // BUZZ_ACP_DISPLAY_NAME lands on the Desktop side.
+        assert_eq!(git_config(&env, "user.name").as_deref(), Some(NPUB));
+        assert_eq!(
+            git_config(&env, "user.email").as_deref(),
+            Some(format!("{PUBKEY_HEX}@buzz").as_str())
+        );
+    }
+
+    #[test]
+    fn test_build_git_env_falls_back_to_npub_when_display_name_is_unusable() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("BUZZ_ACP_DISPLAY_NAME", "<>");
+        std::env::remove_var("BUZZ_RELAY_URL");
+        std::env::remove_var("GIT_CONFIG_COUNT");
+        let env = build_git_env(&key_info());
+        std::env::remove_var("BUZZ_ACP_DISPLAY_NAME");
+
+        assert_eq!(git_config(&env, "user.name").as_deref(), Some(NPUB));
+    }
+
+    #[test]
+    fn test_git_crud_set_matches_observed_git_behavior() {
+        // Empirically derived from git 2.54.0: these bytes, alone, abort a commit.
+        for c in [' ', '"', '\'', ',', ':', ';', '<', '>', '\\', '\t', '\n'] {
+            assert!(is_git_crud(c), "{c:?} should be crud");
+        }
+        for c in ['.', '-', '_', '@', '(', 'a', '🐝'] {
+            assert!(!is_git_crud(c), "{c:?} should not be crud");
+        }
+    }
 }
