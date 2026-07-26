@@ -66,4 +66,35 @@ pub trait ActionSink: Send + Sync {
         text: &str,
         author_pubkey: &str,
     ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>>;
+
+    /// Emit an approval-requested event into a channel.
+    ///
+    /// Creates a kind:46010 (parameterized-replaceable) event that signals a
+    /// pending approval gate in a workflow run. The event carries the
+    /// SHA-256 hash of the approval token as its `d` tag so approvers can
+    /// look it up and respond with a grant/deny event referencing the same
+    /// `d` value.
+    ///
+    /// - `community_id`: the community that owns the workflow run
+    /// - `channel_id`: UUID string of the target channel
+    /// - `token_hash_hex`: hex-encoded SHA-256 hash of the approval token
+    ///   (used as the NIP-33 `d` tag for parameterized replacement)
+    /// - `approver_spec`: who may approve (e.g. `"@manager"` or a hex pubkey)
+    /// - `message`: human-readable approval prompt
+    /// - `workflow_id`: workflow UUID string (context)
+    /// - `run_id`: run UUID string (context)
+    /// - `author_pubkey`: hex-encoded pubkey of the workflow owner
+    ///
+    /// Returns the event ID hex string on success.
+    fn emit_approval_requested(
+        &self,
+        community_id: CommunityId,
+        channel_id: &str,
+        token_hash_hex: &str,
+        approver_spec: &str,
+        message: &str,
+        workflow_id: &str,
+        run_id: &str,
+        author_pubkey: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>>;
 }
