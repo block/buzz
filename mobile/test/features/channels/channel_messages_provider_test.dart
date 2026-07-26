@@ -130,6 +130,98 @@ void main() {
     },
   );
 
+  test(
+    'adds and rolls back a local message in the websocket timeline',
+    () async {
+      final relaySession = _RecordingRelaySessionNotifier();
+      final container = _buildContainer(relaySession);
+      addTearDown(container.dispose);
+
+      container.read(channelMessagesProvider(_channelId));
+      await relaySession.subscribed;
+      final notifier = container.read(
+        channelMessagesProvider(_channelId).notifier,
+      );
+
+      notifier.addLocalMessage(_event(id: 'local', createdAt: 20));
+      expect(
+        container
+            .read(channelMessagesProvider(_channelId))
+            .value
+            ?.map((event) => event.id),
+        ['local'],
+      );
+
+      // A relay echo of the same signed event must not duplicate the local row.
+      relaySession.emit(_event(id: 'local', createdAt: 20));
+      await _pumpEventQueue();
+      expect(
+        container
+            .read(channelMessagesProvider(_channelId))
+            .value
+            ?.map((event) => event.id),
+        ['local'],
+      );
+
+      relaySession.completeHistory([_event(id: 'history', createdAt: 10)]);
+      await _pumpEventQueue();
+
+      // The initial history merge must retain a local row even if the relay's
+      // history snapshot was taken before that outgoing event was durable.
+      expect(
+        container
+            .read(channelMessagesProvider(_channelId))
+            .value
+            ?.map((event) => event.id),
+        ['history', 'local'],
+      );
+
+      notifier.removeLocalMessage('local');
+      expect(
+        container
+            .read(channelMessagesProvider(_channelId))
+            .value
+            ?.map((event) => event.id),
+        ['history'],
+      );
+    },
+  );
+
+  test('adds and rolls back a local message in the channel window', () async {
+    final relaySession = _RecordingRelaySessionNotifier(
+      queryResults: [
+        [_event(id: 'history', createdAt: 10), _bounds()],
+      ],
+    );
+    final container = _buildContainer(relaySession);
+    addTearDown(container.dispose);
+
+    container.read(channelMessagesProvider(_channelId));
+    await relaySession.subscribed;
+    await _pumpEventQueue();
+    final notifier = container.read(
+      channelMessagesProvider(_channelId).notifier,
+    );
+
+    notifier.addLocalMessage(_event(id: 'local', createdAt: 20));
+    expect(
+      container
+          .read(channelMessagesProvider(_channelId))
+          .value
+          ?.map((event) => event.id),
+      ['history', 'local'],
+    );
+
+    notifier.removeLocalMessage('local');
+    expect(
+      container
+          .read(channelMessagesProvider(_channelId))
+          .value
+          ?.map((event) => event.id),
+      ['history'],
+    );
+  });
+
   test('window pagination failures return false without exhausting', () async {
     final relaySession = _RecordingRelaySessionNotifier(
       queryResults: [

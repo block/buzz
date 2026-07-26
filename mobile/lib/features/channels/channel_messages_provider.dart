@@ -229,6 +229,56 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         content.contains('member_removed');
   }
 
+  /// Adds a just-signed outgoing message before the relay acknowledges it.
+  /// The live relay echo is deduplicated by event id.
+  void addLocalMessage(NostrEvent event) {
+    final isTimelineRow = EventKind.channelTimelineContentKinds.contains(
+      event.kind,
+    );
+    if (!_usingChannelWindow &&
+        isTimelineRow &&
+        event.threadReference.parentId == null) {
+      _windowStore = mergeLiveChannelWindowEvent(
+        _windowStore,
+        event,
+        isTimelineRow: true,
+      );
+    }
+    _handleLiveEvent(event);
+  }
+
+  /// Rolls back a local message when its publish is rejected or times out.
+  void removeLocalMessage(String eventId) {
+    final nextOverlay = _windowStore.liveOverlay
+        .where((event) => event.id != eventId)
+        .toList();
+    final removedFromWindow =
+        nextOverlay.length != _windowStore.liveOverlay.length;
+    if (removedFromWindow) {
+      _windowStore = ChannelWindowStore(
+        pages: _windowStore.pages,
+        liveOverlay: nextOverlay,
+        liveAux: _windowStore.liveAux,
+      );
+    }
+
+    if (_usingChannelWindow) {
+      if (!removedFromWindow) return;
+      final flattened = _withDeepLinkEvents(
+        flattenChannelWindowEvents(_windowStore),
+      );
+      _lastKnownMessages = flattened;
+      state = AsyncData(flattened);
+      return;
+    }
+
+    final current = state.value ?? _lastKnownMessages ?? const <NostrEvent>[];
+    final next = current.where((event) => event.id != eventId).toList();
+    if (next.length == current.length) return;
+    _lastKnownMessages = next;
+    state = AsyncData(next);
+  }
+
   static List<NostrEvent> _mergeEvent(
     List<NostrEvent> current,
     NostrEvent incoming,
