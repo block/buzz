@@ -89,7 +89,7 @@ import {
   runtimeDropdownAction,
   usePendingHarnessSelection,
 } from "./addCustomHarness";
-import { enqueueSpawnerPromptUpdate } from "../spawnerPromptUpdateQueue";
+import { pushPrompt } from "./serverPromptUpdatePush";
 import { useServerAgents } from "../useServerAgents";
 import { slugFromName } from "../spawnerPreference";
 import { EditAgentRuntimeSection } from "./EditAgentRuntimeSection";
@@ -759,25 +759,7 @@ export function AgentInstanceEditDialog({
       };
 
       const result = await updateMutation.mutateAsync(input);
-      if (serverContext) {
-        try {
-          await enqueueSpawnerPromptUpdate({
-            spawnerPubkey: serverContext.spawnerPubkey,
-            specSlug: serverContext.specSlug,
-            agentPubkey: serverContext.agentPubkey,
-            prompt: {
-              system_prompt: systemPrompt.trim() || undefined,
-              model: (normalizedModel ?? "") || undefined,
-              provider: (normalizedSubmitProvider ?? "") || undefined,
-            },
-          });
-        } catch (error) {
-          console.debug(
-            "[AgentInstanceEditDialog] enqueueSpawnerPromptUpdate failed:",
-            error,
-          );
-        }
-      }
+      await pushPrompt(serverContext, systemPrompt, inheritedSubmission);
       if (autoRestartOnConfigChange !== agent.autoRestartOnConfigChange) {
         // Standalone setter (mirrors start-on-app-launch) — not part of
         // UpdateManagedAgentInput, so the frozen update shape stays frozen.
