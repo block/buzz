@@ -36,9 +36,15 @@ pub struct ImportedStickerAsset {
     url: String,
     sha256: String,
     mime: String,
+    // Optional fields must be omitted (not null) so the frontend's
+    // `=== undefined` checks in publishStickerPack behave.
+    #[serde(skip_serializing_if = "Option::is_none")]
     width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     height: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     alt: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     emoji: Option<String>,
 }
 
@@ -431,6 +437,28 @@ mod tests {
     use super::*;
 
     const AUTHOR: &str = "7215b2db8754494fd3452b7f2d28b56e23863b95446bf68d79f980a7ad5ec7cd";
+
+    #[test]
+    fn imported_asset_omits_none_fields_so_frontend_undefined_checks_pass() {
+        let asset = ImportedStickerAsset {
+            shortcode: "s0".into(),
+            url: "https://blossom.example/abc.webp".into(),
+            sha256: "a".repeat(64),
+            mime: "image/webp".into(),
+            width: None,
+            height: None,
+            alt: None,
+            emoji: None,
+        };
+        let value = serde_json::to_value(&asset).expect("serialize");
+        let object = value.as_object().expect("object");
+        // publishStickerPack validates with `=== undefined`; serializing None
+        // as null fails `null !== undefined && null < 1` for dimension-less
+        // stickers (the common case for packs without dim fields).
+        for key in ["width", "height", "alt", "emoji"] {
+            assert!(!object.contains_key(key), "key {key} must be omitted");
+        }
+    }
 
     #[test]
     fn nostr_pack_link_parses_coordinate_and_relay_hints() {
