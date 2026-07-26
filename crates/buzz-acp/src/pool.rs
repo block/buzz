@@ -32,7 +32,7 @@ use crate::acp::{
     extract_model_config_options, extract_model_state, model_in_catalog,
     resolve_model_switch_method, AcpClient, AcpError, McpServer, ModelSwitchMethod, StopReason,
 };
-use crate::config::{DedupMode, PermissionMode};
+use crate::config::{compose_session_title, DedupMode, PermissionMode};
 use crate::observer;
 use crate::queue::{
     CancelReason, ContextMessage, ConversationContext, FlushBatch, PromptChannelInfo,
@@ -490,6 +490,9 @@ pub struct PromptContext {
     pub turn_liveness_interval: Duration,
     pub dedup_mode: DedupMode,
     pub system_prompt: Option<String>,
+    /// Sanitized title for each new ACP session, sent as `_meta.sessionTitle`
+    /// on `session/new`. Never part of the prompt.
+    pub session_title: Option<String>,
     pub team_instructions: Option<String>,
     pub heartbeat_prompt: Option<String>,
     /// Base prompt content, or `None` if `--no-base-prompt` was passed.
@@ -806,6 +809,7 @@ async fn create_session_and_apply_model(
     ctx: &PromptContext,
     agent_core: Option<&str>,
     agent_canvas: Option<&str>,
+    channel_name: Option<&str>,
 ) -> Result<String, AcpError> {
     // Build base_prompt + system_prompt + agent core + canvas metadata into a
     // single prompt. Standard protocol-v2 agents receive it in `session/new`;
@@ -825,6 +829,11 @@ async fn create_session_and_apply_model(
         agent_canvas,
     );
 
+    let session_title = ctx
+        .session_title
+        .as_deref()
+        .map(|agent_name| compose_session_title(agent_name, channel_name));
+
     let resp = agent
         .acp
         .session_new_full(
@@ -835,6 +844,7 @@ async fn create_session_and_apply_model(
                 agent.protocol_version,
                 combined_system_prompt.as_deref(),
             ),
+            session_title.as_deref(),
         )
         .await?;
 
@@ -1470,12 +1480,25 @@ pub async fn run_prompt_task(
             if let Some(sid) = agent.state.sessions.get(cid) {
                 (sid.clone(), false)
             } else {
+                // Channel-qualify the title (`Agent · #channel`) so one agent in
+                // several channels doesn't produce identical session rows.
+                // Cache-first; DM or unresolved channels keep the bare name.
+                let channel_name = if ctx.session_title.is_some() {
+                    ctx.channel_info
+                        .resolve(*cid)
+                        .await
+                        .filter(|ci| ci.channel_type != "dm")
+                        .map(|ci| ci.name)
+                } else {
+                    None
+                };
                 // Create new session with model application.
                 match create_session_and_apply_model(
                     &mut agent,
                     &ctx,
                     agent_core.as_deref(),
                     agent_canvas.as_deref(),
+                    channel_name.as_deref(),
                 )
                 .await
                 {
@@ -1523,7 +1546,7 @@ pub async fn run_prompt_task(
             if let Some(sid) = &agent.state.heartbeat_session {
                 (sid.clone(), false)
             } else {
-                match create_session_and_apply_model(&mut agent, &ctx, None, None).await {
+                match create_session_and_apply_model(&mut agent, &ctx, None, None, None).await {
                     Ok(sid) => {
                         tracing::info!(
                             target: "pool::session",
@@ -3802,6 +3825,17 @@ mod tests {
     }
 
     #[test]
+    fn test_framed_system_prompt_never_carries_a_session_title_section() {
+        // Regression against #2372: the title travels out of band in
+        // `_meta.sessionTitle`, so no `[Session]` section may appear in the
+        // prompt and the base framing must stay byte-identical.
+        let framed = framed_system_prompt("/", Some("base text"), Some("persona text"))
+            .expect("both present yields Some");
+        assert_eq!(framed, "[Base]\nbase text\n\n[System]\npersona text");
+        assert!(!framed.contains("[Session]"));
+    }
+
+    #[test]
     fn test_framed_system_prompt_neither_is_none() {
         assert!(framed_system_prompt("/", None, None).is_none());
     }
@@ -5280,6 +5314,7 @@ mod tests {
             turn_liveness_interval: Duration::ZERO,
             dedup_mode: DedupMode::Drop,
             system_prompt: None,
+            session_title: None,
             team_instructions: None,
             heartbeat_prompt: None,
             base_prompt: None,
