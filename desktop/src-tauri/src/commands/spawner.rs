@@ -260,6 +260,78 @@ pub async fn respond_to_spawner_attestation(
     })
 }
 
+/// Output of [`send_spawner_prompt_update`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpawnerPromptUpdateOut {
+    /// The signed kind:24201 event to publish over the WebSocket.
+    pub event_json: String,
+    /// Content hash of the prompt material this update carries, for the
+    /// caller to confirm against what the spawner later reports applying.
+    pub prompt_hash: String,
+}
+
+/// Build a signed, NIP-44-encrypted `PromptUpdate` frame addressed to
+/// `spawner_pubkey`, so a running agent can be edited without minting a new
+/// identity or re-running the attestation handshake.
+fn build_prompt_update_event(
+    owner: &nostr::Keys,
+    spawner_pubkey: &str,
+    spec_slug: &str,
+    agent_pubkey: &str,
+    prompt: PromptMaterial,
+) -> Result<SpawnerPromptUpdateOut, String> {
+    let spawner = nostr::PublicKey::from_hex(spawner_pubkey)
+        .map_err(|e| format!("invalid spawner pubkey: {e}"))?;
+
+    let frame = AttestationFrame::PromptUpdate {
+        spec_slug: spec_slug.to_string(),
+        agent_pubkey: agent_pubkey.to_string(),
+        prompt: prompt.clone(),
+    };
+    frame
+        .validate()
+        .map_err(|e| format!("malformed prompt update frame: {e}"))?;
+
+    let plaintext = serde_json::to_string(&frame)
+        .map_err(|e| format!("failed to serialize prompt update frame: {e}"))?;
+    let ciphertext = nostr::nips::nip44::encrypt(
+        owner.secret_key(),
+        &spawner,
+        plaintext,
+        nostr::nips::nip44::Version::V2,
+    )
+    .map_err(|e| format!("failed to encrypt prompt update frame: {e}"))?;
+
+    let event = build_spawner_attestation(&spawner.to_hex(), &ciphertext)
+        .map_err(|e| format!("failed to build prompt update event: {e}"))?
+        .sign_with_keys(owner)
+        .map_err(|e| format!("failed to sign prompt update event: {e}"))?;
+
+    Ok(SpawnerPromptUpdateOut {
+        event_json: event.as_json(),
+        prompt_hash: prompt.hash(),
+    })
+}
+
+/// Build a signed prompt-update frame for a spawner-hosted agent, so its
+/// system prompt / model / tool config can be edited in place.
+///
+/// Returns the signed event rather than publishing it, for the same reason as
+/// [`respond_to_spawner_attestation`]: kind 24201 is ephemeral and must go out
+/// over the live WebSocket, not `POST /events`.
+#[tauri::command]
+pub async fn send_spawner_prompt_update(
+    state: tauri::State<'_, AppState>,
+    spawner_pubkey: String,
+    spec_slug: String,
+    agent_pubkey: String,
+    prompt: PromptMaterial,
+) -> Result<SpawnerPromptUpdateOut, String> {
+    let keys = state.signing_keys()?;
+    build_prompt_update_event(&keys, &spawner_pubkey, &spec_slug, &agent_pubkey, prompt)
+}
+
 fn decrypt_frame(
     keys: &nostr::Keys,
     spawner: &nostr::PublicKey,
@@ -391,6 +463,45 @@ mod tests {
         };
         let delivered = Keys::parse(private_key_nsec.as_ref().unwrap()).unwrap();
         assert_eq!(&delivered.public_key().to_hex(), agent_pubkey);
+    }
+
+    #[test]
+    fn prompt_update_round_trips_to_the_spawner() {
+        let owner = Keys::generate();
+        let spawner = Keys::generate();
+        let prompt = PromptMaterial {
+            model: Some("claude-opus-5".into()),
+            ..Default::default()
+        };
+        let out = build_prompt_update_event(
+            &owner,
+            &spawner.public_key().to_hex(),
+            "honey",
+            &Keys::generate().public_key().to_hex(),
+            prompt.clone(),
+        )
+        .unwrap();
+        assert_eq!(out.prompt_hash, prompt.hash());
+        // Spawner can decrypt and reads back the same frame.
+        let event: nostr::Event = serde_json::from_str(&out.event_json).unwrap();
+        let plain = nostr::nips::nip44::decrypt(
+            spawner.secret_key(),
+            &owner.public_key(),
+            event.content.as_str(),
+        )
+        .unwrap();
+        let frame: AttestationFrame = serde_json::from_str(&plain).unwrap();
+        match frame {
+            AttestationFrame::PromptUpdate {
+                spec_slug,
+                prompt: p,
+                ..
+            } => {
+                assert_eq!(spec_slug, "honey");
+                assert_eq!(p, prompt);
+            }
+            other => panic!("wrong frame: {other:?}"),
+        }
     }
 
     #[test]
