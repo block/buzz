@@ -27,13 +27,16 @@ class SendMessage {
   /// If [rootEventId] is null it defaults to [parentEventId] (direct reply to
   /// thread head). Tags are built to match the desktop's `buildReplyTags`
   /// convention with `root` / `reply` markers. Pass [mediaTags] to append
-  /// relay-validated `imeta` tags and NIP-30 `emoji` tags.
+  /// relay-validated `imeta` tags and NIP-30 `emoji` tags. Direct-message
+  /// callers must pass [recipientPubkeys] so the other participant receives a
+  /// `p` tag even when the message body contains no explicit @mention.
   Future<void> call({
     required String channelId,
     required String content,
     String? parentEventId,
     String? rootEventId,
     List<String>? mentionPubkeys,
+    List<String> recipientPubkeys = const [],
     List<List<String>> mediaTags = const [],
   }) async {
     // Use explicitly passed pubkeys, or resolve @mentions against
@@ -42,19 +45,22 @@ class SendMessage {
         mentionPubkeys ?? await _resolveMentions(content, channelId);
     final authorPubkey = _signedEventRelay.pubkey;
 
-    // Normalize mentions: lowercase, deduplicate, exclude self (matching
+    // Normalize recipients: lowercase, deduplicate, exclude self (matching
     // the desktop's normalizeMentionPubkeys).
     final selfLower = authorPubkey?.toLowerCase();
-    final seenMentions = <String>{?selfLower};
-    final normalizedMentions = <String>[
-      for (final pk in resolvedMentions)
-        if (seenMentions.add(pk.toLowerCase())) pk,
-    ];
+    final seenRecipients = <String>{?selfLower};
+    final normalizedRecipients = <String>[];
+    for (final pubkey in [...recipientPubkeys, ...resolvedMentions]) {
+      final lower = pubkey.toLowerCase();
+      if (lower.isNotEmpty && seenRecipients.add(lower)) {
+        normalizedRecipients.add(lower);
+      }
+    }
 
     final tags = <List<String>>[
       ['h', channelId],
       if (parentEventId != null) ..._buildReplyTags(parentEventId, rootEventId),
-      for (final pk in normalizedMentions) ['p', pk],
+      for (final pk in normalizedRecipients) ['p', pk],
       ...mediaTags,
     ];
 

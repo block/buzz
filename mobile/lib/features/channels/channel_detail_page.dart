@@ -326,6 +326,9 @@ class ChannelDetailPage extends HookConsumerWidget {
                         channelId: channel.id,
                         content: content,
                         mentionPubkeys: mentionPubkeys,
+                        recipientPubkeys: resolvedChannel.isDm
+                            ? resolvedChannel.participantPubkeys
+                            : const [],
                         mediaTags: mediaTags,
                       ),
             )
