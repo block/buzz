@@ -10,8 +10,8 @@
 #   check, repository.go). CI's dorny/paths-filter catches deletions.
 #   Deliberate — accepted, not worked around.
 # - `commit-msg` has no glob: it rewrites the commit message, not files. Note
-#   Git only runs it for `git commit` and `git merge` — sequencer commits from
-#   `git rebase` and `git cherry-pick` need `--signoff`/`-s` explicitly.
+#   Git only runs it for `git commit` and `git merge` — other flows need their own
+#   flag: `git rebase --signoff`, `git cherry-pick -s`.
 pre-commit:
   parallel: true
   commands:
