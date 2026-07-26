@@ -69,8 +69,8 @@ fn backfill_standalone_agents_in_dir(base_dir: &Path) -> Result<usize, String> {
     // from the initial open, and sited next to the resolved store — see
     // `create_restricted_backup_once` and `resolved_backup_path`.
     let bak_path =
-        super::resolved_backup_path(&agents_path, "managed-agents.json.pre-backfill.bak");
-    super::create_restricted_backup_once(&bak_path, content.as_bytes())
+        crate::util::resolved_backup_path(&agents_path, "managed-agents.json.pre-backfill.bak");
+    crate::util::create_restricted_backup_once(&bak_path, content.as_bytes())
         .map_err(|e| format!("failed to write pre-backfill backup: {e}"))?;
 
     let existing_slugs: std::collections::HashSet<String> =

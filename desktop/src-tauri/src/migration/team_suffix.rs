@@ -116,11 +116,11 @@ pub(super) fn strip_baked_team_instructions_in_dir(base_dir: &Path) -> Result<us
     // a half-migrated snapshot. Owner-only from the initial open, and sited next
     // to the resolved store — see `create_restricted_backup_once` and
     // `resolved_backup_path`.
-    let bak_path = super::resolved_backup_path(
+    let bak_path = crate::util::resolved_backup_path(
         &agents_path,
         "managed-agents.json.pre-team-suffix-strip.bak",
     );
-    super::create_restricted_backup_once(&bak_path, content.as_bytes())
+    crate::util::create_restricted_backup_once(&bak_path, content.as_bytes())
         .map_err(|e| format!("failed to write pre-strip backup: {e}"))?;
 
     let payload = serde_json::to_vec_pretty(&all)
