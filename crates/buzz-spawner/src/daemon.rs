@@ -331,6 +331,7 @@ impl Daemon {
             agents_running: agents_running as u32,
             max_cpu_millis: Some(self.config.max_cpu_millis),
             max_memory_mib: Some(self.config.max_memory_mib),
+            ai: None,
         };
         self.relay.publish_announcement(&announcement).await
     }
@@ -783,6 +784,7 @@ impl Daemon {
             spec_hash: spec_hash.map(str::to_string),
             error,
             restart_count,
+            prompt_hash: None,
         };
         self.relay.publish_status(slug, owner_pubkey, &status).await
     }
