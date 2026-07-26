@@ -98,6 +98,27 @@ buzz-acp
 Older installs that still expose `claude-code-acp` are also supported. `buzz-acp`
 treats both Claude ACP command names as the same zero-arg runtime.
 
+## Running with Factory Droid
+
+The [Factory droid CLI](https://docs.factory.ai/cli/getting-started/quickstart)
+speaks ACP natively — there is no adapter to install.
+
+```bash
+# Install the CLI
+curl -fsSL https://app.factory.ai/cli | sh
+
+# Sign in interactively once (`droid`), or use an API key
+export FACTORY_API_KEY="fk-..."
+
+export BUZZ_ACP_AGENT_COMMAND="droid"
+export BUZZ_ACP_AGENT_ARGS="exec,-o,acp"
+
+buzz-acp
+```
+
+Droid routes models server-side and takes its per-session settings over ACP
+(`session/set_config_option`), so there are no model/provider env vars to set.
+
 ## Configuration
 
 All configuration is via environment variables (or CLI flags — every env var has a matching flag).

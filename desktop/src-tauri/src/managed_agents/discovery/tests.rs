@@ -8,7 +8,7 @@ use super::{
     is_login_shell_path_uninit, is_safe_nvm_tag, managed_agent_avatar_url, normalize_agent_args,
     parse_semver_tag, probe_codex_acp_major_version, record_agent_command,
     refresh_login_shell_path, BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL,
-    GOOSE_AVATAR_URL,
+    FACTORY_DROID_AVATAR_URL, GOOSE_AVATAR_URL,
 };
 use crate::managed_agents::AcpAvailabilityStatus;
 
@@ -81,6 +81,66 @@ fn resolves_buzz_agent_avatar() {
     assert_eq!(
         managed_agent_avatar_url("/usr/local/bin/buzz-agent"),
         Some(BUZZ_AGENT_AVATAR_URL.to_string())
+    );
+}
+
+#[test]
+fn resolves_factory_droid_avatar_for_command_paths_and_aliases() {
+    assert_eq!(
+        managed_agent_avatar_url("droid"),
+        Some(FACTORY_DROID_AVATAR_URL.to_string())
+    );
+    assert_eq!(
+        managed_agent_avatar_url("/opt/homebrew/bin/droid"),
+        Some(FACTORY_DROID_AVATAR_URL.to_string())
+    );
+    assert_eq!(
+        managed_agent_avatar_url("factory-droid"),
+        Some(FACTORY_DROID_AVATAR_URL.to_string())
+    );
+    assert_eq!(
+        managed_agent_avatar_url(r"C:\Tools\droid.exe"),
+        Some(FACTORY_DROID_AVATAR_URL.to_string())
+    );
+}
+
+#[test]
+fn factory_droid_defaults_to_native_acp_argv() {
+    let expected = vec!["exec".to_string(), "-o".to_string(), "acp".to_string()];
+
+    assert_eq!(normalize_agent_args("droid", Vec::new()), expected);
+    assert_eq!(
+        normalize_agent_args("/opt/homebrew/bin/droid", Vec::new()),
+        expected
+    );
+    // Legacy records carry a bare `acp` arg; `droid acp` is not a command, so
+    // it must resolve to the runtime's own ACP argv rather than spawn as-is.
+    assert_eq!(normalize_agent_args("droid", vec!["acp".into()]), expected);
+    // An explicit multi-arg pin is still the operator's call.
+    assert_eq!(
+        normalize_agent_args("droid", vec!["exec".into(), "-o".into(), "json".into()]),
+        vec!["exec".to_string(), "-o".to_string(), "json".to_string()]
+    );
+}
+
+#[test]
+fn factory_droid_needs_no_separate_adapter() {
+    let factory = crate::managed_agents::known_acp_runtime_exact("factory")
+        .expect("factory runtime should be registered");
+
+    assert_eq!(factory.commands, &["droid"]);
+    assert!(factory.underlying_cli.is_none());
+    assert!(factory.adapter_install_commands.is_empty());
+    assert!(!factory.cli_install_commands.is_empty());
+    // Availability must not depend on a second binary being present.
+    assert_eq!(
+        classify_runtime(
+            Some(("droid", std::path::PathBuf::from("/opt/homebrew/bin/droid"))),
+            factory.underlying_cli,
+            false,
+        )
+        .0,
+        AcpAvailabilityStatus::Available
     );
 }
 

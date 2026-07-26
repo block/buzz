@@ -16,6 +16,7 @@ pub(crate) use runtime_metadata::KnownAcpRuntime;
 const GOOSE_AVATAR_URL: &str = "https://goose-docs.ai/img/logo_dark.png";
 const CLAUDE_CODE_AVATAR_URL: &str = "https://anthropic.gallerycdn.vsassets.io/extensions/anthropic/claude-code/2.1.77/1773707456892/Microsoft.VisualStudio.Services.Icons.Default";
 const CODEX_AVATAR_URL: &str = "https://openai.gallerycdn.vsassets.io/extensions/openai/chatgpt/26.5313.41514/1773706730621/Microsoft.VisualStudio.Services.Icons.Default";
+const FACTORY_DROID_AVATAR_URL: &str = "https://avatars.githubusercontent.com/u/131064358?v=4";
 const BUZZ_AGENT_AVATAR_URL: &str =
     "https://raw.githubusercontent.com/block/buzz/refs/heads/main/crates/buzz-agent/buzz-agent.png";
 
@@ -161,6 +162,43 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         login_hint: Some("Run `codex login` to authenticate."),
         // Verified: `codex login status` exits 0 when logged in, non-zero otherwise.
         auth_probe_args: Some(&["codex", "login", "status"]),
+    },
+    KnownAcpRuntime {
+        id: "factory",
+        label: "Factory Droid",
+        // `droid` speaks ACP natively (`droid exec -o acp`), so the CLI is both
+        // the adapter and the underlying binary — no npm adapter to install and
+        // no separate `underlying_cli` that could report CliMissing.
+        commands: &["droid"],
+        aliases: &["factory-droid", "factorydroid", "droid"],
+        avatar_url: FACTORY_DROID_AVATAR_URL,
+        mcp_command: None,
+        mcp_hooks: false,
+        underlying_cli: None,
+        cli_install_commands: &["curl -fsSL https://app.factory.ai/cli | sh"],
+        cli_install_commands_windows: &["powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"irm https://app.factory.ai/cli/windows | iex\""],
+        adapter_install_commands: &[],
+        cli_install_instructions_url: "https://docs.factory.ai/cli/getting-started/quickstart",
+        adapter_install_instructions_url: "",
+        cli_install_hint: "Buzz requires the Factory droid CLI; run `droid` once to sign in, or set FACTORY_API_KEY.",
+        adapter_install_hint: "",
+        skill_dir: Some(".factory/skills"),
+        supports_acp_model_switching: true,
+        // Droid takes its session settings over ACP (`session/set_config_option`)
+        // and routes models server-side, so there is no model/provider env var.
+        model_env_var: None,
+        provider_env_var: None,
+        provider_locked: true,
+        default_env: &[],
+        config_file_path: Some("~/.factory/settings.json"),
+        config_file_format: Some("json"),
+        supports_acp_native_config: true,
+        thinking_env_var: None,
+        max_tokens_env_var: None,
+        context_limit_env_var: None,
+        required_normalized_fields: &[],
+        login_hint: None,
+        auth_probe_args: None,
     },
     KnownAcpRuntime {
         id: "buzz-agent",
@@ -349,6 +387,11 @@ pub use overrides::{apply_agent_command_update, create_time_agent_command_overri
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_command_identity(command).as_str() {
         "goose" => Some(vec!["acp".to_string()]),
+        "droid" | "factory" | "factory-droid" | "factorydroid" => Some(vec![
+            "exec".to_string(),
+            "-o".to_string(),
+            "acp".to_string(),
+        ]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
         _ => None,
@@ -370,8 +413,10 @@ pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<Strin
         return default_args;
     }
 
-    if normalized.len() == 1 && normalized[0].eq_ignore_ascii_case("acp") && default_args.is_empty()
-    {
+    // A bare `acp` arg is the legacy shape every harness record carried before
+    // per-runtime defaults existed. It only means "speak ACP", so let the
+    // runtime's own default argv decide how to ask for that.
+    if normalized.len() == 1 && normalized[0].eq_ignore_ascii_case("acp") {
         return default_args;
     }
 

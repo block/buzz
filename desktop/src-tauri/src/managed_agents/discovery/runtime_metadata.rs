@@ -120,5 +120,19 @@ mod tests {
         );
         assert!(codex.adapter_install_instructions_url.contains("codex-acp"));
         assert!(codex.cli_install_hint.contains("desktop app alone"));
+
+        let factory = known_acp_runtime_exact("factory").unwrap();
+        assert_eq!(
+            factory.cli_install_instructions_url,
+            "https://docs.factory.ai/cli/getting-started/quickstart"
+        );
+        // Native ACP: there is no adapter to point at.
+        assert!(factory.adapter_install_instructions_url.is_empty());
+        assert!(factory.adapter_install_hint.is_empty());
+        assert!(factory.cli_install_hint.contains("FACTORY_API_KEY"));
+        assert!(factory
+            .cli_install_commands_windows
+            .iter()
+            .any(|command| command.contains("app.factory.ai/cli/windows")));
     }
 }
