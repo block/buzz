@@ -1,4 +1,4 @@
-import { CircleAlert, Play } from "lucide-react";
+import { CircleAlert, Play, Server } from "lucide-react";
 import { useReducedMotion } from "motion/react";
 
 import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
@@ -18,6 +18,9 @@ type AgentRuntimeAvatarControlProps = {
   errorLabel?: string | null;
   errorTestId?: string;
   isActive: boolean;
+  /** Identity handed to a spawner: show "runs on a server" instead of Start.
+   * Starting locally would run one identity in two places. */
+  isRelocated?: boolean;
   isStarting: boolean;
   label: string;
   startTestId: string;
@@ -101,6 +104,7 @@ export function AgentRuntimeAvatarControl({
   errorLabel,
   errorTestId,
   isActive,
+  isRelocated = false,
   isStarting,
   label,
   startTestId,
@@ -119,7 +123,17 @@ export function AgentRuntimeAvatarControl({
     <MaskedAvatarBadgeFrame
       badge={
         <span className="grid h-full w-full place-items-center">
-          {isActive ? (
+          {!isActive && isRelocated ? (
+            <span
+              aria-label={`${label} runs on a server`}
+              className="flex h-9 w-9 items-center justify-center rounded-full bg-muted text-muted-foreground"
+              data-testid={`${startTestId}-relocated`}
+              role="img"
+              title={`${label} runs on a server and cannot be started on this Mac.`}
+            >
+              <Server className="h-4 w-4" />
+            </span>
+          ) : isActive ? (
             <span
               aria-label={`${label} is running`}
               className="flex h-6 w-6 items-center justify-center rounded-full"

@@ -11,6 +11,10 @@ fi
 if [[ "${BUZZ_COMPOSE_DEV:-false}" == "true" ]]; then
   COMPOSE_FILES+=(-f compose.dev.yml)
 fi
+# Opt-in: mounts the host Docker socket. See README.md § Server-hosted agents.
+if [[ "${BUZZ_COMPOSE_SPAWNER:-false}" == "true" ]]; then
+  COMPOSE_FILES+=(-f compose.spawner.yml)
+fi
 
 compose() {
   docker compose --env-file .env "${COMPOSE_FILES[@]}" "$@"
@@ -123,6 +127,9 @@ Commands:
 Environment switches:
   BUZZ_COMPOSE_TLS=true   Include compose.caddy.yml for automatic HTTPS
   BUZZ_COMPOSE_DEV=true   Include compose.dev.yml for local admin ports/tools
+  BUZZ_COMPOSE_SPAWNER=true
+                          Include compose.spawner.yml for server-hosted agents.
+                          Mounts the host Docker socket — read README.md first.
 MSG
     ;;
   *)

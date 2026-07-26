@@ -23,6 +23,7 @@ function greenInputs(overrides = {}) {
     workingSource: "none",
     connected: true,
     isLocalBackend: true,
+    isRelocated: false,
     isRunning: true,
     edgeConsumed: false,
     quiescentForMs: AUTO_RESTART_QUIESCENCE_MS,
@@ -56,6 +57,10 @@ const NEVER_FIRE_ROWS = [
   ["observer relay not connected", { connected: false }],
   ["remote backend", { isLocalBackend: false }],
   ["agent not running", { isRunning: false }],
+  [
+    "identity relocated to a spawner (restart here would split-brain)",
+    { isRelocated: true },
+  ],
   [
     "edge already consumed (one attempt per rising edge)",
     { edgeConsumed: true },
