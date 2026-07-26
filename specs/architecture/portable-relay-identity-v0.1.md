@@ -1,6 +1,7 @@
 # Portable Relay Identity v0.1
 
-Status: experimental; implemented by the laptop reference adapter
+Status: experimental; implemented by the laptop and Cloudflare reference
+adapters ([conformance evidence](../evidence/portable-relay/README.md))
 
 ## Decision
 

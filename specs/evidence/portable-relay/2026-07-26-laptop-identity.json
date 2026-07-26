@@ -1,0 +1,76 @@
+{
+  "capability": "portable-relay-cloudflare-v0.1",
+  "profile": "portable-relay-identity-v0.1",
+  "adapter": "laptop-reference",
+  "base_url": "http://127.0.0.1:7798",
+  "mode": "identity",
+  "fixtures": [
+    "local-relay/signed-message.json",
+    "portable-relay/core-v0.1.json"
+  ],
+  "recorded_at": "2026-07-26T13:23:55.756Z",
+  "results": [
+    {
+      "check": "anonymous submit fails closed",
+      "outcome": "pass",
+      "detail": "status 401 code authentication_required"
+    },
+    {
+      "check": "authenticated author submit is stored",
+      "outcome": "pass",
+      "detail": "200 stored"
+    },
+    {
+      "check": "replayed proof fails closed",
+      "outcome": "pass",
+      "detail": "status 401 code replay_detected"
+    },
+    {
+      "check": "mismatched author fails closed",
+      "outcome": "pass",
+      "detail": "status 403 code author_mismatch"
+    },
+    {
+      "check": "authentication kinds are denied direct append",
+      "outcome": "pass",
+      "detail": "status 403 code scope_denied"
+    },
+    {
+      "check": "authentication events never enter the journal",
+      "outcome": "pass"
+    },
+    {
+      "check": "gift-wrap disclosure binds to the tagged recipient",
+      "outcome": "pass"
+    },
+    {
+      "check": "count applies the same disclosure rule",
+      "outcome": "pass",
+      "detail": "1/0"
+    },
+    {
+      "check": "WebSocket issues an AUTH challenge",
+      "outcome": "pass"
+    },
+    {
+      "check": "unauthenticated WebSocket EVENT fails closed",
+      "outcome": "pass",
+      "detail": "authentication_required"
+    },
+    {
+      "check": "unauthenticated WebSocket REQ fails closed",
+      "outcome": "pass",
+      "detail": "authentication_required: identity operation denied"
+    },
+    {
+      "check": "NIP-42 proof authenticates the WebSocket",
+      "outcome": "pass",
+      "detail": "authenticated"
+    },
+    {
+      "check": "authenticated live delivery works end to end",
+      "outcome": "pass"
+    }
+  ],
+  "pass": true
+}

@@ -1,0 +1,82 @@
+{
+  "capability": "portable-relay-cloudflare-v0.1",
+  "profile": "portable-relay-core-v0.1",
+  "adapter": "laptop-reference",
+  "base_url": "http://127.0.0.1:7797",
+  "mode": "full",
+  "fixtures": [
+    "local-relay/signed-message.json",
+    "portable-relay/core-v0.1.json"
+  ],
+  "recorded_at": "2026-07-26T13:23:55.612Z",
+  "results": [
+    {
+      "check": "health endpoint responds",
+      "outcome": "pass",
+      "detail": "{\"status\":\"ok\"}"
+    },
+    {
+      "check": "fixture event accepted as stored",
+      "outcome": "pass",
+      "detail": "200 {\"event_id\":\"d892a65e7677e0554ebb70ee16deeb6a0727dba46450fb4bc001291d7bff971b\",\"accepted\":true,\"message\":\"stored\"}"
+    },
+    {
+      "check": "resubmitted fixture event is duplicate",
+      "outcome": "pass",
+      "detail": "duplicate"
+    },
+    {
+      "check": "initial: fixture envelope served exactly",
+      "outcome": "pass",
+      "detail": "status 200"
+    },
+    {
+      "check": "initial: count includes durable fixture event",
+      "outcome": "pass",
+      "detail": "count 1"
+    },
+    {
+      "check": "initial: WebSocket history precedes EOSE",
+      "outcome": "pass"
+    },
+    {
+      "check": "tampered event rejected as invalid",
+      "outcome": "pass",
+      "detail": "invalid: invalid event id: computed 152c2b3f7cb0b0a3dd9e22bbbce2b81f5a030473b69f08fd352d7a874ab6c2a2, got 545d277873b676cc1335ee27ab6b6674ddaa742d0a8521015a0194e120ba32f3"
+    },
+    {
+      "check": "rejected event absent from durable history",
+      "outcome": "pass"
+    },
+    {
+      "check": "NIP-50 search fails explicitly",
+      "outcome": "pass",
+      "detail": "status 400"
+    },
+    {
+      "check": "unknown filter field fails closed",
+      "outcome": "pass",
+      "detail": "status 400"
+    },
+    {
+      "check": "replaceable stream keeps deterministic winner",
+      "outcome": "pass",
+      "detail": "stored/superseded"
+    },
+    {
+      "check": "ephemeral event is live-only",
+      "outcome": "pass",
+      "detail": "ephemeral"
+    },
+    {
+      "check": "live delivery reaches an open subscription",
+      "outcome": "pass"
+    },
+    {
+      "check": "CLOSE stops later delivery",
+      "outcome": "pass",
+      "detail": "silent"
+    }
+  ],
+  "pass": true
+}

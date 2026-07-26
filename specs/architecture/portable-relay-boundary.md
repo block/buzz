@@ -339,13 +339,16 @@ boundaries. Hosted Buzz provides relevant NIP-42, NIP-98, NIP-OA, scope,
 membership, and result-level read mechanisms, but has not yet been measured
 against the portable identity conformance vector.
 
-The Cloudflare reference adapter is specified by
-[`portable-relay-cloudflare-v0.1`](portable-relay-cloudflare-v0.1.md) but is not
-yet implemented. Its first claim is the portable core only: stateless Worker
-ingress routes one stable relay node/community to one SQLite-backed Durable
-Object, with hibernatable WebSockets and both local-runtime and deployed-preview
-conformance evidence. Identity, replication, effects, and production readiness
-remain separate later claims.
+The Cloudflare reference adapter implements
+[`portable-relay-cloudflare-v0.1`](portable-relay-cloudflare-v0.1.md) at
+`cloudflare/portable-relay`: stateless Worker ingress routes one stable relay
+node/community to one SQLite-backed Durable Object with hibernatable
+WebSockets, and the opt-in identity phase keeps consumed-proof and principal
+state in object-local SQLite so replay protection survives eviction. Core and
+identity conformance are evidenced across all three tiers with exact outcome
+parity against the laptop adapter
+([evidence](../evidence/portable-relay/README.md)). Replication, effects, and
+production readiness remain separate later claims.
 
 The OpenAPI paths and NIP-01 frames are normative. Listener addresses, host
 names, TLS termination, authentication headers, storage schemas, and operational

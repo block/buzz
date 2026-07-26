@@ -2,7 +2,7 @@ capability:
   id: portable-relay-cloudflare
   type: capability
   name: Portable relay Cloudflare adapter
-  status: specified
+  status: implemented
   version: portable-relay-cloudflare-v0.1
   description: |
     Prove that one stable portable relay node preserves its signed-event,
@@ -51,7 +51,7 @@ capability:
       status: required-first-slice
     identity:
       profile: portable-relay-identity-v0.1
-      status: deferred-until-core-conformance
+      status: implemented
     replication:
       profile: portable-relay-replication-v0.1
       status: deferred
@@ -60,6 +60,7 @@ capability:
       status: deferred
 
   implementation:
-    planned_path: cloudflare/portable-relay
-    status: not-started
+    path: cloudflare/portable-relay
+    status: implemented
+    evidence: ../evidence/portable-relay/README.md
     production_ready: false

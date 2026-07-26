@@ -48,3 +48,4 @@ node.
 - [Cloudflare conformance behavior](features/portable-relay/cloudflare-conformance.feature)
 - [Cloudflare conformance vector](fixtures/portable-relay/cloudflare-v0.1.json)
 - [Cloudflare adapter capability](capabilities/portable-relay-cloudflare.capability.yaml)
+- [Portable relay conformance evidence](evidence/portable-relay/README.md)

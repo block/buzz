@@ -29,8 +29,9 @@ capability:
     adapters:
       - portable-relay-cloudflare-v0.1
   identity:
-    status: specified
+    status: implemented-by-reference-adapters
     version: portable-relay-identity-v0.1
+    evidence: ../evidence/portable-relay/README.md
     story: ../stories/portable-relay/control-attributable-access.md
     architecture: ../architecture/portable-relay-identity-v0.1.md
     model: ../models/portable-relay/portable-relay-identity.model.yaml
@@ -45,9 +46,10 @@ capability:
       implementation: crates/buzz-local-relay
       status: core-replication-and-identity-implemented
     - name: cloudflare-reference
-      implementation: planned:cloudflare/portable-relay
+      implementation: cloudflare/portable-relay
       capability: ./portable-relay-cloudflare.capability.yaml
-      status: specified-not-implemented
+      status: core-and-identity-implemented
+      evidence: ../evidence/portable-relay/README.md
     - name: hosted-buzz
       implementation: crates/buzz-relay
       status: conformance-not-yet-measured
