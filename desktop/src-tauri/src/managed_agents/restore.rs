@@ -403,13 +403,23 @@ pub async fn restore_managed_agents_on_launch(
         }
     }
 
-    // Collect profile reconciliation data for successfully spawned agents before
-    // releasing the lock. This mirrors the fire-and-forget pattern in
-    // start_managed_agent — ensuring boot-restored agents get the same profile
-    // self-healing as UI-started agents.
+    // Collect profile reconciliation data before releasing the lock. This
+    // mirrors the fire-and-forget pattern in start_managed_agent — ensuring
+    // boot-restored agents get the same profile self-healing as UI-started
+    // agents. Also includes agents flagged `profile_sync_pending` (a create-time
+    // sync that failed and hasn't been confirmed published) so a stopped agent
+    // self-heals instead of keeping a stale kind:0 name indefinitely.
     let reconcile_personas = super::load_personas(app).unwrap_or_default();
+    let mut reconcile_pubkeys: Vec<String> = successfully_spawned.clone();
+    for record in &records {
+        if record.profile_sync_pending
+            && !reconcile_pubkeys.iter().any(|p| p == &record.pubkey)
+        {
+            reconcile_pubkeys.push(record.pubkey.clone());
+        }
+    }
     let reconcile_items: Vec<(String, crate::commands::ProfileReconcileData)> =
-        successfully_spawned
+        reconcile_pubkeys
             .iter()
             .filter_map(|pubkey| {
                 let record = records.iter().find(|r| r.pubkey == *pubkey)?;

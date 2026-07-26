@@ -827,6 +827,7 @@ pub async fn create_managed_agent(
             pubkey: pubkey.clone(),
             name: name.clone(),
             persona_id: requested_persona_id.clone(),
+            profile_sync_pending: false,
             team_id,
             private_key_nsec: private_key_nsec.clone(),
             auth_tag: auth_tag.clone(),
@@ -978,6 +979,23 @@ pub async fn create_managed_agent(
     .await)
         .err();
 
+    // ── Phase 4b: persist a pending flag if profile sync failed ─────────────
+    // The error is returned to the caller (transient toast), but it must also
+    // be durable so boot-time reconciliation self-heals the kind:0 profile even
+    // when this agent is never (re)started — otherwise the relay keeps a stale
+    // or missing name indefinitely. Cleared by `reconcile_agent_profile`.
+    if profile_sync_error.is_some() {
+        let _store_guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|e| e.to_string())?;
+        let mut records = load_managed_agents(&app)?;
+        if let Some(record) = records.iter_mut().find(|r| r.pubkey == pubkey) {
+            record.profile_sync_pending = true;
+            save_managed_agents(&app, &records)?;
+        }
+    }
+
     // ── Phase 5: provider deploy (async, outside lock) ───────────────────────
     let spawn_error = if input.spawn_after_create && input.backend != BackendKind::Local {
         if let BackendKind::Provider { ref id, ref config } = input.backend {
@@ -1006,8 +1024,12 @@ pub async fn create_managed_agent(
         spawn_error
     };
 
-    // Rebuild summary if provider deploy may have updated backend_agent_id.
-    let final_agent = if input.backend != BackendKind::Local && spawn_error.is_none() {
+    // Rebuild summary if provider deploy may have updated backend_agent_id, or
+    // if the profile sync set the pending flag, so the response reflects the
+    // current on-disk record (including `profile_sync_pending`).
+    let final_agent = if (input.backend != BackendKind::Local && spawn_error.is_none())
+        || profile_sync_error.is_some()
+    {
         let _store_guard = state
             .managed_agents_store_lock
             .lock()

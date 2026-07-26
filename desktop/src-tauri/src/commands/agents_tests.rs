@@ -9,6 +9,7 @@ fn bare_agent_record(
     use crate::managed_agents::{BackendKind, RespondTo};
     use std::collections::BTreeMap;
     ManagedAgentRecord {
+        profile_sync_pending: false,
         pubkey: "agent".to_string(),
         name: "Agent".to_string(),
         persona_id: persona_id.map(str::to_string),

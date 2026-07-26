@@ -299,6 +299,7 @@ fn default_global_config_serializes_all_fields() {
 
 fn bare_record() -> ManagedAgentRecord {
     ManagedAgentRecord {
+        profile_sync_pending: false,
         pubkey: "agent".to_string(),
         name: "Agent".to_string(),
         persona_id: None,

@@ -114,6 +114,7 @@ mod tests {
 
     fn fixture() -> ManagedAgentRecord {
         ManagedAgentRecord {
+            profile_sync_pending: false,
             pubkey: "p".into(),
             name: "n".into(),
             persona_id: None,

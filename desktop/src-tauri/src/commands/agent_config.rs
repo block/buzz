@@ -636,6 +636,7 @@ mod tests {
 
     fn agent_record() -> ManagedAgentRecord {
         ManagedAgentRecord {
+            profile_sync_pending: false,
             pubkey: "agent".to_string(),
             name: "Agent".to_string(),
             persona_id: Some("persona-1".to_string()),

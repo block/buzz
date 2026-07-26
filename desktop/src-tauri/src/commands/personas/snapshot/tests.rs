@@ -19,6 +19,7 @@ use std::collections::BTreeMap;
 /// persona_id.
 fn make_definition(slug: &str) -> ManagedAgentRecord {
     ManagedAgentRecord {
+        profile_sync_pending: false,
         pubkey: String::new(),
         slug: Some(slug.to_string()),
         name: slug.to_string(),
@@ -77,6 +78,7 @@ fn make_definition(slug: &str) -> ManagedAgentRecord {
 /// have `slug: None` and link to their definition via `persona_id`.
 fn make_instance(pubkey: &str, persona_id: &str) -> ManagedAgentRecord {
     ManagedAgentRecord {
+        profile_sync_pending: false,
         pubkey: pubkey.to_string(),
         slug: None,
         persona_id: Some(persona_id.to_string()),

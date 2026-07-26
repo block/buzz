@@ -230,6 +230,7 @@ fn record_with(
     override_cmd: Option<&str>,
 ) -> crate::managed_agents::types::ManagedAgentRecord {
     crate::managed_agents::types::ManagedAgentRecord {
+        profile_sync_pending: false,
         pubkey: String::new(),
         name: "r".to_string(),
         persona_id: persona_id.map(str::to_string),
