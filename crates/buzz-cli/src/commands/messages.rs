@@ -551,6 +551,33 @@ pub async fn cmd_send_message(
     }
     let channel_uuid = parse_uuid(&p.channel_id)?;
 
+    // Resolve @name mentions against the author-written body before any upload
+    // or submit side effects, so `--strict-mentions` fails cleanly with no
+    // orphaned media. Media markdown appended later cannot carry `@names`.
+    let resolved = resolve_content_mentions(client, &p.channel_id, &p.content).await;
+    if !resolved.unresolved.is_empty() {
+        warn_unresolved_mentions(&resolved.unresolved);
+        if p.strict_mentions {
+            let list = resolved
+                .unresolved
+                .iter()
+                .map(|n| format!("@{n}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(CliError::Usage(format!(
+                "unresolved mentions (channel-scoped): {list}"
+            )));
+        }
+    }
+    let mut auto_resolved = resolved.pubkeys;
+
+    // NIP-27: also extract nostr:npub1… inline references (skipping code regions)
+    let stripped = strip_code_regions(&p.content);
+    let uri_pubkeys = extract_nostr_uris(&stripped);
+    merge_mentions(&mut auto_resolved, &uri_pubkeys, MENTION_CAP);
+
+    let mention_refs: Vec<&str> = auto_resolved.iter().map(|s| s.as_str()).collect();
+
     // Upload files and build imeta tags
     let mut media_tags: Vec<Vec<String>> = Vec::new();
     let mut media_content = String::new();
@@ -581,32 +608,6 @@ pub async fn cmd_send_message(
     } else {
         None
     };
-
-    // Resolve @name mentions in the author-written body only — not the media markdown we
-    // append above, which is derived from upload metadata and can't carry `@names`.
-    let resolved = resolve_content_mentions(client, &p.channel_id, &p.content).await;
-    if !resolved.unresolved.is_empty() {
-        warn_unresolved_mentions(&resolved.unresolved);
-        if p.strict_mentions {
-            let list = resolved
-                .unresolved
-                .iter()
-                .map(|n| format!("@{n}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            return Err(CliError::Usage(format!(
-                "unresolved mentions (channel-scoped): {list}"
-            )));
-        }
-    }
-    let mut auto_resolved = resolved.pubkeys;
-
-    // NIP-27: also extract nostr:npub1… inline references (skipping code regions)
-    let stripped = strip_code_regions(&p.content);
-    let uri_pubkeys = extract_nostr_uris(&stripped);
-    merge_mentions(&mut auto_resolved, &uri_pubkeys, MENTION_CAP);
-
-    let mention_refs: Vec<&str> = auto_resolved.iter().map(|s| s.as_str()).collect();
 
     let builder = match p.kind {
         Some(45001) => {
