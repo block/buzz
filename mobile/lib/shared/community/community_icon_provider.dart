@@ -3,6 +3,9 @@ import 'dart:convert';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
 
+/// Supplies the HTTP client used for NIP-11 community icon lookups.
+///
+/// Tests can override this provider to return deterministic relay responses.
 final communityIconHttpClientProvider = Provider<http.Client>((ref) {
   final client = http.Client();
   ref.onDispose(client.close);
