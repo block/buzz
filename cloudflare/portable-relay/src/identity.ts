@@ -32,6 +32,8 @@ export type DenialCode =
   | "audience_mismatch"
   | "replay_detected"
   | "author_mismatch"
+  | "peer_unbound"
+  | "source_mismatch"
   | "scope_denied"
   | "event_disclosure_denied";
 

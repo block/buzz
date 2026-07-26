@@ -6,7 +6,11 @@
   // Opt-in identity, mirroring the laptop adapter's --require-auth flag.
   // Set to "1" (or deploy with --var) to require NIP-42/NIP-98 identity.
   "vars": {
-    "BUZZ_REQUIRE_AUTH": ""
+    "BUZZ_REQUIRE_AUTH": "",
+    // Destination-controlled replication trust: JSON mapping a source stream
+    // ID to { "principal": string, "verification_keys": [pubkey hex] }.
+    // Empty means no replication peers are admitted (fail closed).
+    "BUZZ_REPLICATION_PEERS": ""
   },
   "durable_objects": {
     "bindings": [

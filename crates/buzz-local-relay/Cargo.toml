@@ -24,6 +24,7 @@ buzz-core = { workspace = true }
 chrono = { workspace = true }
 futures-util = { workspace = true }
 nostr = { workspace = true }
+reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -33,5 +34,4 @@ tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
-reqwest = { workspace = true }
 tokio-tungstenite = { workspace = true }

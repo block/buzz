@@ -10,6 +10,8 @@ import {
 import {
   authorizeDirect,
   eventVisibleToReader,
+  KIND_AUTH,
+  KIND_HTTP_AUTH,
   PROOF_RETENTION_SECS,
   verifyNip42At,
   verifyNip98At,
@@ -20,6 +22,12 @@ import {
   filtersFromUnknown,
   ProtocolInputError,
 } from "./protocol";
+import {
+  parsePeerTrust,
+  type ReplicationOutcomeWire,
+  type ReplicationReceiptWire,
+  type ReplicationRecordWire,
+} from "./replication";
 
 const DEFAULT_QUERY_LIMIT = 500;
 const MAX_QUERY_LIMIT = 5_000;
@@ -138,6 +146,14 @@ export class RelayNode extends DurableObject<Env> {
         principal_pubkey TEXT
       ) WITHOUT ROWID, STRICT
     `);
+    // Destination-side replication checkpoints are operational state, kept
+    // outside event history; the source remains the cursor's owner.
+    this.#sql.exec(`
+      CREATE TABLE IF NOT EXISTS source_checkpoints (
+        source TEXT PRIMARY KEY,
+        cursor TEXT NOT NULL
+      ) WITHOUT ROWID, STRICT
+    `);
   }
 
   /**
@@ -229,6 +245,101 @@ export class RelayNode extends DurableObject<Env> {
     return { result: this.#countEffective(filters, outcome.principal) };
   }
 
+  /**
+   * Ingests a batch of replicated records from an authenticated peer.
+   *
+   * Replication always requires peer evidence, independent of the client
+   * identity mode: the NIP-98 signing key must be a destination-configured
+   * verification key for the batch's source stream. Records apply in order
+   * through the normal ingest pipeline; receipts mirror the laptop sink's
+   * outcome mapping so orchestrators can advance checkpoints identically.
+   */
+  ingestReplication(
+    stableNodeKey: string,
+    records: ReplicationRecordWire[],
+    auth: HttpAuthEvidence,
+  ): RpcOutcome<ReplicationReceiptWire[]> {
+    this.initializeNode(stableNodeKey);
+    const verified = this.#verifyHttpEvidence(auth);
+    if ("denied" in verified) {
+      return verified;
+    }
+    if (records.length === 0) {
+      return { result: [] };
+    }
+    const source = records[0].source;
+    const trust = parsePeerTrust(this.env.BUZZ_REPLICATION_PEERS)[source];
+    if (trust === undefined) {
+      return { denied: "peer_unbound" };
+    }
+    if (!trust.verification_keys.includes(verified.principal)) {
+      return { denied: "source_mismatch" };
+    }
+
+    const receipts: ReplicationReceiptWire[] = [];
+    let checkpoint: string | null = null;
+    for (const record of records) {
+      const receipt = this.#applyReplicationRecord(source, record);
+      receipts.push(receipt);
+      if (receipt.outcome.status === "rejected") {
+        break;
+      }
+      checkpoint = record.cursor;
+    }
+    if (checkpoint !== null) {
+      this.#sql.exec(
+        `INSERT INTO source_checkpoints (source, cursor) VALUES (?, ?)
+         ON CONFLICT (source) DO UPDATE SET cursor = excluded.cursor`,
+        source,
+        checkpoint,
+      );
+    }
+    return { result: receipts };
+  }
+
+  #applyReplicationRecord(
+    source: string,
+    record: ReplicationRecordWire,
+  ): ReplicationReceiptWire {
+    const receipt = (
+      outcome: ReplicationOutcomeWire,
+    ): ReplicationReceiptWire => ({
+      source: record.source,
+      cursor: record.cursor,
+      event_id: record.event.id,
+      outcome,
+    });
+    const rejected = (reason: string) =>
+      receipt({ status: "rejected", reason });
+
+    if (record.source !== source) {
+      return rejected("record source does not match the authenticated batch");
+    }
+    if (isEphemeralKind(record.event.kind)) {
+      return rejected("ephemeral events are not part of durable replication");
+    }
+    if (
+      record.event.kind === KIND_AUTH ||
+      record.event.kind === KIND_HTTP_AUTH
+    ) {
+      return rejected("authentication events are never journaled");
+    }
+    const result = this.#applyEvent(record.event);
+    if (!result.accepted) {
+      return rejected(result.message);
+    }
+    switch (result.message) {
+      case "stored":
+        return receipt({ status: "stored" });
+      case "duplicate":
+        return receipt({ status: "duplicate" });
+      case "superseded":
+        return receipt({ status: "superseded" });
+      default:
+        return rejected(`unexpected accepted outcome: ${result.message}`);
+    }
+  }
+
   #authRequired(): boolean {
     const value: string = this.env.BUZZ_REQUIRE_AUTH ?? "";
     return value === "1" || value === "true" || value === "yes";
@@ -244,6 +355,13 @@ export class RelayNode extends DurableObject<Env> {
     if (!this.#authRequired()) {
       return { principal: null };
     }
+    return this.#verifyHttpEvidence(auth);
+  }
+
+  /** Verifies mandatory NIP-98 evidence and consumes its one-use proof. */
+  #verifyHttpEvidence(
+    auth?: HttpAuthEvidence,
+  ): { principal: string } | { denied: DenialCode } {
     const encoded = auth?.authorization?.startsWith("Nostr ")
       ? auth.authorization.slice("Nostr ".length)
       : null;
