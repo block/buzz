@@ -9,13 +9,16 @@ use crate::managed_agents::{
     AcpAvailabilityStatus, AcpRuntimeCatalogEntry, AuthStatus, CommandAvailabilityInfo,
 };
 
+mod agent_args;
 mod runtime_metadata;
 
+pub use agent_args::normalize_agent_args;
 pub(crate) use runtime_metadata::KnownAcpRuntime;
 
 const GOOSE_AVATAR_URL: &str = "https://goose-docs.ai/img/logo_dark.png";
 const CLAUDE_CODE_AVATAR_URL: &str = "https://anthropic.gallerycdn.vsassets.io/extensions/anthropic/claude-code/2.1.77/1773707456892/Microsoft.VisualStudio.Services.Icons.Default";
 const CODEX_AVATAR_URL: &str = "https://openai.gallerycdn.vsassets.io/extensions/openai/chatgpt/26.5313.41514/1773706730621/Microsoft.VisualStudio.Services.Icons.Default";
+const QODER_AVATAR_URL: &str = "https://github.com/QoderAI.png?size=128";
 const BUZZ_AGENT_AVATAR_URL: &str =
     "https://raw.githubusercontent.com/block/buzz/refs/heads/main/crates/buzz-agent/buzz-agent.png";
 
@@ -161,6 +164,39 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         login_hint: Some("Run `codex login` to authenticate."),
         // Verified: `codex login status` exits 0 when logged in, non-zero otherwise.
         auth_probe_args: Some(&["codex", "login", "status"]),
+    },
+    KnownAcpRuntime {
+        id: "qoder",
+        label: "Qoder",
+        commands: &["qodercli"],
+        aliases: &["qoder-cli"],
+        avatar_url: QODER_AVATAR_URL,
+        mcp_command: None,
+        mcp_hooks: false,
+        underlying_cli: Some("qodercli"),
+        cli_install_commands: &["curl -fsSL https://qoder.com/install | bash"],
+        cli_install_commands_windows: &["powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"irm https://qoder.com/install.ps1 | iex\""],
+        adapter_install_commands: &[],
+        cli_install_instructions_url: "https://docs.qoder.com/en/cli/quick-start",
+        adapter_install_instructions_url: "",
+        cli_install_hint: "Buzz requires the Qoder CLI.",
+        adapter_install_hint: "",
+        skill_dir: Some(".qoder/skills"),
+        supports_acp_model_switching: true,
+        model_env_var: None,
+        provider_env_var: None,
+        provider_locked: true,
+        default_env: &[],
+        config_file_path: Some("~/.qoder/settings.json"),
+        config_file_format: Some("json"),
+        supports_acp_native_config: false,
+        thinking_env_var: None,
+        max_tokens_env_var: None,
+        context_limit_env_var: None,
+        required_normalized_fields: &[],
+        login_hint: Some("Run `qodercli login` to authenticate."),
+        // Qoder always exits 0; the JSON `logged_in` field carries auth state.
+        auth_probe_args: Some(&["qodercli", "status", "-o", "json"]),
     },
     KnownAcpRuntime {
         id: "buzz-agent",
@@ -345,38 +381,6 @@ pub fn effective_agent_command(
 
 mod overrides;
 pub use overrides::{apply_agent_command_update, create_time_agent_command_override};
-
-fn default_agent_args(command: &str) -> Option<Vec<String>> {
-    match normalize_command_identity(command).as_str() {
-        "goose" => Some(vec!["acp".to_string()]),
-        "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
-        | "claudecode" | "buzz-agent" => Some(Vec::new()),
-        _ => None,
-    }
-}
-
-pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<String> {
-    let normalized = agent_args
-        .into_iter()
-        .map(|arg| arg.trim().to_string())
-        .filter(|arg| !arg.is_empty())
-        .collect::<Vec<_>>();
-
-    let Some(default_args) = default_agent_args(command) else {
-        return normalized;
-    };
-
-    if normalized.is_empty() {
-        return default_args;
-    }
-
-    if normalized.len() == 1 && normalized[0].eq_ignore_ascii_case("acp") && default_args.is_empty()
-    {
-        return default_args;
-    }
-
-    normalized
-}
 
 fn profile_target_dirs(root: &Path) -> [PathBuf; 2] {
     if cfg!(debug_assertions) {
@@ -941,6 +945,7 @@ fn probe_auth_status(binary_path: &Path, probe_args: &[&str]) -> AuthStatus {
         if let Some(mut pipe) = stdout_pipe {
             let _ = pipe.read_to_end(&mut buf);
         }
+        buf
     });
     let stderr_thread = std::thread::spawn(move || {
         let mut buf = Vec::new();
@@ -992,10 +997,10 @@ fn probe_auth_status(binary_path: &Path, probe_args: &[&str]) -> AuthStatus {
     };
 
     let _ = wait_thread.join();
-    let _ = stdout_thread.join();
+    let stdout_bytes = stdout_thread.join().unwrap_or_default();
     let stderr_bytes = stderr_thread.join().unwrap_or_default();
 
-    match cli_probe::classify_probe_output(&stderr_bytes, exit_status.success()) {
+    match cli_probe::classify_probe_output(&stdout_bytes, &stderr_bytes, exit_status.success()) {
         cli_probe::ProbeOutcome::LoggedIn => AuthStatus::LoggedIn,
         cli_probe::ProbeOutcome::LoggedOut => AuthStatus::LoggedOut,
         cli_probe::ProbeOutcome::ConfigInvalid { stderr_excerpt } => AuthStatus::ConfigInvalid {

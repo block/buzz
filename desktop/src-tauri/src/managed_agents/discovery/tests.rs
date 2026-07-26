@@ -5,10 +5,10 @@ use super::{
     apply_agent_command_update, classify_runtime, codex_adapter_availability,
     codex_adapter_is_outdated, create_time_agent_command_override, default_agent_command,
     effective_agent_command, find_nvm_default_bin, find_via_login_shell,
-    is_login_shell_path_uninit, is_safe_nvm_tag, managed_agent_avatar_url, normalize_agent_args,
-    parse_semver_tag, probe_codex_acp_major_version, record_agent_command,
-    refresh_login_shell_path, BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL,
-    GOOSE_AVATAR_URL,
+    is_login_shell_path_uninit, is_safe_nvm_tag, managed_agent_avatar_url, parse_semver_tag,
+    probe_codex_acp_major_version, record_agent_command, refresh_login_shell_path,
+    BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL, GOOSE_AVATAR_URL,
+    QODER_AVATAR_URL,
 };
 use crate::managed_agents::AcpAvailabilityStatus;
 
@@ -37,6 +37,10 @@ fn resolves_known_avatar_for_command_paths_and_aliases() {
         managed_agent_avatar_url("/usr/local/bin/claude-code-acp"),
         Some(CLAUDE_CODE_AVATAR_URL.to_string())
     );
+    assert_eq!(
+        managed_agent_avatar_url("/Users/example/.local/bin/qodercli"),
+        Some(QODER_AVATAR_URL.to_string())
+    );
 }
 
 #[test]
@@ -49,27 +53,6 @@ fn default_agent_command_resolves_bundled_buzz_agent() {
     // The create-path default must be the bundled buzz-agent, never the
     // bare `goose` that isn't on PATH on a stock Windows install.
     assert_eq!(default_agent_command(), "buzz-agent");
-    // And buzz-agent takes no `acp` arg — confirm no arg leakage from the default.
-    assert_eq!(
-        normalize_agent_args(&default_agent_command(), vec!["acp".into()]),
-        Vec::<String>::new()
-    );
-}
-
-#[test]
-fn normalizes_claude_and_codex_args_to_empty() {
-    assert_eq!(
-        normalize_agent_args("claude-agent-acp", vec!["acp".into()]),
-        Vec::<String>::new()
-    );
-    assert_eq!(
-        normalize_agent_args("claude-code-acp", vec!["acp".into()]),
-        Vec::<String>::new()
-    );
-    assert_eq!(
-        normalize_agent_args("codex-acp", vec!["acp".into()]),
-        Vec::<String>::new()
-    );
 }
 
 #[test]
@@ -81,18 +64,6 @@ fn resolves_buzz_agent_avatar() {
     assert_eq!(
         managed_agent_avatar_url("/usr/local/bin/buzz-agent"),
         Some(BUZZ_AGENT_AVATAR_URL.to_string())
-    );
-}
-
-#[test]
-fn normalizes_buzz_agent_args_to_empty() {
-    assert_eq!(
-        normalize_agent_args("buzz-agent", Vec::new()),
-        Vec::<String>::new()
-    );
-    assert_eq!(
-        normalize_agent_args("buzz-agent", vec!["acp".into()]),
-        Vec::<String>::new()
     );
 }
 
@@ -1074,34 +1045,28 @@ fn test_command_basenames_dotted_name_no_extra_candidates() {
 
 // ── Phase B: cli_install_commands_for_os ────────────────────────────────────
 
-/// Claude and Codex have non-empty default cli_install_commands (install.sh).
+/// Every external vendor CLI has a non-empty default install command.
 #[test]
-fn test_claude_and_codex_have_cli_install_commands() {
-    let claude = super::known_acp_runtime_exact("claude").unwrap();
-    let codex = super::known_acp_runtime_exact("codex").unwrap();
-    assert!(
-        !claude.cli_install_commands.is_empty(),
-        "claude must have cli install commands"
-    );
-    assert!(
-        !codex.cli_install_commands.is_empty(),
-        "codex must have cli install commands"
-    );
+fn test_vendor_runtimes_have_cli_install_commands() {
+    for runtime_id in ["claude", "codex", "qoder"] {
+        let runtime = super::known_acp_runtime_exact(runtime_id).unwrap();
+        assert!(
+            !runtime.cli_install_commands.is_empty(),
+            "{runtime_id} must have cli install commands"
+        );
+    }
 }
 
-/// cli_install_commands_for_os returns a non-empty slice for claude and codex.
+/// cli_install_commands_for_os returns a non-empty slice for every vendor CLI.
 #[test]
-fn test_cli_install_commands_for_os_non_empty_for_claude_codex() {
-    let claude = super::known_acp_runtime_exact("claude").unwrap();
-    let codex = super::known_acp_runtime_exact("codex").unwrap();
-    assert!(
-        !claude.cli_install_commands_for_os().is_empty(),
-        "claude must have install commands on every platform"
-    );
-    assert!(
-        !codex.cli_install_commands_for_os().is_empty(),
-        "codex must have install commands on every platform"
-    );
+fn test_cli_install_commands_for_os_non_empty_for_vendor_runtimes() {
+    for runtime_id in ["claude", "codex", "qoder"] {
+        let runtime = super::known_acp_runtime_exact(runtime_id).unwrap();
+        assert!(
+            !runtime.cli_install_commands_for_os().is_empty(),
+            "{runtime_id} must have install commands on every platform"
+        );
+    }
 }
 
 /// On Windows, every vendor CLI selects its official PowerShell installer.
@@ -1111,11 +1076,13 @@ fn test_cli_install_commands_for_os_selects_powershell_on_windows() {
     let claude = super::known_acp_runtime_exact("claude").unwrap();
     let codex = super::known_acp_runtime_exact("codex").unwrap();
     let goose = super::known_acp_runtime_exact("goose").unwrap();
+    let qoder = super::known_acp_runtime_exact("qoder").unwrap();
 
     // Windows must select the PowerShell commands, not the curl|bash ones.
     let claude_cmds = claude.cli_install_commands_for_os();
     let codex_cmds = codex.cli_install_commands_for_os();
     let goose_cmds = goose.cli_install_commands_for_os();
+    let qoder_cmds = qoder.cli_install_commands_for_os();
 
     assert_ne!(
         claude_cmds, claude.cli_install_commands,
@@ -1124,6 +1091,10 @@ fn test_cli_install_commands_for_os_selects_powershell_on_windows() {
     assert_ne!(
         codex_cmds, codex.cli_install_commands,
         "Windows must NOT use the default curl|bash commands for codex"
+    );
+    assert_ne!(
+        qoder_cmds, qoder.cli_install_commands,
+        "Windows must NOT use the default curl|bash commands for qoder"
     );
     assert_eq!(goose_cmds, goose.cli_install_commands_windows);
 
@@ -1135,6 +1106,12 @@ fn test_cli_install_commands_for_os_selects_powershell_on_windows() {
     assert!(
         codex_cmds.iter().any(|c| c.contains("powershell")),
         "codex Windows install must use powershell; got: {codex_cmds:?}"
+    );
+    assert!(
+        qoder_cmds
+            .iter()
+            .any(|c| c.contains("qoder.com/install.ps1")),
+        "Qoder Windows install must use install.ps1; got: {qoder_cmds:?}"
     );
     assert!(
         goose_cmds.iter().any(|c| c.contains("download_cli.ps1")),

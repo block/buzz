@@ -175,7 +175,7 @@ impl std::fmt::Display for PermissionMode {
     about = "Query available models from the configured agent"
 )]
 pub struct ModelsArgs {
-    /// Agent binary to spawn (e.g. "goose", "claude-agent-acp", "codex-acp").
+    /// Agent binary to spawn (e.g. "goose", "claude-agent-acp", "codex-acp", "qodercli").
     #[command(flatten)]
     pub agent: AuthAgentArgs,
 
@@ -187,7 +187,7 @@ pub struct ModelsArgs {
 /// Shared agent-spawn flags for lightweight local ACP helper subcommands.
 #[derive(Debug, Parser)]
 pub struct AuthAgentArgs {
-    /// Agent binary to spawn (e.g. "goose", "claude-agent-acp", "codex-acp").
+    /// Agent binary to spawn (e.g. "goose", "claude-agent-acp", "codex-acp", "qodercli").
     #[arg(long, env = "BUZZ_ACP_AGENT_COMMAND", default_value = "goose")]
     pub agent_command: String,
 
@@ -617,6 +617,7 @@ pub(crate) fn normalize_agent_command_identity(command: &str) -> String {
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_agent_command_identity(command).as_str() {
         "goose" => Some(vec!["acp".to_string()]),
+        "qoder" | "qoder-cli" | "qodercli" => Some(vec!["--acp".to_string()]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
         _ => None,
@@ -691,11 +692,10 @@ pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<Strin
         return default_args;
     }
 
-    // Older callers relied on the Goose-specific default even for runtimes like
-    // Codex and Claude. Treat that legacy fallback as "no args" for zero-arg
-    // providers so desktop- and env-based launches behave the same way.
-    if normalized.len() == 1 && normalized[0].eq_ignore_ascii_case("acp") && default_args.is_empty()
-    {
+    // Older callers relied on the Goose-specific default even for other
+    // runtimes. Replace that legacy fallback with the selected runtime's
+    // canonical ACP arguments.
+    if normalized.len() == 1 && normalized[0].eq_ignore_ascii_case("acp") {
         return default_args;
     }
 
@@ -1438,6 +1438,19 @@ mod tests {
     fn normalizes_goose_args_to_acp() {
         assert_eq!(normalize_agent_args("goose", Vec::new()), vec!["acp"]);
         assert_eq!(normalize_agent_args("goose", vec!["".into()]), vec!["acp"]);
+    }
+
+    #[test]
+    fn normalizes_qoder_args_to_acp_flag() {
+        assert_eq!(normalize_agent_args("qodercli", Vec::new()), vec!["--acp"]);
+        assert_eq!(
+            normalize_agent_args("/usr/local/bin/qodercli", vec!["acp".into()]),
+            vec!["--acp"]
+        );
+        assert_eq!(
+            normalize_agent_args("Qoder CLI", vec!["--acp".into()]),
+            vec!["--acp"]
+        );
     }
 
     #[test]

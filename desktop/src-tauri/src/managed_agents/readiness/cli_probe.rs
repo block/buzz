@@ -24,7 +24,7 @@ pub(crate) fn augmented_path() -> Option<String> {
 /// Outcome of a CLI login-status probe.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum ProbeOutcome {
-    /// The CLI reported a successful login (exit 0).
+    /// The CLI reported a successful login.
     LoggedIn,
     /// The CLI exited non-zero without a config-parse signal — treat as
     /// "not authenticated."
@@ -66,8 +66,7 @@ pub(crate) fn login_probe(
     crate::util::configure_no_window(&mut command);
 
     match command.output() {
-        Ok(o) if o.status.success() => ProbeOutcome::LoggedIn,
-        Ok(o) => classify_probe_output(&o.stderr, false),
+        Ok(o) => classify_probe_output(&o.stdout, &o.stderr, o.status.success()),
         Err(_) => ProbeOutcome::LoggedOut,
     }
 }
@@ -75,10 +74,25 @@ pub(crate) fn login_probe(
 /// Classify collected probe output into a `ProbeOutcome`.
 ///
 /// Shared between `login_probe` (which has the full `Output`) and the
-/// process-level timeout path in `probe_auth_status` (which drains stderr
-/// on a background thread and collects it separately).
-pub(crate) fn classify_probe_output(stderr_bytes: &[u8], exit_success: bool) -> ProbeOutcome {
+/// process-level timeout path in `probe_auth_status` (which drains stdout and
+/// stderr on background threads and collects them separately).
+pub(crate) fn classify_probe_output(
+    stdout_bytes: &[u8],
+    stderr_bytes: &[u8],
+    exit_success: bool,
+) -> ProbeOutcome {
     if exit_success {
+        // Some CLIs (notably Qoder) return a successful process exit even
+        // when authentication is absent, and expose the real state as JSON.
+        // Honor that structured signal when present while preserving the
+        // exit-code contract for every existing probe.
+        if serde_json::from_slice::<serde_json::Value>(stdout_bytes)
+            .ok()
+            .and_then(|value| value.get("logged_in")?.as_bool())
+            == Some(false)
+        {
+            return ProbeOutcome::LoggedOut;
+        }
         return ProbeOutcome::LoggedIn;
     }
     let stderr = String::from_utf8_lossy(stderr_bytes);
@@ -99,6 +113,22 @@ pub(crate) fn classify_probe_output(stderr_bytes: &[u8], exit_success: bool) -> 
 #[cfg(test)]
 mod tests {
     use super::{ProbeOutcome, CONFIG_PARSE_SIGNALS};
+
+    #[test]
+    fn successful_json_probe_honors_logged_in_false() {
+        assert_eq!(
+            super::classify_probe_output(br#"{"logged_in":false}"#, b"", true),
+            ProbeOutcome::LoggedOut
+        );
+    }
+
+    #[test]
+    fn successful_json_probe_honors_logged_in_true() {
+        assert_eq!(
+            super::classify_probe_output(br#"{"logged_in":true}"#, b"", true),
+            ProbeOutcome::LoggedIn
+        );
+    }
 
     #[cfg(unix)]
     #[test]

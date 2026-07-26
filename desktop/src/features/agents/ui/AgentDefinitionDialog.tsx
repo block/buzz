@@ -503,7 +503,7 @@ export function AgentDefinitionDialog({
     modelFieldVisible,
     open,
     // Gate provider by runtime: runtimes that don't support LLM provider
-    // selection (codex, claude) must not inherit the global provider — doing
+    // selection (codex, claude, qoder) must not inherit the global provider — doing
     // so causes them to discover models from the wrong provider.
     provider: runtimeSupportsLlmProviderSelection(runtime)
       ? effectiveProvider

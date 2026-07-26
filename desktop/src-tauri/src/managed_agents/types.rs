@@ -18,8 +18,9 @@ pub struct AgentDefinition {
     pub display_name: String,
     pub avatar_url: Option<String>,
     pub system_prompt: String,
-    /// Preferred ACP runtime ID (e.g., 'goose', 'claude', 'codex'). Determines which agent binary
-    /// Buzz spawns. When deploying from this persona, this runtime is pre-selected in the UI.
+    /// Preferred ACP runtime ID (e.g., 'goose', 'claude', 'codex', 'qoder'). Determines which
+    /// agent binary Buzz spawns. When deploying from this persona, this runtime is pre-selected
+    /// in the UI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
     /// Opaque, harness-specific model identifier string. Format depends on the runtime and its LLM

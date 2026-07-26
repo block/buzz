@@ -120,5 +120,17 @@ mod tests {
         );
         assert!(codex.adapter_install_instructions_url.contains("codex-acp"));
         assert!(codex.cli_install_hint.contains("desktop app alone"));
+
+        let qoder = known_acp_runtime_exact("qoder").unwrap();
+        assert_eq!(
+            qoder.cli_install_instructions_url,
+            "https://docs.qoder.com/en/cli/quick-start"
+        );
+        assert!(qoder.adapter_install_commands.is_empty());
+        assert_eq!(
+            qoder.auth_probe_args,
+            Some(&["qodercli", "status", "-o", "json"][..])
+        );
+        assert_eq!(qoder.skill_dir, Some(".qoder/skills"));
     }
 }

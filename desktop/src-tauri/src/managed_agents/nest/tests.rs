@@ -122,7 +122,12 @@ fn ensure_nest_creates_skill_file() {
     // On unix, harness-specific symlinks should resolve to the canonical dir.
     #[cfg(unix)]
     {
-        for dir in [".goose/skills", ".claude/skills", ".codex/skills"] {
+        for dir in [
+            ".goose/skills",
+            ".claude/skills",
+            ".codex/skills",
+            ".qoder/skills",
+        ] {
             let link = root.join(dir).join("buzz-cli");
             assert!(
                 link.symlink_metadata().unwrap().file_type().is_symlink(),
@@ -168,6 +173,8 @@ fn ensure_nest_skill_dir_has_700_permissions() {
         ".claude/skills",
         ".codex",
         ".codex/skills",
+        ".qoder",
+        ".qoder/skills",
     ] {
         let path = root.join(dir);
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
@@ -253,7 +260,12 @@ fn ensure_skill_symlinks_are_idempotent() {
     // Second call should succeed without errors.
     ensure_nest_at(&root).unwrap();
     // All symlinks still valid and point to relative targets.
-    for dir in [".goose/skills", ".claude/skills", ".codex/skills"] {
+    for dir in [
+        ".goose/skills",
+        ".claude/skills",
+        ".codex/skills",
+        ".qoder/skills",
+    ] {
         let link = root.join(dir).join("buzz-cli");
         assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
         assert!(

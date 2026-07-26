@@ -9,7 +9,7 @@ Buzz Relay ──WS──→ buzz-acp ──stdio──→ Your Agent
                                        (send_message, etc.)
 ```
 
-Supports any agent that speaks [ACP](https://agentclientprotocol.com/) over stdio: **goose**, **codex** (via [codex-acp](https://github.com/agentclientprotocol/codex-acp)), and **claude code** (via [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)).
+Supports any agent that speaks [ACP](https://agentclientprotocol.com/) over stdio: **goose**, **codex** (via [codex-acp](https://github.com/agentclientprotocol/codex-acp)), **claude code** (via [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)), and **Qoder**.
 
 ## Prerequisites
 
@@ -97,6 +97,26 @@ buzz-acp
 
 Older installs that still expose `claude-code-acp` are also supported. `buzz-acp`
 treats both Claude ACP command names as the same zero-arg runtime.
+
+## Running with Qoder
+
+[Qoder CLI](https://docs.qoder.com/en/cli/acp) implements ACP directly, so no
+adapter is required.
+
+```bash
+# Install and authenticate Qoder CLI first.
+curl -fsSL https://qoder.com/install | bash
+qodercli login
+
+# Run through Qoder's native ACP server.
+export BUZZ_ACP_AGENT_COMMAND="qodercli"
+export BUZZ_ACP_AGENT_ARGS="--acp"
+
+buzz-acp
+```
+
+The harness also normalizes the legacy default argument `acp` to Qoder's
+required `--acp` flag.
 
 ## Configuration
 

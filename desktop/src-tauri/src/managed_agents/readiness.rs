@@ -244,9 +244,8 @@ impl AgentReadiness {
 ///   - `openai` → `OPENAI_COMPAT_API_KEY`
 ///   - `databricks` / `databricks_v2` → `DATABRICKS_HOST` (token optional —
 ///     OAuth PKCE is the fallback)
-/// * **claude**: a successful `claude auth status` probe.
-/// * **codex**: a successful `codex login status` probe (checks the codex
-///   credential store — NOT `OPENAI_API_KEY`).
+/// * **CLI-login runtimes**: the runtime catalog's authentication probe must
+///   succeed (for example Claude, Codex, and Qoder).
 /// * **unknown / custom command**: always `Ready` (no requirements known).
 ///
 /// Databricks note: `DATABRICKS_TOKEN` is `.unwrap_or_default()` in
@@ -283,13 +282,14 @@ fn collect_missing_requirements(
             let file_cfg = read_goose_file_config();
             goose_requirements(effective, file_cfg.as_ref())
         }
-        "claude" => cli_login::requirements(
-            &["claude", "auth", "status"],
-            "complete Claude Code authentication by running the Claude CLI",
-            rt,
-        ),
-        "codex" => cli_login::requirements(&["codex", "login", "status"], "run `codex login`", rt),
-        _ => vec![],
+        _ => match rt.auth_probe_args {
+            Some(probe_args) => cli_login::requirements(
+                probe_args,
+                rt.login_hint.unwrap_or("Complete CLI authentication."),
+                rt,
+            ),
+            None => vec![],
+        },
     }
 }
 

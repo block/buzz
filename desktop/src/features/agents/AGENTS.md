@@ -72,7 +72,7 @@ with a TypeScript lookup table or an id comparison in a component.
    touching this flow or the shared renderer.
 8. **Omit the Model control only after a confirmed successful empty
    discovery on an optional-model harness.** When the field model marks model
-   as `acpNative` (Claude Code / Codex), `shouldRenderModelControl` hides the
+   as `acpNative` (Claude Code / Codex / Qoder), `shouldRenderModelControl` hides the
    picker while discovery is in flight and after IPC resolves with no usable
    options (`modelDiscoverySuccessfulEmpty` / `isSuccessfulEmptyDiscovery`).
    A thrown or unavailable discovery keeps the control so #2246 failure UI can
