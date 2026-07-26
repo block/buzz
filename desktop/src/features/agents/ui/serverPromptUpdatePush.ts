@@ -21,22 +21,56 @@ export type ServerPromptUpdateSaved = {
   provider: string | null | undefined;
 };
 
+/**
+ * The queue input for an edit, or null when there is nothing to send.
+ *
+ * Pure, and exported so the normalization rules are testable without Tauri.
+ * Returns null for a non-server agent and for an edit whose three fields are
+ * all blank: the spawner drops an all-empty update without storing or acking
+ * it, so queueing one would leave an entry that can never be confirmed and is
+ * resent (restarting the container) every few minutes forever.
+ */
+export function promptUpdateFrame(
+  context: ServerAgentEditContext | null,
+  saved: ServerPromptUpdateSaved,
+): {
+  spawnerPubkey: string;
+  specSlug: string;
+  agentPubkey: string;
+  prompt: {
+    system_prompt: string | undefined;
+    model: string | undefined;
+    provider: string | undefined;
+  };
+} | null {
+  if (!context) return null;
+  const prompt = {
+    system_prompt: saved.systemPrompt?.trim() || undefined,
+    model: saved.model?.trim() || undefined,
+    provider: saved.provider?.trim() || undefined,
+  };
+  if (!prompt.system_prompt && !prompt.model && !prompt.provider) return null;
+  return {
+    spawnerPubkey: context.spawnerPubkey,
+    specSlug: context.specSlug,
+    agentPubkey: context.agentPubkey,
+    prompt,
+  };
+}
+
+/** Whether a dialog's `unknown` submit result counts as a successful save. */
+export function shouldPushAfterSubmit(submitResult: unknown): boolean {
+  return submitResult !== false;
+}
+
 export async function pushServerPromptUpdate(
   context: ServerAgentEditContext | null,
   saved: ServerPromptUpdateSaved,
 ): Promise<void> {
-  if (!context) return;
+  const frame = promptUpdateFrame(context, saved);
+  if (!frame) return;
   try {
-    await enqueueSpawnerPromptUpdate({
-      spawnerPubkey: context.spawnerPubkey,
-      specSlug: context.specSlug,
-      agentPubkey: context.agentPubkey,
-      prompt: {
-        system_prompt: saved.systemPrompt?.trim() || undefined,
-        model: saved.model?.trim() || undefined,
-        provider: saved.provider?.trim() || undefined,
-      },
-    });
+    await enqueueSpawnerPromptUpdate(frame);
   } catch (error) {
     console.debug("[server-prompt-update-push] enqueue failed:", error);
   }
@@ -54,7 +88,7 @@ export async function pushServerPromptUpdateAfterSubmit(
   submitResult: unknown,
   saved: ServerPromptUpdateSaved,
 ): Promise<void> {
-  if (submitResult === false) return;
+  if (!shouldPushAfterSubmit(submitResult)) return;
   await pushServerPromptUpdate(context, saved);
 }
 

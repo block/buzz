@@ -14,8 +14,14 @@ export type ServerAgentEditState = {
   context: ServerAgentEditContext | null;
   /** Friendly runtime name advertised by that spawner, when it advertised one. */
   runtime: string | undefined;
-  /** A prompt edit is out but not yet confirmed by the spawner. */
-  pending: boolean;
+  /**
+   * A prompt edit that is out but not yet confirmed by the spawner, or null.
+   *
+   * `delivered` is false only when the send itself failed — the one case the
+   * UI may describe as the server being unreachable; awaiting the spawner's
+   * status echo is the normal path.
+   */
+  pendingUpdate: { delivered: boolean } | null;
   /** Provider/model catalog, or null when the spawner advertised none. */
   ai: { providers: string[]; models: string[] } | null;
   providerOptions: PersonaDropdownOption[];
@@ -55,7 +61,7 @@ export function useServerAgentEditContext(input: {
   return {
     context,
     runtime: runtimeLabel(announcement?.runtime),
-    pending: promptUpdate?.pending ?? false,
+    pendingUpdate: promptUpdate,
     ai,
     providerOptions: (ai?.providers ?? []).map((id) => ({
       label: id,
