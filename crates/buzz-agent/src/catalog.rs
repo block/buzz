@@ -49,6 +49,10 @@ pub const DATABRICKS_V2_KNOWN_MODELS: &[&str] =
 /// Extracting this as a pure function makes the split testable without
 /// spawning an async runtime or making network calls.
 pub fn discovery_failure_fallback(provider: Provider, configured_model: &str) -> Vec<ModelEntry> {
+    // `resolve_model` does not trim, so a padded `DATABRICKS_MODEL` reaches here:
+    // normalize once, or the dedupe below misses and the picker lists the model
+    // twice (once padded, once from the known slate).
+    let configured_model = configured_model.trim();
     let configured = ModelEntry {
         id: configured_model.to_string(),
         name: configured_model.to_string(),
@@ -56,7 +60,7 @@ pub fn discovery_failure_fallback(provider: Provider, configured_model: &str) ->
     match provider {
         Provider::DatabricksV2 => {
             let mut entries = Vec::with_capacity(DATABRICKS_V2_KNOWN_MODELS.len() + 1);
-            if !configured_model.trim().is_empty() {
+            if !configured_model.is_empty() {
                 entries.push(configured);
             }
             entries.extend(
@@ -606,7 +610,21 @@ mod tests {
 
     #[test]
     fn v2_discovery_failure_fallback_tolerates_blank_configured_model() {
-        let result = discovery_failure_fallback(Provider::DatabricksV2, "");
+        for configured in ["", "   "] {
+            let result = discovery_failure_fallback(Provider::DatabricksV2, configured);
+            let ids: Vec<&str> = result.iter().map(|m| m.id.as_str()).collect();
+            assert_eq!(ids, DATABRICKS_V2_KNOWN_MODELS.to_vec());
+        }
+    }
+
+    #[test]
+    fn v2_discovery_failure_fallback_dedupes_a_padded_configured_model() {
+        // `DATABRICKS_MODEL=" databricks-gpt-5-5 "` reaches here untrimmed, and an
+        // untrimmed comparison would list the model twice — once padded, once from
+        // the known slate.
+        let configured = DATABRICKS_V2_KNOWN_MODELS[0];
+        let result =
+            discovery_failure_fallback(Provider::DatabricksV2, &format!("  {configured} "));
         let ids: Vec<&str> = result.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(ids, DATABRICKS_V2_KNOWN_MODELS.to_vec());
     }

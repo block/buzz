@@ -10,7 +10,7 @@ use super::agent_model_process::run_agent_models_command;
 #[cfg(test)]
 use super::agent_models_env::env_value;
 use super::agent_models_env::{
-    effective_discovery_provider, env_or_process_value, redaction_env_with_value,
+    effective_discovery_provider, env_or_process_value, redaction_env_with_value, DiscoveryProvider,
 };
 use super::agent_update_rollback::{rollback_failed_agent_update, AgentUpdateRollback};
 
@@ -109,7 +109,7 @@ pub async fn get_agent_models(
         effective_discovery_provider(saved_provider.as_deref(), provider_env_var, &merged_env);
     if let Some(models) = discover_openai_compatible_models(
         &state.http_client,
-        effective_provider.as_deref(),
+        &effective_provider,
         &merged_env,
         persisted_model.clone(),
     )
@@ -120,7 +120,7 @@ pub async fn get_agent_models(
 
     if let Some(models) = discover_anthropic_models(
         &state.http_client,
-        effective_provider.as_deref(),
+        &effective_provider,
         &merged_env,
         persisted_model.clone(),
     )
@@ -131,7 +131,7 @@ pub async fn get_agent_models(
 
     if let Some(models) = discover_databricks_models(
         &state.http_client,
-        effective_provider.as_deref(),
+        &effective_provider,
         &merged_env,
         persisted_model.clone(),
     )
@@ -302,7 +302,7 @@ pub async fn discover_agent_models(
 
     if let Some(models) = discover_openai_compatible_models(
         &state.http_client,
-        effective_provider.as_deref(),
+        &effective_provider,
         &merged_env,
         None,
     )
@@ -311,24 +311,16 @@ pub async fn discover_agent_models(
         return Ok(models);
     }
 
-    if let Some(models) = discover_anthropic_models(
-        &state.http_client,
-        effective_provider.as_deref(),
-        &merged_env,
-        None,
-    )
-    .await?
+    if let Some(models) =
+        discover_anthropic_models(&state.http_client, &effective_provider, &merged_env, None)
+            .await?
     {
         return Ok(models);
     }
 
-    if let Some(models) = discover_databricks_models(
-        &state.http_client,
-        effective_provider.as_deref(),
-        &merged_env,
-        None,
-    )
-    .await?
+    if let Some(models) =
+        discover_databricks_models(&state.http_client, &effective_provider, &merged_env, None)
+            .await?
     {
         return Ok(models);
     }
@@ -489,20 +481,23 @@ fn normalize_openai_compatible_models(
 
 async fn discover_openai_compatible_models(
     client: &reqwest::Client,
-    provider: Option<&str>,
+    provider: &DiscoveryProvider,
     env: &BTreeMap<String, String>,
     selected_model: Option<String>,
 ) -> Result<Option<AgentModelsResponse>, String> {
-    let relay_mesh = provider.map(str::trim) == Some(crate::managed_agents::RELAY_MESH_PROVIDER_ID);
-    if !relay_mesh && !is_openai_compatible_provider(provider) {
+    let relay_mesh =
+        provider.as_deref().map(str::trim) == Some(crate::managed_agents::RELAY_MESH_PROVIDER_ID);
+    if !relay_mesh && !is_openai_compatible_provider(provider.as_deref()) {
         return Ok(None);
     }
 
     let api_key = if relay_mesh {
         crate::managed_agents::RELAY_MESH_API_KEY_PLACEHOLDER.to_string()
     } else {
-        env_or_process_value(env, "OPENAI_COMPAT_API_KEY")
-            .ok_or_else(|| "config: OPENAI_COMPAT_API_KEY required".to_string())?
+        match provider.required_env(env, "OPENAI_COMPAT_API_KEY")? {
+            Some(api_key) => api_key,
+            None => return Ok(None),
+        }
     };
     let redaction_env = redaction_env_with_value(env, "OPENAI_COMPAT_API_KEY", &api_key);
     let url = if relay_mesh {
@@ -527,13 +522,13 @@ async fn discover_openai_compatible_models(
         .json::<OpenAiModelListResponse>()
         .await
         .map_err(|error| format!("OpenAI model discovery response parse failed: {error}"))?;
-    let models = normalize_openai_compatible_models(response, provider);
+    let models = normalize_openai_compatible_models(response, provider.as_deref());
     if models.is_empty() {
         return Err("OpenAI model discovery returned no compatible text models".to_string());
     }
 
     Ok(Some(AgentModelsResponse {
-        agent_name: provider.unwrap_or("openai").trim().to_string(),
+        agent_name: provider.as_deref().unwrap_or("openai").trim().to_string(),
         agent_version: "models-api".to_string(),
         models,
         agent_default_model: None,
@@ -638,16 +633,18 @@ async fn fetch_anthropic_model_page(
 
 async fn discover_anthropic_models(
     client: &reqwest::Client,
-    provider: Option<&str>,
+    provider: &DiscoveryProvider,
     env: &BTreeMap<String, String>,
     selected_model: Option<String>,
 ) -> Result<Option<AgentModelsResponse>, String> {
-    if !is_anthropic_provider(provider) {
+    if !is_anthropic_provider(provider.as_deref()) {
         return Ok(None);
     }
 
-    let api_key = env_or_process_value(env, "ANTHROPIC_API_KEY")
-        .ok_or_else(|| "config: ANTHROPIC_API_KEY required".to_string())?;
+    let api_key = match provider.required_env(env, "ANTHROPIC_API_KEY")? {
+        Some(api_key) => api_key,
+        None => return Ok(None),
+    };
     let redaction_env = redaction_env_with_value(env, "ANTHROPIC_API_KEY", &api_key);
     let url = anthropic_models_url_for_discovery(env);
     let mut models = Vec::new();
@@ -673,7 +670,11 @@ async fn discover_anthropic_models(
     }
 
     Ok(Some(AgentModelsResponse {
-        agent_name: provider.unwrap_or("anthropic").trim().to_string(),
+        agent_name: provider
+            .as_deref()
+            .unwrap_or("anthropic")
+            .trim()
+            .to_string(),
         agent_version: "models-api".to_string(),
         models,
         agent_default_model: None,
@@ -715,11 +716,11 @@ fn databricks_agent_provider(provider: &str) -> buzz_agent_pkg::config::Provider
 
 async fn discover_databricks_models(
     _client: &reqwest::Client,
-    provider: Option<&str>,
+    provider: &DiscoveryProvider,
     env: &BTreeMap<String, String>,
     selected_model: Option<String>,
 ) -> Result<Option<AgentModelsResponse>, String> {
-    let provider_str = match provider {
+    let provider_str = match provider.as_deref() {
         Some(p) if is_databricks_provider(Some(p)) => p,
         _ => return Ok(None),
     };

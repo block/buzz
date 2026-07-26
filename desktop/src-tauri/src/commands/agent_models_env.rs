@@ -37,6 +37,45 @@ pub(super) fn redaction_env_with_value(
     redaction_env
 }
 
+/// A provider resolved for discovery, plus how it was resolved.
+///
+/// The distinction decides what a missing credential means. An explicit provider
+/// is an assertion — the record or the dialog says this agent runs on Anthropic,
+/// so a missing `ANTHROPIC_API_KEY` is a real misconfiguration and the user
+/// should see it. An inferred provider is only a guess read off the environment,
+/// and a wrong guess must not replace a working catalog with an error: a
+/// `GOOSE_PROVIDER=anthropic` export (goose's documented way to pick a provider,
+/// with the key in goose's own keyring rather than Buzz's env) would otherwise
+/// turn the subprocess catalog into `config: ANTHROPIC_API_KEY required`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct DiscoveryProvider {
+    value: Option<String>,
+    inferred: bool,
+}
+
+impl DiscoveryProvider {
+    pub(super) fn as_deref(&self) -> Option<&str> {
+        self.value.as_deref()
+    }
+
+    /// Read a credential the provider's discovery cannot run without.
+    ///
+    /// `Ok(None)` means "not configured, and the provider was only inferred" —
+    /// the caller must fall through to the `buzz-acp models` subprocess rather
+    /// than surface an error.
+    pub(super) fn required_env(
+        &self,
+        env: &BTreeMap<String, String>,
+        key: &str,
+    ) -> Result<Option<String>, String> {
+        match env_or_process_value(env, key) {
+            Some(value) => Ok(Some(value)),
+            None if self.inferred => Ok(None),
+            None => Err(format!("config: {key} required")),
+        }
+    }
+}
+
 /// Resolve the provider that live model discovery should run against.
 ///
 /// An explicit provider — the agent record's saved provider, or the create/edit
@@ -56,14 +95,20 @@ pub(super) fn effective_discovery_provider(
     provider: Option<&str>,
     provider_env_var: Option<&str>,
     env: &BTreeMap<String, String>,
-) -> Option<String> {
+) -> DiscoveryProvider {
     if let Some(explicit) = provider
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
     {
-        return Some(explicit);
+        return DiscoveryProvider {
+            value: Some(explicit),
+            inferred: false,
+        };
     }
 
-    provider_env_var.and_then(|key| env_or_process_value(env, key))
+    DiscoveryProvider {
+        value: provider_env_var.and_then(|key| env_or_process_value(env, key)),
+        inferred: true,
+    }
 }
