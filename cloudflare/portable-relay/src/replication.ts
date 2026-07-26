@@ -112,3 +112,91 @@ export function parsePeerTrust(
   }
   return trust;
 }
+
+/** A bounded, ordered page from this node's replication export. */
+export interface ReplicationBatchWire {
+  records: ReplicationRecordWire[];
+  next_cursor: string;
+  caught_up: boolean;
+}
+
+/** Read request for one exported stream. */
+export interface ReplicationReadRequest {
+  source: string;
+  cursor: string | null;
+  limit: number;
+}
+
+export const READ_CURSOR_PREFIX = "cf-sqlite-v1:";
+export const MAX_READ_BATCH = 500;
+
+/** Parses a read request from an untrusted body. */
+export function replicationReadRequestFromUnknown(
+  value: unknown,
+): ReplicationReadRequest {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new ProtocolInputError("replication read body must be an object");
+  }
+  const record = value as Record<string, unknown>;
+  if (typeof record.source !== "string" || record.source === "") {
+    throw new ProtocolInputError("replication read requires a source");
+  }
+  const cursor = record.cursor ?? null;
+  if (cursor !== null && typeof cursor !== "string") {
+    throw new ProtocolInputError("cursor must be a string or null");
+  }
+  if (
+    cursor !== null &&
+    (!cursor.startsWith(READ_CURSOR_PREFIX) ||
+      !/^[0-9]+$/.test(cursor.slice(READ_CURSOR_PREFIX.length)))
+  ) {
+    throw new ProtocolInputError("cursor was not issued by this source");
+  }
+  const limit =
+    typeof record.limit === "number" && Number.isSafeInteger(record.limit)
+      ? record.limit
+      : MAX_READ_BATCH;
+  if (limit < 1) {
+    throw new ProtocolInputError("limit must be at least 1");
+  }
+  return { source: record.source, cursor: cursor as string | null, limit };
+}
+
+/**
+ * Parses exported stream declarations: `{"<source>": {"filter": null|[...]}}`.
+ * A stream's filter is part of its identity — redefinitions require a new
+ * stream name. Malformed configuration exports nothing (fail closed).
+ */
+export function parseStreamExports(
+  raw: string | undefined,
+): Record<string, unknown[] | null> {
+  if (raw === undefined || raw.trim() === "") {
+    return {};
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return {};
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return {};
+  }
+  const streams: Record<string, unknown[] | null> = {};
+  for (const [name, candidate] of Object.entries(parsed)) {
+    if (
+      typeof candidate !== "object" ||
+      candidate === null ||
+      !("filter" in (candidate as Record<string, unknown>))
+    ) {
+      continue;
+    }
+    const filter = (candidate as Record<string, unknown>).filter;
+    if (filter === null) {
+      streams[name] = null;
+    } else if (Array.isArray(filter)) {
+      streams[name] = filter;
+    }
+  }
+  return streams;
+}

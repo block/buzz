@@ -14,3 +14,6 @@ export function hexToBytes(hex: string): Uint8Array {
   }
   return bytes;
 }
+
+export const TEST_READER_SECRET_HEX =
+  "2222222222222222222222222222222222222222222222222222222222222222";

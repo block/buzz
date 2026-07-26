@@ -10,7 +10,10 @@ import {
   filtersFromUnknown,
   ProtocolInputError,
 } from "./protocol";
-import { replicationRecordsFromUnknown } from "./replication";
+import {
+  replicationReadRequestFromUnknown,
+  replicationRecordsFromUnknown,
+} from "./replication";
 import { StableNodeKeyError, stableNodeKeyFromUrl } from "./stable-node-key";
 
 export { RelayNode };
@@ -20,6 +23,7 @@ const PORTABLE_HTTP_PATHS = new Set([
   "/query",
   "/count",
   "/replication",
+  "/replication/read",
 ]);
 const MAX_HTTP_BODY_BYTES = 256 * 1024;
 
@@ -92,6 +96,15 @@ export default {
       if (url.pathname === "/events") {
         return unwrap(
           await node.submitEvent(stableNodeKey, eventFromUnknown(body), auth),
+        );
+      }
+      if (url.pathname === "/replication/read") {
+        return unwrap(
+          await node.readReplication(
+            stableNodeKey,
+            replicationReadRequestFromUnknown(body),
+            auth,
+          ),
         );
       }
       if (url.pathname === "/replication") {

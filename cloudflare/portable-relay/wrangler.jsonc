@@ -10,7 +10,13 @@
     // Destination-controlled replication trust: JSON mapping a source stream
     // ID to { "principal": string, "verification_keys": [pubkey hex] }.
     // Empty means no replication peers are admitted (fail closed).
-    "BUZZ_REPLICATION_PEERS": ""
+    "BUZZ_REPLICATION_PEERS": "",
+    // Streams this node exports for authorized readers to drain (rendezvous
+    // role): {"<source>": {"filter": null | [NIP-01 filters]}}.
+    "BUZZ_REPLICATION_STREAMS": "",
+    // Source-controlled reader trust for exported streams; same shape as
+    // BUZZ_REPLICATION_PEERS. Empty = nothing is drainable (fail closed).
+    "BUZZ_REPLICATION_READERS": ""
   },
   "durable_objects": {
     "bindings": [

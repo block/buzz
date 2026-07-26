@@ -235,3 +235,119 @@ describe("replication sink", () => {
     ]);
   });
 });
+
+describe("replication read (rendezvous)", () => {
+  const READER = hexToBytes(
+    "2222222222222222222222222222222222222222222222222222222222222222",
+  );
+
+  async function readStream(
+    origin: string,
+    source: string,
+    cursor: string | null,
+    secretKey: Uint8Array = READER,
+  ): Promise<Response> {
+    const url = `${origin}/replication/read`;
+    const body = JSON.stringify({ source, cursor, limit: 100 });
+    return SELF.fetch(url, {
+      method: "POST",
+      headers: {
+        authorization: await nip98Header(secretKey, url, body),
+        "content-type": "application/json",
+      },
+      body,
+    });
+  }
+
+  it("lets an authorized reader drain custodied records with cursor resume", async () => {
+    const origin = "https://rendezvous-drain.example";
+    const first = signedNote("custodied one");
+    const second = signedNote("custodied two");
+    await pushRecords(origin, [
+      record("local:1", first),
+      record("local:2", second),
+    ]);
+
+    const page = await readStream(origin, TEST_REPLICATION_SOURCE, null);
+    expect(page.status).toBe(200);
+    const batch = (await page.json()) as {
+      records: { source: string; cursor: string; event: { id: string } }[];
+      next_cursor: string;
+      caught_up: boolean;
+    };
+    expect(batch.records.map((r) => r.event.id)).toEqual([first.id, second.id]);
+    expect(batch.records[0].source).toBe(TEST_REPLICATION_SOURCE);
+    expect(batch.records[0].cursor).toMatch(/^cf-sqlite-v1:/);
+    expect(batch.caught_up).toBe(true);
+
+    const resumed = await readStream(
+      origin,
+      TEST_REPLICATION_SOURCE,
+      batch.next_cursor,
+    );
+    const empty = (await resumed.json()) as {
+      records: unknown[];
+      caught_up: boolean;
+    };
+    expect(empty.records).toEqual([]);
+    expect(empty.caught_up).toBe(true);
+  });
+
+  it("applies export filters and renames streams independently of ingest", async () => {
+    const origin = "https://rendezvous-filter.example";
+    const note = signedNote("a note");
+    const head = JSON.parse(
+      JSON.stringify(
+        finalizeEvent(
+          {
+            kind: 30_078,
+            created_at: Math.floor(Date.now() / 1000),
+            tags: [["d", "demo"]],
+            content: "a head",
+          },
+          generateSecretKey(),
+        ),
+      ),
+    );
+    await pushRecords(origin, [
+      record("local:1", note),
+      record("local:2", head),
+    ]);
+
+    const page = await readStream(origin, "rendezvous/notes-only", null);
+    const batch = (await page.json()) as {
+      records: { event: { id: string } }[];
+      caught_up: boolean;
+    };
+    expect(batch.records.map((r) => r.event.id)).toEqual([note.id]);
+    expect(batch.caught_up).toBe(true);
+  });
+
+  it("fails closed for unknown streams, strangers, and the write-side peer", async () => {
+    const origin = "https://rendezvous-denied.example";
+    await pushRecords(origin, [record("local:1", signedNote("custodied"))]);
+
+    const unknown = await readStream(origin, "unknown/stream", null);
+    expect(unknown.status).toBe(403);
+    expect(await unknown.json()).toMatchObject({ code: "peer_unbound" });
+
+    const stranger = await readStream(
+      origin,
+      TEST_REPLICATION_SOURCE,
+      null,
+      generateSecretKey(),
+    );
+    expect(stranger.status).toBe(403);
+    expect(await stranger.json()).toMatchObject({ code: "source_mismatch" });
+
+    // The write-side peer key is not automatically a reader.
+    const writer = await readStream(
+      origin,
+      TEST_REPLICATION_SOURCE,
+      null,
+      PEER_SECRET,
+    );
+    expect(writer.status).toBe(403);
+    expect(await writer.json()).toMatchObject({ code: "source_mismatch" });
+  });
+});

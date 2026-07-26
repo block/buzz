@@ -23,8 +23,13 @@ import {
   ProtocolInputError,
 } from "./protocol";
 import {
+  MAX_READ_BATCH,
   parsePeerTrust,
+  parseStreamExports,
+  READ_CURSOR_PREFIX,
+  type ReplicationBatchWire,
   type ReplicationOutcomeWire,
+  type ReplicationReadRequest,
   type ReplicationReceiptWire,
   type ReplicationRecordWire,
 } from "./replication";
@@ -295,6 +300,82 @@ export class RelayNode extends DurableObject<Env> {
       );
     }
     return { result: receipts };
+  }
+
+  /**
+   * Serves a page of this node's journal as a replication export — the
+   * rendezvous role: peers the operator has authorized as readers may drain
+   * streams this node custodies, without the original source being online.
+   *
+   * Reader trust (BUZZ_REPLICATION_READERS) and stream exports
+   * (BUZZ_REPLICATION_STREAMS) are operator configuration; cursors belong to
+   * this node's own cursor space, independent of the cursors records carried
+   * when they were ingested.
+   */
+  readReplication(
+    stableNodeKey: string,
+    request: ReplicationReadRequest,
+    auth: HttpAuthEvidence,
+  ): RpcOutcome<ReplicationBatchWire> {
+    this.initializeNode(stableNodeKey);
+    const verified = this.#verifyHttpEvidence(auth);
+    if ("denied" in verified) {
+      return verified;
+    }
+    const exported = parseStreamExports(this.env.BUZZ_REPLICATION_STREAMS)[
+      request.source
+    ];
+    const readers = parsePeerTrust(this.env.BUZZ_REPLICATION_READERS)[
+      request.source
+    ];
+    if (exported === undefined || readers === undefined) {
+      return { denied: "peer_unbound" };
+    }
+    if (!readers.verification_keys.includes(verified.principal)) {
+      return { denied: "source_mismatch" };
+    }
+
+    const after =
+      request.cursor === null
+        ? 0
+        : Number.parseInt(request.cursor.slice(READ_CURSOR_PREFIX.length), 10);
+    const scanLimit = Math.min(request.limit, MAX_READ_BATCH);
+    const rows = Array.from(
+      this.#sql.exec<
+        { sequence: number; event_json: string } & Record<
+          string,
+          SqlStorageValue
+        >
+      >(
+        `SELECT sequence, event_json FROM event_journal
+         WHERE sequence > ? ORDER BY sequence ASC LIMIT ?`,
+        after,
+        scanLimit,
+      ),
+    );
+    const lastScanned =
+      rows.length > 0 ? rows[rows.length - 1].sequence : after;
+    const records = rows
+      .map((row) => ({
+        sequence: row.sequence,
+        event: JSON.parse(row.event_json) as Event,
+      }))
+      .filter(
+        (row) =>
+          exported === null || matchFilters(exported as Filter[], row.event),
+      )
+      .map((row) => ({
+        source: request.source,
+        cursor: `${READ_CURSOR_PREFIX}${row.sequence}`,
+        event: row.event,
+      }));
+    return {
+      result: {
+        records,
+        next_cursor: `${READ_CURSOR_PREFIX}${lastScanned}`,
+        caught_up: rows.length < scanLimit,
+      },
+    };
   }
 
   #applyReplicationRecord(
