@@ -268,6 +268,11 @@ pub struct Config {
     /// Whether the configured web bundle serves Git browser routes in addition
     /// to the public invite landing page. Defaults to false.
     pub serve_git_web_gui: bool,
+    /// Whether the configured web bundle is a full client that owns client-side
+    /// routing. When true (`BUZZ_WEB_SPA=full`), every path the relay does not
+    /// serve itself falls back to the SPA shell. Defaults to false, which keeps
+    /// the conservative behaviour of serving only the invite landing page.
+    pub web_spa_full: bool,
 }
 
 fn parse_bind_addr(raw: &str) -> Result<SocketAddr, ConfigError> {
@@ -862,6 +867,9 @@ impl Config {
         let serve_git_web_gui = std::env::var("BUZZ_SERVE_GIT_WEB_GUI")
             .map(|value| value == "true" || value == "1")
             .unwrap_or(false);
+        let web_spa_full = std::env::var("BUZZ_WEB_SPA")
+            .map(|value| value.trim().eq_ignore_ascii_case("full"))
+            .unwrap_or(false);
 
         if let Some(ref dir) = web_dir {
             if !dir.join("index.html").is_file() {
@@ -936,6 +944,7 @@ impl Config {
             admin,
             web_dir,
             serve_git_web_gui,
+            web_spa_full,
         })
     }
 }
@@ -986,6 +995,7 @@ mod tests {
             !config.serve_git_web_gui,
             "serve_git_web_gui should default to false"
         );
+        assert!(!config.web_spa_full, "web_spa_full should default to false");
         assert!(
             !config.require_media_get_auth,
             "require_media_get_auth should default to false for staged client rollout"

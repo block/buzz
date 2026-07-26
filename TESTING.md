@@ -284,6 +284,7 @@ out of the box with `just setup` or `just relay`. Common overrides:
 | `BUZZ_ALLOW_NIP_OA_AUTH`        | `false`                     | Enable NIP-OA owner attestation for membership |
 | `BUZZ_WEB_DIR`                  | unset (source), `/srv/buzz/web` (container) | Directory containing the invite landing bundle; the production container enables it so `/invite/{code}` always works |
 | `BUZZ_SERVE_GIT_WEB_GUI`        | `false`                     | Set to `true` or `1` to expose the bundled Git repository browser at `/` and `/repos/...`; invite routes do not depend on this flag |
+| `BUZZ_WEB_SPA`                  | unset                       | Set to `full` when the configured `BUZZ_WEB_DIR` bundle is a full client that owns client-side routing: every path the relay does not serve itself then falls back to the SPA shell. Server-owned paths (`/api/...`, `/git/...`, `/hooks/...`, `/media/...`, `/upload`, `/.well-known/...`, `/_*`, `/events`, `/query`, `/count`, `/info`, `/health`, `/moderation`) still return their own responses, so a mistyped API call 404s instead of returning HTML |
 
 CLI-side, only two matter for testing:
 
