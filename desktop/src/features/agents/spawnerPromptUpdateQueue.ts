@@ -33,6 +33,16 @@ export type QueueEntry = {
    */
   promptHash: string;
   queuedAt: number;
+  /**
+   * When the last send attempt for this entry was made (successful or not).
+   * Used to hold off resending a *delivered* entry — one with a non-empty
+   * `promptHash` — while its status ack is merely still in flight. Without
+   * this floor, every spawner announcement (which the Rust side republishes
+   * as part of its own reconcile loop after applying a prompt update) would
+   * retrigger a resend before the confirming status has had a chance to
+   * arrive, forcing a needless repeat container restart each time.
+   */
+  lastSentAt: number;
 };
 
 export type QueueAction =
@@ -69,6 +79,31 @@ export function queueReducer(
 
 function queueKey(spawnerPubkey: string, agentPubkey: string): string {
   return `${spawnerPubkey}:${agentPubkey}`;
+}
+
+/**
+ * Minimum time a *delivered* (non-empty `promptHash`) entry must sit unacked
+ * before it is eligible for resend. Deliberately simple — no backoff curve —
+ * this only needs to outlast the gap between "send succeeds" and "spawner's
+ * next status publish echoes the hash back", which is normally seconds.
+ */
+const REDELIVER_FLOOR_MS = 3 * 60 * 1000;
+
+/**
+ * Whether a pending entry should be resent right now.
+ *
+ * A failed send (`promptHash === ""`) always qualifies — it never reached the
+ * spawner. A delivered entry only qualifies once it has been unacked longer
+ * than {@link REDELIVER_FLOOR_MS}, so a spawner's own reconcile-triggered
+ * re-announcement (which fires right after a successful send, before the
+ * confirming status can land) does not cause an immediate, needless resend.
+ */
+export function shouldRetryPromptUpdate(
+  entry: QueueEntry,
+  now: number,
+): boolean {
+  if (!entry.promptHash) return true;
+  return now - entry.lastSentAt >= REDELIVER_FLOOR_MS;
 }
 
 function storageKey(): string {
@@ -151,6 +186,7 @@ export async function enqueueSpawnerPromptUpdate(input: {
     prompt: input.prompt,
     promptHash,
     queuedAt,
+    lastSentAt: Date.now(),
   });
 }
 
@@ -174,14 +210,20 @@ export function ackSpawnerPromptUpdate(
 }
 
 /**
- * Resend every pending prompt update.
+ * Resend prompt updates that actually need it.
  *
  * Called when a spawner is seen alive again (status or announcement ingest),
  * since a send that failed while it was unreachable never got a chance to
- * land.
+ * land. Entries that were already delivered and are merely awaiting their
+ * status ack are skipped (see {@link shouldRetryPromptUpdate}) — the Rust
+ * side republishes its kind:10180 announcement as part of applying a prompt
+ * update, and resending on every one of those before the confirming status
+ * arrives would force a repeat container restart each time.
  */
 export async function retryPendingSpawnerPromptUpdates(): Promise<void> {
+  const now = Date.now();
   for (const [key, entry] of queue) {
+    if (!shouldRetryPromptUpdate(entry, now)) continue;
     try {
       const promptHash = await sendSpawnerPromptUpdate({
         spawnerPubkey: entry.spawnerPubkey,
@@ -194,6 +236,7 @@ export async function retryPendingSpawnerPromptUpdates(): Promise<void> {
         key,
         ...entry,
         promptHash,
+        lastSentAt: Date.now(),
       });
     } catch (error) {
       console.debug(

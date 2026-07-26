@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { queueReducer } from "./spawnerPromptUpdateQueue.ts";
+import {
+  queueReducer,
+  shouldRetryPromptUpdate,
+} from "./spawnerPromptUpdateQueue.ts";
 
 test("enqueue is latest-write-wins per agent", () => {
   let s = queueReducer(new Map(), {
@@ -72,4 +75,40 @@ test("reset clears every pending entry", () => {
   });
   s = queueReducer(s, { type: "reset" });
   assert.equal(s.size, 0);
+});
+
+test("a delivered, unacked entry is not retried immediately", () => {
+  // Rust's reconcile loop republishes the spawner's announcement right after
+  // applying a prompt update, before the confirming status has a chance to
+  // land — retrying here would force a needless repeat container restart.
+  const now = 1_000_000;
+  const entry = { promptHash: "h1", queuedAt: now, lastSentAt: now };
+  assert.equal(shouldRetryPromptUpdate(entry, now + 1_000), false);
+});
+
+test("a delivered entry is retried once it has sat unacked past the floor", () => {
+  const now = 1_000_000;
+  const entry = { promptHash: "h1", queuedAt: now, lastSentAt: now };
+  assert.equal(shouldRetryPromptUpdate(entry, now + 4 * 60 * 1000), true);
+});
+
+test("an entry whose last send failed is always retried", () => {
+  const now = 1_000_000;
+  const entry = { promptHash: "", queuedAt: now, lastSentAt: now };
+  assert.equal(shouldRetryPromptUpdate(entry, now + 1), true);
+});
+
+test("ack still clears a delivered entry regardless of how recently it sent", () => {
+  const now = 1_000_000;
+  const s = queueReducer(new Map(), {
+    type: "enqueue",
+    key: "sp:ag",
+    promptHash: "h1",
+    queuedAt: now,
+    lastSentAt: now,
+  });
+  assert.equal(
+    queueReducer(s, { type: "ack", key: "sp:ag", promptHash: "h1" }).size,
+    0,
+  );
 });
