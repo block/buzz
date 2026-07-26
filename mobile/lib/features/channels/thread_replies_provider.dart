@@ -64,3 +64,58 @@ NostrFilter _threadRepliesFilter(
     },
   );
 }
+
+class ThreadLocalRepliesNotifier extends Notifier<List<NostrEvent>> {
+  final ThreadRepliesArgs args;
+
+  ThreadLocalRepliesNotifier(this.args);
+
+  @override
+  List<NostrEvent> build() => const [];
+
+  void add(NostrEvent event) {
+    state = _mergeReplies(state, [event]);
+  }
+
+  void remove(String eventId) {
+    state = state.where((event) => event.id != eventId).toList();
+  }
+}
+
+final threadLocalRepliesProvider =
+    NotifierProvider.family<
+      ThreadLocalRepliesNotifier,
+      List<NostrEvent>,
+      ThreadRepliesArgs
+    >(ThreadLocalRepliesNotifier.new);
+
+/// Relay-backed replies merged with signed local replies that are still
+/// waiting for acknowledgement.
+final threadRepliesWithLocalProvider =
+    Provider.family<AsyncValue<List<NostrEvent>>, ThreadRepliesArgs>((
+      ref,
+      args,
+    ) {
+      final relayReplies = ref.watch(threadRepliesProvider(args));
+      final localReplies = ref.watch(threadLocalRepliesProvider(args));
+      if (localReplies.isEmpty) return relayReplies;
+      return relayReplies.when(
+        data: (events) => AsyncData(_mergeReplies(events, localReplies)),
+        loading: () => AsyncData(localReplies),
+        error: (error, stackTrace) => AsyncData(localReplies),
+      );
+    });
+
+List<NostrEvent> _mergeReplies(
+  Iterable<NostrEvent> first,
+  Iterable<NostrEvent> second,
+) {
+  final byId = <String, NostrEvent>{};
+  for (final event in [...first, ...second]) {
+    byId[event.id] = event;
+  }
+  return byId.values.toList()..sort((a, b) {
+    final createdAt = a.createdAt.compareTo(b.createdAt);
+    return createdAt != 0 ? createdAt : a.id.compareTo(b.id);
+  });
+}

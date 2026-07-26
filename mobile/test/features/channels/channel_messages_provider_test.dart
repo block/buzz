@@ -5,6 +5,7 @@ import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/features/channels/channel_messages_provider.dart';
+import 'package:buzz/features/channels/thread_replies_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
 void main() {
@@ -222,6 +223,152 @@ void main() {
     );
   });
 
+  test('reconnect hydration cannot retain a rolled-back local row', () async {
+    final relaySession = _RecordingRelaySessionNotifier(
+      queryResults: [
+        [_event(id: 'history', createdAt: 10), _bounds()],
+        [_event(id: 'history', createdAt: 10), _bounds()],
+      ],
+    );
+    final container = _buildContainer(relaySession);
+    addTearDown(container.dispose);
+
+    container.read(channelMessagesProvider(_channelId));
+    await relaySession.subscribed;
+    await _pumpEventQueue();
+    final notifier = container.read(
+      channelMessagesProvider(_channelId).notifier,
+    );
+    notifier.addLocalMessage(_event(id: 'local', createdAt: 20));
+
+    relaySession.setConnected(false);
+    await _pumpEventQueue();
+    relaySession.setConnected(true);
+    await _pumpEventQueue();
+    expect(
+      container
+          .read(channelMessagesProvider(_channelId))
+          .value
+          ?.map((event) => event.id),
+      ['history', 'local'],
+    );
+
+    notifier.removeLocalMessage('local');
+    expect(
+      container
+          .read(channelMessagesProvider(_channelId))
+          .value
+          ?.map((event) => event.id),
+      ['history'],
+    );
+  });
+
+  test(
+    'thread replies are inserted, deduped, and rolled back locally',
+    () async {
+      final relaySession = _RecordingRelaySessionNotifier(
+        queryResults: [
+          [_event(id: 'history', createdAt: 10), _bounds()],
+          <NostrEvent>[],
+        ],
+      );
+      final container = _buildContainer(relaySession);
+      addTearDown(container.dispose);
+
+      container.read(channelMessagesProvider(_channelId));
+      await relaySession.subscribed;
+      await _pumpEventQueue();
+      const args = ThreadRepliesArgs(channelId: _channelId, rootId: 'root');
+      container.read(threadRepliesWithLocalProvider(args));
+      await _pumpEventQueue();
+      final notifier = container.read(
+        channelMessagesProvider(_channelId).notifier,
+      );
+      final reply = _event(
+        id: 'reply',
+        createdAt: 20,
+        extraTags: const [
+          ['e', 'root', '', 'reply'],
+        ],
+      );
+
+      notifier.addLocalMessage(reply);
+      expect(
+        container
+            .read(threadRepliesWithLocalProvider(args))
+            .value
+            ?.map((event) => event.id),
+        ['reply'],
+      );
+      expect(
+        container
+            .read(channelMessagesProvider(_channelId))
+            .value
+            ?.map((event) => event.id),
+        ['history'],
+      );
+
+      relaySession.emit(reply);
+      await _pumpEventQueue();
+      expect(
+        container
+            .read(threadRepliesWithLocalProvider(args))
+            .value
+            ?.map((event) => event.id),
+        ['reply'],
+      );
+
+      final rejected = _event(
+        id: 'rejected',
+        createdAt: 21,
+        extraTags: const [
+          ['e', 'root', '', 'reply'],
+        ],
+      );
+      notifier.addLocalMessage(rejected);
+      notifier.removeLocalMessage('rejected');
+      expect(
+        container
+            .read(threadRepliesWithLocalProvider(args))
+            .value
+            ?.map((event) => event.id),
+        ['reply'],
+      );
+    },
+  );
+
+  test(
+    'window dedupes echoes and orders rapid equal-time local sends',
+    () async {
+      final relaySession = _RecordingRelaySessionNotifier(
+        queryResults: [
+          [_event(id: 'history', createdAt: 10), _bounds()],
+        ],
+      );
+      final container = _buildContainer(relaySession);
+      addTearDown(container.dispose);
+
+      container.read(channelMessagesProvider(_channelId));
+      await relaySession.subscribed;
+      await _pumpEventQueue();
+      final notifier = container.read(
+        channelMessagesProvider(_channelId).notifier,
+      );
+      notifier.addLocalMessage(_event(id: 'z-local', createdAt: 20));
+      notifier.addLocalMessage(_event(id: 'a-local', createdAt: 20));
+      relaySession.emit(_event(id: 'z-local', createdAt: 20));
+      await _pumpEventQueue();
+
+      expect(
+        container
+            .read(channelMessagesProvider(_channelId))
+            .value
+            ?.map((event) => event.id),
+        ['history', 'z-local', 'a-local'],
+      );
+    },
+  );
+
   test('window pagination failures return false without exhausting', () async {
     final relaySession = _RecordingRelaySessionNotifier(
       queryResults: [
@@ -270,14 +417,19 @@ ProviderContainer _buildContainer(_RecordingRelaySessionNotifier relaySession) {
   );
 }
 
-NostrEvent _event({required String id, required int createdAt}) {
+NostrEvent _event({
+  required String id,
+  required int createdAt,
+  List<List<String>> extraTags = const [],
+}) {
   return NostrEvent(
     id: id,
     pubkey: 'alice',
     createdAt: createdAt,
     kind: EventKind.streamMessageV2,
-    tags: const [
+    tags: [
       ['h', _channelId],
+      ...extraTags,
     ],
     content: id,
     sig: 'sig',
@@ -334,6 +486,12 @@ class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
 
   @override
   SessionState build() => const SessionState(status: SessionStatus.connected);
+
+  void setConnected(bool connected) {
+    state = SessionState(
+      status: connected ? SessionStatus.connected : SessionStatus.disconnected,
+    );
+  }
 
   @override
   Future<List<NostrEvent>> queryRelay(

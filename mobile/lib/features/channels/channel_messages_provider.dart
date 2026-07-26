@@ -20,6 +20,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   ChannelWindowStore _windowStore = const ChannelWindowStore.empty();
   final Map<String, NostrEvent> _deepLinkEvents = {};
   final Set<String> _retainedDeepLinkEventIds = {};
+  final Map<String, NostrEvent> _pendingLocalMessages = {};
 
   ChannelMessagesNotifier(this.channelId);
 
@@ -232,12 +233,27 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   /// Adds a just-signed outgoing message before the relay acknowledges it.
   /// The live relay echo is deduplicated by event id.
   void addLocalMessage(NostrEvent event) {
+    _pendingLocalMessages[event.id] = event;
+    final thread = event.threadReference;
+    if (thread.parentId != null) {
+      final rootId = thread.rootId;
+      if (rootId == null) {
+        throw StateError('Reply ${event.id} has a parent but no thread root.');
+      }
+      ref
+          .read(
+            threadLocalRepliesProvider(
+              ThreadRepliesArgs(channelId: channelId, rootId: rootId),
+            ).notifier,
+          )
+          .add(event);
+      return;
+    }
+
     final isTimelineRow = EventKind.channelTimelineContentKinds.contains(
       event.kind,
     );
-    if (!_usingChannelWindow &&
-        isTimelineRow &&
-        event.threadReference.parentId == null) {
+    if (!_usingChannelWindow && isTimelineRow) {
       _windowStore = mergeLiveChannelWindowEvent(
         _windowStore,
         event,
@@ -249,12 +265,29 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
 
   /// Rolls back a local message when its publish is rejected or times out.
   void removeLocalMessage(String eventId) {
+    final pending = _pendingLocalMessages.remove(eventId);
+    if (pending == null) return;
+
+    final thread = pending.threadReference;
+    if (thread.parentId != null) {
+      final rootId = thread.rootId;
+      if (rootId == null) {
+        throw StateError('Reply $eventId has a parent but no thread root.');
+      }
+      ref
+          .read(
+            threadLocalRepliesProvider(
+              ThreadRepliesArgs(channelId: channelId, rootId: rootId),
+            ).notifier,
+          )
+          .remove(eventId);
+      return;
+    }
+
     final nextOverlay = _windowStore.liveOverlay
         .where((event) => event.id != eventId)
         .toList();
-    final removedFromWindow =
-        nextOverlay.length != _windowStore.liveOverlay.length;
-    if (removedFromWindow) {
+    if (nextOverlay.length != _windowStore.liveOverlay.length) {
       _windowStore = ChannelWindowStore(
         pages: _windowStore.pages,
         liveOverlay: nextOverlay,
@@ -262,19 +295,8 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       );
     }
 
-    if (_usingChannelWindow) {
-      if (!removedFromWindow) return;
-      final flattened = _withDeepLinkEvents(
-        flattenChannelWindowEvents(_windowStore),
-      );
-      _lastKnownMessages = flattened;
-      state = AsyncData(flattened);
-      return;
-    }
-
     final current = state.value ?? _lastKnownMessages ?? const <NostrEvent>[];
     final next = current.where((event) => event.id != eventId).toList();
-    if (next.length == current.length) return;
     _lastKnownMessages = next;
     state = AsyncData(next);
   }
@@ -285,7 +307,10 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   ) {
     if (current.any((e) => e.id == incoming.id)) return current;
     final updated = [...current, incoming];
-    updated.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    updated.sort((a, b) {
+      final createdAt = a.createdAt.compareTo(b.createdAt);
+      return createdAt != 0 ? createdAt : a.id.compareTo(b.id);
+    });
     return updated;
   }
 
