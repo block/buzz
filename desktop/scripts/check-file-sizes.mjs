@@ -508,7 +508,10 @@ const overrides = new Map([
   // +59: run install commands under `pipefail` so a failing `curl` in a
   // `curl … | bash` install fails the `cli` step instead of being masked by
   // `bash`'s exit 0, plus tests for the arg shape and the real pipeline status.
-  ["src-tauri/src/commands/agent_discovery.rs", 1895],
+  // +81: install_shell_args re-exports the composed PATH inside the command
+  // body so login startup files can't clear or reorder it, plus an isolated
+  // hostile-profile regression the pure composition tests structurally miss.
+  ["src-tauri/src/commands/agent_discovery.rs", 1980],
   // draft-persistence predicate: submit-time `loadDraft` check + inline comment
   // + deps-array entry in submitMessage closes the never-persisted-boundary
   // defect (Thufir Pass-3 finding). Load-bearing correctness fix; queued to

@@ -547,6 +547,49 @@ fn persist_last_error_on_install(
     save_managed_agents(app, &records)
 }
 
+/// Build the `-l -c` argument list for the install shell.
+///
+/// The body runs under `pipefail`: every CLI install command is a `curl … |
+/// bash` / `| sh` pipe, and without it the pipeline's status is the right-hand
+/// side's — `bash`/`sh` fed an empty stdin exits 0 — so a `curl` that fails (or
+/// isn't on PATH at all) was recorded as a successful `cli` step, leaving the
+/// user an unactionable `verify` error instead of curl's own stderr. Every
+/// install shell supports it; the Windows PowerShell path bypasses this shell.
+/// `SHELLOPTS` is not exported, so the piped-to vendor script keeps its own
+/// defaults.
+///
+/// `composed_path`, when present, is passed as a positional and re-exported
+/// *inside* the body, because `-l` sources the user's login startup files after
+/// the process environment is installed: a profile assigning PATH overwrites
+/// `cmd.env("PATH", …)` before the vendor command runs. `export PATH=` empties
+/// it outright; macOS `/etc/zprofile` runs `path_helper`, which reorders it and
+/// costs Buzz's managed Node/npm dirs their precedence. Passing it as a
+/// positional rather than interpolating it into the body is what keeps entries
+/// containing spaces or quotes intact.
+///
+/// When `composed_path` is `None` the prelude is omitted: `export PATH="$1"`
+/// with `$1` unset sets an *empty* PATH, worse than the ambient one.
+fn install_shell_args(
+    command: &str,
+    composed_path: Option<&std::ffi::OsStr>,
+) -> Vec<std::ffi::OsString> {
+    let Some(path) = composed_path else {
+        return vec![
+            "-l".into(),
+            "-c".into(),
+            format!("set -o pipefail; {command}").into(),
+        ];
+    };
+    vec![
+        "-l".into(),
+        "-c".into(),
+        format!("export PATH=\"$1\"; set -o pipefail; {command}").into(),
+        // `$0` is the shell-name slot, so the PATH must be the second positional.
+        "buzz-install".into(),
+        path.to_os_string(),
+    ]
+}
+
 /// Build a login-shell `Command` for `command` with hermit env vars stripped,
 /// Buzz-managed npm locations set, and the user's PATH set. This is the
 /// single source of truth for
@@ -561,16 +604,6 @@ fn install_shell_command(command: &str) -> Result<std::process::Command, String>
     let shell: std::path::PathBuf = resolve_install_shell()?;
 
     let mut cmd = std::process::Command::new(&shell);
-    // Run under `pipefail`: every CLI install command is a `curl … | bash` /
-    // `| sh` pipe, and without it the pipeline's status is the right-hand
-    // side's — `bash`/`sh` fed an empty stdin exits 0. A `curl` that fails (or
-    // isn't on PATH at all) was therefore recorded as a successful `cli` step,
-    // leaving the user an unactionable post-install `verify` error instead of
-    // curl's own stderr. Every install shell supports it (`/bin/zsh`,
-    // `/bin/bash`, Git Bash); the Windows PowerShell path bypasses this shell.
-    // `SHELLOPTS` is not exported, so the piped-to vendor script still runs
-    // with its own default options.
-    cmd.args(["-l", "-c", &format!("set -o pipefail; {command}")]);
 
     // Strip hermit vars and set managed npm paths (see apply_npm_env).
     apply_npm_env(&mut cmd);
@@ -584,6 +617,11 @@ fn install_shell_command(command: &str) -> Result<std::process::Command, String>
     // (cmd.env("PATH", …) replaces rather than extends). On Windows that case
     // is the steady state: login_shell_path() always returns None there
     // because Git Bash paths are POSIX-shaped and poison native children.
+    //
+    // The composed PATH is set twice on purpose: `cmd.env` so the login
+    // startup files themselves run with a usable PATH, and the `$1` export in
+    // `install_shell_args` so their own PATH assignments cannot undo it.
+    // Neither is redundant — see `install_shell_args`.
     let login_path = crate::managed_agents::login_shell_path();
     let had_login = login_path.is_some();
     let managed: Vec<std::path::PathBuf> = [
@@ -603,11 +641,13 @@ fn install_shell_command(command: &str) -> Result<std::process::Command, String>
     let use_inherited = crate::managed_agents::should_use_inherited(had_login, true);
     let path_parts =
         crate::managed_agents::compose_path_entries(managed, login, inherited, use_inherited);
-    if !path_parts.is_empty() {
-        if let Ok(path) = std::env::join_paths(path_parts) {
-            cmd.env("PATH", path);
-        }
+    let composed_path = (!path_parts.is_empty())
+        .then(|| std::env::join_paths(path_parts).ok())
+        .flatten();
+    if let Some(path) = composed_path.as_deref() {
+        cmd.env("PATH", path);
     }
+    cmd.args(install_shell_args(command, composed_path.as_deref()));
 
     // Detach from the controlling terminal so install scripts that read from
     // /dev/tty (e.g. Codex's "Start Codex now? [y/N]") fall back to stdin
@@ -1431,16 +1471,61 @@ mod tests {
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
-        let body = args
-            .last()
-            .expect("install_shell_command must pass a command body");
+        // A composed PATH is expected on any test host: `-l -c BODY $0 PATH`.
+        assert_eq!(
+            args.len(),
+            5,
+            "expected `-l -c BODY $0 PATH`; got: {args:?}"
+        );
+        let body = &args[2];
         assert!(
-            body.starts_with("set -o pipefail; "),
-            "install command must run under pipefail; got: {body}"
+            body.starts_with("export PATH=\"$1\"; set -o pipefail; "),
+            "composed PATH must be re-exported, then pipefail set; got: {body}"
         );
         assert!(
             body.ends_with("curl -fsSL https://example.test/i.sh | bash"),
             "the vendor command must be preserved verbatim; got: {body}"
+        );
+    }
+
+    /// Without a composed PATH there is no `$1`, and `export PATH="$1"` would
+    /// set an *empty* PATH — worse than inheriting the ambient one. The prelude
+    /// and its positionals must both be omitted in that case.
+    #[test]
+    fn test_install_shell_args_omit_export_when_no_composed_path() {
+        assert_eq!(
+            super::install_shell_args("echo hi", None),
+            ["-l", "-c", "set -o pipefail; echo hi"].map(std::ffi::OsString::from),
+            "no composed PATH must yield the bare pipefail body and no positionals"
+        );
+    }
+
+    /// Regression for the login-startup-file overwrite: `cmd.env("PATH", …)` is
+    /// installed *before* `-l` sources the user's profile, so a profile that
+    /// assigns PATH silently discards the composed one. Uses `/bin/bash`
+    /// explicitly — the planted profile is bash-specific, so resolving the host
+    /// shell (which prefers zsh) would make this vacuous.
+    #[cfg(unix)]
+    #[test]
+    fn test_composed_path_survives_a_profile_that_clears_it() {
+        let home = tempfile::tempdir().expect("temp HOME");
+        std::fs::write(home.path().join(".bash_profile"), "export PATH=\n")
+            .expect("plant a hostile login profile");
+        let composed = std::ffi::OsString::from("/buzz/sentinel/bin:/usr/bin:/bin");
+
+        // `echo` is a shell builtin, so the child needs no PATH to report one.
+        let out = std::process::Command::new("/bin/bash")
+            .args(super::install_shell_args("echo \"$PATH\"", Some(&composed)))
+            .env("HOME", home.path())
+            .env("PATH", &composed)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("bash must spawn");
+
+        let path = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            path.contains("/buzz/sentinel/bin"),
+            "the composed PATH must survive login init; got: {path:?}"
         );
     }
 
