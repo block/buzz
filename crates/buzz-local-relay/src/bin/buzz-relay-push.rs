@@ -22,6 +22,7 @@ use nostr::hashes::sha256::Hash as Sha256Hash;
 use nostr::hashes::Hash;
 use nostr::nips::nip98::{HttpData, HttpMethod};
 use nostr::types::Url;
+use nostr::Filter;
 use nostr::{EventBuilder, Keys, SecretKey, Tag};
 use uuid::Uuid;
 
@@ -34,6 +35,7 @@ struct Config {
     key_file: PathBuf,
     cursor_file: PathBuf,
     batch_size: usize,
+    filter: Option<Vec<Filter>>,
 }
 
 impl Config {
@@ -44,6 +46,8 @@ impl Config {
         let mut key_file = None;
         let mut cursor_file = None;
         let mut batch_size = DEFAULT_BATCH_SIZE;
+        let mut filter_json: Option<String> = None;
+        let mut streams_file: Option<PathBuf> = None;
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -59,6 +63,8 @@ impl Config {
                         .parse()
                         .context("--batch requires a positive integer")?
                 }
+                "--filter" => filter_json = Some(next(&mut args, "--filter")?),
+                "--streams" => streams_file = Some(PathBuf::from(next(&mut args, "--streams")?)),
                 "-h" | "--help" => {
                     print_help();
                     std::process::exit(0);
@@ -67,6 +73,40 @@ impl Config {
             }
         }
         let data = data.context("--data <journal path> is required")?;
+        let source_id = source.context("--source <stream id> is required")?;
+        if filter_json.is_some() && streams_file.is_some() {
+            bail!("--filter and --streams are mutually exclusive");
+        }
+        let filter = if let Some(json) = filter_json {
+            Some(
+                serde_json::from_str::<Vec<Filter>>(&json)
+                    .context("--filter must be a JSON array of NIP-01 filters")?,
+            )
+        } else if let Some(path) = streams_file {
+            let raw = std::fs::read_to_string(&path)
+                .with_context(|| format!("failed to read streams file {}", path.display()))?;
+            let streams: serde_json::Value =
+                serde_json::from_str(&raw).context("streams file is not valid JSON")?;
+            let entry = streams.get(&source_id).with_context(|| {
+                format!(
+                    "stream {source_id:?} not declared in {} (declared: {})",
+                    path.display(),
+                    streams
+                        .as_object()
+                        .map(|object| object.keys().cloned().collect::<Vec<_>>().join(", "))
+                        .unwrap_or_default()
+                )
+            })?;
+            match &entry["filter"] {
+                serde_json::Value::Null => None,
+                value => Some(
+                    serde_json::from_value::<Vec<Filter>>(value.clone())
+                        .context("stream filter must be a JSON array of NIP-01 filters")?,
+                ),
+            }
+        } else {
+            None
+        };
         let cursor_file = cursor_file.unwrap_or_else(|| {
             let mut path = data.clone().into_os_string();
             path.push(".push-cursor");
@@ -78,10 +118,11 @@ impl Config {
                 .context("--to <destination base URL> is required")?
                 .trim_end_matches('/')
                 .to_string(),
-            source: ReplicationSourceId::new(source.context("--source <stream id> is required")?),
+            source: ReplicationSourceId::new(source_id),
             key_file: key_file.context("--key <nsec hex file> is required")?,
             cursor_file,
             batch_size,
+            filter,
         })
     }
 }
@@ -97,7 +138,7 @@ fn print_help() {
 
 Usage:
   buzz-relay-push --data PATH --to URL --source ID --key PATH \\
-                  [--cursor-file PATH] [--batch N]
+                  [--cursor-file PATH] [--batch N] [--filter JSON | --streams PATH]
 
 Options:
   --data PATH         Local append-only event journal (NDJSON)
@@ -105,7 +146,12 @@ Options:
   --source ID         Destination-configured replication source stream ID
   --key PATH          File containing the node secret key (hex)
   --cursor-file PATH  Durable checkpoint (default: <data>.push-cursor)
-  --batch N           Records per request (default: {DEFAULT_BATCH_SIZE})"
+  --batch N           Records per request (default: {DEFAULT_BATCH_SIZE})
+  --filter JSON       Selective stream: NIP-01 filter array for this source ID
+  --streams PATH      JSON file mapping source IDs to {{\"filter\": ...}} entries
+
+A stream's filter is part of its identity: to change the filter, mint a new
+source ID and start from a fresh cursor."
     );
 }
 
@@ -141,7 +187,10 @@ async fn main() -> anyhow::Result<()> {
             .await
             .context("failed to open local journal")?,
     );
-    let source = LocalReplicationSource::new(config.source.clone(), store);
+    let source = match config.filter.clone() {
+        Some(filters) => LocalReplicationSource::with_filter(config.source.clone(), store, filters),
+        None => LocalReplicationSource::new(config.source.clone(), store),
+    };
     let mut cursor = match std::fs::read_to_string(&config.cursor_file) {
         Ok(saved) if !saved.trim().is_empty() => {
             Some(ReplicationCursor::new(saved.trim().to_string()))
@@ -154,13 +203,19 @@ async fn main() -> anyhow::Result<()> {
 
     loop {
         let batch = source.read_batch(cursor.clone(), config.batch_size).await?;
+        // Filtered streams may return empty pages mid-journal; only the
+        // source's caught_up signal ends the run.
         if batch.records.is_empty() {
-            println!(
-                "caught up: {pushed} records pushed, cursor {}",
-                batch.next_cursor.as_str()
-            );
             persist_cursor(&config.cursor_file, &batch.next_cursor)?;
-            return Ok(());
+            cursor = Some(batch.next_cursor.clone());
+            if batch.caught_up {
+                println!(
+                    "caught up: {pushed} records pushed, cursor {}",
+                    batch.next_cursor.as_str()
+                );
+                return Ok(());
+            }
+            continue;
         }
 
         let body = serde_json::to_vec(&batch.records)?;
@@ -201,14 +256,16 @@ async fn main() -> anyhow::Result<()> {
             advanced = Some(receipt.cursor.clone());
             pushed += 1;
         }
-        let checkpoint = advanced.clone().context("receipts advanced no cursor")?;
-        persist_cursor(&config.cursor_file, &checkpoint)?;
+        advanced.clone().context("receipts advanced no cursor")?;
+        // Every receipt was checkpoint-safe, so the scanned-through position
+        // (which may extend past the last matched record) is durable.
+        persist_cursor(&config.cursor_file, &batch.next_cursor)?;
         println!(
             "pushed {} records through cursor {}",
             receipts.len(),
-            checkpoint.as_str()
+            batch.next_cursor.as_str()
         );
-        cursor = Some(checkpoint);
+        cursor = Some(batch.next_cursor.clone());
         if batch.caught_up {
             println!("caught up: {pushed} records pushed");
             return Ok(());

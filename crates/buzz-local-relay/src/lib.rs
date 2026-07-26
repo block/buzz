@@ -330,12 +330,43 @@ impl EventStore {
 pub struct LocalReplicationSource {
     source: ReplicationSourceId,
     store: Arc<EventStore>,
+    filter: Option<Vec<Filter>>,
 }
 
 impl LocalReplicationSource {
     /// Binds an operator-assigned source identity to a local event store.
     pub fn new(source: ReplicationSourceId, store: Arc<EventStore>) -> Self {
-        Self { source, store }
+        Self {
+            source,
+            store,
+            filter: None,
+        }
+    }
+
+    /// Binds a selective stream: only journal events matching `filters`
+    /// (NIP-01 OR semantics) are exported under this source identity.
+    ///
+    /// A stream's predicate is part of its identity. Cursors advance past
+    /// non-matching records permanently, so redefining a stream's filter
+    /// requires a new [`ReplicationSourceId`] and a fresh cursor; destination
+    /// idempotence by event ID makes the resulting re-scan safe.
+    pub fn with_filter(
+        source: ReplicationSourceId,
+        store: Arc<EventStore>,
+        filters: Vec<Filter>,
+    ) -> Self {
+        Self {
+            source,
+            store,
+            filter: Some(filters),
+        }
+    }
+
+    fn exports(&self, event: &Event) -> bool {
+        match self.filter.as_ref() {
+            None => true,
+            Some(filters) => filters_match(filters, &stored_event(event.clone())),
+        }
     }
 }
 
@@ -363,11 +394,15 @@ impl ReplicationSourcePort for LocalReplicationSource {
             });
         }
 
+        // The page bounds *scanned* records, not matched ones, so a filtered
+        // stream makes progress through long non-matching runs; batches may
+        // therefore be empty without being caught up.
         let page_size = limit.min(MAX_REPLICATION_BATCH_SIZE);
         let end = start.saturating_add(page_size).min(inner.journal.len());
         let records = inner.journal[start..end]
             .iter()
             .enumerate()
+            .filter(|(_, event)| self.exports(event))
             .map(|(offset, event)| ReplicationRecord {
                 source: self.source.clone(),
                 cursor: local_replication_cursor(start + offset + 1),

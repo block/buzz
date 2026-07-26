@@ -206,3 +206,72 @@ async fn destination_denies_unconfigured_sources_without_mutation() {
         .expect("destination query succeeds")
         .is_empty());
 }
+
+#[tokio::test]
+async fn selective_stream_filters_exports_and_advances_past_skipped_records() {
+    let store = Arc::new(
+        EventStore::open(StorageMode::Ephemeral)
+            .await
+            .expect("store opens"),
+    );
+    // Journal shape: [1, 30078, 1, 30078, 30078] — the kind-1 stream must
+    // skip runs of non-matching records without stalling.
+    let mut journal_events = Vec::new();
+    for kind in [1u16, 30_078, 1, 30_078, 30_078] {
+        let event = signed_event(kind, &format!("event kind {kind}"));
+        journal_events.push(event.clone());
+        store.accept(event).await.expect("store accepts");
+    }
+
+    let notes_stream = LocalReplicationSource::with_filter(
+        ReplicationSourceId::new("laptop/notes"),
+        Arc::clone(&store),
+        vec![Filter::new().kind(Kind::TextNote)],
+    );
+
+    // Scan-bounded pages: two scanned records yield one match, and the
+    // cursor advances past both.
+    let first_page = notes_stream
+        .read_batch(None, 2)
+        .await
+        .expect("first page reads");
+    assert_eq!(first_page.records.len(), 1);
+    assert_eq!(first_page.records[0].event.id, journal_events[0].id);
+    assert_eq!(first_page.next_cursor.as_str(), "local-ndjson-v1:2");
+    assert!(!first_page.caught_up);
+
+    let second_page = notes_stream
+        .read_batch(Some(first_page.next_cursor), 2)
+        .await
+        .expect("second page reads");
+    assert_eq!(second_page.records.len(), 1);
+    assert_eq!(second_page.records[0].event.id, journal_events[2].id);
+    assert!(!second_page.caught_up);
+
+    // A page of pure non-matching records is empty but still progresses.
+    let third_page = notes_stream
+        .read_batch(Some(second_page.next_cursor), 2)
+        .await
+        .expect("third page reads");
+    assert!(third_page.records.is_empty());
+    assert_eq!(third_page.next_cursor.as_str(), "local-ndjson-v1:5"); // wrong? scanned 2 from 4 -> 5? journal len 5, start 4, end min(4+2,5)=5
+    assert!(third_page.caught_up);
+
+    // A different stream identity over the same journal exports its own set;
+    // predicates bind to IDs, not to the journal.
+    let heads_stream = LocalReplicationSource::with_filter(
+        ReplicationSourceId::new("laptop/heads"),
+        Arc::clone(&store),
+        vec![Filter::new().kind(Kind::Custom(30_078))],
+    );
+    let all_heads = heads_stream
+        .read_batch(None, 10)
+        .await
+        .expect("heads stream reads");
+    assert_eq!(all_heads.records.len(), 3);
+    assert!(all_heads.caught_up);
+    assert!(all_heads
+        .records
+        .iter()
+        .all(|record| record.source.as_str() == "laptop/heads"));
+}
