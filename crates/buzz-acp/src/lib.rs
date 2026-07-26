@@ -257,7 +257,7 @@ async fn author_allowed(
     }
 }
 
-/// Resolve whether `channel_id` is a DM, for the inbound author gate.
+/// Resolve a channel's DM verdict from metadata.
 ///
 /// Resolution order:
 /// 1. Startup discovery metadata (`startup_info`) — covers channels known at
@@ -267,15 +267,40 @@ async fn author_allowed(
 ///    the agent was added to *after* startup (the exploit path: an
 ///    agent-initiated DM is exactly such a channel).
 ///
-/// Fail-closed: if the fetch fails or times out, the channel is treated as a
-/// DM for this event and the result is NOT cached, so a later event retries
+/// Returns `Some(true)` when the channel positively resolves to a DM,
+/// `Some(false)` when it resolves to any other type, and `None` when the
+/// metadata is unresolved (fetch failed/timed out, or startup type is
+/// `"unknown"`). The unresolved result is NOT cached, so a later event retries
 /// the fetch instead of pinning a mis-classification.
+///
+/// Callers pick the failure semantics that match their gate:
+/// - [`is_dm_channel`] fails **closed** (unresolved ⇒ DM) for the inbound
+///   author gate, so a transient failure can only *restrict* authorization.
+/// - [`is_dm_channel_confirmed`] fails **open** (unresolved ⇒ not DM) for the
+///   mention-filter bypass, so a transient failure never *relaxes* the mention
+///   requirement on a non-DM channel.
+pub(crate) async fn resolve_dm_verdict(
+    channel_id: Uuid,
+    channel_info: &pool::ChannelInfoResolver,
+) -> Option<bool> {
+    channel_info
+        .resolve(channel_id)
+        .await
+        .map(|info| info.channel_type == "dm")
+}
+
+/// Resolve whether `channel_id` is a DM, for the inbound author gate.
+///
+/// Fail-closed: if the type is unresolved, the channel is treated as a DM for
+/// this event so allowlist/anyone modes cannot be exercised by non-owner
+/// authors inside an unclassified channel. A transient failure can only ever
+/// *restrict* authorization, never widen it. See [`resolve_dm_verdict`].
 pub(crate) async fn is_dm_channel(
     channel_id: Uuid,
     channel_info: &pool::ChannelInfoResolver,
 ) -> bool {
-    match channel_info.resolve(channel_id).await {
-        Some(info) => info.channel_type == "dm",
+    match resolve_dm_verdict(channel_id, channel_info).await {
+        Some(is_dm) => is_dm,
         None => {
             tracing::warn!(
                 channel_id = %channel_id,
@@ -284,6 +309,24 @@ pub(crate) async fn is_dm_channel(
             true
         }
     }
+}
+
+/// Resolve whether `channel_id` is *positively confirmed* as a DM, for the
+/// mention-filter bypass (dropping the relay `#p` filter and exempting owner
+/// messages from `require_mention`).
+///
+/// Fail-**open**: only metadata that positively resolves to `channel_type ==
+/// "dm"` bypasses the mention requirement. Unknown or unresolved channel types
+/// return `false`, so a transient metadata failure on a non-DM channel keeps
+/// its mention filter instead of making it behave like a DM — mirroring the
+/// startup path's "unknown types keep the mention filter" rule. Contrast with
+/// [`is_dm_channel`], which fails closed for the author gate. See
+/// [`resolve_dm_verdict`].
+pub(crate) async fn is_dm_channel_confirmed(
+    channel_id: Uuid,
+    channel_info: &pool::ChannelInfoResolver,
+) -> bool {
+    resolve_dm_verdict(channel_id, channel_info).await == Some(true)
 }
 
 /// Query an author's kind:0 profile and check if their NIP-OA auth tag
@@ -1981,11 +2024,13 @@ async fn tokio_main() -> Result<()> {
                                         // DM mention exemption (#2747): a DM the
                                         // agent is added to post-startup (e.g. an
                                         // agent-initiated DM) must deliver plain
-                                        // messages too. Resolve type via the shared
-                                        // resolver (fail-closed to DM on unknown,
-                                        // matching the inbound author gate).
-                                        let is_dm = is_dm_channel(ch, &ctx.channel_info).await;
-                                        let filter = filter.with_dm_exemption(is_dm);
+                                        // messages too. Drop the relay `#p` filter
+                                        // ONLY on a positively-confirmed DM — an
+                                        // unresolved/unknown type keeps the mention
+                                        // filter, matching the startup path (#2777).
+                                        let is_dm_confirmed =
+                                            is_dm_channel_confirmed(ch, &ctx.channel_info).await;
+                                        let filter = filter.with_dm_exemption(is_dm_confirmed);
                                         if let Err(e) = relay.subscribe_channel_from(ch, filter, Some(ts)).await {
                                             tracing::warn!("failed to subscribe to new channel {ch}: {e}");
                                         } else {
@@ -2161,17 +2206,34 @@ async fn tokio_main() -> Result<()> {
                             // explicit pubkey list on top, for external people;
                             // it never revokes same-owner team bots.
                             let author = buzz_event.event.pubkey.to_hex();
-                            // DM hardening: resolve channel type (fail-closed
-                            // to DM) so allowlist/anyone modes cannot be
-                            // exercised by non-owner authors inside DMs.
-                            let is_dm =
-                                is_dm_channel(buzz_event.channel_id, &ctx.channel_info).await;
+                            // DM hardening: resolve the channel's DM verdict ONCE,
+                            // then split it into two gates with opposite failure
+                            // semantics (#2777):
+                            //   • author gate — fails CLOSED (unresolved ⇒ DM) so
+                            //     allowlist/anyone modes cannot be exercised by
+                            //     non-owner authors inside an unclassified channel;
+                            //   • mention bypass — fails OPEN (unresolved ⇒ not DM)
+                            //     so a transient metadata failure never strips the
+                            //     mention requirement from a non-DM channel.
+                            let dm_verdict =
+                                resolve_dm_verdict(buzz_event.channel_id, &ctx.channel_info).await;
+                            let is_dm_for_auth = match dm_verdict {
+                                Some(is_dm) => is_dm,
+                                None => {
+                                    tracing::warn!(
+                                        channel_id = %buzz_event.channel_id,
+                                        "channel type unresolved — treating as DM for author gate (fail closed)"
+                                    );
+                                    true
+                                }
+                            };
+                            let is_dm_confirmed = dm_verdict == Some(true);
                             {
                                 let allowed = author_allowed(
                                     &config.respond_to,
                                     &config.respond_to_allowlist,
                                     &author,
-                                    is_dm,
+                                    is_dm_for_auth,
                                     &owner_cache,
                                     &ctx.rest_client,
                                 )
@@ -2181,7 +2243,7 @@ async fn tokio_main() -> Result<()> {
                                         channel_id = %buzz_event.channel_id,
                                         author = %author,
                                         mode = %config.respond_to,
-                                        is_dm,
+                                        is_dm = is_dm_for_auth,
                                         "inbound author gate — dropping event"
                                     );
                                     continue;
@@ -2193,8 +2255,10 @@ async fn tokio_main() -> Result<()> {
                             // DM fires a turn without an explicit @mention. Scoped
                             // to the owner (not siblings) so sibling agents still
                             // need a mention — preserving the anti-loop invariant
-                            // (#2270). Group channels are never exempt.
-                            let mention_exempt = is_dm && owner_cache.get() == Some(author.as_str());
+                            // (#2270). Requires a POSITIVELY-confirmed DM: group and
+                            // unresolved channels are never exempt (#2777).
+                            let mention_exempt =
+                                is_dm_confirmed && owner_cache.get() == Some(author.as_str());
                             let matched = filter::match_event(&buzz_event.event, buzz_event.channel_id, &rules, &pubkey_hex, mention_exempt).await;
                             let prompt_tag = match matched {
                                 Some(m) => m.prompt_tag,
@@ -4757,6 +4821,96 @@ mod author_gate_tests {
         assert!(
             is_dm_channel(Uuid::new_v4(), &resolver(HashMap::new())).await,
             "an unresolvable channel type must be treated as a DM"
+        );
+    }
+
+    // ── is_dm_channel_confirmed: the mention-filter bypass predicate (#2777) ──
+    //
+    // Unlike `is_dm_channel` (fail-CLOSED for the author gate), the bypass
+    // predicate fails OPEN: only a POSITIVELY-resolved `channel_type == "dm"`
+    // drops the relay `#p` filter / exempts the owner from `require_mention`.
+    // Unknown or unresolved types must keep the mention filter, matching the
+    // startup subscription path.
+
+    #[tokio::test]
+    async fn test_is_dm_channel_confirmed_positive_for_declared_dm() {
+        let dm_id = Uuid::new_v4();
+        let stream_id = Uuid::new_v4();
+        let startup = HashMap::from([
+            (
+                dm_id,
+                relay::ChannelInfo {
+                    name: "dm".into(),
+                    channel_type: "dm".into(),
+                },
+            ),
+            (
+                stream_id,
+                relay::ChannelInfo {
+                    name: "stream".into(),
+                    channel_type: "stream".into(),
+                },
+            ),
+        ]);
+        let resolver = resolver(startup);
+        assert!(
+            is_dm_channel_confirmed(dm_id, &resolver).await,
+            "a positively-resolved DM must bypass the mention filter"
+        );
+        assert!(
+            !is_dm_channel_confirmed(stream_id, &resolver).await,
+            "a resolved non-DM channel must keep the mention filter"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unresolved_channel_type_splits_the_two_verdicts() {
+        // The core #2777 regression: a channel whose type cannot be resolved
+        // must fail CLOSED for the author gate but fail OPEN for the mention
+        // bypass. A transient metadata failure on a newly-joined non-DM channel
+        // must NOT make it behave like a DM for mention matching.
+        let id = Uuid::new_v4();
+        // Empty startup + unreachable relay ⇒ the type never resolves.
+        let resolver = resolver(HashMap::new());
+
+        assert_eq!(
+            resolve_dm_verdict(id, &resolver).await,
+            None,
+            "an unresolvable channel type must produce no verdict"
+        );
+        assert!(
+            is_dm_channel(id, &resolver).await,
+            "author gate fails CLOSED: unresolved ⇒ treated as DM (owner-only)"
+        );
+        assert!(
+            !is_dm_channel_confirmed(id, &resolver).await,
+            "mention bypass fails OPEN: unresolved ⇒ NOT a DM, require_mention retained"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unknown_startup_type_retains_mention_filter() {
+        // A channel present at startup with an "unknown" type (the reviewer's
+        // newly-joined-channel case) must keep its mention filter while still
+        // failing closed at the author gate — matching the startup path's
+        // "unknown types keep the mention filter" behavior.
+        let id = Uuid::new_v4();
+        let startup = HashMap::from([(
+            id,
+            relay::ChannelInfo {
+                name: "unknown".into(),
+                channel_type: "unknown".into(),
+            },
+        )]);
+        let resolver = resolver(startup);
+
+        assert!(
+            is_dm_channel(id, &resolver).await,
+            "unknown startup type must fail closed as DM at the author gate"
+        );
+        assert!(
+            !is_dm_channel_confirmed(id, &resolver).await,
+            "unknown startup type must NOT be confirmed as DM — mention filter retained"
         );
     }
 }
