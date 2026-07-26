@@ -91,6 +91,106 @@ const BLOCKED_FILE_MIME_TYPES: &[&str] = &[
     "application/x-apple-diskimage",           // .dmg
 ];
 
+/// Cross-check a bare `application/zip` verdict against the zip **central
+/// directory** to recover OOXML documents that `infer`'s positional
+/// `msooxml` matcher misses.
+///
+/// `infer` 0.19's `is_xlsx`/`is_docx`/`is_pptx` detection walks the *local*
+/// file headers at the front of the archive, hopping forward from one header
+/// to the next by scanning a fixed ~6000-byte window each time. That walk
+/// assumes the first few zip entries are small. Real OOXML documents don't
+/// guarantee this: a spreadsheet with a populated worksheet, or a themed
+/// document, can easily put more than 6000 bytes of compressed data between
+/// two of the early local headers, so the matcher's bounded scan finds
+/// nothing, gives up, and `infer` reports the file as plain `application/zip`
+/// even though it's a perfectly valid, Excel/Word-openable document.
+///
+/// The central directory doesn't have this blind spot: every entry name is
+/// listed there in a fixed-size record regardless of how large that entry's
+/// compressed data is, and the directory's location is computed from the
+/// End-Of-Central-Directory record at the tail of the file rather than
+/// requiring a bounded forward walk from the front. The generic file-upload
+/// path (`process_file_upload`) always buffers the whole request body before
+/// validating it, so the complete archive — central directory included — is
+/// already in memory here; there's no streaming constraint that would make
+/// this fallback unaffordable.
+///
+/// Returns `None` (leaving the caller's `application/zip` verdict alone) if
+/// the buffer isn't parseable as a well-formed, non-Zip64 archive, or the
+/// archive contains none of the three subdirectories that qualify a package
+/// as Word, Excel, or PowerPoint OOXML.
+fn disambiguate_ooxml_zip(bytes: &[u8]) -> Option<&'static str> {
+    const EOCD_SIG: [u8; 4] = [0x50, 0x4B, 0x05, 0x06];
+    const EOCD_LEN: usize = 22;
+    const CD_HEADER_SIG: [u8; 4] = [0x50, 0x4B, 0x01, 0x02];
+    const CD_HEADER_LEN: usize = 46;
+
+    if bytes.len() < EOCD_LEN {
+        return None;
+    }
+
+    // The EOCD record is 22 bytes, optionally followed by a comment of up to
+    // 65,535 bytes. Scan backward from the end for its signature instead of
+    // assuming no comment is present.
+    let search_start = bytes.len().saturating_sub(EOCD_LEN + 65_535);
+    let eocd_pos = bytes[search_start..]
+        .windows(EOCD_SIG.len())
+        .rposition(|w| w == EOCD_SIG)
+        .map(|p| search_start + p)?;
+    if eocd_pos + EOCD_LEN > bytes.len() {
+        return None;
+    }
+    let eocd = &bytes[eocd_pos..eocd_pos + EOCD_LEN];
+
+    let entry_count = u16::from_le_bytes(eocd[10..12].try_into().ok()?) as usize;
+    let cd_size = u32::from_le_bytes(eocd[12..16].try_into().ok()?) as usize;
+    let cd_offset = u32::from_le_bytes(eocd[16..20].try_into().ok()?) as usize;
+
+    // Zip64 sentinel values — bail out rather than mis-parse. Ordinary
+    // OOXML documents (the case this function exists for) are nowhere near
+    // the 4 GiB / 65,535-entry limits that trigger Zip64.
+    if cd_offset == u32::MAX as usize || entry_count == u16::MAX as usize {
+        return None;
+    }
+    let cd_end = cd_offset.checked_add(cd_size)?;
+    if cd_offset >= bytes.len() || cd_end > bytes.len() {
+        return None;
+    }
+
+    let mut pos = cd_offset;
+    for _ in 0..entry_count {
+        if pos + CD_HEADER_LEN > cd_end {
+            break;
+        }
+        if bytes[pos..pos + 4] != CD_HEADER_SIG {
+            break;
+        }
+        let name_len = u16::from_le_bytes(bytes[pos + 28..pos + 30].try_into().ok()?) as usize;
+        let extra_len = u16::from_le_bytes(bytes[pos + 30..pos + 32].try_into().ok()?) as usize;
+        let comment_len = u16::from_le_bytes(bytes[pos + 32..pos + 34].try_into().ok()?) as usize;
+
+        let name_start = pos + CD_HEADER_LEN;
+        let name_end = name_start.checked_add(name_len)?;
+        if name_end > bytes.len() {
+            break;
+        }
+        let name = &bytes[name_start..name_end];
+        if name.starts_with(b"word/") {
+            return Some("application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+        } else if name.starts_with(b"xl/") {
+            return Some("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+        } else if name.starts_with(b"ppt/") {
+            return Some(
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            );
+        }
+
+        pos = name_end.checked_add(extra_len)?.checked_add(comment_len)?;
+    }
+
+    None
+}
+
 /// Map a sniffed MIME type to a file extension for the generic file path.
 ///
 /// Covers the common document, archive, audio, and data formats `infer`
@@ -182,7 +282,18 @@ pub fn validate_file_content(
     //    fine for the generic path; treat as opaque binary served as a download.
     match infer::get(bytes) {
         Some(kind) => {
-            let mime = kind.mime_type().to_string();
+            let mut mime = kind.mime_type().to_string();
+            // `infer`'s OOXML matchers are positional and can miss real
+            // xlsx/docx/pptx files whose early zip entries are large enough
+            // to exceed its internal search window, leaving them classified
+            // as bare `application/zip` (see `disambiguate_ooxml_zip`). We
+            // hold the whole buffered file already, so re-check a `zip`
+            // verdict against the central directory before accepting it.
+            if mime == "application/zip" {
+                if let Some(better) = disambiguate_ooxml_zip(bytes) {
+                    mime = better.to_string();
+                }
+            }
             // Recognized media must never fall through exact-byte attachment
             // storage. Images and video use their canonical media validators;
             // audio is rejected until Buzz has an explicit sanitizer and
@@ -2546,6 +2657,154 @@ mod tests {
         let (mime, ext) = validate_file_content(TINY_ZIP, &config).unwrap();
         assert_eq!(mime, "application/zip");
         assert_eq!(ext, "zip");
+    }
+
+    /// Build a minimal, well-formed zip archive (stored/uncompressed entries)
+    /// out of `(name, data)` pairs, with a real local-header section and a
+    /// real central directory + EOCD trailer. Used to construct synthetic
+    /// OOXML-shaped archives without pulling in a `zip`-writing dependency.
+    fn build_stored_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut central = Vec::new();
+        let mut offsets = Vec::with_capacity(entries.len());
+
+        for (name, data) in entries {
+            offsets.push(out.len() as u32);
+            let name_bytes = name.as_bytes();
+            out.extend_from_slice(&[0x50, 0x4B, 0x03, 0x04]); // local file header sig
+            out.extend_from_slice(&20u16.to_le_bytes()); // version needed
+            out.extend_from_slice(&0u16.to_le_bytes()); // flags
+            out.extend_from_slice(&0u16.to_le_bytes()); // method: stored
+            out.extend_from_slice(&0u16.to_le_bytes()); // mod time
+            out.extend_from_slice(&0u16.to_le_bytes()); // mod date
+            out.extend_from_slice(&0u32.to_le_bytes()); // crc32 (unchecked by our parser)
+            out.extend_from_slice(&(data.len() as u32).to_le_bytes()); // compressed size
+            out.extend_from_slice(&(data.len() as u32).to_le_bytes()); // uncompressed size
+            out.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes()); // extra field len
+            out.extend_from_slice(name_bytes);
+            out.extend_from_slice(data);
+        }
+
+        let cd_offset = out.len() as u32;
+        for ((name, data), &local_offset) in entries.iter().zip(offsets.iter()) {
+            let name_bytes = name.as_bytes();
+            central.extend_from_slice(&[0x50, 0x4B, 0x01, 0x02]); // central dir sig
+            central.extend_from_slice(&20u16.to_le_bytes()); // version made by
+            central.extend_from_slice(&20u16.to_le_bytes()); // version needed
+            central.extend_from_slice(&0u16.to_le_bytes()); // flags
+            central.extend_from_slice(&0u16.to_le_bytes()); // method: stored
+            central.extend_from_slice(&0u16.to_le_bytes()); // mod time
+            central.extend_from_slice(&0u16.to_le_bytes()); // mod date
+            central.extend_from_slice(&0u32.to_le_bytes()); // crc32
+            central.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            central.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            central.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes());
+            central.extend_from_slice(&0u16.to_le_bytes()); // extra len
+            central.extend_from_slice(&0u16.to_le_bytes()); // comment len
+            central.extend_from_slice(&0u16.to_le_bytes()); // disk number start
+            central.extend_from_slice(&0u16.to_le_bytes()); // internal attrs
+            central.extend_from_slice(&0u32.to_le_bytes()); // external attrs
+            central.extend_from_slice(&local_offset.to_le_bytes());
+            central.extend_from_slice(name_bytes);
+        }
+        let cd_size = central.len() as u32;
+        out.extend_from_slice(&central);
+
+        out.extend_from_slice(&[0x50, 0x4B, 0x05, 0x06]); // EOCD sig
+        out.extend_from_slice(&0u16.to_le_bytes()); // disk number
+        out.extend_from_slice(&0u16.to_le_bytes()); // disk where CD starts
+        out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        out.extend_from_slice(&cd_size.to_le_bytes());
+        out.extend_from_slice(&cd_offset.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes()); // comment len
+
+        out
+    }
+
+    /// Reproduces the exact failure mode from the bug report: a spreadsheet
+    /// whose `docProps/core.xml` entry (the one immediately preceding
+    /// `xl/theme/theme1.xml`) is large enough that `infer` 0.19's positional
+    /// `msooxml` matcher — which only scans ~6000 bytes ahead when hopping
+    /// from one local file header to the next — can't find the header it
+    /// needs and falls back to `application/zip`.
+    fn build_large_xlsx_like_zip() -> Vec<u8> {
+        let padding = vec![b'x'; 8_000]; // > infer's 6000-byte search window
+        build_stored_zip(&[
+            ("docProps/app.xml", b"<Properties/>"),
+            ("docProps/core.xml", &padding),
+            ("xl/theme/theme1.xml", b"<theme/>"),
+            ("xl/worksheets/sheet1.xml", b"<worksheet/>"),
+            ("xl/workbook.xml", b"<workbook/>"),
+            ("_rels/.rels", b"<Relationships/>"),
+            ("[Content_Types].xml", b"<Types/>"),
+        ])
+    }
+
+    #[test]
+    fn test_disambiguate_ooxml_zip_recovers_large_xlsx() {
+        let bytes = build_large_xlsx_like_zip();
+        // Sanity check that this fixture actually reproduces the bug: `infer`
+        // must have given up and called it a bare zip, or this test would
+        // pass trivially without exercising the fallback at all.
+        let infer_mime = infer::get(&bytes).map(|k| k.mime_type().to_string());
+        assert_eq!(
+            infer_mime.as_deref(),
+            Some("application/zip"),
+            "fixture no longer reproduces infer's positional-matcher miss; \
+             increase the padding size so this test still exercises the fallback"
+        );
+
+        assert_eq!(
+            disambiguate_ooxml_zip(&bytes),
+            Some("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        );
+    }
+
+    #[test]
+    fn test_validate_file_large_xlsx_detected_correctly_end_to_end() {
+        let config = test_config();
+        let bytes = build_large_xlsx_like_zip();
+        let (mime, ext) = validate_file_content(&bytes, &config).unwrap();
+        assert_eq!(
+            mime,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        );
+        assert_eq!(ext, "xlsx");
+    }
+
+    #[test]
+    fn test_disambiguate_ooxml_zip_ignores_plain_zip() {
+        // A zip with none of the word/xl/ppt markers must be left as `zip`,
+        // even with a large entry, so this never over-fires on real archives.
+        let padding = vec![b'y'; 8_000];
+        let bytes = build_stored_zip(&[("readme.txt", b"hello"), ("data/blob.bin", &padding)]);
+        assert_eq!(disambiguate_ooxml_zip(&bytes), None);
+    }
+
+    #[test]
+    fn test_disambiguate_ooxml_zip_detects_docx_and_pptx() {
+        let padding = vec![b'z'; 8_000];
+        let docx = build_stored_zip(&[
+            ("docProps/app.xml", b"<Properties/>"),
+            ("docProps/core.xml", &padding),
+            ("word/document.xml", b"<document/>"),
+        ]);
+        assert_eq!(
+            disambiguate_ooxml_zip(&docx),
+            Some("application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        );
+
+        let pptx = build_stored_zip(&[
+            ("docProps/app.xml", b"<Properties/>"),
+            ("docProps/core.xml", &padding),
+            ("ppt/presentation.xml", b"<presentation/>"),
+        ]);
+        assert_eq!(
+            disambiguate_ooxml_zip(&pptx),
+            Some("application/vnd.openxmlformats-officedocument.presentationml.presentation")
+        );
     }
 
     #[test]
