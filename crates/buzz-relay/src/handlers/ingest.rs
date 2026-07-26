@@ -31,9 +31,9 @@ use buzz_core::kind::{
     KIND_PRESENCE_UPDATE, KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_REACTION, KIND_READ_STATE,
     KIND_REPORT, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF,
     KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED,
-    KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEXT_NOTE, KIND_USER_STATUS,
-    KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE,
-    RELAY_ADMIN_REMOVE_MEMBER, RELAY_ADMIN_SET_WORKSPACE_PROFILE,
+    KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_SYSTEM_MESSAGE, KIND_TEAM, KIND_TEXT_NOTE,
+    KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER,
+    RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER, RELAY_ADMIN_SET_WORKSPACE_PROFILE,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_core::verification::verify_event;
@@ -1482,6 +1482,17 @@ async fn ingest_event_inner(
 
     if buzz_core::kind::is_relay_only_kind(kind_u32) {
         return Err(IngestError::Rejected("restricted: relay-only kind".into()));
+    }
+    // Kind 40099 also carries legitimate user-submitted system-style messages,
+    // so it cannot be relay-only wholesale. Reserve only the recovery-audit
+    // marker: otherwise a member could forge an event that deletion handlers
+    // must preserve forever.
+    if kind_u32 == KIND_SYSTEM_MESSAGE
+        && super::side_effects::has_channel_owner_recovery_audit_marker(&event)
+    {
+        return Err(IngestError::Rejected(
+            "restricted: channel owner recovery audit marker is relay-only".into(),
+        ));
     }
 
     // Share the event with the verify task via Arc instead of deep-cloning it

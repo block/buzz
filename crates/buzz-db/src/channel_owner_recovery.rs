@@ -4,7 +4,7 @@
 //! supported predicate is durable prior self-consent from every current human
 //! owner naming the nominated replacement.
 
-use buzz_core::CommunityId;
+use buzz_core::{CommunityId, StoredEvent};
 use chrono::{DateTime, Utc};
 use nostr::Event;
 use serde::{Deserialize, Serialize};
@@ -220,18 +220,41 @@ pub async fn recover_channel_owner(
         ));
     }
 
-    let actor_role = sqlx::query_scalar::<_, String>(
-        "SELECT role FROM relay_members \
-         WHERE community_id = $1 AND pubkey = $2 FOR UPDATE",
+    // Lock the actor and target community memberships in stable pubkey order.
+    // Community removal deletes relay_members without touching channel_members,
+    // so the target's current relay row is the authoritative same-community
+    // admission check.
+    let relay_member_rows = sqlx::query(
+        "SELECT pubkey, role FROM relay_members \
+         WHERE community_id = $1 AND pubkey IN ($2, $3) \
+         ORDER BY pubkey FOR UPDATE",
     )
     .bind(community_id.as_uuid())
     .bind(&actor_hex)
-    .fetch_optional(&mut *tx)
-    .await?
-    .ok_or_else(|| DbError::AccessDenied("actor is not a community member".into()))?;
+    .bind(&target_hex)
+    .fetch_all(&mut *tx)
+    .await?;
+    let mut actor_role = None;
+    let mut target_is_community_member = false;
+    for row in relay_member_rows {
+        let pubkey: String = row.try_get("pubkey")?;
+        if pubkey == actor_hex {
+            actor_role = Some(row.try_get::<String, _>("role")?);
+        }
+        if pubkey == target_hex {
+            target_is_community_member = true;
+        }
+    }
+    let actor_role = actor_role
+        .ok_or_else(|| DbError::AccessDenied("actor is not a community member".into()))?;
     if actor_role != "owner" {
         return Err(DbError::AccessDenied(
             "recovery requires an active, known human community owner".into(),
+        ));
+    }
+    if !target_is_community_member {
+        return Err(DbError::AccessDenied(
+            "target must be a current member of the same community".into(),
         ));
     }
 
@@ -492,22 +515,103 @@ pub async fn recover_channel_owner(
     })
 }
 
-/// Mark the channel audit event as durably delivered.
-pub async fn mark_recovery_delivered(
+/// Atomically store a relay-signed audit event and link it to its immutable recovery record.
+///
+/// The exact event-ID linkage prevents historical or mixed-version clients
+/// from forging marker-shaped events that later become undeletable.
+pub async fn store_recovery_audit_event(
     pool: &PgPool,
     community_id: CommunityId,
     request_event_id: &[u8],
-) -> Result<()> {
-    sqlx::query(
-        "UPDATE channel_owner_recovery_outbox SET delivered_at = NOW(), \
-         attempts = attempts + 1, last_error = NULL \
-         WHERE community_id = $1 AND request_event_id = $2",
+    event: &Event,
+    channel_id: Uuid,
+) -> Result<(StoredEvent, bool)> {
+    let event_id = event.id.as_bytes();
+    let event_pubkey = event.pubkey.to_bytes();
+    let event_sig = event.sig.serialize();
+    let event_tags = serde_json::to_value(&event.tags)?;
+    let event_created_at_secs = event.created_at.as_secs() as i64;
+    let event_created_at = DateTime::from_timestamp(event_created_at_secs, 0)
+        .ok_or(DbError::InvalidTimestamp(event_created_at_secs))?;
+    let received_at = Utc::now();
+    let mut tx = pool.begin().await?;
+
+    let inserted = sqlx::query(
+        "INSERT INTO events \
+         (community_id,id,pubkey,created_at,kind,tags,content,sig,received_at,channel_id) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) \
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(community_id.as_uuid())
+    .bind(event_id.as_slice())
+    .bind(event_pubkey.as_slice())
+    .bind(event_created_at)
+    .bind(i32::from(event.kind.as_u16()))
+    .bind(event_tags)
+    .bind(&event.content)
+    .bind(event_sig.as_slice())
+    .bind(received_at)
+    .bind(channel_id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected()
+        == 1;
+
+    let linked = sqlx::query(
+        "UPDATE channel_owner_recovery_outbox \
+         SET audit_event_id = $3, delivered_at = NOW(), \
+             attempts = attempts + 1, last_error = NULL \
+         WHERE community_id = $1 AND request_event_id = $2 \
+           AND channel_id = $4 \
+           AND (audit_event_id IS NULL OR audit_event_id = $3)",
     )
     .bind(community_id.as_uuid())
     .bind(request_event_id)
-    .execute(pool)
-    .await?;
-    Ok(())
+    .bind(event_id.as_slice())
+    .bind(channel_id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if linked != 1 {
+        return Err(DbError::InvalidData(
+            "recovery outbox is missing or linked to a different audit event".into(),
+        ));
+    }
+
+    tx.commit().await?;
+    if inserted {
+        if let Err(error) =
+            crate::insert_mentions(pool, community_id, event, Some(channel_id)).await
+        {
+            tracing::warn!(
+                event_id = %event.id,
+                error = %error,
+                "Failed to insert recovery audit mentions"
+            );
+        }
+    }
+    Ok((
+        StoredEvent::with_received_at(event.clone(), received_at, Some(channel_id), true),
+        inserted,
+    ))
+}
+
+/// Return whether an event ID is durably linked to an immutable recovery audit.
+pub async fn is_recovery_audit_event(
+    pool: &PgPool,
+    community_id: CommunityId,
+    event_id: &[u8],
+) -> Result<bool> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS ( \
+             SELECT 1 FROM channel_owner_recovery_outbox \
+             WHERE community_id = $1 AND audit_event_id = $2 \
+         )",
+    )
+    .bind(community_id.as_uuid())
+    .bind(event_id)
+    .fetch_one(pool)
+    .await?)
 }
 
 /// Record a retryable channel audit delivery failure.
@@ -571,8 +675,6 @@ mod tests {
     use buzz_core::kind::KIND_CHANNEL_OWNER_RECOVERY;
     use nostr::{EventBuilder, Keys, Kind, Tag};
 
-    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz";
-
     struct Fixture {
         community: CommunityId,
         channel: Uuid,
@@ -589,7 +691,9 @@ mod tests {
     }
 
     async fn setup_pool() -> PgPool {
-        PgPool::connect(TEST_DB_URL)
+        let database_url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".into());
+        PgPool::connect(&database_url)
             .await
             .expect("connect to test DB")
     }
@@ -618,12 +722,15 @@ mod tests {
         for keys in [&actor, &owner, &target] {
             insert_human(pool, community, keys).await;
         }
-        sqlx::query("INSERT INTO relay_members (community_id,pubkey,role) VALUES ($1,$2,'owner')")
-            .bind(community.as_uuid())
-            .bind(actor.public_key().to_hex())
-            .execute(pool)
-            .await
-            .expect("insert community owner");
+        for (keys, role) in [(&actor, "owner"), (&owner, "member"), (&target, "member")] {
+            sqlx::query("INSERT INTO relay_members (community_id,pubkey,role) VALUES ($1,$2,$3)")
+                .bind(community.as_uuid())
+                .bind(keys.public_key().to_hex())
+                .bind(role)
+                .execute(pool)
+                .await
+                .expect("insert community member");
+        }
 
         let channel = crate::channel::create_channel(
             pool,
@@ -1061,6 +1168,55 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
+    async fn former_community_member_with_stale_channel_row_cannot_be_promoted() {
+        let pool = setup_pool().await;
+        let fixture = setup_fixture(&pool).await;
+        record_owner_consent(&pool, &fixture).await;
+
+        let removed = crate::relay_members::remove_relay_member(
+            &pool,
+            fixture.community,
+            &fixture.target.public_key().to_hex(),
+        )
+        .await
+        .expect("remove target from community");
+        assert_eq!(removed, crate::relay_members::RemoveResult::Removed);
+
+        let stale_channel_row: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM channel_members \
+             WHERE community_id=$1 AND channel_id=$2 AND pubkey=$3 \
+               AND removed_at IS NULL)",
+        )
+        .bind(fixture.community.as_uuid())
+        .bind(fixture.channel)
+        .bind(fixture.target.public_key().to_bytes().as_slice())
+        .fetch_one(&pool)
+        .await
+        .expect("read stale channel membership");
+        assert!(
+            stale_channel_row,
+            "community removal must leave the regression's channel row intact"
+        );
+
+        let denied = recover_channel_owner(
+            &pool,
+            fixture.community,
+            fixture.channel,
+            fixture.target.public_key().to_bytes().as_slice(),
+            "former member must not be promoted",
+            &request(&fixture, "former member must not be promoted"),
+        )
+        .await;
+        assert!(matches!(
+            denied,
+            Err(DbError::AccessDenied(message))
+                if message == "target must be a current member of the same community"
+        ));
+        assert_no_recovery_side_effects(&pool, &fixture).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
     async fn every_current_owner_must_self_consent_to_the_same_target() {
         let pool = setup_pool().await;
         let fixture = setup_fixture(&pool).await;
@@ -1385,7 +1541,27 @@ mod tests {
         )
         .await;
         assert!(matches!(denied, Err(DbError::AccessDenied(_))));
-        assert_no_recovery_side_effects(&pool, &fixture).await;
+        let target_role: String = sqlx::query_scalar(
+            "SELECT role::text FROM channel_members \
+             WHERE community_id=$1 AND channel_id=$2 AND pubkey=$3",
+        )
+        .bind(fixture.community.as_uuid())
+        .bind(fixture.channel)
+        .bind(fixture.target.public_key().to_bytes().as_slice())
+        .fetch_one(&pool)
+        .await
+        .expect("bot target role");
+        assert_eq!(target_role, "bot");
+        let audit_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM channel_owner_recovery_audit \
+             WHERE community_id=$1 AND channel_id=$2",
+        )
+        .bind(fixture.community.as_uuid())
+        .bind(fixture.channel)
+        .fetch_one(&pool)
+        .await
+        .expect("bot target audit count");
+        assert_eq!(audit_count, 0);
 
         let fixture = setup_fixture(&pool).await;
         record_owner_consent(&pool, &fixture).await;
@@ -1652,7 +1828,11 @@ mod tests {
             &cross_target_request,
         )
         .await;
-        assert!(matches!(denied, Err(DbError::MemberNotFound(_))));
+        assert!(matches!(
+            denied,
+            Err(DbError::AccessDenied(message))
+                if message == "target must be a current member of the same community"
+        ));
         assert_no_recovery_side_effects(&pool, &fixture).await;
     }
 

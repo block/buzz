@@ -47,6 +47,7 @@ buzz channels list
 buzz channels create --name "my-channel" --type stream --visibility open
 buzz channels join --channel <uuid>
 buzz channels topic --channel <uuid> --topic "New topic"
+buzz channels recover-owner --channel <uuid> --pubkey <hex> --reason "Prior consent recorded"
 
 # Reactions
 buzz reactions add --event <event-id> --emoji "👍"
@@ -95,6 +96,12 @@ buzz channels list | jq '.[].name'
 constraint omitted from the command is removed. `protect list` reports malformed
 stored rules in `validation_error` so an owner can remove and repair them.
 
+`channels recover-owner` is an exceptional, promotion-only command. It requires
+the target to be a current human member of the same community and channel, and
+requires every current human owner to have self-archived with that exact target
+as `replaced-by`. It does not recover a lost/deleted key without that prior
+evidence. See [Channel-owner recovery](../../docs/channel-owner-recovery.md).
+
 ## Commands
 
 | Group | Subcommand | Description |
@@ -121,6 +128,7 @@ stored rules in `validation_error` so an owner can remove and repair them.
 | | `members` | List channel members |
 | | `add-member` | Add a member |
 | | `remove-member` | Remove a member |
+| | `recover-owner` | Promote a prior-consented replacement through the audited recovery path |
 | `canvas` | `get` | Get channel canvas |
 | | `set` | Set channel canvas |
 | `reactions` | `add` | React to a message |

@@ -34,6 +34,7 @@ CREATE TABLE channel_owner_recovery_outbox (
     community_id        UUID NOT NULL REFERENCES communities(id),
     request_event_id    BYTEA NOT NULL,
     channel_id          UUID NOT NULL,
+    audit_event_id      BYTEA,
     attempts            INT NOT NULL DEFAULT 0,
     delivered_at        TIMESTAMPTZ,
     last_error          TEXT,
@@ -42,8 +43,14 @@ CREATE TABLE channel_owner_recovery_outbox (
     FOREIGN KEY (community_id, request_event_id)
         REFERENCES channel_owner_recovery_audit (community_id, request_event_id),
     FOREIGN KEY (community_id, channel_id)
-        REFERENCES channels (community_id, id)
+        REFERENCES channels (community_id, id),
+    CONSTRAINT chk_owner_recovery_audit_event_id_len
+        CHECK (audit_event_id IS NULL OR length(audit_event_id) = 32)
 );
+
+CREATE UNIQUE INDEX uq_channel_owner_recovery_audit_event
+    ON channel_owner_recovery_outbox (community_id, audit_event_id)
+    WHERE audit_event_id IS NOT NULL;
 
 CREATE FUNCTION channel_owner_recovery_audit_immutable() RETURNS TRIGGER AS $$
 BEGIN

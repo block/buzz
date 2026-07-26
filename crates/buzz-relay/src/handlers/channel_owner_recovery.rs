@@ -5,7 +5,7 @@ use std::sync::Arc;
 use nostr::{Event, EventBuilder, Kind, Tag};
 use uuid::Uuid;
 
-use buzz_core::kind::KIND_SYSTEM_MESSAGE;
+use buzz_core::kind::{CHANNEL_OWNER_RECOVERY_AUDIT_MARKER, KIND_SYSTEM_MESSAGE};
 use buzz_core::tenant::TenantContext;
 
 use crate::handlers::event::dispatch_persistent_event;
@@ -91,7 +91,12 @@ async fn deliver_audit_event(
     let audit = build_audit_event(&state.relay_keypair, payload)?;
     let (stored, inserted) = state
         .db
-        .insert_event(tenant.community(), &audit, Some(payload.channel_id))
+        .store_recovery_audit_event(
+            tenant.community(),
+            request_event_id,
+            &audit,
+            payload.channel_id,
+        )
         .await?;
     if inserted {
         let relay_pubkey = state.relay_keypair.public_key().to_hex();
@@ -105,10 +110,6 @@ async fn deliver_audit_event(
         )
         .await;
     }
-    state
-        .db
-        .mark_recovery_delivered(tenant.community(), request_event_id)
-        .await?;
     Ok(())
 }
 
@@ -173,6 +174,7 @@ fn build_audit_event(
                 Tag::parse(["p", &payload.target])?,
                 Tag::parse(["predicate", &payload.predicate_id])?,
                 Tag::parse(["reason-code", &payload.reason_code])?,
+                Tag::parse(["audit", CHANNEL_OWNER_RECOVERY_AUDIT_MARKER])?,
             ])
             .custom_created_at(nostr::Timestamp::from(created_at))
             .sign_with_keys(relay_keys)?,
@@ -380,6 +382,7 @@ mod tests {
                 vec!["p".into(), payload.target],
                 vec!["predicate".into(), payload.predicate_id],
                 vec!["reason-code".into(), payload.reason_code],
+                vec!["audit".into(), CHANNEL_OWNER_RECOVERY_AUDIT_MARKER.into(),],
             ]
         );
         buzz_core::verification::verify_event(&first).expect("verify relay signature");
@@ -459,12 +462,15 @@ mod tests {
                 .await
                 .expect("insert human");
         }
-        sqlx::query("INSERT INTO relay_members (community_id,pubkey,role) VALUES ($1,$2,'owner')")
-            .bind(community.as_uuid())
-            .bind(actor.public_key().to_hex())
-            .execute(&pool)
-            .await
-            .expect("insert community owner");
+        for (keys, role) in [(&actor, "owner"), (&owner, "member"), (&target, "member")] {
+            sqlx::query("INSERT INTO relay_members (community_id,pubkey,role) VALUES ($1,$2,$3)")
+                .bind(community.as_uuid())
+                .bind(keys.public_key().to_hex())
+                .bind(role)
+                .execute(&pool)
+                .await
+                .expect("insert community member");
+        }
         let channel = buzz_db::channel::create_channel(
             &pool,
             community,
@@ -518,8 +524,8 @@ mod tests {
             .expect("handle recovery");
         assert_eq!(message, "channel ownership recovered");
 
-        let delivered: Option<DateTime<Utc>> = sqlx::query_scalar(
-            "SELECT delivered_at FROM channel_owner_recovery_outbox \
+        let (delivered, audit_event_id): (Option<DateTime<Utc>>, Option<Vec<u8>>) = sqlx::query_as(
+            "SELECT delivered_at, audit_event_id FROM channel_owner_recovery_outbox \
              WHERE community_id=$1 AND request_event_id=$2",
         )
         .bind(community.as_uuid())
@@ -549,5 +555,14 @@ mod tests {
         assert_eq!(payload.target, target.public_key().to_hex());
         assert_eq!(payload.reason, "handler delivery test");
         buzz_core::verification::verify_event(&audit.event).expect("verify relay signature");
+        assert_eq!(
+            audit_event_id.as_deref(),
+            Some(audit.event.id.as_bytes().as_slice())
+        );
+        assert!(state
+            .db
+            .is_recovery_audit_event(community, audit.event.id.as_bytes().as_slice())
+            .await
+            .expect("read durable audit link"));
     }
 }

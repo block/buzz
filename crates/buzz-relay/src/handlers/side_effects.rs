@@ -216,6 +216,12 @@ pub async fn validate_standard_deletion_event(
             .await?
             .ok_or_else(|| anyhow::anyhow!("target event not found"))?;
 
+        if is_immutable_channel_owner_recovery_audit(tenant, state, &target_event.event).await? {
+            return Err(anyhow::anyhow!(
+                "channel owner recovery audit events are immutable"
+            ));
+        }
+
         let target_author =
             effective_message_author(&target_event.event, &state.relay_keypair.public_key());
         if target_author != actor_bytes
@@ -584,6 +590,12 @@ pub async fn validate_admin_event(
                     return Err(anyhow::anyhow!("target event has no channel"));
                 }
                 _ => {} // Same channel — OK
+            }
+            if is_immutable_channel_owner_recovery_audit(tenant, state, &target_event.event).await?
+            {
+                return Err(anyhow::anyhow!(
+                    "channel owner recovery audit events are immutable"
+                ));
             }
 
             // Check if actor is the event author.
@@ -1605,6 +1617,11 @@ async fn handle_delete_event_side_effect(
             }
             _ => {} // Same channel — OK
         }
+        if is_immutable_channel_owner_recovery_audit(tenant, state, &target_event.event).await? {
+            return Err(anyhow::anyhow!(
+                "channel owner recovery audit events are immutable"
+            ));
+        }
     }
 
     // Look up thread metadata so we can pass parent/root IDs to the
@@ -1655,6 +1672,39 @@ async fn handle_delete_event_side_effect(
 
     info!(target_event = %hex::encode(&target_id), "NIP-29 DELETE_EVENT processed");
     Ok(())
+}
+
+pub(crate) fn has_channel_owner_recovery_audit_marker(event: &Event) -> bool {
+    event.tags.iter().any(|tag| {
+        let parts = tag.as_slice();
+        parts.first().map(String::as_str) == Some("audit")
+            && parts.get(1).map(String::as_str)
+                == Some(buzz_core::kind::CHANNEL_OWNER_RECOVERY_AUDIT_MARKER)
+    })
+}
+
+fn has_channel_owner_recovery_audit_shape(event: &Event) -> bool {
+    event.kind.as_u16() as u32 == buzz_core::kind::KIND_SYSTEM_MESSAGE
+        && has_channel_owner_recovery_audit_marker(event)
+        && serde_json::from_str::<serde_json::Value>(&event.content).is_ok_and(|value| {
+            value.get("type").and_then(serde_json::Value::as_str) == Some("channel_owner_recovered")
+        })
+}
+
+async fn is_immutable_channel_owner_recovery_audit(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    event: &Event,
+) -> anyhow::Result<bool> {
+    if !has_channel_owner_recovery_audit_shape(event) {
+        return Ok(false);
+    }
+    // Exact durable linkage is the trust boundary. Shape alone is insufficient:
+    // an older relay version may have accepted a client-authored lookalike.
+    Ok(state
+        .db
+        .is_recovery_audit_event(tenant.community(), event.id.as_bytes().as_slice())
+        .await?)
 }
 
 async fn handle_create_group(
@@ -2127,6 +2177,13 @@ async fn handle_standard_deletion_event(
             Some(target) => target,
             None => continue,
         };
+        // Defense in depth: validation runs before storage, but the mutation
+        // path must preserve immutable audits even if it is called directly.
+        if is_immutable_channel_owner_recovery_audit(tenant, state, &target_event.event).await? {
+            return Err(anyhow::anyhow!(
+                "channel owner recovery audit events are immutable"
+            ));
+        }
         if u32::from(target_event.event.kind.as_u16()) == super::push_lease::KIND_PUSH_LEASE {
             tracing::debug!(
                 target_id = %hex::encode(&target_id),
@@ -3266,6 +3323,43 @@ fn topic_for_subscription(channel_id: Option<Uuid>) -> EventTopic {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recovery_audit_shape_does_not_depend_on_current_relay_key() {
+        let old_relay = nostr::Keys::generate();
+        let current_relay = nostr::Keys::generate();
+        let content = serde_json::json!({
+            "schema_version": 1,
+            "type": "channel_owner_recovered",
+        })
+        .to_string();
+        let marked = |keys: &nostr::Keys| {
+            EventBuilder::new(
+                Kind::Custom(buzz_core::kind::KIND_SYSTEM_MESSAGE as u16),
+                &content,
+            )
+            .tags([Tag::parse([
+                "audit",
+                buzz_core::kind::CHANNEL_OWNER_RECOVERY_AUDIT_MARKER,
+            ])
+            .unwrap()])
+            .sign_with_keys(keys)
+            .unwrap()
+        };
+
+        assert!(has_channel_owner_recovery_audit_shape(&marked(&old_relay)));
+        assert!(has_channel_owner_recovery_audit_shape(&marked(
+            &current_relay
+        )));
+
+        let unmarked = EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_SYSTEM_MESSAGE as u16),
+            content,
+        )
+        .sign_with_keys(&current_relay)
+        .unwrap();
+        assert!(!has_channel_owner_recovery_audit_shape(&unmarked));
+    }
 
     #[test]
     fn delete_tombstone_omits_absent_moderation_metadata() {

@@ -1568,14 +1568,31 @@ impl Db {
         .await
     }
 
-    /// Mark a recovery audit outbox record delivered.
-    pub async fn mark_recovery_delivered(
+    /// Atomically store and durably link a relay-signed recovery audit event.
+    pub async fn store_recovery_audit_event(
         &self,
         community_id: CommunityId,
         request_event_id: &[u8],
-    ) -> Result<()> {
-        channel_owner_recovery::mark_recovery_delivered(&self.pool, community_id, request_event_id)
-            .await
+        event: &nostr::Event,
+        channel_id: Uuid,
+    ) -> Result<(StoredEvent, bool)> {
+        channel_owner_recovery::store_recovery_audit_event(
+            &self.pool,
+            community_id,
+            request_event_id,
+            event,
+            channel_id,
+        )
+        .await
+    }
+
+    /// Return whether an event is durably linked to an immutable recovery audit.
+    pub async fn is_recovery_audit_event(
+        &self,
+        community_id: CommunityId,
+        event_id: &[u8],
+    ) -> Result<bool> {
+        channel_owner_recovery::is_recovery_audit_event(&self.pool, community_id, event_id).await
     }
 
     /// Record a retryable recovery audit delivery failure.

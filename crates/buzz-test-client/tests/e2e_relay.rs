@@ -43,6 +43,14 @@ fn relay_http_url() -> String {
         .to_string()
 }
 
+fn relay_host() -> String {
+    relay_url()
+        .trim_start_matches("wss://")
+        .trim_start_matches("ws://")
+        .trim_end_matches('/')
+        .to_string()
+}
+
 fn test_owner_keys() -> Keys {
     std::env::var("BUZZ_TEST_OWNER_PRIVATE_KEY")
         .ok()
@@ -117,6 +125,30 @@ async fn seed_relay_member(host: &str, keys: &Keys, role: &str) {
     .execute(&pool)
     .await
     .unwrap_or_else(|e| panic!("seed relay member {role}: {e}"));
+}
+
+async fn seed_preexisting_channel_event(host: &str, channel_id: Uuid, event: &nostr::Event) {
+    let pool = e2e_db_pool().await;
+    let community_id = ensure_test_community(host).await;
+    let created_at = chrono::DateTime::from_timestamp(event.created_at.as_secs() as i64, 0)
+        .expect("valid forged-event timestamp");
+    sqlx::query(
+        "INSERT INTO events \
+         (community_id,id,pubkey,created_at,kind,tags,content,sig,received_at,channel_id) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,now(),$9)",
+    )
+    .bind(community_id)
+    .bind(event.id.as_bytes().as_slice())
+    .bind(event.pubkey.to_bytes().as_slice())
+    .bind(created_at)
+    .bind(i32::from(event.kind.as_u16()))
+    .bind(serde_json::to_value(&event.tags).expect("serialize forged-event tags"))
+    .bind(&event.content)
+    .bind(event.sig.serialize().as_slice())
+    .bind(channel_id)
+    .execute(&pool)
+    .await
+    .expect("seed pre-upgrade marked event");
 }
 
 async fn seed_relay_owner(keys: &Keys) {
@@ -201,6 +233,76 @@ async fn create_test_channel(keys: &Keys) -> String {
     channel_uuid.to_string()
 }
 
+async fn post_test_event(keys: &Keys, event: &nostr::Event) -> (reqwest::StatusCode, String) {
+    let url = format!("{}/events", relay_http_url());
+    let body = serde_json::to_string(event).expect("serialize event");
+    let response = reqwest::Client::new()
+        .post(&url)
+        .header("Authorization", nip98_post_header(keys, &url, &body))
+        .header("Content-Type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .expect("submit test event");
+    let status = response.status();
+    let body = response.text().await.expect("read event response");
+    (status, body)
+}
+
+async fn create_authenticated_test_channel(keys: &Keys) -> String {
+    let channel_uuid = Uuid::new_v4();
+    let event = EventBuilder::new(Kind::Custom(9007), "")
+        .tags([
+            Tag::parse(["h", &channel_uuid.to_string()]).expect("channel h tag"),
+            Tag::parse(["name", &format!("relay-e2e-auth-{channel_uuid}")])
+                .expect("channel name tag"),
+            Tag::parse(["channel_type", "stream"]).expect("channel type tag"),
+            Tag::parse(["visibility", "open"]).expect("channel visibility tag"),
+        ])
+        .sign_with_keys(keys)
+        .expect("sign authenticated create-channel event");
+    let (status, body) = post_test_event(keys, &event).await;
+    assert_event_accepted(status, &body);
+    channel_uuid.to_string()
+}
+
+fn assert_event_accepted(status: reqwest::StatusCode, body: &str) {
+    assert!(
+        status.is_success(),
+        "event submission failed: status={status}, body={body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(body).expect("parse event response");
+    assert!(
+        json["accepted"].as_bool().unwrap_or(false),
+        "event was not accepted: {body}"
+    );
+}
+
+async fn query_channel_events(keys: &Keys, channel_id: &str, kind: u32) -> serde_json::Value {
+    let filters = serde_json::json!([{
+        "kinds": [kind],
+        "#h": [channel_id],
+        "limit": 50,
+    }]);
+    let url = format!("{}/query", relay_http_url());
+    let body = filters.to_string();
+    let response = reqwest::Client::new()
+        .post(&url)
+        .header("Authorization", nip98_post_header(keys, &url, &body))
+        .header("Content-Type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .expect("query channel events");
+    let status = response.status();
+    let body = response.text().await.expect("read query response");
+    assert!(
+        status.is_success(),
+        "channel query failed: status={status}, body={body}"
+    );
+    serde_json::from_str(&body).expect("parse channel query")
+}
+
 #[tokio::test]
 #[ignore]
 async fn test_connect_and_authenticate() {
@@ -212,6 +314,180 @@ async fn test_connect_and_authenticate() {
         .expect("should connect and authenticate");
 
     client.disconnect().await.expect("clean disconnect");
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_owner_recovery_public_ingest_preserves_immutable_visible_audit() {
+    let actor = Keys::generate();
+    let prior_owner = Keys::generate();
+    let target = Keys::generate();
+    let host = relay_host();
+    for (keys, role) in [
+        (&actor, "owner"),
+        (&prior_owner, "member"),
+        (&target, "member"),
+    ] {
+        seed_relay_member(&host, keys, role).await;
+        let profile = EventBuilder::new(
+            Kind::Custom(0),
+            serde_json::json!({
+                "display_name": format!("recovery-{}", keys.public_key().to_hex())
+            })
+            .to_string(),
+        )
+        .sign_with_keys(keys)
+        .expect("sign profile");
+        let (status, body) = post_test_event(keys, &profile).await;
+        assert_event_accepted(status, &body);
+    }
+
+    let channel_id = create_authenticated_test_channel(&prior_owner).await;
+    let channel_uuid = Uuid::parse_str(&channel_id).expect("channel UUID");
+    let target_hex = target.public_key().to_hex();
+    let add_target = buzz_sdk::build_add_member(
+        channel_uuid,
+        &target_hex,
+        Some(buzz_core::channel::MemberRole::Member),
+    )
+    .expect("build add-member")
+    .sign_with_keys(&prior_owner)
+    .expect("sign add-member");
+    let (status, body) = post_test_event(&prior_owner, &add_target).await;
+    assert_event_accepted(status, &body);
+
+    let forged_audit = EventBuilder::new(
+        Kind::Custom(buzz_core::kind::KIND_SYSTEM_MESSAGE as u16),
+        serde_json::json!({"type": "channel_owner_recovered"}).to_string(),
+    )
+    .tags([
+        Tag::parse(["h", &channel_id]).expect("forged audit h tag"),
+        Tag::parse([
+            "audit",
+            buzz_core::kind::CHANNEL_OWNER_RECOVERY_AUDIT_MARKER,
+        ])
+        .expect("forged audit marker"),
+    ])
+    .sign_with_keys(&target)
+    .expect("sign forged recovery audit");
+    let (status, body) = post_test_event(&target, &forged_audit).await;
+    assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
+    assert!(
+        body.contains("channel owner recovery audit marker is relay-only"),
+        "unexpected forged audit rejection: {body}"
+    );
+
+    // Simulate a marker-shaped event accepted by an older pod before the marker
+    // became reserved. Shape alone must not make this historical forgery
+    // immutable after a rolling upgrade.
+    seed_preexisting_channel_event(&host, channel_uuid, &forged_audit).await;
+    let forged_audit_id = forged_audit.id.to_hex();
+    let delete_forgery = EventBuilder::new(Kind::EventDeletion, "")
+        .tags([Tag::parse(["e", &forged_audit_id]).expect("forgery delete e tag")])
+        .sign_with_keys(&target)
+        .expect("sign historical-forgery deletion");
+    let (status, body) = post_test_event(&target, &delete_forgery).await;
+    assert_event_accepted(status, &body);
+    let after_forgery_delete =
+        query_channel_events(&target, &channel_id, buzz_core::kind::KIND_SYSTEM_MESSAGE).await;
+    assert!(
+        after_forgery_delete
+            .as_array()
+            .expect("channel query array")
+            .iter()
+            .all(|event| event["id"].as_str() != Some(forged_audit_id.as_str())),
+        "unlinked historical forgery must remain deletable"
+    );
+
+    let prior_owner_hex = prior_owner.public_key().to_hex();
+    let archive = buzz_sdk::build_archive_identity_request(
+        &prior_owner_hex,
+        "Prior owner designated a replacement before retiring.",
+        Some("retired"),
+        Some(&target_hex),
+        None,
+    )
+    .expect("build self-archive")
+    .sign_with_keys(&prior_owner)
+    .expect("sign self-archive");
+    let (status, body) = post_test_event(&prior_owner, &archive).await;
+    assert_event_accepted(status, &body);
+
+    let recovery = buzz_sdk::build_channel_owner_recovery(
+        channel_uuid,
+        &target_hex,
+        "Public-ingest owner recovery regression",
+    )
+    .expect("build owner recovery")
+    .sign_with_keys(&actor)
+    .expect("sign owner recovery");
+    let (status, body) = post_test_event(&actor, &recovery).await;
+    assert_event_accepted(status, &body);
+
+    let visible =
+        query_channel_events(&target, &channel_id, buzz_core::kind::KIND_SYSTEM_MESSAGE).await;
+    let audit = visible
+        .as_array()
+        .expect("channel query array")
+        .iter()
+        .find(|event| {
+            event["content"].as_str().is_some_and(|content| {
+                serde_json::from_str::<serde_json::Value>(content).is_ok_and(|content| {
+                    content.get("type").and_then(serde_json::Value::as_str)
+                        == Some("channel_owner_recovered")
+                })
+            })
+        })
+        .expect("channel-visible owner recovery audit");
+    let audit_id = audit["id"].as_str().expect("audit event id");
+    assert!(
+        audit["tags"].as_array().is_some_and(|tags| {
+            tags.iter().any(|tag| {
+                tag.as_array().is_some_and(|parts| {
+                    parts.first().and_then(serde_json::Value::as_str) == Some("audit")
+                        && parts.get(1).and_then(serde_json::Value::as_str)
+                            == Some(buzz_core::kind::CHANNEL_OWNER_RECOVERY_AUDIT_MARKER)
+                })
+            })
+        }),
+        "visible audit must carry the immutable relay marker"
+    );
+
+    let delete = EventBuilder::new(Kind::Custom(9005), "")
+        .tags([
+            Tag::parse(["h", &channel_id]).expect("delete h tag"),
+            Tag::parse(["e", audit_id]).expect("delete e tag"),
+        ])
+        .sign_with_keys(&target)
+        .expect("sign attempted audit deletion");
+    let (status, body) = post_test_event(&target, &delete).await;
+    assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
+    assert!(
+        body.contains("channel owner recovery audit events are immutable"),
+        "unexpected audit deletion rejection: {body}"
+    );
+
+    let standard_delete = EventBuilder::new(Kind::EventDeletion, "")
+        .tags([Tag::parse(["e", audit_id]).expect("standard delete e tag")])
+        .sign_with_keys(&actor)
+        .expect("sign standard audit deletion attempt");
+    let (status, body) = post_test_event(&actor, &standard_delete).await;
+    assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
+    assert!(
+        body.contains("channel owner recovery audit events are immutable"),
+        "unexpected standard audit deletion rejection: {body}"
+    );
+
+    let after_delete_attempt =
+        query_channel_events(&target, &channel_id, buzz_core::kind::KIND_SYSTEM_MESSAGE).await;
+    assert!(
+        after_delete_attempt
+            .as_array()
+            .expect("channel query array")
+            .iter()
+            .any(|event| event["id"].as_str() == Some(audit_id)),
+        "recovery audit must remain channel-visible after deletion attempt"
+    );
 }
 
 #[tokio::test]

@@ -887,12 +887,25 @@ mod tests {
         assert!(owner_recovery.contains("CREATE TABLE channel_owner_recovery_audit"));
         assert!(owner_recovery.contains("CREATE TABLE channel_owner_recovery_outbox"));
         assert!(owner_recovery.contains("PRIMARY KEY (community_id, request_event_id)"));
+        assert!(owner_recovery.contains("audit_event_id"));
+        assert!(owner_recovery.contains("uq_channel_owner_recovery_audit_event"));
         assert!(owner_recovery.contains("reason_code"));
         assert!(owner_recovery.contains("BEFORE UPDATE OR DELETE"));
         assert!(!migrations[0]
             .sql
             .as_str()
             .contains("channel_owner_recovery_audit"));
+    }
+
+    #[test]
+    fn desired_state_schema_includes_channel_owner_recovery_state() {
+        let schema = include_str!("../../../schema/schema.sql");
+        assert!(schema.contains("CREATE TABLE channel_owner_recovery_audit"));
+        assert!(schema.contains("CREATE TABLE channel_owner_recovery_outbox"));
+        assert!(schema.contains("audit_event_id"));
+        assert!(schema.contains("uq_channel_owner_recovery_audit_event"));
+        assert!(schema.contains("CREATE TRIGGER trg_channel_owner_recovery_audit_immutable"));
+        assert!(schema.contains("BEFORE UPDATE OR DELETE ON channel_owner_recovery_audit"));
     }
 
     #[test]

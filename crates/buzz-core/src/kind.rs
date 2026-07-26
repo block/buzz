@@ -352,6 +352,8 @@ pub const KIND_IA_UNARCHIVE_REQUEST: u32 = 9036;
 ///
 /// This is a dedicated command, separate from generic channel role changes.
 pub const KIND_CHANNEL_OWNER_RECOVERY: u32 = 9038;
+/// Marker on relay-signed, non-deletable channel-owner recovery audit events.
+pub const CHANNEL_OWNER_RECOVERY_AUDIT_MARKER: &str = "channel-owner-recovery-v1";
 
 // NIP-IA identity archival announcement events (relay-signed)
 /// NIP-IA: Archived-identity delta (relay-signed).

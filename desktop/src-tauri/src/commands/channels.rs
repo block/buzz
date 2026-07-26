@@ -849,6 +849,7 @@ pub async fn change_channel_member_role(
 }
 
 #[tauri::command]
+/// Recover channel ownership through the relay's dedicated audited command.
 pub async fn recover_channel_owner(
     channel_id: String,
     target_pubkey: String,

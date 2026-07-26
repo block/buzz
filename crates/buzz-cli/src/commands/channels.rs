@@ -1001,6 +1001,7 @@ pub async fn cmd_remove_channel_member(
     Ok(())
 }
 
+/// Submit the dedicated, prior-self-consent-only channel-owner recovery event.
 pub async fn cmd_recover_channel_owner(
     client: &BuzzClient,
     channel_id: &str,
