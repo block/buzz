@@ -2,6 +2,10 @@ import * as React from "react";
 import { Loader2 } from "lucide-react";
 
 import { useWorkingAgentHeadlines } from "@/features/channels/ui/useWorkingAgentHeadlines";
+import {
+  shouldShowViewAllAgentActivity,
+  type ChannelActivityAgent,
+} from "@/features/channels/ui/botActivityViewAll";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ManagedAgent } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
@@ -9,10 +13,12 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Shimmer } from "@/shared/ui/Shimmer";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
-export type BotActivityAgent = Pick<ManagedAgent, "pubkey" | "name">;
+export type BotActivityAgent = Pick<ManagedAgent, "pubkey" | "name"> & {
+  status?: ManagedAgent["status"];
+};
 
 type BotActivityBarProps = {
-  agents: BotActivityAgent[];
+  agents: ChannelActivityAgent[];
   channelId?: string | null;
   onOpenAgentSession: (pubkey: string, channelId?: string | null) => void;
   onOpenAllAgentActivity?: () => void;
@@ -118,14 +124,15 @@ export function BotActivityComposerAction({
         }`
       : `${workingAgents[0]?.name ?? "Agent"} +${workingAgents.length - 1}`;
 
-  const canShowAll =
-    workingAgents.length > 1 && Boolean(onOpenAllAgentActivity);
-  const handleShowAll = React.useCallback(() => {
+  const canViewAll =
+    Boolean(onOpenAllAgentActivity) &&
+    shouldShowViewAllAgentActivity({ agents, workingBotPubkeys });
+  const handleViewAll = React.useCallback(() => {
     clearHoverTimer();
     setOpen(false);
     onOpenAllAgentActivity?.();
   }, [clearHoverTimer, onOpenAllAgentActivity]);
-  const showAllButtonClassName = cn(
+  const viewAllButtonClassName = cn(
     "w-full shrink-0 rounded-full border border-border/60 bg-background px-2.5 py-1 text-xs font-semibold text-primary transition-colors hover:border-primary/30 hover:bg-primary/5",
     isInline && "h-7 w-auto",
   );
@@ -246,28 +253,28 @@ export function BotActivityComposerAction({
             );
           })}
         </div>
-        {canShowAll ? (
+        {canViewAll ? (
           <div className="mt-1 border-t border-border/60 px-1 pt-1">
             <button
-              className={showAllButtonClassName}
+              className={viewAllButtonClassName}
               data-testid="bot-activity-show-all-popover"
-              onClick={handleShowAll}
+              onClick={handleViewAll}
               type="button"
             >
-              Show all
+              View all
             </button>
           </div>
         ) : null}
       </PopoverContent>
     </Popover>
-    {isInline && canShowAll ? (
+    {isInline && canViewAll ? (
       <button
-        className={showAllButtonClassName}
+        className={viewAllButtonClassName}
         data-testid="bot-activity-show-all"
-        onClick={handleShowAll}
+        onClick={handleViewAll}
         type="button"
       >
-        Show all
+        View all
       </button>
     ) : null}
     </div>

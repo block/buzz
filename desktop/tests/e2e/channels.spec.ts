@@ -1934,6 +1934,48 @@ test("shows and clears activity indicators for active channel agents", async ({
   );
 });
 
+test("view all opens the multi-agent activity panel for two working agents", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  await page.getByTestId("channel-agents").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("agents");
+  await waitForMockLiveSubscription(page, "agents", KIND_TYPING_INDICATOR);
+
+  for (const pubkey of [
+    TEST_IDENTITIES.alice.pubkey,
+    TEST_IDENTITIES.charlie.pubkey,
+  ]) {
+    await page.evaluate(
+      ({ channelName, agentPubkey }) => {
+        window.__BUZZ_E2E_EMIT_MOCK_TYPING__?.({
+          channelName,
+          pubkey: agentPubkey,
+        });
+      },
+      { channelName: "agents", agentPubkey: pubkey },
+    );
+  }
+
+  await expect(page.getByTestId("bot-activity-composer-trigger")).toBeVisible();
+  await expect(page.getByTestId("bot-activity-show-all")).toBeVisible();
+  await expect(page.getByTestId("bot-activity-show-all")).toHaveText("View all");
+
+  await page.getByTestId("bot-activity-show-all").click();
+  await expect(page.getByTestId("all-agents-activity-panel")).toBeVisible();
+  await expect(
+    page.getByTestId(
+      `all-agents-activity-card-${TEST_IDENTITIES.alice.pubkey}`,
+    ),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId(
+      `all-agents-activity-card-${TEST_IDENTITIES.charlie.pubkey}`,
+    ),
+  ).toBeVisible();
+});
+
 test("members sidebar exposes view-activity for a viewer-owned relay agent", async ({
   page,
 }) => {

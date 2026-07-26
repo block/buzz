@@ -2,6 +2,7 @@ import * as React from "react";
 import { Loader2 } from "lucide-react";
 
 import type { BotActivityAgent } from "@/features/channels/ui/BotActivityBar";
+import { agentsForAllActivityPanel } from "@/features/channels/ui/botActivityViewAll";
 import { useWorkingAgentHeadlines } from "@/features/channels/ui/useWorkingAgentHeadlines";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { useEscapeKey } from "@/shared/hooks/useEscapeKey";
@@ -118,10 +119,16 @@ export function AllAgentsActivityPanel({
     () => new Set(workingBotPubkeys.map((pubkey) => pubkey.toLowerCase())),
     [workingBotPubkeys],
   );
+  const panelAgents = React.useMemo(
+    () => agentsForAllActivityPanel({ agents, workingBotPubkeys }),
+    [agents, workingBotPubkeys],
+  );
   const workingAgents = React.useMemo(
     () =>
-      agents.filter((agent) => workingSet.has(agent.pubkey.toLowerCase())),
-    [agents, workingSet],
+      panelAgents.filter((agent) =>
+        workingSet.has(agent.pubkey.toLowerCase()),
+      ),
+    [panelAgents, workingSet],
   );
   const agentAvatarUrl = (agent: BotActivityAgent) =>
     profiles?.[agent.pubkey.toLowerCase()]?.avatarUrl ?? null;
@@ -141,9 +148,13 @@ export function AllAgentsActivityPanel({
         >
           <AuxiliaryPanelHeaderGroup align="start">
             <AuxiliaryPanelHeaderTitleBlock
-              subtitle={`${workingAgents.length} agent${
-                workingAgents.length === 1 ? "" : "s"
-              } working in this channel`}
+              subtitle={`${panelAgents.length} agent${
+                panelAgents.length === 1 ? "" : "s"
+              } in this channel${
+                workingAgents.length > 0
+                  ? ` · ${workingAgents.length} working now`
+                  : ""
+              }`}
               title="All agent activity"
             />
           </AuxiliaryPanelHeaderGroup>
@@ -156,7 +167,7 @@ export function AllAgentsActivityPanel({
           layout === "split" && "bg-transparent",
         )}
       >
-        {workingAgents.map((agent) => (
+        {panelAgents.map((agent) => (
           <WorkingAgentActivityCard
             agent={agent}
             avatarUrl={agentAvatarUrl(agent)}
