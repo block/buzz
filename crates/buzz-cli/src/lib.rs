@@ -3,6 +3,7 @@ mod client;
 mod commands;
 mod error;
 mod links;
+mod managed_agent_publish;
 mod validate;
 
 use clap::{Parser, Subcommand};
