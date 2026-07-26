@@ -404,7 +404,11 @@ async fn probe_agent_relay_access(
     let key = ManagedAgentRuntimeKey::new(record.pubkey.clone(), &requested_relay_url)?;
     let keys = nostr::Keys::parse(record.private_key_nsec.trim())
         .map_err(|error| format!("invalid managed-agent key: {error}"))?;
-    let api_base = crate::relay::relay_http_base_url(&key.relay_url);
+    // Probe the relay as requested, not via the canonical key: the relay
+    // resolves a community from the literal Host and fails closed on an
+    // unmapped one, so probing a canonicalized loopback host 404s on a
+    // deployment configured with `localhost`.
+    let api_base = crate::relay::relay_http_base_url(&requested_relay_url);
     tokio::time::timeout(
         std::time::Duration::from_secs(10),
         crate::relay::query_relay_at_with_keys(
@@ -505,7 +509,8 @@ pub async fn reconcile_managed_agent_runtimes(
                 Ok((record, key, requested)) => {
                     match start_pair(
                         record.pubkey.clone(),
-                        key.relay_url.clone(),
+                        // Requested URL, not the canonical key: this is dialed.
+                        requested.clone(),
                         true,
                         Some(&record.updated_at),
                         app.clone(),

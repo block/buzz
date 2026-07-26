@@ -2053,13 +2053,19 @@ pub fn spawn_agent_child(
 
     // Stamp the effective spawn config so the summary builder can flag
     // needs_restart when disk state drifts from what this process runs.
-    // `effective_relay_url` is already resolved, and resolution is idempotent,
-    // so it serves as the workspace-relay input here.
+    //
+    // Hash the CANONICAL pair URL, not the dialed one. `needs_restart`
+    // recomputes this hash from `key.relay_url` (the canonical identity), so
+    // feeding the requested spelling here would make the two disagree for any
+    // host the key folds (e.g. `localhost` vs `127.0.0.1`) and report
+    // needs_restart forever. The relay a child dials and the config it was
+    // spawned with are separate concerns: dial the request, fingerprint the
+    // identity.
     let spawn_config_hash = super::spawn_hash::spawn_config_hash(
         record,
         &personas,
         &teams,
-        &effective_relay_url,
+        &runtime_key.relay_url,
         &global,
     );
 
