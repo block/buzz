@@ -187,13 +187,43 @@ unknown or unmapped host rejects generically and never falls through to a defaul
 tenant. Client-supplied `#h` tags are still channel identifiers; they must resolve
 to a channel inside the host-derived community.
 
+Binding happens in the HTTP handler **before** the WebSocket upgrade
+(`router.rs`), so no frame is ever read on an unbound connection. NIP-11 is
+served *before* binding and deliberately fails **open** — an unmapped host still
+receives the relay document (host-scoped fields like `icon` simply absent), so
+the document cannot become the probe oracle the generic rejection exists to
+prevent.
+
+Server-internal paths with no inbound `Host` header — git Smart HTTP, the
+localhost pre-receive hook callback, the workflow execution sink, startup tasks
+— use `bind_deployment_community`, which runs the deployment's own `relay_url`
+through the identical fail-closed path. This is explicitly *not* a default
+community: an unmapped `relay_url` fails exactly like any other unmapped host.
+
+### Step 0.5: Community Activity Gate
+
+`run_registered_community_connection` checks `db.is_community_active()` and
+registers the connection in `state.community_connections`, keyed by community.
+That registry is what makes archival enforceable — archiving a community can
+cancel every live socket bound to it rather than waiting for each to notice.
+
 ### Step 1: Semaphore Acquire
 
 `state.conn_semaphore.try_acquire_owned()` — if the relay is at connection capacity, the connection is rejected immediately before any data is read. The permit is held for the entire connection lifetime and dropped on cleanup.
 
 ### Step 2: NIP-42 Challenge
 
-The relay immediately sends `["AUTH", "<challenge>"]`. The challenge is a random string. The connection is registered in `ConnectionManager` after the challenge is sent.
+The relay immediately sends `["AUTH", "<challenge>"]`. The challenge is a random string.
+
+Two outbound channels are created: a **data** channel (`send_buffer_size`,
+default 1,000) and a **control** channel (capacity 8) carrying only Pong and
+Close. The send loop drains control frames first on every iteration, so a
+stalled data channel can never block a Ping or a Close reason frame.
+
+Setup order is load-bearing: the challenge is sent first, and only then is the
+active-connections gauge incremented and the connection registered in
+`ConnectionManager` — a client that disconnects immediately would otherwise leak
+a registry entry and inflate the gauge.
 
 ### Step 3: Authentication
 
@@ -204,28 +234,53 @@ The client must respond with `["AUTH", <signed-event>]` before submitting events
 | NIP-42 | Signed challenge, pubkey verified | WebSocket connections |
 | NIP-98 HTTP Auth | Schnorr-signed `kind:27235` event on HTTP bridge endpoints | HTTP clients |
 
-On success, `ConnectionState.auth_state` transitions from `Pending` → `Authenticated(AuthContext)`. On failure → `Failed`. Unauthenticated EVENT/REQ messages are rejected with `["CLOSED", ...]` or `["OK", ..., false, "auth-required: ..."]`.
+On success, `ConnectionState.auth_state` transitions from `Pending` → `Authenticated(AuthContext)`. On failure → `Failed`, which is terminal — a failed connection cannot retry, and re-auth on an already-authenticated connection is rejected. Unauthenticated EVENT/REQ messages are rejected with `["CLOSED", ...]` or `["OK", ..., false, "auth-required: ..."]`.
+
+Authentication is a **gate stack**, run in this order after
+`verify_auth_event()` succeeds (`handlers/auth.rs`):
+
+1. **Community ban gate.** Runs before the allowlist and membership gates: a ban
+   must block auth *structurally*, since filtering later would still admit the
+   principal to open channels. It is tri-state — `Clear` / `Banned` / `DbError`
+   — because a DB error must deny without claiming the user is banned (which
+   would pin `Failed` for the connection's life on a false premise). `Banned`
+   returns `blocked: you are banned from this community`; `DbError` returns
+   `error: internal error checking restriction state`.
+   A **NIP-OA cascade** applies: an owner ban cascades to their agents, an agent
+   ban is agent-only. The owner is read from the self-proving auth tag with no
+   DB round-trip. The denial frame is sent on the *control* channel — the data
+   channel would race the cancel and the client would get a bare Close.
+2. **Pubkey allowlist gate** (NIP-42 auth only, when enabled).
+3. **NIP-43 relay membership**, with NIP-OA delegation.
 
 ### Step 4: Active Loops
 
-Three concurrent tasks run for the lifetime of the connection:
+Four concurrent tasks run for the lifetime of the connection:
 
 - **recv_loop** (inline): reads frames, parses `ClientMessage`, dispatches to handlers
-- **send_loop** (spawned): drains the mpsc channel, writes frames to the WebSocket
-- **heartbeat_loop** (spawned): sends WebSocket ping every 30 seconds; 3 missed pongs → disconnect
+- **send_loop** (spawned, child token): drains the data and control channels, writes frames to the WebSocket
+- **heartbeat_loop** (spawned): sends WebSocket ping every 30 seconds; 3 missed pongs → disconnect. A control channel too full to accept a Ping is also terminal
+- **auth_timeout_task** (spawned): `AUTH_TIMEOUT` is 5 seconds — an unauthenticated socket is cancelled, so it cannot idle
 
-A `CancellationToken` coordinates shutdown across all three loops.
+A `CancellationToken` coordinates shutdown across all four tasks.
 
-Slow clients: `ConnectionState::send()` uses `try_send` — if the send buffer is full, a grace counter increments. After `SLOW_CLIENT_GRACE_LIMIT` (3) consecutive full-buffer events, the connection is cancelled. A successful send resets the counter.
+Slow clients: `ConnectionState::send()` uses `try_send` on the **data** channel — if the buffer is full, a grace counter increments. After `config.slow_client_grace_limit` **consecutive** full-buffer events the connection is cancelled; a successful send resets the counter to zero.
+
+Each EVENT / REQ / COUNT message takes a `handler_semaphore` permit
+(`try_acquire_owned`) and is spawned, with the permit dropped inside the task.
+The parent tracing span is captured before the spawn — a bare `tokio::spawn`
+would drop tracing context.
 
 ### Step 5: Cleanup
 
 On disconnect (any cause):
 1. `cancel.cancel()` — signals all loops
-2. Await send_loop and heartbeat_loop tasks
-3. `sub_registry.remove_connection(conn_id)` — removes all subscriptions from the DashMap indexes
+2. Await the send, heartbeat, and auth-timeout tasks
+3. `sub_registry.remove_connection(conn_id)` — removes all subscriptions from the DashMap indexes, releasing each subscription's Redis topic
 4. `conn_manager.deregister(conn_id)` — removes from the send-channel map
-5. `drop(permit)` — releases the connection semaphore slot
+5. **Clear presence only if this was the pubkey's last connection in this community** — closing one of a user's three devices must not mark them offline
+6. Decrement the active-connections gauge
+7. `drop(permit)` — releases the connection semaphore slot
 
 ---
 
@@ -451,18 +506,25 @@ Handles authentication paths, scope enforcement, and token operations.
 
 | Path | Entry Point | Notes |
 |------|-------------|-------|
-| NIP-42 | `verify_auth_event()` | Schnorr-signed challenge/response; grants `Scope::all_known()` (all 14 scopes) |
+| NIP-42 | `verify_auth_event()` | Schnorr-signed challenge/response; grants `Scope::all_known()` (all 16 scopes) |
 | NIP-98 HTTP Auth | `validate_nip98_auth()` | HTTP bridge endpoints; Schnorr-signed `kind:27235` event |
 
 **Key types:**
 
 ```rust
-pub struct AuthContext { pub pubkey: PublicKey, pub scopes: Vec<Scope>, pub auth_method: AuthMethod }
+pub struct AuthContext {
+    pub pubkey: PublicKey,
+    pub scopes: Vec<Scope>,
+    pub channel_ids: Option<Vec<Uuid>>,   // None = unrestricted
+    pub auth_method: AuthMethod,
+    // + the verified NIP-OA owner pubkey, when present
+}
 pub enum AuthMethod { Nip42, Nip98 }
 pub enum Scope { MessagesRead, MessagesWrite, ChannelsRead, ChannelsWrite,
                  AdminChannels, UsersRead, UsersWrite, AdminUsers,
                  JobsRead, JobsWrite, SubscriptionsRead, SubscriptionsWrite,
-                 FilesRead, FilesWrite, Unknown(String) }
+                 FilesRead, FilesWrite, ReposRead, ReposWrite,
+                 Unknown(String) }
 pub trait ChannelAccessChecker: Send + Sync { ... }
 pub trait RateLimiter: Send + Sync { ... }
 ```
