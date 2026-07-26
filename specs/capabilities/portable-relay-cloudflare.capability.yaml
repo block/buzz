@@ -54,7 +54,7 @@ capability:
       status: implemented
     replication:
       profile: portable-relay-replication-v0.1
-      status: deferred
+      status: sink-implemented-profile-not-claimed
     effects:
       profile: portable-relay-effects-v0.1
       status: deferred
