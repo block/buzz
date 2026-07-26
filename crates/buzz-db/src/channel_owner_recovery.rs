@@ -672,7 +672,9 @@ pub async fn pending_recovery_deliveries(
 mod tests {
     use super::*;
     use buzz_core::channel::{ChannelType, ChannelVisibility, MemberRole};
-    use buzz_core::kind::KIND_CHANNEL_OWNER_RECOVERY;
+    use buzz_core::kind::{
+        CHANNEL_OWNER_RECOVERY_AUDIT_MARKER, KIND_CHANNEL_OWNER_RECOVERY, KIND_SYSTEM_MESSAGE,
+    };
     use nostr::{EventBuilder, Keys, Kind, Tag};
 
     struct Fixture {
@@ -1109,6 +1111,84 @@ mod tests {
         .execute(&pool)
         .await;
         assert!(immutable.is_err(), "audit row must be immutable");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn linked_audit_rejects_legacy_unconditional_soft_delete() {
+        let pool = setup_pool().await;
+        let fixture = setup_fixture(&pool).await;
+        record_owner_consent(&pool, &fixture).await;
+        let request = request(&fixture, "legacy delete guard");
+        let recovery = recover_channel_owner(
+            &pool,
+            fixture.community,
+            fixture.channel,
+            fixture.target.public_key().to_bytes().as_slice(),
+            "legacy delete guard",
+            &request,
+        )
+        .await
+        .expect("recover channel owner");
+        let channel_id = fixture.channel.to_string();
+        let audit = EventBuilder::new(
+            Kind::Custom(KIND_SYSTEM_MESSAGE as u16),
+            serde_json::to_string(&recovery.payload).expect("encode audit payload"),
+        )
+        .tags([
+            Tag::parse(["h", &channel_id]).unwrap(),
+            Tag::parse(["audit", CHANNEL_OWNER_RECOVERY_AUDIT_MARKER]).unwrap(),
+        ])
+        .sign_with_keys(&Keys::generate())
+        .expect("sign recovery audit");
+        store_recovery_audit_event(
+            &pool,
+            fixture.community,
+            request.id.as_bytes().as_slice(),
+            &audit,
+            fixture.channel,
+        )
+        .await
+        .expect("store and link recovery audit");
+
+        let db = crate::Db::from_pool(pool.clone());
+        let error = db
+            .soft_delete_event_and_update_thread(
+                fixture.community,
+                audit.id.as_bytes().as_slice(),
+                None,
+                None,
+            )
+            .await
+            .expect_err("legacy unconditional deletion must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("channel owner recovery audit events are immutable"),
+            "unexpected deletion error: {error}"
+        );
+
+        let hard_delete = sqlx::query("DELETE FROM events WHERE community_id=$1 AND id=$2")
+            .bind(fixture.community.as_uuid())
+            .bind(audit.id.as_bytes().as_slice())
+            .execute(&pool)
+            .await
+            .expect_err("hard deletion must also fail closed");
+        assert!(
+            hard_delete
+                .to_string()
+                .contains("channel owner recovery audit events are immutable"),
+            "unexpected hard-deletion error: {hard_delete}"
+        );
+
+        let deleted_at: Option<DateTime<Utc>> =
+            sqlx::query_scalar("SELECT deleted_at FROM events WHERE community_id=$1 AND id=$2")
+                .bind(fixture.community.as_uuid())
+                .bind(audit.id.as_bytes().as_slice())
+                .fetch_one(&pool)
+                .await
+                .expect("read linked audit event");
+        assert!(deleted_at.is_none(), "linked audit must remain visible");
     }
 
     #[tokio::test]

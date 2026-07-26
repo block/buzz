@@ -62,3 +62,36 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER trg_channel_owner_recovery_audit_immutable
     BEFORE UPDATE OR DELETE ON channel_owner_recovery_audit
     FOR EACH ROW EXECUTE FUNCTION channel_owner_recovery_audit_immutable();
+
+-- A relay binary from before this migration can still reach the legacy
+-- unconditional event soft-delete primitive. Keep the exact tenant-linked
+-- channel audit visible at the database boundary so mixed-version pods fail
+-- closed after the schema migration lands.
+CREATE FUNCTION channel_owner_recovery_event_immutable() RETURNS TRIGGER AS $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM channel_owner_recovery_outbox
+        WHERE community_id = OLD.community_id
+          AND audit_event_id = OLD.id
+    ) THEN
+        RAISE EXCEPTION 'channel owner recovery audit events are immutable'
+            USING ERRCODE = 'check_violation';
+    END IF;
+
+    IF TG_OP = 'DELETE' THEN
+        RETURN OLD;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_events_channel_owner_recovery_soft_delete_guard
+    BEFORE UPDATE OF deleted_at ON events
+    FOR EACH ROW
+    WHEN (OLD.deleted_at IS NULL AND NEW.deleted_at IS NOT NULL)
+    EXECUTE FUNCTION channel_owner_recovery_event_immutable();
+
+CREATE TRIGGER trg_events_channel_owner_recovery_hard_delete_guard
+    BEFORE DELETE ON events
+    FOR EACH ROW EXECUTE FUNCTION channel_owner_recovery_event_immutable();

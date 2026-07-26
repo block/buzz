@@ -713,7 +713,10 @@ async fn main() -> anyhow::Result<()> {
                         info!(delivered, "Delivered pending channel-owner recovery audits");
                     }
                     Err(error) => {
-                        warn!("Channel-owner recovery audit worker tick failed: {error}");
+                        warn!(
+                            error = %error,
+                            "Channel-owner recovery audit worker tick failed"
+                        );
                     }
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(interval_secs)).await;

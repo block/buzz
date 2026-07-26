@@ -650,6 +650,38 @@ CREATE TRIGGER trg_channel_owner_recovery_audit_immutable
     BEFORE UPDATE OR DELETE ON channel_owner_recovery_audit
     FOR EACH ROW EXECUTE FUNCTION channel_owner_recovery_audit_immutable();
 
+-- A pre-migration relay binary can still reach the legacy unconditional event
+-- soft-delete primitive during a rolling deployment. Exact tenant linkage is
+-- therefore enforced at the database boundary as well as in current handlers.
+CREATE FUNCTION channel_owner_recovery_event_immutable() RETURNS TRIGGER AS $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM channel_owner_recovery_outbox
+        WHERE community_id = OLD.community_id
+          AND audit_event_id = OLD.id
+    ) THEN
+        RAISE EXCEPTION 'channel owner recovery audit events are immutable'
+            USING ERRCODE = 'check_violation';
+    END IF;
+
+    IF TG_OP = 'DELETE' THEN
+        RETURN OLD;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_events_channel_owner_recovery_soft_delete_guard
+    BEFORE UPDATE OF deleted_at ON events
+    FOR EACH ROW
+    WHEN (OLD.deleted_at IS NULL AND NEW.deleted_at IS NOT NULL)
+    EXECUTE FUNCTION channel_owner_recovery_event_immutable();
+
+CREATE TRIGGER trg_events_channel_owner_recovery_hard_delete_guard
+    BEFORE DELETE ON events
+    FOR EACH ROW EXECUTE FUNCTION channel_owner_recovery_event_immutable();
+
 -- ── Audit log ─────────────────────────────────────────────────────────────────
 -- Conformance: "Audit log and observability". Per-community hash chain:
 -- uniqueness (community_id, seq) and (community_id, hash). One chain per tenant.

@@ -891,6 +891,13 @@ mod tests {
         assert!(owner_recovery.contains("uq_channel_owner_recovery_audit_event"));
         assert!(owner_recovery.contains("reason_code"));
         assert!(owner_recovery.contains("BEFORE UPDATE OR DELETE"));
+        assert!(owner_recovery.contains("CREATE FUNCTION channel_owner_recovery_event_immutable"));
+        assert!(owner_recovery
+            .contains("CREATE TRIGGER trg_events_channel_owner_recovery_soft_delete_guard"));
+        assert!(owner_recovery.contains("BEFORE UPDATE OF deleted_at ON events"));
+        assert!(owner_recovery
+            .contains("CREATE TRIGGER trg_events_channel_owner_recovery_hard_delete_guard"));
+        assert!(owner_recovery.contains("BEFORE DELETE ON events"));
         assert!(!migrations[0]
             .sql
             .as_str()
@@ -906,6 +913,15 @@ mod tests {
         assert!(schema.contains("uq_channel_owner_recovery_audit_event"));
         assert!(schema.contains("CREATE TRIGGER trg_channel_owner_recovery_audit_immutable"));
         assert!(schema.contains("BEFORE UPDATE OR DELETE ON channel_owner_recovery_audit"));
+        assert!(schema.contains("CREATE FUNCTION channel_owner_recovery_event_immutable"));
+        assert!(
+            schema.contains("CREATE TRIGGER trg_events_channel_owner_recovery_soft_delete_guard")
+        );
+        assert!(schema.contains("BEFORE UPDATE OF deleted_at ON events"));
+        assert!(
+            schema.contains("CREATE TRIGGER trg_events_channel_owner_recovery_hard_delete_guard")
+        );
+        assert!(schema.contains("BEFORE DELETE ON events"));
     }
 
     #[test]

@@ -84,9 +84,12 @@ atomically stores the relay event and records its exact event ID in the outbox;
 only that community-scoped durable linkage makes the visible event immutable.
 This keeps audits signed before relay-key rotation protected without trusting
 marker shape alone. Public ingest reserves the marker, while unlinked lookalikes
-accepted by an older relay remain deletable during a rolling upgrade. Linked
-audits are rejected as targets of both NIP-29 `kind:9005` and standard NIP-09
-`kind:5` deletion, including by the newly promoted owner.
+accepted by an older relay remain deletable during a rolling upgrade. Current
+handlers reject linked audits as targets of both NIP-29 `kind:9005` and standard
+NIP-09 `kind:5` deletion, including by the newly promoted owner. A database
+trigger enforces the same exact tenant-linked invariant for soft and hard
+deletion, so a pre-upgrade relay pod using the legacy unconditional delete path
+also fails closed after migration 25 is applied.
 
 ## Relay configuration and operations
 
@@ -101,5 +104,6 @@ Operators should monitor relay warnings containing
 `pending owner recovery audit delivery failed` and inspect
 `channel_owner_recovery_outbox` rows whose `delivered_at` is null. The
 `attempts` and `last_error` columns retain retry state. Reverting application
-code leaves the additive audit/outbox tables and immutability trigger in place;
-do not drop them while any audit or pending delivery must be retained.
+code leaves the additive audit/outbox tables and audit-row/event-deletion
+immutability triggers in place; do not drop them while any audit or pending
+delivery must be retained.
