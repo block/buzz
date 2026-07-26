@@ -56,6 +56,7 @@ import { useCommunityEmojiLiveUpdates } from "@/features/custom-emoji/hooks";
 import { useArchiveSync } from "@/features/local-archive/archiveSyncManager";
 import { useObserverArchiveReconciliation } from "@/features/local-archive/useObserverArchiveSeed";
 import { useAgentMetricArchiveSeed } from "@/features/local-archive/useAgentMetricArchiveSeed";
+import { useGroupsLiveUpdates } from "@/features/groups/groupHooks";
 import { useProfileQuery } from "@/features/profile/hooks";
 import { SendFeedbackController } from "@/features/settings/ui/SendFeedbackController";
 import {
@@ -125,6 +126,7 @@ export function AppShell() {
   const {
     goAgents,
     goChannel,
+    goGroups,
     goHome,
     goNewMessage,
     goProjects,
@@ -197,6 +199,7 @@ export function AppShell() {
   usePresenceSubscription();
   useUserStatusSubscription();
   useCommunityEmojiLiveUpdates();
+  useGroupsLiveUpdates();
   useMembershipNotifications(identityQuery.data?.pubkey);
   const presenceSession = usePresenceSession(deferredPubkey);
   const selfStatusQuery = useUserStatusQuery(
@@ -872,6 +875,7 @@ export function AppShell() {
                             await goChannel(directMessage.id);
                           }}
                           onSelectAgents={() => void goAgents()}
+                          onSelectGroups={() => void goGroups()}
                           onSelectChannel={(channelId) =>
                             void goChannel(channelId)
                           }

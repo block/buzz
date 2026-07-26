@@ -667,12 +667,25 @@ const MENTION_REF = [
   "1111111111111111111111111111111111111111111111111111111111111111",
 ];
 
-test("splitOutgoingTags: undefined input yields three empty arrays", () => {
+test("splitOutgoingTags: undefined input yields empty arrays", () => {
   assert.deepEqual(splitOutgoingTags(undefined), {
     mediaTags: [],
     emojiTags: [],
+    groupTags: [],
     mentionTags: [],
   });
+});
+
+test("splitOutgoingTags: keeps group markers out of imeta validation", () => {
+  const group = ["group", "group-id", "ios-team"];
+  const { mediaTags, emojiTags, groupTags, mentionTags } = splitOutgoingTags([
+    IMETA,
+    group,
+  ]);
+  assert.deepEqual(mediaTags, [IMETA]);
+  assert.deepEqual(emojiTags, []);
+  assert.deepEqual(groupTags, [group]);
+  assert.deepEqual(mentionTags, []);
 });
 
 test("splitOutgoingTags: separates emoji tags from imeta tags", () => {

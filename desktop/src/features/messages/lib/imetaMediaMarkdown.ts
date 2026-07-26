@@ -358,19 +358,23 @@ export function mergeOutgoingTags(
 export function splitOutgoingTags(tags: string[][] | undefined): {
   mediaTags: string[][];
   emojiTags: string[][];
+  groupTags: string[][];
   mentionTags: string[][];
 } {
   const mediaTags: string[][] = [];
   const emojiTags: string[][] = [];
+  const groupTags: string[][] = [];
   const mentionTags: string[][] = [];
   for (const tag of tags ?? []) {
     if (tag[0] === "emoji") {
       emojiTags.push(tag);
+    } else if (tag[0] === "group") {
+      groupTags.push(tag);
     } else if (tag[0] === "mention") {
       mentionTags.push(tag);
     } else {
       mediaTags.push(tag);
     }
   }
-  return { mediaTags, emojiTags, mentionTags };
+  return { mediaTags, emojiTags, groupTags, mentionTags };
 }

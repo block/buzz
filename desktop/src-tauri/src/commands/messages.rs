@@ -486,6 +486,7 @@ pub async fn send_channel_message(
     media_tags: Option<Vec<Vec<String>>>,
     emoji_tags: Option<Vec<Vec<String>>>,
     mention_tags: Option<Vec<Vec<String>>>,
+    group_tags: Option<Vec<Vec<String>>>,
     mention_pubkeys: Option<Vec<String>>,
     kind: Option<u32>,
     state: State<'_, AppState>,
@@ -497,6 +498,7 @@ pub async fn send_channel_message(
     let media = media_tags.unwrap_or_default();
     let emoji = emoji_tags.unwrap_or_default();
     let mention_refs_only = mention_tags.unwrap_or_default();
+    let groups = group_tags.unwrap_or_default();
     let kind_num = kind.unwrap_or(buzz_core_pkg::kind::KIND_STREAM_MESSAGE);
 
     let mut resolved_root: Option<String> = None;
@@ -508,6 +510,7 @@ pub async fn send_channel_message(
             &mention_refs,
             &media,
             &mention_refs_only,
+            &groups,
         )?,
         buzz_core_pkg::kind::KIND_FORUM_COMMENT => {
             let parent_id = parent_event_id
@@ -522,6 +525,7 @@ pub async fn send_channel_message(
                 &mention_refs,
                 &media,
                 &mention_refs_only,
+                &groups,
             )?
         }
         _ => {
@@ -541,6 +545,7 @@ pub async fn send_channel_message(
                 &media,
                 &emoji,
                 &mention_refs_only,
+                &groups,
             )?
         }
     };
@@ -704,6 +709,7 @@ fn build_managed_agent_channel_message(
         content,
         thread_ref,
         &mention_refs,
+        &[],
         &[],
         &[],
         &[],

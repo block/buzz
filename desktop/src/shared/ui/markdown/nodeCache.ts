@@ -11,6 +11,7 @@ import remarkCustomEmoji, {
   type CustomEmoji,
 } from "@/shared/lib/remarkCustomEmoji";
 import remarkMentions from "@/shared/lib/remarkMentions";
+import remarkGroupMentions from "@/shared/lib/remarkGroupMentions";
 import remarkSpoilers from "@/shared/lib/remarkSpoilers";
 
 import { messageLinkUrlTransform } from "./utils";
@@ -65,6 +66,7 @@ export type MarkdownParseInputs = {
   components: Components;
   content: string;
   customEmoji?: CustomEmoji[];
+  groupMentionHandles?: string[];
   mentionNames?: string[];
   searchQuery?: string;
   variant: string;
@@ -99,6 +101,7 @@ function buildMarkdownElement(input: MarkdownParseInputs): React.ReactElement {
       remarkBreaks,
       remarkSpoilers,
       remarkMessageLinks,
+      [remarkGroupMentions, { groupHandles: input.groupMentionHandles }],
       [remarkMentions, { mentionNames: input.mentionNames }],
       [remarkChannelLinks, { channelNames: input.channelNames }],
       [remarkCustomEmoji, { customEmoji: input.customEmoji }],
@@ -131,6 +134,7 @@ export function renderCachedMarkdown(
   // before it is self-delimiting.
   const key =
     segment(input.variant) +
+    listSegment(input.groupMentionHandles) +
     listSegment(input.mentionNames) +
     listSegment(input.channelNames) +
     listSegment(

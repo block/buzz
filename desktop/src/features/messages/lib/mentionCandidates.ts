@@ -1,4 +1,5 @@
 import { resolveTeamPersonas } from "@/features/agents/lib/teamPersonas";
+import type { UserGroup } from "@/shared/api/relayGroups";
 import type { AgentPersona, AgentTeam, ChannelRole } from "@/shared/api/types";
 import { truncatePubkey } from "@/shared/lib/pubkey";
 
@@ -10,11 +11,15 @@ export type TeamMentionMember = {
 };
 
 export type MentionCandidate = {
-  kind: "identity" | "persona" | "team";
+  kind: "identity" | "persona" | "team" | "group";
   pubkey?: string;
   personaId?: string;
   teamId?: string;
   teamMembers?: TeamMentionMember[];
+  groupId?: string;
+  groupHandle?: string;
+  groupName?: string;
+  groupMemberPubkeys?: string[];
   displayName: string | null;
   avatarUrl?: string | null;
   isMember: boolean;
@@ -32,6 +37,22 @@ export function mentionCandidateLabel(candidate: MentionCandidate) {
     candidate.displayName ??
     (candidate.pubkey ? truncatePubkey(candidate.pubkey) : "agent")
   );
+}
+
+export function buildGroupMentionCandidates(
+  groups: readonly UserGroup[],
+): MentionCandidate[] {
+  return groups.map((group) => ({
+    kind: "group",
+    groupId: group.id,
+    groupHandle: group.handle,
+    groupName: group.name,
+    groupMemberPubkeys: group.memberPubkeys,
+    displayName: group.handle,
+    secondaryLabel: group.name,
+    isMember: false,
+    isAgent: false,
+  }));
 }
 
 export function globalSearchIdentityKey(candidate: MentionCandidate) {

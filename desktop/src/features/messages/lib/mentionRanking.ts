@@ -4,7 +4,7 @@ export type MentionCandidateForRanking = {
   displayName: string | null;
   isAgent: boolean;
   isMember: boolean;
-  kind: "identity" | "persona" | "team";
+  kind: "identity" | "persona" | "team" | "group";
   personaId?: string | null;
   personaName?: string | null;
   pubkey?: string;

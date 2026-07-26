@@ -49,6 +49,8 @@ pub mod thread;
 pub mod usage;
 /// User profile persistence.
 pub mod user;
+/// Community-scoped user-group persistence.
+pub mod user_group;
 /// Workflow, run, and approval persistence.
 pub mod workflow;
 
@@ -1433,6 +1435,137 @@ impl Db {
         Ok(outcome)
     }
 
+    /// Creates a user group with its initial members and default channels.
+    ///
+    /// Returns [`DbError::UserGroupHandleConflict`] when an active group in
+    /// the same community already owns `handle`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_user_group(
+        &self,
+        community: CommunityId,
+        group_id: Uuid,
+        handle: &str,
+        name: &str,
+        description: Option<&str>,
+        created_by: &str,
+        members: &[String],
+        default_channels: &[Uuid],
+    ) -> Result<user_group::UserGroupRecord> {
+        user_group::create_group(
+            &self.pool,
+            community,
+            group_id,
+            handle,
+            name,
+            description,
+            created_by,
+            members,
+            default_channels,
+        )
+        .await
+    }
+
+    /// Returns an active user group by its community-scoped UUID.
+    pub async fn get_user_group_by_id(
+        &self,
+        community: CommunityId,
+        group_id: Uuid,
+    ) -> Result<user_group::UserGroupRecord> {
+        user_group::get_group_by_id(&self.pool, community, group_id).await
+    }
+
+    /// Returns an active user group by mention handle, if present.
+    pub async fn get_user_group_by_handle(
+        &self,
+        community: CommunityId,
+        handle: &str,
+    ) -> Result<Option<user_group::UserGroupRecord>> {
+        user_group::get_group_by_handle(&self.pool, community, handle).await
+    }
+
+    /// Lists active user groups in a community.
+    pub async fn list_user_groups(
+        &self,
+        community: CommunityId,
+    ) -> Result<Vec<user_group::UserGroupRecord>> {
+        user_group::list_groups(&self.pool, community).await
+    }
+
+    /// Updates user-group metadata and optionally replaces default channels.
+    pub async fn update_user_group(
+        &self,
+        community: CommunityId,
+        group_id: Uuid,
+        updates: user_group::UserGroupUpdate,
+    ) -> Result<user_group::UserGroupRecord> {
+        user_group::update_group(&self.pool, community, group_id, updates).await
+    }
+
+    /// Soft-deletes a user group.
+    pub async fn soft_delete_user_group(
+        &self,
+        community: CommunityId,
+        group_id: Uuid,
+    ) -> Result<Option<i64>> {
+        user_group::soft_delete_group(&self.pool, community, group_id).await
+    }
+
+    /// Adds members to an active user group.
+    pub async fn add_user_group_members(
+        &self,
+        community: CommunityId,
+        group_id: Uuid,
+        pubkeys: &[String],
+        added_by: &str,
+    ) -> Result<user_group::AddMembersResult> {
+        user_group::add_members(&self.pool, community, group_id, pubkeys, added_by).await
+    }
+
+    /// Removes members from an active user group.
+    pub async fn remove_user_group_members(
+        &self,
+        community: CommunityId,
+        group_id: Uuid,
+        pubkeys: &[String],
+    ) -> Result<user_group::RemoveMembersResult> {
+        user_group::remove_members(&self.pool, community, group_id, pubkeys).await
+    }
+
+    /// Lists members of an active user group.
+    pub async fn list_user_group_members(
+        &self,
+        community: CommunityId,
+        group_id: Uuid,
+    ) -> Result<Vec<user_group::UserGroupMemberRecord>> {
+        user_group::list_members(&self.pool, community, group_id).await
+    }
+
+    /// Lists default channels of an active user group.
+    pub async fn list_user_group_default_channels(
+        &self,
+        community: CommunityId,
+        group_id: Uuid,
+    ) -> Result<Vec<Uuid>> {
+        user_group::list_default_channels(&self.pool, community, group_id).await
+    }
+
+    /// Atomically stores a user-group command event and applies its SQL mutation.
+    pub async fn insert_user_group_command_event(
+        &self,
+        community: CommunityId,
+        event: &nostr::Event,
+        mutation: user_group::UserGroupMutation,
+    ) -> Result<user_group::UserGroupCommandEventResult> {
+        let result =
+            user_group::insert_command_event(&self.pool, community, event, mutation).await?;
+        if result.was_inserted {
+            if let Err(error) = insert_mentions(&self.pool, community, event, None).await {
+                tracing::warn!(event_id = %event.id, "Failed to insert mentions: {error}");
+            }
+        }
+        Ok(result)
+    }
+
     /// Creates a new channel, bootstraps the creator as owner, and returns the record.
     #[allow(clippy::too_many_arguments)]
     pub async fn create_channel(
@@ -1861,6 +1994,15 @@ impl Db {
         pubkey: &[u8],
     ) -> Result<Option<(String, Option<Vec<u8>>)>> {
         user::get_agent_channel_policy(&self.pool, community_id, pubkey).await
+    }
+
+    /// Bulk-load stored community membership and channel-add policy facts.
+    pub async fn get_community_member_facts(
+        &self,
+        community_id: CommunityId,
+        pubkeys: &[Vec<u8>],
+    ) -> Result<Vec<user::CommunityMemberFacts>> {
+        user::get_community_member_facts(&self.pool, community_id, pubkeys).await
     }
 
     /// Check whether `actor_pubkey` is the agent owner of `target_pubkey`.

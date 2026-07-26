@@ -2,6 +2,14 @@
   "version": 1,
   "features": [
     {
+      "id": "groups",
+      "name": "Groups",
+      "description": "Shared handles for mentioning groups of people and agents",
+      "platforms": [
+        "desktop"
+      ]
+    },
+    {
       "id": "workflows",
       "name": "Workflows",
       "description": "YAML-defined automations with approval gates",

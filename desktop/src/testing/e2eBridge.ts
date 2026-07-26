@@ -8105,6 +8105,7 @@ async function handleSendChannelMessage(
     mentionPubkeys?: string[];
     mediaTags?: string[][] | null;
     emojiTags?: string[][] | null;
+    groupTags?: string[][] | null;
   },
   config: E2eConfig | undefined,
 ): Promise<RawSendChannelMessageResponse> {
@@ -8124,8 +8125,9 @@ async function handleSendChannelMessage(
   // relay echoes them back on the stored event too, so mirror that here so the
   // emoji renderer keeps resolving `:shortcode:` after the round-trip.
   const emojiTags = args.emojiTags ?? [];
+  const groupTags = args.groupTags ?? [];
   // Both kinds end up on the stored event's tag set, just like the real relay.
-  const extraTags = [...mediaTags, ...emojiTags];
+  const extraTags = [...mediaTags, ...emojiTags, ...groupTags];
   const identity = getIdentity(config);
   if (!identity) {
     const createdAt = Math.floor(Date.now() / 1000);

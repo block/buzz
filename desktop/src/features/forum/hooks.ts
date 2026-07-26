@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { getForumPosts, getForumThread } from "@/shared/api/forum";
 import { useRelaySelfQuery } from "@/features/moderation/hooks";
+import { splitOutgoingTags } from "@/features/messages/lib/imetaMediaMarkdown";
 import { deleteMessage, sendChannelMessage } from "@/shared/api/tauri";
 import type {
   Channel,
@@ -75,13 +76,17 @@ export function useCreateForumPostMutation(channel: Channel | null) {
         throw new Error("No channel selected.");
       }
 
+      const { mediaTags: imetaTags, groupTags } = splitOutgoingTags(mediaTags);
       return sendChannelMessage(
         channel.id,
         content,
         null,
-        mediaTags,
+        imetaTags,
         mentionPubkeys,
         KIND_FORUM_POST,
+        undefined,
+        undefined,
+        groupTags,
       );
     },
     onSuccess: () => {
@@ -161,13 +166,17 @@ export function useCreateForumReplyMutation(channel: Channel | null) {
         throw new Error("No channel selected.");
       }
 
+      const { mediaTags: imetaTags, groupTags } = splitOutgoingTags(mediaTags);
       return sendChannelMessage(
         channel.id,
         content,
         parentEventId,
-        mediaTags,
+        imetaTags,
         mentionPubkeys,
         KIND_FORUM_COMMENT,
+        undefined,
+        undefined,
+        groupTags,
       );
     },
     onSuccess: (_data, variables) => {

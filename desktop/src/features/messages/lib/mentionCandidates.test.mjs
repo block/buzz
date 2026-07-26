@@ -2,9 +2,36 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  buildGroupMentionCandidates,
   buildTeamMentionCandidates,
   formatTeamMention,
 } from "./mentionCandidates.ts";
+
+test("group candidates use the handle as the mention token", () => {
+  const [candidate] = buildGroupMentionCandidates([
+    {
+      id: "group-id",
+      handle: "ios-team",
+      name: "iOS Team",
+      description: "",
+      creator: "a".repeat(64),
+      memberPubkeys: ["b".repeat(64), "c".repeat(64)],
+      defaultChannelIds: [],
+    },
+  ]);
+
+  assert.deepEqual(candidate, {
+    kind: "group",
+    groupId: "group-id",
+    groupHandle: "ios-team",
+    groupName: "iOS Team",
+    groupMemberPubkeys: ["b".repeat(64), "c".repeat(64)],
+    displayName: "ios-team",
+    secondaryLabel: "iOS Team",
+    isMember: false,
+    isAgent: false,
+  });
+});
 
 function persona(id, displayName, isActive = true) {
   return {

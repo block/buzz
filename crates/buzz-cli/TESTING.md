@@ -172,6 +172,31 @@ buzz channels unarchive --channel "$CHANNEL_ID" | jq .
 # Expected: {"event_id":"...","accepted":true,"message":"..."}
 ```
 
+#### 6.1.1 User Groups
+
+```bash
+MEMBER_PK="0000000000000000000000000000000000000000000000000000000000000001"
+
+GROUP_ID=$(buzz groups create --handle cli-team --name "CLI Team" | jq -r '.group_id')
+buzz groups list | jq .
+buzz --format compact groups get cli-team | jq .
+
+buzz groups edit cli-team --description "CLI group test" \
+  --default-channel "$CHANNEL_ID" | jq .
+buzz groups add-members cli-team --member "$MEMBER_PK" | jq .
+buzz groups remove-members "$GROUP_ID" --member "$MEMBER_PK" | jq .
+
+# Bulk channel addition resolves the current 39100 snapshot.
+buzz groups add-members cli-team --member "$MEMBER_PK" | jq .
+buzz channels add-group --channel "$CHANNEL_ID" --group cli-team | jq .
+
+# The message carries a group marker and p-tags only for group members
+# who are currently in the channel.
+buzz messages send --channel "$CHANNEL_ID" --content "hello @cli-team" | jq .
+
+buzz groups delete "$GROUP_ID" | jq .
+```
+
 ### 6.2 Canvas
 
 ```bash

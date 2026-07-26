@@ -56,6 +56,12 @@ const overrides = new Map([
   // queued for a broader composition-root split. Bumped for the
   // archive/unarchive/transfer community-management commands (web parity).
   ["src-tauri/src/lib.rs", 1013],
+  // user-groups client review fix: validated group-marker parsing and its
+  // tests were split into events/group_tags.rs. The remaining +13 lines are
+  // the group_tags parameters and append calls across the existing stream and
+  // forum builders; extracting those signatures would obscure the builders.
+  // (+1: clippy too_many_arguments allow on the build_message wrapper.)
+  ["src-tauri/src/events.rs", 1013],
   // persona-events rebase: build_deploy_payload threads `state` for the
   // read-time relay-URL workspace fallback while keeping the create-time env
   // pin (the credential-leak guard). Load-bearing feature growth from the
@@ -515,7 +521,14 @@ const overrides = new Map([
   // ownerPubkey) feeding the newly-added-mentions diff. Diff logic itself
   // lives in threading.ts (diffAddedMentionPubkeys); this is the minimal
   // composer-side wiring. Queued to split with the rest of this list.
-  ["src/features/messages/ui/MessageComposer.tsx", 1114],
+  // +1: user-groups client review fix disables group autocomplete while
+  // editing, avoiding an offered mention that the edit wire path cannot emit.
+  ["src/features/messages/ui/MessageComposer.tsx", 1115],
+  // +5 net: user-groups client review fixes thread the edit-mode group gate
+  // into collection candidates and suppress same-named groups when a person
+  // was explicitly selected. The group matching remains in
+  // useCollectionMentions.ts; these lines are the hook's existing ref wiring.
+  ["src/features/messages/lib/useMentions.ts", 1005],
   // global-agent-config: model-tuning section (BuzzAgentModelTuningFields via
   // EditAgentAdvancedFields) + providerValid gate + effectiveProvider derivation
   // + globalProvider threading into getPersonaProviderOptions. All load-bearing

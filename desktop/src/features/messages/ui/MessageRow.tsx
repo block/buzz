@@ -36,7 +36,10 @@ import { parseImetaTags } from "@/features/messages/lib/parseImeta";
 import { useMessageEmoji } from "@/features/messages/lib/useMessageEmoji";
 import { parseWaveMessageContent } from "@/features/messages/lib/waveMessage";
 import { resolveSnapshotSharedBy } from "@/features/messages/lib/snapshotSharedBy";
-import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
+import {
+  resolveGroupMentionHandles,
+  resolveMentionProps,
+} from "@/shared/lib/resolveMentionNames";
 import { Markdown } from "@/shared/ui/markdown";
 import type { VideoReviewContext } from "@/shared/ui/VideoPlayer";
 import { MessageActionBar } from "./MessageActionBar";
@@ -182,6 +185,10 @@ export const MessageRow = React.memo(
     const { mentionNames, mentionPubkeysByName } = React.useMemo(
       () => resolveMentionProps(message.tags, profiles),
       [profiles, message.tags],
+    );
+    const groupMentionHandles = React.useMemo(
+      () => resolveGroupMentionHandles(message.tags),
+      [message.tags],
     );
     // "Is this pubkey an agent" = the community-scoped baseline every surface
     // shares (managed ∪ relay) plus the pubkey's own profile `isAgent` flag from this surface's lookup. Both are per-pubkey
@@ -367,6 +374,7 @@ export const MessageRow = React.memo(
               )}
               content={message.body}
               customEmoji={customEmoji}
+              groupMentionHandles={groupMentionHandles}
               imetaByUrl={imetaByUrl}
               agentMentionPubkeysByName={agentMentionPubkeysByName}
               mentionNames={mentionNames}

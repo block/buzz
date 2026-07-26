@@ -41,12 +41,12 @@ import { useDraftMentionRouting } from "./useDraftMentionRouting";
 import { rankMentionCandidates } from "./mentionRanking";
 import { mapMentionCandidateToSuggestion } from "./mentionSuggestionMapping";
 import {
-  buildTeamMentionCandidates,
   formatTeamMention,
   globalSearchIdentityKey,
   type MentionCandidate,
   mentionCandidateLabel,
 } from "./mentionCandidates";
+import { useCollectionMentions } from "./useCollectionMentions";
 const MENTION_DEBOUNCE_MS = 120;
 const MENTION_SUGGESTION_LIMIT = 50;
 export type PersonaMentionTarget = {
@@ -55,6 +55,7 @@ export type PersonaMentionTarget = {
 };
 type UseMentionsOptions = {
   channelType?: ChannelType | null;
+  includeGroups?: boolean;
 };
 function formatSearchUserDisplayName(user: UserSearchResult) {
   return user.displayName?.trim() || user.nip05Handle?.trim() || null;
@@ -93,7 +94,6 @@ export function useMentions(
   const mentionMapRef = React.useRef<Map<string, string>>(new Map());
   const personaMentionMapRef = React.useRef<Map<string, string>>(new Map());
   const previousSuggestionsRef = React.useRef<MentionSuggestion[]>([]);
-  void options?.channelType;
   const mentionSearchQuery = mentionQuery?.trim() ?? "";
   const canSearchGlobalPeople = mentionSearchQuery.length > 0;
   const identityQuery = useIdentityQuery();
@@ -431,17 +431,13 @@ export function useMentions(
     relayAgentsQuery.data,
   ]);
 
-  const mentionCandidatesWithTeams = React.useMemo(
-    () => [
-      ...mentionCandidates,
-      ...buildTeamMentionCandidates(
-        teamsQuery.data ?? [],
-        personasQuery.data ?? [],
-        mentionCandidates,
-      ),
-    ],
-    [mentionCandidates, personasQuery.data, teamsQuery.data],
-  );
+  const collectionMentions = useCollectionMentions({
+    baseCandidates: mentionCandidates,
+    includeGroups: options?.includeGroups ?? true,
+    personas: personasQuery.data ?? [],
+    teams: teamsQuery.data ?? [],
+  });
+  const mentionCandidatesWithTeams = collectionMentions.candidates;
 
   const ownerPubkeys = React.useMemo(
     () => [
@@ -457,32 +453,16 @@ export function useMentions(
     enabled: ownerPubkeys.length > 0,
   });
 
-  const searchableNames = React.useMemo<string[]>(() => {
-    const names: string[] = [];
-    const seen = new Set<string>();
-
-    for (const candidate of mentionCandidatesWithTeams) {
-      for (const name of [
-        candidate.displayName,
-        candidate.personaName,
-        candidate.secondaryLabel,
-      ]) {
-        const trimmed = name?.trim();
-        if (trimmed && !seen.has(trimmed.toLowerCase())) {
-          names.push(trimmed);
-          seen.add(trimmed.toLowerCase());
-        }
-      }
-    }
-
-    return names;
-  }, [mentionCandidatesWithTeams]);
+  const searchableNames = collectionMentions.searchableNames;
 
   const highlightNames = React.useMemo<string[]>(() => {
     const names: string[] = [];
     const seen = new Set<string>();
 
-    for (const name of selectedMentionNames) {
+    for (const name of [
+      ...selectedMentionNames,
+      ...collectionMentions.selectedGroupHandles,
+    ]) {
       const trimmed = name.trim();
       if (trimmed && !seen.has(trimmed.toLowerCase())) {
         names.push(trimmed);
@@ -491,7 +471,7 @@ export function useMentions(
     }
 
     return names;
-  }, [selectedMentionNames]);
+  }, [collectionMentions.selectedGroupHandles, selectedMentionNames]);
 
   const agentHighlightNames = React.useMemo<string[]>(() => {
     const names: string[] = [];
@@ -615,15 +595,29 @@ export function useMentions(
       }
 
       const displayName = suggestion.displayName;
+      const groupHandle =
+        suggestion.kind === "group" ? suggestion.groupHandle : null;
       const teamMembers =
         suggestion.kind === "team" ? suggestion.teamMembers : null;
-      const insertText = teamMembers
-        ? formatTeamMention(displayName, teamMembers)
-        : `@${displayName} `;
+      const insertText = groupHandle
+        ? `@${groupHandle} `
+        : teamMembers
+          ? formatTeamMention(displayName, teamMembers)
+          : `@${displayName} `;
 
       const mentions = mentionMapRef.current;
       const personaMentions = personaMentionMapRef.current;
-      const selectedMentions = teamMembers ?? [suggestion];
+      if (
+        suggestion.kind === "group" &&
+        suggestion.groupId &&
+        groupHandle &&
+        collectionMentions.selectGroup(suggestion.groupId, groupHandle)
+      ) {
+        mentions.delete(groupHandle);
+        personaMentions.delete(groupHandle);
+      }
+      const selectedMentions =
+        suggestion.kind === "group" ? [] : (teamMembers ?? [suggestion]);
       for (const selected of selectedMentions) {
         if (selected.kind === "persona" && selected.personaId) {
           personaMentions.set(selected.displayName, selected.personaId);
@@ -676,7 +670,7 @@ export function useMentions(
         insertText,
       };
     },
-    [knownAgentPubkeys, mentionStartIndex],
+    [collectionMentions.selectGroup, knownAgentPubkeys, mentionStartIndex],
   );
 
   const registerMentionPubkey = React.useCallback(
@@ -798,6 +792,7 @@ export function useMentions(
         [
           ...mentionMapRef.current.keys(),
           ...personaMentionMapRef.current.keys(),
+          ...collectionMentions.selectedGroupHandles,
         ].map((name) => name.trim().toLowerCase()),
       );
 
@@ -828,7 +823,15 @@ export function useMentions(
 
       return [...new Set(pubkeys)];
     },
-    [mentionCandidates],
+    [collectionMentions.selectedGroupHandles, mentionCandidates],
+  );
+  const extractMentionGroups = React.useCallback(
+    (text: string) =>
+      collectionMentions.extractGroups(text, [
+        ...mentionMapRef.current.keys(),
+        ...personaMentionMapRef.current.keys(),
+      ]),
+    [collectionMentions.extractGroups],
   );
 
   const extractMentionPersonas = React.useCallback(
@@ -870,10 +873,11 @@ export function useMentions(
     cancelMentionAutocomplete();
     mentionMapRef.current.clear();
     personaMentionMapRef.current.clear();
+    collectionMentions.clear();
     selectedAgentMentionNamesRef.current = [];
     setSelectedMentionNames([]);
     setSelectedAgentMentionNames([]);
-  }, [cancelMentionAutocomplete]);
+  }, [cancelMentionAutocomplete, collectionMentions.clear]);
 
   const { getDraftMentionRefs, restoreDraftMentionRefs } =
     useDraftMentionRouting({
@@ -973,6 +977,7 @@ export function useMentions(
     clearMentions,
     extractMentionPersonas,
     extractMentionPubkeys,
+    extractMentionGroups,
     getDraftMentionRefs,
     getMentionDisplayName,
     handleMentionKeyDown,

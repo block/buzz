@@ -2,7 +2,12 @@ import * as React from "react";
 
 import { EditorContent } from "@tiptap/react";
 import { ChevronDown } from "lucide-react";
-import { buildOutgoingMessage } from "@/features/messages/lib/imetaMediaMarkdown";
+import { toast } from "sonner";
+import { expandGroupMentions } from "@/features/messages/lib/groupMentionExpansion";
+import {
+  buildOutgoingMessage,
+  mergeOutgoingTags,
+} from "@/features/messages/lib/imetaMediaMarkdown";
 import { useChannelLinks } from "@/features/messages/lib/useChannelLinks";
 import type { ChannelSuggestion } from "@/features/messages/lib/useChannelLinks";
 import { useMediaUpload } from "@/features/messages/lib/useMediaUpload";
@@ -225,7 +230,18 @@ export function ForumComposer({
         return;
       }
 
-      const pubkeys = mentions.extractMentionPubkeys(trimmed);
+      const groups = mentions.extractMentionGroups(trimmed);
+      if (groups.length > 0 && !mentions.hasResolvedMembers) {
+        toast.error(
+          "Checking channel members. Try sending the group mention again in a moment.",
+        );
+        return;
+      }
+      const groupExpansion = expandGroupMentions({
+        channelMemberPubkeys: mentions.memberPubkeys,
+        groups,
+        individualMentionPubkeys: mentions.extractMentionPubkeys(trimmed),
+      });
 
       // Reuse the shared send-path builder so forum/notes posts emit the same
       // body + imeta as chat: generic files become `[filename](url)` links with a
@@ -234,6 +250,10 @@ export function ForumComposer({
       const { content: finalContent, mediaTags } = buildOutgoingMessage(
         trimmed,
         currentPendingImeta,
+      );
+      const outgoingTags = mergeOutgoingTags(
+        mediaTags,
+        groupExpansion.markerTags,
       );
 
       // Save draft state so we can restore on failure.
@@ -248,7 +268,11 @@ export function ForumComposer({
       channelLinks.clearChannels();
       setIsEmojiPickerOpen(false);
 
-      const result = submitter(finalContent, pubkeys, mediaTags);
+      const result = submitter(
+        finalContent,
+        groupExpansion.mentionPubkeys,
+        outgoingTags,
+      );
       const completeSubmission = () => {
         setSubmitMode("primary");
         if (compact) setIsCompactExpanded(false);
@@ -271,7 +295,10 @@ export function ForumComposer({
       compact,
       media.pendingImetaRef,
       media.setPendingImeta,
+      mentions.extractMentionGroups,
       mentions.extractMentionPubkeys,
+      mentions.hasResolvedMembers,
+      mentions.memberPubkeys,
       mentions.clearMentions,
       channelLinks.clearChannels,
       richText.clearContent,

@@ -100,7 +100,7 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
 
-    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz";
+    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum ConstraintKind {
@@ -560,7 +560,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 24);
+        assert_eq!(migrations.len(), 25);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -879,6 +879,16 @@ mod tests {
             .to_lowercase()
             .contains("for update"));
         assert!(ttl_shared.contains("NEW.kind <> 9007"));
+
+        // User-group state is additive and community-scoped. The migration
+        // carries the metadata, membership, and default-channel tables.
+        assert_eq!(migrations[24].version, 25);
+        let user_groups = migrations[24].sql.as_str();
+        assert!(user_groups.contains("CREATE TABLE user_groups"));
+        assert!(user_groups.contains("CREATE TABLE user_group_members"));
+        assert!(user_groups.contains("CREATE TABLE user_group_default_channels"));
+        assert!(user_groups.contains("idx_user_groups_active_handle"));
+        assert!(user_groups.contains("snapshot_version BIGINT"));
     }
 
     #[test]
@@ -1121,7 +1131,7 @@ mod tests {
         run_migrations(&pool)
             .await
             .expect("retry succeeds after operator repair");
-        assert_eq!(applied_versions(&pool).await.last().copied(), Some(24));
+        assert_eq!(applied_versions(&pool).await.last().copied(), Some(25));
     }
 
     #[tokio::test]

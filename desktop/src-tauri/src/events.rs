@@ -9,7 +9,10 @@
 //! Each function validates inputs and returns a nostr::EventBuilder.
 //! Signing and submission happen in relay::submit_event.
 
+mod group_tags;
+
 use buzz_core_pkg::kind::{KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST};
+use group_tags::append_group_marker_tags;
 use nostr::{EventBuilder, EventId, Kind, Tag};
 use uuid::Uuid;
 
@@ -295,6 +298,7 @@ pub fn build_remove_member(channel_id: Uuid, target_pubkey: &str) -> Result<Even
 // ── Messages ─────────────────────────────────────────────────────────────────
 
 /// Kind 9 — stream message.
+#[allow(clippy::too_many_arguments)]
 pub fn build_message(
     channel_id: Uuid,
     content: &str,
@@ -303,6 +307,7 @@ pub fn build_message(
     media_tags: &[Vec<String>],
     custom_emoji_tags: &[Vec<String>],
     mention_ref_tags: &[Vec<String>],
+    group_tags: &[Vec<String>],
 ) -> Result<EventBuilder, String> {
     build_message_with_client_tags(
         channel_id,
@@ -312,6 +317,7 @@ pub fn build_message(
         media_tags,
         custom_emoji_tags,
         mention_ref_tags,
+        group_tags,
         &[],
     )
 }
@@ -330,6 +336,7 @@ pub fn build_message_with_client_tags(
     media_tags: &[Vec<String>],
     custom_emoji_tags: &[Vec<String>],
     mention_ref_tags: &[Vec<String>],
+    group_tags: &[Vec<String>],
     client_tags: &[Vec<String>],
 ) -> Result<EventBuilder, String> {
     check_content(content)?;
@@ -341,6 +348,7 @@ pub fn build_message_with_client_tags(
     imeta_tags(media_tags, &mut tags)?;
     emoji_tags(custom_emoji_tags, &mut tags)?;
     mention_reference_tags(mention_ref_tags, &mut tags)?;
+    append_group_marker_tags(group_tags, &mut tags)?;
     append_client_tags(client_tags, &mut tags)?;
     Ok(EventBuilder::new(Kind::Custom(9), content).tags(tags))
 }
@@ -369,12 +377,14 @@ pub fn build_forum_post(
     mentions: &[&str],
     media_tags: &[Vec<String>],
     mention_ref_tags: &[Vec<String>],
+    group_tags: &[Vec<String>],
 ) -> Result<EventBuilder, String> {
     check_content(content)?;
     let mut tags = vec![tag(vec!["h", &channel_id.to_string()])?];
     tags.extend(mention_tags(mentions)?);
     imeta_tags(media_tags, &mut tags)?;
     mention_reference_tags(mention_ref_tags, &mut tags)?;
+    append_group_marker_tags(group_tags, &mut tags)?;
     Ok(EventBuilder::new(Kind::Custom(45001), content).tags(tags))
 }
 
@@ -386,6 +396,7 @@ pub fn build_forum_comment(
     mentions: &[&str],
     media_tags: &[Vec<String>],
     mention_ref_tags: &[Vec<String>],
+    group_tags: &[Vec<String>],
 ) -> Result<EventBuilder, String> {
     check_content(content)?;
     let mut tags = vec![tag(vec!["h", &channel_id.to_string()])?];
@@ -393,6 +404,7 @@ pub fn build_forum_comment(
     tags.extend(mention_tags(mentions)?);
     imeta_tags(media_tags, &mut tags)?;
     mention_reference_tags(mention_ref_tags, &mut tags)?;
+    append_group_marker_tags(group_tags, &mut tags)?;
     Ok(EventBuilder::new(Kind::Custom(45003), content).tags(tags))
 }
 
@@ -856,6 +868,7 @@ mod tests {
         assert!(build_create_channel(channel_id, "###", "open", "stream", None, None).is_err());
         assert!(build_update_channel(channel_id, Some("###"), None, None, None).is_err());
     }
+
     /// Builder layout regression for the NIP-IA owner-of-agent archive flow.
     /// Compares against `docs/nips/NIP-IA.md` §Vector 1.
     #[test]

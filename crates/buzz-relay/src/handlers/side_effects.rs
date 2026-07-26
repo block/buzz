@@ -1,5 +1,6 @@
 //! NIP-29 and NIP-25 side-effect handlers.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use nostr::{Event, EventBuilder, Kind, Tag};
@@ -8,13 +9,16 @@ use uuid::Uuid;
 
 use buzz_core::kind::{
     event_kind_u32, is_parameterized_replaceable, KIND_AGENT_PROFILE, KIND_DM_VISIBILITY,
-    KIND_GIT_REPO_ANNOUNCEMENT, KIND_IA_ARCHIVED, KIND_IA_ARCHIVED_LIST, KIND_IA_UNARCHIVED,
-    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_NIP29_GROUP_ADMINS,
-    KIND_NIP29_GROUP_MEMBERS, KIND_NIP29_GROUP_METADATA, KIND_NIP43_MEMBERSHIP_LIST, KIND_REACTION,
-    KIND_THREAD_SUMMARY,
+    KIND_GIT_REPO_ANNOUNCEMENT, KIND_GROUP_ADD_MEMBER, KIND_GROUP_CREATE, KIND_GROUP_DELETE,
+    KIND_GROUP_EDIT, KIND_GROUP_REMOVE_MEMBER, KIND_GROUP_STATE, KIND_IA_ARCHIVED,
+    KIND_IA_ARCHIVED_LIST, KIND_IA_UNARCHIVED, KIND_MEMBER_ADDED_NOTIFICATION,
+    KIND_MEMBER_REMOVED_NOTIFICATION, KIND_NIP29_GROUP_ADMINS, KIND_NIP29_GROUP_MEMBERS,
+    KIND_NIP29_GROUP_METADATA, KIND_NIP43_MEMBERSHIP_LIST, KIND_REACTION, KIND_THREAD_SUMMARY,
 };
 use buzz_core::StoredEvent;
 use buzz_db::channel::{MemberRecord, MemberRole};
+use buzz_db::user_group::{UserGroupMutation, UserGroupMutationResult, UserGroupUpdate};
+use buzz_db::DbError;
 
 use super::event::dispatch_persistent_event;
 use crate::protocol::RelayMessage;
@@ -327,41 +331,17 @@ pub async fn validate_admin_event(
             let target_pubkey =
                 extract_p_tag(event).ok_or_else(|| anyhow::anyhow!("missing p tag"))?;
 
-            // Self-add: always allowed regardless of policy.
-            if target_pubkey == actor_bytes {
-                return Ok(());
-            }
-
-            // Third-party add: check channel_add_policy on the target.
-            if let Some((policy, owner)) = state
+            let policy = state
                 .db
                 .get_agent_channel_policy(tenant.community(), &target_pubkey)
-                .await?
-            {
-                match policy.as_str() {
-                    "owner_only" => {
-                        let owner_bytes = owner.ok_or_else(|| {
-                            anyhow::anyhow!("policy:owner_only — agent has no owner set")
-                        })?;
-                        if actor_bytes != owner_bytes {
-                            return Err(anyhow::anyhow!(
-                                "policy:owner_only — only the agent owner can add this agent"
-                            ));
-                        }
-                    }
-                    "nobody" => {
-                        return Err(anyhow::anyhow!(
-                            "policy:nobody — this agent has disabled external channel additions"
-                        ));
-                    }
-                    // "anyone" or any unknown value → allow.
-                    // NOTE: DB ENUM constraint prevents unknown values from being stored.
-                    // If a new policy value is added to the ENUM, update this match.
-                    _ => {}
-                }
-            }
-
-            Ok(())
+                .await?;
+            validate_channel_add_policy(
+                &target_pubkey,
+                &actor_bytes,
+                policy
+                    .as_ref()
+                    .map(|(policy, owner)| (policy.as_str(), owner.as_deref())),
+            )
         }
         9001 => {
             // REMOVE_USER: self-remove allowed unless actor is the last owner; removing others requires owner/admin
@@ -673,6 +653,29 @@ pub async fn validate_admin_event(
     }
 }
 
+fn validate_channel_add_policy(
+    target_pubkey: &[u8],
+    actor_pubkey: &[u8],
+    policy: Option<(&str, Option<&[u8]>)>,
+) -> anyhow::Result<()> {
+    if target_pubkey == actor_pubkey {
+        return Ok(());
+    }
+    match policy {
+        Some(("owner_only", Some(owner))) if actor_pubkey == owner => Ok(()),
+        Some(("owner_only", Some(_))) => Err(anyhow::anyhow!(
+            "policy:owner_only — only the agent owner can add this agent"
+        )),
+        Some(("owner_only", None)) => Err(anyhow::anyhow!(
+            "policy:owner_only — agent has no owner set"
+        )),
+        Some(("nobody", _)) => Err(anyhow::anyhow!(
+            "policy:nobody — this agent has disabled external channel additions"
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// Emit a system message (kind 40099) signed by the relay keypair.
 pub async fn emit_system_message(
     tenant: &TenantContext,
@@ -951,6 +954,778 @@ async fn emit_addressable_discovery_event(
     Ok(())
 }
 
+/// Sign, store (replacing previous), and fan out one global NIP-33 snapshot.
+async fn emit_parameterized_snapshot(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    kind: u32,
+    d_tag: &str,
+    tags: Vec<Tag>,
+) -> anyhow::Result<bool> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let ts = {
+        let existing = state
+            .db
+            .query_events(&buzz_db::event::EventQuery {
+                kinds: Some(vec![kind as i32]),
+                pubkey: Some(state.relay_keypair.public_key().to_bytes().to_vec()),
+                d_tag: Some(d_tag.to_string()),
+                limit: Some(1),
+                ..buzz_db::event::EventQuery::for_community(tenant.community())
+            })
+            .await
+            .unwrap_or_default();
+        existing
+            .first()
+            .map(|stored| (stored.event.created_at.as_secs() + 1).max(now))
+            .unwrap_or(now)
+    };
+    emit_parameterized_snapshot_at(tenant, state, kind, d_tag, tags, ts).await
+}
+
+async fn emit_parameterized_snapshot_at(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    kind: u32,
+    d_tag: &str,
+    tags: Vec<Tag>,
+    created_at: u64,
+) -> anyhow::Result<bool> {
+    let event = EventBuilder::new(Kind::Custom(kind as u16), "")
+        .tags(tags)
+        .custom_created_at(nostr::Timestamp::from(created_at))
+        .sign_with_keys(&state.relay_keypair)
+        .map_err(|error| anyhow::anyhow!("failed to sign kind:{kind}: {error}"))?;
+    let (stored, was_inserted) = state
+        .db
+        .replace_parameterized_event(tenant.community(), &event, d_tag, None)
+        .await?;
+    if was_inserted {
+        dispatch_persistent_event(
+            tenant,
+            state,
+            &stored,
+            kind,
+            &state.relay_keypair.public_key().to_hex(),
+            None,
+        )
+        .await;
+    }
+    Ok(was_inserted)
+}
+
+#[derive(Debug)]
+/// Failure modes from user-group command validation or application.
+pub(crate) enum UserGroupCommandValidationError {
+    /// A group ID or handle already belongs to an active group.
+    Duplicate(String),
+    /// The command is malformed or the actor is not authorized.
+    Rejected(String),
+    /// The operation could not complete because an internal dependency failed.
+    Internal,
+}
+
+#[derive(Debug)]
+pub(crate) enum ValidatedUserGroupCommand {
+    Create {
+        group_id: Uuid,
+        handle: String,
+        name: String,
+        description: Option<String>,
+        members: Vec<String>,
+        default_channels: Vec<Uuid>,
+    },
+    Edit {
+        group_id: Uuid,
+        updates: UserGroupUpdate,
+    },
+    Delete {
+        group_id: Uuid,
+    },
+    AddMembers {
+        group_id: Uuid,
+        members: Vec<String>,
+    },
+    RemoveMembers {
+        group_id: Uuid,
+        members: Vec<String>,
+    },
+}
+
+/// Validate a user-group command before its signed event is stored.
+///
+/// The preflight performs parsing, authorization, and dependency validation.
+/// Event storage and the SQL mutation commit atomically after this returns.
+pub(crate) async fn validate_user_group_command(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    event: &Event,
+) -> Result<ValidatedUserGroupCommand, UserGroupCommandValidationError> {
+    let command =
+        parse_user_group_command(event).map_err(UserGroupCommandValidationError::Rejected)?;
+    let actor_hex = event.pubkey.to_hex();
+
+    match &command {
+        ValidatedUserGroupCommand::Create {
+            members,
+            default_channels,
+            ..
+        } => {
+            // Edit/delete/membership commands gate the actor via the
+            // creator-or-admin rule; create has no group to load, so the actor
+            // must pass the same community admission as member arguments.
+            validate_group_members(tenant, state, std::slice::from_ref(&actor_hex))
+                .await
+                .map_err(|error| match error {
+                    UserGroupCommandValidationError::Rejected(_) => {
+                        UserGroupCommandValidationError::Rejected(
+                            "restricted: only community members may create user groups".into(),
+                        )
+                    }
+                    other => other,
+                })?;
+            validate_group_members(tenant, state, members).await?;
+            validate_group_default_channels(tenant, state, default_channels).await?;
+        }
+        ValidatedUserGroupCommand::Edit { group_id, updates } => {
+            load_authorized_user_group(tenant, state, *group_id, &actor_hex).await?;
+            if let Some(channel_ids) = updates.default_channels.as_deref() {
+                validate_group_default_channels(tenant, state, channel_ids).await?;
+            }
+        }
+        ValidatedUserGroupCommand::Delete { group_id } => {
+            load_authorized_user_group(tenant, state, *group_id, &actor_hex).await?;
+        }
+        ValidatedUserGroupCommand::AddMembers { group_id, members } => {
+            load_authorized_user_group(tenant, state, *group_id, &actor_hex).await?;
+            validate_group_members(tenant, state, members).await?;
+        }
+        ValidatedUserGroupCommand::RemoveMembers { group_id, .. } => {
+            load_authorized_user_group(tenant, state, *group_id, &actor_hex).await?;
+        }
+    }
+
+    Ok(command)
+}
+
+async fn load_authorized_user_group(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    group_id: Uuid,
+    actor_hex: &str,
+) -> Result<buzz_db::user_group::UserGroupRecord, UserGroupCommandValidationError> {
+    let group = state
+        .db
+        .get_user_group_by_id(tenant.community(), group_id)
+        .await
+        .map_err(|error| match error {
+            DbError::UserGroupNotFound(_) => {
+                UserGroupCommandValidationError::Rejected("invalid: user group not found".into())
+            }
+            other => user_group_internal(other),
+        })?;
+    let community_role = state
+        .db
+        .get_relay_member(tenant.community(), actor_hex)
+        .await
+        .map_err(user_group_internal)?
+        .map(|member| member.role);
+
+    if user_group_actor_can_manage(&group.created_by, actor_hex, community_role.as_deref()) {
+        Ok(group)
+    } else {
+        Err(UserGroupCommandValidationError::Rejected(
+            "restricted: only the group creator or a community admin/owner may modify this group"
+                .into(),
+        ))
+    }
+}
+
+fn user_group_internal(error: impl std::fmt::Display) -> UserGroupCommandValidationError {
+    warn!(%error, "user-group command validation failed");
+    UserGroupCommandValidationError::Internal
+}
+
+pub(crate) fn user_group_mutation(
+    event: &Event,
+    command: ValidatedUserGroupCommand,
+) -> UserGroupMutation {
+    let actor_hex = event.pubkey.to_hex();
+    match command {
+        ValidatedUserGroupCommand::Create {
+            group_id,
+            handle,
+            name,
+            description,
+            members,
+            default_channels,
+        } => UserGroupMutation::Create {
+            group_id,
+            handle,
+            name,
+            description,
+            members,
+            default_channels,
+            created_by: actor_hex,
+        },
+        ValidatedUserGroupCommand::Edit { group_id, updates } => {
+            UserGroupMutation::Edit { group_id, updates }
+        }
+        ValidatedUserGroupCommand::Delete { group_id } => UserGroupMutation::Delete { group_id },
+        ValidatedUserGroupCommand::AddMembers { group_id, members } => {
+            UserGroupMutation::AddMembers {
+                group_id,
+                members,
+                added_by: actor_hex,
+            }
+        }
+        ValidatedUserGroupCommand::RemoveMembers { group_id, members } => {
+            UserGroupMutation::RemoveMembers { group_id, members }
+        }
+    }
+}
+
+pub(crate) async fn handle_user_group_post_commit(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    event: &Event,
+    mutation: UserGroupMutationResult,
+) {
+    let actor_hex = event.pubkey.to_hex();
+    let actor_bytes = event.pubkey.as_bytes();
+
+    match mutation {
+        UserGroupMutationResult::Created {
+            group_id,
+            handle,
+            snapshot_version,
+        } => {
+            publish_user_group_snapshot_best_effort(tenant, state, group_id, snapshot_version)
+                .await;
+            info!(group = %group_id, handle, actor = %actor_hex, "user group created");
+        }
+        UserGroupMutationResult::Edited {
+            group_id,
+            snapshot_version,
+        } => {
+            publish_user_group_snapshot_best_effort(tenant, state, group_id, snapshot_version)
+                .await;
+            info!(group = %group_id, actor = %actor_hex, "user group edited");
+        }
+        UserGroupMutationResult::Deleted {
+            group_id,
+            snapshot_version,
+        } => {
+            publish_user_group_tombstone_best_effort(tenant, state, group_id, snapshot_version)
+                .await;
+            info!(group = %group_id, actor = %actor_hex, "user group deleted");
+        }
+        UserGroupMutationResult::MembersAdded { group_id, result } => {
+            publish_user_group_snapshot_best_effort(
+                tenant,
+                state,
+                group_id,
+                result.snapshot_version,
+            )
+            .await;
+
+            let member_bytes = result
+                .added_pubkeys
+                .iter()
+                .filter_map(|member| match hex::decode(member) {
+                    Ok(bytes) => Some(bytes),
+                    Err(_) => {
+                        warn!(group = %group_id, member, "stored user-group member pubkey is invalid");
+                        None
+                    }
+                })
+                .collect::<Vec<_>>();
+            let facts = match state
+                .db
+                .get_community_member_facts(tenant.community(), &member_bytes)
+                .await
+            {
+                Ok(facts) => facts,
+                Err(error) => {
+                    warn!(group = %group_id, %error, "failed to load channel-add policies");
+                    Vec::new()
+                }
+            };
+            let allowed_members = facts
+                .into_iter()
+                .filter(|facts| {
+                    validate_channel_add_policy(
+                        &facts.pubkey,
+                        actor_bytes,
+                        Some((&facts.channel_add_policy, facts.agent_owner.as_deref())),
+                    )
+                    .is_ok()
+                })
+                .map(|facts| facts.pubkey)
+                .collect::<Vec<_>>();
+
+            for channel_id in &result.default_channels {
+                let channel = match state.db.get_channel(tenant.community(), *channel_id).await {
+                    Ok(channel)
+                        if channel.visibility == "open" && channel.archived_at.is_none() =>
+                    {
+                        channel
+                    }
+                    Ok(_) | Err(DbError::ChannelNotFound(_)) => continue,
+                    Err(error) => {
+                        warn!(group = %group_id, channel = %channel_id, %error, "failed to load default channel");
+                        continue;
+                    }
+                };
+                let existing = match state.db.get_members(tenant.community(), channel.id).await {
+                    Ok(members) => members
+                        .into_iter()
+                        .map(|member| member.pubkey)
+                        .collect::<HashSet<_>>(),
+                    Err(error) => {
+                        warn!(group = %group_id, channel = %channel_id, %error, "failed to load channel members");
+                        continue;
+                    }
+                };
+                let mut changed = false;
+                for member in &allowed_members {
+                    if existing.contains(member) {
+                        continue;
+                    }
+                    if let Err(error) = add_channel_member(
+                        tenant,
+                        state,
+                        channel.id,
+                        member,
+                        MemberRole::Member,
+                        actor_bytes,
+                        false,
+                    )
+                    .await
+                    {
+                        warn!(
+                            group = %group_id,
+                            channel = %channel_id,
+                            %error,
+                            "user-group default-channel auto-join failed"
+                        );
+                    } else {
+                        changed = true;
+                    }
+                }
+                if changed {
+                    if let Err(error) = emit_group_discovery_events(tenant, state, channel.id).await
+                    {
+                        warn!(channel = %channel_id, %error, "NIP-29 group discovery emission failed");
+                    }
+                }
+            }
+            info!(
+                group = %group_id,
+                added = result.added_pubkeys.len(),
+                actor = %actor_hex,
+                "user-group members added"
+            );
+        }
+        UserGroupMutationResult::MembersRemoved { group_id, result } => {
+            publish_user_group_snapshot_best_effort(
+                tenant,
+                state,
+                group_id,
+                result.snapshot_version,
+            )
+            .await;
+            info!(
+                group = %group_id,
+                removed = result.removed,
+                actor = %actor_hex,
+                "user-group members removed"
+            );
+        }
+    }
+}
+
+fn user_group_actor_can_manage(
+    created_by: &str,
+    actor_hex: &str,
+    community_role: Option<&str>,
+) -> bool {
+    created_by == actor_hex || matches!(community_role, Some("owner" | "admin"))
+}
+
+async fn validate_group_members(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    members: &[String],
+) -> Result<(), UserGroupCommandValidationError> {
+    let pubkeys = members
+        .iter()
+        .map(|member| {
+            hex::decode(member).map_err(|_| {
+                UserGroupCommandValidationError::Rejected(
+                    "invalid: member pubkey must be 64 hexadecimal characters".into(),
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let facts = state
+        .db
+        .get_community_member_facts(tenant.community(), &pubkeys)
+        .await
+        .map_err(user_group_internal)?;
+    for facts in facts {
+        let admitted = if state.config.require_relay_membership {
+            facts.relay_member || (state.config.allow_nip_oa_auth && facts.owner_relay_member)
+        } else {
+            facts.user_exists
+        };
+        if !admitted {
+            let member = hex::encode(facts.pubkey);
+            return Err(UserGroupCommandValidationError::Rejected(format!(
+                "invalid: member pubkey is not a community member: {member}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+async fn validate_group_default_channels(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    channel_ids: &[Uuid],
+) -> Result<(), UserGroupCommandValidationError> {
+    for channel_id in channel_ids {
+        let channel = state
+            .db
+            .get_channel(tenant.community(), *channel_id)
+            .await
+            .map_err(|error| match error {
+                DbError::ChannelNotFound(_) => UserGroupCommandValidationError::Rejected(format!(
+                    "invalid: default channel not found: {channel_id}"
+                )),
+                other => user_group_internal(other),
+            })?;
+        if channel.visibility != "open" || channel.archived_at.is_some() {
+            return Err(UserGroupCommandValidationError::Rejected(format!(
+                "invalid: default channel must be public and active: {channel_id}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn parse_user_group_command(event: &Event) -> Result<ValidatedUserGroupCommand, String> {
+    if !event.content.is_empty() {
+        return Err("invalid: user-group command content must be empty".into());
+    }
+
+    let group_id = extract_group_id(event)?;
+    match event_kind_u32(event) {
+        KIND_GROUP_CREATE => {
+            let handle = required_single_tag(event, "handle")?;
+            if !buzz_core::user_group::is_valid_group_handle(&handle) {
+                return Err("invalid: group handle must match ^[a-z0-9][a-z0-9_-]{1,31}$".into());
+            }
+            let name = required_single_tag(event, "name")?;
+            validate_group_name(&name)?;
+            let description =
+                optional_single_tag(event, "description")?.filter(|value| !value.is_empty());
+            let members = extract_group_member_pubkeys(event, false)?;
+            let default_channels =
+                extract_group_default_channels(event, false)?.unwrap_or_default();
+            Ok(ValidatedUserGroupCommand::Create {
+                group_id,
+                handle,
+                name,
+                description,
+                members,
+                default_channels,
+            })
+        }
+        KIND_GROUP_EDIT => {
+            let handle = optional_single_tag(event, "handle")?;
+            if handle
+                .as_deref()
+                .is_some_and(|value| !buzz_core::user_group::is_valid_group_handle(value))
+            {
+                return Err("invalid: group handle must match ^[a-z0-9][a-z0-9_-]{1,31}$".into());
+            }
+            let name = optional_single_tag(event, "name")?;
+            if let Some(value) = name.as_deref() {
+                validate_group_name(value)?;
+            }
+            let description = optional_single_tag(event, "description")?
+                .map(|value| (!value.is_empty()).then_some(value));
+            let default_channels = extract_group_default_channels(event, true)?;
+            if handle.is_none()
+                && name.is_none()
+                && description.is_none()
+                && default_channels.is_none()
+            {
+                return Err("invalid: group edit must include at least one field".into());
+            }
+            Ok(ValidatedUserGroupCommand::Edit {
+                group_id,
+                updates: UserGroupUpdate {
+                    handle,
+                    name,
+                    description,
+                    default_channels,
+                },
+            })
+        }
+        KIND_GROUP_DELETE => Ok(ValidatedUserGroupCommand::Delete { group_id }),
+        KIND_GROUP_ADD_MEMBER => Ok(ValidatedUserGroupCommand::AddMembers {
+            group_id,
+            members: extract_group_member_pubkeys(event, true)?,
+        }),
+        KIND_GROUP_REMOVE_MEMBER => Ok(ValidatedUserGroupCommand::RemoveMembers {
+            group_id,
+            members: extract_group_member_pubkeys(event, true)?,
+        }),
+        kind => Err(format!(
+            "invalid: unexpected user-group command kind: {kind}"
+        )),
+    }
+}
+
+fn extract_group_id(event: &Event) -> Result<Uuid, String> {
+    let value = required_single_tag(event, "g")?;
+    let group_id =
+        Uuid::parse_str(&value).map_err(|_| "invalid: g tag must contain a UUID".to_string())?;
+    if group_id.is_nil() {
+        return Err("invalid: group id must not be nil".to_string());
+    }
+    Ok(group_id)
+}
+
+fn required_single_tag(event: &Event, tag_name: &str) -> Result<String, String> {
+    optional_single_tag(event, tag_name)?.ok_or_else(|| format!("invalid: missing {tag_name} tag"))
+}
+
+fn optional_single_tag(event: &Event, tag_name: &str) -> Result<Option<String>, String> {
+    let tags: Vec<&Tag> = event
+        .tags
+        .iter()
+        .filter(|tag| tag.kind().to_string() == tag_name)
+        .collect();
+    match tags.as_slice() {
+        [] => Ok(None),
+        [tag] => tag
+            .content()
+            .map(|value| Some(value.to_string()))
+            .ok_or_else(|| format!("invalid: {tag_name} tag must contain a value")),
+        _ => Err(format!("invalid: {tag_name} tag must appear at most once")),
+    }
+}
+
+fn validate_group_name(name: &str) -> Result<(), String> {
+    if name.trim().is_empty() {
+        Err("invalid: group name is required".to_string())
+    } else {
+        Ok(())
+    }
+}
+
+fn extract_group_member_pubkeys(event: &Event, required: bool) -> Result<Vec<String>, String> {
+    let mut members = Vec::new();
+    for tag in event
+        .tags
+        .iter()
+        .filter(|tag| tag.kind().to_string() == "p")
+    {
+        if members.len() == buzz_core::user_group::MAX_USER_GROUP_MEMBERS {
+            return Err(format!(
+                "invalid: user-group commands support at most {} member pubkeys",
+                buzz_core::user_group::MAX_USER_GROUP_MEMBERS
+            ));
+        }
+        let value = tag
+            .content()
+            .ok_or_else(|| "invalid: p tag must contain a pubkey".to_string())?;
+        if value.len() != 64 || !value.chars().all(|character| character.is_ascii_hexdigit()) {
+            return Err("invalid: member pubkey must be 64 hexadecimal characters".to_string());
+        }
+        members.push(value.to_ascii_lowercase());
+    }
+    members.sort_unstable();
+    members.dedup();
+    if required && members.is_empty() {
+        return Err("invalid: at least one member pubkey is required".to_string());
+    }
+    Ok(members)
+}
+
+fn extract_group_default_channels(
+    event: &Event,
+    allow_clear: bool,
+) -> Result<Option<Vec<Uuid>>, String> {
+    let tags: Vec<&Tag> = event
+        .tags
+        .iter()
+        .filter(|tag| tag.kind().to_string() == "channel")
+        .collect();
+    if tags.len() > buzz_core::user_group::MAX_USER_GROUP_DEFAULT_CHANNELS {
+        return Err(format!(
+            "invalid: user groups support at most {} default channels",
+            buzz_core::user_group::MAX_USER_GROUP_DEFAULT_CHANNELS
+        ));
+    }
+    if tags.is_empty() {
+        return Ok(None);
+    }
+    let values = tags
+        .iter()
+        .map(|tag| {
+            tag.content()
+                .ok_or_else(|| "invalid: channel tag must contain a value".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if values.iter().any(|value| value.is_empty()) {
+        if allow_clear && values.len() == 1 {
+            return Ok(Some(Vec::new()));
+        }
+        return Err("invalid: empty channel tag must be the only channel tag".to_string());
+    }
+
+    let mut channel_ids = values
+        .into_iter()
+        .map(|value| {
+            Uuid::parse_str(value)
+                .map_err(|_| format!("invalid: channel tag must contain a UUID: {value}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    channel_ids.sort_unstable();
+    channel_ids.dedup();
+    Ok(Some(channel_ids))
+}
+
+pub(crate) fn map_user_group_db_error(error: DbError) -> UserGroupCommandValidationError {
+    match error {
+        DbError::UserGroupHandleConflict(handle) => UserGroupCommandValidationError::Duplicate(
+            format!("duplicate: user group handle already exists: {handle}"),
+        ),
+        DbError::UserGroupIdConflict(group_id) => UserGroupCommandValidationError::Duplicate(
+            format!("duplicate: user group id already used: {group_id}"),
+        ),
+        DbError::UserGroupMemberLimit(limit) => UserGroupCommandValidationError::Rejected(format!(
+            "invalid: user groups support at most {limit} members"
+        )),
+        DbError::UserGroupNotFound(_) => {
+            UserGroupCommandValidationError::Rejected("invalid: user group not found".into())
+        }
+        other => user_group_internal(other),
+    }
+}
+
+async fn publish_user_group_snapshot_best_effort(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    group_id: Uuid,
+    snapshot_version: i64,
+) {
+    if let Err(first_error) =
+        publish_user_group_snapshot(tenant, state, group_id, snapshot_version).await
+    {
+        if let Err(error) =
+            publish_user_group_snapshot(tenant, state, group_id, snapshot_version).await
+        {
+            warn!(group = %group_id, %first_error, retry_error = %error, "user-group snapshot publication failed");
+        }
+    }
+}
+
+async fn publish_user_group_tombstone_best_effort(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    group_id: Uuid,
+    snapshot_version: i64,
+) {
+    let d_tag = group_id.to_string();
+    let tags = match (
+        Tag::parse(["d", &d_tag]),
+        Tag::parse(["deleted"]),
+        u64::try_from(snapshot_version),
+    ) {
+        (Ok(d), Ok(deleted), Ok(version)) => (vec![d, deleted], version),
+        _ => {
+            warn!(group = %group_id, "failed to build user-group tombstone");
+            return;
+        }
+    };
+    if let Err(first_error) = emit_parameterized_snapshot_at(
+        tenant,
+        state,
+        KIND_GROUP_STATE,
+        &d_tag,
+        tags.0.clone(),
+        tags.1,
+    )
+    .await
+    {
+        if let Err(error) =
+            emit_parameterized_snapshot_at(tenant, state, KIND_GROUP_STATE, &d_tag, tags.0, tags.1)
+                .await
+        {
+            warn!(group = %group_id, %first_error, retry_error = %error, "user-group tombstone publication failed");
+        }
+    }
+}
+
+async fn publish_user_group_snapshot(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    group_id: Uuid,
+    snapshot_version: i64,
+) -> anyhow::Result<()> {
+    let d_tag = group_id.to_string();
+    let tags = build_user_group_snapshot(tenant, state, group_id).await?;
+    let created_at = u64::try_from(snapshot_version)?;
+    let _ =
+        emit_parameterized_snapshot_at(tenant, state, KIND_GROUP_STATE, &d_tag, tags, created_at)
+            .await?;
+    Ok(())
+}
+
+async fn build_user_group_snapshot(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    group_id: Uuid,
+) -> anyhow::Result<Vec<Tag>> {
+    let group = state
+        .db
+        .get_user_group_by_id(tenant.community(), group_id)
+        .await?;
+    let members = state
+        .db
+        .list_user_group_members(tenant.community(), group_id)
+        .await?;
+    let default_channels = state
+        .db
+        .list_user_group_default_channels(tenant.community(), group_id)
+        .await?;
+    let group_id = group_id.to_string();
+    let mut tags = Vec::with_capacity(members.len() + default_channels.len() + 6);
+    tags.push(Tag::parse(["d", &group_id])?);
+    tags.push(Tag::parse(["handle", &group.handle])?);
+    tags.push(Tag::parse(["name", &group.name])?);
+    tags.push(Tag::parse([
+        "description",
+        group.description.as_deref().unwrap_or(""),
+    ])?);
+    tags.push(Tag::parse(["creator", &group.created_by])?);
+    for member in &members {
+        tags.push(Tag::parse(["p", &member.pubkey])?);
+    }
+    for channel_id in &default_channels {
+        tags.push(Tag::parse(["channel", &channel_id.to_string()])?);
+    }
+    Ok(tags)
+}
+
 /// Emit NIP-29 group discovery events (39000, 39001, 39002) signed by the relay keypair.
 /// Called after group creation, metadata changes, or membership changes.
 /// Events are stored channel-scoped (`channel_id = Some(...)`) so that existing
@@ -1214,21 +1989,41 @@ async fn handle_put_user(
         .map_err(|_| anyhow::anyhow!("invalid role: {role_str}"))?;
 
     let actor_bytes = event.pubkey.to_bytes().to_vec();
+    add_channel_member(
+        tenant,
+        state,
+        channel_id,
+        &target_pubkey,
+        role,
+        &actor_bytes,
+        true,
+    )
+    .await
+}
 
+async fn add_channel_member(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    channel_id: Uuid,
+    target_pubkey: &[u8],
+    role: MemberRole,
+    actor_bytes: &[u8],
+    refresh_discovery: bool,
+) -> anyhow::Result<()> {
     state
         .db
         .add_member(
             tenant.community(),
             channel_id,
-            &target_pubkey,
+            target_pubkey,
             role,
-            Some(&actor_bytes),
+            Some(actor_bytes),
         )
         .await?;
-    state.invalidate_membership(tenant, channel_id, &target_pubkey);
+    state.invalidate_membership(tenant, channel_id, target_pubkey);
 
-    let actor_hex = hex::encode(&actor_bytes);
-    let target_hex = hex::encode(&target_pubkey);
+    let actor_hex = hex::encode(actor_bytes);
+    let target_hex = hex::encode(target_pubkey);
     emit_system_message(
         tenant,
         state,
@@ -1241,16 +2036,18 @@ async fn handle_put_user(
     )
     .await?;
 
-    if let Err(e) = emit_group_discovery_events(tenant, state, channel_id).await {
-        warn!(channel = %channel_id, error = %e, "NIP-29 group discovery emission failed");
+    if refresh_discovery {
+        if let Err(e) = emit_group_discovery_events(tenant, state, channel_id).await {
+            warn!(channel = %channel_id, error = %e, "NIP-29 group discovery emission failed");
+        }
     }
 
     if let Err(e) = emit_membership_notification(
         tenant,
         state,
         channel_id,
-        &target_pubkey,
-        &actor_bytes,
+        target_pubkey,
+        actor_bytes,
         KIND_MEMBER_ADDED_NOTIFICATION,
     )
     .await
@@ -3062,7 +3859,6 @@ pub async fn publish_dm_visibility_snapshot(
 ) -> anyhow::Result<()> {
     let viewer_hex = hex::encode(viewer);
     let hidden = state.db.list_hidden_dms(tenant.community(), viewer).await?;
-    let relay_pubkey_hex = state.relay_keypair.public_key().to_hex();
 
     let mut tags: Vec<Tag> = Vec::with_capacity(hidden.len() + 2);
     tags.push(
@@ -3082,53 +3878,7 @@ pub async fn publish_dm_visibility_snapshot(
         );
     }
 
-    // Force created_at strictly past any prior snapshot for this viewer: a same-second
-    // replacement whose random event id sorts higher is rejected by stale-write
-    // protection, so a hide→re-open within one second could otherwise strand the stale
-    // snapshot. Same guard as emit_addressable_discovery_event.
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let ts = {
-        let existing = state
-            .db
-            .query_events(&buzz_db::event::EventQuery {
-                kinds: Some(vec![KIND_DM_VISIBILITY as i32]),
-                pubkey: Some(state.relay_keypair.public_key().to_bytes().to_vec()),
-                d_tag: Some(viewer_hex.clone()),
-                limit: Some(1),
-                ..buzz_db::event::EventQuery::for_community(tenant.community())
-            })
-            .await
-            .unwrap_or_default();
-        existing
-            .first()
-            .map(|e| (e.event.created_at.as_secs() + 1).max(now))
-            .unwrap_or(now)
-    };
-
-    let event = EventBuilder::new(Kind::Custom(KIND_DM_VISIBILITY as u16), "")
-        .tags(tags)
-        .custom_created_at(nostr::Timestamp::from(ts))
-        .sign_with_keys(&state.relay_keypair)
-        .map_err(|e| anyhow::anyhow!("failed to sign kind:{KIND_DM_VISIBILITY}: {e}"))?;
-
-    let (stored, was_inserted) = state
-        .db
-        .replace_parameterized_event(tenant.community(), &event, &viewer_hex, None)
-        .await?;
-    if was_inserted {
-        dispatch_persistent_event(
-            tenant,
-            state,
-            &stored,
-            KIND_DM_VISIBILITY,
-            &relay_pubkey_hex,
-            None,
-        )
-        .await;
-    }
+    emit_parameterized_snapshot(tenant, state, KIND_DM_VISIBILITY, &viewer_hex, tags).await?;
 
     info!(
         viewer = %viewer_hex,
@@ -3266,6 +4016,169 @@ fn topic_for_subscription(channel_id: Option<Uuid>) -> EventTopic {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn group_event(kind: u32, tags: Vec<Tag>) -> Event {
+        EventBuilder::new(Kind::Custom(kind as u16), "")
+            .tags(tags)
+            .allow_self_tagging()
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign group event")
+    }
+
+    #[test]
+    fn user_group_creator_and_community_admins_can_manage() {
+        let creator = "aa".repeat(32);
+        let other = "bb".repeat(32);
+
+        assert!(user_group_actor_can_manage(&creator, &creator, None));
+        assert!(user_group_actor_can_manage(&creator, &other, Some("owner")));
+        assert!(user_group_actor_can_manage(&creator, &other, Some("admin")));
+        assert!(!user_group_actor_can_manage(
+            &creator,
+            &other,
+            Some("member")
+        ));
+        assert!(!user_group_actor_can_manage(&creator, &other, None));
+    }
+
+    #[test]
+    fn user_group_handle_conflict_maps_to_duplicate_result() {
+        let error = map_user_group_db_error(DbError::UserGroupHandleConflict("ios-team".into()));
+
+        assert!(matches!(
+            error,
+            UserGroupCommandValidationError::Duplicate(message)
+                if message == "duplicate: user group handle already exists: ios-team"
+        ));
+    }
+
+    #[test]
+    fn channel_add_policy_is_shared_by_direct_and_group_adds() {
+        let actor = [1_u8; 32];
+        let target = [2_u8; 32];
+        let owner = [3_u8; 32];
+
+        assert!(validate_channel_add_policy(&actor, &actor, Some(("nobody", None))).is_ok());
+        assert!(validate_channel_add_policy(&target, &actor, Some(("anyone", None))).is_ok());
+        assert!(validate_channel_add_policy(&target, &actor, Some(("nobody", None))).is_err());
+        assert!(
+            validate_channel_add_policy(&target, &actor, Some(("owner_only", Some(&owner))))
+                .is_err()
+        );
+        assert!(
+            validate_channel_add_policy(&target, &owner, Some(("owner_only", Some(&owner))))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn user_group_command_content_must_be_empty() {
+        let event = EventBuilder::new(Kind::Custom(KIND_GROUP_DELETE as u16), "not empty")
+            .tags([Tag::parse(["g", &Uuid::new_v4().to_string()]).expect("g tag")])
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign group event");
+
+        assert!(parse_user_group_command(&event).is_err());
+    }
+
+    #[test]
+    fn user_group_member_validation_normalizes_and_deduplicates_pubkeys() {
+        let uppercase = "AB".repeat(32);
+        let event = group_event(
+            KIND_GROUP_ADD_MEMBER,
+            vec![
+                Tag::parse(["g", &Uuid::new_v4().to_string()]).expect("g tag"),
+                Tag::parse(["p", &uppercase]).expect("p tag"),
+                Tag::parse(["p", &uppercase.to_ascii_lowercase()]).expect("p tag"),
+            ],
+        );
+
+        assert_eq!(
+            extract_group_member_pubkeys(&event, true).expect("members"),
+            vec![uppercase.to_ascii_lowercase()]
+        );
+    }
+
+    #[test]
+    fn user_group_member_validation_rejects_missing_and_malformed_pubkeys() {
+        let group_id = Uuid::new_v4().to_string();
+        let missing = group_event(
+            KIND_GROUP_ADD_MEMBER,
+            vec![Tag::parse(["g", &group_id]).expect("g tag")],
+        );
+        assert!(extract_group_member_pubkeys(&missing, true).is_err());
+
+        let malformed = group_event(
+            KIND_GROUP_ADD_MEMBER,
+            vec![
+                Tag::parse(["g", &group_id]).expect("g tag"),
+                Tag::parse(["p", "not-a-pubkey"]).expect("p tag"),
+            ],
+        );
+        assert!(extract_group_member_pubkeys(&malformed, true).is_err());
+    }
+
+    #[test]
+    fn user_group_member_commands_reject_oversized_batches_before_deduplication() {
+        let group_id = Uuid::new_v4().to_string();
+        let mut tags = vec![Tag::parse(["g", &group_id]).expect("g tag")];
+        for _ in 0..=buzz_core::user_group::MAX_USER_GROUP_MEMBERS {
+            tags.push(Tag::parse(["p", &"ab".repeat(32)]).expect("p tag"));
+        }
+        let event = group_event(KIND_GROUP_ADD_MEMBER, tags);
+
+        assert!(extract_group_member_pubkeys(&event, true)
+            .expect_err("oversized batch")
+            .contains("at most"));
+    }
+
+    #[test]
+    fn user_group_default_channel_empty_sentinel_clears_only_by_itself() {
+        let group_id = Uuid::new_v4().to_string();
+        let clear = group_event(
+            KIND_GROUP_EDIT,
+            vec![
+                Tag::parse(["g", &group_id]).expect("g tag"),
+                Tag::parse(["channel", ""]).expect("channel tag"),
+            ],
+        );
+        assert_eq!(
+            extract_group_default_channels(&clear, true).expect("clear"),
+            Some(Vec::new())
+        );
+
+        let channel_id = Uuid::new_v4().to_string();
+        let mixed = group_event(
+            KIND_GROUP_EDIT,
+            vec![
+                Tag::parse(["g", &group_id]).expect("g tag"),
+                Tag::parse(["channel", ""]).expect("channel tag"),
+                Tag::parse(["channel", &channel_id]).expect("channel tag"),
+            ],
+        );
+        assert!(extract_group_default_channels(&mixed, true).is_err());
+    }
+
+    #[test]
+    fn user_group_id_requires_one_non_nil_uuid() {
+        let missing = group_event(KIND_GROUP_DELETE, Vec::new());
+        assert!(extract_group_id(&missing).is_err());
+
+        let nil = group_event(
+            KIND_GROUP_DELETE,
+            vec![Tag::parse(["g", &Uuid::nil().to_string()]).expect("g tag")],
+        );
+        assert!(extract_group_id(&nil).is_err());
+
+        let duplicate = group_event(
+            KIND_GROUP_DELETE,
+            vec![
+                Tag::parse(["g", &Uuid::new_v4().to_string()]).expect("g tag"),
+                Tag::parse(["g", &Uuid::new_v4().to_string()]).expect("g tag"),
+            ],
+        );
+        assert!(extract_group_id(&duplicate).is_err());
+    }
 
     #[test]
     fn delete_tombstone_omits_absent_moderation_metadata() {

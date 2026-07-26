@@ -22,6 +22,7 @@ import { RemindersPanel } from "@/features/reminders/ui/RemindersPanel";
 import { TopChromeInsetHeader } from "@/shared/layout/TopChromeInsetHeader";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import { resolveGroupMentionHandles } from "@/shared/lib/resolveMentionNames";
 import {
   ContextMenu,
   ContextMenuContent,
@@ -302,6 +303,9 @@ export function InboxListPane({
                 <Markdown
                   className="inbox-preview-markdown text-inherit leading-5"
                   content={item.preview}
+                  groupMentionHandles={resolveGroupMentionHandles(
+                    item.item.tags,
+                  )}
                   interactive={false}
                   mentionNames={item.mentionNames}
                 />

@@ -29,6 +29,22 @@ pub enum DbError {
     #[error("member not found in channel {0}")]
     MemberNotFound(uuid::Uuid),
 
+    /// The requested active user group does not exist.
+    #[error("user group not found: {0}")]
+    UserGroupNotFound(uuid::Uuid),
+
+    /// The requested user-group handle is already active in this community.
+    #[error("user group handle already exists: {0}")]
+    UserGroupHandleConflict(String),
+
+    /// The requested user-group UUID was already used, including by a deleted group.
+    #[error("user group id already used: {0}")]
+    UserGroupIdConflict(uuid::Uuid),
+
+    /// A user-group membership write would exceed the supported size.
+    #[error("user group supports at most {0} members")]
+    UserGroupMemberLimit(usize),
+
     /// A generic not-found error.
     #[error("not found: {0}")]
     NotFound(String),

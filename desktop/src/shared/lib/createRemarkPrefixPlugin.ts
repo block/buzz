@@ -61,7 +61,11 @@ function walkChildren(node: any, pattern: RegExp, buildNode: NodeBuilder) {
 // biome-ignore lint/suspicious/noExplicitAny: remark tree types are not available
 function shouldSkipNode(node: any): boolean {
   return (
-    node.type === "link" || node.type === "code" || node.type === "inlineCode"
+    node.type === "link" ||
+    node.type === "code" ||
+    node.type === "inlineCode" ||
+    node.type === "mention" ||
+    node.type === "groupMention"
   );
 }
 

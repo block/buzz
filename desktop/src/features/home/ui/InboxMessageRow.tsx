@@ -14,6 +14,7 @@ import { useMessageEmoji } from "@/features/messages/lib/useMessageEmoji";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import { resolveGroupMentionHandles } from "@/shared/lib/resolveMentionNames";
 import { Markdown } from "@/shared/ui/markdown";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
@@ -209,6 +210,7 @@ export function InboxMessageRow({
               )}
               content={message.content}
               customEmoji={customEmoji}
+              groupMentionHandles={resolveGroupMentionHandles(message.tags)}
               mentionNames={message.mentionNames}
               mentionPubkeysByName={message.mentionPubkeysByName}
             />

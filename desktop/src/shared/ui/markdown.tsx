@@ -1717,6 +1717,20 @@ function createMarkdownComponents(
         mentionNode
       );
     },
+    "group-mention": function MarkdownGroupMention({
+      children,
+    }: {
+      children?: React.ReactNode;
+    }) {
+      const mentionText = String(children ?? "");
+      const mentionLabel = mentionText.replace(/^@/, "");
+      return (
+        <span className={MENTION_CHIP_BASE_CLASSES} data-group-mention="">
+          <span className={MENTION_CHIP_PREFIX_CLASS}>@</span>
+          {mentionLabel}
+        </span>
+      );
+    },
     emoji: ({ src, alt }: { src?: string; alt?: string }) => {
       const resolvedSrc = src ? rewriteRelayUrl(src) : src;
       if (!resolvedSrc) {
@@ -1799,7 +1813,7 @@ function createMarkdownComponents(
  * four instances ever exist. Module-stable maps mean cached markdown element
  * trees (see ./markdown/nodeCache.ts) never embed per-mount closures.
  */
-const MARKDOWN_COMPONENT_SCHEMA_VERSION = "4";
+const MARKDOWN_COMPONENT_SCHEMA_VERSION = "5";
 const markdownComponentsByVariant = new Map<string, MarkdownComponentSet>();
 
 type MarkdownComponentSet = { components: Components; variant: string };
@@ -1833,6 +1847,7 @@ function MarkdownInner({
   configNudgeAuthorPubkey,
   content,
   customEmoji,
+  groupMentionHandles,
   imetaByUrl,
   interactive = true,
   agentMentionPubkeysByName,
@@ -1933,6 +1948,7 @@ function MarkdownInner({
           components: componentSet.components,
           content: processedContent,
           customEmoji,
+          groupMentionHandles,
           mentionNames,
           searchQuery,
           variant: componentSet.variant,
@@ -1993,6 +2009,7 @@ export const Markdown = React.memo(
     prev.content === next.content &&
     prev.className === next.className &&
     prev.customEmoji === next.customEmoji &&
+    shallowArrayEqual(prev.groupMentionHandles, next.groupMentionHandles) &&
     prev.interactive === next.interactive &&
     prev.mediaInset === next.mediaInset &&
     shallowRecordEqual(

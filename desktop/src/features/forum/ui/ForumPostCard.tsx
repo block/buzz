@@ -10,7 +10,10 @@ import { UserAvatar } from "@/shared/ui/UserAvatar";
 import type { ForumPost } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { parseImetaTags } from "@/features/messages/lib/parseImeta";
-import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
+import {
+  resolveGroupMentionHandles,
+  resolveMentionProps,
+} from "@/shared/lib/resolveMentionNames";
 import { Markdown } from "@/shared/ui/markdown";
 
 import { formatRelativeTime } from "../lib/time";
@@ -121,6 +124,7 @@ export function ForumPostCard({
         <Markdown
           className="text-sm"
           content={previewContent}
+          groupMentionHandles={resolveGroupMentionHandles(post.tags)}
           imetaByUrl={imetaByUrl}
           mentionNames={mentionNames}
           mentionPubkeysByName={mentionPubkeysByName}
