@@ -3,6 +3,34 @@ use crate::error::CliError;
 use crate::validate::{read_or_stdin, sdk_err, validate_hex64, validate_repo_id};
 use buzz_sdk::{GitIssueMeta, GitRepoCoord, GitStatusMeta};
 
+pub async fn cmd_comment_issue(
+    client: &BuzzClient,
+    issue: &str,
+    repo_owner: &str,
+    repo_id: &str,
+    content: &str,
+    to: &[String],
+) -> Result<(), CliError> {
+    validate_hex64(issue)?;
+    validate_hex64(repo_owner)?;
+    validate_repo_id(repo_id)?;
+    for recipient in to {
+        validate_hex64(recipient)?;
+    }
+
+    let body = read_or_stdin(content)?;
+    let body = body.trim();
+    let repo = GitRepoCoord {
+        owner: repo_owner.to_string(),
+        id: repo_id.to_string(),
+    };
+    let builder = buzz_sdk::build_git_issue_comment(&repo, issue, body, to).map_err(sdk_err)?;
+    let event = client.sign_event(builder)?;
+    let resp = client.submit_event(event).await?;
+    println!("{resp}");
+    Ok(())
+}
+
 pub async fn cmd_create_issue(
     client: &BuzzClient,
     repo_owner: &str,
@@ -147,6 +175,13 @@ pub async fn cmd_issue_status(
 pub async fn dispatch(cmd: crate::IssuesCmd, client: &BuzzClient) -> Result<(), CliError> {
     use crate::IssuesCmd;
     match cmd {
+        IssuesCmd::Comment {
+            issue,
+            repo_owner,
+            repo_id,
+            content,
+            to,
+        } => cmd_comment_issue(client, &issue, &repo_owner, &repo_id, &content, &to).await,
         IssuesCmd::Create {
             repo_owner,
             repo_id,
