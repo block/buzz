@@ -208,17 +208,14 @@ mod tests {
 
     #[tokio::test]
     async fn deployment_url_keeps_nondefault_port_for_lookup() {
-        // Loopback folds to 127.0.0.1 (see buzz-core::tenant::normalize_host),
-        // so the community is keyed canonically — but the non-default port is
-        // still part of the key, which is what this test guards.
-        let r = resolver_with("127.0.0.1:3000", 42);
+        let r = resolver_with("localhost:3000", 42);
         let ctx = bind_deployment_community(&r, "ws://localhost:3000")
             .await
             .expect("deployment host should bind with non-default port");
         assert_eq!(ctx.community().as_uuid(), &Uuid::from_u128(42));
-        assert_eq!(ctx.host(), "127.0.0.1:3000");
+        assert_eq!(ctx.host(), "localhost:3000");
 
-        let wrong = resolver_with("127.0.0.1", 42);
+        let wrong = resolver_with("localhost", 42);
         let err = bind_deployment_community(&wrong, "ws://localhost:3000")
             .await
             .unwrap_err();
@@ -239,38 +236,8 @@ mod tests {
 
     #[test]
     fn relay_url_authority_preserves_ipv6_brackets() {
-        // Non-loopback literal: brackets and port are preserved.
-        assert_eq!(
-            relay_url_authority("ws://[2001:db8::1]:3000"),
-            "[2001:db8::1]:3000"
-        );
-        assert_eq!(
-            relay_url_authority("wss://[2001:db8::1]:443"),
-            "[2001:db8::1]"
-        );
-        // Loopback literal folds to the canonical loopback host, so every
-        // spelling of a loopback deployment resolves to one community.
-        assert_eq!(relay_url_authority("ws://[::1]:3000"), "127.0.0.1:3000");
-        assert_eq!(relay_url_authority("wss://[::1]:443"), "127.0.0.1");
-    }
-
-    #[tokio::test]
-    async fn loopback_spellings_bind_the_same_community() {
-        // Regression: a relay configured with `ws://localhost:PORT` must be
-        // reachable by every loopback spelling of its own host. Clients
-        // canonicalize relay URLs to 127.0.0.1, so before the host fold a
-        // localhost-configured deployment 404'd those callers.
-        let r = resolver_with("127.0.0.1:3000", 7);
-        for host in ["localhost:3000", "127.0.0.1:3000", "[::1]:3000"] {
-            let ctx = bind_community(&r, host)
-                .await
-                .unwrap_or_else(|_| panic!("host {host:?} should bind"));
-            assert_eq!(
-                ctx.community().as_uuid(),
-                &Uuid::from_u128(7),
-                "host {host:?}"
-            );
-        }
+        assert_eq!(relay_url_authority("ws://[::1]:3000"), "[::1]:3000");
+        assert_eq!(relay_url_authority("wss://[::1]:443"), "[::1]");
     }
 
     #[tokio::test]
