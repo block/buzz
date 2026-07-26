@@ -23,6 +23,8 @@ import 'search_provider.dart';
 
 enum _SearchFilter { all, messages, channels, people }
 
+const _searchHeaderBottomHeight = 48.0;
+
 class SearchPage extends HookConsumerWidget {
   const SearchPage({super.key});
 
@@ -39,35 +41,66 @@ class SearchPage extends HookConsumerWidget {
       textController,
       () => textController.text.isNotEmpty,
     );
+    final isBuzzTheme = context.appColors.topSectionGradient != null;
+    final buzzSearchColor = context.theme.brightness == Brightness.dark
+        ? Colors.white
+        : Colors.black;
+    final searchSurfaceColor = isBuzzTheme
+        ? buzzSearchColor.withValues(alpha: 0.04)
+        : context.colors.surfaceContainerHighest;
+    final searchMutedColor = isBuzzTheme
+        ? buzzSearchColor.withValues(alpha: 0.4)
+        : context.colors.onSurfaceVariant;
 
     return FrostedScaffold(
-      resizeToAvoidBottomInset: true,
+      // Keep the empty state centered in the page rather than the portion left
+      // above the keyboard.
+      resizeToAvoidBottomInset: false,
       appBar: FrostedAppBar(
-        title: Container(
-          height: 36,
-          padding: const EdgeInsets.symmetric(horizontal: Grid.half),
-          decoration: BoxDecoration(
-            color: context.colors.surfaceContainerHighest,
-            borderRadius: BorderRadius.circular(Radii.lg),
+        gradient: context.appColors.topSectionGradient,
+        title: const Text('Search'),
+        titleStyle: context.textTheme.titleMedium?.copyWith(
+          fontSize: 22,
+          fontWeight: FontWeight.w600,
+        ),
+        bottomHeight: _searchHeaderBottomHeight,
+        bottom: Padding(
+          padding: const EdgeInsets.fromLTRB(
+            Grid.gutter,
+            0,
+            Grid.gutter,
+            Grid.twelve,
           ),
-          child: TextField(
-            controller: textController,
-            decoration: InputDecoration(
-              hintText: 'Search messages, channels, people\u2026',
-              hintStyle: context.textTheme.bodyMedium?.copyWith(
-                color: context.colors.onSurfaceVariant,
-              ),
-              prefixIcon: const Icon(LucideIcons.search, size: 16),
-              prefixIconConstraints: const BoxConstraints(minWidth: 32),
-              border: InputBorder.none,
-              enabledBorder: InputBorder.none,
-              focusedBorder: InputBorder.none,
-              isDense: true,
-              contentPadding: const EdgeInsets.symmetric(vertical: Grid.xxs),
+          child: Container(
+            height: 36,
+            padding: const EdgeInsets.symmetric(horizontal: Grid.half),
+            decoration: BoxDecoration(
+              color: searchSurfaceColor,
+              borderRadius: BorderRadius.circular(Radii.lg),
             ),
-            style: context.textTheme.bodyMedium,
-            onChanged: (value) =>
-                ref.read(searchProvider.notifier).search(value),
+            child: TextField(
+              controller: textController,
+              decoration: InputDecoration(
+                hintText: 'Search messages, channels, people\u2026',
+                hintStyle: context.textTheme.bodyMedium?.copyWith(
+                  color: searchMutedColor,
+                ),
+                prefixIcon: Icon(
+                  LucideIcons.search,
+                  size: 16,
+                  color: searchMutedColor,
+                ),
+                prefixIconConstraints: const BoxConstraints(minWidth: 32),
+                border: InputBorder.none,
+                enabledBorder: InputBorder.none,
+                focusedBorder: InputBorder.none,
+                isDense: true,
+                contentPadding: const EdgeInsets.symmetric(vertical: Grid.xxs),
+              ),
+              style: context.textTheme.bodyMedium,
+              onChanged: (value) =>
+                  ref.read(searchProvider.notifier).search(value),
+            ),
           ),
         ),
         actions: [
@@ -82,9 +115,19 @@ class SearchPage extends HookConsumerWidget {
         ],
       ),
       body: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          SizedBox(height: frostedAppBarHeight(context)),
+          SizedBox(
+            height: frostedAppBarHeight(
+              context,
+              bottomHeight: _searchHeaderBottomHeight,
+            ),
+          ),
           FilterChipBar<_SearchFilter>(
+            expandItems: true,
+            visualDensity: const VisualDensity(horizontal: -2),
+            chipVerticalPadding: Grid.xxs,
+            barVerticalPadding: Grid.twelve,
             selected: activeFilter.value,
             onSelected: (f) => activeFilter.value = f,
             items: [
@@ -120,10 +163,25 @@ class _SearchBody extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     if (state.query.isEmpty) {
       return Center(
-        child: Text(
-          'Search messages, channels, and people',
-          style: context.textTheme.bodyMedium?.copyWith(
-            color: context.colors.onSurfaceVariant,
+        child: FittedBox(
+          fit: BoxFit.scaleDown,
+          alignment: Alignment.center,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                LucideIcons.search,
+                size: 64,
+                color: context.colors.onSurfaceVariant,
+              ),
+              const SizedBox(height: Grid.xs),
+              Text(
+                'Search messages, channels, and people',
+                style: context.textTheme.bodyMedium?.copyWith(
+                  color: context.colors.onSurfaceVariant,
+                ),
+              ),
+            ],
           ),
         ),
       );

@@ -11,8 +11,8 @@ const _kBarContentHeight = Grid.xxs + 32 + Grid.xxs; // 48
 /// Returns the total height of the [FrostedAppBar] including safe area padding.
 ///
 /// Use this to add top spacing to body content so it starts below the bar.
-double frostedAppBarHeight(BuildContext context) {
-  return MediaQuery.paddingOf(context).top + _kBarContentHeight;
+double frostedAppBarHeight(BuildContext context, {double bottomHeight = 0}) {
+  return MediaQuery.paddingOf(context).top + _kBarContentHeight + bottomHeight;
 }
 
 /// A frosted-glass floating app bar designed to sit inside a [Stack].
@@ -26,6 +26,15 @@ class FrostedAppBar extends StatelessWidget {
 
   /// Widget displayed in the center/title area.
   final Widget? title;
+
+  /// Optional style merged over the default title style.
+  final TextStyle? titleStyle;
+
+  /// Optional content displayed below the title row in the same surface.
+  final Widget? bottom;
+
+  /// Height reserved for [bottom].
+  final double bottomHeight;
 
   /// Widgets displayed on the trailing (right) side.
   final List<Widget> actions;
@@ -45,11 +54,14 @@ class FrostedAppBar extends StatelessWidget {
     super.key,
     this.leading,
     this.title,
+    this.titleStyle,
+    this.bottom,
+    this.bottomHeight = 0,
     this.actions = const [],
     this.horizontalInset = Grid.quarter,
     this.iconColor,
     this.gradient,
-  });
+  }) : assert(bottom == null || bottomHeight > 0);
 
   @override
   Widget build(BuildContext context) {
@@ -93,43 +105,50 @@ class FrostedAppBar extends StatelessWidget {
                 ),
               ),
             ),
-            child: SizedBox(
-              height: _kBarContentHeight,
-              child: Padding(
-                padding: EdgeInsets.symmetric(horizontal: horizontalInset),
-                child: IconTheme.merge(
-                  data: IconThemeData(color: iconColor),
-                  child: Row(
-                    children: [
-                      ?effectiveLeading,
-                      if (title != null)
-                        Expanded(
-                          child: Padding(
-                            padding: EdgeInsets.only(
-                              left: effectiveLeading != null
-                                  ? 0
-                                  : Grid.gutter - Grid.quarter,
-                              right: actions.isEmpty
-                                  ? Grid.gutter - Grid.quarter
-                                  : 0,
-                            ),
-                            child: DefaultTextStyle.merge(
-                              style: context.textTheme.titleMedium?.copyWith(
-                                fontWeight: FontWeight.w600,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                SizedBox(
+                  height: _kBarContentHeight,
+                  child: Padding(
+                    padding: EdgeInsets.symmetric(horizontal: horizontalInset),
+                    child: IconTheme.merge(
+                      data: IconThemeData(color: iconColor),
+                      child: Row(
+                        children: [
+                          ?effectiveLeading,
+                          if (title != null)
+                            Expanded(
+                              child: Padding(
+                                padding: EdgeInsets.only(
+                                  left: effectiveLeading != null
+                                      ? 0
+                                      : Grid.gutter - Grid.quarter,
+                                  right: actions.isEmpty
+                                      ? Grid.gutter - Grid.quarter
+                                      : 0,
+                                ),
+                                child: DefaultTextStyle.merge(
+                                  style: context.textTheme.titleMedium
+                                      ?.copyWith(fontWeight: FontWeight.w600)
+                                      .merge(titleStyle),
+                                  overflow: TextOverflow.ellipsis,
+                                  maxLines: 1,
+                                  child: title!,
+                                ),
                               ),
-                              overflow: TextOverflow.ellipsis,
-                              maxLines: 1,
-                              child: title!,
-                            ),
-                          ),
-                        )
-                      else
-                        const Spacer(),
-                      ...actions,
-                    ],
+                            )
+                          else
+                            const Spacer(),
+                          ...actions,
+                        ],
+                      ),
+                    ),
                   ),
                 ),
-              ),
+                if (bottom != null)
+                  SizedBox(height: bottomHeight, child: bottom),
+              ],
             ),
           ),
         ),

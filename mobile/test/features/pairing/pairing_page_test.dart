@@ -3,25 +3,37 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/features/pairing/pairing_page.dart';
 import 'package:buzz/features/pairing/pairing_provider.dart';
+import 'package:buzz/shared/widgets/tappable_flapping_bee.dart';
 
 import '../../helpers/widget_helpers.dart';
 
 void main() {
   group('PairingPage', () {
-    testWidgets('renders branding, scan button, divider, and text field', (
+    testWidgets('renders branding and progressive pairing actions', (
       tester,
     ) async {
       await tester.pumpWidget(
         WidgetHelpers.testable(child: const PairingPage()),
       );
 
-      expect(
-        find.image(const AssetImage('assets/images/buzz-icon.png')),
-        findsOneWidget,
-      );
+      expect(find.byType(TappableFlappingBee), findsOneWidget);
       expect(find.text('Welcome to Buzz'), findsOneWidget);
-      expect(find.text('Scan QR Code'), findsOneWidget);
-      expect(find.text('or paste pairing code'), findsOneWidget);
+      expect(find.text('Scan a QR code'), findsOneWidget);
+      expect(find.text('Use pairing code'), findsOneWidget);
+      expect(find.text('Connect'), findsNothing);
+      expect(find.byType(TextField), findsNothing);
+    });
+
+    testWidgets('reveals pairing code field and connect action', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        WidgetHelpers.testable(child: const PairingPage()),
+      );
+
+      await _expandPairingCode(tester);
+
+      expect(find.text('Hide pairing code'), findsOneWidget);
       expect(find.text('Connect'), findsOneWidget);
       expect(find.byType(TextField), findsOneWidget);
     });
@@ -32,6 +44,7 @@ void main() {
       await tester.pumpWidget(
         WidgetHelpers.testable(child: const PairingPage()),
       );
+      await _expandPairingCode(tester);
 
       final textField = tester.getBottomLeft(find.byType(TextField));
       final connectButton = tester.getTopLeft(
@@ -46,6 +59,7 @@ void main() {
       await tester.pumpWidget(
         WidgetHelpers.testable(child: const PairingPage()),
       );
+      await _expandPairingCode(tester);
 
       final connectButton = tester.getSize(
         find.widgetWithText(FilledButton, 'Connect'),
@@ -88,9 +102,7 @@ void main() {
       expect(find.text('Connect'), findsNothing);
     });
 
-    testWidgets('text field and buttons disabled when connecting', (
-      tester,
-    ) async {
+    testWidgets('pairing actions are disabled when connecting', (tester) async {
       await tester.pumpWidget(
         WidgetHelpers.testable(
           overrides: [
@@ -101,10 +113,20 @@ void main() {
       );
       await tester.pump();
 
-      final textField = tester.widget<TextField>(find.byType(TextField));
-      expect(textField.enabled, isFalse);
+      final scanButton = tester.widget<FilledButton>(find.byType(FilledButton));
+      final pairingCodeButton = tester.widget<OutlinedButton>(
+        find.widgetWithText(OutlinedButton, 'Use pairing code'),
+      );
+
+      expect(scanButton.onPressed, isNull);
+      expect(pairingCodeButton.onPressed, isNull);
     });
   });
+}
+
+Future<void> _expandPairingCode(WidgetTester tester) async {
+  await tester.tap(find.text('Use pairing code'));
+  await tester.pumpAndSettle();
 }
 
 class _ErrorPairingNotifier extends Notifier<PairingState>
