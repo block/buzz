@@ -511,7 +511,9 @@ const overrides = new Map([
   // +81: install_shell_args re-exports the composed PATH inside the command
   // body so login startup files can't clear or reorder it, plus an isolated
   // hostile-profile regression the pure composition tests structurally miss.
-  ["src-tauri/src/commands/agent_discovery.rs", 1980],
+  // +42: gate that re-export off Windows, where join_paths is `;`-separated and
+  // bash would collapse it into one entry, plus a platform-shape test.
+  ["src-tauri/src/commands/agent_discovery.rs", 2022],
   // draft-persistence predicate: submit-time `loadDraft` check + inline comment
   // + deps-array entry in submitMessage closes the never-persisted-boundary
   // defect (Thufir Pass-3 finding). Load-bearing correctness fix; queued to

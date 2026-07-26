@@ -558,22 +558,35 @@ fn persist_last_error_on_install(
 /// `SHELLOPTS` is not exported, so the piped-to vendor script keeps its own
 /// defaults.
 ///
-/// `composed_path`, when present, is passed as a positional and re-exported
+/// Off Windows, `composed_path` is passed as a positional and re-exported
 /// *inside* the body, because `-l` sources the user's login startup files after
 /// the process environment is installed: a profile assigning PATH overwrites
 /// `cmd.env("PATH", …)` before the vendor command runs. `export PATH=` empties
 /// it outright; macOS `/etc/zprofile` runs `path_helper`, which reorders it and
-/// costs Buzz's managed Node/npm dirs their precedence. Passing it as a
-/// positional rather than interpolating it into the body is what keeps entries
-/// containing spaces or quotes intact.
+/// costs Buzz's managed Node/npm dirs their precedence. A positional rather than
+/// an interpolated body keeps entries containing spaces or quotes intact.
 ///
-/// When `composed_path` is `None` the prelude is omitted: `export PATH="$1"`
-/// with `$1` unset sets an *empty* PATH, worse than the ambient one.
+/// The prelude is omitted where it would do harm:
+/// - `composed_path` is `None` — `export PATH="$1"` with `$1` unset sets an
+///   *empty* PATH, worse than the ambient one.
+/// - `is_windows` — `join_paths` uses the platform separator, so the positional
+///   would be `;`-joined while bash splits PATH on `:`, collapsing every entry
+///   into one nonsense path; and Windows is where the inherited fallback always
+///   fires (`login_shell_path()` is unconditionally `None` there), so this would
+///   be the steady state. `cmd.env("PATH", …)` already delivers the native form
+///   Git Bash translates on entry, and Windows has no login startup files doing
+///   the clobbering this prelude defends against.
+///
+/// `is_windows` is a parameter rather than a `#[cfg]` so the Windows shape stays
+/// asserted on Unix CI — the same reason `should_skip_claude_executable` takes
+/// one. Extracted from `install_shell_command` for that testability, not because
+/// it has more than one caller.
 fn install_shell_args(
     command: &str,
     composed_path: Option<&std::ffi::OsStr>,
+    is_windows: bool,
 ) -> Vec<std::ffi::OsString> {
-    let Some(path) = composed_path else {
+    let Some(path) = composed_path.filter(|_| !is_windows) else {
         return vec![
             "-l".into(),
             "-c".into(),
@@ -618,10 +631,11 @@ fn install_shell_command(command: &str) -> Result<std::process::Command, String>
     // is the steady state: login_shell_path() always returns None there
     // because Git Bash paths are POSIX-shaped and poison native children.
     //
-    // The composed PATH is set twice on purpose: `cmd.env` so the login
-    // startup files themselves run with a usable PATH, and the `$1` export in
-    // `install_shell_args` so their own PATH assignments cannot undo it.
-    // Neither is redundant — see `install_shell_args`.
+    // The composed PATH is set twice on purpose off Windows: `cmd.env` so the
+    // login startup files themselves run with a usable PATH, and the `$1`
+    // export in `install_shell_args` so their own PATH assignments cannot undo
+    // it. Neither is redundant — see `install_shell_args`, which also explains
+    // why the export is suppressed on Windows.
     let login_path = crate::managed_agents::login_shell_path();
     let had_login = login_path.is_some();
     let managed: Vec<std::path::PathBuf> = [
@@ -647,7 +661,11 @@ fn install_shell_command(command: &str) -> Result<std::process::Command, String>
     if let Some(path) = composed_path.as_deref() {
         cmd.env("PATH", path);
     }
-    cmd.args(install_shell_args(command, composed_path.as_deref()));
+    cmd.args(install_shell_args(
+        command,
+        composed_path.as_deref(),
+        cfg!(windows),
+    ));
 
     // Detach from the controlling terminal so install scripts that read from
     // /dev/tty (e.g. Codex's "Start Codex now? [y/N]") fall back to stdin
@@ -1461,8 +1479,10 @@ mod tests {
 
     // ── pipefail: install pipes must not mask a failing left-hand side ────────
 
-    /// The command handed to the install shell must be prefixed with
-    /// `set -o pipefail;`, so `curl … | bash` fails when `curl` does.
+    /// The command handed to the install shell must run under `set -o pipefail;`
+    /// with the vendor command preserved verbatim, so `curl … | bash` fails when
+    /// `curl` does. Platform-agnostic: only the PATH prelude differs by OS, and
+    /// `test_install_shell_args_shape_per_platform` pins that.
     #[test]
     fn test_install_shell_command_enables_pipefail() {
         let cmd = super::install_shell_command("curl -fsSL https://example.test/i.sh | bash")
@@ -1471,16 +1491,10 @@ mod tests {
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
-        // A composed PATH is expected on any test host: `-l -c BODY $0 PATH`.
-        assert_eq!(
-            args.len(),
-            5,
-            "expected `-l -c BODY $0 PATH`; got: {args:?}"
-        );
         let body = &args[2];
         assert!(
-            body.starts_with("export PATH=\"$1\"; set -o pipefail; "),
-            "composed PATH must be re-exported, then pipefail set; got: {body}"
+            body.contains("set -o pipefail; "),
+            "the install body must set pipefail; got: {body}"
         );
         assert!(
             body.ends_with("curl -fsSL https://example.test/i.sh | bash"),
@@ -1488,14 +1502,38 @@ mod tests {
         );
     }
 
-    /// Without a composed PATH there is no `$1`, and `export PATH="$1"` would
-    /// set an *empty* PATH — worse than inheriting the ambient one. The prelude
-    /// and its positionals must both be omitted in that case.
+    /// The PATH prelude is emitted only where it helps, and the exact argument
+    /// vector is the contract: a stray trailing positional with no `$1` reader,
+    /// or an export whose `$1` the shell cannot split, both corrupt PATH.
+    /// Windows is excluded because `join_paths` is `;`-separated there while bash
+    /// splits PATH on `:` — and it is the platform where the inherited fallback
+    /// always fires. See `install_shell_args` for the full reasoning.
     #[test]
-    fn test_install_shell_args_omit_export_when_no_composed_path() {
+    fn test_install_shell_args_shape_per_platform() {
+        let composed = std::ffi::OsString::from("/buzz/node/bin:/usr/bin");
+        let windows_composed = std::ffi::OsString::from(r"C:\buzz\node;C:\Windows\system32");
+        let bare = ["-l", "-c", "set -o pipefail; echo hi"].map(std::ffi::OsString::from);
+
         assert_eq!(
-            super::install_shell_args("echo hi", None),
-            ["-l", "-c", "set -o pipefail; echo hi"].map(std::ffi::OsString::from),
+            super::install_shell_args("echo hi", Some(&composed), false),
+            [
+                "-l",
+                "-c",
+                "export PATH=\"$1\"; set -o pipefail; echo hi",
+                "buzz-install",
+                "/buzz/node/bin:/usr/bin",
+            ]
+            .map(std::ffi::OsString::from),
+            "Unix must re-export the composed PATH after login init"
+        );
+        assert_eq!(
+            super::install_shell_args("echo hi", Some(&windows_composed), true),
+            bare,
+            "Windows must not re-export a `;`-joined PATH inside bash"
+        );
+        assert_eq!(
+            super::install_shell_args("echo hi", None, false),
+            bare,
             "no composed PATH must yield the bare pipefail body and no positionals"
         );
     }
@@ -1515,7 +1553,11 @@ mod tests {
 
         // `echo` is a shell builtin, so the child needs no PATH to report one.
         let out = std::process::Command::new("/bin/bash")
-            .args(super::install_shell_args("echo \"$PATH\"", Some(&composed)))
+            .args(super::install_shell_args(
+                "echo \"$PATH\"",
+                Some(&composed),
+                false,
+            ))
             .env("HOME", home.path())
             .env("PATH", &composed)
             .stdin(std::process::Stdio::null())
