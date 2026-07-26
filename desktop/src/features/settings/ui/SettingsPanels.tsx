@@ -17,6 +17,7 @@ import {
   ShieldAlert,
   Smartphone,
   Smile,
+  Sticker,
   Sun,
   SunMoon,
   Ticket,
@@ -217,6 +218,11 @@ export const settingsSections: SettingsSectionDescriptor[] = [
     label: "Custom emoji",
     icon: Smile,
     featureGate: "custom-emoji",
+  },
+  {
+    value: "stickers",
+    label: "Stickers",
+    icon: Sticker,
   },
   {
     value: "local-archive",

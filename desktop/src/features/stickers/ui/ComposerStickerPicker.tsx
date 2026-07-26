@@ -1,7 +1,13 @@
 import * as React from "react";
-import { Sticker as StickerIcon } from "lucide-react";
+import { PackageOpen, Settings, Sticker as StickerIcon } from "lucide-react";
 
-import { useInstalledStickerPacks } from "@/features/stickers/hooks";
+import {
+  useInstalledStickerPacks,
+  useSetStickerPackInstalledMutation,
+  useStickerCatalogQuery,
+} from "@/features/stickers/hooks";
+import { useAppNavigation } from "@/app/navigation/useAppNavigation";
+import { toast } from "sonner";
 import {
   stickerAssetCacheUrl,
   type StickerAsset,
@@ -22,6 +28,23 @@ export const ComposerStickerPicker = React.memo(function ComposerStickerPicker({
   onSelect: (selection: StickerSelection) => void;
 }) {
   const packs = useInstalledStickerPacks();
+  const catalogPacks = useStickerCatalogQuery().data ?? [];
+  const setInstalled = useSetStickerPackInstalledMutation();
+  const [installingPack, setInstallingPack] = React.useState<string | null>(
+    null,
+  );
+  const { goSettings } = useAppNavigation();
+  const installPack = React.useCallback(
+    async (coordinate: string) => {
+      setInstallingPack(coordinate);
+      try {
+        await setInstalled.mutateAsync({ coordinate, installed: true });
+      } finally {
+        setInstallingPack(null);
+      }
+    },
+    [setInstalled],
+  );
   const [open, setOpen] = React.useState(false);
   const [selectedCoordinate, setSelectedCoordinate] = React.useState("");
   const selectedPack =
@@ -52,9 +75,62 @@ export const ComposerStickerPicker = React.memo(function ComposerStickerPicker({
         sideOffset={10}
       >
         {packs.length === 0 ? (
-          <p className="px-2 py-6 text-center text-sm text-muted-foreground">
-            Install a sticker pack in Settings first.
-          </p>
+          <div className="space-y-3">
+            <div className="flex flex-col items-center gap-1 px-2 pt-1 text-center">
+              <PackageOpen className="h-6 w-6 text-muted-foreground" />
+              <p className="text-sm font-medium">No stickers installed</p>
+              <p className="text-xs text-muted-foreground">
+                Install a curated pack, or create your own.
+              </p>
+            </div>
+            {catalogPacks.length > 0 ? (
+              <div className="max-h-48 space-y-1 overflow-y-auto">
+                {catalogPacks.map((pack) => {
+                  const installing = installingPack === pack.coordinate;
+                  return (
+                    <div
+                      className="flex items-center justify-between gap-2 rounded-md px-2 py-1.5"
+                      key={pack.coordinate}
+                    >
+                      <span className="min-w-0 truncate text-xs">
+                        {pack.title}
+                      </span>
+                      <Button
+                        disabled={installing}
+                        onClick={() =>
+                          void installPack(pack.coordinate).catch((error) =>
+                            toast.error(
+                              error instanceof Error
+                                ? error.message
+                                : "Could not install pack.",
+                            ),
+                          )
+                        }
+                        size="sm"
+                        type="button"
+                        variant="default"
+                      >
+                        {installing ? "Installing…" : "Install"}
+                      </Button>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : null}
+            <Button
+              className="w-full"
+              onClick={() => {
+                setOpen(false);
+                goSettings("stickers");
+              }}
+              size="sm"
+              type="button"
+              variant="outline"
+            >
+              <Settings className="mr-2 h-4 w-4" />
+              Open sticker settings
+            </Button>
+          </div>
         ) : (
           <div className="space-y-3">
             <label className="block">
