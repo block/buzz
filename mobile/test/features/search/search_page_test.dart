@@ -10,6 +10,45 @@ import 'package:flutter_test/flutter_test.dart';
 import '../../helpers/widget_helpers.dart';
 
 void main() {
+  testWidgets('empty state preserves large accessible text scaling', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(320, 640);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          searchProvider.overrideWith(
+            () => _FakeSearchNotifier(const SearchState.initial()),
+          ),
+          profileProvider.overrideWith(() => _FakeProfileNotifier()),
+        ],
+        child: Builder(
+          builder: (context) => MediaQuery(
+            data: MediaQuery.of(
+              context,
+            ).copyWith(textScaler: const TextScaler.linear(2)),
+            child: const SearchPage(),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final emptyState = find.byKey(const Key('search-empty-state'));
+    final message = find.text('Search messages, channels, and people');
+
+    expect(
+      find.descendant(of: emptyState, matching: find.byType(FittedBox)),
+      findsNothing,
+    );
+    expect(tester.getSize(message).height, greaterThan(32));
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('keeps search results scrollable above the keyboard', (
     tester,
   ) async {

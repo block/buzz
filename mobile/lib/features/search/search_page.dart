@@ -163,9 +163,9 @@ class _SearchBody extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     if (state.query.isEmpty) {
       return Center(
-        child: FittedBox(
-          fit: BoxFit.scaleDown,
-          alignment: Alignment.center,
+        child: Padding(
+          key: const Key('search-empty-state'),
+          padding: const EdgeInsets.symmetric(horizontal: Grid.gutter),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -177,6 +177,7 @@ class _SearchBody extends ConsumerWidget {
               const SizedBox(height: Grid.xs),
               Text(
                 'Search messages, channels, and people',
+                textAlign: TextAlign.center,
                 style: context.textTheme.bodyMedium?.copyWith(
                   color: context.colors.onSurfaceVariant,
                 ),
