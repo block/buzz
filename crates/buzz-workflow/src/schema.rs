@@ -139,9 +139,12 @@ pub enum ActionDef {
         #[serde(default)]
         timeout: Option<String>,
     },
-    /// Pause execution for a duration (e.g. `"5m"`, `"1h"`).
+    /// Pause execution for a duration (e.g. `"30s"`, `"4m"`).
+    ///
+    /// Capped at [`crate::executor::MAX_DELAY_SECS`] (270s). Longer delays are
+    /// rejected at definition time; use the scheduled resume pattern instead.
     Delay {
-        /// Duration string (e.g. `"5m"`, `"1h"`).
+        /// Duration string (e.g. `"30s"`, `"4m"`). Must not exceed 270s.
         duration: String,
     },
 }
@@ -189,6 +192,25 @@ impl WorkflowDef {
                     "duplicate step id: {}",
                     step.id
                 )));
+            }
+
+            // A delay the executor will always reject is worth catching here,
+            // otherwise the definition saves clean and then fails at the same
+            // step on every run.
+            if let ActionDef::Delay { duration } = &step.action {
+                let secs = crate::executor::parse_duration_secs(duration).map_err(|_| {
+                    WorkflowError::InvalidDefinition(format!(
+                        "step '{}': invalid delay duration '{duration}': expected a duration like '30s', '4m', or '90s'",
+                        step.id
+                    ))
+                })?;
+                if secs > crate::executor::MAX_DELAY_SECS {
+                    return Err(WorkflowError::InvalidDefinition(format!(
+                        "step '{}': delay '{duration}' exceeds the maximum of {}s; use the scheduled resume pattern for long delays",
+                        step.id,
+                        crate::executor::MAX_DELAY_SECS
+                    )));
+                }
             }
         }
 
@@ -345,7 +367,7 @@ mod tests {
             "  - id: react\n    action: add_reaction\n    emoji: white_check_mark\n",
             "  - id: hook\n    action: call_webhook\n    url: https://hooks.example.com/notify\n    method: POST\n",
             "  - id: approve\n    action: request_approval\n    from: '@manager'\n    message: Approve?\n    timeout: 4h\n",
-            "  - id: wait\n    action: delay\n    duration: 5m\n",
+            "  - id: wait\n    action: delay\n    duration: 4m\n",
         );
         let (def, _) = parse_yaml(yaml).expect("parse failed");
         assert_eq!(def.steps.len(), 7);
@@ -855,6 +877,39 @@ mod tests {
         // 30m = 1800s, well above the 60s minimum.
         let yaml = "name: Interval Schedule\ntrigger:\n  on: schedule\n  interval: 30m\nsteps:\n  - id: s1\n    action: send_message\n    text: tick\n";
         assert!(parse_yaml(yaml).is_ok(), "30m interval should be valid");
+    }
+
+    fn delay_yaml(duration: &str) -> String {
+        format!("name: Delay\ntrigger:\n  on: webhook\nsteps:\n  - id: wait\n    action: delay\n    duration: {duration}\n")
+    }
+
+    #[test]
+    fn validate_rejects_delay_above_the_executor_cap() {
+        // 5m = 300s and 1h = 3600s, both above MAX_DELAY_SECS. These used to
+        // save cleanly and then fail on every run.
+        for duration in ["5m", "1h", "271s"] {
+            let err = parse_yaml(&delay_yaml(duration)).unwrap_err();
+            assert!(
+                matches!(err, WorkflowError::InvalidDefinition(_)),
+                "delay {duration} should be rejected at definition time"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_accepts_delay_at_and_below_the_cap() {
+        for duration in ["30s", "4m", "270s"] {
+            assert!(
+                parse_yaml(&delay_yaml(duration)).is_ok(),
+                "delay {duration} should be valid"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_rejects_unparseable_delay_duration() {
+        let err = parse_yaml(&delay_yaml("soon")).unwrap_err();
+        assert!(matches!(err, WorkflowError::InvalidDefinition(_)));
     }
 
     #[test]
