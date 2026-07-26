@@ -171,9 +171,15 @@ final activityProvider =
       ActivityNotifier.new,
     );
 
-/// Conversation-grouped inbox rows derived from the raw feed.
+/// Conversation-grouped inbox rows derived from the raw feed. DM messages
+/// group by DM channel so one conversation renders as one row.
 final inboxItemsProvider = Provider<List<InboxItem>>((ref) {
   final feed = ref.watch(activityProvider).value;
   if (feed == null) return const [];
-  return buildInboxItems(feed.all);
+  final dmChannelIds = {
+    for (final channel
+        in ref.watch(channelsProvider).asData?.value ?? const <Channel>[])
+      if (channel.isDm) channel.id,
+  };
+  return buildInboxItems(feed.all, isDmChannel: dmChannelIds.contains);
 });
