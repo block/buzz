@@ -128,7 +128,7 @@ export function isJoinPolicyDiscoveryCandidate(relayWsUrl: string): boolean {
 /** Fetch relay-hosted policy content for any join surface. */
 export async function getJoinPolicy(
   relayWsUrl: string,
-  transport: "native" | "webview" = "webview",
+  transport: "native" | "webview",
 ): Promise<JoinPolicy | null> {
   type RawJoinPolicy = {
     terms_markdown?: string;

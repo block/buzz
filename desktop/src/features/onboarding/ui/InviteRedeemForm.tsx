@@ -205,7 +205,7 @@ export function InviteRedeemForm({
       setPolicyError(null);
       setIsLoadingPolicy(true);
       try {
-        const policy = await getJoinPolicy(relayWsUrl);
+        const policy = await getJoinPolicy(relayWsUrl, "webview");
         if (!policy) {
           onRedeem(relayWsUrl, parsedInvite.code);
           return;

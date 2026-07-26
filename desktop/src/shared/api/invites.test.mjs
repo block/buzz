@@ -28,7 +28,7 @@ test("getJoinPolicy maps relay-hosted Markdown and age requirements", async () =
       { status: 200 },
     ),
     async () => {
-      assert.deepEqual(await getJoinPolicy("wss://relay.example"), {
+      assert.deepEqual(await getJoinPolicy("wss://relay.example", "webview"), {
         termsMarkdown: "# Terms",
         privacyMarkdown: "# Privacy",
         ageAttestationRequired: true,
@@ -40,15 +40,44 @@ test("getJoinPolicy maps relay-hosted Markdown and age requirements", async () =
 
 test("getJoinPolicy preserves opt-in behavior for unconfigured and older relays", async () => {
   await withFetch(new Response(JSON.stringify({}), { status: 200 }), async () =>
-    assert.equal(await getJoinPolicy("wss://relay.example"), null),
+    assert.equal(await getJoinPolicy("wss://relay.example", "webview"), null),
   );
   await withFetch(new Response(null, { status: 404 }), async () =>
-    assert.equal(await getJoinPolicy("wss://relay.example"), null),
+    assert.equal(await getJoinPolicy("wss://relay.example", "webview"), null),
   );
 });
 
 test("getJoinPolicy fails closed on a policy endpoint error", async () => {
   await withFetch(new Response(null, { status: 503 }), async () =>
-    assert.rejects(getJoinPolicy("wss://relay.example"), /HTTP 503/),
+    assert.rejects(getJoinPolicy("wss://relay.example", "webview"), /HTTP 503/),
   );
+});
+
+test("getJoinPolicy maps the native command response", async () => {
+  const previousWindow = globalThis.window;
+  globalThis.window = {
+    __TAURI_INTERNALS__: {
+      invoke(command, args) {
+        assert.equal(command, "fetch_join_policy");
+        assert.deepEqual(args, { relayUrl: "wss://relay.example" });
+        return Promise.resolve({
+          terms_markdown: "# Terms",
+          privacy_markdown: "# Privacy",
+          age_attestation_required: true,
+          version: "policy-v1",
+        });
+      },
+    },
+  };
+
+  try {
+    assert.deepEqual(await getJoinPolicy("wss://relay.example", "native"), {
+      termsMarkdown: "# Terms",
+      privacyMarkdown: "# Privacy",
+      ageAttestationRequired: true,
+      version: "policy-v1",
+    });
+  } finally {
+    globalThis.window = previousWindow;
+  }
 });
