@@ -15,6 +15,7 @@ import 'package:buzz/features/profile/profile_avatar.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
 import 'package:buzz/features/profile/user_profile.dart';
 import 'package:buzz/shared/auth/auth.dart';
+import 'package:buzz/shared/community/community_icon_provider.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/avatar_image.dart';
 
@@ -24,12 +25,16 @@ void main() {
     bool previewDirectory = false,
     double keyboardInset = 0,
     bool disableAnimations = false,
+    Map<String, String?> communityIcons = const {},
   }) {
     return ProviderScope(
       overrides: [
         // Provide a fake profile and presence so the avatar doesn't hit the network.
         profileProvider.overrideWith(() => _FakeProfileNotifier()),
         presenceProvider.overrideWith(() => _FakePresenceNotifier()),
+        communityIconProvider.overrideWith(
+          (ref, relayUrl) async => communityIcons[relayUrl],
+        ),
         dmDirectoryPreviewEnabledProvider.overrideWith(
           (ref) => previewDirectory,
         ),
@@ -165,6 +170,11 @@ void main() {
 
     await tester.pumpWidget(
       buildTestable(
+        communityIcons: const {
+          'wss://alpha.example.com':
+              'data:image/png;base64,'
+              'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+        },
         overrides: [
           channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
           communityListProvider.overrideWith(() => communityNotifier),
@@ -198,6 +208,13 @@ void main() {
       tester.getSize(find.byKey(const Key('community-switcher-avatar-alpha'))),
       const Size.square(36),
     );
+    final alphaAvatar = tester.widget<AvatarImage>(
+      find.descendant(
+        of: find.byKey(const Key('community-switcher-avatar-alpha')),
+        matching: find.byType(AvatarImage),
+      ),
+    );
+    expect(alphaAvatar.imageUrl, startsWith('data:image/png;base64,'));
     final activeSelection = find.byKey(
       const Key('community-switcher-selection-alpha'),
     );

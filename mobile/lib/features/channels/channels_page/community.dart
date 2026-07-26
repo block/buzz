@@ -199,6 +199,7 @@ class _CommunitySwitcherTile extends StatelessWidget {
             _CommunityAvatar(
               key: Key('community-switcher-avatar-${community.id}'),
               name: community.name,
+              relayUrl: community.relayUrl,
               size: _communitySwitcherAvatarSize,
             ),
             const SizedBox(width: Grid.xs),
@@ -459,7 +460,8 @@ class _CommunityIndicator extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final activeAsync = ref.watch(activeCommunityProvider);
 
-    final name = activeAsync.value?.name;
+    final activeCommunity = activeAsync.value;
+    final name = activeCommunity?.name;
 
     return GestureDetector(
       onTap: onTap,
@@ -467,7 +469,7 @@ class _CommunityIndicator extends ConsumerWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          _CommunityAvatar(name: name),
+          _CommunityAvatar(name: name, relayUrl: activeCommunity?.relayUrl),
           const SizedBox(width: Grid.xxs),
           if (name != null)
             Flexible(
@@ -495,23 +497,34 @@ class _CommunityIndicator extends ConsumerWidget {
   }
 }
 
-class _CommunityAvatar extends StatelessWidget {
+class _CommunityAvatar extends ConsumerWidget {
   final String? name;
+  final String? relayUrl;
   final double size;
 
-  const _CommunityAvatar({super.key, required this.name, this.size = 32});
+  const _CommunityAvatar({
+    super.key,
+    required this.name,
+    this.relayUrl,
+    this.size = 32,
+  });
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final trimmedName = name?.trim();
     final initial = trimmedName != null && trimmedName.isNotEmpty
         ? trimmedName.substring(0, 1).toUpperCase()
         : '?';
+    final relay = relayUrl;
+    final iconUrl = relay == null
+        ? null
+        : ref.watch(communityIconProvider(relay)).value;
 
-    return CircleAvatar(
+    return AvatarImage(
+      imageUrl: iconUrl,
       radius: size / 2,
       backgroundColor: context.colors.primaryContainer,
-      child: Text(
+      fallback: Text(
         initial,
         style: context.textTheme.labelMedium?.copyWith(
           color: context.colors.onPrimaryContainer,
