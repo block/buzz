@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/features/pairing/pairing_page.dart';
 import 'package:buzz/features/pairing/pairing_provider.dart';
+import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/tappable_flapping_bee.dart';
 
 import '../../helpers/widget_helpers.dart';
@@ -57,6 +58,27 @@ void main() {
 
       expect(overlay.value.statusBarIconBrightness, Brightness.dark);
       expect(overlay.value.statusBarColor, Colors.transparent);
+    });
+
+    testWidgets('uses light status-bar icons for dark-theme SAS verification', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            pairingProvider.overrideWith(() => _ConfirmingSasPairingNotifier()),
+          ],
+          child: MaterialApp(theme: AppTheme.dark(), home: const PairingPage()),
+        ),
+      );
+
+      final overlay = tester.widget<AnnotatedRegion<SystemUiOverlayStyle>>(
+        find.byKey(const Key('pairing-sas-system-overlay')),
+      );
+
+      expect(overlay.value.statusBarIconBrightness, Brightness.light);
+      expect(overlay.value.statusBarColor, Colors.transparent);
+      expect(find.text('Verify Security Code'), findsOneWidget);
     });
 
     testWidgets('reveals pairing code field and connect action', (
@@ -190,6 +212,27 @@ class _ConnectingPairingNotifier extends Notifier<PairingState>
     implements PairingNotifier {
   @override
   PairingState build() => const PairingState(status: PairingStatus.connecting);
+
+  @override
+  Future<void> pair(String rawInput) async {}
+
+  @override
+  void reset() {}
+
+  @override
+  void confirmSas() {}
+
+  @override
+  void denySas() {}
+}
+
+class _ConfirmingSasPairingNotifier extends Notifier<PairingState>
+    implements PairingNotifier {
+  @override
+  PairingState build() => const PairingState(
+    status: PairingStatus.confirmingSas,
+    sasCode: '123456',
+  );
 
   @override
   Future<void> pair(String rawInput) async {}

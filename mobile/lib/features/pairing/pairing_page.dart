@@ -70,13 +70,18 @@ class PairingPage extends HookConsumerWidget {
     }
 
     final isVerifyingSas = pairingState.status == PairingStatus.confirmingSas;
+    final themedSystemOverlayStyle =
+        (Theme.of(context).brightness == Brightness.dark
+                ? SystemUiOverlayStyle.light
+                : SystemUiOverlayStyle.dark)
+            .copyWith(statusBarColor: Colors.transparent);
     final pairingAppBar = addingCommunity
         ? AppBar(
             foregroundColor: isVerifyingSas
                 ? context.colors.onSurface
                 : _onboardingInk,
             systemOverlayStyle: isVerifyingSas
-                ? null
+                ? themedSystemOverlayStyle
                 : SystemUiOverlayStyle.dark.copyWith(
                     statusBarColor: Colors.transparent,
                   ),
@@ -96,18 +101,22 @@ class PairingPage extends HookConsumerWidget {
         : null;
 
     final pairingScaffold = isVerifyingSas
-        ? Scaffold(
-            backgroundColor: context.colors.surface,
-            appBar: pairingAppBar,
-            body: SafeArea(
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: Grid.sm),
-                child: _SasVerificationView(
-                  sasCode: pairingState.sasCode ?? '------',
-                  confirmed: pairingState.userConfirmedSas,
-                  onConfirm: () =>
-                      ref.read(pairingProvider.notifier).confirmSas(),
-                  onDeny: () => ref.read(pairingProvider.notifier).denySas(),
+        ? AnnotatedRegion<SystemUiOverlayStyle>(
+            key: const Key('pairing-sas-system-overlay'),
+            value: themedSystemOverlayStyle,
+            child: Scaffold(
+              backgroundColor: context.colors.surface,
+              appBar: pairingAppBar,
+              body: SafeArea(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: Grid.sm),
+                  child: _SasVerificationView(
+                    sasCode: pairingState.sasCode ?? '------',
+                    confirmed: pairingState.userConfirmedSas,
+                    onConfirm: () =>
+                        ref.read(pairingProvider.notifier).confirmSas(),
+                    onDeny: () => ref.read(pairingProvider.notifier).denySas(),
+                  ),
                 ),
               ),
             ),
