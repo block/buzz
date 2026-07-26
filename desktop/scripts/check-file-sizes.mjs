@@ -119,19 +119,6 @@ const overrides = new Map([
   // helpers) replace the pubkey-keyed PID file, plus the hashed pair-scoped
   // runtime log path. Load-bearing crash-recovery surface; queued to split.
   ["src-tauri/src/managed_agents/storage.rs", 1383],
-  // harness-persona-sync: persona-runtime resolution threaded into the spawn
-  // path here. Load-bearing feature growth; queued to split in the resolver
-  // unify refactor followup. +26 for resolve_effective_prompt_model_provider
-  // re-introduced after 826d735fe removal (config-bridge caller still needs it).
-  // PGID resolution helper + PID-recycling safety guard added for orphan sweep.
-  // activity-feed threads avatar_url into build_managed_agent_summary for the
-  // assistant-bubble pinned snapshot.
-  // +1 for agent_pubkey field in setup payload (config-nudge card wire).
-  // persona-blank-fallback: resolve_effective_prompt_model_provider gains a
-  // record_provider param + applies persona_field_with_record_fallback. +5 lines.
-  // global-agent-config: spawn_agent_child loads global config and merges as
-  // lowest env layer (+8 lines). Queued to split.
-  ["src-tauri/src/managed_agents/runtime.rs", 2216],
   // config-bridge setup-payload env-boundary fix adds readiness wiring in
   // spawn_agent_child; load-bearing security fix, queued to split.
   ["src-tauri/src/managed_agents/config_bridge/reader.rs", 1016],
