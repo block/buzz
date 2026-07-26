@@ -20,6 +20,8 @@ import {
   getModelSelectValue,
   getPersonaProviderOptions,
   hasPersonaModelOption,
+  PERSONA_FIELD_CONTROL_CLASS,
+  PERSONA_FIELD_SHELL_CLASS,
   providerDisplayLabel,
   type PersonaModelOption,
 } from "./agentConfigOptions";
@@ -54,15 +56,64 @@ export function appendNoModelsSentinel(
   return options;
 }
 
+export function resolveModelFieldStatusMessage({
+  discoveredModelOptions,
+  loading,
+  status,
+}: {
+  discoveredModelOptions: readonly PersonaModelOption[] | null;
+  loading: boolean;
+  status: PersonaModelDiscoveryStatus | null;
+}): string | null {
+  if (loading) return "Loading models...";
+  if (status !== null) return status.message;
+  return discoveredModelOptions !== null
+    ? "Saved changes take effect on the next start."
+    : null;
+}
+
 function optionTestId(testId: string | undefined, value: string) {
   if (!testId) return undefined;
   return `${testId}-option-${value || "empty"}`;
+}
+
+export function AgentConfigTextInput({
+  className,
+  usePersonaInputStyle = false,
+  ...props
+}: React.ComponentProps<typeof Input> & {
+  usePersonaInputStyle?: boolean;
+}) {
+  const input = (
+    <Input
+      {...props}
+      className={cn(
+        usePersonaInputStyle && "h-8 px-0 py-0 leading-6",
+        usePersonaInputStyle && PERSONA_FIELD_CONTROL_CLASS,
+        className,
+      )}
+    />
+  );
+
+  return usePersonaInputStyle ? (
+    <div
+      className={cn(
+        "mt-2 flex min-h-11 items-center px-3",
+        PERSONA_FIELD_SHELL_CLASS,
+      )}
+    >
+      {input}
+    </div>
+  ) : (
+    input
+  );
 }
 
 export function AgentDropdownSelect({
   ariaRequired,
   className,
   disabled = false,
+  emptyOptionsLabel = "No options available",
   id,
   onValueChange,
   options,
@@ -77,6 +128,8 @@ export function AgentDropdownSelect({
   ariaRequired?: boolean;
   className?: string;
   disabled?: boolean;
+  /** Shown when the option list is empty (not a search filter miss). */
+  emptyOptionsLabel?: string;
   id: string;
   onValueChange: (value: string) => void;
   options: readonly AgentDropdownOption[];
@@ -184,8 +237,15 @@ export function AgentDropdownSelect({
               />
             </div>
           ) : null}
-          {showSearch && filteredOptions.length === 0 ? (
-            <p className="px-3 py-2 text-sm text-foreground/55">No matches</p>
+          {filteredOptions.length === 0 ? (
+            <p
+              className="px-3 py-2 text-sm text-foreground/55"
+              data-testid={testId ? `${testId}-empty` : undefined}
+            >
+              {showSearch && query.trim().length > 0
+                ? "No matches"
+                : emptyOptionsLabel}
+            </p>
           ) : null}
           {filteredOptions.map((option) => {
             const selected = option.value === value;
@@ -297,6 +357,7 @@ export function AgentModelField({
   showStatusMessage = true,
   showCustomModelOption = true,
   useChevronIcon = false,
+  usePersonaInputStyle = false,
 }: {
   disabled: boolean;
   discoveredModelOptions: readonly PersonaModelOption[] | null;
@@ -342,6 +403,8 @@ export function AgentModelField({
   showCustomModelOption?: boolean;
   /** Render a controlled chevron instead of the native select indicator. */
   useChevronIcon?: boolean;
+  /** Match custom agent text inputs when this field is shown in that flow. */
+  usePersonaInputStyle?: boolean;
 }) {
   const trimmedModel = model.trim();
   const isSharedCompute = provider?.trim() === "relay-mesh";
@@ -464,12 +527,18 @@ export function AgentModelField({
     !isCustomModelEditing
       ? "Loading models..."
       : placeholder;
+  const statusMessage = resolveModelFieldStatusMessage({
+    discoveredModelOptions,
+    loading: modelDiscoveryLoading,
+    status: modelDiscoveryStatus,
+  });
 
   const modelSelect = useCustomSelect ? (
     <AgentDropdownSelect
       ariaRequired={isRequired}
       className={selectClassName}
       disabled={selectDisabled}
+      emptyOptionsLabel="Couldn't load models"
       id={id}
       onValueChange={handleModelSelectChange}
       options={modelOptions}
@@ -526,25 +595,18 @@ export function AgentModelField({
         modelSelect
       )}
       {showCustomModelInput ? (
-        <Input
+        <AgentConfigTextInput
           aria-label="Custom model ID"
           autoCorrect="off"
           disabled={disabled}
           onChange={(event) => onModelChange(event.target.value)}
           placeholder="Custom model ID"
+          usePersonaInputStyle={usePersonaInputStyle}
           value={model}
         />
       ) : null}
-      {showStatusMessage ? (
-        <p className="text-xs text-muted-foreground">
-          {modelDiscoveryLoading
-            ? "Loading models..."
-            : modelDiscoveryStatus !== null
-              ? modelDiscoveryStatus.message
-              : discoveredModelOptions !== null
-                ? "Saved changes take effect on the next start."
-                : "Select a provider above to see available models."}
-        </p>
+      {showStatusMessage && statusMessage ? (
+        <p className="text-xs text-muted-foreground">{statusMessage}</p>
       ) : null}
     </div>
   );

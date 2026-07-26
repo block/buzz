@@ -24,6 +24,7 @@ fn ffmpeg_command(path: &std::path::Path) -> std::process::Command {
     for (name, value) in required_windows_env {
         command.env(name, value);
     }
+    crate::util::configure_no_window(&mut command);
     command
 }
 

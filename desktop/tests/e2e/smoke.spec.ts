@@ -634,6 +634,9 @@ test("does not shift the timeline when the composer grows", async ({
   await page.waitForTimeout(400);
   await page.getByTestId("message-timeline").evaluate((element) => {
     const timeline = element as HTMLDivElement;
+    // The raw position assignment sets up detached history, while wheel is the
+    // same ownership signal a real reader produces before composer reflow.
+    timeline.dispatchEvent(new WheelEvent("wheel", { deltaY: -100 }));
     timeline.scrollTop = 0;
     timeline.dispatchEvent(new Event("scroll"));
   });

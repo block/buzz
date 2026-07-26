@@ -58,9 +58,19 @@ jobs:
               - 'pnpm-lock.yaml'
             mobile:
               - 'mobile/**'
+              - 'scripts/mobile-release.sh'
+              - 'scripts/publish-mobile-release-candidate.sh'
+              - 'scripts/release-rulesets.sh'
+              - 'scripts/test-mobile-release-contract.sh'
+              - 'scripts/test-mobile-release-candidate-publisher.sh'
+              - '.github/workflows/mobile-release-candidate.yml'
               - '.github/workflows/ci.yml'
       - name: Release workflow source contract
         run: scripts/test-release-ref-contract.sh
+      - name: Mobile release contract
+        run: |
+          scripts/test-mobile-release-contract.sh
+          scripts/test-mobile-release-candidate-publisher.sh
 
   rust-lint:
     name: Rust Lint

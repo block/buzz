@@ -1,6 +1,7 @@
 import { listen } from "@tauri-apps/api/event";
 import { Headphones } from "lucide-react";
 import * as React from "react";
+import { toast } from "sonner";
 import { useQueryClient } from "@tanstack/react-query";
 
 import { relayClient } from "@/shared/api/relayClient";
@@ -10,6 +11,7 @@ import { Button } from "@/shared/ui/button";
 import { DropdownMenuItem } from "@/shared/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { useHuddle } from "../HuddleContext";
+import { formatHuddleActionError } from "../lib/huddleError";
 
 /** Huddle lifecycle event kinds */
 const KIND_HUDDLE_STARTED = 48100;
@@ -263,6 +265,7 @@ export function HuddleIndicator({
       void queryClient.invalidateQueries({ queryKey: ["channels"] });
     } catch (e) {
       console.error("Failed to join huddle:", e);
+      toast.error(formatHuddleActionError(e, "join"));
     } finally {
       setIsJoining(false);
     }

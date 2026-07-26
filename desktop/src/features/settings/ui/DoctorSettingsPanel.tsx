@@ -53,6 +53,13 @@ const RUNTIME_SORT_PRIORITY: Record<string, number> = {
   goose: 1,
 };
 
+function runtimeInstallGuideLabel(runtime: AcpRuntimeCatalogEntry) {
+  return runtime.availability === "adapter_missing" ||
+    runtime.availability === "adapter_outdated"
+    ? "Adapter install guide"
+    : "CLI setup guide";
+}
+
 function RuntimeLogo({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
   const avatarUrl = RUNTIME_LOGO_URLS[runtime.id] ?? runtime.avatarUrl;
 
@@ -131,7 +138,7 @@ function RuntimeOverflowMenu({
             onSelect={() => void openUrl(runtime.installInstructionsUrl)}
           >
             <ExternalLink className="h-4 w-4" />
-            Instructions
+            {runtimeInstallGuideLabel(runtime)}
           </DropdownMenuItem>
         ) : null}
       </DropdownMenuContent>
@@ -142,7 +149,6 @@ function RuntimeOverflowMenu({
 function RuntimeActions({
   authMethods,
   connectingMethodId,
-  installSuccess,
   isConnecting,
   isInstalling,
   onConnect,
@@ -151,7 +157,6 @@ function RuntimeActions({
 }: {
   authMethods: AcpAuthMethod[];
   connectingMethodId: string | null;
-  installSuccess: boolean;
   isConnecting: boolean;
   isInstalling: boolean;
   onConnect: (method: AcpAuthMethod) => void;
@@ -160,7 +165,6 @@ function RuntimeActions({
 }) {
   const isAvailable = runtime.availability === "available";
   const canInstall = runtime.canAutoInstall && !runtime.nodeRequired;
-  const isOn = isAvailable || installSuccess;
   const isWorking = isInstalling || isConnecting;
 
   return (
@@ -183,10 +187,10 @@ function RuntimeActions({
       ) : (
         <Switch
           aria-label={`${runtime.label} availability`}
-          checked={isOn}
+          checked={isAvailable}
           className="disabled:cursor-default disabled:opacity-100"
           data-testid={`doctor-runtime-toggle-${runtime.id}`}
-          disabled={isAvailable || installSuccess || !canInstall}
+          disabled={isAvailable || !canInstall}
           onCheckedChange={(checked) => {
             if (checked) {
               onInstall();
@@ -206,7 +210,8 @@ function RuntimeStatusChip({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
         ? "Adapter needed"
         : runtime.availability === "adapter_outdated"
           ? "Update needed"
-          : runtime.availability === "cli_missing"
+          : runtime.availability === "cli_missing" ||
+              runtime.availability === "not_installed"
             ? "CLI needed"
             : null;
 
@@ -239,7 +244,6 @@ function RuntimeStatusChip({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
 function RuntimeHeader({
   authMethods,
   connectingMethodId,
-  installSuccess,
   isConnecting,
   isInstalling,
   onConnect,
@@ -248,7 +252,6 @@ function RuntimeHeader({
 }: {
   authMethods: AcpAuthMethod[];
   connectingMethodId: string | null;
-  installSuccess: boolean;
   isConnecting: boolean;
   isInstalling: boolean;
   onConnect: (method: AcpAuthMethod) => void;
@@ -267,7 +270,6 @@ function RuntimeHeader({
       <RuntimeActions
         authMethods={authMethods}
         connectingMethodId={connectingMethodId}
-        installSuccess={installSuccess}
         isConnecting={isConnecting}
         isInstalling={isInstalling}
         onConnect={onConnect}
@@ -279,22 +281,55 @@ function RuntimeHeader({
 }
 
 function RuntimeRow({
-  installError,
-  installSuccess,
-  isInstalling,
-  onInstall,
+  resetEpoch,
   runtime,
 }: {
-  installError: string | null;
-  installSuccess: boolean;
-  isInstalling: boolean;
-  onInstall: () => void;
+  resetEpoch: number;
   runtime: AcpRuntimeCatalogEntry;
 }) {
   const [terminalLaunchMethodId, setTerminalLaunchMethodId] = React.useState<
     string | null
   >(null);
   const [isUpdateWarningOpen, setIsUpdateWarningOpen] = React.useState(false);
+  // Each row owns its mutation instance so concurrent installs each track
+  // their own isPending / result state independently.
+  const installMutation = useInstallAcpRuntimeMutation();
+  const [installResult, setInstallResult] = React.useState<{
+    success: boolean;
+    error: string | null;
+  } | null>(null);
+  // Clear stale install results when the parent triggers a catalog refresh
+  // (Check again) — the runtime may now be healthy and stale failure state
+  // would linger because keyed rows don't remount on refetch.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: resetEpoch is an intentional trigger only; its value is not consumed in the effect body
+  React.useEffect(() => {
+    setInstallResult(null);
+  }, [resetEpoch]);
+  const isInstalling = installMutation.isPending;
+  const installError = installResult?.error ?? null;
+
+  function handleInstall() {
+    setInstallResult(null);
+    installMutation.mutate(runtime.id, {
+      onSuccess: (result) => {
+        if (result.success) {
+          setInstallResult({ success: true, error: null });
+        } else {
+          setInstallResult({
+            success: false,
+            error: getInstallErrorMessage(result.steps),
+          });
+        }
+      },
+      onError: (error) => {
+        setInstallResult({
+          success: false,
+          error: error instanceof Error ? error.message : "Install failed.",
+        });
+      },
+    });
+  }
+
   const canConnectAccount =
     runtime.availability === "available" &&
     runtime.authStatus.status === "logged_out";
@@ -328,7 +363,6 @@ function RuntimeRow({
         <RuntimeHeader
           authMethods={authMethods}
           connectingMethodId={connectMutation.variables?.methodId ?? null}
-          installSuccess={installSuccess}
           isConnecting={connectMutation.isPending}
           isInstalling={isInstalling}
           onConnect={(method) => {
@@ -352,10 +386,29 @@ function RuntimeRow({
               setIsUpdateWarningOpen(true);
               return;
             }
-            onInstall();
+            handleInstall();
           }}
           runtime={runtime}
         />
+
+        {runtime.availability !== "available" ? (
+          <div
+            className="mt-2 flex flex-wrap items-center justify-between gap-2 text-sm text-muted-foreground"
+            data-testid={`doctor-runtime-guidance-${runtime.id}`}
+          >
+            <p>{runtime.installHint}</p>
+            {runtime.installInstructionsUrl.trim().length > 0 ? (
+              <button
+                className="inline-flex shrink-0 items-center gap-1 underline-offset-2 hover:text-foreground hover:underline"
+                onClick={() => void openUrl(runtime.installInstructionsUrl)}
+                type="button"
+              >
+                <ExternalLink className="h-4 w-4" />
+                {runtimeInstallGuideLabel(runtime)}
+              </button>
+            ) : null}
+          </div>
+        ) : null}
 
         {runtime.authStatus.status === "config_invalid" ? (
           <p
@@ -366,13 +419,11 @@ function RuntimeRow({
           </p>
         ) : null}
 
-        {installSuccess && runtime.availability !== "available" ? (
-          <p className="mt-2 rounded-lg border border-green-500/30 bg-green-500/10 px-3 py-1.5 text-sm text-green-700 dark:text-green-400">
-            {runtime.label} installed. Checking for sign-in options...
-          </p>
-        ) : null}
         {installError ? (
-          <p className="mt-2 whitespace-pre-line rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-1.5 text-sm text-destructive">
+          <p
+            className="mt-2 whitespace-pre-line rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-1.5 text-sm text-destructive"
+            data-testid={`doctor-runtime-install-error-${runtime.id}`}
+          >
             {installError}
           </p>
         ) : null}
@@ -410,7 +461,7 @@ function RuntimeRow({
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
-              onClick={onInstall}
+              onClick={handleInstall}
               data-testid={`doctor-runtime-confirm-update-${runtime.id}`}
             >
               Update
@@ -491,59 +542,9 @@ export function DoctorSettingsPanel() {
     [runtimesQuery.data],
   );
   const isRefreshing = runtimesQuery.isFetching;
-  const installMutation = useInstallAcpRuntimeMutation();
-  const [installResults, setInstallResults] = React.useState<
-    Record<string, { success: boolean; error: string | null }>
-  >({});
-  // Per-runtime installing state: tracks which runtime IDs have an in-flight
-  // install so concurrent installs each show their own spinner correctly.
-  const [installingIds, setInstallingIds] = React.useState<Set<string>>(
-    new Set(),
-  );
-
-  function handleInstall(runtimeId: string) {
-    // Clear any previous result for this runtime before retrying.
-    setInstallResults((prev) => ({
-      ...prev,
-      [runtimeId]: { success: false, error: null },
-    }));
-    setInstallingIds((prev) => new Set(prev).add(runtimeId));
-
-    installMutation.mutate(runtimeId, {
-      onSuccess: (result) => {
-        if (result.success) {
-          setInstallResults((prev) => ({
-            ...prev,
-            [runtimeId]: { success: true, error: null },
-          }));
-        } else {
-          setInstallResults((prev) => ({
-            ...prev,
-            [runtimeId]: {
-              success: false,
-              error: getInstallErrorMessage(result.steps),
-            },
-          }));
-        }
-      },
-      onError: (error) => {
-        setInstallResults((prev) => ({
-          ...prev,
-          [runtimeId]: {
-            success: false,
-            error: error instanceof Error ? error.message : "Install failed.",
-          },
-        }));
-      },
-      onSettled: () => {
-        setInstallingIds((prev) => {
-          const next = new Set(prev);
-          next.delete(runtimeId);
-          return next;
-        });
-      },
-    });
-  }
+  // Incremented each time the user clicks "Check again" so RuntimeRow
+  // useEffect clears stale install results from before the refresh.
+  const [resetEpoch, setResetEpoch] = React.useState(0);
 
   return (
     <section
@@ -558,7 +559,7 @@ export function DoctorSettingsPanel() {
           <Button
             disabled={isRefreshing}
             onClick={() => {
-              setInstallResults({});
+              setResetEpoch((e) => e + 1);
               void runtimesQuery.refetch();
               void gitBashQuery.refetch();
             }}
@@ -598,11 +599,8 @@ export function DoctorSettingsPanel() {
             <div className="space-y-3" data-testid="doctor-runtime-list">
               {runtimes.map((runtime) => (
                 <RuntimeRow
-                  installError={installResults[runtime.id]?.error ?? null}
-                  installSuccess={installResults[runtime.id]?.success ?? false}
-                  isInstalling={installingIds.has(runtime.id)}
                   key={runtime.id}
-                  onInstall={() => handleInstall(runtime.id)}
+                  resetEpoch={resetEpoch}
                   runtime={runtime}
                 />
               ))}

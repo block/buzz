@@ -12,6 +12,7 @@ import type {
   Project,
   ProjectLocalRepoSnapshot,
   ProjectPullRequest,
+  ProjectPullRequestCommentAnchor,
   ProjectRepoContributor,
   ProjectRepoDiff,
   ProjectRepoSnapshot,
@@ -196,6 +197,11 @@ export function WorkspaceTabs({
     ) ?? null;
   const isPullRequestSelected = Boolean(selectedPullRequest);
   const [selectedTab, setSelectedTab] = React.useState("overview");
+  const [pullRequestCommentTarget, setPullRequestCommentTarget] =
+    React.useState<{
+      anchor: ProjectPullRequestCommentAnchor;
+      pullRequestId: string;
+    } | null>(null);
   const [createIssueOpen, setCreateIssueOpen] = React.useState(false);
   const [createPullRequestOpen, setCreatePullRequestOpen] =
     React.useState(false);
@@ -249,6 +255,17 @@ export function WorkspaceTabs({
       onSelectedIssueIdChange,
       onSelectedPullRequestIdChange,
     ],
+  );
+  const handleOpenPullRequestComment = React.useCallback(
+    (anchor: ProjectPullRequestCommentAnchor) => {
+      if (!selectedPullRequestId) return;
+      setPullRequestCommentTarget({
+        anchor: { ...anchor },
+        pullRequestId: selectedPullRequestId,
+      });
+      setSelectedTab("pr-files");
+    },
+    [selectedPullRequestId],
   );
 
   return (
@@ -307,6 +324,7 @@ export function WorkspaceTabs({
                     error={pullRequestsError}
                     isLoading={pullRequestsLoading}
                     mode={mode}
+                    onOpenInlineComment={handleOpenPullRequestComment}
                     onOpenCommit={onSelectedCommitHashChange}
                     onOpenTerminal={onOpenMergeRecoveryTerminal}
                     onSelectedPullRequestIdChange={
@@ -323,6 +341,12 @@ export function WorkspaceTabs({
                 <ProjectPullRequestFilesChangedPanel
                   diff={repoDiff}
                   error={repoDiffError}
+                  focusedAnchor={
+                    pullRequestCommentTarget?.pullRequestId ===
+                    selectedPullRequestId
+                      ? pullRequestCommentTarget.anchor
+                      : null
+                  }
                   isLoading={repoDiffLoading}
                   profiles={profiles}
                   project={project}

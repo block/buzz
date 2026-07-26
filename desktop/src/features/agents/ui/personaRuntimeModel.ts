@@ -100,7 +100,7 @@ export function resolveAgentCommandUpdate(input: {
  * config contribute no entries, so this never blocks on out-of-band auth.
  */
 export function hasMissingRequiredEnvKey(
-  requiredEnvKeys: string[],
+  requiredEnvKeys: readonly string[],
   envVars: Record<string, string>,
 ): boolean {
   return requiredEnvKeys.some((key) => (envVars[key] ?? "").length === 0);

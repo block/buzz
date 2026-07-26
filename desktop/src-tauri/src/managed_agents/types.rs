@@ -585,6 +585,8 @@ pub struct AcpRuntimeCatalogEntry {
     pub install_instructions_url: String,
     /// true when at least one automated install step is available
     pub can_auto_install: bool,
+    /// true when this runtime depends on a separately installed vendor CLI.
+    pub requires_external_cli: bool,
     pub underlying_cli_path: Option<String>,
     /// true when an npm adapter step is pending but Node.js / npm is absent.
     /// The UI hides the Install button and shows a Node.js install callout.

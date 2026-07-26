@@ -48,6 +48,10 @@ function installDOMShim() {
       return this.children[0] ?? null;
     }
 
+    get firstElementChild() {
+      return this.children[0] ?? null;
+    }
+
     get lastChild() {
       return this.children.at(-1) ?? null;
     }
@@ -122,8 +126,16 @@ function installDOMShim() {
   }
 
   globalThis.document = new DocumentShim();
+  const windowEvents = new EventTargetShim();
+  globalThis.addEventListener =
+    windowEvents.addEventListener.bind(windowEvents);
+  globalThis.removeEventListener =
+    windowEvents.removeEventListener.bind(windowEvents);
+  globalThis.dispatchEvent = windowEvents.dispatchEvent.bind(windowEvents);
   globalThis.HTMLIFrameElement = NodeShim;
+  globalThis.HTMLDivElement = NodeShim;
   globalThis.HTMLElement = NodeShim;
+  globalThis.Node = NodeShim;
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   process.env.IS_REACT_ACT_ENVIRONMENT = "true";
   Object.defineProperty(globalThis, "window", {
@@ -142,6 +154,7 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 
 import { useAnchoredScroll } from "./useAnchoredScroll.ts";
+import { useVirtualizedBottomSettle } from "./useVirtualizedBottomSettle.ts";
 
 function makePinnedCenterNodes() {
   const resizeObservers = [];
@@ -232,6 +245,32 @@ function Harness({ channelId, refs }) {
   return null;
 }
 
+function VirtualTargetHarness({ refs }) {
+  const didRun = React.useRef(false);
+  const bottomApi = useVirtualizedBottomSettle(
+    refs.host,
+    refs.list,
+    refs.itemsLength,
+  );
+  const anchored = useAnchoredScroll({
+    channelId: "conversation",
+    contentRef: refs.content,
+    isLoading: false,
+    messages: Array.from({ length: 5 }, (_, index) => ({ id: String(index) })),
+    scrollContainerRef: refs.scroller,
+    virtualCancelBottomIntent: bottomApi.cancel,
+    virtualizerOwnsPrependAnchoring: true,
+    virtualScrollToMessage: () => true,
+  });
+  React.useLayoutEffect(() => {
+    if (didRun.current) return;
+    didRun.current = true;
+    bottomApi.settle();
+    refs.targetResult.current = anchored.scrollToMessage("selected");
+  }, [anchored.scrollToMessage, bottomApi.settle, refs.targetResult]);
+  return null;
+}
+
 test("channel change attaches pinned-center observers after refs mount", async () => {
   const refs = {
     container: { current: null },
@@ -271,4 +310,80 @@ test("channel change attaches pinned-center observers after refs mount", async (
   await act(async () => {
     root.unmount();
   });
+});
+
+test("mounted virtual target retires bottom intent before direct centering", async () => {
+  const resizeObservers = [];
+  globalThis.ResizeObserver = class {
+    constructor(callback) {
+      this.callback = callback;
+      this.targets = [];
+      resizeObservers.push(this);
+    }
+    disconnect() {}
+    observe(target) {
+      this.targets.push(target);
+    }
+  };
+
+  const content = document.createElement("div");
+  const scroller = document.createElement("div");
+  const host = document.createElement("div");
+  scroller.appendChild(content);
+  host.appendChild(scroller);
+  scroller.clientHeight = 400;
+  scroller.scrollHeight = 1_000;
+  scroller.scrollTop = 0;
+  scroller.getBoundingClientRect = () => ({ bottom: 400, top: 0 });
+  const targetContentTop = 250;
+  const row = {
+    getBoundingClientRect: () => ({
+      bottom: targetContentTop - scroller.scrollTop + 40,
+      height: 40,
+      top: targetContentTop - scroller.scrollTop,
+    }),
+  };
+  scroller.querySelector = () => row;
+  scroller.querySelectorAll = () => [];
+  scroller.scrollTo = ({ top }) => {
+    scroller.scrollTop = top;
+  };
+
+  const bottomWrites = [];
+  const refs = {
+    content: { current: content },
+    host: { current: host },
+    itemsLength: { current: 5 },
+    list: {
+      current: {
+        scrollToIndex: (index, options) =>
+          bottomWrites.push({ index, options }),
+      },
+    },
+    scroller: { current: scroller },
+    targetResult: { current: null },
+  };
+  const root = createRoot(document.createElement("div"));
+  await act(async () => {
+    root.render(React.createElement(VirtualTargetHarness, { refs }));
+  });
+
+  assert.deepEqual(bottomWrites, [{ index: 4, options: { align: "end" } }]);
+  assert.equal(refs.targetResult.current, true);
+  assert.equal(row.getBoundingClientRect().top, 180);
+  const bottomGeometryObserver = resizeObservers.find(
+    (observer) =>
+      observer.targets.includes(content) && observer.targets.includes(scroller),
+  );
+  assert.ok(bottomGeometryObserver);
+  bottomGeometryObserver.callback();
+  await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+
+  assert.equal(
+    row.getBoundingClientRect().top,
+    180,
+    "target remains centered after later virtual geometry activity",
+  );
+  assert.equal(bottomWrites.length, 1, "geometry cannot re-pin to bottom");
+  await act(async () => root.unmount());
 });

@@ -139,6 +139,28 @@ export function deriveModelDiscoveryPending({
   );
 }
 
+/**
+ * True when discovery IPC resolved with a response that yielded no usable
+ * model options. Distinct from a thrown/unavailable failure (data stays null).
+ * Callers that omit the Model control or heal persisted values must gate on
+ * this — not on `discoveredModelOptions === null` alone.
+ */
+export function isSuccessfulEmptyDiscovery({
+  activeModelDiscoveryData,
+  discoveredModelOptions,
+  modelDiscoveryPending,
+}: {
+  activeModelDiscoveryData: AgentModelsResponse | null;
+  discoveredModelOptions: readonly PersonaModelOption[] | null;
+  modelDiscoveryPending: boolean;
+}): boolean {
+  return (
+    !modelDiscoveryPending &&
+    activeModelDiscoveryData !== null &&
+    discoveredModelOptions === null
+  );
+}
+
 export function usePersonaModelDiscovery({
   envVars,
   isCustomProviderEditing,
@@ -358,6 +380,11 @@ export function usePersonaModelDiscovery({
     activeModelDiscoveryData,
     activeModelDiscoveryStatus,
   });
+  const modelDiscoverySuccessfulEmpty = isSuccessfulEmptyDiscovery({
+    activeModelDiscoveryData,
+    discoveredModelOptions,
+    modelDiscoveryPending,
+  });
 
   return {
     discoveredModelOptions,
@@ -366,5 +393,6 @@ export function usePersonaModelDiscovery({
       modelDiscoveryPending || discoveredModelOptions !== null
         ? null
         : activeModelDiscoveryStatus,
+    modelDiscoverySuccessfulEmpty,
   };
 }

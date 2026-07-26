@@ -82,6 +82,7 @@ class _MembersButton extends ConsumerWidget {
         .isNotEmpty;
 
     return IconButton(
+      color: context.colors.primary,
       onPressed: () {
         showModalBottomSheet<void>(
           context: context,
@@ -95,7 +96,7 @@ class _MembersButton extends ConsumerWidget {
       icon: Stack(
         clipBehavior: Clip.none,
         children: [
-          const Icon(LucideIcons.users),
+          const Icon(LucideIcons.users, size: 22),
           if (hasWorkingBot)
             Positioned(
               top: -2,
