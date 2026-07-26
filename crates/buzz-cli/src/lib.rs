@@ -1381,6 +1381,75 @@ pub enum PrCmd {
         #[arg(long = "to")]
         to: Vec<String>,
     },
+    /// Comment on a git pull request (kind:1 with NIP-34 project tags)
+    #[command(
+        after_help = "Examples:\n  buzz pr comment --repo-owner <hex> --repo-id myrepo --pr <event> --body 'Looks good to me'\n  buzz pr comment --repo-owner <hex> --repo-id myrepo --pr <event> --body-file - --file src/main.rs --line 42 --side new --commit $(git rev-parse HEAD)"
+    )]
+    Comment {
+        /// Repo owner pubkey (64-char hex)
+        #[arg(long)]
+        repo_owner: String,
+        /// Repo identifier (d-tag)
+        #[arg(long)]
+        repo_id: String,
+        /// Pull request event id (64-char hex)
+        #[arg(long)]
+        pr: String,
+        /// Comment body markdown. Use '-' to read from stdin.
+        #[arg(
+            long,
+            conflicts_with = "body_file",
+            required_unless_present = "body_file"
+        )]
+        body: Option<String>,
+        /// Path to comment body markdown, or '-' to read from stdin.
+        #[arg(long, conflicts_with = "body")]
+        body_file: Option<String>,
+        /// Repository-relative file path for an inline comment — requires
+        /// --line, --side and --commit
+        #[arg(long, requires_all = ["line", "side", "commit"])]
+        file: Option<String>,
+        /// 1-based line number within the diff side
+        #[arg(long, requires = "file")]
+        line: Option<u32>,
+        /// Diff side the line belongs to
+        #[arg(long, requires = "file", value_parser = ["old", "new"])]
+        side: Option<String>,
+        /// Reviewed commit id — required for, and only used by, inline comments
+        #[arg(long, requires = "file")]
+        commit: Option<String>,
+        /// Additional recipient pubkey(s) — can be specified multiple times
+        #[arg(long = "to")]
+        to: Vec<String>,
+    },
+    /// Submit a review decision on a git pull request (kind:1, labeled)
+    Review {
+        /// Repo owner pubkey (64-char hex)
+        #[arg(long)]
+        repo_owner: String,
+        /// Repo identifier (d-tag)
+        #[arg(long)]
+        repo_id: String,
+        /// Pull request event id (64-char hex)
+        #[arg(long)]
+        pr: String,
+        /// Review decision
+        #[arg(long, value_parser = ["approve", "request-changes"])]
+        decision: String,
+        /// Reviewed commit id — the pull request tip you reviewed
+        #[arg(long)]
+        commit: String,
+        /// Review body markdown. Defaults to a decision summary. Use '-' to
+        /// read from stdin.
+        #[arg(long, conflicts_with = "body_file")]
+        body: Option<String>,
+        /// Path to review body markdown, or '-' to read from stdin.
+        #[arg(long, conflicts_with = "body")]
+        body_file: Option<String>,
+        /// Additional recipient pubkey(s) — can be specified multiple times
+        #[arg(long = "to")]
+        to: Vec<String>,
+    },
     /// Get a PR by event id
     Get {
         /// PR event id (64-char hex)
@@ -1964,7 +2033,7 @@ mod tests {
         assert_eq!(protect_names, vec!["list", "remove", "set"]);
         assert_eq!(
             names(&cmd, "pr"),
-            vec!["get", "list", "open", "status", "update"]
+            vec!["comment", "get", "list", "open", "review", "status", "update"]
         );
         assert_eq!(
             names(&cmd, "patches"),
@@ -2006,7 +2075,7 @@ mod tests {
             ("messages", 8),
             ("pack", 2),
             ("patches", 4),
-            ("pr", 5),
+            ("pr", 7),
             ("reactions", 3),
             ("repos", 4),
             ("social", 7),

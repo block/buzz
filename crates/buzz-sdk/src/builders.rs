@@ -1455,6 +1455,195 @@ pub fn build_git_pr_update(
     Ok(EventBuilder::new(Kind::Custom(KIND_GIT_PR_UPDATE as u16), content).tags(tags))
 }
 
+/// Which side of a diff an inline pull request comment is anchored to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitDiffSide {
+    /// The pre-image (left) side of the diff.
+    Old,
+    /// The post-image (right) side of the diff.
+    New,
+}
+
+impl GitDiffSide {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Old => "old",
+            Self::New => "new",
+        }
+    }
+}
+
+/// Anchor pinning a pull request comment to one line of one file in a diff.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitPrCommentAnchor {
+    /// Repository-relative path of the file being commented on.
+    pub path: String,
+    /// Diff side the line belongs to.
+    pub side: GitDiffSide,
+    /// 1-based line number within that side.
+    pub line: u32,
+}
+
+/// Review decision carried by a pull request comment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitPrReviewDecision {
+    /// Approve the changes.
+    Approve,
+    /// Request changes before the pull request can proceed.
+    RequestChanges,
+}
+
+impl GitPrReviewDecision {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Approve => "approval",
+            Self::RequestChanges => "changes-requested",
+        }
+    }
+
+    /// Body used when a decision is submitted without an explicit comment.
+    fn default_content(self) -> &'static str {
+        match self {
+            Self::Approve => "Approved these changes",
+            Self::RequestChanges => "Requested changes",
+        }
+    }
+}
+
+/// Optional facets of a pull request comment (kind:1).
+#[derive(Debug, Clone, Default)]
+pub struct GitPrCommentMeta {
+    /// Additional recipient pubkeys beyond the repo owner.
+    pub recipients: Vec<String>,
+    /// Diff anchor, when the comment is an inline review comment.
+    pub anchor: Option<GitPrCommentAnchor>,
+    /// Reviewed commit. Required for inline comments and review decisions.
+    pub commit: Option<String>,
+    /// Review decision, when the comment records one.
+    pub decision: Option<GitPrReviewDecision>,
+}
+
+/// Reject anchor paths that are absolute, non-canonical, or otherwise unsafe
+/// to render. Mirrors the Desktop anchor validator: paths are validated, never
+/// normalized, so a client is not asked to trust a rewritten path.
+fn check_anchor_path(path: &str) -> Result<(), SdkError> {
+    let invalid = path.is_empty()
+        || path.len() > 4_096
+        || path.starts_with('/')
+        || path.contains('\\')
+        || path.contains('\0')
+        || path
+            .split('/')
+            .any(|segment| segment.is_empty() || segment == "." || segment == "..");
+    if invalid {
+        return Err(SdkError::InvalidInput(format!(
+            "anchor path must be a relative repository path without empty, '.' or '..' segments (got {:?})",
+            path
+        )));
+    }
+    Ok(())
+}
+
+/// Build a comment on a git pull request (kind:1).
+///
+/// NIP-34 defines no review kinds, so pull request conversation — plain
+/// comments, inline diff comments, and review decisions — is carried by
+/// labeled kind:1 notes. The root `e` tag threads the comment onto the pull
+/// request and the repository `a` tag scopes it to the project, which is what
+/// project clients filter on; a note carrying only `e` is never discovered.
+///
+/// An inline comment adds the `inline-comment` label plus `c`/`file`/`side`/
+/// `line` tags; a decision adds the `approval` or `changes-requested` label.
+/// Both require the reviewed `commit`, so a reader can tell which revision the
+/// comment applies to.
+///
+/// Eligibility to review is a client-side convention in Buzz today — the relay
+/// does not enforce who may approve — so this builder validates event shape
+/// only.
+pub fn build_git_pr_comment(
+    repo: &GitRepoCoord,
+    pr_event_id: &str,
+    content: &str,
+    meta: &GitPrCommentMeta,
+) -> Result<EventBuilder, SdkError> {
+    let body = if content.trim().is_empty() {
+        match meta.decision {
+            // A decision carries a meaningful default body; a plain comment does not.
+            Some(decision) => decision.default_content().to_string(),
+            None => {
+                return Err(SdkError::InvalidInput(
+                    "pull request comment must not be empty".into(),
+                ));
+            }
+        }
+    } else {
+        content.to_string()
+    };
+    check_content(&body, 64 * 1024)?;
+
+    let pr_event_id = check_hex_exact(pr_event_id, 64, "pull request event id")?;
+    let a_value = repo.to_a_tag_value()?;
+    let owner = check_pubkey_hex(&repo.owner, "repo owner")?;
+
+    if (meta.anchor.is_some() || meta.decision.is_some()) && meta.commit.is_none() {
+        return Err(SdkError::InvalidInput(
+            "inline comments and review decisions require the reviewed commit".into(),
+        ));
+    }
+    if let Some(ref commit) = meta.commit {
+        check_commit_hex(commit, "commit")?;
+    }
+    if let Some(ref anchor) = meta.anchor {
+        check_anchor_path(&anchor.path)?;
+        if anchor.line == 0 {
+            return Err(SdkError::InvalidInput(
+                "anchor line must be a 1-based line number".into(),
+            ));
+        }
+    }
+
+    let mut seen = std::collections::HashSet::with_capacity(meta.recipients.len() + 1);
+    seen.insert(owner.clone());
+    let mut tags = vec![
+        tag(&["e", &pr_event_id, "", "root"])?,
+        tag(&["a", &a_value])?,
+        tag(&["p", &owner])?,
+    ];
+    for recipient in &meta.recipients {
+        let pubkey = check_pubkey_hex(recipient, "recipient")?;
+        if seen.insert(pubkey.clone()) {
+            tags.push(tag(&["p", &pubkey])?);
+        }
+    }
+
+    // `c` is emitted once even when a decision is anchored to a line.
+    let mut commit_tagged = false;
+    if let Some(ref anchor) = meta.anchor {
+        let commit = meta
+            .commit
+            .as_deref()
+            .expect("anchor requires a commit; checked above");
+        tags.push(tag(&["t", "inline-comment"])?);
+        tags.push(tag(&["c", commit])?);
+        commit_tagged = true;
+        tags.push(tag(&["file", &anchor.path])?);
+        tags.push(tag(&["side", anchor.side.as_str()])?);
+        tags.push(tag(&["line", &anchor.line.to_string()])?);
+    }
+    if let Some(decision) = meta.decision {
+        let commit = meta
+            .commit
+            .as_deref()
+            .expect("decision requires a commit; checked above");
+        tags.push(tag(&["t", decision.label()])?);
+        if !commit_tagged {
+            tags.push(tag(&["c", commit])?);
+        }
+    }
+
+    Ok(EventBuilder::new(Kind::Custom(1), body).tags(tags))
+}
+
 /// Build a workflow definition event (kind 30620).
 ///
 /// - `channel_id`: the channel this workflow belongs to (h-tag)
@@ -3573,6 +3762,233 @@ mod tests {
         };
         let err = build_git_pr_update(&pr_repo(), "", &meta).unwrap_err();
         assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    fn has_root_e_tag(event: &nostr::Event, id: &str) -> bool {
+        event.tags.iter().any(|tag| {
+            let values = tag.as_slice();
+            values.first().map(String::as_str) == Some("e")
+                && values.get(1).map(String::as_str) == Some(id)
+                && values.get(3).map(String::as_str) == Some("root")
+        })
+    }
+
+    #[test]
+    fn git_pr_comment_matches_project_thread_shape() {
+        let owner = "a".repeat(64);
+        let recipient = "b".repeat(64);
+        let pr = event_id().to_hex();
+        let ev = sign(
+            build_git_pr_comment(
+                &pr_repo(),
+                &pr,
+                "Looks good overall.",
+                &GitPrCommentMeta {
+                    // The owner and a duplicate recipient are deduplicated.
+                    recipients: vec![owner.clone(), recipient.clone(), recipient.clone()],
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        );
+
+        assert_eq!(ev.kind.as_u16(), 1);
+        assert_eq!(ev.content, "Looks good overall.");
+        assert!(has_root_e_tag(&ev, &pr));
+        assert!(has_tag(&ev, "a", &format!("30617:{owner}:repo")));
+        assert_eq!(tag_values(&ev, "p"), vec![owner, recipient]);
+        // A plain comment carries no review facets.
+        assert!(tag_values(&ev, "t").is_empty());
+        assert!(tag_values(&ev, "c").is_empty());
+    }
+
+    #[test]
+    fn git_pr_comment_inline_anchor_carries_diff_location() {
+        let commit = "d".repeat(40);
+        let ev = sign(
+            build_git_pr_comment(
+                &pr_repo(),
+                &event_id().to_hex(),
+                "This unwrap can panic.",
+                &GitPrCommentMeta {
+                    anchor: Some(GitPrCommentAnchor {
+                        path: "crates/buzz-cli/src/main.rs".to_string(),
+                        side: GitDiffSide::New,
+                        line: 42,
+                    }),
+                    commit: Some(commit.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        );
+
+        assert!(has_tag(&ev, "t", "inline-comment"));
+        assert!(has_tag(&ev, "c", &commit));
+        assert!(has_tag(&ev, "file", "crates/buzz-cli/src/main.rs"));
+        assert!(has_tag(&ev, "side", "new"));
+        assert!(has_tag(&ev, "line", "42"));
+    }
+
+    #[test]
+    fn git_pr_comment_review_decisions_use_expected_labels() {
+        let commit = "d".repeat(40);
+        let approval = sign(
+            build_git_pr_comment(
+                &pr_repo(),
+                &event_id().to_hex(),
+                "",
+                &GitPrCommentMeta {
+                    commit: Some(commit.clone()),
+                    decision: Some(GitPrReviewDecision::Approve),
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        );
+        assert!(has_tag(&approval, "t", "approval"));
+        assert!(has_tag(&approval, "c", &commit));
+        // An empty body falls back to the decision's default text.
+        assert_eq!(approval.content, "Approved these changes");
+
+        let changes = sign(
+            build_git_pr_comment(
+                &pr_repo(),
+                &event_id().to_hex(),
+                "Needs a test.",
+                &GitPrCommentMeta {
+                    commit: Some(commit.clone()),
+                    decision: Some(GitPrReviewDecision::RequestChanges),
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        );
+        assert!(has_tag(&changes, "t", "changes-requested"));
+        assert_eq!(changes.content, "Needs a test.");
+    }
+
+    #[test]
+    fn git_pr_comment_anchored_decision_tags_commit_once() {
+        let commit = "d".repeat(40);
+        let ev = sign(
+            build_git_pr_comment(
+                &pr_repo(),
+                &event_id().to_hex(),
+                "Blocking on this line.",
+                &GitPrCommentMeta {
+                    anchor: Some(GitPrCommentAnchor {
+                        path: "src/lib.rs".to_string(),
+                        side: GitDiffSide::Old,
+                        line: 1,
+                    }),
+                    commit: Some(commit.clone()),
+                    decision: Some(GitPrReviewDecision::RequestChanges),
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        );
+        assert_eq!(tag_values(&ev, "c"), vec![commit]);
+        assert!(has_tag(&ev, "side", "old"));
+    }
+
+    #[test]
+    fn git_pr_comment_rejects_empty_body_and_bad_pull_request_id() {
+        let empty = build_git_pr_comment(
+            &pr_repo(),
+            &event_id().to_hex(),
+            " \n",
+            &GitPrCommentMeta::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(empty, SdkError::InvalidInput(_)));
+
+        let bad_id = build_git_pr_comment(
+            &pr_repo(),
+            "not-an-event-id",
+            "comment",
+            &GitPrCommentMeta::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(bad_id, SdkError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn git_pr_comment_rejects_review_facets_without_commit() {
+        let anchored = build_git_pr_comment(
+            &pr_repo(),
+            &event_id().to_hex(),
+            "comment",
+            &GitPrCommentMeta {
+                anchor: Some(GitPrCommentAnchor {
+                    path: "src/lib.rs".to_string(),
+                    side: GitDiffSide::New,
+                    line: 1,
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(anchored, SdkError::InvalidInput(_)));
+
+        let decided = build_git_pr_comment(
+            &pr_repo(),
+            &event_id().to_hex(),
+            "comment",
+            &GitPrCommentMeta {
+                decision: Some(GitPrReviewDecision::Approve),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(decided, SdkError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn git_pr_comment_rejects_unsafe_anchor_paths_and_zero_line() {
+        let commit = "d".repeat(40);
+        for path in [
+            "",
+            "/etc/passwd",
+            "src/../secrets",
+            "src//lib.rs",
+            "src\\lib.rs",
+        ] {
+            let err = build_git_pr_comment(
+                &pr_repo(),
+                &event_id().to_hex(),
+                "comment",
+                &GitPrCommentMeta {
+                    anchor: Some(GitPrCommentAnchor {
+                        path: path.to_string(),
+                        side: GitDiffSide::New,
+                        line: 1,
+                    }),
+                    commit: Some(commit.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+            assert!(matches!(err, SdkError::InvalidInput(_)), "path {path:?}");
+        }
+
+        let zero_line = build_git_pr_comment(
+            &pr_repo(),
+            &event_id().to_hex(),
+            "comment",
+            &GitPrCommentMeta {
+                anchor: Some(GitPrCommentAnchor {
+                    path: "src/lib.rs".to_string(),
+                    side: GitDiffSide::New,
+                    line: 0,
+                }),
+                commit: Some(commit),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(zero_line, SdkError::InvalidInput(_)));
     }
 
     // --- community moderation commands (9040–9044) ------------------------

@@ -3,7 +3,10 @@ use crate::error::CliError;
 use crate::validate::{
     read_file_or_stdin, read_or_stdin, sdk_err, validate_hex64, validate_repo_id,
 };
-use buzz_sdk::{GitPrUpdateMeta, GitPullRequestMeta, GitRepoCoord, GitStatusMeta};
+use buzz_sdk::{
+    GitDiffSide, GitPrCommentAnchor, GitPrCommentMeta, GitPrReviewDecision, GitPrUpdateMeta,
+    GitPullRequestMeta, GitRepoCoord, GitStatusMeta,
+};
 
 fn read_optional_body(body: Option<&str>, body_file: Option<&str>) -> Result<String, CliError> {
     match (body, body_file) {
@@ -56,6 +59,120 @@ pub async fn cmd_open_pr(
     };
 
     let builder = buzz_sdk::build_git_pull_request(&repo, &content, &meta).map_err(sdk_err)?;
+    let event = client.sign_event(builder)?;
+    let resp = client.submit_event(event).await?;
+    println!("{resp}");
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn cmd_comment_pr(
+    client: &BuzzClient,
+    repo_owner: &str,
+    repo_id: &str,
+    pr: &str,
+    body: Option<&str>,
+    body_file: Option<&str>,
+    file: Option<&str>,
+    line: Option<u32>,
+    side: Option<&str>,
+    commit: Option<&str>,
+    to: &[String],
+) -> Result<(), CliError> {
+    validate_hex64(repo_owner)?;
+    validate_repo_id(repo_id)?;
+    validate_hex64(pr)?;
+    for recipient in to {
+        validate_hex64(recipient)?;
+    }
+    if body.is_none() && body_file.is_none() {
+        return Err(CliError::Usage(
+            "a comment needs --body or --body-file".into(),
+        ));
+    }
+    let content = read_optional_body(body, body_file)?;
+
+    // clap's `requires_all` guarantees these arrive together.
+    let anchor = match (file, line, side) {
+        (Some(path), Some(line), Some(side)) => Some(GitPrCommentAnchor {
+            path: path.to_string(),
+            side: parse_diff_side(side)?,
+            line,
+        }),
+        _ => None,
+    };
+
+    let repo = GitRepoCoord {
+        owner: repo_owner.to_string(),
+        id: repo_id.to_string(),
+    };
+    let meta = GitPrCommentMeta {
+        recipients: to.to_vec(),
+        anchor,
+        commit: commit.map(str::to_string),
+        decision: None,
+    };
+
+    let builder = buzz_sdk::build_git_pr_comment(&repo, pr, &content, &meta).map_err(sdk_err)?;
+    let event = client.sign_event(builder)?;
+    let resp = client.submit_event(event).await?;
+    println!("{resp}");
+    Ok(())
+}
+
+fn parse_diff_side(side: &str) -> Result<GitDiffSide, CliError> {
+    match side {
+        "old" => Ok(GitDiffSide::Old),
+        "new" => Ok(GitDiffSide::New),
+        other => Err(CliError::Usage(format!(
+            "--side must be 'old' or 'new' (got {other:?})"
+        ))),
+    }
+}
+
+fn parse_review_decision(decision: &str) -> Result<GitPrReviewDecision, CliError> {
+    match decision {
+        "approve" => Ok(GitPrReviewDecision::Approve),
+        "request-changes" => Ok(GitPrReviewDecision::RequestChanges),
+        other => Err(CliError::Usage(format!(
+            "--decision must be 'approve' or 'request-changes' (got {other:?})"
+        ))),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn cmd_review_pr(
+    client: &BuzzClient,
+    repo_owner: &str,
+    repo_id: &str,
+    pr: &str,
+    decision: &str,
+    commit: &str,
+    body: Option<&str>,
+    body_file: Option<&str>,
+    to: &[String],
+) -> Result<(), CliError> {
+    validate_hex64(repo_owner)?;
+    validate_repo_id(repo_id)?;
+    validate_hex64(pr)?;
+    for recipient in to {
+        validate_hex64(recipient)?;
+    }
+    // An empty body is allowed: the SDK substitutes the decision summary.
+    let content = read_optional_body(body, body_file)?;
+
+    let repo = GitRepoCoord {
+        owner: repo_owner.to_string(),
+        id: repo_id.to_string(),
+    };
+    let meta = GitPrCommentMeta {
+        recipients: to.to_vec(),
+        anchor: None,
+        commit: Some(commit.to_string()),
+        decision: Some(parse_review_decision(decision)?),
+    };
+
+    let builder = buzz_sdk::build_git_pr_comment(&repo, pr, &content, &meta).map_err(sdk_err)?;
     let event = client.sign_event(builder)?;
     let resp = client.submit_event(event).await?;
     println!("{resp}");
@@ -216,6 +333,56 @@ pub async fn cmd_pr_status(
 pub async fn dispatch(cmd: crate::PrCmd, client: &BuzzClient) -> Result<(), CliError> {
     use crate::PrCmd;
     match cmd {
+        PrCmd::Comment {
+            repo_owner,
+            repo_id,
+            pr,
+            body,
+            body_file,
+            file,
+            line,
+            side,
+            commit,
+            to,
+        } => {
+            cmd_comment_pr(
+                client,
+                &repo_owner,
+                &repo_id,
+                &pr,
+                body.as_deref(),
+                body_file.as_deref(),
+                file.as_deref(),
+                line,
+                side.as_deref(),
+                commit.as_deref(),
+                &to,
+            )
+            .await
+        }
+        PrCmd::Review {
+            repo_owner,
+            repo_id,
+            pr,
+            decision,
+            commit,
+            body,
+            body_file,
+            to,
+        } => {
+            cmd_review_pr(
+                client,
+                &repo_owner,
+                &repo_id,
+                &pr,
+                &decision,
+                &commit,
+                body.as_deref(),
+                body_file.as_deref(),
+                &to,
+            )
+            .await
+        }
         PrCmd::Open {
             repo_owner,
             repo_id,
