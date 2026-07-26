@@ -798,7 +798,7 @@ export function AgentDefinitionDialog({
           <div className="space-y-5">
             {serverContext ? (
               <ServerRunsOnBanner
-                pending={server.pending}
+                pendingUpdate={server.pendingUpdate}
                 runtime={server.runtime}
                 spawnerName={serverContext.spawnerName}
               />

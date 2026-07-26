@@ -10,11 +10,12 @@ import { Server } from "lucide-react";
 export function ServerRunsOnBanner({
   spawnerName,
   runtime,
-  pending,
+  pendingUpdate,
 }: {
   spawnerName: string;
   runtime?: string | null;
-  pending: boolean;
+  /** A queued prompt edit awaiting the spawner's confirmation, or null. */
+  pendingUpdate: { delivered: boolean } | null;
 }) {
   return (
     <div
@@ -28,7 +29,12 @@ export function ServerRunsOnBanner({
           <span className="text-muted-foreground"> · {runtime}</span>
         ) : null}
       </span>
-      {pending ? <ServerUpdatePendingChip className="ml-auto" /> : null}
+      {pendingUpdate ? (
+        <ServerUpdatePendingChip
+          className="ml-auto"
+          delivered={pendingUpdate.delivered}
+        />
+      ) : null}
     </div>
   );
 }
@@ -37,8 +43,19 @@ export function ServerRunsOnBanner({
  * Amber chip for a prompt update that has been queued but not yet confirmed by
  * the spawner — the spawner echoes `prompt_hash` on its next status, so until
  * then the edit is in flight, not applied.
+ *
+ * Awaiting that echo is the *normal* path and says nothing about the server's
+ * health, so the plain wording is used unless the update was never delivered
+ * (`delivered === false`), which is the only case that really implies the
+ * spawner could not be reached.
  */
-export function ServerUpdatePendingChip({ className }: { className?: string }) {
+export function ServerUpdatePendingChip({
+  className,
+  delivered = true,
+}: {
+  className?: string;
+  delivered?: boolean;
+}) {
   return (
     <span
       className={`rounded-full bg-amber-500/15 px-2 py-0.5 text-2xs font-medium text-amber-600${
@@ -46,7 +63,7 @@ export function ServerUpdatePendingChip({ className }: { className?: string }) {
       }`}
       data-testid="server-update-pending-chip"
     >
-      Update pending — server offline
+      {delivered ? "Update pending" : "Update pending — server offline"}
     </span>
   );
 }
