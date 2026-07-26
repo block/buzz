@@ -15,6 +15,7 @@ import {
   useCreatePersonaMutation,
   useManagedAgentsQuery,
   usePersonasQuery,
+  useRelayAgentsQuery,
   useUpdatePersonaMutation,
 } from "./hooks";
 import {
@@ -23,8 +24,12 @@ import {
   type BackendIntent,
 } from "./lib/instanceInputForDefinition";
 import { useCreatedAgentChannelAttachment } from "./useCreatedAgentChannelAttachment";
+import { combineObserverIngestionAgents } from "./useAgentObserverIngestion";
 import { classifyAgentManagementOrigin } from "./agentManagementBuffer";
 import { useChannelsQuery } from "@/features/channels/hooks";
+import { useUsersBatchQuery } from "@/features/profile/hooks";
+import { useIdentityQuery } from "@/shared/api/hooks";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 import { resolveManagedAgentAvatarUrl } from "./ui/managedAgentAvatar";
 import type { AgentCreateIntent } from "./ui/agentCreateIntent";
 import { editPersonaDialogState } from "./ui/personaDialogState";
@@ -62,6 +67,48 @@ export function useAgentManagement() {
   const personasQuery = usePersonasQuery();
   const managedAgentsQuery = useManagedAgentsQuery();
   const channelsQuery = useChannelsQuery();
+  const identityQuery = useIdentityQuery();
+  const currentPubkey = identityQuery.data?.pubkey;
+  const relayAgentsQuery = useRelayAgentsQuery();
+  const relayAgentPubkeys = React.useMemo(
+    () => (relayAgentsQuery.data ?? []).map((agent) => agent.pubkey),
+    [relayAgentsQuery.data],
+  );
+  const profilesQuery = useUsersBatchQuery(relayAgentPubkeys, {
+    enabled: Boolean(currentPubkey) && relayAgentPubkeys.length > 0,
+  });
+  const ownedRelayAgentPubkeys = React.useMemo(() => {
+    if (relayAgentsQuery.data === undefined || currentPubkey === undefined) {
+      return undefined;
+    }
+    if (relayAgentPubkeys.length === 0) return [];
+    if (profilesQuery.data === undefined || profilesQuery.isPlaceholderData) {
+      return undefined;
+    }
+    const ownerByPubkey = new Map<string, string>();
+    for (const [pubkey, summary] of Object.entries(
+      profilesQuery.data.profiles,
+    )) {
+      if (summary.ownerPubkey) {
+        ownerByPubkey.set(
+          normalizePubkey(pubkey),
+          normalizePubkey(summary.ownerPubkey),
+        );
+      }
+    }
+    return combineObserverIngestionAgents(
+      [],
+      relayAgentPubkeys,
+      ownerByPubkey,
+      currentPubkey,
+    ).map((agent) => agent.pubkey);
+  }, [
+    currentPubkey,
+    profilesQuery.data,
+    profilesQuery.isPlaceholderData,
+    relayAgentPubkeys,
+    relayAgentsQuery.data,
+  ]);
   const runtimesQuery = useAcpRuntimesQuery({ enabled: true });
   const createPersonaMutation = useCreatePersonaMutation();
   const updatePersonaMutation = useUpdatePersonaMutation();
@@ -76,6 +123,7 @@ export function useAgentManagement() {
   const sourceAgentPubkey = React.useRef<string | null>(null);
   const managedAgentsRef = React.useRef(managedAgentsQuery.data);
   const channelsRef = React.useRef(channelsQuery.data);
+  const ownedRelayAgentPubkeysRef = React.useRef(ownedRelayAgentPubkeys);
   const bufferedRequestsRef = React.useRef<
     Array<{ agentPubkey: string; request: AgentManagementRequest }>
   >([]);
@@ -88,6 +136,7 @@ export function useAgentManagement() {
           channelsRef.current,
           agentPubkey,
           next.request.channelId,
+          ownedRelayAgentPubkeysRef.current,
         ) !== "accept" ||
         seenRequestIds.current.has(next.requestId)
       ) {
@@ -106,27 +155,38 @@ export function useAgentManagement() {
   React.useEffect(() => {
     managedAgentsRef.current = managedAgentsQuery.data;
     channelsRef.current = channelsQuery.data;
-    if (managedAgentsQuery.data && channelsQuery.data) {
-      const buffered = bufferedRequestsRef.current.splice(0);
-      for (const candidate of buffered) {
+    ownedRelayAgentPubkeysRef.current = ownedRelayAgentPubkeys;
+    const buffered = bufferedRequestsRef.current.splice(0);
+    for (const candidate of buffered) {
+      const decision = classifyAgentManagementOrigin(
+        managedAgentsRef.current,
+        channelsRef.current,
+        candidate.agentPubkey,
+        candidate.request.request.channelId,
+        ownedRelayAgentPubkeysRef.current,
+      );
+      if (decision === "buffer") {
+        bufferedRequestsRef.current.push(candidate);
+      } else {
         acceptOwnedRequest(candidate.agentPubkey, candidate.request);
       }
     }
-  }, [channelsQuery.data, managedAgentsQuery.data]);
+  }, [channelsQuery.data, managedAgentsQuery.data, ownedRelayAgentPubkeys]);
 
   React.useEffect(
     () =>
       subscribeAgentManagementRequests((agentPubkey, next) => {
-        // Observer frames are owner-scoped and authenticated. Any managed agent
-        // this Desktop owns may draft a change; defer the ownership decision
-        // until the managed-agent query has initialized so ephemeral requests
-        // cannot disappear during startup.
+        // Observer frames are owner-scoped and authenticated. Any local or
+        // owner-attested relay agent may draft a change; defer the ownership
+        // decision until its ownership source has initialized so ephemeral
+        // requests cannot disappear during startup.
         if (
           classifyAgentManagementOrigin(
             managedAgentsRef.current,
             channelsRef.current,
             agentPubkey,
             next.request.channelId,
+            ownedRelayAgentPubkeysRef.current,
           ) === "buffer"
         ) {
           bufferedRequestsRef.current.push({ agentPubkey, request: next });

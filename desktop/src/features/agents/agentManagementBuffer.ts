@@ -12,12 +12,20 @@ export function classifyAgentManagementOrigin(
     | undefined,
   agentPubkey: string,
   channelId: string,
+  ownedRelayAgentPubkeys?: readonly string[],
 ): "buffer" | "accept" | "reject" {
   if (agents === undefined || channels === undefined) return "buffer";
   const normalizedAgentPubkey = agentPubkey.toLowerCase();
-  const isOwnedAgent = agents.some(
+  const isLocallyManaged = agents.some(
     (agent) => agent.pubkey.toLowerCase() === normalizedAgentPubkey,
   );
+  if (!isLocallyManaged && ownedRelayAgentPubkeys === undefined)
+    return "buffer";
+  const isOwnedAgent =
+    isLocallyManaged ||
+    ownedRelayAgentPubkeys?.some(
+      (pubkey) => pubkey.toLowerCase() === normalizedAgentPubkey,
+    );
   const originChannel = channels.find((channel) => channel.id === channelId);
   return isOwnedAgent &&
     originChannel?.isMember === true &&

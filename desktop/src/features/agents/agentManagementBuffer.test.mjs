@@ -21,10 +21,30 @@ test("buffers a draft until ownership and channel data resolve", () => {
   );
 });
 
-test("accepts an owned agent drafting from a shared channel", () => {
+test("accepts a locally managed agent drafting from a shared channel", () => {
   assert.equal(
     classifyAgentManagementOrigin(OWNED_AGENT, SHARED_CHANNEL, AGENT, CHANNEL),
     "accept",
+  );
+});
+
+test("accepts an owner-attested relay agent drafting from a shared channel", () => {
+  assert.equal(
+    classifyAgentManagementOrigin([], SHARED_CHANNEL, AGENT, CHANNEL, [AGENT]),
+    "accept",
+  );
+});
+
+test("buffers a non-local draft until relay ownership resolves", () => {
+  assert.equal(
+    classifyAgentManagementOrigin(
+      [],
+      SHARED_CHANNEL,
+      AGENT,
+      CHANNEL,
+      undefined,
+    ),
+    "buffer",
   );
 });
 
@@ -56,6 +76,7 @@ test("rejects a draft from an agent this Desktop does not own", () => {
       SHARED_CHANNEL,
       AGENT,
       CHANNEL,
+      [],
     ),
     "reject",
   );
