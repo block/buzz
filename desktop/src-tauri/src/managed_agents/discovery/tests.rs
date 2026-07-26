@@ -2,13 +2,14 @@ use std::path::PathBuf;
 
 use super::overrides::{divergent_agent_command_override, update_time_agent_command_override};
 use super::{
-    apply_agent_command_update, classify_runtime, codex_adapter_availability,
+    acp_install_plan, apply_agent_command_update, classify_runtime, codex_adapter_availability,
     codex_adapter_is_outdated, create_time_agent_command_override, default_agent_command,
     effective_agent_command, find_nvm_default_bin, find_via_login_shell,
-    is_login_shell_path_uninit, is_safe_nvm_tag, managed_agent_avatar_url, normalize_agent_args,
-    parse_semver_tag, preset_catalog_entry, probe_codex_acp_major_version, record_agent_command,
-    refresh_login_shell_path, try_record_agent_command, PresetHarness, BUZZ_AGENT_AVATAR_URL,
-    CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL, GOOSE_AVATAR_URL,
+    is_login_shell_path_uninit, is_safe_nvm_tag, managed_agent_avatar_url, node_required,
+    normalize_agent_args, parse_semver_tag, preset_catalog_entry, preset_harness_ids,
+    probe_codex_acp_major_version, record_agent_command, refresh_login_shell_path,
+    try_record_agent_command, PresetHarness, BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL,
+    CODEX_AVATAR_URL, GOOSE_AVATAR_URL,
 };
 use crate::managed_agents::AcpAvailabilityStatus;
 
@@ -199,13 +200,37 @@ const ADAPTER_PRESET: PresetHarness = PresetHarness {
     install_instructions_url: "https://example.com/install",
     install_hint: "Install the amp-acp npm adapter.",
     underlying_cli: Some("amp"),
+    adapter_install_commands: &["npm install -g amp-acp"],
+};
+
+/// Build a preset entry on a platform where npm IS reachable — the case every
+/// availability/wording test below cares about. The `node_required` platform
+/// branch has its own dedicated tests.
+fn preset_entry(
+    def: &PresetHarness,
+    resolve: impl Fn(&str) -> Option<PathBuf>,
+) -> crate::managed_agents::AcpRuntimeCatalogEntry {
+    preset_catalog_entry(def, resolve, false)
+}
+
+/// Docs-link-only preset: the command IS the vendor CLI and Buzz installs
+/// nothing. The shape of every preset except Amp.
+const DOCS_ONLY_PRESET: PresetHarness = PresetHarness {
+    id: "docs-only-test",
+    label: "Docs Only Test",
+    command: "vendor-cli",
+    args: &["acp"],
+    install_instructions_url: "https://example.com/install",
+    install_hint: "Install Vendor CLI from example.com.",
+    underlying_cli: None,
+    adapter_install_commands: &[],
 };
 
 #[test]
 fn preset_entry_adapter_missing_when_underlying_cli_present() {
     // Vendor CLI resolves, adapter does not — the state Tyler's Amp
     // hand-test hit. Must NOT degrade to the misleading NotInstalled.
-    let entry = preset_catalog_entry(&ADAPTER_PRESET, |cmd| {
+    let entry = preset_entry(&ADAPTER_PRESET, |cmd| {
         (cmd == "amp").then(|| PathBuf::from("/usr/local/bin/amp"))
     });
     assert_eq!(entry.availability, AcpAvailabilityStatus::AdapterMissing);
@@ -221,7 +246,7 @@ fn preset_entry_adapter_missing_when_underlying_cli_present() {
 
 #[test]
 fn preset_entry_not_installed_when_both_missing() {
-    let entry = preset_catalog_entry(&ADAPTER_PRESET, |_| None);
+    let entry = preset_entry(&ADAPTER_PRESET, |_| None);
     assert_eq!(entry.availability, AcpAvailabilityStatus::NotInstalled);
     assert!(entry.underlying_cli_path.is_none());
     assert!(!entry.requires_external_cli);
@@ -229,7 +254,7 @@ fn preset_entry_not_installed_when_both_missing() {
 
 #[test]
 fn preset_entry_available_when_adapter_and_cli_present() {
-    let entry = preset_catalog_entry(&ADAPTER_PRESET, |cmd| match cmd {
+    let entry = preset_entry(&ADAPTER_PRESET, |cmd| match cmd {
         "amp-acp" => Some(PathBuf::from("/usr/local/bin/amp-acp")),
         "amp" => Some(PathBuf::from("/usr/local/bin/amp")),
         _ => None,
@@ -250,7 +275,7 @@ fn preset_entry_stays_available_when_adapter_present_but_cli_absent() {
     // FULL classify_runtime predicate would flip this to CliMissing
     // (unselectable, with backwards install copy) — the adapter-missing
     // arm is the only one presets consume.
-    let entry = preset_catalog_entry(&ADAPTER_PRESET, |cmd| {
+    let entry = preset_entry(&ADAPTER_PRESET, |cmd| {
         (cmd == "amp-acp").then(|| PathBuf::from("/usr/local/bin/amp-acp"))
     });
     assert_eq!(entry.availability, AcpAvailabilityStatus::Available);
@@ -267,10 +292,199 @@ fn preset_entry_without_underlying_cli_stays_simple() {
         underlying_cli: None,
         ..ADAPTER_PRESET
     };
-    let entry = preset_catalog_entry(&preset, |_| None);
+    let entry = preset_entry(&preset, |_| None);
     assert_eq!(entry.availability, AcpAvailabilityStatus::NotInstalled);
     assert!(!entry.requires_external_cli);
     assert!(entry.underlying_cli_path.is_none());
+}
+
+// ── Preset auto-install (Tier-2) ────────────────────────────────────────────
+
+#[test]
+fn test_preset_with_adapter_install_commands_can_auto_install() {
+    let entry = preset_entry(&ADAPTER_PRESET, |_| None);
+    assert!(
+        entry.can_auto_install,
+        "a preset carrying install commands must offer the Doctor toggle"
+    );
+}
+
+#[test]
+fn test_preset_without_adapter_install_commands_cannot_auto_install() {
+    // The docs-link-only shape: every preset except Amp. Nothing to run, so
+    // the toggle must stay disabled rather than invoking a no-op install.
+    let entry = preset_entry(&DOCS_ONLY_PRESET, |_| None);
+    assert!(!entry.can_auto_install);
+}
+
+#[test]
+fn test_installable_preset_node_required_when_npm_unavailable() {
+    // Buzz cannot provide npm on this platform and none is on PATH: Doctor
+    // must send the user to nodejs.org instead of offering a toggle that
+    // cannot possibly succeed.
+    let entry = preset_catalog_entry(&ADAPTER_PRESET, |_| None, true);
+    assert_eq!(entry.availability, AcpAvailabilityStatus::NotInstalled);
+    assert!(entry.node_required);
+}
+
+#[test]
+fn test_installable_preset_not_node_required_when_npm_available() {
+    let entry = preset_catalog_entry(&ADAPTER_PRESET, |_| None, false);
+    assert!(!entry.node_required);
+}
+
+#[test]
+fn test_docs_only_preset_never_node_required() {
+    // No npm-backed install to gate, so the nodejs.org nudge would be noise
+    // even on a platform with no npm at all.
+    let entry = preset_catalog_entry(&DOCS_ONLY_PRESET, |_| None, true);
+    assert!(!entry.node_required);
+}
+
+#[test]
+fn test_available_preset_not_node_required_despite_missing_npm() {
+    // The adapter already resolves; nothing will be installed, so the
+    // platform's npm situation is irrelevant.
+    let entry = preset_catalog_entry(
+        &ADAPTER_PRESET,
+        |cmd| (cmd == "amp-acp").then(|| PathBuf::from("/usr/local/bin/amp-acp")),
+        true,
+    );
+    assert_eq!(entry.availability, AcpAvailabilityStatus::Available);
+    assert!(!entry.node_required);
+}
+
+#[test]
+fn test_amp_preset_carries_npm_adapter_install() {
+    // Pins the one populated entry in the shipped catalog. `amp-acp` is both
+    // the probed command and the npm package's bin name, so the installed
+    // global shim is exactly what discovery looks for.
+    let plan = acp_install_plan("amp").expect("amp must resolve as installable");
+    assert_eq!(plan.adapter_install_commands, ["npm install -g amp-acp"]);
+    assert_eq!(plan.adapter_commands, ["amp-acp"]);
+    assert_eq!(plan.underlying_cli, Some("amp"));
+}
+
+#[test]
+fn test_every_other_preset_has_no_install_commands() {
+    // Scope guard: Will's ruling is adapters only, and Amp is the only ACP
+    // adapter on npm today. This reds if a vendor-CLI preset gains an
+    // install command without that ruling being revisited.
+    for id in preset_harness_ids() {
+        if *id == "amp" {
+            continue;
+        }
+        let plan = acp_install_plan(id).expect("every preset id must resolve");
+        assert!(
+            plan.adapter_install_commands.is_empty(),
+            "preset {id} must stay docs-link only"
+        );
+    }
+}
+
+#[test]
+fn test_preset_install_plan_carries_no_cli_install_commands() {
+    // A preset's underlying_cli is a status probe, never an install target:
+    // Phase 1 of the installer must find nothing to run and fall through to
+    // the adapter phase rather than erroring.
+    let plan = acp_install_plan("amp").expect("amp must resolve");
+    assert!(plan.underlying_cli.is_some());
+    assert!(
+        plan.cli_install_commands.is_empty(),
+        "presets never install the vendor CLI"
+    );
+}
+
+#[test]
+fn test_builtin_install_plan_still_resolves_through_shared_lookup() {
+    // Builtins must keep their CLI install steps and full command list.
+    let plan = acp_install_plan("codex").expect("codex must resolve");
+    assert_eq!(plan.underlying_cli, Some("codex"));
+    assert!(!plan.cli_install_commands.is_empty());
+    assert!(plan
+        .adapter_install_commands
+        .iter()
+        .any(|cmd| cmd.contains("codex-acp")));
+    assert!(plan.adapter_commands.contains(&"codex-acp"));
+}
+
+#[test]
+fn test_custom_harness_id_has_no_install_plan() {
+    // Tier-3 boundary: custom harnesses carry a user-typed install hint.
+    // Resolving one here would wire a one-click button to a user-supplied
+    // shell string. `None` is what keeps `can_auto_install` false for them.
+    assert!(acp_install_plan("my-custom-harness").is_none());
+    assert!(acp_install_plan("").is_none());
+}
+
+/// The Tier-3 boundary as the catalog actually exposes it.
+///
+/// The static-lookup test above passes an id that no tier defines, so it would
+/// stay green even if a *loaded* custom entry set `can_auto_install: true`.
+/// This drives the real loader through `discover_acp_runtimes_from`, selects
+/// the `HarnessSource::Custom` entry, and pins the flag the UI gates on — with
+/// an install hint deliberately written to look like a runnable npm command, so
+/// the assertion fails if that free text is ever promoted to an install plan.
+#[test]
+fn test_loaded_custom_harness_never_offers_auto_install() {
+    use crate::managed_agents::custom_harnesses::registry_test_lock;
+    use crate::managed_agents::discovery::discover_acp_runtimes_from;
+    use crate::managed_agents::HarnessSource;
+    use std::fs;
+    use tempfile::tempdir;
+
+    // Discovery warms the process-global PATH caches and publishes to the
+    // global harness registry. Lock order matches the other discovery tests:
+    // path lock first, then registry.
+    let _path_guard = crate::managed_agents::lock_path_mutex();
+    let _lock = registry_test_lock();
+    let dir = tempdir().unwrap();
+    fs::write(
+        dir.path().join("sneaky-harness.json"),
+        r#"{
+            "id": "sneaky-harness",
+            "label": "Sneaky Harness",
+            "command": "sneaky-harness-bin",
+            "args": [],
+            "installHint": "npm install -g sneaky-harness"
+        }"#,
+    )
+    .unwrap();
+
+    let entries = discover_acp_runtimes_from(Some(dir.path()));
+    let entry = entries
+        .iter()
+        .find(|e| e.id == "sneaky-harness")
+        .expect("custom entry must appear in catalog");
+
+    assert_eq!(entry.source, HarnessSource::Custom);
+    assert_eq!(
+        entry.install_hint, "npm install -g sneaky-harness",
+        "precondition: the hint is executable-looking free text"
+    );
+    assert!(
+        !entry.can_auto_install,
+        "a loaded custom harness must never offer one-click install"
+    );
+    assert!(
+        !entry.node_required,
+        "no install plan means no Node.js gate to report"
+    );
+    assert!(
+        acp_install_plan(&entry.id).is_none(),
+        "and it must resolve to no install plan"
+    );
+}
+
+#[test]
+fn test_node_required_ignores_non_npm_install_commands() {
+    // CLI installers are curl-pipes; they need no npm, so a missing npm must
+    // not gate them.
+    assert!(!node_required(
+        &AcpAvailabilityStatus::NotInstalled,
+        &["curl -fsSL https://example.com/install.sh | bash"],
+        true,
+    ));
 }
 
 fn persona_with_runtime(id: &str, runtime: Option<&str>) -> crate::managed_agents::AgentDefinition {

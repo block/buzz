@@ -252,6 +252,25 @@ function RuntimeStatus({
     );
   }
 
+  // Mirrors Doctor's gate (`canAutoInstall && !nodeRequired`): when Buzz has no
+  // npm to run the install with, offer Node.js instead of an install that
+  // cannot succeed. Only an entry that actually has an install plan is
+  // diverted, so docs-link-only runtimes keep their instructions link.
+  if (runtime.canAutoInstall && runtime.nodeRequired) {
+    return (
+      <Button
+        aria-label={`Install Node.js for ${runtime.label}`}
+        className="buzz-onboarding-runtime-setup h-5 rounded-full bg-[var(--buzz-welcome-chartreuse)]/30 px-2.5 font-mono !text-badge font-normal uppercase text-foreground hover:bg-[var(--buzz-welcome-chartreuse)]/40"
+        data-testid={`onboarding-runtime-node-${runtime.id}`}
+        onClick={() => void openUrl("https://nodejs.org")}
+        type="button"
+        variant="ghost"
+      >
+        INSTALL NODE.JS
+      </Button>
+    );
+  }
+
   const installLabel = installError ? "RETRY INSTALL" : "INSTALL";
   if (runtime.canAutoInstall) {
     return (

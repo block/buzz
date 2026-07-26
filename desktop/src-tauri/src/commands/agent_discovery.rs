@@ -294,7 +294,7 @@ fn install_acp_runtime_blocking(runtime_id: &str) -> Result<InstallRuntimeResult
     }
     let _guard = Guard(runtime_id.to_string());
 
-    let runtime = crate::managed_agents::known_acp_runtime_exact(runtime_id)
+    let plan = crate::managed_agents::acp_install_plan(runtime_id)
         .ok_or_else(|| format!("unknown runtime: {runtime_id}"))?;
 
     let mut steps = Vec::new();
@@ -303,9 +303,13 @@ fn install_acp_runtime_blocking(runtime_id: &str) -> Result<InstallRuntimeResult
     // Today every entry in `cli_install_commands` is a curl-pipe; npm-backed
     // adapter installs live in Phase 2 below where they are rewritten to a
     // Buzz-private prefix before execution.
-    if let Some(cli) = runtime.underlying_cli {
+    //
+    // Presets carry no CLI install commands, so an absent vendor CLI is a
+    // no-op here, not a failure: their adapter phase can still run (Amp's
+    // `amp-acp` installs and resolves whether or not `amp` is present).
+    if let Some(cli) = plan.underlying_cli {
         if crate::managed_agents::resolve_command(cli).is_none() {
-            for cmd in runtime.cli_install_commands_for_os() {
+            for cmd in plan.cli_install_commands {
                 let result = run_install_command_with_retry("cli", cmd);
                 let success = result.success;
                 steps.push(result);
@@ -325,15 +329,15 @@ fn install_acp_runtime_blocking(runtime_id: &str) -> Result<InstallRuntimeResult
     // For the codex runtime, "found" is not enough — the resolved binary must also
     // pass the 1.x version gate. An outdated 0.16.x adapter must be overwritten by
     // the new npm install so the CODEX_CONFIG spawn contract works correctly.
-    let adapter_path = runtime
-        .commands
+    let adapter_path = plan
+        .adapter_commands
         .iter()
         .find_map(|cmd| crate::managed_agents::resolve_command(cmd));
     let adapter_probe_path = crate::managed_agents::readiness::cli_probe::augmented_path();
     if let Some(cmds) = plan_adapter_install(
         runtime_id,
         adapter_path.as_deref(),
-        runtime.adapter_install_commands,
+        plan.adapter_install_commands,
         adapter_probe_path.as_deref(),
     ) {
         let use_managed_npm =
@@ -1479,6 +1483,54 @@ mod tests {
             plan.is_none(),
             "non-codex runtime with resolved binary must not trigger reinstall"
         );
+    }
+
+    // ── preset (Tier-2) install resolution ───────────────────────────────────
+
+    #[test]
+    fn test_amp_preset_takes_plain_adapter_missing_arm() {
+        // `plan_adapter_install`'s only special case is codex. Amp must land on
+        // the adapter-missing arm and get its catalog command verbatim — no
+        // uninstall-first sequence.
+        let plan = crate::managed_agents::acp_install_plan("amp").expect("amp resolves");
+        let planned = plan_adapter_install(
+            "amp",
+            None,
+            plan.adapter_install_commands,
+            Some("/usr/bin:/bin"),
+        );
+        assert_eq!(planned, Some(vec!["npm install -g amp-acp"]));
+    }
+
+    #[test]
+    fn test_amp_preset_with_adapter_present_needs_no_install() {
+        // Non-codex + resolved adapter → nothing to do. Pins that the preset
+        // does not inherit codex's version-probe arm.
+        let bin = std::path::Path::new("/usr/local/bin/amp-acp");
+        assert!(
+            plan_adapter_install("amp", Some(bin), &["npm install -g amp-acp"], None).is_none(),
+            "a present preset adapter must not trigger a reinstall"
+        );
+    }
+
+    #[test]
+    fn test_preset_phase_one_no_ops_when_vendor_cli_absent() {
+        // Amp's underlying_cli is Some("amp") but presets carry no CLI install
+        // commands, so the Phase-1 loop body must never execute — an absent
+        // `amp` is a no-op, not an error and not an install attempt.
+        let plan = crate::managed_agents::acp_install_plan("amp").expect("amp resolves");
+        assert!(plan.underlying_cli.is_some());
+        assert_eq!(
+            plan.cli_install_commands.len(),
+            0,
+            "iterating cli_install_commands for a preset must yield no steps"
+        );
+    }
+
+    #[test]
+    fn test_unknown_runtime_has_no_install_plan() {
+        // The guard that keeps custom (Tier-3) harnesses out of the installer.
+        assert!(crate::managed_agents::acp_install_plan("definitely-not-a-runtime").is_none());
     }
 
     // ── should_restart_after_install ─────────────────────────────────────────

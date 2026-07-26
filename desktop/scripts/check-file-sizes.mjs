@@ -333,7 +333,13 @@ const overrides = new Map([
   // absent, so AdapterMissing replaces the misleading NotInstalled. Includes
   // the deliberate-divergence doc comments; net after the inline preset
   // entries.push block collapsed into the helper.
-  ["src-tauri/src/managed_agents/discovery.rs", 1835],
+  // +101: preset auto-install — PresetHarness.adapter_install_commands (per-entry,
+  // populated for Amp only) drives can_auto_install and node_required, the
+  // node_required predicate is extracted and shared with the builtin path, and
+  // AcpInstallPlan / acp_install_plan project the installer's slice of either
+  // tier behind one lookup so presets resolve without widening KnownAcpRuntime.
+  // Includes the tier-boundary doc comments.
+  ["src-tauri/src/managed_agents/discovery.rs", 1936],
   // BYOH — save_custom_harness_to_dir (backup-swap atomic write) + save_and_warm /
   // delete_and_warm (persist-mutex serialization for concurrent-safe registry
   // refresh, B-6). Also: id/collision/load/registry tests (from the file base) +
@@ -378,7 +384,15 @@ const overrides = new Map([
   // Available both-present AND adapter-present/CLI-absent — the selectability
   // regression guard), bound to an injectable resolver so the tests stay
   // PATH-independent.
-  ["src-tauri/src/managed_agents/discovery/tests.rs", 1871],
+  // +155: preset auto-install coverage — can_auto_install derivation (both
+  // arms), node_required on managed-node-supported AND unsupported platforms,
+  // the available-adapter and docs-only negatives, acp_install_plan resolution
+  // for preset/builtin/custom-id, and a scope guard asserting Amp is the only
+  // preset carrying install commands.
+  // +59: Tier-3 boundary through the real loader — a custom definition whose
+  // free-text install hint looks executable must still report
+  // can_auto_install: false out of discover_acp_runtimes_from.
+  ["src-tauri/src/managed_agents/discovery/tests.rs", 2085],
   // identity-import-keyring: the identity resolution state machine's behavioral
   // matrix (46 tests over FakeIdentityStore — probe × marker × file cells,
   // adoption / read-back-corruption / marker-failure arms, recovery-mode
@@ -616,7 +630,11 @@ const overrides = new Map([
   // return value so the frontend immediately has the updated env.
   // +1: rebase over main (#2680) — requires_external_cli: false added to
   // save_custom_harness catalog entry construction (new required field).
-  ["src-tauri/src/commands/agent_discovery.rs", 2167],
+  // +52: preset auto-install — install_acp_runtime_blocking resolves through
+  // acp_install_plan (builtins then presets) instead of known_acp_runtime_exact,
+  // plus tests pinning that Amp takes the plain adapter-missing arm and that
+  // Phase 1 no-ops for a preset whose vendor CLI is absent.
+  ["src-tauri/src/commands/agent_discovery.rs", 2219],
   // draft-persistence predicate: submit-time `loadDraft` check + inline comment
   // + deps-array entry in submitMessage closes the never-persisted-boundary
   // defect (Thufir Pass-3 finding). Load-bearing correctness fix; queued to

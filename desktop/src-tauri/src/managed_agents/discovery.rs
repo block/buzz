@@ -992,13 +992,34 @@ pub(crate) fn find_command(command: &str) -> Option<PathBuf> {
     resolve_command(command)
 }
 
-/// Returns true when the runtime has at least one adapter install step that
-/// is an npm global install. Used to determine whether Node.js is required.
-fn runtime_needs_npm(runtime: &KnownAcpRuntime) -> bool {
-    runtime
-        .adapter_install_commands
+/// True when no npm is reachable for an npm-backed install: Buzz cannot
+/// provide its private Node runtime on this platform AND the machine has no
+/// system `npm`/`node`.
+fn npm_unavailable() -> bool {
+    buzz_managed_node_bin_dir().is_none()
+        && resolve_command("npm").is_none()
+        && resolve_command("node").is_none()
+}
+
+/// `node_required` means Buzz cannot provide npm for this platform, so an
+/// npm-backed install cannot possibly succeed and Doctor must send the user
+/// to nodejs.org instead of offering a toggle.
+///
+/// Only adapter commands are considered: CLI install steps are curl-pipe
+/// installers, never npm. `npm_unavailable` is passed in rather than probed
+/// so the platform branch is testable on any machine.
+fn node_required(
+    availability: &AcpAvailabilityStatus,
+    adapter_install_commands: &[&str],
+    npm_unavailable: bool,
+) -> bool {
+    matches!(
+        availability,
+        AcpAvailabilityStatus::AdapterMissing | AcpAvailabilityStatus::NotInstalled
+    ) && adapter_install_commands
         .iter()
         .any(|cmd| is_npm_global_install(cmd))
+        && npm_unavailable
 }
 
 /// Returns `true` when `cmd` is an npm global install/uninstall invocation.
@@ -1363,13 +1384,11 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime) -> PartialEntr
     // node_required now means Buzz cannot provide npm for this platform.
     // On supported desktop platforms, Buzz downloads a private Node/npm
     // runtime into app data before running npm-backed adapter installs.
-    let node_required = matches!(
-        availability,
-        AcpAvailabilityStatus::AdapterMissing | AcpAvailabilityStatus::NotInstalled
-    ) && runtime_needs_npm(runtime)
-        && buzz_managed_node_bin_dir().is_none()
-        && resolve_command("npm").is_none()
-        && resolve_command("node").is_none();
+    let node_required = node_required(
+        &availability,
+        runtime.adapter_install_commands,
+        npm_unavailable(),
+    );
 
     PartialEntry {
         runtime,
@@ -1405,10 +1424,18 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime) -> PartialEntr
 ///
 /// Post-install verification only needs to know whether the requested runtime
 /// resolves, so it should not pay the cost of authenticating every catalog entry.
+///
+/// Covers presets as well as builtins: any runtime the installer can act on
+/// must also be verifiable, or a successful preset install reports as failed.
+/// The preset arm builds the full catalog entry and keeps only the
+/// availability — deliberately, so verification can never disagree with what
+/// the catalog will show the user a moment later.
 pub(crate) fn discover_acp_runtime_availability(runtime_id: &str) -> Option<AcpAvailabilityStatus> {
-    known_acp_runtime_exact(runtime_id)
-        .map(discover_acp_runtime_phase1)
-        .map(|partial| partial.entry.availability)
+    if let Some(runtime) = known_acp_runtime_exact(runtime_id) {
+        return Some(discover_acp_runtime_phase1(runtime).entry.availability);
+    }
+    preset_harness_exact(runtime_id)
+        .map(|def| preset_catalog_entry(def, find_command, npm_unavailable()).availability)
 }
 
 // ── Tier-2 preset harnesses ────────────────────────────────────────────────
@@ -1436,6 +1463,15 @@ struct PresetHarness {
     /// the `CliMissing` copy would tell the user to install the adapter
     /// they already have. `None` when the command IS the vendor CLI.
     underlying_cli: Option<&'static str>,
+    /// Shell commands that install this preset's ACP adapter, run in order by
+    /// `install_acp_runtime_blocking`. Empty — the default — means no
+    /// auto-install: the Doctor toggle stays disabled and the card is
+    /// docs-link only. npm-global shapes are rewritten to Buzz's private npm
+    /// prefix before execution, exactly as for the builtins.
+    ///
+    /// There is deliberately no CLI-install counterpart: a preset's
+    /// `underlying_cli` is a status probe, never an install target.
+    adapter_install_commands: &'static [&'static str],
 }
 
 /// Build the catalog entry for one preset harness through an injectable
@@ -1448,9 +1484,14 @@ struct PresetHarness {
 /// distinguish `AdapterMissing` (vendor CLI present) from `NotInstalled`
 /// (neither found). See the `underlying_cli` field doc for why the full
 /// `classify_runtime` predicate is deliberately not used here.
+///
+/// `npm_unavailable` is injected for the same reason as `resolve`: it is a
+/// platform probe, and the `node_required` branch it drives has to be
+/// exercised on both a managed-node-supported and an unsupported platform.
 fn preset_catalog_entry(
     def: &PresetHarness,
     resolve: impl Fn(&str) -> Option<PathBuf>,
+    npm_unavailable: bool,
 ) -> AcpRuntimeCatalogEntry {
     let (availability, command, binary_path) = match resolve(def.command) {
         Some(path) => (
@@ -1480,6 +1521,8 @@ fn preset_catalog_entry(
         def.args.iter().map(|s| s.to_string()).collect(),
     );
 
+    let node_required = node_required(&availability, def.adapter_install_commands, npm_unavailable);
+
     AcpRuntimeCatalogEntry {
         id: def.id.to_string(),
         label: def.label.to_string(),
@@ -1495,7 +1538,7 @@ fn preset_catalog_entry(
         thinking_env_var: None,
         install_hint: def.install_hint.to_string(),
         install_instructions_url: def.install_instructions_url.to_string(),
-        can_auto_install: false,
+        can_auto_install: !def.adapter_install_commands.is_empty(),
         // Kept false even for adapter presets: presets carry one flat
         // install_hint (the adapter's), so the requiresExternalCli
         // "CLI is missing" wording would pair the wrong noun with it.
@@ -1503,7 +1546,7 @@ fn preset_catalog_entry(
         // consumer of the true case.
         requires_external_cli: false,
         underlying_cli_path,
-        node_required: false,
+        node_required,
         auth_status: AuthStatus::NotApplicable,
         login_hint: None,
         source: HarnessSource::Preset,
@@ -1521,6 +1564,7 @@ const PRESET_HARNESSES: &[PresetHarness] = &[
         install_instructions_url: "https://cursor.com/downloads",
         install_hint: "Install Cursor from cursor.com/downloads.",
         underlying_cli: None,
+        adapter_install_commands: &[],
     },
     PresetHarness {
         id: "omp",
@@ -1530,6 +1574,7 @@ const PRESET_HARNESSES: &[PresetHarness] = &[
         install_instructions_url: "https://github.com/can1357/oh-my-pi",
         install_hint: "Install Oh My Pi from github.com/can1357/oh-my-pi.",
         underlying_cli: None,
+        adapter_install_commands: &[],
     },
     PresetHarness {
         id: "grok",
@@ -1539,6 +1584,7 @@ const PRESET_HARNESSES: &[PresetHarness] = &[
         install_instructions_url: "https://build.x.ai/docs",
         install_hint: "Install Grok Build from build.x.ai.",
         underlying_cli: None,
+        adapter_install_commands: &[],
     },
     PresetHarness {
         id: "opencode",
@@ -1548,6 +1594,7 @@ const PRESET_HARNESSES: &[PresetHarness] = &[
         install_instructions_url: "https://opencode.ai/docs",
         install_hint: "Install OpenCode from opencode.ai/docs.",
         underlying_cli: None,
+        adapter_install_commands: &[],
     },
     PresetHarness {
         id: "kimi",
@@ -1557,6 +1604,7 @@ const PRESET_HARNESSES: &[PresetHarness] = &[
         install_instructions_url: "https://kimi.ai/download",
         install_hint: "Install Kimi Code from kimi.ai/download.",
         underlying_cli: None,
+        adapter_install_commands: &[],
     },
     PresetHarness {
         id: "amp",
@@ -1566,6 +1614,11 @@ const PRESET_HARNESSES: &[PresetHarness] = &[
         install_instructions_url: "https://github.com/tao12345666333/amp-acp",
         install_hint: "Install the amp-acp npm adapter: npm install -g amp-acp.",
         underlying_cli: Some("amp"),
+        // The only preset with an auto-install today. `amp-acp` is the npm
+        // package's own bin name, so the installed global shim is exactly
+        // the `command` probed above. The vendor `amp` CLI is NOT installed
+        // here — see the field doc.
+        adapter_install_commands: &["npm install -g amp-acp"],
     },
     PresetHarness {
         id: "hermes",
@@ -1575,6 +1628,7 @@ const PRESET_HARNESSES: &[PresetHarness] = &[
         install_instructions_url: "https://hermes-agent.nousresearch.com",
         install_hint: "Install Hermes Agent from hermes-agent.nousresearch.com.",
         underlying_cli: None,
+        adapter_install_commands: &[],
     },
     PresetHarness {
         id: "openclaw",
@@ -1591,6 +1645,7 @@ const PRESET_HARNESSES: &[PresetHarness] = &[
             needs BUZZ_* credentials at execution time, set them on the \
             Gateway's own environment separately.",
         underlying_cli: None,
+        adapter_install_commands: &[],
     },
 ];
 
@@ -1614,6 +1669,50 @@ pub(crate) fn preset_harness_definitions(
             },
         )
         .collect()
+}
+
+fn preset_harness_exact(id: &str) -> Option<&'static PresetHarness> {
+    PRESET_HARNESSES.iter().find(|p| p.id == id)
+}
+
+/// The install-time slice of a runtime, projected from either tier.
+///
+/// `install_acp_runtime_blocking` consumes exactly these four things, so one
+/// lookup can serve builtins and presets without either static type growing
+/// the other's fields — they differ deliberately (see
+/// `PresetHarness::underlying_cli`). This is the narrow intersection.
+pub(crate) struct AcpInstallPlan {
+    /// Vendor CLI to probe before the adapter phase.
+    pub underlying_cli: Option<&'static str>,
+    /// CLI install steps, run only when `underlying_cli` is absent. Always
+    /// empty for presets, whose vendor CLI is installed out of band.
+    pub cli_install_commands: &'static [&'static str],
+    /// Adapter install steps. Empty means no auto-install.
+    pub adapter_install_commands: &'static [&'static str],
+    /// Commands to probe for an already-installed adapter.
+    pub adapter_commands: &'static [&'static str],
+}
+
+/// Resolve the install plan for `runtime_id`, checking builtins then presets.
+///
+/// `None` for an unknown id — including custom (Tier-3) harnesses, whose
+/// install hint is user-typed text and never an executable plan.
+pub(crate) fn acp_install_plan(runtime_id: &str) -> Option<AcpInstallPlan> {
+    if let Some(runtime) = known_acp_runtime_exact(runtime_id) {
+        return Some(AcpInstallPlan {
+            underlying_cli: runtime.underlying_cli,
+            cli_install_commands: runtime.cli_install_commands_for_os(),
+            adapter_install_commands: runtime.adapter_install_commands,
+            adapter_commands: runtime.commands,
+        });
+    }
+    let preset = preset_harness_exact(runtime_id)?;
+    Some(AcpInstallPlan {
+        underlying_cli: preset.underlying_cli,
+        cli_install_commands: &[],
+        adapter_install_commands: preset.adapter_install_commands,
+        adapter_commands: std::slice::from_ref(&preset.command),
+    })
 }
 
 /// Return the static slice of preset harness IDs.
@@ -1712,6 +1811,8 @@ pub fn discover_acp_runtimes_from(
         entries.iter().map(|e| e.id.clone()).collect();
 
     // Phase 2.5: insert static preset entries (PATH-probed, not editable/deletable).
+    // The npm probe is platform state, identical for every preset — resolve once.
+    let npm_unavailable = npm_unavailable();
     for def in PRESET_HARNESSES {
         if seen_ids.contains(def.id) {
             // Builtin or earlier preset shadowed this id — skip silently.
@@ -1719,7 +1820,7 @@ pub fn discover_acp_runtimes_from(
         }
         seen_ids.insert(def.id.to_string());
 
-        entries.push(preset_catalog_entry(def, find_command));
+        entries.push(preset_catalog_entry(def, find_command, npm_unavailable));
     }
 
     // Phase 3: load and append custom harness definitions.
