@@ -43,7 +43,7 @@ Buzz is an agent platform, so AI-assisted PRs are welcome. No need to disclose t
 
 We squash-merge, so your PR title becomes the commit subject in `main`. Use [Conventional Commits](https://www.conventionalcommits.org/) format: `feat(mcp): add get_feed_actions tool`. The type prefix (`feat`, `fix`, `docs`, `refactor`, `test`, `chore`) is required. See the [Commit Messages](#commit-messages) section for the full reference.
 
-Every commit needs a Developer Certificate of Origin sign-off, so commit with `git commit -s` — it appends the `Signed-off-by` trailer that certifies you wrote the change and can contribute it. The required **DCO Check** blocks merge without it on every commit, and it's the most common reason new PRs stall. If you already pushed unsigned commits, run `git rebase --signoff main` and force-push. Running `just hooks` installs a `commit-msg` hook that adds the trailer for you.
+Every commit needs a Developer Certificate of Origin sign-off, so commit with `git commit -s` — it appends the `Signed-off-by` trailer that certifies you wrote the change and can contribute it. The required **DCO Check** blocks merge without it on every commit, and it's the most common reason new PRs stall. If you already pushed unsigned commits, run `git rebase --signoff main` and force-push. Running `just hooks` installs a `commit-msg` hook that adds the trailer to commits you create locally; `git rebase` and `git cherry-pick` still need `--signoff` or `-s`.
 
 We review as capacity allows — focused PRs that follow this guide move fastest.
 
