@@ -8058,8 +8058,24 @@ async function handleSearchMessages(
       }
     }
 
+    const authorSet = args.authors?.length
+      ? new Set(args.authors.map((author) => author.toLowerCase()))
+      : null;
+
     const hits = mockHits
       .filter((hit) => {
+        if (args.channelId && hit.channel_id !== args.channelId) {
+          return false;
+        }
+        if (authorSet && !authorSet.has(hit.pubkey.toLowerCase())) {
+          return false;
+        }
+        if (args.since != null && hit.created_at < args.since) {
+          return false;
+        }
+        if (args.until != null && hit.created_at >= args.until) {
+          return false;
+        }
         if (!query) {
           return true;
         }
@@ -8077,11 +8093,26 @@ async function handleSearchMessages(
     };
   }
 
-  // NIP-50 search via POST /query
+  // NIP-50 search via POST /query — forward operator pushdown fields.
   const limit = args.limit ?? 20;
-  const events = await relayQuery(config, [
-    { kinds: [9, 40002], search: args.q, limit },
-  ]);
+  const filter: Record<string, unknown> = {
+    kinds: [9, 40002, 45001, 45003],
+    search: args.q,
+    limit,
+  };
+  if (args.channelId) {
+    filter["#h"] = [args.channelId];
+  }
+  if (args.authors?.length) {
+    filter.authors = args.authors;
+  }
+  if (args.since != null) {
+    filter.since = args.since;
+  }
+  if (args.until != null) {
+    filter.until = args.until;
+  }
+  const events = await relayQuery(config, [filter]);
   const hits = events.map((ev) => ({
     event_id: ev.id ?? "",
     pubkey: ev.pubkey ?? "",

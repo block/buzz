@@ -29,7 +29,10 @@ test("extracts from / in / after / before and keeps remaining FTS text", () => {
     "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
   );
   assert.equal(parsed.in, "#general");
-  assert.equal(parsed.since, Math.floor(new Date(2024, 0, 15).getTime() / 1000));
+  assert.equal(
+    parsed.since,
+    Math.floor(new Date(2024, 0, 15).getTime() / 1000),
+  );
   assert.equal(parsed.until, Math.floor(new Date(2024, 1, 1).getTime() / 1000));
 });
 
@@ -56,16 +59,47 @@ test("rejects impossible calendar dates", () => {
   assert.equal(parsed.text, "x after:2024-02-30");
 });
 
+test("does not treat hyphen or slash adjacent tokens as operators", () => {
+  assert.deepEqual(parseSearchOperators("built-in:react hooks"), {
+    text: "built-in:react hooks",
+    from: null,
+    in: null,
+    since: null,
+    until: null,
+  });
+  assert.deepEqual(parseSearchOperators("sign-in:flow broken"), {
+    text: "sign-in:flow broken",
+    from: null,
+    in: null,
+    since: null,
+    until: null,
+  });
+  assert.deepEqual(parseSearchOperators("https://x.com/in:foo"), {
+    text: "https://x.com/in:foo",
+    from: null,
+    in: null,
+    since: null,
+    until: null,
+  });
+});
+
+test("strips trailing punctuation from operator values", () => {
+  const parsed = parseSearchOperators("deploy in:general, from:@alice.");
+  assert.equal(parsed.in, "#general".replace("#", "") || "general");
+  assert.equal(parsed.in, "general");
+  assert.equal(parsed.from, "@alice");
+  assert.equal(parsed.text, "deploy");
+});
+
 test("helpers recognize hex pubkeys and channel uuids", () => {
   assert.equal(
-    isHexPubkey("deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"),
+    isHexPubkey(
+      "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+    ),
     true,
   );
   assert.equal(isHexPubkey("npub1abc"), false);
-  assert.equal(
-    isChannelUuid("11111111-1111-1111-1111-111111111111"),
-    true,
-  );
+  assert.equal(isChannelUuid("11111111-1111-1111-1111-111111111111"), true);
   assert.equal(normalizeFromHandle("@alice"), "alice");
   assert.equal(normalizeInChannel("#general"), "general");
 });

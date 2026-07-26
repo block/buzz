@@ -6,6 +6,10 @@
  *
  * Name resolution for `from:` / `in:` happens at the call site (autocomplete or
  * local channel/user lists). This module only splits syntax.
+ *
+ * Operators must start at a token boundary (start of string or whitespace). A
+ * word-boundary `\b` is intentionally avoided: it also matches after `-` / `/`,
+ * which would turn `built-in:react` or `https://x.com/in:foo` into operators.
  */
 
 export type ParsedSearchOperators = {
@@ -15,13 +19,21 @@ export type ParsedSearchOperators = {
   from: string | null;
   /** Raw `in:` value (channel uuid, #name, …), if present. */
   in: string | null;
-  /** `after:YYYY-MM-DD` → unix seconds at local start of day. */
+  /**
+   * `after:YYYY-MM-DD` → unix seconds at local start of that day (inclusive).
+   * Messages at or after this timestamp match.
+   */
   since: number | null;
-  /** `before:YYYY-MM-DD` → unix seconds at local start of day. */
+  /**
+   * `before:YYYY-MM-DD` → unix seconds at local start of that day (exclusive).
+   * Messages strictly before this timestamp match, so the named calendar day
+   * itself is not included (Slack-compatible).
+   */
   until: number | null;
 };
 
-const OPERATOR_RE = /\b(from|in|after|before):(\S+)/gi;
+/** Token-start only — not `\b`, which fires after hyphens and slashes. */
+const OPERATOR_RE = /(?:^|\s)(from|in|after|before):(\S+)/gi;
 
 function parseLocalDayStart(value: string): number | null {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
@@ -48,11 +60,19 @@ function parseLocalDayStart(value: string): number | null {
   return Math.floor(date.getTime() / 1000);
 }
 
+/** Drop trailing punctuation so `in:general,` still resolves to `general`. */
+function cleanOperatorValue(value: string): string {
+  return value.replace(/[.,;:!?]+$/g, "");
+}
+
 /**
  * Extract `from:` / `in:` / `after:` / `before:` operators from `raw`.
  *
  * Later occurrences of the same operator win. Date operators that are not
  * `YYYY-MM-DD` stay in the returned `text`.
+ *
+ * Multi-word handles (`from:@Will Pfleger`) are a known limitation of part 1:
+ * only the first whitespace-delimited token is captured.
  */
 export function parseSearchOperators(raw: string): ParsedSearchOperators {
   let from: string | null = null;
@@ -69,7 +89,7 @@ export function parseSearchOperators(raw: string): ParsedSearchOperators {
     lastIndex = index + match[0].length;
 
     const kind = match[1].toLowerCase();
-    const value = match[2];
+    const value = cleanOperatorValue(match[2]);
 
     if (kind === "from") {
       from = value;
@@ -132,3 +152,14 @@ export function normalizeInChannel(value: string): string {
 export function isChannelUuid(value: string): boolean {
   return UUID_RE.test(value);
 }
+
+/**
+ * Result of resolving a `from:` / `in:` operator against local candidates.
+ *
+ * Distinguishes "no operator" from "operator present but unmatched" so callers
+ * never silently widen the search when resolution fails.
+ */
+export type OperatorResolveResult<T> =
+  | { status: "none" }
+  | { status: "resolved"; value: T }
+  | { status: "unresolved" };

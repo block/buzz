@@ -93,9 +93,8 @@ fn search_messages_filter_requests_prefix_mode_for_topbar_typeahead() {
 
 #[test]
 fn search_messages_filter_emits_operator_fields() {
-    let authors = vec![
-        "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899".to_string(),
-    ];
+    let authors =
+        vec!["aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899".to_string()];
     let filter = build_search_messages_filter(
         "deploy",
         20,
@@ -109,9 +108,7 @@ fn search_messages_filter_emits_operator_fields() {
     assert_eq!(filter["#h"], serde_json::json!(["channel-uuid"]));
     assert_eq!(
         filter["authors"],
-        serde_json::json!([
-            "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
-        ])
+        serde_json::json!(["aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"])
     );
     assert_eq!(filter["since"], serde_json::json!(1_700_000_000));
     assert_eq!(filter["until"], serde_json::json!(1_700_086_400));

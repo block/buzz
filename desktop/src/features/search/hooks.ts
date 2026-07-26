@@ -40,13 +40,9 @@ export function useSearchMessagesQuery(
         since: since ?? undefined,
         until: until ?? undefined,
       }),
-    enabled:
-      enabled &&
-      (trimmedQuery.length >= 2 ||
-        Boolean(authors?.length) ||
-        since != null ||
-        until != null ||
-        Boolean(channelId)),
+    // Call sites own the "when to search" floor (FTS length / unresolved
+    // operators). Keep a single threshold here so it cannot drift.
+    enabled: enabled && trimmedQuery.length >= 2,
     staleTime: 30_000,
     gcTime: 5 * 60 * 1_000,
   });
