@@ -31,6 +31,43 @@ impl ManagedAgentRuntimeKey {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::ManagedAgentRuntimeKey;
+
+    #[test]
+    fn runtime_key_relay_url_is_canonical_identity_not_a_dial_address() {
+        // `relay_url` here is canonicalized (loopback folds to 127.0.0.1) so
+        // `runtime_id()` is stable for one pair no matter how the operator spelled
+        // the host. That is correct for keying, and it is exactly why this field
+        // must never be handed to the harness as the URL to connect to: the relay
+        // resolves a community from the literal request Host and fails closed on
+        // an unmapped one, so a deployment configured as `ws://localhost:PORT`
+        // rejects `ws://127.0.0.1:PORT` with a generic 404. `spawn_agent_child`
+        // dials the URL as requested; see the comment there.
+        let pubkey = "a".repeat(64);
+        for spelling in [
+            "ws://localhost:3000",
+            "ws://127.0.0.1:3000",
+            "ws://[::1]:3000",
+        ] {
+            let key = ManagedAgentRuntimeKey::new(pubkey.clone(), spelling)
+                .expect("loopback relay URL should be accepted");
+            assert_eq!(
+                key.relay_url, "ws://127.0.0.1:3000",
+                "spelling {spelling} should canonicalize"
+            );
+        }
+
+        // One identity across spellings, so the on-disk runtime path is stable.
+        let named = ManagedAgentRuntimeKey::new(pubkey.clone(), "ws://localhost:3000")
+            .expect("valid relay URL");
+        let numeric = ManagedAgentRuntimeKey::new(pubkey.clone(), "ws://127.0.0.1:3000")
+            .expect("valid relay URL");
+        assert_eq!(named.runtime_id(), numeric.runtime_id());
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ManagedAgentRuntimeLifecycle {

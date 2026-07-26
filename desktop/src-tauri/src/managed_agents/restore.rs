@@ -320,10 +320,12 @@ pub async fn restore_managed_agents_on_launch(
                                             // mid-turn session is not resumed by an
                                             // eager child — and silently reintroduces
                                             // N idle brains on every launch.
+                                            // Requested URL, not the canonical
+                                            // key: the child dials this.
                                             spawn_agent_child(
                                                 app,
                                                 record,
-                                                &key.relay_url,
+                                                &relay_url,
                                                 true,
                                                 owner_hex_ref,
                                             )
