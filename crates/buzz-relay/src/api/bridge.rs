@@ -281,9 +281,18 @@ fn extension_flag(raw: &Value, key: &str) -> bool {
 }
 
 fn extract_agent_owner(raw: &Value) -> Result<Option<Vec<u8>>, (StatusCode, Json<Value>)> {
-    let Some(owner) = raw.get("agent_owner").and_then(Value::as_str) else {
+    let Some(value) = raw.get("agent_owner") else {
         return Ok(None);
     };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let owner = value.as_str().ok_or_else(|| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            "agent_owner must be a 64-char hex pubkey",
+        )
+    })?;
     let bytes = hex::decode(owner)
         .ok()
         .filter(|bytes| bytes.len() == 32)
@@ -2929,6 +2938,12 @@ mod tests {
             vec![0xaa; 32]
         );
         assert!(extract_agent_owner(&serde_json::json!({"agent_owner": "bad"})).is_err());
+        assert!(extract_agent_owner(&serde_json::json!({"agent_owner": true})).is_err());
+        assert!(extract_agent_owner(&serde_json::json!({"agent_owner": 42})).is_err());
+        assert_eq!(
+            extract_agent_owner(&serde_json::json!({"agent_owner": null})).unwrap(),
+            None
+        );
         assert_eq!(extract_agent_owner(&serde_json::json!({})).unwrap(), None);
     }
 
