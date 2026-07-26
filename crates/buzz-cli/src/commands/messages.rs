@@ -584,7 +584,12 @@ pub async fn cmd_send_message(
             resolved.pubkeys
         }
         Err(e) if p.strict_mentions => return Err(e),
-        Err(_) => Vec::new(),
+        Err(_) => {
+            // Best-effort: do not block the send, but signal that auto-tagging
+            // was skipped so agents/humans can tell a silent miss from success.
+            eprintln!("warning: mention lookup failed, sending without @mention tags");
+            Vec::new()
+        }
     };
 
     // NIP-27: also extract nostr:npub1… inline references (skipping code regions)
