@@ -28,8 +28,9 @@ export default defineConfig({
             },
           }),
           BUZZ_REPLICATION_STREAMS: JSON.stringify({
-            [TEST_REPLICATION_SOURCE]: { filter: null },
+            [TEST_REPLICATION_SOURCE]: { mirror: true },
             "rendezvous/notes-only": { filter: [{ kinds: [1] }] },
+            "rendezvous/from-peer": { from_source: TEST_REPLICATION_SOURCE },
           }),
           BUZZ_REPLICATION_READERS: JSON.stringify({
             [TEST_REPLICATION_SOURCE]: {
@@ -39,6 +40,12 @@ export default defineConfig({
               ],
             },
             "rendezvous/notes-only": {
+              principal: "did:example:reader-node",
+              verification_keys: [
+                getPublicKey(hexToBytes(TEST_READER_SECRET_HEX)),
+              ],
+            },
+            "rendezvous/from-peer": {
               principal: "did:example:reader-node",
               verification_keys: [
                 getPublicKey(hexToBytes(TEST_READER_SECRET_HEX)),

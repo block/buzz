@@ -162,14 +162,23 @@ export function replicationReadRequestFromUnknown(
   return { source: record.source, cursor: cursor as string | null, limit };
 }
 
+/** One exported stream's selection, always explicit. */
+export type StreamExport =
+  | { mode: "mirror" }
+  | { mode: "filter"; filters: unknown[] }
+  | { mode: "from_source"; source: string };
+
 /**
- * Parses exported stream declarations: `{"<source>": {"filter": null|[...]}}`.
- * A stream's filter is part of its identity — redefinitions require a new
- * stream name. Malformed configuration exports nothing (fail closed).
+ * Parses exported stream declarations. Selection is normative and explicit:
+ * `{"filter": [...]}` selects by event predicate, `{"from_source": "<id>"}`
+ * selects by recorded ingest provenance, and a whole-journal export must be
+ * declared as `{"mirror": true}` — there is no silent default. A stream's
+ * selection is part of its identity; redefinitions require a new stream
+ * name. Malformed entries export nothing (fail closed).
  */
 export function parseStreamExports(
   raw: string | undefined,
-): Record<string, unknown[] | null> {
+): Record<string, StreamExport> {
   if (raw === undefined || raw.trim() === "") {
     return {};
   }
@@ -182,20 +191,21 @@ export function parseStreamExports(
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     return {};
   }
-  const streams: Record<string, unknown[] | null> = {};
+  const streams: Record<string, StreamExport> = {};
   for (const [name, candidate] of Object.entries(parsed)) {
-    if (
-      typeof candidate !== "object" ||
-      candidate === null ||
-      !("filter" in (candidate as Record<string, unknown>))
-    ) {
+    if (typeof candidate !== "object" || candidate === null) {
       continue;
     }
-    const filter = (candidate as Record<string, unknown>).filter;
-    if (filter === null) {
-      streams[name] = null;
-    } else if (Array.isArray(filter)) {
-      streams[name] = filter;
+    const entry = candidate as Record<string, unknown>;
+    if (entry.mirror === true) {
+      streams[name] = { mode: "mirror" };
+    } else if (Array.isArray(entry.filter)) {
+      streams[name] = { mode: "filter", filters: entry.filter };
+    } else if (
+      typeof entry.from_source === "string" &&
+      entry.from_source !== ""
+    ) {
+      streams[name] = { mode: "from_source", source: entry.from_source };
     }
   }
   return streams;

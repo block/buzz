@@ -151,6 +151,13 @@ export class RelayNode extends DurableObject<Env> {
         principal_pubkey TEXT
       ) WITHOUT ROWID, STRICT
     `);
+    // Ingest provenance is adapter metadata for provenance-selected exports;
+    // added later than the base schema, so the column is created lazily.
+    try {
+      this.#sql.exec("ALTER TABLE event_journal ADD COLUMN ingest_source TEXT");
+    } catch {
+      // Column already exists.
+    }
     // Destination-side replication checkpoints are operational state, kept
     // outside event history; the source remains the cursor's owner.
     this.#sql.exec(`
@@ -342,12 +349,13 @@ export class RelayNode extends DurableObject<Env> {
     const scanLimit = Math.min(request.limit, MAX_READ_BATCH);
     const rows = Array.from(
       this.#sql.exec<
-        { sequence: number; event_json: string } & Record<
-          string,
-          SqlStorageValue
-        >
+        {
+          sequence: number;
+          event_json: string;
+          ingest_source: string | null;
+        } & Record<string, SqlStorageValue>
       >(
-        `SELECT sequence, event_json FROM event_journal
+        `SELECT sequence, event_json, ingest_source FROM event_journal
          WHERE sequence > ? ORDER BY sequence ASC LIMIT ?`,
         after,
         scanLimit,
@@ -358,12 +366,18 @@ export class RelayNode extends DurableObject<Env> {
     const records = rows
       .map((row) => ({
         sequence: row.sequence,
+        ingestSource: row.ingest_source,
         event: JSON.parse(row.event_json) as Event,
       }))
-      .filter(
-        (row) =>
-          exported === null || matchFilters(exported as Filter[], row.event),
-      )
+      .filter((row) => {
+        if (exported.mode === "mirror") {
+          return true;
+        }
+        if (exported.mode === "filter") {
+          return matchFilters(exported.filters as Filter[], row.event);
+        }
+        return row.ingestSource === exported.source;
+      })
       .map((row) => ({
         source: request.source,
         cursor: `${READ_CURSOR_PREFIX}${row.sequence}`,
@@ -405,7 +419,7 @@ export class RelayNode extends DurableObject<Env> {
     ) {
       return rejected("authentication events are never journaled");
     }
-    const result = this.#applyEvent(record.event);
+    const result = this.#applyEvent(record.event, source);
     if (!result.accepted) {
       return rejected(result.message);
     }
@@ -499,7 +513,7 @@ export class RelayNode extends DurableObject<Env> {
     return null;
   }
 
-  #applyEvent(event: Event): WriteResult {
+  #applyEvent(event: Event, ingestSource: string | null = null): WriteResult {
     if (!verifySafely(event)) {
       return {
         event_id: event.id,
@@ -567,11 +581,12 @@ export class RelayNode extends DurableObject<Env> {
       }
       this.#sql.exec(
         `INSERT INTO event_journal (
-           event_id, event_json, replacement_key, effective
-         ) VALUES (?, ?, ?, 1)`,
+           event_id, event_json, replacement_key, effective, ingest_source
+         ) VALUES (?, ?, ?, 1, ?)`,
         event.id,
         eventJson,
         candidateKey,
+        ingestSource,
       );
     });
     this.#publishLive(event);

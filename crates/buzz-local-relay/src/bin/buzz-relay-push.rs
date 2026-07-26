@@ -97,12 +97,20 @@ impl Config {
                         .unwrap_or_default()
                 )
             })?;
-            match &entry["filter"] {
-                serde_json::Value::Null => None,
-                value => Some(
-                    serde_json::from_value::<Vec<Filter>>(value.clone())
-                        .context("stream filter must be a JSON array of NIP-01 filters")?,
-                ),
+            // Selection is explicit: a whole-journal export must be declared
+            // as {"mirror": true}; a bare null filter is rejected.
+            if entry["mirror"] == serde_json::Value::Bool(true) {
+                None
+            } else {
+                match &entry["filter"] {
+                    serde_json::Value::Array(_) => Some(
+                        serde_json::from_value::<Vec<Filter>>(entry["filter"].clone())
+                            .context("stream filter must be a JSON array of NIP-01 filters")?,
+                    ),
+                    _ => bail!(
+                        "stream {source_id:?} must declare {{\"filter\": [...]}} or {{\"mirror\": true}}"
+                    ),
+                }
             }
         } else {
             None

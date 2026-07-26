@@ -323,6 +323,33 @@ describe("replication read (rendezvous)", () => {
     expect(batch.caught_up).toBe(true);
   });
 
+  it("selects by ingest provenance, excluding directly submitted events", async () => {
+    const origin = "https://rendezvous-provenance.example";
+    const viaPeer = signedNote("arrived via the peer stream");
+    await pushRecords(origin, [record("local:1", viaPeer)]);
+    const direct = signedNote("submitted directly to the custodian");
+    await SELF.fetch(`${origin}/events`, {
+      method: "POST",
+      body: JSON.stringify(direct),
+    });
+
+    const page = await readStream(origin, "rendezvous/from-peer", null);
+    const batch = (await page.json()) as {
+      records: { event: { id: string } }[];
+      caught_up: boolean;
+    };
+    expect(batch.records.map((r) => r.event.id)).toEqual([viaPeer.id]);
+    expect(batch.caught_up).toBe(true);
+
+    const mirror = await readStream(origin, TEST_REPLICATION_SOURCE, null);
+    const everything = (await mirror.json()) as {
+      records: { event: { id: string } }[];
+    };
+    expect(everything.records.map((r) => r.event.id).sort()).toEqual(
+      [viaPeer.id, direct.id].sort(),
+    );
+  });
+
   it("fails closed for unknown streams, strangers, and the write-side peer", async () => {
     const origin = "https://rendezvous-denied.example";
     await pushRecords(origin, [record("local:1", signedNote("custodied"))]);
