@@ -130,6 +130,23 @@ test("empty slug returns null even with spawner context", () => {
   assert.equal(context, null);
 });
 
+test("slug and agentPubkey are trimmed in output", () => {
+  const context = resolveServerAgentEditContext({
+    relocatedToSpawner: "spawner123",
+    deployedSpawnerPubkey: null,
+    agentPubkey: "  agent-id  ",
+    slug: "  my-slug  ",
+    spawnerNameFor: () => "Spawner",
+  });
+
+  assert.deepEqual(context, {
+    spawnerPubkey: "spawner123",
+    specSlug: "my-slug",
+    agentPubkey: "agent-id",
+    spawnerName: "Spawner",
+  });
+});
+
 test("serverModelOptions returns null when ai is undefined", () => {
   const result = serverModelOptions(undefined, "some-provider");
   assert.equal(result, null);
