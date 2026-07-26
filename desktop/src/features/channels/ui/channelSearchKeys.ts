@@ -10,6 +10,7 @@ export const CHANNEL_SEARCH_KEYS = [
   "agentSessionChannel",
   "autoSend",
   "channelManagement",
+  "harness",
   "messageId",
   "profile",
   "profileTab",

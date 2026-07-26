@@ -26,9 +26,11 @@ export type { ChannelSearchKey } from "./channelSearchKeys";
  * tab), `agentSession` (agent session panel pubkey), `agentSessionChannel`
  * (optional channel scope for the agent session panel), `channelManagement`
  * (presence flag for the channel-management panel — open/closed only, so it
- * carries a sentinel `"1"` rather than an id), `autoSend` (draft auto-submit
- * trigger — cleared surgically after the auto-submit fires so `thread` and
- * all other panel state are preserved).
+ * carries a sentinel `"1"` rather than an id), `harness` (presence flag
+ * promoting the agent session to the full-screen harness view — also a
+ * sentinel `"1"`, and only meaningful alongside `agentSession`), `autoSend`
+ * (draft auto-submit trigger — cleared surgically after the auto-submit fires
+ * so `thread` and all other panel state are preserved).
  */
 
 export type PanelSetterOptions = HistorySearchSetterOptions;
@@ -39,6 +41,7 @@ export type PanelValueSetter = (
 ) => void;
 
 const CHANNEL_MANAGEMENT_OPEN_VALUE = "1";
+const HARNESS_OPEN_VALUE = "1";
 
 export function useChannelPanelHistoryState() {
   const { applyPatch, values } = useHistorySearchState(CHANNEL_SEARCH_KEYS);
@@ -71,10 +74,42 @@ export function useChannelPanelHistoryState() {
     [applyPatch],
   );
 
+  // Closing the agent session also leaves harness mode — a `harness` flag with
+  // no `agentSession` has nothing to render, so it must never outlive it.
   const setOpenAgentSessionPubkey = React.useCallback<PanelValueSetter>(
     (value, options) =>
       applyPatch(
-        { agentSession: value, agentSessionChannel: value ? undefined : null },
+        {
+          agentSession: value,
+          agentSessionChannel: value ? undefined : null,
+          harness: value ? undefined : null,
+        },
+        options,
+      ),
+    [applyPatch],
+  );
+
+  const setHarnessOpen = React.useCallback(
+    (open: boolean, options?: PanelSetterOptions) =>
+      applyPatch({ harness: open ? HARNESS_OPEN_VALUE : null }, options),
+    [applyPatch],
+  );
+
+  // Selecting the agent and raising the harness flag must land in ONE patch:
+  // two sequential applyPatch calls in the same tick both derive from the
+  // pre-patch search state, so the second would drop the first's key.
+  const openHarnessForAgent = React.useCallback(
+    (
+      agentPubkey: string,
+      channelId?: string | null,
+      options?: PanelSetterOptions,
+    ) =>
+      applyPatch(
+        {
+          agentSession: agentPubkey,
+          agentSessionChannel: channelId ?? undefined,
+          harness: HARNESS_OPEN_VALUE,
+        },
         options,
       ),
     [applyPatch],
@@ -114,6 +149,8 @@ export function useChannelPanelHistoryState() {
     channelManagementOpen: values.channelManagement != null,
     clearAutoSend,
     clearMessageRouteTarget,
+    harnessOpen: values.harness != null,
+    openHarnessForAgent,
     openAgentSessionChannelId: values.agentSessionChannel,
     openAgentSessionPubkey: values.agentSession,
     openThreadHeadId: values.thread,
@@ -121,6 +158,7 @@ export function useChannelPanelHistoryState() {
     profilePanelTab: profilePanelTabFromSearch(values.profileTab),
     profilePanelView: profilePanelViewFromSearch(values.profileView),
     setChannelManagementOpen,
+    setHarnessOpen,
     setOpenAgentSessionChannelId,
     setOpenAgentSessionPubkey,
     setOpenThreadHeadId,

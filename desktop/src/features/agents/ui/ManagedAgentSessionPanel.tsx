@@ -30,8 +30,11 @@ import {
   mergeObserverEventWindows,
   resolveDisplayEvents,
   resolveRawRailLayout,
+  isInjectedTranscriptId,
+  mergeTranscriptItems,
   scopeByChannel,
 } from "./agentSessionPanelLayout";
+import { scopeItemsToThread } from "./threadTurnScope";
 import { shorten } from "./agentSessionUtils";
 import {
   useObserverEvents,
@@ -57,6 +60,47 @@ type ManagedAgentSessionPanelProps = {
   profiles?: UserProfileLookup;
   rawEventsOverride?: ObserverEvent[];
   transcriptOverride?: TranscriptItem[];
+  /**
+   * Transcript rows to interleave with the observer-derived ones, by timestamp.
+   * Harness mode uses this to fold in the agent's published replies, which the
+   * ACP stream never carries (a reply is sent via the `buzz` CLI, so only the
+   * tool call appears — not the answer text).
+   */
+  extraTranscriptItems?: TranscriptItem[];
+  /**
+   * Hide only the *trailing* ACP narration row, plus usage rows.
+   *
+   * Two different assistant texts reach this panel. Intermediate narration —
+   * "now let me check X" between tool calls — is exactly the live progress a
+   * human wants to steer against, so it stays. The final narration is a
+   * third-person self-report ("Answered both questions…") that duplicates the
+   * published reply, so it goes. Hiding *all* narration (the earlier behaviour)
+   * threw away the useful half.
+   *
+   * Usage rows are dropped too: the harness surfaces live token counts in its
+   * status strip instead of as transcript entries.
+   */
+  hideTrailingNarration?: boolean;
+  /** Inline content beside the turn-liveness indicator. */
+  liveStatusSlot?: React.ReactNode;
+  /**
+   * Event ids of the messages belonging to one thread. When provided, the
+   * transcript is scoped to the turns those messages started.
+   *
+   * This is real scoping, not a time window: every item carries `turnId`, and a
+   * user row carries the `messageId` that triggered its turn, so a thread's
+   * turns can be identified exactly. A time-based boundary cannot separate two
+   * threads in the same channel — the older thread's window necessarily
+   * contains the newer thread's frames, which is precisely the leak this
+   * replaces.
+   */
+  threadMessageIds?: ReadonlySet<string>;
+  /**
+   * Observe the transcript actually rendered. Harness mode derives its live
+   * status strip (running commands, tokens, elapsed) from this rather than
+   * re-deriving the event pipeline itself.
+   */
+  onTranscriptChange?: (items: TranscriptItem[]) => void;
 };
 
 export function ManagedAgentSessionPanel({
@@ -75,6 +119,11 @@ export function ManagedAgentSessionPanel({
   profiles,
   rawEventsOverride,
   transcriptOverride,
+  extraTranscriptItems,
+  hideTrailingNarration = false,
+  liveStatusSlot,
+  threadMessageIds,
+  onTranscriptChange,
 }: ManagedAgentSessionPanelProps) {
   const hasObserver = isManagedAgentActive(agent);
   // Always read from the store — archived frames are ingested regardless of
@@ -116,7 +165,52 @@ export function ManagedAgentSessionPanel({
     () => buildTranscriptState(combinedEvents).items,
     [combinedEvents],
   );
-  const displayTranscript = transcriptOverride ?? derivedTranscript;
+  const displayTranscript = React.useMemo(() => {
+    const merged = mergeTranscriptItems(
+      transcriptOverride ?? derivedTranscript,
+      extraTranscriptItems ?? [],
+    );
+    // Thread scoping: drop only turns provably belonging to another thread, so
+    // the in-flight turn (whose prompt row may not exist yet) stays visible.
+    const scoped = scopeItemsToThread(
+      merged,
+      threadMessageIds,
+      isInjectedTranscriptId,
+    );
+
+    if (!hideTrailingNarration) {
+      return scoped;
+    }
+    // Usage rows always go — the status strip owns token reporting.
+    const withoutUsage = scoped.filter((item) => !item.id.startsWith("usage:"));
+    // Drop only the last `assistant:` row, and only once a published reply
+    // exists to supersede it. Everything earlier is intermediate progress.
+    const hasPublishedReply = withoutUsage.some((item) =>
+      item.id.startsWith("reply:"),
+    );
+    if (!hasPublishedReply) {
+      return withoutUsage;
+    }
+    let lastNarrationIndex = -1;
+    withoutUsage.forEach((item, index) => {
+      if (item.id.startsWith("assistant:")) {
+        lastNarrationIndex = index;
+      }
+    });
+    return lastNarrationIndex === -1
+      ? withoutUsage
+      : withoutUsage.filter((_, index) => index !== lastNarrationIndex);
+  }, [
+    derivedTranscript,
+    extraTranscriptItems,
+    hideTrailingNarration,
+    threadMessageIds,
+    transcriptOverride,
+  ]);
+
+  React.useEffect(() => {
+    onTranscriptChange?.(displayTranscript);
+  }, [displayTranscript, onTranscriptChange]);
 
   const displayEvents = React.useMemo(
     () => resolveDisplayEvents(combinedEvents, rawEventsOverride),
@@ -162,6 +256,7 @@ export function ManagedAgentSessionPanel({
         profiles={profiles}
         rawLayout={rawLayout}
         showRaw={showRaw}
+        liveStatusSlot={liveStatusSlot}
         transcript={displayTranscript}
         transcriptContentClassName={transcriptContentClassName}
         transcriptVariant={transcriptVariant}
@@ -206,6 +301,7 @@ function SessionHeader({
 }
 
 function SessionBody({
+  liveStatusSlot,
   agentAvatarUrl,
   agentName,
   agentPubkey,
@@ -240,6 +336,7 @@ function SessionBody({
   profiles?: UserProfileLookup;
   rawLayout: "responsive" | "exclusive";
   showRaw: boolean;
+  liveStatusSlot?: React.ReactNode;
   transcript: TranscriptItem[];
   transcriptContentClassName?: string;
   transcriptVariant: AgentSessionTranscriptVariant;
@@ -282,6 +379,7 @@ function SessionBody({
           )}
         >
           <AgentSessionTranscriptList
+            liveStatusSlot={liveStatusSlot}
             agentAvatarUrl={agentAvatarUrl}
             agentName={agentName}
             agentPubkey={agentPubkey}

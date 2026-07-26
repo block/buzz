@@ -17,6 +17,12 @@ export type ActivityRowStats = {
 export type ActivityRowToneScope = "none" | "tool" | "summary";
 
 type ActivityRowProps = {
+  /**
+   * Render expanded on mount. Uncontrolled (`<details open>`), so a reader can
+   * still collapse it — the point is that grouped tool runs are visible by
+   * default instead of hiding what the agent just did behind a click.
+   */
+  defaultOpen?: boolean;
   children: React.ReactNode;
   className?: string;
   openToneScope?: Exclude<ActivityRowToneScope, "none">;
@@ -38,6 +44,7 @@ type ActivityRowContentComponent = React.FC<ActivityRowContentProps> & {
 export function ActivityRow({
   children,
   className,
+  defaultOpen = false,
   openToneScope = "tool",
   testId,
   title,
@@ -65,8 +72,12 @@ export function ActivityRow({
       className={cn(
         openToneScope === "summary" ? "group/summary" : "group",
         "not-prose w-full",
+        // Grouped runs read as a side note, not body copy: cap the measure so
+        // the summary and its children stop spanning the full transcript width.
+        openToneScope === "summary" && "max-w-[55%] min-w-fit",
         className,
       )}
+      open={defaultOpen}
       data-testid={testId}
       title={title}
     >
@@ -90,7 +101,11 @@ export function ActivityRow({
       </summary>
       {contentChildren.map((child, index) => (
         <div
-          className={child.props.className}
+          className={cn(
+            openToneScope === "summary" &&
+              "ml-2 border-l border-border/40 pl-3",
+            child.props.className,
+          )}
           // biome-ignore lint/suspicious/noArrayIndexKey: content regions are static children
           key={index}
         >

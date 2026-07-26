@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Hash, LogIn } from "lucide-react";
+import { Hash, LogIn, TerminalSquare } from "lucide-react";
 import { AnimatePresence } from "motion/react";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useMediaUpload } from "@/features/messages/lib/useMediaUpload";
@@ -66,6 +66,11 @@ import { KIND_SYSTEM_MESSAGE } from "@/shared/constants/kinds";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
 import { channelChrome } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
+import { toast } from "sonner";
+
+import { HarnessModeView } from "@/features/agents/ui/HarnessModeView";
+import { resolveThreadHarnessAgentPubkey } from "@/features/agents/ui/threadHarnessTarget";
+import { cancelManagedAgentTurn } from "@/shared/api/agentControl";
 export const ChannelPane = React.memo(function ChannelPane({
   activeChannel,
   agentPubkeys,
@@ -143,6 +148,9 @@ export const ChannelPane = React.memo(function ChannelPane({
   shouldShowThreadSkeleton,
   openAgentSessionChannelId,
   openAgentSessionPubkey,
+  harnessOpen = false,
+  onHarnessOpenChange,
+  onOpenHarnessForAgent,
   onProfilePanelViewChange,
   onProfilePanelTabChange,
   profilePanelPubkey,
@@ -540,6 +548,102 @@ export const ChannelPane = React.memo(function ChannelPane({
       }),
     [agentSessionAgents, openAgentSessionPubkey, profilePanelPubkey, profiles],
   );
+
+  const handleEnterHarness = React.useCallback(() => {
+    onHarnessOpenChange?.(true);
+  }, [onHarnessOpenChange]);
+
+  // The thread's harness affordance targets whichever known agent the thread
+  // involves. Scanning head-first keeps the button pointed at the agent the
+  // thread was started with as replies accumulate.
+  const threadHarnessAgentPubkey = React.useMemo(() => {
+    if (!onOpenHarnessForAgent || !threadHeadMessage) {
+      return null;
+    }
+    return resolveThreadHarnessAgentPubkey({
+      messages: [
+        threadHeadMessage,
+        ...(threadMessages ?? []).map((entry) => entry.message),
+      ],
+      agentPubkeys: agentSessionAgents.map((agent) => agent.pubkey),
+    });
+  }, [
+    agentSessionAgents,
+    onOpenHarnessForAgent,
+    threadHeadMessage,
+    threadMessages,
+  ]);
+
+  const threadHarnessAction = React.useMemo(() => {
+    if (!threadHarnessAgentPubkey) {
+      return null;
+    }
+    return (
+      <Button
+        aria-label="Open harness mode"
+        data-testid="thread-enter-harness"
+        onClick={() =>
+          onOpenHarnessForAgent?.(threadHarnessAgentPubkey, activeChannelId)
+        }
+        size="icon"
+        title="Harness mode — full-screen agent session"
+        type="button"
+        variant="ghost"
+      >
+        <TerminalSquare />
+      </Button>
+    );
+  }, [activeChannelId, onOpenHarnessForAgent, threadHarnessAgentPubkey]);
+
+  const handleExitHarness = React.useCallback(() => {
+    onHarnessOpenChange?.(false);
+  }, [onHarnessOpenChange]);
+
+  // Human-authored messages of the open thread, head first — the harness's
+  // history rail. Agent output is excluded because the centre transcript already
+  // renders it in full; duplicating it here would just be noise.
+  // The agent's own replies in this thread, folded into the harness transcript
+  // so the final answer shows there alongside the reasoning that produced it.
+  const harnessAgentMessages = React.useMemo(() => {
+    if (!threadHeadMessage) {
+      return undefined;
+    }
+    return [
+      threadHeadMessage,
+      ...(threadMessages ?? []).map((entry) => entry.message),
+    ].filter((message) => message.isAgent);
+  }, [threadHeadMessage, threadMessages]);
+
+  const harnessThreadHistory = React.useMemo(() => {
+    if (!threadHeadMessage) {
+      return undefined;
+    }
+    return [
+      threadHeadMessage,
+      ...(threadMessages ?? []).map((entry) => entry.message),
+    ].filter((message) => !message.isAgent);
+  }, [threadHeadMessage, threadMessages]);
+
+  // Mirrors the agent-session panel's stop-turn affordance: the relay only
+  // forwards the control frame, so success means "signal sent", not "stopped".
+  const handleHarnessCancelTurn = React.useCallback(async () => {
+    if (!selectedAgent || !activeChannel) {
+      return;
+    }
+    try {
+      await cancelManagedAgentTurn(selectedAgent.pubkey, activeChannel.id);
+      toast.success(
+        `Stop signal sent to ${selectedAgent.name}. It may take a moment to respond.`,
+      );
+    } catch (error) {
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : `Failed to stop ${selectedAgent.name}'s current turn.`,
+      );
+    }
+  }, [activeChannel, selectedAgent]);
+
   const hasSplitAuxiliaryPane =
     useSplitAuxiliaryPane &&
     (channelManagementOpen ||
@@ -860,6 +964,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                 disabled={isComposerDisabled}
                 editTarget={threadEditTarget}
                 firstUnreadReplyId={threadFirstUnreadReplyId}
+                headerActions={threadHarnessAction}
                 huddleMemberPubkeys={huddleMemberPubkeys}
                 huddleMemberPubkeysPending={huddleMemberPubkeysPending}
                 isFollowingThread={isFollowingThread}
@@ -962,6 +1067,11 @@ export const ChannelPane = React.memo(function ChannelPane({
                 profiles={profiles}
                 onBack={onBackFromAgentSession}
                 onClose={onCloseAgentSession}
+                onEnterHarness={
+                  onHarnessOpenChange && activeChannel
+                    ? handleEnterHarness
+                    : undefined
+                }
                 widthPx={threadPanelWidthPx}
               />
             );
@@ -994,6 +1104,28 @@ export const ChannelPane = React.memo(function ChannelPane({
           })()
         ) : null}
       </AnimatePresence>
+      {harnessOpen && selectedAgent && activeChannel ? (
+        <HarnessModeView
+          agent={selectedAgent}
+          canCancelTurn={selectedAgent.canInterruptTurn}
+          channelId={activeChannel.id}
+          channelName={activeChannel.name}
+          composerDisabled={isComposerDisabled}
+          currentUserPubkey={currentPubkey ?? null}
+          isSending={isSending}
+          onCancelTurn={handleHarnessCancelTurn}
+          onExit={handleExitHarness}
+          // Harness mode is entered from a thread and leaves `?thread` intact,
+          // so replies must stay in that thread. `onSendThreadReply` resolves
+          // the thread context from `openThreadHeadId` itself; falling back to
+          // the channel send only when no thread is open.
+          onSend={openThreadHeadId ? onSendThreadReply : onSendMessage}
+          profiles={profiles}
+          agentMessages={harnessAgentMessages}
+          threadMessages={harnessThreadHistory}
+          typingPubkeys={openThreadHeadId ? threadTypingPubkeys : typingPubkeys}
+        />
+      ) : null}
     </div>
   );
 });

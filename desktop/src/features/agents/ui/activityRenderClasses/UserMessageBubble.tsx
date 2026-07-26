@@ -6,6 +6,7 @@ import {
 } from "@/features/profile/lib/identity";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { cn } from "@/shared/lib/cn";
+import { authorAccent } from "../authorAccent";
 import { useProfilePanel } from "@/shared/context/ProfilePanelContext";
 import { Markdown } from "@/shared/ui/markdown";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
@@ -89,6 +90,8 @@ export function UserMessageBubble({
       }
     : {};
 
+  const accent = authorAccent(item.authorPubkey);
+
   return (
     <div
       className={cn(
@@ -135,7 +138,11 @@ export function UserMessageBubble({
       >
         <div
           className={cn(
-            "w-full min-w-0 rounded-2xl border border-border/70 bg-transparent p-3 text-sm leading-relaxed text-foreground",
+            // Highlighted, not outlined: a prompt is the anchor you scan for
+            // when scrolling a long session, so it gets a filled tint and a
+            // per-author left rule (colour derived from the pubkey, stable
+            // across clients) instead of a faint border.
+            "w-full min-w-0 rounded-2xl border border-l-4 border-border/70 p-3 text-sm font-medium leading-relaxed text-foreground",
             shouldClampBubble && "relative max-h-36 overflow-hidden",
             messageLink &&
               "group/bubble cursor-pointer transition-colors hover:border-border hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
@@ -143,6 +150,10 @@ export function UserMessageBubble({
             bubbleClassName,
           )}
           ref={bubbleRef}
+          style={{
+            backgroundColor: accent.background,
+            borderLeftColor: accent.border,
+          }}
           {...bubbleLinkProps}
         >
           <Markdown
