@@ -1,6 +1,9 @@
+import 'dart:async';
+
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/relay/relay.dart';
+import 'pending_local_messages_provider.dart';
 
 class ThreadRepliesArgs {
   final String channelId;
@@ -80,6 +83,11 @@ class ThreadLocalRepliesNotifier extends Notifier<List<NostrEvent>> {
   void remove(String eventId) {
     state = state.where((event) => event.id != eventId).toList();
   }
+
+  void confirm(Set<String> eventIds) {
+    if (!state.any((event) => eventIds.contains(event.id))) return;
+    state = state.where((event) => !eventIds.contains(event.id)).toList();
+  }
 }
 
 final threadLocalRepliesProvider =
@@ -98,6 +106,20 @@ final threadRepliesWithLocalProvider =
     ) {
       final relayReplies = ref.watch(threadRepliesProvider(args));
       final localReplies = ref.watch(threadLocalRepliesProvider(args));
+      final authoritative = relayReplies.value;
+      if (authoritative != null && localReplies.isNotEmpty) {
+        final authoritativeIds = authoritative.map((event) => event.id).toSet();
+        if (localReplies.any((event) => authoritativeIds.contains(event.id))) {
+          Future.microtask(() {
+            ref
+                .read(threadLocalRepliesProvider(args).notifier)
+                .confirm(authoritativeIds);
+            ref
+                .read(pendingLocalMessagesProvider(args.channelId).notifier)
+                .confirm(authoritativeIds);
+          });
+        }
+      }
       if (localReplies.isEmpty) return relayReplies;
       return relayReplies.when(
         data: (events) => AsyncData(_mergeReplies(events, localReplies)),

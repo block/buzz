@@ -3,6 +3,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/relay/relay.dart';
 import 'channel_management_provider.dart';
+import 'pending_local_messages_provider.dart';
 import 'channel_window.dart';
 import 'thread_replies_provider.dart';
 
@@ -20,7 +21,6 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   ChannelWindowStore _windowStore = const ChannelWindowStore.empty();
   final Map<String, NostrEvent> _deepLinkEvents = {};
   final Set<String> _retainedDeepLinkEventIds = {};
-  final Map<String, NostrEvent> _pendingLocalMessages = {};
 
   ChannelMessagesNotifier(this.channelId);
 
@@ -88,6 +88,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
 
       final history = await _fetchNewestHistory(session);
       if (!_isCurrentInit(initVersion)) return;
+      _confirmLocalMessages(history.map((event) => event.id));
 
       final existing = state.value ?? const <NostrEvent>[];
       final existingIds = existing.map((event) => event.id).toSet();
@@ -160,7 +161,8 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     },
   );
 
-  void _handleLiveEvent(NostrEvent event) {
+  void _handleLiveEvent(NostrEvent event, {bool authoritative = true}) {
+    if (authoritative) _confirmLocalMessages([event.id]);
     if (_usingChannelWindow) {
       _handleWindowLiveEvent(event);
     } else {
@@ -224,6 +226,12 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     return true;
   }
 
+  void _confirmLocalMessages(Iterable<String> eventIds) {
+    ref
+        .read(pendingLocalMessagesProvider(channelId).notifier)
+        .confirm(eventIds);
+  }
+
   static bool _isMembershipEvent(String content) {
     return content.contains('member_joined') ||
         content.contains('member_left') ||
@@ -233,7 +241,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   /// Adds a just-signed outgoing message before the relay acknowledges it.
   /// The live relay echo is deduplicated by event id.
   void addLocalMessage(NostrEvent event) {
-    _pendingLocalMessages[event.id] = event;
+    ref.read(pendingLocalMessagesProvider(channelId).notifier).add(event);
     final thread = event.threadReference;
     if (thread.parentId != null) {
       final rootId = thread.rootId;
@@ -260,12 +268,14 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         isTimelineRow: true,
       );
     }
-    _handleLiveEvent(event);
+    _handleLiveEvent(event, authoritative: false);
   }
 
   /// Rolls back a local message when its publish is rejected or times out.
   void removeLocalMessage(String eventId) {
-    final pending = _pendingLocalMessages.remove(eventId);
+    final pending = ref
+        .read(pendingLocalMessagesProvider(channelId).notifier)
+        .take(eventId);
     if (pending == null) return;
 
     final thread = pending.threadReference;

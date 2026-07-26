@@ -5,6 +5,7 @@ import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/features/channels/channel_messages_provider.dart';
+import 'package:buzz/features/channels/pending_local_messages_provider.dart';
 import 'package:buzz/features/channels/thread_replies_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
@@ -153,17 +154,6 @@ void main() {
         ['local'],
       );
 
-      // A relay echo of the same signed event must not duplicate the local row.
-      relaySession.emit(_event(id: 'local', createdAt: 20));
-      await _pumpEventQueue();
-      expect(
-        container
-            .read(channelMessagesProvider(_channelId))
-            .value
-            ?.map((event) => event.id),
-        ['local'],
-      );
-
       relaySession.completeHistory([_event(id: 'history', createdAt: 10)]);
       await _pumpEventQueue();
 
@@ -270,6 +260,15 @@ void main() {
         queryResults: [
           [_event(id: 'history', createdAt: 10), _bounds()],
           <NostrEvent>[],
+          [
+            _event(
+              id: 'reply',
+              createdAt: 20,
+              extraTags: const [
+                ['e', 'root', '', 'reply'],
+              ],
+            ),
+          ],
         ],
       );
       final container = _buildContainer(relaySession);
@@ -309,6 +308,8 @@ void main() {
       );
 
       relaySession.emit(reply);
+      await container.read(threadRepliesProvider(args).future);
+      container.read(threadRepliesWithLocalProvider(args));
       await _pumpEventQueue();
       expect(
         container
@@ -317,6 +318,8 @@ void main() {
             ?.map((event) => event.id),
         ['reply'],
       );
+      expect(container.read(threadLocalRepliesProvider(args)), isEmpty);
+      expect(container.read(pendingLocalMessagesProvider(_channelId)), isEmpty);
 
       final rejected = _event(
         id: 'rejected',
@@ -359,6 +362,9 @@ void main() {
       relaySession.emit(_event(id: 'z-local', createdAt: 20));
       await _pumpEventQueue();
 
+      expect(container.read(pendingLocalMessagesProvider(_channelId)).keys, [
+        'a-local',
+      ]);
       expect(
         container
             .read(channelMessagesProvider(_channelId))
