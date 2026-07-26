@@ -6,6 +6,7 @@ import {
   type SpawnerAnnouncement,
 } from "@/shared/api/spawnerRelay";
 import type { RelayEvent } from "@/shared/api/types";
+import { retryPendingSpawnerPromptUpdates } from "@/features/agents/spawnerPromptUpdateQueue";
 
 /**
  * Spawners that have announced themselves in this community, keyed by pubkey.
@@ -52,6 +53,10 @@ function handleAnnouncementEvent(event: RelayEvent): void {
   next.set(event.pubkey, announcement);
   announcements = next;
   notify();
+
+  // An announcement means this spawner is alive right now — resend anything
+  // that queued while it may have been unreachable.
+  void retryPendingSpawnerPromptUpdates();
 }
 
 /** Open the announcement subscription. Idempotent. */
