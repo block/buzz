@@ -5,14 +5,42 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../theme/theme.dart';
 
-/// Height of the frosted app bar content area below the safe area.
-const _kBarContentHeight = Grid.xxs + 32 + Grid.xxs; // 48
+/// Minimum height of the frosted app bar content area below the safe area.
+const _kBarContentMinHeight = Grid.xxs + 32 + Grid.xxs; // 48
+const _kBottomBorderWidth = 1.0;
+
+TextStyle _effectiveTitleStyle(BuildContext context, TextStyle? titleStyle) {
+  final baseStyle =
+      context.textTheme.titleMedium ??
+      const TextStyle(fontSize: 20, height: 1.3);
+  return baseStyle.copyWith(fontWeight: FontWeight.w600).merge(titleStyle);
+}
+
+double _barContentHeight(BuildContext context, TextStyle? titleStyle) {
+  final style = _effectiveTitleStyle(context, titleStyle);
+  final scaledFontSize = MediaQuery.textScalerOf(
+    context,
+  ).scale(style.fontSize ?? 20);
+  final scaledTitleHeight = scaledFontSize * (style.height ?? 1);
+  final accessibleHeight = Grid.xxs + scaledTitleHeight + Grid.xxs;
+  return accessibleHeight > _kBarContentMinHeight
+      ? accessibleHeight
+      : _kBarContentMinHeight;
+}
 
 /// Returns the total height of the [FrostedAppBar] including safe area padding.
 ///
 /// Use this to add top spacing to body content so it starts below the bar.
-double frostedAppBarHeight(BuildContext context, {double bottomHeight = 0}) {
-  return MediaQuery.paddingOf(context).top + _kBarContentHeight + bottomHeight;
+/// Pass the same [titleStyle] to the bar and this helper when customizing it.
+double frostedAppBarHeight(
+  BuildContext context, {
+  double bottomHeight = 0,
+  TextStyle? titleStyle,
+}) {
+  return MediaQuery.paddingOf(context).top +
+      _barContentHeight(context, titleStyle) +
+      bottomHeight +
+      _kBottomBorderWidth;
 }
 
 /// A frosted-glass floating app bar designed to sit inside a [Stack].
@@ -67,6 +95,8 @@ class FrostedAppBar extends StatelessWidget {
   Widget build(BuildContext context) {
     final topPadding = MediaQuery.paddingOf(context).top;
     final canPop = Navigator.canPop(context);
+    final effectiveTitleStyle = _effectiveTitleStyle(context, titleStyle);
+    final barContentHeight = _barContentHeight(context, titleStyle);
 
     final effectiveLeading =
         leading ??
@@ -102,6 +132,7 @@ class FrostedAppBar extends StatelessWidget {
               border: Border(
                 bottom: BorderSide(
                   color: context.colors.outlineVariant.withValues(alpha: 0.3),
+                  width: _kBottomBorderWidth,
                 ),
               ),
             ),
@@ -109,7 +140,7 @@ class FrostedAppBar extends StatelessWidget {
               mainAxisSize: MainAxisSize.min,
               children: [
                 SizedBox(
-                  height: _kBarContentHeight,
+                  height: barContentHeight,
                   child: Padding(
                     padding: EdgeInsets.symmetric(horizontal: horizontalInset),
                     child: IconTheme.merge(
@@ -129,9 +160,7 @@ class FrostedAppBar extends StatelessWidget {
                                       : 0,
                                 ),
                                 child: DefaultTextStyle.merge(
-                                  style: context.textTheme.titleMedium
-                                      ?.copyWith(fontWeight: FontWeight.w600)
-                                      .merge(titleStyle),
+                                  style: effectiveTitleStyle,
                                   overflow: TextOverflow.ellipsis,
                                   maxLines: 1,
                                   child: title!,

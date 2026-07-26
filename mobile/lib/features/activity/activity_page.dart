@@ -26,6 +26,10 @@ class ActivityPage extends HookConsumerWidget {
     final feedAsync = ref.watch(activityProvider);
     final channelsAsync = ref.watch(channelsProvider);
     final filter = useState(_Filter.all);
+    final headerTitleStyle = context.textTheme.titleMedium?.copyWith(
+      fontSize: 22,
+      fontWeight: FontWeight.w600,
+    );
 
     // Cache last successful feed so the UI doesn't flash on rebuild.
     final cachedFeed = useRef<HomeFeedResponse?>(null);
@@ -74,15 +78,14 @@ class ActivityPage extends HookConsumerWidget {
       appBar: FrostedAppBar(
         gradient: context.appColors.topSectionGradient,
         title: const Text('Activity'),
-        titleStyle: context.textTheme.titleMedium?.copyWith(
-          fontSize: 22,
-          fontWeight: FontWeight.w600,
-        ),
+        titleStyle: headerTitleStyle,
       ),
       body: SafeArea(
         top: false,
         child: Padding(
-          padding: EdgeInsets.only(top: frostedAppBarHeight(context)),
+          padding: EdgeInsets.only(
+            top: frostedAppBarHeight(context, titleStyle: headerTitleStyle),
+          ),
           child: Column(
             children: [
               FilterChipBar<_Filter>(

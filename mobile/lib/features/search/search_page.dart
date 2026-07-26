@@ -51,6 +51,10 @@ class SearchPage extends HookConsumerWidget {
     final searchMutedColor = isBuzzTheme
         ? buzzSearchColor.withValues(alpha: 0.4)
         : context.colors.onSurfaceVariant;
+    final headerTitleStyle = context.textTheme.titleMedium?.copyWith(
+      fontSize: 22,
+      fontWeight: FontWeight.w600,
+    );
 
     return FrostedScaffold(
       // Keep the empty state centered in the page rather than the portion left
@@ -59,10 +63,7 @@ class SearchPage extends HookConsumerWidget {
       appBar: FrostedAppBar(
         gradient: context.appColors.topSectionGradient,
         title: const Text('Search'),
-        titleStyle: context.textTheme.titleMedium?.copyWith(
-          fontSize: 22,
-          fontWeight: FontWeight.w600,
-        ),
+        titleStyle: headerTitleStyle,
         bottomHeight: _searchHeaderBottomHeight,
         bottom: Padding(
           padding: const EdgeInsets.fromLTRB(
@@ -121,6 +122,7 @@ class SearchPage extends HookConsumerWidget {
             height: frostedAppBarHeight(
               context,
               bottomHeight: _searchHeaderBottomHeight,
+              titleStyle: headerTitleStyle,
             ),
           ),
           FilterChipBar<_SearchFilter>(
