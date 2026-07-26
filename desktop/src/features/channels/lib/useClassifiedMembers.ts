@@ -33,8 +33,12 @@ export function useClassifiedMembers(
   const isBot = React.useCallback(
     (member: ChannelMember) => {
       const normalized = normalizePubkey(member.pubkey);
+      // member.isAgent carries the backend's NIP-OA owner check — without it,
+      // an agent added by another user under a plain "member" role (and absent
+      // from this viewer's managed/relay agent lists) classifies as a person.
       return (
         member.role === "bot" ||
+        member.isAgent ||
         managedAgentPubkeys.has(normalized) ||
         relayAgentPubkeys.has(normalized)
       );
