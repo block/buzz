@@ -49,6 +49,7 @@ use buzz_core::tenant::CommunityId;
 use buzz_db::workflow::RunStatus;
 use buzz_db::Db;
 use chrono::{DateTime, Utc};
+use sha2::Digest;
 use dashmap::DashMap;
 use tokio::sync::Semaphore;
 use uuid::Uuid;
@@ -188,30 +189,41 @@ impl WorkflowEngine {
                 let trace_json = serde_json::Value::Array(full_trace);
                 let step_count = result.step_index as i32;
 
-                if result.approval_token.is_some() {
-                    // Approval gates are not yet implemented (WF-08).
-                    // Fail explicitly rather than creating unreachable WaitingApproval rows.
-                    tracing::warn!(
-                        run_id = %run_id,
-                        step_index = result.step_index,
-                        "Workflow hit approval gate — not yet implemented, marking as failed"
-                    );
+                if let Some(approval_token) = result.approval_token {
+                    // WF-08: persist the approval record, transition to
+                    // WaitingApproval, and emit kind:46010 to notify approvers.
                     if let Err(e) = self
-                        .db
-                        .update_workflow_run(
+                        .persist_approval_gate(
                             community_id,
                             run_id,
-                            RunStatus::Failed,
+                            &approval_token,
+                            result.step_index,
                             step_count,
                             &trace_json,
-                            Some("approval gates not yet implemented — see WF-08"),
                         )
                         .await
                     {
                         tracing::error!(
                             run_id = %run_id,
-                            "Failed to update run to Failed (approval gate): {e}"
+                            "Failed to persist approval gate, marking run as failed: {e}"
                         );
+                        if let Err(db_err) = self
+                            .db
+                            .update_workflow_run(
+                                community_id,
+                                run_id,
+                                RunStatus::Failed,
+                                step_count,
+                                &trace_json,
+                                Some(&format!("approval gate persistence failed: {e}")),
+                            )
+                            .await
+                        {
+                            tracing::error!(
+                                run_id = %run_id,
+                                "Failed to update run to Failed after approval error: {db_err}"
+                            );
+                        }
                     }
                 } else {
                     tracing::info!(run_id = %run_id, "Workflow run completed");
@@ -258,6 +270,144 @@ impl WorkflowEngine {
                 }
             }
         }
+    }
+
+    /// Persist an approval gate: create the approval record, transition the run
+    /// to `WaitingApproval`, and emit a kind:46010 event to notify approvers.
+    ///
+    /// Called from [`finalize_run`] when the executor returns with an approval
+    /// token. Fetches the workflow definition to extract step metadata (step ID,
+    /// approver spec, timeout) and the workflow's channel and owner for the event.
+    async fn persist_approval_gate(
+        &self,
+        community_id: CommunityId,
+        run_id: Uuid,
+        approval_token: &str,
+        step_index: usize,
+        step_count: i32,
+        trace_json: &serde_json::Value,
+    ) -> Result<(), WorkflowError> {
+        // 1. Fetch run record to get workflow_id.
+        let run = self
+            .db
+            .get_workflow_run(community_id, run_id)
+            .await
+            .map_err(|e| WorkflowError::WebhookError(format!("fetch run: {e}")))?;
+        let workflow_id = run.workflow_id;
+
+        // 2. Fetch workflow record for definition, owner, and channel.
+        let workflow = self
+            .db
+            .get_workflow(community_id, workflow_id)
+            .await
+            .map_err(|e| WorkflowError::WebhookError(format!("fetch workflow: {e}")))?;
+
+        // 3. Parse definition to extract step metadata.
+        let def: WorkflowDef = serde_json::from_value(workflow.definition.clone())
+            .map_err(|e| WorkflowError::InvalidDefinition(format!("parse definition: {e}")))?;
+
+        if step_index >= def.steps.len() {
+            return Err(WorkflowError::InvalidDefinition(format!(
+                "approval step_index {step_index} out of bounds (steps: {})",
+                def.steps.len()
+            )));
+        }
+
+        let step = &def.steps[step_index];
+        let step_id = &step.id;
+
+        // 4. Extract approval-specific fields from the step action.
+        let (approver_spec, message, timeout_str) = match &step.action {
+            ActionDef::RequestApproval {
+                from,
+                message,
+                timeout,
+            } => (
+                from.as_str(),
+                message.as_str(),
+                timeout.as_deref().unwrap_or("24h"),
+            ),
+            _ => {
+                return Err(WorkflowError::InvalidDefinition(format!(
+                    "step {step_id} at index {step_index} is not a RequestApproval action"
+                )));
+            }
+        };
+
+        // 5. Compute expiration from timeout (default 24h on parse error).
+        let timeout_secs = executor::parse_duration_secs(timeout_str).unwrap_or(86400);
+        let expires_at = Utc::now() + chrono::Duration::seconds(timeout_secs as i64);
+
+        // 6. Persist approval record (create_approval hashes the token internally).
+        self.db
+            .create_approval(buzz_db::workflow::CreateApprovalParams {
+                community_id,
+                token: approval_token,
+                workflow_id,
+                run_id,
+                step_id,
+                step_index: step_index as i32,
+                approver_spec,
+                expires_at,
+            })
+            .await
+            .map_err(|e| WorkflowError::WebhookError(format!("create approval: {e}")))?;
+
+        // 7. Transition run to WaitingApproval.
+        self.db
+            .update_workflow_run(
+                community_id,
+                run_id,
+                RunStatus::WaitingApproval,
+                step_count,
+                trace_json,
+                None,
+            )
+            .await
+            .map_err(|e| WorkflowError::WebhookError(format!("update run status: {e}")))?;
+
+        tracing::info!(
+            run_id = %run_id,
+            step_id = %step_id,
+            step_index = step_index,
+            approver = %approver_spec,
+            expires_at = %expires_at,
+            "Workflow suspended at approval gate — WaitingApproval"
+        );
+
+        // 8. Emit kind:46010 (best-effort — approval record is already durable).
+        let channel_id = workflow
+            .channel_id
+            .map(|id| id.to_string())
+            .unwrap_or_default();
+        let owner_pubkey_hex = hex::encode(&workflow.owner_pubkey);
+        let token_hash_hex = hex::encode(sha2::Sha256::digest(approval_token.as_bytes()));
+
+        if let Ok(sink) = self.action_sink() {
+            if let Err(e) = sink
+                .emit_approval_requested(
+                    community_id,
+                    &channel_id,
+                    &token_hash_hex,
+                    approver_spec,
+                    message,
+                    &workflow_id.to_string(),
+                    &run_id.to_string(),
+                    &owner_pubkey_hex,
+                )
+                .await
+            {
+                // Best-effort: the approval record is already persisted and the
+                // run is in WaitingApproval, so the approver can still act via
+                // the token hash. Log the failure but don't fail the gate.
+                tracing::warn!(
+                    run_id = %run_id,
+                    "Failed to emit kind:46010 approval-requested event: {e}"
+                );
+            }
+        }
+
+        Ok(())
     }
 
     /// Called from the event handler post-store hook for every stored event.
