@@ -3,7 +3,9 @@
 use std::{path::PathBuf, time::Duration};
 
 use anyhow::{bail, Context, Result};
+use buzz_sdk::spawner::SpawnerAiProvider;
 use nostr::Keys;
+use tracing::warn;
 
 /// Default agent runtime image. Overridden with `BUZZ_SPAWNER_AGENT_IMAGE`.
 pub const DEFAULT_AGENT_IMAGE: &str = "ghcr.io/block/buzz-acp:main";
@@ -89,6 +91,10 @@ pub struct Config {
     /// Environment passed through to every agent container — LLM credentials
     /// live here, never in an event. Collected from `BUZZ_SPAWNER_AGENT_ENV`.
     pub agent_env: Vec<(String, String)>,
+    /// AI providers/models this spawner advertises in its announcement, so a
+    /// picker can offer a menu instead of the operator having to know in
+    /// advance what to type. Parsed from `BUZZ_SPAWNER_AI_CATALOG`.
+    pub ai_catalog: Option<Vec<SpawnerAiProvider>>,
 }
 
 impl Config {
@@ -142,6 +148,7 @@ impl Config {
             agent_env: parse_agent_env(
                 &std::env::var("BUZZ_SPAWNER_AGENT_ENV").unwrap_or_default(),
             )?,
+            ai_catalog: parse_ai_catalog(non_empty_env("BUZZ_SPAWNER_AI_CATALOG")),
         })
     }
 }
@@ -212,6 +219,23 @@ fn parse_agent_env(raw: &str) -> Result<Vec<(String, String)>> {
     Ok(out)
 }
 
+/// Parse `BUZZ_SPAWNER_AI_CATALOG`, a JSON array of `SpawnerAiProvider`
+/// advertised in this spawner's announcement.
+///
+/// Malformed JSON is logged and dropped rather than failing startup — the
+/// catalog is advertisement, not a correctness requirement, so a typo here
+/// should not take the whole spawner down.
+fn parse_ai_catalog(raw: Option<String>) -> Option<Vec<SpawnerAiProvider>> {
+    let raw = raw?;
+    match serde_json::from_str(&raw) {
+        Ok(providers) => Some(providers),
+        Err(e) => {
+            warn!("BUZZ_SPAWNER_AI_CATALOG is not valid JSON: {e}");
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,5 +250,17 @@ mod tests {
     fn agent_env_is_empty_when_unset() {
         assert!(parse_agent_env("").unwrap().is_empty());
         assert!(parse_agent_env("  ,  ").unwrap().is_empty());
+    }
+
+    #[test]
+    fn ai_catalog_parses_from_env_json() {
+        let parsed = parse_ai_catalog(Some(
+            r#"[{"id":"anthropic","models":["claude-opus-5"]}]"#.into(),
+        ));
+        let providers = parsed.unwrap();
+        assert_eq!(providers[0].id, "anthropic");
+        assert_eq!(providers[0].models, vec!["claude-opus-5"]);
+        assert!(parse_ai_catalog(None).is_none());
+        assert!(parse_ai_catalog(Some("not json".into())).is_none());
     }
 }
