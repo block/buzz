@@ -19,6 +19,7 @@ struct Config {
     storage: StorageMode,
     require_auth: bool,
     peer_trust: Option<PathBuf>,
+    artifacts: Option<PathBuf>,
 }
 
 impl Config {
@@ -32,6 +33,9 @@ impl Config {
         let mut require_auth = std::env::var("BUZZ_LOCAL_RELAY_REQUIRE_AUTH")
             .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes"));
         let mut peer_trust = std::env::var("BUZZ_LOCAL_RELAY_PEER_TRUST")
+            .ok()
+            .map(PathBuf::from);
+        let mut artifacts = std::env::var("BUZZ_LOCAL_RELAY_ARTIFACTS")
             .ok()
             .map(PathBuf::from);
         let mut args = std::env::args().skip(1);
@@ -49,6 +53,12 @@ impl Config {
                 "--peer-trust" => {
                     peer_trust = Some(PathBuf::from(
                         args.next().context("--peer-trust requires a file path")?,
+                    ));
+                }
+                "--artifacts" => {
+                    artifacts = Some(PathBuf::from(
+                        args.next()
+                            .context("--artifacts requires a directory path")?,
                     ));
                 }
                 "-h" | "--help" => {
@@ -69,6 +79,7 @@ impl Config {
             storage,
             require_auth,
             peer_trust,
+            artifacts,
         })
     }
 }
@@ -95,6 +106,16 @@ async fn main() -> anyhow::Result<()> {
             "--peer-trust requires --require-auth: replication peers are bound cryptographically"
         );
     }
+    // Durable relays get a content-addressed artifact store beside the
+    // journal by default; ephemeral relays need an explicit directory.
+    let artifacts_dir = config.artifacts.clone().or_else(|| match &config.storage {
+        StorageMode::Durable(event_log) => {
+            let mut path = event_log.clone().into_os_string();
+            path.push(".artifacts");
+            Some(PathBuf::from(path))
+        }
+        StorageMode::Ephemeral => None,
+    });
     let relay = if config.require_auth {
         // A durable relay also persists consumed-proof replay state, so a
         // restart within the proof freshness window still rejects replays.
@@ -115,14 +136,21 @@ async fn main() -> anyhow::Result<()> {
             proof_store,
         )
         .context("failed to open authentication proof store")?;
-        LocalRelay::open_with_adapters(
+        LocalRelay::open_full(
             config.storage,
             Arc::new(ReplicationSourceAllowlist::new(sources)),
             Some(Arc::new(adapter)),
+            artifacts_dir,
         )
         .await?
     } else {
-        LocalRelay::open(config.storage).await?
+        LocalRelay::open_full(
+            config.storage,
+            Arc::new(buzz_local_relay::ReplicationDisabled),
+            None,
+            artifacts_dir,
+        )
+        .await?
     };
     let listener = TcpListener::bind(address)
         .await
@@ -191,11 +219,13 @@ Options:
   --ephemeral     Keep events in memory only
   --require-auth  Require NIP-42 WebSocket and NIP-98 HTTP authentication
   --peer-trust PATH  JSON trust config admitting replication peers (needs --require-auth)
+  --artifacts DIR    Content-addressed artifact store (default: <data>.artifacts)
 
 Environment:
   BUZZ_LOCAL_RELAY_BIND_ADDR
   BUZZ_LOCAL_RELAY_DATA
   BUZZ_LOCAL_RELAY_REQUIRE_AUTH
-  BUZZ_LOCAL_RELAY_PEER_TRUST"
+  BUZZ_LOCAL_RELAY_PEER_TRUST
+  BUZZ_LOCAL_RELAY_ARTIFACTS"
     );
 }

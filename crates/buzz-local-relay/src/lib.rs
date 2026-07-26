@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket};
-use axum::extract::{State, WebSocketUpgrade};
+use axum::extract::{DefaultBodyLimit, Path as UrlPath, State, WebSocketUpgrade};
 use axum::http::{header::HOST, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -41,6 +41,7 @@ use futures_util::{SinkExt, StreamExt};
 use identity::{
     LocalAuthenticationEvidence, LocalIdentityAdapter, LocalIdentityError, LocalPeerEvidence,
 };
+use nostr::hashes::Hash as _;
 use nostr::{Alphabet, Event, Filter, SingleLetterTag, TagKind};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -56,6 +57,8 @@ const EVENT_CHANNEL_CAPACITY: usize = 1_024;
 const MAX_SUBSCRIPTIONS_PER_CONNECTION: usize = 128;
 const MAX_SUBSCRIPTION_ID_LENGTH: usize = 128;
 const MAX_REPLICATION_BATCH_SIZE: usize = 1_000;
+/// Upper bound for one stored artifact blob (bytes).
+const MAX_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
 const LOCAL_REPLICATION_CURSOR_PREFIX: &str = "local-ndjson-v1:";
 
 /// Persistent or in-memory storage selection for a local relay.
@@ -468,7 +471,8 @@ impl ReplicationPolicy for ReplicationSourceAllowlist {
     }
 }
 
-struct ReplicationDisabled;
+/// Default replication policy: no source stream is admitted.
+pub struct ReplicationDisabled;
 
 impl ReplicationPolicy for ReplicationDisabled {
     fn admit(&self, _source: &ReplicationSourceId, _event: &Event) -> Result<(), String> {
@@ -482,6 +486,7 @@ pub struct LocalRelay {
     live_events: broadcast::Sender<Event>,
     replication_policy: Arc<dyn ReplicationPolicy>,
     identity: Option<Arc<LocalIdentityAdapter>>,
+    artifacts_dir: Option<PathBuf>,
 }
 
 impl LocalRelay {
@@ -512,6 +517,17 @@ impl LocalRelay {
         replication_policy: Arc<dyn ReplicationPolicy>,
         identity: Option<Arc<LocalIdentityAdapter>>,
     ) -> Result<Arc<Self>, StoreError> {
+        Self::open_full(mode, replication_policy, identity, None).await
+    }
+
+    /// Opens a relay with adapters and an optional content-addressed
+    /// artifact store rooted at `artifacts_dir`.
+    pub async fn open_full(
+        mode: StorageMode,
+        replication_policy: Arc<dyn ReplicationPolicy>,
+        identity: Option<Arc<LocalIdentityAdapter>>,
+        artifacts_dir: Option<PathBuf>,
+    ) -> Result<Arc<Self>, StoreError> {
         let store = Arc::new(EventStore::open(mode).await?);
         let (live_events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         Ok(Arc::new(Self {
@@ -519,6 +535,7 @@ impl LocalRelay {
             live_events,
             replication_policy,
             identity,
+            artifacts_dir,
         }))
     }
 
@@ -702,6 +719,11 @@ pub fn router(relay: Arc<LocalRelay>) -> Router {
         .route("/query", post(query_events))
         .route("/count", post(count_events))
         .route("/replication", post(replication_ingest))
+        .route(
+            "/artifacts",
+            post(artifact_upload).layer(DefaultBodyLimit::max(MAX_ARTIFACT_BYTES)),
+        )
+        .route("/artifacts/{sha256}", get(artifact_fetch))
         .with_state(relay)
 }
 
@@ -757,6 +779,16 @@ async fn authenticate_http(
     path: &str,
     body: &[u8],
 ) -> Result<Option<AuthenticatedPrincipal>, ApiError> {
+    authenticate_http_method(relay, headers, "POST", path, body).await
+}
+
+async fn authenticate_http_method(
+    relay: &LocalRelay,
+    headers: &HeaderMap,
+    method: &str,
+    path: &str,
+    body: &[u8],
+) -> Result<Option<AuthenticatedPrincipal>, ApiError> {
     let Some(identity) = relay.identity.as_ref() else {
         return Ok(None);
     };
@@ -780,7 +812,7 @@ async fn authenticate_http(
         .authenticate(
             LocalAuthenticationEvidence::Nip98 {
                 event_json,
-                method: "POST".to_string(),
+                method: method.to_string(),
                 body: body.to_vec(),
             },
             &audience,
@@ -846,6 +878,91 @@ async fn replication_ingest(
         }
     }
     Ok(Json(receipts))
+}
+
+/// Stores one immutable blob under its SHA-256. The NIP-98 payload tag binds
+/// the uploader's proof to the exact content, so authentication doubles as an
+/// integrity commitment over the artifact.
+async fn artifact_upload(
+    State(relay): State<Arc<LocalRelay>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<Value>, ApiError> {
+    let Some(dir) = relay.artifacts_dir.clone() else {
+        return Err(ApiError::NotFound("artifact store is not enabled".into()));
+    };
+    authenticate_http(&relay, &headers, "/artifacts", &body).await?;
+    if body.is_empty() {
+        return Err(ApiError::BadRequest("artifact body is empty".into()));
+    }
+    let hash = nostr::hashes::sha256::Hash::hash(&body).to_string();
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(StoreError::Io)?;
+    let final_path = dir.join(&hash);
+    if !tokio::fs::try_exists(&final_path)
+        .await
+        .map_err(StoreError::Io)?
+    {
+        let tmp_path = dir.join(format!(".{hash}.{}", Uuid::new_v4()));
+        let mut file = tokio::fs::File::create(&tmp_path)
+            .await
+            .map_err(StoreError::Io)?;
+        file.write_all(&body).await.map_err(StoreError::Io)?;
+        file.sync_data().await.map_err(StoreError::Io)?;
+        tokio::fs::rename(&tmp_path, &final_path)
+            .await
+            .map_err(StoreError::Io)?;
+    }
+    Ok(Json(json!({
+        "sha256": hash,
+        "size": body.len(),
+        "url": format!("/artifacts/{hash}"),
+    })))
+}
+
+/// Serves one blob by content hash, re-verifying the bytes before disclosure
+/// so silent disk corruption fails closed instead of shipping.
+async fn artifact_fetch(
+    State(relay): State<Arc<LocalRelay>>,
+    UrlPath(sha256): UrlPath<String>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let Some(dir) = relay.artifacts_dir.clone() else {
+        return Err(ApiError::NotFound("artifact store is not enabled".into()));
+    };
+    if sha256.len() != 64 || !sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(ApiError::BadRequest(
+            "artifact ID must be 64 hex characters".into(),
+        ));
+    }
+    let sha256 = sha256.to_ascii_lowercase();
+    authenticate_http_method(
+        &relay,
+        &headers,
+        "GET",
+        &format!("/artifacts/{sha256}"),
+        b"",
+    )
+    .await?;
+    let path = dir.join(&sha256);
+    let bytes = match tokio::fs::read(&path).await {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ApiError::NotFound(format!("unknown artifact {sha256}")));
+        }
+        Err(error) => return Err(StoreError::Io(error).into()),
+    };
+    if nostr::hashes::sha256::Hash::hash(&bytes).to_string() != sha256 {
+        return Err(ApiError::BadRequest(format!(
+            "artifact {sha256} failed content verification"
+        )));
+    }
+    Ok((
+        [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+        bytes,
+    )
+        .into_response())
 }
 
 async fn websocket_upgrade(
@@ -1221,6 +1338,8 @@ enum ApiError {
     Identity(#[from] LocalIdentityError),
     #[error("{0}")]
     BadRequest(String),
+    #[error("{0}")]
+    NotFound(String),
     #[error(transparent)]
     Store(#[from] StoreError),
     #[error(transparent)]
@@ -1245,12 +1364,13 @@ impl IntoResponse for ApiError {
             },
             Self::Identity(LocalIdentityError::Internal(_)) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
+            Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Query(_) => StatusCode::BAD_REQUEST,
         };
         let code = match &self {
             Self::Identity(error) => error.denial_code().map(IdentityDenialCode::as_str),
-            Self::BadRequest(_) | Self::Store(_) | Self::Query(_) => None,
+            Self::BadRequest(_) | Self::NotFound(_) | Self::Store(_) | Self::Query(_) => None,
         };
         (
             status,

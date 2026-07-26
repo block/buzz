@@ -49,6 +49,9 @@ intentional local-network experiment, not an internet deployment.
 - Portable durable-history replication source and policy-gated sink ports
 - Peer-bound HTTP replication sink (`POST /replication`, requires
   `--require-auth` plus a `--peer-trust` binding for the source stream)
+- Content-addressed artifact store (`POST /artifacts`, `GET /artifacts/{sha256}`;
+  NIP-98 payload binding doubles as an integrity commitment, and reads
+  re-verify content before disclosure)
 - Optional laptop identity adapter (`--require-auth`):
   - NIP-42 challenge authentication for WebSocket connections
   - payload-bound NIP-98 authentication for HTTP writes, queries, and counts
