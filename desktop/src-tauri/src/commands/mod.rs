@@ -3,6 +3,7 @@ mod agent_config;
 mod agent_discovery;
 mod agent_logs;
 mod agent_metric_archive;
+mod agent_model_normalization;
 mod agent_model_process;
 mod agent_models;
 mod agent_models_env;

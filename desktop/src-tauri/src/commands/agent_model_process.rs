@@ -5,7 +5,7 @@ use crate::managed_agents::{
     redact_env_values_in, AgentModelsResponse,
 };
 
-use super::agent_models::normalize_agent_models;
+use super::agent_model_normalization::normalize_agent_models;
 
 pub(super) async fn run_agent_models_command(
     resolved_acp: PathBuf,

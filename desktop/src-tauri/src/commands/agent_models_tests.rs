@@ -149,6 +149,99 @@ fn anthropic_model_normalization_uses_display_names() {
 }
 
 #[test]
+fn model_normalization_suppresses_base_ids_with_effort_qualified_variants() {
+    let raw = serde_json::json!({
+        "agent": {
+            "name": "codex-acp",
+            "version": "1.1.7"
+        },
+        "stable": {
+            "configOptions": [{
+                "id": "model",
+                "category": "model",
+                "options": [{
+                    "value": "gpt-5.6-sol",
+                    "name": "GPT-5.6-SOL"
+                }]
+            }]
+        },
+        "unstable": {
+            "currentModelId": "gpt-5.6-sol[medium]",
+            "availableModels": [
+                {
+                    "modelId": "gpt-5.6-sol[low]",
+                    "name": "GPT-5.6-SOL (low)"
+                },
+                {
+                    "modelId": "gpt-5.6-sol[medium]",
+                    "name": "GPT-5.6-SOL (medium)"
+                },
+                {
+                    "modelId": "gpt-5.6-sol[high]",
+                    "name": "GPT-5.6-SOL (high)"
+                }
+            ]
+        }
+    });
+
+    let response = normalize_agent_models(&raw, None);
+    let ids: Vec<&str> = response
+        .models
+        .iter()
+        .map(|model| model.id.as_str())
+        .collect();
+
+    assert_eq!(
+        ids,
+        vec![
+            "gpt-5.6-sol[low]",
+            "gpt-5.6-sol[medium]",
+            "gpt-5.6-sol[high]"
+        ]
+    );
+    assert_eq!(
+        response.agent_default_model.as_deref(),
+        Some("gpt-5.6-sol[medium]")
+    );
+}
+
+#[test]
+fn model_normalization_keeps_stable_ids_without_qualified_variants() {
+    let raw = serde_json::json!({
+        "agent": {
+            "name": "test-agent",
+            "version": "1.0.0"
+        },
+        "stable": {
+            "configOptions": [{
+                "configId": "model",
+                "category": "model",
+                "options": [
+                    { "value": "gpt-5", "displayName": "GPT-5" },
+                    { "value": "gpt-5.6", "displayName": "GPT-5.6" }
+                ]
+            }]
+        },
+        "unstable": {
+            "currentModelId": "gpt-5.6[high]",
+            "availableModels": [{
+                "modelId": "gpt-5.6[high]",
+                "name": "GPT-5.6 (high)"
+            }]
+        }
+    });
+
+    let response = normalize_agent_models(&raw, None);
+    let ids: Vec<&str> = response
+        .models
+        .iter()
+        .map(|model| model.id.as_str())
+        .collect();
+
+    assert_eq!(ids, vec!["gpt-5", "gpt-5.6[high]"]);
+}
+
+#[test]
 fn redaction_env_records_value_used_for_request() {
     let env = BTreeMap::from([("OPENAI_COMPAT_API_KEY".to_string(), "   ".to_string())]);
 
