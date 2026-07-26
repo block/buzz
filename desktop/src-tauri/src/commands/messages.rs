@@ -428,11 +428,16 @@ pub async fn get_event(event_id: String, state: State<'_, AppState>) -> Result<S
 
 // ── Writes ──────────────────────────────────────────────────────────────────
 
+struct ResolvedThreadContext {
+    thread_ref: events::ThreadRef,
+    parent_pubkey: String,
+}
+
 /// Fetch a parent event and extract the thread root from its NIP-10 e-tags.
 async fn resolve_thread_ref(
     parent_event_id: &str,
     state: &AppState,
-) -> Result<events::ThreadRef, String> {
+) -> Result<ResolvedThreadContext, String> {
     let parent_eid =
         EventId::from_hex(parent_event_id).map_err(|e| format!("invalid parent event ID: {e}"))?;
 
@@ -471,10 +476,21 @@ async fn resolve_thread_ref(
         _ => parent_eid,
     };
 
-    Ok(events::ThreadRef {
-        root_event_id: root_eid,
-        parent_event_id: parent_eid,
+    Ok(ResolvedThreadContext {
+        thread_ref: events::ThreadRef {
+            root_event_id: root_eid,
+            parent_event_id: parent_eid,
+        },
+        parent_pubkey: parent.pubkey.to_hex(),
     })
+}
+
+fn reply_mention_pubkeys(explicit_mentions: &[String], parent_pubkey: Option<&str>) -> Vec<String> {
+    let mut mentions = explicit_mentions.to_vec();
+    if let Some(pubkey) = parent_pubkey {
+        mentions.push(pubkey.to_string());
+    }
+    mentions
 }
 
 #[tauri::command]
@@ -513,13 +529,16 @@ pub async fn send_channel_message(
             let parent_id = parent_event_id
                 .as_deref()
                 .ok_or("forum comment requires parent_event_id")?;
-            let thread_ref = resolve_thread_ref(parent_id, &state).await?;
-            resolved_root = Some(thread_ref.root_event_id.to_hex());
+            let thread_context = resolve_thread_ref(parent_id, &state).await?;
+            resolved_root = Some(thread_context.thread_ref.root_event_id.to_hex());
+            let reply_mentions =
+                reply_mention_pubkeys(&mentions, Some(thread_context.parent_pubkey.as_str()));
+            let reply_mention_refs: Vec<&str> = reply_mentions.iter().map(|s| s.as_str()).collect();
             events::build_forum_comment(
                 channel_uuid,
                 content.trim(),
-                &thread_ref,
-                &mention_refs,
+                &thread_context.thread_ref,
+                &reply_mention_refs,
                 &media,
                 &mention_refs_only,
             )?
@@ -528,16 +547,23 @@ pub async fn send_channel_message(
             let thread_ref = match parent_event_id.as_deref() {
                 Some(pid) => {
                     let tr = resolve_thread_ref(pid, &state).await?;
-                    resolved_root = Some(tr.root_event_id.to_hex());
+                    resolved_root = Some(tr.thread_ref.root_event_id.to_hex());
                     Some(tr)
                 }
                 None => None,
             };
+            let reply_mentions = reply_mention_pubkeys(
+                &mentions,
+                thread_ref
+                    .as_ref()
+                    .map(|context| context.parent_pubkey.as_str()),
+            );
+            let reply_mention_refs: Vec<&str> = reply_mentions.iter().map(|s| s.as_str()).collect();
             events::build_message(
                 channel_uuid,
                 content.trim(),
-                thread_ref.as_ref(),
-                &mention_refs,
+                thread_ref.as_ref().map(|context| &context.thread_ref),
+                &reply_mention_refs,
                 &media,
                 &emoji,
                 &mention_refs_only,
@@ -776,10 +802,10 @@ pub async fn send_managed_agent_channel_message(
                 event_id: existing.id.to_hex(),
                 parent_event_id: thread_ref
                     .as_ref()
-                    .map(|reference| reference.parent_event_id.to_hex()),
+                    .map(|context| context.thread_ref.parent_event_id.to_hex()),
                 root_event_id: thread_ref
                     .as_ref()
-                    .map(|reference| reference.root_event_id.to_hex()),
+                    .map(|context| context.thread_ref.root_event_id.to_hex()),
                 depth: if thread_ref.is_some() { 1 } else { 0 },
                 created_at: existing.created_at.as_secs() as i64,
             });
@@ -796,11 +822,16 @@ pub async fn send_managed_agent_channel_message(
             client_tags.push(vec!["client".to_string(), marker.to_string()]);
         }
     }
-    let mentions = mention_pubkeys.unwrap_or_default();
+    let mentions = reply_mention_pubkeys(
+        &mention_pubkeys.unwrap_or_default(),
+        thread_ref
+            .as_ref()
+            .map(|context| context.parent_pubkey.as_str()),
+    );
     let builder = build_managed_agent_channel_message(
         channel_uuid,
         trimmed,
-        thread_ref.as_ref(),
+        thread_ref.as_ref().map(|context| &context.thread_ref),
         &mentions,
         &client_tags,
     )?;
@@ -810,7 +841,7 @@ pub async fn send_managed_agent_channel_message(
     Ok(SendChannelMessageResponse {
         event_id: result.event_id,
         parent_event_id: parent_event_id.clone(),
-        root_event_id: thread_ref.map(|reference| reference.root_event_id.to_hex()),
+        root_event_id: thread_ref.map(|context| context.thread_ref.root_event_id.to_hex()),
         depth: if parent_event_id.is_some() { 1 } else { 0 },
         created_at: chrono::Utc::now().timestamp(),
     })
