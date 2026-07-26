@@ -163,6 +163,7 @@ mod tests {
             prompt: None,
             restart_count: 0,
             last_failure_at: None,
+            carried_team_instructions: None,
         }
     }
 

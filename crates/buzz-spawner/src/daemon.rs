@@ -276,7 +276,15 @@ impl Daemon {
         }
 
         info!(slug = %record.slug, "prompt updated by owner");
+        let carried = carried_team_instructions(&record, prompt);
         self.store.update(&record.owner_pubkey, &record.slug, |r| {
+            // `r.prompt` is stored exactly as received so `prompt_hash_for`
+            // reproduces the hash the owner computed over the frame — that echo
+            // is the client's only ack. Team instructions, which the desktop's
+            // prompt update never carries, ride alongside instead of being
+            // merged in, so a model tweak no longer wipes them (see
+            // `AgentRecord::carried_team_instructions`).
+            r.carried_team_instructions = carried.clone();
             r.prompt = Some(prompt.clone());
             // Force a restart: the container bakes the prompt into its env, so
             // a new prompt only takes effect on a fresh container.
@@ -433,6 +441,7 @@ impl Daemon {
                 prompt: None,
                 restart_count: 0,
                 last_failure_at: None,
+                carried_team_instructions: None,
             };
             info!(
                 slug = %record.slug,
@@ -463,6 +472,7 @@ impl Daemon {
             prompt: None,
             restart_count: 0,
             last_failure_at: None,
+            carried_team_instructions: None,
         };
 
         info!(
@@ -704,12 +714,7 @@ impl Daemon {
         // most recently intended.
         if let Some(record) = self.store.get(&desired.owner_pubkey, &desired.slug) {
             if let Some(prompt) = record.prompt.as_ref().filter(|p| !p.is_empty()) {
-                return Ok(ResolvedPrompt {
-                    system_prompt: prompt.system_prompt.clone(),
-                    team_instructions: prompt.team_instructions.clone(),
-                    model: prompt.model.clone(),
-                    provider: prompt.provider.clone(),
-                });
+                return Ok(resolved_from_record(record, prompt));
             }
         }
 
@@ -798,6 +803,45 @@ fn prompt_hash_for(record: Option<&AgentRecord>) -> Option<String> {
     record.and_then(|r| r.prompt.as_ref()).map(|p| p.hash())
 }
 
+/// Team instructions to keep after applying `incoming` to `record`.
+///
+/// "Previous wins when incoming is None": a desktop prompt update carries only
+/// system prompt / model / provider, so without this a model tweak would drop
+/// the agent's team instructions at its next restart.
+fn carried_team_instructions(
+    record: &AgentRecord,
+    incoming: &buzz_sdk::spawner::PromptMaterial,
+) -> Option<String> {
+    incoming
+        .team_instructions
+        .clone()
+        .or_else(|| {
+            record
+                .prompt
+                .as_ref()
+                .and_then(|p| p.team_instructions.clone())
+        })
+        .or_else(|| record.carried_team_instructions.clone())
+}
+
+/// Container-env view of a record's stored prompt, with team instructions
+/// filled in from [`AgentRecord::carried_team_instructions`] when the stored
+/// material itself has none.
+fn resolved_from_record(
+    record: &AgentRecord,
+    prompt: &buzz_sdk::spawner::PromptMaterial,
+) -> ResolvedPrompt {
+    ResolvedPrompt {
+        system_prompt: prompt.system_prompt.clone(),
+        team_instructions: prompt
+            .team_instructions
+            .clone()
+            .or_else(|| record.carried_team_instructions.clone()),
+        model: prompt.model.clone(),
+        provider: prompt.provider.clone(),
+    }
+}
+
 /// Truncate on a char boundary so a multi-byte log tail cannot panic.
 fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
@@ -861,6 +905,7 @@ mod tests {
             prompt,
             restart_count: 0,
             last_failure_at: None,
+            carried_team_instructions: None,
         }
     }
 
@@ -881,6 +926,65 @@ mod tests {
         let record = test_record(None);
         assert_eq!(prompt_hash_for(Some(&record)), None);
         assert_eq!(prompt_hash_for(None), None);
+    }
+
+    #[test]
+    fn prompt_update_without_team_instructions_keeps_them_for_the_container() {
+        // The desktop's prompt update only carries system prompt / model /
+        // provider. Applying one must not wipe team instructions delivered
+        // earlier over the attestation handshake, and the status hash must
+        // still equal the hash of the frame material the owner sent.
+        let mut record = test_record(Some(buzz_sdk::spawner::PromptMaterial {
+            system_prompt: Some("be Fizz".into()),
+            team_instructions: Some("ship small PRs".into()),
+            model: Some("old-model".into()),
+            provider: None,
+        }));
+
+        let incoming = buzz_sdk::spawner::PromptMaterial {
+            system_prompt: Some("be Fizz".into()),
+            team_instructions: None,
+            model: Some("new-model".into()),
+            provider: None,
+        };
+
+        // Mirrors `apply_prompt_update`'s store mutation.
+        record.carried_team_instructions = carried_team_instructions(&record, &incoming);
+        record.prompt = Some(incoming.clone());
+
+        let resolved = resolved_from_record(&record, record.prompt.as_ref().unwrap());
+        assert_eq!(
+            resolved.team_instructions.as_deref(),
+            Some("ship small PRs")
+        );
+        assert_eq!(resolved.model.as_deref(), Some("new-model"));
+        assert_eq!(prompt_hash_for(Some(&record)), Some(incoming.hash()));
+
+        // And a later update still carries them, now via the carry field.
+        let second = buzz_sdk::spawner::PromptMaterial {
+            system_prompt: Some("be Fizzier".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            carried_team_instructions(&record, &second).as_deref(),
+            Some("ship small PRs")
+        );
+    }
+
+    #[test]
+    fn an_explicit_team_instruction_in_the_update_wins() {
+        let record = test_record(Some(buzz_sdk::spawner::PromptMaterial {
+            team_instructions: Some("old".into()),
+            ..Default::default()
+        }));
+        let incoming = buzz_sdk::spawner::PromptMaterial {
+            team_instructions: Some("new".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            carried_team_instructions(&record, &incoming).as_deref(),
+            Some("new")
+        );
     }
 
     #[test]
