@@ -97,6 +97,61 @@ test("estimateRowHeight: bare URL line adds a preview card", () => {
   assert.ok(withUrl > withoutUrl + 50, `url ${withUrl} vs ${withoutUrl}`);
 });
 
+test("estimateRowHeight: structured job results reserve the handoff card", () => {
+  const jobRequest = "a".repeat(64);
+  const tags = [["e", jobRequest, "", "reply"]];
+  const oneArtifact = estimateRowHeight(
+    msg({
+      kind: 43004,
+      tags,
+      body: JSON.stringify({
+        schemaVersion: 1,
+        jobRequest,
+        requestedOutcome: "Make the result inspectable",
+        outcome: "The handoff is ready.",
+        disposition: "completed",
+        artifacts: [
+          {
+            kind: "pull_request",
+            label: "Pull request",
+            reference: "https://github.com/block/buzz/pull/1",
+          },
+        ],
+        verification: [],
+      }),
+    }),
+  );
+  const twoArtifacts = estimateRowHeight(
+    msg({
+      kind: 43004,
+      tags,
+      body: JSON.stringify({
+        schemaVersion: 1,
+        jobRequest,
+        requestedOutcome: "Make the result inspectable",
+        outcome: "The handoff is ready.",
+        disposition: "completed",
+        artifacts: [
+          {
+            kind: "pull_request",
+            label: "Pull request",
+            reference: "https://github.com/block/buzz/pull/1",
+          },
+          {
+            kind: "file",
+            label: "Protocol documentation",
+            reference: "docs/nips/NIP-AJ.md",
+          },
+        ],
+        verification: [],
+      }),
+    }),
+  );
+
+  assert.ok(oneArtifact > 300);
+  assert.ok(twoArtifacts > oneArtifact);
+});
+
 test("timelineRowReserveStyle: message item yields containIntrinsicSize", () => {
   const style = timelineRowReserveStyle({
     kind: "message",

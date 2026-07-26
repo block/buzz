@@ -180,6 +180,9 @@ enum Cmd {
     /// Send, read, search, and manage messages
     #[command(subcommand)]
     Messages(MessagesCmd),
+    /// Publish inspectable agent job handoffs
+    #[command(subcommand)]
+    Jobs(JobsCmd),
     /// Create, configure, and manage channels
     #[command(subcommand)]
     Channels(ChannelsCmd),
@@ -521,6 +524,25 @@ pub enum MessagesCmd {
         /// Vote direction: "up" or "down"
         #[arg(long)]
         direction: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum JobsCmd {
+    /// Publish a structured result for an agent job (kind 43004)
+    #[command(after_help = "Examples:\n  \
+buzz jobs handoff --channel <UUID> --job <EVENT_ID> --manifest result.json\n  \
+cat result.json | buzz jobs handoff --channel <UUID> --job <EVENT_ID> --manifest -")]
+    Handoff {
+        /// Channel UUID containing the originating job
+        #[arg(long)]
+        channel: String,
+        /// Event ID of the originating kind 43001 job request
+        #[arg(long)]
+        job: String,
+        /// Job result JSON file, or '-' to read from stdin
+        #[arg(long)]
+        manifest: String,
     },
 }
 
@@ -1993,6 +2015,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
     match cli.command {
         Cmd::Agents(sub) => commands::agents::dispatch(sub, &client).await,
         Cmd::Messages(sub) => commands::messages::dispatch(sub, &client, &cli.format).await,
+        Cmd::Jobs(sub) => commands::jobs::dispatch(sub, &client).await,
         Cmd::Channels(sub) => commands::channels::dispatch(sub, &client, &cli.format).await,
         Cmd::Canvas(sub) => commands::channels::dispatch_canvas(sub, &client).await,
         Cmd::Reactions(sub) => commands::reactions::dispatch(sub, &client).await,
@@ -2019,7 +2042,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::CommandFactory;
+    use clap::{CommandFactory, Parser};
 
     /// Raw shorthand `[auth,hex,,hex]` normalizes to strict JSON; the empty
     /// conditions field becomes `""`.
@@ -2073,6 +2096,35 @@ mod tests {
     }
 
     #[test]
+    fn jobs_handoff_parses_file_and_stdin_manifests() {
+        for manifest in ["result.json", "-"] {
+            let cli = Cli::try_parse_from([
+                "buzz",
+                "jobs",
+                "handoff",
+                "--channel",
+                "550e8400-e29b-41d4-a716-446655440000",
+                "--job",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "--manifest",
+                manifest,
+            ])
+            .expect("jobs handoff should parse");
+
+            assert!(matches!(
+                cli.command,
+                Cmd::Jobs(JobsCmd::Handoff {
+                    channel,
+                    job,
+                    manifest: parsed_manifest,
+                }) if channel == "550e8400-e29b-41d4-a716-446655440000"
+                    && job == "a".repeat(64)
+                    && parsed_manifest == manifest
+            ));
+        }
+    }
+
+    #[test]
     fn set_status_clear_rejects_text_and_emoji() {
         for extra in [["--text", "busy"], ["--emoji", "🎶"]] {
             let args = ["buzz", "users", "set-status", "--clear"]
@@ -2106,6 +2158,7 @@ mod tests {
             "emoji",
             "feed",
             "issues",
+            "jobs",
             "media",
             "mem",
             "messages",
@@ -2185,6 +2238,7 @@ mod tests {
                 "vote"
             ]
         );
+        assert_eq!(names(&cmd, "jobs"), vec!["handoff"]);
         assert_eq!(
             names(&cmd, "channels"),
             vec![
@@ -2314,6 +2368,7 @@ mod tests {
             ("emoji", 5),
             ("feed", 1),
             ("issues", 4),
+            ("jobs", 1),
             ("media", 1),
             ("messages", 8),
             ("pack", 2),
