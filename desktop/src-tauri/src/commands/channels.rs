@@ -849,6 +849,20 @@ pub async fn change_channel_member_role(
 }
 
 #[tauri::command]
+pub async fn recover_channel_owner(
+    channel_id: String,
+    target_pubkey: String,
+    reason: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let uuid = parse_channel_uuid(&channel_id)?;
+    let builder = buzz_sdk_pkg::build_channel_owner_recovery(uuid, &target_pubkey, &reason)
+        .map_err(|error| error.to_string())?;
+    submit_event(builder, &state).await?;
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn join_channel(channel_id: String, state: State<'_, AppState>) -> Result<(), String> {
     let uuid = parse_channel_uuid(&channel_id)?;
     let builder = events::build_join(uuid)?;

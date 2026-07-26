@@ -15,6 +15,7 @@ import {
   leaveChannel,
   openDm,
   removeChannelMember,
+  recoverChannelOwner,
   setCanvas,
   setChannelPurpose,
   setChannelTopic,
@@ -543,6 +544,32 @@ export function useRemoveChannelMemberMutation(channelId: string | null) {
         queryClient.invalidateQueries({ queryKey: ["managed-agents"] }),
         queryClient.invalidateQueries({ queryKey: ["relay-agents"] }),
       ]);
+    },
+  });
+}
+
+export function useRecoverChannelOwnerMutation(channelId: string | null) {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async ({
+      reason,
+      targetPubkey,
+    }: {
+      reason: string;
+      targetPubkey: string;
+    }) => {
+      if (!channelId) {
+        throw new Error("No channel selected.");
+      }
+      await recoverChannelOwner({
+        channelId,
+        reason,
+        targetPubkey,
+      });
+    },
+    onSettled: async () => {
+      await invalidateChannelState(queryClient, channelId);
     },
   });
 }

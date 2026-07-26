@@ -1,5 +1,7 @@
 /// NIP-42 authentication handler.
 pub mod auth;
+/// Dedicated orphaned-channel ownership recovery (kind 9038).
+pub mod channel_owner_recovery;
 /// Subscription close (CLOSE) handler.
 pub mod close;
 /// Command executor — transactional processing for command kinds.

@@ -5,14 +5,14 @@
 
 use buzz_core::{
     kind::{
-        KIND_AGENT_OBSERVER_FRAME, KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_DELETION,
-        KIND_DM_ADD_MEMBER, KIND_DM_OPEN, KIND_EMOJI_SET, KIND_GIT_ISSUE, KIND_GIT_PATCH,
-        KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT,
-        KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED,
-        KIND_GIT_STATUS_OPEN, KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST,
-        KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT,
-        KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_PRESENCE_UPDATE, KIND_WORKFLOW_DEF,
-        KIND_WORKFLOW_TRIGGER,
+        KIND_AGENT_OBSERVER_FRAME, KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT,
+        KIND_CHANNEL_OWNER_RECOVERY, KIND_DELETION, KIND_DM_ADD_MEMBER, KIND_DM_OPEN,
+        KIND_EMOJI_SET, KIND_GIT_ISSUE, KIND_GIT_PATCH, KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST,
+        KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT,
+        KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN, KIND_IA_ARCHIVE_REQUEST,
+        KIND_IA_UNARCHIVE_REQUEST, KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT,
+        KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT,
+        KIND_PRESENCE_UPDATE, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
     },
     observer::{
         content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -73,6 +73,45 @@ fn check_pubkey_hex(s: &str, field: &str) -> Result<String, SdkError> {
         )));
     }
     Ok(s.to_ascii_lowercase())
+}
+
+/// Build a protected request to recover an orphaned channel's ownership.
+///
+/// The relay applies the narrow `all_current_human_owners_self_archived_for_target_v1`
+/// predicate. This builder cannot grant owner through the generic role-change
+/// path and does not imply recovery for lost or deleted keys.
+pub fn build_channel_owner_recovery(
+    channel_id: Uuid,
+    target_pubkey: &str,
+    reason: &str,
+) -> Result<EventBuilder, SdkError> {
+    if channel_id.is_nil() {
+        return Err(SdkError::InvalidInput(
+            "channel_id must not be nil".to_string(),
+        ));
+    }
+    let target = check_pubkey_hex(target_pubkey, "target_pubkey")?;
+    let reason = reason.trim();
+    if reason.is_empty() {
+        return Err(SdkError::InvalidInput(
+            "recovery reason must not be empty".to_string(),
+        ));
+    }
+    check_content(reason, 500)?;
+    if reason.chars().any(char::is_control) {
+        return Err(SdkError::InvalidInput(
+            "recovery reason must not contain control characters".to_string(),
+        ));
+    }
+
+    Ok(
+        EventBuilder::new(Kind::Custom(KIND_CHANNEL_OWNER_RECOVERY as u16), "").tags([
+            tag(&["-"])?,
+            tag(&["h", &channel_id.to_string()])?,
+            tag(&["p", &target])?,
+            tag(&["reason", reason])?,
+        ]),
+    )
 }
 
 /// Validate an exact-length hex string (event ids), returning it lowercased.
@@ -3820,5 +3859,40 @@ mod tests {
             .tags
             .iter()
             .any(|t| t.as_slice().first().map(String::as_str) == Some("replaced-by")));
+    }
+
+    #[test]
+    fn channel_owner_recovery_has_dedicated_protected_wire_shape() {
+        let channel = Uuid::new_v4();
+        let target = "ab".repeat(32);
+        let event =
+            sign(build_channel_owner_recovery(channel, &target, "Prior consent recorded").unwrap());
+        let tags: Vec<Vec<String>> = event
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice().to_vec())
+            .collect();
+        assert_eq!(event.kind, Kind::Custom(KIND_CHANNEL_OWNER_RECOVERY as u16));
+        assert_eq!(
+            tags,
+            vec![
+                vec!["-"],
+                vec!["h", &channel.to_string()],
+                vec!["p", &target],
+                vec!["reason", "Prior consent recorded"],
+            ]
+        );
+        assert!(event.content.is_empty());
+    }
+
+    #[test]
+    fn channel_owner_recovery_rejects_unsafe_inputs() {
+        let channel = Uuid::new_v4();
+        let target = "ab".repeat(32);
+        assert!(build_channel_owner_recovery(Uuid::nil(), &target, "reason").is_err());
+        assert!(build_channel_owner_recovery(channel, "not-a-key", "reason").is_err());
+        assert!(build_channel_owner_recovery(channel, &target, " ").is_err());
+        assert!(build_channel_owner_recovery(channel, &target, "bad\nreason").is_err());
+        assert!(build_channel_owner_recovery(channel, &target, &"x".repeat(501)).is_err());
     }
 }

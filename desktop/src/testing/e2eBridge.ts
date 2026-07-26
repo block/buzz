@@ -214,6 +214,12 @@ type E2eConfig = {
     /** Sequenced add-member failures. A string fails that call; null succeeds. */
     addChannelMembersErrors?: (string | null)[];
     channelMembersReadDelayMs?: number;
+    /** Relay denial returned by the dedicated owner-recovery command. */
+    channelOwnerRecoveryError?: string;
+    /** Hides the current identity from the active channel membership response. */
+    currentChannelMemberAbsent?: boolean;
+    /** Marks the current identity as an agent for fail-closed UI tests. */
+    currentIdentityIsAgent?: boolean;
     createManagedAgentDelayMs?: number;
     channelTemplates?: ChannelTemplate[];
     channelsReadError?: string;
@@ -5507,7 +5513,11 @@ async function handleGetUsersBatch(
         avatar_url: profile.avatar_url,
         nip05_handle: profile.nip05_handle,
         owner_pubkey: profile.owner_pubkey,
-        is_agent: profile.is_agent ?? false,
+        is_agent:
+          normalizedPubkey === getMockMemberPubkey(config) &&
+          config?.mock?.currentIdentityIsAgent
+            ? true
+            : (profile.is_agent ?? false),
       };
     }
 
@@ -5535,12 +5545,15 @@ async function handleGetUsersBatch(
         ((ev.tags ?? []) as string[][]).find(
           (tag) => Array.isArray(tag) && tag[0] === "auth" && tag.length === 4,
         )?.[1] ?? null,
-      is_agent: Array.isArray(ev.tags)
-        ? ev.tags.some(
-            (tag) =>
-              Array.isArray(tag) && tag[0] === "auth" && tag.length === 4,
-          )
-        : false,
+      is_agent:
+        (pk === getMockMemberPubkey(config) &&
+          config?.mock?.currentIdentityIsAgent) ||
+        (Array.isArray(ev.tags)
+          ? ev.tags.some(
+              (tag) =>
+                Array.isArray(tag) && tag[0] === "auth" && tag.length === 4,
+            )
+          : false),
     };
   }
   for (const pubkey of args.pubkeys) {
@@ -5561,7 +5574,11 @@ async function handleGetUsersBatch(
       avatar_url: profile.avatar_url,
       nip05_handle: profile.nip05_handle,
       owner_pubkey: profile.owner_pubkey,
-      is_agent: profile.is_agent ?? false,
+      is_agent:
+        normalizedPubkey === getMockMemberPubkey(config) &&
+        config?.mock?.currentIdentityIsAgent
+          ? true
+          : (profile.is_agent ?? false),
     };
   }
   const missing = args.pubkeys.filter((p) => !found.has(p.toLowerCase()));
@@ -6022,8 +6039,23 @@ async function handleGetChannelMembers(
   const identity = getIdentity(config);
   if (!identity) {
     const channel = getMockChannel(args.channelId);
+    const members = cloneMembers(channel.members);
+    if (config?.mock?.currentChannelMemberAbsent) {
+      const currentPubkey = getMockMemberPubkey(config);
+      return {
+        members: members.filter((member) => member.pubkey !== currentPubkey),
+        next_cursor: null,
+      };
+    }
+    if (config?.mock?.currentIdentityIsAgent) {
+      const currentPubkey = getMockMemberPubkey(config);
+      const current = members.find((member) => member.pubkey === currentPubkey);
+      if (current) {
+        current.is_agent = true;
+      }
+    }
     return {
-      members: cloneMembers(channel.members),
+      members,
       next_cursor: null,
     };
   }
@@ -6466,6 +6498,86 @@ async function handleRemoveChannelMember(
     tags: [
       ["h", args.channelId],
       ["p", args.pubkey],
+    ],
+  });
+}
+
+async function handleRecoverChannelOwner(
+  args: {
+    channelId: string;
+    targetPubkey: string;
+    reason: string;
+  },
+  config: E2eConfig | undefined,
+) {
+  const configuredError = config?.mock?.channelOwnerRecoveryError;
+  if (configuredError) {
+    throw new Error(configuredError);
+  }
+
+  const identity = getIdentity(config);
+  if (!identity) {
+    const channel = getMockChannel(args.channelId);
+    const actor = getMockMemberPubkey(config);
+    const priorElevatedRoles = channel.members
+      .filter((member) => member.role === "owner" || member.role === "admin")
+      .map((member) => ({ pubkey: member.pubkey, role: member.role }));
+    const target = channel.members.find(
+      (member) => member.pubkey === args.targetPubkey,
+    );
+    if (!target) {
+      throw new Error("target is not an active channel member");
+    }
+    if (!args.reason.trim()) {
+      throw new Error("recovery reason must not be empty");
+    }
+    target.role = "owner";
+    syncMockChannel(channel);
+    touchMockChannel(channel);
+    const requestEventId = crypto
+      .randomUUID()
+      .replace(/-/g, "")
+      .padEnd(64, "0");
+    const payload = {
+      schema_version: 1,
+      type: "channel_owner_recovered",
+      community_id: "00000000-0000-0000-0000-000000000001",
+      channel_id: args.channelId,
+      request_event_id: requestEventId,
+      actor,
+      target: args.targetPubkey,
+      predicate_id: "all_current_human_owners_self_archived_for_target_v1",
+      reason_code: "orphaned_owner_prior_self_consent",
+      reason: args.reason.trim(),
+      prior_elevated_roles: priorElevatedRoles,
+      created_at: new Date().toISOString(),
+    };
+    const event = createMockEvent(
+      KIND_SYSTEM_MESSAGE,
+      JSON.stringify(payload),
+      [
+        ["h", args.channelId],
+        ["e", requestEventId],
+        ["p", actor],
+        ["p", args.targetPubkey],
+        ["predicate", payload.predicate_id],
+        ["reason-code", payload.reason_code],
+      ],
+      "f".repeat(64),
+    );
+    recordMockMessage(args.channelId, event);
+    emitMockLiveEvent(args.channelId, event);
+    return;
+  }
+
+  await submitSignedEvent(config, {
+    kind: 9038,
+    content: "",
+    tags: [
+      ["-"],
+      ["h", args.channelId],
+      ["p", args.targetPubkey],
+      ["reason", args.reason],
     ],
   });
 }
@@ -10593,6 +10705,11 @@ export function maybeInstallE2eTauriMocks() {
       case "remove_channel_member":
         return handleRemoveChannelMember(
           payload as Parameters<typeof handleRemoveChannelMember>[0],
+          activeConfig,
+        );
+      case "recover_channel_owner":
+        return handleRecoverChannelOwner(
+          payload as Parameters<typeof handleRecoverChannelOwner>[0],
           activeConfig,
         );
       case "join_channel":

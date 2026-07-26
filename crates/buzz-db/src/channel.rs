@@ -16,6 +16,21 @@ use buzz_core::CommunityId;
 // without pulling in sqlx/tokio.
 pub use buzz_core::channel::{ChannelType, ChannelVisibility, MemberRole};
 
+/// Acquire the transaction-scoped lock shared by every channel membership
+/// mutation and the owner-recovery transaction.
+pub(crate) async fn lock_channel_membership(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    channel_id: Uuid,
+) -> Result<()> {
+    let key = format!("channel-membership:{community_id}:{channel_id}");
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(key)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
 /// A channel row as returned from the database.
 #[derive(Debug, Clone)]
 pub struct ChannelRecord {
@@ -359,6 +374,7 @@ pub async fn add_member(
     }
 
     let mut tx = pool.begin().await?;
+    lock_channel_membership(&mut tx, community_id, channel_id).await?;
 
     let channel = get_channel_tx(&mut tx, community_id, channel_id).await?;
 
@@ -464,6 +480,7 @@ pub async fn remove_member(
     actor_pubkey: &[u8],
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
+    lock_channel_membership(&mut tx, community_id, channel_id).await?;
 
     let is_self_remove = pubkey == actor_pubkey;
     if !is_self_remove {

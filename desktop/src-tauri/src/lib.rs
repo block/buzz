@@ -730,6 +730,7 @@ pub fn run() {
             add_channel_members,
             remove_channel_member,
             change_channel_member_role,
+            recover_channel_owner,
             join_channel,
             leave_channel,
             get_canvas,

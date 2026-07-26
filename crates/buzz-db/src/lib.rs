@@ -17,6 +17,8 @@ pub mod api_token;
 pub mod archived_identities;
 /// Channel and membership persistence.
 pub mod channel;
+/// Atomic orphaned-channel ownership recovery.
+pub mod channel_owner_recovery;
 /// Direct message channel persistence.
 pub mod dm;
 /// Database error types.
@@ -1544,6 +1546,60 @@ impl Db {
         actor_pubkey: &[u8],
     ) -> Result<()> {
         channel::remove_member(&self.pool, community_id, channel_id, pubkey, actor_pubkey).await
+    }
+
+    /// Apply or idempotently replay a dedicated channel-owner recovery request.
+    pub async fn recover_channel_owner(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        target_pubkey: &[u8],
+        reason: &str,
+        request: &nostr::Event,
+    ) -> Result<channel_owner_recovery::RecoveryRecord> {
+        channel_owner_recovery::recover_channel_owner(
+            &self.pool,
+            community_id,
+            channel_id,
+            target_pubkey,
+            reason,
+            request,
+        )
+        .await
+    }
+
+    /// Mark a recovery audit outbox record delivered.
+    pub async fn mark_recovery_delivered(
+        &self,
+        community_id: CommunityId,
+        request_event_id: &[u8],
+    ) -> Result<()> {
+        channel_owner_recovery::mark_recovery_delivered(&self.pool, community_id, request_event_id)
+            .await
+    }
+
+    /// Record a retryable recovery audit delivery failure.
+    pub async fn record_recovery_delivery_failure(
+        &self,
+        community_id: CommunityId,
+        request_event_id: &[u8],
+        error: &str,
+    ) -> Result<()> {
+        channel_owner_recovery::record_recovery_delivery_failure(
+            &self.pool,
+            community_id,
+            request_event_id,
+            error,
+        )
+        .await
+    }
+
+    /// Load a bounded batch of pending channel recovery audit deliveries.
+    pub async fn pending_recovery_deliveries(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<channel_owner_recovery::PendingRecoveryDelivery>> {
+        channel_owner_recovery::pending_recovery_deliveries(&self.pool, limit).await
     }
 
     /// Returns `true` if the pubkey is an active member.

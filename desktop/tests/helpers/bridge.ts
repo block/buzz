@@ -220,6 +220,12 @@ type MockBridgeOptions = {
   /** Sequenced add-member failures. A string fails that call; null succeeds. */
   addChannelMembersErrors?: (string | null)[];
   channelMembersReadDelayMs?: number;
+  /** Relay denial returned by the dedicated owner-recovery command. */
+  channelOwnerRecoveryError?: string;
+  /** Hides the current identity from the active channel membership response. */
+  currentChannelMemberAbsent?: boolean;
+  /** Marks the current identity as an agent for fail-closed UI tests. */
+  currentIdentityIsAgent?: boolean;
   channelsReadError?: string;
   /** Reject successive mock `get_channels` calls, then resume. */
   channelsReadErrors?: (string | null)[];

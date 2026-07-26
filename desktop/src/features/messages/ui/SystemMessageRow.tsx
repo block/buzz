@@ -48,6 +48,7 @@ type SystemMessagePayload = {
   public_reason?: string;
   reason_code?: string;
   action_id?: string;
+  reason?: string;
 };
 
 type SystemMessageDescription = {
@@ -608,6 +609,20 @@ function describeSystemEvent(
       return {
         title: actorName,
         action: "unarchived this channel",
+      };
+    case "channel_owner_recovered":
+      if (!payload.actor || !payload.target || !payload.reason) return null;
+      return {
+        title: targetName,
+        action: (
+          <>
+            was promoted to channel owner by{" "}
+            <ProfileName pubkey={payload.actor} underlineOnHover>
+              {actorLabel}
+            </ProfileName>
+            . Recovery reason: &ldquo;{payload.reason}&rdquo;
+          </>
+        ),
       };
     case "message_deleted": {
       // Room-facing tombstone. When a moderator removed the message, the relay
