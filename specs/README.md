@@ -49,3 +49,4 @@ node.
 - [Cloudflare conformance vector](fixtures/portable-relay/cloudflare-v0.1.json)
 - [Cloudflare adapter capability](capabilities/portable-relay-cloudflare.capability.yaml)
 - [Portable relay conformance evidence](evidence/portable-relay/README.md)
+- [Sovereign sync agreement (draft)](architecture/sovereign-sync-agreement-v0.1-draft.md)
