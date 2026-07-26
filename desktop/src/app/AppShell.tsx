@@ -41,6 +41,8 @@ import { useManagedAgentRuntimeReconciliation } from "@/features/agents/useManag
 import { useAutoRestartPolicy } from "@/features/agents/lib/useAutoRestartPolicy";
 import { usePersonaSync } from "@/features/agents/lib/usePersonaSync";
 import { useAgentObserverIngestion } from "@/features/agents/useAgentObserverIngestion";
+import { useSpawnerIngestion } from "@/features/agents/useSpawnerIngestion";
+import { SpawnerAttestationDialog } from "@/features/agents/ui/SpawnerAttestationDialog";
 import { AgentManagementDialogs } from "@/features/agents/ui/AgentManagementDialogs";
 import { RequestedAgentCreateDialogs } from "@/features/agents/ui/RequestedAgentCreateDialogs";
 import {
@@ -182,6 +184,9 @@ export function AppShell() {
   // relay-owned agents join automatically once identity arrives. Adding a
   // guard here would drop managed-agent coverage during startup.
   useAgentObserverIngestion();
+  // Kind 24201 is ephemeral and relay-routed by `#p`: a request that arrives
+  // while the Agents screen is unmounted is gone, so this is app-wide.
+  useSpawnerIngestion();
   // Kind 24200 is relay-ephemeral, so reconciliation runs eagerly (not
   // deferred) and unconditionally repairs the DB subscription on internal
   // builds — otherwise frames emitted before the listener opens are lost.
@@ -941,6 +946,7 @@ export function AppShell() {
                     )}
                     <RequestedAgentCreateDialogs />
                     <AgentManagementDialogs />
+                    <SpawnerAttestationDialog />
                     <AppShellOverlays
                       activeChannel={managedChannel}
                       browseDialogType={browseDialogType}

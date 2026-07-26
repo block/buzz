@@ -335,6 +335,7 @@ pub fn build_managed_agent_summary(
         last_error_code: record.last_error_code,
         start_on_app_launch: record.start_on_app_launch,
         auto_restart_on_config_change: record.auto_restart_on_config_change,
+        relocated_to_spawner: record.relocated_to_spawner.clone(),
         log_path,
         respond_to: record.respond_to,
         respond_to_allowlist: record.respond_to_allowlist.clone(),
@@ -459,6 +460,12 @@ pub fn spawn_agent_child(
     owner_hex: Option<&str>,
 ) -> Result<crate::managed_agents::ManagedAgentProcess, String> {
     if let Some(error) = spawn_key_refusal(record) {
+        return Err(error);
+    }
+    // Relocated identities live on their spawner now; every spawn path funnels
+    // through here, so this closes local resurrection (manual start, restore,
+    // reconcile, lazy @mention wake, auto-restart) in one place.
+    if let Some(error) = super::spawn_relocation_refusal(record) {
         return Err(error);
     }
     let runtime_key = ManagedAgentRuntimeKey::new(record.pubkey.clone(), relay_url)?;

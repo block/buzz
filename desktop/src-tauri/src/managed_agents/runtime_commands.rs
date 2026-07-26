@@ -466,9 +466,13 @@ pub async fn reconcile_managed_agent_runtimes(
     let records = load_managed_agents(&app)?;
     let mut jobs = Vec::new();
     for community in communities {
-        for record in records
-            .iter()
-            .filter(|record| record.start_on_app_launch && record.backend == BackendKind::Local)
+        for record in records.iter().filter(|record| {
+            record.start_on_app_launch
+                    && record.backend == BackendKind::Local
+                    // Relocated identities run on their spawner — never fan
+                    // out a local pair for them.
+                    && record.relocated_to_spawner.is_none()
+        })
         // The legacy per-record relay pin is deliberately ignored here — see
         // `effective_agent_relay_url`. Every local auto-start agent fans out
         // to every configured community.

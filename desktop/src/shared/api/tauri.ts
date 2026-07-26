@@ -152,6 +152,7 @@ export type RawManagedAgent = {
   log_path: string;
   start_on_app_launch: boolean;
   auto_restart_on_config_change?: boolean;
+  relocated_to_spawner?: string | null;
   backend: ManagedAgentBackend;
   backend_agent_id: string | null;
   // Optional: pre-feature mock fixtures may omit these. Mapped to
@@ -733,6 +734,7 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     logPath: agent.log_path,
     startOnAppLaunch: agent.start_on_app_launch,
     autoRestartOnConfigChange: agent.auto_restart_on_config_change ?? true,
+    relocatedToSpawner: agent.relocated_to_spawner ?? null,
     backend: agent.backend,
     backendAgentId: agent.backend_agent_id,
     // Fallbacks for pre-feature mocks/fixtures that don't carry these fields.
