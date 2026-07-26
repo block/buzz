@@ -20,7 +20,24 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
   Future<HomeFeedResponse> build() {
     ref.watch(relayConfigProvider);
     ref.watch(relaySessionProvider);
+    // React to the DM channel set (loading → data, membership changes) so a
+    // cold start where channels resolve after the first fetch still surfaces
+    // DMs without a manual refresh.
+    ref.watch(channelsProvider.select(_dmChannelKey));
     return _fetch();
+  }
+
+  /// Stable identity for the joined DM channel set: null while channels are
+  /// loading, otherwise the sorted member-DM ids. Keeps unrelated channel
+  /// updates from refetching the feed.
+  static String? _dmChannelKey(AsyncValue<List<Channel>> channels) {
+    final value = channels.asData?.value;
+    if (value == null) return null;
+    final ids = [
+      for (final channel in value)
+        if (channel.isDm && channel.isMember) channel.id,
+    ]..sort();
+    return ids.join(',');
   }
 
   Future<HomeFeedResponse> _fetch() async {
@@ -36,8 +53,9 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
 
     final session = ref.read(relaySessionProvider.notifier);
 
-    // DM channels come from the already-cached channel list when available;
-    // a missing list only skips the DM source for this refresh.
+    // DM channels come from the channel list; while it is still loading the
+    // DM source is skipped, and build() rebuilds when it resolves (see the
+    // channelsProvider watch above).
     final dmChannelIds = [
       for (final channel
           in ref.read(channelsProvider).asData?.value ?? const <Channel>[])
