@@ -320,15 +320,24 @@ pub async fn upsert_workflow(
     definition_json: &str,
     definition_hash: &[u8],
 ) -> Result<()> {
+    // The `enabled` flag lives in the definition (WorkflowDef.enabled, default
+    // true). Honor it on both insert AND update — otherwise re-publishing a
+    // definition with `enabled: false` changes the JSON but leaves the row
+    // enabled, so a disabled workflow keeps firing.
+    let enabled = serde_json::from_str::<serde_json::Value>(definition_json)
+        .ok()
+        .and_then(|v| v.get("enabled").and_then(|e| e.as_bool()))
+        .unwrap_or(true);
     let row = sqlx::query(
         r#"
         INSERT INTO workflows
             (community_id, id, name, owner_pubkey, channel_id, definition, definition_hash, status, enabled)
-        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, 'active', TRUE)
+        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, 'active', $8)
         ON CONFLICT (community_id, id) DO UPDATE
         SET name = EXCLUDED.name,
             definition = EXCLUDED.definition,
             definition_hash = EXCLUDED.definition_hash,
+            enabled = EXCLUDED.enabled,
             updated_at = NOW()
         WHERE workflows.owner_pubkey = EXCLUDED.owner_pubkey
           AND workflows.channel_id IS NOT DISTINCT FROM EXCLUDED.channel_id
@@ -342,6 +351,7 @@ pub async fn upsert_workflow(
     .bind(channel_id)
     .bind(definition_json)
     .bind(definition_hash)
+    .bind(enabled)
     .fetch_optional(pool)
     .await?;
 
