@@ -258,8 +258,17 @@ pub struct CliArgs {
     )]
     pub agent_args: Vec<String>,
 
-    #[arg(long, env = "BUZZ_ACP_MCP_COMMAND", default_value = "")]
-    pub mcp_command: String,
+    /// MCP server binaries to run alongside the agent. Accepts a
+    /// comma-separated list so an agent can hold more than one server (e.g. a
+    /// data MCP plus the dev tools it replies with); a single value keeps the
+    /// previous behaviour.
+    #[arg(
+        long = "mcp-command",
+        env = "BUZZ_ACP_MCP_COMMAND",
+        default_value = "",
+        value_delimiter = ','
+    )]
+    pub mcp_commands: Vec<String>,
 
     /// Idle timeout: max seconds of silence before killing a turn.
     /// Resets on any agent stdout activity.
@@ -494,7 +503,7 @@ pub struct Config {
     pub relay_url: String,
     pub agent_command: String,
     pub agent_args: Vec<String>,
-    pub mcp_command: String,
+    pub mcp_commands: Vec<String>,
     pub idle_timeout_secs: u64,
     pub max_turn_duration_secs: u64,
     pub agents: u32,
@@ -1034,7 +1043,11 @@ impl Config {
             relay_url: args.relay_url,
             agent_command,
             agent_args,
-            mcp_command: args.mcp_command,
+            mcp_commands: args
+                .mcp_commands
+                .into_iter()
+                .filter(|c| !c.trim().is_empty())
+                .collect(),
             idle_timeout_secs,
             max_turn_duration_secs,
             agents: args.agents,
@@ -1104,7 +1117,7 @@ impl Config {
             self.keys.public_key().to_hex(),
             self.agent_command,
             self.agent_args.join(" "),
-            self.mcp_command,
+            self.mcp_commands.join(","),
             self.idle_timeout_secs,
             self.max_turn_duration_secs,
             self.agents,
@@ -1412,7 +1425,7 @@ mod tests {
             relay_url: "ws://localhost:3000".into(),
             agent_command: "goose".into(),
             agent_args: vec!["acp".into()],
-            mcp_command: "".into(),
+            mcp_commands: vec![],
             idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,

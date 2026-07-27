@@ -4139,61 +4139,89 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
     Ok(())
 }
 
-fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
-    if config.mcp_command.is_empty() {
-        return vec![];
+/// Derive a stable, unique server name from a command path.
+///
+/// `McpRegistry::spawn_all` rejects duplicate names, so two commands sharing a
+/// file stem (`/opt/a/bridge` and `/opt/b/bridge`) would abort startup. Suffix
+/// the later one rather than failing: the operator's intent is unambiguous.
+fn mcp_server_name(command: &str, taken: &mut std::collections::HashSet<String>) -> String {
+    let base = std::path::Path::new(command)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("mcp")
+        .to_string();
+    if taken.insert(base.clone()) {
+        return base;
     }
-    vec![McpServer {
-        name: std::path::Path::new(&config.mcp_command)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("mcp")
-            .to_string(),
-        command: config.mcp_command.clone(),
-        args: vec![],
-        env: {
-            let mut env = vec![
-                EnvVar {
-                    name: "BUZZ_RELAY_URL".into(),
-                    value: config.relay_url.clone(),
-                },
-                EnvVar {
-                    name: "BUZZ_PRIVATE_KEY".into(),
-                    // bech32 encoding of a valid secret key is infallible.
-                    // Panic here is correct: injecting a bogus secret would cause
-                    // delayed, hard-to-diagnose agent failures downstream.
-                    value: config
-                        .keys
-                        .secret_key()
-                        .to_bech32()
-                        .expect("secret key bech32 encoding should never fail"),
-                },
-            ];
-            // Forward BUZZ_AUTH_TAG (NIP-OA owner attestation credential)
-            // so the MCP server can attach it to every signed event.
-            if let Ok(auth_tag) = std::env::var("BUZZ_AUTH_TAG") {
-                if !auth_tag.is_empty() {
-                    env.push(EnvVar {
-                        name: "BUZZ_AUTH_TAG".into(),
-                        value: auth_tag,
-                    });
-                }
+    for n in 2.. {
+        let candidate = format!("{base}-{n}");
+        if taken.insert(candidate.clone()) {
+            return candidate;
+        }
+    }
+    unreachable!("suffix search is unbounded")
+}
+
+fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
+    // The env every MCP subprocess receives. buzz-agent clears the environment
+    // before spawning, so anything a server needs has to be handed over here.
+    let base_env = || {
+        let mut env = vec![
+            EnvVar {
+                name: "BUZZ_RELAY_URL".into(),
+                value: config.relay_url.clone(),
+            },
+            EnvVar {
+                name: "BUZZ_PRIVATE_KEY".into(),
+                // bech32 encoding of a valid secret key is infallible.
+                // Panic here is correct: injecting a bogus secret would cause
+                // delayed, hard-to-diagnose agent failures downstream.
+                value: config
+                    .keys
+                    .secret_key()
+                    .to_bech32()
+                    .expect("secret key bech32 encoding should never fail"),
+            },
+        ];
+        // Forward BUZZ_AUTH_TAG (NIP-OA owner attestation credential)
+        // so the MCP server can attach it to every signed event.
+        if let Ok(auth_tag) = std::env::var("BUZZ_AUTH_TAG") {
+            if !auth_tag.is_empty() {
+                env.push(EnvVar {
+                    name: "BUZZ_AUTH_TAG".into(),
+                    value: auth_tag,
+                });
             }
-            // Forward the agent's display name so dev-mcp can use it as the git
-            // author name instead of the raw npub. Read from the process env
-            // rather than Config: this is a pass-through of a contract owned
-            // upstream, and absent simply means dev-mcp falls back to the npub.
-            if let Ok(display_name) = std::env::var("BUZZ_ACP_DISPLAY_NAME") {
-                if !display_name.is_empty() {
-                    env.push(EnvVar {
-                        name: "BUZZ_ACP_DISPLAY_NAME".into(),
-                        value: display_name,
-                    });
-                }
+        }
+        // Forward the agent's display name so dev-mcp can use it as the git
+        // author name instead of the raw npub. Read from the process env
+        // rather than Config: this is a pass-through of a contract owned
+        // upstream, and absent simply means dev-mcp falls back to the npub.
+        if let Ok(display_name) = std::env::var("BUZZ_ACP_DISPLAY_NAME") {
+            if !display_name.is_empty() {
+                env.push(EnvVar {
+                    name: "BUZZ_ACP_DISPLAY_NAME".into(),
+                    value: display_name,
+                });
             }
-            env
-        },
-    }]
+        }
+        env
+    };
+
+    let mut taken = std::collections::HashSet::new();
+    config
+        .mcp_commands
+        .iter()
+        .map(|c| c.trim())
+        .filter(|c| !c.is_empty())
+        .map(|command| McpServer {
+            name: mcp_server_name(command, &mut taken),
+            command: command.to_string(),
+            args: vec![],
+            env: base_env(),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -4962,7 +4990,7 @@ mod build_mcp_servers_tests {
             relay_url: "ws://localhost:3000".into(),
             agent_command: "goose".into(),
             agent_args: vec!["acp".into()],
-            mcp_command: "test-mcp-server".into(),
+            mcp_commands: vec!["test-mcp-server".into()],
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
@@ -5107,18 +5135,18 @@ mod build_mcp_servers_tests {
     #[test]
     fn empty_mcp_command_returns_no_servers() {
         let mut config = test_config();
-        config.mcp_command = "".into();
+        config.mcp_commands = vec!["".into()];
         let servers = build_mcp_servers(&config);
         assert!(
             servers.is_empty(),
-            "empty mcp_command should produce no MCP servers"
+            "empty mcp command should produce no MCP servers"
         );
     }
 
     #[test]
     fn absolute_path_mcp_command_uses_file_stem_as_name() {
         let mut config = test_config();
-        config.mcp_command = "/opt/bin/my-mcp-server".into();
+        config.mcp_commands = vec!["/opt/bin/my-mcp-server".into()];
         let servers = build_mcp_servers(&config);
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].name, "my-mcp-server");
@@ -5128,7 +5156,7 @@ mod build_mcp_servers_tests {
     fn mcp_command_with_no_stem_falls_back_to_mcp() {
         // Path::new("").file_stem() returns None — exercises the unwrap_or("mcp") path.
         let mut config = test_config();
-        config.mcp_command = "".into();
+        config.mcp_commands = vec!["".into()];
         // Empty command returns no servers; test the stem logic directly.
         assert_eq!(
             std::path::Path::new("")
@@ -5139,13 +5167,82 @@ mod build_mcp_servers_tests {
         );
 
         // Confirm a non-empty command with no stem (e.g. just a dot) also falls back.
-        config.mcp_command = ".".into();
+        config.mcp_commands = vec![".".into()];
         let servers = build_mcp_servers(&config);
         assert_eq!(servers.len(), 1);
         assert_eq!(
             servers[0].name, "mcp",
             "Path::new(\".\").file_stem() is None — should fall back to \"mcp\""
         );
+    }
+
+    #[test]
+    fn multiple_mcp_commands_produce_one_server_each() {
+        // The motivating case: an agent needs a data MCP *and* the dev tools it
+        // replies with. A single slot forces a choice between reading and acting.
+        let mut config = test_config();
+        config.mcp_commands = vec![
+            "/usr/local/bin/buzz-dev-mcp".into(),
+            "/usr/local/bin/data-bridge".into(),
+        ];
+        let servers = build_mcp_servers(&config);
+        assert_eq!(servers.len(), 2);
+        let names: Vec<&str> = servers.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["buzz-dev-mcp", "data-bridge"]);
+        let commands: Vec<&str> = servers.iter().map(|s| s.command.as_str()).collect();
+        assert_eq!(
+            commands,
+            vec!["/usr/local/bin/buzz-dev-mcp", "/usr/local/bin/data-bridge"]
+        );
+    }
+
+    #[test]
+    fn every_server_receives_the_identity_env() {
+        let mut config = test_config();
+        config.mcp_commands = vec!["/opt/a/first".into(), "/opt/b/second".into()];
+        let servers = build_mcp_servers(&config);
+        assert_eq!(servers.len(), 2);
+        for server in &servers {
+            let names: Vec<&str> = server.env.iter().map(|e| e.name.as_str()).collect();
+            assert!(
+                names.contains(&"BUZZ_RELAY_URL") && names.contains(&"BUZZ_PRIVATE_KEY"),
+                "server {} missing identity env; got {names:?}",
+                server.name
+            );
+        }
+    }
+
+    /// `McpRegistry::spawn_all` rejects duplicate server names, so colliding
+    /// file stems must be disambiguated rather than aborting startup.
+    #[test]
+    fn colliding_file_stems_are_disambiguated() {
+        let mut config = test_config();
+        config.mcp_commands = vec![
+            "/opt/a/bridge".into(),
+            "/opt/b/bridge".into(),
+            "/opt/c/bridge".into(),
+        ];
+        let servers = build_mcp_servers(&config);
+        let names: Vec<&str> = servers.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["bridge", "bridge-2", "bridge-3"]);
+        let unique: std::collections::HashSet<&&str> = names.iter().collect();
+        assert_eq!(unique.len(), names.len(), "server names must be unique");
+    }
+
+    #[test]
+    fn blank_entries_are_skipped_without_dropping_the_rest() {
+        let mut config = test_config();
+        config.mcp_commands = vec!["".into(), "  ".into(), "/opt/bin/real".into()];
+        let servers = build_mcp_servers(&config);
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].name, "real");
+    }
+
+    #[test]
+    fn no_mcp_commands_returns_no_servers() {
+        let mut config = test_config();
+        config.mcp_commands = vec![];
+        assert!(build_mcp_servers(&config).is_empty());
     }
 }
 
@@ -5183,7 +5280,7 @@ mod error_outcome_emission_tests {
             // feed emission under test.
             agent_command: "true".into(),
             agent_args: vec![],
-            mcp_command: "test-mcp-server".into(),
+            mcp_commands: vec!["test-mcp-server".into()],
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
