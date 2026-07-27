@@ -197,6 +197,8 @@ pub async fn start_huddle(
         hs.phase = HuddlePhase::Creating;
         hs.parent_channel_id = Some(parent_channel_id.clone());
     }
+    // The huddle owns the audio device now — end any message read-aloud.
+    crate::message_tts::stop_message_playback(&state);
 
     let ephemeral_uuid = Uuid::new_v4();
     let ephemeral_channel_id = ephemeral_uuid.to_string();
@@ -352,6 +354,8 @@ pub async fn join_huddle(
         hs.parent_channel_id = Some(parent_channel_id.clone());
         hs.ephemeral_channel_id = Some(ephemeral_channel_id.clone());
     }
+    // The huddle owns the audio device now — end any message read-aloud.
+    crate::message_tts::stop_message_playback(&state);
 
     // Seed participant list with own pubkey as a fallback until relay responds.
     let own_pubkey = state

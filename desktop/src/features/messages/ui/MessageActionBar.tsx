@@ -11,7 +11,9 @@ import {
   MailOpen,
   Pencil,
   SmilePlus,
+  Square,
   Trash2,
+  Volume2,
 } from "lucide-react";
 import * as React from "react";
 
@@ -19,6 +21,7 @@ import { buildMessageLink } from "@/features/messages/lib/messageLink";
 import { EmojiPicker } from "@/features/custom-emoji/ui/EmojiPicker";
 import { useCustomEmoji } from "@/features/custom-emoji/hooks";
 import { getThreadReference } from "@/features/messages/lib/threading";
+import { useMessageTts } from "@/features/message-tts/ui/MessageTtsProvider";
 import { ReportMessageDialog } from "@/features/moderation/ui/ReportMessageDialog";
 import { MessageModerationMenuItems } from "@/features/moderation/ui/MessageModerationMenuItems";
 import type {
@@ -365,6 +368,74 @@ function isCustomEmojiShortcode(emoji: string) {
   return emoji.startsWith(":") && emoji.endsWith(":");
 }
 
+/**
+ * Play/Stop read-aloud toggle for delivered agent messages.
+ *
+ * Renders nothing when the MessageTtsProvider is absent (web builds, tests)
+ * or when the message is not delivered agent text — read-aloud is scoped to
+ * agent responses in v1. While a huddle is live the button stays visible but
+ * disabled, with the tooltip explaining why (the backend refuses too).
+ */
+function ReadAloudButton({ message }: { message: TimelineMessage }) {
+  const messageTts = useMessageTts();
+
+  if (!messageTts) {
+    return null;
+  }
+  // Delivered agent text only: no pending sends, no system huddle rows,
+  // nothing without a body to speak.
+  if (
+    !message.isAgent ||
+    message.pending ||
+    message.kind === KIND_HUDDLE_STARTED ||
+    !message.body.trim()
+  ) {
+    return null;
+  }
+
+  const playing = messageTts.isPlaying(message.id);
+  const disabled = messageTts.disabledReason !== null;
+  const label = playing ? "Stop reading aloud" : "Read message aloud";
+  const tooltip = disabled
+    ? (messageTts.disabledReason ?? label)
+    : playing
+      ? "Stop"
+      : "Read aloud";
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button
+          aria-label={label}
+          aria-pressed={playing}
+          className={ACTION_BUTTON_CLASS}
+          data-testid={`read-aloud-${message.id}`}
+          disabled={disabled}
+          onClick={() => {
+            if (playing) {
+              messageTts.stop();
+            } else {
+              // Current rendered body: edits are picked up naturally because
+              // each play sends the text visible at click time.
+              messageTts.play(message.id, message.body);
+            }
+          }}
+          size="sm"
+          type="button"
+          variant={playing ? "secondary" : "ghost"}
+        >
+          {playing ? (
+            <Square className={ACTION_ICON_CLASS} />
+          ) : (
+            <Volume2 className={ACTION_ICON_CLASS} />
+          )}
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent>{tooltip}</TooltipContent>
+    </Tooltip>
+  );
+}
+
 export const MessageActionBar = React.memo(function MessageActionBar({
   channelId,
   message,
@@ -545,6 +616,8 @@ export const MessageActionBar = React.memo(function MessageActionBar({
               </PopoverContent>
             </Popover>
           ) : null}
+
+          <ReadAloudButton message={message} />
 
           {hasReplyAction ? (
             <Tooltip>

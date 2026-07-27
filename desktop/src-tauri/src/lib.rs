@@ -13,6 +13,7 @@ mod media_proxy;
 mod mesh_llm;
 #[cfg(not(feature = "mesh-llm"))]
 mod mesh_llm_stubs;
+mod message_tts;
 mod migration;
 #[cfg(test)]
 mod model_tests;
@@ -878,6 +879,8 @@ pub fn run() {
             get_model_status,
             set_tts_enabled,
             speak_agent_message,
+            message_tts::speak_chat_message,
+            message_tts::stop_chat_message_speech,
             add_agent_to_huddle,
             check_pipeline_hotstart,
             confirm_huddle_active,

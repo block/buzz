@@ -64,6 +64,7 @@ import {
   isSettingsSection,
 } from "@/features/settings/ui/SettingsPanels";
 import { HuddleBar, HuddleProvider } from "@/features/huddle";
+import { MessageTtsProvider } from "@/features/message-tts/ui/MessageTtsProvider";
 import { useDueReminderBadgeCount } from "@/features/reminders/hooks";
 import { RemindMeLaterProvider } from "@/features/reminders/ui/RemindMeLaterProvider";
 import { useReminderNotifications } from "@/features/reminders/useReminderNotifications";
@@ -923,7 +924,13 @@ export function AppShell() {
                             style={chromeCssVarDefaults as React.CSSProperties}
                           >
                             <BuzzTheme.ContentSurface>
-                              <Outlet />
+                              {/* Message read-aloud state; scoped to routed
+                                  content — every message surface renders
+                                  under the Outlet. Inside HuddleProvider
+                                  (provider reads huddle state). */}
+                              <MessageTtsProvider>
+                                <Outlet />
+                              </MessageTtsProvider>
                             </BuzzTheme.ContentSurface>
                           </SidebarInset>
                         </MainInsetProvider>

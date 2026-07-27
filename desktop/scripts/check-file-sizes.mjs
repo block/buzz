@@ -482,10 +482,12 @@ const overrides = new Map([
   // transition lock doc broadened to cover all protected-PID transitions, and
   // clear_agent_session_caches (per-pubkey retain) added alongside the
   // per-key clear. Load-bearing identity-contract change; queued to split.
-  // +4 (1081 -> 1085): mesh recovery keeps one app-scoped state object beside
-  // the embedded runtime and coordinator. Probe/re-arm logic lives in
-  // mesh_llm/recovery.rs rather than growing AppState or command modules.
-  ["src-tauri/src/app_state.rs", 1085],
+  // +8 (1081 -> 1089): app-scoped mesh recovery and message read-aloud state
+  // remain as thin fields; their implementations live in dedicated modules.
+  ["src-tauri/src/app_state.rs", 1089],
+  // +8 (994 -> 1002): message read-aloud mounts one app-scoped provider around
+  // the routed surface so all message rows share playback state and huddle gating.
+  ["src/app/AppShell.tsx", 1002],
   // multi-slot splitting + no-op suppression (#1309): the ReadStateManager
   // class grew from ~700 lines to ~1019 with the addition of
   // splitContextsIntoBudgetedSlots (pure fn + 5 tests), publishSplitSlots,
