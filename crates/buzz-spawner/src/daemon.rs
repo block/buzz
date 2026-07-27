@@ -310,9 +310,13 @@ impl Daemon {
         }
 
         // Advertise after acting, so the published count reflects this pass.
+        // Running containers only: `list` reports stopped ones too, and counting
+        // those would advertise a host as full when the agents filling it are
+        // disabled or crashed, steering owners away from capacity that exists.
         // A failure here is not fatal: discovery is a convenience, and an
         // un-advertised spawner still works for anyone who knows its pubkey.
-        if let Err(e) = self.announce(containers.len()).await {
+        let running = containers.iter().filter(|c| c.running).count();
+        if let Err(e) = self.announce(running).await {
             warn!("failed to publish spawner announcement: {e:#}");
         }
         Ok(())
