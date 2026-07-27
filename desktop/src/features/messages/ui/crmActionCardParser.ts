@@ -9,6 +9,7 @@ export type CrmActionCard = {
   expiresAt: string;
   content: string;
   calendarSlots?: CrmCalendarSlot[];
+  leadControlChoices?: string[];
 };
 
 export type CrmCalendarSlot = { label: string; reaction: string };
@@ -26,6 +27,9 @@ const MARKER =
 const REDDIT_DRAFT =
   /(?:^|\n)Draft to copy manually:\s*\n(`{3,})[^\n]*\n([\s\S]*?)\n\1(?=\n|$)/i;
 const CALENDAR_SLOT = /^\*\*Slot ([1-3]):\*\*\s*(.+)$/gim;
+const LEAD_CONTROL_OPTIONS =
+  /(?:^|\n)crm-action-options:v1:lead_control:([^\n]+)\s*(?=\n|$)/i;
+const LEAD_CONTROL_REACTIONS = new Set(["⛔", "🏢", "🗑️"]);
 const ACTION_HEADER =
   /^\[CRM Buzz action [0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\]\s*\n?/i;
 const ACTION_FOOTERS: Record<CrmActionCard["actionType"], RegExp> = {
@@ -47,7 +51,8 @@ function readableContent(
 ): string {
   const readable = body
     .replace(ACTION_HEADER, "")
-    .replace(ACTION_FOOTERS[actionType], "");
+    .replace(ACTION_FOOTERS[actionType], "")
+    .replace(LEAD_CONTROL_OPTIONS, "");
 
   return (actionType === "calendar_book"
     ? readable.replace(CALENDAR_SLOT, "").replace(/\n{3,}/g, "\n\n")
@@ -78,6 +83,12 @@ export function parseCrmActionCard(body: string): CrmActionCard | null {
 
   if (action.actionType === "calendar_book") {
     action.calendarSlots = extractCrmCalendarSlots(body);
+  }
+  if (action.actionType === "lead_control") {
+    const choices = extractCrmLeadControlChoices(body);
+    if (choices !== undefined) {
+      action.leadControlChoices = choices;
+    }
   }
 
   return action;
@@ -114,4 +125,15 @@ export function extractCrmCalendarSlots(
   }
 
   return slots;
+}
+
+/** Return only the safeguard choices frozen by CRM for this review. */
+export function extractCrmLeadControlChoices(
+  content: string,
+): string[] | undefined {
+  const encoded = LEAD_CONTROL_OPTIONS.exec(content)?.[1];
+  if (!encoded) return undefined;
+  return [...new Set(encoded.split(",").map((emoji) => emoji.trim()))].filter(
+    (emoji) => LEAD_CONTROL_REACTIONS.has(emoji),
+  );
 }

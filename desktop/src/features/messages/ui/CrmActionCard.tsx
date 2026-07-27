@@ -86,25 +86,31 @@ export function CrmActionCard({
     action.actionType === "calendar_book"
       ? action.calendarSlots ?? []
       : [];
+  const leadControlReactions =
+    action.actionType === "lead_control"
+      ? (action.leadControlChoices ??
+        LEAD_CONTROL_CHOICES.map((choice) => choice.reaction))
+      : [];
   const selectedLeadControl =
     action.actionType === "lead_control"
-      ? [...reactions]
+      ? ([...reactions]
           .reverse()
           .find(
             (reaction) =>
               reaction.reactedByCurrentUser &&
-              LEAD_CONTROL_CHOICES.some(
-                (choice) => choice.reaction === reaction.emoji,
-              ),
-          )?.emoji ?? null
+              leadControlReactions.includes(reaction.emoji),
+          )?.emoji ?? null)
       : null;
 
   if (action.actionType === "lead_control") {
+    const availableLeadControlChoices = LEAD_CONTROL_CHOICES.filter((choice) =>
+      leadControlReactions.includes(choice.reaction),
+    );
     return (
       <div className="my-2 max-w-md rounded-lg border border-input/50 bg-muted/20 p-3">
         <p className="text-sm font-medium">Lead safeguards</p>
         <div className="mt-3 flex flex-wrap gap-2">
-          {LEAD_CONTROL_CHOICES.map((choice) => {
+          {availableLeadControlChoices.map((choice) => {
             const Icon = choice.icon;
             const selected = selectedLeadControl === choice.reaction;
 
@@ -116,7 +122,7 @@ export function CrmActionCard({
                 onClick={() => {
                   if (!selected) {
                     void onChooseLeadControl(
-                      LEAD_CONTROL_CHOICES.map((item) => item.reaction),
+                      availableLeadControlChoices.map((item) => item.reaction),
                       choice.reaction,
                     );
                   }
