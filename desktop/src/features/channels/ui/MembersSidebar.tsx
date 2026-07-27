@@ -760,13 +760,7 @@ export function MembersSidebar({
                 onScroll={handlePeopleSearchScroll}
               >
                 <SearchResultSectionTitle>
-                  {normalizedSearchQuery
-                    ? memberView === "people"
-                      ? "People"
-                      : "Agents"
-                    : memberView === "people"
-                      ? `People · ${people.length}`
-                      : `Agents · ${bots.length}`}
+                  {memberView === "people" ? "People" : "Agents"}
                 </SearchResultSectionTitle>
                 {normalizedSearchQuery ? (
                   <div>
