@@ -107,6 +107,10 @@ pub fn evaluate_response(
             // match and must not be evaluated as a handshake response.
             bail!("prompt updates are not attestation responses")
         }
+        AttestationFrame::CredentialUpdate { .. } | AttestationFrame::CredentialAck { .. } => {
+            // Owner-scoped frames, routed in the daemon before this point.
+            bail!("credential frames are not attestation responses")
+        }
         AttestationFrame::Response {
             auth_tag,
             prompt,
