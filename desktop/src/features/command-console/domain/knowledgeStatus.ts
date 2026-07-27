@@ -12,9 +12,12 @@ import {
 } from "./validation";
 
 const KNOWLEDGE_STATUS_VERSION = 1 as const;
+const TRUSTED_LAN_KNOWLEDGE_STATUS_VERSION = 2 as const;
 
 type KnowledgeContractBase = {
-  readonly version: typeof KNOWLEDGE_STATUS_VERSION;
+  readonly version:
+    | typeof KNOWLEDGE_STATUS_VERSION
+    | typeof TRUSTED_LAN_KNOWLEDGE_STATUS_VERSION;
   readonly classification: Classification;
 };
 
@@ -28,8 +31,13 @@ export type KnowledgeFreshness =
   | "fresh"
   | "stale"
   | "corrupt"
+  | "observed"
   | "unknown";
-export type KnowledgeValidation = "verified" | "failed" | "unknown";
+export type KnowledgeValidation =
+  | "verified"
+  | "trusted_lan_observed"
+  | "failed"
+  | "unknown";
 
 export type MemoryKnowledgeStatus = {
   readonly status: KnowledgeServiceStatus;
@@ -82,6 +90,9 @@ export type CommandKnowledgeStatus = KnowledgeContractBase & {
   readonly rag: RagKnowledgeStatus;
   readonly appleInputs: readonly AppleKnowledgeStatus[];
   readonly degradedSections: readonly string[];
+  readonly sourceMode?: "trusted_lan";
+  readonly modelRoute?: "local_litellm_openai";
+  readonly evidenceAssurance?: "trusted_lan_observed";
 };
 
 function nullableText(value: unknown): value is string | null {
@@ -106,12 +117,18 @@ function isKnowledgeFreshness(value: unknown): value is KnowledgeFreshness {
     value === "fresh" ||
     value === "stale" ||
     value === "corrupt" ||
+    value === "observed" ||
     value === "unknown"
   );
 }
 
 function isKnowledgeValidation(value: unknown): value is KnowledgeValidation {
-  return value === "verified" || value === "failed" || value === "unknown";
+  return (
+    value === "verified" ||
+    value === "trusted_lan_observed" ||
+    value === "failed" ||
+    value === "unknown"
+  );
 }
 
 function parseToolAllowlist(value: unknown): readonly string[] | null {
@@ -132,6 +149,7 @@ function isSha256Digest(value: string | null): value is string {
 
 function parseMemoryKnowledgeStatus(
   value: unknown,
+  trustedLan = false,
 ): MemoryKnowledgeStatus | null {
   if (
     !isRecord(value) ||
@@ -172,9 +190,13 @@ function parseMemoryKnowledgeStatus(
     !toolAllowlist ||
     (value.status === "ready"
       ? value.serverIdentity !== "memory" ||
-        value.nodeId === null ||
-        value.freshness === "unknown" ||
-        value.validation !== "verified" ||
+        (trustedLan
+          ? value.nodeId !== null ||
+            value.freshness !== "observed" ||
+            value.validation !== "trusted_lan_observed"
+          : value.nodeId === null ||
+            value.freshness === "unknown" ||
+            value.validation !== "verified") ||
         value.error !== null
       : value.serverIdentity !== null || value.validation === "verified")
   )
@@ -196,7 +218,10 @@ function parseMemoryKnowledgeStatus(
   });
 }
 
-function parseRagKnowledgeStatus(value: unknown): RagKnowledgeStatus | null {
+function parseRagKnowledgeStatus(
+  value: unknown,
+  trustedLan = false,
+): RagKnowledgeStatus | null {
   if (
     !isRecord(value) ||
     !hasExactKeys(value, [
@@ -228,11 +253,15 @@ function parseRagKnowledgeStatus(value: unknown): RagKnowledgeStatus | null {
     (value.status === "ready"
       ? value.serverIdentity !== "rag" ||
         !isSha256Digest(value.activeSnapshotId) ||
-        !isSha256Digest(value.signatureFingerprint) ||
+        (trustedLan
+          ? value.signatureFingerprint !== null ||
+            value.freshness !== "observed" ||
+            value.validation !== "trusted_lan_observed"
+          : !isSha256Digest(value.signatureFingerprint) ||
+            value.freshness !== "fresh" ||
+            value.validation !== "verified") ||
         value.snapshotTime === null ||
         value.lastSuccessfulActivation === null ||
-        value.freshness !== "fresh" ||
-        value.validation !== "verified" ||
         value.error !== null
       : value.serverIdentity !== null ||
         value.activeSnapshotId !== null ||
@@ -299,6 +328,7 @@ function expectedDegradedSections(
   memory: MemoryKnowledgeStatus,
   rag: RagKnowledgeStatus,
   appleInputs: readonly AppleKnowledgeStatus[],
+  trustedLan = false,
 ): readonly string[] {
   const sections: string[] = [];
   if (memory.status !== "ready") sections.push("memory-readiness");
@@ -309,6 +339,7 @@ function expectedDegradedSections(
       sections.push(`apple-${source.source}`);
     }
   }
+  if (trustedLan) sections.push("trusted-lan-unsigned");
   return sections.sort();
 }
 
@@ -338,26 +369,47 @@ export function createCommandKnowledgeStatus(
 export function parseCommandKnowledgeStatus(
   value: unknown,
 ): CommandKnowledgeStatus | null {
+  const trustedLan =
+    isRecord(value) && value.version === TRUSTED_LAN_KNOWLEDGE_STATUS_VERSION;
+  const exactKeys = trustedLan
+    ? [
+        "kind",
+        "version",
+        "classification",
+        "sourceMode",
+        "modelRoute",
+        "evidenceAssurance",
+        "observedAt",
+        "memory",
+        "rag",
+        "appleInputs",
+        "degradedSections",
+      ]
+    : [
+        "kind",
+        "version",
+        "classification",
+        "observedAt",
+        "memory",
+        "rag",
+        "appleInputs",
+        "degradedSections",
+      ];
   if (
     !isRecord(value) ||
-    !hasExactKeys(value, [
-      "kind",
-      "version",
-      "classification",
-      "observedAt",
-      "memory",
-      "rag",
-      "appleInputs",
-      "degradedSections",
-    ]) ||
+    !hasExactKeys(value, exactKeys) ||
     value.kind !== "command-knowledge-status" ||
-    value.version !== KNOWLEDGE_STATUS_VERSION ||
+    (value.version !== KNOWLEDGE_STATUS_VERSION && !trustedLan) ||
+    (trustedLan &&
+      (value.sourceMode !== "trusted_lan" ||
+        value.modelRoute !== "local_litellm_openai" ||
+        value.evidenceAssurance !== "trusted_lan_observed")) ||
     !isClassification(value.classification) ||
     !isRfc3339(value.observedAt)
   )
     return null;
-  const memory = parseMemoryKnowledgeStatus(value.memory);
-  const rag = parseRagKnowledgeStatus(value.rag);
+  const memory = parseMemoryKnowledgeStatus(value.memory, trustedLan);
+  const rag = parseRagKnowledgeStatus(value.rag, trustedLan);
   const appleInputs = parseObjectArray(
     value.appleInputs,
     parseAppleKnowledgeStatus,
@@ -374,17 +426,29 @@ export function parseCommandKnowledgeStatus(
     degradedSections.length > 16 ||
     new Set(degradedSections).size !== degradedSections.length ||
     JSON.stringify(degradedSections) !==
-      JSON.stringify(expectedDegradedSections(memory, rag, appleInputs))
+      JSON.stringify(
+        expectedDegradedSections(memory, rag, appleInputs, trustedLan),
+      )
   )
     return null;
-  return Object.freeze({
-    kind: value.kind,
-    version: value.version,
+  const parsed = {
+    kind: "command-knowledge-status" as const,
+    version: trustedLan
+      ? TRUSTED_LAN_KNOWLEDGE_STATUS_VERSION
+      : KNOWLEDGE_STATUS_VERSION,
     classification: value.classification,
     observedAt: value.observedAt,
     memory,
     rag,
     appleInputs,
     degradedSections,
-  });
+    ...(trustedLan
+      ? {
+          sourceMode: "trusted_lan" as const,
+          modelRoute: "local_litellm_openai" as const,
+          evidenceAssurance: "trusted_lan_observed" as const,
+        }
+      : {}),
+  };
+  return Object.freeze(parsed);
 }

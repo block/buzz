@@ -7,7 +7,7 @@
 )]
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use chrono::DateTime;
 use serde::Serialize;
@@ -30,7 +30,11 @@ use crate::command_services::memory::{
 };
 use crate::command_services::policy::{AdmissionError, AuthenticatedSourceService};
 use crate::command_services::rag::{
-    extract_verified_rag_evidence, get_rag_source_binding, RagSnapshotError, VerifiedRagSnapshot,
+    extract_verified_rag_evidence, get_rag_source_binding, RagSnapshotAssurance, RagSnapshotError,
+    VerifiedRagSnapshot,
+};
+use crate::command_services::trusted_lan::{
+    catalogue_fingerprint, TrustedLanConfig, TrustedLanSourceClient,
 };
 
 const MAX_CO_REQUEST_BYTES: usize = 1024;
@@ -38,6 +42,7 @@ const MAX_RETRIEVAL_QUERY_BYTES: usize = 2048;
 const RAG_TOOL: &str = "search_knowledge_base";
 const MEMORY_TOOL: &str = "command_memory_context";
 const COLLECTION_SCOPE: &str = "verified_catalogue";
+const OBSERVED_COLLECTION_SCOPE: &str = "observed_catalogue";
 
 const RAG_MEMORY_SECTIONS: [BriefSection; 5] = [
     BriefSection::Operations,
@@ -138,6 +143,10 @@ pub(crate) trait SourceBackend: Send + Sync {
         expected: &VerifiedRagSnapshot,
         cancellation: &CancellationToken,
     ) -> Result<(), SourceCollectionError>;
+
+    fn post_recheck_limitations(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 impl<T> SourceBackend for Arc<T>
@@ -183,6 +192,10 @@ where
         cancellation: &CancellationToken,
     ) -> Result<(), SourceCollectionError> {
         (**self).recheck_rag_snapshot(expected, cancellation)
+    }
+
+    fn post_recheck_limitations(&self) -> Vec<String> {
+        (**self).post_recheck_limitations()
     }
 }
 
@@ -393,6 +406,149 @@ impl SourceBackend for ProductionSourceBackend {
     }
 }
 
+/// Direct read-only adapter for the owner-approved trusted-LAN Memory and RAG
+/// services. Evidence is explicitly marked as observed rather than signed.
+#[derive(Clone, Debug)]
+pub(crate) struct TrustedLanSourceBackend {
+    snapshot: VerifiedRagSnapshot,
+    client: TrustedLanSourceClient,
+    post_recheck_warning: Arc<Mutex<Option<String>>>,
+}
+
+impl TrustedLanSourceBackend {
+    pub(crate) fn from_config(
+        config: &TrustedLanConfig,
+        observed_at: &str,
+    ) -> Result<Self, SourceCollectionError> {
+        let client = config
+            .source_client()
+            .map_err(|_| SourceCollectionError::RagUnavailable)?;
+        let catalogue = client
+            .catalogue()
+            .map_err(|_| SourceCollectionError::RagUnavailable)?;
+        let fingerprint =
+            catalogue_fingerprint(&catalogue).map_err(|_| SourceCollectionError::RagInvalid)?;
+        let collections = observed_collection_names(&catalogue)?;
+        let snapshot = VerifiedRagSnapshot::from_trusted_lan_observation(
+            &fingerprint,
+            observed_at,
+            collections,
+        )
+        .map_err(|_| SourceCollectionError::RagInvalid)?;
+        Ok(Self {
+            snapshot,
+            client,
+            post_recheck_warning: Arc::new(Mutex::new(None)),
+        })
+    }
+}
+
+impl SourceBackend for TrustedLanSourceBackend {
+    fn verify_active_rag_snapshot(&self) -> Result<VerifiedRagSnapshot, SourceCollectionError> {
+        Ok(self.snapshot.clone())
+    }
+
+    fn memory_conflict_count(&self) -> u64 {
+        0
+    }
+
+    fn collect_rag(
+        &self,
+        snapshot: &VerifiedRagSnapshot,
+        intent: &FixedRetrievalIntent,
+        cancellation: &CancellationToken,
+    ) -> Result<Value, SourceReadError> {
+        if cancellation.is_cancelled() {
+            return Err(SourceReadError::new("cancelled"));
+        }
+        if snapshot != &self.snapshot {
+            return Err(SourceReadError::new("rag_catalogue_mismatch"));
+        }
+        let result = self
+            .client
+            .search_rag(intent.query(), snapshot.logical_collections())
+            .map_err(|_| SourceReadError::new("rag_read_unavailable"))?;
+        if cancellation.is_cancelled() {
+            Err(SourceReadError::new("cancelled"))
+        } else {
+            Ok(result)
+        }
+    }
+
+    fn collect_memory(
+        &self,
+        intent: &FixedRetrievalIntent,
+        cancellation: &CancellationToken,
+    ) -> Result<Value, SourceReadError> {
+        if cancellation.is_cancelled() {
+            return Err(SourceReadError::new("cancelled"));
+        }
+        let result = self
+            .client
+            .search_memory(intent.query(), 10)
+            .map_err(|_| SourceReadError::new("memory_read_unavailable"))?;
+        if cancellation.is_cancelled() {
+            Err(SourceReadError::new("cancelled"))
+        } else {
+            Ok(result)
+        }
+    }
+
+    fn collect_apple(
+        &self,
+        request: &AppleInputRequest,
+        cancellation: &CancellationToken,
+    ) -> Result<AppleInputResponse, SourceCollectionError> {
+        if cancellation.is_cancelled() {
+            return Err(SourceCollectionError::Cancelled);
+        }
+        let response = read_apple_inputs_blocking(request.clone());
+        if cancellation.is_cancelled() {
+            Err(SourceCollectionError::Cancelled)
+        } else {
+            Ok(response)
+        }
+    }
+
+    fn recheck_rag_snapshot(
+        &self,
+        expected: &VerifiedRagSnapshot,
+        cancellation: &CancellationToken,
+    ) -> Result<(), SourceCollectionError> {
+        if cancellation.is_cancelled() {
+            return Err(SourceCollectionError::Cancelled);
+        }
+        // This is deliberately audit-only. A changed catalogue must never
+        // restart, invalidate, or fail an in-flight trusted-LAN brief.
+        let finish_fingerprint = self
+            .client
+            .catalogue()
+            .ok()
+            .and_then(|catalogue| catalogue_fingerprint(&catalogue).ok());
+        if finish_fingerprint
+            .as_deref()
+            .is_some_and(|fingerprint| fingerprint != expected.snapshot_id())
+        {
+            if let Ok(mut warning) = self.post_recheck_warning.lock() {
+                *warning = Some(
+                    "Trusted-LAN catalogue changed during generation; the recorded fingerprint is audit-only and the brief uses its cited passages."
+                        .to_string(),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn post_recheck_limitations(&self) -> Vec<String> {
+        self.post_recheck_warning
+            .lock()
+            .ok()
+            .and_then(|warning| warning.clone())
+            .into_iter()
+            .collect()
+    }
+}
+
 /// All source evidence frozen before any adviser runs.
 pub(crate) struct FrozenSourceContext {
     run_id: String,
@@ -531,10 +687,16 @@ impl<B: SourceBackend> SourceCollector<B> {
         if snapshot.physical_collections().is_empty() || snapshot.logical_collections().is_empty() {
             return Err(SourceCollectionError::RagInvalid);
         }
-        let intents = fixed_retrieval_intents(&self.co_request);
+        let intents = fixed_retrieval_intents(&self.co_request, snapshot.assurance());
         let mut candidates = vec![snapshot_catalogue_source(&snapshot)?];
         let mut degraded = BTreeSet::new();
         let mut limitations = BTreeSet::new();
+        if snapshot.assurance() == RagSnapshotAssurance::TrustedLanObserved {
+            limitations.insert(
+                "Unsigned trusted-LAN evidence was observed directly from the approved LAN services; it is not a signed RAG snapshot or replicated Memory revision."
+                    .to_string(),
+            );
+        }
         ensure_collection_active(cancellation)?;
         let memory_conflict_count = self.backend.memory_conflict_count();
         ensure_collection_active(cancellation)?;
@@ -554,22 +716,39 @@ impl<B: SourceBackend> SourceCollector<B> {
                 ensure_collection_active(cancellation)?;
                 match result {
                     Ok(value) => {
-                        match extract_verified_rag_evidence(&snapshot, intent.query(), &value) {
+                        let records = match snapshot.assurance() {
+                            RagSnapshotAssurance::SignedSnapshot => {
+                                extract_verified_rag_evidence(&snapshot, intent.query(), &value)
+                                    .map(|records| {
+                                        records
+                                            .into_iter()
+                                            .map(|record| CandidateSource {
+                                                source_id: record.source_id,
+                                                source_kind: SourceKind::Rag,
+                                                collection: record.collection,
+                                                document_id: record.document_id,
+                                                chunk_id: record.chunk_id,
+                                                timestamp: record.retrieved_at.clone(),
+                                                location: record.location,
+                                                retrieved_at: record.retrieved_at,
+                                                observed_at: self.observed_at.clone(),
+                                                quote: record.quote,
+                                            })
+                                            .collect()
+                                    })
+                            }
+                            RagSnapshotAssurance::TrustedLanObserved => {
+                                extract_trusted_lan_rag_evidence(
+                                    &value,
+                                    intent.query(),
+                                    &self.observed_at,
+                                    snapshot.logical_collections(),
+                                )
+                            }
+                        };
+                        match records {
                             Ok(records) => {
-                                candidates.extend(records.into_iter().map(|record| {
-                                    CandidateSource {
-                                        source_id: record.source_id,
-                                        source_kind: SourceKind::Rag,
-                                        collection: record.collection,
-                                        document_id: record.document_id,
-                                        chunk_id: record.chunk_id,
-                                        timestamp: record.retrieved_at.clone(),
-                                        location: record.location,
-                                        retrieved_at: record.retrieved_at,
-                                        observed_at: self.observed_at.clone(),
-                                        quote: record.quote,
-                                    }
-                                }));
+                                candidates.extend(records);
                             }
                             Err(_) => {
                                 rag_available = false;
@@ -597,34 +776,53 @@ impl<B: SourceBackend> SourceCollector<B> {
                 let result = self.backend.collect_memory(intent, cancellation);
                 ensure_collection_active(cancellation)?;
                 match result {
-                    Ok(value) => match extract_verified_memory_evidence(&value) {
-                        Ok(records) => {
-                            candidates.extend(records.into_iter().map(|record| CandidateSource {
-                                source_id: record.revision_hash().to_string(),
-                                source_kind: SourceKind::Memory,
-                                collection: "command_memory".to_string(),
-                                document_id: record.entity_id().to_string(),
-                                chunk_id: record.envelope_hash().to_string(),
-                                timestamp: record.origin_timestamp().to_string(),
-                                location: format!(
-                                    "origin {} cursor {} revision {} served by {}",
-                                    record.origin_node_id(),
-                                    record.cursor(),
-                                    record.revision_hash(),
-                                    record.serving_node_id()
-                                ),
-                                retrieved_at: record.retrieved_at().to_string(),
-                                observed_at: self.observed_at.clone(),
-                                quote: record.quoted_text().to_string(),
-                            }));
+                    Ok(value) => match snapshot.assurance() {
+                        RagSnapshotAssurance::TrustedLanObserved => {
+                            match extract_trusted_lan_memory_evidence(&value, &self.observed_at) {
+                                Ok(records) => candidates.extend(records),
+                                Err(_) => {
+                                    memory_available = false;
+                                    degrade_all(
+                                        &mut degraded,
+                                        &mut limitations,
+                                        "Memory evidence from the trusted LAN was malformed.",
+                                    );
+                                }
+                            }
                         }
-                        Err(_) => {
-                            memory_available = false;
-                            degrade_all(
+                        RagSnapshotAssurance::SignedSnapshot => {
+                            match extract_verified_memory_evidence(&value) {
+                                Ok(records) => {
+                                    candidates.extend(records.into_iter().map(|record| {
+                                        CandidateSource {
+                                            source_id: record.revision_hash().to_string(),
+                                            source_kind: SourceKind::Memory,
+                                            collection: "command_memory".to_string(),
+                                            document_id: record.entity_id().to_string(),
+                                            chunk_id: record.envelope_hash().to_string(),
+                                            timestamp: record.origin_timestamp().to_string(),
+                                            location: format!(
+                                                "origin {} cursor {} revision {} served by {}",
+                                                record.origin_node_id(),
+                                                record.cursor(),
+                                                record.revision_hash(),
+                                                record.serving_node_id()
+                                            ),
+                                            retrieved_at: record.retrieved_at().to_string(),
+                                            observed_at: self.observed_at.clone(),
+                                            quote: record.quoted_text().to_string(),
+                                        }
+                                    }));
+                                }
+                                Err(_) => {
+                                    memory_available = false;
+                                    degrade_all(
                                 &mut degraded,
                                 &mut limitations,
                                 "Memory evidence failed revision, envelope, or citation verification.",
                             );
+                                }
+                            }
                         }
                     },
                     Err(error) => {
@@ -669,7 +867,7 @@ impl<B: SourceBackend> SourceCollector<B> {
             .map(ValidatedSource::from)
             .collect();
         let limitations = bounded_limitations(limitations);
-        let context = FrozenSourceContext {
+        let mut context = FrozenSourceContext {
             run_id: self.run_id.clone(),
             snapshot,
             observed_at: self.observed_at.clone(),
@@ -680,6 +878,13 @@ impl<B: SourceBackend> SourceCollector<B> {
             retrieval_intents: intents,
         };
         self.recheck_snapshot_with_cancellation(&context, cancellation)?;
+        let post_recheck_limitations = self.backend.post_recheck_limitations();
+        if !post_recheck_limitations.is_empty() {
+            let mut rechecked_limitations =
+                context.limitations.iter().cloned().collect::<BTreeSet<_>>();
+            rechecked_limitations.extend(post_recheck_limitations);
+            context.limitations = bounded_limitations(rechecked_limitations);
+        }
         Ok(context)
     }
 
@@ -713,13 +918,26 @@ fn ensure_collection_active(cancellation: &CancellationToken) -> Result<(), Sour
     }
 }
 
-fn fixed_retrieval_intents(co_request: &str) -> Vec<FixedRetrievalIntent> {
+fn fixed_retrieval_intents(
+    co_request: &str,
+    assurance: RagSnapshotAssurance,
+) -> Vec<FixedRetrievalIntent> {
+    let (source_description, collection_scope) = match assurance {
+        RagSnapshotAssurance::SignedSnapshot => (
+            "verified local catalogue and conflict-safe command memory",
+            COLLECTION_SCOPE,
+        ),
+        RagSnapshotAssurance::TrustedLanObserved => (
+            "approved trusted-LAN catalogue and observed command memory",
+            OBSERVED_COLLECTION_SCOPE,
+        ),
+    };
     specialist_definitions()
         .iter()
         .map(|persona| {
             let prefix = format!(
-                "{} Use only the verified local catalogue and conflict-safe command memory. CO request: ",
-                persona.purpose
+                "{} Use only the {source_description}. CO request: ",
+                persona.purpose,
             );
             let remaining = MAX_RETRIEVAL_QUERY_BYTES.saturating_sub(prefix.len());
             let (request, _) = truncate_utf8(co_request, remaining);
@@ -727,7 +945,7 @@ fn fixed_retrieval_intents(co_request: &str) -> Vec<FixedRetrievalIntent> {
                 adviser: persona.adviser,
                 rag_tool: RAG_TOOL,
                 memory_tool: MEMORY_TOOL,
-                collection_scope: COLLECTION_SCOPE,
+                collection_scope,
                 query: format!("{prefix}{request}"),
             }
         })
@@ -760,3 +978,5 @@ fn bounded_limitations(limitations: BTreeSet<String>) -> Vec<String> {
 
 mod canonical;
 use canonical::*;
+mod trusted_lan_evidence;
+use trusted_lan_evidence::*;

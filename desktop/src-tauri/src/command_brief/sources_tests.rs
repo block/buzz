@@ -33,6 +33,7 @@ struct FakeState {
     apple_results: VecDeque<AppleInputResponse>,
     requests: Vec<Value>,
     recheck_snapshot: Option<String>,
+    post_recheck_limitations: Vec<String>,
     memory_conflict_count: u64,
     bind_rag_query: bool,
 }
@@ -177,6 +178,14 @@ impl SourceBackend for FakeBackend {
             .clone()
             .ok_or(SourceCollectionError::RagUnavailable)?;
         expected.verify_unchanged(&observed).map_err(Into::into)
+    }
+
+    fn post_recheck_limitations(&self) -> Vec<String> {
+        self.state
+            .lock()
+            .expect("fake state")
+            .post_recheck_limitations
+            .clone()
     }
 }
 
@@ -514,6 +523,95 @@ fn source_kinds(context: &FrozenSourceContext) -> Vec<SourceKind> {
         .iter()
         .map(|source| source.source_kind())
         .collect()
+}
+
+#[test]
+fn trusted_lan_observations_are_cited_without_signed_snapshot_or_revision_claims() {
+    let backend = FakeBackend {
+        initial_snapshot: Ok(VerifiedRagSnapshot::from_trusted_lan_observation(
+            SNAPSHOT_A,
+            OBSERVED_AT,
+            vec!["navy-publications".to_string()],
+        )
+        .expect("trusted catalogue observation")),
+        state: Mutex::new(FakeState {
+            rag_results: VecDeque::from([Ok(json!({
+                "query": "fixed query",
+                "total": 1,
+                "results": [{
+                    "point_id": "db41f397-8f71-56be-9849-be83095aeecd",
+                    "doc_id": "sha256:101cb4100b970cfb857f37e4f209354ccb023255076925ba0c53784f79ba2cfc",
+                    "doc_name": "01_20260426_233709.pdf",
+                    "collection": "navy-publications",
+                    "page_no": 16,
+                    "section_path": ["0114. CO - Delegated Authority"],
+                    "score": -2.2521,
+                    "text": "The OOW may query or veto instructions that conflict with safe conduct."
+                }]
+            }))]),
+            memory_results: VecDeque::from([Ok(json!([{
+                "id": "01KYGEBMBH8S06RA9SHEQQQ24B",
+                "event_date": "2026-07-27T10:08:00+10:00",
+                "recorded_at": "2026-07-27T00:07:23.761557+00:00",
+                "entities": ["hmas-supply-command-console"],
+                "agent": "CODEX",
+                "content": "Phase 4 first-launch checkpoint."
+            }]))]),
+            apple_results: valid_apple_responses(),
+            recheck_snapshot: Some(SNAPSHOT_A.to_string()),
+            bind_rag_query: true,
+            ..FakeState::default()
+        }),
+    };
+
+    let context = collector(backend, "Prepare today's command brief.")
+        .freeze()
+        .expect("trusted LAN collection");
+
+    assert!(context.retrieval_intents().iter().all(|intent| {
+        intent.collection_scope() == "observed_catalogue"
+            && intent
+                .query()
+                .contains("approved trusted-LAN catalogue and observed command memory")
+            && !intent.query().contains("conflict-safe")
+    }));
+    assert!(context
+        .limitations()
+        .iter()
+        .any(|item| item.contains("Unsigned trusted-LAN evidence")));
+    let rag = context
+        .ledger()
+        .iter()
+        .find(|source| source.source_kind() == SourceKind::Rag)
+        .expect("RAG source");
+    assert_eq!(rag.source_id(), "db41f397-8f71-56be-9849-be83095aeecd");
+    assert!(rag.location().contains("trusted-lan-observed"));
+    let memory = context
+        .ledger()
+        .iter()
+        .find(|source| source.source_kind() == SourceKind::Memory)
+        .expect("Memory source");
+    assert_eq!(memory.source_id(), "01KYGEBMBH8S06RA9SHEQQQ24B");
+    assert!(memory.location().contains("trusted-lan-observed"));
+}
+
+#[test]
+fn nonblocking_catalogue_change_warning_is_added_after_recheck() {
+    let backend = FakeBackend::with_state(|state| {
+        state.post_recheck_limitations = vec![
+            "Trusted-LAN catalogue changed during generation; the recorded fingerprint is audit-only and the brief uses its cited passages."
+                .to_string(),
+        ];
+    });
+
+    let context = collector(backend, "Prepare today's command brief.")
+        .freeze()
+        .expect("catalogue warning must not fail collection");
+
+    assert!(context
+        .limitations()
+        .iter()
+        .any(|item| item.contains("catalogue changed during generation")));
 }
 
 #[test]

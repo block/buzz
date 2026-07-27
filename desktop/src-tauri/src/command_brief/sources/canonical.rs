@@ -17,24 +17,45 @@ pub(super) struct CandidateSource {
 pub(super) fn snapshot_catalogue_source(
     snapshot: &VerifiedRagSnapshot,
 ) -> Result<CandidateSource, SourceCollectionError> {
-    let quote = serde_jcs::to_vec(&json!({
-        "active_snapshot_id": snapshot.snapshot_id(),
-        "logical_collections": snapshot.logical_collections(),
-        "physical_collections": snapshot.physical_collections(),
-        "snapshot_time": snapshot.snapshot_time(),
-        "verified_at": snapshot.verified_at(),
-    }))
-    .ok()
-    .and_then(|bytes| String::from_utf8(bytes).ok())
-    .ok_or(SourceCollectionError::RagInvalid)?;
+    let (source_id, collection, chunk_id, location, quote_value) = match snapshot.assurance() {
+        RagSnapshotAssurance::SignedSnapshot => (
+            format!("rag:snapshot:{}", snapshot.snapshot_id()),
+            "verified_catalogue",
+            "active_snapshot",
+            "cryptographically verified active snapshot catalogue",
+            json!({
+                "active_snapshot_id": snapshot.snapshot_id(),
+                "logical_collections": snapshot.logical_collections(),
+                "physical_collections": snapshot.physical_collections(),
+                "snapshot_time": snapshot.snapshot_time(),
+                "verified_at": snapshot.verified_at(),
+            }),
+        ),
+        RagSnapshotAssurance::TrustedLanObserved => (
+            format!("rag:catalogue:{}", snapshot.snapshot_id()),
+            "observed_catalogue",
+            "trusted-lan-observed",
+            "trusted-lan-observed catalogue fingerprint; audit metadata only",
+            json!({
+                "assurance": "trusted-lan-observed",
+                "catalogue_fingerprint": snapshot.snapshot_id(),
+                "logical_collections": snapshot.logical_collections(),
+                "observed_at": snapshot.verified_at(),
+            }),
+        ),
+    };
+    let quote = serde_jcs::to_vec(&quote_value)
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .ok_or(SourceCollectionError::RagInvalid)?;
     Ok(CandidateSource {
-        source_id: format!("rag:snapshot:{}", snapshot.snapshot_id()),
+        source_id,
         source_kind: SourceKind::Rag,
-        collection: "verified_catalogue".to_string(),
+        collection: collection.to_string(),
         document_id: snapshot.snapshot_id().to_string(),
-        chunk_id: "active_snapshot".to_string(),
+        chunk_id: chunk_id.to_string(),
         timestamp: snapshot.snapshot_time().to_string(),
-        location: "cryptographically verified active snapshot catalogue".to_string(),
+        location: location.to_string(),
         retrieved_at: snapshot.verified_at().to_string(),
         observed_at: snapshot.verified_at().to_string(),
         quote,

@@ -8,8 +8,9 @@ use rusqlite::Connection;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    dispatch_readiness_with_retry, model_readiness_for_schedule, observe_readiness_transition,
-    readiness_transition_token, start_model_readiness_observer_with_poll, timer_claim_fast_path,
+    admitted_model, dispatch_readiness_with_retry, model_readiness_for_schedule,
+    observe_readiness_transition, readiness_transition_token,
+    start_model_readiness_observer_with_poll, timer_claim_fast_path,
     trusted_model_readiness_observation, CommandBriefReadinessTransitions, CommandBriefRuntimeSet,
     InstalledCommandBriefRuntime, ReadinessSignalSource, RuntimeConfigIdentity, RuntimeReadiness,
 };
@@ -132,6 +133,24 @@ fn utc(value: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(value)
         .expect("rfc3339")
         .with_timezone(&Utc)
+}
+
+#[test]
+fn trusted_lan_mode_can_reach_cloud_fallback_when_lm_studio_is_unavailable() {
+    let unavailable = LmStudioReadiness {
+        status: LmStudioReadinessState::ApiUnreachable,
+        detail: "unreachable".to_string(),
+        configured_model: Some("qwen-command".to_string()),
+        loaded_models: Vec::new(),
+        security_warnings: Vec::new(),
+        bind_exposure: "unknown",
+    };
+
+    assert_eq!(admitted_model(&unavailable, false), None);
+    assert_eq!(
+        admitted_model(&unavailable, true).as_deref(),
+        Some("qwen-command")
+    );
 }
 
 #[test]

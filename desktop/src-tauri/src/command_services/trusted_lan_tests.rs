@@ -1,4 +1,8 @@
-use super::trusted_lan::{TrustedLanConfig, TrustedLanEndpoint};
+use super::trusted_lan::{
+    catalogue_fingerprint, load_optional, mcp_tool_result, TrustedLanConfig, TrustedLanEndpoint,
+};
+use serde_json::json;
+use std::os::unix::fs::PermissionsExt;
 
 #[test]
 fn accepts_the_approved_literal_private_endpoints() {
@@ -9,6 +13,25 @@ fn accepts_the_approved_literal_private_endpoints() {
 
     assert_eq!(memory.as_str(), "http://192.168.1.26:8006/mcp");
     assert_eq!(rag.as_str(), "http://192.168.1.107:8005/mcp/");
+}
+
+#[test]
+fn optional_loader_selects_only_a_valid_protected_trusted_lan_config() {
+    let directory = tempfile::tempdir_in(std::env::current_dir().expect("working directory"))
+        .expect("temporary protected config directory");
+    let absent = directory.path().join("absent.json");
+    assert!(load_optional(&absent).expect("absent config").is_none());
+
+    let path = directory.path().join("trusted-lan-sources.json");
+    std::fs::write(
+        &path,
+        include_bytes!("../../trusted-lan-sources.example.json"),
+    )
+    .expect("write trusted LAN config");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+        .expect("protect trusted LAN config");
+
+    assert!(load_optional(&path).expect("protected config").is_some());
 }
 
 #[test]
@@ -97,4 +120,60 @@ fn rejects_unacknowledged_or_ambiguous_cloud_configuration() {
             "\"automatic_cloud_fallback_acknowledged\": true",
         );
     assert!(TrustedLanConfig::parse(unknown_field.as_bytes()).is_err());
+}
+
+#[test]
+fn unwraps_legacy_fastmcp_text_without_synthesizing_evidence_fields() {
+    let value = mcp_tool_result(&json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "result": {
+            "content": [{
+                "type": "text",
+                "text": "{\"query\":\"bridge safety\",\"total\":1,\"results\":[{\"point_id\":\"point-1\",\"text\":\"evidence\"}]}"
+            }],
+            "isError": false
+        }
+    }))
+    .expect("legacy MCP result");
+
+    assert_eq!(value["results"][0]["point_id"], "point-1");
+    let encoded = serde_json::to_string(&value).expect("fixture serialization");
+    assert!(!encoded.contains("signature"));
+    assert!(!encoded.contains("immutable"));
+    assert!(!encoded.contains("revision_hash"));
+}
+
+#[test]
+fn catalogue_fingerprint_is_stable_but_changes_with_the_observed_catalogue() {
+    let first = json!({
+        "collections": [
+            {"name": "navy-publications", "chunks": 3579},
+            {"name": "marine-navigation", "chunks": 11162}
+        ],
+        "total_chunks": 14741
+    });
+    let reordered = json!({
+        "total_chunks": 14741,
+        "collections": [
+            {"chunks": 3579, "name": "navy-publications"},
+            {"chunks": 11162, "name": "marine-navigation"}
+        ]
+    });
+    let changed = json!({
+        "collections": [
+            {"name": "navy-publications", "chunks": 3580},
+            {"name": "marine-navigation", "chunks": 11162}
+        ],
+        "total_chunks": 14742
+    });
+
+    assert_eq!(
+        catalogue_fingerprint(&first).expect("first"),
+        catalogue_fingerprint(&reordered).expect("reordered")
+    );
+    assert_ne!(
+        catalogue_fingerprint(&first).expect("first"),
+        catalogue_fingerprint(&changed).expect("changed")
+    );
 }

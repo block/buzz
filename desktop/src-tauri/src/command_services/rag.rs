@@ -102,8 +102,8 @@ pub(crate) enum RagError {
 
 mod evidence;
 pub(crate) use evidence::{
-    extract_verified_rag_evidence, verified_snapshot_from_readiness, RagSnapshotError,
-    RagSourceBinding, VerifiedRagSnapshot,
+    extract_verified_rag_evidence, verified_snapshot_from_readiness, RagSnapshotAssurance,
+    RagSnapshotError, RagSourceBinding, VerifiedRagSnapshot,
 };
 
 impl RagError {

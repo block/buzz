@@ -22,7 +22,7 @@ use super::types::{
     SPECIALIST_COUNT,
 };
 use crate::command_services::policy::{
-    adviser_runtime_catalog, AdmissionError, AdviserRuntimeCatalog,
+    adviser_runtime_catalog, build_adviser_runtime_catalog, AdmissionError, AdviserRuntimeCatalog,
 };
 
 const MAX_REQUEST_IDENTITY_BYTES: usize = 1_024;
@@ -241,9 +241,20 @@ impl AdviserExecutionError {
         self.diagnostic
     }
 
-    const fn new(code: AdviserExecutionErrorCode, diagnostic: &'static str) -> Self {
+    pub(crate) const fn new(code: AdviserExecutionErrorCode, diagnostic: &'static str) -> Self {
         Self { code, diagnostic }
     }
+}
+
+pub(crate) const fn cloud_fallback_eligible(code: AdviserExecutionErrorCode) -> bool {
+    matches!(
+        code,
+        AdviserExecutionErrorCode::Authentication
+            | AdviserExecutionErrorCode::ModelUnavailable
+            | AdviserExecutionErrorCode::Timeout
+            | AdviserExecutionErrorCode::Transport
+            | AdviserExecutionErrorCode::InvalidOutput
+    )
 }
 
 impl fmt::Display for AdviserExecutionError {
@@ -283,6 +294,24 @@ impl AdviserExecutor {
         timeout: Duration,
     ) -> Result<Self, AdviserExecutionError> {
         let catalog = adviser_runtime_catalog().map_err(map_catalog_error)?;
+        Self::new(model, catalog, timeout)
+    }
+
+    /// Builds the local adviser runtime with no model-callable source tools.
+    /// Trusted-LAN evidence is collected and bounded by native Rust first.
+    pub(crate) fn from_local_evidence_only(
+        model: impl Into<String>,
+        timeout: Duration,
+    ) -> Result<Self, AdviserExecutionError> {
+        let facts = crate::managed_agents::trusted_lmstudio_runtime_facts().map_err(|_| {
+            AdviserExecutionError::new(
+                AdviserExecutionErrorCode::Authentication,
+                "LM Studio runtime unavailable",
+            )
+        })?;
+        let catalog =
+            build_adviser_runtime_catalog(&[], &facts.endpoint, facts.api_token.as_deref())
+                .map_err(map_catalog_error)?;
         Self::new(model, catalog, timeout)
     }
 
@@ -442,6 +471,60 @@ impl AdviserExecutor {
             parse_chief_output(terminal, &ledger_ids, &allowed_findings, &expected_dissent)?;
         Ok(finish_execution(consolidation, execution))
     }
+}
+
+pub(crate) fn cloud_specialist_payload(
+    request: &SpecialistAdviserRequest,
+) -> Result<(&'static str, String), AdviserExecutionError> {
+    if request.adviser == AdviserId::ChiefOfStaff
+        || !valid_identifier(&request.request_identity, MAX_REQUEST_IDENTITY_BYTES)
+    {
+        return Err(invalid_request());
+    }
+    validate_source_collection(&request.sources)?;
+    let persona = definition_for(request.adviser);
+    let evidence = build_evidence_prompt(persona, &request.sources);
+    let evidence_value: Value =
+        serde_json::from_str(&evidence.evidence_json).map_err(|_| invalid_request())?;
+    let input = serde_json::to_string(&json!({
+        "classification": "OFFICIAL",
+        "evidence": evidence_value,
+        "evidenceLimitations": evidence.limitations,
+    }))
+    .map_err(|_| invalid_request())?;
+    Ok((persona.system_prompt(), input))
+}
+
+pub(crate) fn parse_cloud_specialist_output(
+    request: &SpecialistAdviserRequest,
+    terminal: &str,
+) -> Result<AdviserContribution, AdviserExecutionError> {
+    let ledger_ids = request
+        .sources
+        .iter()
+        .map(|source| source.ledger_id().to_string())
+        .collect::<BTreeSet<_>>();
+    let value = serde_json::from_str(terminal).map_err(|_| invalid_output())?;
+    AdviserContribution::parse_for_adviser(value, request.adviser, &ledger_ids)
+        .map_err(|_| invalid_output())
+}
+
+pub(crate) fn cloud_chief_payload(
+    request: &ChiefOfStaffRequest,
+) -> Result<(&'static str, String), AdviserExecutionError> {
+    let (input, _, _, _) = build_chief_input(request)?;
+    Ok((
+        definition_for(AdviserId::ChiefOfStaff).system_prompt(),
+        input,
+    ))
+}
+
+pub(crate) fn parse_cloud_chief_output(
+    request: &ChiefOfStaffRequest,
+    terminal: &str,
+) -> Result<ChiefOfStaffConsolidation, AdviserExecutionError> {
+    let (_, ledger_ids, allowed_findings, expected_dissent) = build_chief_input(request)?;
+    parse_chief_output(terminal, &ledger_ids, &allowed_findings, &expected_dissent)
 }
 
 struct NativeExecution {

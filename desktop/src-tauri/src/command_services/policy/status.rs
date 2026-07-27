@@ -1,6 +1,7 @@
 use super::*;
 use chrono::Utc;
 use serde::Serialize;
+use tauri::Manager;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -52,11 +53,114 @@ pub(crate) struct CommandKnowledgeStatus {
     kind: &'static str,
     version: u32,
     classification: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_mode: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model_route: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    evidence_assurance: Option<&'static str>,
     observed_at: String,
     memory: MemoryKnowledgeStatus,
     rag: RagKnowledgeStatus,
     apple_inputs: Vec<AppleKnowledgeStatus>,
     degraded_sections: Vec<String>,
+}
+
+async fn trusted_lan_knowledge_status(
+    app: &tauri::AppHandle,
+) -> Option<(MemoryKnowledgeStatus, RagKnowledgeStatus, Vec<String>)> {
+    let path = app
+        .path()
+        .app_config_dir()
+        .ok()?
+        .join("trusted-lan-sources.json");
+    if !path.exists() {
+        return None;
+    }
+    let observed_at = Utc::now().to_rfc3339();
+    let probe_time = observed_at.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let config =
+            crate::command_services::trusted_lan::TrustedLanConfig::load(&path).map_err(|_| ())?;
+        let client = config.source_client().map_err(|_| ())?;
+        let catalogue = client.catalogue().map_err(|_| ())?;
+        let fingerprint = crate::command_services::trusted_lan::catalogue_fingerprint(&catalogue)
+            .map_err(|_| ())?;
+        client
+            .search_memory("Buzz command knowledge readiness probe", 1)
+            .map_err(|_| ())?;
+        Ok::<_, ()>(fingerprint)
+    })
+    .await;
+    match result {
+        Ok(Ok(fingerprint)) => Some((
+            MemoryKnowledgeStatus {
+                status: "ready".to_string(),
+                server_identity: Some("memory".to_string()),
+                node_id: None,
+                home_node_id: None,
+                revision_count: 0,
+                conflict_count: 0,
+                replication_cursor: None,
+                home_replication_cursor: None,
+                last_successful_sync: None,
+                freshness: "observed",
+                validation: "trusted_lan_observed",
+                tool_allowlist: vec!["search_events".to_string()],
+                error: None,
+            },
+            RagKnowledgeStatus {
+                status: "ready".to_string(),
+                server_identity: Some("rag".to_string()),
+                active_snapshot_id: Some(fingerprint),
+                signature_fingerprint: None,
+                snapshot_time: Some(probe_time.clone()),
+                last_successful_activation: Some(probe_time),
+                freshness: "observed".to_string(),
+                validation: "trusted_lan_observed".to_string(),
+                tool_allowlist: vec![
+                    "list_collections".to_string(),
+                    "search_knowledge_base".to_string(),
+                ],
+                error: None,
+            },
+            vec!["trusted-lan-unsigned".to_string()],
+        )),
+        _ => Some((
+            MemoryKnowledgeStatus {
+                status: "unavailable".to_string(),
+                server_identity: None,
+                node_id: None,
+                home_node_id: None,
+                revision_count: 0,
+                conflict_count: 0,
+                replication_cursor: None,
+                home_replication_cursor: None,
+                last_successful_sync: None,
+                freshness: "unknown",
+                validation: "failed",
+                tool_allowlist: Vec::new(),
+                error: Some("trusted_lan_unavailable".to_string()),
+            },
+            RagKnowledgeStatus {
+                status: "unavailable".to_string(),
+                server_identity: None,
+                active_snapshot_id: None,
+                signature_fingerprint: None,
+                snapshot_time: None,
+                last_successful_activation: None,
+                freshness: "unknown".to_string(),
+                validation: "failed".to_string(),
+                tool_allowlist: Vec::new(),
+                error: Some("trusted_lan_unavailable".to_string()),
+            },
+            vec![
+                "memory-readiness".to_string(),
+                "rag-readiness".to_string(),
+                "trusted-lan-unsigned".to_string(),
+            ],
+        )),
+    }
 }
 
 fn value_text(value: &Value, key: &str) -> Option<String> {
@@ -276,24 +380,33 @@ async fn apple_knowledge_status() -> (Vec<AppleKnowledgeStatus>, Vec<String>) {
 
 #[tauri::command]
 pub(crate) async fn get_command_knowledge_status(app: tauri::AppHandle) -> CommandKnowledgeStatus {
-    let (memory, rag, apple) = tokio::join!(
-        memory_knowledge_status(app.clone()),
-        rag_knowledge_status(app.clone()),
-        apple_knowledge_status(),
-    );
-    notify_knowledge_readiness(&app, &memory.0, &rag.0);
-    let mut degraded_sections = memory.1;
-    degraded_sections.extend(rag.1);
+    let trusted = trusted_lan_knowledge_status(&app).await;
+    let (memory, rag, mut degraded_sections, trusted_mode) = if let Some(trusted) = trusted {
+        (trusted.0, trusted.1, trusted.2, true)
+    } else {
+        let (memory, rag) = tokio::join!(
+            memory_knowledge_status(app.clone()),
+            rag_knowledge_status(app.clone()),
+        );
+        let mut degraded = memory.1;
+        degraded.extend(rag.1);
+        (memory.0, rag.0, degraded, false)
+    };
+    let apple = apple_knowledge_status().await;
+    notify_knowledge_readiness(&app, &memory, &rag);
     degraded_sections.extend(apple.1);
     degraded_sections.sort();
     degraded_sections.dedup();
     CommandKnowledgeStatus {
         kind: "command-knowledge-status",
-        version: 1,
+        version: if trusted_mode { 2 } else { 1 },
         classification: "OFFICIAL",
+        source_mode: trusted_mode.then_some("trusted_lan"),
+        model_route: trusted_mode.then_some("local_litellm_openai"),
+        evidence_assurance: trusted_mode.then_some("trusted_lan_observed"),
         observed_at: Utc::now().to_rfc3339(),
-        memory: memory.0,
-        rag: rag.0,
+        memory,
+        rag,
         apple_inputs: apple.0,
         degraded_sections,
     }

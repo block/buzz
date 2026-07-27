@@ -9,7 +9,8 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use super::lmstudio::{
-    AdviserExecutionErrorCode, AdviserExecutor, ChiefOfStaffRequest, SpecialistAdviserRequest,
+    cloud_fallback_eligible, cloud_specialist_payload, AdviserExecutionErrorCode, AdviserExecutor,
+    ChiefOfStaffRequest, SpecialistAdviserRequest,
 };
 use super::provenance::ValidatedSource;
 use super::types::{
@@ -248,6 +249,44 @@ fn rag_readiness() -> Value {
 
 fn specialist_request() -> SpecialistAdviserRequest {
     SpecialistAdviserRequest::new("run-1:operations", AdviserId::Operations, vec![source()])
+}
+
+#[test]
+fn cloud_payload_contains_only_bounded_evidence_and_no_lan_or_tool_routes() {
+    let (_, input) = cloud_specialist_payload(&specialist_request()).expect("cloud payload");
+
+    assert!(input.contains("The machinery state is within operating limits."));
+    for forbidden in [
+        "192.168.1.26",
+        "192.168.1.107",
+        "mcp-session-id",
+        "Authorization: Bearer",
+        "command_memory_context",
+        "search_knowledge_base",
+    ] {
+        assert!(!input.contains(forbidden), "leaked {forbidden}");
+    }
+}
+
+#[test]
+fn cloud_fallback_stops_for_cancellation_and_policy_integrity_failures() {
+    for eligible in [
+        AdviserExecutionErrorCode::Authentication,
+        AdviserExecutionErrorCode::ModelUnavailable,
+        AdviserExecutionErrorCode::Timeout,
+        AdviserExecutionErrorCode::Transport,
+        AdviserExecutionErrorCode::InvalidOutput,
+    ] {
+        assert!(cloud_fallback_eligible(eligible), "{eligible:?}");
+    }
+    for terminal in [
+        AdviserExecutionErrorCode::Cancelled,
+        AdviserExecutionErrorCode::InvalidRequest,
+        AdviserExecutionErrorCode::PolicyRejected,
+        AdviserExecutionErrorCode::EvidenceRejected,
+    ] {
+        assert!(!cloud_fallback_eligible(terminal), "{terminal:?}");
+    }
 }
 
 fn parse_specialist(value: Value, adviser: AdviserId) -> AdviserContribution {

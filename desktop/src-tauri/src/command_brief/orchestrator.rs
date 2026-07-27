@@ -14,15 +14,16 @@ use tauri::Manager;
 use tokio_util::sync::CancellationToken;
 
 use super::audit::{PersistedTerminal, TerminalAuditInput};
+use super::cloud::{CloudAdviserClient, CloudProvider};
 use super::lmstudio::{
-    AdviserExecutionError, AdviserExecutionErrorCode, AdviserExecutor, ChiefOfStaffRequest,
-    SpecialistAdviserRequest,
+    cloud_fallback_eligible, AdviserExecutionError, AdviserExecutionErrorCode, AdviserExecutor,
+    ChiefOfStaffRequest, SpecialistAdviserRequest,
 };
 use super::provenance::ValidatedSource;
 use super::scheduler::{LocalModelScheduler, SchedulerError, SchedulerJobKey};
 use super::sources::{
     FrozenSourceContext, ProductionSourceBackend, SourceBackend, SourceCollectionError,
-    SourceCollector,
+    SourceCollector, TrustedLanSourceBackend,
 };
 use super::types::{
     AdviserContribution, AdviserId, BriefRunState, BriefRunStatus, BriefSection, CitedFinding,
@@ -30,6 +31,7 @@ use super::types::{
     MAX_ARRAY_ITEMS, MAX_TEXT_BYTES, SPECIALIST_ADVISERS,
 };
 use crate::command_services::apple_inputs::AppleBriefSelection;
+use crate::command_services::trusted_lan::load_optional as load_optional_trusted_lan_config;
 
 mod lifecycle;
 mod runtime;
@@ -135,7 +137,10 @@ mod providers;
 pub(crate) use providers::ReloadingSourceProvider;
 #[cfg(test)]
 pub(crate) use providers::{CollectedSourceProvider, SourceBackendLoader};
-use providers::{ImmediateFinalizationGate, ProductionSourceBackendLoader};
+use providers::{
+    FallbackAdviserProvider, ImmediateFinalizationGate, ProductionSourceBackendLoader,
+    TrustedLanSourceBackendLoader,
+};
 
 /// Bounded, trusted input for one OFFICIAL command-brief run.
 #[derive(Clone)]
@@ -266,15 +271,40 @@ impl CommandBriefOrchestrator {
             .join("command-apple-inputs.json");
         let apple_selection = AppleBriefSelection::load_protected(&config_path)
             .map_err(|_| ProductionOrchestratorError)?;
-        let executor = AdviserExecutor::from_catalog(model.to_string(), timeout)
-            .map_err(|_| ProductionOrchestratorError)?;
+        let trusted_lan_path = app
+            .path()
+            .app_config_dir()
+            .map_err(|_| ProductionOrchestratorError)?
+            .join("trusted-lan-sources.json");
+        let (advisers, source_loader): (
+            Arc<dyn BriefAdviserProvider>,
+            Arc<dyn providers::SourceBackendLoader>,
+        ) = if let Some(config) = load_optional_trusted_lan_config(&trusted_lan_path)
+            .map_err(|_| ProductionOrchestratorError)?
+        {
+            let local = AdviserExecutor::from_local_evidence_only(model.to_string(), timeout)
+                .map_err(|_| ProductionOrchestratorError)?;
+            let cloud = CloudAdviserClient::from_config(&config, timeout)
+                .map_err(|_| ProductionOrchestratorError)?;
+            (
+                Arc::new(FallbackAdviserProvider { local, cloud }),
+                Arc::new(TrustedLanSourceBackendLoader {
+                    config: config.clone(),
+                }),
+            )
+        } else {
+            (
+                Arc::new(
+                    AdviserExecutor::from_catalog(model.to_string(), timeout)
+                        .map_err(|_| ProductionOrchestratorError)?,
+                ),
+                Arc::new(ProductionSourceBackendLoader { app }),
+            )
+        };
         Ok(Self::new(
             scheduler,
-            Arc::new(ReloadingSourceProvider::new(
-                Arc::new(ProductionSourceBackendLoader { app }),
-                apple_selection,
-            )),
-            Arc::new(executor),
+            Arc::new(ReloadingSourceProvider::new(source_loader, apple_selection)),
+            advisers,
             persistence,
         ))
     }

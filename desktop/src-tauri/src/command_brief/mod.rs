@@ -2,6 +2,7 @@ pub mod types;
 pub mod wake;
 
 pub mod audit;
+pub(crate) mod cloud;
 pub mod lmstudio;
 pub mod orchestrator;
 pub mod personas;

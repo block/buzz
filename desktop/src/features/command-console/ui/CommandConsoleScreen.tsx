@@ -8,6 +8,9 @@ import { DailyCommandBrief } from "./DailyCommandBrief";
 export function CommandConsoleScreen() {
   const systemStatus = useCommandConsoleStatus();
   const commandBrief = useDailyCommandBrief();
+  const trustedLan = systemStatus.degradedSections.includes(
+    "trusted-lan-unsigned",
+  );
 
   return (
     <div
@@ -21,9 +24,13 @@ export function CommandConsoleScreen() {
         >
           <ShieldCheck className="h-6 w-6 shrink-0" aria-hidden="true" />
           <div className="min-w-0">
-            <p className="text-sm font-bold tracking-widest">OFFICIAL</p>
+            <p className="text-sm font-bold tracking-widest">
+              {trustedLan ? "OFFICIAL - TRUSTED LAN" : "OFFICIAL"}
+            </p>
             <p className="text-sm text-primary-foreground/80">
-              Command Console information is classified OFFICIAL by default.
+              {trustedLan
+                ? "Local preferred - Automatic cloud fallback. Unsigned trusted-LAN evidence is clearly identified."
+                : "Command Console information is classified OFFICIAL by default."}
             </p>
           </div>
         </section>

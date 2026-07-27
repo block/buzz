@@ -22,6 +22,13 @@ pub(crate) struct VerifiedRagSnapshot {
     snapshot_time: String,
     physical_collections: Vec<String>,
     logical_collections: Vec<String>,
+    assurance: RagSnapshotAssurance,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RagSnapshotAssurance {
+    SignedSnapshot,
+    TrustedLanObserved,
 }
 
 /// Cryptographically verified RAG snapshot and re-attested read service used
@@ -61,6 +68,10 @@ impl VerifiedRagSnapshot {
         &self.logical_collections
     }
 
+    pub(crate) const fn assurance(&self) -> RagSnapshotAssurance {
+        self.assurance
+    }
+
     pub(crate) fn verify_unchanged(
         &self,
         observed_snapshot_id: &str,
@@ -82,7 +93,35 @@ impl VerifiedRagSnapshot {
             snapshot_time: snapshot_time.to_string(),
             physical_collections: vec!["documents".to_string()],
             logical_collections: vec!["navy-publications".to_string()],
+            assurance: RagSnapshotAssurance::SignedSnapshot,
         }
+    }
+
+    pub(crate) fn from_trusted_lan_observation(
+        catalogue_fingerprint: &str,
+        observed_at: &str,
+        logical_collections: Vec<String>,
+    ) -> Result<Self, RagSnapshotError> {
+        if !valid_digest(catalogue_fingerprint)
+            || DateTime::parse_from_rfc3339(observed_at).is_err()
+            || logical_collections.is_empty()
+            || logical_collections.len() > 256
+            || logical_collections
+                .iter()
+                .any(|name| !valid_catalogue_name(name))
+            || logical_collections.iter().collect::<BTreeSet<_>>().len()
+                != logical_collections.len()
+        {
+            return Err(RagSnapshotError::Invalid);
+        }
+        Ok(Self {
+            snapshot_id: catalogue_fingerprint.to_string(),
+            verified_at: observed_at.to_string(),
+            snapshot_time: observed_at.to_string(),
+            physical_collections: logical_collections.clone(),
+            logical_collections,
+            assurance: RagSnapshotAssurance::TrustedLanObserved,
+        })
     }
 }
 
@@ -118,6 +157,7 @@ pub(crate) fn verified_snapshot_from_readiness(
         snapshot_time: snapshot_time.to_string(),
         physical_collections: readiness.verified_physical_collections.clone(),
         logical_collections: readiness.verified_logical_collections.clone(),
+        assurance: RagSnapshotAssurance::SignedSnapshot,
     })
 }
 

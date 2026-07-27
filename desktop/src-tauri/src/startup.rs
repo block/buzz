@@ -22,12 +22,14 @@ use crate::command_brief::schedule::{
     ScheduledRunPresence, ScheduledRunStarter, ScheduledStartError, DEFAULT_SCHEDULE_ID,
 };
 use crate::command_brief::scheduler::LocalModelScheduler;
-use crate::command_brief::sources::{ProductionSourceBackend, SourceBackend};
+use crate::command_brief::sources::{
+    ProductionSourceBackend, SourceBackend, TrustedLanSourceBackend,
+};
 use crate::command_brief::store::{open_command_brief_store, validate_command_brief_store_schema};
 #[cfg(target_os = "macos")]
 use crate::command_brief::wake::{MacWorkspaceWakeSource, WakeEventSource};
 use crate::command_services::apple_inputs::{bundled_helper_identity, AppleBriefSelection};
-use crate::commands::{LmStudioReadiness, LmStudioReadinessState};
+use crate::commands::LmStudioReadiness;
 use tokio_util::sync::CancellationToken;
 
 const MODEL_TIMEOUT: Duration = Duration::from_secs(120);
@@ -37,6 +39,12 @@ const COMMAND_BRIEF_POLICY_REVISION: &str = "command-brief-policy-v1";
 const IDENTITY_UNAVAILABLE: &str = "identity_unavailable";
 
 mod scheduled_owner;
+mod trusted_model;
+
+pub(crate) use trusted_model::{
+    admitted_model, model_readiness_for_schedule, trusted_lan_mode_enabled,
+    trusted_model_readiness_observation, TrustedModelReadinessObservation,
+};
 
 #[cfg(test)]
 use scheduled_owner::OrchestratorStarter;
@@ -286,69 +294,12 @@ fn readiness_transition_token(basis: &[u8]) -> String {
     format!("signal:{}", hex::encode(Sha256::digest(basis)))
 }
 
-fn lmstudio_readiness_basis(readiness: &Result<LmStudioReadiness, String>) -> Vec<u8> {
-    readiness
-        .as_ref()
-        .ok()
-        .and_then(|value| {
-            serde_json::to_vec(&(
-                value.status,
-                &value.configured_model,
-                &value.loaded_models,
-                &value.security_warnings,
-                value.bind_exposure,
-            ))
-            .ok()
-        })
-        .unwrap_or_else(|| b"model:probe-unavailable".to_vec())
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct TrustedModelReadinessObservation {
-    readiness: Option<LmStudioReadiness>,
-    transition_token: String,
-}
-
-impl TrustedModelReadinessObservation {
-    pub(crate) fn readiness(&self) -> Option<&LmStudioReadiness> {
-        self.readiness.as_ref()
-    }
-
-    pub(crate) fn transition_token(&self) -> &str {
-        &self.transition_token
-    }
-}
-
-pub(crate) fn trusted_model_readiness_observation(
-    readiness: Result<LmStudioReadiness, String>,
-) -> TrustedModelReadinessObservation {
-    let transition_token = lmstudio_readiness_transition_token(&readiness);
-    TrustedModelReadinessObservation {
-        readiness: readiness.ok(),
-        transition_token,
-    }
-}
-
-pub(crate) async fn model_readiness_for_schedule<Probe, ProbeFuture>(
-    supplied: Option<TrustedModelReadinessObservation>,
-    probe: Probe,
-) -> TrustedModelReadinessObservation
-where
-    Probe: FnOnce() -> ProbeFuture,
-    ProbeFuture: Future<Output = Result<LmStudioReadiness, String>>,
-{
-    match supplied {
-        Some(observation) => observation,
-        None => trusted_model_readiness_observation(probe().await),
-    }
-}
-
 pub(crate) fn notify_lmstudio_readiness(
     app: &AppHandle,
     readiness: &Result<LmStudioReadiness, String>,
 ) {
     let observation = trusted_model_readiness_observation(readiness.clone());
-    let token = observation.transition_token.clone();
+    let token = observation.transition_token().to_string();
     let transitions = Arc::clone(
         app.state::<Arc<Mutex<CommandBriefReadinessTransitions>>>()
             .inner(),
@@ -376,10 +327,6 @@ pub(crate) fn notify_lmstudio_readiness(
         )
         .await;
     });
-}
-
-fn lmstudio_readiness_transition_token(readiness: &Result<LmStudioReadiness, String>) -> String {
-    readiness_transition_token(&lmstudio_readiness_basis(readiness))
 }
 
 pub(crate) struct CommandBriefModelReadinessObserver {
@@ -667,16 +614,12 @@ async fn run_command_brief_schedule_with_model_observation(
             return process_due_schedule(&conn, &schedule, now, trigger, &readiness, &NoStarter);
         }
     };
-    if model_readiness.status != LmStudioReadinessState::Ready {
+    let trusted_lan_mode = trusted_lan_mode_enabled(&app).await?;
+    let Some(model) = admitted_model(model_readiness, trusted_lan_mode) else {
         let readiness =
             ReadinessSnapshot::deferred(DeferredReason::ModelUnavailable, model_transition_token);
         return process_due_schedule(&conn, &schedule, now, trigger, &readiness, &NoStarter);
-    }
-    let model = model_readiness
-        .configured_model
-        .clone()
-        .or_else(|| model_readiness.loaded_models.first().cloned())
-        .ok_or_else(|| "command brief model unavailable".to_string())?;
+    };
 
     let preflight = match production_preflight(&app, &schedule, &model, &expected_owner_pubkey)
         .await
@@ -799,9 +742,7 @@ async fn production_preflight(
     if owner_pubkey != expected_owner_pubkey {
         return Err(IDENTITY_UNAVAILABLE);
     }
-    let backend = ProductionSourceBackend::from_app(app.clone())
-        .await
-        .map_err(|_| "rag_unavailable")?;
+    let backend = production_preflight_source_backend(app, &Utc::now().to_rfc3339()).await?;
     if !active_owner_matches(&state, expected_owner_pubkey) {
         return Err(IDENTITY_UNAVAILABLE);
     }
@@ -845,6 +786,37 @@ async fn production_preflight(
     )
     .map_err(|_| "runtime_config_unavailable")?;
     Ok(ProductionPreflight { config, owner_keys })
+}
+
+async fn production_preflight_source_backend(
+    app: &AppHandle,
+    observed_at: &str,
+) -> Result<Arc<dyn SourceBackend>, &'static str> {
+    let trusted_lan_path = app
+        .path()
+        .app_config_dir()
+        .map_err(|_| "rag_unavailable")?
+        .join("trusted-lan-sources.json");
+    let observed_at = observed_at.to_string();
+    let trusted = tokio::task::spawn_blocking(move || {
+        crate::command_services::trusted_lan::load_optional(&trusted_lan_path)
+            .map_err(|_| "rag_unavailable")
+    })
+    .await
+    .map_err(|_| "rag_unavailable")??;
+    if let Some(config) = trusted {
+        return tokio::task::spawn_blocking(move || {
+            TrustedLanSourceBackend::from_config(&config, &observed_at)
+                .map(|backend| Arc::new(backend) as Arc<dyn SourceBackend>)
+                .map_err(|_| "rag_unavailable")
+        })
+        .await
+        .map_err(|_| "rag_unavailable")?;
+    }
+    ProductionSourceBackend::from_app(app.clone())
+        .await
+        .map(|backend| Arc::new(backend) as Arc<dyn SourceBackend>)
+        .map_err(|_| "rag_unavailable")
 }
 
 async fn ensure_production_runtime(
@@ -919,13 +891,8 @@ pub(crate) async fn start_manual_command_brief(
     let readiness = crate::commands::read_lmstudio_readiness(app.clone())
         .await
         .map_err(|_| "command brief model unavailable".to_string())?;
-    if readiness.status != LmStudioReadinessState::Ready {
-        return Err("command brief model unavailable".to_string());
-    }
-    let model = readiness
-        .configured_model
-        .clone()
-        .or_else(|| readiness.loaded_models.first().cloned())
+    let trusted_lan_mode = trusted_lan_mode_enabled(&app).await?;
+    let model = admitted_model(&readiness, trusted_lan_mode)
         .ok_or_else(|| "command brief model unavailable".to_string())?;
     let preflight = production_preflight(&app, &schedule, &model, expected_owner_pubkey)
         .await

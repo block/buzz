@@ -731,3 +731,55 @@ test("command knowledge status rejects asserted crypto state and unsafe metadata
     null,
   );
 });
+
+test("trusted LAN knowledge status preserves observed assurance without fake signatures", () => {
+  const status = parseCommandKnowledgeStatus({
+    kind: "command-knowledge-status",
+    version: 2,
+    classification: "OFFICIAL",
+    sourceMode: "trusted_lan",
+    modelRoute: "local_litellm_openai",
+    evidenceAssurance: "trusted_lan_observed",
+    observedAt: NOW,
+    memory: {
+      status: "ready",
+      serverIdentity: "memory",
+      nodeId: null,
+      homeNodeId: null,
+      revisionCount: 0,
+      conflictCount: 0,
+      replicationCursor: null,
+      homeReplicationCursor: null,
+      lastSuccessfulSync: null,
+      freshness: "observed",
+      validation: "trusted_lan_observed",
+      toolAllowlist: ["search_events"],
+      error: null,
+    },
+    rag: {
+      status: "ready",
+      serverIdentity: "rag",
+      activeSnapshotId: "a".repeat(64),
+      signatureFingerprint: null,
+      snapshotTime: NOW,
+      lastSuccessfulActivation: NOW,
+      freshness: "observed",
+      validation: "trusted_lan_observed",
+      toolAllowlist: ["list_collections", "search_knowledge_base"],
+      error: null,
+    },
+    appleInputs: ["calendar", "reminders", "notes", "files"].map((source) => ({
+      source,
+      permission: "authorized",
+      observedAt: NOW,
+      recordCount: 0,
+      truncated: false,
+      error: null,
+    })),
+    degradedSections: ["trusted-lan-unsigned"],
+  });
+
+  assert.equal(status?.sourceMode, "trusted_lan");
+  assert.equal(status?.rag.signatureFingerprint, null);
+  assert.equal(status?.evidenceAssurance, "trusted_lan_observed");
+});

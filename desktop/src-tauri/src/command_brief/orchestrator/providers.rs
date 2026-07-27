@@ -1,4 +1,5 @@
 use super::*;
+use crate::command_services::trusted_lan::TrustedLanConfig;
 
 pub(super) struct ImmediateFinalizationGate;
 
@@ -54,6 +55,109 @@ impl BriefAdviserProvider for AdviserExecutor {
             .and_then(|result| {
                 serde_json::to_value(result.contribution).map_err(|_| BriefAdviserError::Failed)
             })
+        })
+    }
+}
+
+pub(super) struct FallbackAdviserProvider {
+    pub(super) local: AdviserExecutor,
+    pub(super) cloud: CloudAdviserClient,
+}
+
+impl BriefAdviserProvider for FallbackAdviserProvider {
+    fn run_specialist<'a>(
+        &'a self,
+        run_id: &'a str,
+        adviser: AdviserId,
+        sources: Vec<ValidatedSource>,
+        cancellation: CancellationToken,
+    ) -> BriefFuture<'a, Result<AdviserContribution, BriefAdviserError>> {
+        Box::pin(async move {
+            let identity = format!("{run_id}:{}", adviser_label(adviser));
+            let local = AdviserExecutor::run_specialist(
+                &self.local,
+                SpecialistAdviserRequest::new(&identity, adviser, sources.clone()),
+                cancellation.clone(),
+            )
+            .await;
+            match local {
+                Ok(result) => return Ok(result.contribution),
+                Err(error) if !cloud_fallback_eligible(error.code()) => {
+                    return Err(BriefAdviserError::from(error));
+                }
+                Err(_) => {}
+            }
+            for provider in [CloudProvider::LiteLlm, CloudProvider::OpenAi] {
+                if !self.cloud.available(provider) {
+                    continue;
+                }
+                let request = SpecialistAdviserRequest::new(&identity, adviser, sources.clone());
+                match self
+                    .cloud
+                    .run_specialist(provider, &request, cancellation.clone())
+                    .await
+                {
+                    Ok(contribution) => return Ok(contribution),
+                    Err(error) if !cloud_fallback_eligible(error.code()) => {
+                        return Err(BriefAdviserError::from(error));
+                    }
+                    Err(_) => {}
+                }
+            }
+            Err(BriefAdviserError::Failed)
+        })
+    }
+
+    fn run_chief_of_staff<'a>(
+        &'a self,
+        run_id: &'a str,
+        contributions: Vec<AdviserContribution>,
+        source_ledger: Vec<ValidatedSource>,
+        cancellation: CancellationToken,
+    ) -> BriefFuture<'a, Result<Value, BriefAdviserError>> {
+        Box::pin(async move {
+            let identity = format!("{run_id}:chief_of_staff");
+            let local = AdviserExecutor::run_chief_of_staff(
+                &self.local,
+                ChiefOfStaffRequest::new(&identity, contributions.clone(), source_ledger.clone()),
+                cancellation.clone(),
+            )
+            .await;
+            match local {
+                Ok(result) => {
+                    return serde_json::to_value(result.contribution)
+                        .map_err(|_| BriefAdviserError::Failed);
+                }
+                Err(error) if !cloud_fallback_eligible(error.code()) => {
+                    return Err(BriefAdviserError::from(error));
+                }
+                Err(_) => {}
+            }
+            for provider in [CloudProvider::LiteLlm, CloudProvider::OpenAi] {
+                if !self.cloud.available(provider) {
+                    continue;
+                }
+                let request = ChiefOfStaffRequest::new(
+                    &identity,
+                    contributions.clone(),
+                    source_ledger.clone(),
+                );
+                match self
+                    .cloud
+                    .run_chief_of_staff(provider, &request, cancellation.clone())
+                    .await
+                {
+                    Ok(consolidation) => {
+                        return serde_json::to_value(consolidation)
+                            .map_err(|_| BriefAdviserError::Failed);
+                    }
+                    Err(error) if !cloud_fallback_eligible(error.code()) => {
+                        return Err(BriefAdviserError::from(error));
+                    }
+                    Err(_) => {}
+                }
+            }
+            Err(BriefAdviserError::Failed)
         })
     }
 }
@@ -169,6 +273,35 @@ impl SourceBackendLoader for ProductionSourceBackendLoader {
                 return Err(SourceCollectionError::Cancelled);
             }
             let backend = ProductionSourceBackend::from_app(app).await?;
+            if cancellation.is_cancelled() {
+                return Err(SourceCollectionError::Cancelled);
+            }
+            Ok(Arc::new(backend) as Arc<dyn SourceBackend + Send + Sync>)
+        })
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct TrustedLanSourceBackendLoader {
+    pub(super) config: TrustedLanConfig,
+}
+
+impl SourceBackendLoader for TrustedLanSourceBackendLoader {
+    fn load<'a>(
+        &'a self,
+        cancellation: CancellationToken,
+    ) -> BriefFuture<'a, Result<Arc<dyn SourceBackend + Send + Sync>, SourceCollectionError>> {
+        let config = self.config.clone();
+        Box::pin(async move {
+            if cancellation.is_cancelled() {
+                return Err(SourceCollectionError::Cancelled);
+            }
+            let observed_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+            let backend = tokio::task::spawn_blocking(move || {
+                TrustedLanSourceBackend::from_config(&config, &observed_at)
+            })
+            .await
+            .map_err(|_| SourceCollectionError::RagInvalid)??;
             if cancellation.is_cancelled() {
                 return Err(SourceCollectionError::Cancelled);
             }
