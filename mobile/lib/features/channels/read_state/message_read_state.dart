@@ -20,6 +20,12 @@ int? effectiveMessageReadAt(
 }
 
 /// Whether a message should currently show as unread in the actions menu.
+///
+/// A message-level forced unread (from this menu) wins; otherwise the
+/// timestamp precedence decides. A channel-level forced unread (from the
+/// channel tile) is deliberately not consulted: it is a channel-scoped
+/// choice, and letting it leak in here would make the message-level toggle
+/// unable to round-trip without clearing the channel-level choice.
 bool isMessageUnread(
   ReadStateState readState, {
   required String channelId,
@@ -27,7 +33,7 @@ bool isMessageUnread(
   required int createdAt,
   String? threadRootId,
 }) {
-  if (readState.locallyForcedChannelIds.contains(channelId)) return true;
+  if (readState.isForcedUnread(msgContextKey(messageId))) return true;
   final readAt = effectiveMessageReadAt(
     readState,
     channelId: channelId,

@@ -4,13 +4,13 @@ import 'package:flutter_test/flutter_test.dart';
 
 ReadStateState _state(
   Map<String, int> contexts, {
-  Set<String> forced = const {},
+  Map<String, String> forced = const {},
 }) => ReadStateState(
   isReady: true,
   pubkey: 'pk',
   contexts: contexts,
   version: 1,
-  locallyForcedChannelIds: forced,
+  forcedUnreadContexts: forced,
 );
 
 void main() {
@@ -113,10 +113,10 @@ void main() {
       );
     });
 
-    test('forced-unread channel wins over markers', () {
+    test('forced-unread message wins over markers', () {
       final readState = _state(
         const {channelId: 1000},
-        forced: const {channelId},
+        forced: const {'msg:$messageId': channelId},
       );
       expect(
         isMessageUnread(
@@ -126,6 +126,25 @@ void main() {
           createdAt: 150,
         ),
         isTrue,
+      );
+    });
+
+    test('channel-level forced unread does not leak into message state', () {
+      // A channel forced unread from the channel tile is a channel-scoped
+      // choice — an already-read message inside it still shows as read, so
+      // its own Mark read/unread toggle round-trips independently.
+      final readState = _state(
+        const {channelId: 1000},
+        forced: const {channelId: channelId},
+      );
+      expect(
+        isMessageUnread(
+          readState,
+          channelId: channelId,
+          messageId: messageId,
+          createdAt: 150,
+        ),
+        isFalse,
       );
     });
   });

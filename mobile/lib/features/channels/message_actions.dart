@@ -2,13 +2,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
-import 'package:share_plus/share_plus.dart';
 
 import '../../shared/clipboard_utils.dart';
 import '../../shared/deeplink/deep_link.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
+import '../../shared/widgets/sheet_divider.dart';
 import '../reminders/remind_me_later_sheet.dart';
 import '../reminders/reminder_service.dart';
 import 'channel_management_provider.dart';
@@ -62,28 +62,19 @@ void showMessageActions({
                   mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                   children: [
                     for (final emoji in quickEmojis)
-                      GestureDetector(
+                      _QuickReactionCircle(
                         onTap: () {
                           Navigator.of(sheetContext).pop();
                           ref
                               .read(channelActionsProvider)
                               .addReaction(message.id, emoji);
                         },
-                        child: Container(
-                          width: 52,
-                          height: 52,
-                          alignment: Alignment.center,
-                          decoration: BoxDecoration(
-                            color: sheetContext.colors.surfaceContainerHighest,
-                            shape: BoxShape.circle,
-                          ),
-                          child: Text(
-                            emoji,
-                            style: const TextStyle(fontSize: 24),
-                          ),
+                        child: Text(
+                          emoji,
+                          style: const TextStyle(fontSize: 24),
                         ),
                       ),
-                    GestureDetector(
+                    _QuickReactionCircle(
                       onTap: () {
                         Navigator.of(sheetContext).pop();
                         showEmojiPicker(
@@ -95,19 +86,10 @@ void showMessageActions({
                           },
                         );
                       },
-                      child: Container(
-                        width: 52,
-                        height: 52,
-                        alignment: Alignment.center,
-                        decoration: BoxDecoration(
-                          color: sheetContext.colors.surfaceContainerHighest,
-                          shape: BoxShape.circle,
-                        ),
-                        child: Icon(
-                          LucideIcons.plus,
-                          size: 24,
-                          color: sheetContext.colors.onSurfaceVariant,
-                        ),
+                      child: Icon(
+                        LucideIcons.plus,
+                        size: 24,
+                        color: sheetContext.colors.onSurfaceVariant,
                       ),
                     ),
                   ],
@@ -128,7 +110,7 @@ void showMessageActions({
                   // Triage: come back to this message later.
                   _MarkReadUnreadTile(message: message, channelId: channelId),
                   _FollowThreadTile(message: message),
-                  const _SheetDivider(),
+                  const SheetDivider(),
                   // Export: take the content out of the conversation.
                   ListTile(
                     leading: const Icon(LucideIcons.copy),
@@ -140,28 +122,9 @@ void showMessageActions({
                       Clipboard.setData(data);
                     },
                   ),
-                  ListTile(
-                    leading: const Icon(LucideIcons.share),
-                    title: const Text('Share message'),
-                    onTap: () {
-                      final origin = _shareOriginRect(sheetContext);
-                      Navigator.of(sheetContext).pop();
-                      SharePlus.instance.share(
-                        ShareParams(
-                          uri: Uri.parse(
-                            messageLinkFor(
-                              message: message,
-                              channelId: channelId,
-                            ),
-                          ),
-                          sharePositionOrigin: origin,
-                        ),
-                      );
-                    },
-                  ),
                 ],
                 if (canManageMessage) ...[
-                  if (!message.isSystem) const _SheetDivider(),
+                  if (!message.isSystem) const SheetDivider(),
                   ListTile(
                     leading: const Icon(LucideIcons.pencil),
                     title: const Text('Edit message'),
@@ -217,14 +180,6 @@ String messageLinkFor({
   );
 }
 
-/// Anchor rect for the iPad/macOS share popover, from the sheet's own render
-/// box. Falls back to null (share_plus centers the popover) when unavailable.
-Rect? _shareOriginRect(BuildContext context) {
-  final box = context.findRenderObject() as RenderBox?;
-  if (box == null || !box.hasSize) return null;
-  return box.localToGlobal(Offset.zero) & box.size;
-}
-
 class _MarkReadUnreadTile extends ConsumerWidget {
   final TimelineMessage message;
   final String channelId;
@@ -251,19 +206,21 @@ class _MarkReadUnreadTile extends ConsumerWidget {
         Navigator.of(context).pop();
         final notifier = ref.read(readStateProvider.notifier);
         if (unread) {
+          // Advances the `msg:` marker and clears this message's own forced
+          // flag — a channel-level forced unread (channel tile) is a separate
+          // choice and stays untouched.
           notifier.markContextRead(
             msgContextKey(message.id),
             message.createdAt,
           );
-          // The forced-unread flag is channel-level, so advancing the `msg:`
-          // marker alone can't clear it — drop it here so Mark read/unread
-          // round-trips instead of sticking on "Mark read".
-          notifier.clearContextForcedUnread(channelId);
         } else {
           // Read markers are monotonic and cannot move backward, so mark
-          // unread forces the channel unread locally — the same semantic as
-          // the channel-tile action (session-local, does not survive relaunch).
-          notifier.markContextUnread(channelId);
+          // unread forces this message unread locally (session-local, does
+          // not survive relaunch). The channel surfaces it as unread too.
+          notifier.markContextUnread(
+            msgContextKey(message.id),
+            channelId: channelId,
+          );
         }
       },
     );
@@ -441,16 +398,28 @@ class _FastActionTile extends StatelessWidget {
   }
 }
 
-/// Section divider between the sheet's action groups, matching the
-/// `AppListSection` divider convention.
-class _SheetDivider extends StatelessWidget {
-  const _SheetDivider();
+/// Circular filled tap target shared by the quick-reaction emojis and the
+/// "+" emoji-picker tile — one treatment, one place to change it.
+class _QuickReactionCircle extends StatelessWidget {
+  final VoidCallback onTap;
+  final Widget child;
+
+  const _QuickReactionCircle({required this.onTap, required this.child});
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
-      child: Divider(height: 1, color: context.colors.outlineVariant),
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        width: 52,
+        height: 52,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: context.colors.surfaceContainerHighest,
+          shape: BoxShape.circle,
+        ),
+        child: child,
+      ),
     );
   }
 }

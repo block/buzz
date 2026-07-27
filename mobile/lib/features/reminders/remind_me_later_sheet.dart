@@ -3,6 +3,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/sheet_divider.dart';
 import 'reminder_service.dart';
 import 'reminder_time_presets.dart';
 
@@ -69,7 +70,7 @@ void showRemindMeLaterSheet({
                     submit(preset.getTimestamp());
                   },
                 ),
-              const Divider(height: Grid.xs),
+              const SheetDivider(),
               ListTile(
                 leading: const Icon(LucideIcons.calendarClock),
                 title: const Text('Pick a date & time'),

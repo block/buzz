@@ -39,32 +39,37 @@ class _FakeReadStateNotifier extends ReadStateNotifier {
   ReadStateState build() => _initialState;
 
   @override
-  void markContextRead(String contextId, int unixTimestamp) {
+  void markContextRead(
+    String contextId,
+    int unixTimestamp, {
+    bool clearForcedMessages = false,
+  }) {
     markedRead[contextId] = unixTimestamp;
-    state = state.copyWithContext(contextId, unixTimestamp);
+    var forced = {
+      for (final entry in state.forcedUnreadContexts.entries)
+        if (entry.key != contextId) entry.key: entry.value,
+    };
+    if (clearForcedMessages) {
+      forced = {
+        for (final entry in forced.entries)
+          if (entry.value != contextId) entry.key: entry.value,
+      };
+    }
+    state = _withForced(forced).copyWithContext(contextId, unixTimestamp);
   }
 
   @override
-  void markContextUnread(String contextId) {
+  void markContextUnread(String contextId, {required String channelId}) {
     markedUnread.add(contextId);
-    state = _withForced({...state.locallyForcedChannelIds, contextId});
+    state = _withForced({...state.forcedUnreadContexts, contextId: channelId});
   }
 
-  @override
-  void clearContextForcedUnread(String contextId) {
-    if (!state.locallyForcedChannelIds.contains(contextId)) return;
-    state = _withForced({
-      for (final id in state.locallyForcedChannelIds)
-        if (id != contextId) id,
-    });
-  }
-
-  ReadStateState _withForced(Set<String> forced) => ReadStateState(
+  ReadStateState _withForced(Map<String, String> forced) => ReadStateState(
     isReady: state.isReady,
     pubkey: state.pubkey,
     contexts: state.contexts,
     version: state.version + 1,
-    locallyForcedChannelIds: Set.unmodifiable(forced),
+    forcedUnreadContexts: Map.unmodifiable(forced),
   );
 }
 
@@ -152,7 +157,6 @@ void main() {
 
       expect(find.text('Copy text'), findsOneWidget);
       expect(find.text('Copy link'), findsOneWidget);
-      expect(find.text('Share message'), findsOneWidget);
       expect(find.text('Mark unread'), findsOneWidget);
       expect(find.text('Follow thread'), findsOneWidget);
       // No thread context → no Reply fast action.
@@ -188,7 +192,6 @@ void main() {
 
       expect(find.text('Copy text'), findsNothing);
       expect(find.text('Copy link'), findsNothing);
-      expect(find.text('Share message'), findsNothing);
       expect(find.text('Mark unread'), findsNothing);
       expect(find.text('Follow thread'), findsNothing);
       expect(find.text('Reply'), findsNothing);
@@ -228,7 +231,7 @@ void main() {
       expect(notifier.markedRead, {'msg:msg-1': 900});
     });
 
-    testWidgets('Mark unread forces the channel unread', (tester) async {
+    testWidgets('Mark unread forces the message unread', (tester) async {
       final prefs = await _mockPrefs();
       final notifier = _FakeReadStateNotifier(
         _readState(const {_channelId: 2000}),
@@ -244,7 +247,11 @@ void main() {
       await tester.tap(find.text('Mark unread'));
       await tester.pumpAndSettle();
 
-      expect(notifier.markedUnread, [_channelId]);
+      // The force flag is message-scoped, mapped to its channel so tiles and
+      // badges surface it.
+      expect(notifier.markedUnread, ['msg:msg-1']);
+      expect(notifier.state.forcedUnreadContexts, {'msg:msg-1': _channelId});
+      expect(notifier.state.locallyForcedChannelIds, {_channelId});
     });
 
     testWidgets('Mark read after a forced unread clears the force flag so '
@@ -260,30 +267,61 @@ void main() {
         readStateOverride: () => notifier,
       );
 
-      // Force the channel unread; the row flips to Mark read.
+      // Force the message unread; the row flips to Mark read.
       await tester.tap(find.text('Mark unread'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('open'));
       await tester.pumpAndSettle();
       expect(find.text('Mark read'), findsOneWidget);
 
-      // Mark read must clear the channel-level force flag, not just the
-      // message marker — otherwise the row sticks on "Mark read".
+      // Mark read must clear the message's own force flag — otherwise the
+      // row sticks on "Mark read".
       await tester.tap(find.text('Mark read'));
       await tester.pumpAndSettle();
 
       final container = ProviderScope.containerOf(
         tester.element(find.text('open')),
       );
-      expect(
-        container.read(readStateProvider).locallyForcedChannelIds,
-        isEmpty,
-      );
+      expect(container.read(readStateProvider).forcedUnreadContexts, isEmpty);
 
       await tester.tap(find.text('open'));
       await tester.pumpAndSettle();
       expect(find.text('Mark unread'), findsOneWidget);
       expect(find.text('Mark read'), findsNothing);
+    });
+
+    testWidgets('message-level Mark read leaves a channel-level forced '
+        'unread untouched', (tester) async {
+      final prefs = await _mockPrefs();
+      final notifier = _FakeReadStateNotifier(
+        ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: const {_channelId: 2000},
+          version: 1,
+          // Channel forced unread from the channel tile, message forced
+          // unread from this sheet.
+          forcedUnreadContexts: const {
+            _channelId: _channelId,
+            'msg:msg-1': _channelId,
+          },
+        ),
+      );
+      await _pumpSheet(
+        tester,
+        message: _message(createdAt: 900),
+        prefs: prefs,
+        readStateOverride: () => notifier,
+      );
+
+      expect(find.text('Mark read'), findsOneWidget);
+      await tester.tap(find.text('Mark read'));
+      await tester.pumpAndSettle();
+
+      // The message's flag is gone; the user's channel-level choice stays.
+      final readState = notifier.state;
+      expect(readState.forcedUnreadContexts, {_channelId: _channelId});
+      expect(readState.locallyForcedChannelIds, {_channelId});
     });
 
     testWidgets('hides read-state row while read state is not ready', (
