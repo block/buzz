@@ -176,6 +176,11 @@ export function EditAgentAdvancedFields({
             value={parallelism}
           />
         </div>
+        <p className="text-xs text-muted-foreground">
+          This is the instance&apos;s actual worker count. Higher values allow
+          simultaneous conversations and may start additional provider
+          processes.
+        </p>
       </div>
 
       {/* Relay URL: intentionally no editor. The legacy per-record relay pin

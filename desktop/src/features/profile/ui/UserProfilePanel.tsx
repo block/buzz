@@ -398,12 +398,18 @@ export function UserProfilePanel({
   });
 
   const handleEditAgent = React.useCallback(() => {
-    if (resolvedPersona) {
-      setPersonaDialogState(editPersonaDialogState(resolvedPersona));
+    // A running/stopped instance must open its own editor even when it is
+    // linked to a persona. Routing linked instances straight to the persona
+    // editor made instance-only settings such as parallelism impossible to
+    // discover or change from the normal UI.
+    if (managedAgent) {
+      setEditAgentOpen(true);
       return;
     }
-    setEditAgentOpen(true);
-  }, [resolvedPersona]);
+    if (resolvedPersona) {
+      setPersonaDialogState(editPersonaDialogState(resolvedPersona));
+    }
+  }, [managedAgent, resolvedPersona]);
 
   const { deleteManagedAgentRecord, deleteManagedAgentsForPersona } =
     useProfileAgentDeletion({
