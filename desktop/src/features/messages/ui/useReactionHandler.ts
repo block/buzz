@@ -20,6 +20,8 @@ type ReactionHandler = {
   errorMessage: string | null;
   /** Call to toggle an emoji reaction. Safe to fire-and-forget. */
   select: (emoji: string) => Promise<void>;
+  /** Replace the current user's choice among a mutually exclusive reaction set. */
+  chooseExclusive: (choices: readonly string[], emoji: string) => Promise<void>;
 };
 
 /** @visibleForTesting */
@@ -75,6 +77,33 @@ export function applyOptimisticReaction(
       users: [{ pubkey: "", displayName: "You", avatarUrl: null }],
     },
   ];
+}
+
+/** @visibleForTesting */
+export function replaceOwnChoiceReactions(
+  reactions: TimelineReaction[],
+  choices: readonly string[],
+  selectedEmoji: string,
+): TimelineReaction[] {
+  const choiceSet = new Set(choices);
+  let next = reactions;
+
+  for (const reaction of reactions) {
+    if (
+      reaction.reactedByCurrentUser &&
+      choiceSet.has(reaction.emoji) &&
+      reaction.emoji !== selectedEmoji
+    ) {
+      next = applyOptimisticReaction(next, reaction.emoji, true);
+    }
+  }
+
+  return next.some(
+    (reaction) =>
+      reaction.emoji === selectedEmoji && reaction.reactedByCurrentUser,
+  )
+    ? next
+    : applyOptimisticReaction(next, selectedEmoji, false);
 }
 
 /**
@@ -179,5 +208,73 @@ export function useReactionHandler(
     ],
   );
 
-  return { reactions, canToggle, pending, errorMessage, select };
+  const chooseExclusive = React.useCallback(
+    async (choices: readonly string[], emoji: string) => {
+      if (!onToggleReaction || pending || !choices.includes(emoji)) {
+        return;
+      }
+
+      const activeChoices = reactions.filter(
+        (reaction) =>
+          reaction.reactedByCurrentUser && choices.includes(reaction.emoji),
+      );
+      const alreadySelected = activeChoices.some(
+        (reaction) => reaction.emoji === emoji,
+      );
+      const otherActiveChoices = activeChoices.filter(
+        (reaction) => reaction.emoji !== emoji,
+      );
+      if (alreadySelected && otherActiveChoices.length === 0) {
+        return;
+      }
+
+      setErrorMessage(null);
+      setPending(true);
+      setOptimisticState((current) => {
+        const baseReactions =
+          current && current.sourceReactions === sourceReactions
+            ? current.reactions
+            : reactions;
+
+        return {
+          reactions: replaceOwnChoiceReactions(baseReactions, choices, emoji),
+          sourceReactions,
+        };
+      });
+      try {
+        for (const reaction of otherActiveChoices) {
+          await onToggleReaction(message, reaction.emoji, true);
+        }
+        if (!alreadySelected) {
+          await onToggleReaction(message, emoji, false);
+        }
+      } catch (error) {
+        setOptimisticState(null);
+        const nextMessage =
+          error instanceof Error
+            ? error.message
+            : "Failed to update the reaction.";
+        setErrorMessage(nextMessage);
+        throw error;
+      } finally {
+        setPending(false);
+      }
+    },
+    [
+      message,
+      onToggleReaction,
+      pending,
+      reactions,
+      sourceReactions,
+    ],
+  );
+
+  return {
+    reactions,
+    canToggle,
+    pending,
+    errorMessage,
+    select,
+    chooseExclusive,
+  };
 }

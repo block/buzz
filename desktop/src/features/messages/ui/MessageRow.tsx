@@ -170,6 +170,7 @@ export const MessageRow = React.memo(
       pending: reactionPending,
       errorMessage: reactionErrorMessage,
       select: handleReactionSelect,
+      chooseExclusive: handleExclusiveReactionChoice,
     } = useReactionHandler(message, onToggleReaction);
     const { openReminder, activeReminderEventIds } = useRemindLater();
     const hasActiveReminder = activeReminderEventIds.has(message.id);
@@ -402,6 +403,7 @@ export const MessageRow = React.memo(
       <CrmActionCard
         action={crmActionCard}
         canToggle={canToggleReactions}
+        onChooseLeadControl={handleExclusiveReactionChoice}
         onSelect={handleReactionSelect}
         pending={reactionPending}
         reactions={reactions}

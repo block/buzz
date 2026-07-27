@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   applyOptimisticReaction,
+  replaceOwnChoiceReactions,
   selectDisplayReactions,
 } from "./useReactionHandler.ts";
 
@@ -87,6 +88,36 @@ test("applyOptimisticReaction: no-op when adding an emoji the user already react
     result,
     source,
     "must return same reference when already reacted",
+  );
+});
+
+test("replaceOwnChoiceReactions: keeps exactly one selected safeguard reaction", () => {
+  const source = [
+    pill("⛔", 1, true),
+    pill("🏢", 1),
+    pill("❤️", 1),
+  ];
+
+  const result = replaceOwnChoiceReactions(
+    source,
+    ["⛔", "🏢", "🗑️"],
+    "🏢",
+  );
+
+  assert.deepEqual(
+    result.map((reaction) => [reaction.emoji, reaction.reactedByCurrentUser]),
+    [
+      ["🏢", true],
+      ["❤️", false],
+    ],
+  );
+});
+
+test("replaceOwnChoiceReactions: does not toggle off an already active selection", () => {
+  const source = [pill("🏢", 1, true)];
+  assert.equal(
+    replaceOwnChoiceReactions(source, ["⛔", "🏢", "🗑️"], "🏢"),
+    source,
   );
 });
 

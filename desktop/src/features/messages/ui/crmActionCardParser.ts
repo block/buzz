@@ -4,7 +4,8 @@ export type CrmActionCard = {
     | "reddit_mark_posted"
     | "lead_categorize"
     | "outreach_approve"
-    | "calendar_book";
+    | "calendar_book"
+    | "lead_control";
   expiresAt: string;
   content: string;
   calendarSlots?: CrmCalendarSlot[];
@@ -17,10 +18,11 @@ const CONTROL_REACTIONS: Record<CrmActionCard["actionType"], readonly string[]> 
   lead_categorize: ["👍", "📅", "ℹ️", "👎", "🕒", "⛔", "🔀", "❌"],
   outreach_approve: ["✅", "❌", "✏️"],
   calendar_book: ["1️⃣", "2️⃣", "3️⃣", "❌"],
+  lead_control: ["⛔", "🏢", "🗑️", "✅"],
 };
 
 const MARKER =
-  /(?:^|\n)crm-action:v1:([0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}):(reddit_mark_posted|lead_categorize|outreach_approve|calendar_book):(\S+)\s*$/i;
+  /(?:^|\n)crm-action:v1:([0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}):(reddit_mark_posted|lead_categorize|outreach_approve|calendar_book|lead_control):(\S+)\s*$/i;
 const REDDIT_DRAFT =
   /(?:^|\n)Draft to copy manually:\s*\n(`{3,})[^\n]*\n([\s\S]*?)\n\1(?=\n|$)/i;
 const CALENDAR_SLOT = /^\*\*Slot ([1-3]):\*\*\s*(.+)$/gim;
@@ -35,6 +37,8 @@ const ACTION_FOOTERS: Record<CrmActionCard["actionType"], RegExp> = {
     /\n*Approve to send this frozen draft, or reject it\.\nExpires: [^\n]+\s*$/i,
   calendar_book:
     /\n*Choose a meeting slot using the action card\.\nExpires: [^\n]+\s*$/i,
+  lead_control:
+    /\n*Choose a safeguard using the action card\.\nExpires: [^\n]+\s*$/i,
 };
 
 function readableContent(

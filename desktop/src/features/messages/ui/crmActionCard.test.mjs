@@ -50,6 +50,25 @@ test("parses the supported calendar booking action marker", () => {
   );
 });
 
+test("parses lead safeguards and keeps their transport reactions out of the thread", () => {
+  const safeguards = parseCrmActionCard(
+    [
+      "## Lead safeguards",
+      "",
+      "**Lead:** arnaud@example.com",
+      "crm-action:v1:8ca5bd14-00d4-45cc-88ec-4bb1609e7d4a:lead_control:2026-07-26T20:15:00+00:00",
+    ].join("\n"),
+  );
+
+  assert.equal(safeguards?.actionType, "lead_control");
+  assert.equal(isCrmActionControlReaction(safeguards, "⛔"), true);
+  assert.equal(isCrmActionControlReaction(safeguards, "🏢"), true);
+  assert.equal(isCrmActionControlReaction(safeguards, "🗑️"), true);
+  assert.equal(isCrmActionControlReaction(safeguards, "✅"), true);
+  assert.equal(isCrmActionControlReaction(safeguards, "❌"), false);
+  assert.equal(isCrmActionControlReaction(safeguards, "❤️"), false);
+});
+
 test("extracts only numbered calendar slots in their displayed order", () => {
   const content = [
     "# Schedule a meeting",

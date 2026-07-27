@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Check, Copy, Pencil, X } from "lucide-react";
+import { Building2, Check, Copy, Pencil, ShieldBan, Trash2, X } from "lucide-react";
 
 import type { TimelineReaction } from "@/features/messages/types";
 import {
@@ -21,6 +21,11 @@ const LEAD_CATEGORY_CHOICES = [
   { label: "Do Not Contact", reaction: "⛔" },
   { label: "Wrong Person", reaction: "🔀" },
 ] as const;
+const LEAD_CONTROL_CHOICES = [
+  { icon: ShieldBan, label: "Block person", reaction: "⛔" },
+  { icon: Building2, label: "Block company", reaction: "🏢" },
+  { icon: Trash2, label: "Remove from campaign", reaction: "🗑️" },
+] as const;
 const CALENDAR_SLOT_REACTIONS = new Set(["1️⃣", "2️⃣", "3️⃣"]);
 
 function isFinalDecisionReaction(
@@ -39,6 +44,8 @@ function isFinalDecisionReaction(
       return emoji === APPROVE_EMOJI || emoji === CANCEL_EMOJI;
     case "calendar_book":
       return emoji === CANCEL_EMOJI || CALENDAR_SLOT_REACTIONS.has(emoji);
+    case "lead_control":
+      return emoji === APPROVE_EMOJI;
   }
 }
 
@@ -48,12 +55,17 @@ export function CrmActionCard({
   pending,
   reactions,
   onSelect,
+  onChooseLeadControl,
 }: {
   action: CrmAction;
   canToggle: boolean;
   pending: boolean;
   reactions: TimelineReaction[];
   onSelect: (emoji: string) => Promise<void>;
+  onChooseLeadControl: (
+    choices: readonly string[],
+    emoji: string,
+  ) => Promise<void>;
 }) {
   const [selectedReaction, setSelectedReaction] = React.useState<string | null>(
     null,
@@ -74,6 +86,68 @@ export function CrmActionCard({
     action.actionType === "calendar_book"
       ? action.calendarSlots ?? []
       : [];
+  const selectedLeadControl =
+    action.actionType === "lead_control"
+      ? [...reactions]
+          .reverse()
+          .find(
+            (reaction) =>
+              reaction.reactedByCurrentUser &&
+              LEAD_CONTROL_CHOICES.some(
+                (choice) => choice.reaction === reaction.emoji,
+              ),
+          )?.emoji ?? null
+      : null;
+
+  if (action.actionType === "lead_control") {
+    return (
+      <div className="my-2 max-w-md rounded-lg border border-input/50 bg-muted/20 p-3">
+        <p className="text-sm font-medium">Lead safeguards</p>
+        <div className="mt-3 flex flex-wrap gap-2">
+          {LEAD_CONTROL_CHOICES.map((choice) => {
+            const Icon = choice.icon;
+            const selected = selectedLeadControl === choice.reaction;
+
+            return (
+              <Button
+                aria-pressed={selected}
+                disabled={disabled}
+                key={choice.reaction}
+                onClick={() => {
+                  if (!selected) {
+                    void onChooseLeadControl(
+                      LEAD_CONTROL_CHOICES.map((item) => item.reaction),
+                      choice.reaction,
+                    );
+                  }
+                }}
+                size="sm"
+                type="button"
+                variant={selected ? "default" : "outline"}
+              >
+                <Icon aria-hidden="true" />
+                {choice.label}
+              </Button>
+            );
+          })}
+        </div>
+        {selectedLeadControl ? (
+          <div className="mt-3 flex flex-wrap gap-2">
+            <Button
+              disabled={disabled}
+              onClick={() => void onSelect(APPROVE_EMOJI)}
+              size="sm"
+              type="button"
+              variant="destructive"
+            >
+              <Check aria-hidden="true" />
+              Apply change
+            </Button>
+          </div>
+        ) : null}
+      </div>
+    );
+  }
 
   if (action.actionType === "lead_categorize") {
     return (
