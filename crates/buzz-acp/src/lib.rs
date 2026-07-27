@@ -3605,6 +3605,15 @@ mod agent_draft_prompt_tests {
         assert!(prompt.contains("single-quoted shell strings preserve `\\n` literally"));
         assert!(prompt.contains("buzz messages send ... --content -"));
     }
+
+    #[test]
+    fn shared_base_prompt_makes_publishing_a_turn_exit_gate() {
+        let prompt = include_str!("base_prompt.md");
+        assert!(prompt.contains("Publishing is part of the task"));
+        assert!(prompt.contains("Before ending every turn"));
+        assert!(prompt.contains("Writing an answer without publishing it is a silent failure"));
+        assert!(prompt.contains("A conversational response in your internal output without a `buzz messages send` call is invisible"));
+    }
 }
 
 fn default_heartbeat_prompt() -> String {
