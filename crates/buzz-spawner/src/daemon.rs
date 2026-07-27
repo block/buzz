@@ -577,6 +577,7 @@ impl Daemon {
                     command: self.config.agent_command.as_deref(),
                     args: self.config.agent_args.as_deref(),
                 },
+                None,
             ),
             cpu_millis,
             memory_mib,
