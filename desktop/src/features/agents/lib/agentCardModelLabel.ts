@@ -22,7 +22,11 @@ export function resolveAgentCardModelLabel(input: {
   agent: Pick<ManagedAgent, "modelSource" | "model"> | undefined;
   personaModel: string | null | undefined;
   defaultModel: string;
+  supportsBuzzModelConfig?: boolean | null;
 }): string {
+  if (input.supportsBuzzModelConfig === false) {
+    return "Runtime default";
+  }
   if (input.agent) {
     const isInherited =
       !input.agent.modelSource || input.agent.modelSource === "global";

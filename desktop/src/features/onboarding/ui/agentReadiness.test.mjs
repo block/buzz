@@ -15,6 +15,9 @@ function makeRuntime(overrides = {}) {
     binaryPath: "/usr/local/bin/goose",
     defaultArgs: [],
     mcpCommand: null,
+    modelEnvVar: "GOOSE_MODEL",
+    providerEnvVar: "GOOSE_PROVIDER",
+    thinkingEnvVar: "GOOSE_THINKING_EFFORT",
     installHint: "",
     installInstructionsUrl: "https://example.com",
     canAutoInstall: false,
@@ -40,7 +43,15 @@ function makeConfig(overrides = {}) {
 // ---------------------------------------------------------------------------
 
 test("resolveAgentReadiness_cli_returns_ready_when_preferred_cli_runtime_is_logged_in", () => {
-  const runtimes = [makeRuntime({ id: "claude", label: "Claude" })];
+  const runtimes = [
+    makeRuntime({
+      id: "claude",
+      label: "Claude",
+      modelEnvVar: null,
+      providerEnvVar: null,
+      thinkingEnvVar: null,
+    }),
+  ];
   const result = resolveAgentReadiness(
     runtimes,
     makeConfig({ preferred_runtime: "claude" }),
@@ -52,9 +63,37 @@ test("resolveAgentReadiness_cli_returns_ready_when_preferred_cli_runtime_is_logg
   });
 });
 
+test("resolveAgentReadiness_devin_uses_catalog_capabilities_without_an_id_check", () => {
+  const runtimes = [
+    makeRuntime({
+      id: "devin",
+      label: "Devin",
+      modelEnvVar: null,
+      providerEnvVar: null,
+      thinkingEnvVar: null,
+    }),
+  ];
+  const result = resolveAgentReadiness(
+    runtimes,
+    makeConfig({ preferred_runtime: "devin" }),
+    "preferred",
+  );
+  assert.deepEqual(result, {
+    ready: true,
+    reason: "cli",
+    runtimeLabel: "Devin",
+  });
+});
+
 test("resolveAgentReadiness_uses_only_the_preferred_runtime", () => {
   const runtimes = [
-    makeRuntime({ id: "claude", label: "Claude" }),
+    makeRuntime({
+      id: "claude",
+      label: "Claude",
+      modelEnvVar: null,
+      providerEnvVar: null,
+      thinkingEnvVar: null,
+    }),
     makeRuntime({ id: "goose", label: "Goose" }),
   ];
   const result = resolveAgentReadiness(runtimes, makeConfig(), "preferred");
@@ -197,7 +236,15 @@ test("resolveAgentReadiness_neither_returns_not_ready", () => {
 });
 
 test("resolveAgentReadiness_welcome_readiness_uses_ready_cli_without_preference", () => {
-  const runtimes = [makeRuntime({ id: "claude", label: "Claude" })];
+  const runtimes = [
+    makeRuntime({
+      id: "claude",
+      label: "Claude",
+      modelEnvVar: null,
+      providerEnvVar: null,
+      thinkingEnvVar: null,
+    }),
+  ];
   const result = resolveAgentReadiness(
     runtimes,
     makeConfig({ preferred_runtime: null }),

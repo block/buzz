@@ -56,3 +56,34 @@ test("resolveAgentCardModelLabel — non-inherited agent with a blank resolved m
   });
   assert.equal(label, "Default model (claude-sonnet)");
 });
+
+test("resolveAgentCardModelLabel — runtime-owned model choice ignores stale Buzz model state", () => {
+  const label = resolveAgentCardModelLabel({
+    agent: { modelSource: "definition", model: "stale-model" },
+    personaModel: "stale-persona-model",
+    defaultModel: "claude-sonnet",
+    supportsBuzzModelConfig: false,
+  });
+  assert.equal(label, "Runtime default");
+});
+
+test("resolveAgentCardModelLabel — supported and unknown capabilities preserve existing labels", () => {
+  assert.equal(
+    resolveAgentCardModelLabel({
+      agent: { modelSource: "definition", model: "gpt-5" },
+      personaModel: null,
+      defaultModel: "claude-sonnet",
+      supportsBuzzModelConfig: true,
+    }),
+    "gpt-5",
+  );
+  assert.equal(
+    resolveAgentCardModelLabel({
+      agent: undefined,
+      personaModel: null,
+      defaultModel: "claude-sonnet",
+      supportsBuzzModelConfig: null,
+    }),
+    "Default model (claude-sonnet)",
+  );
+});

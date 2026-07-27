@@ -1,3 +1,11 @@
+import type * as RuntimeCapabilities from "./runtimeCapabilities";
+export type {
+  CancelManagedAgentTurnResult,
+  ControlResultFrame,
+  ManagedAgentLog,
+  SwitchManagedAgentModelStatus,
+} from "./runtimeCapabilities";
+
 export type ChannelType = "stream" | "forum" | "dm";
 export type ChannelVisibility = "open" | "private";
 export type ChannelRole = "owner" | "admin" | "member" | "guest" | "bot";
@@ -415,7 +423,7 @@ export type ManagedAgent = {
    * `"allowlist"`. Preserved across mode toggles.
    */
   respondToAllowlist: string[];
-};
+} & RuntimeCapabilities.ManagedAgentRuntimeCapabilities;
 
 /**
  * Inbound author gate mode. Mirrors `buzz-acp`'s `--respond-to` CLI flag.
@@ -487,34 +495,6 @@ export type CreateManagedAgentResponse = {
   spawnError: string | null;
 };
 
-export type ManagedAgentLog = {
-  content: string;
-  logPath: string;
-};
-
-export type CancelManagedAgentTurnResult = {
-  status: "sent" | "no_active_turn";
-};
-
-/**
- * Outcome of a live `switch_model` control frame, surfaced asynchronously via
- * the agent's `control_result` observer frame. Busy path: `sent` (cancel +
- * requeue on the new model) or `turn_ending` (oneshot already consumed this
- * turn). Idle path: `switched`, `unsupported_model`, or `no_active_turn`.
- */
-export type SwitchManagedAgentModelStatus =
-  | "sent"
-  | "turn_ending"
-  | "switched"
-  | "unsupported_model"
-  | "no_active_turn";
-
-export type ControlResultFrame = {
-  type: "cancel_turn" | "switch_model";
-  status: string;
-  modelId?: string;
-};
-
 export type GitBashPrerequisite = {
   available: boolean;
   path: string | null;
@@ -579,7 +559,7 @@ export type AcpRuntimeCatalogEntry = {
    * for `builtin` and `preset` entries.
    */
   definitionEnv?: Record<string, string>;
-};
+} & RuntimeCapabilities.RuntimeCatalogCapabilities;
 
 /** An AcpRuntimeCatalogEntry that is confirmed available — command and binaryPath are non-null. */
 export type AcpRuntime = AcpRuntimeCatalogEntry & {
@@ -724,7 +704,7 @@ export type RuntimeConfigSurface = {
   advanced: ConfigField[];
   extensions: ExtensionEntry[];
   sources: ConfigSourceReport;
-};
+} & RuntimeCapabilities.RuntimeConfigCapabilities;
 
 export type UpdateManagedAgentInput = {
   pubkey: string;

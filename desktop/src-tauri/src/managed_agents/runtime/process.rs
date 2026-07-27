@@ -34,14 +34,15 @@ pub(crate) const KNOWN_SCRIPT_INTERPRETERS: &[&str] = &["node"];
 /// Uses exact match or prefix-with-separator to avoid false positives
 /// (e.g. `"goose"` must not match `"mongoose"`).
 pub(super) fn name_matches_known_binary(name: &str) -> bool {
-    KNOWN_AGENT_BINARIES.iter().any(|&binary| {
-        name == binary || {
-            name.starts_with(binary) && {
-                let rest = &name[binary.len()..];
-                rest.starts_with('-') || rest.starts_with('_') || rest.starts_with('.')
+    known_acp_runtime(name).is_some()
+        || KNOWN_AGENT_BINARIES.iter().any(|&binary| {
+            name == binary || {
+                name.starts_with(binary) && {
+                    let rest = &name[binary.len()..];
+                    rest.starts_with('-') || rest.starts_with('_') || rest.starts_with('.')
+                }
             }
-        }
-    })
+        })
 }
 
 /// Check if a process name is a known script interpreter that may be hosting
@@ -243,6 +244,10 @@ fn signal_process_group_or_leader(pid: u32, signal: i32, action: &str) -> Result
 
 #[cfg(unix)]
 pub(crate) fn terminate_process(pid: u32) -> Result<(), String> {
+    // Reap independently-grouped ACP descendants while their ownership can
+    // still be proven through the live harness ancestry.
+    sweep::terminate_owned_descendant_groups(pid);
+
     // Try graceful shutdown first (SIGTERM to the group).
     signal_process_group_or_leader(pid, libc::SIGTERM, "terminate")?;
 

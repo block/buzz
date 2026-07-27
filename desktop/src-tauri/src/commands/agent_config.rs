@@ -606,40 +606,8 @@ mod tests {
     use super::*;
     use crate::managed_agents::{BackendKind, RespondTo};
 
-    fn goose_runtime() -> &'static KnownAcpRuntime {
-        &KnownAcpRuntime {
-            id: "goose",
-            label: "Goose",
-            commands: &["goose"],
-            aliases: &[],
-            avatar_url: "",
-            mcp_command: None,
-            mcp_hooks: false,
-            underlying_cli: None,
-            cli_install_commands: &[],
-            cli_install_commands_windows: &[],
-            adapter_install_commands: &[],
-            cli_install_instructions_url: "",
-            adapter_install_instructions_url: "",
-            cli_install_hint: "",
-            adapter_install_hint: "",
-            skill_dir: None,
-            supports_acp_model_switching: false,
-            model_env_var: Some("GOOSE_MODEL"),
-            provider_env_var: Some("GOOSE_PROVIDER"),
-            provider_locked: false,
-            default_env: &[],
-            config_file_path: Some("~/.config/goose/config.yaml"),
-            config_file_format: Some("yaml"),
-            supports_acp_native_config: true,
-            thinking_env_var: Some("GOOSE_THINKING_EFFORT"),
-            max_tokens_env_var: Some("GOOSE_MAX_TOKENS"),
-            context_limit_env_var: Some("GOOSE_CONTEXT_LIMIT"),
-            required_normalized_fields: &["model", "provider"],
-            login_hint: None,
-            auth_probe_args: None,
-        }
-    }
+    mod fixtures;
+    use fixtures::goose_runtime;
 
     fn agent_record() -> ManagedAgentRecord {
         ManagedAgentRecord {

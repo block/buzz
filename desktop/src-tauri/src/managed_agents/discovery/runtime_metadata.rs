@@ -2,9 +2,38 @@
 pub(crate) struct KnownAcpRuntime {
     pub id: &'static str,
     pub label: &'static str,
+    /// Compact product label used by runtime pickers.
+    pub display_label: &'static str,
+    /// Stable catalog ordering before the label tie-breaker.
+    pub sort_priority: u16,
+    /// Whether first-run onboarding should offer this runtime.
+    pub onboarding_visible: bool,
     pub commands: &'static [&'static str],
     pub aliases: &'static [&'static str],
+    /// Arguments used when the runtime is launched without an explicit argv.
+    pub default_args: &'static [&'static str],
+    /// Runtime-specific worker default used when neither the request nor a
+    /// linked persona specifies parallelism. `None` preserves Buzz's global
+    /// default.
+    pub default_parallelism: Option<u32>,
+    /// Whether a desktop-requested lazy harness should defer spawning the ACP
+    /// subprocess until accepted work is queued. Runtimes with expensive or
+    /// failure-prone first handshakes can opt out while preserving the lazy
+    /// relay socket.
+    pub defer_agent_start_until_work: bool,
+    /// Runtime-specific idle timeout used only when the agent record, process
+    /// environment, and merged user environment do not supply an override.
+    /// `None` preserves the harness default.
+    pub default_idle_timeout_secs: Option<u64>,
+    /// App-local runtime mark used by catalog-driven frontend surfaces.
+    pub icon_url: &'static str,
+    /// Presentation scale for the runtime mark. Kept with the catalog entry so
+    /// React does not need a harness-ID lookup table.
+    pub icon_scale: f32,
     pub avatar_url: &'static str,
+    /// Catalog-default avatar URLs superseded by `avatar_url`. These are not
+    /// user-selected images and may be replaced during read-time migration.
+    pub superseded_avatar_urls: &'static [&'static str],
     /// Legacy MCP server binary field. Vestigial — all agents now use the bundled CLI
     /// directly. Will be removed when runtime discovery is simplified.
     pub mcp_command: Option<&'static str>,
@@ -34,14 +63,28 @@ pub(crate) struct KnownAcpRuntime {
     /// runtime reads the canonical path directly or has no skill support.
     pub skill_dir: Option<&'static str>,
     /// Whether this runtime handles model switching via ACP protocol natively.
-    /// Currently unused — env var injection runs unconditionally regardless of
-    /// this value. Retained as scaffolding for when ACP model switching matures.
-    #[allow(dead_code)]
+    /// Env var injection still handles initial model selection separately.
     pub supports_acp_model_switching: bool,
+    /// Whether Buzz should pass its resolved model through the generic
+    /// `BUZZ_ACP_MODEL` harness setting at process launch.
+    ///
+    /// This is intentionally separate from `supports_acp_model_switching` and
+    /// `model_env_var`: existing adapters may consume the generic bootstrap
+    /// model without exposing Buzz-side model controls. Native runtimes whose
+    /// official ACP server owns model selection set this to `false`.
+    pub accepts_harness_model: bool,
     pub model_env_var: Option<&'static str>,
     pub provider_env_var: Option<&'static str>,
     pub provider_locked: bool,
+    /// Environment defaults applied only when neither the parent process nor
+    /// saved agent configuration supplies a value.
     pub default_env: &'static [(&'static str, &'static str)],
+    /// Environment values enforced at process launch after inherited and
+    /// user-configured values have been merged.
+    pub enforced_env: &'static [(&'static str, &'static str)],
+    /// Environment variables removed from runtime subprocesses. This prevents
+    /// ambient process state from overriding catalog-declared identity policy.
+    pub scrub_env_vars: &'static [&'static str],
     pub config_file_path: Option<&'static str>,
     #[allow(dead_code)] // reserved for format-based dispatch when readers are unified
     pub config_file_format: Option<&'static str>,
@@ -62,6 +105,9 @@ pub(crate) struct KnownAcpRuntime {
     /// CLI args for probing authentication status. `args[0]` is the binary name;
     /// the remainder are the subcommand. `None` for runtimes with no login step.
     pub auth_probe_args: Option<&'static [&'static str]>,
+    /// CLI argv for an interactive login launched in a visible terminal.
+    /// `None` when authentication is adapter-owned or not applicable.
+    pub auth_login_args: Option<&'static [&'static str]>,
 }
 
 impl KnownAcpRuntime {
@@ -84,6 +130,23 @@ impl KnownAcpRuntime {
 #[cfg(test)]
 mod tests {
     use super::super::known_acp_runtime_exact;
+
+    #[test]
+    fn onboarding_visibility_and_order_are_catalog_owned() {
+        let mut visible = super::super::KNOWN_ACP_RUNTIMES
+            .iter()
+            .filter(|runtime| runtime.onboarding_visible)
+            .collect::<Vec<_>>();
+        visible.sort_by_key(|runtime| runtime.sort_priority);
+
+        assert_eq!(
+            visible
+                .into_iter()
+                .map(|runtime| runtime.id)
+                .collect::<Vec<_>>(),
+            ["devin", "claude", "codex", "goose", "buzz-agent"]
+        );
+    }
 
     #[test]
     fn vendor_metadata_distinguishes_cli_and_adapter_guidance() {
@@ -120,5 +183,51 @@ mod tests {
         );
         assert!(codex.adapter_install_instructions_url.contains("codex-acp"));
         assert!(codex.cli_install_hint.contains("desktop app alone"));
+
+        let devin = known_acp_runtime_exact("devin").unwrap();
+        assert_eq!(devin.commands, &["devin"]);
+        assert_eq!(devin.default_args, &["acp"]);
+        assert_eq!(devin.default_parallelism, Some(1));
+        assert!(!devin.defer_agent_start_until_work);
+        assert_eq!(devin.default_idle_timeout_secs, Some(120));
+        assert_eq!(devin.display_label, "Devin");
+        assert_eq!(devin.sort_priority, 20);
+        assert!(devin.onboarding_visible);
+        assert_eq!(devin.icon_url, "/runtime-icons/devin.svg");
+        assert_eq!(devin.icon_scale, 1.1);
+        assert_eq!(devin.underlying_cli, Some("devin"));
+        assert_eq!(devin.skill_dir, Some(".devin/skills"));
+        assert_eq!(
+            devin.auth_probe_args,
+            Some(&["devin", "auth", "status"][..])
+        );
+        assert_eq!(devin.auth_login_args, Some(&["devin", "auth", "login"][..]));
+        assert!(devin.default_env.is_empty());
+        assert_eq!(
+            devin.enforced_env,
+            &[
+                ("BUZZ_ACP_PERMISSION_MODE", "default"),
+                ("BUZZ_ACP_AUTO_APPROVE_PERMISSIONS", "false"),
+                ("BUZZ_ACP_INTERACTIVE_PERMISSIONS", "true"),
+                ("BUZZ_ACP_SELF_PUBLISH_COMPLETION_GRACE", "30"),
+            ]
+        );
+        assert_eq!(devin.scrub_env_vars, &["WINDSURF_API_KEY"]);
+        assert_eq!(
+            devin.cli_install_instructions_url,
+            "https://docs.devin.ai/cli"
+        );
+        assert_eq!(
+            devin.cli_install_commands,
+            &["curl -fsSL https://cli.devin.ai/install.sh | bash"]
+        );
+        assert_eq!(
+            devin.cli_install_commands_windows,
+            &[
+                "powershell.exe -NoProfile -Command \"irm https://static.devin.ai/cli/setup.ps1 | iex\""
+            ]
+        );
+        assert!(devin.adapter_install_commands.is_empty());
+        assert!(devin.cli_install_hint.contains("desktop app alone"));
     }
 }

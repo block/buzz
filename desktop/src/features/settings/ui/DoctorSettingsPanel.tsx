@@ -35,25 +35,6 @@ import { SectionHeader } from "@/shared/ui/PageHeader";
 import { Spinner } from "@/shared/ui/spinner";
 import { Switch } from "@/shared/ui/switch";
 
-const RUNTIME_LOGO_URLS: Record<string, string> = {
-  "buzz-agent": "/app-icon@2x.png",
-  claude: "/runtime-icons/claude.png",
-  codex: "/runtime-icons/codex.png",
-  goose: "/runtime-icons/goose.svg",
-};
-
-const RUNTIME_LOGO_SCALE: Record<string, string> = {
-  "buzz-agent": "scale-110",
-  claude: "scale-110",
-  codex: "scale-110",
-  goose: "scale-125",
-};
-
-const RUNTIME_SORT_PRIORITY: Record<string, number> = {
-  "buzz-agent": 0,
-  goose: 1,
-};
-
 function runtimeInstallGuideLabel(runtime: AcpRuntimeCatalogEntry) {
   return runtime.availability === "adapter_missing" ||
     runtime.availability === "adapter_outdated"
@@ -81,13 +62,11 @@ function RuntimeLogo({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
     );
   }
 
-  const avatarUrl = RUNTIME_LOGO_URLS[runtime.id] ?? runtime.avatarUrl;
-
   return (
     <ProfileAvatar
-      avatarUrl={avatarUrl}
+      avatarUrl={runtime.iconUrl || runtime.avatarUrl}
       className="h-9 w-9 rounded-xl bg-background shadow-none"
-      imageClassName={RUNTIME_LOGO_SCALE[runtime.id]}
+      imageStyle={{ transform: `scale(${runtime.iconScale})` }}
       label={runtime.label}
       testId={`doctor-runtime-logo-${runtime.id}`}
     />
@@ -556,8 +535,10 @@ export function DoctorSettingsPanel() {
     () =>
       [...(runtimesQuery.data ?? [])].sort(
         (left, right) =>
-          (RUNTIME_SORT_PRIORITY[left.id] ?? Number.MAX_SAFE_INTEGER) -
-          (RUNTIME_SORT_PRIORITY[right.id] ?? Number.MAX_SAFE_INTEGER),
+          left.sortPriority - right.sortPriority ||
+          (left.displayLabel || left.label || left.id).localeCompare(
+            right.displayLabel || right.label || right.id,
+          ),
       ),
     [runtimesQuery.data],
   );

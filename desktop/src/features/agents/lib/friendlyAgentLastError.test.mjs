@@ -47,6 +47,15 @@ test("generic harness exit message → passthrough", () => {
   });
 });
 
+test("Devin ACP startup failure remains distinct and actionable", () => {
+  const startupFailure =
+    "failed to start Devin ACP: process exited before initialization";
+  assert.deepEqual(friendlyAgentLastError(startupFailure), {
+    severity: "generic",
+    copy: startupFailure,
+  });
+});
+
 test("trims whitespace before matching", () => {
   const result = friendlyAgentLastError(
     "  Agent reported error: llm auth: nope\n",

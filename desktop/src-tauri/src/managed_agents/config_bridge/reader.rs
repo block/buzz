@@ -205,6 +205,8 @@ pub(crate) fn read_config_surface(
     RuntimeConfigSurface {
         runtime_id: runtime_meta.map(|m| m.id.to_string()),
         runtime_label: runtime_meta.map(|m| m.label.to_string()),
+        supports_buzz_model_config: runtime_meta
+            .map(|m| m.model_env_var.is_some() || m.supports_acp_model_switching),
         is_pre_spawn,
         normalized,
         advanced,

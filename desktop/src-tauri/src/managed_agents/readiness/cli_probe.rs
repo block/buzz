@@ -57,18 +57,30 @@ pub(crate) fn login_probe(
     binary_path: &Path,
     probe_args: &[&str],
     augmented_path: Option<&str>,
+    scrub_env_vars: &[&str],
 ) -> ProbeOutcome {
     let mut command = std::process::Command::new(binary_path);
     command.args(&probe_args[1..]);
-    if let Some(path) = augmented_path {
-        command.env("PATH", path);
-    }
+    configure_probe_environment(&mut command, augmented_path, scrub_env_vars);
     crate::util::configure_no_window(&mut command);
 
     match command.output() {
         Ok(o) if o.status.success() => ProbeOutcome::LoggedIn,
         Ok(o) => classify_probe_output(&o.stderr, false),
         Err(_) => ProbeOutcome::LoggedOut,
+    }
+}
+
+pub(crate) fn configure_probe_environment(
+    command: &mut std::process::Command,
+    augmented_path: Option<&str>,
+    scrub_env_vars: &[&str],
+) {
+    if let Some(path) = augmented_path {
+        command.env("PATH", path);
+    }
+    for key in scrub_env_vars {
+        command.env_remove(key);
     }
 }
 
@@ -99,6 +111,18 @@ pub(crate) fn classify_probe_output(stderr_bytes: &[u8], exit_success: bool) -> 
 #[cfg(test)]
 mod tests {
     use super::{ProbeOutcome, CONFIG_PARSE_SIGNALS};
+
+    #[test]
+    fn probe_environment_removes_catalog_declared_identity_overrides() {
+        let mut command = std::process::Command::new("devin");
+        command.env("WINDSURF_API_KEY", "sentinel");
+
+        super::configure_probe_environment(&mut command, None, &["WINDSURF_API_KEY"]);
+
+        assert!(command
+            .get_envs()
+            .any(|(key, value)| { key == "WINDSURF_API_KEY" && value.is_none() }));
+    }
 
     #[cfg(unix)]
     #[test]
@@ -154,6 +178,7 @@ mod tests {
                 &script_path,
                 &["fake-codex", "login", "status"],
                 Some(&augmented_path),
+                &[],
             ),
             ProbeOutcome::LoggedIn,
             "the injected augmented PATH should allow /usr/bin/env to find the interpreter"
@@ -187,6 +212,7 @@ mod tests {
             &script_path,
             &["fake-codex-bad-config", "login", "status"],
             None,
+            &[],
         );
         assert!(
             matches!(outcome, ProbeOutcome::ConfigInvalid { .. }),
@@ -225,6 +251,7 @@ mod tests {
             &script_path,
             &["fake-codex-logged-out", "login", "status"],
             None,
+            &[],
         );
         assert_eq!(
             outcome,

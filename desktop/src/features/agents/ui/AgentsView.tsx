@@ -142,6 +142,7 @@ export function AgentsView() {
           <div className="flex flex-col gap-8">
             <UnifiedAgentsSection
               defaultModel={inheritedDefaults.model.value}
+              runtimes={personas.acpRuntimesQuery.data ?? []}
               actionErrorMessage={agents.actionErrorMessage}
               actionNoticeMessage={agents.actionNoticeMessage}
               agents={agents.managedAgents}

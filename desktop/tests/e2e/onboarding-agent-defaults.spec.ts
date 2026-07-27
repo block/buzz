@@ -3,7 +3,7 @@ import { installMockBridge } from "../helpers/bridge";
 import { passThroughBackupStep } from "../helpers/onboarding";
 
 function runtime(
-  id: "buzz-agent" | "claude" | "codex" | "goose",
+  id: "buzz-agent" | "claude" | "codex" | "devin" | "goose",
   availability: string,
   authStatus: Record<string, unknown>,
   overrides: Record<string, unknown> = {},
@@ -17,12 +17,20 @@ function runtime(
           ? "Claude Code"
           : id === "codex"
             ? "Codex"
-            : "Goose",
+            : id === "devin"
+              ? "Devin"
+              : "Goose",
+    display_label: id === "buzz-agent" ? "Buzz" : undefined,
+    source: "builtin",
     avatar_url: "",
+    sort_priority: 100,
+    onboarding_visible: true,
+    icon_url: "",
+    icon_scale: 1,
     availability,
     command: availability === "available" ? id : null,
     binary_path: availability === "available" ? `/usr/local/bin/${id}` : null,
-    default_args: [],
+    default_args: id === "devin" || id === "goose" ? ["acp"] : [],
     mcp_command: null,
     install_hint: `Install ${id}`,
     install_instructions_url: "https://example.com",
@@ -57,15 +65,47 @@ async function readSavedRuntime(page: Parameters<typeof installMockBridge>[0]) {
   });
 }
 
-test("setup shows all bundled harnesses as detected", async ({ page }) => {
+test("setup projects catalog visibility and ordering, including Devin", async ({
+  page,
+}) => {
   await installMockBridge(
     page,
     {
       acpRuntimesCatalog: [
-        runtime("buzz-agent", "available", { status: "not_applicable" }),
-        runtime("goose", "available", { status: "not_applicable" }),
-        runtime("codex", "available", { status: "logged_in" }),
-        runtime("claude", "available", { status: "logged_in" }),
+        runtime(
+          "buzz-agent",
+          "available",
+          { status: "not_applicable" },
+          { onboarding_visible: true, sort_priority: 60 },
+        ),
+        runtime(
+          "goose",
+          "available",
+          { status: "not_applicable" },
+          { onboarding_visible: true, sort_priority: 50 },
+        ),
+        runtime(
+          "codex",
+          "available",
+          { status: "logged_in" },
+          { sort_priority: 40 },
+        ),
+        runtime(
+          "devin",
+          "available",
+          { status: "logged_in" },
+          {
+            sort_priority: 20,
+            icon_url: "/runtime-icons/devin.svg",
+            icon_scale: 1.1,
+          },
+        ),
+        runtime(
+          "claude",
+          "available",
+          { status: "logged_in" },
+          { sort_priority: 30 },
+        ),
       ],
     },
     { skipCommunitySeed: true, skipOnboardingSeed: true },
@@ -73,11 +113,83 @@ test("setup shows all bundled harnesses as detected", async ({ page }) => {
   await page.goto("/");
   await navigateToSetupPage(page);
 
+  await expect(page.getByTestId("onboarding-runtime-devin")).toBeVisible();
   await expect(page.getByTestId("onboarding-runtime-claude")).toBeVisible();
   await expect(page.getByTestId("onboarding-runtime-codex")).toBeVisible();
   await expect(page.getByTestId("onboarding-runtime-goose")).toBeVisible();
   await expect(page.getByTestId("onboarding-runtime-buzz-agent")).toBeVisible();
   await expect(page.getByRole("checkbox")).toHaveCount(0);
+
+  const visibleRuntimeIds = await page
+    .locator("[data-testid^='onboarding-runtime-']")
+    .evaluateAll((elements) =>
+      elements
+        .map((element) => element.getAttribute("data-testid"))
+        .filter(
+          (testId) =>
+            testId != null &&
+            !testId.includes("-ready-") &&
+            !testId.includes("-checkmark-") &&
+            !testId.includes("-instructions-") &&
+            !testId.includes("-install-"),
+        ),
+    );
+  expect(visibleRuntimeIds).toEqual([
+    "onboarding-runtime-devin",
+    "onboarding-runtime-claude",
+    "onboarding-runtime-codex",
+    "onboarding-runtime-goose",
+    "onboarding-runtime-buzz-agent",
+  ]);
+  const devinIcon = page.getByTestId("onboarding-runtime-devin").locator("img");
+  await expect(devinIcon).toHaveAttribute("src", "/runtime-icons/devin.svg");
+
+  const renderedIcon = await devinIcon.evaluate(async (element) => {
+    const image = element as HTMLImageElement;
+    await image.decode();
+
+    const canvas = document.createElement("canvas");
+    canvas.width = image.naturalWidth;
+    canvas.height = image.naturalHeight;
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    if (!context) throw new Error("2D canvas context unavailable");
+    context.drawImage(image, 0, 0);
+
+    const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+    let whitePixels = 0;
+    let darkPixels = 0;
+    let transparentPixels = 0;
+    for (let offset = 0; offset < pixels.length; offset += 4) {
+      const red = pixels[offset];
+      const green = pixels[offset + 1];
+      const blue = pixels[offset + 2];
+      const alpha = pixels[offset + 3];
+      if (alpha === 0) transparentPixels += 1;
+      if (alpha === 255 && red > 250 && green > 250 && blue > 250) {
+        whitePixels += 1;
+      }
+      if (alpha === 255 && red < 32 && green < 32 && blue < 32) {
+        darkPixels += 1;
+      }
+    }
+
+    const pixelCount = canvas.width * canvas.height;
+    return {
+      naturalHeight: image.naturalHeight,
+      naturalWidth: image.naturalWidth,
+      transparentPixels,
+      whiteRatio: whitePixels / pixelCount,
+      darkRatio: darkPixels / pixelCount,
+      corner: Array.from(context.getImageData(0, 0, 1, 1).data),
+    };
+  });
+
+  expect(renderedIcon.naturalWidth).toBe(425);
+  expect(renderedIcon.naturalHeight).toBe(425);
+  expect(renderedIcon.corner).toEqual([255, 255, 255, 255]);
+  expect(renderedIcon.transparentPixels).toBe(0);
+  expect(renderedIcon.whiteRatio).toBeGreaterThan(0.5);
+  expect(renderedIcon.darkRatio).toBeGreaterThan(0.05);
 });
 
 test("setup distinguishes a missing CLI from an installed desktop app", async ({

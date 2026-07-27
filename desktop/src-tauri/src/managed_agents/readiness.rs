@@ -390,9 +390,9 @@ impl AgentReadiness {
 ///   - `openai` → `OPENAI_COMPAT_API_KEY`
 ///   - `databricks` / `databricks_v2` → `DATABRICKS_HOST` (token optional —
 ///     OAuth PKCE is the fallback)
-/// * **claude**: a successful `claude auth status` probe.
-/// * **codex**: a successful `codex login status` probe (checks the codex
-///   credential store — NOT `OPENAI_API_KEY`).
+/// * **CLI-login runtimes**: a successful catalog-declared authentication
+///   probe (for example `claude auth status`, `codex login status`, or
+///   `devin auth status`).
 /// * **unknown / custom command**: always `Ready` (no requirements known).
 ///
 /// Databricks note: `DATABRICKS_TOKEN` is `.unwrap_or_default()` in
@@ -427,7 +427,7 @@ fn collect_missing_requirements(
         return vec![];
     };
 
-    match rt.id {
+    let runtime_specific = match rt.id {
         "buzz-agent" => buzz_agent_requirements(effective),
         "goose" => {
             // Read the file config once at the call site so the inner fn is
@@ -435,14 +435,21 @@ fn collect_missing_requirements(
             let file_cfg = read_goose_file_config();
             goose_requirements(effective, file_cfg.as_ref())
         }
-        "claude" => cli_login::requirements(
-            &["claude", "auth", "status"],
-            "complete Claude Code authentication by running the Claude CLI",
-            rt,
-        ),
-        "codex" => cli_login::requirements(&["codex", "login", "status"], "run `codex login`", rt),
         _ => vec![],
+    };
+    if !runtime_specific.is_empty() || matches!(rt.id, "buzz-agent" | "goose") {
+        return runtime_specific;
     }
+
+    let Some(probe_args) = rt.auth_probe_args else {
+        return vec![];
+    };
+    cli_login::requirements(
+        probe_args,
+        rt.login_hint
+            .unwrap_or("Complete authentication in the runtime CLI."),
+        rt,
+    )
 }
 
 /// Requirements for buzz-agent (provider + model + provider-specific creds).
@@ -644,6 +651,9 @@ mod tests {
 
     use super::*;
     use crate::managed_agents::discovery::known_acp_runtime_exact;
+
+    mod devin_tests;
+    mod fixtures;
 
     /// Build a minimal `EffectiveAgentEnv` with the given env map and command.
     fn make_env(command: &str, env: BTreeMap<String, String>) -> EffectiveAgentEnv {
@@ -1012,34 +1022,10 @@ mod tests {
         KnownAcpRuntime {
             id: "test-cli-runtime",
             label: "Test CLI",
+            display_label: "Test CLI",
             commands,
-            aliases: &[],
-            avatar_url: "",
-            mcp_command: None,
-            mcp_hooks: false,
             underlying_cli,
-            cli_install_commands: &[],
-            cli_install_commands_windows: &[],
-            adapter_install_commands: &[],
-            cli_install_instructions_url: "",
-            adapter_install_instructions_url: "",
-            cli_install_hint: "",
-            adapter_install_hint: "",
-            skill_dir: None,
-            supports_acp_model_switching: false,
-            config_file_path: None,
-            config_file_format: None,
-            model_env_var: None,
-            provider_env_var: None,
-            provider_locked: false,
-            default_env: &[],
-            supports_acp_native_config: false,
-            thinking_env_var: None,
-            max_tokens_env_var: None,
-            context_limit_env_var: None,
-            required_normalized_fields: &[],
-            login_hint: None,
-            auth_probe_args: None,
+            ..fixtures::known_runtime_fixture()
         }
     }
 
@@ -1207,34 +1193,11 @@ mod tests {
         KnownAcpRuntime {
             id: "codex",
             label: "Codex",
+            display_label: "Codex",
             commands: adapter_commands,
-            aliases: &[],
-            avatar_url: "",
-            mcp_command: None,
-            mcp_hooks: false,
             underlying_cli,
-            cli_install_commands: &[],
-            cli_install_commands_windows: &[],
-            adapter_install_commands: &[],
-            cli_install_instructions_url: "",
-            adapter_install_instructions_url: "",
-            cli_install_hint: "",
-            adapter_install_hint: "",
-            skill_dir: None,
-            supports_acp_model_switching: false,
-            config_file_path: None,
-            config_file_format: None,
-            model_env_var: None,
-            provider_env_var: None,
-            provider_locked: false,
-            default_env: &[],
-            supports_acp_native_config: false,
-            thinking_env_var: None,
-            max_tokens_env_var: None,
-            context_limit_env_var: None,
-            required_normalized_fields: &[],
-            login_hint: None,
-            auth_probe_args: None,
+            onboarding_visible: true,
+            ..fixtures::known_runtime_fixture()
         }
     }
 

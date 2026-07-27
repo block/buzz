@@ -108,9 +108,7 @@ pub async fn save_custom_harness(
     original_id: Option<String>,
     app: tauri::AppHandle,
 ) -> Result<AcpRuntimeCatalogEntry, String> {
-    use crate::managed_agents::{
-        custom_harnesses, AcpAvailabilityStatus, AuthStatus, HarnessSource,
-    };
+    use crate::managed_agents::{custom_harnesses, AcpAvailabilityStatus};
     use tauri::Manager;
 
     // ── Phase 1: full validation before touching the filesystem ─────────────
@@ -164,31 +162,13 @@ pub async fn save_custom_harness(
     let default_args =
         crate::managed_agents::normalize_agent_args(&definition.command, definition.args.clone());
 
-    Ok(AcpRuntimeCatalogEntry {
-        id: definition.id,
-        label: definition.label,
-        // Security: no user-supplied avatar URL in catalog entries.
-        avatar_url: String::new(),
+    Ok(crate::managed_agents::custom_runtime_catalog_entry(
+        definition,
         availability,
-        command: command_opt,
+        command_opt,
         binary_path,
         default_args,
-        mcp_command: None,
-        model_env_var: None,
-        provider_env_var: None,
-        thinking_env_var: None,
-        install_hint: definition.install_hint,
-        install_instructions_url: definition.install_instructions_url,
-        can_auto_install: false,
-        requires_external_cli: false,
-        underlying_cli_path: None,
-        node_required: false,
-        auth_status: AuthStatus::NotApplicable,
-        login_hint: None,
-        source: HarnessSource::Custom,
-        // Carry definition env back so the edit form can read and preserve it.
-        definition_env: definition.env,
-    })
+    ))
 }
 
 /// Remove a user-defined harness definition from `<app-data>/custom_harnesses/`.

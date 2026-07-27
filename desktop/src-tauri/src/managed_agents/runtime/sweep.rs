@@ -186,6 +186,82 @@ pub(super) fn ppid_of_linux(pid: u32) -> Option<u32> {
     proc_stat_ppid_pgid_linux(pid).map(|(ppid, _)| ppid)
 }
 
+/// Snapshot every live, same-user descendant of `root_pid` while the root is
+/// still running.
+///
+/// Managed ACP runtimes may put their own subprocesses in independent process
+/// groups. Signalling only the harness group therefore cannot guarantee that
+/// the complete runtime tree exits. Callers use this snapshot immediately,
+/// before terminating the root, so the ancestor relationship is still
+/// available and unrelated same-user processes remain out of scope.
+#[cfg(target_os = "macos")]
+pub(super) fn collect_live_descendant_pids(root_pid: u32) -> Vec<u32> {
+    let my_uid = unsafe { libc::getuid() };
+    collect_all_pids()
+        .into_iter()
+        .filter_map(|pid| {
+            if pid <= 0 || pid as u32 == root_pid {
+                return None;
+            }
+            let upid = pid as u32;
+            let mut info = std::mem::MaybeUninit::<super::BSDInfo>::zeroed();
+            let ret = unsafe {
+                super::proc_pidinfo(
+                    pid,
+                    super::PROC_PIDTBSDINFO,
+                    0,
+                    info.as_mut_ptr() as *mut libc::c_void,
+                    std::mem::size_of::<super::BSDInfo>() as libc::c_int,
+                )
+            };
+            if ret <= 0 {
+                return None;
+            }
+            let info = unsafe { info.assume_init() };
+            (info.pbi_uid == my_uid && walk_has_tracked_ancestor(upid, &[root_pid], ppid_of_macos))
+                .then_some(upid)
+        })
+        .collect()
+}
+
+/// Terminate process groups led by a live, same-user descendant of `root_pid`.
+///
+/// This must run while the root is still alive so the bounded ancestry walk
+/// can prove ownership before any signal is sent.
+#[cfg(unix)]
+pub(super) fn terminate_owned_descendant_groups(root_pid: u32) {
+    let descendant_pids = collect_live_descendant_pids(root_pid)
+        .into_iter()
+        .map(|pid| pid as i32)
+        .collect::<Vec<_>>();
+    if !descendant_pids.is_empty() {
+        super::resolve_pgids_and_kill(&descendant_pids);
+    }
+}
+
+/// Linux variant of [`collect_live_descendant_pids`].
+#[cfg(all(unix, not(target_os = "macos")))]
+pub(super) fn collect_live_descendant_pids(root_pid: u32) -> Vec<u32> {
+    let my_uid = unsafe { libc::getuid() };
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let pid = entry.file_name().to_str()?.parse::<u32>().ok()?;
+            if pid == 0 || pid == root_pid {
+                return None;
+            }
+            use std::os::unix::fs::MetadataExt;
+            if entry.metadata().ok()?.uid() != my_uid {
+                return None;
+            }
+            walk_has_tracked_ancestor(pid, &[root_pid], ppid_of_linux).then_some(pid)
+        })
+        .collect()
+}
+
 /// True if `pid` is a live descendant of any tracked harness in `skip_pids`.
 ///
 /// Three complementary checks:
@@ -433,7 +509,7 @@ fn collect_process_snapshots(harness_name: &str) -> Vec<ProcessSnapshot> {
     snapshots
 }
 
-// ── expected_harness_exe_path ─────────────────────────────────────────────
+// ── expected_harness_exe_paths ────────────────────────────────────────────
 
 /// Derive the expected path of the `buzz-acp` harness binary next to the
 /// current executable. Returns `None` if `current_exe()` fails or has no
@@ -460,12 +536,29 @@ fn collect_process_snapshots(harness_name: &str) -> Vec<ProcessSnapshot> {
 /// the same app (different bundle path, e.g. a prior DMG) will not match
 /// this path — that class is handled by `sweep_system_agent_processes`, which
 /// scopes by `BUZZ_MANAGED_AGENT` instance ID rather than exe path.
-pub fn expected_harness_exe_path() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let dir = exe.parent()?;
-    let raw = dir.join("buzz-acp");
-    // Canonicalize if possible; fall back to the raw path on failure.
-    Some(std::fs::canonicalize(&raw).unwrap_or(raw))
+pub fn expected_harness_exe_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(raw) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("buzz-acp")))
+    {
+        paths.push(std::fs::canonicalize(&raw).unwrap_or(raw));
+    }
+
+    // `tauri dev` builds the desktop crate under `desktop/src-tauri/target`
+    // while Buzz's sidecar build lives under the repository-level `target`.
+    // The launch resolver intentionally uses that workspace sidecar, so the
+    // boot sweeper must recognize the same exact path. Release builds remain
+    // scoped to the sibling binary inside the app bundle.
+    #[cfg(debug_assertions)]
+    if let Some(raw) = crate::managed_agents::discovery::resolve_workspace_command("buzz-acp") {
+        let path = std::fs::canonicalize(&raw).unwrap_or(raw);
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+
+    paths
 }
 
 /// The basename of the harness binary — used for the cheap name pre-filter in
@@ -496,19 +589,28 @@ const HARNESS_BINARY_NAME: &str = "buzz-acp";
 /// when `resolve_pgids_and_kill` signals the PGID.
 #[cfg(unix)]
 pub(crate) fn sweep_untracked_bundle_harnesses(skip_pids: &[u32]) {
-    let Some(harness_exe) = expected_harness_exe_path() else {
+    let harness_exes = expected_harness_exe_paths();
+    if harness_exes.is_empty() {
         return;
-    };
+    }
     let snapshots = collect_process_snapshots(HARNESS_BINARY_NAME);
-    let to_kill = select_untracked_bundle_harnesses(&snapshots, &harness_exe, skip_pids);
+    let mut to_kill = std::collections::BTreeSet::new();
+    for harness_exe in &harness_exes {
+        to_kill.extend(select_untracked_bundle_harnesses(
+            &snapshots,
+            harness_exe,
+            skip_pids,
+        ));
+    }
     if to_kill.is_empty() {
         return;
     }
+    let to_kill = to_kill.into_iter().collect::<Vec<_>>();
     eprintln!(
-        "buzz-desktop: sweep_untracked_bundle_harnesses: reaping {} stale harness process(es) {:?} (exe: {})",
+        "buzz-desktop: sweep_untracked_bundle_harnesses: reaping {} stale harness process(es) {:?} (expected exe paths: {:?})",
         to_kill.len(),
         to_kill,
-        harness_exe.display(),
+        harness_exes,
     );
     // Small snapshot→kill PID-reuse window: a PID in `to_kill` could be
     // recycled between the snapshot and the kill call. This matches the

@@ -132,6 +132,8 @@ pub struct ConfigSourceReport {
 pub struct RuntimeConfigSurface {
     pub runtime_id: Option<String>,
     pub runtime_label: Option<String>,
+    /// Catalog-projected model capability. `None` for unknown runtimes.
+    pub supports_buzz_model_config: Option<bool>,
     pub is_pre_spawn: bool,
     pub normalized: NormalizedConfig,
     pub advanced: Vec<ConfigField>,

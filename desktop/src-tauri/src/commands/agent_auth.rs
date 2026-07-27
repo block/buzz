@@ -68,6 +68,12 @@ pub async fn connect_acp_runtime(
 }
 
 fn discover_acp_auth_methods_blocking(runtime_id: &str) -> Result<AcpAuthMethodsResult, String> {
+    if let Some(runtime) = known_acp_runtime_exact(runtime_id) {
+        if let Some(methods) = catalog_cli_auth_methods(runtime) {
+            return Ok(methods);
+        }
+    }
+
     let output = run_buzz_acp_auth_command(runtime_id, ["auth-methods", "--json"])?;
     if !output.status.success() {
         return Err(command_error("buzz-acp auth-methods", &output));
@@ -75,6 +81,23 @@ fn discover_acp_auth_methods_blocking(runtime_id: &str) -> Result<AcpAuthMethods
 
     serde_json::from_slice::<AcpAuthMethodsResult>(&output.stdout)
         .map_err(|error| format!("failed to parse auth methods JSON: {error}"))
+}
+
+fn catalog_cli_auth_methods(
+    runtime: &crate::managed_agents::KnownAcpRuntime,
+) -> Option<AcpAuthMethodsResult> {
+    let command = runtime.auth_login_args?;
+    Some(AcpAuthMethodsResult {
+        methods: vec![AcpAuthMethod {
+            id: "cli-login".to_string(),
+            name: format!("Sign in to {}", runtime.label),
+            description: runtime.login_hint.map(str::to_string),
+            method_type: Some("terminal".to_string()),
+            args: Vec::new(),
+            command: command.iter().map(|arg| (*arg).to_string()).collect(),
+            meta: None,
+        }],
+    })
 }
 
 fn connect_acp_runtime_blocking(
@@ -256,7 +279,7 @@ fn launch_terminal_auth(runtime_id: &str, method: &AcpAuthMethod) -> Result<(), 
         .ok_or_else(|| format!("{} ACP adapter is not installed", runtime.label))?;
     let fallback_command = adapter_command.1.display().to_string();
     let argv = adapter_terminal_argv(runtime.label, method, &fallback_command)?;
-    launch_visible_terminal(&argv)
+    launch_visible_terminal(&argv, runtime.scrub_env_vars)
 }
 
 fn adapter_terminal_argv(
@@ -361,15 +384,16 @@ fn spawn_without_stdio(mut command: Command) -> Result<(), String> {
 }
 
 #[cfg(target_os = "macos")]
-fn launch_visible_terminal(argv: &[String]) -> Result<(), String> {
+fn launch_visible_terminal(argv: &[String], scrub_env_vars: &[&str]) -> Result<(), String> {
     let mut script = tempfile::Builder::new()
         .prefix("buzz-auth-")
         .suffix(".command")
         .tempfile()
         .map_err(|error| format!("failed to create terminal login script: {error}"))?;
+    let unset_commands = shell_unset_commands(scrub_env_vars);
     writeln!(
         script,
-        "#!/bin/sh\ntrap 'rm -f -- \"$0\"' EXIT\n{}",
+        "#!/bin/sh\ntrap 'rm -f -- \"$0\"' EXIT\n{unset_commands}{}",
         shell_join(argv)
     )
     .map_err(|error| format!("failed to write terminal login script: {error}"))?;
@@ -395,8 +419,12 @@ fn launch_visible_terminal(argv: &[String]) -> Result<(), String> {
 }
 
 #[cfg(target_os = "linux")]
-fn launch_visible_terminal(argv: &[String]) -> Result<(), String> {
-    let command = shell_join(argv);
+fn launch_visible_terminal(argv: &[String], scrub_env_vars: &[&str]) -> Result<(), String> {
+    let command = format!(
+        "{}{}",
+        shell_unset_commands(scrub_env_vars),
+        shell_join(argv)
+    );
     let candidates: [(&str, &[&str]); 4] = [
         ("x-terminal-emulator", &["-e", "sh", "-lc"]),
         ("gnome-terminal", &["--", "sh", "-lc"]),
@@ -406,6 +434,9 @@ fn launch_visible_terminal(argv: &[String]) -> Result<(), String> {
     for (terminal, prefix) in candidates {
         let mut terminal_command = Command::new(terminal);
         terminal_command.args(prefix).arg(&command);
+        for key in scrub_env_vars {
+            terminal_command.env_remove(key);
+        }
         if spawn_without_stdio(terminal_command).is_ok() {
             return Ok(());
         }
@@ -414,7 +445,7 @@ fn launch_visible_terminal(argv: &[String]) -> Result<(), String> {
 }
 
 #[cfg(target_os = "windows")]
-fn launch_visible_terminal(argv: &[String]) -> Result<(), String> {
+fn launch_visible_terminal(argv: &[String], scrub_env_vars: &[&str]) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
 
     const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
@@ -425,6 +456,9 @@ fn launch_visible_terminal(argv: &[String]) -> Result<(), String> {
     command
         .args(windows_terminal_args(argv))
         .creation_flags(CREATE_NEW_CONSOLE);
+    for key in scrub_env_vars {
+        command.env_remove(key);
+    }
     spawn_without_stdio(command)
 }
 
@@ -436,8 +470,16 @@ fn windows_terminal_args(argv: &[String]) -> Vec<String> {
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-fn launch_visible_terminal(_argv: &[String]) -> Result<(), String> {
+fn launch_visible_terminal(_argv: &[String], _scrub_env_vars: &[&str]) -> Result<(), String> {
     Err("opening a terminal is not supported on this platform".to_string())
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
+fn shell_unset_commands(scrub_env_vars: &[&str]) -> String {
+    scrub_env_vars
+        .iter()
+        .map(|key| format!("unset {}\n", shell_escape(key)))
+        .collect()
 }
 
 fn shell_join(argv: &[String]) -> String {
@@ -461,10 +503,34 @@ fn shell_escape(arg: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        adapter_terminal_argv, append_inherited_path, is_claude_subscription_login,
-        run_buzz_acp_auth_command_with_paths, shell_escape, shell_join, uses_terminal_auth,
-        windows_terminal_args, AcpAuthMethod,
+        adapter_terminal_argv, append_inherited_path, catalog_cli_auth_methods,
+        is_claude_subscription_login, run_buzz_acp_auth_command_with_paths, shell_escape,
+        shell_join, shell_unset_commands, uses_terminal_auth, windows_terminal_args, AcpAuthMethod,
     };
+
+    #[test]
+    fn devin_uses_catalog_declared_visible_terminal_login() {
+        let runtime =
+            crate::managed_agents::known_acp_runtime_exact("devin").expect("Devin runtime");
+        let result = catalog_cli_auth_methods(runtime).expect("catalog CLI login method");
+
+        assert_eq!(result.methods.len(), 1);
+        assert_eq!(result.methods[0].id, "cli-login");
+        assert_eq!(result.methods[0].method_type.as_deref(), Some("terminal"));
+        assert_eq!(
+            result.methods[0].command,
+            ["devin", "auth", "login"].map(str::to_string)
+        );
+    }
+
+    #[test]
+    fn terminal_login_scrubs_only_catalog_declared_identity_overrides() {
+        assert_eq!(
+            shell_unset_commands(&["WINDSURF_API_KEY"]),
+            "unset WINDSURF_API_KEY\n"
+        );
+        assert!(shell_unset_commands(&[]).is_empty());
+    }
 
     /// Windows regression: the augmented PATH there holds only Buzz-managed
     /// dirs and the exe parent (no login-shell PATH, no managed Node), so the

@@ -86,6 +86,27 @@ fn persona_record(id: &str, model: Option<&str>, provider: Option<&str>) -> Agen
     }
 }
 
+#[test]
+fn created_devin_agents_default_to_one_worker() {
+    assert_eq!(resolve_agent_parallelism(None, "devin"), 1);
+}
+
+#[test]
+fn created_existing_runtime_agents_keep_the_global_default() {
+    for command in ["goose", "claude-agent-acp", "codex-acp", "buzz-agent"] {
+        assert_eq!(
+            resolve_agent_parallelism(None, command),
+            crate::managed_agents::DEFAULT_AGENT_PARALLELISM,
+            "{command}"
+        );
+    }
+}
+
+#[test]
+fn explicit_or_persona_parallelism_overrides_runtime_default() {
+    assert_eq!(resolve_agent_parallelism(Some(3), "devin"), 3);
+}
+
 /// Auto-archive uses the same NIP-IA wire builder as the explicit GUI action,
 /// attaches owner consent, and marks a deliberate delete as `retired`.
 #[test]

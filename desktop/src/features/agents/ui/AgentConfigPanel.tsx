@@ -168,6 +168,7 @@ function NormalizedRow({
   field,
   isPreSpawn,
   configFilePath,
+  runtimeControlsModel = false,
   variant = "compact",
 }: {
   fieldKey: keyof NormalizedConfig;
@@ -175,26 +176,31 @@ function NormalizedRow({
   field: NormalizedField;
   isPreSpawn: boolean;
   configFilePath: string | null;
+  runtimeControlsModel?: boolean;
   variant?: RowVariant;
 }) {
   const Icon = NORMALIZED_ICONS[fieldKey];
   // ACP-sourced origins only become meaningful post-spawn
   const isAcpOnly =
     field.origin === "acpNativeRead" || field.origin === "acpConfigOption";
-  const rawDisplayValue =
-    isPreSpawn && isAcpOnly
+  const rawDisplayValue = runtimeControlsModel
+    ? "Runtime default"
+    : isPreSpawn && isAcpOnly
       ? "Available after agent starts"
       : (field.value ?? "—");
   const displayValue =
     fieldKey === "provider"
       ? providerDisplayLabel(rawDisplayValue)
       : rawDisplayValue;
-  const provenance = field.value
-    ? provenanceSentence(field.origin, field.writeVia, configFilePath)
-    : null;
-  const locked = isReadOnlyField(field);
+  const provenance = runtimeControlsModel
+    ? "Controlled by runtime"
+    : field.value
+      ? provenanceSentence(field.origin, field.writeVia, configFilePath)
+      : null;
+  const locked = runtimeControlsModel || isReadOnlyField(field);
   const isCopyable =
     variant === "profile" &&
+    !runtimeControlsModel &&
     shouldOfferCopy({
       fieldKey,
       origin: field.origin,
@@ -216,7 +222,7 @@ function NormalizedRow({
         )}
         <span
           className="mt-0.5 block truncate text-sm text-muted-foreground"
-          title={field.value ?? undefined}
+          title={runtimeControlsModel ? undefined : (field.value ?? undefined)}
         >
           {displayValue}
           {!(isPreSpawn && isAcpOnly) && field.overriddenValue ? (
@@ -417,6 +423,9 @@ export function AgentConfigPanel({
               field={field}
               isPreSpawn={isPreSpawn}
               configFilePath={configFilePath}
+              runtimeControlsModel={
+                key === "model" && data.supportsBuzzModelConfig === false
+              }
               variant={advancedMode === "flat" ? "profile" : "compact"}
             />
           ))

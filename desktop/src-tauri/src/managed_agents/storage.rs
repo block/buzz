@@ -11,7 +11,10 @@ use crate::app_state::keyring_service;
 use crate::managed_agents::{
     ManagedAgentRecord, ManagedAgentRuntimeKey, ManagedAgentRuntimeReceipt,
 };
+
+mod normalization;
 use crate::secret_store::{KeyringProbe, SecretStore};
+use normalization::normalize_runtime_avatars;
 
 /// Keyring key name for an agent's nsec, namespaced from the human identity
 /// key (`"identity"`) which shares the service.
@@ -181,7 +184,7 @@ fn load_agent_store(app: &AppHandle) -> Result<Vec<ManagedAgentRecord>, String> 
 
     let content = fs::read_to_string(&path)
         .map_err(|error| format!("failed to read agent store: {error}"))?;
-    serde_json::from_str(&content).map_err(|error| {
+    let mut records: Vec<ManagedAgentRecord> = serde_json::from_str(&content).map_err(|error| {
         // Fail loudly and preserve the evidence: a later in-app save rewrites
         // this file wholesale, which would silently destroy a malformed hand
         // edit. Best-effort file-authoring contract (see managed_agents::
@@ -190,7 +193,11 @@ fn load_agent_store(app: &AppHandle) -> Result<Vec<ManagedAgentRecord>, String> 
         // swallowed into an empty store.
         backup_invalid_store(&path);
         format!("failed to parse agent store (preserved as .invalid): {error}")
-    })
+    })?;
+
+    normalize_runtime_avatars(&mut records);
+
+    Ok(records)
 }
 
 /// Load the keyed agent *instances*. Key-less definitions (former personas,
@@ -590,11 +597,34 @@ fn maybe_rotate_log(path: &Path) {
 
 pub(crate) fn open_log_file(path: &Path) -> Result<File, String> {
     maybe_rotate_log(path);
-    OpenOptions::new()
-        .create(true)
-        .append(true)
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+
+    let file = options
         .open(path)
-        .map_err(|error| format!("failed to open log file {}: {error}", path.display()))
+        .map_err(|error| format!("failed to open log file {}: {error}", path.display()))?;
+
+    // `mode()` applies only when the file is created. Tighten logs written by
+    // older builds as soon as they are reopened so upgrades do not leave agent
+    // activity readable by other local accounts.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .map_err(|error| {
+                format!(
+                    "failed to secure log file permissions for {}: {error}",
+                    path.display()
+                )
+            })?;
+    }
+
+    Ok(file)
 }
 
 pub(crate) fn append_log_marker(path: &Path, message: &str) -> Result<(), String> {
@@ -789,14 +819,16 @@ pub fn meaningful_agent_error_from_log(path: &Path) -> Option<AgentLogError> {
 mod tests {
     use std::cell::RefCell;
     use std::collections::HashMap;
-    use std::io::Write as _;
-
-    use tempfile::NamedTempFile;
 
     use super::{
         agent_keyring_name, hydrate_keys_with, migrate_inline_key, persist_agent_keys_with,
         KeyMigration, KeyStore, KeyringProbe, ManagedAgentRecord,
     };
+
+    mod avatar;
+    mod log_errors;
+    #[cfg(unix)]
+    mod log_permissions;
 
     /// In-memory [`KeyStore`] for testing the migrate decision without the OS
     /// keyring. `reachable=false` simulates a backend outage; `fail_verify`
@@ -1095,12 +1127,6 @@ mod tests {
         assert!(records[1].private_key_nsec.is_empty());
     }
 
-    fn write_log(content: &str) -> NamedTempFile {
-        let mut file = NamedTempFile::new().expect("temp log");
-        file.write_all(content.as_bytes()).expect("write log");
-        file
-    }
-
     /// The keyringless fallback write must land `0o600` from the write itself —
     /// not a post-write `chmod` — so a crash in the umask window can never leave
     /// plaintext agent nsecs world-readable (Wes storage.rs:239, SECURITY.md:90).
@@ -1124,58 +1150,6 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(&path).expect("read back"),
             r#"[{"private_key_nsec":"nsec1secret"}]"#
-        );
-    }
-
-    #[test]
-    fn meaningful_agent_error_from_log_promotes_wrapped_llm_auth() {
-        let file = write_log(
-            "noise\nAgent reported error (code -32001): llm auth: 401 unauthorized: ...\n",
-        );
-        let result = super::meaningful_agent_error_from_log(file.path()).unwrap();
-        assert!(result.message.contains("llm auth"));
-        assert_eq!(result.code, Some(-32001));
-    }
-
-    #[test]
-    fn meaningful_agent_error_from_log_promotes_unwrapped_llm_auth() {
-        let file = write_log("noise\nllm auth: denied\n");
-        let result = super::meaningful_agent_error_from_log(file.path()).unwrap();
-        assert_eq!(result.message, "Agent reported error: llm auth: denied");
-        assert_eq!(result.code, Some(-32001));
-    }
-
-    #[test]
-    fn meaningful_agent_error_from_log_promotes_bare_model_not_found() {
-        let file = write_log("noise\nllm model not found: (some-model) 404\n");
-        let result = super::meaningful_agent_error_from_log(file.path()).unwrap();
-        assert_eq!(
-            result.message,
-            "Agent reported error: llm model not found: (some-model) 404"
-        );
-        assert_eq!(result.code, Some(-32002));
-    }
-
-    #[test]
-    fn meaningful_agent_error_from_log_promotes_legacy_format() {
-        let file = write_log("noise\nAgent reported error: llm: 500 internal\n");
-        let result = super::meaningful_agent_error_from_log(file.path()).unwrap();
-        assert_eq!(result.message, "Agent reported error: llm: 500 internal");
-        assert_eq!(result.code, None);
-    }
-
-    #[test]
-    fn meaningful_agent_error_from_log_does_not_promote_midline_auth_text() {
-        let file = write_log("noise before llm auth: denied\n");
-        assert!(super::meaningful_agent_error_from_log(file.path()).is_none());
-    }
-
-    #[test]
-    fn strips_ansi_from_typical_tracing_line() {
-        let input = "\x1b[2m2026-05-27T15:16:32\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2mbuzz_acp\x1b[0m\x1b[2m:\x1b[0m starting";
-        assert_eq!(
-            strip_ansi_escapes::strip_str(input),
-            "2026-05-27T15:16:32  INFO buzz_acp: starting"
         );
     }
 

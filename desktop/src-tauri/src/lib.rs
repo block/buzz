@@ -395,6 +395,21 @@ pub fn run() {
                 migration::run_boot_migrations(&app_handle);
             }
 
+            // Reclaim subprocesses left behind by an ungraceful prior exit
+            // before the webview can send messages. Agent restoration remains
+            // deferred until apply_workspace installs the correct relay, but
+            // cleanup needs neither relay nor identity and must not share that
+            // delay: a stale lazy harness can still subscribe as the same agent
+            // and consume the first post-relaunch prompt.
+            //
+            // The single-instance plugin has already admitted this process.
+            // Receipt, same-instance marker, and exact-bundle checks keep
+            // upstream Buzz plus other bundle identifiers out of scope.
+            let startup_instance_id = managed_agents::current_instance_id(&app_handle);
+            managed_agents::sweep_orphaned_agent_processes(&app_handle, &[]);
+            managed_agents::sweep_system_agent_processes(&startup_instance_id, &[]);
+            managed_agents::sweep_untracked_bundle_harnesses(&[]);
+
             // Resolve persisted identity key (env var → file → generate+save).
             // This is fatal — the app should not start with an ephemeral identity
             // that will be lost on restart, as that silently breaks channel

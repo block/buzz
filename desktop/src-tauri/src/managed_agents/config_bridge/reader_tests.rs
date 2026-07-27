@@ -31,9 +31,19 @@ fn test_runtime() -> &'static KnownAcpRuntime {
     &KnownAcpRuntime {
         id: "goose",
         label: "Goose",
+        display_label: "Goose",
+        sort_priority: 1,
+        onboarding_visible: false,
         commands: &["goose"],
         aliases: &[],
+        default_args: &["acp"],
+        default_parallelism: None,
+        defer_agent_start_until_work: true,
+        default_idle_timeout_secs: None,
+        icon_url: "",
+        icon_scale: 1.0,
         avatar_url: "",
+        superseded_avatar_urls: &[],
         mcp_command: None,
         mcp_hooks: false,
         underlying_cli: None,
@@ -46,10 +56,13 @@ fn test_runtime() -> &'static KnownAcpRuntime {
         adapter_install_hint: "",
         skill_dir: None,
         supports_acp_model_switching: false,
+        accepts_harness_model: true,
         model_env_var: Some("GOOSE_MODEL"),
         provider_env_var: Some("GOOSE_PROVIDER"),
         provider_locked: false,
         default_env: &[],
+        enforced_env: &[],
+        scrub_env_vars: &[],
         config_file_path: Some("~/.config/goose/config.yaml"),
         config_file_format: Some("yaml"),
         supports_acp_native_config: true,
@@ -59,6 +72,7 @@ fn test_runtime() -> &'static KnownAcpRuntime {
         required_normalized_fields: &["model", "provider"],
         login_hint: None,
         auth_probe_args: None,
+        auth_login_args: None,
     }
 }
 
@@ -131,6 +145,18 @@ fn pre_spawn_surface_reports_pending_acp_tiers() {
         ConfigTierStatus::Pending
     );
     assert_eq!(surface.sources.env_vars, ConfigTierStatus::Available);
+    assert_eq!(surface.supports_buzz_model_config, Some(true));
+}
+
+#[test]
+fn devin_surface_projects_runtime_owned_model_capability() {
+    let record = test_record();
+    let runtime =
+        crate::managed_agents::known_acp_runtime("devin").expect("Devin must remain cataloged");
+    let surface = read_config_surface(&record, Some(runtime), None, None);
+
+    assert_eq!(surface.runtime_id.as_deref(), Some("devin"));
+    assert_eq!(surface.supports_buzz_model_config, Some(false));
 }
 
 #[test]
@@ -607,9 +633,19 @@ fn buzz_agent_runtime() -> &'static KnownAcpRuntime {
     &KnownAcpRuntime {
         id: "buzz-agent",
         label: "Buzz Agent",
+        display_label: "Buzz",
+        sort_priority: 0,
+        onboarding_visible: false,
         commands: &["buzz-agent"],
         aliases: &[],
+        default_args: &[],
+        default_parallelism: None,
+        defer_agent_start_until_work: true,
+        default_idle_timeout_secs: None,
+        icon_url: "",
+        icon_scale: 1.0,
         avatar_url: "",
+        superseded_avatar_urls: &[],
         mcp_command: None,
         mcp_hooks: false,
         underlying_cli: None,
@@ -622,10 +658,13 @@ fn buzz_agent_runtime() -> &'static KnownAcpRuntime {
         adapter_install_hint: "",
         skill_dir: None,
         supports_acp_model_switching: true,
+        accepts_harness_model: true,
         model_env_var: Some("BUZZ_AGENT_MODEL"),
         provider_env_var: Some("BUZZ_AGENT_PROVIDER"),
         provider_locked: false,
         default_env: &[],
+        enforced_env: &[],
+        scrub_env_vars: &[],
         config_file_path: None,
         config_file_format: None,
         supports_acp_native_config: false,
@@ -635,6 +674,7 @@ fn buzz_agent_runtime() -> &'static KnownAcpRuntime {
         required_normalized_fields: &["model", "provider"],
         login_hint: None,
         auth_probe_args: None,
+        auth_login_args: None,
     }
 }
 

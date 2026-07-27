@@ -1181,6 +1181,8 @@ test("first-community shows the scenario cards for localhost", async ({
         {
           id: "claude",
           label: "Claude Code",
+          sort_priority: 30,
+          onboarding_visible: true,
           avatar_url: "",
           availability: "available",
           command: "claude",

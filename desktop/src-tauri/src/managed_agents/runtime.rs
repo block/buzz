@@ -8,8 +8,8 @@ use crate::{
     managed_agents::{
         append_log_marker, known_acp_runtime, login_shell_path, managed_agent_log_path,
         missing_command_message, normalize_agent_args, open_log_file, resolve_command,
-        spawn_key_refusal, KnownAcpRuntime, ManagedAgentPairRuntime, ManagedAgentRecord,
-        ManagedAgentRuntimeKey, ManagedAgentSummary,
+        spawn_key_refusal, ManagedAgentPairRuntime, ManagedAgentRecord, ManagedAgentRuntimeKey,
+        ManagedAgentSummary,
     },
     util::now_iso,
 };
@@ -20,8 +20,20 @@ pub(crate) use path::compose_path_entries;
 pub(crate) use path::should_skip_claude_executable;
 pub(crate) use path::should_use_inherited;
 
+mod cli_config;
+pub(crate) use cli_config::configure_runtime_cli;
+
 mod metadata;
 pub(crate) use metadata::{resolve_effective_prompt_model_provider, runtime_metadata_env_vars};
+
+mod env_policy;
+use env_policy::{
+    apply_runtime_env_policy, child_rust_log_filter, effective_idle_timeout,
+    harness_model_for_runtime, should_defer_agent_start,
+};
+
+mod presentation;
+use presentation::runtime_presentation_for_summary;
 
 mod stop;
 pub(crate) use stop::managed_agent_runtime_keys;
@@ -293,6 +305,7 @@ pub fn build_managed_agent_summary(
         .and_then(|r| r.mcp_command)
         .unwrap_or("")
         .to_string();
+    let runtime_presentation = runtime_presentation_for_summary(&descriptor.command);
 
     Ok(ManagedAgentSummary {
         pubkey: record.pubkey.clone(),
@@ -312,6 +325,10 @@ pub fn build_managed_agent_summary(
         parallelism: record.parallelism,
         system_prompt: effective_prompt,
         avatar_url: record.avatar_url.clone(),
+        runtime_icon_url: runtime_presentation.icon_url,
+        runtime_avatar_url: runtime_presentation.avatar_url,
+        runtime_superseded_avatar_urls: runtime_presentation.superseded_avatar_urls,
+        supports_buzz_model_config: runtime_presentation.supports_buzz_model_config,
         model: effective_model,
         model_source,
         provider: effective_provider,
@@ -418,30 +435,6 @@ pub(crate) fn build_respond_to_env(
     Ok((set, remove))
 }
 
-pub(crate) fn configure_runtime_cli(
-    command: &mut std::process::Command,
-    runtime: Option<&KnownAcpRuntime>,
-) {
-    let Some(runtime) = runtime else {
-        return;
-    };
-    if runtime.id != "claude" {
-        return;
-    }
-    if let Some(cli_path) = runtime.underlying_cli.and_then(resolve_command) {
-        // On Windows, `.cmd` and `.bat` files are batch shims — they cannot be
-        // passed directly to `CreateProcess` and cause EINVAL when the Claude
-        // adapter tries to spawn them (issue #2397). Skip setting
-        // `CLAUDE_CODE_EXECUTABLE` for shim paths so the adapter falls back to
-        // its own PATH lookup and finds the real binary instead.
-        // Non-Windows: `.cmd`/`.bat` are valid executables and must be assigned.
-        if should_skip_claude_executable(&cli_path, cfg!(windows)) {
-            return;
-        }
-        command.env("CLAUDE_CODE_EXECUTABLE", cli_path);
-    }
-}
-
 /// Spawn an agent process without holding any locks on records or runtimes.
 /// Returns the child process and log path on success. The caller is responsible
 /// for updating `ManagedAgentRecord` fields and inserting into the runtimes map.
@@ -541,6 +534,7 @@ pub fn spawn_agent_child(
     let resolved_agent_command = resolve_command(effective_command)
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| effective_command.clone());
+    let runtime_meta = known_acp_runtime(effective_command);
 
     // The caller supplies the explicit canonical pair relay. This is the only
     // relay this child may connect to, regardless of the record/workspace default.
@@ -576,7 +570,11 @@ pub fn spawn_agent_child(
     command.env("RUST_LOG", child_rust_log_filter());
     command.env("BUZZ_PRIVATE_KEY", &record.private_key_nsec);
     command.env("BUZZ_RELAY_URL", &effective_relay_url);
-    command.env("BUZZ_ACP_LAZY_POOL", if lazy { "true" } else { "false" });
+    let defer_agent_start = should_defer_agent_start(lazy, runtime_meta);
+    command.env(
+        "BUZZ_ACP_LAZY_POOL",
+        if defer_agent_start { "true" } else { "false" },
+    );
     command.env("BUZZ_ACP_AGENT_COMMAND", &resolved_agent_command);
     command.env("BUZZ_ACP_AGENT_ARGS", agent_args.join(","));
     match &resolved_mcp_command {
@@ -589,7 +587,6 @@ pub fn spawn_agent_child(
     }
     // Enable MCP hook tools (_Stop, _PostCompact) for agents that need them.
     // Uses "*" because build_mcp_servers() hard-codes the server name to "buzz-mcp".
-    let runtime_meta = known_acp_runtime(effective_command);
     if runtime_meta.is_some_and(|r| r.mcp_hooks) {
         command.env("MCP_HOOK_SERVERS", "*");
     }
@@ -710,13 +707,16 @@ pub fn spawn_agent_child(
             );
         }
     }
-    // Only emit BUZZ_ACP_IDLE_TIMEOUT when the user has explicitly set an
-    // override. When unset, the buzz-acp harness applies its own default
-    // (see `DEFAULT_IDLE_TIMEOUT_SECS` in crates/buzz-acp/src/config.rs),
-    // which is the single source of truth. The previously-emitted
-    // `BUZZ_ACP_TURN_TIMEOUT` is deprecated upstream and was pinning every
-    // agent to the desktop's stale default (320s), bypassing harness bumps.
-    if let Some(idle) = record.idle_timeout_seconds {
+    // Emit BUZZ_ACP_IDLE_TIMEOUT for an explicit agent override or a
+    // KnownAcpRuntime catalog default. Otherwise the buzz-acp harness applies
+    // its generic default. Preserve an inherited process value; the merged
+    // global/persona/agent environment below can still override a catalog
+    // default.
+    if let Some(idle) = effective_idle_timeout(
+        record.idle_timeout_seconds,
+        std::env::var_os("BUZZ_ACP_IDLE_TIMEOUT").is_some(),
+        runtime_meta,
+    ) {
         command.env("BUZZ_ACP_IDLE_TIMEOUT", idle.to_string());
     }
 
@@ -755,13 +755,14 @@ pub fn spawn_agent_child(
     let effective_prompt = effective_cfg.system_prompt.value;
     let effective_model = effective_cfg.model.value;
     let effective_provider = effective_cfg.provider.value;
+    let harness_model = harness_model_for_runtime(runtime_meta, effective_model.as_deref());
 
     if let Some(prompt) = &effective_prompt {
         command.env("BUZZ_ACP_SYSTEM_PROMPT", prompt);
     } else {
         command.env_remove("BUZZ_ACP_SYSTEM_PROMPT");
     }
-    if let Some(model) = effective_model.as_deref() {
+    if let Some(model) = harness_model {
         command.env("BUZZ_ACP_MODEL", model);
     } else {
         command.env_remove("BUZZ_ACP_MODEL");
@@ -868,6 +869,10 @@ pub fn spawn_agent_child(
         }
     }
 
+    // Runtime identity and safety policy goes last so ambient, global,
+    // persona, and per-agent values cannot silently override it.
+    apply_runtime_env_policy(&mut command, runtime_meta);
+
     // Stamp desktop ownership and an unpredictable harness-generation identity.
     let start_nonce = uuid::Uuid::new_v4().simple().to_string();
     command
@@ -950,14 +955,6 @@ pub fn spawn_agent_child(
     })
 }
 
-fn child_rust_log_filter() -> String {
-    match std::env::var("RUST_LOG") {
-        Ok(existing) if existing.contains("buzz_acp") => existing,
-        Ok(existing) if !existing.trim().is_empty() => format!("{existing},buzz_acp=info"),
-        _ => "buzz_acp=info".to_string(),
-    }
-}
-
 pub fn start_managed_agent_process(
     app: &AppHandle,
     record: &mut ManagedAgentRecord,
@@ -1015,5 +1012,7 @@ pub fn start_managed_agent_process(
     Ok(())
 }
 
+#[cfg(all(test, unix))]
+mod process_tree_tests;
 #[cfg(test)]
 mod tests;

@@ -8,35 +8,74 @@ import {
   runtimeIsVisibleInOnboarding,
 } from "./onboardingRuntimeSelection.ts";
 
-function runtime(id, availability, status) {
-  return { id, availability, authStatus: { status } };
+function runtime(
+  id,
+  availability,
+  status,
+  { onboardingVisible = true, sortPriority = 100 } = {},
+) {
+  return {
+    id,
+    availability,
+    authStatus: { status },
+    onboardingVisible,
+    sortPriority,
+  };
 }
 
-test("all bundled harnesses are visible in onboarding", () => {
-  assert.equal(runtimeIsVisibleInOnboarding("claude"), true);
-  assert.equal(runtimeIsVisibleInOnboarding("codex"), true);
-  assert.equal(runtimeIsVisibleInOnboarding("goose"), true);
-  assert.equal(runtimeIsVisibleInOnboarding("buzz-agent"), true);
-  assert.equal(runtimeIsVisibleInOnboarding("custom"), false);
+test("onboarding visibility comes from catalog metadata", () => {
+  assert.equal(
+    runtimeIsVisibleInOnboarding(runtime("devin", "available", "logged_in")),
+    true,
+  );
+  assert.equal(
+    runtimeIsVisibleInOnboarding(
+      runtime("future-runtime", "available", "logged_in", {
+        onboardingVisible: false,
+      }),
+    ),
+    false,
+  );
 });
 
-test("visible onboarding runtimes use the product order", () => {
+test("visible onboarding runtimes use catalog ordering", () => {
   const runtimes = [
-    runtime("buzz-agent", "available", "not_applicable"),
-    runtime("codex", "available", "logged_in"),
-    runtime("goose", "available", "not_applicable"),
-    runtime("claude", "available", "logged_in"),
+    runtime("buzz-agent", "available", "not_applicable", {
+      sortPriority: 60,
+    }),
+    runtime("codex", "available", "logged_in", { sortPriority: 40 }),
+    runtime("goose", "available", "not_applicable", {
+      sortPriority: 50,
+    }),
+    runtime("devin", "available", "logged_in", { sortPriority: 20 }),
+    runtime("claude", "available", "logged_in", { sortPriority: 30 }),
   ];
 
   assert.deepEqual(
     getVisibleOnboardingRuntimes(runtimes).map(({ id }) => id),
-    ["claude", "codex", "goose", "buzz-agent"],
+    ["devin", "claude", "codex", "goose", "buzz-agent"],
+  );
+});
+
+test("catalog ordering falls back to labels for rolling-upgrade payloads", () => {
+  const alpha = runtime("alpha", "available", "logged_in");
+  alpha.label = "Alpha";
+  const beta = runtime("beta", "available", "logged_in");
+  beta.label = "Beta";
+
+  assert.deepEqual(
+    getVisibleOnboardingRuntimes([beta, alpha]).map(({ id }) => id),
+    ["alpha", "beta"],
   );
 });
 
 test("readiness requires an available and authenticated runtime", () => {
   assert.equal(
     runtimeIsReadyForOnboarding(runtime("claude", "available", "logged_in")),
+    true,
+  );
+  assert.equal(
+    runtimeIsReadyForOnboarding(runtime("devin", "available", "logged_in")),
     true,
   );
   assert.equal(
@@ -57,11 +96,14 @@ test("readiness requires an available and authenticated runtime", () => {
 
 test("ready onboarding runtimes exclude unknown and non-ready harnesses", () => {
   const runtimes = [
-    runtime("goose", "available", "not_applicable"),
-    runtime("codex", "available", "logged_out"),
-    runtime("buzz-agent", "available", "not_applicable"),
-    runtime("claude", "available", "logged_in"),
-    runtime("custom", "available", "not_applicable"),
+    runtime("goose", "available", "not_applicable", { sortPriority: 50 }),
+    runtime("codex", "available", "logged_out", { sortPriority: 40 }),
+    runtime("buzz-agent", "available", "not_applicable", { sortPriority: 60 }),
+    runtime("devin", "available", "logged_out", { sortPriority: 20 }),
+    runtime("claude", "available", "logged_in", { sortPriority: 30 }),
+    runtime("custom", "available", "not_applicable", {
+      onboardingVisible: false,
+    }),
   ];
 
   assert.deepEqual(

@@ -7,18 +7,20 @@ use std::time::{Duration, Instant};
 use crate::managed_agents::{
     buzz_managed_command_path, buzz_managed_node_bin_dir, buzz_managed_npm_bin_dir,
     AcpAvailabilityStatus, AcpRuntimeCatalogEntry, AuthStatus, CommandAvailabilityInfo,
-    HarnessSource,
+    HarnessSource, DEFAULT_AGENT_PARALLELISM,
 };
 
+mod catalog_projection;
+mod runtime_catalog;
 mod runtime_metadata;
 
+pub(crate) use catalog_projection::custom_runtime_catalog_entry;
+use runtime_catalog::KNOWN_ACP_RUNTIMES;
+#[cfg(test)]
+use runtime_catalog::{
+    BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL, GOOSE_AVATAR_URL,
+};
 pub(crate) use runtime_metadata::KnownAcpRuntime;
-
-const GOOSE_AVATAR_URL: &str = "https://goose-docs.ai/img/logo_dark.png";
-const CLAUDE_CODE_AVATAR_URL: &str = "https://anthropic.gallerycdn.vsassets.io/extensions/anthropic/claude-code/2.1.77/1773707456892/Microsoft.VisualStudio.Services.Icons.Default";
-const CODEX_AVATAR_URL: &str = "https://openai.gallerycdn.vsassets.io/extensions/openai/chatgpt/26.5313.41514/1773706730621/Microsoft.VisualStudio.Services.Icons.Default";
-const BUZZ_AGENT_AVATAR_URL: &str =
-    "https://raw.githubusercontent.com/block/buzz/refs/heads/main/crates/buzz-agent/buzz-agent.png";
 
 fn common_binary_paths() -> &'static [PathBuf] {
     static PATHS: OnceLock<Vec<PathBuf>> = OnceLock::new();
@@ -62,140 +64,6 @@ fn common_binary_paths() -> &'static [PathBuf] {
         paths
     })
 }
-
-const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
-    KnownAcpRuntime {
-        id: "goose",
-        label: "Goose",
-        commands: &["goose"],
-        aliases: &[],
-        avatar_url: GOOSE_AVATAR_URL,
-        mcp_command: None,
-        mcp_hooks: false,
-        underlying_cli: Some("goose"),
-        cli_install_commands: &["curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh | CONFIGURE=false bash"],
-        // Goose's stable release currently publishes only the Unix installer;
-        // its official Windows instructions intentionally point at this main-branch script.
-        cli_install_commands_windows: &["powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"$env:CONFIGURE='false'; irm https://raw.githubusercontent.com/aaif-goose/goose/main/download_cli.ps1 | iex\""],
-        adapter_install_commands: &[],
-        cli_install_instructions_url: "https://goose-docs.ai/docs/getting-started/installation/",
-        adapter_install_instructions_url: "",
-        cli_install_hint: "Buzz requires the Goose CLI; the desktop app alone is not enough.",
-        adapter_install_hint: "",
-        skill_dir: Some(".goose/skills"),
-        supports_acp_model_switching: false,
-        model_env_var: Some("GOOSE_MODEL"),
-        provider_env_var: Some("GOOSE_PROVIDER"),
-        provider_locked: false,
-        default_env: &[("GOOSE_MODE", "auto")],
-        config_file_path: Some("~/.config/goose/config.yaml"),
-        config_file_format: Some("yaml"),
-        supports_acp_native_config: true,
-        thinking_env_var: Some("GOOSE_THINKING_EFFORT"),
-        max_tokens_env_var: Some("GOOSE_MAX_TOKENS"),
-        context_limit_env_var: Some("GOOSE_CONTEXT_LIMIT"),
-        required_normalized_fields: &["model", "provider"],
-        login_hint: None,
-        auth_probe_args: None,
-    },
-    KnownAcpRuntime {
-        id: "claude",
-        label: "Claude Code",
-        commands: &["claude-agent-acp", "claude-code-acp"],
-        aliases: &["claude-code", "claudecode"],
-        avatar_url: CLAUDE_CODE_AVATAR_URL,
-        mcp_command: None,
-        mcp_hooks: false,
-        underlying_cli: Some("claude"),
-        cli_install_commands: &["curl -fsSL https://claude.ai/install.sh | bash"],
-        cli_install_commands_windows: &["powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"irm https://claude.ai/install.ps1 | iex\""],
-        adapter_install_commands: &["npm install -g @agentclientprotocol/claude-agent-acp"],
-        cli_install_instructions_url: "https://code.claude.com/docs/en/getting-started",
-        adapter_install_instructions_url: "https://github.com/agentclientprotocol/claude-agent-acp",
-        cli_install_hint: "Buzz requires the Claude Code CLI; the desktop app alone is not enough.",
-        adapter_install_hint: "Install the Claude Code ACP adapter via npm.",
-        skill_dir: Some(".claude/skills"),
-        supports_acp_model_switching: false,
-        model_env_var: None,
-        provider_env_var: None,
-        provider_locked: true,
-        default_env: &[],
-        config_file_path: Some("~/.claude/settings.json"),
-        config_file_format: Some("json"),
-        supports_acp_native_config: false,
-        thinking_env_var: None,
-        max_tokens_env_var: None,
-        context_limit_env_var: None,
-        required_normalized_fields: &[],
-        login_hint: Some("Run the Claude CLI to complete authentication."),
-        auth_probe_args: Some(&["claude", "auth", "status"]),
-    },
-    KnownAcpRuntime {
-        id: "codex",
-        label: "Codex",
-        commands: &["codex-acp"],
-        aliases: &[],
-        avatar_url: CODEX_AVATAR_URL,
-        mcp_command: Some("buzz-dev-mcp"),
-        mcp_hooks: false,
-        underlying_cli: Some("codex"),
-        cli_install_commands: &["curl -fsSL https://chatgpt.com/codex/install.sh | sh"],
-        cli_install_commands_windows: &["powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"irm https://chatgpt.com/codex/install.ps1 | iex\""],
-        adapter_install_commands: &["npm install -g @agentclientprotocol/codex-acp"],
-        cli_install_instructions_url: "https://developers.openai.com/codex/cli/",
-        adapter_install_instructions_url: "https://github.com/agentclientprotocol/codex-acp",
-        cli_install_hint: "Buzz requires the Codex CLI; the desktop app alone is not enough.",
-        adapter_install_hint: "Install the Codex ACP adapter via npm.",
-        skill_dir: Some(".codex/skills"),
-        supports_acp_model_switching: false,
-        model_env_var: None,
-        provider_env_var: None,
-        provider_locked: false,
-        default_env: &[],
-        config_file_path: Some("~/.codex/config.toml"),
-        config_file_format: Some("toml"),
-        supports_acp_native_config: false,
-        thinking_env_var: None,
-        max_tokens_env_var: None,
-        context_limit_env_var: None,
-        required_normalized_fields: &[],
-        login_hint: Some("Run `codex login` to authenticate."),
-        // Verified: `codex login status` exits 0 when logged in, non-zero otherwise.
-        auth_probe_args: Some(&["codex", "login", "status"]),
-    },
-    KnownAcpRuntime {
-        id: "buzz-agent",
-        label: "Buzz Agent",
-        commands: &["buzz-agent"],
-        aliases: &[],
-        avatar_url: BUZZ_AGENT_AVATAR_URL,
-        mcp_command: Some("buzz-dev-mcp"),
-        mcp_hooks: true,
-        underlying_cli: None,
-        cli_install_commands: &[],
-        cli_install_commands_windows: &[],
-        adapter_install_commands: &[],
-        cli_install_instructions_url: "https://github.com/block/buzz",
-        adapter_install_instructions_url: "https://github.com/block/buzz",
-        cli_install_hint: "Ships with the Buzz desktop app.",
-        adapter_install_hint: "",
-        skill_dir: None,
-        supports_acp_model_switching: true,
-        model_env_var: Some("BUZZ_AGENT_MODEL"),
-        provider_env_var: Some("BUZZ_AGENT_PROVIDER"),
-        provider_locked: false,
-        default_env: &[],
-        config_file_path: None,
-        config_file_format: None,
-        supports_acp_native_config: false,
-        thinking_env_var: Some("BUZZ_AGENT_THINKING_EFFORT"),
-        max_tokens_env_var: Some("BUZZ_AGENT_MAX_OUTPUT_TOKENS"),
-        context_limit_env_var: Some("BUZZ_AGENT_MAX_CONTEXT_TOKENS"),
-        required_normalized_fields: &["model", "provider"],
-        login_hint: None,
-        auth_probe_args: None,
-    },
-];
 
 /// Skill discovery directories declared by known runtimes.
 pub(crate) fn known_skill_dirs() -> impl Iterator<Item = &'static str> {
@@ -264,6 +132,12 @@ pub(crate) fn known_acp_runtime(command: &str) -> Option<&'static KnownAcpRuntim
 
 pub(crate) fn known_acp_runtime_exact(id: &str) -> Option<&'static KnownAcpRuntime> {
     KNOWN_ACP_RUNTIMES.iter().find(|p| p.id == id)
+}
+
+pub(crate) fn resolve_agent_parallelism(requested: Option<u32>, command: &str) -> u32 {
+    requested
+        .or_else(|| known_acp_runtime(command).and_then(|runtime| runtime.default_parallelism))
+        .unwrap_or(DEFAULT_AGENT_PARALLELISM)
 }
 
 /// The agent command a freshly-created agent defaults to when the create
@@ -455,12 +329,13 @@ pub fn try_record_agent_command(
 }
 
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
-    match normalize_command_identity(command).as_str() {
-        "goose" => Some(vec!["acp".to_string()]),
-        "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
-        | "claudecode" | "buzz-agent" => Some(Vec::new()),
-        _ => None,
-    }
+    known_acp_runtime(command).map(|runtime| {
+        runtime
+            .default_args
+            .iter()
+            .map(|arg| (*arg).to_string())
+            .collect()
+    })
 }
 
 pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<String> {
@@ -486,8 +361,8 @@ pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<Strin
     normalized
 }
 
-fn profile_target_dirs(root: &Path) -> [PathBuf; 2] {
-    if cfg!(debug_assertions) {
+fn profile_target_dirs(root: &Path, debug_build: bool) -> [PathBuf; 2] {
+    if debug_build {
         // `just dev` builds fresh debug sidecars; never prefer stale release output.
         [root.join("target/debug"), root.join("target/release")]
     } else {
@@ -495,23 +370,50 @@ fn profile_target_dirs(root: &Path) -> [PathBuf; 2] {
     }
 }
 
-fn command_search_dirs() -> Vec<PathBuf> {
-    let mut dirs = profile_target_dirs(&workspace_root_dir()).to_vec();
-    if let Ok(current_dir) = std::env::current_dir() {
-        dirs.extend(profile_target_dirs(&current_dir));
+fn command_search_dirs_for(
+    workspace_root: &Path,
+    current_dir: Option<&Path>,
+    executable_dir: Option<&Path>,
+    debug_build: bool,
+) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+
+    // A packaged release must run the sidecar that was signed and shipped
+    // beside the desktop executable. Build-machine checkout paths can still
+    // exist on a developer Mac; searching them first silently mixes an
+    // installed release with stale target/debug binaries.
+    if !debug_build {
+        dirs.extend(executable_dir.map(Path::to_path_buf));
     }
 
-    dirs.extend(
-        std::env::current_exe()
-            .ok()
-            .and_then(|path| path.parent().map(Path::to_path_buf)),
-    );
+    dirs.extend(profile_target_dirs(workspace_root, debug_build));
+    if let Some(current_dir) = current_dir {
+        dirs.extend(profile_target_dirs(current_dir, debug_build));
+    }
+
+    if debug_build {
+        dirs.extend(executable_dir.map(Path::to_path_buf));
+    }
+
     dirs.into_iter().fold(Vec::new(), |mut unique, dir| {
         if !unique.contains(&dir) {
             unique.push(dir);
         }
         unique
     })
+}
+
+fn command_search_dirs() -> Vec<PathBuf> {
+    let current_dir = std::env::current_dir().ok();
+    let executable_dir = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf));
+    command_search_dirs_for(
+        &workspace_root_dir(),
+        current_dir.as_deref(),
+        executable_dir.as_deref(),
+        cfg!(debug_assertions),
+    )
 }
 
 fn is_executable_file(path: &Path) -> bool {
@@ -534,7 +436,7 @@ fn is_executable_file(path: &Path) -> bool {
     }
 }
 
-fn resolve_workspace_command(command: &str) -> Option<PathBuf> {
+pub(crate) fn resolve_workspace_command(command: &str) -> Option<PathBuf> {
     if command_looks_like_path(command) {
         let path = PathBuf::from(command);
         return is_executable_file(&path).then_some(path);
@@ -1019,16 +921,18 @@ pub(crate) fn is_npm_global_install(cmd: &str) -> bool {
 /// background threads to prevent pipe-buffer deadlock. On timeout the child is
 /// killed and `Unknown` is returned; no orphaned threads or processes are left
 /// behind. Returns `Unknown` on timeout.
-fn probe_auth_status(binary_path: &Path, probe_args: &[&str]) -> AuthStatus {
+fn probe_auth_status(
+    binary_path: &Path,
+    probe_args: &[&str],
+    scrub_env_vars: &[&str],
+) -> AuthStatus {
     use crate::managed_agents::readiness::cli_probe;
 
     let augmented_path = cli_probe::augmented_path();
 
     let mut command = std::process::Command::new(binary_path);
     command.args(&probe_args[1..]);
-    if let Some(ref path) = augmented_path {
-        command.env("PATH", path);
-    }
+    cli_probe::configure_probe_environment(&mut command, augmented_path.as_deref(), scrub_env_vars);
     command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -1326,10 +1230,11 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime) -> PartialEntr
         .and_then(find_command)
         .map(|p| p.display().to_string());
 
-    let default_args = command
-        .as_deref()
-        .map(|cmd| normalize_agent_args(cmd, Vec::new()))
-        .unwrap_or_default();
+    let default_args = runtime
+        .default_args
+        .iter()
+        .map(|arg| (*arg).to_string())
+        .collect();
 
     let can_auto_install = !runtime.cli_install_commands_for_os().is_empty()
         || !runtime.adapter_install_commands.is_empty();
@@ -1376,7 +1281,19 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime) -> PartialEntr
         entry: AcpRuntimeCatalogEntry {
             id: runtime.id.to_string(),
             label: runtime.label.to_string(),
+            display_label: runtime.display_label.to_string(),
+            sort_priority: runtime.sort_priority,
+            onboarding_visible: runtime.onboarding_visible,
+            icon_url: runtime.icon_url.to_string(),
+            icon_scale: runtime.icon_scale,
             avatar_url: runtime.avatar_url.to_string(),
+            superseded_avatar_urls: runtime
+                .superseded_avatar_urls
+                .iter()
+                .map(|url| (*url).to_string())
+                .collect(),
+            supports_buzz_model_config: runtime.model_env_var.is_some()
+                || runtime.supports_acp_model_switching,
             availability,
             command,
             binary_path,
@@ -1483,8 +1400,15 @@ fn preset_catalog_entry(
     AcpRuntimeCatalogEntry {
         id: def.id.to_string(),
         label: def.label.to_string(),
+        display_label: def.label.to_string(),
+        sort_priority: 100,
+        onboarding_visible: false,
+        icon_url: String::new(),
+        icon_scale: 1.0,
         // No remote URL — all preset icons are bundled assets.
         avatar_url: String::new(),
+        superseded_avatar_urls: Vec::new(),
+        supports_buzz_model_config: true,
         availability,
         command,
         binary_path,
@@ -1669,10 +1593,11 @@ pub fn discover_acp_runtimes_from(
             // Need the resolved binary path for the CLI (e.g. the actual `claude` binary).
             let binary_path = resolve_command(probe_args[0])?;
             let probe_args_owned: Vec<String> = probe_args.iter().map(|s| s.to_string()).collect();
+            let scrub_env_vars = partial.runtime.scrub_env_vars;
 
             let handle = std::thread::spawn(move || {
                 let refs: Vec<&str> = probe_args_owned.iter().map(String::as_str).collect();
-                probe_auth_status(&binary_path, &refs)
+                probe_auth_status(&binary_path, &refs, scrub_env_vars)
             });
             Some((idx, handle))
         })
@@ -1746,37 +1671,13 @@ pub fn discover_acp_runtimes_from(
 
             let default_args = normalize_agent_args(&def.command, def.args.clone());
 
-            entries.push(AcpRuntimeCatalogEntry {
-                id: def.id.clone(),
-                label: def.label.clone(),
-                // F1 security fix: never copy user-supplied avatar URL into the catalog.
-                // All icons are bundled assets; customs fall back to TerminalSquare in the UI.
-                avatar_url: String::new(),
+            entries.push(custom_runtime_catalog_entry(
+                def,
                 availability,
                 command,
                 binary_path,
                 default_args,
-                // Custom harnesses are plain ACP — no MCP sidecar, no env-var
-                // model switching, no thinking knobs.
-                mcp_command: None,
-                model_env_var: None,
-                provider_env_var: None,
-                thinking_env_var: None,
-                install_hint: def.install_hint.clone(),
-                install_instructions_url: def.install_instructions_url.clone(),
-                // Security line: custom definitions carry no install scripts.
-                can_auto_install: false,
-                requires_external_cli: false,
-                underlying_cli_path: None,
-                node_required: false,
-                // No auth probe for custom harnesses.
-                auth_status: AuthStatus::NotApplicable,
-                login_hint: None,
-                source: HarnessSource::Custom,
-                // Carry definition env into the catalog so the edit form can
-                // read it back — prevents silently erasing env on save.
-                definition_env: def.env.clone(),
-            });
+            ));
         }
     }
 
@@ -1828,6 +1729,20 @@ pub(crate) mod pre_publish_test_hook {
 pub fn managed_agent_avatar_url(command: &str) -> Option<String> {
     let runtime = known_acp_runtime(command)?;
     Some(runtime.avatar_url.to_string())
+}
+
+/// Replace a superseded catalog-default avatar without touching user-selected
+/// images. This is intentionally a read-time normalization: existing records
+/// render correctly immediately, their relay profiles reconcile to the new
+/// default, and the normalized value is persisted on the next ordinary save.
+pub fn normalize_managed_agent_avatar(command: &str, avatar_url: Option<String>) -> Option<String> {
+    if let (Some(runtime), Some(avatar)) = (known_acp_runtime(command), avatar_url.as_deref()) {
+        if runtime.superseded_avatar_urls.contains(&avatar) {
+            return Some(runtime.avatar_url.to_string());
+        }
+    }
+
+    avatar_url
 }
 
 #[cfg(test)]

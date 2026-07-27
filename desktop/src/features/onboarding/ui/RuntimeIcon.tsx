@@ -3,18 +3,6 @@ import { TerminalSquare } from "lucide-react";
 
 import type { AcpRuntimeCatalogEntry } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
-import { useTheme } from "@/shared/theme/ThemeProvider";
-import { BuzzMark } from "@/shared/ui/buzz-logo/BuzzMark";
-import chatgptLogoUrl from "../assets/harness-logos/chatgpt.png?inline";
-import claudeLogoUrl from "../assets/harness-logos/claude.png?inline";
-import gooseLogoUrl from "../assets/harness-logos/goose.png?inline";
-
-// Bundled logos for compiled-in runtimes (inline base64, no network fetch).
-const RUNTIME_LOGOS: Record<string, string> = {
-  claude: claudeLogoUrl,
-  codex: chatgptLogoUrl,
-  goose: gooseLogoUrl,
-};
 
 // Public-path logos for bundled presets. Served from /harness-logos/ at runtime.
 // Keys match the preset `id` values emitted by the backend PRESET_HARNESSES.
@@ -28,19 +16,22 @@ export const PRESET_LOGOS: Record<string, string> = {
   openclaw: "/harness-logos/openclaw.svg",
 };
 
-function isBuzzRuntime(runtime: AcpRuntimeCatalogEntry): boolean {
-  return runtime.id.trim().toLowerCase() === "buzz-agent";
-}
-
 export function getRuntimeDisplayLabel(
   runtime: AcpRuntimeCatalogEntry,
 ): string {
-  return isBuzzRuntime(runtime) ? "Buzz" : runtime.label;
+  return runtime.displayLabel;
 }
 
 function getRuntimeLogoUrl(runtime: AcpRuntimeCatalogEntry): string | null {
   const id = runtime.id.trim().toLowerCase();
-  return RUNTIME_LOGOS[id] ?? PRESET_LOGOS[id] ?? null;
+  if (runtime.source === "builtin") {
+    return runtime.iconUrl || null;
+  }
+  if (runtime.source === "preset") {
+    return PRESET_LOGOS[id] ?? null;
+  }
+  // Never render user-controlled custom avatar URLs in onboarding.
+  return null;
 }
 
 export function RuntimeIcon({
@@ -51,16 +42,8 @@ export function RuntimeIcon({
   runtime: AcpRuntimeCatalogEntry;
 }) {
   const [imageFailed, setImageFailed] = React.useState(false);
-  const { isDark } = useTheme();
-  // Only use bundled logo maps — never render user-supplied avatar URLs for
-  // custom/preset entries (tracking pixel / spoofing vector, security line).
   const id = runtime.id.trim().toLowerCase();
   const imageUrl = getRuntimeLogoUrl(runtime);
-  const shouldForceForegroundColor = !imageUrl && id === "goose";
-
-  if (isBuzzRuntime(runtime)) {
-    return <BuzzMark className="h-7 w-10 text-foreground" />;
-  }
 
   if (imageUrl && !imageFailed) {
     return (
@@ -71,11 +54,10 @@ export function RuntimeIcon({
           className,
           id === "omp" && "bg-[#0d0d0d] p-1",
           id === "grok" && "bg-white p-1",
-          shouldForceForegroundColor &&
-            (isDark ? "brightness-0 invert" : "brightness-0"),
         )}
         onError={() => setImageFailed(true)}
         src={imageUrl}
+        style={{ transform: `scale(${runtime.iconScale})` }}
       />
     );
   }
