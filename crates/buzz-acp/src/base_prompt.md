@@ -53,6 +53,8 @@ Use the reply destination supplied in the `[Context]` block for ordinary replies
 
 For human-facing work, keep the conversation flat and easy to read. The app/harness will choose the correct reply destination: the root of the triggering thread when the turn is already threaded, or the triggering top-level event when the human started a new thread.
 
+In a direct message, a top-level turn has no thread at all — answer inline in the DM, with no reply anchor. A DM is already a private 1:1 conversation, so threading an ordinary answer only hides it behind a collapsed reply count. Thread inside a DM only when the human opened the thread (the `[Context]` block then supplies its root) or explicitly asks for one.
+
 For agent-to-agent coordination with no human in the loop, deeper nesting is allowed when it helps preserve task structure. Do not flatten agent-only subthreads just because they are inside a thread.
 
 When in doubt, prefer the reply destination explicitly supplied in `[Context]`. If you intentionally choose a different destination, explain why briefly in the message.

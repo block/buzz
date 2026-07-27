@@ -1171,6 +1171,23 @@ fn append_new_thread_reply_instruction(s: &mut String, event_id: &str) {
     ));
 }
 
+/// Append a flat-reply instruction for a top-level DM turn.
+///
+/// A DM is already a private 1:1 surface, so an ordinary reply belongs inline in
+/// the conversation. Threading it hides the answer behind a collapsed "N replies"
+/// affordance the human has to open, and every following exchange starts one
+/// level deeper. Threads inside a DM stay reserved for threads the human opened
+/// — those keep their reply instruction via [`append_reply_instruction`].
+fn append_dm_flat_reply_instruction(s: &mut String) {
+    s.push_str(
+        "\nIMPORTANT: This is a top-level direct message, not a thread. Send \
+         ordinary replies for this turn inline in the DM — do NOT pass \
+         `--reply-to` — so the human reads the answer in the conversation \
+         instead of a collapsed thread. Only open a thread if the human \
+         explicitly asks for one.",
+    );
+}
+
 /// Decide whether a turn is human-facing for reply-anchor purposes.
 ///
 /// A turn is human-facing when the triggering sender is a human, OR a human
@@ -1275,6 +1292,11 @@ fn format_context_hints(
             if let Some(event_id) = reply_anchor {
                 append_reply_instruction(&mut s, event_id);
             }
+        } else {
+            // Top-level DM: say so explicitly. Left unsaid, the agent falls back
+            // to the base-prompt rule for top-level mentions and opens a thread,
+            // burying the answer behind a collapsed "N replies" affordance.
+            append_dm_flat_reply_instruction(&mut s);
         }
         s
     } else if let Some(ref root) = thread_tags.root_event_id {
@@ -3972,9 +3994,10 @@ mod tests {
     }
 
     #[test]
-    fn test_reply_instruction_absent_for_dm_non_reply() {
+    fn test_dm_non_reply_instructs_flat_reply() {
         let ch = Uuid::new_v4();
         let event = make_event("hey there");
+        let event_id = event.id.to_hex();
         let batch = FlushBatch {
             channel_id: ch,
             events: vec![BatchEvent {
@@ -3998,9 +4021,59 @@ mod tests {
             },
         )
         .join("\n\n");
+        // A top-level DM must be told to answer inline. Left unsaid, the agent
+        // falls back to the top-level-mention rule and opens a thread, hiding
+        // the answer behind a collapsed "N replies" affordance.
         assert!(
-            !prompt.contains("--reply-to"),
-            "DM non-reply should NOT include reply instruction"
+            prompt.contains("top-level direct message"),
+            "top-level DM should carry the flat-reply instruction"
+        );
+        assert!(
+            !prompt.contains(&format!("--reply-to {event_id}")),
+            "top-level DM should NOT anchor a reply to any event"
+        );
+    }
+
+    #[test]
+    fn test_dm_thread_reply_keeps_reply_instruction() {
+        let ch = Uuid::new_v4();
+        let root_id = "d".repeat(64);
+        let event = make_event_with_tags(
+            "still in the thread",
+            vec![vec!["e".into(), root_id, "".into(), "reply".into()]],
+        );
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let ci = PromptChannelInfo {
+            name: "DM".into(),
+            channel_type: "dm".into(),
+        };
+
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                channel_info: Some(&ci),
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+        // A thread the human opened inside a DM still threads — the flat-reply
+        // instruction is for top-level DM turns only.
+        assert!(
+            prompt.contains("--reply-to"),
+            "DM thread reply should keep its reply instruction"
+        );
+        assert!(
+            !prompt.contains("top-level direct message"),
+            "DM thread reply should NOT get the flat-reply instruction"
         );
     }
 
