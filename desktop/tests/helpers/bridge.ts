@@ -79,6 +79,19 @@ type MockSpawnerAnnouncementSeed = {
   createdAt?: number;
 };
 
+/**
+ * A kind:30179 agent status replayed to the status subscription. `content` is
+ * the raw snake_case status body (e.g. `{ phase: "stopped",
+ * needs_credential: true }`), authored by `spawnerPubkey` with `slug` as the
+ * `d` tag.
+ */
+type MockSpawnerStatusSeed = {
+  spawnerPubkey: string;
+  slug: string;
+  content: Record<string, unknown>;
+  createdAt?: number;
+};
+
 type MockSearchProfileSeed = {
   pubkey: string;
   displayName: string | null;
@@ -243,6 +256,8 @@ type MockBridgeOptions = {
   }>;
   /** kind:10180 announcements served to the spawner-directory subscription. */
   spawnerAnnouncements?: MockSpawnerAnnouncementSeed[];
+  /** kind:30179 statuses served to the spawner-status subscription. */
+  spawnerStatuses?: MockSpawnerStatusSeed[];
   personas?: MockPersonaSeed[];
   /** Community catalog replaceable-event heads returned by relay queries. */
   personaCatalogEvents?: RelayEvent[];

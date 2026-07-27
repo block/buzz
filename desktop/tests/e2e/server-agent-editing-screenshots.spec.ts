@@ -72,6 +72,21 @@ const MANAGED_AGENTS = [
   },
 ];
 
+// A server agent held stopped because its owner has not provisioned a token.
+const HELD_AGENT_SLUG = "prod-runner";
+
+const SPAWNER_STATUSES = [
+  {
+    spawnerPubkey: SPAWNER_WITH_CATALOG,
+    slug: HELD_AGENT_SLUG,
+    content: {
+      phase: "stopped",
+      agent_pubkey: CATALOG_AGENT_PUBKEY,
+      needs_credential: true,
+    },
+  },
+];
+
 async function install(page: import("@playwright/test").Page) {
   // Seeded before the bridge installs: the section reads the store on mount and
   // the bridge is what triggers mount.
@@ -87,6 +102,7 @@ async function install(page: import("@playwright/test").Page) {
   await installMockBridge(page, {
     managedAgents: MANAGED_AGENTS,
     spawnerAnnouncements: SPAWNER_ANNOUNCEMENTS,
+    spawnerStatuses: SPAWNER_STATUSES,
   });
 }
 
@@ -193,6 +209,47 @@ test.describe("server-aware agent editing", () => {
     await waitForAnimations(page);
     await dialog.screenshot({
       path: `${SCREENSHOT_DIR}/03-no-catalog-fallback.png`,
+    });
+  });
+
+  test("offers a write-only credential card per connected spawner", async ({
+    page,
+  }) => {
+    await install(page);
+    await gotoAgents(page);
+
+    const card = page.getByTestId("spawner-credential-card").first();
+    await expect(card).toBeVisible({ timeout: 15_000 });
+    await expect(card).toContainText("Your Claude credential");
+    await expect(card).toContainText("never stored on this device");
+    // Password-type input: the token is never rendered back.
+    await expect(
+      card.getByTestId("spawner-credential-input"),
+    ).toHaveAttribute("type", "password");
+
+    await waitForAnimations(page);
+    await card.screenshot({ path: `${SCREENSHOT_DIR}/04-credential-card.png` });
+  });
+
+  test("flags an agent held for a missing owner credential", async ({
+    page,
+  }) => {
+    await install(page);
+    await gotoAgents(page);
+
+    const row = page
+      .locator("li")
+      .filter({ hasText: "Needs credential" })
+      .first();
+    await expect(row).toBeVisible({ timeout: 15_000 });
+    await expect(row).toContainText(HELD_AGENT_SLUG);
+    await expect(row).toContainText(
+      "Add your Claude credential below to start this agent.",
+    );
+
+    await waitForAnimations(page);
+    await row.screenshot({
+      path: `${SCREENSHOT_DIR}/05-needs-credential-badge.png`,
     });
   });
 });
