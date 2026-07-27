@@ -50,6 +50,7 @@ export function isolateSelectionForBlockFormatting(
     return false;
   }
 
+  const isBackward = transaction.selection.anchor > transaction.selection.head;
   let { from, to } = transaction.selection;
 
   const nodeAfterSelection = transaction.doc.resolve(to).nodeAfter;
@@ -74,6 +75,12 @@ export function isolateSelectionForBlockFormatting(
     ({ from, to } = mapRangeThroughLatestStep(transaction, from, to));
   }
 
-  transaction.setSelection(TextSelection.create(transaction.doc, from, to));
+  transaction.setSelection(
+    TextSelection.create(
+      transaction.doc,
+      isBackward ? to : from,
+      isBackward ? from : to,
+    ),
+  );
   return true;
 }

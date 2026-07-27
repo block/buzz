@@ -42,6 +42,7 @@ async function dragSelectText(
   page: Page,
   input: Locator,
   selectedText: string,
+  backward = false,
 ) {
   const points = await input.evaluate((element, text) => {
     const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
@@ -77,9 +78,11 @@ async function dragSelectText(
     throw new Error(`Could not locate "${text}" for mouse selection`);
   }, selectedText);
 
-  await page.mouse.move(points.start.x, points.start.y);
+  const dragStart = backward ? points.end : points.start;
+  const dragEnd = backward ? points.start : points.end;
+  await page.mouse.move(dragStart.x, dragStart.y);
   await page.mouse.down();
-  await page.mouse.move(points.end.x, points.end.y, { steps: 12 });
+  await page.mouse.move(dragEnd.x, dragEnd.y, { steps: 12 });
   await page.mouse.up();
 
   await expect
@@ -215,6 +218,40 @@ test("block formatting only changes text selected with a native mouse drag", asy
   await expect(input.locator(":scope > p").first()).toHaveText("before ");
   await expect(input.locator(":scope > ul")).toHaveText("selected");
   await expect(input.locator(":scope > p").last()).toHaveText(" after");
+});
+
+test("block formatting preserves a backward native selection", async ({
+  page,
+}) => {
+  await openGeneral(page);
+
+  const input = page.getByTestId("message-input");
+  await input.fill("before selected after");
+  await dragSelectText(page, input, "selected", true);
+
+  const tray = page.getByTestId("selection-formatting-tray");
+  await expect(tray).toBeVisible();
+  await tray.getByRole("button", { name: "Bullet list" }).click();
+
+  await expect(input.locator(":scope > ul")).toHaveText("selected");
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const selection = window.getSelection();
+        if (!(selection?.anchorNode && selection.focusNode)) return false;
+        const anchorRange = document.createRange();
+        anchorRange.setStart(selection.anchorNode, selection.anchorOffset);
+        anchorRange.collapse(true);
+        const focusRange = document.createRange();
+        focusRange.setStart(selection.focusNode, selection.focusOffset);
+        focusRange.collapse(true);
+        return (
+          anchorRange.compareBoundaryPoints(Range.START_TO_START, focusRange) >
+          0
+        );
+      }),
+    )
+    .toBe(true);
 });
 
 test("Buzz theme uses the primary color for the selection formatter", async ({

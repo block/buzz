@@ -1,4 +1,5 @@
 import * as React from "react";
+import { TextSelection } from "@tiptap/pm/state";
 import type { Editor } from "@tiptap/react";
 import {
   Bold,
@@ -31,8 +32,8 @@ type FormattingToolbarProps = {
 };
 
 type FormattingSelectionRange = {
-  from: number;
-  to: number;
+  anchor: number;
+  head: number;
 };
 
 type ActiveStates = {
@@ -152,8 +153,8 @@ export const FormattingToolbar = React.memo(function FormattingToolbar({
       return;
     }
 
-    const { from, to } = editor.state.selection;
-    pendingSelectionRef.current = { from, to };
+    const { anchor, head } = editor.state.selection;
+    pendingSelectionRef.current = { anchor, head };
   }, [editor]);
 
   const formattingChain = React.useCallback(() => {
@@ -165,10 +166,14 @@ export const FormattingToolbar = React.memo(function FormattingToolbar({
 
     if (
       range &&
-      range.from < range.to &&
-      range.to <= editor.state.doc.content.size
+      range.anchor !== range.head &&
+      range.anchor <= editor.state.doc.content.size &&
+      range.head <= editor.state.doc.content.size
     ) {
-      chain.setTextSelection(range);
+      chain.command(({ tr }) => {
+        tr.setSelection(TextSelection.create(tr.doc, range.anchor, range.head));
+        return true;
+      });
     }
 
     return chain.focus();
