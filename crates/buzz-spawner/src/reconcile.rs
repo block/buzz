@@ -96,6 +96,17 @@ pub enum Action {
         /// Container to remove.
         container_id: String,
     },
+    /// Tear down / decline to start an agent whose owner has delivered no
+    /// credential, and report `needs_credential`. Identity, record, and volume
+    /// are all preserved — this is a hold, not a delete.
+    HoldForCredential {
+        /// Owner pubkey.
+        owner_pubkey: String,
+        /// Spec slug.
+        slug: String,
+        /// Running container to remove, if one exists.
+        container_id: Option<String>,
+    },
 }
 
 /// Inputs to a reconciliation pass.
@@ -121,6 +132,12 @@ pub struct ReconcileInput<'a> {
     /// on every restart — the agent comes back with a new identity and loses
     /// its channel membership and attestation.
     pub desired_hydrated: bool,
+    /// Owner pubkeys with a stored provider credential.
+    ///
+    /// An attested, enabled agent whose owner is absent here is held stopped
+    /// instead of started — server agents run on their owner's token, never
+    /// the operator's.
+    pub credentialed_owners: &'a HashSet<String>,
 }
 
 /// Backoff before retrying a failed start, capped so a permanently broken agent
@@ -267,6 +284,22 @@ pub fn plan(input: ReconcileInput<'_>) -> Vec<Action> {
             continue;
         }
 
+        // 5b. Attested but the owner has delivered no credential — hold rather
+        // than start. Emitted only on the transition (running container, or a
+        // record that still thinks it started something) so status is not
+        // republished on every pass.
+        if !input.credentialed_owners.contains(&desired.owner_pubkey) {
+            let container_id = container.map(|c| c.id.clone());
+            if container_id.is_some() || record.spec_hash.is_some() {
+                actions.push(Action::HoldForCredential {
+                    owner_pubkey: desired.owner_pubkey.clone(),
+                    slug: desired.slug.clone(),
+                    container_id,
+                });
+            }
+            continue;
+        }
+
         let hash = desired.spec_hash();
 
         match container {
@@ -372,6 +405,17 @@ mod tests {
         }
     }
 
+    /// Every test owner ("b"*64) has a credential unless a test says otherwise.
+    fn all_owners() -> &'static HashSet<String> {
+        static SET: std::sync::OnceLock<HashSet<String>> = std::sync::OnceLock::new();
+        SET.get_or_init(|| HashSet::from(["b".repeat(64)]))
+    }
+
+    fn no_owners() -> &'static HashSet<String> {
+        static SET: std::sync::OnceLock<HashSet<String>> = std::sync::OnceLock::new();
+        SET.get_or_init(HashSet::new)
+    }
+
     fn input<'a>(
         desired: &'a [DesiredAgent],
         records: &'a [AgentRecord],
@@ -385,6 +429,7 @@ mod tests {
             attestation_timeout_secs: 600,
             max_agents: 16,
             desired_hydrated: true,
+            credentialed_owners: all_owners(),
         }
     }
 
@@ -685,6 +730,75 @@ mod tests {
             plan(late).as_slice(),
             [Action::ReRequestAttestation { .. }]
         ));
+    }
+
+    #[test]
+    fn holds_an_attested_agent_whose_owner_has_no_credential() {
+        let d = vec![desired("fizz", true, 1)];
+        let hash = d[0].spec_hash();
+        let r = vec![record("fizz", "agent1", true, Some(&hash))];
+        let mut uncred = input(&d, &r, &[]);
+        uncred.credentialed_owners = no_owners();
+        assert_eq!(
+            plan(uncred),
+            [Action::HoldForCredential {
+                owner_pubkey: "b".repeat(64),
+                slug: "fizz".into(),
+                container_id: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn stops_a_running_agent_when_its_owner_credential_is_cleared() {
+        let d = vec![desired("fizz", true, 1)];
+        let hash = d[0].spec_hash();
+        let r = vec![record("fizz", "agent1", true, Some(&hash))];
+        let c = vec![container("agent1", true)];
+        let mut uncred = input(&d, &r, &c);
+        uncred.credentialed_owners = no_owners();
+        assert_eq!(
+            plan(uncred),
+            [Action::HoldForCredential {
+                owner_pubkey: "b".repeat(64),
+                slug: "fizz".into(),
+                container_id: Some("ctr-agent1".into()),
+            }]
+        );
+    }
+
+    #[test]
+    fn an_already_held_agent_is_not_re_held_every_pass() {
+        // spec_hash None + no container = the hold already happened; a second
+        // HoldForCredential would republish status on every reconcile tick.
+        let d = vec![desired("fizz", true, 1)];
+        let r = vec![record("fizz", "agent1", true, None)];
+        let mut uncred = input(&d, &r, &[]);
+        uncred.credentialed_owners = no_owners();
+        assert!(plan(uncred).is_empty());
+    }
+
+    #[test]
+    fn credential_gate_does_not_block_attestation_or_teardown() {
+        // Attestation chasing still runs without a credential…
+        let d = vec![desired("fizz", true, 1)];
+        let r = vec![record("fizz", "agent1", false, None)];
+        let mut late = input(&d, &r, &[]);
+        late.credentialed_owners = no_owners();
+        late.now = 1_000 + 601;
+        assert!(matches!(
+            plan(late).as_slice(),
+            [Action::ReRequestAttestation { .. }]
+        ));
+        // …and so does deletion of a removed spec.
+        let hash = desired("fizz", true, 1).spec_hash();
+        let r = vec![record("fizz", "agent1", true, Some(&hash))];
+        let c = vec![container("agent1", true)];
+        let mut gone = input(&[], &r, &c);
+        gone.credentialed_owners = no_owners();
+        assert!(plan(gone)
+            .iter()
+            .any(|a| matches!(a, Action::Delete { .. })));
     }
 
     #[test]
