@@ -1254,6 +1254,21 @@ pub enum PatchesCmd {
         #[arg(long)]
         limit: Option<u32>,
     },
+    /// Read patch status events (NIP-34 kind:1630-1633) for a repo — the read side of sign-off
+    StatusList {
+        /// Repo owner pubkey (64-char hex)
+        #[arg(long)]
+        repo_owner: String,
+        /// Repo identifier (d-tag)
+        #[arg(long)]
+        repo_id: String,
+        /// Only status events referencing this patch root event id
+        #[arg(long)]
+        patch: Option<String>,
+        /// Maximum number of results
+        #[arg(long)]
+        limit: Option<u32>,
+    },
     /// Set status on a patch (open/merged/closed/draft — NIP-34 kind:1630-1633)
     Status {
         /// Root patch event id (first patch of the series/revision)
@@ -1968,7 +1983,7 @@ mod tests {
         );
         assert_eq!(
             names(&cmd, "patches"),
-            vec!["get", "list", "send", "status"]
+            vec!["get", "list", "send", "status", "status-list"]
         );
         assert_eq!(
             names(&cmd, "issues"),
@@ -2005,7 +2020,7 @@ mod tests {
             ("media", 1),
             ("messages", 8),
             ("pack", 2),
-            ("patches", 4),
+            ("patches", 5),
             ("pr", 5),
             ("reactions", 3),
             ("repos", 4),

@@ -110,6 +110,38 @@ pub async fn cmd_list_patches(
     Ok(())
 }
 
+/// Read patch status events (kind:1630-1633) for a repo — the read side of sign-off.
+/// Mirrors `cmd_list_patches` but selects status kinds instead of the patch kind, so
+/// operator sign-off (a signed `merged` status event) is queryable, not write-only.
+pub async fn cmd_list_status(
+    client: &BuzzClient,
+    repo_owner: &str,
+    repo_id: &str,
+    patch: Option<&str>,
+    limit: Option<u32>,
+) -> Result<(), CliError> {
+    validate_hex64(repo_owner)?;
+    validate_repo_id(repo_id)?;
+
+    let a_value = format!("30617:{repo_owner}:{repo_id}");
+    let mut filter = serde_json::json!({
+        "kinds": [1630, 1631, 1632, 1633],
+        "#a": [a_value]
+    });
+
+    if let Some(root) = patch {
+        validate_hex64(root)?;
+        filter["#e"] = serde_json::json!([root]);
+    }
+    if let Some(n) = limit {
+        filter["limit"] = serde_json::json!(n);
+    }
+
+    let resp = client.query(&filter).await?;
+    println!("{resp}");
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn cmd_patch_status(
     client: &BuzzClient,
@@ -244,6 +276,12 @@ pub async fn dispatch(cmd: crate::PatchesCmd, client: &BuzzClient) -> Result<(),
             author,
             limit,
         } => cmd_list_patches(client, &repo_owner, &repo_id, author.as_deref(), limit).await,
+        PatchesCmd::StatusList {
+            repo_owner,
+            repo_id,
+            patch,
+            limit,
+        } => cmd_list_status(client, &repo_owner, &repo_id, patch.as_deref(), limit).await,
         PatchesCmd::Status {
             root,
             status,
