@@ -1,5 +1,6 @@
 // biome-ignore format: keep compact to stay within file size limit
 import * as React from "react";
+import { useAppShell } from "@/app/AppShellContext";
 import { FeatureGate } from "@/shared/features";
 import { SidebarDndContext } from "@/features/sidebar/ui/SidebarDnd";
 
@@ -15,13 +16,11 @@ import {
 import { useActiveWorkingChannelsById } from "@/features/sidebar/lib/useActiveWorkingChannelsById";
 import { useDmSidebarMetadata } from "@/features/sidebar/useDmSidebarMetadata";
 import { sortDmChannelsForSidebar } from "@/features/sidebar/lib/dmSidebarSort";
-import {
-  sectionSortGroupKey,
-  sortChannelsForSidebar,
-} from "@/features/sidebar/lib/channelSortPreference";
+import { sectionSortGroupKey } from "@/features/sidebar/lib/channelSortPreference";
 import { useChannelSortPreference } from "@/features/sidebar/lib/useChannelSortPreference";
 import { useSidebarScrollLock } from "@/features/sidebar/lib/useSidebarScrollLock";
 import { isSidebarBackgroundTarget } from "@/features/sidebar/lib/sidebarBackgroundTarget";
+import { useSidebarChannelGroups } from "@/features/sidebar/lib/useSidebarChannelGroups";
 import { useUnreadOverflow } from "@/features/sidebar/lib/useUnreadOverflow";
 import {
   CreateSectionDialog,
@@ -167,9 +166,6 @@ type AppSidebarProps = {
   onBackgroundClick?: () => void;
   isCreateChannelOpen?: boolean;
   onCreateChannelOpenChange?: (open: boolean) => void;
-  mutedChannelIds?: ReadonlySet<string>;
-  onMuteChannel?: (channelId: string) => void;
-  onUnmuteChannel?: (channelId: string) => void;
   starredChannelIds?: ReadonlySet<string>;
   onStarChannel?: (channelId: string) => void;
   onUnstarChannel?: (channelId: string) => void;
@@ -230,13 +226,19 @@ export function AppSidebar({
   onNewMessage,
   isCreateChannelOpen: isCreateChannelOpenProp,
   onCreateChannelOpenChange,
-  mutedChannelIds,
-  onMuteChannel,
-  onUnmuteChannel,
   starredChannelIds,
   onStarChannel,
   onUnstarChannel,
 }: AppSidebarProps) {
+  // NIP-CN notification state comes from the shell surface, not props: the
+  // sidebar, its rows, and the channel context menu all read the same resolver.
+  const { channelNotify, mentionUnreadChannelIds } = useAppShell();
+  const {
+    hiddenChannelIds,
+    mutedChannelIds,
+    muteChannel: onMuteChannel,
+    unmuteChannel: onUnmuteChannel,
+  } = channelNotify;
   const activeWorkingByChannelId = useActiveWorkingChannelsById();
   const { status: updateStatus } = useUpdaterContext();
   const canShowSidebarUpdateCard = shouldShowSidebarUpdateCard(updateStatus);
@@ -383,55 +385,17 @@ export function AppSidebar({
       if (channel.id === selectedChannelId) onSelectHome();
     });
 
-  const streamChannels = React.useMemo(
-    () => channels.filter((channel) => channel.channelType === "stream"),
-    [channels],
-  );
-
-  const sectionBuckets = React.useMemo(() => {
-    const bySection: Record<string, Channel[]> = {};
-    const unassigned: Channel[] = [];
-    const sectionIds = new Set(channelSections.map((s) => s.id));
-
-    for (const channel of streamChannels) {
-      if (starredChannelIds?.has(channel.id)) continue;
-      const sectionId = channelAssignments[channel.id];
-      if (sectionId && sectionIds.has(sectionId)) {
-        if (!bySection[sectionId]) {
-          bySection[sectionId] = [];
-        }
-        bySection[sectionId].push(channel);
-      } else {
-        unassigned.push(channel);
-      }
-    }
-    // Apply each grouping's own sort preference; section membership itself
-    // is untouched.
-    for (const sectionId of Object.keys(bySection)) {
-      bySection[sectionId] = sortChannelsForSidebar(
-        bySection[sectionId],
-        sortModeFor(sectionSortGroupKey(sectionId)),
-      );
-    }
-    return {
-      bySection,
-      unassigned: sortChannelsForSidebar(unassigned, sortModeFor("channels")),
-    };
-  }, [
-    streamChannels,
-    channelSections,
-    channelAssignments,
-    starredChannelIds,
-    sortModeFor,
-  ]);
-
-  const starredChannels = React.useMemo(() => {
-    if (!starredChannelIds || starredChannelIds.size === 0) return [];
-    return sortChannelsForSidebar(
-      streamChannels.filter((channel) => starredChannelIds.has(channel.id)),
-      sortModeFor("starred"),
-    );
-  }, [streamChannels, starredChannelIds, sortModeFor]);
+  const { forumChannels, sectionBuckets, starredChannels, streamChannels } =
+    useSidebarChannelGroups({
+      activeChannelId: selectedView === "channel" ? selectedChannelId : null,
+      channelAssignments,
+      channels,
+      channelSections,
+      hiddenChannelIds,
+      mentionUnreadChannelIds,
+      sortModeFor,
+      starredChannelIds,
+    });
 
   const handleCreateSectionForChannel = React.useCallback(
     (channelId: string) => {
@@ -454,14 +418,6 @@ export function AppSidebar({
     [createSection, assignChannel, createSectionState.pendingChannelId],
   );
 
-  const forumChannels = React.useMemo(
-    () =>
-      sortChannelsForSidebar(
-        channels.filter((channel) => channel.channelType === "forum"),
-        sortModeFor("forums"),
-      ),
-    [channels, sortModeFor],
-  );
   const directMessages = React.useMemo(
     () => channels.filter((channel) => channel.channelType === "dm"),
     [channels],

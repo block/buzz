@@ -1,6 +1,7 @@
 import { LogIn } from "lucide-react";
 import type * as React from "react";
 
+import { useAppShell } from "@/app/AppShellContext";
 import { ChatHeader } from "@/features/chat/ui/ChatHeader";
 import type { EphemeralChannelDisplay } from "@/features/channels/lib/ephemeralChannel";
 import type { ActiveDmHeaderParticipant } from "@/features/channels/useActiveChannelHeader";
@@ -62,6 +63,12 @@ export function ChannelScreenHeader({
   onManageChannel,
   onToggleMembers,
 }: ChannelScreenHeaderProps) {
+  const { channelNotify } = useAppShell();
+  // DMs bypass NIP-CN levels entirely, so they never get the suffix.
+  const notifyState =
+    activeChannel && activeChannel.channelType !== "dm"
+      ? channelNotify.resolveChannelNotify(activeChannel.id)
+      : null;
   const isGroupDm =
     activeChannel?.channelType === "dm" &&
     activeDmHeaderParticipants.length > 1;
@@ -106,7 +113,7 @@ export function ChannelScreenHeader({
       chromeWrapperRef={chromeWrapperRef}
       actions={actions}
       channelType={activeChannel?.channelType}
-      description={getChannelDescription(activeChannel)}
+      description={getChannelDescription(activeChannel, notifyState)}
       leadingContent={
         activeChannel?.channelType === "dm" ? (
           isGroupDm ? (

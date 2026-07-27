@@ -1,4 +1,5 @@
 import {
+  Check,
   ChevronRight,
   Copy,
   FileText,
@@ -12,6 +13,7 @@ import { toast } from "sonner";
 import type { Channel } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { writeTextToClipboard } from "@/shared/lib/clipboard";
+import { Switch } from "@/shared/ui/switch";
 
 function getChannelIcon(channelType: Channel["channelType"]): LucideIcon {
   if (channelType === "forum") {
@@ -221,6 +223,95 @@ export function NarrativeField({
           {value}
         </span>
       </span>
+    </div>
+  );
+}
+
+/**
+ * A radio row inside a `FieldGroup` — one option of a single-choice setting.
+ * Rows sharing a `name` form one native radio group; the parent owns the
+ * selection state.
+ */
+export function ChoiceFieldRow({
+  description,
+  label,
+  name,
+  onSelect,
+  selected,
+  testId,
+}: {
+  description?: string;
+  label: string;
+  name: string;
+  onSelect: () => void;
+  selected: boolean;
+  testId?: string;
+}) {
+  return (
+    <label
+      className="flex w-full cursor-pointer items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/40"
+      data-testid={testId}
+    >
+      <input
+        checked={selected}
+        className="sr-only"
+        name={name}
+        onChange={onSelect}
+        type="radio"
+      />
+      <span className="flex h-5 w-5 shrink-0 items-center justify-center">
+        {selected ? <Check className="h-4 w-4 text-foreground" /> : null}
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block text-sm font-medium text-foreground">
+          {label}
+        </span>
+        {description ? (
+          <span className="mt-0.5 block text-xs text-muted-foreground">
+            {description}
+          </span>
+        ) : null}
+      </span>
+    </label>
+  );
+}
+
+/** A switch row inside a `FieldGroup` — one boolean setting. */
+export function ToggleFieldRow({
+  checked,
+  description,
+  icon: Icon,
+  label,
+  onCheckedChange,
+  testId,
+}: {
+  checked: boolean;
+  description?: string;
+  icon: LucideIcon;
+  label: string;
+  onCheckedChange: (checked: boolean) => void;
+  testId?: string;
+}) {
+  return (
+    <div className="flex w-full items-center gap-3 px-4 py-3">
+      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-muted/60">
+        <Icon className="h-4 w-4 text-muted-foreground" />
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block text-sm font-medium text-foreground">
+          {label}
+        </span>
+        {description ? (
+          <span className="mt-0.5 block text-xs text-muted-foreground">
+            {description}
+          </span>
+        ) : null}
+      </span>
+      <Switch
+        checked={checked}
+        data-testid={testId}
+        onCheckedChange={onCheckedChange}
+      />
     </div>
   );
 }

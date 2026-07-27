@@ -14,6 +14,8 @@ export type ResolvedChannelNotifyState = {
   level: ChannelNotifyLevel;
   /** True when `level` is "mute" only because a timed mute is still running. */
   timedMuteActive: boolean;
+  /** Expiry of the running timed mute (Unix seconds), or null when none runs. */
+  muteUntil: number | null;
   desktop: boolean;
   followAllThreads: boolean;
   broadcasts: boolean;
@@ -25,6 +27,7 @@ export const DEFAULT_CHANNEL_NOTIFY_STATE: ResolvedChannelNotifyState =
   Object.freeze({
     level: "all" as ChannelNotifyLevel,
     timedMuteActive: false,
+    muteUntil: null,
     desktop: true,
     followAllThreads: false,
     broadcasts: true,
@@ -81,6 +84,7 @@ export function resolveChannelNotifyState(
   return {
     level,
     timedMuteActive,
+    muteUntil: timedMuteActive ? (entry?.muteUntil ?? null) : null,
     desktop: entry?.desktop ?? true,
     followAllThreads: entry?.followAllThreads ?? false,
     broadcasts: entry?.broadcasts ?? true,

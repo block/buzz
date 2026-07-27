@@ -43,6 +43,7 @@ test("an entry with only advanced fields keeps level 'all'", () => {
     {
       level: "all",
       timedMuteActive: false,
+      muteUntil: null,
       desktop: false,
       followAllThreads: true,
       broadcasts: false,
@@ -94,6 +95,12 @@ test("muteUntil exactly at now is already expired", () => {
   const state = resolve({ muteUntil: NOW, updatedAt: 1 });
   assert.equal(state.level, "all");
   assert.equal(state.timedMuteActive, false);
+});
+
+test("muteUntil is exposed while running and null once expired", () => {
+  const entry = { muteUntil: NOW + 60, updatedAt: 1 };
+  assert.equal(resolve(entry).muteUntil, NOW + 60);
+  assert.equal(resolve(entry, null, NOW + 61).muteUntil, null);
 });
 
 test("timed mute on an explicitly muted channel keeps hidden true", () => {

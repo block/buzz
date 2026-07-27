@@ -21,6 +21,7 @@ import {
 } from "@/features/channels/hooks";
 import { useChannelModerationCapabilities } from "@/features/channels/ui/ChannelManagementModerationActions";
 import type { ChannelSection } from "@/features/sidebar/lib/useChannelSections";
+import { ChannelNotificationsSubmenu } from "@/features/sidebar/ui/ChannelNotificationsSubmenu";
 import {
   ContextMenuIconSlot,
   deferMenuAction,
@@ -207,6 +208,9 @@ export function ChannelContextMenuItems({
   const showReadToggle = hasUnread
     ? Boolean(onMarkChannelRead)
     : Boolean(onMarkChannelUnread);
+  // The mute handlers stay the presence gate for the whole notification block:
+  // channels get the NIP-CN "Notifications" submenu, DMs keep the binary pair
+  // (levels are channel-scoped only in v1).
   const showMuteToggle = Boolean(onMuteChannel && onUnmuteChannel);
   const showMove = Boolean(
     sections &&
@@ -256,7 +260,10 @@ export function ChannelContextMenuItems({
         </ContextMenuItem>
       ) : null}
       {showMuteToggle || showStar ? <ContextMenuSeparator /> : null}
-      {showMuteToggle ? (
+      {showMuteToggle && channel.channelType !== "dm" ? (
+        <ChannelNotificationsSubmenu channelId={channel.id} />
+      ) : null}
+      {showMuteToggle && channel.channelType === "dm" ? (
         isMuted ? (
           <ContextMenuItem
             onSelect={() =>

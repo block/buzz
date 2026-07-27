@@ -19,6 +19,11 @@ export type ChannelNotificationSettings = {
    * mute). Consumers that still speak in booleans read this.
    */
   mutedChannelIds: ReadonlySet<string>;
+  /**
+   * Channels the resolver marks `hidden` ("Mute and hide"): an explicit prefs
+   * level of "mute". Legacy-only and timed mutes never hide.
+   */
+  hiddenChannelIds: ReadonlySet<string>;
   resolveChannelNotify: (channelId: string) => ResolvedChannelNotifyState;
   setChannelNotifyLevel: (channelId: string, level: ChannelNotifyLevel) => void;
   muteChannelUntil: (channelId: string, untilSeconds: number) => void;
@@ -41,6 +46,7 @@ export type ChannelNotificationSettings = {
 export const DEFAULT_CHANNEL_NOTIFICATION_SETTINGS: ChannelNotificationSettings =
   Object.freeze({
     mutedChannelIds: new Set<string>(),
+    hiddenChannelIds: new Set<string>(),
     resolveChannelNotify: () => DEFAULT_CHANNEL_NOTIFY_STATE,
     setChannelNotifyLevel: () => {},
     muteChannelUntil: () => {},
@@ -91,8 +97,19 @@ export function useChannelNotificationSettings(
     }, [legacyMutedChannelIds, prefsStore.channels, resolveChannel]),
   );
 
+  const hiddenChannelIds = useStableSet(
+    React.useMemo(() => {
+      const ids = new Set<string>();
+      for (const channelId of Object.keys(prefsStore.channels)) {
+        if (resolveChannel(channelId).hidden) ids.add(channelId);
+      }
+      return ids;
+    }, [prefsStore.channels, resolveChannel]),
+  );
+
   return {
     mutedChannelIds,
+    hiddenChannelIds,
     resolveChannelNotify: resolveChannel,
     setChannelNotifyLevel,
     muteChannelUntil: prefs.muteChannelUntil,

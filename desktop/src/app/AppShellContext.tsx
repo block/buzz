@@ -55,6 +55,9 @@ type AppShellContextValue = {
   // surface reads, plus mutations that own the legacy `channel-mutes`
   // dual-write so callers never have to.
   channelNotify: ChannelNotificationSettings;
+  // Channels holding a mention-tier unread. The sidebar's escape hatch for
+  // "Mute and hide" channels: a hidden channel with a mention stays rendered.
+  mentionUnreadChannelIds: ReadonlySet<string>;
   // Open the Settings panel at the given section. Available on all surfaces
   // that render under AppShell (channel, home, projects, pulse, agents).
   // Used by config-nudge cards to deep-link to Settings → Agents.
@@ -83,6 +86,7 @@ const AppShellContext = React.createContext<AppShellContextValue>({
   threadActivityItems: [],
   threadActivityFeedItems: [],
   channelNotify: DEFAULT_CHANNEL_NOTIFICATION_SETTINGS,
+  mentionUnreadChannelIds: EMPTY_SET,
   feedItemState: {
     doneSet: EMPTY_SET,
     markDone: () => {},

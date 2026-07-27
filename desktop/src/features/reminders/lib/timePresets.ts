@@ -28,9 +28,14 @@ export function nextDayAt9am(dayOffset: number): number {
   return Math.floor(target.getTime() / 1_000);
 }
 
+/** One hour from now, as a Unix timestamp in seconds. */
+export function inOneHour(): number {
+  return nowSeconds() + 60 * 60;
+}
+
 export const TIME_PRESETS: TimePreset[] = [
   { label: "In 30 minutes", getTimestamp: () => nowSeconds() + 30 * 60 },
-  { label: "In 1 hour", getTimestamp: () => nowSeconds() + 60 * 60 },
+  { label: "In 1 hour", getTimestamp: inOneHour },
   { label: "In 3 hours", getTimestamp: () => nowSeconds() + 3 * 60 * 60 },
   { label: "Tomorrow at 9am", getTimestamp: () => nextDayAt9am(1) },
   {

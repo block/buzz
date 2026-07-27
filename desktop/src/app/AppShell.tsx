@@ -739,6 +739,7 @@ export function AppShell() {
             threadActivityFeedItems,
             feedItemState,
             channelNotify,
+            mentionUnreadChannelIds: highPriorityUnreadChannelIds,
             onOpenSettings: handleOpenSettings,
           }}
         >
@@ -911,9 +912,6 @@ export function AppShell() {
                           selectedView={selectedView}
                           unreadChannelIds={unreadChannelIds}
                           unreadChannelCounts={unreadChannelCounts}
-                          mutedChannelIds={channelNotify.mutedChannelIds}
-                          onMuteChannel={channelNotify.muteChannel}
-                          onUnmuteChannel={channelNotify.unmuteChannel}
                           starredChannelIds={starredChannelIds}
                           onStarChannel={starChannel}
                           onUnstarChannel={unstarChannel}
