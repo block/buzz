@@ -148,6 +148,9 @@ class ChannelDetailPage extends HookConsumerWidget {
         channel;
     final resolvedChannel =
         detailsAsync.whenData(baseChannel.mergeDetails).value ?? baseChannel;
+    final appBarTitleContentHeight = resolvedChannel.isDm
+        ? _dmAppBarTitleContentHeight(context)
+        : 0.0;
     final readTimestamp = _channelReadTimestamp(
       channel: resolvedChannel,
       messagesState: messagesState,
@@ -185,6 +188,7 @@ class ChannelDetailPage extends HookConsumerWidget {
     return FrostedScaffold(
       appBar: FrostedAppBar(
         iconColor: context.colors.primary,
+        titleContentHeight: appBarTitleContentHeight,
         title: resolvedChannel.isDm
             ? _DmAppBarTitle(
                 channel: resolvedChannel,
@@ -262,13 +266,19 @@ class ChannelDetailPage extends HookConsumerWidget {
                 : messagesState.when(
                     loading: () => Padding(
                       padding: EdgeInsets.only(
-                        top: frostedAppBarHeight(context),
+                        top: frostedAppBarHeight(
+                          context,
+                          titleContentHeight: appBarTitleContentHeight,
+                        ),
                       ),
                       child: const Center(child: CircularProgressIndicator()),
                     ),
                     error: (e, _) => Padding(
                       padding: EdgeInsets.only(
-                        top: frostedAppBarHeight(context),
+                        top: frostedAppBarHeight(
+                          context,
+                          titleContentHeight: appBarTitleContentHeight,
+                        ),
                       ),
                       child: Center(
                         child: Text(
@@ -300,6 +310,7 @@ class ChannelDetailPage extends HookConsumerWidget {
                         currentPubkey: currentPubkey,
                         isMember: resolvedChannel.isMember,
                         isArchived: resolvedChannel.isArchived,
+                        appBarTitleContentHeight: appBarTitleContentHeight,
                       );
                     },
                   ),

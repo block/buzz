@@ -1,6 +1,6 @@
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
-import '../../shared/relay/relay.dart';
+import '../relay/relay.dart';
 import 'custom_emoji.dart';
 
 /// Community custom-emoji palette (NIP-30, per-user kind:30030 sets unioned).

@@ -1,6 +1,6 @@
 import 'package:flutter/foundation.dart';
 
-import '../../shared/relay/nostr_models.dart';
+import '../relay/nostr_models.dart';
 
 /// A community custom emoji: a `:shortcode:` mapped to an image URL.
 ///

@@ -122,6 +122,7 @@ export default defineConfig({
         "**/inbox-live-update.spec.ts",
         "**/mesh-compute.spec.ts",
         "**/observer-archive-policy.spec.ts",
+        "**/harness-management.spec.ts",
       ],
       use: {
         ...devices["Desktop Chrome"],

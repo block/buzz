@@ -12,7 +12,10 @@ void main() {
   ) async {
     await tester.pumpWidget(
       ProviderScope(
-        child: MaterialApp(theme: AppTheme.light(), home: const HomePage()),
+        child: MaterialApp(
+          theme: AppTheme.light(),
+          home: const HomePage(settingsPageBuilder: _buildSettingsPage),
+        ),
       ),
     );
     await tester.pump();
@@ -67,7 +70,10 @@ void main() {
 
     await tester.pumpWidget(
       ProviderScope(
-        child: MaterialApp(theme: AppTheme.light(), home: const HomePage()),
+        child: MaterialApp(
+          theme: AppTheme.light(),
+          home: const HomePage(settingsPageBuilder: _buildSettingsPage),
+        ),
       ),
     );
     await tester.pump();
@@ -95,7 +101,10 @@ void main() {
   ) async {
     await tester.pumpWidget(
       ProviderScope(
-        child: MaterialApp(theme: AppTheme.light(), home: const HomePage()),
+        child: MaterialApp(
+          theme: AppTheme.light(),
+          home: const HomePage(settingsPageBuilder: _buildSettingsPage),
+        ),
       ),
     );
     await tester.pump();
@@ -135,3 +144,5 @@ void main() {
     expect(opacity(), closeTo(1, 0.001));
   });
 }
+
+Widget _buildSettingsPage(BuildContext context) => const SizedBox.shrink();

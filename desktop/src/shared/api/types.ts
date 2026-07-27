@@ -343,6 +343,12 @@ export type ManagedAgent = {
   pubkey: string;
   name: string;
   personaId: string | null;
+  /**
+   * The record's harness/runtime id (e.g. "goose", "my-custom-harness").
+   * `null` means the agent inherits its harness from the linked persona.
+   * Used to count agents referencing a harness definition (delete confirm).
+   */
+  runtime: string | null;
   teamId?: string | null;
   relayUrl: string;
   acpCommand: string;
@@ -363,6 +369,7 @@ export type ManagedAgent = {
   systemPrompt: string | null;
   avatarUrl: string | null;
   model: string | null;
+  modelSource: "definition" | "global" | "instance_legacy" | null;
   /** LLM inference provider, from the agent's pinned record snapshot. */
   provider: string | null;
   /**
@@ -557,6 +564,21 @@ export type AcpRuntimeCatalogEntry = {
   authStatus: AuthStatus;
   /** Hint for completing authentication; null when not applicable or already logged in. */
   loginHint: string | null;
+  /**
+   * Whether this entry is compiled into the app ("builtin"), a bundled preset
+   * ("preset" — PATH-probed, not editable/deletable), or loaded from a user
+   * JSON file in `custom_harnesses/` ("custom"). Controls editability in the
+   * UI — only "custom" entries can be edited or deleted.
+   */
+  source: "builtin" | "preset" | "custom";
+  /**
+   * Definition-level environment variables for `source: custom` entries.
+   *
+   * Populated by the backend from `HarnessDefinition.env` so the edit form can
+   * read them back without losing existing env vars on save. Always absent/empty
+   * for `builtin` and `preset` entries.
+   */
+  definitionEnv?: Record<string, string>;
 };
 
 /** An AcpRuntimeCatalogEntry that is confirmed available — command and binaryPath are non-null. */

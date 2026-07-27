@@ -27,11 +27,17 @@ const STATUS_PUBLISH_TIMEOUT: Duration = Duration::from_secs(10);
 /// not hammer discovery every tick, but a recovered peer is noticed quickly.
 const INGRESS_WATCHDOG_BASE: Duration = Duration::from_secs(15);
 const INGRESS_WATCHDOG_MAX: Duration = Duration::from_secs(120);
+/// A Share Compute node may start before another member's signed status reaches
+/// the relay. Recheck promptly so simultaneous starts converge into one Buzz
+/// mesh instead of remaining independent islands.
+const MESH_JOIN_POLL_INTERVAL: Duration = Duration::from_secs(15);
+const MESH_JOIN_RETRY_MAX: Duration = Duration::from_secs(120);
 
 pub struct MeshCoordinator {
     _status_publisher: tokio::task::JoinHandle<()>,
     _roster_watcher: tokio::task::JoinHandle<()>,
     _ingress_watchdog: tokio::task::JoinHandle<()>,
+    _mesh_join_watcher: tokio::task::JoinHandle<()>,
 }
 
 /// Start the runtime-owned status publisher and admission-roster watcher.
@@ -62,9 +68,22 @@ pub async fn start_coordinator(app: AppHandle) {
         let mut pending_shrink: Option<Vec<String>> = None;
         loop {
             tokio::time::sleep(ROSTER_POLL_INTERVAL).await;
-            let state = roster_app.state::<AppState>();
-            if let Err(error) = reconcile_roster(&state, &mut pending_shrink).await {
+            if let Err(error) = reconcile_roster(&roster_app, &mut pending_shrink).await {
                 eprintln!("buzz-mesh: roster reconcile failed: {error}");
+            }
+        }
+    });
+    let join_app = app.clone();
+    let mesh_join_watcher = tokio::spawn(async move {
+        let mut sleep_for = MESH_JOIN_POLL_INTERVAL;
+        loop {
+            tokio::time::sleep(sleep_for).await;
+            match reconcile_buzz_mesh_join(&join_app).await {
+                Ok(()) => sleep_for = MESH_JOIN_POLL_INTERVAL,
+                Err(error) => {
+                    eprintln!("buzz-mesh: community mesh join reconcile failed: {error}");
+                    sleep_for = (sleep_for * 2).min(MESH_JOIN_RETRY_MAX);
+                }
             }
         }
     });
@@ -98,12 +117,83 @@ pub async fn start_coordinator(app: AppHandle) {
             _status_publisher: status_publisher,
             _roster_watcher: roster_watcher,
             _ingress_watchdog: ingress_watchdog,
+            _mesh_join_watcher: mesh_join_watcher,
         });
     } else {
         status_publisher.abort();
         roster_watcher.abort();
         ingress_watchdog.abort();
+        mesh_join_watcher.abort();
     }
+}
+
+/// Join an isolated runtime to the existing Buzz community mesh. The relay is
+/// discovery only: the selected endpoint is member-signed and validated, then
+/// MeshLLM establishes the encrypted peer transport itself.
+async fn reconcile_buzz_mesh_join(app: &AppHandle) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let peer_ids = {
+        let runtime = state.mesh_llm_runtime.lock().await;
+        let Some(runtime) = runtime.as_ref() else {
+            return Ok(());
+        };
+        let payload = runtime
+            .status_report_payload()
+            .await
+            .map_err(|error| error.to_string())?;
+        visible_peer_ids(&payload)
+    };
+
+    let targets = crate::commands::mesh_llm::resolve_buzz_mesh_join_targets(&state).await?;
+    let Some(target) = targets
+        .into_iter()
+        .find(|target| !target_is_visible(target, &peer_ids))
+    else {
+        return Ok(());
+    };
+
+    let runtime = state.mesh_llm_runtime.lock().await;
+    let Some(runtime) = runtime.as_ref() else {
+        return Ok(());
+    };
+    let payload = runtime
+        .status_report_payload()
+        .await
+        .map_err(|error| error.to_string())?;
+    if target_is_visible(&target, &visible_peer_ids(&payload)) {
+        return Ok(());
+    }
+    runtime
+        .dial_endpoint_addr(target.endpoint_addr)
+        .await
+        .map_err(|error| format!("mesh join failed: {error:#}"))
+}
+
+fn visible_peer_ids(payload: &serde_json::Value) -> Vec<String> {
+    payload
+        .get("peers")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|peer| peer.get("id").and_then(serde_json::Value::as_str))
+        .map(|id| id.trim().to_ascii_lowercase())
+        .filter(|id| !id.is_empty())
+        .collect()
+}
+
+fn target_is_visible(target: &crate::mesh_llm::MeshServeTarget, peer_ids: &[String]) -> bool {
+    let Some(endpoint_id) = target.endpoint_id.as_deref() else {
+        return false;
+    };
+    let endpoint_id = endpoint_id.trim().to_ascii_lowercase();
+    if endpoint_id.is_empty() {
+        return false;
+    }
+    peer_ids.iter().any(|peer_id| {
+        let peer_id = peer_id.trim().to_ascii_lowercase();
+        !peer_id.is_empty()
+            && (endpoint_id.starts_with(&peer_id) || peer_id.starts_with(&endpoint_id))
+    })
 }
 
 /// Outcome of a roster reconcile decision.
@@ -170,9 +260,10 @@ fn roster_reconcile_action(
 }
 
 async fn reconcile_roster(
-    state: &AppState,
+    app: &AppHandle,
     pending_shrink: &mut Option<Vec<String>>,
 ) -> Result<(), String> {
+    let state = app.state::<AppState>();
     let current_request = {
         let runtime = state.mesh_llm_runtime.lock().await;
         match runtime.as_ref() {
@@ -192,7 +283,7 @@ async fn reconcile_roster(
     // other member on a transient relay blip (the flapping restart loop). Keep
     // the current allowlist and try again on the next poll. A shrink is held
     // for one extra poll (hysteresis) so a single short-read never tears down.
-    let query = crate::commands::mesh_llm::resolve_trusted_owner_ids(state).await;
+    let query = crate::commands::mesh_llm::resolve_trusted_owner_ids(&state).await;
     let fresh = match roster_reconcile_action(current_owners, pending_shrink.as_deref(), query) {
         RosterReconcileAction::Keep => {
             *pending_shrink = None;
@@ -209,8 +300,27 @@ async fn reconcile_roster(
         }
     };
 
-    let mut request = current_request;
+    let mut request = current_request.clone();
     request.trusted_owner_ids = Some(fresh);
+    // Bootstrap endpoints are live device state, not configuration. The
+    // endpoint used at the previous start may belong to the member that just
+    // left or to a device whose iroh identity rotated while offline. Resolve a
+    // fresh validated peer for this restart; starting isolated is safe because
+    // the join watcher will converge it when a member next publishes.
+    request.join_token = match crate::commands::mesh_llm::resolve_buzz_mesh_join_targets(&state)
+        .await
+    {
+        Ok(targets) => targets
+            .into_iter()
+            .next()
+            .map(|target| target.endpoint_addr),
+        Err(error) => {
+            eprintln!(
+                "buzz-mesh: could not refresh bootstrap endpoint for roster restart; starting isolated: {error}"
+            );
+            None
+        }
+    };
     let mut guard = state.mesh_llm_runtime.lock().await;
     let startup_pending = match guard.as_ref() {
         Some(runtime) => runtime.is_starting().await,
@@ -222,12 +332,29 @@ async fn reconcile_roster(
         );
         return Ok(());
     }
+    if guard
+        .as_ref()
+        .is_some_and(|runtime| runtime.start_request() != &current_request)
+    {
+        // The runtime changed while relay discovery was in flight. Its own
+        // request is now authoritative; the next poll will reconcile that
+        // runtime instead of tearing down a fresh replacement from this stale
+        // snapshot.
+        return Ok(());
+    }
     let Some(running) = guard.take() else {
         return Ok(());
     };
     eprintln!("buzz-mesh: membership roster changed; restarting mesh node with fresh allowlist");
     if let Err(error) = running.stop().await {
-        eprintln!("buzz-mesh: stopping mesh node for roster restart failed: {error}");
+        drop(guard);
+        eprintln!(
+            "buzz-mesh: stopping mesh node for roster restart failed; restarting Buzz instead of racing the occupied ingress: {error}"
+        );
+        app.request_restart();
+        return Err(format!(
+            "mesh node shutdown failed during roster change: {error}"
+        ));
     }
     let replacement = crate::mesh_llm::DesktopMeshRuntime::start(request)
         .await
@@ -356,6 +483,51 @@ mod tests {
     use nostr::JsonUtil;
 
     use super::*;
+
+    fn join_target(endpoint_id: Option<&str>) -> crate::mesh_llm::MeshServeTarget {
+        crate::mesh_llm::MeshServeTarget {
+            model_id: "model".to_string(),
+            model_name: None,
+            endpoint_addr: "iroh://example".to_string(),
+            reporter_pubkey: Some("member".to_string()),
+            owner_id: Some("owner".to_string()),
+            node_name: None,
+            capacity: None,
+            endpoint_id: endpoint_id.map(str::to_string),
+            device_id: None,
+            device_name: None,
+        }
+    }
+
+    #[test]
+    fn visible_peer_ids_reads_the_sdk_status_shape() {
+        assert_eq!(
+            visible_peer_ids(&serde_json::json!({
+                "peers": [{"id": " ABC123 "}, {"id": "def456"}, {"name": "ignored"}]
+            })),
+            vec!["abc123".to_string(), "def456".to_string()]
+        );
+    }
+
+    #[test]
+    fn target_visibility_accepts_sdk_short_endpoint_ids() {
+        let target = join_target(Some("ABC1234567890"));
+
+        assert!(target_is_visible(&target, &["abc123".to_string()]));
+        assert!(!target_is_visible(&target, &["def456".to_string()]));
+    }
+
+    #[test]
+    fn target_without_an_endpoint_id_is_never_treated_as_connected() {
+        assert!(!target_is_visible(
+            &join_target(None),
+            &["abc123".to_string()]
+        ));
+        assert!(!target_is_visible(
+            &join_target(Some("  ")),
+            &["abc123".to_string()]
+        ));
+    }
 
     // Regression: a transient roster-query failure must never restart the node
     // down to self-only. Before the fix, `resolve_trusted_owner_ids` returned

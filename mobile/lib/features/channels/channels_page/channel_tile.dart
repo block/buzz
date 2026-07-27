@@ -41,20 +41,19 @@ class _ChannelTile extends ConsumerWidget {
         ),
         child: Row(
           children: [
-            if (channel.isDm)
-              _DmAvatar(channel: channel, currentPubkey: currentPubkey)
-            else
-              SizedBox(
-                width: _kChannelLeadingWidth,
-                child: Align(
-                  alignment: Alignment.centerLeft,
-                  child: Icon(
-                    channelIcon(channel),
-                    size: _kChannelIconSize,
-                    color: context.colors.onSurface,
-                  ),
-                ),
+            SizedBox(
+              width: _kChannelLeadingWidth,
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: channel.isDm
+                    ? _DmAvatar(channel: channel, currentPubkey: currentPubkey)
+                    : Icon(
+                        channelIcon(channel),
+                        size: _kChannelIconSize,
+                        color: context.colors.onSurface,
+                      ),
               ),
+            ),
             const SizedBox(width: _kChannelLabelGap),
             Expanded(
               child: Column(
@@ -343,8 +342,8 @@ class _DmAvatar extends ConsumerWidget {
 
     if (visiblePubkeys.length > 1) {
       return Container(
-        width: 22,
-        height: 22,
+        width: _kDmAvatarSize,
+        height: _kDmAvatarSize,
         alignment: Alignment.center,
         decoration: BoxDecoration(
           color: context.colors.surfaceContainerHighest,
@@ -354,7 +353,7 @@ class _DmAvatar extends ConsumerWidget {
         child: Text(
           '${visiblePubkeys.length}',
           style: context.textTheme.labelSmall?.copyWith(
-            fontSize: 10,
+            fontSize: 9,
             color: context.colors.onSurface,
             fontWeight: FontWeight.w600,
             height: 1,
@@ -385,14 +384,14 @@ class _DmAvatar extends ConsumerWidget {
         : 'offline';
 
     return SizedBox(
-      width: 22,
-      height: 22,
+      width: _kDmAvatarSize,
+      height: _kDmAvatarSize,
       child: Stack(
         clipBehavior: Clip.none,
         children: [
           AvatarImage(
             imageUrl: avatarUrl,
-            radius: 10,
+            radius: _kDmAvatarSize / 2,
             backgroundColor: context.colors.primaryContainer,
             fallback: Text(
               initial,
@@ -407,8 +406,8 @@ class _DmAvatar extends ConsumerWidget {
             right: -1,
             bottom: -1,
             child: Container(
-              width: 9,
-              height: 9,
+              width: 8,
+              height: 8,
               decoration: BoxDecoration(
                 color: _presenceColor(context, presence),
                 shape: BoxShape.circle,

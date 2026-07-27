@@ -714,6 +714,23 @@ function SetupStepContent({
         >
           Back
         </Button>
+
+        <p className="text-xs text-foreground/50">
+          More harnesses (Cursor, Grok, Amp&hellip;){" "}
+          {actions.navigateToAgentSettings ? (
+            <button
+              className="text-foreground/70 underline underline-offset-2 hover:text-foreground"
+              data-testid="onboarding-setup-more-harnesses"
+              onClick={actions.navigateToAgentSettings}
+              type="button"
+            >
+              Settings → Agents
+            </button>
+          ) : (
+            <span className="text-foreground/70">Settings → Agents</span>
+          )}{" "}
+          after setup.
+        </p>
       </OnboardingFooter>
     </OnboardingSlideTransition>
   );

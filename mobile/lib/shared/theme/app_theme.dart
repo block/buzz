@@ -13,16 +13,21 @@ class Radii {
   static const double lg = 10.0;
   static const double md = 8.0;
   static const double sm = 6.0;
+  static const double card = 12.0; // grouped settings cards
   static const double dialog = 24.0; // desktop uses rounded-3xl for dialogs
 }
 
 class AppTheme {
-  static ThemeData light({ColorScheme? colorScheme}) {
+  static ThemeData light({
+    ColorScheme? colorScheme,
+    Gradient? topSectionGradient,
+  }) {
     final scheme = colorScheme ?? lightColorScheme;
     final appColors = AppColors(
       success: const Color(0xFF40A02B), // Catppuccin Latte Green — universal
       warning: const Color(0xFFDF8E1D), // Latte Yellow
       accent: scheme.tertiary,
+      topSectionGradient: topSectionGradient,
     );
 
     return _buildTheme(
@@ -34,7 +39,10 @@ class AppTheme {
     );
   }
 
-  static ThemeData dark({ColorScheme? colorScheme}) {
+  static ThemeData dark({
+    ColorScheme? colorScheme,
+    Gradient? topSectionGradient,
+  }) {
     final scheme = colorScheme ?? darkColorScheme;
     final appColors = AppColors(
       success: const Color(
@@ -42,6 +50,7 @@ class AppTheme {
       ), // Catppuccin Macchiato Green — universal
       warning: const Color(0xFFEED49F), // Macchiato Yellow
       accent: scheme.tertiary,
+      topSectionGradient: topSectionGradient,
     );
 
     return _buildTheme(

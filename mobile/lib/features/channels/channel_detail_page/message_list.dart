@@ -9,6 +9,7 @@ class _MessageList extends HookConsumerWidget {
   final String? currentPubkey;
   final bool isMember;
   final bool isArchived;
+  final double appBarTitleContentHeight;
 
   const _MessageList({
     required this.entries,
@@ -19,6 +20,7 @@ class _MessageList extends HookConsumerWidget {
     required this.currentPubkey,
     required this.isMember,
     required this.isArchived,
+    required this.appBarTitleContentHeight,
   });
 
   @override
@@ -199,7 +201,10 @@ class _MessageList extends HookConsumerWidget {
             padding: EdgeInsets.only(
               left: Grid.gutter,
               right: Grid.gutter,
-              top: frostedAppBarHeight(context),
+              top: frostedAppBarHeight(
+                context,
+                titleContentHeight: appBarTitleContentHeight,
+              ),
               bottom: Grid.xxs,
             ),
             itemCount: displayEntries.length + (isLoadingOlder.value ? 1 : 0),
