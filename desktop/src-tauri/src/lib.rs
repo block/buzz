@@ -698,6 +698,8 @@ pub fn run() {
             decode_spawner_attestation,
             respond_to_spawner_attestation,
             send_spawner_prompt_update,
+            send_spawner_credential_update,
+            decode_spawner_credential_ack,
             discover_acp_providers,
             discover_git_bash_prerequisite,
             install_acp_runtime,
