@@ -187,6 +187,8 @@ type E2eConfig = {
     connectAcpRuntimeResult?: RawConnectAcpRuntimeResult;
     connectAcpRuntimeDelayMs?: number;
     connectAcpRuntimeError?: string;
+    /** Catalog returned after a successful mocked connect (sign-in). */
+    acpRuntimesCatalogAfterConnect?: RawAcpRuntimeCatalogEntry[];
     activePersonaIds?: string[];
     installAcpRuntimeDelayMs?: number;
     installAcpRuntimeResult?: RawInstallRuntimeResult;
@@ -6960,6 +6962,7 @@ function withMockRuntimeConfigMetadata(
 
 let runtimeCatalogDiscoveryCount = 0;
 let mockInstallCompleted = false;
+let mockConnectCompleted = false;
 
 async function handleDiscoverAcpRuntimes(
   config: E2eConfig | undefined,
@@ -6984,6 +6987,10 @@ async function handleDiscoverAcpRuntimes(
   const afterInstall = config?.mock?.acpRuntimesCatalogAfterInstall;
   if (mockInstallCompleted && afterInstall) {
     return afterInstall.map(withMockRuntimeConfigMetadata);
+  }
+  const afterConnect = config?.mock?.acpRuntimesCatalogAfterConnect;
+  if (mockConnectCompleted && afterConnect) {
+    return afterConnect.map(withMockRuntimeConfigMetadata);
   }
   const sequence = config?.mock?.acpRuntimesCatalogSequence;
   if (sequence && sequence.length > 0) {
@@ -7114,6 +7121,7 @@ async function handleConnectAcpRuntime(
   if (delayMs > 0) {
     await new Promise((resolve) => window.setTimeout(resolve, delayMs));
   }
+  mockConnectCompleted = true;
   return config?.mock?.connectAcpRuntimeResult ?? { launched: true };
 }
 

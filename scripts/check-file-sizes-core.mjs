@@ -10,6 +10,13 @@ import path from "node:path";
  * the two apps can never drift.
  */
 
+// `rules[].root` and the `overrides` keys are authored with `/`, but
+// path.relative yields `\` on Windows — so every comparison against them has
+// to happen in posix form or it silently matches nothing.
+function toPosixPath(relativePath) {
+  return relativePath.split(path.sep).join("/");
+}
+
 async function walkFiles(directory) {
   const entries = await fs.readdir(directory, { withFileTypes: true });
   const files = await Promise.all(
@@ -27,10 +34,8 @@ async function walkFiles(directory) {
 }
 
 function findRule(rules, relativePath) {
-  return rules.find((rule) => {
-    const normalizedRoot = `${rule.root}${path.sep}`;
-    return relativePath.startsWith(normalizedRoot);
-  });
+  const posixPath = toPosixPath(relativePath);
+  return rules.find((rule) => posixPath.startsWith(`${rule.root}/`));
 }
 
 function countLines(content) {
@@ -82,11 +87,15 @@ export async function runFileSizeCheck({
       continue;
     }
 
-    const limit = overrides.get(relativePath) ?? rule.maxLines;
+    const limit = overrides.get(toPosixPath(relativePath)) ?? rule.maxLines;
     const content = await fs.readFile(filePath, "utf8");
     const lineCount = countLines(content);
     if (lineCount > limit) {
-      violations.push({ limit, lineCount, relativePath });
+      violations.push({
+        limit,
+        lineCount,
+        relativePath: toPosixPath(relativePath),
+      });
     }
   }
 

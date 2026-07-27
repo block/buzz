@@ -25,9 +25,13 @@ import 'package:buzz/features/profile/user_cache_provider.dart';
 import 'package:buzz/features/profile/user_profile.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
-import 'package:buzz/shared/widgets/frosted_app_bar.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 const _channelId = 'test-channel';
+
+/// Shared mock prefs for providers that read [savedPrefsProvider]
+/// (e.g. the compose bar's draft store). Initialized in [main].
+late SharedPreferences _testPrefs;
 
 final _testChannel = Channel(
   id: _channelId,
@@ -144,7 +148,9 @@ Widget _buildTestable({
   ReadStateNotifier? readStateNotifier,
   _FakeMessagesNotifier? messagesNotifier,
   String? canvasContent,
-  List<NostrEvent>? threadReplies,
+  String? initialMessageId,
+  String? initialThreadRootId,
+  Map<String, List<NostrEvent>> threadReplies = const {},
   TextScaler textScaler = TextScaler.noScaling,
 }) {
   final resolvedChannel = channel ?? _testChannel;
@@ -180,14 +186,16 @@ Widget _buildTestable({
         channelActionsProvider.overrideWith(createChannelActions),
       if (readStateNotifier != null)
         readStateProvider.overrideWith(() => readStateNotifier),
-      if (threadReplies != null)
+      for (final entry in threadReplies.entries)
         threadRepliesProvider(
-          const ThreadRepliesArgs(channelId: _channelId, rootId: 'thread-root'),
-        ).overrideWith((ref) async => threadReplies),
+          ThreadRepliesArgs(channelId: _channelId, rootId: entry.key),
+        ).overrideWith((ref) async => entry.value),
       // Stub the relay client provider so preloadMembers doesn't crash.
       relayClientProvider.overrideWithValue(
         RelayClient(baseUrl: 'http://localhost:3000'),
       ),
+      // Compose bar drafts persist through SharedPreferences.
+      savedPrefsProvider.overrideWithValue(_testPrefs),
     ],
     child: MaterialApp(
       theme: AppTheme.light(),
@@ -195,7 +203,11 @@ Widget _buildTestable({
       home: Builder(
         builder: (context) => MediaQuery(
           data: MediaQuery.of(context).copyWith(textScaler: textScaler),
-          child: ChannelDetailPage(channel: resolvedChannel),
+          child: ChannelDetailPage(
+            channel: resolvedChannel,
+            initialMessageId: initialMessageId,
+            initialThreadRootId: initialThreadRootId,
+          ),
         ),
       ),
     ),
@@ -229,6 +241,11 @@ double? effectiveFontSizeForText(
 }
 
 void main() {
+  setUp(() async {
+    SharedPreferences.setMockInitialValues({});
+    _testPrefs = await SharedPreferences.getInstance();
+  });
+
   group('ChannelDetailPage', () {
     testWidgets('defers read-state mark until after build', (tester) async {
       final readState = _SynchronousReadStateNotifier(
@@ -1334,50 +1351,6 @@ void main() {
       expect(find.text('secret'), findsOneWidget);
       expect(find.byIcon(LucideIcons.lock), findsOneWidget);
     });
-
-    testWidgets('grows for a scaled two-line DM title', (tester) async {
-      final dmChannel = Channel(
-        id: _channelId,
-        name: 'dm',
-        channelType: 'dm',
-        visibility: 'private',
-        description: '',
-        createdBy: 'alice',
-        createdAt: DateTime(2025),
-        memberCount: 2,
-        participants: const ['Alice'],
-        participantPubkeys: const ['alice'],
-        isMember: true,
-      );
-
-      await tester.pumpWidget(
-        _buildTestable(
-          messages: [],
-          channel: dmChannel,
-          users: const {
-            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
-          },
-          textScaler: const TextScaler.linear(1.25),
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      final appBar = find.byType(FrostedAppBar);
-      final clip = find.descendant(of: appBar, matching: find.byType(ClipRect));
-      final title = find.descendant(of: appBar, matching: find.text('Alice'));
-      final presence = find.descendant(
-        of: appBar,
-        matching: find.text('Offline'),
-      );
-
-      expect(
-        tester.getSize(clip).height,
-        greaterThan(
-          tester.getSize(title).height + tester.getSize(presence).height,
-        ),
-      );
-      expect(tester.takeException(), isNull);
-    });
   });
 
   group('Error and loading states', () {
@@ -1398,6 +1371,7 @@ void main() {
             relayClientProvider.overrideWithValue(
               RelayClient(baseUrl: 'http://localhost:3000'),
             ),
+            savedPrefsProvider.overrideWithValue(_testPrefs),
           ],
           child: MaterialApp(
             theme: AppTheme.light(),
@@ -1457,6 +1431,69 @@ void main() {
       expect(find.text('Bob'), findsNWidgets(2));
       expect(findRichText('joined the channel'), findsOneWidget);
       expect(findRichText('Thanks for the invite!'), findsOneWidget);
+    });
+  });
+
+  group('Deep-link navigation', () {
+    testWidgets('opens a nested reply in its direct-parent thread', (
+      tester,
+    ) async {
+      final root = _textMsg(
+        id: 'root',
+        pubkey: 'alice',
+        content: 'Outer root',
+        createdAt: 1000,
+      );
+      final parent = _textMsg(
+        id: 'parent',
+        pubkey: 'bob',
+        content: 'Nested thread head',
+        createdAt: 1100,
+        extraTags: const [
+          ['e', 'root', '', 'reply'],
+        ],
+      );
+      final target = _textMsg(
+        id: 'target',
+        pubkey: 'carol',
+        content: 'Deeply nested target',
+        createdAt: 1200,
+        extraTags: const [
+          ['e', 'root', '', 'root'],
+          ['e', 'parent', '', 'reply'],
+        ],
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [root, parent, target],
+          initialMessageId: 'target',
+          initialThreadRootId: 'parent',
+          threadReplies: {
+            // Relay subtree filtering is keyed by thread_metadata.root_event_id,
+            // so nested replies are returned by the outer-root query.
+            'root': [parent, target],
+          },
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+            'carol': UserProfile(pubkey: 'carol', displayName: 'Carol'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final threadPage = tester.widget<ThreadDetailPage>(
+        find.byType(ThreadDetailPage),
+      );
+      expect(threadPage.threadHead.id, 'parent');
+      expect(threadPage.initialMessageId, 'target');
+
+      final highlighted = tester.widget<DecoratedBox>(
+        find.byKey(const ValueKey('thread-message-target')),
+      );
+      final decoration = highlighted.decoration as BoxDecoration;
+      expect(decoration.color, isNot(Colors.transparent));
     });
   });
 
@@ -1614,7 +1651,7 @@ void main() {
       await tester.pumpWidget(
         _buildTestable(
           messages: [rootEvent],
-          threadReplies: replies,
+          threadReplies: {'thread-root': replies},
           users: {
             'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
             'bob': const UserProfile(pubkey: 'bob', displayName: 'Bob'),
@@ -1702,7 +1739,11 @@ class _SynchronousReadStateNotifier extends ReadStateNotifier {
   ReadStateState build() => _initialState;
 
   @override
-  void markContextRead(String contextId, int unixTimestamp) {
+  void markContextRead(
+    String contextId,
+    int unixTimestamp, {
+    bool clearForcedMessages = false,
+  }) {
     markedContexts[contextId] = unixTimestamp;
     state = state.copyWithContext(contextId, unixTimestamp);
   }

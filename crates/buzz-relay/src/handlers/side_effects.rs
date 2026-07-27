@@ -51,6 +51,52 @@ async fn evict_live_channel_subscriptions(
     }
 }
 
+/// Durably disable a departing member's workflows in the channel (SEC-006).
+///
+/// A workflow runs with its owner's standing authority; once the owner is no
+/// longer a member (removed via kind 9001 or left via kind 9022) their
+/// workflows must stop firing on every path — event triggers, the scheduler,
+/// manual triggers, and the webhook endpoint all honor `enabled = FALSE`.
+/// The per-fire authority gate in `buzz-workflow` is the fail-closed backstop;
+/// this makes the revocation durable and immediately visible.
+///
+/// Failures are logged, not propagated: membership removal has already been
+/// committed, and the per-fire gate still denies a removed owner even if this
+/// disable write is lost.
+async fn disable_departed_member_workflows(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    channel_id: Uuid,
+    target_pubkey: &[u8],
+) {
+    match state
+        .db
+        .disable_workflows_for_owner_in_channel(tenant.community(), channel_id, target_pubkey)
+        .await
+    {
+        Ok(0) => {}
+        Ok(n) => {
+            tracing::info!(
+                channel = %channel_id,
+                owner = %hex::encode(target_pubkey),
+                disabled = n,
+                "Disabled departed member's workflows"
+            );
+            state
+                .workflow_engine
+                .invalidate_channel_workflows(tenant.community(), channel_id);
+        }
+        Err(e) => {
+            warn!(
+                channel = %channel_id,
+                owner = %hex::encode(target_pubkey),
+                error = %e,
+                "Failed to disable departed member's workflows — per-fire authority gate still denies"
+            );
+        }
+    }
+}
+
 /// Close every live channel-scoped subscription on `conn_id`, removing them from
 /// the connection's local map and sending `CLOSED restricted` for each.
 async fn evict_conn_channel_subscriptions(
@@ -1341,6 +1387,7 @@ async fn handle_remove_user(
         .await?;
     state.invalidate_membership(tenant, channel_id, &target_pubkey);
     evict_live_channel_subscriptions(tenant, state, channel_id, &target_pubkey).await;
+    disable_departed_member_workflows(tenant, state, channel_id, &target_pubkey).await;
 
     let actor_hex = hex::encode(&actor_bytes);
     let target_hex = hex::encode(&target_pubkey);
@@ -1987,6 +2034,7 @@ async fn handle_leave_request(
         .await?;
     state.invalidate_membership(tenant, channel_id, &actor_bytes);
     evict_live_channel_subscriptions(tenant, state, channel_id, &actor_bytes).await;
+    disable_departed_member_workflows(tenant, state, channel_id, &actor_bytes).await;
 
     let actor_hex = hex::encode(&actor_bytes);
     emit_system_message(

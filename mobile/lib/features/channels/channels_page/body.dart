@@ -308,7 +308,11 @@ class _SliverChannelsList extends HookConsumerWidget {
                   if (ts != null) {
                     ref
                         .read(readStateProvider.notifier)
-                        .markContextRead(channel.id, ts);
+                        .markContextRead(
+                          channel.id,
+                          ts,
+                          clearForcedMessages: true,
+                        );
                     ref
                         .read(channelsProvider.notifier)
                         .clearObservedUnreadCoveredByRead(channel.id, ts);
