@@ -8,22 +8,32 @@
  */
 
 const PURE_CACHE_KEY_PREFIXES = [
-  "buzz-channel-messages.v1",
-  "buzz-channels.v1",
-  "buzz-sidebar-skeleton-shape.v1",
-  "buzz-timeline-skeleton-shape.v1",
+  "buzz-channel-messages.v1:",
+  "buzz-channels.v1:",
+  "buzz-sidebar-skeleton-shape.v1:",
+  "buzz-timeline-skeleton-shape.v1:",
 ];
 
 const QUOTA_RECOVERY_MARKER_KEY = "buzz-local-storage-quota-recovery.v1";
+
+// Keep disposable snapshots below 2 MiB, leaving roughly 3 MiB of WebKit's
+// observed ~5 MiB origin quota for identities, communities, preferences, and
+// read state. localStorage strings are UTF-16, so count two bytes per code unit.
+const PURE_CACHE_BYTE_BUDGET = 2 * 1024 * 1024;
+
+function isPureCacheKey(key: string): boolean {
+  return PURE_CACHE_KEY_PREFIXES.some((prefix) => key.startsWith(prefix));
+}
+
+function storageEntryBytes(key: string, value: string): number {
+  return (key.length + value.length) * 2;
+}
 
 function evictPureCacheEntries(): number {
   const toRemove: string[] = [];
   for (let i = 0; i < window.localStorage.length; i++) {
     const key = window.localStorage.key(i);
-    if (
-      key !== null &&
-      PURE_CACHE_KEY_PREFIXES.some((prefix) => key.startsWith(prefix))
-    ) {
+    if (key !== null && isPureCacheKey(key)) {
       toRemove.push(key);
     }
   }
@@ -33,17 +43,48 @@ function evictPureCacheEntries(): number {
   return toRemove.length;
 }
 
+function pureCacheBytesExcluding(excludedKey: string): number {
+  let bytes = 0;
+  for (let i = 0; i < window.localStorage.length; i++) {
+    const key = window.localStorage.key(i);
+    if (key === null || key === excludedKey || !isPureCacheKey(key)) continue;
+    const value = window.localStorage.getItem(key);
+    if (value !== null) bytes += storageEntryBytes(key, value);
+  }
+  return bytes;
+}
+
+function preparePureCacheWrite(key: string, value: string): boolean {
+  if (!isPureCacheKey(key)) return true;
+
+  const writeBytes = storageEntryBytes(key, value);
+  if (writeBytes > PURE_CACHE_BYTE_BUDGET) {
+    window.localStorage.removeItem(key);
+    return false;
+  }
+
+  if (pureCacheBytesExcluding(key) + writeBytes > PURE_CACHE_BYTE_BUDGET) {
+    evictPureCacheEntries();
+  }
+  return true;
+}
+
 /**
- * Clears disposable snapshots once for installs that may already have filled
- * WebKit localStorage before quota-aware writes shipped. The marker is written
- * only after cleanup succeeds, so an interrupted/unavailable storage backend
- * retries on the next launch. Load-bearing preferences and identity state are
- * never touched.
+ * Probes storage once at startup so installs that already filled WebKit
+ * localStorage recover before app initialization. Healthy installs keep their
+ * caches; only a failed marker write triggers disposable-cache eviction. The
+ * marker is written after recovery, so an interrupted/unavailable backend
+ * retries on the next launch. Load-bearing state is never touched.
  */
 export function recoverLocalStorageQuotaOnStartup(): void {
   try {
     if (window.localStorage.getItem(QUOTA_RECOVERY_MARKER_KEY) === "1") return;
-    evictPureCacheEntries();
+    try {
+      window.localStorage.setItem(QUOTA_RECOVERY_MARKER_KEY, "1");
+      return;
+    } catch {
+      evictPureCacheEntries();
+    }
     window.localStorage.setItem(QUOTA_RECOVERY_MARKER_KEY, "1");
   } catch (error) {
     console.warn("[localStorageQuota] startup cache cleanup failed:", error);
@@ -76,6 +117,7 @@ export function setLocalStorageItemWithRecovery(
   value: string,
 ): boolean {
   try {
+    if (!preparePureCacheWrite(key, value)) return false;
     window.localStorage.setItem(key, value);
     return true;
   } catch (error) {

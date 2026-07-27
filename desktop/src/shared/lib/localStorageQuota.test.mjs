@@ -34,7 +34,7 @@ function install(ls) {
 }
 
 test("startup recovery removes disposable caches but preserves user state", () => {
-  const ls = makeQuotaLocalStorage({ maxEntries: 10 });
+  const ls = makeQuotaLocalStorage({ maxEntries: 5 });
   install(ls);
   ls.store.set("buzz-channel-messages.v1:relay:chan", "big");
   ls.store.set("buzz-channels.v1:relay", "big");
@@ -53,6 +53,30 @@ test("startup recovery removes disposable caches but preserves user state", () =
   );
   assert.equal(ls.getItem("buzz-communities"), "keep");
   assert.equal(ls.getItem("buzz-local-storage-quota-recovery.v1"), "1");
+});
+
+test("healthy startup preserves disposable caches", () => {
+  const ls = makeQuotaLocalStorage({ maxEntries: 10 });
+  install(ls);
+  ls.store.set("buzz-channel-messages.v1:relay:new", "snapshot");
+
+  recoverLocalStorageQuotaOnStartup();
+
+  assert.equal(ls.getItem("buzz-channel-messages.v1:relay:new"), "snapshot");
+  assert.equal(ls.getItem("buzz-local-storage-quota-recovery.v1"), "1");
+});
+
+test("startup recovery does not remove namespace near misses", () => {
+  const ls = makeQuotaLocalStorage({ maxEntries: 2 });
+  install(ls);
+  ls.store.set("buzz-channels.v10:durable", "keep");
+  ls.store.set("buzz-channel-messages.v1-durable", "keep");
+
+  recoverLocalStorageQuotaOnStartup();
+
+  assert.equal(ls.getItem("buzz-channels.v10:durable"), "keep");
+  assert.equal(ls.getItem("buzz-channel-messages.v1-durable"), "keep");
+  assert.equal(ls.getItem("buzz-local-storage-quota-recovery.v1"), null);
 });
 
 test("startup recovery runs only once", () => {
@@ -83,6 +107,48 @@ test("startup recovery retries after marker write fails", () => {
 
   assert.equal(ls.getItem("buzz-channel-messages.v1:relay:chan"), null);
   assert.equal(ls.getItem("buzz-local-storage-quota-recovery.v1"), "1");
+});
+
+test("global cache byte budget spans relays and preserves durable state", () => {
+  const ls = makeQuotaLocalStorage({ maxEntries: 20 });
+  install(ls);
+  ls.store.set("buzz-communities", "keep");
+  const largeSnapshot = "x".repeat(600_000);
+
+  assert.equal(
+    setLocalStorageItemWithRecovery(
+      "buzz-channel-messages.v1:relay-one:chan",
+      largeSnapshot,
+    ),
+    true,
+  );
+  assert.equal(
+    setLocalStorageItemWithRecovery(
+      "buzz-channel-messages.v1:relay-two:chan",
+      largeSnapshot,
+    ),
+    true,
+  );
+
+  assert.equal(ls.getItem("buzz-channel-messages.v1:relay-one:chan"), null);
+  assert.equal(
+    ls.getItem("buzz-channel-messages.v1:relay-two:chan"),
+    largeSnapshot,
+  );
+  assert.equal(ls.getItem("buzz-communities"), "keep");
+});
+
+test("rejects a single cache entry larger than the global byte budget", () => {
+  const ls = makeQuotaLocalStorage({ maxEntries: 10 });
+  install(ls);
+  const key = "buzz-channel-messages.v1:relay:oversized";
+  ls.store.set(key, "previous snapshot");
+
+  assert.equal(
+    setLocalStorageItemWithRecovery(key, "x".repeat(1_100_000)),
+    false,
+  );
+  assert.equal(ls.getItem(key), null);
 });
 
 test("writes normally when under quota", () => {
