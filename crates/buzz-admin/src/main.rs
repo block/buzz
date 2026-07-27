@@ -342,11 +342,13 @@ async fn cmd_list_members() -> Result<i32> {
 }
 
 async fn cmd_alias_add(host_arg: String) -> Result<i32> {
-    let host = normalize_host(&host_arg);
-    if host.is_empty() {
-        eprintln!("error: host must not be empty");
-        return Ok(1);
-    }
+    let host = match validate_alias_host_arg(&host_arg) {
+        Ok(host) => host,
+        Err(msg) => {
+            eprintln!("error: {msg}");
+            return Ok(1);
+        }
+    };
 
     let db = connect_db().await?;
     let tenant = resolve_admin_tenant(&db).await?;
@@ -379,7 +381,14 @@ async fn cmd_alias_add(host_arg: String) -> Result<i32> {
 }
 
 async fn cmd_alias_remove(host_arg: String) -> Result<i32> {
-    let host = normalize_host(&host_arg);
+    let host = match validate_alias_host_arg(&host_arg) {
+        Ok(host) => host,
+        Err(msg) => {
+            eprintln!("error: {msg}");
+            return Ok(1);
+        }
+    };
+
     let db = connect_db().await?;
     let tenant = resolve_admin_tenant(&db).await?;
 
@@ -416,6 +425,22 @@ async fn cmd_alias_list() -> Result<i32> {
     }
 
     Ok(0)
+}
+
+/// Normalize and validate an operator-supplied alias host argument.
+///
+/// Applies the same [`buzz_core::tenant::validate_host`] authority rules as
+/// the relay's community provisioning endpoints, so `alias add`/`alias remove`
+/// can only ever touch host values a valid HTTP `Host` header can present.
+/// Runs before any Postgres connection is opened.
+fn validate_alias_host_arg(host_arg: &str) -> std::result::Result<String, String> {
+    let host = normalize_host(host_arg);
+    if host.is_empty() {
+        return Err("host must not be empty".to_string());
+    }
+    buzz_core::tenant::validate_host(&host)
+        .map_err(|reason| format!("invalid host '{host_arg}': {reason}"))?;
+    Ok(host)
 }
 
 /// Validate that `role` is `"member"` or `"admin"`. Rejects `"owner"`.
@@ -720,4 +745,90 @@ async fn reconcile_channels(relay_key_arg: Option<String>) -> Result<()> {
         channels.len()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // `validate_alias_host_arg` is the shared gate for both `alias add` and
+    // `alias remove`: each command calls it before opening any Postgres
+    // connection, so these cases cover the pre-DB rejection path for both.
+
+    #[test]
+    fn alias_host_accepts_valid_authority() {
+        assert_eq!(
+            validate_alias_host_arg("relay.example.svc.cluster.local:3000").unwrap(),
+            "relay.example.svc.cluster.local:3000"
+        );
+    }
+
+    #[test]
+    fn alias_host_normalizes_before_validation() {
+        // Uppercase, default port, and trailing dot are normalized away
+        // rather than rejected — matching what request-time host resolution
+        // would look up.
+        assert_eq!(
+            validate_alias_host_arg("Relay.Example:443").unwrap(),
+            "relay.example"
+        );
+        assert_eq!(
+            validate_alias_host_arg("relay.example.").unwrap(),
+            "relay.example"
+        );
+    }
+
+    #[test]
+    fn alias_host_rejects_empty() {
+        assert!(validate_alias_host_arg("").is_err());
+        assert!(validate_alias_host_arg("   ").is_err());
+    }
+
+    #[test]
+    fn alias_host_rejects_scheme_prefix() {
+        assert!(validate_alias_host_arg("https://relay.example").is_err());
+        assert!(validate_alias_host_arg("wss://relay.example").is_err());
+    }
+
+    #[test]
+    fn alias_host_rejects_path() {
+        assert!(validate_alias_host_arg("foo/bar").is_err());
+        assert!(validate_alias_host_arg("relay.example/path").is_err());
+    }
+
+    #[test]
+    fn alias_host_rejects_malformed_port() {
+        assert!(validate_alias_host_arg("relay.example:99999").is_err());
+        assert!(validate_alias_host_arg("relay.example:abc").is_err());
+        assert!(validate_alias_host_arg("relay.example:").is_err());
+    }
+
+    #[test]
+    fn alias_host_rejects_whitespace_and_control_chars() {
+        assert!(validate_alias_host_arg("relay .example").is_err());
+        assert!(validate_alias_host_arg("relay\t.example").is_err());
+        assert!(validate_alias_host_arg("relay\n.example").is_err());
+        assert!(validate_alias_host_arg("relay\u{0}.example").is_err());
+    }
+
+    #[test]
+    fn alias_host_rejects_noncanonical_authority() {
+        assert!(validate_alias_host_arg("example..com").is_err());
+        assert!(validate_alias_host_arg("-bad.example").is_err());
+        assert!(validate_alias_host_arg("foo_bar.example").is_err());
+        assert!(validate_alias_host_arg("user@relay.example").is_err());
+        assert!(validate_alias_host_arg("[::1").is_err());
+    }
+
+    #[test]
+    fn alias_host_rejects_oversized() {
+        let long = format!("{}.example", "a".repeat(260));
+        assert!(validate_alias_host_arg(&long).is_err());
+    }
+
+    #[test]
+    fn alias_host_error_names_the_input() {
+        let err = validate_alias_host_arg("https://relay.example").unwrap_err();
+        assert!(err.contains("https://relay.example"), "got: {err}");
+    }
 }

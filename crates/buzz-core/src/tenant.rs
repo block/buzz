@@ -137,6 +137,109 @@ pub fn normalize_host(host: &str) -> String {
     host
 }
 
+/// Maximum accepted length (in bytes) for a community host authority.
+pub const MAX_HOST_LEN: usize = 255;
+
+/// Validate a normalized host authority value for a community.
+///
+/// The host must already be in normalized shape (`normalize_host` is a
+/// no-op on it): lowercase, no default port, no trailing dot. Requiring the
+/// caller to send the normalized form keeps the stored `communities.host`
+/// value byte-identical to what request-time host resolution will look up.
+///
+/// Shared by the relay's community provisioning endpoints and the
+/// `buzz-admin` CLI's host-alias commands, so both persist only host values
+/// a valid HTTP `Host` header can actually present.
+pub fn validate_host(host: &str) -> Result<(), String> {
+    if host.is_empty() {
+        return Err("host is empty".to_string());
+    }
+    if host.len() > MAX_HOST_LEN {
+        return Err(format!(
+            "host too long: {} bytes (max {MAX_HOST_LEN})",
+            host.len()
+        ));
+    }
+    if normalize_host(host) != host {
+        return Err(format!(
+            "host is not normalized: expected {:?}",
+            normalize_host(host)
+        ));
+    }
+    validate_authority(host)
+}
+
+fn validate_authority(authority: &str) -> Result<(), String> {
+    if authority
+        .chars()
+        .any(|c| c.is_control() || c.is_whitespace())
+    {
+        return Err("host contains invalid characters".to_string());
+    }
+    if authority.contains('/')
+        || authority.contains('?')
+        || authority.contains('#')
+        || authority.contains('@')
+    {
+        return Err(
+            "host must be a bare authority (no scheme, path, query, or userinfo)".to_string(),
+        );
+    }
+
+    // Parse as an HTTP authority by wrapping it in a URL. This rejects empty
+    // hosts, malformed bracketed IPv6 literals, and invalid ports while keeping
+    // the accepted shape aligned with request `Host` authority syntax.
+    let parsed = url::Url::parse(&format!("http://{authority}/"))
+        .map_err(|_| "host is not a valid authority".to_string())?;
+    let host = parsed
+        .host()
+        .ok_or_else(|| "host is not a valid authority".to_string())?;
+
+    let serialized_host = match host {
+        url::Host::Domain(domain) => {
+            validate_domain_labels(domain)?;
+            domain.to_string()
+        }
+        url::Host::Ipv4(addr) => addr.to_string(),
+        url::Host::Ipv6(addr) => format!("[{addr}]"),
+    };
+    let canonical_authority = match parsed.port() {
+        Some(port) => format!("{serialized_host}:{port}"),
+        None => serialized_host,
+    };
+
+    if canonical_authority != authority {
+        return Err(format!(
+            "host is not a canonical authority: expected {canonical_authority:?}"
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_domain_labels(domain: &str) -> Result<(), String> {
+    if domain.len() > 253 {
+        return Err("domain name too long".to_string());
+    }
+    for label in domain.split('.') {
+        if label.is_empty() {
+            return Err("domain contains an empty label".to_string());
+        }
+        if label.len() > 63 {
+            return Err("domain label too long".to_string());
+        }
+        let valid_label = label
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            && !label.starts_with('-')
+            && !label.ends_with('-');
+        if !valid_label {
+            return Err("domain label contains invalid characters".to_string());
+        }
+    }
+    Ok(())
+}
+
 /// Extract the authority (host plus an explicit non-default port, if present)
 /// from a relay URL in the same normalized shape as request `Host` headers and
 /// `communities.host`.
