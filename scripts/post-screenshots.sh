@@ -17,9 +17,12 @@ fi
 
 GH_USER=$(gh api user --jq .login)
 BRANCH="agent-screenshots/${GH_USER}"
-REPO="block/buzz"
+REPO="${GITHUB_REPOSITORY:-$(gh repo view "$(git remote get-url origin)" --json nameWithOwner --jq .nameWithOwner)}"
 
-mapfile -t PNGS < <(find "$PNG_DIR" -maxdepth 1 -name "*.png" -type f | sort)
+PNGS=()
+while IFS= read -r png; do
+  PNGS[${#PNGS[@]}]="$png"
+done < <(find "$PNG_DIR" -maxdepth 1 -name "*.png" -type f | sort)
 if [[ ${#PNGS[@]} -eq 0 ]]; then
   echo "error: no PNGs found in $PNG_DIR" >&2
   exit 1
@@ -47,42 +50,42 @@ done
 COMBINED=$(printf '%s\n' "$EXISTING_ENTRIES" "$NEW_ENTRIES" | grep -v '^$')
 TREE=$(echo "$COMBINED" | git mktree)
 
-PARENT_ARGS=()
 if git rev-parse "origin/${BRANCH}" >/dev/null 2>&1; then
-  PARENT_ARGS=(-p "origin/${BRANCH}")
+  COMMIT=$(git commit-tree "$TREE" -p "origin/${BRANCH}" -m "screenshots: PR #${PR}")
+else
+  COMMIT=$(git commit-tree "$TREE" -m "screenshots: PR #${PR}")
 fi
-COMMIT=$(git commit-tree "$TREE" "${PARENT_ARGS[@]}" -m "screenshots: PR #${PR}")
 git push --force-with-lease origin "${COMMIT}:refs/heads/${BRANCH}"
 
 RAW_BASE="https://raw.githubusercontent.com/${REPO}/${COMMIT}"
 
-declare -A IMAGE_URL_MAP
+IMAGE_NAMES=()
 IMAGE_URLS=()
 for i in "${!PNGS[@]}"; do
   ORIG_NAME="$(basename "${PNGS[$i]}" .png)"
   URL="${RAW_BASE}/${TREE_PATHS[$i]}"
+  IMAGE_NAMES+=("$ORIG_NAME")
   IMAGE_URLS+=("$URL")
-  IMAGE_URL_MAP["$ORIG_NAME"]="$URL"
 done
 
 if [[ -n "$BODY_FILE" ]]; then
   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   "$SCRIPT_DIR/check-pr-image-urls.sh" "$BODY_FILE"
   COMMENT_BODY="$(cat "$BODY_FILE")"
-  UNREFERENCED=()
-  for NAME in "${!IMAGE_URL_MAP[@]}"; do
-    URL="${IMAGE_URL_MAP[$NAME]}"
+  UNREFERENCED_INDEXES=()
+  for i in "${!IMAGE_NAMES[@]}"; do
+    NAME="${IMAGE_NAMES[$i]}"
+    URL="${IMAGE_URLS[$i]}"
     PLACEHOLDER="{{${NAME}}}"
     if [[ "$COMMENT_BODY" == *"$PLACEHOLDER"* ]]; then
       COMMENT_BODY="${COMMENT_BODY//"$PLACEHOLDER"/![$NAME]($URL)}"
     else
-      UNREFERENCED+=("$NAME")
+      UNREFERENCED_INDEXES+=("$i")
     fi
   done
-  if [[ ${#UNREFERENCED[@]} -gt 0 ]]; then
-    IFS=$'\n' SORTED=($(printf '%s\n' "${UNREFERENCED[@]}" | sort)); unset IFS
-    for NAME in "${SORTED[@]}"; do
-      COMMENT_BODY+=$'\n\n'"![${NAME}](${IMAGE_URL_MAP[$NAME]})"
+  if [[ ${#UNREFERENCED_INDEXES[@]} -gt 0 ]]; then
+    for i in "${UNREFERENCED_INDEXES[@]}"; do
+      COMMENT_BODY+=$'\n\n'"![${IMAGE_NAMES[$i]}](${IMAGE_URLS[$i]})"
     done
   fi
 else
