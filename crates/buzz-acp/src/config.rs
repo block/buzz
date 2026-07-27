@@ -542,6 +542,9 @@ pub struct Config {
     /// Per-persona env vars to inject at agent spawn time (e.g., GOOSE_PROVIDER, GOOSE_MODEL, BUZZ_AGENT_MODEL).
     /// Populated from persona pack resolution. Empty when no pack is configured.
     pub persona_env_vars: Vec<(String, String)>,
+    /// Stable per-slot files carrying the current automatic reply anchor.
+    /// Populated by the harness after setup-mode handling and before pool startup.
+    pub reply_to_files: Vec<PathBuf>,
     /// Whether `codex_network_env()` successfully injected a `CODEX_CONFIG` entry into
     /// `persona_env_vars`.  When true, `AcpClient::spawn` merges all `CODEX_CONFIG` entries
     /// and forces `sandbox_workspace_write.network_access = true` via `build_codex_config_env`.
@@ -1096,6 +1099,7 @@ impl Config {
             respond_to_allowlist,
             allowed_respond_to,
             persona_env_vars,
+            reply_to_files: vec![],
             has_generated_codex_config,
             relay_observer: args.relay_observer,
             lazy_pool: args.lazy_pool,
@@ -1466,6 +1470,7 @@ mod tests {
             respond_to_allowlist: HashSet::new(),
             allowed_respond_to: Vec::new(),
             persona_env_vars: vec![],
+            reply_to_files: vec![],
             has_generated_codex_config: false,
             relay_observer: false,
             lazy_pool: false,
