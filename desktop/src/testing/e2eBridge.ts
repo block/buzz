@@ -1022,7 +1022,9 @@ declare global {
     }) => RelayEvent[];
     __BUZZ_E2E_EMIT_MOCK_TYPING__?: (input: {
       channelName: string;
+      createdAt?: number;
       pubkey?: string;
+      threadHeadId?: string;
     }) => RelayEvent;
     __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
       command: string,
@@ -4030,13 +4032,21 @@ function emitMockChannelMessage(
   return event;
 }
 
-function emitMockTypingIndicator(channelId: string, pubkey: string) {
+function emitMockTypingIndicator(
+  channelId: string,
+  pubkey: string,
+  threadHeadId?: string,
+  createdAt?: number,
+) {
   const event: RelayEvent = {
     id: crypto.randomUUID().replace(/-/g, ""),
     pubkey,
-    created_at: Math.floor(Date.now() / 1000),
+    created_at: createdAt ?? Math.floor(Date.now() / 1000),
     kind: 20002,
-    tags: [["h", channelId]],
+    tags: [
+      ["h", channelId],
+      ...(threadHeadId ? [["e", threadHeadId, "", "reply"]] : []),
+    ],
     content: "",
     sig: "mocksig".repeat(20).slice(0, 128),
   };
@@ -9179,7 +9189,12 @@ export function maybeInstallE2eTauriMocks() {
     );
   };
   window.__BUZZ_E2E_PREPEND_MOCK_HISTORY__ = prependMockHistory;
-  window.__BUZZ_E2E_EMIT_MOCK_TYPING__ = ({ channelName, pubkey }) => {
+  window.__BUZZ_E2E_EMIT_MOCK_TYPING__ = ({
+    channelName,
+    createdAt,
+    pubkey,
+    threadHeadId,
+  }) => {
     const channel = mockChannels.find(
       (candidate) => candidate.name === channelName,
     );
@@ -9187,7 +9202,12 @@ export function maybeInstallE2eTauriMocks() {
       throw new Error(`Mock channel ${channelName} not found.`);
     }
 
-    return emitMockTypingIndicator(channel.id, pubkey ?? CHARLIE_PUBKEY);
+    return emitMockTypingIndicator(
+      channel.id,
+      pubkey ?? CHARLIE_PUBKEY,
+      threadHeadId,
+      createdAt,
+    );
   };
   window.__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__ = ({ channelName, kind }) => {
     const channel = mockChannels.find(

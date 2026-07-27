@@ -1,7 +1,6 @@
 import type { ComponentProps } from "react";
 
 import { MessageComposerToolbar } from "@/features/messages/ui/MessageComposerToolbar";
-import { cn } from "@/shared/lib/cn";
 
 type ComposerDockToolbarProps = ComponentProps<
   typeof MessageComposerToolbar
@@ -22,10 +21,7 @@ export function ComposerDockToolbar({
       {accessoryVisible !== undefined ? (
         <div
           aria-hidden="true"
-          className={cn(
-            "shrink-0 transition-[height] duration-200 ease-[cubic-bezier(0.23,1,0.32,1)] motion-reduce:transition-none",
-            accessoryVisible ? "h-0" : "h-3.5",
-          )}
+          className="composer-dock-quiet-spacer shrink-0"
         />
       ) : null}
       <MessageComposerToolbar {...toolbarProps} />

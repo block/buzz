@@ -1819,15 +1819,18 @@ test("channel date divider keeps the date sticky while the separator rule scroll
     "background-color",
     "rgba(0, 0, 0, 0)",
   );
-  await expect(composerOverlay.getByTestId("message-composer")).not.toHaveCSS(
+  await expect(composerOverlay.getByTestId("message-composer")).toHaveCSS(
     "backdrop-filter",
     "none",
   );
-  const composerActivityRow = composerOverlay.getByTestId(
-    "channel-composer-activity-row",
+  await expect(
+    composerOverlay.getByTestId("composer-dock-backdrop").locator("div"),
+  ).not.toHaveCSS("backdrop-filter", "none");
+  const composerRailMask = composerOverlay.getByTestId(
+    "composer-dock-rail-mask",
   );
-  await expect(composerActivityRow).toHaveCSS("backdrop-filter", "none");
-  await expect(composerActivityRow).not.toHaveCSS(
+  await expect(composerRailMask).toHaveCSS("backdrop-filter", "none");
+  await expect(composerRailMask).not.toHaveCSS(
     "background-color",
     "rgba(0, 0, 0, 0)",
   );

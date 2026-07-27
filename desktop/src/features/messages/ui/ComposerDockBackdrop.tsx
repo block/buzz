@@ -1,7 +1,6 @@
 import { cn } from "@/shared/lib/cn";
 
 type ComposerDockBackdropProps = {
-  accessoryVisible: boolean;
   gutterClassName: string;
 };
 
@@ -10,7 +9,6 @@ type ComposerDockBackdropProps = {
  * An opaque rail mask covers the portion released for activity content.
  */
 export function ComposerDockBackdrop({
-  accessoryVisible,
   gutterClassName,
 }: ComposerDockBackdropProps) {
   return (
@@ -21,15 +19,14 @@ export function ComposerDockBackdrop({
           "pointer-events-none absolute inset-y-0 z-0",
           gutterClassName,
         )}
+        data-testid="composer-dock-backdrop"
       >
         <div className="h-full w-full rounded-2xl backdrop-blur-md dark:backdrop-blur-xl" />
       </div>
       <div
         aria-hidden="true"
-        className={cn(
-          "pointer-events-none absolute inset-x-0 bottom-0 z-[5] bg-background transition-[height] duration-200 ease-[cubic-bezier(0.23,1,0.32,1)] motion-reduce:transition-none",
-          accessoryVisible ? "h-8.5" : "h-5",
-        )}
+        className="composer-dock-rail-mask pointer-events-none absolute inset-x-0 bottom-0 z-[5] bg-background"
+        data-testid="composer-dock-rail-mask"
       />
     </>
   );

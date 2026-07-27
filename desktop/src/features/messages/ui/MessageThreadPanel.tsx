@@ -833,16 +833,11 @@ export function MessageThreadPanel({
         >
           <div
             className={cn(
-              "composer-overlay-corner-masks relative pointer-events-auto transition-[padding-bottom] duration-200 ease-[cubic-bezier(0.23,1,0.32,1)] motion-reduce:transition-none",
-              hasComposerBottomActivity
-                ? "composer-overlay-corner-masks--with-activity pb-8.5"
-                : "pb-5",
+              "composer-dock composer-overlay-corner-masks relative pointer-events-auto",
+              hasComposerBottomActivity && "composer-dock--with-activity",
             )}
           >
-            <ComposerDockBackdrop
-              accessoryVisible={hasComposerBottomActivity}
-              gutterClassName="inset-x-5"
-            />
+            <ComposerDockBackdrop gutterClassName="inset-x-5" />
             <MessageComposer
               audienceContext={{
                 type: "thread",

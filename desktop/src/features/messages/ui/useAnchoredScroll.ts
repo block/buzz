@@ -69,6 +69,14 @@ export function shouldSettleForSplitPanel({
   return isAtBottom && splitPanelOpen;
 }
 
+export function shouldSettleVirtualizedViewportResize({
+  virtualizerAtBottom,
+}: {
+  virtualizerAtBottom: boolean;
+}): boolean {
+  return virtualizerAtBottom;
+}
+
 export function shouldSettleVirtualizedBottom({
   isAtBottom,
   messageDelta,
@@ -860,7 +868,11 @@ export function useAnchoredScroll({
       return;
     }
     const observer = new ResizeObserver(() => {
-      if (anchorRef.current.kind === "at-bottom") {
+      if (
+        shouldSettleVirtualizedViewportResize({
+          virtualizerAtBottom: virtualizerAtBottomRef.current,
+        })
+      ) {
         virtualSettleAtBottom();
       }
     });
