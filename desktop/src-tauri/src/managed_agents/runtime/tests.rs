@@ -572,6 +572,16 @@ fn name_matches_known_binary_rejects_node() {
 }
 
 #[test]
+fn pi_acp_is_a_known_binary_but_bare_pi_is_not() {
+    assert!(super::name_matches_known_binary("pi-acp"));
+    assert!(super::name_matches_known_binary("pi_acp"));
+    // Bare "pi" is Node-hosted (covered by the interpreter+marker path);
+    // listing it would prefix-match unrelated processes like "pi-hole".
+    assert!(!super::name_matches_known_binary("pi"));
+    assert!(!super::name_matches_known_binary("pi-hole"));
+}
+
+#[test]
 fn name_matches_interpreter_accepts_node() {
     // `node` IS a known script interpreter and must be recognized.
     assert!(super::name_matches_interpreter("node"));
