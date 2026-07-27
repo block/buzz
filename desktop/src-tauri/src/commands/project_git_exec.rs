@@ -333,9 +333,8 @@ mod tests {
 
     #[test]
     fn credential_helper_config_value_uses_forward_slashes() {
-        let path = std::path::PathBuf::from(
-            r"C:\Users\x\AppData\Local\Buzz\git-credential-nostr.exe",
-        );
+        let path =
+            std::path::PathBuf::from(r"C:\Users\x\AppData\Local\Buzz\git-credential-nostr.exe");
         assert_eq!(
             credential_helper_config_value(&path),
             "C:/Users/x/AppData/Local/Buzz/git-credential-nostr.exe",
