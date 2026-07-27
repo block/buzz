@@ -396,7 +396,10 @@ const overrides = new Map([
   // transition lock doc broadened to cover all protected-PID transitions, and
   // clear_agent_session_caches (per-pubkey retain) added alongside the
   // per-key clear. Load-bearing identity-contract change; queued to split.
-  ["src-tauri/src/app_state.rs", 1081],
+  // +4 (1081 -> 1085): message read-aloud experiment — the app-scoped
+  // MessageTtsState field (doc + init) added beside huddle_state. The state
+  // itself lives in message_tts.rs; only the wiring lands here.
+  ["src-tauri/src/app_state.rs", 1085],
   // multi-slot splitting + no-op suppression (#1309): the ReadStateManager
   // class grew from ~700 lines to ~1019 with the addition of
   // splitContextsIntoBudgetedSlots (pure fn + 5 tests), publishSplitSlots,
