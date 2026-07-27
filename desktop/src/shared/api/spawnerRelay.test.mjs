@@ -34,7 +34,15 @@ test("parsesARunningStatusFromTheSnakeCaseWire", () => {
     error: undefined,
     restartCount: 0,
     promptHash: undefined,
+    needsCredential: false,
   });
+});
+
+test("parsesNeedsCredentialWhenTheSpawnerReportsIt", () => {
+  const status = parseSpawnerStatus(
+    JSON.stringify({ phase: "stopped", needs_credential: true }),
+  );
+  assert.equal(status.needsCredential, true);
 });
 
 test("parsesAFailedStatusWithItsError", () => {

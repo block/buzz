@@ -28,6 +28,7 @@ import { useSpawnerDirectory } from "../spawnerDirectoryStore";
 import { addSpawner, removeSpawner } from "../spawnerPreference";
 import { useServerAgents, type ServerAgent } from "../useServerAgents";
 import { shortenPubkey } from "./SpawnerAttestationDialog";
+import { SpawnerCredentialCard } from "./SpawnerCredentialCard";
 
 /** Human-readable label and tone for a reconciliation phase. */
 export function phaseLabel(phase: SpawnPhase): {
@@ -220,6 +221,10 @@ export function ServerAgentsSection({ personas }: ServerAgentsSectionProps) {
                 ))}
               </ul>
             )}
+            <SpawnerCredentialCard
+              spawnerName={spawnerLabel(spawner, directory)}
+              spawnerPubkey={spawner}
+            />
           </div>
         );
       })}
@@ -292,7 +297,10 @@ function ServerAgentRow({
   onToggle: (enabled: boolean) => void;
   onRemove: () => void;
 }) {
-  const { label, variant } = phaseLabel(agent.status.phase);
+  // The phase is `stopped`, but *why* is the useful part.
+  const { label, variant } = agent.status.needsCredential
+    ? { label: "Needs credential", variant: "warning" as const }
+    : phaseLabel(agent.status.phase);
   const isStopped = agent.status.phase === "stopped";
 
   return (
@@ -311,6 +319,11 @@ function ServerAgentRow({
           <p className="flex items-start gap-1 text-xs text-destructive">
             <CircleAlert aria-hidden className="mt-0.5 size-3 shrink-0" />
             <span className="min-w-0 break-words">{agent.status.error}</span>
+          </p>
+        ) : null}
+        {agent.status.needsCredential ? (
+          <p className="text-2xs text-muted-foreground">
+            Add your Claude credential below to start this agent.
           </p>
         ) : null}
         {agent.status.restartCount > 0 ? (
