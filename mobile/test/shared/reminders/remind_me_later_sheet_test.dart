@@ -14,11 +14,12 @@ const _target = ReminderTarget(
   authorPubkey: 'alice',
 );
 
-/// Records createReminder calls.
+/// Records createReminder calls; throws when [error] is set.
 class _RecordingReminderService extends ReminderService {
+  final Object? error;
   final List<int> submittedNotBefore = [];
 
-  _RecordingReminderService()
+  _RecordingReminderService({this.error})
     : super(
         signedEventRelay: SignedEventRelay(
           session: RelaySessionNotifier(),
@@ -33,6 +34,8 @@ class _RecordingReminderService extends ReminderService {
     required int notBefore,
     String? note,
   }) async {
+    final error = this.error;
+    if (error != null) throw error;
     submittedNotBefore.add(notBefore);
   }
 }
@@ -90,6 +93,23 @@ void main() {
       expect(find.text('Remind me about this message'), findsOneWidget);
       expect(find.text('Pick a date & time'), findsOneWidget);
       expect(service.submittedNotBefore, isEmpty);
+    });
+
+    testWidgets('preset submission failure shows stable copy without the '
+        'raw error', (tester) async {
+      final service = _RecordingReminderService(
+        error: Exception('nip44 conversation key mismatch'),
+      );
+      await _pumpSheet(tester, service: service);
+
+      await tester.tap(find.text('In 1 hour'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Couldn’t set reminder. Try again.'), findsOneWidget);
+      expect(
+        find.textContaining('nip44 conversation key mismatch'),
+        findsNothing,
+      );
     });
 
     testWidgets('preset submission success confirms with a snackbar', (

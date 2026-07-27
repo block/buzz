@@ -29,8 +29,10 @@ void showRemindMeLaterSheet({
       await service.createReminder(target: target, notBefore: notBefore);
       messenger.showSnackBar(const SnackBar(content: Text('Reminder set')));
     } catch (error) {
+      // Stable user-facing copy; the relay/crypto detail goes to the log.
+      debugPrint('[RemindMeLater] createReminder failed: $error');
       messenger.showSnackBar(
-        SnackBar(content: Text('Failed to set reminder: $error')),
+        const SnackBar(content: Text('Couldn’t set reminder. Try again.')),
       );
     }
   }
