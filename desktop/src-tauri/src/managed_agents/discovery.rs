@@ -496,22 +496,22 @@ fn profile_target_dirs(root: &Path) -> [PathBuf; 2] {
 }
 
 fn command_search_dirs() -> Vec<PathBuf> {
-    let mut dirs = profile_target_dirs(&workspace_root_dir()).to_vec();
-    if let Ok(current_dir) = std::env::current_dir() {
-        dirs.extend(profile_target_dirs(&current_dir));
-    }
+    let workspace_dirs = profile_target_dirs(&workspace_root_dir()).to_vec();
+    let current_dirs = std::env::current_dir()
+        .ok()
+        .map(|dir| profile_target_dirs(&dir).to_vec())
+        .unwrap_or_default();
+    let exe_parent = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf));
 
-    dirs.extend(
-        std::env::current_exe()
-            .ok()
-            .and_then(|path| path.parent().map(Path::to_path_buf)),
-    );
-    dirs.into_iter().fold(Vec::new(), |mut unique, dir| {
-        if !unique.contains(&dir) {
-            unique.push(dir);
-        }
-        unique
-    })
+    // Releases prefer bundled binaries; debug keeps `just dev` target priority.
+    super::command_search::ordered_command_search_dirs(
+        workspace_dirs,
+        current_dirs,
+        exe_parent,
+        !cfg!(debug_assertions),
+    )
 }
 
 fn is_executable_file(path: &Path) -> bool {
