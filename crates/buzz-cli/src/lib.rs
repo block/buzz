@@ -348,7 +348,11 @@ buzz agents archived"
 pub enum MessagesCmd {
     /// Send a message to a channel
     #[command(
-        after_help = "Examples:\n  buzz messages send --channel <UUID> --content \"hello\"\n  buzz messages send --channel <UUID> --content \"@alice check this\"\n  echo \"hello from stdin\" | buzz messages send --channel <UUID> --content -"
+        after_help = "Examples:\n  buzz messages send --channel <UUID> --content \"hello\"\n  buzz messages send --channel <UUID> --content \"@alice check this\"\n  buzz messages send --channel <UUID> --content \"deploy is done\" --notify channel\n  echo \"hello from stdin\" | buzz messages send --channel <UUID> --content -\n\n\
+Channel-wide mentions:\n  \
+--notify channel  notifies every member of the channel (muted members excluded)\n  \
+--notify here     notifies members who are online right now\n  \
+Literal @channel/@here text in --content does NOT notify without the flag."
     )]
     Send {
         /// Channel UUID (from 'buzz channels list')
@@ -366,6 +370,9 @@ pub enum MessagesCmd {
         /// Also publish to the Nostr network
         #[arg(long, default_value_t = false)]
         broadcast: bool,
+        /// Channel-wide mention: 'channel' (all members) or 'here' (online members)
+        #[arg(long, value_name = "MODE")]
+        notify: Option<String>,
         /// Attach file(s) — uploads and includes as imeta tags
         #[arg(long = "file")]
         files: Vec<String>,

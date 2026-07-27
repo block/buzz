@@ -1,4 +1,4 @@
-use buzz_sdk::{DeleteMessageOptions, DiffMeta, ThreadRef, VoteDirection};
+use buzz_sdk::{DeleteMessageOptions, DiffMeta, NotifyMode, ThreadRef, VoteDirection};
 use nostr::PublicKey;
 use uuid::Uuid;
 
@@ -9,8 +9,8 @@ use crate::validate::{
     validate_content_size, validate_hex64, validate_uuid, MAX_DIFF_BYTES,
 };
 use buzz_sdk::mentions::{
-    extract_at_mentions_with_known, extract_nostr_uris, merge_mentions, strip_code_regions,
-    MENTION_CAP,
+    extract_at_mentions_with_known, extract_nostr_uris, extract_reserved_mention_tokens,
+    merge_mentions, strip_code_regions, MENTION_CAP,
 };
 
 /// Extract the thread root event ID from a Nostr tag array.
@@ -477,7 +477,40 @@ pub struct SendMessageParams {
     pub kind: Option<u16>,
     pub reply_to: Option<String>,
     pub broadcast: bool,
+    /// Raw `--notify` value, parsed by [`parse_notify_mode`].
+    pub notify: Option<String>,
     pub files: Vec<String>,
+}
+
+/// Parse the `--notify` flag value into a [`NotifyMode`].
+///
+/// Unknown values are a usage error (exit code 1) rather than a silent
+/// downgrade — sending a message that quietly failed to notify anyone is the
+/// worse outcome.
+fn parse_notify_mode(value: Option<&str>) -> Result<Option<NotifyMode>, CliError> {
+    match value {
+        None => Ok(None),
+        Some(raw) => raw.parse::<NotifyMode>().map(Some).map_err(|_| {
+            CliError::Usage(format!(
+                "invalid --notify value '{raw}' (expected 'channel' or 'here')"
+            ))
+        }),
+    }
+}
+
+/// Warning shown when content mentions `@channel`/`@here` without the flag.
+///
+/// Returns `None` when no reserved token is present outside code regions, so
+/// an `@here` inside a code fence stays quiet.
+fn unflagged_notify_warning(content: &str, notify: Option<NotifyMode>) -> Option<String> {
+    if notify.is_some() {
+        return None;
+    }
+    let tokens = extract_reserved_mention_tokens(&strip_code_regions(content));
+    let first = tokens.first()?;
+    Some(format!(
+        "warning: @{first} does not notify anyone unless --notify {first} is passed; sending without it"
+    ))
 }
 
 pub async fn cmd_send_message(
@@ -490,6 +523,10 @@ pub async fn cmd_send_message(
     // bugs for agent and human users alike.
     p.content = read_or_stdin(&p.content)?;
     validate_content_size(&p.content)?;
+    let notify = parse_notify_mode(p.notify.as_deref())?;
+    if let Some(warning) = unflagged_notify_warning(&p.content, notify) {
+        eprintln!("{warning}");
+    }
     if let Some(ref r) = p.reply_to {
         validate_hex64(r)?;
     }
@@ -538,10 +575,14 @@ pub async fn cmd_send_message(
     let mention_refs: Vec<&str> = auto_resolved.iter().map(|s| s.as_str()).collect();
 
     let builder = match p.kind {
-        Some(45001) => {
-            buzz_sdk::build_forum_post(channel_uuid, &final_content, &mention_refs, &media_tags)
-                .map_err(|e| CliError::Other(format!("build_forum_post failed: {e}")))?
-        }
+        Some(45001) => buzz_sdk::build_forum_post(
+            channel_uuid,
+            &final_content,
+            &mention_refs,
+            notify,
+            &media_tags,
+        )
+        .map_err(|e| CliError::Other(format!("build_forum_post failed: {e}")))?,
         Some(45003) => {
             let tr = thread_ref.as_ref().ok_or_else(|| {
                 CliError::Usage("--reply-to is required for forum comments (kind 45003)".into())
@@ -551,6 +592,7 @@ pub async fn cmd_send_message(
                 &final_content,
                 tr,
                 &mention_refs,
+                notify,
                 &media_tags,
             )
             .map_err(|e| CliError::Other(format!("build_forum_comment failed: {e}")))?
@@ -561,6 +603,7 @@ pub async fn cmd_send_message(
             thread_ref.as_ref(),
             &mention_refs,
             p.broadcast,
+            notify,
             &media_tags,
         )
         .map_err(|e| CliError::Other(format!("build_message failed: {e}")))?,
@@ -764,6 +807,7 @@ pub async fn dispatch(
             kind,
             reply_to,
             broadcast,
+            notify,
             files,
         } => {
             cmd_send_message(
@@ -774,6 +818,7 @@ pub async fn dispatch(
                     kind,
                     reply_to,
                     broadcast,
+                    notify,
                     files,
                 },
             )
@@ -876,7 +921,10 @@ pub async fn dispatch(
 
 #[cfg(test)]
 mod tests {
-    use super::{find_root_from_tags, match_profiles_by_name, parse_member_pubkeys};
+    use super::{
+        find_root_from_tags, match_profiles_by_name, parse_member_pubkeys, parse_notify_mode,
+        unflagged_notify_warning, CliError, NotifyMode,
+    };
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
     };
@@ -1163,5 +1211,50 @@ mod tests {
             profile_event(PK_VALID_A, Some("Aaron"), None),
         ];
         assert_eq!(match_profiles_by_name(&events, "Aaron").len(), 1);
+    }
+
+    #[test]
+    fn notify_flag_parses_both_modes() {
+        assert_eq!(parse_notify_mode(None).expect("no flag"), None);
+        assert_eq!(
+            parse_notify_mode(Some("channel")).expect("channel"),
+            Some(NotifyMode::Channel)
+        );
+        assert_eq!(
+            parse_notify_mode(Some("here")).expect("here"),
+            Some(NotifyMode::Here)
+        );
+    }
+
+    #[test]
+    fn notify_flag_rejects_unknown_value_as_usage_error() {
+        // Usage errors exit 1; anything else would mask a typo as a send failure.
+        let err = parse_notify_mode(Some("everyone")).unwrap_err();
+        assert!(matches!(err, CliError::Usage(_)), "got {err:?}");
+        assert!(err.to_string().contains("everyone"));
+        // Wire format is lowercase-only.
+        assert!(parse_notify_mode(Some("Channel")).is_err());
+    }
+
+    #[test]
+    fn literal_reserved_token_without_flag_warns() {
+        let warning = unflagged_notify_warning("ship it @channel", None).expect("warning");
+        assert!(warning.contains("@channel"));
+        assert!(warning.contains("--notify channel"));
+        assert!(unflagged_notify_warning("heads up @here", None)
+            .expect("warning")
+            .contains("--notify here"));
+    }
+
+    #[test]
+    fn no_warning_when_flag_passed_or_token_absent() {
+        assert!(unflagged_notify_warning("ship it @channel", Some(NotifyMode::Channel)).is_none());
+        assert!(unflagged_notify_warning("hello @alice", None).is_none());
+    }
+
+    #[test]
+    fn reserved_token_inside_code_region_does_not_warn() {
+        assert!(unflagged_notify_warning("run `git push @here`", None).is_none());
+        assert!(unflagged_notify_warning("```\n@channel\n```", None).is_none());
     }
 }

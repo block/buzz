@@ -29,6 +29,7 @@
 
 use std::collections::HashSet;
 
+use buzz_core::channel_mentions::is_reserved_mention_token;
 use nostr::{FromBech32, PublicKey};
 
 /// Maximum number of mention p-tags allowed on a single message.
@@ -61,7 +62,31 @@ pub struct MentionProfile<'a> {
 ///
 /// Allowed name characters: ASCII alphanumerics, `.`, `-`, `_`.
 /// Duplicates are removed; first-seen order is preserved.
+///
+/// The reserved channel-wide mention tokens (`@channel`, `@here`) are never
+/// returned — see [`extract_reserved_mention_tokens`].
 pub fn extract_at_names(content: &str) -> Vec<String> {
+    scan_at_tokens(content)
+        .into_iter()
+        .filter(|name| !is_reserved_mention_token(name))
+        .collect()
+}
+
+/// Extract the reserved channel-wide mention tokens (`channel`, `here`) that
+/// appear as `@tokens` in `content`.
+///
+/// Returned lowercased, deduplicated, in first-seen order. Matching is
+/// case-insensitive, so `@Here` is reported as `here`. Callers that care about
+/// code blocks should pass content through [`strip_code_regions`] first.
+pub fn extract_reserved_mention_tokens(content: &str) -> Vec<String> {
+    scan_at_tokens(content)
+        .into_iter()
+        .filter(|name| is_reserved_mention_token(name))
+        .collect()
+}
+
+/// Scan single-word `@tokens`, lowercased, deduplicated, first-seen order.
+fn scan_at_tokens(content: &str) -> Vec<String> {
     if content.is_empty() || !content.contains('@') {
         return vec![];
     }
@@ -104,6 +129,9 @@ pub fn extract_at_names(content: &str) -> Vec<String> {
 /// longest-first (case-insensitive, word-boundary-checked), then falls back
 /// to single-word tokenization. Returns lowercased names in first-seen order,
 /// deduplicated. Empty/whitespace-only entries in `known_names` are ignored.
+///
+/// The reserved channel-wide mention tokens (`channel`, `here`) are never
+/// returned, even when a member is literally named one of them.
 pub fn extract_at_mentions_with_known(content: &str, known_names: &[&str]) -> Vec<String> {
     if content.is_empty() || !content.contains('@') {
         return vec![];
@@ -144,6 +172,9 @@ pub fn extract_at_mentions_with_known(content: &str, known_names: &[&str]) -> Ve
             rest[..end].to_ascii_lowercase()
         };
 
+        if is_reserved_mention_token(&lower) {
+            continue;
+        }
         if seen.insert(lower.clone()) {
             names.push(lower);
         }
@@ -171,7 +202,9 @@ fn is_word_boundary(s: &str) -> bool {
 /// rather than text-position ordering.
 ///
 /// Profiles whose `content_json` does not parse, or whose `display_name`
-/// (and `name`) are absent or non-string, are silently skipped.
+/// (and `name`) are absent or non-string, are silently skipped. So are
+/// profiles named after a reserved channel-wide mention token (`channel`,
+/// `here`) — those tokens never resolve to an identity.
 ///
 /// Duplicate display names within a channel will produce multiple matches
 /// for a single `@name` — this is by design; resolution is bounded to
@@ -190,7 +223,7 @@ pub fn match_names_to_profiles(names: &[String], profiles: &[MentionProfile<'_>]
             .or_else(|| value.get("name"))
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        if name.is_empty() {
+        if name.is_empty() || is_reserved_mention_token(name) {
             continue;
         }
         if names.iter().any(|n| n.eq_ignore_ascii_case(name)) {
@@ -424,6 +457,54 @@ mod tests {
         assert!(extract_at_names("user@example.com").is_empty());
         assert!(extract_at_names("hello @ world").is_empty());
         assert!(extract_at_names("hello @").is_empty());
+    }
+
+    #[test]
+    fn reserved_tokens_are_never_extracted_as_names() {
+        assert!(extract_at_names("@channel ship it").is_empty());
+        assert!(extract_at_names("heads up @Here").is_empty());
+        assert_eq!(
+            extract_at_names("@channel and @alice"),
+            vec!["alice"],
+            "regular names alongside a reserved token still resolve"
+        );
+    }
+
+    #[test]
+    fn reserved_tokens_lose_to_no_one_even_a_member_named_here() {
+        // A member whose display name is literally "here" must not be pulled in
+        // by @here — the reserved token wins in every parser.
+        let names = extract_at_mentions_with_known("ping @here now", &["here", "Alice"]);
+        assert!(names.is_empty(), "got {names:?}");
+
+        let profiles = [MentionProfile {
+            pubkey: "aa",
+            content_json: r#"{"display_name":"here"}"#,
+        }];
+        assert!(match_names_to_profiles(&["here".to_string()], &profiles).is_empty());
+    }
+
+    #[test]
+    fn reserved_token_prefixes_are_still_ordinary_names() {
+        assert_eq!(
+            extract_at_names("@channels @herer"),
+            vec!["channels", "herer"]
+        );
+    }
+
+    #[test]
+    fn extract_reserved_mention_tokens_reports_lowercased_tokens() {
+        assert_eq!(
+            extract_reserved_mention_tokens("hey @Channel and @here"),
+            vec!["channel", "here"]
+        );
+        assert!(extract_reserved_mention_tokens("hey @alice").is_empty());
+        assert!(extract_reserved_mention_tokens("user@channel.com").is_empty());
+        assert_eq!(
+            extract_reserved_mention_tokens("@here @HERE"),
+            vec!["here"],
+            "deduplicated case-insensitively"
+        );
     }
 
     #[test]

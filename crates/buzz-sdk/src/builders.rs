@@ -4,6 +4,7 @@
 //! The caller signs: `builder.sign_with_keys(&keys)?`.
 
 use buzz_core::{
+    channel_mentions::{NotifyMode, NOTIFY_TAG},
     kind::{
         KIND_AGENT_OBSERVER_FRAME, KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_DELETION,
         KIND_DM_ADD_MEMBER, KIND_DM_OPEN, KIND_EMOJI_SET, KIND_GIT_ISSUE, KIND_GIT_PATCH,
@@ -208,6 +209,17 @@ fn imeta_tags(media_tags: &[Vec<String>], tags: &mut Vec<Tag>) -> Result<(), Sdk
     Ok(())
 }
 
+/// Emit the NIP-CM channel-wide mention tag, if any.
+///
+/// Deliberately no `p` tag expansion: the marker tag alone carries the
+/// channel-wide mention, so the roster never lands in the event.
+fn notify_tag(notify: Option<NotifyMode>, tags: &mut Vec<Tag>) -> Result<(), SdkError> {
+    if let Some(mode) = notify {
+        tags.push(tag(&[NOTIFY_TAG, mode.as_str()])?);
+    }
+    Ok(())
+}
+
 /// Build a stream message (kind 9).
 ///
 /// - `channel_id`: target channel UUID
@@ -215,6 +227,7 @@ fn imeta_tags(media_tags: &[Vec<String>], tags: &mut Vec<Tag>) -> Result<(), Sdk
 /// - `thread_ref`: optional NIP-10 reply context
 /// - `mentions`: pubkey hex strings to p-tag (deduped, max 50)
 /// - `broadcast`: if true, adds `["broadcast", "1"]` tag
+/// - `notify`: if set, adds the NIP-CM `["notify", "channel"|"here"]` tag
 /// - `media_tags`: raw imeta tag vectors
 pub fn build_message(
     channel_id: Uuid,
@@ -222,6 +235,7 @@ pub fn build_message(
     thread_ref: Option<&ThreadRef>,
     mentions: &[&str],
     broadcast: bool,
+    notify: Option<NotifyMode>,
     media_tags: &[Vec<String>],
 ) -> Result<EventBuilder, SdkError> {
     check_content(content, 64 * 1024)?;
@@ -233,6 +247,7 @@ pub fn build_message(
     if broadcast {
         tags.push(tag(&["broadcast", "1"])?);
     }
+    notify_tag(notify, &mut tags)?;
     imeta_tags(media_tags, &mut tags)?;
     Ok(EventBuilder::new(Kind::Custom(9), content).tags(tags))
 }
@@ -275,31 +290,39 @@ pub fn build_agent_observer_frame(
 }
 
 /// Build a forum post thread root (kind 45001).
+///
+/// `notify` optionally adds the NIP-CM `["notify", …]` channel-wide mention tag.
 pub fn build_forum_post(
     channel_id: Uuid,
     content: &str,
     mentions: &[&str],
+    notify: Option<NotifyMode>,
     media_tags: &[Vec<String>],
 ) -> Result<EventBuilder, SdkError> {
     check_content(content, 64 * 1024)?;
     let mut tags = vec![tag(&["h", &channel_id.to_string()])?];
     mention_tags(mentions, &mut tags)?;
+    notify_tag(notify, &mut tags)?;
     imeta_tags(media_tags, &mut tags)?;
     Ok(EventBuilder::new(Kind::Custom(45001), content).tags(tags))
 }
 
 /// Build a forum comment reply (kind 45003).
+///
+/// `notify` optionally adds the NIP-CM `["notify", …]` channel-wide mention tag.
 pub fn build_forum_comment(
     channel_id: Uuid,
     content: &str,
     thread_ref: &ThreadRef,
     mentions: &[&str],
+    notify: Option<NotifyMode>,
     media_tags: &[Vec<String>],
 ) -> Result<EventBuilder, SdkError> {
     check_content(content, 64 * 1024)?;
     let mut tags = vec![tag(&["h", &channel_id.to_string()])?];
     thread_tags(thread_ref, &mut tags)?;
     mention_tags(mentions, &mut tags)?;
+    notify_tag(notify, &mut tags)?;
     imeta_tags(media_tags, &mut tags)?;
     Ok(EventBuilder::new(Kind::Custom(45003), content).tags(tags))
 }
@@ -1873,7 +1896,7 @@ mod tests {
     #[test]
     fn message_happy_path() {
         let cid = uuid();
-        let ev = sign(build_message(cid, "hello", None, &[], false, &[]).unwrap());
+        let ev = sign(build_message(cid, "hello", None, &[], false, None, &[]).unwrap());
         assert_eq!(ev.kind.as_u16(), 9);
         assert_eq!(ev.content, "hello");
         assert!(has_tag(&ev, "h", &cid.to_string()));
@@ -1931,7 +1954,7 @@ mod tests {
             root_event_id: eid,
             parent_event_id: eid,
         };
-        let ev = sign(build_message(cid, "reply", Some(&tr), &[], false, &[]).unwrap());
+        let ev = sign(build_message(cid, "reply", Some(&tr), &[], false, None, &[]).unwrap());
         // Direct reply: only one e-tag with "reply" marker
         let e_tags: Vec<_> = ev
             .tags
@@ -1954,7 +1977,7 @@ mod tests {
             root_event_id: root,
             parent_event_id: parent,
         };
-        let ev = sign(build_message(cid, "nested", Some(&tr), &[], false, &[]).unwrap());
+        let ev = sign(build_message(cid, "nested", Some(&tr), &[], false, None, &[]).unwrap());
         let e_tags: Vec<_> = ev
             .tags
             .iter()
@@ -1972,15 +1995,56 @@ mod tests {
     #[test]
     fn message_broadcast_flag() {
         let cid = uuid();
-        let ev = sign(build_message(cid, "hi", None, &[], true, &[]).unwrap());
+        let ev = sign(build_message(cid, "hi", None, &[], true, None, &[]).unwrap());
         assert!(has_tag(&ev, "broadcast", "1"));
+    }
+
+    #[test]
+    fn message_notify_tag() {
+        let cid = uuid();
+        for (mode, expected) in [(NotifyMode::Channel, "channel"), (NotifyMode::Here, "here")] {
+            let ev = sign(build_message(cid, "hi", None, &[], false, Some(mode), &[]).unwrap());
+            assert!(has_tag(&ev, "notify", expected));
+            assert!(
+                !ev.tags
+                    .iter()
+                    .any(|t| t.as_slice().first() == Some(&"p".to_string())),
+                "channel-wide mentions never expand to p tags"
+            );
+        }
+    }
+
+    #[test]
+    fn message_without_notify_has_no_notify_tag() {
+        let cid = uuid();
+        let ev = sign(build_message(cid, "hi", None, &[], false, None, &[]).unwrap());
+        assert!(!ev
+            .tags
+            .iter()
+            .any(|t| t.as_slice().first() == Some(&"notify".to_string())));
+    }
+
+    #[test]
+    fn forum_builders_carry_notify_tag() {
+        let cid = uuid();
+        let ev = sign(build_forum_post(cid, "post", &[], Some(NotifyMode::Channel), &[]).unwrap());
+        assert!(has_tag(&ev, "notify", "channel"));
+
+        let eid = event_id();
+        let tr = ThreadRef {
+            root_event_id: eid,
+            parent_event_id: eid,
+        };
+        let ev =
+            sign(build_forum_comment(cid, "c", &tr, &[], Some(NotifyMode::Here), &[]).unwrap());
+        assert!(has_tag(&ev, "notify", "here"));
     }
 
     #[test]
     fn message_mentions_deduped() {
         let cid = uuid();
         let hex = "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234";
-        let ev = sign(build_message(cid, "hi", None, &[hex, hex], false, &[]).unwrap());
+        let ev = sign(build_message(cid, "hi", None, &[hex, hex], false, None, &[]).unwrap());
         let p_tags = tag_values(&ev, "p");
         assert_eq!(p_tags.len(), 1);
     }
@@ -2001,7 +2065,7 @@ mod tests {
             })
             .collect();
         let refs: Vec<&str> = hexes.iter().map(|s| s.as_str()).collect();
-        let result = build_message(cid, "hi", None, &refs, false, &[]);
+        let result = build_message(cid, "hi", None, &refs, false, None, &[]);
         assert!(matches!(result, Err(SdkError::TooManyMentions)));
     }
 
@@ -2009,7 +2073,7 @@ mod tests {
     fn message_content_too_large() {
         let cid = uuid();
         let big = "x".repeat(64 * 1024 + 1);
-        let result = build_message(cid, &big, None, &[], false, &[]);
+        let result = build_message(cid, &big, None, &[], false, None, &[]);
         assert!(matches!(result, Err(SdkError::ContentTooLarge { .. })));
     }
 
@@ -2017,13 +2081,13 @@ mod tests {
     fn message_max_content_ok() {
         let cid = uuid();
         let max = "x".repeat(64 * 1024);
-        assert!(build_message(cid, &max, None, &[], false, &[]).is_ok());
+        assert!(build_message(cid, &max, None, &[], false, None, &[]).is_ok());
     }
 
     #[test]
     fn forum_post_happy_path() {
         let cid = uuid();
-        let ev = sign(build_forum_post(cid, "post body", &[], &[]).unwrap());
+        let ev = sign(build_forum_post(cid, "post body", &[], None, &[]).unwrap());
         assert_eq!(ev.kind.as_u16(), 45001);
         assert!(has_tag(&ev, "h", &cid.to_string()));
     }
@@ -2033,7 +2097,7 @@ mod tests {
         let cid = uuid();
         let big = "x".repeat(64 * 1024 + 1);
         assert!(matches!(
-            build_forum_post(cid, &big, &[], &[]),
+            build_forum_post(cid, &big, &[], None, &[]),
             Err(SdkError::ContentTooLarge { .. })
         ));
     }
@@ -2046,7 +2110,7 @@ mod tests {
             root_event_id: eid,
             parent_event_id: eid,
         };
-        let ev = sign(build_forum_comment(cid, "comment", &tr, &[], &[]).unwrap());
+        let ev = sign(build_forum_comment(cid, "comment", &tr, &[], None, &[]).unwrap());
         assert_eq!(ev.kind.as_u16(), 45003);
         assert!(has_tag(&ev, "h", &cid.to_string()));
     }

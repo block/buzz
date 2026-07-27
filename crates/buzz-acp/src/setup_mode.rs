@@ -629,6 +629,7 @@ async fn publish_setup_nudge(
         thread_ref.as_ref(),
         &[&author_hex], // p-tag the asker
         false,
+        None,
         &[],
     )
     .map_err(|e| anyhow::anyhow!("failed to build setup nudge: {e}"))?;
