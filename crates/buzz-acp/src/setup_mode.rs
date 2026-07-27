@@ -74,7 +74,7 @@ use crate::{
     author_allowed,
     config::Config,
     event_mentions_agent, filter,
-    relay::{HarnessRelay, RelayEventPublisher},
+    relay::{HarnessRelay, RelayEventPublisher, RelayStreamItem},
 };
 
 // ── Payload ───────────────────────────────────────────────────────────────────
@@ -330,6 +330,15 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
         HarnessRelay::connect(&config.relay_url, &config.keys, &pubkey_hex, relay_auth_tag)
             .await
             .map_err(|e| anyhow::anyhow!("setup-mode relay connect error: {e}"))?;
+    let mut relay_workflow_signer = crate::fetch_trusted_relay_pubkey(&relay).await;
+    let mut relay_identity_refresh = tokio::time::interval_at(
+        tokio::time::Instant::now() + crate::RELAY_IDENTITY_REFRESH_INTERVAL,
+        crate::RELAY_IDENTITY_REFRESH_INTERVAL,
+    );
+    relay_identity_refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    if relay_workflow_signer.is_none() {
+        relay_identity_refresh.reset_after(crate::RELAY_IDENTITY_RETRY_INTERVAL);
+    }
 
     if let Err(e) = relay.set_startup_watermark(startup_watermark).await {
         tracing::warn!("setup-mode: failed to set startup watermark: {e}");
@@ -389,13 +398,48 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
     let mut nudged_event_ids: HashSet<EventId> = HashSet::new();
 
     loop {
-        let Some(buzz_event) = relay.next_event().await else {
-            tracing::warn!("setup-mode: relay event stream ended — requesting reconnect");
-            if let Err(e) = relay.reconnect().await {
-                tracing::error!("setup-mode: relay background task is gone: {e} — exiting");
+        let relay_item = tokio::select! {
+            biased;
+            _ = relay_identity_refresh.tick() => {
+                let refreshed_signer = crate::fetch_trusted_relay_pubkey(&relay).await;
+                if crate::replace_trusted_workflow_signer(
+                    &mut relay_workflow_signer,
+                    refreshed_signer,
+                ) {
+                    relay_identity_refresh.reset_after(crate::RELAY_IDENTITY_RETRY_INTERVAL);
+                } else {
+                    relay_identity_refresh.reset();
+                }
+                continue;
+            }
+            item = relay.next_event() => item,
+        };
+        let buzz_event = match relay_item {
+            Some(RelayStreamItem::Event(event)) => *event,
+            Some(RelayStreamItem::Disconnected) => {
+                tracing::warn!("setup-mode: relay event stream ended — requesting reconnect");
+                if let Err(e) = relay.reconnect().await {
+                    tracing::error!("setup-mode: relay background task is gone: {e} — exiting");
+                    break;
+                }
+                continue;
+            }
+            Some(RelayStreamItem::Reconnected) => {
+                let refreshed_signer = crate::fetch_trusted_relay_pubkey(&relay).await;
+                if crate::replace_trusted_workflow_signer(
+                    &mut relay_workflow_signer,
+                    refreshed_signer,
+                ) {
+                    relay_identity_refresh.reset_immediately();
+                } else {
+                    relay_identity_refresh.reset();
+                }
+                continue;
+            }
+            None => {
+                tracing::error!("setup-mode: relay background task exited");
                 break;
             }
-            continue;
         };
 
         let kind_u32 = buzz_event.event.kind.as_u16() as u32;
@@ -414,8 +458,19 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
             continue;
         }
 
+        let Some(author_hex) =
+            crate::effective_inbound_author(&buzz_event.event, relay_workflow_signer.as_ref())
+        else {
+            tracing::warn!(
+                event_id = %buzz_event.event.id,
+                signer = %buzz_event.event.pubkey,
+                "setup-mode: dropping unverifiable workflow event"
+            );
+            continue;
+        };
+
         // ignore_self: don't react to our own messages.
-        if buzz_event.event.pubkey.to_hex() == pubkey_hex {
+        if author_hex == pubkey_hex {
             continue;
         }
 
@@ -428,7 +483,6 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
         // Apply the same author gate as normal mode so the nudge only goes
         // to authors the real agent would have answered. Same DM hardening:
         // in DMs only owner/siblings get a nudge (fail-closed on unknown type).
-        let author_hex = buzz_event.event.pubkey.to_hex();
         let is_dm = crate::is_dm_channel(buzz_event.channel_id, &channel_info).await;
         let allowed = author_allowed(
             &config.respond_to,
@@ -466,6 +520,7 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
             &config.keys,
             buzz_event.channel_id,
             &buzz_event.event,
+            &author_hex,
             &payload,
         )
         .await
@@ -591,12 +646,13 @@ async fn handle_setup_membership(
 /// Build and publish a setup nudge reply to the triggering event.
 ///
 /// Threading: flat reply to the thread root if one exists; otherwise reply
-/// to the triggering event itself. P-tags the asker.
+/// to the triggering event itself. P-tags the attributed asker.
 async fn publish_setup_nudge(
     publisher: &RelayEventPublisher,
     keys: &nostr::Keys,
     channel_id: Uuid,
     triggering_event: &nostr::Event,
+    author_hex: &str,
     payload: &SetupPayload,
 ) -> Result<()> {
     use buzz_sdk::ThreadRef;
@@ -621,13 +677,12 @@ async fn publish_setup_nudge(
     };
 
     let body = payload.nudge_body();
-    let author_hex = triggering_event.pubkey.to_hex();
 
     let event_builder = buzz_sdk::build_message(
         channel_id,
         &body,
         thread_ref.as_ref(),
-        &[&author_hex], // p-tag the asker
+        &[author_hex], // p-tag the asker
         false,
         &[],
     )
@@ -650,6 +705,46 @@ async fn publish_setup_nudge(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn setup_nudge_p_tags_the_attributed_workflow_owner() {
+        let (publisher, mut published) = RelayEventPublisher::test_pair();
+        let relay = nostr::Keys::generate();
+        let owner = nostr::Keys::generate();
+        let owner_hex = owner.public_key().to_hex();
+        let relay_hex = relay.public_key().to_hex();
+        let triggering_event =
+            nostr::EventBuilder::new(nostr::Kind::TextNote, "relay-signed workflow output")
+                .sign_with_keys(&relay)
+                .expect("sign triggering event");
+        let payload = SetupPayload {
+            agent_name: "Fizz".to_string(),
+            agent_pubkey: "test".to_string(),
+            requirements: vec![],
+        };
+
+        publish_setup_nudge(
+            &publisher,
+            &nostr::Keys::generate(),
+            Uuid::new_v4(),
+            &triggering_event,
+            &owner_hex,
+            &payload,
+        )
+        .await
+        .expect("publish setup nudge");
+
+        let event = published.recv().await.expect("published event");
+        let p_tags = event
+            .tags
+            .iter()
+            .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("p"));
+        let recipients: Vec<&str> = p_tags
+            .filter_map(|tag| tag.as_slice().get(1).map(String::as_str))
+            .collect();
+        assert!(recipients.contains(&owner_hex.as_str()));
+        assert!(!recipients.contains(&relay_hex.as_str()));
+    }
 
     #[test]
     fn setup_payload_from_raw_returns_none_when_absent() {

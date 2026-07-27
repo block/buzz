@@ -118,7 +118,7 @@ use buzz_core::kind::{
     KIND_TYPING_INDICATOR,
 };
 use futures_util::{SinkExt, StreamExt};
-use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Tag};
+use nostr::{Event, EventBuilder, Keys, Kind, PublicKey, RelayUrl, Tag};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
@@ -533,7 +533,7 @@ type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 /// Ping frames, preventing disconnection during long agent turns.
 pub struct HarnessRelay {
     /// Receiver for events forwarded by the background task.
-    event_rx: mpsc::Receiver<Option<BuzzEvent>>,
+    event_rx: mpsc::Receiver<RelayStreamItem>,
     /// Receiver for encrypted observer control events addressed to this agent.
     observer_control_rx: Option<mpsc::Receiver<Event>>,
     /// Sender for commands to the background task.
@@ -550,6 +550,16 @@ pub struct HarnessRelay {
     /// Wrapped in `Option` so `shutdown()` can take ownership without conflicting
     /// with `Drop` (which only has `&mut self`).
     bg_handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+/// Ordered messages from the relay task to the harness.
+///
+/// Reconnect markers share the event channel so a signer refresh cannot race
+/// replayed events from the new socket.
+pub enum RelayStreamItem {
+    Event(Box<BuzzEvent>),
+    Disconnected,
+    Reconnected,
 }
 
 /// Cloneable publisher handle for signed events on the relay background socket.
@@ -607,7 +617,7 @@ impl HarnessRelay {
         let (ws, handshake_buffer) =
             retry_initial_connect(|| do_connect(relay_url, keys, auth_tag.as_ref())).await?;
 
-        let (event_tx, event_rx) = mpsc::channel::<Option<BuzzEvent>>(event_channel_capacity());
+        let (event_tx, event_rx) = mpsc::channel::<RelayStreamItem>(event_channel_capacity());
         let (observer_control_tx, observer_control_rx) =
             mpsc::channel::<Event>(event_channel_capacity());
         let (cmd_tx, cmd_rx) = mpsc::channel::<RelayCommand>(CMD_CHANNEL_CAPACITY);
@@ -728,6 +738,33 @@ impl HarnessRelay {
         }
     }
 
+    /// Fetch the relay key trusted for workflow messages.
+    ///
+    /// New relays advertise `buzz_workflow_signer`, including development
+    /// relays with an ephemeral process key. Older relays fall back to the
+    /// stable NIP-11 `self` key.
+    pub(crate) async fn relay_workflow_signer_pubkey(
+        &self,
+    ) -> Result<Option<PublicKey>, RelayError> {
+        let response = self
+            .http
+            .get(relay_ws_to_http(&self.relay_url))
+            .header("Accept", "application/nostr+json")
+            .send()
+            .await
+            .map_err(|e| RelayError::Http(e.to_string()))?;
+
+        if !response.status().is_success() {
+            return Ok(None);
+        }
+
+        let info = response
+            .json::<Value>()
+            .await
+            .map_err(|e| RelayError::Http(format!("invalid NIP-11 document: {e}")))?;
+        workflow_signer_from_nip11(&info)
+    }
+
     /// Subscribe to events in a channel using the given filter.
     ///
     /// Sends a `Subscribe` command to the background task, which issues the
@@ -804,13 +841,13 @@ impl HarnessRelay {
         Ok(())
     }
 
-    /// Wait for the next event from any subscribed channel.
+    /// Wait for the next ordered relay stream item.
     ///
-    /// Reads from the background task's event channel. Returns `None` on
-    /// connection loss — the caller should call [`reconnect`](Self::reconnect).
-    pub async fn next_event(&mut self) -> Option<BuzzEvent> {
-        // The background task sends `None` to signal connection loss.
-        self.event_rx.recv().await.flatten()
+    /// A [`RelayStreamItem::Disconnected`] marker asks the caller to request
+    /// reconnection. A [`RelayStreamItem::Reconnected`] marker always precedes
+    /// events replayed from the replacement socket.
+    pub async fn next_event(&mut self) -> Option<RelayStreamItem> {
+        self.event_rx.recv().await
     }
 
     /// Publish a signed event to the relay via the background WebSocket task.
@@ -891,6 +928,20 @@ impl HarnessRelay {
             .map_err(|_| RelayError::ConnectionClosed)?;
         Ok(())
     }
+}
+
+fn workflow_signer_from_nip11(info: &Value) -> Result<Option<PublicKey>, RelayError> {
+    let Some(signer) = info
+        .get("buzz_workflow_signer")
+        .or_else(|| info.get("self"))
+        .and_then(Value::as_str)
+    else {
+        return Ok(None);
+    };
+
+    PublicKey::from_hex(signer)
+        .map(Some)
+        .map_err(|e| RelayError::Http(format!("invalid NIP-11 workflow signer pubkey: {e}")))
 }
 
 impl HarnessRelay {
@@ -1534,7 +1585,7 @@ async fn execute_connected_command(
 async fn run_background_task(
     mut ws: WsStream,
     initial_handshake_buffer: std::collections::VecDeque<RelayMessage>,
-    event_tx: mpsc::Sender<Option<BuzzEvent>>,
+    event_tx: mpsc::Sender<RelayStreamItem>,
     observer_control_tx: mpsc::Sender<Event>,
     mut cmd_rx: mpsc::Receiver<RelayCommand>,
     keys: Keys,
@@ -1560,7 +1611,7 @@ async fn run_background_task(
         warn!("handshake buffer contained a drop signal — attempting autonomous reconnect");
         // Don't wait for a caller-driven Reconnect command — the caller was
         // never notified (no sentinel sent). Go straight to reconnect loop.
-        let _ = event_tx.try_send(None);
+        let _ = event_tx.try_send(RelayStreamItem::Disconnected);
         match try_autonomous_reconnect(
             &mut ws,
             &mut cmd_rx,
@@ -1643,7 +1694,7 @@ async fn run_background_task(
                 ResubscribeResult::Shutdown => return,
                 ResubscribeResult::RetryConnection => {
                     warn!("proactive resubscribe had failures — triggering reconnect");
-                    let _ = event_tx.try_send(None);
+                    let _ = event_tx.try_send(RelayStreamItem::Disconnected);
                     match try_autonomous_reconnect(
                         &mut ws,
                         &mut cmd_rx,
@@ -1819,7 +1870,7 @@ async fn run_background_task(
                            // Signal the caller, then attempt autonomous reconnect.
                            // Use try_send to avoid blocking on backpressure — recovery
                            // must not stall when the event channel is full.
-                           let _ = event_tx.try_send(None);
+                           let _ = event_tx.try_send(RelayStreamItem::Disconnected);
                            let outcome = try_autonomous_reconnect(
                                &mut ws,
                                &mut cmd_rx,
@@ -1900,7 +1951,7 @@ async fn run_background_task(
                                if !ok {
                                    // Send failed — socket is likely dead. Trigger reconnect.
                                    warn!("command send failed — triggering reconnect");
-                                   let _ = event_tx.try_send(None);
+                                   let _ = event_tx.try_send(RelayStreamItem::Disconnected);
                                    match try_autonomous_reconnect(
                                        &mut ws, &mut cmd_rx, &mut state, &keys, &relay_url,
         &agent_pubkey_hex, &event_tx,
@@ -1939,7 +1990,7 @@ async fn run_background_task(
                            // No pong received after our last ping — connection is dead.
                            warn!("no pong received within {:?} — connection dead, reconnecting", PONG_TIMEOUT);
                            // Use try_send to avoid blocking on backpressure during recovery.
-                           let _ = event_tx.try_send(None);
+                           let _ = event_tx.try_send(RelayStreamItem::Disconnected);
                            match try_autonomous_reconnect(
                                &mut ws, &mut cmd_rx, &mut state, &keys, &relay_url,
         &agent_pubkey_hex, &event_tx,
@@ -1972,7 +2023,7 @@ async fn run_background_task(
                            if let Err(e) = ws_send_timeout(&mut ws, Message::Ping(vec![].into()), WS_SEND_TIMEOUT_SECS).await {
                                warn!("failed to send ping: {e} — triggering reconnect");
                                // Use try_send to avoid blocking on backpressure during recovery.
-                               let _ = event_tx.try_send(None);
+                               let _ = event_tx.try_send(RelayStreamItem::Disconnected);
                                match try_autonomous_reconnect(
                                    &mut ws, &mut cmd_rx, &mut state, &keys, &relay_url,
         &agent_pubkey_hex, &event_tx,
@@ -2043,7 +2094,7 @@ async fn run_background_task(
 async fn handle_ws_message(
     msg: Message,
     ws: &mut WsStream,
-    event_tx: &mpsc::Sender<Option<BuzzEvent>>,
+    event_tx: &mpsc::Sender<RelayStreamItem>,
     observer_control_tx: &mpsc::Sender<Event>,
     state: &mut BgState,
     keys: &Keys,
@@ -2112,7 +2163,7 @@ async fn handle_ws_message(
                                 "event channel at ≥80% capacity — backpressure imminent"
                             );
                         }
-                        match event_tx.try_send(Some(buzz_event)) {
+                        match event_tx.try_send(RelayStreamItem::Event(Box::new(buzz_event))) {
                             Ok(()) => {
                                 state.membership_last_seen =
                                     Some(state.membership_last_seen.unwrap_or(0).max(ts));
@@ -2154,7 +2205,7 @@ async fn handle_ws_message(
                                     "event channel at ≥80% capacity — backpressure imminent"
                                 );
                             }
-                            match event_tx.try_send(Some(buzz_event)) {
+                            match event_tx.try_send(RelayStreamItem::Event(Box::new(buzz_event))) {
                                 Ok(()) => {}
                                 Err(mpsc::error::TrySendError::Full(_)) => {
                                     // Remove from dedup set so the replayed event
@@ -2393,7 +2444,7 @@ async fn handle_ws_message(
 async fn process_handshake_buffer(
     ws: &mut WsStream,
     buffer: std::collections::VecDeque<RelayMessage>,
-    event_tx: &mpsc::Sender<Option<BuzzEvent>>,
+    event_tx: &mpsc::Sender<RelayStreamItem>,
     observer_control_tx: &mpsc::Sender<Event>,
     state: &mut BgState,
     keys: &Keys,
@@ -2897,7 +2948,7 @@ async fn try_autonomous_reconnect(
     keys: &Keys,
     relay_url: &str,
     agent_pubkey_hex: &str,
-    event_tx: &mpsc::Sender<Option<BuzzEvent>>,
+    event_tx: &mpsc::Sender<RelayStreamItem>,
     observer_control_tx: &mpsc::Sender<Event>,
     auth_tag: Option<&nostr::Tag>,
 ) -> ReconnectOutcome {
@@ -2925,6 +2976,9 @@ async fn try_autonomous_reconnect(
             Ok((new_ws, handshake_buffer)) => {
                 *ws = new_ws;
                 info!("autonomous reconnect succeeded (attempt {})", attempt + 1);
+                if event_tx.send(RelayStreamItem::Reconnected).await.is_err() {
+                    return ReconnectOutcome::Shutdown;
+                }
                 let handshake_ok = process_handshake_buffer(
                     ws,
                     handshake_buffer,
@@ -3026,7 +3080,7 @@ async fn wait_for_reconnect(
     keys: &Keys,
     relay_url: &str,
     agent_pubkey_hex: &str,
-    event_tx: &mpsc::Sender<Option<BuzzEvent>>,
+    event_tx: &mpsc::Sender<RelayStreamItem>,
     observer_control_tx: &mpsc::Sender<Event>,
     skip_drain: bool,
     auth_tag: Option<&nostr::Tag>,
@@ -3063,6 +3117,9 @@ async fn wait_for_reconnect(
             Ok((new_ws, handshake_buffer)) => {
                 *ws = new_ws;
                 info!("relay reconnected to {relay_url}");
+                if event_tx.send(RelayStreamItem::Reconnected).await.is_err() {
+                    return ReconnectOutcome::Shutdown;
+                }
                 let handshake_ok = process_handshake_buffer(
                     ws,
                     handshake_buffer,
@@ -3550,6 +3607,9 @@ pub(crate) fn parse_relay_message(text: &str) -> Result<RelayMessage, RelayError
                     .cloned()
                     .ok_or_else(|| RelayError::UnexpectedMessage(text.to_string()))?,
             )?;
+            event
+                .verify()
+                .map_err(|e| RelayError::UnexpectedMessage(format!("invalid EVENT: {e}")))?;
             Ok(RelayMessage::Event {
                 subscription_id: sub_id,
                 event: Box::new(event),
@@ -3996,6 +4056,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn workflow_signer_supports_ephemeral_extension_and_stable_fallback() {
+        let ephemeral = Keys::generate().public_key();
+        let stable = Keys::generate().public_key();
+
+        assert_eq!(
+            workflow_signer_from_nip11(&json!({
+                "buzz_workflow_signer": ephemeral.to_hex(),
+                "self": stable.to_hex(),
+            }))
+            .unwrap(),
+            Some(ephemeral),
+            "the current workflow signer must take precedence over stable self"
+        );
+        assert_eq!(
+            workflow_signer_from_nip11(&json!({"self": stable.to_hex()})).unwrap(),
+            Some(stable),
+            "older relays must remain compatible through NIP-11 self"
+        );
+        assert_eq!(workflow_signer_from_nip11(&json!({})).unwrap(), None);
+    }
+
+    #[test]
     fn relay_ws_to_http_plain() {
         assert_eq!(
             relay_ws_to_http("ws://localhost:3000"),
@@ -4163,6 +4245,33 @@ mod tests {
             }
             _ => panic!("expected Ok"),
         }
+    }
+
+    #[test]
+    fn parse_event_verifies_id_and_signature() {
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::TextNote, "valid")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let valid = json!(["EVENT", "sub-1", event]).to_string();
+        assert!(matches!(
+            parse_relay_message(&valid).unwrap(),
+            RelayMessage::Event { .. }
+        ));
+
+        let mut forged = json!(["EVENT", "sub-1", event]);
+        forged[2]["content"] = Value::String("tampered".into());
+        assert!(matches!(
+            parse_relay_message(&forged.to_string()),
+            Err(RelayError::UnexpectedMessage(message)) if message.contains("invalid EVENT")
+        ));
+
+        let mut forged = json!(["EVENT", "sub-1", event]);
+        forged[2]["sig"] = Value::String("00".repeat(64));
+        assert!(matches!(
+            parse_relay_message(&forged.to_string()),
+            Err(RelayError::UnexpectedMessage(message)) if message.contains("invalid EVENT")
+        ));
     }
 
     #[test]
@@ -4382,6 +4491,99 @@ mod tests {
                 replay_since: Some(1_000),
             },
         );
+    }
+
+    #[tokio::test]
+    async fn reconnected_marker_precedes_buffered_workflow_replay() {
+        use buzz_core::kind::KIND_STREAM_MESSAGE;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind reconnect relay");
+        let relay_url = format!("ws://{}", listener.local_addr().expect("relay address"));
+        let channel_id = Uuid::new_v4();
+        let owner = Keys::generate();
+        let relay_signer = Keys::generate();
+        let trusted_signer = relay_signer.public_key();
+        let workflow_event = EventBuilder::new(
+            Kind::Custom(KIND_STREAM_MESSAGE as u16),
+            "scheduled workflow wake",
+        )
+        .tags([
+            Tag::public_key(owner.public_key()),
+            Tag::parse(["h", &channel_id.to_string()]).expect("valid channel tag"),
+            Tag::parse(["buzz:workflow", "true"]).expect("valid workflow tag"),
+        ])
+        .sign_with_keys(&relay_signer)
+        .expect("sign workflow event");
+        let subscription_id = channel_sub_id(channel_id);
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept reconnect");
+            let mut ws = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("complete reconnect handshake");
+            ws.send(Message::Text(
+                json!(["AUTH", "reconnect-challenge"]).to_string().into(),
+            ))
+            .await
+            .expect("send auth challenge");
+
+            let auth = next_test_frame(&mut ws).await;
+            assert_eq!(auth[0], "AUTH");
+            let auth_event_id = auth[1]["id"].as_str().expect("AUTH event id");
+
+            // do_connect buffers messages received while waiting for AUTH OK.
+            ws.send(Message::Text(
+                json!(["EVENT", subscription_id, workflow_event])
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .expect("send buffered workflow event");
+            ws.send(Message::Text(
+                json!(["OK", auth_event_id, true, ""]).to_string().into(),
+            ))
+            .await
+            .expect("accept AUTH");
+
+            let req = next_test_frame(&mut ws).await;
+            assert_eq!(req[0], "REQ");
+        });
+
+        let (mut old_ws, _old_server) = test_ws_pair().await;
+        let (_cmd_tx, mut cmd_rx) = mpsc::channel(4);
+        let (event_tx, mut event_rx) = mpsc::channel(4);
+        let (observer_tx, _observer_rx) = mpsc::channel(4);
+        let mut state = BgState::new();
+        seed_test_subscription(&mut state, channel_id);
+        let agent_keys = Keys::generate();
+        let outcome = try_autonomous_reconnect(
+            &mut old_ws,
+            &mut cmd_rx,
+            &mut state,
+            &agent_keys,
+            &relay_url,
+            &agent_keys.public_key().to_hex(),
+            &event_tx,
+            &observer_tx,
+            None,
+        )
+        .await;
+
+        assert!(matches!(outcome, ReconnectOutcome::Ok));
+        assert!(matches!(
+            event_rx.recv().await,
+            Some(RelayStreamItem::Reconnected)
+        ));
+        let Some(RelayStreamItem::Event(replay)) = event_rx.recv().await else {
+            panic!("workflow replay must follow the reconnect marker");
+        };
+        assert_eq!(
+            crate::effective_inbound_author(&replay.event, Some(&trusted_signer)),
+            Some(owner.public_key().to_hex())
+        );
+        server.await.expect("join reconnect relay");
     }
 
     #[tokio::test]

@@ -42,7 +42,7 @@ use pool::{
 };
 use pool_lifecycle::PoolLifecycle;
 use queue::{CancelReason, EventQueue, FlushBatch, QueuedEvent, ThreadTags};
-use relay::{HarnessRelay, RelayEventPublisher};
+use relay::{HarnessRelay, RelayEventPublisher, RelayStreamItem};
 use tokio::sync::{mpsc, watch};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
@@ -65,6 +65,66 @@ const MODELS_TIMEOUT: Duration = Duration::from_secs(10);
 /// Timeout for `buzz-acp authenticate`. Browser-based vendor auth can require
 /// human interaction, so it must not share the short probe timeout.
 const AUTHENTICATE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
+/// Refresh the trusted relay signing identity independently of inbound events.
+///
+/// A fixed timer avoids letting an attacker force HTTP work by attaching the
+/// reserved `buzz:workflow` tag to otherwise valid channel messages.
+const RELAY_IDENTITY_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
+const RELAY_IDENTITY_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+const RELAY_IDENTITY_FETCH_TIMEOUT: Duration = Duration::from_secs(2);
+
+async fn fetch_trusted_relay_pubkey(relay: &HarnessRelay) -> Option<PublicKey> {
+    match tokio::time::timeout(
+        RELAY_IDENTITY_FETCH_TIMEOUT,
+        relay.relay_workflow_signer_pubkey(),
+    )
+    .await
+    {
+        Ok(Ok(Some(pubkey))) => Some(pubkey),
+        Ok(Ok(None)) => {
+            tracing::warn!(
+                "relay NIP-11 document has no workflow signer; workflow events will fail closed"
+            );
+            None
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(
+                %error,
+                "failed to verify relay identity; workflow events will fail closed"
+            );
+            None
+        }
+        Err(_) => {
+            tracing::warn!(
+                timeout_ms = RELAY_IDENTITY_FETCH_TIMEOUT.as_millis(),
+                "relay identity lookup timed out; workflow events will fail closed"
+            );
+            None
+        }
+    }
+}
+
+fn replace_trusted_workflow_signer(
+    trusted_signer: &mut Option<PublicKey>,
+    refreshed_signer: Option<PublicKey>,
+) -> bool {
+    *trusted_signer = refreshed_signer;
+    trusted_signer.is_none()
+}
+
+#[cfg(test)]
+mod relay_identity_refresh_tests {
+    use super::*;
+
+    #[test]
+    fn failed_reconnect_refresh_revokes_the_previous_workflow_signer() {
+        let mut trusted = Some(nostr::Keys::generate().public_key());
+
+        assert!(replace_trusted_workflow_signer(&mut trusted, None));
+        assert_eq!(trusted, None);
+    }
+}
 
 /// Publish a kind:20001 presence update event via the WebSocket connection.
 ///
@@ -1344,6 +1404,15 @@ async fn tokio_main() -> Result<()> {
         HarnessRelay::connect(&config.relay_url, &config.keys, &pubkey_hex, relay_auth_tag)
             .await
             .map_err(|e| anyhow::anyhow!("relay connect error: {e}"))?;
+    let mut relay_workflow_signer = fetch_trusted_relay_pubkey(&relay).await;
+    let mut relay_identity_refresh = tokio::time::interval_at(
+        tokio::time::Instant::now() + RELAY_IDENTITY_REFRESH_INTERVAL,
+        RELAY_IDENTITY_REFRESH_INTERVAL,
+    );
+    relay_identity_refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    if relay_workflow_signer.is_none() {
+        relay_identity_refresh.reset_after(RELAY_IDENTITY_RETRY_INTERVAL);
+    }
 
     // Tell the relay background task the watermark so it can use
     // `since = watermark - 5s` on the first REQ instead of `since=now`.
@@ -1902,11 +1971,25 @@ async fn tokio_main() -> Result<()> {
                     }
                     None
                 }
+                _ = relay_identity_refresh.tick() => {
+                    let _ = result_rx;
+                    let refreshed_signer = fetch_trusted_relay_pubkey(&relay).await;
+                    if replace_trusted_workflow_signer(
+                        &mut relay_workflow_signer,
+                        refreshed_signer,
+                    ) {
+                        relay_identity_refresh.reset_after(RELAY_IDENTITY_RETRY_INTERVAL);
+                    } else {
+                        relay_identity_refresh.reset();
+                    }
+                    None
+                }
                 // Remaining branches don't touch pool — evaluated when pool is idle.
                 buzz_event = relay.next_event() => {
                     let _ = result_rx; // end split borrow before relay handling
                     match buzz_event {
-                        Some(buzz_event) => {
+                        Some(RelayStreamItem::Event(buzz_event)) => {
+                            let buzz_event = *buzz_event;
                             let kind_u32 = buzz_event.event.kind.as_u16() as u32;
 
                             if kind_u32 == KIND_MEMBER_ADDED_NOTIFICATION
@@ -2025,7 +2108,19 @@ async fn tokio_main() -> Result<()> {
                                 continue;
                             }
 
-                            if config.ignore_self && buzz_event.event.pubkey.to_hex() == pubkey_hex {
+                            let Some(inbound_author) = effective_inbound_author(
+                                &buzz_event.event,
+                                relay_workflow_signer.as_ref(),
+                            ) else {
+                                tracing::warn!(
+                                    event_id = %buzz_event.event.id,
+                                    signer = %buzz_event.event.pubkey,
+                                    "dropping unverifiable workflow event"
+                                );
+                                continue;
+                            };
+
+                            if config.ignore_self && inbound_author == pubkey_hex {
                                 tracing::debug!(channel_id = %buzz_event.channel_id, "dropping self-authored event");
                                 continue;
                             }
@@ -2145,7 +2240,6 @@ async fn tokio_main() -> Result<()> {
                             // explicit pubkey list on top, for external people;
                             // it never revokes same-owner team bots.
                             {
-                                let author = buzz_event.event.pubkey.to_hex();
                                 // DM hardening: resolve channel type (fail-closed
                                 // to DM) so allowlist/anyone modes cannot be
                                 // exercised by non-owner authors inside DMs.
@@ -2154,7 +2248,7 @@ async fn tokio_main() -> Result<()> {
                                 let allowed = author_allowed(
                                     &config.respond_to,
                                     &config.respond_to_allowlist,
-                                    &author,
+                                    &inbound_author,
                                     is_dm,
                                     &owner_cache,
                                     &ctx.rest_client,
@@ -2163,7 +2257,8 @@ async fn tokio_main() -> Result<()> {
                                 if !allowed {
                                     tracing::debug!(
                                         channel_id = %buzz_event.channel_id,
-                                        author = %buzz_event.event.pubkey.to_hex(),
+                                        author = %inbound_author,
+                                        signer = %buzz_event.event.pubkey.to_hex(),
                                         mode = %config.respond_to,
                                         is_dm,
                                         "inbound author gate — dropping event"
@@ -2180,9 +2275,7 @@ async fn tokio_main() -> Result<()> {
                                     continue;
                                 }
                             };
-                            // Capture author pubkey before queue.push() moves
-                            // buzz_event.event (needed for mode gate below).
-                            let author_hex = buzz_event.event.pubkey.to_hex();
+                            // Capture the event ID before queue.push() moves the event.
                             let event_id_hex = buzz_event.event.id.to_hex();
                             // Clone for the non-cancelling steer fork, which
                             // needs the event to render the steer body. The
@@ -2224,7 +2317,7 @@ async fn tokio_main() -> Result<()> {
                                 // event that reaches here.
                                 let signal = mode_gate_signal(
                                     config.multiple_event_handling,
-                                    &author_hex,
+                                    &inbound_author,
                                     owner_cache.get(),
                                 );
                                 if let Some(signal) = signal {
@@ -2266,13 +2359,32 @@ async fn tokio_main() -> Result<()> {
                                 }
                             }
                         }
-                        None => {
+                        Some(RelayStreamItem::Reconnected) => {
+                            let refreshed_signer = fetch_trusted_relay_pubkey(&relay).await;
+                            if replace_trusted_workflow_signer(
+                                &mut relay_workflow_signer,
+                                refreshed_signer,
+                            ) {
+                                // The ordered marker prevents replayed events
+                                // from reaching the author gate before this
+                                // fail-closed refresh. Retry promptly without
+                                // tying HTTP work to untrusted event traffic.
+                                relay_identity_refresh.reset_immediately();
+                            } else {
+                                relay_identity_refresh.reset();
+                            }
+                        }
+                        Some(RelayStreamItem::Disconnected) => {
                             tracing::warn!("relay event stream ended — requesting reconnect");
                             if let Err(e) = relay.reconnect().await {
                                 tracing::error!("relay background task is gone: {e} — exiting");
                                 tokio::time::sleep(Duration::from_secs(1)).await;
                                 break;
                             }
+                        }
+                        None => {
+                            tracing::error!("relay background task exited — shutting down");
+                            break;
                         }
                     }
                     None
@@ -2714,6 +2826,39 @@ fn event_mentions_agent(event: &nostr::Event, agent_pubkey_hex: &str) -> bool {
         t.as_slice().first().map(|s| s.as_str()) == Some("p")
             && t.as_slice().get(1).map(|s| s.as_str()) == Some(agent_pubkey_hex)
     })
+}
+
+fn is_workflow_event(event: &nostr::Event) -> bool {
+    event
+        .tags
+        .iter()
+        .any(|tag| tag.as_slice().first().map(String::as_str) == Some("buzz:workflow"))
+}
+
+/// Return the author used by the inbound gate.
+///
+/// The relay action sink signs workflow output with its advertised workflow
+/// signer and writes the workflow owner as the first `p` tag. Workflow events
+/// fail closed unless their ID and signature verify, their signer matches that
+/// trusted key, and the owner tag is valid.
+fn effective_inbound_author(
+    event: &nostr::Event,
+    relay_workflow_signer: Option<&PublicKey>,
+) -> Option<String> {
+    if !is_workflow_event(event) {
+        return Some(event.pubkey.to_hex());
+    }
+
+    if event.verify().is_err() || relay_workflow_signer != Some(&event.pubkey) {
+        return None;
+    }
+
+    let owner_tag = event
+        .tags
+        .iter()
+        .find(|tag| tag.as_slice().first().map(String::as_str) == Some("p"))?;
+    let owner = owner_tag.as_slice().get(1)?;
+    PublicKey::from_hex(owner).ok().map(|owner| owner.to_hex())
 }
 
 fn is_owner_control_command(
@@ -4407,6 +4552,80 @@ mod author_gate_tests {
         cache.cache_sibling(STRANGER.into(), false);
         cache.cache_sibling(EXTERNAL.into(), false);
         cache
+    }
+
+    #[tokio::test]
+    async fn test_verified_workflow_attribution_preserves_dm_author_gate() {
+        use nostr::{EventBuilder, Keys, Kind, Tag};
+
+        let relay = Keys::generate();
+        let workflow_owner = Keys::generate();
+        let watcher = Keys::generate();
+        let workflow_event = |signer: &Keys| {
+            EventBuilder::new(
+                Kind::Custom(KIND_STREAM_MESSAGE as u16),
+                "@watcher scheduled scan",
+            )
+            .tags([
+                Tag::public_key(workflow_owner.public_key()),
+                Tag::parse(["h", &Uuid::new_v4().to_string()]).expect("valid h tag"),
+                Tag::parse(["buzz:workflow", "true"]).expect("valid workflow tag"),
+                Tag::public_key(watcher.public_key()),
+            ])
+            .sign_with_keys(signer)
+            .expect("event signs")
+        };
+
+        let event = workflow_event(&relay);
+        assert!(event_mentions_agent(&event, &watcher.public_key().to_hex()));
+        let attributed_author =
+            effective_inbound_author(&event, Some(&relay.public_key())).expect("trusted workflow");
+        assert_eq!(
+            attributed_author,
+            workflow_owner.public_key().to_hex(),
+            "verified workflow output must be attributed to its owner"
+        );
+        assert_eq!(
+            effective_inbound_author(&event, None),
+            None,
+            "missing relay identity must drop a workflow event"
+        );
+
+        let cache = OwnerCache::new(Some(watcher.public_key().to_hex()));
+        cache.cache_sibling(workflow_owner.public_key().to_hex(), true);
+        assert!(
+            author_allowed(
+                &RespondTo::OwnerOnly,
+                &HashSet::new(),
+                &attributed_author,
+                true,
+                &cache,
+                &dummy_rest_client()
+            )
+            .await,
+            "a workflow owned by a verified same-owner sibling must reach the watcher in a DM"
+        );
+
+        let spoofed_event = workflow_event(&Keys::generate());
+        assert_eq!(
+            effective_inbound_author(&spoofed_event, Some(&relay.public_key())),
+            None,
+            "a non-relay signer must not borrow workflow attribution"
+        );
+
+        let mut forged: serde_json::Value =
+            serde_json::to_value(workflow_event(&relay)).expect("event serializes");
+        forged["sig"] = serde_json::Value::String("00".repeat(64));
+        let forged: nostr::Event = serde_json::from_value(forged).expect("event deserializes");
+        assert!(
+            forged.verify().is_err(),
+            "the test fixture must have an invalid signature"
+        );
+        assert_eq!(
+            effective_inbound_author(&forged, Some(&relay.public_key())),
+            None,
+            "a forged relay signature must not borrow workflow attribution"
+        );
     }
 
     #[tokio::test]

@@ -55,6 +55,13 @@ pub struct RelayInfo {
     /// Relay's own signing pubkey (NIP-11 `self` field, NIP-43).
     #[serde(rename = "self", skip_serializing_if = "Option::is_none")]
     pub relay_self: Option<String>,
+    /// Current key used to sign relay-generated workflow messages.
+    ///
+    /// Unlike `self`, this Buzz extension is also present when the process uses
+    /// an ephemeral development key. Clients must not use it for NIP-43 or
+    /// other long-lived authoritative relay state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub buzz_workflow_signer: Option<String>,
 }
 
 /// Protocol and resource limits advertised in the NIP-11 document.
@@ -124,6 +131,10 @@ impl RelayInfo {
     /// unconditionally) requires clients to verify those events against
     /// `self`. Pass `Some` whenever the relay has a stable signing key.
     ///
+    /// `workflow_signer` is the current process key used for relay-generated
+    /// workflow messages. It is advertised even when that key is ephemeral;
+    /// clients must refresh it and use it only for workflow-message attribution.
+    ///
     /// `icon` is the community's workspace icon (see
     /// [`workspace_icon_for_host`]) — a host-scoped scalar, pre-fetched by
     /// the caller so `build` itself stays static-input.
@@ -135,6 +146,7 @@ impl RelayInfo {
     /// programmer error to advertise NIP-43 without a `relay_self`.
     pub fn build(
         relay_self: Option<&str>,
+        workflow_signer: Option<&str>,
         icon: Option<&str>,
         advertise_nip43: bool,
         max_message_length: usize,
@@ -164,6 +176,7 @@ impl RelayInfo {
             limitation: Some(relay_limitation(max_message_length)),
             pairing_relay_url: pairing_relay_url.map(str::to_string),
             relay_self: relay_self.map(|s| s.to_string()),
+            buzz_workflow_signer: workflow_signer.map(str::to_string),
         }
     }
 }
@@ -234,9 +247,11 @@ fn push_descriptor(
 /// host-scoped workspace icon.
 pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &str) -> RelayInfo {
     let (relay_self, advertise_nip43) = nip11_facts(state);
+    let workflow_signer = state.relay_keypair.public_key().to_hex();
     let icon = workspace_icon_for_host(state, raw_host).await;
     let mut info = RelayInfo::build(
         relay_self.as_deref(),
+        Some(&workflow_signer),
         icon.as_deref(),
         advertise_nip43,
         state.config.max_frame_bytes,
@@ -329,6 +344,7 @@ pub(crate) fn nip11_facts(state: &crate::state::AppState) -> (Option<String>, bo
 const _RELAY_INFO_BUILD_STATIC_INPUT_FENCE: fn(
     Option<&str>,
     Option<&str>,
+    Option<&str>,
     bool,
     usize,
     Option<&str>,
@@ -386,13 +402,14 @@ mod tests {
 
     #[test]
     fn build_advertises_buzz_repository_url() {
-        let info = RelayInfo::build(None, None, false, DEFAULT_MAX_FRAME_BYTES, None);
+        let info = RelayInfo::build(None, None, None, false, DEFAULT_MAX_FRAME_BYTES, None);
         assert_eq!(info.software, "https://github.com/block/buzz");
     }
 
     #[test]
     fn configured_pairing_relay_is_advertised_and_unset_value_is_omitted() {
         let info = RelayInfo::build(
+            None,
             None,
             None,
             false,
@@ -406,7 +423,7 @@ mod tests {
             Some("wss://pairing.buzz.xyz")
         );
 
-        let info = RelayInfo::build(None, None, false, DEFAULT_MAX_FRAME_BYTES, None);
+        let info = RelayInfo::build(None, None, None, false, DEFAULT_MAX_FRAME_BYTES, None);
         let json = serde_json::to_value(&info).expect("serialize");
         assert!(json.get("pairing_relay_url").is_none());
     }
@@ -417,6 +434,7 @@ mod tests {
     #[test]
     fn icon_is_mirrored_and_empty_or_absent_is_omitted() {
         let info = RelayInfo::build(
+            None,
             None,
             Some("data:image/webp;base64,UklGRg=="),
             false,
@@ -434,7 +452,7 @@ mod tests {
         );
 
         for icon in [None, Some("")] {
-            let info = RelayInfo::build(None, icon, false, DEFAULT_MAX_FRAME_BYTES, None);
+            let info = RelayInfo::build(None, None, icon, false, DEFAULT_MAX_FRAME_BYTES, None);
             assert!(info.icon.is_none());
             let json = serde_json::to_value(&info).expect("serialize");
             assert!(
@@ -454,7 +472,7 @@ mod tests {
 
     #[test]
     fn max_message_length_uses_configured_frame_limit() {
-        let info = RelayInfo::build(None, None, false, 262_144, None);
+        let info = RelayInfo::build(None, None, None, false, 262_144, None);
         let limitation = info.limitation.expect("limitation");
         assert_eq!(limitation.max_message_length, Some(262_144));
     }
@@ -482,11 +500,14 @@ mod tests {
         );
     }
 
-    /// Open relay, ephemeral key — both `self` and NIP-43 are absent.
+    /// Open relay, ephemeral key — `self` and NIP-43 are absent, while the
+    /// current workflow signer remains discoverable.
     #[test]
     fn build_open_relay_ephemeral_key_omits_self_and_nip43() {
-        let info = RelayInfo::build(None, None, false, DEFAULT_MAX_FRAME_BYTES, None);
+        let pk = "0000000000000000000000000000000000000000000000000000000000000001";
+        let info = RelayInfo::build(None, Some(pk), None, false, DEFAULT_MAX_FRAME_BYTES, None);
         assert!(info.relay_self.is_none());
+        assert_eq!(info.buzz_workflow_signer.as_deref(), Some(pk));
         assert!(!info.supported_nips.contains(&NIP_RELAY_MEMBERSHIP));
     }
 
@@ -498,8 +519,16 @@ mod tests {
     #[test]
     fn build_open_relay_stable_key_advertises_self_but_not_nip43() {
         let pk = "0000000000000000000000000000000000000000000000000000000000000001";
-        let info = RelayInfo::build(Some(pk), None, false, DEFAULT_MAX_FRAME_BYTES, None);
+        let info = RelayInfo::build(
+            Some(pk),
+            Some(pk),
+            None,
+            false,
+            DEFAULT_MAX_FRAME_BYTES,
+            None,
+        );
         assert_eq!(info.relay_self.as_deref(), Some(pk));
+        assert_eq!(info.buzz_workflow_signer.as_deref(), Some(pk));
         assert!(!info.supported_nips.contains(&NIP_RELAY_MEMBERSHIP));
     }
 
@@ -507,8 +536,16 @@ mod tests {
     #[test]
     fn build_membership_relay_advertises_self_and_nip43() {
         let pk = "0000000000000000000000000000000000000000000000000000000000000001";
-        let info = RelayInfo::build(Some(pk), None, true, DEFAULT_MAX_FRAME_BYTES, None);
+        let info = RelayInfo::build(
+            Some(pk),
+            Some(pk),
+            None,
+            true,
+            DEFAULT_MAX_FRAME_BYTES,
+            None,
+        );
         assert_eq!(info.relay_self.as_deref(), Some(pk));
+        assert_eq!(info.buzz_workflow_signer.as_deref(), Some(pk));
         assert!(info.supported_nips.contains(&NIP_RELAY_MEMBERSHIP));
     }
 
@@ -518,6 +555,6 @@ mod tests {
     #[test]
     #[should_panic(expected = "advertise_nip43=true requires relay_self=Some")]
     fn build_nip43_without_self_panics_in_debug() {
-        let _ = RelayInfo::build(None, None, true, DEFAULT_MAX_FRAME_BYTES, None);
+        let _ = RelayInfo::build(None, None, None, true, DEFAULT_MAX_FRAME_BYTES, None);
     }
 }
