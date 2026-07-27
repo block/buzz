@@ -475,7 +475,7 @@ class _CommunityIndicator extends ConsumerWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           _CommunityAvatar(name: name, relayUrl: activeCommunity?.relayUrl),
-          const SizedBox(width: Grid.xxs),
+          const SizedBox(width: _kTopSectionLabelGap),
           if (name != null)
             Flexible(
               child: Text(
@@ -511,7 +511,7 @@ class _CommunityAvatar extends ConsumerWidget {
     super.key,
     required this.name,
     this.relayUrl,
-    this.size = 32,
+    this.size = _kTopSectionAvatarSize,
   });
 
   @override

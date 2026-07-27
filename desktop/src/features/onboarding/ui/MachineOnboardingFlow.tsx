@@ -171,7 +171,11 @@ export function MachineOnboardingFlow({
                   onClick={() => void loadFreshIdentity()}
                   type="button"
                 >
-                  {isPending ? "Saving identity…" : "Create a new identity key"}
+                  {isPending
+                    ? "Loading identity…"
+                    : selectedPubkey
+                      ? "Continue setup"
+                      : "Create a new identity key"}
                 </Button>
                 <Button
                   className="h-9 rounded-full bg-foreground/10 px-5 hover:bg-foreground/15"
@@ -180,7 +184,9 @@ export function MachineOnboardingFlow({
                   type="button"
                   variant="ghost"
                 >
-                  Use an existing key
+                  {selectedPubkey
+                    ? "Use a different key instead"
+                    : "Use an existing key"}
                 </Button>
               </div>
               <IdentityKeyHelpDialog />

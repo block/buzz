@@ -577,6 +577,9 @@ impl AcpClient {
     /// `cwd` must be an absolute path. `mcp_servers` may be empty.
     /// `system_prompt` is included in the request when `Some` — agents that
     /// support the field will use it; others ignore unknown fields per JSON-RPC.
+    /// `session_title` rides in `_meta.sessionTitle` when `Some`; `_meta` is
+    /// omitted entirely otherwise, since adapters may distinguish an absent
+    /// member from a null one.
     /// Callers use [`extract_model_config_options`] and [`extract_model_state`]
     /// to pull model info from the raw result.
     pub async fn session_new_full(
@@ -584,6 +587,7 @@ impl AcpClient {
         cwd: &str,
         mcp_servers: Vec<McpServer>,
         system_prompt: Option<&str>,
+        session_title: Option<&str>,
     ) -> Result<SessionNewResponse, AcpError> {
         let mut params = serde_json::json!({
             "cwd": cwd,
@@ -591,6 +595,9 @@ impl AcpClient {
         });
         if let Some(sp) = system_prompt {
             params["systemPrompt"] = serde_json::Value::String(sp.to_owned());
+        }
+        if let Some(title) = session_title {
+            params["_meta"] = serde_json::json!({ "sessionTitle": title });
         }
         let result = self.send_request("session/new", params).await?;
         let session_id = result["sessionId"]
@@ -613,9 +620,10 @@ impl AcpClient {
         cwd: &str,
         mcp_servers: Vec<McpServer>,
         system_prompt: Option<&str>,
+        session_title: Option<&str>,
     ) -> Result<String, AcpError> {
         Ok(self
-            .session_new_full(cwd, mcp_servers, system_prompt)
+            .session_new_full(cwd, mcp_servers, system_prompt, session_title)
             .await?
             .session_id)
     }
@@ -2973,7 +2981,7 @@ mod tests {
             .expect("initialize should succeed");
 
         let resp = client
-            .session_new_full("/tmp", vec![], Some("Custom system prompt"))
+            .session_new_full("/tmp", vec![], Some("Custom system prompt"), None)
             .await
             .expect("session_new_full should succeed");
 
@@ -3058,7 +3066,7 @@ mod tests {
             .expect("initialize should succeed");
 
         let resp = client
-            .session_new_full("/tmp", vec![], None)
+            .session_new_full("/tmp", vec![], None, None)
             .await
             .expect("session_new_full should succeed");
 
@@ -3067,6 +3075,61 @@ mod tests {
         assert!(
             received["params"]["systemPrompt"].is_null(),
             "systemPrompt should NOT be in params when value is None"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_new_full_sends_session_title_in_meta_when_some() {
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
+            read -t 2 REQ
+            echo '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"ses_test","_receivedRequest":'"$REQ"'}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+
+        let resp = client
+            .session_new_full("/tmp", vec![], None, Some("Fizz · #buzz-dev"))
+            .await
+            .expect("session_new_full should succeed");
+
+        let received = &resp.raw["_receivedRequest"];
+        assert_eq!(
+            received["params"]["_meta"]["sessionTitle"].as_str(),
+            Some("Fizz · #buzz-dev"),
+            "title should ride in _meta.sessionTitle, out of band from the prompt"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_new_full_omits_meta_when_session_title_none() {
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
+            read -t 2 REQ
+            echo '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"ses_test","_receivedRequest":'"$REQ"'}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+
+        let resp = client
+            .session_new_full("/tmp", vec![], None, None)
+            .await
+            .expect("session_new_full should succeed");
+
+        let received = &resp.raw["_receivedRequest"];
+        assert!(
+            received["params"].get("_meta").is_none(),
+            "_meta should be absent entirely, not an empty object or null"
         );
     }
 

@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:math' show pi;
+import 'dart:math' show max, min, pi;
 import 'dart:ui';
 
 import 'package:flutter/material.dart';
@@ -16,6 +16,7 @@ import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
+import '../../shared/widgets/skeleton.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
 import '../../shared/custom_emoji/custom_emoji_render.dart';
@@ -46,15 +47,13 @@ part 'channels_page/sections.dart';
 part 'channels_page/channel_tile.dart';
 part 'channels_page/sheets.dart';
 part 'channels_page/badges.dart';
+part 'channels_page/skeleton.dart';
 part 'channels_page/community.dart';
 part 'channels_page/quick_actions.dart';
 part 'channels_page/quick_actions_launcher.dart';
 
 enum _QuickAction { createChannel, newDm }
 
-/// Height of the [_ConnectionBanner]: vertical padding (Grid.quarter + 2) × 2
-/// plus the ~16px row content (12px spinner / labelSmall text).
-const double _kBannerHeight = 24.0;
 const double _kChannelSectionInset = Grid.gutter;
 const double _kChannelLeadingWidth = 22.0;
 const double _kChannelIconSize = 18.0;
@@ -69,12 +68,17 @@ const double _kChannelLabelInset =
 /// sections while the labels stay on [_kChannelLabelInset].
 const double _kDmAvatarSize = _kChannelIconSize;
 
+const double _kTopSectionAvatarSize = 32.0;
+
 /// The top section's avatars are 32dp circles, which fill their box edge to
 /// edge; the channel rows below lead with an 18dp glyph left-aligned in a 22dp
 /// box at [_kChannelSectionInset]. Edge-aligning the two leaves the circles
 /// looking pushed outward, so the bar is pulled in to sit the avatar's centre
-/// on the channel-icon column (12 + 16 = 28dp against the glyph's ~29dp).
+/// on the channel-icon column (12 + 16 = 28dp against the glyph's ~29dp). Its
+/// label gap is derived separately so both labels land on the same 50dp column.
 const double _kTopSectionInset = Grid.twelve;
+const double _kTopSectionLabelGap =
+    _kChannelLabelInset - _kTopSectionInset - _kTopSectionAvatarSize;
 const Duration _kSectionExpandDuration = Duration(milliseconds: 220);
 const Duration _kSectionCollapseDuration = Duration(milliseconds: 170);
 const Curve _kSectionExpandCurve = Cubic(0.23, 1, 0.32, 1);
@@ -202,21 +206,20 @@ class ChannelsPage extends HookConsumerWidget {
       return timer.cancel;
     }, [canSurfaceError]);
 
-    // Match desktop's degraded-state debounce: cached content remains steady
-    // through brief socket flaps, and the banner appears only for a sustained
-    // reconnect.
-    final showConnectionBanner = useState(false);
+    // Keep cached content steady through brief socket flaps. A sustained
+    // reconnect swaps to element-shaped skeletons that match desktop.
+    final showConnectionSkeleton = useState(false);
     final isReconnectingWithContent =
         channels != null &&
         (sessionState.status == SessionStatus.connecting ||
             sessionState.status == SessionStatus.reconnecting);
     useEffect(() {
       if (!isReconnectingWithContent) {
-        showConnectionBanner.value = false;
+        showConnectionSkeleton.value = false;
         return null;
       }
       final timer = Timer(const Duration(seconds: 2), () {
-        showConnectionBanner.value = true;
+        showConnectionSkeleton.value = true;
       });
       return timer.cancel;
     }, [isReconnectingWithContent]);
@@ -252,7 +255,7 @@ class ChannelsPage extends HookConsumerWidget {
         channelsAsync: channelsAsync,
         showError: showError.value,
         sessionStatus: sessionState.status,
-        showConnectionBanner: showConnectionBanner.value,
+        showConnectionSkeleton: showConnectionSkeleton.value,
         currentPubkey: currentPubkey,
         onRefresh: () => ref.read(channelsProvider.notifier).refresh(),
         onSelectChannel: openChannel,
