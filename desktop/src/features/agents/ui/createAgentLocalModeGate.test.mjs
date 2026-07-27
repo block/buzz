@@ -1442,3 +1442,39 @@ test("inherited defaults expose a provider-specific model fallback to agent dial
     value: "goose-claude-opus-4-8",
   });
 });
+
+test("localModeGateSatisfiedForSubmit_serverManaged_ignoresMissingCredentialKeys", async () => {
+  const { localModeGateSatisfiedForSubmit } = await import(
+    "./agentConfigOptions.tsx"
+  );
+  // Spawner-hosted agent: credentials live on the server (e.g. OAuth), so a
+  // missing local ANTHROPIC_API_KEY must not block Save.
+  const gate = computeLocalModeGate({
+    envVars: {},
+    isProviderMode: false,
+    model: "claude-sonnet-5",
+    provider: "anthropic",
+    runtimeId: "buzz-agent",
+  });
+  assert.equal(gate.satisfied, false, "precondition: local gate is unsatisfied");
+  assert.deepEqual(gate.missingEnvKeys, ["ANTHROPIC_API_KEY"]);
+
+  assert.equal(localModeGateSatisfiedForSubmit(gate, true), true);
+  assert.equal(localModeGateSatisfiedForSubmit(gate, false), false);
+});
+
+test("localModeGateSatisfiedForSubmit_serverManaged_stillRequiresNormalizedFields", async () => {
+  const { localModeGateSatisfiedForSubmit } = await import(
+    "./agentConfigOptions.tsx"
+  );
+  // Missing provider/model are real form errors even for server-hosted
+  // agents — only the local credential requirement is waived.
+  const gate = computeLocalModeGate({
+    envVars: {},
+    isProviderMode: false,
+    model: "",
+    provider: "",
+    runtimeId: "buzz-agent",
+  });
+  assert.equal(localModeGateSatisfiedForSubmit(gate, true), false);
+});

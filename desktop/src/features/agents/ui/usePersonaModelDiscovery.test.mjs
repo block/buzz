@@ -312,3 +312,57 @@ test("isSuccessfulEmptyDiscovery_stillPending_isFalse", () => {
     false,
   );
 });
+
+// ── server-managed suppression ────────────────────────────────────────────────
+
+test("canRunLocalModelDiscovery_serverManaged_isFalse", async () => {
+  const { canRunLocalModelDiscovery } = await import(
+    "./usePersonaModelDiscovery.ts"
+  );
+  const base = {
+    open: true,
+    modelFieldVisible: true,
+    serverManaged: false,
+    runtimeAvailability: "available",
+    runtimeCommand: "buzz-agent",
+    isCustomProviderEditing: false,
+    provider: "anthropic",
+  };
+  // Sanity: a locally-configured agent still discovers.
+  assert.equal(canRunLocalModelDiscovery(base), true);
+  // A spawner-hosted agent must never hit local discovery — the model catalog
+  // comes from the spawner announcement, and local credentials are irrelevant.
+  assert.equal(
+    canRunLocalModelDiscovery({ ...base, serverManaged: true }),
+    false,
+  );
+});
+
+test("shouldSurfaceRuntimeUnavailableStatus_serverManaged_isFalse", async () => {
+  const { shouldSurfaceRuntimeUnavailableStatus } = await import(
+    "./usePersonaModelDiscovery.ts"
+  );
+  // Local runtime availability is meaningless for a server-hosted agent — no
+  // "Runtime not available" warning may leak into the dialog.
+  assert.equal(
+    shouldSurfaceRuntimeUnavailableStatus({
+      serverManaged: true,
+      runtimeAvailability: "not_installed",
+    }),
+    false,
+  );
+  assert.equal(
+    shouldSurfaceRuntimeUnavailableStatus({
+      serverManaged: false,
+      runtimeAvailability: "not_installed",
+    }),
+    true,
+  );
+  assert.equal(
+    shouldSurfaceRuntimeUnavailableStatus({
+      serverManaged: false,
+      runtimeAvailability: "available",
+    }),
+    false,
+  );
+});
