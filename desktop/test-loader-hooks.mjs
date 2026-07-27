@@ -129,6 +129,17 @@ export async function load(url, context, nextLoad) {
     };
   }
 
+  // Vite turns imported image assets into resolved URLs. Node's ESM loader
+  // does not understand those extensions, so mirror the bundler contract for
+  // component tests without reading image bytes into the test process.
+  if (/\.(?:png|jpe?g|webp)$/.test(url)) {
+    return {
+      format: "module",
+      shortCircuit: true,
+      source: `export default ${JSON.stringify(url)};`,
+    };
+  }
+
   if (url.endsWith(".tsx")) {
     const source = fs.readFileSync(fileURLToPath(url), "utf8");
     const transpiled = ts.transpileModule(source, {

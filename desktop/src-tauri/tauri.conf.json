@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Buzz",
+  "productName": "Command Adviser",
   "version": "0.4.24",
   "identifier": "xyz.block.buzz.app",
   "build": {
