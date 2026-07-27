@@ -1259,6 +1259,21 @@ fn validate_agent_turn_metric_envelope(event: &nostr::Event) -> Result<(), Strin
 /// and MUST be in the range 0..=9007199254740991 (`Number.MAX_SAFE_INTEGER`, the
 /// interoperable JSON integer bound the spec mandates). Parsing is exact integer
 /// parsing — never lossy floating-point — so values that overflow are malformed.
+// Postgres cannot store NUL in `text`/`jsonb` columns, so an event carrying
+// `\u0000` in its content or tag values would otherwise pass validation and
+// then fail at insert time as an internal database error.
+fn validate_no_nul_bytes(event: &Event) -> Result<(), &'static str> {
+    if event.content.contains('\0') {
+        return Err("content contains a NUL character");
+    }
+    for tag in event.tags.iter() {
+        if tag.as_slice().iter().any(|value| value.contains('\0')) {
+            return Err("tag value contains a NUL character");
+        }
+    }
+    Ok(())
+}
+
 fn validate_not_before(tag_value: &str) -> Result<u64, &'static str> {
     const MAX_NOT_BEFORE: u64 = 9_007_199_254_740_991;
 
@@ -1532,6 +1547,10 @@ async fn ingest_event_inner(
             MAX_EVENT_CONTENT_BYTES,
             event.content.len()
         )));
+    }
+
+    if let Err(e) = validate_no_nul_bytes(&event) {
+        return Err(IngestError::Rejected(format!("invalid: {e}")));
     }
 
     let is_gift_wrap = kind_u32 == KIND_GIFT_WRAP;
@@ -3141,6 +3160,43 @@ mod tests {
             ],
         );
         assert!(validate_diff_event(&event).is_err());
+    }
+
+    #[test]
+    fn nul_validation_rejects_content_with_nul() {
+        let event = make_event_with_tags(KIND_STREAM_MESSAGE, "hello\0world", &[]);
+        assert_eq!(
+            validate_no_nul_bytes(&event),
+            Err("content contains a NUL character")
+        );
+    }
+
+    #[test]
+    fn nul_validation_rejects_tag_value_with_nul() {
+        let event = make_event_with_tags(KIND_STREAM_MESSAGE, "hello", &[&["title", "a\0b"]]);
+        assert_eq!(
+            validate_no_nul_bytes(&event),
+            Err("tag value contains a NUL character")
+        );
+    }
+
+    #[test]
+    fn nul_validation_rejects_tag_name_with_nul() {
+        let event = make_event_with_tags(KIND_STREAM_MESSAGE, "hello", &[&["ti\0tle", "a"]]);
+        assert_eq!(
+            validate_no_nul_bytes(&event),
+            Err("tag value contains a NUL character")
+        );
+    }
+
+    #[test]
+    fn nul_validation_accepts_clean_event() {
+        let event = make_event_with_tags(
+            KIND_STREAM_MESSAGE,
+            "hello world",
+            &[&["title", "greeting"]],
+        );
+        assert!(validate_no_nul_bytes(&event).is_ok());
     }
 
     fn make_dummy_event() -> Event {
