@@ -31,7 +31,25 @@ export function getResolvedThreadTargets({
   };
 }
 
+type LayoutScrollTarget = {
+  messageId: string;
+  threadHeadId: string;
+};
+
+export function getScopedLayoutScrollTargetId({
+  activeThreadHeadId,
+  layoutTarget,
+}: {
+  activeThreadHeadId: string | null;
+  layoutTarget: LayoutScrollTarget | null;
+}): string | null {
+  return layoutTarget?.threadHeadId === activeThreadHeadId
+    ? layoutTarget.messageId
+    : null;
+}
+
 type ThreadViewModeSwitchOptions = {
+  activeThreadHeadId: string | null;
   externalScrollTargetId: string | null;
   onExternalTargetResolved: () => void;
   onModeChange?: (mode: ThreadViewMode) => void;
@@ -39,13 +57,23 @@ type ThreadViewModeSwitchOptions = {
 
 /** Preserves the reply being read while the thread changes presentation. */
 export function useThreadViewModeSwitch({
+  activeThreadHeadId,
   externalScrollTargetId,
   onExternalTargetResolved,
   onModeChange,
 }: ThreadViewModeSwitchOptions) {
-  const [layoutScrollTargetId, setLayoutScrollTargetId] = React.useState<
-    string | null
-  >(null);
+  const [layoutScrollTarget, setLayoutScrollTarget] =
+    React.useState<LayoutScrollTarget | null>(null);
+  const layoutScrollTargetId = getScopedLayoutScrollTargetId({
+    activeThreadHeadId,
+    layoutTarget: layoutScrollTarget,
+  });
+
+  React.useEffect(() => {
+    setLayoutScrollTarget((current) =>
+      current?.threadHeadId === activeThreadHeadId ? current : null,
+    );
+  }, [activeThreadHeadId]);
 
   const changeThreadViewMode = React.useCallback(
     (mode: ThreadViewMode, restoreFocus: boolean) => {
@@ -54,7 +82,11 @@ export function useThreadViewModeSwitch({
       );
       const anchorId = findTopVisibleThreadMessageId(body);
 
-      setLayoutScrollTargetId(anchorId);
+      setLayoutScrollTarget(
+        anchorId && activeThreadHeadId
+          ? { messageId: anchorId, threadHeadId: activeThreadHeadId }
+          : null,
+      );
       onModeChange?.(mode);
       setThreadViewMode(mode);
       requestAnimationFrame(() => {
@@ -69,7 +101,7 @@ export function useThreadViewModeSwitch({
         });
       });
     },
-    [onModeChange],
+    [activeThreadHeadId, onModeChange],
   );
 
   const resolveScrollTarget = React.useCallback(
@@ -80,12 +112,20 @@ export function useThreadViewModeSwitch({
       });
       if (resolution.resolveExternal) onExternalTargetResolved();
       if (settledMessageId) {
-        setLayoutScrollTargetId((current) =>
-          current === settledMessageId ? null : current,
+        setLayoutScrollTarget((current) =>
+          current?.threadHeadId === activeThreadHeadId &&
+          current.messageId === settledMessageId
+            ? null
+            : current,
         );
       }
     },
-    [externalScrollTargetId, layoutScrollTargetId, onExternalTargetResolved],
+    [
+      activeThreadHeadId,
+      externalScrollTargetId,
+      layoutScrollTargetId,
+      onExternalTargetResolved,
+    ],
   );
 
   return {

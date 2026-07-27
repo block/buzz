@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   findTopVisibleThreadMessageId,
   getResolvedThreadTargets,
+  getScopedLayoutScrollTargetId,
 } from "./useThreadViewModeSwitch.ts";
 
 function row(id, top, bottom) {
@@ -58,6 +59,38 @@ test("does not resolve a layout target that was never captured", () => {
       layoutTargetId: null,
     }),
     { resolveExternal: true, resolveLayout: false },
+  );
+});
+
+test("drops a captured layout target when the active thread closes or changes", () => {
+  const captured = { messageId: "reply-a", threadHeadId: "thread-a" };
+
+  assert.equal(
+    getScopedLayoutScrollTargetId({
+      activeThreadHeadId: "thread-a",
+      layoutTarget: captured,
+    }),
+    "reply-a",
+  );
+  assert.equal(
+    getScopedLayoutScrollTargetId({
+      activeThreadHeadId: null,
+      layoutTarget: captured,
+    }),
+    null,
+  );
+  const replacementLayoutTargetId = getScopedLayoutScrollTargetId({
+    activeThreadHeadId: "thread-b",
+    layoutTarget: captured,
+  });
+  assert.equal(replacementLayoutTargetId, null);
+  assert.deepEqual(
+    getResolvedThreadTargets({
+      externalTargetId: "reply-b",
+      layoutTargetId: replacementLayoutTargetId,
+    }),
+    { resolveExternal: true, resolveLayout: false },
+    "the stale anchor does not mask the replacement thread target",
   );
 });
 

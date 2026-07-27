@@ -524,6 +524,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   );
   const { changeThreadViewMode, layoutScrollTargetId, resolveScrollTarget } =
     useThreadViewModeSwitch({
+      activeThreadHeadId: threadHeadMessage?.id ?? null,
       externalScrollTargetId: threadScrollTargetId,
       onExternalTargetResolved: onThreadScrollTargetResolved,
       onModeChange: markExitComplete,
