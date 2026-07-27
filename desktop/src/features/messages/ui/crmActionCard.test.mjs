@@ -51,6 +51,50 @@ test("preserves read-only Reddit review content ahead of the action controls", (
   assert.equal(extractCrmRedditDraft(card?.content ?? ""), "Safe reply text");
 });
 
+test("hides CRM action transport chrome from the readable Reddit review", () => {
+  const review = [
+    "[CRM Buzz action 8ca5bd14-00d4-45cc-88ec-4bb1609e7d4a]",
+    "# 🚀 New Reddit Opportunity",
+    "",
+    "**Post:** [Storage question](https://www.reddit.com/r/selfstorage/comments/1)",
+    "**Subreddit:** r/selfstorage",
+    "**Category:** Acquisition",
+    "**Confidence:** 🟢 high",
+    "",
+    "## 🤖 AI Draft",
+    "",
+    "Draft to copy manually:",
+    "```",
+    "Safe reply text",
+    "```",
+    "",
+    "Mark Reddit draft as posted.",
+    "Use Approve only after the Reddit post is live.",
+    "Expires: 2026-07-27T09:31:48.865306+00:00",
+    marker,
+  ].join("\n");
+
+  const card = parseCrmActionCard(review);
+  assert.equal(
+    card?.content,
+    [
+      "# 🚀 New Reddit Opportunity",
+      "",
+      "**Post:** [Storage question](https://www.reddit.com/r/selfstorage/comments/1)",
+      "**Subreddit:** r/selfstorage",
+      "**Category:** Acquisition",
+      "**Confidence:** 🟢 high",
+      "",
+      "## 🤖 AI Draft",
+      "",
+      "Draft to copy manually:",
+      "```",
+      "Safe reply text",
+      "```",
+    ].join("\n"),
+  );
+});
+
 test("does not expose a copy value without the explicit Reddit draft delimiter", () => {
   assert.equal(extractCrmRedditDraft("A fenced block is not necessarily a Reddit draft.\n```\nIgnore me\n```"), null);
 });
