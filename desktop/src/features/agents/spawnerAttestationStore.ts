@@ -2,10 +2,7 @@ import React from "react";
 import { toast } from "sonner";
 
 import { getIdentity } from "@/shared/api/tauriIdentity";
-import {
-  setManagedAgentRelocated,
-  stopManagedAgent,
-} from "@/shared/api/tauriManagedAgents";
+import { setManagedAgentRelocated } from "@/shared/api/tauriManagedAgents";
 import {
   respondToSpawnerAttestation,
   subscribeToSpawnerAttestations,
@@ -83,45 +80,49 @@ function promptFor(specSlug: string): SpawnerPromptMaterial | undefined {
 }
 
 /**
- * Publish an attestation answer, then retire the local copy of a relocated
- * agent.
+ * Publish an attestation answer, undoing the relocation if it never lands.
  *
- * The order is deliberate and load-bearing:
+ * By the time the signed event exists, Rust has already marked the local agent
+ * relocated and stopped it — atomically, under the store lock, before handing
+ * the event back. It has to be that way round: the response *contains* the
+ * agent's secret key, so any gap between publishing it and retiring the local
+ * copy is a window where two runners hold one identity, both answer every
+ * mention, and the owner pays twice. A window this side of an IPC boundary
+ * cannot be closed by ordering two calls carefully, only by not having it.
  *
- * 1. **Publish first.** If the response never reaches the spawner the agent is
- *    still only running here, and stopping it first would take the user's agent
- *    offline everywhere for nothing.
- * 2. **Mark relocated second.** Relocation must be *state*, not just a stop:
- *    the auto-restart policy, app-launch restore, runtime reconcile, and the
- *    manual Start button all resurrect a merely-stopped agent (the split-brain
- *    found in testing came from exactly that). The persisted flag is what every
- *    start path checks, so it lands before the stop it protects.
- * 3. **Stop third, and only on `relocatedAgentPubkey`.** Rust sets that field
- *    exactly when it handed the agent's secret key to the spawner, so from that
- *    moment two processes hold one key. Both would see every mention and both
- *    would reply: duplicate answers, and the owner billed twice per turn.
- *
- * A failed mark or stop is surfaced as a toast rather than swallowed. It leaves
- * a real split brain that only the user can resolve, so silence is the one
- * unacceptable outcome — the publish itself already succeeded and must not be
- * retried.
+ * That leaves the opposite failure to handle here: the key was never actually
+ * delivered, and the agent is now stopped everywhere. Clearing the flag puts it
+ * back exactly where it was, so the user can retry.
  */
 async function publishAndRetireRelocated(
   response: SpawnerAttestationResponse,
-  spawnerPubkey: string,
 ): Promise<void> {
-  await respondToSpawnerAttestation(response.event);
-
   const relocated = response.relocatedAgentPubkey;
-  if (!relocated) return;
   try {
-    await setManagedAgentRelocated(relocated, spawnerPubkey);
-    await stopManagedAgent(relocated);
+    await respondToSpawnerAttestation(response.event);
+  } catch (error) {
+    if (relocated) {
+      await rollBackRelocation(relocated);
+    }
+    throw error;
+  }
+}
+
+/**
+ * Put a relocated agent back on this device after a failed publish.
+ *
+ * Best-effort by necessity — if this fails too, the agent is stopped and
+ * flagged as living on a server that never received its key, which no
+ * background retry can resolve. Say so loudly instead, and name the fix.
+ */
+async function rollBackRelocation(pubkey: string): Promise<void> {
+  try {
+    await setManagedAgentRelocated(pubkey, null);
   } catch (error) {
     toast.error(
-      `This agent now runs on the server, but the copy on this Mac could not be retired: ${
+      `The hand-off failed and this agent could not be moved back to this Mac: ${
         error instanceof Error ? error.message : "unknown error"
-      }. Stop it from the Agents screen — until you do, it will answer twice.`,
+      }. It is stopped everywhere until you move it back from the Agents screen.`,
       { duration: Number.POSITIVE_INFINITY },
     );
   }
@@ -183,7 +184,6 @@ async function handleAttestationEvent(event: RelayEvent): Promise<void> {
           trust: "trusted",
           prompt: promptFor(request.specSlug),
         }),
-        request.spawnerPubkey,
       );
     } catch {
       // Fall through to prompting. A failed auto-approval (relay down,
@@ -223,7 +223,6 @@ export async function approveAttestation(
       trust: "trusted",
       prompt: promptFor(item.specSlug),
     }),
-    item.spawnerPubkey,
   );
   // Remember only after the signature actually went out, so a failed publish
   // does not leave a spawner silently trusted for every future request.
