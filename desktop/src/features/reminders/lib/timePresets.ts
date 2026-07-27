@@ -17,7 +17,7 @@ function nowSeconds(): number {
  * instant is already past (e.g. it is after 9am and offset is 0), roll to the
  * following day so the result is always in the future.
  */
-function nextDayAt9am(dayOffset: number): number {
+export function nextDayAt9am(dayOffset: number): number {
   const now = new Date();
   const target = new Date(now);
   target.setDate(target.getDate() + dayOffset);
