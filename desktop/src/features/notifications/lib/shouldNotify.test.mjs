@@ -4,7 +4,6 @@ import test from "node:test";
 import {
   isHighPriorityEventForUser,
   notifyDecisionForEvent,
-  shouldNotifyForEvent,
 } from "./shouldNotify.ts";
 
 const PUBKEY = "a".repeat(64);
@@ -346,11 +345,4 @@ test("ignored thread reply decision is all-false", () => {
     alert: false,
     highPriority: false,
   });
-});
-
-test("shouldNotifyForEvent mirrors the decision's unread flag", () => {
-  const notified = makeEvent([]);
-  const ignored = makeEvent([rootTag(ROOT_ID), replyTag(PARENT_ID)]);
-  assert.equal(shouldNotifyForEvent(notified, PUBKEY, opts()), true);
-  assert.equal(shouldNotifyForEvent(ignored, PUBKEY, opts()), false);
 });

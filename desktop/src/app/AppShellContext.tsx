@@ -2,6 +2,10 @@ import * as React from "react";
 import type { ContextParentResolver } from "@/features/channels/readState/readStateManager";
 import type { ThreadActivityItem } from "@/features/channels/useUnreadChannels";
 import type { FeedItemState } from "@/features/home/useFeedItemState";
+import {
+  DEFAULT_CHANNEL_NOTIFICATION_SETTINGS,
+  type ChannelNotificationSettings,
+} from "@/app/useChannelNotificationSettings";
 import type { FeedItem } from "@/shared/api/types";
 import type { SettingsSection } from "@/features/settings/ui/SettingsPanels";
 
@@ -47,6 +51,10 @@ type AppShellContextValue = {
   threadActivityItems: ThreadActivityItem[];
   threadActivityFeedItems: FeedItem[];
   feedItemState: FeedItemState;
+  // Per-channel notification preferences (NIP-CN): the one resolver every
+  // surface reads, plus mutations that own the legacy `channel-mutes`
+  // dual-write so callers never have to.
+  channelNotify: ChannelNotificationSettings;
   // Open the Settings panel at the given section. Available on all surfaces
   // that render under AppShell (channel, home, projects, pulse, agents).
   // Used by config-nudge cards to deep-link to Settings → Agents.
@@ -74,6 +82,7 @@ const AppShellContext = React.createContext<AppShellContextValue>({
   isThreadMuted: () => false,
   threadActivityItems: [],
   threadActivityFeedItems: [],
+  channelNotify: DEFAULT_CHANNEL_NOTIFICATION_SETTINGS,
   feedItemState: {
     doneSet: EMPTY_SET,
     markDone: () => {},

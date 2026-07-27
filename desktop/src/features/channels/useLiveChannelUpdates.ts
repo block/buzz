@@ -8,7 +8,10 @@ import {
   getChannelIdFromTags,
   isThreadReply,
 } from "@/features/messages/lib/threading";
-import { shouldNotifyForEvent } from "@/features/notifications/lib/shouldNotify";
+import {
+  notifyDecisionForEvent,
+  type ChannelNotifyPrefsLookup,
+} from "@/features/notifications/lib/shouldNotify";
 import { relayClient } from "@/shared/api/relayClient";
 import {
   CHANNEL_EVENT_KINDS,
@@ -41,6 +44,12 @@ export type UseLiveChannelUpdatesOptions = {
    */
   onChannelMessage?: (channelId: string, event: RelayEvent) => void;
   /**
+   * Fired for live events that earn an alert (dock bounce tier) rather than
+   * just an unread mark — the NIP-CN decision's `alert` field. A channel at
+   * level "mentions" records unread without firing this.
+   */
+  onChannelAlert?: (channelId: string, event: RelayEvent) => void;
+  /**
    * Fired for thread replies that should be surfaced as Home inbox activity.
    */
   onThreadReplyNotification?: (channelId: string, event: RelayEvent) => void;
@@ -66,6 +75,8 @@ export type UseLiveChannelUpdatesOptions = {
   authoredRootIds?: ReadonlySet<string>;
   mutedRootIds?: ReadonlySet<string>;
   mutedChannelIds?: ReadonlySet<string>;
+  /** Resolved per-channel notification prefs (NIP-CN); see `NotifyOptions`. */
+  channelPrefs?: ChannelNotifyPrefsLookup;
 };
 
 const LIVE_SUBSCRIPTION_RETRY_BASE_MS = 1_000;
@@ -266,20 +277,17 @@ export function useLiveChannelUpdates(
     const isThreadedReply = isThreadReply(event.tags);
 
     if (isExternalTriggerEvent) {
-      const shouldNotify = shouldNotifyForEvent(
-        event,
-        normalizedCurrentPubkey,
-        {
-          participatedRootIds: options.participatedRootIds ?? EMPTY_SET,
-          followedRootIds: options.followedRootIds ?? EMPTY_SET,
-          authoredRootIds: options.authoredRootIds ?? EMPTY_SET,
-          mutedRootIds: options.mutedRootIds ?? EMPTY_SET,
-          mutedChannelIds: options.mutedChannelIds ?? EMPTY_SET,
-          channelId,
-        },
-      );
+      const decision = notifyDecisionForEvent(event, normalizedCurrentPubkey, {
+        participatedRootIds: options.participatedRootIds ?? EMPTY_SET,
+        followedRootIds: options.followedRootIds ?? EMPTY_SET,
+        authoredRootIds: options.authoredRootIds ?? EMPTY_SET,
+        mutedRootIds: options.mutedRootIds ?? EMPTY_SET,
+        mutedChannelIds: options.mutedChannelIds ?? EMPTY_SET,
+        channelPrefs: options.channelPrefs,
+        channelId,
+      });
 
-      if (!shouldNotify) {
+      if (!decision.unread) {
         if (isThreadedReply) {
           options.onThreadReplyCandidate?.(channelId, event);
         }
@@ -290,8 +298,10 @@ export function useLiveChannelUpdates(
         }
       }
 
-      if (shouldNotify && isThreadedReply) {
+      if (decision.alert) {
+        options.onChannelAlert?.(channelId, event);
         if (
+          isThreadedReply &&
           !dmChannelMap.has(channelId) &&
           (channelId !== activeChannelId || options.notifyForActiveChannel)
         ) {

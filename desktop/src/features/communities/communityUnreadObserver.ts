@@ -13,11 +13,21 @@ import {
   getThreadReference,
   isBroadcastReply,
 } from "@/features/messages/lib/threading";
-import { shouldNotifyForEvent } from "@/features/notifications/lib/shouldNotify";
 import {
-  mutedChannelIdsFromStore,
+  DEFAULT_CHANNEL_NOTIFY_STATE,
+  resolveChannelNotifyState,
+} from "@/features/notifications/lib/resolveChannelNotifyState";
+import { notifyDecisionForEvent } from "@/features/notifications/lib/shouldNotify";
+import {
+  DEFAULT_STORE as DEFAULT_LEGACY_MUTE_STORE,
   parseMutePayload,
+  type ChannelMuteStore,
 } from "@/features/sidebar/lib/channelMutesStorage";
+import {
+  DEFAULT_STORE as DEFAULT_NOTIFY_PREFS_STORE,
+  parseNotifyPrefsPayload,
+  type ChannelNotifyPrefsStore,
+} from "@/features/sidebar/lib/channelNotifyPrefsStorage";
 import type { Community } from "@/features/communities/types";
 import { withReadOnlyRelayClient } from "@/shared/api/readOnlyRelayClient";
 import type { RelaySubscriptionFilter } from "@/shared/api/relayClientShared";
@@ -27,6 +37,7 @@ import {
   CHANNEL_MESSAGE_EVENT_KINDS,
   HOME_MENTION_EVENT_KINDS,
   KIND_CHANNEL_MUTES,
+  KIND_CHANNEL_NOTIFY_PREFS,
   KIND_DM_VISIBILITY,
   KIND_READ_STATE,
 } from "@/shared/constants/kinds";
@@ -158,6 +169,7 @@ export async function fetchCommunityUnread(args: {
   nowSeconds?: number;
   decryptReadState?: (ciphertext: string) => Promise<string>;
   decryptMutes?: (ciphertext: string) => Promise<string>;
+  decryptNotifyPrefs?: (ciphertext: string) => Promise<string>;
   readThreadRelationships?: (pubkey: string) => ThreadRelationships;
   readForcedUnread?: (pubkey: string) => ForcedUnreadMap;
 }): Promise<CommunityUnreadObserverResult> {
@@ -165,6 +177,7 @@ export async function fetchCommunityUnread(args: {
   const normalizedPubkey = pubkey.toLowerCase();
   const nowSeconds = args.nowSeconds ?? Math.floor(Date.now() / 1_000);
   const decryptMutes = args.decryptMutes ?? nip44DecryptFromSelf;
+  const decryptNotifyPrefs = args.decryptNotifyPrefs ?? nip44DecryptFromSelf;
   const readRelationships =
     args.readThreadRelationships ?? defaultReadThreadRelationships;
   const readForcedUnread =
@@ -175,7 +188,7 @@ export async function fetchCommunityUnread(args: {
     return { hasUnread: false, mentionCount: 0 };
   }
 
-  const [readStateEvents, mutesEvents] = await Promise.all([
+  const [readStateEvents, mutesEvents, notifyPrefsEvents] = await Promise.all([
     client.fetchEvents({
       kinds: [KIND_READ_STATE],
       authors: [pubkey],
@@ -189,6 +202,12 @@ export async function fetchCommunityUnread(args: {
       "#d": ["channel-mutes"],
       limit: 1,
     }),
+    client.fetchEvents({
+      kinds: [KIND_CHANNEL_NOTIFY_PREFS],
+      authors: [pubkey],
+      "#d": ["channel-notify-prefs"],
+      limit: 1,
+    }),
   ]);
 
   const readState = await mergeReadStateEvents(
@@ -197,16 +216,24 @@ export async function fetchCommunityUnread(args: {
     args.decryptReadState,
   );
 
-  let mutedIds = new Set<string>();
+  let legacyMutes: ChannelMuteStore = DEFAULT_LEGACY_MUTE_STORE;
   if (mutesEvents.length > 0) {
     try {
       const plaintext = await decryptMutes(mutesEvents[0].content);
-      const store = parseMutePayload(JSON.parse(plaintext));
-      if (store) {
-        mutedIds = mutedChannelIdsFromStore(store);
-      }
+      legacyMutes = parseMutePayload(JSON.parse(plaintext)) ?? legacyMutes;
     } catch {
       // decryption failure → treat as empty mutes set
+    }
+  }
+
+  let notifyPrefs: ChannelNotifyPrefsStore = DEFAULT_NOTIFY_PREFS_STORE;
+  if (notifyPrefsEvents.length > 0) {
+    try {
+      const plaintext = await decryptNotifyPrefs(notifyPrefsEvents[0].content);
+      notifyPrefs =
+        parseNotifyPrefsPayload(JSON.parse(plaintext)) ?? notifyPrefs;
+    } catch {
+      // decryption failure → treat as no per-channel prefs
     }
   }
 
@@ -226,7 +253,20 @@ export async function fetchCommunityUnread(args: {
   let mentionCount = 0;
 
   for (const channel of channels) {
-    if (mutedIds.has(channel.id)) continue;
+    // NIP-CN: DMs bypass levels; every other channel resolves through the same
+    // pure resolver the app uses. A muted channel no longer disqualifies the
+    // whole channel — it only loses the dot. Its direct mentions still count
+    // toward mentionCount, so a mention in a muted channel lights the rail.
+    const notify =
+      channel.channelType === "dm"
+        ? DEFAULT_CHANNEL_NOTIFY_STATE
+        : resolveChannelNotifyState(
+            channel.id,
+            notifyPrefs,
+            legacyMutes,
+            nowSeconds,
+          );
+    const isMutedChannel = notify.level === "mute";
 
     // Compute readAt first so the forced-unread gate can compare against it.
     const readAt = readState.get(channel.id) ?? null;
@@ -237,7 +277,11 @@ export async function fetchCommunityUnread(args: {
     // read has covered the channel (the drain path in useUnreadChannels only
     // runs while the community is active, so the store may not be pruned for
     // inactive communities).
-    if (!hasUnread && Object.hasOwn(forcedUnreadMap, channel.id)) {
+    if (
+      !hasUnread &&
+      !isMutedChannel &&
+      Object.hasOwn(forcedUnreadMap, channel.id)
+    ) {
       const markerAtWhenForced = forcedUnreadMap[channel.id];
       if (
         readAt === null ||
@@ -250,14 +294,15 @@ export async function fetchCommunityUnread(args: {
     const since = readAt === null ? 0 : readAt + 1;
     const kinds = unreadKindsForChannel(channel.channelType);
 
-    const unreadEventsPromise: Promise<RelayEvent[]> = hasUnread
-      ? Promise.resolve([])
-      : client.fetchEvents({
-          kinds,
-          "#h": [channel.id],
-          since,
-          limit: UNREAD_EXISTENCE_LIMIT,
-        });
+    const unreadEventsPromise: Promise<RelayEvent[]> =
+      hasUnread || isMutedChannel
+        ? Promise.resolve([])
+        : client.fetchEvents({
+            kinds,
+            "#h": [channel.id],
+            since,
+            limit: UNREAD_EXISTENCE_LIMIT,
+          });
     const mentionEventsPromise: Promise<RelayEvent[]> = client.fetchEvents({
       kinds: [...HOME_MENTION_EVENT_KINDS],
       "#h": [channel.id],
@@ -275,14 +320,14 @@ export async function fetchCommunityUnread(args: {
       hasUnread = unreadEvents.some(
         (event) =>
           isUnreadExternalEvent(event, readState, readAt, normalizedPubkey) &&
-          shouldNotifyForEvent(event, normalizedPubkey, {
+          notifyDecisionForEvent(event, normalizedPubkey, {
             participatedRootIds,
             followedRootIds,
             authoredRootIds,
             mutedRootIds,
-            mutedChannelIds: mutedIds,
+            channelPrefs: () => notify,
             channelId: channel.id,
-          }),
+          }).unread,
       );
     }
 

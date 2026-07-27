@@ -120,6 +120,97 @@ export function countUnreadHighPriorityObservedEvents(
   return count;
 }
 
+export type UnreadAggregation = {
+  unreadChannelIds: Set<string>;
+  highPriorityUnreadChannelIds: Set<string>;
+  unreadChannelCounts: Map<string, number>;
+  unreadChannelNotificationCount: number;
+};
+
+/**
+ * Project the observed-unread evidence onto the sidebar's per-channel tiers.
+ *
+ * Pure: the caller supplies the read markers, the observed events, and the
+ * NIP-CN mute predicate, which is evaluated against the channel's *current*
+ * resolved level — so changing a level re-tiers immediately without rewriting
+ * the frozen `ObservedUnreadEvent` records (and therefore never re-notifies).
+ * A muted channel contributes only its mention-tier events, mirroring the
+ * sidebar escape hatch that keeps a hidden channel visible while it holds a
+ * mention.
+ */
+export function aggregateUnreadChannels(input: {
+  channels: readonly { id: string; channelType?: string }[];
+  activeChannelId: string | null;
+  hasForcedUnread: (channelId: string) => boolean;
+  hasObservedLatest: (channelId: string) => boolean;
+  getObservedEvents: (
+    channelId: string,
+  ) => ReadonlyMap<string, ObservedUnreadEvent> | undefined;
+  getReadAt: (
+    channelId: string,
+  ) => (event: ObservedUnreadEvent) => number | null;
+  isMutedChannel: (channelId: string) => boolean;
+}): UnreadAggregation {
+  const unread = new Set<string>();
+  const highPriority = new Set<string>();
+  const counts = new Map<string, number>();
+  let unreadChannelNotificationCount = 0;
+
+  for (const channel of input.channels) {
+    if (channel.id === input.activeChannelId) continue;
+
+    // DMs bypass NIP-CN levels entirely.
+    const isMuted =
+      channel.channelType !== "dm" && input.isMutedChannel(channel.id);
+
+    if (input.hasForcedUnread(channel.id)) {
+      if (isMuted) continue;
+      // Forced-unread is dot tier only — not high-priority.
+      unread.add(channel.id);
+      counts.set(channel.id, 1);
+      unreadChannelNotificationCount += 1;
+      continue;
+    }
+
+    if (!input.hasObservedLatest(channel.id)) continue;
+
+    const observedEvents = input.getObservedEvents(channel.id);
+    const readAtFor = input.getReadAt(channel.id);
+
+    if (countUnreadObservedEvents(observedEvents, readAtFor) === 0) continue;
+
+    const highPriorityCount = countUnreadHighPriorityObservedEvents(
+      observedEvents,
+      readAtFor,
+    );
+    if (isMuted && highPriorityCount === 0) continue;
+
+    unread.add(channel.id);
+    counts.set(
+      channel.id,
+      isMuted
+        ? highPriorityCount
+        : countUnreadBadgeObservedEvents(observedEvents, readAtFor),
+    );
+    unreadChannelNotificationCount += isMuted
+      ? highPriorityCount
+      : countUnreadAppBadgeObservedEvents(observedEvents, readAtFor);
+
+    // DM channels: any unread DM is high-priority. Non-DM: only when at least
+    // one mention/broadcast remains unread in its own channel/thread context.
+    if (channel.channelType === "dm" || highPriorityCount > 0) {
+      highPriority.add(channel.id);
+    }
+  }
+
+  return {
+    unreadChannelIds: unread,
+    highPriorityUnreadChannelIds: highPriority,
+    unreadChannelCounts: counts,
+    unreadChannelNotificationCount,
+  };
+}
+
 export function observedUnreadEventReadAt(
   event: ObservedUnreadEvent,
   channelReadAt: number | null,

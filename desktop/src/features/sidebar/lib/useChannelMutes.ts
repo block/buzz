@@ -16,6 +16,12 @@ import type { RemoteMutes } from "./channelMutesSync";
 
 export function useChannelMutes(pubkey: string | undefined): {
   mutedChannelIds: Set<string>;
+  /**
+   * The raw legacy `channel-mutes` store. Exposed so NIP-CN resolution can
+   * compare per-entry `updatedAt` values across the two blobs (a newer unmute
+   * on an old client must beat a stale prefs "mute").
+   */
+  muteStore: ChannelMuteStore;
   muteChannel: (channelId: string) => void;
   unmuteChannel: (channelId: string) => void;
 } {
@@ -184,6 +190,7 @@ export function useChannelMutes(pubkey: string | undefined): {
 
   return {
     mutedChannelIds,
+    muteStore: store,
     muteChannel,
     unmuteChannel,
   };

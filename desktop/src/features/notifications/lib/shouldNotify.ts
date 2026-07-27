@@ -144,15 +144,30 @@ export function notifyDecisionForEvent(
 }
 
 /**
- * Transitional boolean view of {@link notifyDecisionForEvent} for call sites
- * that have not yet been split into the unread / alert tiers.
+ * Channel gate for a Home-feed item (badge counts and feed-driven desktop
+ * banners). The feed has no event graph, so it cannot run the full ladder —
+ * this is the ladder's channel dimension expressed over what a `FeedItem`
+ * carries: its `notify` marker tags and whether the relay categorised it as a
+ * mention.
+ *
+ * `@channel` / `@here` items obey the level and the broadcasts opt-out (NIP-CN
+ * N7) instead of riding the mention exemption; a direct mention pierces the
+ * mute exactly as it does in the ladder; anything else is suppressed while the
+ * channel resolves to "mute".
+ *
+ * `isMentionCategory` is passed in because the feed's category taxonomy is
+ * spelled differently at different call sites.
  */
-export function shouldNotifyForEvent(
-  event: RelayEvent,
-  currentPubkey: string,
-  options: NotifyOptions,
+export function allowsFeedItemForChannel(
+  state: ResolvedChannelNotifyState,
+  isMentionCategory: boolean,
+  tags: string[][] | undefined,
 ): boolean {
-  return notifyDecisionForEvent(event, currentPubkey, options).unread;
+  if (eventNotifyMode(tags ?? []) !== null) {
+    return state.level !== "mute" && state.broadcasts;
+  }
+  if (isMentionCategory) return true;
+  return state.level !== "mute";
 }
 
 /**

@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  allowsFeedItemForChannel,
   hasMentionForEvent,
   isHighPriorityEventForUser,
   notifyDecisionForEvent,
-  shouldNotifyForEvent,
 } from "./shouldNotify.ts";
 import { resolveChannelNotifyState } from "./resolveChannelNotifyState.ts";
 
@@ -17,6 +17,9 @@ const ROOT_ID = `root-${"0".repeat(59)}`;
 const PARENT_ID = `parent-${"0".repeat(57)}`;
 
 const EMPTY = new Set();
+
+const unreadFor = (event, pubkey, options) =>
+  notifyDecisionForEvent(event, pubkey, options).unread;
 
 function makeEvent(tags = [], overrides = {}) {
   return {
@@ -65,7 +68,7 @@ test("hasMentionForEvent: empty currentPubkey returns false", () => {
 test("top-level message in muted channel is suppressed", () => {
   const event = makeEvent([hTag(CHANNEL_ID)]);
   assert.equal(
-    shouldNotifyForEvent(event, PUBKEY, {
+    unreadFor(event, PUBKEY, {
       participatedRootIds: EMPTY,
       followedRootIds: EMPTY,
       authoredRootIds: EMPTY,
@@ -79,7 +82,7 @@ test("top-level message in muted channel is suppressed", () => {
 test("mention in muted channel still notifies (mention fires before mute check)", () => {
   const event = makeEvent([hTag(CHANNEL_ID), pTag(PUBKEY)]);
   assert.equal(
-    shouldNotifyForEvent(event, PUBKEY, {
+    unreadFor(event, PUBKEY, {
       participatedRootIds: EMPTY,
       followedRootIds: EMPTY,
       authoredRootIds: EMPTY,
@@ -97,7 +100,7 @@ test("thread reply in muted channel is suppressed", () => {
     replyTag(PARENT_ID),
   ]);
   assert.equal(
-    shouldNotifyForEvent(event, PUBKEY, {
+    unreadFor(event, PUBKEY, {
       participatedRootIds: new Set([ROOT_ID]),
       followedRootIds: EMPTY,
       authoredRootIds: EMPTY,
@@ -115,7 +118,7 @@ test("broadcast reply in muted channel is suppressed (NIP-CN: mute beats broadca
     broadcastTag(),
   ]);
   assert.equal(
-    shouldNotifyForEvent(event, PUBKEY, {
+    unreadFor(event, PUBKEY, {
       participatedRootIds: EMPTY,
       followedRootIds: EMPTY,
       authoredRootIds: EMPTY,
@@ -129,7 +132,7 @@ test("broadcast reply in muted channel is suppressed (NIP-CN: mute beats broadca
 test("top-level message in unmuted channel notifies", () => {
   const event = makeEvent([hTag(CHANNEL_ID)]);
   assert.equal(
-    shouldNotifyForEvent(event, PUBKEY, {
+    unreadFor(event, PUBKEY, {
       participatedRootIds: EMPTY,
       followedRootIds: EMPTY,
       authoredRootIds: EMPTY,
@@ -143,7 +146,7 @@ test("no channelId passed behaves as if unmuted (top-level notifies)", () => {
   const event = makeEvent([hTag(CHANNEL_ID)]);
   // mutedChannelIds has the channel but channelId is null (default)
   assert.equal(
-    shouldNotifyForEvent(event, PUBKEY, {
+    unreadFor(event, PUBKEY, {
       participatedRootIds: EMPTY,
       followedRootIds: EMPTY,
       authoredRootIds: EMPTY,
@@ -161,7 +164,7 @@ test("thread in mutedRootIds AND in muted channel is suppressed", () => {
   ]);
   // Both the root thread and the channel are muted; mute channel check fires first
   assert.equal(
-    shouldNotifyForEvent(event, PUBKEY, {
+    unreadFor(event, PUBKEY, {
       participatedRootIds: new Set([ROOT_ID]),
       followedRootIds: EMPTY,
       authoredRootIds: EMPTY,
@@ -476,4 +479,57 @@ test("isHighPriorityEventForUser: legacy mutedChannelIds demotes a broadcast rep
     false,
   );
   assert.equal(isHighPriorityEventForUser(event, PUBKEY), true);
+});
+
+// ── allowsFeedItemForChannel (Home feed / badge seam) ─────────────────────────
+
+const feedState = (overrides = {}) => ({
+  level: "all",
+  timedMuteActive: false,
+  desktop: true,
+  followAllThreads: false,
+  broadcasts: true,
+  hidden: false,
+  ...overrides,
+});
+
+test("allowsFeedItemForChannel: ordinary item is dropped only while muted", () => {
+  assert.equal(allowsFeedItemForChannel(feedState(), false, []), true);
+  assert.equal(
+    allowsFeedItemForChannel(feedState({ level: "mentions" }), false, []),
+    true,
+  );
+  assert.equal(
+    allowsFeedItemForChannel(feedState({ level: "mute" }), false, []),
+    false,
+  );
+});
+
+test("allowsFeedItemForChannel: a direct mention pierces the mute", () => {
+  assert.equal(
+    allowsFeedItemForChannel(feedState({ level: "mute" }), true, []),
+    true,
+  );
+});
+
+test("allowsFeedItemForChannel: a notify-tag item obeys the level, not the mention exemption", () => {
+  const tags = [["notify", "channel"]];
+  assert.equal(allowsFeedItemForChannel(feedState(), true, tags), true);
+  assert.equal(
+    allowsFeedItemForChannel(feedState({ level: "mentions" }), true, tags),
+    true,
+  );
+  assert.equal(
+    allowsFeedItemForChannel(feedState({ level: "mute" }), true, tags),
+    false,
+  );
+});
+
+test("allowsFeedItemForChannel: the broadcasts opt-out drops notify-tag items", () => {
+  assert.equal(
+    allowsFeedItemForChannel(feedState({ broadcasts: false }), true, [
+      ["notify", "here"],
+    ]),
+    false,
+  );
 });

@@ -5,6 +5,7 @@ import {
   toSearchHit,
 } from "@/app/AppShell.helpers";
 import { getThreadReference } from "@/features/messages/lib/threading";
+import type { ResolvedChannelNotifyState } from "@/features/notifications/lib/resolveChannelNotifyState";
 import { hasMentionForEvent } from "@/features/notifications/lib/shouldNotify";
 import type { NotificationSettings } from "@/features/notifications/hooks";
 import {
@@ -30,6 +31,7 @@ export function useAppShellDesktopNotifications({
   notificationSettings,
   openSearchHit,
   pubkey,
+  resolveChannelNotify,
 }: {
   channels: Channel[];
   goChannel: (channelId: string) => Promise<unknown>;
@@ -39,11 +41,18 @@ export function useAppShellDesktopNotifications({
     hit: import("@/shared/api/types").SearchHit,
   ) => Promise<unknown>;
   pubkey?: string;
+  /**
+   * Resolved per-channel notification prefs (NIP-CN). Only `desktop` is read
+   * here: it silences this channel's banner, sound, and dock bounce on desktop
+   * clients without changing whether the event counts as unread.
+   */
+  resolveChannelNotify: (channelId: string) => ResolvedChannelNotifyState;
 }) {
   const handleChannelNotification = React.useEffectEvent(
-    (_channelId: string, event: RelayEvent) => {
+    (channelId: string, event: RelayEvent) => {
       if (!shouldBounceForChannelNotification(event.tags)) return;
       if (!notificationSettings.desktopEnabled) return;
+      if (!resolveChannelNotify(channelId).desktop) return;
       void requestDockBounce();
     },
   );
@@ -52,7 +61,8 @@ export function useAppShellDesktopNotifications({
     (event: RelayEvent, channel: Channel) => {
       if (
         !notificationSettings.desktopEnabled ||
-        !notificationSettings.slotAlertsEnabled.dm
+        !notificationSettings.slotAlertsEnabled.dm ||
+        !resolveChannelNotify(channel.id).desktop
       ) {
         return;
       }
@@ -86,7 +96,8 @@ export function useAppShellDesktopNotifications({
     (channelId: string, event: RelayEvent) => {
       if (
         !notificationSettings.desktopEnabled ||
-        !notificationSettings.slotAlertsEnabled.thread_reply
+        !notificationSettings.slotAlertsEnabled.thread_reply ||
+        !resolveChannelNotify(channelId).desktop
       ) {
         return;
       }
