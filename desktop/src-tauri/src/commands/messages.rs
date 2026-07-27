@@ -537,6 +537,7 @@ pub async fn send_channel_message(
     mention_tags: Option<Vec<Vec<String>>>,
     mention_pubkeys: Option<Vec<String>>,
     kind: Option<u32>,
+    notify: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<SendChannelMessageResponse, String> {
     let channel_uuid = uuid::Uuid::parse_str(&channel_id)
@@ -547,6 +548,8 @@ pub async fn send_channel_message(
     let emoji = emoji_tags.unwrap_or_default();
     let mention_refs_only = mention_tags.unwrap_or_default();
     let kind_num = kind.unwrap_or(buzz_core_pkg::kind::KIND_STREAM_MESSAGE);
+    // NIP-CM channel-wide mention marker; validated by the builder.
+    let notify_mode = notify.as_deref().map(str::trim).filter(|m| !m.is_empty());
 
     let mut resolved_root: Option<String> = None;
 
@@ -555,6 +558,7 @@ pub async fn send_channel_message(
             channel_uuid,
             content.trim(),
             &mention_refs,
+            notify_mode,
             &media,
             &mention_refs_only,
         )?,
@@ -569,6 +573,7 @@ pub async fn send_channel_message(
                 content.trim(),
                 &thread_ref,
                 &mention_refs,
+                notify_mode,
                 &media,
                 &mention_refs_only,
             )?
@@ -587,6 +592,7 @@ pub async fn send_channel_message(
                 content.trim(),
                 thread_ref.as_ref(),
                 &mention_refs,
+                notify_mode,
                 &media,
                 &emoji,
                 &mention_refs_only,
@@ -753,6 +759,7 @@ fn build_managed_agent_channel_message(
         content,
         thread_ref,
         &mention_refs,
+        None,
         &[],
         &[],
         &[],

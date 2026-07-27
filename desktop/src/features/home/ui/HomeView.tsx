@@ -799,20 +799,17 @@ export function HomeView({
                 const itemToReply = selectedItem;
                 setIsSendingReply(true);
                 try {
-                  const {
-                    mediaTags: imetaTags,
-                    emojiTags,
-                    mentionTags,
-                  } = splitOutgoingTags(mediaTags);
+                  const split = splitOutgoingTags(mediaTags);
                   const result = await sendChannelMessage(
                     channelId,
                     content,
                     parentEventId,
-                    imetaTags,
+                    split.mediaTags,
                     mentionPubkeys,
                     undefined,
-                    emojiTags,
-                    mentionTags,
+                    split.emojiTags,
+                    split.mentionTags,
+                    split.notifyMode,
                   );
                   const authorPubkey = currentPubkey ?? itemToReply.item.pubkey;
                   const reply: InboxReply = {
@@ -838,7 +835,7 @@ export function HomeView({
                     id: result.eventId,
                     parentId: result.parentEventId,
                     rootId: result.rootEventId,
-                    tags: emojiTags,
+                    tags: split.emojiTags,
                     timeLabel: formatTime(result.createdAt),
                   };
                   setLocalRepliesByItemId((current) => ({

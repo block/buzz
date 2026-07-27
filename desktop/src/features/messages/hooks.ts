@@ -458,6 +458,9 @@ export function useSendMessageMutation(
         mediaTags: imetaTags,
         emojiTags,
         mentionTags,
+        notifyTags,
+        // NIP-CM: at most one marker; the Rust command re-validates the mode.
+        notifyMode: notify,
       } = splitOutgoingTags(mediaTags);
       const recipientPubkeys = messageMentionPubkeys(
         effectiveChannel,
@@ -468,7 +471,14 @@ export function useSendMessageMutation(
       // Messages carrying media OR custom-emoji tags MUST go through REST so
       // the relay's tag validation runs. The WebSocket path emits no extra
       // tags, so emoji-only messages would otherwise lose their emoji tag.
-      if (parentEventId || imetaTags.length > 0 || emojiTags.length > 0) {
+      // A notify tag also forces the REST path: the WebSocket send emits no
+      // extra tags, so the marker would be silently dropped.
+      if (
+        parentEventId ||
+        imetaTags.length > 0 ||
+        emojiTags.length > 0 ||
+        notify !== null
+      ) {
         const cachedMessages =
           queryClient.getQueryData<RelayEvent[]>(
             channelMessagesKey(effectiveChannel.id),
@@ -482,6 +492,7 @@ export function useSendMessageMutation(
           undefined,
           emojiTags,
           mentionTags,
+          notify,
         );
 
         // Build tags matching relay-emitted shape: h, author p, mention ps, reply es, imeta, emoji.
@@ -519,6 +530,7 @@ export function useSendMessageMutation(
             ...imetaTags,
             ...emojiTags,
             ...mentionTags,
+            ...notifyTags,
           ],
           content: content.trim(),
           sig: "",

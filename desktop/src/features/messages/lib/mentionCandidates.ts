@@ -10,12 +10,14 @@ export type TeamMentionMember = {
 };
 
 export type MentionCandidate = {
-  kind: "identity" | "persona" | "team";
+  kind: "identity" | "persona" | "team" | "special";
   pubkey?: string;
   personaId?: string;
   teamId?: string;
   teamMembers?: TeamMentionMember[];
   displayName: string | null;
+  /** Static subtitle for `special` rows; ordinary rows derive theirs. */
+  description?: string;
   avatarUrl?: string | null;
   isMember: boolean;
   role?: ChannelRole | null;
@@ -26,6 +28,40 @@ export type MentionCandidate = {
   isManagedAgent?: boolean;
   isGlobalSearchResult?: boolean;
 };
+
+/**
+ * Autocomplete rows for the channel-wide mentions. They resolve to a notify
+ * tag rather than to identities, so they carry no pubkey.
+ *
+ * `memberCount` is only rendered when the caller already has the member list
+ * loaded; the online count for `@here` is not cheaply available, so that row
+ * stays count-free. Omitted entirely in DMs, where the relay rejects the tag.
+ */
+export function buildChannelMentionCandidates(
+  memberCount?: number | null,
+): MentionCandidate[] {
+  const members =
+    typeof memberCount === "number" && memberCount > 0
+      ? ` · ${memberCount} ${memberCount === 1 ? "member" : "members"}`
+      : "";
+
+  return [
+    {
+      kind: "special",
+      displayName: "channel",
+      description: `Notify everyone in this channel${members}`,
+      isMember: false,
+      isAgent: false,
+    },
+    {
+      kind: "special",
+      displayName: "here",
+      description: "Notify members who are online",
+      isMember: false,
+      isAgent: false,
+    },
+  ];
+}
 
 export function mentionCandidateLabel(candidate: MentionCandidate) {
   return (

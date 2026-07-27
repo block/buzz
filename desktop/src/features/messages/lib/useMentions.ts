@@ -41,12 +41,15 @@ import { useDraftMentionRouting } from "./useDraftMentionRouting";
 import { rankMentionCandidates } from "./mentionRanking";
 import { mapMentionCandidateToSuggestion } from "./mentionSuggestionMapping";
 import {
+  buildChannelMentionCandidates,
   buildTeamMentionCandidates,
   formatTeamMention,
   globalSearchIdentityKey,
   type MentionCandidate,
   mentionCandidateLabel,
 } from "./mentionCandidates";
+import { reservedMentionToken } from "./channelNotify";
+import { resolveMentionPubkeys } from "./resolveMentionPubkeys";
 const MENTION_DEBOUNCE_MS = 120;
 const MENTION_SUGGESTION_LIMIT = 50;
 export type PersonaMentionTarget = {
@@ -439,8 +442,18 @@ export function useMentions(
         personasQuery.data ?? [],
         mentionCandidates,
       ),
+      // Channel-wide mentions are rejected by the relay in DMs.
+      ...(options?.channelType === "dm"
+        ? []
+        : buildChannelMentionCandidates(members?.length)),
     ],
-    [mentionCandidates, personasQuery.data, teamsQuery.data],
+    [
+      members?.length,
+      mentionCandidates,
+      options?.channelType,
+      personasQuery.data,
+      teamsQuery.data,
+    ],
   );
 
   const ownerPubkeys = React.useMemo(
@@ -614,6 +627,26 @@ export function useMentions(
         debounceTimerRef.current = null;
       }
 
+      const startIndex =
+        flushedMentionStartIndexRef.current ?? mentionStartIndex;
+      flushedMentionStartIndexRef.current = null;
+      setMentionQuery(null);
+      setMentionSelectedIndex(0);
+
+      // Reserved tokens insert literally and notify via the event's notify
+      // tag; they never enter the pubkey mention map (D16 precedence).
+      const reserved = reservedMentionToken(suggestion.displayName);
+      if (reserved) {
+        setSelectedMentionNames((current) =>
+          appendUniqueName(current, reserved),
+        );
+        return {
+          replaceFromOffset: startIndex,
+          replaceToOffset: selectionEnd,
+          insertText: `@${reserved} `,
+        };
+      }
+
       const displayName = suggestion.displayName;
       const teamMembers =
         suggestion.kind === "team" ? suggestion.teamMembers : null;
@@ -664,12 +697,7 @@ export function useMentions(
       }
       trimMapToSize(mentions, 200);
       trimMapToSize(personaMentions, 200);
-      setMentionQuery(null);
-      setMentionSelectedIndex(0);
 
-      const startIndex =
-        flushedMentionStartIndexRef.current ?? mentionStartIndex;
-      flushedMentionStartIndexRef.current = null;
       return {
         replaceFromOffset: startIndex,
         replaceToOffset: selectionEnd,
@@ -792,42 +820,13 @@ export function useMentions(
   );
 
   const extractMentionPubkeys = React.useCallback(
-    (text: string): string[] => {
-      const pubkeys: string[] = [];
-      const selectedDisplayNames = new Set(
-        [
-          ...mentionMapRef.current.keys(),
-          ...personaMentionMapRef.current.keys(),
-        ].map((name) => name.trim().toLowerCase()),
-      );
-
-      for (const [displayName, pubkey] of mentionMapRef.current) {
-        if (hasMention(text, displayName)) {
-          pubkeys.push(pubkey);
-        }
-      }
-
-      for (const candidate of mentionCandidates) {
-        if (!candidate.pubkey) {
-          continue;
-        }
-        if (!candidate.isMember) {
-          continue;
-        }
-        if (pubkeys.includes(candidate.pubkey)) {
-          continue;
-        }
-        const name = candidate.displayName;
-        if (name && selectedDisplayNames.has(name.trim().toLowerCase())) {
-          continue;
-        }
-        if (name && hasMention(text, name)) {
-          pubkeys.push(candidate.pubkey);
-        }
-      }
-
-      return [...new Set(pubkeys)];
-    },
+    (text: string): string[] =>
+      resolveMentionPubkeys(
+        text,
+        mentionMapRef.current,
+        personaMentionMapRef.current.keys(),
+        mentionCandidates,
+      ),
     [mentionCandidates],
   );
 

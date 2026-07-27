@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  buildChannelMentionCandidates,
   buildTeamMentionCandidates,
   formatTeamMention,
 } from "./mentionCandidates.ts";
@@ -55,6 +56,36 @@ function identity(personaId, displayName, overrides = {}) {
     ...overrides,
   };
 }
+
+test("channel-wide rows carry no pubkey and describe who they notify", () => {
+  const [channel, here] = buildChannelMentionCandidates(3);
+
+  assert.deepEqual(
+    [channel.kind, channel.displayName, channel.pubkey, channel.isMember],
+    ["special", "channel", undefined, false],
+  );
+  assert.equal(
+    channel.description,
+    "Notify everyone in this channel · 3 members",
+  );
+  assert.deepEqual(
+    [here.kind, here.displayName, here.pubkey],
+    ["special", "here", undefined],
+  );
+  assert.equal(here.description, "Notify members who are online");
+});
+
+test("the member count is omitted when it is not available", () => {
+  for (const count of [undefined, null, 0]) {
+    const [channel] = buildChannelMentionCandidates(count);
+    assert.equal(channel.description, "Notify everyone in this channel");
+  }
+  const [single] = buildChannelMentionCandidates(1);
+  assert.equal(
+    single.description,
+    "Notify everyone in this channel · 1 member",
+  );
+});
 
 test("team mentions preserve team order and prefer concrete managed agents", () => {
   const personas = [
