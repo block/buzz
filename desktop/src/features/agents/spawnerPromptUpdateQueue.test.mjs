@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   findAckKey,
+  mergeHydrated,
   queueReducer,
   shouldRetryPromptUpdate,
 } from "./spawnerPromptUpdateQueue.ts";
@@ -80,6 +81,31 @@ test("reset clears every pending entry", () => {
   });
   s = queueReducer(s, { type: "reset" });
   assert.equal(s.size, 0);
+});
+
+test("hydration keeps entries queued before the relay origin resolved", () => {
+  // A write made while the origin was unknown lives in memory only, since
+  // there was no community-scoped key to persist it to. Hydration must merge
+  // rather than replace, or that edit is lost.
+  const stored = new Map([["sp:a", { promptHash: "stored" }]]);
+  const inMemory = new Map([["sp:b", { promptHash: "in-memory" }]]);
+  const merged = mergeHydrated(stored, inMemory);
+  assert.deepEqual([...merged.keys()], ["sp:a", "sp:b"]);
+});
+
+test("hydration lets the newer in-memory entry win a key collision", () => {
+  const stored = new Map([["sp:a", { promptHash: "stored" }]]);
+  const inMemory = new Map([["sp:a", { promptHash: "in-memory" }]]);
+  assert.equal(
+    mergeHydrated(stored, inMemory).get("sp:a").promptHash,
+    "in-memory",
+  );
+});
+
+test("hydration with one side empty returns the other untouched", () => {
+  const stored = new Map([["sp:a", { promptHash: "stored" }]]);
+  assert.equal(mergeHydrated(stored, new Map()), stored);
+  assert.equal(mergeHydrated(new Map(), stored), stored);
 });
 
 test("an ack matches on agent pubkey even when the slug differs", () => {
