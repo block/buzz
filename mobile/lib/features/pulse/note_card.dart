@@ -105,10 +105,14 @@ class NoteCard extends HookConsumerWidget {
                               ),
                             ],
                             const SizedBox(width: Grid.xxs),
-                            Text(
-                              formatPulseRelativeTime(note.createdAt),
-                              style: messageTimestampTextStyle.copyWith(
-                                color: context.colors.onSurfaceVariant,
+                            Flexible(
+                              child: Text(
+                                formatPulseRelativeTime(note.createdAt),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: messageTimestampTextStyle.copyWith(
+                                  color: context.colors.onSurfaceVariant,
+                                ),
                               ),
                             ),
                           ],

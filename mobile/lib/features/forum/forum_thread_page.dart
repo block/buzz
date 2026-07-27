@@ -348,10 +348,14 @@ class _OriginalPost extends ConsumerWidget {
                       ),
                     ),
                     const SizedBox(width: Grid.xxs),
-                    Text(
-                      formatRelativeTime(post.createdAt),
-                      style: messageTimestampTextStyle.copyWith(
-                        color: context.colors.onSurfaceVariant,
+                    Flexible(
+                      child: Text(
+                        formatRelativeTime(post.createdAt),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: messageTimestampTextStyle.copyWith(
+                          color: context.colors.onSurfaceVariant,
+                        ),
                       ),
                     ),
                   ],
@@ -434,10 +438,14 @@ class _ReplyRow extends ConsumerWidget {
                       ),
                     ),
                     const SizedBox(width: Grid.xxs),
-                    Text(
-                      formatRelativeTime(reply.createdAt),
-                      style: messageTimestampTextStyle.copyWith(
-                        color: context.colors.onSurfaceVariant,
+                    Flexible(
+                      child: Text(
+                        formatRelativeTime(reply.createdAt),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: messageTimestampTextStyle.copyWith(
+                          color: context.colors.onSurfaceVariant,
+                        ),
                       ),
                     ),
                   ],
