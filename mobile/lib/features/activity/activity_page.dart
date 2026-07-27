@@ -300,7 +300,9 @@ class ActivityPage extends HookConsumerWidget {
       body: SafeArea(
         top: false,
         child: Padding(
-          padding: EdgeInsets.only(top: frostedAppBarHeight(context)),
+          padding: EdgeInsets.only(
+            top: frostedAppBarHeight(context, titleStyle: headerTitleStyle),
+          ),
           child: body,
         ),
       ),
