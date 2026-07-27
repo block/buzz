@@ -2870,6 +2870,35 @@ test("members modal does not show direct pubkey entry", async ({ page }) => {
   ).toHaveAttribute("placeholder", "Add people and agents");
 });
 
+test("members modal separates people and agents", async ({ page }) => {
+  const agentPubkey = "abab".repeat(16);
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: agentPubkey,
+        name: "Scout",
+        channelNames: ["general"],
+        status: "running",
+      },
+    ],
+  });
+  await page.goto("/");
+  await openMembersSidebar(page, "general");
+
+  await expect(page.getByTestId("members-sidebar-people-tab")).toHaveAttribute(
+    "data-state",
+    "active",
+  );
+  await expect(page.getByText("Scout", { exact: true })).toHaveCount(0);
+
+  await page.getByTestId("members-sidebar-agents-tab").click();
+  await expect(page.getByTestId("members-sidebar-agents-tab")).toHaveAttribute(
+    "data-state",
+    "active",
+  );
+  await expect(page.getByText("Scout", { exact: true })).toBeVisible();
+});
+
 test("channel header omits the add agent action", async ({ page }) => {
   await page.goto("/");
 
