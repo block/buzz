@@ -45,6 +45,7 @@ import { useFeedbackToasts } from "@/shared/hooks/useToastEffect";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
+import { Tabs, TabsList, TabsTrigger } from "@/shared/ui/tabs";
 import {
   MODAL_SEARCH_INPUT_CLASS,
   MODAL_SEARCH_SHELL_CLASS,
@@ -147,6 +148,9 @@ export function MembersSidebar({
   const queryClient = useQueryClient();
   const searchInputRef = React.useRef<HTMLInputElement>(null);
   const [searchQuery, setSearchQuery] = React.useState("");
+  const [memberView, setMemberView] = React.useState<"people" | "agents">(
+    "people",
+  );
   const [inviteSubmissionErrors, setInviteSubmissionErrors] = React.useState<
     AddChannelMembersResult["errors"]
   >([]);
@@ -184,12 +188,12 @@ export function MembersSidebar({
     managedAgentsQuery,
     relayAgentsQuery,
   } = useClassifiedMembers(rawMembers, currentPubkey);
-  const activeMembers = React.useMemo(
+  const visibleMembers = React.useMemo(
     () =>
-      [...people, ...bots].sort((left, right) =>
+      [...(memberView === "people" ? people : bots)].sort((left, right) =>
         compareMembersForModal(currentPubkey, left, right),
       ),
-    [bots, currentPubkey, people],
+    [bots, currentPubkey, memberView, people],
   );
 
   const allMemberPubkeys = React.useMemo(
@@ -207,12 +211,12 @@ export function MembersSidebar({
   const normalizedDeferredSearchQuery = deferredSearchQuery.toLowerCase();
   const filteredActiveMembers = React.useMemo(() => {
     if (!normalizedSearchQuery) {
-      return activeMembers;
+      return visibleMembers;
     }
 
     const profiles = memberProfilesQuery.data?.profiles ?? {};
 
-    return activeMembers.filter((member) => {
+    return visibleMembers.filter((member) => {
       const normalizedPubkey = normalizePubkey(member.pubkey);
       const profile = profiles[normalizedPubkey] ?? null;
       const memberIsBot = isBot(member);
@@ -230,11 +234,11 @@ export function MembersSidebar({
       );
     });
   }, [
-    activeMembers,
     currentPubkey,
     isBot,
     memberProfilesQuery.data?.profiles,
     normalizedSearchQuery,
+    visibleMembers,
   ]);
   const memberPubkeys = React.useMemo(
     () => new Set(rawMembers.map((member) => normalizePubkey(member.pubkey))),
@@ -725,6 +729,29 @@ export function MembersSidebar({
             </label>
           </DialogHeader>
 
+          <Tabs
+            onValueChange={(view) => setMemberView(view as "people" | "agents")}
+            value={memberView}
+          >
+            <TabsList
+              aria-label="Member type"
+              className="mb-4 grid w-full grid-cols-2"
+            >
+              <TabsTrigger
+                data-testid="members-sidebar-people-tab"
+                value="people"
+              >
+                People · {people.length}
+              </TabsTrigger>
+              <TabsTrigger
+                data-testid="members-sidebar-agents-tab"
+                value="agents"
+              >
+                Agents · {bots.length}
+              </TabsTrigger>
+            </TabsList>
+          </Tabs>
+
           <div className="max-h-[calc(100vh-12rem)] overflow-y-auto pb-6">
             <section>
               <div
@@ -734,8 +761,12 @@ export function MembersSidebar({
               >
                 <SearchResultSectionTitle>
                   {normalizedSearchQuery
-                    ? "Members"
-                    : `Members · ${activeMembers.length}`}
+                    ? memberView === "people"
+                      ? "People"
+                      : "Agents"
+                    : memberView === "people"
+                      ? `People · ${people.length}`
+                      : `Agents · ${bots.length}`}
                 </SearchResultSectionTitle>
                 {normalizedSearchQuery ? (
                   <div>
@@ -777,7 +808,9 @@ export function MembersSidebar({
                     addSearchResults.length === 0 &&
                     !isAddSearchLoading ? (
                       <p className="px-4 py-3 text-sm text-muted-foreground">
-                        No matching people or agents.
+                        {memberView === "people"
+                          ? "No matching people."
+                          : "No matching agents."}
                       </p>
                     ) : null}
                   </div>
@@ -793,7 +826,9 @@ export function MembersSidebar({
                       ? "Loading members..."
                       : normalizedSearchQuery
                         ? "No members match your search."
-                        : "No members found."}
+                        : memberView === "people"
+                          ? "No people found."
+                          : "No agents found."}
                   </p>
                 )}
               </div>
