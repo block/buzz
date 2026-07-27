@@ -23,6 +23,14 @@ export const BLOCK_BUILD_HIDDEN_PROVIDER_IDS: ReadonlySet<string> = new Set([
   "databricks",
 ]);
 
+/**
+ * Providers Buzz derives at spawn time for buzz-agent only, by rewriting
+ * `BUZZ_AGENT_PROVIDER` to an underlying transport. Nothing rewrites
+ * `GOOSE_PROVIDER`, and goose has no provider under these ids, so offering
+ * them for a goose agent would persist a provider goose rejects at startup.
+ */
+const BUZZ_AGENT_ONLY_PROVIDER_IDS: ReadonlySet<string> = new Set(["together"]);
+
 export const PERSONA_FIELD_SHELL_CLASS =
   "rounded-xl border border-input bg-muted/40 transition-colors duration-150 ease-out hover:border-muted-foreground/40 focus-within:border-muted-foreground/50";
 export const PERSONA_FIELD_CONTROL_CLASS =
@@ -387,6 +395,11 @@ export function buildTemplateModelDropdownOptions(
  * Internal Block builds pass `BLOCK_BUILD_HIDDEN_PROVIDER_IDS` to hide the
  * legacy Databricks v1 option (the boot migration rewrites v1→v2 on those
  * builds). OSS builds pass an empty Set so v1 remains visible.
+ *
+ * `BUZZ_AGENT_ONLY_PROVIDER_IDS` is suppressed for provider-selecting runtimes
+ * other than buzz-agent, which is derived from `runtimeId` rather than passed
+ * in — those ids are meaningless to any runtime that misses the spawn-time
+ * rewrite, so no caller should have to remember to exclude them.
  */
 export function getPersonaProviderOptions(
   currentProvider: string,
@@ -398,9 +411,16 @@ export function getPersonaProviderOptions(
   const defaultProviderOptions = [
     { id: "", label: getDefaultLlmProviderLabel(runtimeId, globalProvider) },
   ];
-  const filteredOptions = hideProviderIds?.size
-    ? PERSONA_LLM_PROVIDER_OPTIONS.filter((o) => !hideProviderIds.has(o.id))
-    : PERSONA_LLM_PROVIDER_OPTIONS;
+  // A runtime that selects providers but is not buzz-agent (goose today) never
+  // receives the spawn-time rewrite these ids depend on.
+  const hidesBuzzAgentOnly =
+    runtimeSupportsLlmProviderSelection(runtimeId) &&
+    runtimeId !== "buzz-agent";
+  const filteredOptions = PERSONA_LLM_PROVIDER_OPTIONS.filter(
+    (o) =>
+      !hideProviderIds?.has(o.id) &&
+      !(hidesBuzzAgentOnly && BUZZ_AGENT_ONLY_PROVIDER_IDS.has(o.id)),
+  );
   const options = [...defaultProviderOptions, ...filteredOptions];
   if (
     trimmedProvider.length === 0 ||

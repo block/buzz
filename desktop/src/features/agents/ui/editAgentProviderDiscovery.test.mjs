@@ -153,6 +153,29 @@ test("together_requiresAnExplicitModel", () => {
   assert.equal(providerRequiresExplicitModel("together"), true);
 });
 
+test("together_isNotOfferedToGooseWhichCannotReceiveTheRewrite", () => {
+  // Only buzz-agent gets BUZZ_AGENT_PROVIDER rewritten to the OpenAI transport
+  // at spawn. A goose agent would persist GOOSE_PROVIDER=together, which goose
+  // has no provider for, so the option must not be offered there.
+  const gooseIds = getPersonaProviderOptions("", "goose").map((o) => o.id);
+  assert.ok(
+    !gooseIds.includes("together"),
+    "together must be hidden for goose",
+  );
+  // Providers goose really does support are unaffected.
+  for (const id of ["anthropic", "openai", "databricks_v2"]) {
+    assert.ok(gooseIds.includes(id), `${id} must remain available to goose`);
+  }
+});
+
+test("together_stillRendersAsCurrentOnAnAgentThatAlreadySavedIt", () => {
+  // Hiding an option must not blank out an agent already persisted with it.
+  const options = getPersonaProviderOptions("together", "goose");
+  const tail = options.at(-1);
+  assert.equal(tail?.id, "together");
+  assert.equal(tail?.label, "together (current)");
+});
+
 test("editAgent_providerOptions_includesDefaultEntry", () => {
   const options = getPersonaProviderOptions("", "buzz-agent");
   // The first entry is the default (empty id) — clearing back to runtime default.
