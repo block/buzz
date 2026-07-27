@@ -421,9 +421,17 @@ class _ReplyRow extends ConsumerWidget {
               Expanded(
                 child: Row(
                   children: [
-                    GestureDetector(
-                      onTap: () => showUserProfileSheet(context, reply.pubkey),
-                      child: Text(displayName, style: messageUsernameTextStyle),
+                    Flexible(
+                      child: GestureDetector(
+                        onTap: () =>
+                            showUserProfileSheet(context, reply.pubkey),
+                        child: Text(
+                          displayName,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: messageUsernameTextStyle,
+                        ),
+                      ),
                     ),
                     const SizedBox(width: Grid.xxs),
                     Text(
