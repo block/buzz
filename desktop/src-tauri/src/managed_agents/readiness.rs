@@ -246,6 +246,8 @@ impl AgentReadiness {
 /// * **claude**: a successful `claude auth status` probe.
 /// * **codex**: a successful `codex login status` probe (checks the codex
 ///   credential store — NOT `OPENAI_API_KEY`).
+/// * **pi**: no Buzz-side requirements — pi's own config owns model,
+///   provider, and auth.
 /// * **unknown / custom command**: always `Ready` (no requirements known).
 ///
 /// Databricks note: `DATABRICKS_TOKEN` is `.unwrap_or_default()` in
@@ -288,6 +290,11 @@ fn collect_missing_requirements(
             rt,
         ),
         "codex" => cli_login::requirements(&["codex", "login", "status"], "run `codex login`", rt),
+        // Pi owns model, provider, and auth via its own config (~/.pi/agent)
+        // and /login flow — deliberately no Buzz-side requirements. Auth
+        // failures surface as runtime errors in agent output; Doctor shows
+        // the catalog login_hint.
+        "pi" => vec![],
         _ => vec![],
     }
 }
@@ -682,6 +689,16 @@ mod tests {
                 ("ANTHROPIC_API_KEY", "sk-test"),
             ]),
         );
+        assert!(agent_readiness(&env).is_ready());
+    }
+
+    // ── pi tests ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn pi_is_ready_with_no_buzz_side_config() {
+        // Pi owns model/provider/auth via its own config and /login flow —
+        // Buzz has no requirements to enforce (deliberate policy, not fallthrough).
+        let env = make_env("pi-acp", env_with(&[]));
         assert!(agent_readiness(&env).is_ready());
     }
 
