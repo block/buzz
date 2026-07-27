@@ -906,6 +906,30 @@ async fn validate_forum_vote_target(
 }
 
 /// Validate kind:40008 diff event metadata tags.
+/// NIP-CM: validate a `["notify", "channel"|"here"]` channel-wide mention tag.
+///
+/// Tag shape, mode spelling, at-most-one, and the allowed-kind gate are pure
+/// and live in [`buzz_core::channel_mentions`]. Only the DM rejection needs
+/// the channel row, which is why it is applied here rather than in core.
+fn validate_channel_mention(
+    event: &Event,
+    channel_row: Option<&buzz_db::channel::ChannelRecord>,
+) -> Result<(), String> {
+    use buzz_core::channel_mentions::{event_notify_mode, NotifyTagError};
+
+    if event_notify_mode(event)
+        .map_err(|e| e.to_string())?
+        .is_none()
+    {
+        return Ok(());
+    }
+    if channel_row.is_some_and(|row| row.channel_type == buzz_db::channel::ChannelType::Dm.as_str())
+    {
+        return Err(NotifyTagError::DirectMessage.to_string());
+    }
+    Ok(())
+}
+
 fn validate_diff_event(event: &Event) -> Result<(), String> {
     // Content max 60KB
     if event.content.len() > 61_440 {
@@ -1781,6 +1805,12 @@ async fn ingest_event_inner(
         Some(ch_id) => state.db.get_channel(tenant.community(), ch_id).await.ok(),
         None => None,
     };
+    // NIP-CM: gate the channel-wide mention tag before anything stores or
+    // fans out the event. Runs for every kind so an unlisted kind carrying a
+    // notify tag is rejected rather than silently ignored.
+    validate_channel_mention(&event, channel_row.as_ref())
+        .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+
     // E1 phase-2 (§4.8 phase-2 addendum): resolve the fan-out visibility once,
     // here, through the same `channel_visibility_cached` gate fan-out uses
     // (fence 2: cached `private` wins over the prefetched row; a `private`
@@ -3094,6 +3124,87 @@ mod tests {
             required_scope_for_kind(KIND_PRESENCE_UPDATE, &dummy).is_err(),
             "KIND_PRESENCE_UPDATE should not be in the scope allowlist"
         );
+    }
+
+    fn make_channel_row(channel_type: &str) -> buzz_db::channel::ChannelRecord {
+        let now = chrono::Utc::now();
+        buzz_db::channel::ChannelRecord {
+            id: uuid::Uuid::new_v4(),
+            name: "test".into(),
+            channel_type: channel_type.into(),
+            visibility: "open".into(),
+            description: None,
+            canvas: None,
+            created_by: vec![0u8; 32],
+            created_at: now,
+            updated_at: now,
+            archived_at: None,
+            deleted_at: None,
+            nip29_group_id: None,
+            topic_required: false,
+            max_members: None,
+            topic: None,
+            topic_set_by: None,
+            topic_set_at: None,
+            purpose: None,
+            purpose_set_by: None,
+            purpose_set_at: None,
+            ttl_seconds: None,
+            ttl_deadline: None,
+        }
+    }
+
+    #[test]
+    fn channel_mention_accepted_on_allowed_kinds() {
+        for kind in buzz_core::channel_mentions::NOTIFY_ALLOWED_KINDS {
+            for mode in ["channel", "here"] {
+                let event = make_event_with_tags(kind, "hi", &[&["notify", mode]]);
+                assert!(
+                    validate_channel_mention(&event, Some(&make_channel_row("stream"))).is_ok(),
+                    "kind {kind} mode {mode}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn channel_mention_rejected_on_other_kinds() {
+        let event = make_event_with_tags(KIND_STREAM_MESSAGE_V2, "hi", &[&["notify", "channel"]]);
+        assert!(validate_channel_mention(&event, Some(&make_channel_row("stream"))).is_err());
+    }
+
+    #[test]
+    fn channel_mention_rejected_for_bad_mode_and_duplicates() {
+        let bad_mode = make_event_with_tags(KIND_STREAM_MESSAGE, "hi", &[&["notify", "everyone"]]);
+        assert!(validate_channel_mention(&bad_mode, Some(&make_channel_row("stream"))).is_err());
+
+        let duplicate = make_event_with_tags(
+            KIND_STREAM_MESSAGE,
+            "hi",
+            &[&["notify", "channel"], &["notify", "here"]],
+        );
+        assert!(validate_channel_mention(&duplicate, Some(&make_channel_row("stream"))).is_err());
+
+        let missing_mode = make_event_with_tags(KIND_STREAM_MESSAGE, "hi", &[&["notify"]]);
+        assert!(
+            validate_channel_mention(&missing_mode, Some(&make_channel_row("stream"))).is_err()
+        );
+    }
+
+    #[test]
+    fn channel_mention_rejected_in_dm_channels() {
+        let event = make_event_with_tags(KIND_STREAM_MESSAGE, "hi", &[&["notify", "channel"]]);
+        let err = validate_channel_mention(&event, Some(&make_channel_row("dm")))
+            .expect_err("DM channels must reject channel-wide mentions");
+        assert!(err.contains("DM"), "{err}");
+    }
+
+    #[test]
+    fn untagged_events_are_unaffected() {
+        let event = make_event_with_tags(KIND_STREAM_MESSAGE, "hi", &[&["h", "abc"]]);
+        assert!(validate_channel_mention(&event, Some(&make_channel_row("dm"))).is_ok());
+        let other_kind = make_event_with_tags(1, "hi", &[]);
+        assert!(validate_channel_mention(&other_kind, None).is_ok());
     }
 
     #[test]

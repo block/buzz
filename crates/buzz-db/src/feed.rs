@@ -1,7 +1,8 @@
 //! Feed-specific DB queries for the Home Feed feature.
 //!
 //! Aggregates three categories of data:
-//! - **Mentions**: Events where the user's pubkey appears in a `p` tag.
+//! - **Mentions**: Events where the user's pubkey appears in a `p` tag, plus
+//!   NIP-CM `["notify", "channel"]` events in channels the user belongs to.
 //! - **Needs Action**: Approval requests (kind 46010) and reminders (kind 40007) tagged to the user.
 //! - **Activity**: Recent events from channels the user can access.
 //!
@@ -92,8 +93,9 @@ fn build_mentions_query(
     let limit = limit.min(FEED_MAX_LIMIT);
     let pubkey_hex = hex::encode(pubkey_bytes);
 
+    // Branch 1 — direct `p`-tag mentions.
     let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(format!(
-        "SELECT {EVENT_COLS} FROM events e \
+        "SELECT * FROM ((SELECT {EVENT_COLS}, m.event_created_at AS feed_created_at FROM events e \
          INNER JOIN event_mentions m ON e.community_id = m.community_id AND e.id = m.event_id \
          WHERE e.community_id = "
     ));
@@ -114,14 +116,55 @@ fn build_mentions_query(
     }
     qb.push(" ORDER BY m.event_created_at DESC LIMIT ")
         .push_bind(limit);
+
+    // Branch 2 — NIP-CM `["notify", "channel"]` events in channels the caller
+    // is still a member of. `UNION` (not `UNION ALL`) collapses an event that
+    // both p-tags the caller and notifies the channel into one feed row.
+    // `@here` is never stored, so it can never surface here.
+    qb.push(format!(
+        ") UNION (SELECT {EVENT_COLS}, n.event_created_at AS feed_created_at FROM events e \
+         INNER JOIN channel_notifications n ON e.community_id = n.community_id \
+         AND e.id = n.event_id \
+         INNER JOIN channel_members cm ON cm.community_id = n.community_id \
+         AND cm.channel_id = n.channel_id \
+         WHERE e.community_id = "
+    ));
+    qb.push_bind(*community.as_uuid());
+    qb.push(" AND n.community_id = ")
+        .push_bind(*community.as_uuid());
+    qb.push(" AND cm.pubkey = ")
+        .push_bind(pubkey_bytes.to_vec());
+    qb.push(" AND cm.removed_at IS NULL");
+    qb.push(" AND e.deleted_at IS NULL");
+    // The caller's own announcement is not a mention of the caller.
+    qb.push(" AND e.pubkey <> ")
+        .push_bind(pubkey_bytes.to_vec());
+    qb.push(format!(
+        " AND e.kind IN ({KIND_STREAM_MESSAGE}, {KIND_FORUM_POST}, {KIND_FORUM_COMMENT})"
+    ));
+    push_visible_channel_filter(&mut qb, "e.channel_id", accessible_channel_ids);
+    if let Some(s) = since {
+        qb.push(" AND n.event_created_at >= ").push_bind(s);
+    }
+    qb.push(" ORDER BY n.event_created_at DESC LIMIT ")
+        .push_bind(limit);
+
+    qb.push(")) u ORDER BY feed_created_at DESC LIMIT ")
+        .push_bind(limit);
     qb
 }
 
-/// Find events that @mention the given pubkey (have `["p", pubkey_hex]` in tags).
+/// Find events that mention the given pubkey.
 ///
-/// Joins against the `event_mentions` table -- Phase 2 implementation.
-/// **Performance**: community-leading indexed lookup on
-/// `(community_id, pubkey_hex, event_created_at DESC)`.
+/// Two sources, unioned and deduplicated by event id:
+/// - direct `["p", pubkey_hex]` mentions, via the `event_mentions` index;
+/// - NIP-CM `["notify", "channel"]` events (`channel_notifications`) in
+///   channels where the caller is a current member. `["notify", "here"]` is
+///   live-only and never persisted, so it never appears in this feed.
+///
+/// **Performance**: community-leading indexed lookups on
+/// `(community_id, pubkey_hex, event_created_at DESC)` and
+/// `(community_id, channel_id, event_created_at DESC)`.
 ///
 /// Only returns community-global events and events from `accessible_channel_ids`.
 /// `limit` is capped at [`FEED_MAX_LIMIT`] regardless of the value passed by the caller.
@@ -316,6 +359,263 @@ mod tests {
             .await
             .expect("insert mentions");
         event
+    }
+
+    /// Store an event authored by `keys` and run both denormalized indexes
+    /// (`event_mentions`, `channel_notifications`) exactly as the relay does.
+    async fn store_feed_event_as(
+        pool: &PgPool,
+        community: CommunityId,
+        keys: &Keys,
+        kind: u32,
+        content: &str,
+        channel_id: Option<Uuid>,
+        tags: Vec<Tag>,
+    ) -> nostr::Event {
+        let event = EventBuilder::new(Kind::Custom(kind as u16), content)
+            .tags(tags)
+            .sign_with_keys(keys)
+            .expect("sign event");
+        crate::event::insert_event(pool, community, &event, channel_id)
+            .await
+            .expect("insert feed event");
+        crate::insert_mentions(pool, community, &event, channel_id)
+            .await
+            .expect("insert mentions");
+        crate::insert_channel_notification(pool, community, &event, channel_id)
+            .await
+            .expect("insert channel notification");
+        event
+    }
+
+    async fn add_channel_member(
+        pool: &PgPool,
+        community: CommunityId,
+        channel_id: Uuid,
+        pubkey: &[u8],
+    ) {
+        sqlx::query(
+            "INSERT INTO channel_members (community_id, channel_id, pubkey) \
+             VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+        )
+        .bind(community.as_uuid())
+        .bind(channel_id)
+        .bind(pubkey)
+        .execute(pool)
+        .await
+        .expect("insert channel member");
+    }
+
+    fn notify_tag(mode: &str) -> Tag {
+        Tag::parse(["notify", mode]).expect("notify tag")
+    }
+
+    // -- NIP-CM channel-wide mentions -----------------------------------------
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_mention_reaches_members_and_only_members() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let channel = insert_test_channel(&pool, community).await;
+        let author = Keys::generate();
+        let member = Keys::generate();
+        let outsider = Keys::generate();
+        let member_bytes = member.public_key().to_bytes().to_vec();
+        let outsider_bytes = outsider.public_key().to_bytes().to_vec();
+        add_channel_member(&pool, community, channel, &member_bytes).await;
+
+        let event = store_feed_event_as(
+            &pool,
+            community,
+            &author,
+            KIND_STREAM_MESSAGE,
+            "ship it @channel",
+            Some(channel),
+            vec![notify_tag("channel")],
+        )
+        .await;
+
+        let member_feed = query_mentions(&pool, community, &member_bytes, &[channel], None, 10)
+            .await
+            .expect("member mentions feed");
+        assert!(
+            member_feed.iter().any(|row| row.event.id == event.id),
+            "channel members must see the @channel event in their mentions feed"
+        );
+
+        let outsider_feed = query_mentions(&pool, community, &outsider_bytes, &[channel], None, 10)
+            .await
+            .expect("outsider mentions feed");
+        assert!(
+            outsider_feed.iter().all(|row| row.event.id != event.id),
+            "non-members must not see the @channel event"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn here_and_edits_never_persist_a_channel_notification() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let channel = insert_test_channel(&pool, community).await;
+        let author = Keys::generate();
+        let member = Keys::generate();
+        let member_bytes = member.public_key().to_bytes().to_vec();
+        add_channel_member(&pool, community, channel, &member_bytes).await;
+
+        let here = store_feed_event_as(
+            &pool,
+            community,
+            &author,
+            KIND_STREAM_MESSAGE,
+            "standup now @here",
+            Some(channel),
+            vec![notify_tag("here")],
+        )
+        .await;
+        let edit = store_feed_event_as(
+            &pool,
+            community,
+            &author,
+            buzz_core::kind::KIND_STREAM_MESSAGE_EDIT,
+            "edited @channel",
+            Some(channel),
+            vec![notify_tag("channel")],
+        )
+        .await;
+
+        let feed = query_mentions(&pool, community, &member_bytes, &[channel], None, 10)
+            .await
+            .expect("member mentions feed");
+        assert!(
+            feed.iter().all(|row| row.event.id != here.id),
+            "@here is live-only and must never reach the feed"
+        );
+        assert!(
+            feed.iter().all(|row| row.event.id != edit.id),
+            "edits carry the tag for rendering only and must not re-notify"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_mention_is_deduped_with_a_direct_mention_and_excludes_the_author() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let channel = insert_test_channel(&pool, community).await;
+        let author = Keys::generate();
+        let member = Keys::generate();
+        let author_bytes = author.public_key().to_bytes().to_vec();
+        let member_bytes = member.public_key().to_bytes().to_vec();
+        add_channel_member(&pool, community, channel, &member_bytes).await;
+        add_channel_member(&pool, community, channel, &author_bytes).await;
+
+        let event = store_feed_event_as(
+            &pool,
+            community,
+            &author,
+            KIND_STREAM_MESSAGE,
+            "heads up @channel",
+            Some(channel),
+            vec![
+                notify_tag("channel"),
+                Tag::parse(["p", &member.public_key().to_hex()]).expect("p tag"),
+            ],
+        )
+        .await;
+
+        let member_feed = query_mentions(&pool, community, &member_bytes, &[channel], None, 10)
+            .await
+            .expect("member mentions feed");
+        assert_eq!(
+            member_feed
+                .iter()
+                .filter(|row| row.event.id == event.id)
+                .count(),
+            1,
+            "an event that is both p-tagged and @channel must appear once"
+        );
+
+        let author_feed = query_mentions(&pool, community, &author_bytes, &[channel], None, 10)
+            .await
+            .expect("author mentions feed");
+        assert!(
+            author_feed.iter().all(|row| row.event.id != event.id),
+            "the author's own @channel event is not a mention of the author"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_mention_respects_visible_channel_scoping() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let channel = insert_test_channel(&pool, community).await;
+        let author = Keys::generate();
+        let member = Keys::generate();
+        let member_bytes = member.public_key().to_bytes().to_vec();
+        add_channel_member(&pool, community, channel, &member_bytes).await;
+
+        let event = store_feed_event_as(
+            &pool,
+            community,
+            &author,
+            KIND_FORUM_POST,
+            "forum @channel",
+            Some(channel),
+            vec![notify_tag("channel")],
+        )
+        .await;
+
+        let scoped_out = query_mentions(&pool, community, &member_bytes, &[], None, 10)
+            .await
+            .expect("mentions feed with no accessible channels");
+        assert!(
+            scoped_out.iter().all(|row| row.event.id != event.id),
+            "an empty accessible-channel list means global-only, never all channels"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_mention_is_scoped_across_communities() {
+        let pool = setup_pool().await;
+        let community_a = CommunityId::from_uuid(make_test_community(&pool).await);
+        let community_b = CommunityId::from_uuid(make_test_community(&pool).await);
+        let channel_a = insert_test_channel(&pool, community_a).await;
+        let channel_b = insert_test_channel(&pool, community_b).await;
+        let author = Keys::generate();
+        let member = Keys::generate();
+        let member_bytes = member.public_key().to_bytes().to_vec();
+        add_channel_member(&pool, community_a, channel_a, &member_bytes).await;
+        add_channel_member(&pool, community_b, channel_b, &member_bytes).await;
+
+        let event_b = store_feed_event_as(
+            &pool,
+            community_b,
+            &author,
+            KIND_STREAM_MESSAGE,
+            "community-b @channel",
+            Some(channel_b),
+            vec![notify_tag("channel")],
+        )
+        .await;
+
+        let feed_a = query_mentions(
+            &pool,
+            community_a,
+            &member_bytes,
+            &[channel_a, channel_b],
+            None,
+            10,
+        )
+        .await
+        .expect("community A mentions feed");
+        assert!(
+            feed_a.iter().all(|row| row.event.id != event_b.id),
+            "community B channel mention must not appear in community A feed"
+        );
     }
 
     // -- Postgres tenant-scope regressions ------------------------------------
@@ -785,6 +1085,43 @@ mod tests {
                 && sql.contains(&KIND_GIT_ISSUE.to_string())
                 && sql.contains(&KIND_TEXT_NOTE.to_string()),
             "mentions feed must include Buzz Git roots and comments: {sql}"
+        );
+    }
+
+    #[test]
+    fn mentions_query_unions_channel_notifications_for_member_channels() {
+        let community = buzz_core::CommunityId::from_uuid(Uuid::new_v4());
+        let pubkey = vec![0x42; 32];
+        let channel_id = Uuid::new_v4();
+        let mut qb = build_mentions_query(community, &pubkey, &[channel_id], None, 10);
+        let query = qb.build();
+        let sql_str = sqlx::Execute::sql(query);
+        let sql = sql_str.as_str();
+
+        assert!(
+            sql.contains("INNER JOIN channel_notifications n ON e.community_id = n.community_id"),
+            "mentions must union NIP-CM channel notifications on the composite tenant/event key: {sql}"
+        );
+        assert!(
+            sql.contains("INNER JOIN channel_members cm ON cm.community_id = n.community_id"),
+            "channel notifications must resolve the audience through channel_members: {sql}"
+        );
+        assert!(
+            sql.contains("AND cm.removed_at IS NULL"),
+            "removed members must not receive channel mentions: {sql}"
+        );
+        assert!(
+            sql.contains(") UNION (") && sql.contains(")) u ORDER BY feed_created_at DESC LIMIT "),
+            "both branches must be deduplicated and ordered together: {sql}"
+        );
+        assert!(
+            !sql.contains("UNION ALL"),
+            "UNION (not UNION ALL) is what dedupes an event that is both p-tagged and @channel: {sql}"
+        );
+        assert_eq!(
+            sql.matches("LIMIT ").count(),
+            3,
+            "each branch and the outer query must carry the feed limit: {sql}"
         );
     }
 

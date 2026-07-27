@@ -560,7 +560,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 25);
+        assert_eq!(migrations.len(), 26);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -879,7 +879,6 @@ mod tests {
             .to_lowercase()
             .contains("for update"));
         assert!(ttl_shared.contains("NEW.kind <> 9007"));
-
         // Use-limited invite links: durable relay_invites table stores only
         // the SHA-256 of an opaque v2 code, scoped by community_id. Never
         // listed in _operator_global_tables — it is community-scoped.
@@ -904,6 +903,15 @@ mod tests {
             desired_schema.contains("CREATE TABLE join_policy_acceptances"),
             "desired-state schema must include join-policy evidence used by invite claims",
         );
+
+        // NIP-CM: @channel mentions persist one row per event (never one per
+        // member) and @here never persists at all.
+        assert_eq!(migrations[25].version, 26);
+        let channel_notifications = migrations[25].sql.as_str();
+        assert!(channel_notifications.contains("CREATE TABLE channel_notifications"));
+        assert!(channel_notifications.contains("PRIMARY KEY (community_id, event_id)"));
+        assert!(channel_notifications.contains("mode IN ('channel')"));
+        assert!(channel_notifications.contains("idx_channel_notifications_channel_created"));
     }
 
     #[test]
