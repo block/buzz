@@ -44,19 +44,66 @@ fn pi_settings_path() -> Option<PathBuf> {
 /// from the process environment injected by `buzz-acp`, and is resolved via
 /// the augmented child PATH.
 pub(super) fn ensure_workdir_mcp_json(workdir: &std::path::Path) -> Result<(), String> {
-    let pi_dir = workdir.join(".pi");
-    std::fs::create_dir_all(&pi_dir).map_err(|e| format!("create {}: {e}", pi_dir.display()))?;
-    let path = pi_dir.join("mcp.json");
+    use atomic_write_file::AtomicWriteFile;
+    use std::io::Write;
 
-    let mut root: serde_json::Value = match std::fs::read_to_string(&path) {
-        Ok(raw) => serde_json::from_str(&raw).map_err(|e| {
+    let pi_dir = workdir.join(".pi");
+    match std::fs::symlink_metadata(&pi_dir) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(format!(
+                "refusing to use symlinked pi config directory {}",
+                pi_dir.display()
+            ));
+        }
+        Ok(metadata) if !metadata.is_dir() => {
+            return Err(format!("{} is not a directory", pi_dir.display()));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir(&pi_dir)
+                .map_err(|error| format!("create {}: {error}", pi_dir.display()))?;
+        }
+        Err(error) => return Err(format!("inspect {}: {error}", pi_dir.display())),
+    }
+
+    // Re-check after creation so a racing replacement cannot turn the directory
+    // into a symlink before the config file is inspected.
+    let pi_dir_metadata = std::fs::symlink_metadata(&pi_dir)
+        .map_err(|error| format!("inspect {}: {error}", pi_dir.display()))?;
+    if pi_dir_metadata.file_type().is_symlink() || !pi_dir_metadata.is_dir() {
+        return Err(format!(
+            "refusing to use non-directory or symlinked pi config path {}",
+            pi_dir.display()
+        ));
+    }
+
+    let path = pi_dir.join("mcp.json");
+    let path_exists = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(format!(
+                "refusing to overwrite symlinked pi MCP config {}",
+                path.display()
+            ));
+        }
+        Ok(metadata) if !metadata.is_file() => {
+            return Err(format!("{} is not a regular file", path.display()));
+        }
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(format!("inspect {}: {error}", path.display())),
+    };
+
+    let mut root: serde_json::Value = if path_exists {
+        let raw = std::fs::read_to_string(&path)
+            .map_err(|error| format!("read {}: {error}", path.display()))?;
+        serde_json::from_str(&raw).map_err(|error| {
             format!(
-                "existing {} is not valid JSON ({e}); refusing to overwrite",
+                "existing {} is not valid JSON ({error}); refusing to overwrite",
                 path.display()
             )
-        })?,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
-        Err(err) => return Err(format!("read {}: {err}", path.display())),
+        })?
+    } else {
+        serde_json::json!({})
     };
 
     let root_obj = root
@@ -75,9 +122,14 @@ pub(super) fn ensure_workdir_mcp_json(workdir: &std::path::Path) -> Result<(), S
     }
     servers_obj.insert("buzz".to_string(), desired);
 
-    let serialized = serde_json::to_string_pretty(&root)
-        .map_err(|e| format!("serialize {}: {e}", path.display()))?;
-    std::fs::write(&path, serialized).map_err(|e| format!("write {}: {e}", path.display()))
+    let serialized = serde_json::to_vec_pretty(&root)
+        .map_err(|error| format!("serialize {}: {error}", path.display()))?;
+    let mut temp = AtomicWriteFile::open(&path)
+        .map_err(|error| format!("open {} for atomic write: {error}", path.display()))?;
+    temp.write_all(&serialized)
+        .map_err(|error| format!("write {}: {error}", path.display()))?;
+    temp.commit()
+        .map_err(|error| format!("commit {}: {error}", path.display()))
 }
 
 #[cfg(test)]
@@ -181,6 +233,40 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(pi_dir.join("mcp.json")).unwrap(),
             "{{{{not json"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_mcp_json_rejects_symlinked_pi_directory() {
+        use std::os::unix::fs::symlink;
+
+        let workdir = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        symlink(target.path(), workdir.path().join(".pi")).unwrap();
+
+        let error = ensure_workdir_mcp_json(workdir.path()).unwrap_err();
+        assert!(error.contains("symlink"), "unexpected error: {error}");
+        assert!(!target.path().join("mcp.json").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_mcp_json_rejects_symlinked_config_file() {
+        use std::os::unix::fs::symlink;
+
+        let workdir = tempfile::tempdir().unwrap();
+        let pi_dir = workdir.path().join(".pi");
+        std::fs::create_dir(&pi_dir).unwrap();
+        let target = workdir.path().join("outside.json");
+        std::fs::write(&target, r#"{"mcpServers": {}}"#).unwrap();
+        symlink(&target, pi_dir.join("mcp.json")).unwrap();
+
+        let error = ensure_workdir_mcp_json(workdir.path()).unwrap_err();
+        assert!(error.contains("symlink"), "unexpected error: {error}");
+        assert_eq!(
+            std::fs::read_to_string(target).unwrap(),
+            r#"{"mcpServers": {}}"#
         );
     }
 }

@@ -417,6 +417,26 @@ pub(crate) fn configure_runtime_cli(
     }
 }
 
+/// Select the pi MCP write target only when the process workdir is the real
+/// Buzz nest. `default_agent_workdir()` may fall back to `$HOME`; that fallback
+/// must never receive Buzz-owned `.pi/mcp.json` state.
+fn pi_mcp_write_target(
+    runtime: Option<&KnownAcpRuntime>,
+    workdir: Option<&std::path::Path>,
+    nest: Option<&std::path::Path>,
+) -> Option<std::path::PathBuf> {
+    if !runtime.is_some_and(|runtime| runtime.id == "pi") {
+        return None;
+    }
+    let workdir = workdir?;
+    let nest = nest?;
+    let nest_is_real_dir = nest
+        .symlink_metadata()
+        .map(|metadata| metadata.is_dir())
+        .unwrap_or(false);
+    (nest_is_real_dir && workdir == nest).then(|| nest.to_path_buf())
+}
+
 /// Spawn an agent process without holding any locks on records or runtimes.
 /// Returns the child process and log path on success. The caller is responsible
 /// for updating `ManagedAgentRecord` fields and inserting into the runtimes map.
@@ -523,8 +543,9 @@ pub fn spawn_agent_child(
     );
 
     let mut command = std::process::Command::new(&resolved_acp_command);
-    if let Some(home) = super::default_agent_workdir() {
-        command.current_dir(home);
+    let agent_workdir = super::default_agent_workdir();
+    if let Some(workdir) = agent_workdir.as_deref() {
+        command.current_dir(workdir);
     }
     command.stdin(std::process::Stdio::null());
     command.stdout(std::process::Stdio::from(stdout));
@@ -552,12 +573,23 @@ pub fn spawn_agent_child(
 
     // Pi loads MCP servers from a project-level .pi/mcp.json (via its MCP
     // extension) — the ACP session/new mcpServers field is not yet wired
-    // through the adapter. Write the nest file so buzz-dev-mcp tools are
-    // available. Non-fatal: pi degrades to its native tools on failure.
-    if runtime_meta.is_some_and(|r| r.id == "pi") {
-        if let Some(workdir) = super::default_agent_workdir() {
-            if let Err(error) = super::config_bridge::ensure_pi_workdir_mcp_json(&workdir) {
-                eprintln!("buzz-desktop: failed to write pi mcp.json in nest: {error}");
+    // through the adapter. Write only in the real Buzz nest; the process CWD
+    // may fall back to $HOME when the nest is unavailable.
+    if runtime_meta.is_some_and(|runtime| runtime.id == "pi") {
+        let nest = super::nest_dir();
+        let target = pi_mcp_write_target(runtime_meta, agent_workdir.as_deref(), nest.as_deref());
+        let write_result = target
+            .as_deref()
+            .ok_or_else(|| "refusing to write outside the real Buzz nest".to_string())
+            .and_then(super::config_bridge::ensure_pi_workdir_mcp_json);
+        if let Err(error) = write_result {
+            let message = format!("buzz-desktop: failed to write pi mcp.json in nest: {error}");
+            eprintln!("{message}");
+            if let Err(log_error) = append_log_marker(&log_path, &message) {
+                eprintln!(
+                    "buzz-desktop: failed to append pi mcp.json error to {}: {log_error}",
+                    log_path.display()
+                );
             }
         }
     }
