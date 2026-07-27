@@ -57,12 +57,20 @@ pub struct AgentRuntime<'a> {
     pub args: Option<&'a str>,
 }
 
+/// Env var names an owner-delivered credential displaces.
+const OWNER_CREDENTIAL_KEYS: &[&str] = &["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"];
+
 /// Build the full environment for an agent container.
 ///
 /// `passthrough` is the operator-configured env (LLM credentials and the like).
 /// It is applied *first* so the Buzz-owned variables below always win: an
 /// operator cannot accidentally — or deliberately — override an agent's identity
 /// by naming `BUZZ_PRIVATE_KEY` in the compose file.
+///
+/// `owner_credential` is the per-owner provider credential delivered over the
+/// encrypted kind:24201 channel. When present it displaces any host-global
+/// Anthropic credential in `passthrough` — each owner's agents bill against
+/// their own token, never the operator's.
 pub fn build_agent_env(
     record: &AgentRecord,
     spec: &SpawnerAgentSpec,
@@ -70,12 +78,23 @@ pub fn build_agent_env(
     relay_url: &str,
     passthrough: &[(String, String)],
     runtime: &AgentRuntime<'_>,
+    owner_credential: Option<&str>,
 ) -> Vec<(String, String)> {
     let mut env: Vec<(String, String)> = passthrough
         .iter()
         .filter(|(k, _)| !RESERVED_KEYS.contains(&k.as_str()))
+        .filter(|(k, _)| {
+            owner_credential.is_none() || !OWNER_CREDENTIAL_KEYS.contains(&k.as_str())
+        })
         .cloned()
         .collect();
+
+    if let Some(token) = owner_credential {
+        env.push((
+            crate::credentials::credential_env_key(token).to_string(),
+            token.to_string(),
+        ));
+    }
 
     let mut set = |key: &str, value: String| env.push((key.to_string(), value));
 
@@ -208,6 +227,7 @@ mod tests {
             "wss://relay.example",
             &[],
             &DEFAULT_RUNTIME,
+            None,
         );
 
         assert_eq!(
@@ -234,6 +254,68 @@ mod tests {
     }
 
     #[test]
+    fn owner_credential_wins_over_host_global_passthrough() {
+        let passthrough = vec![
+            ("ANTHROPIC_API_KEY".to_string(), "sk-host-global".to_string()),
+            (
+                "CLAUDE_CODE_OAUTH_TOKEN".to_string(),
+                "sk-host-oauth".to_string(),
+            ),
+            ("OTHER_VAR".to_string(), "kept".to_string()),
+        ];
+        let env = build_agent_env(
+            &record(),
+            &spec(),
+            &ResolvedPrompt::default(),
+            "wss://r",
+            &passthrough,
+            &DEFAULT_RUNTIME,
+            Some("sk-ant-oat01-owner"),
+        );
+        assert_eq!(
+            lookup(&env, "CLAUDE_CODE_OAUTH_TOKEN").as_deref(),
+            Some("sk-ant-oat01-owner")
+        );
+        // Host-global Anthropic credentials are fully displaced, not shadowed.
+        assert!(lookup(&env, "ANTHROPIC_API_KEY").is_none());
+        assert!(!env.iter().any(|(_, v)| v.starts_with("sk-host")));
+        assert_eq!(lookup(&env, "OTHER_VAR").as_deref(), Some("kept"));
+    }
+
+    #[test]
+    fn owner_api_key_is_injected_under_the_api_key_var() {
+        let env = build_agent_env(
+            &record(),
+            &spec(),
+            &ResolvedPrompt::default(),
+            "wss://r",
+            &[],
+            &DEFAULT_RUNTIME,
+            Some("sk-ant-api03-owner"),
+        );
+        assert_eq!(
+            lookup(&env, "ANTHROPIC_API_KEY").as_deref(),
+            Some("sk-ant-api03-owner")
+        );
+        assert!(lookup(&env, "CLAUDE_CODE_OAUTH_TOKEN").is_none());
+    }
+
+    #[test]
+    fn without_an_owner_credential_passthrough_flows_unchanged() {
+        let passthrough = vec![("ANTHROPIC_API_KEY".to_string(), "sk-host".to_string())];
+        let env = build_agent_env(
+            &record(),
+            &spec(),
+            &ResolvedPrompt::default(),
+            "wss://r",
+            &passthrough,
+            &DEFAULT_RUNTIME,
+            None,
+        );
+        assert_eq!(lookup(&env, "ANTHROPIC_API_KEY").as_deref(), Some("sk-host"));
+    }
+
+    #[test]
     fn passthrough_cannot_override_reserved_keys() {
         // A compose file naming BUZZ_PRIVATE_KEY must not be able to hand an
         // agent a different identity, nor swap the relay out from under it.
@@ -256,6 +338,7 @@ mod tests {
             "wss://relay.example",
             &passthrough,
             &DEFAULT_RUNTIME,
+            None,
         );
 
         assert_eq!(
@@ -287,6 +370,7 @@ mod tests {
                 command: Some("claude-agent-acp"),
                 args: None,
             },
+            None,
         );
         assert_eq!(
             lookup(&env, "BUZZ_ACP_AGENT_COMMAND").as_deref(),
@@ -303,6 +387,7 @@ mod tests {
             "wss://r",
             &[],
             &DEFAULT_RUNTIME,
+            None,
         );
         assert!(lookup(&env, "BUZZ_ACP_AGENT_COMMAND").is_none());
     }
@@ -323,6 +408,7 @@ mod tests {
                 command: Some("claude-agent-acp"),
                 args: None,
             },
+            None,
         );
         assert_eq!(
             lookup(&env, "BUZZ_ACP_AGENT_COMMAND").as_deref(),
@@ -342,6 +428,7 @@ mod tests {
             "wss://relay.example",
             &[],
             &DEFAULT_RUNTIME,
+            None,
         );
         assert!(lookup(&env, "BUZZ_AUTH_TAG").is_none());
     }
@@ -356,6 +443,7 @@ mod tests {
             "wss://r",
             &[],
             &DEFAULT_RUNTIME,
+            None,
         );
         assert!(lookup(&env, "BUZZ_ACP_RESPOND_TO_ALLOWLIST").is_none());
 
@@ -368,6 +456,7 @@ mod tests {
             "wss://r",
             &[],
             &DEFAULT_RUNTIME,
+            None,
         );
         assert_eq!(
             lookup(&env, "BUZZ_ACP_RESPOND_TO_ALLOWLIST"),
