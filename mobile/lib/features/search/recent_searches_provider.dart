@@ -56,6 +56,8 @@ class RecentSearchesNotifier extends Notifier<List<String>> {
   }
 }
 
+/// Provides device-local recent searches scoped to the active community and
+/// account.
 final recentSearchesProvider =
     NotifierProvider<RecentSearchesNotifier, List<String>>(
       RecentSearchesNotifier.new,
