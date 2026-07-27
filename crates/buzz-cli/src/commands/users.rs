@@ -1,3 +1,6 @@
+use buzz_core::kind::KIND_MANAGED_AGENT;
+use nostr::PublicKey;
+
 use crate::client::{normalize_write_response, BuzzClient};
 use crate::error::CliError;
 use crate::validate::validate_hex64;
@@ -13,6 +16,7 @@ pub async fn cmd_get_users(
     client: &BuzzClient,
     pubkeys: &[String],
     name: Option<&str>,
+    owner: Option<&str>,
     format: &crate::OutputFormat,
 ) -> Result<(), CliError> {
     if let Some(query) = name {
@@ -21,7 +25,11 @@ pub async fn cmd_get_users(
                 "--name and --pubkey are mutually exclusive".into(),
             ));
         }
-        return search_by_name(client, query, format).await;
+        return search_by_name(client, query, owner, format).await;
+    }
+
+    if owner.is_some() {
+        return Err(CliError::Usage("--owner requires --name".into()));
     }
 
     for pk in pubkeys {
@@ -76,23 +84,95 @@ pub async fn cmd_get_users(
     Ok(())
 }
 
+fn effective_owner(client: &BuzzClient) -> String {
+    client
+        .auth_tag_owner_hex()
+        .unwrap_or_else(|| client.keys().public_key().to_hex())
+}
+
+fn resolve_owner(client: &BuzzClient, owner: Option<&str>) -> Result<Option<String>, CliError> {
+    owner
+        .map(|owner| {
+            if owner == "me" {
+                Ok(effective_owner(client))
+            } else {
+                PublicKey::parse(owner)
+                    .map(|pubkey| pubkey.to_hex())
+                    .map_err(|e| {
+                        CliError::Usage(format!("--owner must be `me`, a pubkey, or npub: {e}"))
+                    })
+            }
+        })
+        .transpose()
+}
+
+fn owned_agent_pubkeys_from_events(events: &[serde_json::Value], query: &str) -> Vec<String> {
+    let mut pubkeys: Vec<String> = events
+        .iter()
+        .filter_map(|event| {
+            let content: serde_json::Value =
+                serde_json::from_str(event.get("content")?.as_str()?).ok()?;
+            let name = content.get("name")?.as_str()?;
+            if !name.eq_ignore_ascii_case(query) {
+                return None;
+            }
+            event.get("tags")?.as_array()?.iter().find_map(|tag| {
+                let tag = tag.as_array()?;
+                (tag.first()?.as_str()? == "d").then(|| tag.get(1)?.as_str().map(str::to_string))?
+            })
+        })
+        .collect();
+    pubkeys.sort();
+    pubkeys.dedup();
+    pubkeys
+}
+
+async fn owned_agent_pubkeys_by_name(
+    client: &BuzzClient,
+    owner: &str,
+    query: &str,
+) -> Result<Vec<String>, CliError> {
+    let filter = serde_json::json!({
+        "kinds": [KIND_MANAGED_AGENT],
+        "authors": [owner],
+    });
+    let events = client.query_all(filter).await?;
+    Ok(owned_agent_pubkeys_from_events(&events, query))
+}
+
 /// Search for users by display name via NIP-50 full-text search on kind:0 profiles.
 /// Returns [] if the relay does not implement NIP-50 search.
 async fn search_by_name(
     client: &BuzzClient,
     query: &str,
+    owner: Option<&str>,
     format: &crate::OutputFormat,
 ) -> Result<(), CliError> {
     if query.trim().is_empty() {
         return Err(CliError::Usage("--name cannot be empty".into()));
     }
 
-    let filter = serde_json::json!({
-        "kinds": [0],
-        "search": query,
-        "limit": 100
-    });
-    let raw = client.query(&filter).await?;
+    let owner = resolve_owner(client, owner)?;
+    let (raw, result_owner) = if let Some(owner) = owner {
+        let pubkeys = owned_agent_pubkeys_by_name(client, &owner, query).await?;
+        if pubkeys.is_empty() {
+            println!("[]");
+            return Ok(());
+        }
+        let filter = serde_json::json!({
+            "kinds": [0],
+            "authors": pubkeys,
+            "limit": pubkeys.len(),
+        });
+        (client.query(&filter).await?, Some(owner))
+    } else {
+        let filter = serde_json::json!({
+            "kinds": [0],
+            "search": query,
+            "limit": 100
+        });
+        (client.query(&filter).await?, None)
+    };
 
     // Parse and filter client-side for case-insensitive substring match
     // on display_name or name fields (NIP-50 may return broader matches).
@@ -126,6 +206,13 @@ async fn search_by_name(
                     "pubkey".to_string(),
                     serde_json::json!(event.get("pubkey").and_then(|v| v.as_str()).unwrap_or("")),
                 );
+                if let Some(owner) = &result_owner {
+                    obj.insert("owner_pubkey".to_string(), serde_json::json!(owner));
+                    obj.insert(
+                        "owned_by_me".to_string(),
+                        serde_json::json!(owner == &effective_owner(client)),
+                    );
+                }
             }
             Some(profile)
         })
@@ -137,6 +224,8 @@ async fn search_by_name(
                 .map(|p| serde_json::json!({
                     "pubkey": p.get("pubkey").cloned().unwrap_or_default(),
                     "display_name": p.get("display_name").or_else(|| p.get("name")).cloned().unwrap_or_default(),
+                    "owner_pubkey": p.get("owner_pubkey").cloned().unwrap_or_default(),
+                    "owned_by_me": p.get("owned_by_me").cloned().unwrap_or_default(),
                 }))
                 .collect();
             serde_json::to_string(&compact).unwrap_or_default()
@@ -311,9 +400,11 @@ pub async fn dispatch(
 ) -> Result<(), CliError> {
     use crate::UsersCmd;
     match cmd {
-        UsersCmd::Get { pubkeys, name } => {
-            cmd_get_users(client, &pubkeys, name.as_deref(), format).await
-        }
+        UsersCmd::Get {
+            pubkeys,
+            name,
+            owner,
+        } => cmd_get_users(client, &pubkeys, name.as_deref(), owner.as_deref(), format).await,
         UsersCmd::SetProfile {
             name,
             avatar,
@@ -336,8 +427,30 @@ pub async fn dispatch(
 
 #[cfg(test)]
 mod tests {
-    use super::presence_subject;
+    use super::{owned_agent_pubkeys_from_events, presence_subject};
     use serde_json::json;
+
+    #[test]
+    fn owned_agent_lookup_matches_exact_name_case_insensitively() {
+        let events = vec![
+            json!({"content": r#"{"name":"Honey"}"#, "tags": [["d", "b"]]}),
+            json!({"content": r#"{"name":"Honeybee"}"#, "tags": [["d", "c"]]}),
+            json!({"content": r#"{"name":"honey"}"#, "tags": [["d", "a"]]}),
+        ];
+        assert_eq!(
+            owned_agent_pubkeys_from_events(&events, "Honey"),
+            vec!["a", "b"]
+        );
+    }
+
+    #[test]
+    fn owned_agent_lookup_ignores_malformed_events() {
+        let events = vec![
+            json!({"content": "not json", "tags": [["d", "a"]]}),
+            json!({"content": r#"{"name":"Honey"}"#, "tags": [["p", "b"]]}),
+        ];
+        assert!(owned_agent_pubkeys_from_events(&events, "Honey").is_empty());
+    }
 
     #[test]
     fn presence_subject_uses_p_tag() {
