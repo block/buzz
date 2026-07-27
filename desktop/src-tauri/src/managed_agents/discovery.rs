@@ -1527,8 +1527,8 @@ const PRESET_HARNESSES: &[PresetHarness] = &[
         label: "Oh My Pi",
         command: "omp",
         args: &["acp"],
-        install_instructions_url: "https://github.com/can1357/oh-my-pi",
-        install_hint: "Install Oh My Pi from github.com/can1357/oh-my-pi.",
+        install_instructions_url: "https://omp.sh/",
+        install_hint: "Install Oh My Pi from omp.sh (curl -fsSL https://omp.sh/install.sh | bash).",
         underlying_cli: None,
     },
     PresetHarness {
