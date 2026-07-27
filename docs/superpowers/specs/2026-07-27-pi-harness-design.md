@@ -101,14 +101,16 @@ flow. This is an implementation-time checkpoint, not a design change.
 Neither community adapter forwards `session/new` `mcpServers` into pi today.
 Bridge instead:
 
-- New `config_bridge/pi.rs` writes `.pi/mcp.json` **into the agent's nest
-  directory** (the per-agent cwd Buzz controls) at spawn time:
+- New `config_bridge/pi.rs` writes `.pi/mcp.json` **into the Buzz nest
+  directory** (`~/.buzz` — the shared agent workdir Buzz owns and uses as
+  spawn cwd) at spawn time:
 
   ```json
   { "mcpServers": { "buzz": { "command": "buzz-dev-mcp" } } }
   ```
 
-  - **Per-agent, not machine-global** — Buzz never edits `~/.pi/agent/*`.
+  - **Buzz-owned, not machine-global** — Buzz never edits `~/.pi/agent/*`;
+    the file lives in the nest Buzz already provisions.
   - **No secrets in the file** — `buzz-dev-mcp` inherits `BUZZ_RELAY_URL`,
     `BUZZ_PRIVATE_KEY`, `BUZZ_AUTH_TAG` from the process environment that
     `buzz-acp` already injects into agent subprocesses.
