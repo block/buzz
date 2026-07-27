@@ -17,7 +17,7 @@ export function ModelRoutingControls({
   return (
     <section
       aria-labelledby="model-routing-heading"
-      className="rounded-xl border border-border/70 bg-card/80 p-4 shadow-xs"
+      className="text-white"
       data-testid="model-routing-controls"
     >
       <div className="flex flex-wrap items-start justify-between gap-4">
@@ -25,7 +25,7 @@ export function ModelRoutingControls({
           <h2 className="text-base font-semibold" id="model-routing-heading">
             Adviser model routing
           </h2>
-          <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
+          <p className="mt-1 max-w-2xl text-sm text-slate-300">
             Choose the first provider for new briefs. If it is unavailable, the
             other route is tried automatically.
           </p>
@@ -54,7 +54,7 @@ export function ModelRoutingControls({
           </Button>
         </fieldset>
       </div>
-      <p className="mt-3 text-sm text-muted-foreground">
+      <p className="mt-3 text-sm text-slate-400">
         The selection applies to the next run; an active brief keeps the route
         it started with.
       </p>
