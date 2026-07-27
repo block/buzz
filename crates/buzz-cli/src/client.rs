@@ -60,20 +60,54 @@ pub fn build_imeta_tag(d: &BlobDescriptor) -> Vec<String> {
     tag
 }
 
-/// MIME types accepted for upload.
-const ALLOWED_MIMES: &[&str] = &[
-    "image/jpeg",
-    "image/png",
-    "image/gif",
-    "image/webp",
-    "video/mp4",
+/// MIME types the relay always rejects on the generic file-upload path.
+///
+/// Mirrors `BLOCKED_FILE_MIME_TYPES` in `crates/buzz-media/src/validation.rs`
+/// (kept in sync manually — buzz-cli does not depend on buzz-media to avoid
+/// pulling its S3/image/mp4 dependency tree into the CLI binary). Everything
+/// else is sent to the relay, which is the authority on acceptance: the relay
+/// validates images/video through dedicated pipelines and accepts generic
+/// files (pdf, zip, csv, ...) via a deny-list, not an allow-list.
+const BLOCKED_MIMES: &[&str] = &[
+    // Active web content — stored-XSS vectors.
+    "text/html",
+    "application/xhtml+xml",
+    "image/svg+xml",
+    "application/javascript",
+    "text/javascript",
+    // Native executables / installers.
+    "application/x-msdownload",
+    "application/x-executable",
+    "application/vnd.microsoft.portable-executable",
+    "application/x-mach-binary",
+    "application/x-sharedlib",
+    "application/x-elf",
+    "application/x-msi",
+    "application/vnd.android.package-archive",
+    "application/x-apple-diskimage",
 ];
+
+/// Client-side pre-check for `upload_file`: fail fast only on MIME types the
+/// relay permanently blocks. All other types are uploaded and validated
+/// server-side.
+fn check_upload_mime(mime: &str) -> Result<(), CliError> {
+    if BLOCKED_MIMES.contains(&mime) {
+        return Err(CliError::Usage(format!(
+            "blocked file type: {mime} (the relay rejects active web content and executables)"
+        )));
+    }
+    Ok(())
+}
 
 /// Maximum file size for image uploads (50 MB).
 const MAX_IMAGE_BYTES: u64 = 50 * 1024 * 1024;
 
 /// Maximum file size for video uploads (500 MB).
 const MAX_VIDEO_BYTES: u64 = 500 * 1024 * 1024;
+
+/// Maximum file size for generic (non-image, non-video) uploads (100 MB) —
+/// matches the relay's default `max_file_bytes`.
+const MAX_FILE_BYTES: u64 = 100 * 1024 * 1024;
 
 /// Sign a NIP-98 HTTP auth event (kind:27235) and return the Authorization header value.
 ///
@@ -1113,15 +1147,15 @@ impl BuzzClient {
             .map(|t| t.mime_type().to_string())
             .unwrap_or_else(|| "application/octet-stream".to_string());
 
-        if !ALLOWED_MIMES.contains(&mime.as_str()) {
-            return Err(CliError::Usage(format!("unsupported file type: {mime}")));
-        }
+        check_upload_mime(&mime)?;
 
         // 3. Size check
         let max = if mime.starts_with("video/") {
             MAX_VIDEO_BYTES
-        } else {
+        } else if mime.starts_with("image/") {
             MAX_IMAGE_BYTES
+        } else {
+            MAX_FILE_BYTES
         };
         if bytes.len() as u64 > max {
             return Err(CliError::Usage(format!(
@@ -2297,8 +2331,10 @@ mod retry_policy_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        advance_query_cursor, create_response_with_id, extract_relay_response_field, BuzzClient,
+        advance_query_cursor, check_upload_mime, create_response_with_id,
+        extract_relay_response_field, BuzzClient,
     };
+    use crate::error::CliError;
     use nostr::{EventBuilder, Keys, Kind, Tag};
 
     #[test]
@@ -2473,5 +2509,42 @@ mod tests {
             built.headers().get("x-auth-tag").is_none(),
             "x-auth-tag header must not be present when no auth tag is configured"
         );
+    }
+
+    // --- upload MIME pre-check mirrors the relay's denylist (issue #2963) ---
+
+    #[test]
+    fn upload_mime_check_allows_types_the_relay_accepts() {
+        for mime in [
+            "application/pdf",
+            "application/zip", // .xlsx / .docx sniff as zip
+            "application/gzip",
+            "text/csv",
+            "application/octet-stream",
+        ] {
+            assert!(
+                check_upload_mime(mime).is_ok(),
+                "{mime} should pass the client check"
+            );
+        }
+        assert!(check_upload_mime("image/jpeg").is_ok());
+        assert!(check_upload_mime("video/mp4").is_ok());
+    }
+
+    #[test]
+    fn upload_mime_check_rejects_relay_blocked_types() {
+        for mime in [
+            "text/html",
+            "image/svg+xml",
+            "application/javascript",
+            "application/x-msdownload",
+            "application/x-mach-binary",
+        ] {
+            let err = check_upload_mime(mime).expect_err(mime);
+            assert!(
+                matches!(err, CliError::Usage(_)),
+                "{mime} should be a usage error"
+            );
+        }
     }
 }

@@ -72,6 +72,7 @@ pub(crate) fn looks_like_mp4_iso_bmff(bytes: &[u8]) -> bool {
 /// HTML, JS, and SVG are the classic stored-XSS carriers. Native executables are
 /// blocked because there's no legitimate reason to host them inline in chat and
 /// they're a malware-distribution risk.
+/// NOTE: mirrored by `BLOCKED_MIMES` in `crates/buzz-cli/src/client.rs` — keep in sync.
 const BLOCKED_FILE_MIME_TYPES: &[&str] = &[
     // Active web content — stored-XSS vectors.
     "text/html",
