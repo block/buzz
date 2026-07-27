@@ -226,9 +226,10 @@ A local edit MUST NOT be clobbered by a fetched or subscribed snapshot: merge
 the snapshot into the local state, and republish whenever the merge result still
 holds anything the snapshot does not. Clients MUST decide this by comparing the
 merge result against the snapshot, **not** by checking whether a debounced
-publish is still outstanding — a debounce cancelled by a client restart, sign-out
-or community switch would otherwise lose the edit permanently and silently, since
-the local mirror keeps it while no device ever publishes it. The comparison
+publish is still outstanding — a debounce cancelled by a client restart,
+sign-out or community switch would otherwise lose the edit permanently and
+silently, since the local mirror keeps it while no device publishes it. The
+comparison
 terminates: once the client's own republished blob comes back, the merge result
 equals it.
 
@@ -323,9 +324,9 @@ cannot swallow something addressed to the user:
 Only direct mentions qualify for hatch 2. A client that records a per-event
 mention-tier classification alongside its unread evidence MUST NOT reuse it
 here: that classification was decided under the level in force when the event
-arrived, so a `@channel` marker or broadcast reply seen at level `all` would keep
-resurfacing the channel after the user mutes it. Direct mentions pierce every
-level, so their classification stays correct across later level changes.
+arrived, so a `@channel` marker or broadcast reply seen at level `all` would
+keep resurfacing the channel after the user mutes it. Direct mentions pierce
+every level, so their classification stays correct across later level changes.
 
 Hidden channels MUST remain reachable through channel browse / search surfaces.
 
