@@ -147,6 +147,57 @@ void main() {
       reason: 'no retries may fire after dispose',
     );
   });
+
+  test('late relay CLOSED after subscribe() reported success retries and '
+      'eventually adopts remote state', () async {
+    await setUpEnv();
+    // Under cold-start load, subscribe() can time out its 500ms readiness
+    // wait and resolve successfully before the relay's rate-limit CLOSED
+    // lands. The rejection then arrives only via onClosed. Pre-fix the
+    // manager passed no onClosed, kept the dead subscription, and never
+    // retried.
+    final relay = _RateLimitedRelaySession(failuresBeforeSuccess: 0);
+    final manager = buildManager(relaySession: relay);
+    await manager.initialize();
+    expect(relay.subscribeCalls, 1);
+
+    // Late CLOSED lands after initialize() completed successfully.
+    relay.closeLiveSubscription('rate-limited: quota exceeded');
+
+    // The manager must drop the dead subscription and re-subscribe.
+    await _waitUntil(() => relay.subscribeCalls > 1);
+
+    // Remote state arriving on the NEW subscription must be adopted.
+    relay.emit(
+      sectionsEvent(
+        sections: [
+          {'id': 's1', 'name': 'Desktop Group', 'order': 0},
+        ],
+        createdAt: 100,
+      ),
+    );
+    await _waitUntil(() => manager.store.sections.isNotEmpty);
+    expect(manager.store.sections.single.name, 'Desktop Group');
+
+    // Exactly one replacement subscription — no duplicates.
+    await Future<void>.delayed(const Duration(milliseconds: 60));
+    expect(relay.subscribeCalls, 2);
+    expect(relay.activeListeners, 1);
+    manager.dispose(flushPending: false);
+  });
+
+  test('late CLOSED after dispose does not schedule retries', () async {
+    await setUpEnv();
+    final relay = _RateLimitedRelaySession(failuresBeforeSuccess: 0);
+    final manager = buildManager(relaySession: relay);
+    await manager.initialize();
+    manager.dispose(flushPending: false);
+
+    relay.closeLiveSubscription('rate-limited: quota exceeded');
+    await Future<void>.delayed(const Duration(milliseconds: 60));
+
+    expect(relay.subscribeCalls, 1, reason: 'no re-subscribe after dispose');
+  });
 }
 
 Future<void> _waitUntil(
@@ -177,6 +228,25 @@ class _RateLimitedRelaySession extends RelaySessionNotifier {
   int fetchCalls = 0;
   int subscribeCalls = 0;
   final List<void Function(NostrEvent)> _listeners = [];
+  final List<void Function(String)> _closedCallbacks = [];
+
+  int get activeListeners => _listeners.length;
+
+  void emit(NostrEvent event) {
+    for (final listener in List.of(_listeners)) {
+      listener(event);
+    }
+  }
+
+  /// Simulates a relay CLOSED landing after subscribe() already resolved —
+  /// the readiness-timeout window on a loaded cold start. Drops the live
+  /// subscription (as _handleClosed does) and invokes onClosed.
+  void closeLiveSubscription(String message) {
+    if (_listeners.isEmpty) return;
+    _listeners.removeAt(0);
+    final onClosed = _closedCallbacks.removeAt(0);
+    onClosed(message);
+  }
 
   @override
   Future<List<NostrEvent>> fetchHistory(
@@ -201,6 +271,13 @@ class _RateLimitedRelaySession extends RelaySessionNotifier {
       throw Exception('rate-limited: quota exceeded; retry in 1s');
     }
     _listeners.add(onEvent);
-    return () => _listeners.remove(onEvent);
+    _closedCallbacks.add(onClosed ?? (_) {});
+    return () {
+      final index = _listeners.indexOf(onEvent);
+      if (index >= 0) {
+        _listeners.removeAt(index);
+        _closedCallbacks.removeAt(index);
+      }
+    };
   }
 }

@@ -292,6 +292,7 @@ class ChannelSectionsManager {
           limit: 1,
         ),
         _handleIncomingEvent,
+        onClosed: _handleSubscriptionClosed,
       );
       return true;
     } catch (error) {
@@ -300,6 +301,20 @@ class ChannelSectionsManager {
       // startup-sync backoff.
       return false;
     }
+  }
+
+  /// A relay `CLOSED` can arrive after `subscribe()` already reported
+  /// success: the 500ms readiness wait times out silently under load, and
+  /// the rate-limit rejection lands later. Without this handler the manager
+  /// would keep a dead subscription and never retry — the exact
+  /// load-correlated cold-start failure this retry exists for.
+  void _handleSubscriptionClosed(String message) {
+    if (_disposed) return;
+    debugPrint(
+      '[ChannelSectionsManager] live subscription closed by relay: $message',
+    );
+    _unsubscribe = null;
+    _scheduleStartupRetry();
   }
 
   void _mergeEvents(List<NostrEvent> events) {
