@@ -1,13 +1,12 @@
 -- NIP-CM channel-wide mentions (@channel).
 --
 -- One row per notifying event, NOT one row per member: the mentions feed
--- resolves the audience at read time by joining channel_members, so a
+-- resolves the recipients at read time by joining channel_members, so a
 -- 5000-member channel costs a single row here and the roster is never
 -- denormalized into the event or this table.
 --
 -- @here is deliberately absent: it is live-only (no persistence, no
--- retroactive badge). `mode` is still stored so the column can carry future
--- persistent modes without a second table.
+-- retroactive badge), which is why `mode` is constrained to 'channel'.
 CREATE TABLE channel_notifications (
     community_id     UUID NOT NULL REFERENCES communities(id),
     channel_id       UUID NOT NULL,

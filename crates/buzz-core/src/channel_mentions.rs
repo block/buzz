@@ -54,7 +54,7 @@ pub fn is_reserved_mention_token(token: &str) -> bool {
         .any(|reserved| token.eq_ignore_ascii_case(reserved))
 }
 
-/// The audience selected by a `["notify", …]` tag.
+/// Who a `["notify", …]` tag notifies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotifyMode {
     /// Every member of the channel; persistent (feed row, badge, offline catch-up).

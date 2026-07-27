@@ -95,7 +95,7 @@ fn build_mentions_query(
 
     // Branch 1 — direct `p`-tag mentions.
     let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(format!(
-        "SELECT * FROM ((SELECT {EVENT_COLS}, m.event_created_at AS feed_created_at FROM events e \
+        "SELECT * FROM ((SELECT {EVENT_COLS} FROM events e \
          INNER JOIN event_mentions m ON e.community_id = m.community_id AND e.id = m.event_id \
          WHERE e.community_id = "
     ));
@@ -119,10 +119,11 @@ fn build_mentions_query(
 
     // Branch 2 — NIP-CM `["notify", "channel"]` events in channels the caller
     // is still a member of. `UNION` (not `UNION ALL`) collapses an event that
-    // both p-tags the caller and notifies the channel into one feed row.
+    // both p-tags the caller and notifies the channel into one feed row: both
+    // branches project exactly `EVENT_COLS`, so identical event rows collapse.
     // `@here` is never stored, so it can never surface here.
     qb.push(format!(
-        ") UNION (SELECT {EVENT_COLS}, n.event_created_at AS feed_created_at FROM events e \
+        ") UNION (SELECT {EVENT_COLS} FROM events e \
          INNER JOIN channel_notifications n ON e.community_id = n.community_id \
          AND e.id = n.event_id \
          INNER JOIN channel_members cm ON cm.community_id = n.community_id \
@@ -149,7 +150,7 @@ fn build_mentions_query(
     qb.push(" ORDER BY n.event_created_at DESC LIMIT ")
         .push_bind(limit);
 
-    qb.push(")) u ORDER BY feed_created_at DESC LIMIT ")
+    qb.push(")) u ORDER BY created_at DESC LIMIT ")
         .push_bind(limit);
     qb
 }
@@ -1104,15 +1105,19 @@ mod tests {
         );
         assert!(
             sql.contains("INNER JOIN channel_members cm ON cm.community_id = n.community_id"),
-            "channel notifications must resolve the audience through channel_members: {sql}"
+            "channel notifications must resolve recipients through channel_members: {sql}"
         );
         assert!(
             sql.contains("AND cm.removed_at IS NULL"),
             "removed members must not receive channel mentions: {sql}"
         );
         assert!(
-            sql.contains(") UNION (") && sql.contains(")) u ORDER BY feed_created_at DESC LIMIT "),
+            sql.contains(") UNION (") && sql.contains(")) u ORDER BY created_at DESC LIMIT "),
             "both branches must be deduplicated and ordered together: {sql}"
+        );
+        assert!(
+            !sql.contains(" AS feed_created_at"),
+            "both branches must project exactly EVENT_COLS or UNION cannot dedupe: {sql}"
         );
         assert!(
             !sql.contains("UNION ALL"),
