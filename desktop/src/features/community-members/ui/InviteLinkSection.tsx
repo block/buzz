@@ -45,8 +45,8 @@ export function InviteLinkSection({
   ttlSecs: number;
 }) {
   const [copyStatus, setCopyStatus] = React.useState<CopyStatus>("idle");
-  const [maxUsesEnabled, setMaxUsesEnabled] = React.useState(false);
-  const [maxUsesInput, setMaxUsesInput] = React.useState("10");
+  const [maxUsesEnabled, setMaxUsesEnabled] = React.useState(true);
+  const [maxUsesInput, setMaxUsesInput] = React.useState("3");
   const parsedMaxUses = Number(maxUsesInput);
   const maxUsesValid =
     !maxUsesEnabled ||
@@ -150,7 +150,7 @@ export function InviteLinkSection({
             max={10000}
             min={1}
             onChange={(event) => setMaxUsesInput(event.target.value)}
-            placeholder="10"
+            placeholder="3"
             type="number"
             value={maxUsesInput}
           />
