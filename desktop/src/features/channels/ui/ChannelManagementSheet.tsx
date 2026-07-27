@@ -11,6 +11,7 @@ import {
   MessageSquare,
   Pencil,
   Radio,
+  ShieldCheck,
   Type,
   Users,
   Zap,
@@ -27,10 +28,16 @@ import {
   useDeleteChannelMutation,
   useJoinChannelMutation,
   useLeaveChannelMutation,
+  useRecoverChannelOwnerMutation,
   useUnarchiveChannelMutation,
   useUpdateChannelMutation,
 } from "@/features/channels/hooks";
-import { compareMembersByRole } from "@/features/channels/lib/memberUtils";
+import { useMyRelayMembershipQuery } from "@/features/community-members/hooks";
+import { useUsersBatchQuery } from "@/features/profile/hooks";
+import {
+  compareMembersByRole,
+  formatMemberName,
+} from "@/features/channels/lib/memberUtils";
 import {
   DEFAULT_EPHEMERAL_TTL_SECONDS,
   formatTtlDuration,
@@ -69,6 +76,7 @@ import {
   CHANNEL_FORM_FIELD_SHELL_CLASS,
 } from "./channelFormStyles";
 import { ChannelTypeSettings } from "./ChannelTypeSettings";
+import { ChannelOwnerRecoveryDialog } from "./ChannelOwnerRecoveryDialog";
 import { ChannelPermissionsSettings } from "./ChannelPermissionsSettings";
 import {
   ChannelHero,
@@ -124,6 +132,8 @@ export function ChannelManagementSheet({
   const deleteChannelMutation = useDeleteChannelMutation(channelId);
   const joinChannelMutation = useJoinChannelMutation(channelId);
   const leaveChannelMutation = useLeaveChannelMutation(channelId);
+  const recoverChannelOwnerMutation = useRecoverChannelOwnerMutation(channelId);
+  const myRelayMembershipQuery = useMyRelayMembershipQuery();
   const channelIdRef = React.useRef(channelId);
   channelIdRef.current = channelId;
 
@@ -137,6 +147,15 @@ export function ChannelManagementSheet({
   const selfMember =
     members.find((member) => member.pubkey === currentPubkey) ?? null;
   const hasResolvedMembership = membersQuery.data !== undefined;
+  const recoveryIdentitiesQuery = useUsersBatchQuery(
+    [
+      ...(currentPubkey ? [currentPubkey] : []),
+      ...members.map((member) => member.pubkey),
+    ],
+    {
+      enabled: open && myRelayMembershipQuery.data?.role === "owner",
+    },
+  );
 
   const { canDeleteChannel, canManageChannel } =
     useChannelModerationCapabilities(membersQuery.data, currentPubkey, open);
@@ -167,6 +186,7 @@ export function ChannelManagementSheet({
   );
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = React.useState(false);
   const [isEditDialogOpen, setIsEditDialogOpen] = React.useState(false);
+  const [isRecoveryDialogOpen, setIsRecoveryDialogOpen] = React.useState(false);
   const [isConvertingVisibility, setIsConvertingVisibility] =
     React.useState(false);
   const [hasUserEditedChannelDraft, setHasUserEditedChannelDraft] =
@@ -184,6 +204,7 @@ export function ChannelManagementSheet({
       syncedForRef.current = null;
       setIsDeleteDialogOpen(false);
       setIsEditDialogOpen(false);
+      setIsRecoveryDialogOpen(false);
       setActiveView("summary");
       return;
     }
@@ -263,6 +284,34 @@ export function ChannelManagementSheet({
     ? getMarkdownPreviewText(canvasContent)
     : undefined;
   const canOpenCanvas = hasCanvas || canEditNarrative;
+  function isKnownHuman(pubkey: string) {
+    const normalizedPubkey = pubkey.toLowerCase();
+    const profile =
+      recoveryIdentitiesQuery.data?.profiles[normalizedPubkey] ?? undefined;
+    return (
+      profile !== undefined &&
+      profile.isAgent === false &&
+      profile.ownerPubkey === null &&
+      !recoveryIdentitiesQuery.data?.missing.some(
+        (missingPubkey) => missingPubkey.toLowerCase() === normalizedPubkey,
+      )
+    );
+  }
+  const recoveryCandidates = members.filter(
+    (member) =>
+      isKnownHuman(member.pubkey) &&
+      (member.role === "member" || member.role === "guest"),
+  );
+  const currentOwners = members.filter((member) => member.role === "owner");
+  const currentIdentityIsKnownHuman =
+    currentPubkey !== undefined && isKnownHuman(currentPubkey);
+  const canRequestOwnerRecovery =
+    hasResolvedMembership &&
+    myRelayMembershipQuery.data?.role === "owner" &&
+    currentIdentityIsKnownHuman &&
+    !isArchived &&
+    resolvedChannel.channelType !== "dm" &&
+    recoveryCandidates.length > 0;
 
   function handleEditDialogOpenChange(next: boolean) {
     if (!next) {
@@ -377,6 +426,8 @@ export function ChannelManagementSheet({
             resolvedChannel={resolvedChannel}
             setActiveView={setActiveView}
             setIsEditDialogOpen={setIsEditDialogOpen}
+            setIsRecoveryDialogOpen={setIsRecoveryDialogOpen}
+            canRequestOwnerRecovery={canRequestOwnerRecovery}
             unarchiveChannelMutation={unarchiveChannelMutation}
           />
         </DialogPrimitive.Content>
@@ -423,6 +474,8 @@ export function ChannelManagementSheet({
               resolvedChannel={resolvedChannel}
               setActiveView={setActiveView}
               setIsEditDialogOpen={setIsEditDialogOpen}
+              setIsRecoveryDialogOpen={setIsRecoveryDialogOpen}
+              canRequestOwnerRecovery={canRequestOwnerRecovery}
               unarchiveChannelMutation={unarchiveChannelMutation}
             />
           </DialogPrimitive.Content>
@@ -565,6 +618,20 @@ export function ChannelManagementSheet({
           </DialogContent>
         </Dialog>
       ) : null}
+
+      <ChannelOwnerRecoveryDialog
+        candidates={recoveryCandidates}
+        channelName={resolvedChannel.name}
+        currentOwners={currentOwners.map((owner) =>
+          formatMemberName(owner, currentPubkey),
+        )}
+        mutation={recoverChannelOwnerMutation}
+        onOpenChange={(next) => {
+          recoverChannelOwnerMutation.reset();
+          setIsRecoveryDialogOpen(next);
+        }}
+        open={isRecoveryDialogOpen}
+      />
     </DialogPrimitive.Root>
   );
 }
@@ -604,6 +671,8 @@ type ChannelManagementPanelContentProps = {
   resolvedChannel: Channel;
   setActiveView: React.Dispatch<React.SetStateAction<"summary" | "canvas">>;
   setIsEditDialogOpen: React.Dispatch<React.SetStateAction<boolean>>;
+  setIsRecoveryDialogOpen: React.Dispatch<React.SetStateAction<boolean>>;
+  canRequestOwnerRecovery: boolean;
   unarchiveChannelMutation: ChannelMutation;
 };
 
@@ -636,6 +705,8 @@ function ChannelManagementPanelContent({
   resolvedChannel,
   setActiveView,
   setIsEditDialogOpen,
+  setIsRecoveryDialogOpen,
+  canRequestOwnerRecovery,
   unarchiveChannelMutation,
 }: ChannelManagementPanelContentProps) {
   const scrollRef = React.useRef<HTMLDivElement>(null);
@@ -753,6 +824,14 @@ function ChannelManagementPanelContent({
                   label="Edit"
                   onClick={() => setIsEditDialogOpen(true)}
                   testId="channel-management-edit"
+                />
+              ) : null}
+              {canRequestOwnerRecovery ? (
+                <ChannelQuickAction
+                  icon={ShieldCheck}
+                  label="Recover owner"
+                  onClick={() => setIsRecoveryDialogOpen(true)}
+                  testId="channel-owner-recovery-open"
                 />
               ) : null}
             </div>

@@ -560,7 +560,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 24);
+        assert_eq!(migrations.len(), 25);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -879,6 +879,49 @@ mod tests {
             .to_lowercase()
             .contains("for update"));
         assert!(ttl_shared.contains("NEW.kind <> 9007"));
+
+        // Channel-owner recovery is additive and keeps its promotion audit and
+        // retryable relay-delivery state community-scoped and immutable.
+        assert_eq!(migrations[24].version, 25);
+        let owner_recovery = migrations[24].sql.as_str();
+        assert!(owner_recovery.contains("CREATE TABLE channel_owner_recovery_audit"));
+        assert!(owner_recovery.contains("CREATE TABLE channel_owner_recovery_outbox"));
+        assert!(owner_recovery.contains("PRIMARY KEY (community_id, request_event_id)"));
+        assert!(owner_recovery.contains("audit_event_id"));
+        assert!(owner_recovery.contains("uq_channel_owner_recovery_audit_event"));
+        assert!(owner_recovery.contains("reason_code"));
+        assert!(owner_recovery.contains("BEFORE UPDATE OR DELETE"));
+        assert!(owner_recovery.contains("CREATE FUNCTION channel_owner_recovery_event_immutable"));
+        assert!(owner_recovery
+            .contains("CREATE TRIGGER trg_events_channel_owner_recovery_soft_delete_guard"));
+        assert!(owner_recovery.contains("BEFORE UPDATE OF deleted_at ON events"));
+        assert!(owner_recovery
+            .contains("CREATE TRIGGER trg_events_channel_owner_recovery_hard_delete_guard"));
+        assert!(owner_recovery.contains("BEFORE DELETE ON events"));
+        assert!(!migrations[0]
+            .sql
+            .as_str()
+            .contains("channel_owner_recovery_audit"));
+    }
+
+    #[test]
+    fn desired_state_schema_includes_channel_owner_recovery_state() {
+        let schema = include_str!("../../../schema/schema.sql");
+        assert!(schema.contains("CREATE TABLE channel_owner_recovery_audit"));
+        assert!(schema.contains("CREATE TABLE channel_owner_recovery_outbox"));
+        assert!(schema.contains("audit_event_id"));
+        assert!(schema.contains("uq_channel_owner_recovery_audit_event"));
+        assert!(schema.contains("CREATE TRIGGER trg_channel_owner_recovery_audit_immutable"));
+        assert!(schema.contains("BEFORE UPDATE OR DELETE ON channel_owner_recovery_audit"));
+        assert!(schema.contains("CREATE FUNCTION channel_owner_recovery_event_immutable"));
+        assert!(
+            schema.contains("CREATE TRIGGER trg_events_channel_owner_recovery_soft_delete_guard")
+        );
+        assert!(schema.contains("BEFORE UPDATE OF deleted_at ON events"));
+        assert!(
+            schema.contains("CREATE TRIGGER trg_events_channel_owner_recovery_hard_delete_guard")
+        );
+        assert!(schema.contains("BEFORE DELETE ON events"));
     }
 
     #[test]

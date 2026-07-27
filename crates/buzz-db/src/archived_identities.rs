@@ -7,9 +7,24 @@
 
 use buzz_core::CommunityId;
 use chrono::{DateTime, Utc};
-use sqlx::{PgPool, Row as _};
+use sqlx::{PgPool, Postgres, Row as _, Transaction};
 
 use crate::error::Result;
+
+/// Acquire the transaction-scoped identity lock shared by archive, unarchive,
+/// and owner recovery. Callers that lock multiple identities must sort them.
+pub(crate) async fn lock_identity(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    pubkey: &str,
+) -> Result<()> {
+    let key = format!("archived-identity:{community_id}:{pubkey}");
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(key)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
 
 /// A single archived identity record.
 #[derive(Debug, Clone)]
@@ -57,6 +72,8 @@ pub async fn archive(
     replaced_by: Option<&str>,
     request_event_id: &str,
 ) -> Result<bool> {
+    let mut tx = pool.begin().await?;
+    lock_identity(&mut tx, community_id, pubkey).await?;
     let result = sqlx::query(
         "INSERT INTO archived_identities \
          (community_id, pubkey, consent_path, actor, reason, replaced_by, request_event_id) \
@@ -70,10 +87,11 @@ pub async fn archive(
     .bind(reason)
     .bind(replaced_by)
     .bind(request_event_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
-
-    Ok(result.rows_affected() > 0)
+    let changed = result.rows_affected() > 0;
+    tx.commit().await?;
+    Ok(changed)
 }
 
 /// Unarchives an identity from `community_id`.
@@ -81,14 +99,17 @@ pub async fn archive(
 /// Returns `true` if a row was deleted, `false` if the identity was not archived
 /// in that community.
 pub async fn unarchive(pool: &PgPool, community_id: CommunityId, pubkey: &str) -> Result<bool> {
+    let mut tx = pool.begin().await?;
+    lock_identity(&mut tx, community_id, pubkey).await?;
     let result =
         sqlx::query("DELETE FROM archived_identities WHERE community_id = $1 AND pubkey = $2")
             .bind(community_id.as_uuid())
             .bind(pubkey)
-            .execute(pool)
+            .execute(&mut *tx)
             .await?;
-
-    Ok(result.rows_affected() > 0)
+    let changed = result.rows_affected() > 0;
+    tx.commit().await?;
+    Ok(changed)
 }
 
 /// Returns all identities archived in `community_id`, ordered by archive time ascending.

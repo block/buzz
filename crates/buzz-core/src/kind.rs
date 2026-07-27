@@ -348,6 +348,12 @@ pub const KIND_NIP43_LEAVE_REQUEST: u32 = 28936;
 pub const KIND_IA_ARCHIVE_REQUEST: u32 = 9035;
 /// NIP-IA: Request that the relay unarchive a target identity.
 pub const KIND_IA_UNARCHIVE_REQUEST: u32 = 9036;
+/// Buzz: Request audited recovery of an orphaned channel owner.
+///
+/// This is a dedicated command, separate from generic channel role changes.
+pub const KIND_CHANNEL_OWNER_RECOVERY: u32 = 9038;
+/// Marker on relay-signed, non-deletable channel-owner recovery audit events.
+pub const CHANNEL_OWNER_RECOVERY_AUDIT_MARKER: &str = "channel-owner-recovery-v1";
 
 // NIP-IA identity archival announcement events (relay-signed)
 /// NIP-IA: Archived-identity delta (relay-signed).
@@ -612,6 +618,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_NIP43_LEAVE_REQUEST,
     KIND_IA_ARCHIVE_REQUEST,
     KIND_IA_UNARCHIVE_REQUEST,
+    KIND_CHANNEL_OWNER_RECOVERY,
     KIND_IA_ARCHIVED,
     KIND_IA_UNARCHIVED,
     KIND_IA_ARCHIVED_LIST,

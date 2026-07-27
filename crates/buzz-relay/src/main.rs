@@ -680,6 +680,50 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // Durable channel-owner recovery audit delivery. The ownership promotion,
+    // immutable audit row, and outbox entry commit together; this bounded
+    // sweeper makes the relay-signed channel event converge after a crash or a
+    // transient post-commit delivery failure. Deterministic event IDs make
+    // concurrent relay pods harmless.
+    {
+        let recovery_audit_state = Arc::clone(&state);
+        let interval_secs: u64 = std::env::var("BUZZ_RECOVERY_AUDIT_INTERVAL_SECS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(10)
+            .max(1);
+        let batch_limit: i64 = std::env::var("BUZZ_RECOVERY_AUDIT_BATCH_LIMIT")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(100);
+        tokio::spawn(async move {
+            info!(
+                interval_secs,
+                batch_limit, "Channel-owner recovery audit worker started"
+            );
+            loop {
+                match buzz_relay::handlers::channel_owner_recovery::drain_pending_recovery_audits(
+                    &recovery_audit_state,
+                    batch_limit,
+                )
+                .await
+                {
+                    Ok(0) => {}
+                    Ok(delivered) => {
+                        info!(delivered, "Delivered pending channel-owner recovery audits");
+                    }
+                    Err(error) => {
+                        warn!(
+                            error = %error,
+                            "Channel-owner recovery audit worker tick failed"
+                        );
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(interval_secs)).await;
+            }
+        });
+    }
+
     // NIP-PL matcher and worker are enabled as one unit. Lease acceptance is
     // already disabled without the exact gateway URL, so discovery and runtime
     // cannot advertise or accumulate work for an undeliverable configuration.

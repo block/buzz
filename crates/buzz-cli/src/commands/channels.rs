@@ -1001,6 +1001,23 @@ pub async fn cmd_remove_channel_member(
     Ok(())
 }
 
+/// Submit the dedicated, prior-self-consent-only channel-owner recovery event.
+pub async fn cmd_recover_channel_owner(
+    client: &BuzzClient,
+    channel_id: &str,
+    target_pubkey: &str,
+    reason: &str,
+) -> Result<(), CliError> {
+    let channel = parse_uuid(channel_id)?;
+    validate_hex64(target_pubkey)?;
+    let builder = buzz_sdk::build_channel_owner_recovery(channel, target_pubkey, reason)
+        .map_err(|error| CliError::Usage(error.to_string()))?;
+    let event = client.sign_event(builder)?;
+    let response = client.submit_event(event).await?;
+    println!("{}", normalize_write_response(&response));
+    Ok(())
+}
+
 /// Set the channel addition policy — sign and submit a kind:10100 (agent profile) event.
 pub async fn cmd_set_add_policy(client: &BuzzClient, policy: &str) -> Result<(), CliError> {
     match policy {
@@ -1161,6 +1178,11 @@ pub async fn dispatch(
         ChannelsCmd::RemoveMember { channel, pubkey } => {
             cmd_remove_channel_member(client, &channel, &pubkey).await
         }
+        ChannelsCmd::RecoverOwner {
+            channel,
+            pubkey,
+            reason,
+        } => cmd_recover_channel_owner(client, &channel, &pubkey, &reason).await,
         ChannelsCmd::SetAddPolicy { policy } => cmd_set_add_policy(client, &policy).await,
     }
 }

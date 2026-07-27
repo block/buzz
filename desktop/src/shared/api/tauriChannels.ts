@@ -172,6 +172,18 @@ export async function deleteChannel(channelId: string): Promise<void> {
   await invokeTauri("delete_channel", { channelId });
 }
 
+export type RecoverChannelOwnerInput = {
+  channelId: string;
+  targetPubkey: string;
+  reason: string;
+};
+
+export async function recoverChannelOwner(
+  input: RecoverChannelOwnerInput,
+): Promise<void> {
+  await invokeTauri("recover_channel_owner", input);
+}
+
 type RawChannelMessagesPageResponse = {
   events: ChannelMessagesPageResponse["events"];
   next_cursor: { created_at: number; event_id: string } | null;

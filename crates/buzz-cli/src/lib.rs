@@ -666,6 +666,26 @@ pub enum ChannelsCmd {
         #[arg(long)]
         pubkey: String,
     },
+    /// Recover an orphaned channel owner using prior durable self-consent.
+    #[command(
+        name = "recover-owner",
+        after_help = "The relay denies this command unless every current human owner \
+self-archived and named the target as replacement before becoming unavailable. \
+Lost or deleted keys without that durable evidence are out of scope.\n\n\
+Example:\n  buzz channels recover-owner --channel <UUID> --pubkey <PUBKEY> \
+--reason \"All owners recorded replacement consent\""
+    )]
+    RecoverOwner {
+        /// Channel UUID.
+        #[arg(long)]
+        channel: String,
+        /// Existing human member to promote (64-char hex).
+        #[arg(long)]
+        pubkey: String,
+        /// Human-readable immutable audit reason (1-500 bytes).
+        #[arg(long)]
+        reason: String,
+    },
     /// Set your channel addition policy
     #[command(name = "set-add-policy")]
     SetAddPolicy {
@@ -1904,6 +1924,7 @@ mod tests {
                 "list",
                 "members",
                 "purpose",
+                "recover-owner",
                 "remove-member",
                 "search",
                 "set-add-policy",
@@ -1997,7 +2018,7 @@ mod tests {
         let expected: Vec<(&str, usize)> = vec![
             ("agents", 5),
             ("canvas", 2),
-            ("channels", 16),
+            ("channels", 17),
             ("dms", 4),
             ("emoji", 5),
             ("feed", 1),

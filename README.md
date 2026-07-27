@@ -222,6 +222,7 @@ A Rust workspace of focused crates. Single source of truth: the relay. See [ARCH
 
 - **[VISION.md](VISION.md)** · **[VISION_SOVEREIGN.md](VISION_SOVEREIGN.md)** · **[VISION_PROJECTS.md](VISION_PROJECTS.md)** · **[VISION_AGENT.md](VISION_AGENT.md)** — the four vision docs
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** — system design, kind ranges, subsystem boundaries
+- **[Channel-owner recovery](docs/channel-owner-recovery.md)** — exceptional recovery policy, event contract, and relay operations
 - **[TESTING.md](TESTING.md)** — multi-agent E2E test suite
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** · **[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)** · **[SECURITY.md](SECURITY.md)** · **[GOVERNANCE.md](GOVERNANCE.md)**
 

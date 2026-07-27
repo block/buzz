@@ -14,26 +14,26 @@ use buzz_core::kind::{
     event_kind_u32, is_identity_archive_request_kind, is_parameterized_replaceable,
     is_relay_admin_kind, KIND_AGENT_ENGRAM, KIND_AGENT_PROFILE, KIND_AGENT_TURN_METRIC,
     KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_AUTH, KIND_BOOKMARK_LIST, KIND_BOOKMARK_SET,
-    KIND_CANVAS, KIND_CONTACT_LIST, KIND_DELETION, KIND_DM_ADD_MEMBER, KIND_DM_HIDE, KIND_DM_OPEN,
-    KIND_EMOJI_LIST, KIND_EMOJI_SET, KIND_EVENT_REMINDER, KIND_FOLLOW_SET, KIND_FORUM_COMMENT,
-    KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_GIFT_WRAP, KIND_GIT_ISSUE, KIND_GIT_PATCH,
-    KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE,
-    KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN,
-    KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES, KIND_HUDDLE_PARTICIPANT_JOINED,
-    KIND_HUDDLE_PARTICIPANT_LEFT, KIND_HUDDLE_STARTED, KIND_IA_ARCHIVE_REQUEST,
-    KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM, KIND_MANAGED_AGENT, KIND_MEMBER_ADDED_NOTIFICATION,
-    KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT,
-    KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST,
-    KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT, KIND_NIP29_DELETE_GROUP,
-    KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST, KIND_NIP29_LEAVE_REQUEST,
-    KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER, KIND_NIP43_LEAVE_REQUEST,
-    KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST, KIND_PRESENCE_UPDATE,
-    KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_REACTION, KIND_READ_STATE, KIND_REPORT,
-    KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF,
+    KIND_CANVAS, KIND_CHANNEL_OWNER_RECOVERY, KIND_CONTACT_LIST, KIND_DELETION, KIND_DM_ADD_MEMBER,
+    KIND_DM_HIDE, KIND_DM_OPEN, KIND_EMOJI_LIST, KIND_EMOJI_SET, KIND_EVENT_REMINDER,
+    KIND_FOLLOW_SET, KIND_FORUM_COMMENT, KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_GIFT_WRAP,
+    KIND_GIT_ISSUE, KIND_GIT_PATCH, KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST,
+    KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE, KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT,
+    KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN, KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES,
+    KIND_HUDDLE_PARTICIPANT_JOINED, KIND_HUDDLE_PARTICIPANT_LEFT, KIND_HUDDLE_STARTED,
+    KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM, KIND_MANAGED_AGENT,
+    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MODERATION_BAN,
+    KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN,
+    KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST, KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT,
+    KIND_NIP29_DELETE_GROUP, KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST,
+    KIND_NIP29_LEAVE_REQUEST, KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER,
+    KIND_NIP43_LEAVE_REQUEST, KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST,
+    KIND_PRESENCE_UPDATE, KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_REACTION, KIND_READ_STATE,
+    KIND_REPORT, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF,
     KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED,
-    KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEXT_NOTE, KIND_USER_STATUS,
-    KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE,
-    RELAY_ADMIN_REMOVE_MEMBER, RELAY_ADMIN_SET_WORKSPACE_PROFILE,
+    KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_SYSTEM_MESSAGE, KIND_TEAM, KIND_TEXT_NOTE,
+    KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER,
+    RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER, RELAY_ADMIN_SET_WORKSPACE_PROFILE,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_core::verification::verify_event;
@@ -246,6 +246,7 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         KIND_NIP29_PUT_USER | KIND_NIP29_REMOVE_USER | KIND_NIP29_DELETE_GROUP => {
             Ok(Scope::AdminChannels)
         }
+        KIND_CHANNEL_OWNER_RECOVERY => Ok(Scope::AdminChannels),
         // NIP-43: relay membership admin commands (9030–9032) + Buzz
         // workspace-profile command (9033).
         k if k == RELAY_ADMIN_ADD_MEMBER
@@ -473,6 +474,7 @@ pub(crate) fn requires_h_channel_scope(kind: u32) -> bool {
             | KIND_NIP29_EDIT_METADATA
             | KIND_NIP29_DELETE_EVENT
             | KIND_NIP29_DELETE_GROUP
+            | KIND_CHANNEL_OWNER_RECOVERY
             | KIND_NIP29_LEAVE_REQUEST
             // Huddle lifecycle events + guidelines
             | KIND_HUDDLE_STARTED
@@ -1481,6 +1483,17 @@ async fn ingest_event_inner(
     if buzz_core::kind::is_relay_only_kind(kind_u32) {
         return Err(IngestError::Rejected("restricted: relay-only kind".into()));
     }
+    // Kind 40099 also carries legitimate user-submitted system-style messages,
+    // so it cannot be relay-only wholesale. Reserve only the recovery-audit
+    // marker: otherwise a member could forge an event that deletion handlers
+    // must preserve forever.
+    if kind_u32 == KIND_SYSTEM_MESSAGE
+        && super::side_effects::has_channel_owner_recovery_audit_marker(&event)
+    {
+        return Err(IngestError::Rejected(
+            "restricted: channel owner recovery audit marker is relay-only".into(),
+        ));
+    }
 
     // Share the event with the verify task via Arc instead of deep-cloning it
     // (tags + up to 256 KB of content). spawn_blocking only needs 'static, not
@@ -1798,7 +1811,8 @@ async fn ingest_event_inner(
             || kind_u32 == KIND_STREAM_MESSAGE_EDIT
             || kind_u32 == KIND_NIP29_EDIT_METADATA
             || kind_u32 == KIND_NIP29_DELETE_EVENT
-            || kind_u32 == KIND_NIP29_DELETE_GROUP;
+            || kind_u32 == KIND_NIP29_DELETE_GROUP
+            || kind_u32 == KIND_CHANNEL_OWNER_RECOVERY;
         if !skip_membership {
             // Spec AuthCheck (line 794): emit the verdict at the actual
             // call site. claimed_community comes from the event's h tag
@@ -1828,6 +1842,19 @@ async fn ingest_event_inner(
             );
             auth_result.map_err(IngestError::Rejected)?;
         }
+    }
+
+    if kind_u32 == KIND_CHANNEL_OWNER_RECOVERY {
+        let message = crate::handlers::channel_owner_recovery::handle_channel_owner_recovery(
+            tenant, state, &event,
+        )
+        .await
+        .map_err(|error| IngestError::Rejected(format!("invalid: {error}")))?;
+        return Ok(IngestResult {
+            event_id: event_id_hex,
+            accepted: true,
+            message,
+        });
     }
 
     // Handled directly — these mutate relay_members and do NOT get stored.
