@@ -115,7 +115,8 @@ export function ActiveAgentCommunitiesSettingsCard() {
                       ? "Working…"
                       : runtime.lifecycle === "stopped"
                         ? "Start"
-                        : runtime.lifecycle === "failed"
+                        : runtime.lifecycle === "failed" ||
+                            runtime.lifecycle === "unknown"
                           ? "Restart"
                           : "Stop"}
                   </Button>

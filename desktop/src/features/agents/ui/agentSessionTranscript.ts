@@ -12,6 +12,7 @@ import {
   normalizeToolStatus,
 } from "./agentSessionToolCatalog";
 import { classifyTool } from "./agentSessionToolClassifier";
+import { describeMentionSlaEvent } from "./agentMentionSlaTranscript";
 import { asRecord, asString, titleCase } from "./agentSessionUtils";
 import {
   describeTurnStarted,
@@ -715,7 +716,19 @@ export function processTranscriptEvent(
     sessionId: event.sessionId ?? d.latestSessionId,
   };
 
-  if (event.kind === "raw_json_rpc") {
+  const mentionSlaItem = describeMentionSlaEvent(event);
+  if (mentionSlaItem) {
+    upsertLifecycleItem(
+      d,
+      mentionSlaItem.id,
+      mentionSlaItem.renderClass,
+      mentionSlaItem.title,
+      mentionSlaItem.text,
+      event.timestamp,
+      { ...ctx, channelId: mentionSlaItem.channelId },
+      event.kind,
+    );
+  } else if (event.kind === "raw_json_rpc") {
     upsertMetadata(
       d,
       `raw-json-rpc:${ch}:${event.seq}`,

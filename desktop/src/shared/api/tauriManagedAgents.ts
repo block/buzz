@@ -89,6 +89,16 @@ export async function putManagedAgentRuntimeLifecycle(
   });
 }
 
+export async function putManagedAgentRuntimeLease(
+  outerPubkey: string,
+  payload: unknown,
+): Promise<ManagedAgentRuntimeStatus> {
+  return invokeTauri("put_managed_agent_runtime_lease", {
+    outerPubkey,
+    payload,
+  });
+}
+
 export async function reconcileManagedAgentRuntimes(
   communities: readonly { relayUrl: string }[],
 ): Promise<ManagedAgentRuntimeStatus[]> {

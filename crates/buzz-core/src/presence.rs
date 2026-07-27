@@ -2,6 +2,28 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Interval used by connected clients to refresh their signed presence lease.
+///
+/// The relay lease is deliberately three intervals long, leaving one complete
+/// interval of scheduling/network margin after a single dropped refresh.
+pub const PRESENCE_HEARTBEAT_INTERVAL_SECS: u64 = 30;
+
+/// Lifetime of a presence lease in the relay's shared store.
+///
+/// Keep this at three times [`PRESENCE_HEARTBEAT_INTERVAL_SECS`]. A client that
+/// misses one refresh then has another full heartbeat interval to recover
+/// before the relay expires its lease.
+pub const PRESENCE_LEASE_TTL_SECS: u64 = PRESENCE_HEARTBEAT_INTERVAL_SECS * 3;
+
+/// Refresh interval for the owner-encrypted managed-agent runtime lease.
+pub const MANAGED_AGENT_RUNTIME_LEASE_INTERVAL_SECS: u64 = 15;
+
+/// Lifetime of a managed-agent runtime lease.
+///
+/// Three intervals tolerate one lost encrypted observer frame while retaining
+/// a bounded stale-to-unknown transition.
+pub const MANAGED_AGENT_RUNTIME_LEASE_TTL_SECS: u64 = MANAGED_AGENT_RUNTIME_LEASE_INTERVAL_SECS * 3;
+
 /// Allowed presence statuses for the REST/MCP surface.
 ///
 /// The WebSocket path (kind:20001) accepts arbitrary status strings for
@@ -69,5 +91,25 @@ mod tests {
         assert_eq!(format!("{}", PresenceStatus::Online), "online");
         assert_eq!(format!("{}", PresenceStatus::Away), "away");
         assert_eq!(format!("{}", PresenceStatus::Offline), "offline");
+    }
+
+    #[test]
+    fn lease_survives_one_missed_heartbeat_with_a_full_interval_of_margin() {
+        let one_missed_refresh_gap = PRESENCE_HEARTBEAT_INTERVAL_SECS * 2;
+        assert!(one_missed_refresh_gap < PRESENCE_LEASE_TTL_SECS);
+        assert_eq!(
+            PRESENCE_LEASE_TTL_SECS - one_missed_refresh_gap,
+            PRESENCE_HEARTBEAT_INTERVAL_SECS
+        );
+    }
+
+    #[test]
+    fn managed_runtime_lease_survives_one_missed_frame_then_expires() {
+        let one_missed_refresh_gap = MANAGED_AGENT_RUNTIME_LEASE_INTERVAL_SECS * 2;
+        assert!(one_missed_refresh_gap < MANAGED_AGENT_RUNTIME_LEASE_TTL_SECS);
+        assert_eq!(
+            MANAGED_AGENT_RUNTIME_LEASE_TTL_SECS - one_missed_refresh_gap,
+            MANAGED_AGENT_RUNTIME_LEASE_INTERVAL_SECS
+        );
     }
 }

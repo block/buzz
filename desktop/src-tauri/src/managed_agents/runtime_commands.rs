@@ -44,6 +44,18 @@ struct StatusInputs<'a> {
     global: &'a super::GlobalAgentConfig,
 }
 
+fn effective_runtime_lifecycle(runtime: &ManagedAgentPairRuntime) -> ManagedAgentRuntimeLifecycle {
+    if matches!(
+        runtime.lifecycle,
+        ManagedAgentRuntimeLifecycle::Failed | ManagedAgentRuntimeLifecycle::Unknown
+    ) || std::time::Instant::now() <= runtime.lease_deadline
+    {
+        runtime.lifecycle.clone()
+    } else {
+        ManagedAgentRuntimeLifecycle::Unknown
+    }
+}
+
 fn status_for_with(
     app: &AppHandle,
     record: &super::ManagedAgentRecord,
@@ -63,18 +75,39 @@ fn status_for_with(
         requested_relay_url,
         local_setup,
         lifecycle: runtime
-            .map(|runtime| runtime.lifecycle.clone())
+            .map(effective_runtime_lifecycle)
             .unwrap_or(ManagedAgentRuntimeLifecycle::Stopped),
         pid: runtime.map(|runtime| runtime.child.id()),
         error: runtime.and_then(|runtime| runtime.error.clone()),
         log_path: managed_agent_runtime_log_path(app, key)
             .ok()
             .map(|path| path.display().to_string()),
+        observer_sequence: runtime.and_then(|runtime| runtime.last_runtime_observer_seq),
+        last_observed_at: runtime.and_then(|runtime| runtime.last_observed_at.clone()),
+        lease_expires_at: runtime.and_then(|runtime| runtime.lease_expires_at.clone()),
     }
 }
 
 fn emit_status(app: &AppHandle, status: &ManagedAgentRuntimeStatus) {
     let _ = app.emit(STATUS_EVENT, status);
+}
+
+const RUNTIME_OBSERVER_MAX_CLOCK_SKEW_SECS: i64 = 30;
+const RUNTIME_OBSERVER_REPLAY_WINDOW_SECS: i64 = 300;
+const RUNTIME_LAST_ERROR_MAX_BYTES: usize = 512;
+
+fn validate_runtime_observer_timestamp(source_timestamp: &str) -> Result<(), String> {
+    let source = chrono::DateTime::parse_from_rfc3339(source_timestamp)
+        .map_err(|_| "runtime observer source timestamp is not RFC3339".to_string())?
+        .with_timezone(&chrono::Utc);
+    let now = chrono::Utc::now();
+    if source > now + chrono::TimeDelta::seconds(RUNTIME_OBSERVER_MAX_CLOCK_SKEW_SECS) {
+        return Err("runtime observer source timestamp is in the future".into());
+    }
+    if source < now - chrono::TimeDelta::seconds(RUNTIME_OBSERVER_REPLAY_WINDOW_SECS) {
+        return Err("runtime observer frame is outside the replay window".into());
+    }
+    Ok(())
 }
 
 fn observer_lifecycle_key(
@@ -89,6 +122,20 @@ fn observer_lifecycle_key(
         ManagedAgentRuntimeLifecycle::Starting | ManagedAgentRuntimeLifecycle::Stopped
     ) {
         return Err("observer cannot author starting or stopped lifecycle".into());
+    }
+    if payload.lifecycle == ManagedAgentRuntimeLifecycle::Unknown {
+        return Err("observer cannot author unknown lifecycle".into());
+    }
+    if payload.observer_sequence == 0 {
+        return Err("runtime observer sequence must be positive".into());
+    }
+    validate_runtime_observer_timestamp(&payload.source_timestamp)?;
+    if payload
+        .error
+        .as_ref()
+        .is_some_and(|error| error.len() > RUNTIME_LAST_ERROR_MAX_BYTES)
+    {
+        return Err("lifecycle error exceeds the runtime observer limit".into());
     }
     if payload.lifecycle == ManagedAgentRuntimeLifecycle::Failed && payload.error.is_none() {
         return Err("failed lifecycle requires an error".into());
@@ -123,6 +170,12 @@ pub fn put_managed_agent_runtime_lifecycle(
         return Err("lifecycle frame does not match the current harness generation".into());
     }
     if runtime
+        .last_runtime_observer_seq
+        .is_some_and(|sequence| payload.observer_sequence <= sequence)
+    {
+        return Err("lifecycle frame is stale or duplicated".into());
+    }
+    if runtime
         .child
         .try_wait()
         .map_err(|e| e.to_string())?
@@ -130,8 +183,103 @@ pub fn put_managed_agent_runtime_lifecycle(
     {
         return Err("lifecycle frame arrived after process exit".into());
     }
+    runtime.last_runtime_observer_seq = Some(payload.observer_sequence);
+    runtime.last_observed_at = Some(payload.source_timestamp);
     runtime.lifecycle = payload.lifecycle;
     runtime.error = payload.error;
+    let status = status_for(&app, record, &key, Some(runtime), None);
+    emit_status(&app, &status);
+    Ok(status)
+}
+
+fn observer_lease_key(
+    outer_pubkey: &str,
+    payload: &super::ManagedAgentRuntimeLeaseObserverPayload,
+) -> Result<(ManagedAgentRuntimeKey, std::time::Duration), String> {
+    if !outer_pubkey.eq_ignore_ascii_case(&payload.pubkey) {
+        return Err("observer signer does not match lease payload pubkey".into());
+    }
+    if payload.start_nonce != payload.lease_epoch {
+        return Err("runtime lease epoch does not match its generation nonce".into());
+    }
+    if payload.observer_sequence == 0 {
+        return Err("runtime observer sequence must be positive".into());
+    }
+    if payload
+        .last_error
+        .as_ref()
+        .is_some_and(|error| error.len() > RUNTIME_LAST_ERROR_MAX_BYTES)
+    {
+        return Err("runtime lease error exceeds the observer limit".into());
+    }
+    validate_runtime_observer_timestamp(&payload.source_timestamp)?;
+    let source = chrono::DateTime::parse_from_rfc3339(&payload.source_timestamp)
+        .map_err(|_| "runtime lease source timestamp is not RFC3339".to_string())?
+        .with_timezone(&chrono::Utc);
+    let expires = chrono::DateTime::parse_from_rfc3339(&payload.expires_at)
+        .map_err(|_| "runtime lease expiry is not RFC3339".to_string())?
+        .with_timezone(&chrono::Utc);
+    let lease_ttl = std::time::Duration::from_secs(
+        buzz_core_pkg::presence::MANAGED_AGENT_RUNTIME_LEASE_TTL_SECS,
+    );
+    if expires.signed_duration_since(source)
+        != chrono::TimeDelta::seconds(lease_ttl.as_secs() as i64)
+    {
+        return Err("runtime lease duration does not match the shared contract".into());
+    }
+    let remaining = expires
+        .signed_duration_since(chrono::Utc::now())
+        .to_std()
+        .map_err(|_| "runtime lease is already expired".to_string())?
+        .min(lease_ttl);
+    Ok((
+        ManagedAgentRuntimeKey::new(payload.pubkey.clone(), &payload.relay_url)?,
+        remaining,
+    ))
+}
+
+#[tauri::command]
+pub fn put_managed_agent_runtime_lease(
+    outer_pubkey: String,
+    payload: super::ManagedAgentRuntimeLeaseObserverPayload,
+    app: AppHandle,
+) -> Result<ManagedAgentRuntimeStatus, String> {
+    let (key, remaining) = observer_lease_key(&outer_pubkey, &payload)?;
+    let state = app.state::<AppState>();
+    let records = load_managed_agents(&app)?;
+    let record = records
+        .iter()
+        .find(|record| record.pubkey.eq_ignore_ascii_case(&key.pubkey))
+        .ok_or_else(|| format!("agent {} not found", key.pubkey))?;
+    let mut runtimes = state
+        .managed_agent_processes
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let runtime = runtimes
+        .get_mut(&key)
+        .ok_or_else(|| "lease frame does not match a tracked runtime pair".to_string())?;
+    if runtime.start_nonce != payload.start_nonce {
+        return Err("lease frame does not match the current harness generation".into());
+    }
+    if runtime
+        .last_runtime_observer_seq
+        .is_some_and(|sequence| payload.observer_sequence <= sequence)
+    {
+        return Err("lease frame is stale or duplicated".into());
+    }
+    if runtime
+        .child
+        .try_wait()
+        .map_err(|error| error.to_string())?
+        .is_some()
+    {
+        return Err("lease frame arrived after process exit".into());
+    }
+    runtime.last_runtime_observer_seq = Some(payload.observer_sequence);
+    runtime.lease_deadline = std::time::Instant::now() + remaining;
+    runtime.last_observed_at = Some(payload.source_timestamp);
+    runtime.lease_expires_at = Some(payload.expires_at);
+    runtime.error = payload.last_error;
     let status = status_for(&app, record, &key, Some(runtime), None);
     emit_status(&app, &status);
     Ok(status)
@@ -162,15 +310,27 @@ pub fn list_managed_agent_runtimes(
         .map_err(|e| e.to_string())?;
     let exited_keys: Vec<_> = runtimes
         .iter_mut()
-        .filter_map(|(key, runtime)| match runtime.child.try_wait() {
-            Ok(Some(_)) | Err(_) => Some(key.clone()),
-            Ok(None) => None,
+        .filter_map(|(key, runtime)| {
+            match (
+                runtime.lifecycle == ManagedAgentRuntimeLifecycle::Unknown,
+                runtime.child.try_wait(),
+            ) {
+                (true, _) => None,
+                (false, Ok(Some(_))) | (false, Err(_)) => Some(key.clone()),
+                (false, Ok(None)) => None,
+            }
         })
         .collect();
     let records_changed = !exited_keys.is_empty();
     let mut statuses = Vec::new();
     for key in exited_keys {
-        runtimes.remove(&key);
+        let error = "Harness process exited without an explicit owner stop.".to_string();
+        let Some(runtime) = runtimes.get_mut(&key) else {
+            continue;
+        };
+        runtime.lifecycle = ManagedAgentRuntimeLifecycle::Unknown;
+        runtime.error = Some(error.clone());
+        runtime.lease_deadline = std::time::Instant::now();
         super::remove_agent_runtime_receipt(&app, &key);
         state.clear_agent_session_cache(&key);
         if let Some(record) = records
@@ -178,12 +338,12 @@ pub fn list_managed_agent_runtimes(
             .find(|record| record.pubkey.eq_ignore_ascii_case(&key.pubkey))
         {
             record.updated_at = crate::util::now_iso();
-            record.last_stopped_at = Some(record.updated_at.clone());
+            record.last_error = Some(error);
             let status = status_for_with(
                 &app,
                 record,
                 &key,
-                None,
+                Some(runtime),
                 None,
                 StatusInputs {
                     personas: &personas,
@@ -191,7 +351,6 @@ pub fn list_managed_agent_runtimes(
                 },
             );
             emit_status(&app, &status);
-            statuses.push(status);
         }
     }
     statuses.extend(runtimes.iter().filter_map(|(key, runtime)| {
@@ -443,6 +602,9 @@ fn unkeyable_failed_status(
         pid: None,
         error: Some(error),
         log_path: None,
+        observer_sequence: None,
+        last_observed_at: None,
+        lease_expires_at: None,
     }
 }
 
@@ -581,6 +743,8 @@ mod tests {
             pubkey: "aa".repeat(32),
             relay_url: relay_url.into(),
             start_nonce: "test-generation".into(),
+            observer_sequence: 1,
+            source_timestamp: chrono::Utc::now().to_rfc3339(),
             lifecycle,
             error: error.map(str::to_owned),
         }
@@ -712,5 +876,81 @@ mod tests {
             Some("unexpected"),
         );
         assert!(observer_lifecycle_key(&ready_with_error.pubkey, &ready_with_error).is_err());
+    }
+
+    fn lease_payload() -> super::super::ManagedAgentRuntimeLeaseObserverPayload {
+        let source = chrono::Utc::now();
+        let expires = source
+            + chrono::TimeDelta::seconds(
+                buzz_core_pkg::presence::MANAGED_AGENT_RUNTIME_LEASE_TTL_SECS as i64,
+            );
+        super::super::ManagedAgentRuntimeLeaseObserverPayload {
+            pubkey: "aa".repeat(32),
+            relay_url: "wss://relay.example".into(),
+            start_nonce: "test-generation".into(),
+            lease_epoch: "test-generation".into(),
+            observer_sequence: 7,
+            source_timestamp: source.to_rfc3339(),
+            expires_at: expires.to_rfc3339(),
+            last_error: None,
+        }
+    }
+
+    #[test]
+    fn observer_lease_accepts_current_generation_and_shared_duration() {
+        let lease = lease_payload();
+        let (key, remaining) = observer_lease_key(&lease.pubkey, &lease).unwrap();
+        assert_eq!(key.relay_url, "wss://relay.example");
+        assert!(
+            remaining.as_secs() <= buzz_core_pkg::presence::MANAGED_AGENT_RUNTIME_LEASE_TTL_SECS
+        );
+        assert!(remaining.as_secs() > 0);
+
+        let mut future_lease = lease_payload();
+        let future_source = chrono::Utc::now() + chrono::TimeDelta::seconds(20);
+        future_lease.source_timestamp = future_source.to_rfc3339();
+        future_lease.expires_at = (future_source
+            + chrono::TimeDelta::seconds(
+                buzz_core_pkg::presence::MANAGED_AGENT_RUNTIME_LEASE_TTL_SECS as i64,
+            ))
+        .to_rfc3339();
+        let (_, remaining) = observer_lease_key(&future_lease.pubkey, &future_lease).unwrap();
+        assert_eq!(
+            remaining.as_secs(),
+            buzz_core_pkg::presence::MANAGED_AGENT_RUNTIME_LEASE_TTL_SECS
+        );
+    }
+
+    #[test]
+    fn observer_lease_rejects_cross_agent_and_epoch_mismatch() {
+        let mut lease = lease_payload();
+        assert!(observer_lease_key(&"bb".repeat(32), &lease).is_err());
+        lease.lease_epoch = "older-generation".into();
+        assert!(observer_lease_key(&lease.pubkey, &lease).is_err());
+    }
+
+    #[test]
+    fn observer_lease_rejects_expired_or_wrong_duration() {
+        let mut lease = lease_payload();
+        lease.expires_at = chrono::Utc::now()
+            .checked_sub_signed(chrono::TimeDelta::seconds(1))
+            .unwrap()
+            .to_rfc3339();
+        assert!(observer_lease_key(&lease.pubkey, &lease).is_err());
+
+        let mut lease = lease_payload();
+        lease.expires_at = (chrono::Utc::now() + chrono::TimeDelta::seconds(300)).to_rfc3339();
+        assert!(observer_lease_key(&lease.pubkey, &lease).is_err());
+    }
+
+    #[test]
+    fn observer_lease_rejects_unbounded_error_and_zero_sequence() {
+        let mut lease = lease_payload();
+        lease.last_error = Some("x".repeat(RUNTIME_LAST_ERROR_MAX_BYTES + 1));
+        assert!(observer_lease_key(&lease.pubkey, &lease).is_err());
+
+        let mut lease = lease_payload();
+        lease.observer_sequence = 0;
+        assert!(observer_lease_key(&lease.pubkey, &lease).is_err());
     }
 }
