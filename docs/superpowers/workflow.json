@@ -1,5 +1,5 @@
 {
-  "linear": { "team": null, "projects": [] },
+  "linear": { "team": "BUZZ", "projects": [], "localMode": true },
   "pr": { "repo": "block/buzz", "base": "main" },
   "paths": {
     "specs": "docs/superpowers/specs",
