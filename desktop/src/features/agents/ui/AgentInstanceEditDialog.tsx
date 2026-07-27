@@ -406,6 +406,27 @@ export function AgentInstanceEditDialog({
 
   const { data: bakedEnvKeys } = useBakedBuildEnvKeysQuery({ enabled: open });
 
+  // Server residency: a relocated agent is configured on the spawner, so the
+  // harness is not this device's to choose and the model catalog is whatever
+  // the spawner advertises. Resolved before model discovery so a server-hosted
+  // agent never runs local discovery (its credentials live on the spawner).
+  const { agents: serverAgents } = useServerAgents();
+  const serverSpecSlug = React.useMemo(() => {
+    const matched = serverAgents.find(
+      (candidate) => candidate.status.agentPubkey === agent.pubkey,
+    );
+    return matched?.slug ?? slugFromName(agent.name);
+  }, [serverAgents, agent.pubkey, agent.name]);
+  const server = useServerAgentEditContext({
+    relocatedToSpawner: agent.relocatedToSpawner,
+    deployedSpawnerPubkey: null,
+    agentPubkey: agent.pubkey,
+    slug: serverSpecSlug,
+    provider,
+  });
+  const serverContext = server.context;
+  const serverAi = server.ai;
+
   // Merge global env as the base layer so credential keys satisfied via global
   // config (e.g. ANTHROPIC_API_KEY) are available to model discovery. Use
   // `inheritedSubmission.envVars` (the same snapshot the credential gate
@@ -432,6 +453,7 @@ export function AgentInstanceEditDialog({
     open,
     provider: providerForDiscovery,
     selectedRuntime,
+    serverManaged: serverContext !== null,
   });
 
   // D2: derive advancedRequiredEnvKeys for EnvVarsEditor display.
@@ -462,26 +484,6 @@ export function AgentInstanceEditDialog({
     secretEnvVar: topLevelSecretEnvVar,
     value: apiKeyValue,
   } = apiKeyFieldState;
-  // Server residency: a relocated agent is configured on the spawner, so the
-  // harness is not this device's to choose and the model catalog is whatever
-  // the spawner advertises.
-  const { agents: serverAgents } = useServerAgents();
-  const serverSpecSlug = React.useMemo(() => {
-    const matched = serverAgents.find(
-      (candidate) => candidate.status.agentPubkey === agent.pubkey,
-    );
-    return matched?.slug ?? slugFromName(agent.name);
-  }, [serverAgents, agent.pubkey, agent.name]);
-  const server = useServerAgentEditContext({
-    relocatedToSpawner: agent.relocatedToSpawner,
-    deployedSpawnerPubkey: null,
-    agentPubkey: agent.pubkey,
-    slug: serverSpecSlug,
-    provider,
-  });
-  const serverContext = server.context;
-  const serverAi = server.ai;
-
   // Clear model when provider scope changes and current model is no longer valid.
   React.useEffect(() => {
     if (
@@ -642,6 +644,7 @@ export function AgentInstanceEditDialog({
       inheritHarness,
       agentCommand,
       requiredEnvKeyMissing,
+      serverManaged: serverContext !== null,
     }) &&
     providerValid &&
     !updateMutation.isPending &&
