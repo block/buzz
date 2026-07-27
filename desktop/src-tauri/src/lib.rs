@@ -4,6 +4,8 @@ mod archive;
 mod builderlab;
 mod commands;
 mod deep_link;
+#[cfg(test)]
+mod deep_link_startup_tests;
 mod event_sync;
 mod events;
 mod huddle;
@@ -567,6 +569,12 @@ pub fn run() {
             #[cfg(desktop)]
             {
                 use tauri_plugin_deep_link::DeepLinkExt;
+
+                #[cfg(any(windows, target_os = "linux"))]
+                if let Err(error) = app.deep_link().register_all() {
+                    eprintln!("buzz-desktop: failed to register deep-link schemes: {error}");
+                }
+
                 let dl_handle = app.handle().clone();
                 app.deep_link().on_open_url(move |event| {
                     for url in event.urls() {
