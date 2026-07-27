@@ -85,7 +85,7 @@ On any other kind a notify tag MUST be rejected. Silently ignoring it is the wor
 
 **`channel`** — every current member of the channel. Persistent: it produces a stored feed row, so a member who was offline when it was sent still finds it on return, and it counts toward mention-tier unread state.
 
-**`here`** — members who are online at the moment of delivery. Live-only, by construction: it is **never stored**, never appears in the mentions feed, and never produces retroactive badge state. A reader who was offline, or who scrolls the message into view an hour later, gets nothing beyond a normal unread message. `@here` is a doorbell, not a letter.
+**`here`** — members who are online at the moment of delivery. Live-only, by construction: **no notification is ever recorded** for it — no index row, no mentions-feed entry, no retroactive badge state. The event itself is an ordinary stored channel message like any other; it is the *mention* that has no persistent form. A reader who was offline, or who scrolls the message into view an hour later, gets nothing beyond a normal unread message. `@here` is a doorbell, not a letter.
 
 ## Relay Processing
 
@@ -109,7 +109,7 @@ On accept, an event with `mode = channel` on kind `9`, `45001`, or `45003` recor
 |--------|---------|
 | `community_id`, `event_id` | primary key; the tenant and the notifying event |
 | `channel_id` | the channel whose roster resolves recipients at read time |
-| `mode` | constrained to `'channel'` — `here` has no persistent form |
+| `mode` | constrained to `'channel'` — `here` has no persistent notification form |
 | `event_created_at` | ordering key, indexed `(community_id, channel_id, event_created_at DESC)` |
 
 `mode = here` and kind `40003` write nothing.
@@ -130,7 +130,7 @@ Two consequences worth stating explicitly:
 - **Membership is evaluated at read time.** Someone who joins the channel after an `@channel` message sees it in their mentions feed; someone who has left does not. This is the behavior a frozen `p`-tag list cannot have.
 - **The author is excluded.** Branch 2 omits events authored by the caller, so your own `@channel` announcement is not a mention *of you*. (Branch 1 keeps its pre-existing behavior.)
 
-`@here` is absent from both branches by construction — there is nothing stored to union.
+`@here` is absent from both branches by construction — it writes no index row, so there is nothing to union.
 
 ## Client Behavior
 
@@ -178,7 +178,7 @@ An event with `notify: here` escalates for a reader iff, **at observation time**
 
 The window absorbs clock skew and relay latency without letting `@here` become a persistent mention; 120 seconds is this implementation's value and other implementations MAY choose another, but it MUST be short enough that a message pulled from history never escalates. Because the test is evaluated at observation, the same event escalates for one reader and not another — that is the definition of "here", not an inconsistency.
 
-Since `@here` is never stored, the live delivery path owns its notification entirely; the feed path can never produce one. Conversely `@channel` notifications SHOULD be owned by whichever single path a client already uses for mention notifications, with the other path skipping notify-tagged events, so one message never notifies twice.
+Since `@here` records no notification, the live delivery path owns its notification entirely; the feed path can never produce one. Conversely `@channel` notifications SHOULD be owned by whichever single path a client already uses for mention notifications, with the other path skipping notify-tagged events, so one message never notifies twice.
 
 ## Degradation
 
@@ -215,5 +215,5 @@ A relay implementing this NIP MAY advertise it in its NIP-11 document; clients n
 - **NIP-29**: supplies the channel (`h` tag) and the membership relation that resolves recipients at read time.
 - **NIP-CW (`["broadcast","1"]`)**: the closest sibling and a distinct thing. `broadcast` is about **placement** — it lifts a depth-1 reply onto the channel timeline as a window row — and it says nothing about notification recipients. `notify` is about **recipients** and says nothing about placement. They are orthogonal and composable: a broadcast reply may also carry a notify tag. Notably `broadcast` pierces a channel mute and `notify` does not, because the mute is exactly the control for "stop telling me about this channel."
 - **Direct mentions (`["p", <pubkey>]`)**: the per-person mention, unchanged by this NIP. It names an identity, it is frozen at send time, it pierces a channel mute, and it can wake an agent. A notify tag does none of those. A message may carry both; each keeps its own semantics, and the mentions feed collapses the pair into a single row. `["mention", …]` reference-style tags, where used, are references — never a notification instruction.
-- **NIP-PL**: push leases match on filters over stored events. `@channel` events are ordinary stored events and match normally; `@here` is never stored and therefore never pushes — which is correct, since a pushed `@here` would by definition reach someone who was not here. Because there is no roster expansion, channel-wide mentions cannot trip a lease's `suppress.p_tags_max` hellthread gate.
+- **NIP-PL**: push leases match filters over stored events, and this NIP changes nothing there. A notify-tagged message is a stored channel message, so it matches a lease exactly as the same message without the tag would — for both modes. Push delivery therefore carries no channel-mention tier: an `@here` that matches a reader's `#h` lease pushes as an ordinary channel message, not as a mention, which is the conservative outcome (a push cannot know whether the reader is *here*). Because there is no roster expansion, channel-wide mentions never appear in a lease's `#p` match set and cannot trip its `suppress.p_tags_max` hellthread gate.
 - **NIP-RS**: read state is unaffected; a channel-wide mention changes the *tier* of unread state, not its bookkeeping.
