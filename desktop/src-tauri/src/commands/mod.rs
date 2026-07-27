@@ -16,7 +16,7 @@ mod channels;
 mod clipboard;
 mod command_brief;
 mod dms;
-mod engrams;
+pub(crate) mod engrams;
 mod export_util;
 mod global_agent_config;
 mod identity;

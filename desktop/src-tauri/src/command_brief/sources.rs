@@ -989,6 +989,7 @@ fn fixed_retrieval_intents(
 
 mod canonical;
 use canonical::*;
+mod command_team_discussions;
 mod limitations;
 use limitations::*;
 mod trusted_lan_evidence;

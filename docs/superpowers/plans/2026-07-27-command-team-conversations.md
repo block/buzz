@@ -278,7 +278,7 @@ git commit -m "feat(command-team): open reusable adviser conversations"
 - Create: `desktop/src-tauri/src/command_brief/sources/command_team_discussions.rs`
 - Modify: `desktop/src-tauri/src/command_brief/sources.rs`
 
-- [ ] **Step 1: Add failing parser and selection tests**
+- [x] **Step 1: Add failing parser and selection tests**
 
 In the new module, write table-driven unit tests for:
 
@@ -325,7 +325,7 @@ struct CommandDiscussionOutcome {
 }
 ```
 
-- [ ] **Step 2: Run the parser tests and confirm the intended failure**
+- [x] **Step 2: Run the parser tests and confirm the intended failure**
 
 ```bash
 . ./bin/activate-hermit
@@ -334,7 +334,7 @@ cargo test --manifest-path desktop/src-tauri/Cargo.toml command_team_discussions
 
 Expected: module/type/function failures before implementation.
 
-- [ ] **Step 3: Refactor the existing owner-gated engram reader**
+- [x] **Step 3: Refactor the existing owner-gated engram reader**
 
 Extract the body of the current Tauri command without changing its authorization or result shape:
 
@@ -354,7 +354,7 @@ The existing `get_agent_memory` command delegates to it. Preserve:
 - tombstone exclusion;
 - existing 5,000-entry truncation behavior and listing metadata.
 
-- [ ] **Step 4: Implement strict parsing, validation, and bounded selection**
+- [x] **Step 4: Implement strict parsing, validation, and bounded selection**
 
 In `command_team_discussions.rs`, add:
 
@@ -396,7 +396,7 @@ Use:
 - outcome `recorded_at` as source timestamp;
 - collection time as `retrieved_at` and `observed_at`.
 
-- [ ] **Step 5: Run focused Rust tests**
+- [x] **Step 5: Run focused Rust tests**
 
 ```bash
 . ./bin/activate-hermit
@@ -404,7 +404,7 @@ cargo test --manifest-path desktop/src-tauri/Cargo.toml command_team_discussions
 cargo test --manifest-path desktop/src-tauri/Cargo.toml commands::engrams
 ```
 
-- [ ] **Step 6: Commit the outcome reader**
+- [x] **Step 6: Commit the outcome reader**
 
 ```bash
 . ./bin/activate-hermit
