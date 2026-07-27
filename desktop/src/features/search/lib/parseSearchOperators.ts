@@ -25,9 +25,10 @@ export type ParsedSearchOperators = {
    */
   since: number | null;
   /**
-   * `before:YYYY-MM-DD` → unix seconds at local start of that day (exclusive).
-   * Messages strictly before this timestamp match, so the named calendar day
-   * itself is not included (Slack-compatible).
+   * `before:YYYY-MM-DD` → one second before local start of that day, because
+   * NIP-01 `until` is an *inclusive* upper bound. Messages strictly before
+   * local midnight match, so the named calendar day itself is not included
+   * (Slack-compatible).
    */
   until: number | null;
 };
@@ -113,7 +114,9 @@ export function parseSearchOperators(raw: string): ParsedSearchOperators {
       if (parsed === null) {
         kept.push(match[0]);
       } else {
-        until = parsed;
+        // NIP-01 `until` is inclusive, so step back one second to keep
+        // `before:` exclusive of the named day's midnight.
+        until = parsed - 1;
       }
     }
   }

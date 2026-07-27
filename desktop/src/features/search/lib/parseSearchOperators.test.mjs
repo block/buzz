@@ -33,7 +33,20 @@ test("extracts from / in / after / before and keeps remaining FTS text", () => {
     parsed.since,
     Math.floor(new Date(2024, 0, 15).getTime() / 1000),
   );
-  assert.equal(parsed.until, Math.floor(new Date(2024, 1, 1).getTime() / 1000));
+  assert.equal(
+    parsed.until,
+    Math.floor(new Date(2024, 1, 1).getTime() / 1000) - 1,
+  );
+});
+
+test("before: excludes the named day's exact local midnight", () => {
+  const localMidnight = Math.floor(new Date(2024, 1, 1).getTime() / 1000);
+  const parsed = parseSearchOperators("deploy before:2024-02-01");
+
+  assert.equal(parsed.until, localMidnight - 1);
+  // The relay keeps events where `created_at <= until`, so a message stamped
+  // exactly at midnight must fail that predicate.
+  assert.equal(localMidnight <= parsed.until, false);
 });
 
 test("keeps invalid date operators in the FTS text", () => {
