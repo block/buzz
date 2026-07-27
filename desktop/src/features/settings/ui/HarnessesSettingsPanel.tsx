@@ -151,14 +151,19 @@ export function HarnessesSettingsPanel() {
         ) : null}
 
         <section aria-label="Your harnesses">
-          <div className="mb-3 text-sm">
-            <h2 className="text-lg font-semibold tracking-tight">
-              Your harnesses
-            </h2>
-            <p className="mt-1 text-sm font-normal text-muted-foreground">
-              Ready to use, or one switch-flip away.
-            </p>
-          </div>
+          {/* The sub-header only earns its keep when another section (System
+              prerequisites, Windows-only) shares the page; otherwise it just
+              restates the page header. */}
+          {gitBashQuery.data ? (
+            <div className="mb-3 text-sm">
+              <h2 className="text-lg font-semibold tracking-tight">
+                Your harnesses
+              </h2>
+              <p className="mt-1 text-sm font-normal text-muted-foreground">
+                Ready to use, or one switch-flip away.
+              </p>
+            </div>
+          ) : null}
 
           {runtimesQuery.isLoading ? (
             <div className="rounded-2xl bg-muted/20 px-4 py-4 text-sm font-normal text-muted-foreground">
