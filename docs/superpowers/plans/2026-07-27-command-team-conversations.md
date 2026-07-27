@@ -507,7 +507,7 @@ git commit -m "feat(command-brief): cite adviser discussion outcomes"
 - Modify: `desktop/tests/e2e/agents.spec.ts`
 - Modify: `desktop/tests/e2e/command-console.spec.ts`
 
-- [ ] **Step 1: Add the six definitions to the mock bridge**
+- [x] **Step 1: Add the six definitions to the mock bridge**
 
 Update `resetMockPersonas` so the command-team definitions mirror native defaults:
 
@@ -518,7 +518,7 @@ Update `resetMockPersonas` so the command-team definitions mirror native default
 
 Keep existing Fizz, Honey, and Bumble behavior so unrelated test scenarios remain meaningful.
 
-- [ ] **Step 2: Add a failing focused Playwright journey**
+- [x] **Step 2: Add a failing focused Playwright journey**
 
 The new spec must prove:
 
@@ -530,7 +530,7 @@ The new spec must prove:
 
 Use mock bridge inspection to assert instance count and stable pubkey, not only visible navigation.
 
-- [ ] **Step 3: Run the E2E spec and confirm the intended failure**
+- [x] **Step 3: Run the E2E spec and confirm the intended failure**
 
 ```bash
 cd desktop
@@ -540,13 +540,13 @@ pnpm exec playwright test tests/e2e/command-team-conversations.spec.ts --project
 
 If port 4173 is already serving stale code, terminate that preview process, rebuild, and rerun.
 
-- [ ] **Step 4: Register the spec and make the focused journey pass**
+- [x] **Step 4: Register the spec and make the focused journey pass**
 
 Add the spec to the smoke project's `testMatch`. Update existing Agents and Command Console assertions only where the six default definitions intentionally change the visible catalogue.
 
 Before any manual screenshot, use the shared animation wait. No PR screenshots are required unless the implementation materially differs from the already approved naval UI.
 
-- [ ] **Step 5: Run adjacent desktop tests**
+- [x] **Step 5: Run adjacent desktop tests**
 
 ```bash
 cd desktop
@@ -558,7 +558,7 @@ pnpm exec playwright test \
   --project=smoke
 ```
 
-- [ ] **Step 6: Commit E2E coverage**
+- [x] **Step 6: Commit E2E coverage**
 
 ```bash
 . ./bin/activate-hermit

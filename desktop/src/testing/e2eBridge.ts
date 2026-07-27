@@ -2108,6 +2108,54 @@ function resetMockPersonas(config?: E2eConfig) {
       avatar_url: null,
       system_prompt: "You are Bumble.",
     },
+    {
+      id: "builtin:command-chief-of-staff",
+      display_name: "Chief of Staff",
+      avatar_url:
+        "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96'%3E%3Ccircle cx='48' cy='48' r='45' fill='%23071a2f' stroke='%23d8aa4f' stroke-width='3'/%3E%3Cg fill='none' stroke='%23e5bd65' stroke-width='6' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='48' cy='25' r='7'/%3E%3Cpath d='M48 32v39M31 43h34M22 57c5 14 14 21 26 21s21-7 26-21M22 57h12M62 57h12'/%3E%3C/g%3E%3C/svg%3E",
+      system_prompt: "You are the Chief of Staff.",
+      default_active: true,
+    },
+    {
+      id: "builtin:command-operations",
+      display_name: "Operations Adviser",
+      avatar_url:
+        "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96'%3E%3Ccircle cx='48' cy='48' r='45' fill='%23071a2f' stroke='%23d8aa4f' stroke-width='3'/%3E%3Cg fill='none' stroke='%23e5bd65' stroke-width='3'%3E%3Ccircle cx='48' cy='48' r='29'/%3E%3Ccircle cx='48' cy='48' r='18' opacity='.65'/%3E%3Cpath d='M48 19v58M19 48h58M48 48l24-17'/%3E%3Ccircle cx='65' cy='36' r='3' fill='%23e5bd65'/%3E%3C/g%3E%3C/svg%3E",
+      system_prompt: "You are the Operations Adviser.",
+      default_active: true,
+    },
+    {
+      id: "builtin:command-navigation",
+      display_name: "Navigation Adviser",
+      avatar_url:
+        "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96'%3E%3Ccircle cx='48' cy='48' r='45' fill='%23071a2f' stroke='%23d8aa4f' stroke-width='3'/%3E%3Cg fill='none' stroke='%23e5bd65' stroke-width='4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M25 66a33 33 0 0 1 46-30M25 66h48M33 61l31-31M49 44l21 22M43 50l18 16'/%3E%3Ccircle cx='64' cy='30' r='5'/%3E%3C/g%3E%3C/svg%3E",
+      system_prompt: "You are the Navigation Adviser.",
+      default_active: true,
+    },
+    {
+      id: "builtin:command-daily-routine",
+      display_name: "Daily Routine Adviser",
+      avatar_url:
+        "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96'%3E%3Ccircle cx='48' cy='48' r='45' fill='%23071a2f' stroke='%23d8aa4f' stroke-width='3'/%3E%3Cg fill='none' stroke='%23e5bd65' stroke-width='5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M31 61h34c-5-6-7-13-7-23a10 10 0 0 0-20 0c0 10-2 17-7 23Z'/%3E%3Cpath d='M42 68a7 7 0 0 0 12 0M48 21v7'/%3E%3C/g%3E%3C/svg%3E",
+      system_prompt: "You are the Daily Routine Adviser.",
+      default_active: true,
+    },
+    {
+      id: "builtin:command-reporting",
+      display_name: "Reporting Adviser",
+      avatar_url:
+        "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96'%3E%3Ccircle cx='48' cy='48' r='45' fill='%23071a2f' stroke='%23d8aa4f' stroke-width='3'/%3E%3Cg fill='none' stroke='%23e5bd65' stroke-width='4' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='29' y='25' width='38' height='50' rx='4'/%3E%3Cpath d='M40 25v-5h16v5M39 41h18M39 51h18M39 61h12'/%3E%3C/g%3E%3C/svg%3E",
+      system_prompt: "You are the Reporting Adviser.",
+      default_active: true,
+    },
+    {
+      id: "builtin:command-plans",
+      display_name: "Plans Adviser",
+      avatar_url:
+        "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96'%3E%3Ccircle cx='48' cy='48' r='45' fill='%23071a2f' stroke='%23d8aa4f' stroke-width='3'/%3E%3Cg fill='none' stroke='%23e5bd65' stroke-width='4' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='27' cy='67' r='6'/%3E%3Ccircle cx='69' cy='29' r='6'/%3E%3Cpath d='M33 64c15-3 9-22 25-25M52 32l12 4-4 12'/%3E%3C/g%3E%3C/svg%3E",
+      system_prompt: "You are the Plans Adviser.",
+      default_active: true,
+    },
   ];
   mockPersonas = builtInPersonas.map((persona) => ({
     id: persona.id,
@@ -2119,7 +2167,9 @@ function resetMockPersonas(config?: E2eConfig) {
     provider: null,
     name_pool: [],
     is_builtin: true,
-    is_active: activePersonaIds.has(persona.id),
+    is_active:
+      ("default_active" in persona && persona.default_active) ||
+      activePersonaIds.has(persona.id),
     source_team: null,
     created_at: now,
     updated_at: now,

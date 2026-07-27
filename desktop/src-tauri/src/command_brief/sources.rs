@@ -10,12 +10,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 use chrono::DateTime;
-use serde::Serialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
-use super::personas::specialist_definitions;
 use super::provenance::ValidatedSource;
 use super::types::{AdviserId, BriefSection, SourceKind, SourceLedgerEntry, MAX_ARRAY_ITEMS};
 use crate::command_services::apple_inputs::{
@@ -35,11 +33,8 @@ use crate::command_services::trusted_lan::{
 };
 
 const MAX_CO_REQUEST_BYTES: usize = 1024;
-const MAX_RETRIEVAL_QUERY_BYTES: usize = 2048;
 const RAG_TOOL: &str = "search_knowledge_base";
 const MEMORY_TOOL: &str = "command_memory_context";
-const COLLECTION_SCOPE: &str = "verified_catalogue";
-const OBSERVED_COLLECTION_SCOPE: &str = "observed_catalogue";
 const RETRIEVAL_RESULT_LIMIT: u32 = 3;
 
 const RAG_MEMORY_SECTIONS: [BriefSection; 5] = [
@@ -75,39 +70,6 @@ impl SourceReadError {
 
     fn code(self) -> &'static str {
         self.code
-    }
-}
-
-/// One native-owned, bounded retrieval request for a fixed specialist.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct FixedRetrievalIntent {
-    adviser: AdviserId,
-    rag_tool: &'static str,
-    memory_tool: &'static str,
-    collection_scope: &'static str,
-    query: String,
-}
-
-impl FixedRetrievalIntent {
-    pub(crate) const fn adviser(&self) -> AdviserId {
-        self.adviser
-    }
-
-    pub(crate) const fn rag_tool(&self) -> &'static str {
-        self.rag_tool
-    }
-
-    pub(crate) const fn memory_tool(&self) -> &'static str {
-        self.memory_tool
-    }
-
-    pub(crate) const fn collection_scope(&self) -> &'static str {
-        self.collection_scope
-    }
-
-    pub(crate) fn query(&self) -> &str {
-        &self.query
     }
 }
 
@@ -999,40 +961,6 @@ fn ensure_collection_active(cancellation: &CancellationToken) -> Result<(), Sour
     }
 }
 
-fn fixed_retrieval_intents(
-    co_request: &str,
-    assurance: RagSnapshotAssurance,
-) -> Vec<FixedRetrievalIntent> {
-    let (source_description, collection_scope) = match assurance {
-        RagSnapshotAssurance::SignedSnapshot => (
-            "verified local catalogue and conflict-safe command memory",
-            COLLECTION_SCOPE,
-        ),
-        RagSnapshotAssurance::TrustedLanObserved => (
-            "approved trusted-LAN catalogue and observed command memory",
-            OBSERVED_COLLECTION_SCOPE,
-        ),
-    };
-    specialist_definitions()
-        .iter()
-        .map(|persona| {
-            let prefix = format!(
-                "{} Use only the {source_description}. CO request: ",
-                persona.purpose,
-            );
-            let remaining = MAX_RETRIEVAL_QUERY_BYTES.saturating_sub(prefix.len());
-            let (request, _) = truncate_utf8(co_request, remaining);
-            FixedRetrievalIntent {
-                adviser: persona.adviser,
-                rag_tool: RAG_TOOL,
-                memory_tool: MEMORY_TOOL,
-                collection_scope,
-                query: format!("{prefix}{request}"),
-            }
-        })
-        .collect()
-}
-
 mod canonical;
 use canonical::*;
 mod command_team_discussions;
@@ -1041,5 +969,8 @@ pub(crate) use command_team_discussions::{
 };
 mod limitations;
 use limitations::*;
+mod retrieval_intents;
+use retrieval_intents::fixed_retrieval_intents;
+pub(crate) use retrieval_intents::FixedRetrievalIntent;
 mod trusted_lan_evidence;
 use trusted_lan_evidence::*;

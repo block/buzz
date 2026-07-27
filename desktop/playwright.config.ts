@@ -116,6 +116,7 @@ export default defineConfig({
         "**/inbox-live-update.spec.ts",
         "**/mesh-compute.spec.ts",
         "**/command-console.spec.ts",
+        "**/command-team-conversations.spec.ts",
         "**/daily-command-brief.spec.ts",
         "**/command-adviser-naval-ui.spec.ts",
         "**/observer-archive-policy.spec.ts",
