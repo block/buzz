@@ -60,13 +60,26 @@ pub fn build_imeta_tag(d: &BlobDescriptor) -> Vec<String> {
     tag
 }
 
-/// MIME types accepted for upload.
-const ALLOWED_MIMES: &[&str] = &[
-    "image/jpeg",
-    "image/png",
-    "image/gif",
-    "image/webp",
-    "video/mp4",
+/// MIME types blocked from upload — mirrors the desktop/relay generic-file deny-list.
+///
+/// Active-content XSS carriers and native executables. Everything else (images,
+/// video, documents, archives, text, data) is accepted; un-sniffable files fall
+/// back to `application/octet-stream` and are served as downloads by the relay.
+const BLOCKED_MIMES: &[&str] = &[
+    "text/html",
+    "application/xhtml+xml",
+    "image/svg+xml",
+    "application/javascript",
+    "text/javascript",
+    "application/x-msdownload",
+    "application/x-executable",
+    "application/vnd.microsoft.portable-executable",
+    "application/x-mach-binary",
+    "application/x-sharedlib",
+    "application/x-elf",
+    "application/x-msi",
+    "application/vnd.android.package-archive",
+    "application/x-apple-diskimage",
 ];
 
 /// Maximum file size for image uploads (50 MB).
@@ -74,6 +87,31 @@ const MAX_IMAGE_BYTES: u64 = 50 * 1024 * 1024;
 
 /// Maximum file size for video uploads (500 MB).
 const MAX_VIDEO_BYTES: u64 = 500 * 1024 * 1024;
+
+/// Maximum file size for generic (non-image/video) uploads (100 MB).
+/// Matches `buzz-media` default `max_file_bytes`.
+const MAX_FILE_BYTES: u64 = 100 * 1024 * 1024;
+
+/// Detect MIME and reject blocked active-content / executable types.
+fn detect_and_validate_upload_mime(bytes: &[u8]) -> Result<String, CliError> {
+    let mime = infer::get(bytes)
+        .map(|t| t.mime_type().to_string())
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+    if BLOCKED_MIMES.contains(&mime.as_str()) {
+        return Err(CliError::Usage(format!("unsupported file type: {mime}")));
+    }
+    Ok(mime)
+}
+
+fn max_upload_bytes(mime: &str) -> u64 {
+    if mime.starts_with("video/") {
+        MAX_VIDEO_BYTES
+    } else if mime.starts_with("image/") {
+        MAX_IMAGE_BYTES
+    } else {
+        MAX_FILE_BYTES
+    }
+}
 
 /// Sign a NIP-98 HTTP auth event (kind:27235) and return the Authorization header value.
 ///
@@ -446,6 +484,31 @@ mod media_download_tests {
                 media_url_from_input("https://relay.example", input).is_err(),
                 "input should be rejected: {input}"
             );
+        }
+    }
+
+    #[test]
+    fn upload_mime_accepts_plain_text_as_octet_stream() {
+        let mime = detect_and_validate_upload_mime(b"hello world").unwrap();
+        assert_eq!(mime, "application/octet-stream");
+        assert_eq!(max_upload_bytes(&mime), MAX_FILE_BYTES);
+    }
+
+    #[test]
+    fn upload_mime_accepts_jpeg() {
+        let jpeg = [0xFF, 0xD8, 0xFF, 0xE0];
+        let mime = detect_and_validate_upload_mime(&jpeg).unwrap();
+        assert_eq!(mime, "image/jpeg");
+        assert_eq!(max_upload_bytes(&mime), MAX_IMAGE_BYTES);
+    }
+
+    #[test]
+    fn upload_mime_rejects_html() {
+        let html = b"<!DOCTYPE html><html><body><script>alert(1)</script></body></html>";
+        let err = detect_and_validate_upload_mime(html).unwrap_err();
+        match err {
+            CliError::Usage(msg) => assert!(msg.contains("text/html"), "got: {msg}"),
+            other => panic!("expected Usage error, got {other:?}"),
         }
     }
 
@@ -1108,21 +1171,11 @@ impl BuzzClient {
         let bytes = std::fs::read(file_path)
             .map_err(|e| CliError::Other(format!("failed to read {file_path}: {e}")))?;
 
-        // 2. Detect MIME from magic bytes
-        let mime = infer::get(&bytes)
-            .map(|t| t.mime_type().to_string())
-            .unwrap_or_else(|| "application/octet-stream".to_string());
-
-        if !ALLOWED_MIMES.contains(&mime.as_str()) {
-            return Err(CliError::Usage(format!("unsupported file type: {mime}")));
-        }
+        // 2. Detect MIME from magic bytes (deny-list, matching desktop/relay)
+        let mime = detect_and_validate_upload_mime(&bytes)?;
 
         // 3. Size check
-        let max = if mime.starts_with("video/") {
-            MAX_VIDEO_BYTES
-        } else {
-            MAX_IMAGE_BYTES
-        };
+        let max = max_upload_bytes(&mime);
         if bytes.len() as u64 > max {
             return Err(CliError::Usage(format!(
                 "file too large: {} bytes (max {})",

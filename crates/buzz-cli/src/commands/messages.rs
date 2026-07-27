@@ -13,6 +13,149 @@ use buzz_sdk::mentions::{
     MENTION_CAP,
 };
 
+/// Kind for stream message edits (NIP-Buzz).
+const KIND_STREAM_MESSAGE_EDIT: u64 = 40003;
+
+/// Extract the first `e` tag target from an edit (or any) event.
+fn first_e_tag_id(event: &serde_json::Value) -> Option<&str> {
+    let tags = event.get("tags")?.as_array()?;
+    for tag in tags {
+        let Some(parts) = tag.as_array() else {
+            continue;
+        };
+        if parts.first().and_then(|v| v.as_str()) == Some("e") {
+            let id = parts.get(1)?.as_str()?;
+            if id.len() == 64 && id.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Some(id);
+            }
+        }
+    }
+    None
+}
+
+/// Overlay `imeta` (always) and `emoji` (when present on the edit) tags from an
+/// edit event onto the original — mirrors desktop `applyEditTagOverlay`.
+fn apply_edit_tag_overlay(
+    original_tags: &serde_json::Value,
+    edit_tags: &serde_json::Value,
+) -> serde_json::Value {
+    let Some(original) = original_tags.as_array() else {
+        return original_tags.clone();
+    };
+    let Some(edit) = edit_tags.as_array() else {
+        return original_tags.clone();
+    };
+    let edit_has_emoji = edit.iter().any(|t| {
+        t.as_array()
+            .and_then(|a| a.first())
+            .and_then(|v| v.as_str())
+            == Some("emoji")
+    });
+    let mut out: Vec<serde_json::Value> = original
+        .iter()
+        .filter(|t| {
+            let key = t
+                .as_array()
+                .and_then(|a| a.first())
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if key == "imeta" {
+                return false;
+            }
+            if edit_has_emoji && key == "emoji" {
+                return false;
+            }
+            true
+        })
+        .cloned()
+        .collect();
+    for t in edit {
+        let key = t
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if key == "imeta" || (edit_has_emoji && key == "emoji") {
+            out.push(t.clone());
+        }
+    }
+    serde_json::Value::Array(out)
+}
+
+/// Apply the latest kind:40003 edit onto each targeted message and optionally
+/// drop the raw edit events from the result set.
+///
+/// When `keep_edit_events` is true (caller explicitly requested kind 40003),
+/// edits are left as separate events and originals are still overlaid so both
+/// representations are useful.
+fn apply_message_edits(events: &mut Vec<serde_json::Value>, keep_edit_events: bool) {
+    use std::collections::HashMap;
+
+    let mut latest_edit: HashMap<String, serde_json::Value> = HashMap::new();
+    for event in events.iter() {
+        if event.get("kind").and_then(|v| v.as_u64()) != Some(KIND_STREAM_MESSAGE_EDIT) {
+            continue;
+        }
+        let Some(target) = first_e_tag_id(event) else {
+            continue;
+        };
+        let created = event.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0);
+        match latest_edit.get(target) {
+            Some(existing)
+                if existing
+                    .get("created_at")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0)
+                    >= created => {}
+            _ => {
+                latest_edit.insert(target.to_ascii_lowercase(), event.clone());
+            }
+        }
+    }
+
+    if latest_edit.is_empty() {
+        return;
+    }
+
+    for event in events.iter_mut() {
+        let kind = event.get("kind").and_then(|v| v.as_u64()).unwrap_or(0);
+        if kind == KIND_STREAM_MESSAGE_EDIT {
+            continue;
+        }
+        let Some(id) = event.get("id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Some(edit) = latest_edit.get(&id.to_ascii_lowercase()) else {
+            continue;
+        };
+        if let Some(content) = edit.get("content").cloned() {
+            event["content"] = content;
+        }
+        let original_tags = event
+            .get("tags")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([]));
+        let edit_tags = edit
+            .get("tags")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([]));
+        event["tags"] = apply_edit_tag_overlay(&original_tags, &edit_tags);
+    }
+
+    if !keep_edit_events {
+        events.retain(|e| e.get("kind").and_then(|v| v.as_u64()) != Some(KIND_STREAM_MESSAGE_EDIT));
+    }
+}
+
+fn kinds_request_includes_edits(kinds: Option<&str>) -> bool {
+    kinds
+        .map(|k| {
+            k.split(',')
+                .any(|s| s.trim() == KIND_STREAM_MESSAGE_EDIT.to_string())
+        })
+        .unwrap_or(false)
+}
+
 /// Extract the thread root event ID from a Nostr tag array.
 ///
 /// Parses `"e"` tags with NIP-10 markers:
@@ -271,6 +414,7 @@ pub async fn cmd_get_messages(
 ) -> Result<(), CliError> {
     validate_uuid(channel_id)?;
     let limit = limit.unwrap_or(50).min(200);
+    let keep_edit_events = kinds_request_includes_edits(kinds);
 
     let mut filter = serde_json::json!({
         "kinds": [9, 40002, 40008, 45001, 45003],
@@ -295,7 +439,31 @@ pub async fn cmd_get_messages(
 
     let resp = client.query(&filter).await?;
     let mut events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
+
+    // Fetch edits targeting the returned messages so get shows edited content
+    // (Desktop overlays kind:40003; default get kinds intentionally omit it).
+    if !keep_edit_events {
+        let target_ids: Vec<String> = events
+            .iter()
+            .filter_map(|e| e.get("id").and_then(|v| v.as_str()).map(str::to_string))
+            .collect();
+        if !target_ids.is_empty() {
+            let edit_filter = serde_json::json!({
+                "kinds": [KIND_STREAM_MESSAGE_EDIT],
+                "#h": [channel_id],
+                "#e": target_ids,
+                "limit": 200
+            });
+            if let Ok(edit_resp) = client.query(&edit_filter).await {
+                let edits: Vec<serde_json::Value> =
+                    serde_json::from_str(&edit_resp).unwrap_or_default();
+                events.extend(edits);
+            }
+        }
+    }
+
     events.sort_by_key(|e| e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0));
+    apply_message_edits(&mut events, keep_edit_events);
     let normalized = normalize_events(&events);
     println!("{}", format_events(&normalized, format));
     Ok(())
@@ -314,7 +482,7 @@ pub async fn cmd_get_thread(
     let limit = limit.unwrap_or(100).min(500);
 
     // Two filters ORed in a single HTTP call:
-    // 1. Replies referencing this event via e-tag (no kind restriction)
+    // 1. Replies referencing this event via e-tag (includes edits)
     // 2. The root event itself by ID
     let mut reply_filter = serde_json::json!({
         "kinds": [9, 40002, 40003, 40008, 45003],
@@ -332,6 +500,8 @@ pub async fn cmd_get_thread(
     let resp = client.query_multi(&[reply_filter, root_filter]).await?;
     let mut events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
     events.sort_by_key(|e| e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0));
+    // Overlay edits onto targets; hide raw 40003 rows so thread reads like Desktop.
+    apply_message_edits(&mut events, false);
     let normalized = normalize_events(&events);
     println!("{}", format_events(&normalized, format));
     Ok(())
@@ -357,8 +527,10 @@ pub async fn cmd_search(
         None => None,
     };
 
+    // Include kind:40003 so full-text search hits edited bodies (edits are
+    // separate events; FTS indexes each event's own content).
     let mut filter = serde_json::json!({
-        "kinds": [9, 40002, 45001, 45003],
+        "kinds": [9, 40002, 40003, 45001, 45003],
         "limit": limit
     });
     if let Some(q) = query {
@@ -372,6 +544,27 @@ pub async fn cmd_search(
     }
     let resp = client.query(&filter).await?;
     let mut events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
+
+    // When FTS hits an edit (kind:40003), pull the targeted originals and
+    // overlay so results look like Desktop (edited body on the message row).
+    let edit_targets: Vec<String> = events
+        .iter()
+        .filter(|e| e.get("kind").and_then(|v| v.as_u64()) == Some(KIND_STREAM_MESSAGE_EDIT))
+        .filter_map(|e| first_e_tag_id(e).map(str::to_string))
+        .collect();
+    if !edit_targets.is_empty() {
+        let target_filter = serde_json::json!({
+            "ids": edit_targets,
+            "limit": edit_targets.len().min(100)
+        });
+        if let Ok(target_resp) = client.query(&target_filter).await {
+            let targets: Vec<serde_json::Value> =
+                serde_json::from_str(&target_resp).unwrap_or_default();
+            events.extend(targets);
+        }
+        apply_message_edits(&mut events, false);
+    }
+
     // The full-text path returns relevance order; a pure author/time query has
     // no relevance, so present newest-first like `messages get`.
     if query.is_none() {
@@ -876,7 +1069,10 @@ pub async fn dispatch(
 
 #[cfg(test)]
 mod tests {
-    use super::{find_root_from_tags, match_profiles_by_name, parse_member_pubkeys};
+    use super::{
+        apply_message_edits, find_root_from_tags, kinds_request_includes_edits,
+        match_profiles_by_name, parse_member_pubkeys,
+    };
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
     };
@@ -1163,5 +1359,79 @@ mod tests {
             profile_event(PK_VALID_A, Some("Aaron"), None),
         ];
         assert_eq!(match_profiles_by_name(&events, "Aaron").len(), 1);
+    }
+
+    #[test]
+    fn apply_message_edits_overlays_latest_content_and_strips_edits() {
+        let original_id = "a".repeat(64);
+        let older_edit_id = "b".repeat(64);
+        let newer_edit_id = "c".repeat(64);
+        let mut events = vec![
+            json!({
+                "id": original_id,
+                "kind": 9,
+                "content": "original",
+                "created_at": 100,
+                "tags": [["h", "chan"], ["imeta", "url https://old"]],
+            }),
+            json!({
+                "id": older_edit_id,
+                "kind": 40003,
+                "content": "first edit",
+                "created_at": 200,
+                "tags": [["e", original_id], ["imeta", "url https://mid"]],
+            }),
+            json!({
+                "id": newer_edit_id,
+                "kind": 40003,
+                "content": "second edit",
+                "created_at": 300,
+                "tags": [["e", original_id], ["imeta", "url https://new"]],
+            }),
+        ];
+        apply_message_edits(&mut events, false);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["content"], "second edit");
+        let tags = events[0]["tags"].as_array().unwrap();
+        assert!(tags.iter().any(|t| {
+            t.as_array().map(|a| a.get(1).and_then(|v| v.as_str()) == Some("url https://new")).unwrap_or(false)
+        }));
+        assert!(!tags.iter().any(|t| {
+            t.as_array().map(|a| a.get(1).and_then(|v| v.as_str()) == Some("url https://old")).unwrap_or(false)
+        }));
+    }
+
+    #[test]
+    fn apply_message_edits_can_keep_raw_edit_events() {
+        let original_id = "d".repeat(64);
+        let edit_id = "e".repeat(64);
+        let mut events = vec![
+            json!({
+                "id": original_id,
+                "kind": 9,
+                "content": "original",
+                "created_at": 1,
+                "tags": [],
+            }),
+            json!({
+                "id": edit_id,
+                "kind": 40003,
+                "content": "edited",
+                "created_at": 2,
+                "tags": [["e", original_id]],
+            }),
+        ];
+        apply_message_edits(&mut events, true);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["content"], "edited");
+        assert_eq!(events[1]["kind"], 40003);
+    }
+
+    #[test]
+    fn kinds_request_includes_edits_parses_csv() {
+        assert!(!kinds_request_includes_edits(None));
+        assert!(!kinds_request_includes_edits(Some("9,45001")));
+        assert!(kinds_request_includes_edits(Some("9, 40003")));
+        assert!(kinds_request_includes_edits(Some("40003")));
     }
 }
