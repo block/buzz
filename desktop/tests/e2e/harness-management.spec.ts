@@ -241,6 +241,15 @@ test.describe("your harnesses split", () => {
     await openHarnessSettings(page);
     await openCatalog(page);
 
+    // Ready entries live in the "Installed" accordion, collapsed by default.
+    await expect(
+      page.getByTestId("harness-catalog-list-item-hermes"),
+    ).toHaveCount(0);
+    await expect(
+      page.getByTestId("harness-catalog-section-installed-count"),
+    ).toHaveText("1");
+    await page.getByTestId("harness-catalog-section-installed").click();
+
     await page.getByTestId("harness-catalog-list-item-hermes").click();
     const detail = page.getByTestId("harness-catalog-detail-pane");
     await expect(detail).toContainText("Ready");

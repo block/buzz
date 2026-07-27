@@ -160,7 +160,9 @@ test("after: consolidated harnesses panel + catalog dialog", async ({
     path: `${SHOTS}/after-catalog-needs-setup.png`,
   });
 
-  // 3. Ready entry detail (Ready state, no install action).
+  // 3. Ready entry detail (Ready state, no install action). Ready entries
+  // sit in the "Installed" accordion, collapsed by default — expand it.
+  await page.getByTestId("harness-catalog-section-installed").click();
   await page.getByTestId("harness-catalog-list-item-claude").click();
   await page.waitForTimeout(300);
   await page.getByTestId("harness-catalog-dialog").screenshot({

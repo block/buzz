@@ -6,6 +6,7 @@ import {
   catalogPrimaryAction,
   entryStatusLabel,
   filterCatalogEntries,
+  groupCatalogEntries,
   isYourHarnessEntry,
   stableRowOrder,
   yourHarnessEntries,
@@ -110,6 +111,42 @@ describe("catalogDialogEntries", () => {
       catalogDialogEntries(catalog).map((e) => e.id),
       ["alpha", "beta", "zed"],
     );
+  });
+});
+
+// ── groupCatalogEntries ──────────────────────────────────────────────────────
+
+describe("groupCatalogEntries", () => {
+  it("splits ready entries into installed, everything else into setup", () => {
+    const entries = [
+      entry({ id: "needs-cli", availability: "cli_missing" }),
+      entry({ id: "ready", availability: "available" }),
+      entry({ id: "needs-adapter", availability: "adapter_missing" }),
+    ];
+    const groups = groupCatalogEntries(entries);
+    assert.deepEqual(
+      groups.setup.map((e) => e.id),
+      ["needs-cli", "needs-adapter"],
+    );
+    assert.deepEqual(
+      groups.installed.map((e) => e.id),
+      ["ready"],
+    );
+  });
+
+  it("preserves input order within each group", () => {
+    const entries = [
+      entry({ id: "b", availability: "available" }),
+      entry({ id: "a", availability: "available" }),
+    ];
+    assert.deepEqual(
+      groupCatalogEntries(entries).installed.map((e) => e.id),
+      ["b", "a"],
+    );
+  });
+
+  it("handles empty input", () => {
+    assert.deepEqual(groupCatalogEntries([]), { setup: [], installed: [] });
   });
 });
 

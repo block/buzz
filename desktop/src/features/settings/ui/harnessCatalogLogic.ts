@@ -64,6 +64,24 @@ function compareCatalogEntries(
   return a.label.localeCompare(b.label);
 }
 
+/**
+ * Splits catalog entries into the two accordion sections of the Add-runtimes
+ * list: "Setup" (needs action — the reason the user opened the dialog) and
+ * "Installed" (already ready, collapsed by default). Relative order within
+ * each group is preserved from the input.
+ */
+export function groupCatalogEntries(
+  entries: readonly AcpRuntimeCatalogEntry[],
+): {
+  setup: AcpRuntimeCatalogEntry[];
+  installed: AcpRuntimeCatalogEntry[];
+} {
+  return {
+    setup: entries.filter((e) => e.availability !== "available"),
+    installed: entries.filter((e) => e.availability === "available"),
+  };
+}
+
 /** Case-insensitive catalog search across label, id, and command. */
 export function filterCatalogEntries(
   entries: readonly AcpRuntimeCatalogEntry[],

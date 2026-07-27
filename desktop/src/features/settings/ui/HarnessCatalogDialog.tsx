@@ -1,5 +1,5 @@
 import * as React from "react";
-import { ExternalLink, Plus, Search } from "lucide-react";
+import { ChevronRight, ExternalLink, Plus, Search } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
 import {
@@ -27,6 +27,7 @@ import {
   catalogPrimaryAction,
   entryStatusLabel,
   filterCatalogEntries,
+  groupCatalogEntries,
   installLinkLabel,
 } from "./harnessCatalogLogic";
 
@@ -61,6 +62,16 @@ export function HarnessCatalogDialog({
     [entries, query],
   );
   const [selectedId, setSelectedId] = React.useState<string | null>(null);
+  const groups = React.useMemo(() => groupCatalogEntries(filtered), [filtered]);
+  // "Installed" is collapsed by default — the dialog exists to set up new
+  // runtimes. Searching force-expands it (VS Code-style) so matches are never
+  // hidden; likewise when there is nothing left to set up.
+  const [setupOpen, setSetupOpen] = React.useState(true);
+  const [installedOpen, setInstalledOpen] = React.useState(false);
+  const isSearching = query.trim().length > 0;
+  const setupExpanded = setupOpen || isSearching;
+  const installedExpanded =
+    installedOpen || isSearching || groups.setup.length === 0;
 
   // Keep a valid selection: default to the first visible entry; hold on to
   // the custom-form selection regardless of the filter.
@@ -78,6 +89,8 @@ export function HarnessCatalogDialog({
     if (!open) {
       setQuery("");
       setSelectedId(null);
+      setSetupOpen(true);
+      setInstalledOpen(false);
     }
   }, [open]);
 
@@ -127,20 +140,47 @@ export function HarnessCatalogDialog({
               <div className="space-y-1">
                 {isLoading ? (
                   <CatalogListSkeleton />
+                ) : filtered.length === 0 ? (
+                  <p className="px-4 py-2 text-sm text-sidebar-foreground/60">
+                    No runtimes match.
+                  </p>
                 ) : (
                   <>
-                    {filtered.map((entry) => (
-                      <CatalogListItem
-                        entry={entry}
-                        isCurrent={entry.id === selectedId}
-                        key={entry.id}
-                        onSelect={() => setSelectedId(entry.id)}
-                      />
-                    ))}
-                    {filtered.length === 0 ? (
-                      <p className="px-4 py-2 text-sm text-sidebar-foreground/60">
-                        No runtimes match.
-                      </p>
+                    {groups.setup.length > 0 ? (
+                      <CatalogSection
+                        count={groups.setup.length}
+                        label="Setup"
+                        onToggle={() => setSetupOpen((v) => !v)}
+                        open={setupExpanded}
+                        testId="harness-catalog-section-setup"
+                      >
+                        {groups.setup.map((entry) => (
+                          <CatalogListItem
+                            entry={entry}
+                            isCurrent={entry.id === selectedId}
+                            key={entry.id}
+                            onSelect={() => setSelectedId(entry.id)}
+                          />
+                        ))}
+                      </CatalogSection>
+                    ) : null}
+                    {groups.installed.length > 0 ? (
+                      <CatalogSection
+                        count={groups.installed.length}
+                        label="Installed"
+                        onToggle={() => setInstalledOpen((v) => !v)}
+                        open={installedExpanded}
+                        testId="harness-catalog-section-installed"
+                      >
+                        {groups.installed.map((entry) => (
+                          <CatalogListItem
+                            entry={entry}
+                            isCurrent={entry.id === selectedId}
+                            key={entry.id}
+                            onSelect={() => setSelectedId(entry.id)}
+                          />
+                        ))}
+                      </CatalogSection>
                     ) : null}
                   </>
                 )}
@@ -196,6 +236,55 @@ export function HarnessCatalogDialog({
         </div>
       </ChooserDialogContent>
     </Dialog>
+  );
+}
+
+/**
+ * VS Code-style collapsible list section: chevron + uppercase label +
+ * trailing count badge. The header is a plain toggle — selection lives on
+ * the rows inside.
+ */
+function CatalogSection({
+  children,
+  count,
+  label,
+  onToggle,
+  open,
+  testId,
+}: {
+  children: React.ReactNode;
+  count: number;
+  label: string;
+  onToggle: () => void;
+  open: boolean;
+  testId: string;
+}) {
+  return (
+    <div>
+      <button
+        aria-expanded={open}
+        className="flex w-full items-center gap-1 rounded-md px-2 py-1 text-left text-2xs font-semibold uppercase tracking-wider text-sidebar-foreground/60 transition-colors hover:text-sidebar-foreground focus:outline-hidden focus-visible:ring-2 focus-visible:ring-sidebar-ring/50"
+        data-testid={testId}
+        onClick={onToggle}
+        type="button"
+      >
+        <ChevronRight
+          aria-hidden
+          className={cn(
+            "h-3 w-3 shrink-0 transition-transform",
+            open && "rotate-90",
+          )}
+        />
+        <span className="min-w-0 flex-1 truncate">{label}</span>
+        <span
+          className="ml-auto shrink-0 rounded-full bg-sidebar-accent px-1.5 py-px font-medium normal-case tracking-normal text-sidebar-foreground/70"
+          data-testid={`${testId}-count`}
+        >
+          {count}
+        </span>
+      </button>
+      {open ? <div className="space-y-1 pt-0.5">{children}</div> : null}
+    </div>
   );
 }
 
