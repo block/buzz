@@ -2,7 +2,10 @@ import React from "react";
 
 import { sendSpawnerPromptUpdate } from "@/shared/api/spawnerRelay";
 import type { SpawnerPromptMaterial } from "@/shared/api/tauriSpawner";
-import { getCachedRelayOrigin } from "@/shared/lib/mediaUrl";
+import {
+  getCachedRelayOrigin,
+  subscribeRelayOrigin,
+} from "@/shared/lib/mediaUrl";
 
 /**
  * Pending prompt updates for server-hosted agents, keyed by
@@ -112,10 +115,12 @@ export function shouldRetryPromptUpdate(
  * Resolved on every read and write, never captured: the cached relay origin is
  * still null at module-import time, so a key computed once at import would read
  * from a bare, community-less key and write to the real one — pending updates
- * would never survive a restart.
+ * would never survive a restart. Only ever called with a resolved origin (see
+ * {@link currentQueue} and {@link persist}), so the empty-origin key — which
+ * every community would share — is never touched.
  */
-function storageKey(): string {
-  return `buzz:spawner-prompt-queue:${getCachedRelayOrigin() ?? ""}`;
+function storageKey(origin: string): string {
+  return `buzz:spawner-prompt-queue:${origin}`;
 }
 
 const listeners = new Set<() => void>();
@@ -130,18 +135,47 @@ let hydrated = false;
 
 const EMPTY: ReadonlyMap<string, QueueEntry> = new Map();
 
-/** The live queue, hydrating from storage on first access after a reset. */
+/**
+ * Merge storage into whatever is already in memory, newest-write-wins.
+ *
+ * Anything queued before the relay origin resolved was held in memory only (it
+ * had nowhere safe to persist to), so hydration must not clobber it with the
+ * stored map. Pure, and exported for tests.
+ */
+export function mergeHydrated(
+  stored: ReadonlyMap<string, QueueEntry>,
+  inMemory: ReadonlyMap<string, QueueEntry>,
+): ReadonlyMap<string, QueueEntry> {
+  if (inMemory.size === 0) return stored;
+  if (stored.size === 0) return inMemory;
+  const merged = new Map(stored);
+  for (const [key, entry] of inMemory) merged.set(key, entry);
+  return merged;
+}
+
+/**
+ * The live queue, hydrating from storage on first access after a reset.
+ *
+ * Hydration is skipped — and crucially `hydrated` is *not* latched — while the
+ * relay origin is unknown. `resetCommunityState` nulls the cached origin right
+ * after resetting this queue and only refreshes it asynchronously, as does a
+ * cold start; latching there would bind the session to the shared empty-origin
+ * key, so the new community's persisted entries would never load and the next
+ * write would overwrite the real key with a map built from the wrong one.
+ */
 function currentQueue(): ReadonlyMap<string, QueueEntry> {
   if (!hydrated) {
-    queue = readStored();
+    const origin = getCachedRelayOrigin();
+    if (origin === null) return queue;
+    queue = mergeHydrated(readStored(origin), queue);
     hydrated = true;
   }
   return queue;
 }
 
-function readStored(): ReadonlyMap<string, QueueEntry> {
+function readStored(origin: string): ReadonlyMap<string, QueueEntry> {
   try {
-    const raw = window.localStorage.getItem(storageKey());
+    const raw = window.localStorage.getItem(storageKey(origin));
     if (!raw) return new Map();
     const parsed: unknown = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object") return new Map();
@@ -152,15 +186,29 @@ function readStored(): ReadonlyMap<string, QueueEntry> {
 }
 
 function persist(): void {
+  const origin = getCachedRelayOrigin();
+  // No resolved origin means no key that belongs to this community. The
+  // entries stay in memory and are flushed once the origin arrives.
+  if (origin === null) return;
   try {
     window.localStorage.setItem(
-      storageKey(),
+      storageKey(origin),
       JSON.stringify(Object.fromEntries(queue)),
     );
   } catch {
     // Keep the in-memory queue so this session still works.
   }
 }
+
+// Hydrate (and flush anything queued in the meantime) as soon as the origin
+// resolves, rather than waiting for the next queue access.
+subscribeRelayOrigin(() => {
+  if (hydrated || getCachedRelayOrigin() === null) return;
+  const before = queue;
+  if (currentQueue() === before && before.size === 0) return;
+  persist();
+  for (const listener of listeners) listener();
+});
 
 function dispatch(action: QueueAction): void {
   const next = queueReducer(currentQueue(), action);
