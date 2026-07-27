@@ -20,14 +20,7 @@ import 'thread_detail_page.dart';
 import 'thread_follows/thread_follows_provider.dart';
 import 'timeline_message.dart';
 
-const quickEmojis = [
-  '\u{1F44D}',
-  '\u{2764}\u{FE0F}',
-  '\u{1F602}',
-  '\u{1F389}',
-  '\u{1F440}',
-  '\u{1F64F}',
-];
+const quickEmojis = ['\u{1F44D}', '\u{2764}\u{FE0F}', '\u{1F602}', '\u{1F389}'];
 
 /// Preview length for reminder targets — matches desktop's
 /// `msg.body.slice(0, 100)`.
@@ -77,8 +70,8 @@ void showMessageActions({
                               .addReaction(message.id, emoji);
                         },
                         child: Container(
-                          width: 44,
-                          height: 44,
+                          width: 52,
+                          height: 52,
                           alignment: Alignment.center,
                           decoration: BoxDecoration(
                             color: sheetContext.colors.surfaceContainerHighest,
@@ -86,7 +79,7 @@ void showMessageActions({
                           ),
                           child: Text(
                             emoji,
-                            style: const TextStyle(fontSize: 20),
+                            style: const TextStyle(fontSize: 24),
                           ),
                         ),
                       ),
@@ -103,8 +96,8 @@ void showMessageActions({
                         );
                       },
                       child: Container(
-                        width: 44,
-                        height: 44,
+                        width: 52,
+                        height: 52,
                         alignment: Alignment.center,
                         decoration: BoxDecoration(
                           color: sheetContext.colors.surfaceContainerHighest,
@@ -112,7 +105,7 @@ void showMessageActions({
                         ),
                         child: Icon(
                           LucideIcons.plus,
-                          size: 20,
+                          size: 24,
                           color: sheetContext.colors.onSurfaceVariant,
                         ),
                       ),
@@ -396,12 +389,8 @@ class _FastActionsRow extends ConsumerWidget {
     ];
 
     return Row(
-      children: [
-        for (var i = 0; i < tiles.length; i++) ...[
-          if (i > 0) const SizedBox(width: Grid.xxs),
-          Expanded(child: tiles[i]),
-        ],
-      ],
+      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+      children: tiles,
     );
   }
 }
@@ -419,34 +408,34 @@ class _FastActionTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Material(
-      color: context.colors.surfaceContainerHighest,
-      borderRadius: BorderRadius.circular(Radii.lg),
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(Radii.lg),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(
-            horizontal: Grid.half,
-            vertical: Grid.twelve,
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Pill-shaped icon container with the caption below the fill,
+          // matching the emoji circles' fill and tap treatment.
+          Container(
+            width: 76,
+            height: 56,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: context.colors.surfaceContainerHighest,
+              borderRadius: BorderRadius.circular(Radii.dialog),
+            ),
+            child: Icon(icon, size: 24, color: context.colors.onSurface),
           ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(icon, size: 20, color: context.colors.secondary),
-              const SizedBox(height: Grid.xxs),
-              Text(
-                label,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: context.textTheme.labelMedium?.copyWith(
-                  color: context.colors.onSurface,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ],
+          const SizedBox(height: Grid.xxs),
+          Text(
+            label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: context.textTheme.labelMedium?.copyWith(
+              color: context.colors.onSurface,
+            ),
           ),
-        ),
+        ],
       ),
     );
   }
