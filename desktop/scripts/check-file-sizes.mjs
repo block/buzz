@@ -192,7 +192,9 @@ const overrides = new Map([
   // definition-authoritative resolver comments grew it to 982, and this PR's
   // typed harness-descriptor resolution in spawn_agent_child (+38) lands on
   // top. Queued to shrink with the next runtime split pass (#2974 follow-up).
-  ["src-tauri/src/managed_agents/runtime.rs", 1020],
+  // +1: #3023 credential-helper slash normalization (MinGW bash treats
+  // backslashes as escapes).
+  ["src-tauri/src/managed_agents/runtime.rs", 1021],
   // applyWorkspace reposDir parameter plus the validateReposDir binding,
   // threaded through Tauri invokes for configurable repos_dir, plus the
   // harness-persona-sync `harnessOverride` create-input bit — load-bearing
