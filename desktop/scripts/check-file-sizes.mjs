@@ -93,7 +93,9 @@ const overrides = new Map([
   // build_managed_agent_summary into callers, dangling-harness summaries render
   // the deleted id, and spawn errors surface as sentences (tests included).
   // +1: merge of the two deltas above (actual post-merge count).
-  ["src-tauri/src/commands/agents.rs", 1418],
+  // +7 (#2515): mint guard call in create_managed_agent (guard itself lives in
+  // managed_agents/mint_guard.rs).
+  ["src-tauri/src/commands/agents.rs", 1425],
   // agent-lifecycle-fixes: cascade-delete in delete_persona restructured into
   // 3-phase (stage/stop/commit) + commit_cascade_agents injectable helper for
   // retry-safety. Load-bearing reviewer-required change; queued to split.

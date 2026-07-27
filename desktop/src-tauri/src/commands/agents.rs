@@ -636,16 +636,6 @@ pub async fn create_managed_agent(
             let personas = load_personas(&app)?;
             ensure_persona_is_active(&personas, persona_id)?;
         }
-        let keys = Keys::generate();
-        let pubkey = keys.public_key().to_hex();
-        if records.iter().any(|record| record.pubkey == pubkey) {
-            return Err(format!("agent {pubkey} already exists"));
-        }
-        let private_key_nsec = keys
-            .secret_key()
-            .to_bech32()
-            .map_err(|error| format!("failed to encode private key: {error}"))?;
-
         // Store the relay override exactly as supplied (trimmed). An explicit
         // value pins the agent; empty stays empty and resolves to the active
         // workspace relay at read-time. Uniform for Local and Provider.
@@ -655,6 +645,23 @@ pub async fn create_managed_agent(
             .map(str::trim)
             .unwrap_or("")
             .to_string();
+
+        // #2515 mint guard: one instance of an agent per relay scope.
+        crate::managed_agents::mint_guard::ensure_no_duplicate_instance(
+            &records,
+            &name,
+            &resolved_relay_url,
+        )?;
+
+        let keys = Keys::generate();
+        let pubkey = keys.public_key().to_hex();
+        if records.iter().any(|record| record.pubkey == pubkey) {
+            return Err(format!("agent {pubkey} already exists"));
+        }
+        let private_key_nsec = keys
+            .secret_key()
+            .to_bech32()
+            .map_err(|error| format!("failed to encode private key: {error}"))?;
 
         (keys, private_key_nsec, pubkey, resolved_relay_url, input)
     };
