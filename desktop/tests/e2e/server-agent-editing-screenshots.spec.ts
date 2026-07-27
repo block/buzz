@@ -223,9 +223,10 @@ test.describe("server-aware agent editing", () => {
     await expect(card).toContainText("Your Claude credential");
     await expect(card).toContainText("never stored on this device");
     // Password-type input: the token is never rendered back.
-    await expect(
-      card.getByTestId("spawner-credential-input"),
-    ).toHaveAttribute("type", "password");
+    await expect(card.getByTestId("spawner-credential-input")).toHaveAttribute(
+      "type",
+      "password",
+    );
 
     await waitForAnimations(page);
     await card.screenshot({ path: `${SCREENSHOT_DIR}/04-credential-card.png` });

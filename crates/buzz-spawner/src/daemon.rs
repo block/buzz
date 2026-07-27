@@ -147,8 +147,7 @@ impl Daemon {
                 self.reconcile().await
             }
             Inbound::Attestation { sender, frame } => {
-                if let buzz_sdk::spawner::AttestationFrame::CredentialUpdate { credential } =
-                    &frame
+                if let buzz_sdk::spawner::AttestationFrame::CredentialUpdate { credential } = &frame
                 {
                     return self.apply_credential_update(&sender, credential).await;
                 }

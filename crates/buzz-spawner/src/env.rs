@@ -83,9 +83,7 @@ pub fn build_agent_env(
     let mut env: Vec<(String, String)> = passthrough
         .iter()
         .filter(|(k, _)| !RESERVED_KEYS.contains(&k.as_str()))
-        .filter(|(k, _)| {
-            owner_credential.is_none() || !OWNER_CREDENTIAL_KEYS.contains(&k.as_str())
-        })
+        .filter(|(k, _)| owner_credential.is_none() || !OWNER_CREDENTIAL_KEYS.contains(&k.as_str()))
         .cloned()
         .collect();
 
@@ -256,7 +254,10 @@ mod tests {
     #[test]
     fn owner_credential_wins_over_host_global_passthrough() {
         let passthrough = vec![
-            ("ANTHROPIC_API_KEY".to_string(), "sk-host-global".to_string()),
+            (
+                "ANTHROPIC_API_KEY".to_string(),
+                "sk-host-global".to_string(),
+            ),
             (
                 "CLAUDE_CODE_OAUTH_TOKEN".to_string(),
                 "sk-host-oauth".to_string(),
@@ -312,7 +313,10 @@ mod tests {
             &DEFAULT_RUNTIME,
             None,
         );
-        assert_eq!(lookup(&env, "ANTHROPIC_API_KEY").as_deref(), Some("sk-host"));
+        assert_eq!(
+            lookup(&env, "ANTHROPIC_API_KEY").as_deref(),
+            Some("sk-host")
+        );
     }
 
     #[test]
