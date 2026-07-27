@@ -1,7 +1,7 @@
 import 'dart:convert';
 
-import 'package:buzz/features/reminders/reminder_service.dart';
-import 'package:buzz/features/reminders/reminder_time_presets.dart';
+import 'package:buzz/shared/reminders/reminder_service.dart';
+import 'package:buzz/shared/reminders/reminder_time_presets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nostr/nostr.dart' as nostr;
 

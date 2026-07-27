@@ -4,9 +4,9 @@ import 'dart:typed_data';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
-import '../../shared/crypto/ecdh.dart';
-import '../../shared/crypto/nip44.dart';
-import '../../shared/relay/relay.dart';
+import '../crypto/ecdh.dart';
+import '../crypto/nip44.dart';
+import '../relay/relay.dart';
 
 /// The message a reminder points back to. Mirrors the desktop
 /// `ReminderTarget` shape (`desktop/src/features/reminders/lib/reminderTypes.ts`)

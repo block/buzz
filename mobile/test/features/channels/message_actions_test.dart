@@ -2,7 +2,7 @@ import 'package:buzz/features/channels/message_actions.dart';
 import 'package:buzz/features/channels/read_state/read_state_provider.dart';
 import 'package:buzz/features/channels/thread_follows/thread_follows_provider.dart';
 import 'package:buzz/features/channels/timeline_message.dart';
-import 'package:buzz/features/reminders/reminder_service.dart';
+import 'package:buzz/shared/reminders/reminder_service.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/material.dart';
