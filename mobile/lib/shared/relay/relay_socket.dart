@@ -6,6 +6,7 @@ import 'package:nostr/nostr.dart' as nostr;
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'nostr_models.dart';
+import 'relay_websocket_connector.dart';
 
 /// Low-level websocket connection with NIP-42 authentication.
 ///
@@ -63,7 +64,7 @@ class RelaySocket {
     _state = SocketState.connecting;
 
     try {
-      _channel = WebSocketChannel.connect(Uri.parse(_wsUrl));
+      _channel = connectRelayWebSocket(Uri.parse(_wsUrl));
       await _channel!.ready;
     } catch (e) {
       _state = SocketState.disconnected;
