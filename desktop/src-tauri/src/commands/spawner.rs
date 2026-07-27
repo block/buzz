@@ -11,14 +11,24 @@
 //! user's** membership. A malicious spawner that gets a signature can run an
 //! agent that reads the user's channels. So:
 //!
-//! - Signing is never automatic for an unrecognized spawner. The frontend must
-//!   have recorded an explicit trust decision first; [`respond_to_spawner_attestation`]
-//!   fails closed when it has not.
 //! - The tag is computed only for the agent pubkey named in the *decrypted*
 //!   frame, so a frame body cannot ask for a signature over some other key
 //!   while displaying a benign one.
+//! - The relocation key is looked up in this device's own store by that same
+//!   pubkey, so a spawner cannot name an arbitrary key and be handed it.
 //! - The response is NIP-44 encrypted back to the same spawner that asked, so
 //!   an eavesdropper on the ephemeral kind:24201 stream gets ciphertext.
+//!
+//! ## Where the trust decision lives
+//!
+//! The consent prompt and the remembered set of approved spawners are the
+//! renderer's (`features/agents/trustedSpawners.ts`), and the `trust` argument
+//! here is that answer passed back in. This module does **not** re-derive it:
+//! anything with IPC reach can therefore ask for a signature without a user
+//! ever seeing a prompt, and the renderer is the boundary being relied on. That
+//! is the same trust model as every other signing command in this app — the
+//! webview is not treated as hostile — but it is worth stating plainly rather
+//! than implying a backend check that does not exist.
 
 use nostr::JsonUtil;
 use serde::{Deserialize, Serialize};
@@ -26,6 +36,7 @@ use serde::{Deserialize, Serialize};
 use buzz_sdk_pkg::spawner::{build_spawner_attestation, AttestationFrame, PromptMaterial};
 
 use crate::app_state::AppState;
+use crate::commands::agent_settings::set_managed_agent_relocated;
 use crate::managed_agents::load_managed_agents;
 
 /// The trusted-spawner decision the frontend has already made.
@@ -89,6 +100,23 @@ pub async fn decode_spawner_attestation(
     }
 }
 
+/// Outcome of answering an attestation, for the caller to act on.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpawnerAttestationResponse {
+    /// The signed kind:24201 event to publish over the WebSocket.
+    pub event_json: String,
+    /// Set when this hand-off relocated a locally-managed agent, meaning the
+    /// response carries that agent's secret key.
+    ///
+    /// The local copy is already marked relocated and stopped by the time this
+    /// returns. The caller needs the pubkey only to undo that — see
+    /// `set_managed_agent_relocated(pubkey, None)` — if publishing the event
+    /// fails and the spawner never receives the key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relocated_agent_pubkey: Option<String>,
+}
+
 /// Build the signed answer to an attestation request: sign the NIP-OA tag when
 /// `trust` is [`SpawnerTrust::Trusted`], and an explicit rejection otherwise.
 ///
@@ -104,21 +132,20 @@ pub async fn decode_spawner_attestation(
 /// `restricted: unknown event kind`. Kind 24200 observer control frames solve
 /// this the same way — `build_observer_control_event` signs here and the
 /// renderer publishes over the live socket.
-/// Outcome of answering an attestation, for the caller to act on.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SpawnerAttestationResponse {
-    /// The signed kind:24201 event to publish over the WebSocket.
-    pub event_json: String,
-    /// Set when this handover relocated a locally-managed agent.
-    ///
-    /// The caller MUST stop the local process for this pubkey: two runners
-    /// holding one key both see every mention and both reply, so the agent
-    /// answers twice and burns two turns per message.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub relocated_agent_pubkey: Option<String>,
-}
-
+///
+/// # Why relocation is retired before the event is handed back
+///
+/// A relocation response contains the agent's secret key, so the instant it is
+/// published two runners hold one identity: both see every mention, both reply,
+/// and the owner is billed twice per turn. Marking and stopping the local copy
+/// here — not in a follow-up call from the renderer — means there is no window
+/// where that has happened and this device has not yet been told.
+///
+/// The residual risk is inverted rather than removed: if the publish then
+/// fails, the agent is stopped here and never started there. That is the better
+/// failure. It is visible (the agent is plainly stopped), it is recoverable by
+/// clearing the flag, and it is quiet — whereas a split identity is silent and
+/// costs money on every message until somebody notices.
 #[tauri::command]
 pub async fn respond_to_spawner_attestation(
     app: tauri::AppHandle,
@@ -214,6 +241,19 @@ pub async fn respond_to_spawner_attestation(
         .map_err(|e| format!("failed to build attestation event: {e}"))?
         .sign_with_keys(&keys)
         .map_err(|e| format!("failed to sign attestation event: {e}"))?;
+
+    // Retire the local copy before the caller can publish. If this fails the
+    // whole hand-off fails and the event is never returned, so the key stays on
+    // this device — the safe direction, since the alternative is handing out a
+    // key while the agent it belongs to keeps running here.
+    if let Some(relocated) = &relocated_agent_pubkey {
+        set_managed_agent_relocated(relocated.clone(), Some(spawner.to_hex()), app)
+            .await
+            .map_err(|e| {
+                format!("refusing to hand over the key: could not retire the local agent: {e}")
+            })?;
+    }
+
     Ok(SpawnerAttestationResponse {
         event_json: event.as_json(),
         relocated_agent_pubkey,
@@ -297,6 +337,60 @@ mod tests {
             owner.public_key()
         );
         assert!(buzz_sdk_pkg::nip_oa::verify_auth_tag(&auth_tag, &other.public_key()).is_err());
+    }
+
+    #[test]
+    fn a_rejection_never_carries_a_key_or_a_tag() {
+        // The Untrusted arm is what runs when the user declines. It must not
+        // leak the agent's secret key, and it must not carry a signature that
+        // a spawner could treat as approval.
+        let frame = AttestationFrame::Reject {
+            spec_slug: "fizz-prod".into(),
+            agent_pubkey: Keys::generate().public_key().to_hex(),
+            nonce: "ab".repeat(ATTESTATION_NONCE_BYTES),
+            reason: Some("owner has not approved this spawner".into()),
+        };
+        let json = serde_json::to_string(&frame).unwrap();
+
+        assert!(!json.contains("private_key_nsec"));
+        assert!(!json.contains("auth_tag"));
+        assert!(!json.contains("nsec1"));
+    }
+
+    #[test]
+    fn a_relocation_response_carries_exactly_the_attested_identitys_key() {
+        // The spawner verifies this itself (evaluate_response rejects a key for
+        // a different agent), but the owner side must not build such a frame in
+        // the first place — the key is looked up by the pubkey in the decrypted
+        // request, so these two can never diverge.
+        let agent = Keys::generate();
+        let owner = Keys::generate();
+        let nsec = {
+            use nostr::nips::nip19::ToBech32;
+            agent.secret_key().to_bech32().unwrap()
+        };
+        let auth_tag =
+            buzz_sdk_pkg::nip_oa::compute_auth_tag(&owner, &agent.public_key(), "").unwrap();
+
+        let frame = AttestationFrame::Response {
+            spec_slug: "fizz-prod".into(),
+            agent_pubkey: agent.public_key().to_hex(),
+            nonce: "ab".repeat(ATTESTATION_NONCE_BYTES),
+            auth_tag,
+            private_key_nsec: Some(nsec.clone()),
+            prompt: None,
+        };
+
+        let AttestationFrame::Response {
+            agent_pubkey,
+            private_key_nsec,
+            ..
+        } = &frame
+        else {
+            unreachable!("built a Response above")
+        };
+        let delivered = Keys::parse(private_key_nsec.as_ref().unwrap()).unwrap();
+        assert_eq!(&delivered.public_key().to_hex(), agent_pubkey);
     }
 
     #[test]
