@@ -570,6 +570,36 @@ test("editAgent_missingRequiredEnvKey_blocksSaveViaValidity", () => {
   );
 });
 
+test("editAgent_parallelism_requiresAnIntegerFromOneThroughThirtyTwo", () => {
+  const base = {
+    name: "My Agent",
+    parallelism: "",
+    agentAcpCommand: "",
+    acpCommand: "",
+    respondTo: "all",
+    respondToAllowlistLength: 0,
+    selectedRuntimeId: "buzz-agent",
+    inheritHarness: false,
+    agentCommand: "buzz-agent",
+    requiredEnvKeyMissing: false,
+  };
+
+  for (const parallelism of ["1", "32", ""]) {
+    assert.equal(
+      computeEditAgentFormValidity({ ...base, parallelism }),
+      true,
+      `${parallelism || "blank"} should be accepted`,
+    );
+  }
+  for (const parallelism of ["0", "33", "1.5", "2workers"]) {
+    assert.equal(
+      computeEditAgentFormValidity({ ...base, parallelism }),
+      false,
+      `${parallelism} should be rejected`,
+    );
+  }
+});
+
 test("editAgent_customCommandPinned_blocksSaveWhenCommandEmpty", () => {
   // A pinned custom command with an empty command field must block Save — the
   // backend would spawn a runtime with no command otherwise. Exercises the real

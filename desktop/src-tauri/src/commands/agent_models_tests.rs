@@ -568,6 +568,18 @@ fn definition_less_instance_accepts_model_provider_prompt_writes() {
 }
 
 #[test]
+fn managed_agent_parallelism_update_enforces_runtime_bounds() {
+    assert!(validate_parallelism_update(None).is_ok());
+    assert!(validate_parallelism_update(Some(1)).is_ok());
+    assert!(validate_parallelism_update(Some(32)).is_ok());
+
+    for invalid in [0, 33, 1_000] {
+        let error = validate_parallelism_update(Some(invalid)).unwrap_err();
+        assert!(error.contains("between 1 and 32"), "{error}");
+    }
+}
+
+#[test]
 fn is_databricks_provider_matches_both_variants() {
     assert!(is_databricks_provider(Some("databricks")));
     assert!(is_databricks_provider(Some("databricks_v2")));

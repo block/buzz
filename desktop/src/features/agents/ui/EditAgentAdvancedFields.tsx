@@ -171,8 +171,11 @@ export function EditAgentAdvancedFields({
             disabled={disabled}
             id="edit-agent-parallelism"
             inputMode="numeric"
+            max={32}
+            min={1}
             onChange={(event) => onParallelismChange(event.target.value)}
             placeholder="1"
+            type="number"
             value={parallelism}
           />
         </div>
