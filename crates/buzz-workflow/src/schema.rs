@@ -131,7 +131,7 @@ pub enum ActionDef {
     },
     /// Suspend execution and request approval.
     RequestApproval {
-        /// User mention or role (e.g. `"@release-manager"`).
+        /// Who may approve: `""` (anyone), `"any"`, or a 64-char hex pubkey.
         from: String,
         /// Message shown to the approver.
         message: String,
@@ -189,6 +189,25 @@ impl WorkflowDef {
                     "duplicate step id: {}",
                     step.id
                 )));
+            }
+        }
+
+        // Validate approver spec on RequestApproval steps: must be empty,
+        // "any", or a 64-char hex pubkey — matching check_approver_spec's
+        // allowlist so malformed specs fail at definition time, not grant time.
+        for step in &self.steps {
+            if let ActionDef::RequestApproval { from, .. } = &step.action {
+                let spec = from.trim();
+                let valid = spec.is_empty()
+                    || spec == "any"
+                    || (spec.len() == 64 && spec.chars().all(|c| c.is_ascii_hexdigit()));
+                if !valid {
+                    return Err(WorkflowError::InvalidDefinition(format!(
+                        "step '{}': unsupported approver spec '{}' — \
+                         must be empty, 'any', or a 64-char hex pubkey",
+                        step.id, from
+                    )));
+                }
             }
         }
 
@@ -344,7 +363,7 @@ mod tests {
             "  - id: topic\n    action: set_channel_topic\n    topic: Status active\n",
             "  - id: react\n    action: add_reaction\n    emoji: white_check_mark\n",
             "  - id: hook\n    action: call_webhook\n    url: https://hooks.example.com/notify\n    method: POST\n",
-            "  - id: approve\n    action: request_approval\n    from: '@manager'\n    message: Approve?\n    timeout: 4h\n",
+            "  - id: approve\n    action: request_approval\n    from: 'any'\n    message: Approve?\n    timeout: 4h\n",
             "  - id: wait\n    action: delay\n    duration: 5m\n",
         );
         let (def, _) = parse_yaml(yaml).expect("parse failed");
@@ -380,7 +399,7 @@ mod tests {
             "name: Deploy Approval\n",
             "trigger:\n  on: webhook\n",
             "steps:\n",
-            "  - id: request\n    action: request_approval\n    from: '@engineering-lead'\n",
+            "  - id: request\n    action: request_approval\n    from: 'any'\n",
             "    message: Approve deploy?\n    timeout: 4h\n",
             "  - id: notify_approved\n    if: 'steps_request_output_approved == true'\n",
             "    action: send_message\n    text: Deploy approved\n",
@@ -855,6 +874,68 @@ mod tests {
         // 30m = 1800s, well above the 60s minimum.
         let yaml = "name: Interval Schedule\ntrigger:\n  on: schedule\n  interval: 30m\nsteps:\n  - id: s1\n    action: send_message\n    text: tick\n";
         assert!(parse_yaml(yaml).is_ok(), "30m interval should be valid");
+    }
+
+    #[test]
+    fn validate_rejects_at_anyone_approver_spec() {
+        let yaml = "name: Bad Approver\ntrigger:\n  on: webhook\nsteps:\n  - id: gate\n    action: request_approval\n    from: '@anyone'\n    message: approve\n";
+        let err = parse_yaml(yaml).unwrap_err();
+        match &err {
+            WorkflowError::InvalidDefinition(msg) => {
+                assert!(
+                    msg.contains("unsupported approver spec"),
+                    "expected 'unsupported approver spec' in: {msg}"
+                );
+            }
+            other => panic!("expected InvalidDefinition, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_at_role_approver_spec() {
+        let yaml = "name: Bad Role\ntrigger:\n  on: webhook\nsteps:\n  - id: gate\n    action: request_approval\n    from: '@engineering-lead'\n    message: approve\n";
+        let err = parse_yaml(yaml).unwrap_err();
+        assert!(matches!(err, WorkflowError::InvalidDefinition(_)));
+    }
+
+    #[test]
+    fn validate_accepts_any_approver_spec() {
+        let yaml = "name: Any Approver\ntrigger:\n  on: webhook\nsteps:\n  - id: gate\n    action: request_approval\n    from: 'any'\n    message: approve\n";
+        assert!(
+            parse_yaml(yaml).is_ok(),
+            "'any' approver spec should be valid"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_empty_approver_spec() {
+        let yaml = "name: Empty Approver\ntrigger:\n  on: webhook\nsteps:\n  - id: gate\n    action: request_approval\n    from: ''\n    message: approve\n";
+        assert!(
+            parse_yaml(yaml).is_ok(),
+            "empty approver spec should be valid"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_hex_pubkey_approver_spec() {
+        let hex_pk = "a".repeat(64);
+        let yaml = format!(
+            "name: Hex Approver\ntrigger:\n  on: webhook\nsteps:\n  - id: gate\n    action: request_approval\n    from: '{hex_pk}'\n    message: approve\n"
+        );
+        assert!(
+            parse_yaml(&yaml).is_ok(),
+            "64-char hex pubkey should be valid"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_short_hex_approver_spec() {
+        let short_hex = "a".repeat(63);
+        let yaml = format!(
+            "name: Short Hex\ntrigger:\n  on: webhook\nsteps:\n  - id: gate\n    action: request_approval\n    from: '{short_hex}'\n    message: approve\n"
+        );
+        let err = parse_yaml(&yaml).unwrap_err();
+        assert!(matches!(err, WorkflowError::InvalidDefinition(_)));
     }
 
     #[test]

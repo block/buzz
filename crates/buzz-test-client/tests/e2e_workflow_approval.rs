@@ -512,3 +512,234 @@ async fn workflow_without_approval_completes_normally() {
         approval_events.len()
     );
 }
+
+// ---------------------------------------------------------------------------
+// YAML helpers for edge-case tests
+// ---------------------------------------------------------------------------
+
+/// YAML for a workflow with a very short approval timeout (1 second).
+fn short_timeout_approval_yaml(name: &str) -> String {
+    format!(
+        "name: {name}\n\
+         description: short timeout approval e2e test\n\
+         trigger:\n\
+         \x20 on: webhook\n\
+         steps:\n\
+         \x20 - id: approve\n\
+         \x20   name: Request approval\n\
+         \x20   action: request_approval\n\
+         \x20   from: 'any'\n\
+         \x20   message: Quick approval\n\
+         \x20   timeout: 1s\n\
+         \x20 - id: notify\n\
+         \x20   name: Send notification\n\
+         \x20   action: send_message\n\
+         \x20   text: Approved\n"
+    )
+}
+
+/// YAML for a workflow with a specific hex pubkey as the approver.
+fn pubkey_approver_yaml(name: &str, approver_hex: &str) -> String {
+    format!(
+        "name: {name}\n\
+         description: pubkey-restricted approval e2e test\n\
+         trigger:\n\
+         \x20 on: webhook\n\
+         steps:\n\
+         \x20 - id: approve\n\
+         \x20   name: Request approval\n\
+         \x20   action: request_approval\n\
+         \x20   from: '{approver_hex}'\n\
+         \x20   message: Only the designated approver may grant\n\
+         \x20   timeout: 1h\n\
+         \x20 - id: notify\n\
+         \x20   name: Send notification\n\
+         \x20   action: send_message\n\
+         \x20   text: Approved\n"
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Test: approval_expired_token_rejected
+// ---------------------------------------------------------------------------
+
+/// Trigger a workflow with a 1-second timeout. Wait for expiry, then submit
+/// a grant. The grant should be rejected because the approval has expired.
+#[tokio::test]
+#[ignore]
+async fn approval_expired_token_rejected() {
+    let keys = Keys::generate();
+    let channel_id = create_test_channel(&keys).await;
+
+    // 1. Define workflow with short timeout.
+    let name = format!("approval_expired_{}", Uuid::new_v4().simple());
+    let yaml = short_timeout_approval_yaml(&name);
+    let workflow_id = define_workflow(&keys, &channel_id, &yaml, &name).await;
+
+    // 2. Trigger the workflow.
+    let trigger_resp = trigger_workflow(&keys, &workflow_id).await;
+    assert!(
+        trigger_resp["accepted"].as_bool().unwrap_or(false),
+        "workflow trigger not accepted: {trigger_resp}"
+    );
+
+    // 3. Poll for kind:46010 (approval requested).
+    let approval_events = poll_for_events(
+        &keys,
+        &channel_id,
+        KIND_WORKFLOW_APPROVAL_REQUESTED,
+        Duration::from_secs(10),
+    )
+    .await;
+    assert!(
+        !approval_events.is_empty(),
+        "expected kind:46010 event for expired-token test"
+    );
+
+    let token_hash_hex =
+        extract_d_tag_from_json(&approval_events[0]).expect("kind:46010 must have a `d` tag");
+
+    // 4. Wait for the 1-second timeout to expire.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // 5. Submit a grant — should be rejected as expired.
+    let grant_event = EventBuilder::new(Kind::Custom(KIND_APPROVAL_GRANT as u16), "")
+        .tags(vec![Tag::parse(["d", &token_hash_hex]).unwrap()])
+        .sign_with_keys(&keys)
+        .unwrap();
+    let grant_resp = submit_event(&keys, grant_event).await;
+
+    // The relay should reject the expired approval.
+    let accepted = grant_resp["accepted"].as_bool().unwrap_or(true);
+    let msg = grant_resp["message"].as_str().unwrap_or_default();
+    assert!(
+        !accepted || msg.contains("expired"),
+        "expected expired approval rejection, got: accepted={accepted}, message={msg}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test: approval_wrong_approver_rejected
+// ---------------------------------------------------------------------------
+
+/// Define a workflow with a specific hex pubkey as the required approver.
+/// Submit a grant from a different keypair. The grant should be rejected.
+#[tokio::test]
+#[ignore]
+async fn approval_wrong_approver_rejected() {
+    let designated_approver = Keys::generate();
+    let workflow_owner = Keys::generate();
+    let unauthorized_granter = Keys::generate();
+
+    let channel_id = create_test_channel(&workflow_owner).await;
+
+    // 1. Define workflow restricted to the designated approver's pubkey.
+    let name = format!("approval_wrong_approver_{}", Uuid::new_v4().simple());
+    let yaml = pubkey_approver_yaml(&name, &designated_approver.public_key().to_hex());
+    let workflow_id = define_workflow(&workflow_owner, &channel_id, &yaml, &name).await;
+
+    // 2. Trigger the workflow.
+    let trigger_resp = trigger_workflow(&workflow_owner, &workflow_id).await;
+    assert!(
+        trigger_resp["accepted"].as_bool().unwrap_or(false),
+        "workflow trigger not accepted: {trigger_resp}"
+    );
+
+    // 3. Poll for kind:46010 (approval requested).
+    let approval_events = poll_for_events(
+        &workflow_owner,
+        &channel_id,
+        KIND_WORKFLOW_APPROVAL_REQUESTED,
+        Duration::from_secs(10),
+    )
+    .await;
+    assert!(
+        !approval_events.is_empty(),
+        "expected kind:46010 event for wrong-approver test"
+    );
+
+    let token_hash_hex =
+        extract_d_tag_from_json(&approval_events[0]).expect("kind:46010 must have a `d` tag");
+
+    // 4. Submit a grant from the WRONG keypair (not the designated approver).
+    let grant_event = EventBuilder::new(Kind::Custom(KIND_APPROVAL_GRANT as u16), "")
+        .tags(vec![Tag::parse(["d", &token_hash_hex]).unwrap()])
+        .sign_with_keys(&unauthorized_granter)
+        .unwrap();
+    let grant_resp = submit_event(&unauthorized_granter, grant_event).await;
+
+    // The relay should reject the unauthorized approver.
+    let accepted = grant_resp["accepted"].as_bool().unwrap_or(true);
+    let msg = grant_resp["message"].as_str().unwrap_or_default();
+    assert!(
+        !accepted || msg.contains("forbidden"),
+        "expected unauthorized approver rejection, got: accepted={accepted}, message={msg}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test: approval_double_grant_idempotent
+// ---------------------------------------------------------------------------
+
+/// Grant an approval successfully, then submit a second grant with the same
+/// token hash. The second grant should be rejected because the approval
+/// status is no longer `pending`.
+#[tokio::test]
+#[ignore]
+async fn approval_double_grant_idempotent() {
+    let keys = Keys::generate();
+    let channel_id = create_test_channel(&keys).await;
+
+    // 1. Define and trigger workflow with approval gate.
+    let name = format!("approval_double_grant_{}", Uuid::new_v4().simple());
+    let yaml = approval_workflow_yaml(&name);
+    let workflow_id = define_workflow(&keys, &channel_id, &yaml, &name).await;
+
+    let trigger_resp = trigger_workflow(&keys, &workflow_id).await;
+    assert!(
+        trigger_resp["accepted"].as_bool().unwrap_or(false),
+        "workflow trigger not accepted: {trigger_resp}"
+    );
+
+    // 2. Poll for kind:46010 (approval requested).
+    let approval_events = poll_for_events(
+        &keys,
+        &channel_id,
+        KIND_WORKFLOW_APPROVAL_REQUESTED,
+        Duration::from_secs(10),
+    )
+    .await;
+    assert!(
+        !approval_events.is_empty(),
+        "expected kind:46010 event for double-grant test"
+    );
+
+    let token_hash_hex =
+        extract_d_tag_from_json(&approval_events[0]).expect("kind:46010 must have a `d` tag");
+
+    // 3. First grant — should succeed.
+    let grant_event_1 = EventBuilder::new(Kind::Custom(KIND_APPROVAL_GRANT as u16), "")
+        .tags(vec![Tag::parse(["d", &token_hash_hex]).unwrap()])
+        .sign_with_keys(&keys)
+        .unwrap();
+    let grant_resp_1 = submit_event(&keys, grant_event_1).await;
+    assert!(
+        grant_resp_1["accepted"].as_bool().unwrap_or(false),
+        "first grant should be accepted: {grant_resp_1}"
+    );
+
+    // 4. Second grant with same token hash — should be rejected.
+    let grant_event_2 = EventBuilder::new(Kind::Custom(KIND_APPROVAL_GRANT as u16), "")
+        .tags(vec![Tag::parse(["d", &token_hash_hex]).unwrap()])
+        .sign_with_keys(&keys)
+        .unwrap();
+    let grant_resp_2 = submit_event(&keys, grant_event_2).await;
+
+    let accepted_2 = grant_resp_2["accepted"].as_bool().unwrap_or(true);
+    let msg_2 = grant_resp_2["message"].as_str().unwrap_or_default();
+    assert!(
+        !accepted_2 || msg_2.contains("already") || msg_2.contains("not pending"),
+        "second grant should be rejected (approval no longer pending), \
+         got: accepted={accepted_2}, message={msg_2}"
+    );
+}

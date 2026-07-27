@@ -337,22 +337,10 @@ impl WorkflowEngine {
         let timeout_secs = executor::parse_duration_secs(timeout_str).unwrap_or(86400);
         let expires_at = Utc::now() + chrono::Duration::seconds(timeout_secs as i64);
 
-        // 6. Persist approval record (create_approval hashes the token internally).
-        self.db
-            .create_approval(buzz_db::workflow::CreateApprovalParams {
-                community_id,
-                token: approval_token,
-                workflow_id,
-                run_id,
-                step_id,
-                step_index: step_index as i32,
-                approver_spec,
-                expires_at,
-            })
-            .await
-            .map_err(|e| WorkflowError::WebhookError(format!("create approval: {e}")))?;
-
-        // 7. Transition run to WaitingApproval.
+        // 6. Transition run to WaitingApproval BEFORE creating the approval
+        //    record. This ordering ensures a fast grant sees the correct status;
+        //    the approval record not yet existing means the grant gets "not found"
+        //    (retriable) rather than seeing Running status and bailing permanently.
         self.db
             .update_workflow_run(
                 community_id,
@@ -364,6 +352,47 @@ impl WorkflowEngine {
             )
             .await
             .map_err(|e| WorkflowError::WebhookError(format!("update run status: {e}")))?;
+
+        // 7. Persist approval record (create_approval hashes the token internally).
+        //    If this fails, roll back the run to Failed — the WaitingApproval
+        //    status without an approval record would strand the workflow.
+        if let Err(e) = self
+            .db
+            .create_approval(buzz_db::workflow::CreateApprovalParams {
+                community_id,
+                token: approval_token,
+                workflow_id,
+                run_id,
+                step_id,
+                step_index: step_index as i32,
+                approver_spec,
+                expires_at,
+            })
+            .await
+        {
+            tracing::error!(
+                run_id = %run_id,
+                "Failed to create approval record after WaitingApproval transition, rolling back: {e}"
+            );
+            if let Err(rollback_err) = self
+                .db
+                .update_workflow_run(
+                    community_id,
+                    run_id,
+                    RunStatus::Failed,
+                    step_count,
+                    trace_json,
+                    Some(&format!("approval record creation failed: {e}")),
+                )
+                .await
+            {
+                tracing::error!(
+                    run_id = %run_id,
+                    "Failed to roll back run to Failed after approval error: {rollback_err}"
+                );
+            }
+            return Err(WorkflowError::WebhookError(format!("create approval: {e}")));
+        }
 
         tracing::info!(
             run_id = %run_id,
