@@ -50,7 +50,6 @@ use buzz_db::workflow::RunStatus;
 use buzz_db::Db;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
-use sha2::Digest;
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 
@@ -190,8 +189,6 @@ impl WorkflowEngine {
                 let step_count = result.step_index as i32;
 
                 if let Some(approval_token) = result.approval_token {
-                    // WF-08: persist the approval record, transition to
-                    // WaitingApproval, and emit kind:46010 to notify approvers.
                     if let Err(e) = self
                         .persist_approval_gate(
                             community_id,
@@ -301,9 +298,11 @@ impl WorkflowEngine {
             .get_workflow(community_id, workflow_id)
             .await
             .map_err(|e| WorkflowError::WebhookError(format!("fetch workflow: {e}")))?;
+        let workflow_channel_id = workflow.channel_id;
+        let owner_pubkey = workflow.owner_pubkey;
 
         // 3. Parse definition to extract step metadata.
-        let def: WorkflowDef = serde_json::from_value(workflow.definition.clone())
+        let def: WorkflowDef = serde_json::from_value(workflow.definition)
             .map_err(|e| WorkflowError::InvalidDefinition(format!("parse definition: {e}")))?;
 
         if step_index >= def.steps.len() {
@@ -376,7 +375,7 @@ impl WorkflowEngine {
         );
 
         // 8. Emit kind:46010 (best-effort — approval record is already durable).
-        let channel_id = match workflow.channel_id {
+        let channel_id = match workflow_channel_id {
             Some(id) => id.to_string(),
             None => {
                 tracing::warn!(
@@ -387,8 +386,8 @@ impl WorkflowEngine {
                 return Ok(());
             }
         };
-        let owner_pubkey_hex = hex::encode(&workflow.owner_pubkey);
-        let token_hash_hex = hex::encode(sha2::Sha256::digest(approval_token.as_bytes()));
+        let owner_pubkey_hex = hex::encode(&owner_pubkey);
+        let token_hash_hex = hex::encode(buzz_db::workflow::hash_approval_token(approval_token));
 
         if let Ok(sink) = self.action_sink() {
             if let Err(e) = sink

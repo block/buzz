@@ -18,43 +18,38 @@
 //! RELAY_URL=ws://localhost:3000 cargo test --test e2e_workflow_approval -- --ignored
 //! ```
 
+use std::sync::OnceLock;
 use std::time::Duration;
 
+use buzz_core::kind::{
+    KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_WORKFLOW_APPROVAL_REQUESTED,
+    KIND_WORKFLOW_CANCELLED, KIND_WORKFLOW_COMPLETED, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
+};
 use nostr::{Alphabet, EventBuilder, Filter, Keys, Kind, SingleLetterTag, Tag};
 use uuid::Uuid;
 
-fn relay_url() -> String {
-    std::env::var("RELAY_URL").unwrap_or_else(|_| "ws://localhost:3000".to_string())
+fn relay_http_url() -> &'static str {
+    static URL: OnceLock<String> = OnceLock::new();
+    URL.get_or_init(|| {
+        std::env::var("RELAY_URL")
+            .unwrap_or_else(|_| "ws://localhost:3000".to_string())
+            .replace("wss://", "https://")
+            .replace("ws://", "http://")
+            .trim_end_matches('/')
+            .to_string()
+    })
 }
 
-fn relay_http_url() -> String {
-    relay_url()
-        .replace("wss://", "https://")
-        .replace("ws://", "http://")
-        .trim_end_matches('/')
-        .to_string()
+fn http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(reqwest::Client::new)
 }
 
-/// Workflow definition command (kind 30620).
-const KIND_WORKFLOW_DEF: u16 = 30620;
-/// Workflow trigger command (kind 46020).
-const KIND_WORKFLOW_TRIGGER: u16 = 46020;
-/// Approval grant (kind 46030).
-const KIND_APPROVAL_GRANT: u16 = 46030;
-/// Approval deny (kind 46031).
-const KIND_APPROVAL_DENY: u16 = 46031;
-/// Workflow approval requested notification (kind 46010).
-const KIND_WORKFLOW_APPROVAL_REQUESTED: u16 = 46010;
-/// Workflow completed trace event (kind 46005).
-const KIND_WORKFLOW_COMPLETED: u16 = 46005;
-/// Workflow cancelled trace event (kind 46007).
-const KIND_WORKFLOW_CANCELLED: u16 = 46007;
 /// Submit a signed event to the relay via the HTTP bridge (`POST /events`).
 /// Returns the parsed JSON response `{accepted, message, ...}`.
 async fn submit_event(keys: &Keys, event: nostr::Event) -> serde_json::Value {
     let http_url = relay_http_url();
-    let client = reqwest::Client::new();
-    let resp = client
+    let resp = http_client()
         .post(format!("{http_url}/events"))
         .header("X-Pubkey", keys.public_key().to_hex())
         .header("Content-Type", "application/json")
@@ -130,7 +125,7 @@ fn simple_workflow_yaml(name: &str) -> String {
 
 /// Define a workflow and return the server-generated workflow ID.
 async fn define_workflow(keys: &Keys, channel_id: &str, yaml: &str, name: &str) -> String {
-    let event = EventBuilder::new(Kind::Custom(KIND_WORKFLOW_DEF), yaml)
+    let event = EventBuilder::new(Kind::Custom(KIND_WORKFLOW_DEF as u16), yaml)
         .tags(vec![
             Tag::parse(["h", channel_id]).unwrap(),
             Tag::parse(["name", name]).unwrap(),
@@ -160,7 +155,7 @@ async fn define_workflow(keys: &Keys, channel_id: &str, yaml: &str, name: &str) 
 
 /// Trigger a workflow by ID. Returns the response body.
 async fn trigger_workflow(keys: &Keys, workflow_id: &str) -> serde_json::Value {
-    let event = EventBuilder::new(Kind::Custom(KIND_WORKFLOW_TRIGGER), "")
+    let event = EventBuilder::new(Kind::Custom(KIND_WORKFLOW_TRIGGER as u16), "")
         .tags(vec![Tag::parse(["d", workflow_id]).unwrap()])
         .sign_with_keys(keys)
         .unwrap();
@@ -172,11 +167,10 @@ async fn trigger_workflow(keys: &Keys, workflow_id: &str) -> serde_json::Value {
 /// Returns the parsed event array.
 async fn query_events(keys: &Keys, filter: Filter) -> Vec<serde_json::Value> {
     let http_url = relay_http_url();
-    let client = reqwest::Client::new();
     let filter_json = serde_json::to_value(&filter).expect("serialize filter");
     let body = serde_json::json!([filter_json]);
 
-    let resp = client
+    let resp = http_client()
         .post(format!("{http_url}/query"))
         .header("X-Pubkey", keys.public_key().to_hex())
         .header("Content-Type", "application/json")
@@ -201,13 +195,13 @@ async fn query_events(keys: &Keys, filter: Filter) -> Vec<serde_json::Value> {
 async fn poll_for_events(
     keys: &Keys,
     channel_id: &str,
-    kind: u16,
+    kind: u32,
     timeout: Duration,
 ) -> Vec<serde_json::Value> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         let filter = Filter::new()
-            .kind(Kind::Custom(kind))
+            .kind(Kind::Custom(kind as u16))
             .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel_id]);
         let events = query_events(keys, filter).await;
         if !events.is_empty() {
@@ -284,7 +278,7 @@ async fn approval_grant_resumes_workflow() {
     );
 
     // 5. Submit a kind:46030 grant event referencing the token hash.
-    let grant_event = EventBuilder::new(Kind::Custom(KIND_APPROVAL_GRANT), "")
+    let grant_event = EventBuilder::new(Kind::Custom(KIND_APPROVAL_GRANT as u16), "")
         .tags(vec![Tag::parse(["d", &token_hash_hex]).unwrap()])
         .sign_with_keys(&keys)
         .unwrap();
@@ -356,7 +350,7 @@ async fn approval_deny_cancels_workflow() {
         extract_d_tag_from_json(&approval_events[0]).expect("kind:46010 event must have a `d` tag");
 
     // 5. Submit a kind:46031 deny event.
-    let deny_event = EventBuilder::new(Kind::Custom(KIND_APPROVAL_DENY), "Not approved")
+    let deny_event = EventBuilder::new(Kind::Custom(KIND_APPROVAL_DENY as u16), "Not approved")
         .tags(vec![Tag::parse(["d", &token_hash_hex]).unwrap()])
         .sign_with_keys(&keys)
         .unwrap();
@@ -505,7 +499,7 @@ async fn workflow_without_approval_completes_normally() {
     // 4. Verify no kind:46010 (approval requested) events were emitted — this
     //    workflow has no approval step, so none should appear.
     let filter = Filter::new()
-        .kind(Kind::Custom(KIND_WORKFLOW_APPROVAL_REQUESTED))
+        .kind(Kind::Custom(KIND_WORKFLOW_APPROVAL_REQUESTED as u16))
         .custom_tags(
             SingleLetterTag::lowercase(Alphabet::H),
             [channel_id.as_str()],

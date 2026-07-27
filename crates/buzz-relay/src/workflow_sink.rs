@@ -148,6 +148,74 @@ fn resolve_mention_pubkeys(text: &str, members: &[(String, String)]) -> Vec<Stri
     out
 }
 
+/// Resolved channel context returned by [`resolve_channel`].
+struct ResolvedChannel {
+    state: Arc<AppState>,
+    tenant: buzz_core::tenant::TenantContext,
+    channel_uuid: Uuid,
+    channel_id_canonical: String,
+    channel: buzz_db::channel::ChannelRecord,
+}
+
+/// Shared validation prologue for action sink methods: upgrade the weak state
+/// reference, resolve the community host to a `TenantContext`, validate the
+/// content is non-empty, and look up + validate the target channel.
+async fn resolve_channel(
+    state_weak: &Weak<AppState>,
+    community_id: CommunityId,
+    channel_id: &str,
+    content: &str,
+) -> Result<ResolvedChannel, ActionSinkError> {
+    let state = state_weak
+        .upgrade()
+        .ok_or_else(|| ActionSinkError::Database("relay is shutting down".into()))?;
+
+    let host = state
+        .db
+        .lookup_community_host(community_id)
+        .await
+        .map_err(|e| ActionSinkError::Database(e.to_string()))?
+        .ok_or_else(|| {
+            ActionSinkError::Database(format!(
+                "workflow run community {community_id} is not mapped to a host"
+            ))
+        })?;
+    let tenant = buzz_core::tenant::TenantContext::resolved(community_id, host);
+
+    if content.trim().is_empty() {
+        return Err(ActionSinkError::EmptyContent);
+    }
+
+    let channel_uuid = Uuid::parse_str(channel_id)
+        .map_err(|e| ActionSinkError::InvalidInput(format!("invalid UUID: {e}")))?;
+    let channel_id_canonical = channel_uuid.to_string();
+
+    let channel = state
+        .db
+        .get_channel(tenant.community(), channel_uuid)
+        .await
+        .map_err(|e| match &e {
+            buzz_db::DbError::ChannelNotFound(_) | buzz_db::DbError::NotFound(_) => {
+                ActionSinkError::ChannelNotFound(channel_id_canonical.clone())
+            }
+            _ => ActionSinkError::Database(e.to_string()),
+        })?;
+
+    if channel.archived_at.is_some() {
+        return Err(ActionSinkError::ChannelArchived(
+            channel_id_canonical.clone(),
+        ));
+    }
+
+    Ok(ResolvedChannel {
+        state,
+        tenant,
+        channel_uuid,
+        channel_id_canonical,
+        channel,
+    })
+}
+
 /// Relay-side action sink — executes workflow side-effects directly.
 ///
 /// Holds a **weak** reference to `AppState` to avoid an `Arc` reference cycle:
@@ -182,58 +250,13 @@ impl ActionSink for RelayActionSink {
         let author_pubkey = author_pubkey.to_owned();
 
         Box::pin(async move {
-            // 0. Upgrade weak reference — fails only during shutdown.
-            let state = self
-                .state
-                .upgrade()
-                .ok_or_else(|| ActionSinkError::Database("relay is shutting down".into()))?;
-
-            // The run carries its owning community (`community_id`); the
-            // relay-signed kind:9 message belongs to *that* community, never the
-            // deployment default. Re-deriving the tenant from `config.relay_url`
-            // would post a community-B workflow's output into the deployment/
-            // default community under N>1. Read the community's host back to
-            // form a complete TenantContext (host is for labelling only — the
-            // community is already fixed and is never re-derived from it). Fail
-            // closed if the community no longer maps to a host.
-            let host = state
-                .db
-                .lookup_community_host(community_id)
-                .await
-                .map_err(|e| ActionSinkError::Database(e.to_string()))?
-                .ok_or_else(|| {
-                    ActionSinkError::Database(format!(
-                        "workflow run community {community_id} is not mapped to a host"
-                    ))
-                })?;
-            let tenant = buzz_core::tenant::TenantContext::resolved(community_id, host);
-
-            // 1. Validate content is not empty/whitespace-only
-            if text.trim().is_empty() {
-                return Err(ActionSinkError::EmptyContent);
-            }
-
-            // 2. Parse and validate channel — canonicalize UUID immediately
-            let channel_uuid = Uuid::parse_str(&channel_id)
-                .map_err(|e| ActionSinkError::InvalidInput(format!("invalid UUID: {e}")))?;
-            let channel_id_canonical = channel_uuid.to_string();
-
-            let channel = state
-                .db
-                .get_channel(tenant.community(), channel_uuid)
-                .await
-                .map_err(|e| match &e {
-                    buzz_db::DbError::ChannelNotFound(_) | buzz_db::DbError::NotFound(_) => {
-                        ActionSinkError::ChannelNotFound(channel_id_canonical.clone())
-                    }
-                    _ => ActionSinkError::Database(e.to_string()),
-                })?;
-
-            if channel.archived_at.is_some() {
-                return Err(ActionSinkError::ChannelArchived(
-                    channel_id_canonical.clone(),
-                ));
-            }
+            let ResolvedChannel {
+                state,
+                tenant,
+                channel_uuid,
+                channel_id_canonical,
+                channel,
+            } = resolve_channel(&self.state, community_id, &channel_id, &text).await?;
 
             let author_pubkey = nostr::PublicKey::from_hex(&author_pubkey).map_err(|e| {
                 ActionSinkError::InvalidInput(format!("invalid author pubkey: {e}"))
@@ -379,53 +402,15 @@ impl ActionSink for RelayActionSink {
         } = params;
 
         Box::pin(async move {
-            // 0. Upgrade weak reference — fails only during shutdown.
-            let state = self
-                .state
-                .upgrade()
-                .ok_or_else(|| ActionSinkError::Database("relay is shutting down".into()))?;
+            let ResolvedChannel {
+                state,
+                tenant,
+                channel_uuid,
+                channel_id_canonical,
+                channel: _,
+            } = resolve_channel(&self.state, community_id, &channel_id, &message).await?;
 
-            // 1. Resolve community host → TenantContext.
-            let host = state
-                .db
-                .lookup_community_host(community_id)
-                .await
-                .map_err(|e| ActionSinkError::Database(e.to_string()))?
-                .ok_or_else(|| {
-                    ActionSinkError::Database(format!(
-                        "workflow run community {community_id} is not mapped to a host"
-                    ))
-                })?;
-            let tenant = buzz_core::tenant::TenantContext::resolved(community_id, host);
-
-            // 2. Validate content is not empty/whitespace-only.
-            if message.trim().is_empty() {
-                return Err(ActionSinkError::EmptyContent);
-            }
-
-            // 3. Parse and validate channel UUID.
-            let channel_uuid = Uuid::parse_str(&channel_id)
-                .map_err(|e| ActionSinkError::InvalidInput(format!("invalid UUID: {e}")))?;
-            let channel_id_canonical = channel_uuid.to_string();
-
-            let channel = state
-                .db
-                .get_channel(tenant.community(), channel_uuid)
-                .await
-                .map_err(|e| match &e {
-                    buzz_db::DbError::ChannelNotFound(_) | buzz_db::DbError::NotFound(_) => {
-                        ActionSinkError::ChannelNotFound(channel_id_canonical.clone())
-                    }
-                    _ => ActionSinkError::Database(e.to_string()),
-                })?;
-
-            if channel.archived_at.is_some() {
-                return Err(ActionSinkError::ChannelArchived(
-                    channel_id_canonical.clone(),
-                ));
-            }
-
-            // 4. Validate author pubkey.
+            // Validate author pubkey.
             let author_pk = nostr::PublicKey::from_hex(&author_pubkey).map_err(|e| {
                 ActionSinkError::InvalidInput(format!("invalid author pubkey: {e}"))
             })?;
