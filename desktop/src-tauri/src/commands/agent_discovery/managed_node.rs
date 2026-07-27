@@ -462,21 +462,24 @@ fn verify_node_tree(dir: &std::path::Path) -> Result<(), String> {
     }
 }
 
-// ── managed npm adapter installs ──────────────────────────────────────────────
+// ── managed npm CLI and adapter installs ──────────────────────────────────────
 
 /// Guidance text shown when the Buzz-private npm prefix is not available.
 fn managed_npm_prefix_hint() -> String {
     "Buzz could not create its private Node tools directory. Check app-data directory permissions, restart Buzz, then click Install again.".to_string()
 }
 
-pub(super) fn managed_npm_command(command: &str) -> Result<Option<String>, Box<InstallStepResult>> {
+pub(super) fn managed_npm_command(
+    step: &str,
+    command: &str,
+) -> Result<Option<String>, Box<InstallStepResult>> {
     if !is_npm_global_install(command) {
         return Ok(None);
     }
 
     let Some(prefix) = crate::managed_agents::buzz_managed_npm_prefix() else {
         return Err(Box::new(InstallStepResult {
-            step: "adapter".to_string(),
+            step: step.to_string(),
             command: command.to_string(),
             success: false,
             stdout: String::new(),
@@ -487,7 +490,7 @@ pub(super) fn managed_npm_command(command: &str) -> Result<Option<String>, Box<I
     };
     if let Err(error) = std::fs::create_dir_all(&prefix) {
         return Err(Box::new(InstallStepResult {
-            step: "adapter".to_string(),
+            step: step.to_string(),
             command: command.to_string(),
             success: false,
             stdout: String::new(),
@@ -535,7 +538,7 @@ pub(super) fn npm_eacces_hint(stderr: &str, _command: &str) -> Option<String> {
     }
 }
 
-// ── end managed npm adapter installs ──────────────────────────────────────────
+// ── end managed npm CLI and adapter installs ──────────────────────────────────
 
 #[cfg(test)]
 mod tests {

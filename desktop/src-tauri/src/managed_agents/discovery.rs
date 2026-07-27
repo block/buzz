@@ -184,7 +184,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         // changes — bump the pin deliberately after testing.
         adapter_install_commands: &[
             "npm install -g @victor-software-house/pi-acp@0.17.1",
-            "pi install npm:pi-mcp-extension",
+            "pi install npm:pi-mcp-extension@1.5.0",
         ],
         cli_install_instructions_url: "https://pi.dev",
         adapter_install_instructions_url: "https://github.com/victor-software-house/pi-acp",

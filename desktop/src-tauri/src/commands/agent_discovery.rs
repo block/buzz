@@ -26,7 +26,10 @@ fn active_installs() -> &'static std::sync::Mutex<std::collections::HashSet<Stri
 /// `None` if none was found).
 ///
 /// Returns `None` when no install is needed (adapter is present and current).
-/// Returns `Some(cmds)` when the adapter is missing or (for codex) outdated.
+/// Pi is the exception: its idempotent MCP-extension command remains planned
+/// even when the adapter binary is already present.
+/// Returns `Some(cmds)` when the adapter is missing, codex is outdated, or pi's
+/// post-install extension must be ensured.
 ///
 /// For the codex **outdated** case the returned sequence is a two-step
 /// reinstall: first uninstall the old `@zed-industries/codex-acp` package
@@ -47,6 +50,16 @@ pub(crate) fn plan_adapter_install<'c>(
     adapter_probe_path: Option<&str>,
 ) -> Option<Vec<&'c str>> {
     match adapter_path {
+        // Pi's MCP extension is an independent post-install requirement. Keep
+        // running that idempotent command even when the adapter binary exists.
+        Some(_) if runtime_id == "pi" => {
+            let follow_up_commands: Vec<&str> = adapter_install_commands
+                .iter()
+                .copied()
+                .filter(|command| !is_npm_global_install(command))
+                .collect();
+            (!follow_up_commands.is_empty()).then_some(follow_up_commands)
+        }
         // Adapter present and current — no install needed.
         Some(_) if runtime_id != "codex" => None,
         Some(path)
@@ -117,6 +130,13 @@ pub async fn install_acp_runtime(
     })
 }
 
+fn should_prepare_managed_npm(commands: &[&str], managed_node_supported: bool) -> bool {
+    managed_node_supported
+        && commands
+            .iter()
+            .any(|command| is_npm_global_install(command))
+}
+
 /// Err(_) = infrastructure failure (panic, concurrency guard).
 /// Ok({success: false}) = an install step failed (stderr captured in steps).
 fn install_acp_runtime_blocking(runtime_id: &str) -> Result<InstallRuntimeResult, String> {
@@ -154,14 +174,49 @@ fn install_acp_runtime_blocking(runtime_id: &str) -> Result<InstallRuntimeResult
 
     let mut steps = Vec::new();
 
-    // Phase 1: Install CLI if missing and commands are available.
-    // Today every entry in `cli_install_commands` is a curl-pipe; npm-backed
-    // adapter installs live in Phase 2 below where they are rewritten to a
-    // Buzz-private prefix before execution.
+    // Phase 1: Install CLI if missing and commands are available. npm-backed
+    // CLIs (pi) use the same managed Node/private-prefix path as adapters, and
+    // Node must be provisioned before the first npm command runs.
     if let Some(cli) = runtime.underlying_cli {
         if crate::managed_agents::resolve_command(cli).is_none() {
-            for cmd in runtime.cli_install_commands_for_os() {
-                let result = run_install_command_with_retry("cli", cmd);
+            let commands = runtime.cli_install_commands_for_os();
+            let use_managed_npm =
+                should_prepare_managed_npm(commands, managed_node_runtime_supported());
+            if use_managed_npm {
+                if let Err(step) = ensure_managed_node_runtime_blocking() {
+                    steps.push(*step);
+                    return Ok(InstallRuntimeResult {
+                        success: false,
+                        steps,
+                        restarted_count: 0,
+                        failed_restart_count: 0,
+                    });
+                }
+            }
+
+            for cmd in commands {
+                let planned = match if use_managed_npm {
+                    managed_npm_command("cli", cmd)
+                } else {
+                    Ok(None)
+                } {
+                    Ok(Some(command)) => command,
+                    Ok(None) => cmd.to_string(),
+                    Err(step) => {
+                        steps.push(*step);
+                        return Ok(InstallRuntimeResult {
+                            success: false,
+                            steps,
+                            restarted_count: 0,
+                            failed_restart_count: 0,
+                        });
+                    }
+                };
+
+                let mut result = run_install_command_with_retry("cli", &planned);
+                if !result.success && result.hint.is_none() && is_npm_global_install(cmd) {
+                    result.hint = npm_eacces_hint(&result.stderr, cmd);
+                }
                 let success = result.success;
                 steps.push(result);
                 if !success {
@@ -191,8 +246,7 @@ fn install_acp_runtime_blocking(runtime_id: &str) -> Result<InstallRuntimeResult
         runtime.adapter_install_commands,
         adapter_probe_path.as_deref(),
     ) {
-        let use_managed_npm =
-            cmds.iter().any(|cmd| is_npm_global_install(cmd)) && managed_node_runtime_supported();
+        let use_managed_npm = should_prepare_managed_npm(&cmds, managed_node_runtime_supported());
         if use_managed_npm {
             if let Err(step) = ensure_managed_node_runtime_blocking() {
                 steps.push(*step);
@@ -207,7 +261,7 @@ fn install_acp_runtime_blocking(runtime_id: &str) -> Result<InstallRuntimeResult
 
         for cmd in cmds {
             let planned = match if use_managed_npm {
-                managed_npm_command(cmd)
+                managed_npm_command("adapter", cmd)
             } else {
                 Ok(None)
             } {
@@ -1219,6 +1273,14 @@ mod tests {
         assert!(!is_npm_global_install("cargo install some-tool"));
     }
 
+    #[test]
+    fn npm_backed_pi_cli_install_prepares_managed_node() {
+        assert!(should_prepare_managed_npm(
+            &["npm install -g @earendil-works/pi-coding-agent"],
+            true,
+        ));
+    }
+
     // ── npm_eacces_hint ───────────────────────────────────────────────────────
 
     #[test]
@@ -1333,6 +1395,20 @@ mod tests {
         assert!(
             plan.is_none(),
             "non-codex runtime with resolved binary must not trigger reinstall"
+        );
+    }
+
+    #[test]
+    fn test_plan_adapter_install_keeps_pi_extension_when_adapter_exists() {
+        let adapter = std::path::Path::new("/managed/bin/pi-acp");
+        let install_cmds = &[
+            "npm install -g @victor-software-house/pi-acp@0.17.1",
+            "pi install npm:pi-mcp-extension@1.5.0",
+        ];
+
+        assert_eq!(
+            plan_adapter_install("pi", Some(adapter), install_cmds, None),
+            Some(vec!["pi install npm:pi-mcp-extension@1.5.0"])
         );
     }
 
