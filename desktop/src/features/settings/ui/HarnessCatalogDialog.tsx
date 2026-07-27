@@ -17,6 +17,7 @@ import { Button } from "@/shared/ui/button";
 import { ChooserDialogContent } from "@/shared/ui/chooser-dialog-content";
 import { Dialog } from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
+import { Skeleton } from "@/shared/ui/skeleton";
 import { Spinner } from "@/shared/ui/spinner";
 
 import { CustomHarnessForm } from "./CustomHarnessForm";
@@ -48,6 +49,7 @@ export function HarnessCatalogDialog({
 }) {
   const contentRef = React.useRef<HTMLDivElement | null>(null);
   const runtimesQuery = useAcpRuntimesQuery();
+  const isLoading = runtimesQuery.isLoading;
   const entries = React.useMemo(
     () => catalogDialogEntries(runtimesQuery.data ?? []),
     [runtimesQuery.data],
@@ -122,19 +124,25 @@ export function HarnessCatalogDialog({
               data-testid="harness-catalog-list"
             >
               <div className="space-y-1">
-                {filtered.map((entry) => (
-                  <CatalogListItem
-                    entry={entry}
-                    isCurrent={entry.id === selectedId}
-                    key={entry.id}
-                    onSelect={() => setSelectedId(entry.id)}
-                  />
-                ))}
-                {filtered.length === 0 ? (
-                  <p className="px-4 py-2 text-sm text-sidebar-foreground/60">
-                    No harnesses match.
-                  </p>
-                ) : null}
+                {isLoading ? (
+                  <CatalogListSkeleton />
+                ) : (
+                  <>
+                    {filtered.map((entry) => (
+                      <CatalogListItem
+                        entry={entry}
+                        isCurrent={entry.id === selectedId}
+                        key={entry.id}
+                        onSelect={() => setSelectedId(entry.id)}
+                      />
+                    ))}
+                    {filtered.length === 0 ? (
+                      <p className="px-4 py-2 text-sm text-sidebar-foreground/60">
+                        No harnesses match.
+                      </p>
+                    ) : null}
+                  </>
+                )}
               </div>
               <div className="my-2 border-t border-sidebar-border/60" />
               <button
@@ -169,6 +177,8 @@ export function HarnessCatalogDialog({
                 <CustomHarnessDetail onDone={() => onOpenChange(false)} />
               ) : selectedEntry ? (
                 <CatalogDetail entry={selectedEntry} key={selectedEntry.id} />
+              ) : isLoading ? (
+                <CatalogDetailSkeleton />
               ) : (
                 <div className="flex min-h-80 items-center justify-center rounded-lg border border-dashed border-border/70 px-6 text-center">
                   <p className="max-w-sm text-sm text-muted-foreground">
@@ -181,6 +191,58 @@ export function HarnessCatalogDialog({
         </div>
       </ChooserDialogContent>
     </Dialog>
+  );
+}
+
+/** Pulsing placeholder rows shown while harness discovery is running. */
+function CatalogListSkeleton() {
+  const widths = ["w-24", "w-32", "w-20", "w-28", "w-24", "w-16"];
+  return (
+    <div
+      aria-label="Loading harnesses"
+      className="space-y-1"
+      data-testid="harness-catalog-list-skeleton"
+      role="status"
+    >
+      {widths.map((width, index) => (
+        <div
+          className="flex w-full items-center gap-2 rounded-lg px-4 py-1.5"
+          // Static placeholder list — order never changes.
+          // biome-ignore lint/suspicious/noArrayIndexKey: static skeleton rows
+          key={index}
+        >
+          <Skeleton className="h-6 w-6 shrink-0 rounded-md" />
+          <Skeleton className={cn("h-3.5 rounded", width)} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** Pulsing placeholder mirroring the detail-pane layout while loading. */
+function CatalogDetailSkeleton() {
+  return (
+    <div
+      aria-label="Loading harness details"
+      className="flex min-h-full flex-col gap-6"
+      data-testid="harness-catalog-detail-skeleton"
+      role="status"
+    >
+      <div className="flex items-center gap-4">
+        <Skeleton className="h-16 w-16 rounded-xl" />
+        <div className="min-w-0 space-y-2">
+          <Skeleton className="h-5 w-40 rounded" />
+          <Skeleton className="h-4 w-16 rounded" />
+          <Skeleton className="h-7 w-24 rounded-md" />
+        </div>
+      </div>
+      <div className="space-y-2">
+        <Skeleton className="h-3.5 w-full rounded" />
+        <Skeleton className="h-3.5 w-11/12 rounded" />
+        <Skeleton className="h-3.5 w-2/3 rounded" />
+      </div>
+      <Skeleton className="h-28 w-full rounded-lg" />
+    </div>
   );
 }
 
@@ -308,7 +370,7 @@ function CatalogDetail({ entry }: { entry: AcpRuntimeCatalogEntry }) {
         <p className="text-sm leading-6 text-muted-foreground">{description}</p>
       ) : null}
 
-      {!isReady && entry.installHint ? (
+      {entry.installHint ? (
         <div className="space-y-1">
           <p className="text-xs font-semibold text-muted-foreground">Setup</p>
           <p className="whitespace-pre-line text-sm leading-6 text-foreground">
