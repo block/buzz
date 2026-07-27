@@ -10,6 +10,7 @@ type AgentIdentityCardProps = {
   avatar?: ReactNode;
   avatarUrl?: string | null;
   dataTestId: string;
+  description?: string | null;
   label: string;
   modelLabel?: string | null;
   onClick: () => void;
@@ -23,6 +24,7 @@ export function AgentIdentityCard({
   avatar,
   avatarUrl,
   dataTestId,
+  description,
   label,
   modelLabel,
   onClick,
@@ -72,6 +74,15 @@ export function AgentIdentityCard({
         <span className="min-w-0 truncate font-semibold text-foreground tracking-normal">
           {label}
         </span>
+        {description ? (
+          <span
+            className="min-w-0 truncate text-xs font-normal text-foreground/70"
+            data-testid={`${dataTestId}-description`}
+            title={description}
+          >
+            {description}
+          </span>
+        ) : null}
         {modelLabel ? (
           <span className="min-w-0 truncate text-xs font-normal text-secondary-foreground/75">
             {modelLabel}

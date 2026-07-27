@@ -30,6 +30,19 @@ fn trim_optional(value: Option<String>) -> Option<String> {
     })
 }
 
+fn normalize_description(value: Option<String>) -> Result<Option<String>, String> {
+    let normalized = value
+        .map(|candidate| candidate.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|candidate| !candidate.is_empty());
+    if normalized
+        .as_ref()
+        .is_some_and(|candidate| candidate.chars().count() > 160)
+    {
+        return Err("One-line description must be 160 characters or fewer".to_string());
+    }
+    Ok(normalized)
+}
+
 mod pending;
 pub(in crate::commands) use pending::retain_persona_pending;
 pub(super) use pending::tombstone_persona_pending;
@@ -58,6 +71,7 @@ pub async fn create_persona(
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let display_name = trim_required(&input.display_name, "Display name")?;
+        let description = normalize_description(input.description)?;
         // System prompt optional: core memory is auto-injected. Empty is valid.
         let system_prompt = input.system_prompt.trim().to_string();
         let avatar_url = trim_optional(input.avatar_url);
@@ -80,6 +94,7 @@ pub async fn create_persona(
         let mut persona = AgentDefinition {
             id: Uuid::new_v4().to_string(),
             display_name,
+            description,
             avatar_url,
             system_prompt,
             runtime,
@@ -159,6 +174,7 @@ pub async fn update_persona(
         move || -> Result<(AgentDefinition, ProfileSyncParams), String> {
             let state = app.state::<AppState>();
             let display_name = trim_required(&input.display_name, "Display name")?;
+            let description = normalize_description(input.description)?;
             let system_prompt = input.system_prompt.clone();
             let avatar_url = trim_optional(input.avatar_url);
             let runtime = trim_optional(input.runtime);
@@ -181,6 +197,7 @@ pub async fn update_persona(
             let old_display_name = persona.display_name.clone();
 
             persona.display_name = display_name;
+            persona.description = description;
             persona.avatar_url = avatar_url;
             persona.system_prompt = system_prompt;
             persona.runtime = runtime;

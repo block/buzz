@@ -125,6 +125,7 @@ export function AgentDefinitionDialog({
   createSubmitBlocked = false,
 }: AgentDefinitionDialogProps) {
   const [displayName, setDisplayName] = React.useState("");
+  const [agentDescription, setAgentDescription] = React.useState("");
   const [aiDefaultsOpen, setAiDefaultsOpen] = React.useState(false);
   const aiDefaultsTriggerRef = React.useRef<HTMLButtonElement>(null);
   const [avatarUrl, setAvatarUrl] = React.useState("");
@@ -185,6 +186,7 @@ export function AgentDefinitionDialog({
     }
 
     setDisplayName(initialValues.displayName);
+    setAgentDescription(initialValues.description ?? "");
     setAvatarUrl(initialValues.avatarUrl ?? "");
     setSystemPrompt(initialValues.systemPrompt);
     setRuntime(initialValues.runtime ?? "");
@@ -283,6 +285,7 @@ export function AgentDefinitionDialog({
   function handleOpenChange(next: boolean) {
     if (!next) {
       setDisplayName("");
+      setAgentDescription("");
       setAvatarUrl("");
       setSystemPrompt("");
       setRuntime("");
@@ -333,6 +336,7 @@ export function AgentDefinitionDialog({
           : undefined;
     const baseInput = {
       displayName: displayName.trim(),
+      description: agentDescription.trim() || undefined,
       avatarUrl: avatarUrl.trim() || undefined,
       systemPrompt: systemPrompt,
       runtime: runtimeForSubmit,
@@ -801,6 +805,43 @@ export function AgentDefinitionDialog({
                   value={displayName}
                 />
               </div>
+            </div>
+
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between gap-3">
+                <label
+                  className="text-sm font-medium text-foreground"
+                  htmlFor="persona-description"
+                >
+                  One-line description
+                </label>
+                <span className="text-xs text-muted-foreground">
+                  {agentDescription.length}/160
+                </span>
+              </div>
+              <div
+                className={cn(
+                  "flex min-h-11 items-center px-3",
+                  PERSONA_FIELD_SHELL_CLASS,
+                )}
+              >
+                <Input
+                  autoCorrect="on"
+                  className={cn(
+                    "h-8 px-0 py-0 leading-6",
+                    PERSONA_FIELD_CONTROL_CLASS,
+                  )}
+                  disabled={isPending}
+                  id="persona-description"
+                  maxLength={160}
+                  onChange={(event) => setAgentDescription(event.target.value)}
+                  placeholder="Turns ideas into finished work."
+                  value={agentDescription}
+                />
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Shown under the agent name on thumbnails.
+              </p>
             </div>
 
             <div className="space-y-1.5">

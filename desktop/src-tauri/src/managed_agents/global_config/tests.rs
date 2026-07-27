@@ -338,6 +338,7 @@ fn bare_record() -> ManagedAgentRecord {
         respond_to: RespondTo::OwnerOnly,
         respond_to_allowlist: vec![],
         display_name: None,
+        description: None,
         slug: None,
         runtime: None,
         name_pool: vec![],
@@ -357,6 +358,7 @@ fn persona(id: &str, model: Option<&str>, provider: Option<&str>) -> AgentDefini
     AgentDefinition {
         id: id.to_string(),
         display_name: "Test Persona".to_string(),
+        description: None,
         avatar_url: None,
         system_prompt: "".to_string(),
         runtime: None,
@@ -616,6 +618,7 @@ fn record_runtime_wins_over_persona_runtime_for_command_resolution() {
     let persona = AgentDefinition {
         id: "p1".to_string(),
         display_name: "Goose persona".to_string(),
+        description: None,
         avatar_url: None,
         system_prompt: "".to_string(),
         runtime: Some("goose".to_string()),

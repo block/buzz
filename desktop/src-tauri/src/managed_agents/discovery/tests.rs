@@ -277,6 +277,7 @@ fn persona_with_runtime(id: &str, runtime: Option<&str>) -> crate::managed_agent
     crate::managed_agents::AgentDefinition {
         id: id.to_string(),
         display_name: id.to_string(),
+        description: None,
         avatar_url: None,
         system_prompt: String::new(),
         runtime: runtime.map(str::to_string),
@@ -354,6 +355,7 @@ fn record_with(
         respond_to: Default::default(),
         respond_to_allowlist: vec![],
         display_name: None,
+        description: None,
         slug: None,
         runtime: runtime.map(str::to_string),
         name_pool: Vec::new(),

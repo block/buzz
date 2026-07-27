@@ -16,10 +16,10 @@ use crate::app_state::AppState;
 ///
 /// Field order MUST match the NIP-AP reference vectors (`docs/nips/NIP-AP.md`
 /// content body: `display_name, system_prompt, avatar_url, runtime, model,
-/// provider, name_pool`). serde emits fields in declaration order, so this
-/// order pins the exact content bytes and therefore the NIP-01 event id — a
-/// reorder here breaks cross-implementation interop. Guarded by
-/// `content_matches_nip_ap_vector`.
+/// provider, name_pool`; newer optional fields follow). serde emits fields in
+/// declaration order, so this order pins the exact content bytes and therefore
+/// the NIP-01 event id — a reorder here breaks cross-implementation interop.
+/// Guarded by `content_matches_nip_ap_vector`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersonaEventContent {
     pub display_name: String,
@@ -39,6 +39,10 @@ pub struct PersonaEventContent {
     pub provider: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub name_pool: Vec<String>,
+    /// Short presentation copy shown beneath the agent name. Appended after
+    /// the original NIP-AP fields so records without it keep identical bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     /// Definition-level defaults copied onto instances at creation
     /// (NIP-AP behavioral fields). Absent = defer to client defaults;
     /// `skip_serializing_if` keeps pre-revision hashes stable.
@@ -180,6 +184,7 @@ pub fn persona_from_event(event: &nostr::Event) -> Result<AgentDefinition, Strin
     Ok(AgentDefinition {
         id: d_tag.clone(),
         display_name: content.display_name,
+        description: content.description,
         avatar_url: content.avatar_url,
         system_prompt: content.system_prompt.unwrap_or_default(),
         runtime: content.runtime,
@@ -347,6 +352,7 @@ pub fn persona_event_content(record: &AgentDefinition) -> PersonaEventContent {
         model: record.model.clone(),
         provider: record.provider.clone(),
         name_pool: record.name_pool.clone(),
+        description: record.description.clone(),
         // NIP-AP behavioral defaults: live since the create-path unification
         // (B5) — carried on AgentDefinition in wire shape and copied verbatim.
         // Quad-absent records serialize identically to the reserved era, so

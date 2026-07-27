@@ -56,6 +56,7 @@ fn team_export_round_trip_preserves_team_and_excludes_member_memory() {
         AgentDefinition {
             id: "alice".to_string(),
             display_name: "Alice".to_string(),
+            description: None,
             avatar_url: None,
             system_prompt: "Alice prompt".to_string(),
             runtime: Some("goose".to_string()),
@@ -76,6 +77,7 @@ fn team_export_round_trip_preserves_team_and_excludes_member_memory() {
         AgentDefinition {
             id: "bob".to_string(),
             display_name: "Bob".to_string(),
+            description: None,
             avatar_url: None,
             system_prompt: "Bob prompt".to_string(),
             runtime: Some("goose".to_string()),
@@ -137,6 +139,7 @@ fn team_export_with_instance_and_memory_level_uses_supplied_entries() {
     let definitions = vec![AgentDefinition {
         id: "alice".to_string(),
         display_name: "Alice".to_string(),
+        description: None,
         avatar_url: None,
         system_prompt: "Alice prompt".to_string(),
         runtime: Some("goose".to_string()),
@@ -174,6 +177,7 @@ fn team_export_with_instance_and_memory_level_uses_supplied_entries() {
         pubkey: "a".repeat(64),
         name: "Alice".to_string(),
         display_name: None,
+        description: None,
         slug: None,
         persona_id: Some("alice".to_string()),
         private_key_nsec: String::new(),

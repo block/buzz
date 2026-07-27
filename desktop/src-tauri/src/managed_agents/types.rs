@@ -16,6 +16,9 @@ pub enum BackendKind {
 pub struct AgentDefinition {
     pub id: String,
     pub display_name: String,
+    /// Short presentation copy shown beneath the agent name in cards.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     pub avatar_url: Option<String>,
     pub system_prompt: String,
     /// Preferred ACP runtime ID (e.g., 'goose', 'claude', 'codex'). Determines which agent binary
@@ -125,6 +128,7 @@ impl AgentDefinition {
             respond_to: RespondTo::default(),
             respond_to_allowlist: Vec::new(),
             display_name: Some(self.display_name),
+            description: self.description,
             slug: Some(self.id),
             runtime: self.runtime,
             name_pool: self.name_pool,
@@ -153,6 +157,7 @@ impl ManagedAgentRecord {
                 .display_name
                 .clone()
                 .unwrap_or_else(|| self.name.clone()),
+            description: self.description.clone(),
             avatar_url: self.avatar_url.clone(),
             system_prompt: self.system_prompt.clone().unwrap_or_default(),
             runtime: self.runtime.clone(),
@@ -336,6 +341,10 @@ pub struct ManagedAgentRecord {
     /// from `AgentDefinition.display_name` (unified agent model, Phase 1A).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    /// Definition-owned one-line presentation copy. `None` for legacy and
+    /// definition-less records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     /// Stable definition slug — the former `AgentDefinition.id`. Key-less
     /// records (definitions not yet instantiated) publish kind:30175 at
     /// `d_tag = slug`, preserving the pre-merge event coordinates. `None` for

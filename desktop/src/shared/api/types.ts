@@ -759,6 +759,7 @@ export type UpdateManagedAgentInput = {
 export type AgentPersona = {
   id: string;
   displayName: string;
+  description: string | null;
   avatarUrl: string | null;
   systemPrompt: string;
   /** Preferred ACP runtime ID (e.g. "goose", "claude"). */
@@ -796,6 +797,7 @@ export type PersonaBehaviorInput = {
 
 export type CreatePersonaInput = {
   displayName: string;
+  description?: string;
   avatarUrl?: string;
   systemPrompt: string;
   runtime?: string;
@@ -809,6 +811,7 @@ export type CreatePersonaInput = {
 export type UpdatePersonaInput = {
   id: string;
   displayName: string;
+  description?: string;
   avatarUrl?: string;
   systemPrompt: string;
   runtime?: string;

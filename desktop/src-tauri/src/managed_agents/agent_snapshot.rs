@@ -210,7 +210,7 @@ pub fn build_snapshot(
             .display_name
             .clone()
             .unwrap_or_else(|| record.name.clone()),
-        about: None, // kind:0 `about` not yet surfaced in ManagedAgentRecord
+        about: record.description.clone(),
         avatar_data_url,
         avatar_url: avatar_url_ref,
     };
@@ -476,6 +476,7 @@ mod tests {
             pubkey: "deadbeef".to_string(),
             name: "Test Agent".to_string(),
             display_name: Some("Test Agent Display".to_string()),
+            description: Some("A portable test agent.".to_string()),
             persona_id: Some("SENTINEL_PERSONA_ID".to_string()), // MUST NOT appear in snapshot
             team_id: Some("SENTINEL_TEAM_ID".to_string()),       // MUST NOT appear in snapshot
             private_key_nsec: "nsec1secret".to_string(),         // MUST NOT appear in snapshot

@@ -102,6 +102,12 @@ with a TypeScript lookup table or an id comparison in a component.
    Edit. In Edit,
    selecting Custom command keeps its required command field beside the harness
    picker rather than hiding it in Advanced.
+10. **Agent card descriptions belong to definitions.** The editable one-line
+    description is persisted on `AgentDefinition`, projected through the
+    persona event/store compatibility view, and rendered by the shared
+    `AgentIdentityCard`. Legacy definitions fall back to the first instruction
+    sentence in `resolveAgentDescriptor`; do not infer descriptions separately
+    in individual card surfaces.
 
 ## The tests that enforce this
 

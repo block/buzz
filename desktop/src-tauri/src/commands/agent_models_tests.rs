@@ -386,6 +386,7 @@ fn model_discovery_ignores_stale_record_for_linked_agent() {
     let persona = crate::managed_agents::AgentDefinition {
         id: "persona-1".to_string(),
         display_name: "Persona".to_string(),
+        description: None,
         avatar_url: None,
         system_prompt: "You are a persona.".to_string(),
         runtime: Some("goose".to_string()),

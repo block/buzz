@@ -10,6 +10,7 @@ fn custom_persona(id: &str, display_name: &str) -> AgentDefinition {
     AgentDefinition {
         id: id.to_string(),
         display_name: display_name.to_string(),
+        description: None,
         avatar_url: Some("https://example.com/avatar.png".to_string()),
         system_prompt: "Custom prompt".to_string(),
         runtime: None,
@@ -39,6 +40,7 @@ fn merge_personas_adds_missing_built_ins() {
     assert!(records
         .iter()
         .any(|record| record.id == "builtin:fizz" && record.runtime.is_none()));
+    assert!(records.iter().all(|record| record.description.is_some()));
     let display_names: Vec<&str> = records
         .iter()
         .map(|record| record.display_name.as_str())
@@ -70,6 +72,7 @@ fn merge_personas_preserves_builtin_edits() {
     edited_builtin.is_builtin = true;
     edited_builtin.is_active = true;
     edited_builtin.system_prompt = "User-edited instructions".to_string();
+    edited_builtin.description = Some("My saved Fizz description.".to_string());
     edited_builtin.name_pool = vec!["User-edited name".to_string()];
     edited_builtin.env_vars =
         std::collections::BTreeMap::from([("USER_SETTING".to_string(), "value".to_string())]);
@@ -82,6 +85,7 @@ fn merge_personas_preserves_builtin_edits() {
         .find(|record| record.id == "builtin:fizz")
         .expect("fizz built-in should exist");
     assert_eq!(fizz.display_name, edited_builtin.display_name);
+    assert_eq!(fizz.description, edited_builtin.description);
     assert_eq!(fizz.system_prompt, edited_builtin.system_prompt);
     assert_eq!(fizz.name_pool, edited_builtin.name_pool);
     assert_eq!(fizz.env_vars, edited_builtin.env_vars);

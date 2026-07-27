@@ -12,6 +12,7 @@ fn local_in_app() -> AgentDefinition {
     AgentDefinition {
         id: UUID.to_string(),
         display_name: "Local".to_string(),
+        description: None,
         avatar_url: None,
         system_prompt: "local prompt".to_string(),
         runtime: Some("goose".to_string()),
@@ -37,6 +38,7 @@ fn inbound_for(d_tag: &str, display_name: &str) -> AgentDefinition {
     AgentDefinition {
         id: d_tag.to_string(),
         display_name: display_name.to_string(),
+        description: None,
         avatar_url: Some("https://example.com/a.png".to_string()),
         system_prompt: "remote prompt".to_string(),
         runtime: Some("acp".to_string()),
@@ -198,6 +200,7 @@ fn local_agent() -> ManagedAgentRecord {
         respond_to: crate::managed_agents::RespondTo::OwnerOnly,
         respond_to_allowlist: vec![],
         display_name: None,
+        description: None,
         slug: None,
         runtime: None,
         name_pool: Vec::new(),

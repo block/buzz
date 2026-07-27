@@ -10,6 +10,7 @@ fn definition(
     AgentDefinition {
         id: id.to_string(),
         display_name: "Test Definition".to_string(),
+        description: None,
         avatar_url: None,
         system_prompt: prompt.to_string(),
         runtime: None,
@@ -76,6 +77,7 @@ fn record(
         respond_to: RespondTo::OwnerOnly,
         respond_to_allowlist: vec![],
         display_name: None,
+        description: None,
         slug: None,
         runtime: None,
         name_pool: vec![],

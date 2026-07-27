@@ -203,6 +203,7 @@ mod tests {
             // Unified-model fields carry real values so the exclusion test
             // proves they are absent from the wire, not vacuously empty.
             display_name: Some("Display Name Secretish".to_string()),
+            description: None,
             slug: Some("sample-slug".to_string()),
             runtime: Some("goose".to_string()),
             name_pool: vec!["poolname".to_string()],

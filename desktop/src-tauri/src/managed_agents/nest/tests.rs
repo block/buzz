@@ -414,6 +414,7 @@ fn make_persona(id: &str, display_name: &str) -> AgentDefinition {
     AgentDefinition {
         id: id.to_string(),
         display_name: display_name.to_string(),
+        description: None,
         avatar_url: None,
         system_prompt: String::new(),
         runtime: None,
@@ -475,6 +476,7 @@ fn make_agent(name: &str, persona_id: Option<&str>) -> ManagedAgentRecord {
         respond_to_allowlist: vec![],
         env_vars: std::collections::BTreeMap::new(),
         display_name: None,
+        description: None,
         slug: None,
         runtime: None,
         name_pool: Vec::new(),
