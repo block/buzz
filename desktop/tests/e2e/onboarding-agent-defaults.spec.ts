@@ -552,6 +552,31 @@ test("defaults Back returns to harness setup", async ({ page }) => {
   await expect(page.getByTestId("onboarding-page-2")).toBeVisible();
 });
 
+test("skipping harness setup returns to setup, not the empty defaults step", async ({
+  page,
+}) => {
+  await installMockBridge(
+    page,
+    {
+      acpRuntimesCatalog: [
+        runtime("claude", "adapter_missing", { status: "unknown" }),
+        runtime("codex", "not_installed", { status: "unknown" }),
+      ],
+    },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+  await navigateToSetupPage(page);
+  await page.getByTestId("onboarding-setup-skip").click();
+  await expect(page.getByText("Join or create a community")).toBeVisible();
+
+  await page.getByTestId("welcome-setup-back").click();
+
+  await expect(page.getByTestId("onboarding-page-2")).toBeVisible();
+  await expect(page.getByTestId("onboarding-page-config")).toHaveCount(0);
+  await expect(page.getByTestId("onboarding-setup-next")).toBeDisabled();
+});
+
 test("defaults auto-selects the only ready visible harness", async ({
   page,
 }) => {

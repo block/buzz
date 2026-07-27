@@ -46,9 +46,11 @@ function formatHarnessLabel(runtime: AcpRuntimeCatalogEntry | undefined) {
 }
 
 function AgentDefaultsSection({
+  onNoReadyRuntimes,
   onPersistenceStateChange,
   readyRuntimeIds,
 }: {
+  onNoReadyRuntimes: () => void;
   onPersistenceStateChange: (state: {
     canComplete: boolean;
     flush: () => Promise<void>;
@@ -181,6 +183,17 @@ function AgentDefaultsSection({
     selectedRuntimeId,
   ]);
 
+  React.useEffect(() => {
+    if (configSurfaceLoading || runtimesQuery.isError) return;
+    if (effectiveReadyRuntimeIds.length > 0) return;
+    onNoReadyRuntimes();
+  }, [
+    configSurfaceLoading,
+    effectiveReadyRuntimeIds,
+    onNoReadyRuntimes,
+    runtimesQuery.isError,
+  ]);
+
   const flushPersistence = React.useCallback(
     () => coalescerRef.current?.flush() ?? Promise.resolve(),
     [],
@@ -304,6 +317,7 @@ export function DefaultConfigStep({
       <div className="flex w-full flex-1 items-center justify-center py-10">
         <div className="w-full max-w-[328px]">
           <AgentDefaultsSection
+            onNoReadyRuntimes={actions.returnToSetup}
             onPersistenceStateChange={setPersistenceState}
             readyRuntimeIds={readyRuntimeIds}
           />
