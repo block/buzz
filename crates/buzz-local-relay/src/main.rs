@@ -22,6 +22,7 @@ struct Config {
     peer_trust: Option<PathBuf>,
     artifacts: Option<PathBuf>,
     owner: Option<PublicKey>,
+    node_label: Option<String>,
 }
 
 impl Config {
@@ -41,6 +42,7 @@ impl Config {
             .ok()
             .map(PathBuf::from);
         let mut owner = std::env::var("BUZZ_LOCAL_RELAY_OWNER").ok();
+        let mut node_label = std::env::var("BUZZ_LOCAL_RELAY_NODE_LABEL").ok();
         let mut args = std::env::args().skip(1);
 
         while let Some(arg) = args.next() {
@@ -67,6 +69,9 @@ impl Config {
                 "--owner" => {
                     owner = Some(args.next().context("--owner requires a pubkey (hex)")?);
                 }
+                "--node-label" => {
+                    node_label = Some(args.next().context("--node-label requires a label")?);
+                }
                 "-h" | "--help" => {
                     print_help();
                     std::process::exit(0);
@@ -85,6 +90,9 @@ impl Config {
                 PublicKey::from_hex(&hex).with_context(|| format!("invalid owner pubkey {hex:?}"))
             })
             .transpose()?;
+        if owner.is_some() && node_label.is_none() {
+            bail!("--owner requires --node-label: declarations are node-scoped (n tag)");
+        }
         Ok(Self {
             bind_address,
             storage,
@@ -92,6 +100,7 @@ impl Config {
             peer_trust,
             artifacts,
             owner,
+            node_label,
         })
     }
 }
@@ -134,28 +143,34 @@ async fn main() -> anyhow::Result<()> {
     // specs/architecture/sovereign-sync-agreement-v0.1-draft.md).
     let store = Arc::new(EventStore::open(config.storage).await?);
     let peer_trust = match &config.owner {
-        Some(owner) => match admit_domain_from_journal(&store, owner).await? {
-            Some(entries) => {
-                tracing::info!(
-                    active_heads = entries.len(),
-                    "admit domain governed by journal declarations; peer-trust file ignored"
-                );
-                entries
+        Some(owner) => {
+            let node_label = config
+                .node_label
+                .as_deref()
+                .expect("owner requires node_label (validated at parse)");
+            match admit_domain_from_journal(&store, owner, node_label).await? {
+                Some(entries) => {
+                    tracing::info!(
+                        active_heads = entries.len(),
+                        "admit domain governed by journal declarations; peer-trust file ignored"
+                    );
+                    entries
+                }
+                None => {
+                    let entries = config
+                        .peer_trust
+                        .as_ref()
+                        .map(load_peer_trust)
+                        .transpose()?
+                        .unwrap_or_default();
+                    tracing::info!(
+                        entries = entries.len(),
+                        "no owner-signed admit declarations; bootstrap file config governs"
+                    );
+                    entries
+                }
             }
-            None => {
-                let entries = config
-                    .peer_trust
-                    .as_ref()
-                    .map(load_peer_trust)
-                    .transpose()?
-                    .unwrap_or_default();
-                tracing::info!(
-                    entries = entries.len(),
-                    "no owner-signed admit declarations; bootstrap file config governs"
-                );
-                entries
-            }
-        },
+        }
         None => config
             .peer_trust
             .as_ref()
@@ -260,7 +275,9 @@ Options:
   --artifacts DIR    Content-addressed artifact store (default: <data>.artifacts)
   --owner PUBKEY     Owner pubkey (hex); owner-signed admit declarations in the
                      journal then govern peer trust, and --peer-trust becomes
-                     bootstrap-only
+                     bootstrap-only (requires --node-label)
+  --node-label NAME  This node's label; only declarations n-tagged with it
+                     govern (journals replicate whole across nodes)
 
 Environment:
   BUZZ_LOCAL_RELAY_BIND_ADDR
@@ -268,6 +285,7 @@ Environment:
   BUZZ_LOCAL_RELAY_REQUIRE_AUTH
   BUZZ_LOCAL_RELAY_PEER_TRUST
   BUZZ_LOCAL_RELAY_ARTIFACTS
-  BUZZ_LOCAL_RELAY_OWNER"
+  BUZZ_LOCAL_RELAY_OWNER
+  BUZZ_LOCAL_RELAY_NODE_LABEL"
     );
 }

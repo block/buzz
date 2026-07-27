@@ -16,7 +16,18 @@
     "BUZZ_REPLICATION_STREAMS": "",
     // Source-controlled reader trust for exported streams; same shape as
     // BUZZ_REPLICATION_PEERS. Empty = nothing is drainable (fail closed).
-    "BUZZ_REPLICATION_READERS": ""
+    "BUZZ_REPLICATION_READERS": "",
+    // Owner identity anchor (pubkey hex). When set together with
+    // BUZZ_NODE_LABEL, owner-signed kind-30700 declaration heads in this
+    // node's journal govern peers/readers/streams per domain, and the
+    // BUZZ_REPLICATION_* vars above become bootstrap-only (consulted solely
+    // for domains with no declaration head). Identity, not policy — stable
+    // across deploys.
+    "BUZZ_OWNER_PUBKEY": "",
+    // This node's label. Only declarations n-tagged with it govern here:
+    // journals replicate whole, so one owner's declarations for different
+    // nodes coexist in every copy, and each node evaluates only its own.
+    "BUZZ_NODE_LABEL": ""
   },
   "durable_objects": {
     "bindings": [

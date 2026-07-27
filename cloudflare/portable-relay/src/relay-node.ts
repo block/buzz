@@ -18,6 +18,11 @@ import {
   type DenialCode,
 } from "./identity";
 import {
+  evaluateDeclarations,
+  KIND_SYNC_DECLARATION,
+  type DeclarationConfig,
+} from "./declarations";
+import {
   eventFromUnknown,
   filtersFromUnknown,
   ProtocolInputError,
@@ -29,9 +34,11 @@ import {
   READ_CURSOR_PREFIX,
   type ReplicationBatchWire,
   type ReplicationOutcomeWire,
+  type ReplicationPeerTrust,
   type ReplicationReadRequest,
   type ReplicationReceiptWire,
   type ReplicationRecordWire,
+  type StreamExport,
 } from "./replication";
 
 const DEFAULT_QUERY_LIMIT = 500;
@@ -280,7 +287,7 @@ export class RelayNode extends DurableObject<Env> {
       return { result: [] };
     }
     const source = records[0].source;
-    const trust = parsePeerTrust(this.env.BUZZ_REPLICATION_PEERS)[source];
+    const trust = this.#resolvedPeers()[source];
     if (trust === undefined) {
       return { denied: "peer_unbound" };
     }
@@ -314,10 +321,11 @@ export class RelayNode extends DurableObject<Env> {
    * rendezvous role: peers the operator has authorized as readers may drain
    * streams this node custodies, without the original source being online.
    *
-   * Reader trust (BUZZ_REPLICATION_READERS) and stream exports
-   * (BUZZ_REPLICATION_STREAMS) are operator configuration; cursors belong to
-   * this node's own cursor space, independent of the cursors records carried
-   * when they were ingested.
+   * Reader trust and stream exports are operator configuration — owner-signed
+   * declaration heads in this node's own journal when present, env bootstrap
+   * (BUZZ_REPLICATION_READERS / BUZZ_REPLICATION_STREAMS) otherwise; cursors
+   * belong to this node's own cursor space, independent of the cursors
+   * records carried when they were ingested.
    */
   readReplication(
     stableNodeKey: string,
@@ -329,12 +337,8 @@ export class RelayNode extends DurableObject<Env> {
     if ("denied" in verified) {
       return verified;
     }
-    const exported = parseStreamExports(this.env.BUZZ_REPLICATION_STREAMS)[
-      request.source
-    ];
-    const readers = parsePeerTrust(this.env.BUZZ_REPLICATION_READERS)[
-      request.source
-    ];
+    const exported = this.#resolvedStreams()[request.source];
+    const readers = this.#resolvedReaders()[request.source];
     if (exported === undefined || readers === undefined) {
       return { denied: "peer_unbound" };
     }
@@ -390,6 +394,53 @@ export class RelayNode extends DurableObject<Env> {
         caught_up: rows.length < scanLimit,
       },
     };
+  }
+
+  /**
+   * Owner-signed declaration heads evaluated into configuration. Without
+   * both anchors (BUZZ_OWNER_PUBKEY and BUZZ_NODE_LABEL) every domain is
+   * unclaimed and env bootstrap config governs, matching pre-declaration
+   * behavior. The node label keeps a replicated journal safe to evaluate
+   * everywhere: this node applies only heads n-tagged for it.
+   */
+  #ownerDeclarations(): DeclarationConfig {
+    const owner: string = this.env.BUZZ_OWNER_PUBKEY ?? "";
+    const nodeLabel: string = this.env.BUZZ_NODE_LABEL ?? "";
+    if (owner === "" || nodeLabel === "") {
+      return { peers: null, readers: null, streams: null };
+    }
+    // The LIKE clause is a coarse prefilter only (the kind number appears
+    // somewhere in the JSON); evaluateDeclarations re-checks kind and author.
+    const rows = Array.from(
+      this.#sql.exec<{ event_json: string } & Record<string, SqlStorageValue>>(
+        `SELECT event_json FROM event_journal
+         WHERE effective = 1 AND event_json LIKE ?`,
+        `%${KIND_SYNC_DECLARATION}%`,
+      ),
+    );
+    const events = rows.map((row) => JSON.parse(row.event_json) as Event);
+    return evaluateDeclarations(events, owner, nodeLabel);
+  }
+
+  #resolvedPeers(): Record<string, ReplicationPeerTrust> {
+    return (
+      this.#ownerDeclarations().peers ??
+      parsePeerTrust(this.env.BUZZ_REPLICATION_PEERS)
+    );
+  }
+
+  #resolvedReaders(): Record<string, ReplicationPeerTrust> {
+    return (
+      this.#ownerDeclarations().readers ??
+      parsePeerTrust(this.env.BUZZ_REPLICATION_READERS)
+    );
+  }
+
+  #resolvedStreams(): Record<string, StreamExport> {
+    return (
+      this.#ownerDeclarations().streams ??
+      parseStreamExports(this.env.BUZZ_REPLICATION_STREAMS)
+    );
   }
 
   #applyReplicationRecord(

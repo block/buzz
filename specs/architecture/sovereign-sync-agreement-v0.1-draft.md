@@ -191,16 +191,22 @@ Adapters derive operating configuration from declaration heads at defined
 evaluation points — the laptop adapter at process start, the Cloudflare
 adapter at each replication request. Three rules:
 
-1. **Owner anchor.** Only declaration heads authored by the node's owner
-   pubkey govern that node's configuration. The owner pubkey is the one
-   remaining bootstrap datum (laptop `--owner` / `BUZZ_LOCAL_RELAY_OWNER`,
-   Cloudflare `BUZZ_OWNER_PUBKEY`); it is identity, not policy, and stable
-   across deploys. Foreign declarations remain relationship halves — they
-   confer nothing without a matching owner half (invariant 5).
+1. **Owner anchor, node scope.** Only declaration heads authored by the
+   node's owner pubkey AND carrying an `n` tag equal to the node's own label
+   govern that node's configuration. Both anchors are bootstrap data (laptop
+   `--owner`/`--node-label`, Cloudflare `BUZZ_OWNER_PUBKEY`/`BUZZ_NODE_LABEL`);
+   they are identity, not policy, and stable across deploys. The `n` tag is
+   what keeps a replicated journal safe to evaluate everywhere: one owner's
+   declarations for different nodes coexist in every copy of the journal,
+   and each node evaluates only its own. A head without an `n` tag governs
+   no node's configuration (it can still be a relationship half). Foreign
+   declarations remain relationship halves — they confer nothing without a
+   matching owner half (invariant 5).
 2. **Per-domain precedence, wholesale.** The domains are `admit/*` (sink
-   peer trust), `export/*` (stream exports), and `read/*` (reader grants).
-   If the journal holds *any* owner-signed head in a domain — whatever its
-   status — the journal governs that domain entirely and file/env config
+   peer trust), `export/*` (stream exports), and `read/*` (reader grants),
+   each scoped to this node's label. If the journal holds *any* owner-signed
+   head in a domain for this node — whatever its status — the journal
+   governs that domain entirely and file/env config
    for the domain is ignored; only `status: "active"` heads confer trust.
    File/env is consulted solely when the journal holds no head in the
    domain (bootstrap). Revocation is therefore irreversible by fallback: a

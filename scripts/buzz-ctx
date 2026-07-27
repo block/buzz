@@ -19,6 +19,7 @@
 #   buzz-ctx fetch <sha256> [out]       # fetch + verify an artifact
 #   buzz-ctx agreement export <stream> <reader-pubkey>...  # declare (offer)
 #   buzz-ctx agreement admit <source> <principal> <pubkey>...  # sink trust half
+#   buzz-ctx agreement read <stream> <principal> <pubkey>...   # reader grant
 #   buzz-ctx agreement match <stream>   # evaluate the matched-pair rule
 #   buzz-ctx agreement list             # all declaration heads
 #   buzz-ctx agreement migrate          # sweep config files into declarations
@@ -103,6 +104,9 @@ case "${1:-}" in
     # Sync declarations per sovereign-sync-agreement-v0.1-draft.
     # Kind 30700 is PROVISIONAL pending upstream registry assignment.
     AGREEMENT_KIND=30700
+    # Declarations that govern a node's config are node-scoped via an n tag;
+    # BUZZ_CTX_NODE names the governed node (default: this laptop's label).
+    NODE_LABEL="${BUZZ_CTX_NODE:-ted-laptop}"
     sub="${2:?usage: buzz-ctx agreement export|match|list ...}"
     case "$sub" in
       export)
@@ -112,13 +116,14 @@ case "${1:-}" in
         selection="$(jq -e --arg s "$stream" '.[$s]' "$HOME_DIR/streams.json")"           || die "stream $stream not declared in streams.json"
         readers="$(printf '%s\n' "$@" | jq -R . | jq -sc 'map(["p", .])')"
         event="$(jq -n --arg pk "$PUBKEY" --arg d "export/$stream" \
+          --arg n "$NODE_LABEL" \
           --argjson sel "$selection" --argjson readers "$readers" \
           --arg ts "$(date +%s)" \
           '{pubkey:$pk, created_at:($ts|tonumber), kind:30700,
-            tags:([["d",$d]] + $readers),
+            tags:([["d",$d],["n",$n]] + $readers),
             content:({status:"active", selection:$sel, artifacts:"referenced"}|tojson)}')"
         post_event "$event"
-        echo "declared export/$stream (offer to: $*)"
+        echo "declared export/$stream on node $NODE_LABEL (offer to: $*)"
         ;;
       admit)
         # Destination-side half: which principal, under which verification
@@ -131,14 +136,33 @@ case "${1:-}" in
         [ $# -ge 1 ] || die "at least one verification pubkey required"
         keys="$(printf '%s\n' "$@" | jq -R . | jq -sc 'map(["p", .])')"
         event="$(jq -n --arg pk "$PUBKEY" --arg d "admit/$source_id" \
+          --arg n "$NODE_LABEL" \
           --arg principal "$principal" --argjson keys "$keys" \
           --arg ts "$(date +%s)" \
           '{pubkey:$pk, created_at:($ts|tonumber), kind:30700,
-            tags:([["d",$d]] + $keys),
+            tags:([["d",$d],["n",$n]] + $keys),
             content:({status:"active", principal:$principal,
                       retention:{keep:"journal"}}|tojson)}')"
         post_event "$event"
-        echo "declared admit/$source_id (principal $principal, $# key(s))"
+        echo "declared admit/$source_id on node $NODE_LABEL (principal $principal, $# key(s))"
+        ;;
+      read)
+        # Source-side reader grant: which principal may drain this exported
+        # stream from the governed node (the rendezvous-reader role).
+        stream="${3:?usage: buzz-ctx agreement read <stream> <principal> <reader-pubkey>...}"
+        principal="${4:?a stable principal label (e.g. did:buzz:node-c) is required}"
+        shift 4
+        [ $# -ge 1 ] || die "at least one reader pubkey required"
+        keys="$(printf '%s\n' "$@" | jq -R . | jq -sc 'map(["p", .])')"
+        event="$(jq -n --arg pk "$PUBKEY" --arg d "read/$stream" \
+          --arg n "$NODE_LABEL" \
+          --arg principal "$principal" --argjson keys "$keys" \
+          --arg ts "$(date +%s)" \
+          '{pubkey:$pk, created_at:($ts|tonumber), kind:30700,
+            tags:([["d",$d],["n",$n]] + $keys),
+            content:({status:"active", principal:$principal}|tojson)}')"
+        post_event "$event"
+        echo "declared read/$stream on node $NODE_LABEL (principal $principal, $# key(s))"
         ;;
       migrate)
         # Sweep bootstrap config files into owner-signed declarations, per
