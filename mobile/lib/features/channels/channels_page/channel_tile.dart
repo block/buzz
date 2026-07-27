@@ -200,14 +200,21 @@ class _ChannelTile extends ConsumerWidget {
                         onMarkRead?.call();
                         ref
                             .read(readStateProvider.notifier)
-                            .markContextRead(channel.id, ts);
+                            .markContextRead(
+                              channel.id,
+                              ts,
+                              clearForcedMessages: true,
+                            );
                         ref
                             .read(channelsProvider.notifier)
                             .clearObservedUnreadCoveredByRead(channel.id, ts);
                       } else {
                         ref
                             .read(readStateProvider.notifier)
-                            .markContextUnread(channel.id);
+                            .markContextUnread(
+                              channel.id,
+                              channelId: channel.id,
+                            );
                       }
                     }
                   },

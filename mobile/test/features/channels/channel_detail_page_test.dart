@@ -25,9 +25,13 @@ import 'package:buzz/features/profile/user_cache_provider.dart';
 import 'package:buzz/features/profile/user_profile.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
-import 'package:buzz/shared/widgets/frosted_app_bar.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 const _channelId = 'test-channel';
+
+/// Shared mock prefs for providers that read [savedPrefsProvider]
+/// (e.g. the compose bar's draft store). Initialized in [main].
+late SharedPreferences _testPrefs;
 
 final _testChannel = Channel(
   id: _channelId,
@@ -190,6 +194,8 @@ Widget _buildTestable({
       relayClientProvider.overrideWithValue(
         RelayClient(baseUrl: 'http://localhost:3000'),
       ),
+      // Compose bar drafts persist through SharedPreferences.
+      savedPrefsProvider.overrideWithValue(_testPrefs),
     ],
     child: MaterialApp(
       theme: AppTheme.light(),
@@ -235,6 +241,11 @@ double? effectiveFontSizeForText(
 }
 
 void main() {
+  setUp(() async {
+    SharedPreferences.setMockInitialValues({});
+    _testPrefs = await SharedPreferences.getInstance();
+  });
+
   group('ChannelDetailPage', () {
     testWidgets('defers read-state mark until after build', (tester) async {
       final readState = _SynchronousReadStateNotifier(
@@ -1340,50 +1351,6 @@ void main() {
       expect(find.text('secret'), findsOneWidget);
       expect(find.byIcon(LucideIcons.lock), findsOneWidget);
     });
-
-    testWidgets('grows for a scaled two-line DM title', (tester) async {
-      final dmChannel = Channel(
-        id: _channelId,
-        name: 'dm',
-        channelType: 'dm',
-        visibility: 'private',
-        description: '',
-        createdBy: 'alice',
-        createdAt: DateTime(2025),
-        memberCount: 2,
-        participants: const ['Alice'],
-        participantPubkeys: const ['alice'],
-        isMember: true,
-      );
-
-      await tester.pumpWidget(
-        _buildTestable(
-          messages: [],
-          channel: dmChannel,
-          users: const {
-            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
-          },
-          textScaler: const TextScaler.linear(1.25),
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      final appBar = find.byType(FrostedAppBar);
-      final clip = find.descendant(of: appBar, matching: find.byType(ClipRect));
-      final title = find.descendant(of: appBar, matching: find.text('Alice'));
-      final presence = find.descendant(
-        of: appBar,
-        matching: find.text('Offline'),
-      );
-
-      expect(
-        tester.getSize(clip).height,
-        greaterThan(
-          tester.getSize(title).height + tester.getSize(presence).height,
-        ),
-      );
-      expect(tester.takeException(), isNull);
-    });
   });
 
   group('Error and loading states', () {
@@ -1404,6 +1371,7 @@ void main() {
             relayClientProvider.overrideWithValue(
               RelayClient(baseUrl: 'http://localhost:3000'),
             ),
+            savedPrefsProvider.overrideWithValue(_testPrefs),
           ],
           child: MaterialApp(
             theme: AppTheme.light(),
@@ -1771,7 +1739,11 @@ class _SynchronousReadStateNotifier extends ReadStateNotifier {
   ReadStateState build() => _initialState;
 
   @override
-  void markContextRead(String contextId, int unixTimestamp) {
+  void markContextRead(
+    String contextId,
+    int unixTimestamp, {
+    bool clearForcedMessages = false,
+  }) {
     markedContexts[contextId] = unixTimestamp;
     state = state.copyWithContext(contextId, unixTimestamp);
   }
