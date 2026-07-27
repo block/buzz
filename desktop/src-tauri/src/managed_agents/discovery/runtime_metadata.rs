@@ -168,8 +168,7 @@ mod tests {
         // MCP extension install so pi loads the nest .pi/mcp.json.
         assert!(pi
             .adapter_install_commands
-            .iter()
-            .any(|c| *c == "pi install npm:pi-mcp-extension@1.5.0"));
+            .contains(&"pi install npm:pi-mcp-extension@1.5.0"));
         assert_eq!(pi.cli_install_instructions_url, "https://pi.dev");
         // Model/provider are pi-owned — Buzz must not inject them.
         assert!(pi.model_env_var.is_none());

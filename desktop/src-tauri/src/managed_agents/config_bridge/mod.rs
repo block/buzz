@@ -23,7 +23,7 @@ fn pi_mcp_write_target(
     workdir: Option<&std::path::Path>,
     nest: Option<&std::path::Path>,
 ) -> Option<std::path::PathBuf> {
-    if !runtime.is_some_and(|runtime| runtime.id == "pi") {
+    if runtime.is_none_or(|runtime| runtime.id != "pi") {
         return None;
     }
     let workdir = workdir?;
@@ -43,7 +43,7 @@ pub(crate) fn prepare_pi_workdir_mcp_json(
     nest: Option<&std::path::Path>,
     log_path: &std::path::Path,
 ) {
-    if !runtime.is_some_and(|runtime| runtime.id == "pi") {
+    if runtime.is_none_or(|runtime| runtime.id != "pi") {
         return;
     }
     let result = pi_mcp_write_target(runtime, workdir, nest)
