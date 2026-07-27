@@ -66,18 +66,31 @@ impl AgentRecord {
         self.auth_tag.is_some() && !self.private_key_nsec.is_empty()
     }
 
-    /// The container name for this agent.
+    /// The container name for this agent, as created by `spawner_pubkey`.
     ///
     /// Keyed on the owner pubkey prefix as well as the slug: slugs are chosen by
     /// clients and are only unique *per owner*, so two owners both naming an
     /// agent `fizz` must not collide into one container on a shared host.
-    pub fn container_name(&self) -> String {
+    ///
+    /// Keyed on the *spawner* too, because labels are spawner-scoped but names
+    /// are global to the Docker daemon. Without it, two spawners sharing a host
+    /// collide the moment an owner moves an agent from one to the other: the
+    /// old spawner still manages the container while the new one needs the same
+    /// name, and reclaiming it would force-remove a live agent belonging to
+    /// somebody else — twice over, since the first spawner then does the same.
+    pub fn container_name(&self, spawner_pubkey: &str) -> String {
         format!(
-            "buzz-agent-{}-{}",
-            &self.owner_pubkey[..12.min(self.owner_pubkey.len())],
+            "buzz-agent-{}-{}-{}",
+            short_pubkey(spawner_pubkey),
+            short_pubkey(&self.owner_pubkey),
             self.slug
         )
     }
+}
+
+/// First 12 hex characters of a pubkey, for use in Docker object names.
+fn short_pubkey(pubkey: &str) -> &str {
+    &pubkey[..12.min(pubkey.len())]
 }
 
 /// The serialized state file.
@@ -253,9 +266,23 @@ mod tests {
     fn container_names_are_scoped_per_owner() {
         // Slugs are client-chosen and only unique per owner. Two owners each
         // naming an agent "fizz" must not fight over one container.
+        let spawner = "s".repeat(64);
         let a = record(&"a".repeat(64), "fizz");
         let b = record(&"c".repeat(64), "fizz");
-        assert_ne!(a.container_name(), b.container_name());
+        assert_ne!(a.container_name(&spawner), b.container_name(&spawner));
+    }
+
+    #[test]
+    fn container_names_are_scoped_per_spawner() {
+        // The mutual-destruction case: an owner moves an agent from spawner A
+        // to spawner B on the same host. Unscoped names collide, and whichever
+        // spawner loses the race force-removes the other's live container to
+        // free the name — then the first does the same on its next pass.
+        let rec = record(&"a".repeat(64), "fizz");
+        assert_ne!(
+            rec.container_name(&"s".repeat(64)),
+            rec.container_name(&"t".repeat(64))
+        );
     }
 
     #[test]
