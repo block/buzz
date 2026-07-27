@@ -65,6 +65,35 @@ pub struct TaskMeta {
     /// tasks only — all prompt tasks install a steer channel regardless
     /// of the agent's name.
     pub steer_tx: Option<tokio::sync::mpsc::Sender<SteerRequest>>,
+    /// Owner-approved permission decisions for the in-flight turn.
+    ///
+    /// Decisions are matched to both `turn_id` and the ACP JSON-RPC request id
+    /// before the read loop may select `allow_once`.
+    pub permission_tx: Option<tokio::sync::mpsc::Sender<PermissionDecision>>,
+}
+
+/// One owner selection for an ACP `session/request_permission` request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionDecision {
+    pub request_id: serde_json::Value,
+    pub selection: PermissionSelection,
+}
+
+/// How an owner-selected ACP permission option is identified.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PermissionSelection {
+    /// Exact `optionId` copied from the current permission request.
+    OptionId(String),
+    /// Backward-compatible selection by ACP option kind.
+    Kind(String),
+}
+
+/// Failure to deliver an interactive permission decision to a live turn.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PermissionDecisionError {
+    NoActiveTurn,
+    StaleTurn,
+    Unavailable,
 }
 
 /// Agent-level model capabilities. Populated on first session creation.
@@ -263,6 +292,11 @@ fn apply_completed_before_control_signal(
 pub enum ControlSignal {
     /// Stop the current turn and drop its triggering batch.
     Cancel,
+    /// The agent already published an externally visible channel result, but
+    /// its ACP adapter did not finish `session/prompt` within the configured
+    /// compatibility grace. Stop the exact publishing turn, drop its already
+    /// satisfied batch, and report successful completion.
+    PublishedResult,
     /// Stop the current turn and requeue its triggering batch for a merged
     /// re-prompt framed as a **supersede**: the new request replaces the old.
     Interrupt,
@@ -510,6 +544,10 @@ pub struct PromptContext {
     pub max_turns_per_session: u32,
     /// Permission mode to apply after session creation. `Default` = skip.
     pub permission_mode: PermissionMode,
+    /// Whether ACP permission requests may select `allow_once`.
+    pub auto_approve_permissions: bool,
+    /// Whether owner-signed controls may resolve ACP permission requests.
+    pub interactive_permissions: bool,
     /// Agent identity — used to derive the NIP-AE conversation key at
     /// session creation for core injection.
     pub agent_keys: nostr::Keys,
@@ -659,6 +697,32 @@ impl AgentPool {
             .ok_or_else(|| SteerError::Transport("steer_tx not installed".into()))?;
         tx.try_send(request)
             .map_err(|e| SteerError::Transport(e.to_string()))
+    }
+
+    /// Deliver an owner-approved permission decision to one exact in-flight
+    /// turn. Matching the turn id prevents a delayed control frame from
+    /// authorizing a later turn in the same channel.
+    pub fn send_permission_decision(
+        &mut self,
+        channel_id: Uuid,
+        turn_id: &str,
+        decision: PermissionDecision,
+    ) -> Result<(), PermissionDecisionError> {
+        let Some(meta) = self
+            .task_map
+            .values_mut()
+            .find(|meta| meta.channel_id == Some(channel_id))
+        else {
+            return Err(PermissionDecisionError::NoActiveTurn);
+        };
+        if meta.turn_id != turn_id {
+            return Err(PermissionDecisionError::StaleTurn);
+        }
+        let Some(tx) = meta.permission_tx.as_ref() else {
+            return Err(PermissionDecisionError::Unavailable);
+        };
+        tx.try_send(decision)
+            .map_err(|_| PermissionDecisionError::Unavailable)
     }
 
     pub fn result_tx(&self) -> mpsc::UnboundedSender<PromptResult> {
@@ -824,7 +888,6 @@ async fn create_session_and_apply_model(
         ),
         agent_canvas,
     );
-
     let resp = agent
         .acp
         .session_new_full(
@@ -1241,6 +1304,7 @@ fn send_prompt_result(
     batch: Option<FlushBatch>,
 ) {
     agent.acp.clear_steer_rx();
+    agent.acp.clear_permission_rx();
     let _ = result_tx.send(PromptResult {
         agent,
         source,
@@ -1271,6 +1335,13 @@ pub async fn run_prompt_task(
     control_rx: Option<tokio::sync::oneshot::Receiver<ControlSignal>>,
     turn_id: String,
 ) {
+    agent
+        .acp
+        .set_auto_approve_permissions(ctx.auto_approve_permissions);
+    agent
+        .acp
+        .set_interactive_permissions(ctx.interactive_permissions);
+
     // Is this a channel prompt or a heartbeat?
     let source = match &batch {
         Some(b) => PromptSource::Channel(b.channel_id),
@@ -1576,7 +1647,6 @@ pub async fn run_prompt_task(
             "isNewSession": is_new_session,
         }),
     );
-
     if is_new_session {
         if let (PromptSource::Channel(cid), Some(ref initial_msg)) = (&source, &ctx.initial_message)
         {
@@ -1819,7 +1889,6 @@ pub async fn run_prompt_task(
             .collect(),
         None => prompt_sections.iter().map(String::as_str).collect(),
     };
-
     // When control_rx is Some (channel tasks), wrap the prompt in select! so
     // the main loop can cancel, interrupt, or rotate it. Heartbeats
     // (control_rx=None) take the simple await path — they are not controllable.
@@ -1848,6 +1917,8 @@ pub async fn run_prompt_task(
                 ) => result,
                 mode = rx => {
                     let control_signal = mode.unwrap_or(ControlSignal::Cancel);
+                    let published_result =
+                        matches!(control_signal, ControlSignal::PublishedResult);
                     // Land the model switch before any cancel/requeue work: setting
                     // `desired_model` here means the fresh session created by the
                     // requeued turn (busy) or the next turn (already-completed)
@@ -1878,7 +1949,11 @@ pub async fn run_prompt_task(
                                     observer_channel_id,
                                     &session_id,
                                     &turn_id,
-                                    Some(buzz_core::agent_turn_metric::StopReason::Cancelled),
+                                    Some(if published_result {
+                                        buzz_core::agent_turn_metric::StopReason::EndTurn
+                                    } else {
+                                        buzz_core::agent_turn_metric::StopReason::Cancelled
+                                    }),
                                 )
                                 .await;
                                 send_prompt_result(
@@ -1886,7 +1961,11 @@ pub async fn run_prompt_task(
                                     &turn_id,
                                     agent,
                                     source,
-                                    PromptOutcome::Cancelled,
+                                    if published_result {
+                                        PromptOutcome::Ok(StopReason::EndTurn)
+                                    } else {
+                                        PromptOutcome::Cancelled
+                                    },
                                     retry_batch,
                                 );
                                 return;
@@ -2991,8 +3070,12 @@ fn requeue_cancelled_batch(
     let reason = match signal {
         ControlSignal::Steer => CancelReason::Steer,
         ControlSignal::Interrupt | ControlSignal::SwitchModel(_) => CancelReason::Interrupt,
-        // Cancel/Rotate discard the batch — no merged re-prompt.
-        ControlSignal::Cancel | ControlSignal::Rotate => return None,
+        // Cancel/Rotate discard the batch — no merged re-prompt. PublishedResult
+        // also discards it because the agent's self-authored channel event is
+        // evidence that the triggering work already produced its visible result.
+        ControlSignal::Cancel | ControlSignal::Rotate | ControlSignal::PublishedResult => {
+            return None;
+        }
     };
     requeue_batch_if_queue(ctx, batch).map(|mut b| {
         b.cancel_reason = Some(reason);
@@ -3652,6 +3735,59 @@ mod tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
     use serde_json::json;
+
+    #[tokio::test]
+    async fn permission_decision_requires_exact_turn_and_delivers_once() {
+        let channel_id = Uuid::new_v4();
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        let (permission_tx, mut permission_rx) =
+            tokio::sync::mpsc::channel::<PermissionDecision>(1);
+        pool.task_map_mut().insert(
+            task_id,
+            TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                turn_id: "turn-current".to_string(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+                permission_tx: Some(permission_tx),
+            },
+        );
+
+        assert_eq!(
+            pool.send_permission_decision(
+                channel_id,
+                "turn-stale",
+                PermissionDecision {
+                    request_id: json!("request-1"),
+                    selection: PermissionSelection::Kind("allow_once".to_string()),
+                },
+            ),
+            Err(PermissionDecisionError::StaleTurn)
+        );
+
+        pool.send_permission_decision(
+            channel_id,
+            "turn-current",
+            PermissionDecision {
+                request_id: json!("request-1"),
+                selection: PermissionSelection::OptionId("allow-workspace".to_string()),
+            },
+        )
+        .expect("matching owner decision should be delivered");
+
+        let delivered = permission_rx
+            .recv()
+            .await
+            .expect("permission decision should arrive");
+        assert_eq!(delivered.request_id, json!("request-1"));
+        assert_eq!(
+            delivered.selection,
+            PermissionSelection::OptionId("allow-workspace".to_string())
+        );
+    }
 
     // These pin the initial_message dispatch path (run_prompt_task, ~line 855):
     // a legacy agent WITH a base_prompt must get [Base] prepended to the user
@@ -4466,6 +4602,7 @@ mod tests {
             ),
             (ControlSignal::Cancel, None),
             (ControlSignal::Rotate, None),
+            (ControlSignal::PublishedResult, None),
         ];
         let mut ctx = make_prompt_context_no_owner();
         ctx.dedup_mode = DedupMode::Queue;
@@ -4551,6 +4688,15 @@ mod tests {
                 name: "CancelDrainTimeout + Cancel drops the batch",
                 error: || AcpError::CancelDrainTimeout(CONTROL_CANCEL_GRACE),
                 signal: ControlSignal::Cancel,
+                expected_outcome: "CancelDrainTimeout",
+                batch_preserved: false,
+                expected_reason: None,
+                invalidate_all: false,
+            },
+            Case {
+                name: "CancelDrainTimeout + PublishedResult drops the satisfied batch",
+                error: || AcpError::CancelDrainTimeout(CONTROL_CANCEL_GRACE),
+                signal: ControlSignal::PublishedResult,
                 expected_outcome: "CancelDrainTimeout",
                 batch_preserved: false,
                 expected_reason: None,
@@ -5302,6 +5448,8 @@ mod tests {
             context_message_limit: 0,
             max_turns_per_session: 0,
             permission_mode: PermissionMode::Default,
+            auto_approve_permissions: true,
+            interactive_permissions: false,
             agent_keys: agent_keys.clone(),
             agent_owner_pubkey: owner_pubkey,
             memory_enabled: false,

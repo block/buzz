@@ -1,6 +1,7 @@
 import type {
   AgentActivityDescriptor,
   AgentActivityRenderClass,
+  AgentPermissionOption,
   ObserverEvent,
   PromptSection,
   ToolStatus,
@@ -12,6 +13,10 @@ import {
   normalizeToolStatus,
 } from "./agentSessionToolCatalog";
 import { classifyTool } from "./agentSessionToolClassifier";
+import {
+  describePermissionOutcome,
+  describePermissionRequest,
+} from "./agentSessionPermission";
 import { asRecord, asString, titleCase } from "./agentSessionUtils";
 import {
   describeTurnStarted,
@@ -171,85 +176,6 @@ function stringifyPayload(value: unknown) {
   }
 }
 
-function describePermissionRequest(payload: Record<string, unknown>) {
-  const params = asRecord(payload.params);
-  const title =
-    asString(params.title) ??
-    asString(params.message) ??
-    asString(params.reason) ??
-    "Permission requested";
-  const toolCallId =
-    asString(params.toolCallId) ?? asString(params.tool_call_id);
-  const options = Array.isArray(params.options)
-    ? params.options
-        .map((option) => {
-          const record = asRecord(option);
-          return (
-            asString(record.name) ??
-            asString(record.kind) ??
-            asString(record.optionId)
-          );
-        })
-        .filter((option): option is string => Boolean(option))
-    : [];
-  const detail: string[] = [];
-  if (title !== "Permission requested") detail.push(title);
-  if (toolCallId) detail.push(`Tool call: ${toolCallId}`);
-  if (options.length > 0) detail.push(`Options: ${options.join(", ")}`);
-
-  // Build optionId → kind map for outcome labeling on the response.
-  const optionNames = new Map<string, string>();
-  if (Array.isArray(params.options)) {
-    for (const option of params.options) {
-      const record = asRecord(option);
-      const optionId = asString(record.optionId);
-      const kind = asString(record.kind);
-      if (optionId && kind) {
-        optionNames.set(optionId, kind);
-      }
-    }
-  }
-
-  return {
-    title,
-    text: detail.join("\n"),
-    optionNames,
-    descriptor: {
-      renderClass: "permission" as const,
-      label: "Permission requested",
-      preview: title,
-      action: { verb: "Requested", object: title },
-      tone: "admin" as const,
-      operation: "session/request_permission",
-      object: title,
-      source: "acp" as const,
-      groupKey: "permission:request",
-    },
-  };
-}
-
-/**
- * Format a human-readable outcome label from a permission response.
- * kind values from ACP: allow_once, allow_always, reject_once, reject_always.
- * "reject_*" kinds are denials; anything else that is selected is an approval.
- */
-function describePermissionOutcome(
-  outcome: string,
-  optionId: string | null,
-  optionNames: Map<string, string>,
-): string {
-  if (outcome === "cancelled") {
-    return "Cancelled";
-  }
-  if (outcome === "selected" && optionId) {
-    const kind = optionNames.get(optionId) ?? optionId;
-    const isDenial = kind.startsWith("reject");
-    const verb = isDenial ? "Denied" : "Approved";
-    return `${verb} (${kind})`;
-  }
-  return outcome;
-}
-
 /**
  * Stable map key for a JSON-RPC id, which may be a string or a finite number
  * per the spec. Using JSON.stringify avoids collisions between the number 1 and
@@ -260,6 +186,12 @@ function jsonRpcId(value: unknown): string | null {
   if (typeof value === "string") return JSON.stringify(value);
   if (typeof value === "number" && Number.isFinite(value))
     return JSON.stringify(value);
+  return null;
+}
+
+function jsonRpcIdValue(value: unknown): string | number | null {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" && Number.isFinite(value)) return value;
   return null;
 }
 
@@ -408,6 +340,8 @@ function upsertLifecycleItem(
   ctx: TranscriptItemContext,
   acpSource?: string,
   descriptor?: AgentActivityDescriptor,
+  permissionRequestId?: string | number,
+  permissionOptions?: AgentPermissionOption[],
 ) {
   const existing = d.itemsById.get(id);
   if (existing?.type === "lifecycle") {
@@ -417,6 +351,8 @@ function upsertLifecycleItem(
       title,
       text: joinLifecycleText(existing.text, text),
       descriptor: descriptor ?? existing.descriptor,
+      permissionRequestId: permissionRequestId ?? existing.permissionRequestId,
+      permissionOptions: permissionOptions ?? existing.permissionOptions,
       channelId: ctx.channelId,
       turnId: ctx.turnId ?? existing.turnId,
       sessionId: ctx.sessionId ?? existing.sessionId,
@@ -434,6 +370,8 @@ function upsertLifecycleItem(
     text,
     timestamp,
     descriptor,
+    permissionRequestId,
+    permissionOptions,
     channelId: ctx.channelId,
     turnId: ctx.turnId,
     sessionId: ctx.sessionId,
@@ -792,7 +730,10 @@ export function processTranscriptEvent(
 
     if (method === "session/request_permission") {
       const request = describePermissionRequest(payload);
-      const itemId = `permission:${ch}:${event.turnId ?? event.seq}`;
+      const requestId = jsonRpcId(payload.id);
+      const itemId = `permission:${ch}:${event.turnId ?? event.seq}:${
+        requestId ?? event.seq
+      }`;
       upsertLifecycleItem(
         d,
         itemId,
@@ -803,10 +744,11 @@ export function processTranscriptEvent(
         ctx,
         "permission_request",
         request.descriptor,
+        jsonRpcIdValue(payload.id) ?? undefined,
+        request.permissionOptions,
       );
       // Index by JSON-RPC id so the response (acp_write with result.outcome,
       // no method) can correlate by id rather than by turn/seq.
-      const requestId = jsonRpcId(payload.id);
       if (requestId) {
         d.pendingPermissions = new Map(d.pendingPermissions);
         d.pendingPermissions.set(requestId, {

@@ -68,6 +68,12 @@ export type TranscriptItemIdentity = {
   channelId?: string | null;
 };
 
+export type AgentPermissionOption = {
+  optionId: string;
+  name: string;
+  kind: string;
+};
+
 export type TranscriptItem =
   | ({
       id: string;
@@ -109,6 +115,10 @@ export type TranscriptItem =
       text: string;
       /** Resolved outcome for permission items (e.g. "Approved (allow_once)", "Denied (reject_once)", "Cancelled"). */
       outcome?: string;
+      /** Raw ACP JSON-RPC id used for an exact interactive decision match. */
+      permissionRequestId?: string | number;
+      /** Exact options offered by the runtime for this live request. */
+      permissionOptions?: AgentPermissionOption[];
       timestamp: string;
       descriptor?: AgentActivityDescriptor;
       acpSource?: TranscriptAcpSource;

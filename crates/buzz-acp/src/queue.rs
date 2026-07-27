@@ -1171,6 +1171,21 @@ fn append_new_thread_reply_instruction(s: &mut String, event_id: &str) {
     ));
 }
 
+/// Append the destination instruction for an ordinary top-level DM response.
+///
+/// Omitting a reply anchor is not enough for every ACP runtime: an agent may
+/// still choose to thread a conversational response. State the main-timeline
+/// destination explicitly while preserving an explicit human request to open a
+/// thread.
+fn append_top_level_dm_reply_instruction(s: &mut String) {
+    s.push_str(
+        "\nIMPORTANT: This is a top-level DM message. For ordinary replies in \
+         this turn, use `buzz messages send` without `--reply-to` so the answer \
+         appears directly in the DM's main timeline. Only use `--reply-to` if \
+         the human explicitly asks for a threaded response.",
+    );
+}
+
 /// Decide whether a turn is human-facing for reply-anchor purposes.
 ///
 /// A turn is human-facing when the triggering sender is a human, OR a human
@@ -1275,6 +1290,8 @@ fn format_context_hints(
             if let Some(event_id) = reply_anchor {
                 append_reply_instruction(&mut s, event_id);
             }
+        } else {
+            append_top_level_dm_reply_instruction(&mut s);
         }
         s
     } else if let Some(ref root) = thread_tags.root_event_id {
@@ -1463,7 +1480,8 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
     //   - in a thread  → anchor to the thread ROOT (no depth-2 nesting)
     //   - top-level     → anchor to the triggering event (it becomes the root)
     // Agent↔agent turns get no forced anchor — deep nesting is intentional
-    // there. DMs are always 1:1 with a human, so they always anchor.
+    // there. Existing DM threads anchor to the triggering event; top-level DMs
+    // explicitly stay in the main timeline.
     let sender_pubkey = last_event.event.pubkey.to_hex();
     let reply_anchor = if is_dm {
         thread_tags
@@ -3972,9 +3990,10 @@ mod tests {
     }
 
     #[test]
-    fn test_reply_instruction_absent_for_dm_non_reply() {
+    fn test_top_level_dm_reply_instruction_stays_in_main_timeline() {
         let ch = Uuid::new_v4();
         let event = make_event("hey there");
+        let event_id = event.id.to_hex();
         let batch = FlushBatch {
             channel_id: ch,
             events: vec![BatchEvent {
@@ -3998,9 +4017,12 @@ mod tests {
             },
         )
         .join("\n\n");
+        assert!(prompt.contains("This is a top-level DM message"));
+        assert!(prompt.contains("without `--reply-to`"));
+        assert!(prompt.contains("directly in the DM's main timeline"));
         assert!(
-            !prompt.contains("--reply-to"),
-            "DM non-reply should NOT include reply instruction"
+            !prompt.contains(&format!("`--reply-to {}`", event_id)),
+            "top-level DM must not anchor to the triggering event"
         );
     }
 

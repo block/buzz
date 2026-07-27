@@ -57,6 +57,24 @@ export function BotActivityComposerAction({
     Boolean(singleWorkingAgent),
     singleWorkingAgent?.pubkey,
   );
+  const pendingPermission = React.useMemo(() => {
+    if (!singleWorkingAgent) return null;
+    const scoped = channelId
+      ? transcript.filter((item) => item.channelId === channelId)
+      : transcript;
+    for (let index = scoped.length - 1; index >= 0; index--) {
+      const item = scoped[index];
+      if (
+        item?.type === "lifecycle" &&
+        item.renderClass === "permission" &&
+        !item.outcome &&
+        item.permissionRequestId != null
+      ) {
+        return item;
+      }
+    }
+    return null;
+  }, [channelId, singleWorkingAgent, transcript]);
   const activityHeadlines = React.useMemo(() => {
     if (!singleWorkingAgent) {
       return [];
@@ -144,17 +162,21 @@ export function BotActivityComposerAction({
     profiles?.[agent.pubkey.toLowerCase()]?.avatarUrl ?? null;
   const selectedPubkey = openAgentSessionPubkey?.toLowerCase() ?? null;
   const triggerLabel =
-    workingAgents.length === 1
-      ? `${workingAgents[0]?.name ?? "Agent"} is working`
-      : `${workingAgents.length} agents working`;
+    pendingPermission && singleWorkingAgent
+      ? `${singleWorkingAgent.name} needs permission`
+      : workingAgents.length === 1
+        ? `${workingAgents[0]?.name ?? "Agent"} is working`
+        : `${workingAgents.length} agents working`;
   const isInline = variant === "inline";
   const visibleStatusLabel =
-    workingAgents.length === 1
-      ? `${workingAgents[0]?.name ?? "Agent"}: ${
-          activityHeadlines[headlineIndex % activityHeadlines.length] ??
-          "Working"
-        }`
-      : `${workingAgents[0]?.name ?? "Agent"} +${workingAgents.length - 1}`;
+    pendingPermission && singleWorkingAgent
+      ? `${singleWorkingAgent.name}: Approval required`
+      : workingAgents.length === 1
+        ? `${workingAgents[0]?.name ?? "Agent"}: ${
+            activityHeadlines[headlineIndex % activityHeadlines.length] ??
+            "Working"
+          }`
+        : `${workingAgents[0]?.name ?? "Agent"} +${workingAgents.length - 1}`;
 
   return (
     <Popover onOpenChange={setOpen} open={open}>
@@ -166,11 +188,17 @@ export function BotActivityComposerAction({
             isInline
               ? "h-7 min-w-0 gap-2 overflow-visible border-transparent bg-transparent px-0 text-xs font-semibold leading-none shadow-none hover:border-transparent hover:bg-transparent data-[state=open]:border-transparent data-[state=open]:bg-transparent"
               : "h-9 min-w-9 gap-1.5 px-2 text-xs",
+            pendingPermission ? "text-amber-700 dark:text-amber-400" : null,
           )}
           data-testid="bot-activity-composer-trigger"
           onBlur={closeWithDelay}
           onClick={() => {
             clearHoverTimer();
+            if (pendingPermission && singleWorkingAgent) {
+              setOpen(false);
+              onOpenAgentSession(singleWorkingAgent.pubkey, channelId);
+              return;
+            }
             setOpen((current) => !current);
           }}
           onFocus={() => setOpen(true)}

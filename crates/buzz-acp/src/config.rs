@@ -361,6 +361,21 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_NO_IGNORE_SELF")]
     pub no_ignore_self: bool,
 
+    /// Seconds to wait after observing a self-authored channel message before
+    /// closing the exact still-running turn that published it. 0 disables the
+    /// compatibility recovery.
+    ///
+    /// Some ACP adapters can successfully publish their externally visible
+    /// result and then fail to return `session/prompt`. The grace period lets
+    /// the adapter finish naturally first; an exact turn-id match prevents a
+    /// delayed timer from cancelling later work in the same channel.
+    #[arg(
+        long = "self-publish-completion-grace",
+        env = "BUZZ_ACP_SELF_PUBLISH_COMPLETION_GRACE",
+        default_value_t = 0
+    )]
+    pub self_publish_completion_grace_secs: u64,
+
     /// Maximum number of context messages to include for thread replies and DMs.
     /// Set to 0 to disable automatic context fetching. Max 100.
     #[arg(long, env = "BUZZ_ACP_CONTEXT_MESSAGE_LIMIT", default_value_t = 12,
@@ -437,6 +452,33 @@ pub struct CliArgs {
     )]
     pub permission_mode: PermissionMode,
 
+    /// Whether Buzz may answer ACP permission requests with `allow_once`.
+    ///
+    /// This preserves the historical harness behavior by default. A managed
+    /// runtime may enforce `false` when a headless community turn must never
+    /// substitute for interactive user consent.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_AUTO_APPROVE_PERMISSIONS",
+        default_value_t = true,
+        action = clap::ArgAction::Set
+    )]
+    pub auto_approve_permissions: bool,
+
+    /// Whether owner-signed observer controls may resolve ACP permission
+    /// requests interactively with `allow_once` or `reject_once`.
+    ///
+    /// Disabled by default so existing runtimes preserve their historical
+    /// behavior. Managed runtimes that disable auto-approval may enable this
+    /// owner-consent path without selecting a bypass permission mode.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_INTERACTIVE_PERMISSIONS",
+        default_value_t = false,
+        action = clap::ArgAction::Set
+    )]
+    pub interactive_permissions: bool,
+
     /// Inbound author gate: which authors' events the harness forwards.
     /// Modes: owner-only (default), allowlist, anyone, nobody.
     #[arg(
@@ -506,6 +548,9 @@ pub struct Config {
     pub dedup_mode: DedupMode,
     pub multiple_event_handling: MultipleEventHandling,
     pub ignore_self: bool,
+    /// Runtime compatibility recovery after a self-authored result publish.
+    /// 0 disables the recovery and preserves historical behavior.
+    pub self_publish_completion_grace_secs: u64,
     pub kinds_override: Option<Vec<u32>>,
     pub channels_override: Option<Vec<String>>,
     pub no_mention_filter: bool,
@@ -524,6 +569,10 @@ pub struct Config {
     pub model: Option<String>,
     /// Permission mode to apply after session creation. `Default` = skip.
     pub permission_mode: PermissionMode,
+    /// Whether ACP permission requests may select `allow_once`.
+    pub auto_approve_permissions: bool,
+    /// Whether owner-signed observer controls may resolve permission requests.
+    pub interactive_permissions: bool,
     /// Inbound author gate mode.
     pub respond_to: RespondTo,
     /// Validated allowlist of pubkey hex strings (used when respond_to == Allowlist).
@@ -616,7 +665,7 @@ pub(crate) fn normalize_agent_command_identity(command: &str) -> String {
 
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_agent_command_identity(command).as_str() {
-        "goose" => Some(vec!["acp".to_string()]),
+        "goose" | "devin" => Some(vec!["acp".to_string()]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
         _ => None,
@@ -982,6 +1031,7 @@ impl Config {
             dedup_mode: args.dedup,
             multiple_event_handling: args.multiple_event_handling,
             ignore_self: !args.no_ignore_self,
+            self_publish_completion_grace_secs: args.self_publish_completion_grace_secs,
             kinds_override: args.kinds,
             channels_override: args.channels,
             no_mention_filter: args.no_mention_filter,
@@ -993,6 +1043,8 @@ impl Config {
             memory_enabled: args.memory && !args.no_memory,
             model,
             permission_mode: args.permission_mode,
+            auto_approve_permissions: args.auto_approve_permissions,
+            interactive_permissions: args.interactive_permissions,
             respond_to: args.respond_to,
             respond_to_allowlist,
             allowed_respond_to,
@@ -1024,7 +1076,7 @@ impl Config {
             format!(" allowed_respond_to=[{}]", modes.join(","))
         };
         format!(
-            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
+            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} self_publish_completion_grace={}s context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} auto_approve_permissions={} interactive_permissions={} {}{}",
             self.relay_url,
             self.keys.public_key().to_hex(),
             self.agent_command,
@@ -1038,6 +1090,7 @@ impl Config {
             self.dedup_mode,
             self.multiple_event_handling,
             self.ignore_self,
+            self.self_publish_completion_grace_secs,
             self.context_message_limit,
             self.max_turns_per_session,
             self.presence_enabled,
@@ -1045,6 +1098,8 @@ impl Config {
             self.memory_enabled,
             self.model.as_deref().unwrap_or("(agent default)"),
             self.permission_mode,
+            self.auto_approve_permissions,
+            self.interactive_permissions,
             respond_to_detail,
             allowed_respond_to_detail,
         )
@@ -1351,6 +1406,7 @@ mod tests {
             dedup_mode: DedupMode::Queue,
             multiple_event_handling: MultipleEventHandling::Queue,
             ignore_self: true,
+            self_publish_completion_grace_secs: 0,
             kinds_override: None,
             channels_override: None,
             no_mention_filter: false,
@@ -1362,6 +1418,8 @@ mod tests {
             memory_enabled: true,
             model: None,
             permission_mode: PermissionMode::BypassPermissions,
+            auto_approve_permissions: true,
+            interactive_permissions: false,
             respond_to: RespondTo::Anyone,
             respond_to_allowlist: HashSet::new(),
             allowed_respond_to: Vec::new(),
@@ -1489,6 +1547,22 @@ mod tests {
         assert_eq!(
             normalize_agent_args("buzz-agent", vec!["acp".into()]),
             Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn normalizes_devin_args_to_native_acp_subcommand() {
+        assert_eq!(normalize_agent_args("devin", Vec::new()), vec!["acp"]);
+        assert_eq!(
+            normalize_agent_args("/usr/local/bin/devin", vec!["".into()]),
+            vec!["acp"]
+        );
+        assert_eq!(
+            normalize_agent_args(
+                "devin",
+                vec!["acp".into(), "--agent-type".into(), "review".into()]
+            ),
+            vec!["acp", "--agent-type", "review"]
         );
     }
 
@@ -2046,6 +2120,57 @@ channels = "ALL"
         let args = CliArgs::try_parse_from(["buzz-acp", "--private-key", &key, "--lazy-pool=true"]);
         assert!(args.is_err(), "bool flags do not take an explicit value");
         assert!(CliArgs::parse_from(["buzz-acp", "--private-key", &key, "--lazy-pool"]).lazy_pool);
+    }
+
+    #[test]
+    fn self_publish_completion_recovery_defaults_off_and_accepts_a_grace() {
+        let key = "0".repeat(64);
+        assert_eq!(
+            CliArgs::parse_from(["buzz-acp", "--private-key", &key])
+                .self_publish_completion_grace_secs,
+            0
+        );
+        assert_eq!(
+            CliArgs::parse_from([
+                "buzz-acp",
+                "--private-key",
+                &key,
+                "--self-publish-completion-grace",
+                "30",
+            ])
+            .self_publish_completion_grace_secs,
+            30
+        );
+    }
+
+    #[test]
+    fn permission_request_auto_approval_defaults_on_and_can_be_disabled() {
+        let key = "0".repeat(64);
+        assert!(CliArgs::parse_from(["buzz-acp", "--private-key", &key]).auto_approve_permissions);
+        assert!(
+            !CliArgs::parse_from([
+                "buzz-acp",
+                "--private-key",
+                &key,
+                "--auto-approve-permissions=false",
+            ])
+            .auto_approve_permissions
+        );
+    }
+
+    #[test]
+    fn interactive_permissions_default_off_and_can_be_enabled() {
+        let key = "0".repeat(64);
+        assert!(!CliArgs::parse_from(["buzz-acp", "--private-key", &key]).interactive_permissions);
+        assert!(
+            CliArgs::parse_from([
+                "buzz-acp",
+                "--private-key",
+                &key,
+                "--interactive-permissions=true",
+            ])
+            .interactive_permissions
+        );
     }
 
     #[test]

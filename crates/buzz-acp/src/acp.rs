@@ -132,6 +132,56 @@ fn build_initialize_params() -> serde_json::Value {
     })
 }
 
+#[cfg(test)]
+fn permission_option_id(
+    options: &[serde_json::Value],
+    approve: bool,
+) -> Result<(&str, bool), AcpError> {
+    if approve {
+        if let Some(option) = options
+            .iter()
+            .find(|option| option.get("kind").and_then(|kind| kind.as_str()) == Some("allow_once"))
+        {
+            let option_id = option["optionId"]
+                .as_str()
+                .ok_or_else(|| AcpError::Protocol("allow_once option missing optionId".into()))?;
+            return Ok((option_id, true));
+        }
+    }
+
+    let option = options
+        .iter()
+        .find(|option| option.get("kind").and_then(|kind| kind.as_str()) == Some("reject_once"))
+        .ok_or_else(|| {
+            AcpError::Protocol("no reject_once option available for permission response".into())
+        })?;
+    let option_id = option["optionId"]
+        .as_str()
+        .ok_or_else(|| AcpError::Protocol("reject_once option missing optionId".into()))?;
+    Ok((option_id, false))
+}
+
+fn permission_option_for_selection<'a>(
+    options: &'a [serde_json::Value],
+    selection: &crate::pool::PermissionSelection,
+) -> Option<(&'a str, &'a str)> {
+    options.iter().find_map(|option| {
+        let option_id = option.get("optionId")?.as_str()?;
+        let kind = option.get("kind")?.as_str()?;
+        // Interactive managed-runtime consent is deliberately one-shot.
+        // Never forward allow_always/reject_always, even if an owner-signed
+        // control names an exact persistent option offered by the runtime.
+        if !matches!(kind, "allow_once" | "reject_once") {
+            return None;
+        }
+        let matches = match selection {
+            crate::pool::PermissionSelection::OptionId(selected) => option_id == selected,
+            crate::pool::PermissionSelection::Kind(selected) => kind == selected,
+        };
+        matches.then_some((option_id, kind))
+    })
+}
+
 /// ACP client that owns an agent subprocess and communicates over its stdio.
 ///
 /// One `AcpClient` per agent process. Multiple sessions can be created on the
@@ -158,6 +208,16 @@ pub struct AcpClient {
     /// Guards against double-response if a timeout fires after the allow_once
     /// response was written but before `pending_permission_id` was cleared.
     permission_responded: bool,
+    /// Whether ACP permission requests may be approved with `allow_once`.
+    ///
+    /// Buzz historically auto-approves these requests. Managed runtimes may
+    /// disable that fallback so a headless community prompt cannot silently
+    /// stand in for user consent.
+    auto_approve_permissions: bool,
+    /// Whether owner-signed observer controls may resolve permission requests.
+    interactive_permissions: bool,
+    /// Per-turn channel for owner permission decisions.
+    permission_rx: Option<tokio::sync::mpsc::Receiver<crate::pool::PermissionDecision>>,
     /// The JSON-RPC id of the most recently sent `session/prompt` request.
     /// Used by [`cancel_with_cleanup`] to drain the correct response.
     /// Set in [`session_prompt_with_idle_timeout`]; consumed in [`cancel_with_cleanup`].
@@ -488,6 +548,9 @@ impl AcpClient {
             next_id: 0,
             pending_permission_id: None,
             permission_responded: false,
+            auto_approve_permissions: true,
+            interactive_permissions: false,
+            permission_rx: None,
             last_prompt_id: None,
             current_hard_deadline: None,
             observer: None,
@@ -503,6 +566,38 @@ impl AcpClient {
     pub fn set_observer(&mut self, observer: Option<ObserverHandle>, agent_index: usize) {
         self.observer = observer;
         self.observer_agent_index = Some(agent_index);
+    }
+
+    /// Control whether `session/request_permission` may select `allow_once`.
+    ///
+    /// When disabled, the client selects `reject_once` and never falls back to
+    /// an allow option. This is set from the managed runtime launch policy at
+    /// the start of every prompt.
+    pub fn set_auto_approve_permissions(&mut self, enabled: bool) {
+        self.auto_approve_permissions = enabled;
+    }
+
+    /// Control whether owner-signed observer controls may select an exact option
+    /// offered by the current permission request.
+    pub fn set_interactive_permissions(&mut self, enabled: bool) {
+        self.interactive_permissions = enabled;
+    }
+
+    /// Install the permission-decision channel for one prompt turn.
+    pub fn install_permission_rx(
+        &mut self,
+        rx: tokio::sync::mpsc::Receiver<crate::pool::PermissionDecision>,
+    ) {
+        debug_assert!(
+            self.permission_rx.is_none(),
+            "install_permission_rx: previous turn receiver was not cleared"
+        );
+        self.permission_rx = Some(rx);
+    }
+
+    /// Clear any permission receiver before the agent returns to the pool.
+    pub fn clear_permission_rx(&mut self) {
+        self.permission_rx = None;
     }
 
     /// Update metadata that will be attached to subsequent raw wire events.
@@ -706,6 +801,19 @@ impl AcpClient {
             self.current_hard_deadline = None;
             return Err(e);
         }
+        let prompt_dispatched_at = tokio::time::Instant::now();
+        self.observe(
+            "prompt_dispatched",
+            serde_json::json!({
+                "idleTimeoutSeconds": idle_timeout.as_secs(),
+                "maxDurationSeconds": max_duration.as_secs(),
+            }),
+        );
+        tracing::info!(
+            idle_timeout_secs = idle_timeout.as_secs(),
+            max_duration_secs = max_duration.as_secs(),
+            "ACP prompt dispatched"
+        );
 
         let result = self
             .read_until_response_with_idle_timeout(
@@ -716,6 +824,19 @@ impl AcpClient {
                 max_duration,
             )
             .await;
+        let elapsed_ms = prompt_dispatched_at.elapsed().as_millis() as u64;
+        self.observe(
+            "prompt_wait_finished",
+            serde_json::json!({
+                "elapsedMs": elapsed_ms,
+                "success": result.is_ok(),
+            }),
+        );
+        tracing::info!(
+            elapsed_ms,
+            success = result.is_ok(),
+            "ACP prompt wait finished"
+        );
 
         // On timeout errors, leave current_hard_deadline set so cancel_with_cleanup
         // can inherit the remaining budget. Clear it on all other outcomes.
@@ -1224,6 +1345,7 @@ impl AcpClient {
         let mut idle_deadline = now + idle_timeout;
         let mut hard_deadline = hard_deadline;
         let mut last_activity_at = now;
+        let mut first_activity_observed = false;
 
         loop {
             // Determine which deadline fires first BEFORE sleeping — this is
@@ -1411,6 +1533,15 @@ impl AcpClient {
                             continue;
                         }
                     };
+                    if !first_activity_observed {
+                        first_activity_observed = true;
+                        let elapsed_ms = now.elapsed().as_millis() as u64;
+                        self.observe(
+                            "prompt_first_activity",
+                            serde_json::json!({ "elapsedMs": elapsed_ms }),
+                        );
+                        tracing::info!(elapsed_ms, "ACP prompt produced first activity");
+                    }
                     self.observe("acp_read", msg.clone());
 
                     let activity_now = Instant::now();
@@ -1668,10 +1799,12 @@ impl AcpClient {
         }
     }
 
-    /// Auto-approve a `session/request_permission` request from the agent.
+    /// Respond to a `session/request_permission` request from the agent.
     ///
-    /// Finds the option with `kind == "allow_once"` and responds with its `optionId`.
-    /// If no `allow_once` option exists, falls back to `reject_once`.
+    /// When auto-approval is enabled, finds the option with
+    /// `kind == "allow_once"` and responds with its `optionId`. Otherwise it
+    /// selects `reject_once`. A missing allow option also falls back to
+    /// `reject_once`; a missing reject option is a protocol error.
     ///
     /// **Critical:** Never hardcode `optionId` — always find it dynamically by `kind`.
     ///
@@ -1699,39 +1832,79 @@ impl AcpClient {
             options.len()
         );
 
-        // Find allow_once by kind — NEVER hardcode optionId.
-        let allow_once = options
-            .iter()
-            .find(|opt| opt.get("kind").and_then(|k| k.as_str()) == Some("allow_once"));
+        // Auto-approval preserves the historical behavior for existing
+        // runtimes. Interactive mode waits only for an owner-signed control
+        // routed to this exact turn and request id. Any missing, stale, closed,
+        // or timed-out decision fails closed.
+        let selection = if self.auto_approve_permissions {
+            Some(crate::pool::PermissionSelection::Kind(
+                "allow_once".to_string(),
+            ))
+        } else if self.interactive_permissions {
+            self.wait_for_permission_decision(&id).await
+        } else {
+            None
+        };
 
-        let response = if let Some(opt) = allow_once {
-            let option_id = opt["optionId"]
-                .as_str()
-                .ok_or_else(|| AcpError::Protocol("allow_once option missing optionId".into()))?;
-            tracing::info!(
-                target: "acp::permission",
-                "auto-approving permission id={id} with allow_once optionId={option_id:?}"
-            );
+        // Owner controls carry an exact option ID. Validate it against this
+        // live request before returning it to the runtime. Any missing or
+        // unknown selection fails closed to reject_once.
+        let selected = selection
+            .as_ref()
+            .and_then(|selection| permission_option_for_selection(options, selection));
+        let (option_id, kind) = match selected {
+            Some(selected) => selected,
+            None => {
+                if selection.is_some() {
+                    tracing::warn!(
+                        target: "acp::permission",
+                        "permission selection did not match the current request — rejecting"
+                    );
+                }
+                permission_option_for_selection(
+                    options,
+                    &crate::pool::PermissionSelection::Kind("reject_once".to_string()),
+                )
+                .ok_or_else(|| {
+                    AcpError::Protocol(
+                        "no reject_once option available for permission response".into(),
+                    )
+                })?
+            }
+        };
+        let approved = !kind.starts_with("reject");
+
+        let response = if approved {
+            if self.auto_approve_permissions {
+                tracing::info!(
+                    target: "acp::permission",
+                    "auto-approving permission id={id} with {kind} optionId={option_id:?}"
+                );
+            } else {
+                tracing::info!(
+                    target: "acp::permission",
+                    "owner selected permission id={id} with {kind} optionId={option_id:?}"
+                );
+            }
             permission_response_selected(&id, option_id)
         } else {
-            // No allow_once — fall back to reject_once.
-            tracing::warn!(
-                target: "acp::permission",
-                "no allow_once option found in permission request id={id}, falling back to reject_once"
-            );
-            let reject = options
-                .iter()
-                .find(|opt| opt.get("kind").and_then(|k| k.as_str()) == Some("reject_once"));
-
-            if let Some(opt) = reject {
-                let option_id = opt["optionId"].as_str().unwrap_or("reject");
-                permission_response_selected(&id, option_id)
+            if self.auto_approve_permissions && selection.is_some() {
+                tracing::warn!(
+                    target: "acp::permission",
+                    "no allow_once option found in permission request id={id}, falling back to reject_once"
+                );
+            } else if self.interactive_permissions {
+                tracing::info!(
+                    target: "acp::permission",
+                    "owner rejected or did not resolve permission request id={id}"
+                );
             } else {
-                return Err(AcpError::Protocol(
-                    "no suitable permission option found (neither allow_once nor reject_once)"
-                        .into(),
-                ));
+                tracing::info!(
+                    target: "acp::permission",
+                    "rejecting permission request id={id} because auto-approval is disabled"
+                );
             }
+            permission_response_selected(&id, option_id)
         };
 
         // Write the response first, then mark as responded.
@@ -1752,6 +1925,58 @@ impl AcpClient {
         self.permission_responded = true;
         self.pending_permission_id = None;
         Ok(())
+    }
+
+    /// Wait for a decision that matches this ACP JSON-RPC request id.
+    ///
+    /// The receiver is scoped to one prompt turn. The hard turn deadline also
+    /// bounds this wait so an unattended prompt cannot stay parked forever.
+    async fn wait_for_permission_decision(
+        &mut self,
+        request_id: &serde_json::Value,
+    ) -> Option<crate::pool::PermissionSelection> {
+        let Some(deadline) = self.current_hard_deadline else {
+            tracing::warn!(
+                target: "acp::permission",
+                "interactive permission request has no hard deadline — rejecting"
+            );
+            return None;
+        };
+        let Some(rx) = self.permission_rx.as_mut() else {
+            tracing::warn!(
+                target: "acp::permission",
+                "interactive permission request has no owner decision channel — rejecting"
+            );
+            return None;
+        };
+
+        loop {
+            match tokio::time::timeout_at(deadline, rx.recv()).await {
+                Ok(Some(decision)) if decision.request_id == *request_id => {
+                    return Some(decision.selection);
+                }
+                Ok(Some(_)) => {
+                    tracing::debug!(
+                        target: "acp::permission",
+                        "ignoring permission decision for a different request id"
+                    );
+                }
+                Ok(None) => {
+                    tracing::warn!(
+                        target: "acp::permission",
+                        "permission decision channel closed — rejecting"
+                    );
+                    return None;
+                }
+                Err(_) => {
+                    tracing::info!(
+                        target: "acp::permission",
+                        "interactive permission request timed out — rejecting"
+                    );
+                    return None;
+                }
+            }
+        }
     }
 
     /// Parse `stopReason` from a `session/prompt` result value.
@@ -2109,6 +2334,109 @@ mod tests {
             .find(|opt| opt.get("kind").and_then(|k| k.as_str()) == Some("reject_once"));
         assert!(reject_once.is_some());
         assert_eq!(reject_once.unwrap()["optionId"].as_str(), Some("rej-x"));
+    }
+
+    #[test]
+    fn permission_policy_rejects_when_auto_approval_is_disabled() {
+        let options = serde_json::json!([
+            {"optionId": "reject-this", "kind": "reject_once"},
+            {"optionId": "allow-this", "kind": "allow_once"}
+        ]);
+        let options = options.as_array().unwrap();
+
+        let (option_id, approved) = permission_option_id(options, false).unwrap();
+
+        assert_eq!(option_id, "reject-this");
+        assert!(!approved);
+    }
+
+    #[test]
+    fn permission_policy_preserves_existing_allow_once_behavior_when_enabled() {
+        let options = serde_json::json!([
+            {"optionId": "reject-this", "kind": "reject_once"},
+            {"optionId": "allow-this", "kind": "allow_once"}
+        ]);
+        let options = options.as_array().unwrap();
+
+        let (option_id, approved) = permission_option_id(options, true).unwrap();
+
+        assert_eq!(option_id, "allow-this");
+        assert!(approved);
+    }
+
+    #[test]
+    fn permission_selection_resolves_exact_one_shot_option_id() {
+        let options = serde_json::json!([
+            {"optionId": "allow-once", "kind": "allow_once"},
+            {"optionId": "reject-this", "kind": "reject_once"}
+        ]);
+        let selection = crate::pool::PermissionSelection::OptionId("allow-once".to_string());
+
+        assert_eq!(
+            permission_option_for_selection(options.as_array().unwrap(), &selection),
+            Some(("allow-once", "allow_once"))
+        );
+    }
+
+    #[test]
+    fn permission_selection_rejects_persistent_options() {
+        let options = serde_json::json!([
+            {"optionId": "allow-once", "kind": "allow_once"},
+            {
+                "optionId": "allow-buzz-messages-in-workspace",
+                "kind": "allow_always"
+            },
+            {"optionId": "reject-always", "kind": "reject_always"},
+            {"optionId": "reject-this", "kind": "reject_once"}
+        ]);
+
+        for option_id in ["allow-buzz-messages-in-workspace", "reject-always"] {
+            let selection = crate::pool::PermissionSelection::OptionId(option_id.to_string());
+            assert_eq!(
+                permission_option_for_selection(options.as_array().unwrap(), &selection),
+                None,
+                "{option_id} must not be actionable"
+            );
+        }
+    }
+
+    #[test]
+    fn permission_selection_by_kind_rejects_persistent_options() {
+        let options = serde_json::json!([
+            {"optionId": "allow-always", "kind": "allow_always"},
+            {"optionId": "reject-this", "kind": "reject_once"}
+        ]);
+        let selection = crate::pool::PermissionSelection::Kind("allow_always".to_string());
+
+        assert_eq!(
+            permission_option_for_selection(options.as_array().unwrap(), &selection),
+            None
+        );
+    }
+
+    #[test]
+    fn permission_selection_rejects_unknown_option_id() {
+        let options = serde_json::json!([
+            {"optionId": "allow-once", "kind": "allow_once"},
+            {"optionId": "reject-this", "kind": "reject_once"}
+        ]);
+        let selection =
+            crate::pool::PermissionSelection::OptionId("not-offered-by-agent".to_string());
+
+        assert_eq!(
+            permission_option_for_selection(options.as_array().unwrap(), &selection),
+            None
+        );
+    }
+
+    #[test]
+    fn permission_policy_never_allows_when_reject_is_unavailable() {
+        let options = serde_json::json!([
+            {"optionId": "allow-this", "kind": "allow_once"}
+        ]);
+        let options = options.as_array().unwrap();
+
+        assert!(permission_option_id(options, false).is_err());
     }
 
     #[test]
@@ -2625,6 +2953,48 @@ mod tests {
             matches!(result, Err(AcpError::IdleTimeout(_))),
             "expected IdleTimeout, got {result:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn prompt_timing_observer_events_do_not_capture_prompt_content() {
+        let script = r#"IFS= read -r _line
+printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"stopReason":"end_turn"}}'"#;
+        let mut client = spawn_script(script).await;
+        let observer = crate::observer::ObserverHandle::in_process();
+        client.set_observer(Some(observer.clone()), 0);
+
+        let result = client
+            .session_prompt_with_idle_timeout(
+                "test-session",
+                "SENSITIVE_PROMPT_SENTINEL",
+                std::time::Duration::from_secs(1),
+                std::time::Duration::from_secs(5),
+            )
+            .await;
+        assert!(matches!(result, Ok(StopReason::EndTurn)));
+
+        let events = observer.snapshot();
+        for kind in [
+            "prompt_dispatched",
+            "prompt_first_activity",
+            "prompt_wait_finished",
+        ] {
+            assert!(
+                events.iter().any(|event| event.kind == kind),
+                "missing {kind} timing event"
+            );
+        }
+        let timing_payloads = events
+            .iter()
+            .filter(|event| event.kind.starts_with("prompt_"))
+            .map(|event| event.payload.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !timing_payloads.contains("SENSITIVE_PROMPT_SENTINEL"),
+            "timing telemetry must never include prompt content"
+        );
+        client.shutdown().await;
     }
 
     #[tokio::test]

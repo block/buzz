@@ -29,3 +29,24 @@ export async function switchManagedAgentModel(
     modelId,
   });
 }
+
+/**
+ * Resolve one live ACP permission request. The harness accepts only
+ * owner-signed, encrypted controls that match the exact channel, turn, and
+ * JSON-RPC request id, then verifies that optionId belongs to that request.
+ */
+export async function resolveManagedAgentPermission(
+  pubkey: string,
+  channelId: string,
+  turnId: string,
+  requestId: string | number,
+  optionId: string,
+): Promise<void> {
+  await sendAgentObserverControl(pubkey, {
+    type: "permission_decision",
+    channelId,
+    turnId,
+    requestId,
+    optionId,
+  });
+}

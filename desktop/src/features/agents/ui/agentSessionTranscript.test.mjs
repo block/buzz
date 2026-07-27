@@ -6,6 +6,7 @@ import {
   buildTranscriptDisplayBlocks,
   flattenDisplayBlocks,
 } from "./agentSessionTranscriptGrouping.ts";
+import { oneShotPermissionOptions } from "./agentSessionPermission.ts";
 import { formatToolTitle } from "./agentSessionToolCatalog.ts";
 
 const baseEvent = {
@@ -572,12 +573,20 @@ test("buildTranscript surfaces session/request_permission as a permission lifecy
       turnId: "turn-1",
       payload: {
         jsonrpc: "2.0",
+        id: 41,
         method: "session/request_permission",
         params: {
-          toolCallId: "tool-1",
-          title: "Confirm force-with-lease push to block/buzz.",
+          toolCall: {
+            toolCallId: "tool-1",
+            title: "Confirm force-with-lease push to block/buzz.",
+          },
           options: [
             { optionId: "allow_once", kind: "allow_once", name: "Allow" },
+            {
+              optionId: "allow_workspace",
+              kind: "allow_always",
+              name: "Always allow in this workspace",
+            },
             { optionId: "reject_once", kind: "reject_once", name: "Reject" },
           ],
         },
@@ -590,6 +599,41 @@ test("buildTranscript surfaces session/request_permission as a permission lifecy
   assert.equal(transcript[0].renderClass, "permission");
   assert.equal(transcript[0].title, "Permission requested");
   assert.match(transcript[0].text, /Confirm force-with-lease push/);
+  assert.equal(transcript[0].permissionRequestId, 41);
+  assert.deepEqual(transcript[0].permissionOptions, [
+    { optionId: "allow_once", kind: "allow_once", name: "Allow" },
+    {
+      optionId: "allow_workspace",
+      kind: "allow_always",
+      name: "Always allow in this workspace",
+    },
+    { optionId: "reject_once", kind: "reject_once", name: "Reject" },
+  ]);
+  assert.equal(transcript[0].channelId, "channel-1");
+  assert.equal(transcript[0].turnId, "turn-1");
+});
+
+test("interactive permission actions exclude persistent runtime choices", () => {
+  assert.deepEqual(
+    oneShotPermissionOptions([
+      { optionId: "allow_once", kind: "allow_once", name: "Allow once" },
+      {
+        optionId: "allow_workspace",
+        kind: "allow_always",
+        name: "Always allow in this workspace",
+      },
+      {
+        optionId: "reject_always",
+        kind: "reject_always",
+        name: "Always reject",
+      },
+      { optionId: "reject_once", kind: "reject_once", name: "Deny once" },
+    ]),
+    [
+      { optionId: "allow_once", kind: "allow_once", name: "Allow once" },
+      { optionId: "reject_once", kind: "reject_once", name: "Deny once" },
+    ],
+  );
 });
 
 test("buildTranscript stamps completedAt when a terminal tool update is inserted first", () => {
@@ -819,6 +863,22 @@ test("buildTranscript no-ops on a permission response with an unmatched id", () 
   assert.equal(item.outcome, undefined);
   assert.doesNotMatch(item.text ?? "", /Approved/);
   assert.doesNotMatch(item.text ?? "", /Denied/);
+});
+
+test("buildTranscript keeps multiple permission requests in one turn separate", () => {
+  const transcript = buildTranscript([
+    makePermissionRequest(1, "req-first"),
+    makePermissionResponse(2, "req-first", "selected", "allow_once"),
+    makePermissionRequest(3, "req-second"),
+    makePermissionResponse(4, "req-second", "selected", "reject_once"),
+  ]);
+
+  assert.equal(transcript.length, 2);
+  assert.notEqual(transcript[0].id, transcript[1].id);
+  assert.equal(transcript[0].type, "lifecycle");
+  assert.equal(transcript[0].outcome, "Approved (allow_once)");
+  assert.equal(transcript[1].type, "lifecycle");
+  assert.equal(transcript[1].outcome, "Denied (reject_once)");
 });
 
 test("buildTranscript appends Approved outcome for a numeric JSON-RPC id (selected allow_once)", () => {
