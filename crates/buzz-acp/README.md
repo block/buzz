@@ -9,7 +9,7 @@ Buzz Relay ──WS──→ buzz-acp ──stdio──→ Your Agent
                                        (send_message, etc.)
 ```
 
-Supports any agent that speaks [ACP](https://agentclientprotocol.com/) over stdio: **goose**, **codex** (via [codex-acp](https://github.com/agentclientprotocol/codex-acp)), and **claude code** (via [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)).
+Supports any agent that speaks [ACP](https://agentclientprotocol.com/) over stdio: **goose**, **codex** (via [codex-acp](https://github.com/agentclientprotocol/codex-acp)), **claude code** (via [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)), and **oh my pi** (via `omp acp` — [omp.sh](https://omp.sh/)).
 
 ## Prerequisites
 
@@ -97,6 +97,25 @@ buzz-acp
 
 Older installs that still expose `claude-code-acp` are also supported. `buzz-acp`
 treats both Claude ACP command names as the same zero-arg runtime.
+
+## Running with Oh My Pi
+
+[Oh My Pi](https://omp.sh/) (`omp`) is a single-binary, multi-provider CLI whose ACP server is the `omp acp` subcommand — no separate adapter. It resolves its own model and credentials from `~/.omp`, so you authenticate omp once (e.g. an Anthropic Max subscription) and Buzz just spawns it.
+
+```bash
+# Install omp (see https://omp.sh/)
+curl -fsSL https://omp.sh/install.sh | bash
+
+# Authenticate a provider once (interactive), e.g. Anthropic Max:
+#   omp   # then run /login and pick Anthropic
+
+# Run
+export BUZZ_ACP_AGENT_COMMAND="omp"   # args default to `acp`
+
+buzz-acp
+```
+
+Select a model with `--model` in `BUZZ_ACP_AGENT_ARGS` (e.g. `acp,--model,claude-opus-4-5`) or set a default in `~/.omp/agent/config.yml`.
 
 ## Configuration
 

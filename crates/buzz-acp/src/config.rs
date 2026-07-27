@@ -616,7 +616,8 @@ pub(crate) fn normalize_agent_command_identity(command: &str) -> String {
 
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_agent_command_identity(command).as_str() {
-        "goose" => Some(vec!["acp".to_string()]),
+        // Single-binary agents whose ACP server is a subcommand of the CLI.
+        "goose" | "omp" | "oh-my-pi" => Some(vec!["acp".to_string()]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
         _ => None,
@@ -1441,6 +1442,19 @@ mod tests {
     }
 
     #[test]
+    fn normalizes_omp_args_to_acp() {
+        // omp exposes its ACP server as `omp acp`, so args default to ["acp"].
+        assert_eq!(normalize_agent_args("omp", Vec::new()), vec!["acp"]);
+        assert_eq!(normalize_agent_args("omp", vec!["".into()]), vec!["acp"]);
+        assert_eq!(normalize_agent_args("omp", vec!["acp".into()]), vec!["acp"]);
+        assert_eq!(
+            normalize_agent_args("/usr/local/bin/omp", Vec::new()),
+            vec!["acp"]
+        );
+        assert_eq!(normalize_agent_args("Oh My Pi", Vec::new()), vec!["acp"]);
+    }
+
+    #[test]
     fn normalizes_codex_and_claude_args_to_empty() {
         assert_eq!(
             normalize_agent_args("codex-acp", Vec::new()),
@@ -1495,6 +1509,12 @@ mod tests {
     #[test]
     fn normalize_agent_command_identity_variants() {
         assert_eq!(normalize_agent_command_identity("goose"), "goose");
+        assert_eq!(normalize_agent_command_identity("omp"), "omp");
+        assert_eq!(
+            normalize_agent_command_identity("/Users/me/.bun/bin/omp"),
+            "omp"
+        );
+        assert_eq!(normalize_agent_command_identity("Oh My Pi"), "oh-my-pi");
         assert_eq!(
             normalize_agent_command_identity("C:\\Program Files\\Goose\\goose.exe"),
             "goose"
