@@ -30,10 +30,16 @@ pub(crate) async fn post_connect_setup(
         fetch_channel_members(ephemeral_channel_id, Some("bot"), state),
         fetch_channel_members(ephemeral_channel_id, None, state),
     );
-    if let Ok(agents) = agents_result {
+    let transcription_auto_enabled = if let Ok(agents) = agents_result {
         let mut hs = state.huddle()?;
         *hs.agent_pubkeys.lock().unwrap_or_else(|e| e.into_inner()) = agents;
-        hs.maybe_auto_enable_transcription_for_agents();
+        hs.maybe_auto_enable_transcription_for_agents()
+    } else {
+        false
+    };
+
+    if transcription_auto_enabled {
+        state.emit_huddle_state_changed();
     }
 
     if let Ok(all_members) = all_members_result {
