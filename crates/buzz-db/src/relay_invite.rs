@@ -152,6 +152,33 @@ fn log_claim_outcome(
     );
 }
 
+/// Maximum rows deleted by one retention sweep so cleanup cannot monopolize
+/// the invite table on a busy deployment.
+const RETENTION_SWEEP_BATCH_SIZE: i64 = 1_000;
+
+/// Delete one bounded batch of invite rows expired before `cutoff`.
+///
+/// The relay calls this from its leader-only periodic tick. Ordering by the
+/// expiry index makes old rows drain first without turning cleanup into an
+/// unbounded transaction.
+pub async fn reap_expired_relay_invites(pool: &PgPool, cutoff: DateTime<Utc>) -> Result<u64> {
+    let result = sqlx::query(
+        "DELETE FROM relay_invites \
+         WHERE (community_id, id) IN (\
+             SELECT community_id, id FROM relay_invites \
+             WHERE expires_at < $1 \
+             ORDER BY expires_at \
+             LIMIT $2\
+         )",
+    )
+    .bind(cutoff)
+    .bind(RETENTION_SWEEP_BATCH_SIZE)
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected())
+}
+
 /// Atomically claim a v2 relay invite.
 ///
 /// Executes the full redemption in one PostgreSQL transaction:
@@ -174,7 +201,7 @@ fn log_claim_outcome(
 pub async fn claim_relay_invite(
     pool: &PgPool,
     community: CommunityId,
-    token_hash: &[u8],
+    token_hash: &[u8; 32],
     claimer_pubkey: &str,
     policy_version: Option<&str>,
 ) -> Result<ClaimOutcome> {
@@ -204,7 +231,9 @@ pub async fn claim_relay_invite(
     let use_count: i32 = invite.try_get("use_count")?;
     let expires_at: DateTime<Utc> = invite.try_get("expires_at")?;
 
-    // 4. Expired check.
+    // Expiry is checked before membership deliberately. An expired bearer must
+    // not authorize fresh policy-acceptance evidence, even for an existing
+    // member; exhausted-but-live invites remain valid for idempotent retries.
     if expires_at <= Utc::now() {
         tx.rollback().await?;
         log_claim_outcome(
@@ -546,6 +575,44 @@ mod tests {
         assert_eq!(use_count(&pool, community_a, invite.invite_id).await, 0);
         delete_test_community(&pool, community_a).await;
         delete_test_community(&pool, community_b).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn retention_sweep_deletes_only_invites_older_than_cutoff() {
+        let pool = setup_pool().await;
+        let community = make_test_community(&pool).await;
+        let old = mint_relay_invite(&pool, community, "owner", 3600, Some(1))
+            .await
+            .expect("mint old invite");
+        let recent = mint_relay_invite(&pool, community, "owner", 3600, Some(1))
+            .await
+            .expect("mint recent invite");
+        let cutoff = Utc::now() - chrono::Duration::days(30);
+
+        sqlx::query("UPDATE relay_invites SET expires_at = $1 WHERE community_id = $2 AND id = $3")
+            .bind(cutoff - chrono::Duration::seconds(1))
+            .bind(community.as_uuid())
+            .bind(old.invite_id)
+            .execute(&pool)
+            .await
+            .expect("age old invite");
+
+        assert_eq!(
+            reap_expired_relay_invites(&pool, cutoff)
+                .await
+                .expect("reap expired invites"),
+            1
+        );
+        let remaining: Vec<Uuid> =
+            sqlx::query_scalar("SELECT id FROM relay_invites WHERE community_id = $1 ORDER BY id")
+                .bind(community.as_uuid())
+                .fetch_all(&pool)
+                .await
+                .expect("read remaining invites");
+        assert_eq!(remaining, vec![recent.invite_id]);
+
+        delete_test_community(&pool, community).await;
     }
 
     #[tokio::test]

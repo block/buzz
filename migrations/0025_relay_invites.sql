@@ -29,3 +29,5 @@ CREATE TABLE relay_invites (
     UNIQUE (community_id, token_hash),
     CHECK (max_uses IS NULL OR use_count <= max_uses)
 );
+
+CREATE INDEX relay_invites_expires_at_idx ON relay_invites (expires_at);

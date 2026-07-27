@@ -304,7 +304,10 @@ pub async fn mint_invite(
         .db
         .mint_relay_invite(tenant.community(), &sender_hex, ttl, max_uses)
         .await
-        .map_err(|e| internal_error(&format!("invite mint: {e}")))?;
+        .map_err(|error| match error {
+            buzz_db::DbError::InvalidData(message) => api_error(StatusCode::BAD_REQUEST, &message),
+            error => internal_error(&format!("invite mint: {error}")),
+        })?;
 
     // Same TLS-posture logic as nip98_expected_url: wss deployments get an
     // https landing page URL, ws dev/test deployments get http.

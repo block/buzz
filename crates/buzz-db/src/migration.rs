@@ -895,6 +895,8 @@ mod tests {
         );
         assert!(relay_invites.contains("CHECK (max_uses IS NULL OR use_count <= max_uses)"));
         assert!(relay_invites.contains("role = 'member'"));
+        assert!(relay_invites
+            .contains("CREATE INDEX relay_invites_expires_at_idx ON relay_invites (expires_at)"));
         assert!(!relay_invites.contains("_operator_global_tables"));
     }
 

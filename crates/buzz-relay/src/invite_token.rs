@@ -121,10 +121,11 @@ fn sign_payload(key: &[u8; 32], payload_bytes: &[u8]) -> Vec<u8> {
     mac.finalize().into_bytes().to_vec()
 }
 
-/// Mint an invite code for `community`, expiring `ttl_secs` from now.
+/// Mint a legacy v1 invite code for compatibility tests.
 ///
-/// The role is fixed to `"member"` — elevated roles are granted post-join via
-/// the existing kind:9032 change-role command, never via a bearer link.
+/// Production minting uses database-backed v2 codes. Remove this helper with
+/// v1 claim verification after the compatibility drain window.
+#[cfg(test)]
 pub fn mint_invite(key: &[u8; 32], community: CommunityId, ttl_secs: u64) -> (String, u64) {
     let ttl = ttl_secs.clamp(60, MAX_INVITE_TTL_SECS);
     let expires_at = now_unix() + ttl;

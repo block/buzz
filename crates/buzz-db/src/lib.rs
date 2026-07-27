@@ -3062,6 +3062,14 @@ impl Db {
         relay_invite::mint_relay_invite(&self.pool, community, created_by, ttl_secs, max_uses).await
     }
 
+    /// Delete one bounded batch of invites expired before `cutoff`.
+    pub async fn reap_expired_relay_invites(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64> {
+        relay_invite::reap_expired_relay_invites(&self.pool, cutoff).await
+    }
+
     /// Atomically claims a v2 relay invite. The full redemption (membership
     /// insert, policy evidence, use_count increment) runs in one PostgreSQL
     /// transaction with `FOR UPDATE` on the invite row.
@@ -3070,7 +3078,7 @@ impl Db {
     pub async fn claim_relay_invite(
         &self,
         community: CommunityId,
-        token_hash: &[u8],
+        token_hash: &[u8; 32],
         claimer_pubkey: &str,
         policy_version: Option<&str>,
     ) -> Result<relay_invite::ClaimOutcome> {

@@ -1426,6 +1426,20 @@ async fn run_usage_metrics_tick(
             *leader = None;
             return Err(error);
         }
+        let invite_retention_cutoff = chrono::Utc::now() - chrono::Duration::days(30);
+        match state
+            .db
+            .reap_expired_relay_invites(invite_retention_cutoff)
+            .await
+        {
+            Ok(deleted) if deleted > 0 => {
+                info!(deleted, "reaped expired relay invites");
+            }
+            Ok(_) => {}
+            Err(error) => {
+                warn!(error = %error, "failed to reap expired relay invites");
+            }
+        }
         run_storage_sweep_tick(state, emission_scope, &host_map).await;
     }
 
