@@ -334,9 +334,12 @@ Notes on the ladder:
   NOT let it change `unread` or `highPriority`. The ladder stays
   device-agnostic.
 - A client whose notification surface has no event graph (e.g. a server-built
-  activity feed) MUST still apply the channel dimension of this ladder: items
-  carrying a broadcast marker obey the level and `broadcasts`; direct mentions
-  pierce; everything else is suppressed while the channel resolves to `mute`.
+  activity feed) MUST still apply the channel dimension of this ladder, **in the
+  ladder's order**: a direct `p`-tag mention of self pierces first (row 2) —
+  including when the same item also carries a broadcast marker; only items
+  without such a mention fall to the broadcast-marker rows and obey the level
+  and `broadcasts`; everything else is suppressed while the channel resolves to
+  `mute`.
 
 Level changes apply at resolution time. A client MUST NOT re-notify already
 delivered events because a level changed, and MUST NOT retroactively re-tier

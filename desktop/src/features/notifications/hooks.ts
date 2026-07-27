@@ -454,6 +454,7 @@ export function useHomeFeedNotificationState(
           resolveChannelNotify(item.channelId),
           item.category === "mention",
           item.tags,
+          normalizedPubkey,
         )
       ) {
         continue;
@@ -489,6 +490,7 @@ export function useHomeFeedNotificationState(
     highPriorityChannelIds,
     isHomeActive,
     localUnreadFeedIds,
+    normalizedPubkey,
     readStateVersion,
     resolveChannelNotify,
     seenFeedIds,

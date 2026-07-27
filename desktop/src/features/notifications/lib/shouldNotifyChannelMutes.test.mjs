@@ -6,6 +6,7 @@ import {
   hasMentionForEvent,
   isHighPriorityEventForUser,
   notifyDecisionForEvent,
+  tagsMentionPubkey,
 } from "./shouldNotify.ts";
 import { resolveChannelNotifyState } from "./resolveChannelNotifyState.ts";
 
@@ -63,6 +64,22 @@ test("hasMentionForEvent: no p-tags returns false", () => {
 test("hasMentionForEvent: empty currentPubkey returns false", () => {
   const event = makeEvent([pTag(PUBKEY)]);
   assert.equal(hasMentionForEvent(event, ""), false);
+});
+
+test("tagsMentionPubkey: matches a p-tag case-insensitively", () => {
+  assert.equal(tagsMentionPubkey([pTag(PUBKEY)], PUBKEY), true);
+  assert.equal(tagsMentionPubkey([pTag(PUBKEY.toUpperCase())], PUBKEY), true);
+});
+
+test("tagsMentionPubkey: no p-tag for the reader returns false", () => {
+  assert.equal(tagsMentionPubkey([pTag(OTHER_PUBKEY)], PUBKEY), false);
+  assert.equal(tagsMentionPubkey([hTag(CHANNEL_ID)], PUBKEY), false);
+  assert.equal(tagsMentionPubkey([], PUBKEY), false);
+  assert.equal(tagsMentionPubkey(undefined, PUBKEY), false);
+});
+
+test("tagsMentionPubkey: an empty pubkey never matches", () => {
+  assert.equal(tagsMentionPubkey([pTag(PUBKEY)], ""), false);
 });
 
 test("top-level message in muted channel is suppressed", () => {
@@ -494,42 +511,123 @@ const feedState = (overrides = {}) => ({
 });
 
 test("allowsFeedItemForChannel: ordinary item is dropped only while muted", () => {
-  assert.equal(allowsFeedItemForChannel(feedState(), false, []), true);
+  assert.equal(allowsFeedItemForChannel(feedState(), false, [], PUBKEY), true);
   assert.equal(
-    allowsFeedItemForChannel(feedState({ level: "mentions" }), false, []),
+    allowsFeedItemForChannel(
+      feedState({ level: "mentions" }),
+      false,
+      [],
+      PUBKEY,
+    ),
     true,
   );
   assert.equal(
-    allowsFeedItemForChannel(feedState({ level: "mute" }), false, []),
+    allowsFeedItemForChannel(feedState({ level: "mute" }), false, [], PUBKEY),
     false,
   );
 });
 
 test("allowsFeedItemForChannel: a direct mention pierces the mute", () => {
   assert.equal(
-    allowsFeedItemForChannel(feedState({ level: "mute" }), true, []),
+    allowsFeedItemForChannel(feedState({ level: "mute" }), true, [], PUBKEY),
+    true,
+  );
+  assert.equal(
+    allowsFeedItemForChannel(
+      feedState({ level: "mute" }),
+      false,
+      [pTag(PUBKEY)],
+      PUBKEY,
+    ),
     true,
   );
 });
 
 test("allowsFeedItemForChannel: a notify-tag item obeys the level, not the mention exemption", () => {
   const tags = [["notify", "channel"]];
-  assert.equal(allowsFeedItemForChannel(feedState(), true, tags), true);
+  assert.equal(allowsFeedItemForChannel(feedState(), true, tags, PUBKEY), true);
   assert.equal(
-    allowsFeedItemForChannel(feedState({ level: "mentions" }), true, tags),
+    allowsFeedItemForChannel(
+      feedState({ level: "mentions" }),
+      true,
+      tags,
+      PUBKEY,
+    ),
     true,
   );
   assert.equal(
-    allowsFeedItemForChannel(feedState({ level: "mute" }), true, tags),
+    allowsFeedItemForChannel(feedState({ level: "mute" }), true, tags, PUBKEY),
     false,
   );
 });
 
 test("allowsFeedItemForChannel: the broadcasts opt-out drops notify-tag items", () => {
   assert.equal(
-    allowsFeedItemForChannel(feedState({ broadcasts: false }), true, [
-      ["notify", "here"],
-    ]),
+    allowsFeedItemForChannel(
+      feedState({ broadcasts: false }),
+      true,
+      [["notify", "here"]],
+      PUBKEY,
+    ),
     false,
   );
+});
+
+test("allowsFeedItemForChannel: a notify item that also p-tags the reader pierces the mute", () => {
+  const tags = [["notify", "channel"], pTag(PUBKEY)];
+  assert.equal(
+    allowsFeedItemForChannel(feedState({ level: "mute" }), true, tags, PUBKEY),
+    true,
+  );
+  // The relay's category is irrelevant — the p-tag alone carries the rung.
+  assert.equal(
+    allowsFeedItemForChannel(feedState({ level: "mute" }), false, tags, PUBKEY),
+    true,
+  );
+});
+
+test("allowsFeedItemForChannel: a notify item that also p-tags the reader survives the broadcasts opt-out", () => {
+  assert.equal(
+    allowsFeedItemForChannel(
+      feedState({ broadcasts: false }),
+      true,
+      [["notify", "here"], pTag(PUBKEY)],
+      PUBKEY,
+    ),
+    true,
+  );
+  assert.equal(
+    allowsFeedItemForChannel(
+      feedState({ level: "mute", broadcasts: false }),
+      true,
+      [["notify", "here"], pTag(PUBKEY)],
+      PUBKEY,
+    ),
+    true,
+  );
+});
+
+test("allowsFeedItemForChannel: a p-tag of somebody else does not pierce", () => {
+  assert.equal(
+    allowsFeedItemForChannel(
+      feedState({ level: "mute" }),
+      true,
+      [["notify", "channel"], pTag(OTHER_PUBKEY)],
+      PUBKEY,
+    ),
+    false,
+  );
+});
+
+test("allowsFeedItemForChannel: an empty reader pubkey keeps the notify gate", () => {
+  const tags = [["notify", "channel"], pTag(PUBKEY)];
+  assert.equal(
+    allowsFeedItemForChannel(feedState({ level: "mute" }), true, tags, ""),
+    false,
+  );
+  assert.equal(
+    allowsFeedItemForChannel(feedState({ broadcasts: false }), true, tags, ""),
+    false,
+  );
+  assert.equal(allowsFeedItemForChannel(feedState(), true, tags, ""), true);
 });

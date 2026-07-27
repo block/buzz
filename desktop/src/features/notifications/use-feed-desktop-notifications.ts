@@ -187,6 +187,7 @@ export function useFeedDesktopNotifications(
                 state,
                 item.category === "mention",
                 item.tags,
+                normalizedPubkey,
               )
             );
           })

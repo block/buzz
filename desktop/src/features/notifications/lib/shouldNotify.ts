@@ -9,16 +9,29 @@ import {
   type ResolvedChannelNotifyState,
 } from "@/features/notifications/lib/resolveChannelNotifyState";
 
+/**
+ * Whether `tags` carry a direct `p`-tag mention of `normalizedPubkey`. Tag
+ * values are compared case-insensitively; an empty pubkey never matches. Kept
+ * tags-only so both the event-shaped ladder and the tag-shaped feed predicate
+ * share one discrimination point.
+ */
+export function tagsMentionPubkey(
+  tags: string[][] | undefined,
+  normalizedPubkey: string,
+): boolean {
+  if (normalizedPubkey.length === 0) return false;
+  return (
+    tags?.some(
+      (tag) => tag[0] === "p" && tag[1]?.toLowerCase() === normalizedPubkey,
+    ) ?? false
+  );
+}
+
 export function hasMentionForEvent(
   event: RelayEvent,
   currentPubkey: string,
 ): boolean {
-  return (
-    currentPubkey.length > 0 &&
-    event.tags.some(
-      (tag) => tag[0] === "p" && tag[1]?.toLowerCase() === currentPubkey,
-    )
-  );
+  return tagsMentionPubkey(event.tags, currentPubkey);
 }
 
 /** Per-channel resolved notification state lookup, injected by the caller. */
@@ -150,19 +163,27 @@ export function notifyDecisionForEvent(
  * carries: its `notify` marker tags and whether the relay categorised it as a
  * mention.
  *
- * `@channel` / `@here` items obey the level and the broadcasts opt-out (NIP-CN
- * N7) instead of riding the mention exemption; a direct mention pierces the
- * mute exactly as it does in the ladder; anything else is suppressed while the
- * channel resolves to "mute".
+ * Evaluated in the ladder's order, first match wins:
+ *
+ * 1. a direct `p`-tag mention of `currentPubkey` pierces every level — even
+ *    when the same item also carries an `@channel` / `@here` marker;
+ * 2. otherwise `@channel` / `@here` items obey the level and the broadcasts
+ *    opt-out (NIP-CN N7) instead of riding the mention exemption;
+ * 3. otherwise a relay-categorised mention passes (the feed may know the item
+ *    is a mention without exposing the tags that prove it);
+ * 4. otherwise the item is suppressed while the channel resolves to "mute".
  *
  * `isMentionCategory` is passed in because the feed's category taxonomy is
- * spelled differently at different call sites.
+ * spelled differently at different call sites. `currentPubkey` must already be
+ * normalized (trimmed, lowercased) or "".
  */
 export function allowsFeedItemForChannel(
   state: ResolvedChannelNotifyState,
   isMentionCategory: boolean,
   tags: string[][] | undefined,
+  currentPubkey: string,
 ): boolean {
+  if (tagsMentionPubkey(tags, currentPubkey)) return true;
   if (eventNotifyMode(tags ?? []) !== null) {
     return state.level !== "mute" && state.broadcasts;
   }
