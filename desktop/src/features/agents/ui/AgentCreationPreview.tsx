@@ -38,31 +38,29 @@ import {
 } from "@/shared/ui/popover";
 import { Spinner } from "@/shared/ui/spinner";
 import { Tabs, TabsList, TabsTrigger } from "@/shared/ui/tabs";
-
-function isAvatarFileDrag(event: React.DragEvent<HTMLElement>) {
-  return Array.from(event.dataTransfer.types).includes("Files");
-}
-
-const AVATAR_APPLY_MOTION_TRANSITION = {
-  duration: 0.14,
-  ease: [0.23, 1, 0.32, 1],
-} as const;
-
-type AvatarTab = "image" | "emoji";
-
-type EmojiMartEmoji = {
-  native?: string;
-};
+import {
+  AVATAR_APPLY_MOTION_TRANSITION,
+  type AvatarTab,
+  type EmojiMartEmoji,
+  isAvatarFileDrag,
+} from "./AgentCreationPreview.utils";
 
 export function AgentCreationPreview({
+  assetLabel = "avatar",
   avatarUrl,
   disabled = false,
   hideEditControl = false,
   label,
   onClearAvatar,
+  onCommitAvatar,
   onUploadPendingChange,
   onSelectAvatar,
+  processImage,
+  shape = "circle",
+  testIdPrefix = "agent-avatar",
+  variant = "default",
 }: {
+  assetLabel?: string;
   avatarUrl: string | null;
   disabled?: boolean;
   /** When true, omit all upload/edit controls and render the avatar as a
@@ -71,8 +69,13 @@ export function AgentCreationPreview({
   hideEditControl?: boolean;
   label: string;
   onClearAvatar?: () => void;
+  onCommitAvatar?: (avatarUrl: string) => void;
   onUploadPendingChange?: (isPending: boolean) => void;
   onSelectAvatar: (avatarUrl: string) => void;
+  processImage?: (file: File) => Promise<string>;
+  shape?: "circle" | "rounded-square";
+  testIdPrefix?: string;
+  variant?: "compact" | "default";
 }) {
   const [isDragOverAvatar, setIsDragOverAvatar] = React.useState(false);
   const [isAvatarMenuOpen, setIsAvatarMenuOpen] = React.useState(false);
@@ -102,6 +105,11 @@ export function AgentCreationPreview({
   const emojiPickerContainerRef = React.useRef<HTMLDivElement | null>(null);
   const emojiMartThemeVars = useEmojiMartThemeVars();
   const { burstEmoji } = useEmojiBurst();
+  const assetLabelTitle =
+    assetLabel.charAt(0).toUpperCase() + assetLabel.slice(1);
+  const isRoundedSquare = shape === "rounded-square";
+  const isCompact = variant === "compact";
+  const emojiShape = isRoundedSquare ? "rounded-square" : "circle";
   const {
     inputRef: avatarUploadInputRef,
     isUploading,
@@ -111,10 +119,13 @@ export function AgentCreationPreview({
     uploadFile: uploadAvatarFile,
     handleFileChange: handleAvatarUploadFileChange,
   } = useAvatarUpload({
+    fallbackErrorMessage: `Could not use that ${assetLabel}.`,
     onUploadSuccess: (url) => {
       onSelectAvatar(url);
+      onCommitAvatar?.(url);
       setIsAvatarMenuOpen(false);
     },
+    processImage,
   });
 
   useEmojiMartStyles(
@@ -164,7 +175,11 @@ export function AgentCreationPreview({
     if (!isCustomColorPickerOpen || !selectedEmoji) {
       return;
     }
-    const nextAvatarUrl = emojiAvatarDataUrl(selectedEmoji, customColorDraft);
+    const nextAvatarUrl = emojiAvatarDataUrl(
+      selectedEmoji,
+      customColorDraft,
+      emojiShape,
+    );
     if (avatarUrl === nextAvatarUrl) {
       return;
     }
@@ -175,6 +190,7 @@ export function AgentCreationPreview({
     isCustomColorPickerOpen,
     onSelectAvatar,
     selectedEmoji,
+    emojiShape,
   ]);
 
   function applyAvatarUrl() {
@@ -184,12 +200,20 @@ export function AgentCreationPreview({
     }
     clearUploadError();
     onSelectAvatar(nextUrl);
+    onCommitAvatar?.(nextUrl);
     setIsAvatarMenuOpen(false);
   }
 
   function applyEmojiAvatar(emoji: string, color = selectedColor) {
-    onSelectAvatar(emojiAvatarDataUrl(emoji, color));
+    const nextAvatarUrl = emojiAvatarDataUrl(emoji, color, emojiShape);
+    onSelectAvatar(nextAvatarUrl);
+    onCommitAvatar?.(nextAvatarUrl);
     setSquishKey((key) => key + 1);
+  }
+
+  function clearAvatar() {
+    onClearAvatar?.();
+    onCommitAvatar?.("");
   }
 
   function handleColorSelect(swatch: AvatarColorSwatch) {
@@ -385,7 +409,7 @@ export function AgentCreationPreview({
     >
       {/* Single drop zone covering the entire popover */}
       <fieldset
-        aria-label="Avatar picker"
+        aria-label={`${assetLabelTitle} picker`}
         className={cn(
           "relative m-0 rounded-lg border-2 border-transparent p-0 transition-[border-color,background-color] duration-150",
           isPopoverDragOver && "border-dashed border-primary bg-primary/5",
@@ -507,12 +531,12 @@ export function AgentCreationPreview({
                 className="flex min-h-8 w-full items-center justify-center rounded-lg text-xs text-destructive outline-hidden transition-colors duration-150 ease-out hover:bg-destructive/10 focus-visible:bg-destructive/10 focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50"
                 disabled={disabled || isUploading}
                 onClick={() => {
-                  onClearAvatar();
+                  clearAvatar();
                   setIsAvatarMenuOpen(false);
                 }}
                 type="button"
               >
-                Remove avatar
+                Remove {assetLabel}
               </button>
             ) : null}
           </div>
@@ -624,7 +648,7 @@ export function AgentCreationPreview({
                 setCustomValue(nextValue);
               }}
               saturation={customSaturation}
-              testIdPrefix="agent-avatar"
+              testIdPrefix={testIdPrefix}
               value={customValue}
               visible={isCustomColorPickerVisible}
             />
@@ -634,13 +658,13 @@ export function AgentCreationPreview({
                 className="flex min-h-8 w-full items-center justify-center rounded-lg text-xs text-destructive outline-hidden transition-colors duration-150 ease-out hover:bg-destructive/10 focus-visible:bg-destructive/10 focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50"
                 disabled={disabled}
                 onClick={() => {
-                  onClearAvatar();
+                  clearAvatar();
                   setSelectedEmoji(null);
                   setIsAvatarMenuOpen(false);
                 }}
                 type="button"
               >
-                Remove avatar
+                Remove {assetLabel}
               </button>
             ) : null}
           </div>
@@ -653,24 +677,60 @@ export function AgentCreationPreview({
   // Used when the caller provides its own edit affordance.
   if (hideEditControl) {
     return (
-      <div className="mx-auto w-full max-w-[220px] lg:sticky lg:top-0">
-        <div className="group/avatar-preview relative m-0 flex min-h-[190px] min-w-0 flex-col items-center justify-center gap-3 rounded-xl border border-transparent p-0">
-          <div className="relative h-36 w-36">
+      <div
+        className={cn(
+          "w-full",
+          isCompact ? "w-auto" : "mx-auto max-w-[220px] lg:sticky lg:top-0",
+        )}
+      >
+        <div
+          className={cn(
+            "group/avatar-preview relative m-0 flex min-w-0 flex-col items-center justify-center rounded-xl border border-transparent p-0",
+            isCompact ? "min-h-0" : "min-h-[190px] gap-3",
+          )}
+        >
+          <div
+            className={cn("relative", isCompact ? "h-16 w-16" : "h-36 w-36")}
+          >
             {emojiAvatarPreview ? (
               <div
-                aria-label={`${label} avatar`}
-                className="relative flex h-full w-full shrink-0 items-center justify-center overflow-hidden rounded-full shadow-xs transition-[background-color] duration-200 ease-out"
+                aria-label={`${label} ${assetLabel}`}
+                className={cn(
+                  "relative flex h-full w-full shrink-0 items-center justify-center overflow-hidden shadow-xs transition-[background-color] duration-200 ease-out",
+                  isRoundedSquare
+                    ? isCompact
+                      ? "rounded-2xl"
+                      : "rounded-[2rem]"
+                    : "rounded-full",
+                )}
                 role="img"
                 style={{ backgroundColor: emojiAvatarPreview.color }}
               >
-                <span className="flex h-full w-full items-center justify-center text-[4rem] leading-none">
+                <span
+                  className={cn(
+                    "flex h-full w-full items-center justify-center leading-none",
+                    isCompact ? "text-2xl" : "text-[4rem]",
+                  )}
+                >
                   {emojiAvatarPreview.emoji}
                 </span>
               </div>
+            ) : isRoundedSquare && avatarUrl ? (
+              <img
+                alt={`${label} ${assetLabel}`}
+                className={cn(
+                  "h-full w-full object-cover shadow-xs",
+                  isCompact ? "rounded-2xl" : "rounded-[2rem]",
+                )}
+                src={avatarUrl}
+              />
             ) : (
               <ProfileAvatar
                 avatarUrl={avatarUrl}
-                className="h-full w-full text-4xl"
+                className={cn(
+                  "h-full w-full",
+                  isCompact ? "text-base" : "text-4xl",
+                )}
                 label={label}
               />
             )}
@@ -681,11 +741,17 @@ export function AgentCreationPreview({
   }
 
   return (
-    <div className="mx-auto w-full max-w-[220px] lg:sticky lg:top-0">
+    <div
+      className={cn(
+        "w-full",
+        isCompact ? "w-auto" : "mx-auto max-w-[220px] lg:sticky lg:top-0",
+      )}
+    >
       <fieldset
-        aria-label="Agent avatar preview"
+        aria-label={`${assetLabelTitle} preview`}
         className={cn(
-          "group/avatar-preview relative m-0 flex min-h-[190px] min-w-0 flex-col items-center justify-center gap-3 rounded-xl border border-transparent p-0 transition-[background-color,border-color,box-shadow] duration-150",
+          "group/avatar-preview relative m-0 flex min-w-0 flex-col items-center justify-center rounded-xl border border-transparent p-0 transition-[background-color,border-color,box-shadow] duration-150",
+          isCompact ? "min-h-0" : "min-h-[190px] gap-3",
           isDragOverAvatar &&
             !isAvatarMenuOpen &&
             "border-dashed border-primary/70 bg-primary/5 ring-2 ring-primary/15",
@@ -705,37 +771,146 @@ export function AgentCreationPreview({
 
         <Popover open={isAvatarMenuOpen} onOpenChange={setIsAvatarMenuOpen}>
           <PopoverAnchor asChild>
-            <div className="relative h-36 w-36">
-              {hasAvatar ? (
+            <div
+              className={cn("relative", isCompact ? "h-16 w-16" : "h-36 w-36")}
+            >
+              {hasAvatar && isRoundedSquare ? (
                 <MaskedAvatarBadgeFrame
                   badge={
                     <PopoverTrigger asChild>
                       <button
-                        aria-label="Edit avatar"
-                        className="flex h-9 w-9 items-center justify-center rounded-full bg-sidebar-active text-sidebar-active-foreground shadow-lg transition-[background-color,scale] duration-150 ease-out hover:scale-[1.04] hover:bg-sidebar-active focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-default disabled:opacity-90 disabled:hover:scale-100"
+                        aria-label={`Edit ${assetLabel}`}
+                        className={cn(
+                          "flex items-center justify-center rounded-full bg-sidebar-active text-sidebar-active-foreground shadow-lg transition-[background-color,scale] duration-150 ease-out hover:scale-[1.04] hover:bg-sidebar-active focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-default disabled:opacity-90 disabled:hover:scale-100",
+                          isCompact ? "h-6 w-6" : "h-9 w-9",
+                        )}
                         disabled={disabled || isUploading}
-                        title="Edit avatar"
+                        title={`Edit ${assetLabel}`}
                         type="button"
                       >
                         {isUploading ? (
                           <Spinner
-                            aria-label="Uploading avatar"
-                            className="h-4 w-4 border-2"
+                            aria-label={`Uploading ${assetLabel}`}
+                            className={cn(
+                              "border-2",
+                              isCompact ? "h-3 w-3" : "h-4 w-4",
+                            )}
                           />
                         ) : (
-                          <Pencil className="h-4 w-4" />
+                          <Pencil
+                            className={isCompact ? "h-3 w-3" : "h-4 w-4"}
+                          />
                         )}
                       </button>
                     </PopoverTrigger>
                   }
-                  badgeBox={{ bottom: 0, height: 42, right: 0, width: 42 }}
-                  className="h-36 w-36"
-                  cutout={{ cx: 123, cy: 123, r: 24 }}
-                  size={144}
+                  badgeBox={
+                    isCompact
+                      ? { bottom: 0, height: 28, right: 0, width: 28 }
+                      : { bottom: 0, height: 42, right: 0, width: 42 }
+                  }
+                  className={isCompact ? "h-16 w-16" : "h-36 w-36"}
+                  clipTestId={`${testIdPrefix}-mask`}
+                  cornerRadius={isCompact ? 16 : 32}
+                  cutout={
+                    isCompact
+                      ? { cx: 58, cy: 58, r: 16.5 }
+                      : { cx: 123, cy: 123, r: 24 }
+                  }
+                  maskMode={isCompact ? "radial" : "clip-path"}
+                  size={isCompact ? 64 : 144}
                 >
                   {emojiAvatarPreview ? (
                     <div
-                      aria-label={`${label} avatar`}
+                      aria-label={`${label} ${assetLabel}`}
+                      className={cn(
+                        "relative flex h-full w-full shrink-0 items-center justify-center overflow-hidden shadow-xs transition-[background-color] duration-200 ease-out",
+                        isCompact ? "rounded-2xl" : "rounded-[2rem]",
+                      )}
+                      role="img"
+                      style={{
+                        backgroundColor: emojiAvatarPreview.color,
+                      }}
+                    >
+                      <span
+                        className={cn(
+                          "flex h-full w-full items-center justify-center leading-none",
+                          isCompact ? "text-2xl" : "text-[4rem]",
+                          squishKey > 0 && "buzz-avatar-squish",
+                        )}
+                        key={squishKey}
+                        style={
+                          {
+                            "--buzz-avatar-emoji-offset-x": "0px",
+                            "--buzz-avatar-emoji-offset-y": "0px",
+                          } as React.CSSProperties
+                        }
+                      >
+                        {emojiAvatarPreview.emoji}
+                      </span>
+                    </div>
+                  ) : (
+                    <img
+                      alt={`${label} ${assetLabel}`}
+                      className={cn(
+                        "h-full w-full object-cover shadow-xs transition-shadow duration-150",
+                        isCompact ? "rounded-2xl" : "rounded-[2rem]",
+                        isDragOverAvatar &&
+                          !isAvatarMenuOpen &&
+                          "ring-2 ring-primary/30",
+                      )}
+                      src={avatarUrl ?? ""}
+                    />
+                  )}
+                </MaskedAvatarBadgeFrame>
+              ) : hasAvatar ? (
+                <MaskedAvatarBadgeFrame
+                  badge={
+                    <PopoverTrigger asChild>
+                      <button
+                        aria-label={`Edit ${assetLabel}`}
+                        className={cn(
+                          "flex items-center justify-center rounded-full bg-sidebar-active text-sidebar-active-foreground shadow-lg transition-[background-color,scale] duration-150 ease-out hover:scale-[1.04] hover:bg-sidebar-active focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-default disabled:opacity-90 disabled:hover:scale-100",
+                          isCompact ? "h-6 w-6" : "h-9 w-9",
+                        )}
+                        disabled={disabled || isUploading}
+                        title={`Edit ${assetLabel}`}
+                        type="button"
+                      >
+                        {isUploading ? (
+                          <Spinner
+                            aria-label={`Uploading ${assetLabel}`}
+                            className={cn(
+                              "border-2",
+                              isCompact ? "h-3 w-3" : "h-4 w-4",
+                            )}
+                          />
+                        ) : (
+                          <Pencil
+                            className={isCompact ? "h-3 w-3" : "h-4 w-4"}
+                          />
+                        )}
+                      </button>
+                    </PopoverTrigger>
+                  }
+                  badgeBox={
+                    isCompact
+                      ? { bottom: 0, height: 28, right: 0, width: 28 }
+                      : { bottom: 0, height: 42, right: 0, width: 42 }
+                  }
+                  className={isCompact ? "h-16 w-16" : "h-36 w-36"}
+                  clipTestId={`${testIdPrefix}-mask`}
+                  cutout={
+                    isCompact
+                      ? { cx: 58, cy: 58, r: 16.5 }
+                      : { cx: 123, cy: 123, r: 24 }
+                  }
+                  maskMode={isCompact ? "radial" : "clip-path"}
+                  size={isCompact ? 64 : 144}
+                >
+                  {emojiAvatarPreview ? (
+                    <div
+                      aria-label={`${label} ${assetLabel}`}
                       className="relative flex h-full w-full shrink-0 items-center justify-center overflow-hidden rounded-full shadow-xs transition-[background-color] duration-200 ease-out"
                       role="img"
                       style={{
@@ -744,7 +919,8 @@ export function AgentCreationPreview({
                     >
                       <span
                         className={cn(
-                          "flex h-full w-full items-center justify-center text-[4rem] leading-none",
+                          "flex h-full w-full items-center justify-center leading-none",
+                          isCompact ? "text-2xl" : "text-[4rem]",
                           squishKey > 0 && "buzz-avatar-squish",
                         )}
                         key={squishKey}
@@ -762,7 +938,8 @@ export function AgentCreationPreview({
                     <ProfileAvatar
                       avatarUrl={avatarUrl}
                       className={cn(
-                        "h-full w-full text-4xl transition-shadow duration-150",
+                        "h-full w-full transition-shadow duration-150",
+                        isCompact ? "text-base" : "text-4xl",
                         isDragOverAvatar &&
                           !isAvatarMenuOpen &&
                           "ring-2 ring-primary/30",
@@ -774,24 +951,33 @@ export function AgentCreationPreview({
               ) : (
                 <PopoverTrigger asChild>
                   <button
-                    aria-label="Add avatar"
+                    aria-label={`Add ${assetLabel}`}
                     className={cn(
-                      "flex h-36 w-36 items-center justify-center rounded-full border-2 border-dashed border-border bg-background text-primary shadow-xs transition-[background-color,border-color,color,box-shadow,scale] duration-150 ease-out hover:scale-[1.02] hover:border-primary/60 hover:bg-primary/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-default disabled:opacity-60 disabled:hover:scale-100",
+                      "flex items-center justify-center border-2 border-dashed border-border bg-background text-primary shadow-xs transition-[background-color,border-color,color,box-shadow,scale] duration-150 ease-out hover:scale-[1.02] hover:border-primary/60 hover:bg-primary/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-default disabled:opacity-60 disabled:hover:scale-100",
+                      isCompact ? "h-16 w-16" : "h-36 w-36",
+                      isRoundedSquare
+                        ? isCompact
+                          ? "rounded-2xl"
+                          : "rounded-[2rem]"
+                        : "rounded-full",
                       isDragOverAvatar &&
                         !isAvatarMenuOpen &&
                         "border-primary/70 bg-primary/5 ring-2 ring-primary/15",
                     )}
                     disabled={disabled || isUploading}
-                    title="Add avatar"
+                    title={`Add ${assetLabel}`}
                     type="button"
                   >
                     {isUploading ? (
                       <Spinner
-                        aria-label="Uploading avatar"
+                        aria-label={`Uploading ${assetLabel}`}
                         className="h-4 w-4 border-2"
                       />
                     ) : (
-                      <Plus aria-hidden="true" className="h-14 w-14" />
+                      <Plus
+                        aria-hidden="true"
+                        className={isCompact ? "h-6 w-6" : "h-14 w-14"}
+                      />
                     )}
                   </button>
                 </PopoverTrigger>

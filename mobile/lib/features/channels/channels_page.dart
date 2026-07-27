@@ -1,23 +1,26 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' show pi;
+import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
+import 'package:flutter/physics.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/auth/auth.dart';
+import '../../shared/community/community_icon_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
-import '../custom_emoji/custom_emoji.dart';
-import '../custom_emoji/custom_emoji_provider.dart';
-import '../custom_emoji/custom_emoji_render.dart';
+import '../../shared/custom_emoji/custom_emoji.dart';
+import '../../shared/custom_emoji/custom_emoji_provider.dart';
+import '../../shared/custom_emoji/custom_emoji_render.dart';
 import '../profile/profile_avatar.dart';
 import '../profile/profile_provider.dart';
-import '../settings/settings_page.dart';
 import '../profile/presence_cache_provider.dart';
 import '../profile/user_cache_provider.dart';
 import '../pairing/pairing_page.dart';
@@ -44,6 +47,8 @@ part 'channels_page/channel_tile.dart';
 part 'channels_page/sheets.dart';
 part 'channels_page/badges.dart';
 part 'channels_page/community.dart';
+part 'channels_page/quick_actions.dart';
+part 'channels_page/quick_actions_launcher.dart';
 
 enum _QuickAction { createChannel, newDm }
 
@@ -57,8 +62,19 @@ const double _kChannelLabelGap = Grid.xxs;
 const double _kChannelRowVerticalPadding = Grid.xxs + Grid.quarter;
 const double _kChannelLabelInset =
     _kChannelSectionInset + _kChannelLeadingWidth + _kChannelLabelGap;
-const double _kCommunityAvatarInset =
-    _kChannelSectionInset - Grid.quarter; // FrostedAppBar adds Grid.quarter.
+
+/// DM avatars are circles, so they fill their box edge to edge where a channel
+/// glyph leaves 4dp of slack inside the same 22dp leading column. Sizing them to
+/// the glyph's ink width keeps the icon-to-label distance identical across both
+/// sections while the labels stay on [_kChannelLabelInset].
+const double _kDmAvatarSize = _kChannelIconSize;
+
+/// The top section's avatars are 32dp circles, which fill their box edge to
+/// edge; the channel rows below lead with an 18dp glyph left-aligned in a 22dp
+/// box at [_kChannelSectionInset]. Edge-aligning the two leaves the circles
+/// looking pushed outward, so the bar is pulled in to sit the avatar's centre
+/// on the channel-icon column (12 + 16 = 28dp against the glyph's ~29dp).
+const double _kTopSectionInset = Grid.twelve;
 const Duration _kSectionExpandDuration = Duration(milliseconds: 220);
 const Duration _kSectionCollapseDuration = Duration(milliseconds: 170);
 const Curve _kSectionExpandCurve = Cubic(0.23, 1, 0.32, 1);
@@ -126,7 +142,9 @@ _UnreadChannelState _computeUnreadChannelState({
 }
 
 class ChannelsPage extends HookConsumerWidget {
-  const ChannelsPage({super.key});
+  const ChannelsPage({required this.settingsPageBuilder, super.key});
+
+  final WidgetBuilder settingsPageBuilder;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -155,7 +173,6 @@ class ChannelsPage extends HookConsumerWidget {
       cachedChannels.value = data;
     }
     final channels = cachedChannels.value;
-
     Future<void> openChannel(Channel channel) async {
       if (!context.mounted) return;
       await Navigator.of(context).push(
@@ -163,42 +180,6 @@ class ChannelsPage extends HookConsumerWidget {
           builder: (_) => ChannelDetailPage(channel: channel),
         ),
       );
-    }
-
-    Future<void> openQuickActions() async {
-      final action = await showModalBottomSheet<_QuickAction>(
-        context: context,
-        showDragHandle: true,
-        builder: (_) => const _QuickActionsSheet(),
-      );
-
-      if (!context.mounted || action == null) {
-        return;
-      }
-
-      switch (action) {
-        case _QuickAction.createChannel:
-          final created = await showModalBottomSheet<Channel>(
-            context: context,
-            isScrollControlled: true,
-            showDragHandle: true,
-            builder: (_) => const _CreateChannelSheet(channelType: 'stream'),
-          );
-          if (created != null && context.mounted) {
-            await openChannel(created);
-          }
-        case _QuickAction.newDm:
-          final opened = await showModalBottomSheet<Channel>(
-            context: context,
-            isScrollControlled: true,
-            showDragHandle: true,
-            builder: (_) =>
-                _NewDirectMessageSheet(currentPubkey: currentPubkey),
-          );
-          if (opened != null && context.mounted) {
-            await openChannel(opened);
-          }
-      }
     }
 
     // Only surface fetch errors while the relay is stably connected. During a
@@ -242,31 +223,29 @@ class ChannelsPage extends HookConsumerWidget {
 
     return FrostedScaffold(
       appBar: FrostedAppBar(
+        horizontalInset: _kTopSectionInset,
+        // Under a Buzz theme the community + account avatar strip carries the
+        // branded gradient, the way desktop paints it across the sidebar. Null
+        // under every other theme, leaving the default frosted fill.
+        gradient: context.appColors.topSectionGradient,
         leading: _CommunityIndicator(
-          onTap: () => showModalBottomSheet<void>(
-            context: context,
-            showDragHandle: true,
-            builder: (_) => const _CommunitySwitcherSheet(),
-          ),
+          onTap: () {
+            ref.invalidate(communityIconProvider);
+            showModalBottomSheet<void>(
+              context: context,
+              showDragHandle: true,
+              builder: (_) => const _CommunitySwitcherSheet(),
+            );
+          },
         ),
         title: const SizedBox.shrink(),
         actions: [
           ProfileAvatar(
-            onTap: () => Navigator.of(context).push(
-              MaterialPageRoute<void>(builder: (_) => const SettingsPage()),
-            ),
+            onTap: () => Navigator.of(
+              context,
+            ).push(MaterialPageRoute<void>(builder: settingsPageBuilder)),
           ),
-          const SizedBox(width: Grid.twelve + Grid.quarter),
         ],
-      ),
-      floatingActionButton: FloatingActionButton(
-        heroTag: 'channels-fab',
-        onPressed: openQuickActions,
-        tooltip: 'Create or start conversation',
-        backgroundColor: context.colors.primary,
-        foregroundColor: context.colors.onPrimary,
-        shape: const CircleBorder(),
-        child: const Icon(LucideIcons.plus),
       ),
       body: _ChannelsBody(
         channels: channels,

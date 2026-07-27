@@ -11,22 +11,37 @@ pub(crate) fn buzz_managed_node_root() -> Option<PathBuf> {
 }
 
 pub(crate) fn buzz_managed_node_bin_dir() -> Option<PathBuf> {
-    let platform = match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("macos", "aarch64") => "darwin-arm64",
-        ("macos", "x86_64") => "darwin-x64",
-        ("linux", "x86_64") => "linux-x64",
-        ("linux", "aarch64") => "linux-arm64",
-        _ => return None,
-    };
+    let (platform, bin_subdir): (&str, Option<&str>) =
+        match (std::env::consts::OS, std::env::consts::ARCH) {
+            ("macos", "aarch64") => ("darwin-arm64", Some("bin")),
+            ("macos", "x86_64") => ("darwin-x64", Some("bin")),
+            ("linux", "x86_64") => ("linux-x64", Some("bin")),
+            ("linux", "aarch64") => ("linux-arm64", Some("bin")),
+            // Windows zips have node.exe + npm.cmd at the archive root — no bin/ subdir
+            ("windows", "x86_64") => ("win-x64", None),
+            ("windows", "aarch64") => ("win-arm64", None),
+            _ => return None,
+        };
     buzz_managed_node_root().map(|root| {
-        root.join(BUZZ_MANAGED_NODE_VERSION)
-            .join(platform)
-            .join("bin")
+        let dir = root.join(BUZZ_MANAGED_NODE_VERSION).join(platform);
+        match bin_subdir {
+            Some(sub) => dir.join(sub),
+            None => dir,
+        }
     })
 }
 
 pub(crate) fn buzz_managed_node_bin_path() -> Option<PathBuf> {
-    buzz_managed_node_bin_dir().map(|bin| bin.join("node"))
+    buzz_managed_node_bin_dir().map(|bin| {
+        #[cfg(windows)]
+        {
+            bin.join("node.exe")
+        }
+        #[cfg(not(windows))]
+        {
+            bin.join("node")
+        }
+    })
 }
 
 pub(crate) fn buzz_managed_npm_bin_dir() -> Option<PathBuf> {

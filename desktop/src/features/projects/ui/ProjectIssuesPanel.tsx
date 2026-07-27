@@ -17,7 +17,6 @@ import { relativeTime } from "@/features/projects/lib/projectsViewHelpers";
 import type { ChannelMember } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
-import { Markdown } from "@/shared/ui/markdown";
 import {
   ProjectFeedRow,
   ProjectFeedRowCluster,
@@ -25,13 +24,7 @@ import {
 } from "./ProjectFeedRow";
 import { OverviewRailSection } from "./ProjectOverviewPanel";
 import { ProfileIdentityButton } from "./ProjectProfileIdentity";
-
-function compactDate(createdAt: number) {
-  return new Date(createdAt * 1_000).toLocaleDateString(undefined, {
-    month: "short",
-    day: "numeric",
-  });
-}
+import { ProjectRichContent } from "./ProjectRichContent";
 
 export function issueStatusClassName(status: ProjectIssue["status"]) {
   if (status === "Done") return "text-purple-400";
@@ -230,11 +223,7 @@ export function ProjectIssueDetail({
             </h3>
           </div>
           {issue.content ? (
-            <Markdown
-              className="text-sm"
-              content={issue.content}
-              interactive={false}
-            />
+            <ProjectRichContent content={issue.content} tags={issue.tags} />
           ) : null}
         </header>
 
@@ -251,14 +240,10 @@ export function ProjectIssueDetail({
                     <AuthorIdentity
                       profiles={profiles}
                       pubkey={item.author}
-                      role={compactDate(item.createdAt)}
+                      role={relativeTime(item.createdAt)}
                     />
                   </div>
-                  <Markdown
-                    className="text-sm"
-                    content={item.content}
-                    interactive={false}
-                  />
+                  <ProjectRichContent content={item.content} tags={item.tags} />
                 </article>
               ))}
             </div>
@@ -345,13 +330,13 @@ function IssueMetaRail({
           <div className="flex items-center justify-between gap-3">
             <dt>Created</dt>
             <dd className="font-medium text-foreground">
-              {compactDate(issue.createdAt)}
+              {relativeTime(issue.createdAt)}
             </dd>
           </div>
           <div className="flex items-center justify-between gap-3">
             <dt>Updated</dt>
             <dd className="font-medium text-foreground">
-              {compactDate(issue.updatedAt)}
+              {relativeTime(issue.updatedAt)}
             </dd>
           </div>
         </dl>

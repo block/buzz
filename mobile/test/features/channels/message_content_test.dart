@@ -3,8 +3,10 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:hooks_riverpod/misc.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:nostr/nostr.dart' as nostr;
 import 'package:buzz/features/channels/message_content.dart';
 import 'package:buzz/features/channels/media_viewer_page.dart';
+import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 
 Widget _testable(Widget child, {List<Override> overrides = const []}) {
@@ -135,6 +137,44 @@ bool _spanHasStyle(
 
 void main() {
   group('MessageContent', () {
+    testWidgets('opens local file links through an authenticated download', (
+      tester,
+    ) async {
+      const url = 'https://relay.example/media/report.pdf';
+      String? openedUrl;
+      Map<String, String>? openedHeaders;
+      String? openedFilename;
+      final auth = MediaGetAuthService(
+        baseUrl: 'https://relay.example',
+        nsec: nostr.Keys.generate().nsec,
+      );
+
+      await tester.pumpWidget(
+        _testable(
+          const MessageContent(content: '[report.pdf]($url)'),
+          overrides: [
+            mediaGetAuthServiceProvider.overrideWithValue(auth),
+            openDownloadedFileProvider.overrideWithValue((
+              url,
+              headers,
+              filename,
+            ) async {
+              openedUrl = url;
+              openedHeaders = headers;
+              openedFilename = filename;
+            }),
+          ],
+        ),
+      );
+
+      await tester.tap(find.text('report.pdf'));
+      await tester.pump();
+
+      expect(openedUrl, url);
+      expect(openedFilename, 'report.pdf');
+      expect(openedHeaders?['Authorization'], startsWith('Nostr '));
+    });
+
     test('buildImageViewerRoute uses modal-style page route builder', () {
       final route = buildImageViewerRoute(
         imageUrl: 'https://example.com/media/image.png',
@@ -728,8 +768,10 @@ void main() {
           ),
         );
 
-        // Mention should be rendered as @Alice in a highlighted container.
-        expect(find.text('@Alice'), findsOneWidget);
+        // The desktop-style mention chip renders the prefix and label
+        // separately so they can be aligned independently.
+        expect(find.text('@'), findsOneWidget);
+        expect(find.text('Alice'), findsOneWidget);
       });
 
       testWidgets('highlights an entire multi-word display name', (
@@ -744,7 +786,8 @@ void main() {
           ),
         );
 
-        expect(find.text('@Kenny Lopez'), findsOneWidget);
+        expect(find.text('@'), findsOneWidget);
+        expect(find.text('Kenny Lopez'), findsOneWidget);
         expect(find.text('@Kenny'), findsNothing);
         expect(_allRichText(tester), isNot(contains('Lopez Lopez')));
       });
@@ -759,7 +802,8 @@ void main() {
           ),
         );
 
-        expect(find.text('@unknown'), findsOneWidget);
+        expect(find.text('@'), findsOneWidget);
+        expect(find.text('unknown'), findsOneWidget);
       });
 
       testWidgets('does not treat email addresses as mentions', (tester) async {
@@ -788,7 +832,7 @@ void main() {
           ),
         );
 
-        await tester.tap(find.text('@Alice'));
+        await tester.tap(find.text('Alice'));
         expect(tappedPubkey, 'pk1');
       });
 
@@ -806,7 +850,7 @@ void main() {
           ),
         );
 
-        await tester.tap(find.text('@Kenny Lopez'));
+        await tester.tap(find.text('Kenny Lopez'));
         expect(tappedPubkey, 'pk1');
       });
 
@@ -822,7 +866,7 @@ void main() {
           ),
         );
 
-        await tester.tap(find.text('@unknown'), warnIfMissed: false);
+        await tester.tap(find.text('unknown'), warnIfMissed: false);
         expect(tapped, isFalse);
       });
     });
@@ -896,7 +940,8 @@ void main() {
         );
 
         expect(_hasBoldSpan(tester, 'Important'), isTrue);
-        expect(find.text('@Alice'), findsOneWidget);
+        expect(find.text('@'), findsOneWidget);
+        expect(find.text('Alice'), findsOneWidget);
       });
 
       testWidgets('preserves markdown around mentions', (tester) async {
@@ -909,7 +954,8 @@ void main() {
           ),
         );
 
-        expect(find.text('@Alice'), findsOneWidget);
+        expect(find.text('@'), findsOneWidget);
+        expect(find.text('Alice'), findsOneWidget);
         expect(_allRichText(tester), isNot(contains('**')));
       });
 

@@ -441,18 +441,257 @@ fn missing_definition_leaves_materialized_runtime_in_hash() {
     );
 }
 
+// ── Global default trips hash for linked inherited agents ─────────────────
+
 #[test]
-fn effective_spawn_prompt_matches_hash_semantics() {
-    // The env write and the hash share effective_spawn_prompt — this row
-    // pins the helper's own semantics so a refactor of either caller cannot
-    // silently diverge from the contract.
-    let mut r = record();
-    r.system_prompt = Some(String::new());
-    assert_eq!(
-        effective_spawn_prompt(&r),
-        None,
-        "empty collapses to absent"
+fn global_model_change_trips_hash_for_linked_inherited_agent() {
+    let mut rec = record();
+    rec.persona_id = Some("p1".into());
+    rec.model = Some("stale-record-model".into());
+
+    let personas = vec![persona("p1", Some("goose"), "prompt")];
+
+    let global_a = GlobalAgentConfig {
+        model: Some("model-a".to_string()),
+        provider: Some("prov-a".to_string()),
+        ..Default::default()
+    };
+    let global_b = GlobalAgentConfig {
+        model: Some("model-b".to_string()),
+        provider: Some("prov-b".to_string()),
+        ..Default::default()
+    };
+
+    let hash_a = spawn_config_hash(&rec, &personas, &[], "wss://ws.example", &global_a);
+    let hash_b = spawn_config_hash(&rec, &personas, &[], "wss://ws.example", &global_b);
+
+    assert_ne!(
+        hash_a, hash_b,
+        "changing the global default must trip the hash for a linked inherited agent"
     );
-    r.system_prompt = Some("real".into());
-    assert_eq!(effective_spawn_prompt(&r).as_deref(), Some("real"));
+}
+
+#[test]
+fn global_model_change_trips_hash_without_model_env_var() {
+    let mut rec = record();
+    rec.persona_id = Some("p1".into());
+    rec.agent_command = "some-harness-without-model-env".into();
+
+    let personas = vec![{
+        let mut p = persona("p1", None, "prompt");
+        p.model = None;
+        p.provider = None;
+        p
+    }];
+
+    let global_a = GlobalAgentConfig {
+        model: Some("model-a".to_string()),
+        ..Default::default()
+    };
+    let global_b = GlobalAgentConfig {
+        model: Some("model-b".to_string()),
+        ..Default::default()
+    };
+
+    let hash_a = spawn_config_hash(&rec, &personas, &[], "wss://ws.example", &global_a);
+    let hash_b = spawn_config_hash(&rec, &personas, &[], "wss://ws.example", &global_b);
+
+    assert_ne!(
+        hash_a, hash_b,
+        "global model change must trip hash even without a model_env_var runtime"
+    );
+}
+
+#[test]
+fn linked_instance_stale_prompt_bytes_are_inert_at_hash_time() {
+    // Regression for the split-resolve defect: prompt used to be read from
+    // the record's own (possibly Phase-A-snapshot-stale) bytes while
+    // model/provider were resolved live from the definition. A definition
+    // edit landing between a caller's snapshot apply and spawn could hand a
+    // fresh model/provider to a stale prompt, and the hash (which already
+    // resolved model/provider live) would silently agree with a spawn that
+    // wrote the stale prompt. Now both come from one `resolve_effective_config`
+    // call, so a record whose own `system_prompt` bytes disagree with the
+    // live definition must hash exactly as if the record carried the
+    // definition's prompt verbatim — the record's prompt bytes are inert for
+    // a linked instance.
+    let mut rec = record();
+    rec.persona_id = Some("p1".into());
+    rec.system_prompt = Some("stale prompt on record".into());
+
+    let mut matching_bytes = rec.clone();
+    matching_bytes.system_prompt = Some("live prompt".into());
+
+    let personas = [persona("p1", Some("goose"), "live prompt")];
+
+    assert_eq!(
+        spawn_config_hash(
+            &rec,
+            &personas,
+            &[],
+            "wss://ws.example",
+            &Default::default()
+        ),
+        spawn_config_hash(
+            &matching_bytes,
+            &personas,
+            &[],
+            "wss://ws.example",
+            &Default::default()
+        ),
+        "record's own system_prompt bytes must not affect the hash of a linked instance"
+    );
+}
+
+#[test]
+fn linked_instance_prompt_model_provider_resolve_from_one_call() {
+    // The prompt for a linked instance must track the definition, exactly
+    // like model/provider — a definition prompt edit trips the hash even
+    // though the record's own (stale) system_prompt bytes are unchanged.
+    let mut rec = record();
+    rec.persona_id = Some("p1".into());
+    rec.system_prompt = Some("stale".into());
+
+    let before = [persona("p1", Some("goose"), "old definition prompt")];
+    let after = [persona("p1", Some("goose"), "new definition prompt")];
+
+    assert_ne!(
+        spawn_config_hash(&rec, &before, &[], "wss://ws.example", &Default::default()),
+        spawn_config_hash(&rec, &after, &[], "wss://ws.example", &Default::default()),
+        "linked instance prompt must resolve from the live definition, not stale record bytes"
+    );
+}
+
+// ── I2: definition args and env reach spawn_config_hash ──────────────────────
+//
+// These tests prove that editing a custom harness definition's args or env
+// changes spawn_config_hash, which trips the "restart required" badge.
+// They would fail if spawn_config_hash used only record.agent_args without
+// falling back to definition args, or if resolve_effective_agent_env did not
+// include definition env.
+
+/// When a record has no instance args but the definition has default args,
+/// changing the definition args changes the spawn hash. This would fail if
+/// spawn_config_hash used only record.agent_args.
+#[test]
+fn spawn_hash_changes_when_definition_default_args_change() {
+    use crate::managed_agents::custom_harnesses::{
+        registry_test_lock, warm_harness_registry_from_dir,
+    };
+    use std::fs;
+    use tempfile::tempdir;
+
+    // The loaded-harness registry is process-global: a parallel test re-warming
+    // it between the two hash computations makes both resolve to no-definition
+    // and h1 == h2 (observed on Windows CI).
+    let _lock = registry_test_lock();
+    let dir = tempdir().unwrap();
+
+    // Write v1 definition (args: ["--mode", "v1"]).
+    fs::write(
+        dir.path().join("my-def.json"),
+        r#"{"id":"my-def","label":"My Def","command":"my-def-bin","args":["--mode","v1"]}"#,
+    )
+    .unwrap();
+    warm_harness_registry_from_dir(Some(dir.path()));
+
+    let mut r = record();
+    r.runtime = Some("my-def".into());
+    r.agent_args = vec![]; // no instance args → definition args are used
+
+    let h1 = spawn_config_hash(&r, &[], &[], "ws://relay", &Default::default());
+
+    // Update to v2 args and re-warm (simulating save + transactional refresh).
+    fs::write(
+        dir.path().join("my-def.json"),
+        r#"{"id":"my-def","label":"My Def","command":"my-def-bin","args":["--mode","v2"]}"#,
+    )
+    .unwrap();
+    warm_harness_registry_from_dir(Some(dir.path()));
+
+    let h2 = spawn_config_hash(&r, &[], &[], "ws://relay", &Default::default());
+
+    assert_ne!(
+        h1, h2,
+        "changing definition default args must change the spawn hash"
+    );
+}
+
+/// When a definition has env vars, adding them changes the spawn hash. This
+/// proves resolve_effective_agent_env includes definition env in the layering.
+#[test]
+fn spawn_hash_changes_when_definition_env_changes() {
+    use crate::managed_agents::custom_harnesses::{
+        registry_test_lock, warm_harness_registry_from_dir,
+    };
+    use std::fs;
+    use tempfile::tempdir;
+
+    // Serialize against parallel registry re-warms (see the args test above).
+    let _lock = registry_test_lock();
+    let dir = tempdir().unwrap();
+
+    // Write definition without env.
+    fs::write(
+        dir.path().join("env-def.json"),
+        r#"{"id":"env-def","label":"Env Def","command":"env-def-bin"}"#,
+    )
+    .unwrap();
+    warm_harness_registry_from_dir(Some(dir.path()));
+
+    let mut r = record();
+    r.runtime = Some("env-def".into());
+
+    let h1 = spawn_config_hash(&r, &[], &[], "ws://relay", &Default::default());
+
+    // Update to include env and re-warm.
+    fs::write(
+        dir.path().join("env-def.json"),
+        r#"{"id":"env-def","label":"Env Def","command":"env-def-bin","env":{"MY_FLAG":"1"}}"#,
+    )
+    .unwrap();
+    warm_harness_registry_from_dir(Some(dir.path()));
+
+    let h2 = spawn_config_hash(&r, &[], &[], "ws://relay", &Default::default());
+
+    assert_ne!(h1, h2, "adding definition env must change the spawn hash");
+}
+
+/// Instance-level args win over definition default args (non-empty instance
+/// args must NOT be overridden by the definition). The hash must match a record
+/// that has the same effective args from either source.
+#[test]
+fn spawn_hash_instance_args_win_over_definition_args() {
+    use crate::managed_agents::custom_harnesses::{
+        registry_test_lock, warm_harness_registry_from_dir,
+    };
+    use std::fs;
+    use tempfile::tempdir;
+
+    // Serialize against parallel registry re-warms (see the args test above).
+    let _lock = registry_test_lock();
+    let dir = tempdir().unwrap();
+    fs::write(
+        dir.path().join("arg-def.json"),
+        r#"{"id":"arg-def","label":"Arg Def","command":"arg-def-bin","args":["--def-arg"]}"#,
+    )
+    .unwrap();
+    warm_harness_registry_from_dir(Some(dir.path()));
+
+    let mut r_instance = record();
+    r_instance.runtime = Some("arg-def".into());
+    r_instance.agent_args = vec!["--instance-arg".to_string()];
+
+    let mut r_no_instance = record();
+    r_no_instance.runtime = Some("arg-def".into());
+    r_no_instance.agent_args = vec![];
+
+    let h_instance = spawn_config_hash(&r_instance, &[], &[], "ws://relay", &Default::default());
+    let h_no_instance =
+        spawn_config_hash(&r_no_instance, &[], &[], "ws://relay", &Default::default());
+
+    assert_ne!(
+        h_instance, h_no_instance,
+        "instance args and definition args must produce different hashes"
+    );
 }
