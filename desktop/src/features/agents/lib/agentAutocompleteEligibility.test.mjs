@@ -7,6 +7,7 @@ import {
   getSharedChannelIds,
   isAgentIdentityInManagedList,
   relayAgentIsSharedWithUser,
+  shouldAdmitMentionCandidate,
   shouldHideAgentFromMentions,
 } from "./agentAutocompleteEligibility.ts";
 
@@ -136,7 +137,50 @@ test("getMentionableAgentPubkeys: keeps managed agents and shared relay agents",
   assert.deepEqual(result, new Set([PUB_A, PUB_B, PUB_C]));
 });
 
-test("isAgentIdentityInManagedList: keeps people and only current managed agent identities", () => {
+test("shouldAdmitMentionCandidate: admits a cross-owner channel bot with anyone access", () => {
+  const mentionableAgentPubkeys = getMentionableAgentPubkeys({
+    currentPubkey: CURRENT_PUBKEY,
+    managedAgentPubkeys: [],
+    relayAgents: [
+      {
+        pubkey: PUB_B,
+        ownerPubkey: OTHER_OWNER_PUBKEY,
+        respondTo: "anyone",
+        respondToAllowlist: [],
+        channelIds: ["general"],
+      },
+    ],
+    sharedChannelIds: new Set(["general"]),
+  });
+
+  assert.equal(
+    shouldAdmitMentionCandidate({
+      isArchived: false,
+      isAgent: true,
+      isMember: true,
+      pubkey: PUB_B,
+      mentionableAgentPubkeys,
+      directoryAgentPubkeys: new Set([PUB_B]),
+    }),
+    true,
+  );
+});
+
+test("shouldAdmitMentionCandidate: rejects archived identities", () => {
+  assert.equal(
+    shouldAdmitMentionCandidate({
+      isArchived: true,
+      isAgent: false,
+      isMember: true,
+      pubkey: PUB_B,
+      mentionableAgentPubkeys: new Set(),
+      directoryAgentPubkeys: new Set(),
+    }),
+    false,
+  );
+});
+
+test("isAgentIdentityInManagedList: scopes add-member search to managed agent identities", () => {
   const managedAgentPubkeys = new Set([PUB_A]);
 
   assert.equal(

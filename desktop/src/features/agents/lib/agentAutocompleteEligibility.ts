@@ -58,6 +58,8 @@ export function isAgentIdentityInManagedList(
   candidate: { isAgent?: boolean; pubkey: string },
   managedAgentPubkeys: ReadonlySet<string>,
 ) {
+  // This is an ownership filter for add-member search. Mention autocomplete
+  // uses the invocability policy in shouldAdmitMentionCandidate instead.
   return (
     candidate.isAgent !== true ||
     managedAgentPubkeys.has(normalizePubkey(candidate.pubkey))
@@ -95,6 +97,18 @@ export function shouldHideAgentFromMentions({
   // mentionability is still loading could be hidden prematurely — keep the
   // two sets derived from the same query.
   return directoryAgentPubkeys.has(normalized);
+}
+
+export function shouldAdmitMentionCandidate(args: {
+  isArchived: boolean;
+  isAgent: boolean;
+  isMember: boolean;
+  pubkey: string;
+  mentionableAgentPubkeys: ReadonlySet<string>;
+  directoryAgentPubkeys: ReadonlySet<string>;
+}) {
+  if (args.isArchived) return false;
+  return !shouldHideAgentFromMentions(args);
 }
 
 type AgentAutocompleteCandidate = {
