@@ -741,13 +741,13 @@ export function MembersSidebar({
                 data-testid="members-sidebar-people-tab"
                 value="people"
               >
-                People · {people.length}
+                People <span className="opacity-60">{people.length}</span>
               </TabsTrigger>
               <TabsTrigger
                 data-testid="members-sidebar-agents-tab"
                 value="agents"
               >
-                Agents · {bots.length}
+                Agents <span className="opacity-60">{bots.length}</span>
               </TabsTrigger>
             </TabsList>
           </Tabs>
