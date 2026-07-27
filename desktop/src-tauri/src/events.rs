@@ -470,30 +470,21 @@ pub fn build_set_canvas(channel_id: Uuid, content: &str) -> Result<EventBuilder,
 
 // ── Profile ──────────────────────────────────────────────────────────────────
 
-/// Kind 0 — NIP-01 profile metadata (full snapshot).
-pub fn build_profile(
-    display_name: Option<&str>,
-    name: Option<&str>,
-    picture: Option<&str>,
-    about: Option<&str>,
-    nip05: Option<&str>,
+/// Kind 0 — NIP-01 profile metadata, merging `fields` into the identity's
+/// `current` profile content.
+///
+/// kind:0 is replaceable, so publishing a rebuilt subset deletes every key it
+/// omits. There is no full-replacement variant here on purpose: every desktop
+/// profile write goes through a merge.
+///
+/// The merge itself lives in `buzz-sdk` so the two crates share one
+/// implementation — it is plain `serde_json`, so it crosses the nostr 0.36/0.37
+/// boundary that keeps the rest of these builders duplicated.
+pub fn build_profile_merged(
+    current: &serde_json::Map<String, serde_json::Value>,
+    fields: &buzz_sdk_pkg::ProfileFields<'_>,
 ) -> Result<EventBuilder, String> {
-    let mut map = serde_json::Map::new();
-    if let Some(v) = display_name {
-        map.insert("display_name".into(), serde_json::Value::String(v.into()));
-    }
-    if let Some(v) = name {
-        map.insert("name".into(), serde_json::Value::String(v.into()));
-    }
-    if let Some(v) = picture {
-        map.insert("picture".into(), serde_json::Value::String(v.into()));
-    }
-    if let Some(v) = about {
-        map.insert("about".into(), serde_json::Value::String(v.into()));
-    }
-    if let Some(v) = nip05 {
-        map.insert("nip05".into(), serde_json::Value::String(v.into()));
-    }
+    let map = buzz_sdk_pkg::merge_profile_content(current, fields);
     let content = serde_json::Value::Object(map).to_string();
     Ok(EventBuilder::new(Kind::Custom(0), content))
 }

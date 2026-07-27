@@ -323,6 +323,13 @@ buzz users get --pubkey "$MY_PUBKEY" --pubkey "$MY_PUBKEY" | jq .
 # users set-profile
 buzz users set-profile --name "CLI Test Agent" --about "Testing buzz-cli" | jq .
 
+# users set-profile — fields not passed are preserved, including ones the CLI
+# does not model. Set the bot flag, then confirm --about did not clear it.
+buzz users set-profile --bot true --website "https://example.com" | jq .
+buzz users set-profile --about "still a bot" | jq .
+buzz users get --pubkey "$MY_PUBKEY" | jq '.[0].content | fromjson | {bot, website, about}'
+# expect: {"bot": true, "website": "https://example.com", "about": "still a bot"}
+
 # users presence
 buzz users presence --pubkeys "$MY_PUBKEY" | jq .
 
@@ -498,6 +505,10 @@ buzz messages vote --event "$(printf '0%.0s' {1..64})" \
 # Exit 1: Empty body guard
 buzz users set-profile 2>&1; echo "exit: $?"
 # exit: 1 (at least one field required)
+
+# Exit 1: Non-boolean --bot
+buzz users set-profile --bot maybe 2>&1; echo "exit: $?"
+# exit: 1
 
 # Exit 3: No auth configured
 env -u BUZZ_PRIVATE_KEY \

@@ -63,21 +63,18 @@ pub async fn update_profile(
         .and_then(|ev| serde_json::from_str::<Value>(&ev.content).ok())
         .unwrap_or(Value::Null);
 
-    let dn = display_name
-        .as_deref()
-        .or_else(|| current.get("display_name").and_then(Value::as_str));
-    let name = current.get("name").and_then(Value::as_str);
-    let picture = avatar_url
-        .as_deref()
-        .or_else(|| current.get("picture").and_then(Value::as_str));
-    let ab = about
-        .as_deref()
-        .or_else(|| current.get("about").and_then(Value::as_str));
-    let nip05 = nip05_handle
-        .as_deref()
-        .or_else(|| current.get("nip05").and_then(Value::as_str));
-
-    let builder = events::build_profile(dn, name, picture, ab, nip05)?;
+    // Merge into the full current content: per-key fallbacks would still drop
+    // every key not enumerated here, and kind:0 is replaceable.
+    let builder = events::build_profile_merged(
+        &current.as_object().cloned().unwrap_or_default(),
+        &buzz_sdk_pkg::ProfileFields {
+            display_name: display_name.as_deref(),
+            picture: avatar_url.as_deref(),
+            about: about.as_deref(),
+            nip05: nip05_handle.as_deref(),
+            ..Default::default()
+        },
+    )?;
     submit_event(builder, &state).await?;
 
     // Re-fetch to return canonical profile.
@@ -152,17 +149,16 @@ fn build_deferred_profile_event(
     avatar_url: &str,
     prior_event: Option<&nostr::Event>,
 ) -> Result<nostr::EventBuilder, String> {
-    let display_name = current.get("display_name").and_then(Value::as_str);
-    let name = current.get("name").and_then(Value::as_str);
-    let about = current.get("about").and_then(Value::as_str);
-    let nip05 = current.get("nip05").and_then(Value::as_str);
-
-    Ok(
-        events::build_profile(display_name, name, Some(avatar_url), about, nip05)?
-            .custom_created_at(monotonic_created_at(
-                prior_event.map(|event| event.created_at.as_secs() as i64),
-            )),
-    )
+    Ok(events::build_profile_merged(
+        &current.as_object().cloned().unwrap_or_default(),
+        &buzz_sdk_pkg::ProfileFields {
+            picture: Some(avatar_url),
+            ..Default::default()
+        },
+    )?
+    .custom_created_at(monotonic_created_at(
+        prior_event.map(|event| event.created_at.as_secs() as i64),
+    )))
 }
 
 fn capture_expected_signer(state: &AppState, expected_pubkey: &str) -> Result<nostr::Keys, String> {

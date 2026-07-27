@@ -531,9 +531,104 @@ pub fn build_set_canvas(channel_id: Uuid, content: &str) -> Result<EventBuilder,
     Ok(EventBuilder::new(Kind::Custom(40100), content).tags(tags))
 }
 
-/// Build a NIP-01 profile metadata event (kind 0).
+/// The kind:0 profile fields Buzz models explicitly.
+///
+/// Every field is optional and `None` means **leave the current value untouched**,
+/// not "clear it". Build one with [`ProfileFields::default()`] and set only the
+/// fields you intend to change:
+///
+/// ```
+/// use buzz_sdk::ProfileFields;
+///
+/// let fields = ProfileFields {
+///     nip05: Some("alice@example.com"),
+///     ..Default::default()
+/// };
+/// ```
+///
+/// Fields Buzz does not model are preserved by [`merge_profile_content`] rather
+/// than enumerated here, so an unknown key from a future NIP survives a Buzz write.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProfileFields<'a> {
+    /// Long-form display name (`display_name`).
+    pub display_name: Option<&'a str>,
+    /// Short username handle (`name`).
+    pub name: Option<&'a str>,
+    /// Avatar URL (`picture`).
+    pub picture: Option<&'a str>,
+    /// Bio text (`about`).
+    pub about: Option<&'a str>,
+    /// NIP-05 identifier (`nip05`).
+    pub nip05: Option<&'a str>,
+    /// Homepage URL (`website`).
+    pub website: Option<&'a str>,
+    /// Profile banner URL (`banner`).
+    pub banner: Option<&'a str>,
+    /// Lightning address (`lud16`).
+    pub lud16: Option<&'a str>,
+    /// NIP-24 automated-account flag (`bot`).
+    pub bot: Option<bool>,
+}
+
+/// Merge `fields` into an existing kind:0 content object, preserving every key
+/// Buzz does not model.
+///
+/// kind:0 is a replaceable event, so a partial rebuild is not a partial update —
+/// it is a deletion of everything omitted. Callers that publish a profile must
+/// therefore merge into the identity's current content rather than construct a
+/// fresh object, or fields such as `bot`, `website` and `lud16` are silently
+/// destroyed.
+///
+/// This function is deliberately free of any `nostr` types so that callers built
+/// against a different `nostr` version (the desktop crate) can share it.
+pub fn merge_profile_content(
+    current: &serde_json::Map<String, serde_json::Value>,
+    fields: &ProfileFields<'_>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut map = current.clone();
+    let mut set_str = |key: &str, value: Option<&str>| {
+        if let Some(v) = value {
+            map.insert(key.into(), serde_json::Value::String(v.into()));
+        }
+    };
+    set_str("display_name", fields.display_name);
+    set_str("name", fields.name);
+    set_str("picture", fields.picture);
+    set_str("about", fields.about);
+    set_str("nip05", fields.nip05);
+    set_str("website", fields.website);
+    set_str("banner", fields.banner);
+    set_str("lud16", fields.lud16);
+    if let Some(v) = fields.bot {
+        map.insert("bot".into(), serde_json::Value::Bool(v));
+    }
+    map
+}
+
+/// Build a NIP-01 profile metadata event (kind 0) that merges `fields` into the
+/// identity's `current` profile content.
+///
+/// This is the safe way to publish a profile: unknown keys in `current` are
+/// carried forward. Pass an empty map only when you genuinely intend to replace
+/// the whole profile.
+pub fn build_profile_merged(
+    current: &serde_json::Map<String, serde_json::Value>,
+    fields: &ProfileFields<'_>,
+) -> Result<EventBuilder, SdkError> {
+    let map = merge_profile_content(current, fields);
+    let content = serde_json::Value::Object(map).to_string();
+    Ok(EventBuilder::new(Kind::Custom(0), content).tags([]))
+}
+
+/// Build a NIP-01 profile metadata event (kind 0) from scratch.
 ///
 /// Only present (Some) fields are included in the JSON object.
+///
+/// # Warning
+///
+/// kind:0 is replaceable, so this **deletes every field it is not given**,
+/// including `bot`, `website`, `banner` and `lud16`. Prefer
+/// [`build_profile_merged`], which carries the identity's existing keys forward.
 pub fn build_profile(
     display_name: Option<&str>,
     name: Option<&str>,
@@ -541,24 +636,17 @@ pub fn build_profile(
     about: Option<&str>,
     nip05: Option<&str>,
 ) -> Result<EventBuilder, SdkError> {
-    let mut map = serde_json::Map::new();
-    if let Some(v) = display_name {
-        map.insert("display_name".into(), serde_json::Value::String(v.into()));
-    }
-    if let Some(v) = name {
-        map.insert("name".into(), serde_json::Value::String(v.into()));
-    }
-    if let Some(v) = picture {
-        map.insert("picture".into(), serde_json::Value::String(v.into()));
-    }
-    if let Some(v) = about {
-        map.insert("about".into(), serde_json::Value::String(v.into()));
-    }
-    if let Some(v) = nip05 {
-        map.insert("nip05".into(), serde_json::Value::String(v.into()));
-    }
-    let content = serde_json::Value::Object(map).to_string();
-    Ok(EventBuilder::new(Kind::Custom(0), content).tags([]))
+    build_profile_merged(
+        &serde_json::Map::new(),
+        &ProfileFields {
+            display_name,
+            name,
+            picture,
+            about,
+            nip05,
+            ..Default::default()
+        },
+    )
 }
 
 /// Build a NIP-29 add-member event (kind 9000).
@@ -2352,6 +2440,139 @@ mod tests {
         let ev = sign(build_profile(None, None, None, None, None).unwrap());
         let v: serde_json::Value = serde_json::from_str(&ev.content).unwrap();
         assert!(v.as_object().unwrap().is_empty());
+    }
+
+    /// Parse a kind:0 content object from a JSON literal.
+    fn profile_content(v: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+        v.as_object().cloned().unwrap()
+    }
+
+    /// Regression for the silent field-drop: publishing one field must not delete
+    /// the rest of the profile, including keys the SDK does not model.
+    #[test]
+    fn merged_profile_preserves_unmodelled_fields() {
+        let current = profile_content(serde_json::json!({
+            "display_name": "Dennis",
+            "name": "dennis",
+            "about": "hello",
+            "picture": "https://example.com/d.jpg",
+            "website": "https://nave.pub",
+            "bot": true,
+            "lud16": "dennis@getalby.com",
+            "some_future_nip_key": {"nested": [1, 2]},
+        }));
+
+        // The repro from the issue: set one field to a new value.
+        let ev = sign(
+            build_profile_merged(
+                &current,
+                &ProfileFields {
+                    nip05: Some("dennis@nave.pub"),
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        );
+
+        let v: serde_json::Value = serde_json::from_str(&ev.content).unwrap();
+        assert_eq!(v["nip05"], "dennis@nave.pub");
+        // Everything else survives — this is what regressed.
+        assert_eq!(v["display_name"], "Dennis");
+        assert_eq!(v["name"], "dennis");
+        assert_eq!(v["about"], "hello");
+        assert_eq!(v["picture"], "https://example.com/d.jpg");
+        assert_eq!(v["website"], "https://nave.pub");
+        assert_eq!(v["bot"], true);
+        assert_eq!(v["lud16"], "dennis@getalby.com");
+        assert_eq!(
+            v["some_future_nip_key"],
+            serde_json::json!({"nested": [1, 2]})
+        );
+    }
+
+    #[test]
+    fn merged_profile_overwrites_supplied_fields_only() {
+        let current = profile_content(serde_json::json!({
+            "display_name": "Old",
+            "about": "keep me",
+        }));
+        let ev = sign(
+            build_profile_merged(
+                &current,
+                &ProfileFields {
+                    display_name: Some("New"),
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        );
+        let v: serde_json::Value = serde_json::from_str(&ev.content).unwrap();
+        assert_eq!(v["display_name"], "New");
+        assert_eq!(v["about"], "keep me");
+    }
+
+    #[test]
+    fn merged_profile_can_set_bot_flag_both_ways() {
+        let current = profile_content(serde_json::json!({"bot": true}));
+        let cleared = merge_profile_content(
+            &current,
+            &ProfileFields {
+                bot: Some(false),
+                ..Default::default()
+            },
+        );
+        assert_eq!(cleared["bot"], false);
+
+        // `None` leaves the flag exactly as it was, rather than clearing it.
+        let untouched = merge_profile_content(&current, &ProfileFields::default());
+        assert_eq!(untouched["bot"], true);
+    }
+
+    #[test]
+    fn merged_profile_from_empty_current_matches_legacy_builder() {
+        let fields = ProfileFields {
+            display_name: Some("Alice"),
+            name: Some("alice"),
+            picture: Some("https://example.com/pic.jpg"),
+            about: Some("Hello world"),
+            nip05: Some("alice@example.com"),
+            ..Default::default()
+        };
+        let merged = sign(build_profile_merged(&serde_json::Map::new(), &fields).unwrap());
+        let legacy = sign(
+            build_profile(
+                Some("Alice"),
+                Some("alice"),
+                Some("https://example.com/pic.jpg"),
+                Some("Hello world"),
+                Some("alice@example.com"),
+            )
+            .unwrap(),
+        );
+        assert_eq!(merged.content, legacy.content);
+    }
+
+    #[test]
+    fn merged_profile_sets_every_modelled_field() {
+        let map = merge_profile_content(
+            &serde_json::Map::new(),
+            &ProfileFields {
+                display_name: Some("A"),
+                name: Some("a"),
+                picture: Some("p"),
+                about: Some("b"),
+                nip05: Some("a@e.com"),
+                website: Some("https://w"),
+                banner: Some("https://bn"),
+                lud16: Some("a@alby"),
+                bot: Some(true),
+            },
+        );
+        assert_eq!(map.len(), 9);
+        assert_eq!(map["banner"], "https://bn");
+        assert_eq!(map["lud16"], "a@alby");
+        assert_eq!(map["website"], "https://w");
+        assert_eq!(map["bot"], true);
     }
 
     #[test]

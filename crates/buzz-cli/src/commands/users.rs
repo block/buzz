@@ -147,64 +147,42 @@ async fn search_by_name(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn cmd_set_profile(
     client: &BuzzClient,
     display_name: Option<&str>,
+    username: Option<&str>,
     avatar_url: Option<&str>,
     about: Option<&str>,
     nip05_handle: Option<&str>,
+    website: Option<&str>,
+    bot: Option<bool>,
 ) -> Result<(), CliError> {
-    if display_name.is_none() && avatar_url.is_none() && about.is_none() && nip05_handle.is_none() {
+    let fields = buzz_sdk::ProfileFields {
+        display_name,
+        name: username,
+        picture: avatar_url,
+        about,
+        nip05: nip05_handle,
+        website,
+        bot,
+        ..Default::default()
+    };
+    if fields == buzz_sdk::ProfileFields::default() {
         return Err(CliError::Usage(
-            "at least one field required (--name, --avatar, --about, --nip05)".into(),
+            "at least one field required (--name, --username, --avatar, --about, --nip05, \
+             --website, --bot)"
+                .into(),
         ));
     }
 
-    // Read-merge-write: fetch current profile, merge in the new fields, then sign.
+    // Read-merge-write. kind:0 is replaceable, so anything not carried forward is
+    // deleted — merge into the full current content, not a rebuilt subset, or
+    // fields Buzz does not model (bot, lud16, …) are silently destroyed.
     let current = fetch_current_profile(client).await?;
 
-    // Merge: caller-supplied fields win; fall back to current profile values.
-    let merged_name = display_name
-        .map(|s| s.to_string())
-        .or_else(|| {
-            current
-                .get("display_name")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        })
-        .or_else(|| {
-            current
-                .get("name")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        });
-    let merged_picture = avatar_url.map(|s| s.to_string()).or_else(|| {
-        current
-            .get("picture")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-    });
-    let merged_about = about.map(|s| s.to_string()).or_else(|| {
-        current
-            .get("about")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-    });
-    let merged_nip05 = nip05_handle.map(|s| s.to_string()).or_else(|| {
-        current
-            .get("nip05")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-    });
-
-    let builder = buzz_sdk::build_profile(
-        merged_name.as_deref(),
-        None, // `name` field (username) — not exposed by CLI
-        merged_picture.as_deref(),
-        merged_about.as_deref(),
-        merged_nip05.as_deref(),
-    )
-    .map_err(|e| CliError::Other(format!("build_profile failed: {e}")))?;
+    let builder = buzz_sdk::build_profile_merged(&current, &fields)
+        .map_err(|e| CliError::Other(format!("build_profile failed: {e}")))?;
 
     let event = client.sign_event(builder)?;
 
@@ -316,16 +294,22 @@ pub async fn dispatch(
         }
         UsersCmd::SetProfile {
             name,
+            username,
             avatar,
             about,
             nip05,
+            website,
+            bot,
         } => {
             cmd_set_profile(
                 client,
                 name.as_deref(),
+                username.as_deref(),
                 avatar.as_deref(),
                 about.as_deref(),
                 nip05.as_deref(),
+                website.as_deref(),
+                bot,
             )
             .await
         }

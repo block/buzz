@@ -130,7 +130,7 @@ stored rules in `validation_error` so an owner can remove and repair them.
 | | `open` | Open a DM (1–8 pubkeys) |
 | | `add-member` | Add member to DM group |
 | `users` | `get` | Get user profile(s) |
-| | `set-profile` | Update your profile |
+| | `set-profile` | Update your profile (merges — unset fields are preserved) |
 | | `presence` | Get presence status |
 | | `set-presence` | Set presence status |
 | `workflows` | `list` | List workflows |
