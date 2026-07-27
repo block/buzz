@@ -10,8 +10,6 @@ import {
   useManagedAgentsQuery,
   usePersonasQuery,
 } from "@/features/agents/hooks";
-import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
-import { RUNTIME_MARKS } from "@/features/onboarding/ui/HarnessMarks";
 import { RuntimeIcon } from "@/features/onboarding/ui/RuntimeIcon";
 import type { AcpAuthMethod, AcpRuntimeCatalogEntry } from "@/shared/api/types";
 import { getInstallErrorMessage } from "@/shared/lib/installError";
@@ -36,20 +34,17 @@ import {
 import { Spinner } from "@/shared/ui/spinner";
 
 import { CustomHarnessForm } from "./CustomHarnessForm";
-import { isDownloadPageUrl } from "./harnessCatalogLogic";
+import {
+  adapterUpdateWarning,
+  entryStatusLabel,
+  isDownloadPageUrl,
+} from "./harnessCatalogLogic";
 import { formValuesFromCatalogEntry } from "./harnessFormLogic";
 import { deleteConfirmState } from "./harnessGalleryLogic";
 
-const RUNTIME_LOGO_URLS: Record<string, string> = {
-  "buzz-agent": "/app-icon@2x.png",
-  claude: "/runtime-icons/claude.png",
-};
-
-const RUNTIME_LOGO_SCALE: Record<string, string> = {
-  "buzz-agent": "scale-110",
-  claude: "scale-110",
-};
-
+/** Link label for the row's install-instructions URL. Distinct from the
+ * catalog's `installLinkLabel` — rows spell out what the guide covers
+ * (adapter vs CLI) because the row lacks the catalog's setup context. */
 function runtimeInstallGuideLabel(runtime: AcpRuntimeCatalogEntry) {
   if (
     runtime.availability === "adapter_missing" ||
@@ -63,38 +58,18 @@ function runtimeInstallGuideLabel(runtime: AcpRuntimeCatalogEntry) {
 }
 
 function RuntimeLogo({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
-  // Presets and customs deliberately emit an empty avatar_url (no remote or
-  // user-supplied icon URLs), so route them through RuntimeIcon — which owns
-  // the theme-adaptive RUNTIME_MARKS (goose/codex/cursor), the PRESET_LOGOS
-  // map, the per-logo contrast treatments (omp needs a dark chip, grok a
-  // light one), and the terminal-glyph fallback. Builtins with inline marks
-  // take the same path so their icons adapt to dark/light; the remaining
-  // bitmap builtins keep the ProfileAvatar path below.
-  if (
-    runtime.source === "preset" ||
-    runtime.source === "custom" ||
-    RUNTIME_MARKS[runtime.id]
-  ) {
-    return (
-      <span
-        className="flex h-9 w-9 shrink-0 items-center justify-center"
-        data-testid={`doctor-runtime-logo-${runtime.id}`}
-      >
-        <RuntimeIcon className="h-9 w-9" runtime={runtime} />
-      </span>
-    );
-  }
-
-  const avatarUrl = RUNTIME_LOGO_URLS[runtime.id] ?? runtime.avatarUrl;
-
+  // Single logo pipeline: RuntimeIcon owns every runtime asset — the
+  // theme-adaptive RUNTIME_MARKS, the BuzzMark, the bundled bitmap maps
+  // (RUNTIME_LOGOS / PRESET_LOGOS), and the terminal-glyph fallback. It never
+  // renders remote or user-supplied avatar URLs (security line), so the row
+  // and the catalog cannot drift apart.
   return (
-    <ProfileAvatar
-      avatarUrl={avatarUrl}
-      className="h-9 w-9 rounded-xl bg-background shadow-none"
-      imageClassName={RUNTIME_LOGO_SCALE[runtime.id]}
-      label={runtime.label}
-      testId={`doctor-runtime-logo-${runtime.id}`}
-    />
+    <span
+      className="flex h-9 w-9 shrink-0 items-center justify-center"
+      data-testid={`doctor-runtime-logo-${runtime.id}`}
+    >
+      <RuntimeIcon className="h-9 w-9" runtime={runtime} />
+    </span>
   );
 }
 
@@ -217,6 +192,11 @@ function RuntimeActions({
   runtime: AcpRuntimeCatalogEntry;
 }) {
   const isAvailable = runtime.availability === "available";
+  // Signed-out rows carry the amber "Sign-in needed" status chip instead of a
+  // green Ready chip — auth-required is an explicit row-face state, and Ready
+  // must not claim otherwise.
+  const isAuthNeeded =
+    isAvailable && runtime.authStatus.status === "logged_out";
   const canInstall = runtime.canAutoInstall && !runtime.nodeRequired;
   const isWorking = isInstalling || isConnecting;
 
@@ -240,12 +220,14 @@ function RuntimeActions({
           />
         </div>
       ) : isAvailable ? (
-        <span
-          className="inline-flex shrink-0 items-center rounded-md bg-emerald-500/15 px-2 py-0.5 text-xs font-medium text-emerald-600 dark:text-emerald-400"
-          data-testid={`doctor-runtime-ready-${runtime.id}`}
-        >
-          Ready
-        </span>
+        isAuthNeeded ? null : ( // Signed-out rows carry the amber status chip instead; never Install.
+          <span
+            className="inline-flex shrink-0 items-center rounded-md bg-emerald-500/15 px-2 py-0.5 text-xs font-medium text-emerald-600 dark:text-emerald-400"
+            data-testid={`doctor-runtime-ready-${runtime.id}`}
+          >
+            Ready
+          </span>
+        )
       ) : canInstall ? (
         // Rows needing multi-step setup render no action here — setup lives in
         // the Add-runtimes catalog. Custom rows keep their ••• menu instead.
@@ -266,23 +248,21 @@ function RuntimeActions({
 }
 
 function RuntimeStatusChip({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
-  const label =
-    runtime.authStatus.status === "config_invalid"
-      ? "Config error"
-      : runtime.availability === "adapter_missing"
-        ? "Adapter needed"
-        : runtime.availability === "adapter_outdated"
-          ? "Update needed"
-          : runtime.availability === "cli_missing" ||
-              runtime.availability === "not_installed"
-            ? "CLI needed"
-            : null;
+  // Single availability→label source: entryStatusLabel drives this row chip
+  // AND the catalog detail chip, so the two surfaces cannot drift. That
+  // includes "Sign-in needed" for installed-but-signed-out runtimes — an
+  // explicit auth-required state on the row face, not just a ••• menu item.
+  const label = entryStatusLabel(runtime);
 
   if (!label) {
     return null;
   }
 
   const isConfigError = runtime.authStatus.status === "config_invalid";
+  const isAuthNeeded =
+    !isConfigError &&
+    runtime.availability === "available" &&
+    runtime.authStatus.status === "logged_out";
 
   return (
     <>
@@ -294,7 +274,9 @@ function RuntimeStatusChip({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
           "inline-flex shrink-0 items-center rounded-md px-2 py-0.5 text-xs font-medium",
           isConfigError
             ? "bg-destructive/10 text-destructive"
-            : "bg-muted text-muted-foreground",
+            : isAuthNeeded
+              ? "bg-amber-500/15 text-amber-600 dark:text-amber-400"
+              : "bg-muted text-muted-foreground",
         )}
         data-testid={`doctor-runtime-status-${runtime.id}`}
       >
@@ -582,9 +564,7 @@ export function HarnessRow({
           <AlertDialogHeader>
             <AlertDialogTitle>Update {runtime.label} adapter?</AlertDialogTitle>
             <AlertDialogDescription>
-              This replaces the machine-wide codex-acp adapter. Older Buzz
-              releases using the legacy adapter may lose community access until
-              @zed-industries/codex-acp@0.16.0 is restored.
+              {adapterUpdateWarning(runtime)}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

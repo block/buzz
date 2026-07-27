@@ -80,3 +80,19 @@ test("PRESET_LOGOS has no entries for unknown presets", () => {
     `PRESET_LOGOS maps ids the backend does not emit as presets: ${unknown.join(", ")}`,
   );
 });
+
+test("codex ships no bundled mark or logo (vendor-removed OpenAI blossom)", () => {
+  // The OpenAI blossom was removed from simple-icons v16 at the vendor's
+  // request — Codex must render RuntimeIcon's neutral terminal-glyph
+  // fallback, not a re-bundled copy of the withdrawn mark.
+  assert.equal(
+    RUNTIME_MARKS.codex,
+    undefined,
+    "codex has a RUNTIME_MARKS entry — the OpenAI blossom must not ship without explicit approval",
+  );
+  assert.equal(
+    PRESET_LOGOS.codex,
+    undefined,
+    "codex has a PRESET_LOGOS entry — no bundled Codex logo is approved",
+  );
+});

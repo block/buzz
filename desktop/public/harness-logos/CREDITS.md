@@ -24,8 +24,11 @@ Monochrome marks inlined as `currentColor` paths in
 | Mark | Upstream | Version/Commit | License | Source path | Modifications |
 |---|---|---|---|---|---|
 | Goose | [block/goose](https://github.com/block/goose) | `305849b71709b95b86ed9f11bd3bc939899c0aab` | Apache-2.0 © Block, Inc. | `documentation/static/img/goose.svg` | `fill="#101010"` → `currentColor`; dropped the redundant clipPath wrapper |
-| Codex (OpenAI blossom) | [simple-icons](https://github.com/simple-icons/simple-icons) | `15.20.0` (slug `openai`) | CC0-1.0 (path data); nominative use of the OpenAI mark to identify OpenAI's Codex harness. Note: the mark was removed from simple-icons v16, but path data published under CC0 remains CC0 | `icons/openai.svg` | `fill` → `currentColor` |
 | Cursor | [simple-icons](https://github.com/simple-icons/simple-icons) | `16.27.1` (slug `cursor`) | CC0-1.0 (path data); nominative use of the Cursor mark to identify Cursor's harness | `icons/cursor.svg` | `fill` → `currentColor` |
+
+Codex deliberately has **no** bundled mark: the OpenAI blossom was removed
+from simple-icons in v16 at the vendor's request, so we do not ship it —
+Codex renders `RuntimeIcon`'s neutral terminal-glyph fallback instead.
 
 `amp.png` and `opencode.svg` predate this file; their provenance was not
 recorded when they were added. Cursor previously used the generic terminal

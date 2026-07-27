@@ -153,6 +153,29 @@ export function entryStatusLabel(entry: AcpRuntimeCatalogEntry): string | null {
   }
 }
 
+/**
+ * Body copy for the confirmation dialog shown before replacing an
+ * already-installed (but outdated) adapter.
+ *
+ * Codex carries a specific machine-wide caveat about the legacy Zed adapter
+ * contract; every other runtime gets generic, runtime-derived copy — Codex
+ * package names must never appear for another runtime.
+ */
+export function adapterUpdateWarning(entry: AcpRuntimeCatalogEntry): string {
+  if (entry.id === "codex") {
+    return (
+      "This replaces the machine-wide codex-acp adapter. Older Buzz " +
+      "releases using the legacy adapter may lose community access until " +
+      "@zed-industries/codex-acp@0.16.0 is restored."
+    );
+  }
+  const adapter = entry.command?.trim() || entry.label;
+  return (
+    `This replaces the machine-wide ${adapter} adapter. Other tools using ` +
+    "the currently installed adapter will switch to the updated version."
+  );
+}
+
 export type CatalogPrimaryAction =
   | { kind: "install"; label: string }
   | { kind: "docs"; label: string }

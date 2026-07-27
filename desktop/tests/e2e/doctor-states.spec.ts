@@ -259,8 +259,10 @@ test.describe("Doctor panel state screenshots", () => {
   });
 
   /**
-   * 02 — an available runtime that needs authentication stays the same height
-   * as the others and moves setup instructions into its overflow menu.
+   * 02 — an available runtime that needs authentication shows an explicit
+   * "Sign-in needed" chip on the row face (never a green Ready chip), stays
+   * the same height as the others, and keeps setup instructions in its
+   * overflow menu.
    */
   test("02-auth-logged-out", async ({ page }) => {
     await installMockBridge(page, {
@@ -285,6 +287,12 @@ test.describe("Doctor panel state screenshots", () => {
 
     const row = page.getByTestId("doctor-runtime-codex");
     await expect(row).toBeVisible({ timeout: 10_000 });
+    // Auth-required is an explicit row-face state: amber "Sign-in needed"
+    // chip (single source: entryStatusLabel), no green Ready chip.
+    await expect(page.getByTestId("doctor-runtime-status-codex")).toHaveText(
+      "Sign-in needed",
+    );
+    await expect(page.getByTestId("doctor-runtime-ready-codex")).toHaveCount(0);
     await expect(row).not.toContainText("Not authenticated");
     await expect(row).not.toContainText("Run `codex login` to authenticate.");
     await expect(row).toHaveCSS(
@@ -393,12 +401,16 @@ test.describe("Doctor panel state screenshots", () => {
       "Adapter needed",
     );
     // Node gate blocks one-click install; the primary action is the vendor
-    // setup guide instead.
+    // setup guide instead — a single pinned bottom-bar CTA
+    // (harness-catalog-setup-*), not a separate docs button.
     await expect(page.getByTestId("harness-catalog-install-codex")).toHaveCount(
       0,
     );
     await expect(page.getByTestId("harness-catalog-setup-codex")).toBeVisible();
-    await expect(page.getByTestId("harness-catalog-docs-codex")).toBeVisible();
+    await expect(page.getByTestId("harness-catalog-setup-codex")).toHaveText(
+      /Setup guide/,
+    );
+    await expect(page.getByTestId("harness-catalog-docs-codex")).toHaveCount(0);
 
     const detail = page.getByTestId("harness-catalog-detail-pane");
     await expect(detail).toContainText("Install the Codex ACP adapter");
@@ -569,7 +581,9 @@ test.describe("Doctor panel state screenshots", () => {
 
   /**
    * 06 — adapter-provided account methods appear in the overflow menu and
-   * launch the vendor-owned flow without expanding the runtime row.
+   * launch the vendor-owned flow without expanding the runtime row. The
+   * row face flips "Sign-in needed" → Ready once the connect settles and
+   * discovery reports logged_in.
    */
   test("06-connect-account-methods", async ({ page }) => {
     await installMockBridge(page, {
@@ -584,6 +598,21 @@ test.describe("Doctor panel state screenshots", () => {
           underlying_cli_path: "/usr/local/bin/codex",
           auth_status: { status: "logged_out" },
           login_hint: "Run `codex login` to authenticate.",
+        },
+        BUZZ_AGENT_AVAILABLE,
+      ],
+      // After the mocked connect succeeds, discovery reports logged_in so
+      // the row face can flip from "Sign-in needed" to Ready.
+      acpRuntimesCatalogAfterConnect: [
+        GOOSE_AVAILABLE,
+        CLAUDE_AVAILABLE_LOGGED_IN,
+        {
+          ...CODEX_NOT_INSTALLED,
+          availability: "available",
+          command: "codex-acp",
+          binary_path: "/usr/local/bin/codex-acp",
+          underlying_cli_path: "/usr/local/bin/codex",
+          auth_status: { status: "logged_in" },
         },
         BUZZ_AGENT_AVAILABLE,
       ],
@@ -607,6 +636,11 @@ test.describe("Doctor panel state screenshots", () => {
 
     const row = page.getByTestId("doctor-runtime-codex");
     await expect(row).toBeVisible({ timeout: 10_000 });
+    // Signed-out row face: explicit auth chip, no green Ready chip.
+    await expect(page.getByTestId("doctor-runtime-status-codex")).toHaveText(
+      "Sign-in needed",
+    );
+    await expect(page.getByTestId("doctor-runtime-ready-codex")).toHaveCount(0);
     await expect(row).not.toContainText("Not authenticated");
     await expect(row).toHaveCSS(
       "height",
@@ -626,7 +660,12 @@ test.describe("Doctor panel state screenshots", () => {
     await expect(loading).toContainText("Codex connecting");
     await expect(page.getByTestId("doctor-runtime-ready-codex")).toHaveCount(0);
     await expect(loading).toHaveCount(0, { timeout: 5_000 });
+    // Connect settled and discovery reports logged_in — sign-in chip gone,
+    // Ready chip on.
     await expect(page.getByTestId("doctor-runtime-ready-codex")).toBeVisible();
+    await expect(page.getByTestId("doctor-runtime-status-codex")).toHaveCount(
+      0,
+    );
   });
 
   /**

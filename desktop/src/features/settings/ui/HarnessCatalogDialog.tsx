@@ -445,16 +445,20 @@ function CatalogDetail({ entry }: { entry: AcpRuntimeCatalogEntry }) {
             <h3 className="truncate text-xl font-semibold leading-snug">
               {getRuntimeDisplayLabel(entry)}
             </h3>
-            {isReady ? (
-              <span className="mt-1 inline-flex items-center rounded-md bg-emerald-500/15 px-2 py-0.5 text-xs font-medium text-emerald-600 dark:text-emerald-400">
-                Ready
-              </span>
-            ) : statusLabel ? (
+            {statusLabel ? (
+              // entryStatusLabel is the single availability→label source
+              // shared with the row chip — when it has something to say
+              // (setup needed, sign-in needed, config error) it outranks the
+              // green Ready chip even for available entries.
               <span
                 className="mt-1 inline-flex items-center rounded-md bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground"
                 data-testid={`harness-catalog-status-${entry.id}`}
               >
                 {statusLabel}
+              </span>
+            ) : isReady ? (
+              <span className="mt-1 inline-flex items-center rounded-md bg-emerald-500/15 px-2 py-0.5 text-xs font-medium text-emerald-600 dark:text-emerald-400">
+                Ready
               </span>
             ) : null}
           </div>

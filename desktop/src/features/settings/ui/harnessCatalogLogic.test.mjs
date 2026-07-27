@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
+  adapterUpdateWarning,
   catalogDialogEntries,
   catalogPrimaryAction,
   entryStatusLabel,
@@ -300,6 +301,39 @@ describe("entryStatusLabel", () => {
       ),
       null,
     );
+  });
+});
+
+// ── adapterUpdateWarning ─────────────────────────────────────────────────────
+
+describe("adapterUpdateWarning", () => {
+  it("keeps the codex-specific machine-wide caveat for codex", () => {
+    const copy = adapterUpdateWarning(
+      entry({ id: "codex", label: "Codex", command: "codex-acp" }),
+    );
+    assert.match(copy, /codex-acp/);
+    assert.match(copy, /@zed-industries\/codex-acp@0\.16\.0/);
+  });
+
+  it("never leaks codex package copy into other runtimes", () => {
+    const copy = adapterUpdateWarning(
+      entry({
+        id: "claude",
+        label: "Claude Code",
+        command: "claude-agent-acp",
+      }),
+    );
+    assert.match(copy, /claude-agent-acp/);
+    assert.doesNotMatch(copy, /codex/i);
+    assert.doesNotMatch(copy, /zed-industries/);
+  });
+
+  it("falls back to the label when the command is missing", () => {
+    const copy = adapterUpdateWarning(
+      entry({ id: "mystery", label: "Mystery Harness", command: null }),
+    );
+    assert.match(copy, /Mystery Harness/);
+    assert.doesNotMatch(copy, /codex/i);
   });
 });
 
