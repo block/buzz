@@ -16,6 +16,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { RUNTIME_MARKS } from "./HarnessMarks.tsx";
 import { PRESET_LOGOS } from "./RuntimeIcon.tsx";
 
 const desktopRoot = path.resolve(
@@ -46,28 +47,19 @@ test("PRESET_HARNESSES parse found the preset ids", () => {
   );
 });
 
-const FALLBACK_ONLY_PRESETS = new Set([
-  // Cursor publishes official assets, but neither its brand page nor terms grant
-  // third parties permission to redistribute them. Keep the generic icon.
-  "cursor",
-]);
-
 for (const id of presetIds) {
-  test(`preset "${id}" has a bundled logo or an approved fallback`, () => {
-    const logoPath = PRESET_LOGOS[id];
-    if (FALLBACK_ONLY_PRESETS.has(id)) {
-      assert.equal(
-        logoPath,
-        undefined,
-        `preset "${id}" must keep the generic TerminalSquare fallback until ` +
-          "its vendor grants logo redistribution permission",
-      );
+  test(`preset "${id}" has a bundled logo or inline mark`, () => {
+    // Inline SVG marks (RUNTIME_MARKS) take precedence over bitmap logos —
+    // e.g. Cursor's mark ships as an inline CC0 simple-icons path, not a
+    // file under desktop/public.
+    if (RUNTIME_MARKS[id]) {
       return;
     }
+    const logoPath = PRESET_LOGOS[id];
     assert.ok(
       logoPath,
-      `preset "${id}" has no PRESET_LOGOS entry — it renders the generic ` +
-        `TerminalSquare fallback. Add desktop/public${logoPath ?? `/harness-logos/${id}.png`} ` +
+      `preset "${id}" has no RUNTIME_MARKS or PRESET_LOGOS entry — it renders ` +
+        `the generic TerminalSquare fallback. Add desktop/public${logoPath ?? `/harness-logos/${id}.png`} ` +
         `and map it in RuntimeIcon.tsx.`,
     );
     assert.ok(

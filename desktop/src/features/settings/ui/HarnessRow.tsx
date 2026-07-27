@@ -11,6 +11,7 @@ import {
   usePersonasQuery,
 } from "@/features/agents/hooks";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
+import { RUNTIME_MARKS } from "@/features/onboarding/ui/HarnessMarks";
 import { RuntimeIcon } from "@/features/onboarding/ui/RuntimeIcon";
 import type { AcpAuthMethod, AcpRuntimeCatalogEntry } from "@/shared/api/types";
 import { getInstallErrorMessage } from "@/shared/lib/installError";
@@ -42,15 +43,11 @@ import { deleteConfirmState } from "./harnessGalleryLogic";
 const RUNTIME_LOGO_URLS: Record<string, string> = {
   "buzz-agent": "/app-icon@2x.png",
   claude: "/runtime-icons/claude.png",
-  codex: "/runtime-icons/codex.png",
-  goose: "/runtime-icons/goose.svg",
 };
 
 const RUNTIME_LOGO_SCALE: Record<string, string> = {
   "buzz-agent": "scale-110",
   claude: "scale-110",
-  codex: "scale-110",
-  goose: "scale-125",
 };
 
 function runtimeInstallGuideLabel(runtime: AcpRuntimeCatalogEntry) {
@@ -68,11 +65,16 @@ function runtimeInstallGuideLabel(runtime: AcpRuntimeCatalogEntry) {
 function RuntimeLogo({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
   // Presets and customs deliberately emit an empty avatar_url (no remote or
   // user-supplied icon URLs), so route them through RuntimeIcon — which owns
-  // the PRESET_LOGOS map, the per-logo contrast treatments (omp needs a dark
-  // chip, grok a light one), and the terminal-glyph fallback for logo-less
-  // entries like Cursor (brand assets not licensed for bundling). Builtins
-  // keep the ProfileAvatar path below.
-  if (runtime.source === "preset" || runtime.source === "custom") {
+  // the theme-adaptive RUNTIME_MARKS (goose/codex/cursor), the PRESET_LOGOS
+  // map, the per-logo contrast treatments (omp needs a dark chip, grok a
+  // light one), and the terminal-glyph fallback. Builtins with inline marks
+  // take the same path so their icons adapt to dark/light; the remaining
+  // bitmap builtins keep the ProfileAvatar path below.
+  if (
+    runtime.source === "preset" ||
+    runtime.source === "custom" ||
+    RUNTIME_MARKS[runtime.id]
+  ) {
     return (
       <span
         className="flex h-9 w-9 shrink-0 items-center justify-center"

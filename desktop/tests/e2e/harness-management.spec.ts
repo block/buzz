@@ -309,8 +309,8 @@ test("harness rows render bundled preset logos, not initials", async ({
     "/harness-logos/hermes.png",
   );
 
-  // Cursor has no bundled logo (licensing) — it must fall through to
-  // RuntimeIcon's terminal glyph, not initials.
+  // Cursor renders its inline SVG mark (RUNTIME_MARKS, CC0 simple-icons
+  // path) — an svg, never an img or initials.
   const cursorLogo = page.getByTestId("doctor-runtime-logo-cursor");
   await expect(cursorLogo).toBeVisible();
   await expect(cursorLogo.locator("svg")).toBeVisible();
