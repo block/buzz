@@ -1,7 +1,6 @@
 use super::{
     build_profile_event, classify_intercepted_response, effective_agent_relay_url,
-    extract_retry_in_hint, parse_command_response, relay_http_base_url,
-    MALFORMED_RESPONSE_MESSAGE,
+    extract_retry_in_hint, parse_command_response, relay_http_base_url, MALFORMED_RESPONSE_MESSAGE,
 };
 use serde::Deserialize;
 
@@ -235,10 +234,8 @@ fn content_type_case_insensitive() {
 fn evil_suffix_does_not_match_cloudflare() {
     // A host whose suffix happens to contain the Cloudflare string but is
     // not actually a subdomain must NOT match.
-    let result = classify_intercepted_response(
-        "notcloudflareaccess.com.evil.example",
-        "application/json",
-    );
+    let result =
+        classify_intercepted_response("notcloudflareaccess.com.evil.example", "application/json");
     assert!(
         result.is_none(),
         "false suffix match should not trigger Cloudflare branch"

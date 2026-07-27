@@ -487,11 +487,10 @@ mod tests {
         .sign_with_keys(&keys)
         .expect("sign prior profile");
 
-        let event =
-            build_deferred_profile_event("https://example.com/new.png", Some(&prior_event))
-                .expect("build deferred profile")
-                .sign_with_keys(&keys)
-                .expect("sign deferred profile");
+        let event = build_deferred_profile_event("https://example.com/new.png", Some(&prior_event))
+            .expect("build deferred profile")
+            .sign_with_keys(&keys)
+            .expect("sign deferred profile");
 
         let content = serde_json::from_str::<Value>(&event.content).unwrap();
         assert_eq!(content["picture"], "https://example.com/new.png");
@@ -502,7 +501,10 @@ mod tests {
             ("nip05", serde_json::json!("larry@example.com")),
             ("bot", serde_json::json!(true)),
             ("website", serde_json::json!("https://larry.example")),
-            ("banner", serde_json::json!("https://example.com/banner.png")),
+            (
+                "banner",
+                serde_json::json!("https://example.com/banner.png"),
+            ),
             ("lud16", serde_json::json!("larry@getalby.example")),
         ] {
             assert_eq!(content[key], expected, "{key} was dropped on deferred save");
