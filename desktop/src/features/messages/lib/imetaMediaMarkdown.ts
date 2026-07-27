@@ -26,7 +26,7 @@
  */
 
 import type { BlobDescriptor } from "@/shared/api/tauri";
-import { parseImetaTags } from "./parseImeta";
+import { parseImetaTags } from "@/shared/ui/markdown/parseImeta";
 
 export type ImetaMedia = BlobDescriptor & {
   /** Composer-only label used for attachment links; not emitted in imeta. */

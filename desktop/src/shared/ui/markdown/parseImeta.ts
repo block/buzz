@@ -1,22 +1,21 @@
-export type ImetaEntry = {
+import type { ImetaEntry } from "./types";
+
+export type ParsedImetaEntry = ImetaEntry & {
   url: string;
   m: string;
   x: string;
   size: number;
-  dim?: string;
   blurhash?: string;
   alt?: string;
-  thumb?: string;
-  duration?: number;
-  image?: string;
-  filename?: string;
 };
 
-export function parseImetaTags(tags: string[][]): Map<string, ImetaEntry> {
-  const map = new Map<string, ImetaEntry>();
+export function parseImetaTags(
+  tags: string[][],
+): Map<string, ParsedImetaEntry> {
+  const map = new Map<string, ParsedImetaEntry>();
   for (const tag of tags) {
     if (tag[0] !== "imeta") continue;
-    const entry: Partial<ImetaEntry> = {};
+    const entry: Partial<ParsedImetaEntry> = {};
     for (const part of tag.slice(1)) {
       const spaceIdx = part.indexOf(" ");
       if (spaceIdx === -1) continue;
@@ -58,7 +57,7 @@ export function parseImetaTags(tags: string[][]): Map<string, ImetaEntry> {
           break;
       }
     }
-    if (entry.url) map.set(entry.url, entry as ImetaEntry);
+    if (entry.url) map.set(entry.url, entry as ParsedImetaEntry);
   }
   return map;
 }

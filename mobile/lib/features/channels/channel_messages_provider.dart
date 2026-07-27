@@ -3,6 +3,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/relay/relay.dart';
 import 'channel_management_provider.dart';
+import 'pending_local_messages_provider.dart';
 import 'channel_window.dart';
 import 'thread_replies_provider.dart';
 
@@ -87,6 +88,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
 
       final history = await _fetchNewestHistory(session);
       if (!_isCurrentInit(initVersion)) return;
+      _confirmLocalMessages(history.map((event) => event.id));
 
       final existing = state.value ?? const <NostrEvent>[];
       final existingIds = existing.map((event) => event.id).toSet();
@@ -159,7 +161,13 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     },
   );
 
-  void _handleLiveEvent(NostrEvent event) {
+  void _handleLiveEvent(NostrEvent event, {bool authoritative = true}) {
+    // Reply ownership and its thread-local overlay must transition together.
+    // The authoritative thread query performs both confirmations after it
+    // contains the reply; a live echo only triggers that query below.
+    if (authoritative && event.threadReference.parentId == null) {
+      _confirmLocalMessages([event.id]);
+    }
     if (_usingChannelWindow) {
       _handleWindowLiveEvent(event);
     } else {
@@ -223,10 +231,96 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     return true;
   }
 
+  void _confirmLocalMessages(Iterable<String> eventIds) {
+    ref
+        .read(pendingLocalMessagesProvider(channelId).notifier)
+        .confirm(eventIds);
+  }
+
   static bool _isMembershipEvent(String content) {
     return content.contains('member_joined') ||
         content.contains('member_left') ||
         content.contains('member_removed');
+  }
+
+  /// Adds a just-signed outgoing message before the relay acknowledges it.
+  /// The live relay echo is deduplicated by event id.
+  void addLocalMessage(NostrEvent event) {
+    ref.read(pendingLocalMessagesProvider(channelId).notifier).add(event);
+    final thread = event.threadReference;
+    if (thread.parentId != null) {
+      final rootId = thread.rootId;
+      if (rootId == null) {
+        throw StateError('Reply ${event.id} has a parent but no thread root.');
+      }
+      ref
+          .read(
+            threadLocalRepliesProvider(
+              ThreadRepliesArgs(channelId: channelId, rootId: rootId),
+            ).notifier,
+          )
+          .add(event);
+      return;
+    }
+
+    final isTimelineRow = EventKind.channelTimelineContentKinds.contains(
+      event.kind,
+    );
+    if (!_usingChannelWindow && isTimelineRow) {
+      _windowStore = mergeLiveChannelWindowEvent(
+        _windowStore,
+        event,
+        isTimelineRow: true,
+      );
+    }
+    _handleLiveEvent(event, authoritative: false);
+  }
+
+  /// Releases rollback ownership after the publish future succeeds. The
+  /// optimistic row (and any thread overlay) remains visible until relay data
+  /// replaces it, because OK and EVENT delivery are unordered.
+  void completeLocalMessage(String eventId) {
+    _confirmLocalMessages([eventId]);
+  }
+
+  /// Rolls back a local message when its publish is rejected or times out.
+  void removeLocalMessage(String eventId) {
+    final pending = ref
+        .read(pendingLocalMessagesProvider(channelId).notifier)
+        .take(eventId);
+    if (pending == null) return;
+
+    final thread = pending.threadReference;
+    if (thread.parentId != null) {
+      final rootId = thread.rootId;
+      if (rootId == null) {
+        throw StateError('Reply $eventId has a parent but no thread root.');
+      }
+      ref
+          .read(
+            threadLocalRepliesProvider(
+              ThreadRepliesArgs(channelId: channelId, rootId: rootId),
+            ).notifier,
+          )
+          .remove(eventId);
+      return;
+    }
+
+    final nextOverlay = _windowStore.liveOverlay
+        .where((event) => event.id != eventId)
+        .toList();
+    if (nextOverlay.length != _windowStore.liveOverlay.length) {
+      _windowStore = ChannelWindowStore(
+        pages: _windowStore.pages,
+        liveOverlay: nextOverlay,
+        liveAux: _windowStore.liveAux,
+      );
+    }
+
+    final current = state.value ?? _lastKnownMessages ?? const <NostrEvent>[];
+    final next = current.where((event) => event.id != eventId).toList();
+    _lastKnownMessages = next;
+    state = AsyncData(next);
   }
 
   static List<NostrEvent> _mergeEvent(
@@ -235,7 +329,10 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   ) {
     if (current.any((e) => e.id == incoming.id)) return current;
     final updated = [...current, incoming];
-    updated.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    updated.sort((a, b) {
+      final createdAt = a.createdAt.compareTo(b.createdAt);
+      return createdAt != 0 ? createdAt : a.id.compareTo(b.id);
+    });
     return updated;
   }
 
