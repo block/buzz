@@ -1,19 +1,28 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readFile } from "node:fs/promises";
+
+import {
+  assertCommandAdviserArtifactNames,
+  checkCommandAdviserSourceIdentity,
+} from "./check-command-adviser-branding.mjs";
 
 test("macOS product identity is Command Adviser without changing stable internals", async () => {
-  const config = JSON.parse(
-    await readFile(new URL("../src-tauri/tauri.conf.json", import.meta.url)),
-  );
-  const plist = await readFile(
-    new URL("../src-tauri/Info.plist", import.meta.url),
-    "utf8",
-  );
+  await checkCommandAdviserSourceIdentity(new URL("../", import.meta.url));
+});
 
-  assert.equal(config.productName, "Command Adviser");
-  assert.equal(config.identifier, "xyz.block.buzz.app");
-  assert.deepEqual(config.plugins["deep-link"].desktop.schemes, ["buzz"]);
-  assert.match(plist, /<string>Command Adviser<\/string>/);
-  assert.doesNotMatch(plist, />Buzz needs|>Buzz can read/);
+test("native artifact names expose Command Adviser", () => {
+  assert.doesNotThrow(() =>
+    assertCommandAdviserArtifactNames(
+      "/tmp/Command Adviser.app",
+      "/tmp/Command Adviser_0.4.24_aarch64.dmg",
+    ),
+  );
+  assert.throws(
+    () =>
+      assertCommandAdviserArtifactNames(
+        "/tmp/Buzz.app",
+        "/tmp/Buzz_0.4.24_aarch64.dmg",
+      ),
+    /Command Adviser/,
+  );
 });
