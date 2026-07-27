@@ -820,7 +820,7 @@ export const ChannelPane = React.memo(function ChannelPane({
             </div>
           )}
           {canDropInMainColumn && mainComposerMedia.isDragOver ? (
-            <DropZoneOverlay className="z-30 rounded-none" />
+            <DropZoneOverlay className="z-50 rounded-2xl bg-primary/20 backdrop-blur-sm" />
           ) : null}
         </section>
       ) : null}
