@@ -10,8 +10,11 @@
 const PURE_CACHE_KEY_PREFIXES = [
   "buzz-channel-messages.v1",
   "buzz-channels.v1",
+  "buzz-sidebar-skeleton-shape.v1",
   "buzz-timeline-skeleton-shape.v1",
 ];
+
+const QUOTA_RECOVERY_MARKER_KEY = "buzz-local-storage-quota-recovery.v1";
 
 function evictPureCacheEntries(): number {
   const toRemove: string[] = [];
@@ -28,6 +31,23 @@ function evictPureCacheEntries(): number {
     window.localStorage.removeItem(key);
   }
   return toRemove.length;
+}
+
+/**
+ * Clears disposable snapshots once for installs that may already have filled
+ * WebKit localStorage before quota-aware writes shipped. The marker is written
+ * only after cleanup succeeds, so an interrupted/unavailable storage backend
+ * retries on the next launch. Load-bearing preferences and identity state are
+ * never touched.
+ */
+export function recoverLocalStorageQuotaOnStartup(): void {
+  try {
+    if (window.localStorage.getItem(QUOTA_RECOVERY_MARKER_KEY) === "1") return;
+    evictPureCacheEntries();
+    window.localStorage.setItem(QUOTA_RECOVERY_MARKER_KEY, "1");
+  } catch (error) {
+    console.warn("[localStorageQuota] startup cache cleanup failed:", error);
+  }
 }
 
 let warnedPersistentFailure = false;

@@ -2,6 +2,7 @@ import * as React from "react";
 
 import type { Channel } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
+import { setLocalStorageItemWithRecovery } from "@/shared/lib/localStorageQuota";
 import {
   SidebarGroup,
   SidebarGroupContent,
@@ -134,7 +135,7 @@ function writeSidebarLoadingShape(
   };
 
   try {
-    window.localStorage.setItem(cacheKey, JSON.stringify(payload));
+    setLocalStorageItemWithRecovery(cacheKey, JSON.stringify(payload));
   } catch {
     // localStorage can be unavailable or full in embedded webviews.
   }

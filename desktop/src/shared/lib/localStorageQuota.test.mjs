@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { setLocalStorageItemWithRecovery } from "./localStorageQuota.ts";
+import {
+  recoverLocalStorageQuotaOnStartup,
+  setLocalStorageItemWithRecovery,
+} from "./localStorageQuota.ts";
 
 function makeQuotaLocalStorage({ maxEntries }) {
   const store = new Map();
@@ -29,6 +32,58 @@ function install(ls) {
   globalThis.window.localStorage = ls;
   globalThis.localStorage = ls;
 }
+
+test("startup recovery removes disposable caches but preserves user state", () => {
+  const ls = makeQuotaLocalStorage({ maxEntries: 10 });
+  install(ls);
+  ls.store.set("buzz-channel-messages.v1:relay:chan", "big");
+  ls.store.set("buzz-channels.v1:relay", "big");
+  ls.store.set("buzz-timeline-skeleton-shape.v1:chan", "small");
+  ls.store.set("buzz-sidebar-skeleton-shape.v1:community:user", "small");
+  ls.store.set("buzz-communities", "keep");
+
+  recoverLocalStorageQuotaOnStartup();
+
+  assert.equal(ls.getItem("buzz-channel-messages.v1:relay:chan"), null);
+  assert.equal(ls.getItem("buzz-channels.v1:relay"), null);
+  assert.equal(ls.getItem("buzz-timeline-skeleton-shape.v1:chan"), null);
+  assert.equal(
+    ls.getItem("buzz-sidebar-skeleton-shape.v1:community:user"),
+    null,
+  );
+  assert.equal(ls.getItem("buzz-communities"), "keep");
+  assert.equal(ls.getItem("buzz-local-storage-quota-recovery.v1"), "1");
+});
+
+test("startup recovery runs only once", () => {
+  const ls = makeQuotaLocalStorage({ maxEntries: 10 });
+  install(ls);
+
+  recoverLocalStorageQuotaOnStartup();
+  ls.store.set("buzz-channel-messages.v1:relay:new", "new snapshot");
+  recoverLocalStorageQuotaOnStartup();
+
+  assert.equal(
+    ls.getItem("buzz-channel-messages.v1:relay:new"),
+    "new snapshot",
+  );
+});
+
+test("startup recovery retries after marker write fails", () => {
+  const ls = makeQuotaLocalStorage({ maxEntries: 1 });
+  install(ls);
+  ls.store.set("buzz-communities", "keep");
+
+  recoverLocalStorageQuotaOnStartup();
+  assert.equal(ls.getItem("buzz-local-storage-quota-recovery.v1"), null);
+
+  ls.store.delete("buzz-communities");
+  ls.store.set("buzz-channel-messages.v1:relay:chan", "big");
+  recoverLocalStorageQuotaOnStartup();
+
+  assert.equal(ls.getItem("buzz-channel-messages.v1:relay:chan"), null);
+  assert.equal(ls.getItem("buzz-local-storage-quota-recovery.v1"), "1");
+});
 
 test("writes normally when under quota", () => {
   const ls = makeQuotaLocalStorage({ maxEntries: 10 });
