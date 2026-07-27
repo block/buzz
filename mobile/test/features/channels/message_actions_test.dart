@@ -8,6 +8,7 @@ import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:nostr/nostr.dart' as nostr;
 import 'package:shared_preferences/shared_preferences.dart';
 
 const _channelId = 'chan-1';
@@ -80,6 +81,19 @@ Future<SharedPreferences> _mockPrefs() async {
   return SharedPreferences.getInstance();
 }
 
+/// A [ReminderService] whose constructor dependencies are inert until used —
+/// enough for visibility checks on the "Remind me" fast action.
+ReminderService _stubReminderService() {
+  final keys = nostr.Keys.generate();
+  return ReminderService(
+    signedEventRelay: SignedEventRelay(
+      session: RelaySessionNotifier(),
+      nsec: keys.nsec,
+    ),
+    crypto: ReminderCrypto(keys.nsec, keys.public),
+  );
+}
+
 Future<void> _pumpSheet(
   WidgetTester tester, {
   required TimelineMessage message,
@@ -87,6 +101,7 @@ Future<void> _pumpSheet(
   ReadStateNotifier Function()? readStateOverride,
   bool canManageMessage = false,
   List<TimelineMessage>? allMessages,
+  ReminderService? reminderService,
 }) async {
   await tester.pumpWidget(
     ProviderScope(
@@ -99,9 +114,9 @@ Future<void> _pumpSheet(
                 _readState(const {_channelId: 100000}),
               ),
         ),
-        // No signing identity → reminder row hidden by default; individual
-        // tests opt in via their own scope when needed.
-        reminderServiceProvider.overrideWithValue(null),
+        // No signing identity → "Remind me" hidden by default; individual
+        // tests opt in by passing a stub service.
+        reminderServiceProvider.overrideWithValue(reminderService),
       ],
       child: MaterialApp(
         theme: AppTheme.light(),
@@ -140,10 +155,31 @@ void main() {
       expect(find.text('Share message'), findsOneWidget);
       expect(find.text('Mark unread'), findsOneWidget);
       expect(find.text('Follow thread'), findsOneWidget);
+      // No thread context → no Reply fast action.
+      expect(find.text('Reply'), findsNothing);
       // No signing identity → no reminders; no manage rights → no edit/delete.
-      expect(find.text('Remind me later'), findsNothing);
+      expect(find.text('Remind me'), findsNothing);
       expect(find.text('Edit message'), findsNothing);
       expect(find.text('Delete message'), findsNothing);
+    });
+
+    testWidgets('promotes Reply, Copy link, and Remind me to the fast-actions '
+        'row', (tester) async {
+      final prefs = await _mockPrefs();
+      await _pumpSheet(
+        tester,
+        message: _message(),
+        prefs: prefs,
+        allMessages: [_message()],
+        reminderService: _stubReminderService(),
+      );
+
+      expect(find.text('Reply'), findsOneWidget);
+      expect(find.text('Copy link'), findsOneWidget);
+      expect(find.text('Remind me'), findsOneWidget);
+      // Promoted actions no longer appear under their old list-row labels.
+      expect(find.text('Reply in thread'), findsNothing);
+      expect(find.text('Remind me later'), findsNothing);
     });
 
     testWidgets('hides utility actions for system messages', (tester) async {
@@ -155,7 +191,8 @@ void main() {
       expect(find.text('Share message'), findsNothing);
       expect(find.text('Mark unread'), findsNothing);
       expect(find.text('Follow thread'), findsNothing);
-      expect(find.text('Reply in thread'), findsNothing);
+      expect(find.text('Reply'), findsNothing);
+      expect(find.text('Remind me'), findsNothing);
     });
 
     testWidgets('shows Edit/Delete only with manage rights', (tester) async {

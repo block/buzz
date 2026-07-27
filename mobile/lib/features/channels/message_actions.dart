@@ -120,29 +120,23 @@ void showMessageActions({
                   ],
                 ),
                 const SizedBox(height: Grid.xs),
-                if (allMessages != null && !message.isSystem)
-                  ListTile(
-                    leading: const Icon(LucideIcons.messageSquareReply),
-                    title: const Text('Reply in thread'),
-                    onTap: () {
-                      Navigator.of(sheetContext).pop();
-                      Navigator.of(context).push(
-                        MaterialPageRoute<void>(
-                          builder: (_) => ThreadDetailPage(
-                            threadHead: message,
-                            allMessages: allMessages,
-                            channelId: channelId,
-                            currentPubkey: currentPubkey,
-                            isMember: isMember,
-                            isArchived: isArchived,
-                          ),
-                        ),
-                      );
-                    },
-                  ),
                 if (!message.isSystem) ...[
+                  // Fast actions: respond now, hand off context, defer.
+                  _FastActionsRow(
+                    message: message,
+                    channelId: channelId,
+                    allMessages: allMessages,
+                    currentPubkey: currentPubkey,
+                    isMember: isMember,
+                    isArchived: isArchived,
+                    pageContext: context,
+                  ),
+                  const SizedBox(height: Grid.xs),
+                  // Triage: come back to this message later.
                   _MarkReadUnreadTile(message: message, channelId: channelId),
                   _FollowThreadTile(message: message),
+                  const _SheetDivider(),
+                  // Export: take the content out of the conversation.
                   ListTile(
                     leading: const Icon(LucideIcons.copy),
                     title: const Text('Copy text'),
@@ -151,18 +145,6 @@ void showMessageActions({
                       // Copy to clipboard
                       final data = ClipboardData(text: message.content);
                       Clipboard.setData(data);
-                    },
-                  ),
-                  ListTile(
-                    leading: const Icon(LucideIcons.link2),
-                    title: const Text('Copy link'),
-                    onTap: () {
-                      Navigator.of(sheetContext).pop();
-                      copyToClipboard(
-                        context,
-                        messageLinkFor(message: message, channelId: channelId),
-                        message: 'Message link copied',
-                      );
                     },
                   ),
                   ListTile(
@@ -184,9 +166,9 @@ void showMessageActions({
                       );
                     },
                   ),
-                  _RemindMeLaterTile(message: message, channelId: channelId),
                 ],
                 if (canManageMessage) ...[
+                  if (!message.isSystem) const _SheetDivider(),
                   ListTile(
                     leading: const Icon(LucideIcons.pencil),
                     title: const Text('Edit message'),
@@ -324,37 +306,162 @@ class _FollowThreadTile extends ConsumerWidget {
   }
 }
 
-class _RemindMeLaterTile extends ConsumerWidget {
+/// Promoted actions for the three dominant mobile jobs: respond now (Reply),
+/// hand off context (Copy link — the `buzz://message` link is the workspace's
+/// context-transfer primitive), and defer (Remind me).
+class _FastActionsRow extends ConsumerWidget {
   final TimelineMessage message;
   final String channelId;
+  final List<TimelineMessage>? allMessages;
+  final String? currentPubkey;
+  final bool isMember;
+  final bool isArchived;
 
-  const _RemindMeLaterTile({required this.message, required this.channelId});
+  /// The long-pressed message's page context — survives the sheet pop, used
+  /// for the thread push and the copy-link snackbar.
+  final BuildContext pageContext;
+
+  const _FastActionsRow({
+    required this.message,
+    required this.channelId,
+    required this.allMessages,
+    required this.currentPubkey,
+    required this.isMember,
+    required this.isArchived,
+    required this.pageContext,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    if (ref.watch(reminderServiceProvider) == null) {
-      return const SizedBox.shrink();
-    }
+    final messages = allMessages;
+    final canRemind = ref.watch(reminderServiceProvider) != null;
 
-    return ListTile(
-      leading: const Icon(LucideIcons.clock),
-      title: const Text('Remind me later'),
-      onTap: () {
-        final rootContext = Navigator.of(context, rootNavigator: true).context;
-        Navigator.of(context).pop();
-        showRemindMeLaterSheet(
-          context: rootContext,
-          ref: ref,
-          target: ReminderTarget(
-            eventId: message.id,
-            channelId: channelId,
-            preview: message.content.characters
-                .take(_reminderPreviewLength)
-                .toString(),
-            authorPubkey: message.pubkey,
+    final tiles = <Widget>[
+      if (messages != null)
+        _FastActionTile(
+          icon: LucideIcons.messageSquareReply,
+          label: 'Reply',
+          onTap: () {
+            Navigator.of(context).pop();
+            Navigator.of(pageContext).push(
+              MaterialPageRoute<void>(
+                builder: (_) => ThreadDetailPage(
+                  threadHead: message,
+                  allMessages: messages,
+                  channelId: channelId,
+                  currentPubkey: currentPubkey,
+                  isMember: isMember,
+                  isArchived: isArchived,
+                ),
+              ),
+            );
+          },
+        ),
+      _FastActionTile(
+        icon: LucideIcons.link2,
+        label: 'Copy link',
+        onTap: () {
+          Navigator.of(context).pop();
+          copyToClipboard(
+            pageContext,
+            messageLinkFor(message: message, channelId: channelId),
+            message: 'Message link copied',
+          );
+        },
+      ),
+      if (canRemind)
+        _FastActionTile(
+          icon: LucideIcons.clock,
+          label: 'Remind me',
+          onTap: () {
+            final rootContext = Navigator.of(
+              context,
+              rootNavigator: true,
+            ).context;
+            Navigator.of(context).pop();
+            showRemindMeLaterSheet(
+              context: rootContext,
+              ref: ref,
+              target: ReminderTarget(
+                eventId: message.id,
+                channelId: channelId,
+                preview: message.content.characters
+                    .take(_reminderPreviewLength)
+                    .toString(),
+                authorPubkey: message.pubkey,
+              ),
+            );
+          },
+        ),
+    ];
+
+    return Row(
+      children: [
+        for (var i = 0; i < tiles.length; i++) ...[
+          if (i > 0) const SizedBox(width: Grid.xxs),
+          Expanded(child: tiles[i]),
+        ],
+      ],
+    );
+  }
+}
+
+class _FastActionTile extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+
+  const _FastActionTile({
+    required this.icon,
+    required this.label,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: context.colors.surfaceContainerHighest,
+      borderRadius: BorderRadius.circular(Radii.lg),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(Radii.lg),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+            horizontal: Grid.half,
+            vertical: Grid.twelve,
           ),
-        );
-      },
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 20, color: context.colors.secondary),
+              const SizedBox(height: Grid.half),
+              Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: context.textTheme.labelSmall?.copyWith(
+                  color: context.colors.onSurface,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Section divider between the sheet's action groups, matching the
+/// `AppListSection` divider convention.
+class _SheetDivider extends StatelessWidget {
+  const _SheetDivider();
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
+      child: Divider(height: 1, color: context.colors.outlineVariant),
     );
   }
 }
