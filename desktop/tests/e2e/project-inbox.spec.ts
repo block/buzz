@@ -6,7 +6,7 @@ import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 const DEFAULT_MOCK_PUBKEY = "deadbeef".repeat(8);
 const BUZZ_REPO_ADDRESS = `30617:${DEFAULT_MOCK_PUBKEY}:buzz`;
 
-test("Buzz Git pull request renders and stays actionable in Activity", async ({
+test("Buzz Git pull request renders and stays actionable in Inbox", async ({
   page,
 }) => {
   await page.addInitScript(() => {
@@ -39,7 +39,7 @@ test("Buzz Git pull request renders and stays actionable in Activity", async ({
   );
   expect(pullRequestId).toBeTruthy();
 
-  await page.getByRole("button", { name: "Activity", exact: true }).click();
+  await page.getByRole("button", { name: "Inbox", exact: true }).click();
   await page.evaluate(
     ({ author, id, repoAddress, viewer }) => {
       window.__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__?.({

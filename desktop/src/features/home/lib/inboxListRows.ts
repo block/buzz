@@ -2,7 +2,7 @@ import type { InboxItem } from "@/features/home/lib/inbox";
 import type { DraftViewItem } from "@/features/messages/ui/DraftsPanel";
 import type { Reminder } from "@/features/reminders/lib/reminderTypes";
 
-export type ActivityListRow =
+export type InboxListRow =
   | {
       key: string;
       kind: "inbox";
@@ -34,7 +34,7 @@ function draftActivityAt(item: DraftViewItem): number {
   return 0;
 }
 
-export function buildActivityListRows({
+export function buildInboxListRows({
   drafts,
   items,
   reminders,
@@ -42,9 +42,9 @@ export function buildActivityListRows({
   drafts: readonly DraftViewItem[];
   items: readonly InboxItem[];
   reminders: readonly Reminder[];
-}): ActivityListRow[] {
+}): InboxListRow[] {
   const consumedReminderIds = new Set<string>();
-  const inboxRows = items.map((item): ActivityListRow => {
+  const inboxRows = items.map((item): InboxListRow => {
     const eventIds = new Set([
       item.id,
       item.item.id,
@@ -91,7 +91,7 @@ export function buildActivityListRows({
           !consumedReminderIds.has(reminder.id),
       )
       .map(
-        (reminder): ActivityListRow => ({
+        (reminder): InboxListRow => ({
           key: `reminder:${reminder.id}`,
           kind: "reminder",
           reminder,
@@ -101,7 +101,7 @@ export function buildActivityListRows({
     ...drafts
       .filter((item) => item.rootStatus !== "deleted")
       .map(
-        (item): ActivityListRow => ({
+        (item): InboxListRow => ({
           key: `draft:${item.entry.key}`,
           kind: "draft",
           item,

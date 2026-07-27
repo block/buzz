@@ -430,7 +430,7 @@ export function getInboxItemConversationId(item: FeedItem) {
   );
 }
 
-/** Finds the Activity row containing an event, including grouped events. */
+/** Finds the Inbox row containing an event, including grouped events. */
 export function findInboxItemByEventId(
   items: readonly InboxItem[],
   eventId: string,

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { resolveActivityFilterSelection } from "./activitySelection.ts";
+import { resolveInboxFilterSelection } from "./inboxSelection.ts";
 
 const items = [
   { conversationId: "first-conversation", id: "first-event" },
@@ -10,7 +10,7 @@ const items = [
 
 test("filter selection preserves a conversation that remains visible", () => {
   assert.deepEqual(
-    resolveActivityFilterSelection({
+    resolveInboxFilterSelection({
       isNarrow: false,
       items,
       selectedConversationId: "second-conversation",
@@ -21,7 +21,7 @@ test("filter selection preserves a conversation that remains visible", () => {
 
 test("wide filter selection immediately selects the first valid row", () => {
   assert.deepEqual(
-    resolveActivityFilterSelection({
+    resolveInboxFilterSelection({
       isNarrow: false,
       items,
       selectedConversationId: "filtered-out-conversation",
@@ -32,7 +32,7 @@ test("wide filter selection immediately selects the first valid row", () => {
 
 test("narrow filter selection returns to the list when selection is invalid", () => {
   assert.deepEqual(
-    resolveActivityFilterSelection({
+    resolveInboxFilterSelection({
       isNarrow: true,
       items,
       selectedConversationId: "filtered-out-conversation",
@@ -43,7 +43,7 @@ test("narrow filter selection returns to the list when selection is invalid", ()
 
 test("empty filter selection clears detail at every width", () => {
   assert.deepEqual(
-    resolveActivityFilterSelection({
+    resolveInboxFilterSelection({
       isNarrow: false,
       items: [],
       selectedConversationId: "filtered-out-conversation",

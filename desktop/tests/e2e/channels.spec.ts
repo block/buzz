@@ -2573,7 +2573,7 @@ async function seedHomeInboxMention(
   await page.getByTestId(`home-inbox-item-${itemId}`).click();
 }
 
-test("Activity All excludes generic channel traffic", async ({ page }) => {
+test("Inbox All excludes generic channel traffic", async ({ page }) => {
   await page.goto("/");
   await page.waitForFunction(() => {
     const win = window as MockFeedWindow;
@@ -2593,7 +2593,7 @@ test("Activity All excludes generic channel traffic", async ({ page }) => {
         channel_type: "stream",
         content: "Ordinary channel traffic",
         created_at: now,
-        id: "activity-generic-channel-message",
+        id: "inbox-generic-channel-message",
         kind: 9,
         pubkey: senderPubkey,
         tags: [["h", channelId]],
@@ -2605,7 +2605,7 @@ test("Activity All excludes generic channel traffic", async ({ page }) => {
         channel_type: "stream",
         content: "A message that needs my attention",
         created_at: now + 1,
-        id: "activity-personal-mention",
+        id: "inbox-personal-mention",
         kind: 9,
         pubkey: senderPubkey,
         tags: [
@@ -2622,14 +2622,14 @@ test("Activity All excludes generic channel traffic", async ({ page }) => {
   );
 
   await expect(
-    page.getByTestId("home-inbox-item-activity-personal-mention"),
+    page.getByTestId("home-inbox-item-inbox-personal-mention"),
   ).toBeVisible();
   await expect(
-    page.getByTestId("home-inbox-item-activity-generic-channel-message"),
+    page.getByTestId("home-inbox-item-inbox-generic-channel-message"),
   ).toHaveCount(0);
 });
 
-test("Activity unread-only hides reminders and drafts from mixed All", async ({
+test("Inbox unread-only hides reminders and drafts from mixed All", async ({
   page,
 }) => {
   const draftKey = `channel:${GENERAL_CHANNEL_ID}`;
@@ -2641,7 +2641,7 @@ test("Activity unread-only hides reminders and drafts from mixed All", async ({
         JSON.stringify({
           [draftStorageKey]: {
             channelId: "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50",
-            content: "Finish the mixed Activity test",
+            content: "Finish the mixed Inbox test",
             createdAt: timestamp,
             pendingImeta: [],
             selectionEnd: 30,
@@ -2664,8 +2664,8 @@ test("Activity unread-only hides reminders and drafts from mixed All", async ({
     return typeof win.__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__ === "function";
   });
 
-  const reminderId = "activity-unread-only-reminder";
-  const messageId = "activity-unread-only-message";
+  const reminderId = "inbox-unread-only-reminder";
+  const messageId = "inbox-unread-only-message";
   await page.evaluate(
     async ({
       channelId,
@@ -2689,7 +2689,7 @@ test("Activity unread-only hides reminders and drafts from mixed All", async ({
             target: {
               eventId: "mock-general-alice",
               channelId,
-              preview: "Due reminder in mixed Activity",
+              preview: "Due reminder in mixed Inbox",
               authorPubkey: senderPubkey,
             },
             status: "pending",
@@ -2709,7 +2709,7 @@ test("Activity unread-only hides reminders and drafts from mixed All", async ({
         channel_id: channelId,
         channel_name: "general",
         channel_type: "stream",
-        content: "Unread message in mixed Activity",
+        content: "Unread message in mixed Inbox",
         created_at: now,
         id: messageId,
         kind: 9,
@@ -2744,11 +2744,11 @@ test("Activity unread-only hides reminders and drafts from mixed All", async ({
   await expect(draftRow).toHaveCount(0);
 });
 
-test("Activity merges a due reminder into its represented conversation", async ({
+test("Inbox merges a due reminder into its represented conversation", async ({
   page,
 }) => {
-  const messageId = "activity-reminder-merge-message";
-  const reminderId = "activity-reminder-merge";
+  const messageId = "inbox-reminder-merge-message";
+  const reminderId = "inbox-reminder-merge";
   await seedHomeInboxMention(page, messageId);
 
   await page.evaluate(
@@ -2806,13 +2806,13 @@ test("Activity merges a due reminder into its represented conversation", async (
   await expect(conversationRow.getByText("Reminder due")).toBeVisible();
 });
 
-test("Activity All keeps its filter when opening a due reminder", async ({
+test("Inbox All keeps its filter when opening a due reminder", async ({
   page,
 }) => {
   await page.goto("/");
   await expect(page.getByTestId("home-inbox")).toBeVisible();
 
-  const reminderId = "activity-stable-reminder";
+  const reminderId = "inbox-stable-reminder";
   await page.evaluate(
     async ({ channelId, id, pubkey }) => {
       const now = Math.floor(Date.now() / 1000);
@@ -2830,7 +2830,7 @@ test("Activity All keeps its filter when opening a due reminder", async ({
             target: {
               eventId: "mock-general-alice",
               channelId,
-              preview: "Review the Activity behavior",
+              preview: "Review the Inbox behavior",
               authorPubkey: pubkey,
             },
             status: "pending",
@@ -2858,13 +2858,11 @@ test("Activity All keeps its filter when opening a due reminder", async ({
   await expect(page.getByTestId("home-inbox-list")).toBeVisible();
 });
 
-test("Activity reminder rows and detail identify DM context", async ({
-  page,
-}) => {
+test("Inbox reminder rows and detail identify DM context", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByTestId("home-inbox")).toBeVisible();
 
-  const reminderId = "activity-dm-reminder";
+  const reminderId = "inbox-dm-reminder";
   const dmChannelId = "f48efb06-0c93-5025-aac9-2e646bb6bfa8";
   await page.evaluate(
     async ({ authorPubkey, channelId, currentPubkey, reminderId }) => {
@@ -2920,7 +2918,7 @@ test("Activity reminder rows and detail identify DM context", async ({
   );
 });
 
-test("Activity detail title and source action navigate to the conversation", async ({
+test("Inbox detail title and source action navigate to the conversation", async ({
   page,
 }) => {
   await seedHomeInboxMention(page, "mock-feed-home-channel-navigate");
@@ -2965,14 +2963,14 @@ test("home inbox thread reply mention carries threadRootId to the channel", asyn
   await expect(page.getByTestId("home-inbox-list")).toHaveCount(0);
 });
 
-test("Activity filter changes preserve valid detail and directly select a replacement", async ({
+test("Inbox filter changes preserve valid detail and directly select a replacement", async ({
   page,
 }) => {
-  const threadItemId = "activity-filter-thread";
-  const actionItemId = "activity-filter-action";
+  const threadItemId = "inbox-filter-thread";
+  const actionItemId = "inbox-filter-action";
   await seedHomeInboxMention(page, threadItemId, [
-    ["e", "activity-filter-root", "", "root"],
-    ["e", "activity-filter-parent", "", "reply"],
+    ["e", "inbox-filter-root", "", "root"],
+    ["e", "inbox-filter-parent", "", "reply"],
     ["p", TEST_IDENTITIES.tyler.pubkey],
   ]);
 
@@ -3023,7 +3021,7 @@ test("Activity filter changes preserve valid detail and directly select a replac
   );
 });
 
-test("Activity keeps the unread boundary for replies from multiple agents", async ({
+test("Inbox keeps the unread boundary for replies from multiple agents", async ({
   page,
 }) => {
   await page.goto("/");
@@ -3037,9 +3035,9 @@ test("Activity keeps the unread boundary for replies from multiple agents", asyn
   });
 
   const replyIds = [
-    "activity-agent-reply-first",
-    "activity-agent-reply-second",
-    "activity-agent-reply-third",
+    "inbox-agent-reply-first",
+    "inbox-agent-reply-second",
+    "inbox-agent-reply-third",
   ];
   await page.evaluate(
     ({ agentPubkeys, channelId, currentPubkey, ids }) => {
@@ -3055,7 +3053,7 @@ test("Activity keeps the unread boundary for replies from multiple agents", asyn
         channelName: "general",
         content: "Agent collaboration thread",
         createdAt: createdAt - 10,
-        id: "activity-agent-thread-root",
+        id: "inbox-agent-thread-root",
         pubkey: currentPubkey,
       });
       const contents = [
@@ -3117,11 +3115,7 @@ test("home inbox groups consecutive DMs and opens the full conversation", async 
   page,
 }) => {
   const dmChannelId = "f48efb06-0c93-5025-aac9-2e646bb6bfa8";
-  const dmIds = [
-    "activity-dm-first",
-    "activity-dm-second",
-    "activity-dm-third",
-  ];
+  const dmIds = ["inbox-dm-first", "inbox-dm-second", "inbox-dm-third"];
 
   await page.goto("/");
   await expect(page.getByTestId("home-inbox-list")).toBeVisible();

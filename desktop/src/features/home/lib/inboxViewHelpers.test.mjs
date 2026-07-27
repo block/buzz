@@ -4,23 +4,23 @@ import test from "node:test";
 import { formatTimelineMessages } from "../../messages/lib/formatTimelineMessages.ts";
 import { getConfigNudgeAuthorPubkey } from "../../messages/ui/configNudgeAuthPubkey.ts";
 import {
-  filterActivityInboxItems,
+  filterInboxItems,
   getContextMessageDepth,
   getReactionTargetId,
   hasInboxThreadContext,
   isInboxThreadContextEvent,
-  matchesActivityAllView,
+  matchesInboxAllView,
   matchesInboxFilter,
   toInboxContextMessage,
   toTimelineMessage,
 } from "./inboxViewHelpers.ts";
 
-test("Activity uses the dedicated reminder list instead of feed reminder rows", () => {
+test("Inbox uses the dedicated reminder list instead of feed reminder rows", () => {
   const message = { item: { kind: 9 } };
   const reminder = { item: { kind: 40007 } };
   const items = [message, reminder];
 
-  assert.deepEqual(filterActivityInboxItems(items), [message]);
+  assert.deepEqual(filterInboxItems(items), [message]);
 });
 
 test("hasInboxThreadContext finds replies in the grouped row or loaded context", () => {
@@ -72,10 +72,10 @@ test("matchesInboxFilter returns true for the 'all' filter regardless of categor
   assert.equal(matchesInboxFilter({ categories: ["mentions"] }, "all"), true);
 });
 
-test("Activity All excludes generic top-level channel traffic", () => {
+test("Inbox All excludes generic top-level channel traffic", () => {
   const owned = new Set(["owned-agent"]);
   assert.equal(
-    matchesActivityAllView(
+    matchesInboxAllView(
       {
         categories: ["activity"],
         item: {
@@ -90,7 +90,7 @@ test("Activity All excludes generic top-level channel traffic", () => {
   );
 });
 
-test("Activity All includes each personally relevant message source", () => {
+test("Inbox All includes each personally relevant message source", () => {
   const owned = new Set(["owned-agent"]);
   const cases = [
     {
@@ -130,13 +130,13 @@ test("Activity All includes each personally relevant message source", () => {
   ];
 
   for (const item of cases) {
-    assert.equal(matchesActivityAllView(item, owned), true);
+    assert.equal(matchesInboxAllView(item, owned), true);
   }
 });
 
-test("Activity All excludes generic updates from agents the user does not own", () => {
+test("Inbox All excludes generic updates from agents the user does not own", () => {
   assert.equal(
-    matchesActivityAllView(
+    matchesInboxAllView(
       {
         categories: ["agent_activity"],
         item: {

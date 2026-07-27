@@ -117,7 +117,7 @@ function ReminderRow({
   onSelect,
 }: {
   isSelected?: boolean;
-  presentation?: "activity-list" | "card";
+  presentation?: "inbox-list" | "card";
   reminder: Reminder;
   pubkey: string;
   source: ReminderSource | null;
@@ -157,29 +157,29 @@ function ReminderRow({
     !isDone && reminder.notBefore
       ? reminder.notBefore <= Math.floor(Date.now() / 1_000)
       : false;
-  const isActivityList = presentation === "activity-list";
+  const isInboxList = presentation === "inbox-list";
 
   return (
     <div
       className={cn(
         "flex items-start gap-3 transition-colors",
-        isActivityList
+        isInboxList
           ? "border-b border-border/45 px-4 py-4 hover:bg-muted/40 focus-within:bg-muted/40"
           : "rounded-md border p-3",
-        isActivityList && isSelected && "bg-muted/40",
+        isInboxList && isSelected && "bg-muted/40",
       )}
       data-testid={`home-reminder-item-${reminder.id}`}
     >
-      {isActivityList ? (
+      {isInboxList ? (
         <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
           <Bell className="h-4 w-4" />
         </span>
       ) : null}
       <button
         className="flex min-w-0 flex-1 flex-col items-start gap-1 text-left enabled:hover:opacity-80 disabled:cursor-default"
-        disabled={!isActivityList && !isNavigable}
+        disabled={!isInboxList && !isNavigable}
         onClick={() => {
-          if (isActivityList) onSelect?.(reminder);
+          if (isInboxList) onSelect?.(reminder);
           else if (isNavigable) onNavigate(reminder);
         }}
         type="button"
@@ -220,7 +220,7 @@ function ReminderRow({
           </p>
         ) : null}
       </button>
-      {isDone || isActivityList ? null : (
+      {isDone || isInboxList ? null : (
         <div className="flex shrink-0 items-center gap-1">
           <Button
             className="h-7 w-7 p-0"
@@ -265,7 +265,7 @@ export function RemindersPanel({
   pubkey: string;
   includeDone?: boolean;
   onSelectReminder?: (reminderId: string) => void;
-  presentation?: "activity-list" | "card";
+  presentation?: "inbox-list" | "card";
   selectedReminderId?: string | null;
 }) {
   const remindersQuery = useRemindersQuery(pubkey);
@@ -293,7 +293,7 @@ export function RemindersPanel({
     () => groupReminders(reminders ?? [], includeDone),
     [reminders, includeDone],
   );
-  const activityReminders = React.useMemo(
+  const inboxReminders = React.useMemo(
     () => groups.flatMap((group) => group.reminders),
     [groups],
   );
@@ -318,16 +318,16 @@ export function RemindersPanel({
     );
   }
 
-  if (presentation === "activity-list") {
+  if (presentation === "inbox-list") {
     return (
       <div className="min-h-0 flex-1 overflow-y-auto">
-        {activityReminders.map((reminder) => (
+        {inboxReminders.map((reminder) => (
           <ReminderRow
             isSelected={reminder.id === selectedReminderId}
             key={reminder.id}
             onNavigate={handleNavigate}
             onSelect={(selected) => onSelectReminder?.(selected.id)}
-            presentation="activity-list"
+            presentation="inbox-list"
             pubkey={pubkey}
             reminder={reminder}
             source={sources.get(reminder.id) ?? null}

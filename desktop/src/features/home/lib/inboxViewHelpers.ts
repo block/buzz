@@ -25,7 +25,7 @@ function hasThreadReplyTags(tags: string[][]) {
   return thread.parentId !== null && !isBroadcastReply(tags);
 }
 
-export function filterActivityInboxItems(items: InboxItem[]) {
+export function filterInboxItems(items: InboxItem[]) {
   return items.filter((item) => item.item.kind !== KIND_REMINDER);
 }
 
@@ -49,7 +49,7 @@ export function matchesInboxFilter(
 ) {
   if (filter === "all") {
     return ownedAgentPubkeys
-      ? matchesActivityAllView(item, ownedAgentPubkeys)
+      ? matchesInboxAllView(item, ownedAgentPubkeys)
       : true;
   }
 
@@ -75,7 +75,7 @@ export function matchesInboxFilter(
   return item.categories.includes(filter);
 }
 
-export function matchesActivityAllView(
+export function matchesInboxAllView(
   item: {
     categories: readonly string[];
     groupItems?: readonly FeedItem[];

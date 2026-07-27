@@ -3,7 +3,7 @@ import { DraftDetailPane } from "@/features/messages/ui/DraftDetailPane";
 import type { Reminder } from "@/features/reminders/lib/reminderTypes";
 import { ReminderDetailPane } from "@/features/reminders/ui/RemindersPanel";
 
-type HomePersonalActivityDetailProps = {
+type HomePersonalInboxDetailProps = {
   currentPubkey?: string;
   draftItem: DraftViewItem | null;
   mode: "drafts" | "reminders";
@@ -12,14 +12,14 @@ type HomePersonalActivityDetailProps = {
   reminder: Reminder | null;
 };
 
-export function HomePersonalActivityDetail({
+export function HomePersonalInboxDetail({
   currentPubkey,
   draftItem,
   mode,
   onBack,
   onDeleteDraft,
   reminder,
-}: HomePersonalActivityDetailProps) {
+}: HomePersonalInboxDetailProps) {
   if (mode === "drafts") {
     return (
       <DraftDetailPane

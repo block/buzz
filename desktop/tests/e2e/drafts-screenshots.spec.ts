@@ -349,7 +349,7 @@ test.describe("drafts screenshots", () => {
     page,
   }) => {
     // Draft counts stay beside the Drafts option instead of decorating the
-    // overall Activity filter trigger. Two drafts make the count explicit.
+    // overall Inbox filter trigger. Two drafts make the count explicit.
     await installMockBridge(page);
     await patchCommunityPubkey(page);
     await seedDraftStore(page, ACTIVE_DRAFTS);
@@ -362,7 +362,7 @@ test.describe("drafts screenshots", () => {
     await expect(page.getByTestId("inbox-draft-badge")).toHaveCount(0);
     await expect(page.getByTestId("inbox-filter-trigger")).toHaveAttribute(
       "aria-label",
-      "Filter activity: All. 2 active drafts",
+      "Filter inbox: All. 2 active drafts",
     );
 
     // Open the filter dropdown so the badge-option is visible too.
@@ -373,7 +373,7 @@ test.describe("drafts screenshots", () => {
 
     await waitForAnimations(page);
 
-    // Capture the Activity header and the dropdown-only count.
+    // Capture the Inbox header and the dropdown-only count.
     await page.getByTestId("home-inbox").screenshot({
       path: `${SHOTS}/06-draft-badge.png`,
     });

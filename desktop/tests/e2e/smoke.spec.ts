@@ -74,7 +74,7 @@ async function selectHomeInboxFilter(
   await page
     .getByTestId("home-inbox")
     .getByRole("button", {
-      name: /^Filter activity:/,
+      name: /^Filter inbox:/,
     })
     .click();
   await page.getByRole("menuitemradio", { name: label }).click();
@@ -295,7 +295,7 @@ test("opens a mocked channel from the inbox feed", async ({ page }) => {
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 });
 
-test("Activity excludes generic channel and unowned agent traffic", async ({
+test("Inbox excludes generic channel and unowned agent traffic", async ({
   page,
 }) => {
   const inboxList = page.getByTestId("home-inbox-list");

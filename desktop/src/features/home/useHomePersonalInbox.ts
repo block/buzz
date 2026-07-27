@@ -7,7 +7,7 @@ import {
 } from "@/features/reminders/hooks";
 import { groupReminders } from "@/features/reminders/lib/reminderFilters";
 
-type UseHomePersonalActivityOptions = {
+type UseHomePersonalInboxOptions = {
   allowMixedSelection: boolean;
   currentPubkey?: string;
   isDrafts: boolean;
@@ -16,14 +16,14 @@ type UseHomePersonalActivityOptions = {
   viewportWidthPx: number;
 };
 
-export function useHomePersonalActivity({
+export function useHomePersonalInbox({
   allowMixedSelection,
   currentPubkey,
   isDrafts,
   isNarrowHomeViewport,
   isReminders,
   viewportWidthPx,
-}: UseHomePersonalActivityOptions) {
+}: UseHomePersonalInboxOptions) {
   const remindersQuery = useRemindersQuery(currentPubkey);
   const dueReminderCount = countDueReminders(remindersQuery.data ?? []);
   const pendingReminders = React.useMemo(

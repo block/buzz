@@ -152,7 +152,7 @@ export function useInboxThreadContext(
                 .then((events) => ({ events, failed: false }))
                 .catch((error) => {
                   console.error(
-                    "Failed to hydrate Activity thread context",
+                    "Failed to hydrate Inbox thread context",
                     selectedChannelId,
                     threadRootId,
                     error,
@@ -180,7 +180,7 @@ export function useInboxThreadContext(
         );
       } catch (error) {
         if (!isCancelled) {
-          console.error("Failed to load Activity message context", error);
+          console.error("Failed to load Inbox message context", error);
           setHasLoadError(true);
         }
       } finally {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildActivityListRows } from "./activityListRows.ts";
+import { buildInboxListRows } from "./inboxListRows.ts";
 
 function inboxItem(
   id,
@@ -44,8 +44,8 @@ function reminder(
   };
 }
 
-test("Activity All combines rows in latest-first order", () => {
-  const rows = buildActivityListRows({
+test("Inbox All combines rows in latest-first order", () => {
+  const rows = buildInboxListRows({
     drafts: [draftItem("draft", "2026-07-21T12:00:00.000Z")],
     items: [inboxItem("message", 1_753_099_300)],
     reminders: [reminder("reminder", 1_753_099_100)],
@@ -57,8 +57,8 @@ test("Activity All combines rows in latest-first order", () => {
   );
 });
 
-test("Activity All excludes completed reminders and deleted-root drafts", () => {
-  const rows = buildActivityListRows({
+test("Inbox All excludes completed reminders and deleted-root drafts", () => {
+  const rows = buildInboxListRows({
     drafts: [draftItem("deleted", "2026-07-21T12:00:00.000Z", "deleted")],
     items: [],
     reminders: [reminder("done", 1_753_099_100, "done")],
@@ -67,13 +67,13 @@ test("Activity All excludes completed reminders and deleted-root drafts", () => 
   assert.deepEqual(rows, []);
 });
 
-test("Activity conversation keys stay stable when the representative changes", () => {
-  const first = buildActivityListRows({
+test("Inbox conversation keys stay stable when the representative changes", () => {
+  const first = buildInboxListRows({
     drafts: [],
     items: [inboxItem("reply-1", 1, "thread-root")],
     reminders: [],
   });
-  const second = buildActivityListRows({
+  const second = buildInboxListRows({
     drafts: [],
     items: [inboxItem("reply-2", 2, "thread-root")],
     reminders: [],
@@ -86,7 +86,7 @@ test("Activity conversation keys stay stable when the representative changes", (
 test("due reminder enriches its existing conversation instead of duplicating it", () => {
   const item = inboxItem("message", 100);
   item.groupItems = [{ id: "reminded-reply" }];
-  const rows = buildActivityListRows({
+  const rows = buildInboxListRows({
     drafts: [],
     items: [item],
     reminders: [
@@ -104,7 +104,7 @@ test("due reminder enriches its existing conversation instead of duplicating it"
 });
 
 test("due reminder without a represented conversation sorts at trigger time", () => {
-  const rows = buildActivityListRows({
+  const rows = buildInboxListRows({
     drafts: [],
     items: [inboxItem("newer-than-creation", 150)],
     reminders: [

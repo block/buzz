@@ -1,6 +1,6 @@
 import type { InboxItem } from "@/features/home/lib/inbox";
 
-export function resolveActivityFilterSelection({
+export function resolveInboxFilterSelection({
   isNarrow,
   items,
   selectedConversationId,

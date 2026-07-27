@@ -14,8 +14,8 @@ import {
   type InboxItem,
   type InboxTypeLabel,
 } from "@/features/home/lib/inbox";
-import { buildActivityListRows } from "@/features/home/lib/activityListRows";
-import { ActivityFilterMenu } from "@/features/home/ui/ActivityFilterMenu";
+import { buildInboxListRows } from "@/features/home/lib/inboxListRows";
+import { InboxFilterMenu } from "@/features/home/ui/InboxFilterMenu";
 import {
   DraftsPanel,
   getDraftPreview,
@@ -50,7 +50,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { VirtualizedList } from "@/shared/ui/VirtualizedList";
 
-const ACTIVITY_EMPTY_STATE_TITLES: Record<InboxFilter, string> = {
+const INBOX_EMPTY_STATE_TITLES: Record<InboxFilter, string> = {
   all: "No activity yet",
   project: "No project work found",
   mention: "No mentions found",
@@ -61,7 +61,7 @@ const ACTIVITY_EMPTY_STATE_TITLES: Record<InboxFilter, string> = {
   drafts: "No drafts",
 };
 
-const ACTIVITY_UNREAD_EMPTY_STATE_TITLES: Record<InboxFilter, string> = {
+const INBOX_UNREAD_EMPTY_STATE_TITLES: Record<InboxFilter, string> = {
   all: "No unread activity",
   project: "No unread project work",
   mention: "No unread mentions",
@@ -77,7 +77,7 @@ const INBOX_HEADER_ICON_BUTTON_CLASS =
 const INBOX_PANE_RIGHT_DIVIDER_CLASS =
   "after:pointer-events-none after:absolute after:inset-y-0 after:right-0 after:z-40 after:w-px after:bg-border/35 after:content-['']";
 
-function ActivityLabel({
+function InboxLabel({
   isDone,
   isActionRequired,
   label,
@@ -167,7 +167,7 @@ function PersonalItemRow({
           {isDraft ? "Draft" : "Reminder"}
         </span>
         {location ? (
-          <ActivityLabel
+          <InboxLabel
             isActionRequired={false}
             isDone={false}
             label={location}
@@ -241,12 +241,12 @@ export function InboxListPane({
 }: InboxListPaneProps) {
   const isReminders = filter === "reminders";
   const isDrafts = filter === "drafts";
-  const isMixedActivityView = filter === "all";
+  const isMixedInboxView = filter === "all";
   const scrollRef = React.useRef<HTMLDivElement>(null);
-  const activityRows = React.useMemo(
+  const inboxRows = React.useMemo(
     () =>
-      buildActivityListRows({
-        drafts: unreadOnly || !isMixedActivityView ? [] : draftItems,
+      buildInboxListRows({
+        drafts: unreadOnly || !isMixedInboxView ? [] : draftItems,
         items,
         reminders: unreadOnly
           ? []
@@ -254,14 +254,14 @@ export function InboxListPane({
               isDue(reminder, Math.floor(Date.now() / 1_000)),
             ),
       }),
-    [draftItems, isMixedActivityView, items, reminders, unreadOnly],
+    [draftItems, isMixedInboxView, items, reminders, unreadOnly],
   );
-  const visibleActivityRows = React.useMemo(
+  const visibleInboxRows = React.useMemo(
     () =>
-      isMixedActivityView
-        ? activityRows
-        : activityRows.filter((row) => row.kind === "inbox"),
-    [activityRows, isMixedActivityView],
+      isMixedInboxView
+        ? inboxRows
+        : inboxRows.filter((row) => row.kind === "inbox"),
+    [inboxRows, isMixedInboxView],
   );
   const reminderSources = useReminderSources(reminders);
   const unreadVisibleItemCount = React.useMemo(
@@ -398,7 +398,7 @@ export function InboxListPane({
                   {item.timestampLabel}
                 </span>
               </div>
-              <ActivityLabel
+              <InboxLabel
                 isActionRequired={item.isActionRequired}
                 isDone={isDone}
                 label={typeLabel}
@@ -530,7 +530,7 @@ export function InboxListPane({
               <Popover>
                 <PopoverTrigger asChild>
                   <button
-                    aria-label="Activity options"
+                    aria-label="Inbox options"
                     className={cn(INBOX_HEADER_ICON_BUTTON_CLASS, "-mr-4")}
                     data-testid="inbox-options-trigger"
                     type="button"
@@ -578,7 +578,7 @@ export function InboxListPane({
               </Popover>
             </div>
             <div className="order-1 flex shrink-0 items-center justify-start">
-              <ActivityFilterMenu
+              <InboxFilterMenu
                 activeDraftCount={activeDraftCount}
                 dueReminderCount={dueReminderCount}
                 filter={filter}
@@ -598,7 +598,7 @@ export function InboxListPane({
           {reminderPubkey ? (
             <RemindersPanel
               onSelectReminder={onSelectReminder}
-              presentation="activity-list"
+              presentation="inbox-list"
               pubkey={reminderPubkey}
               selectedReminderId={selectedReminderId}
             />
@@ -622,11 +622,11 @@ export function InboxListPane({
           data-testid="home-inbox-list"
           ref={scrollRef}
         >
-          {visibleActivityRows.length > 0 ? (
+          {visibleInboxRows.length > 0 ? (
             <VirtualizedList
               estimateSize={96}
               getItemKey={(row) => row.key}
-              items={visibleActivityRows}
+              items={visibleInboxRows}
               renderItem={(row) => {
                 if (row.kind === "inbox") {
                   return renderItem(row.item, row.dueReminder);
@@ -693,8 +693,8 @@ export function InboxListPane({
               <div>
                 <p className="text-sm font-medium text-foreground">
                   {unreadOnly
-                    ? ACTIVITY_UNREAD_EMPTY_STATE_TITLES[filter]
-                    : ACTIVITY_EMPTY_STATE_TITLES[filter]}
+                    ? INBOX_UNREAD_EMPTY_STATE_TITLES[filter]
+                    : INBOX_EMPTY_STATE_TITLES[filter]}
                 </p>
                 <p className="mt-1 text-sm text-muted-foreground">
                   {unreadOnly

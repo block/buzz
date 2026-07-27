@@ -100,11 +100,11 @@ export function AppSidebarPrimaryMenu({
           <SidebarMenuButton
             isActive={selectedView === "home"}
             onClick={onSelectHome}
-            tooltip="Activity"
+            tooltip="Inbox"
             type="button"
           >
             <Bell className="h-4 w-4" />
-            <SidebarMenuLabel>Activity</SidebarMenuLabel>
+            <SidebarMenuLabel>Inbox</SidebarMenuLabel>
           </SidebarMenuButton>
           {homeBadgeCount > 0 ? (
             <SidebarMenuBadge

@@ -18,14 +18,14 @@ import {
 import { useInboxSelectionAnchor } from "@/features/home/useInboxSelectionAnchor";
 import { useOwnedAgentPubkeys } from "@/features/home/useOwnedAgentPubkeys";
 import {
-  filterActivityInboxItems,
+  filterInboxItems,
   matchesInboxFilter,
 } from "@/features/home/lib/inboxViewHelpers";
-import { resolveActivityFilterSelection } from "@/features/home/lib/activitySelection";
+import { resolveInboxFilterSelection } from "@/features/home/lib/inboxSelection";
 import { useHomeInboxReadState } from "@/features/home/useHomeInboxReadState";
 import { useHomeInboxAutoSelection } from "@/features/home/useHomeInboxAutoSelection";
 import { useHomeInboxContextMessages } from "@/features/home/useHomeInboxContextMessages";
-import { useHomePersonalActivity } from "@/features/home/useHomePersonalActivity";
+import { useHomePersonalInbox } from "@/features/home/useHomePersonalInbox";
 import { useInboxThreadContext } from "@/features/home/useInboxThreadContext";
 import {
   type ProfilePanelTab,
@@ -45,7 +45,7 @@ import { getHomeMessageCapabilities } from "@/features/home/lib/homeMessageCapab
 import { HomeLoadingState } from "@/features/home/ui/HomeLoadingState";
 import { InboxDetailPane } from "@/features/home/ui/InboxDetailPane";
 import { InboxListPane } from "@/features/home/ui/InboxListPane";
-import { HomePersonalActivityDetail } from "@/features/home/ui/HomePersonalActivityDetail";
+import { HomePersonalInboxDetail } from "@/features/home/ui/HomePersonalInboxDetail";
 import {
   useChannelMessagesQuery,
   useToggleReactionMutation,
@@ -134,7 +134,7 @@ export function HomeView({
       selectedItem: selectedReminder,
       select: setSelectedReminderId,
     },
-  } = useHomePersonalActivity({
+  } = useHomePersonalInbox({
     allowMixedSelection: allowMixedPersonalSelection,
     currentPubkey,
     isDrafts,
@@ -363,7 +363,7 @@ export function HomeView({
       getThreadReadAt,
       profiles: feedProfiles,
     });
-    return filterActivityInboxItems(items);
+    return filterInboxItems(items);
   }, [
     channels,
     currentPubkey,
@@ -498,7 +498,7 @@ export function HomeView({
             !effectiveDoneSet.has(item.id) ||
             item.conversationId === selectedConversationId),
       );
-      const selection = resolveActivityFilterSelection({
+      const selection = resolveInboxFilterSelection({
         isNarrow: isNarrowHomeViewport,
         items: nextItems,
         selectedConversationId,
@@ -871,7 +871,7 @@ export function HomeView({
             />
           ) : null}
           {showDetailPane && detailMode !== "messages" ? (
-            <HomePersonalActivityDetail
+            <HomePersonalInboxDetail
               currentPubkey={currentPubkey}
               draftItem={selectedDraftItem}
               mode={detailMode}

@@ -936,10 +936,10 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
   await expect(page.getByTestId("agent-memory-list")).toContainText("orphan");
 });
 
-test("restored activity deep link hides the back arrow", async ({ page }) => {
+test("restored Inbox deep link hides the back arrow", async ({ page }) => {
   // Charlie is a `bot` member of #agents and authors a seeded message there;
   // seeding a managed agent with the same pubkey makes that message's avatar
-  // open a managed-agent profile panel with the Activity ingress. Unlike an
+  // open a managed-agent profile panel with the Inbox ingress. Unlike an
   // agent created at runtime through the bridge, this seed survives
   // `page.reload()` because init scripts re-run on navigation.
   const agentPubkey = TEST_IDENTITIES.charlie.pubkey;
@@ -1129,10 +1129,10 @@ test("renders settings in the app shell with a back button", async ({
 }) => {
   await page.goto("/");
 
-  const activityNavButton = page
+  const inboxNavButton = page
     .getByTestId("app-sidebar")
-    .getByRole("button", { name: "Activity" });
-  await expect(activityNavButton).toBeVisible();
+    .getByRole("button", { name: "Inbox" });
+  await expect(inboxNavButton).toBeVisible();
 
   await openSettings(page);
   await expect(page.getByTestId("settings-sidebar")).toBeVisible();
@@ -1161,14 +1161,14 @@ test("renders settings in the app shell with a back button", async ({
       name: "Appearance",
     }),
   ).toBeVisible();
-  await expect(activityNavButton).toHaveCount(0);
+  await expect(inboxNavButton).toHaveCount(0);
 
   await page.getByTestId("settings-back-to-app").click();
   await expectHomeView(page);
-  await expect(activityNavButton).toBeVisible();
+  await expect(inboxNavButton).toBeVisible();
 });
 
-test("notification settings drive the Activity badge and desktop alerts", async ({
+test("notification settings drive the Inbox badge and desktop alerts", async ({
   page,
 }) => {
   async function getAppBadgeCount() {
@@ -1299,7 +1299,7 @@ test("notification settings drive the Activity badge and desktop alerts", async 
 
   await page
     .getByTestId("app-sidebar")
-    .getByRole("button", { name: "Activity" })
+    .getByRole("button", { name: "Inbox" })
     .click();
   await expectHomeView(page);
   await expect(page.getByTestId("sidebar-home-count")).toHaveCount(0);

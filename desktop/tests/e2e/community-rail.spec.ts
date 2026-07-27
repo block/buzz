@@ -325,7 +325,7 @@ test.describe("community rail", () => {
     await page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`).click();
     await expect(page).toHaveURL(randomUrl);
 
-    await page.getByRole("button", { name: "Activity" }).click();
+    await page.getByRole("button", { name: "Inbox" }).click();
     await expect(page).toHaveURL(/#\/$/);
     await page.getByTestId(`community-rail-button-${COMMUNITY_A.id}`).click();
     await expect(page).toHaveURL(generalUrl);

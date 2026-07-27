@@ -11,7 +11,7 @@ import {
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
 
-const ACTIVITY_FILTER_OPTIONS: Array<{
+const INBOX_FILTER_OPTIONS: Array<{
   label: string;
   value: InboxFilter;
 }> = [
@@ -28,7 +28,7 @@ const ACTIVITY_FILTER_OPTIONS: Array<{
 const TRIGGER_CLASS =
   "inline-flex h-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted/70 hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring data-[state=open]:bg-muted/70 data-[state=open]:text-foreground disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 relative -ml-2 w-auto gap-1 px-2 text-sm font-medium text-foreground";
 
-type ActivityFilterMenuProps = {
+type InboxFilterMenuProps = {
   activeDraftCount: number;
   dueReminderCount: number;
   filter: InboxFilter;
@@ -36,14 +36,14 @@ type ActivityFilterMenuProps = {
   reminderCount: number;
 };
 
-export function ActivityFilterMenu({
+export function InboxFilterMenu({
   activeDraftCount,
   dueReminderCount,
   filter,
   onFilterChange,
   reminderCount,
-}: ActivityFilterMenuProps) {
-  const activeFilter = ACTIVITY_FILTER_OPTIONS.find(
+}: InboxFilterMenuProps) {
+  const activeFilter = INBOX_FILTER_OPTIONS.find(
     (option) => option.value === filter,
   );
   const statusLabel =
@@ -57,7 +57,7 @@ export function ActivityFilterMenu({
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <button
-          aria-label={`Filter activity: ${activeFilter?.label ?? "All"}${statusLabel ? `. ${statusLabel}` : ""}`}
+          aria-label={`Filter inbox: ${activeFilter?.label ?? "All"}${statusLabel ? `. ${statusLabel}` : ""}`}
           className={cn(TRIGGER_CLASS)}
           data-testid="inbox-filter-trigger"
           type="button"
@@ -71,7 +71,7 @@ export function ActivityFilterMenu({
           onValueChange={(value) => onFilterChange(value as InboxFilter)}
           value={filter}
         >
-          {ACTIVITY_FILTER_OPTIONS.map((option) => (
+          {INBOX_FILTER_OPTIONS.map((option) => (
             <div key={option.value}>
               {option.value === "reminders" ? (
                 <DropdownMenuSeparator className="my-2 bg-border/60" />
