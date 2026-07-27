@@ -685,6 +685,61 @@ describe("activeAgentTurnsStore", () => {
       );
     });
 
+    it("keeps a persisted failure across a cancelled (non-'ok') turn_completed", () => {
+      // Regression (#2240 review): turn_completed fires on EVERY exit path
+      // (TurnCompletionGuard), so a cancelled turn used to clear a prior genuine
+      // failure. It must survive a completion whose outcome is not "ok".
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({ seq: 1, turnId: "t1", channelId: "c1" }),
+        makeEvent({
+          seq: 2,
+          kind: "turn_error",
+          turnId: "t1",
+          channelId: "c1",
+          payload: {
+            outcome: "error",
+            error: "boom",
+            error_class: "transport",
+          },
+        }),
+      ]);
+      assert.ok(getLastTurnFailureForAgent(AGENT), "failure must be recorded");
+
+      // A later turn starts and is cancelled — its turn_completed reports a
+      // non-success outcome, which must NOT clear the failure.
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({ seq: 3, turnId: "t2", channelId: "c1" }),
+        makeEvent({
+          seq: 4,
+          kind: "turn_completed",
+          turnId: "t2",
+          channelId: "c1",
+          payload: { outcome: "incomplete" },
+        }),
+      ]);
+      assert.ok(
+        getLastTurnFailureForAgent(AGENT),
+        "a cancelled turn_completed must not clear the persisted failure",
+      );
+
+      // Only a genuinely successful completion (outcome: "ok") clears it.
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({ seq: 5, turnId: "t3", channelId: "c1" }),
+        makeEvent({
+          seq: 6,
+          kind: "turn_completed",
+          turnId: "t3",
+          channelId: "c1",
+          payload: { outcome: "ok" },
+        }),
+      ]);
+      assert.equal(
+        getLastTurnFailureForAgent(AGENT),
+        null,
+        "an 'ok' turn_completed must clear the persisted failure",
+      );
+    });
+
     it("is scoped per agent", () => {
       syncAgentTurnsFromEvents(AGENT, [
         makeEvent({ seq: 1, turnId: "t1", channelId: "c1" }),

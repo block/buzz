@@ -2857,6 +2857,10 @@ fn spawn_failure_notice(
 /// classes for wording differences.
 fn classify_turn_failure(outcome: &PromptOutcome) -> &'static str {
     match outcome {
+        // Defensive, unreachable default: both emit sites call this only on a
+        // failing outcome, never on `Ok`. Bucketing it as "error" keeps the match
+        // total instead of panicking; a future caller must not treat this arm as a
+        // real classification of a successful turn.
         PromptOutcome::Ok(_) => "error",
         PromptOutcome::Timeout(_) => "timeout",
         PromptOutcome::AgentExited => "exited",

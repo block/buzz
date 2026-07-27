@@ -20,6 +20,7 @@
 //! `AcpClient` is NOT Clone — ownership moves out on claim and back on return.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -1247,11 +1248,17 @@ pub async fn run_prompt_task(
     // metadata now, before the agent is moved into PromptResult. It must be
     // declared before `liveness_guard`: Rust drops locals in reverse order, so
     // liveness is aborted before completion makes the turn terminal.
+    // Shared success flag for the completion guard above. It stays false unless a
+    // `PromptOutcome::Ok` send path flips it, so the `turn_completed` emitted on
+    // any other exit (error/timeout/cancel/panic) reports a non-success outcome —
+    // stopping a cancelled turn from clearing a prior failure badge (#1659).
+    let turn_succeeded = Arc::new(AtomicBool::new(false));
     let _turn_guard = TurnCompletionGuard::new(
         agent.acp.observer_handle(),
         agent.acp.observer_agent_index(),
         observer_channel_id,
         turn_id.clone(),
+        Arc::clone(&turn_succeeded),
     );
 
     // Start liveness with `turn_started`, not the final session/prompt call:
@@ -1920,6 +1927,7 @@ pub async fn run_prompt_task(
                             Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
                         )
                         .await;
+                        turn_succeeded.store(true, Ordering::Relaxed);
                         send_prompt_result(
                             &result_tx,
                             &turn_id,
@@ -1983,6 +1991,7 @@ pub async fn run_prompt_task(
             )
             .await;
 
+            turn_succeeded.store(true, Ordering::Relaxed);
             send_prompt_result(
                 &result_tx,
                 &turn_id,
@@ -3225,6 +3234,11 @@ struct TurnCompletionGuard {
     agent_index: Option<usize>,
     channel_id: Option<uuid::Uuid>,
     turn_id: String,
+    /// Whether the turn reached a successful `PromptOutcome::Ok` send. Defaults
+    /// to false and is flipped true only on the success paths, so every other
+    /// exit (error/timeout/cancel/panic) reports a non-success `outcome` on the
+    /// `turn_completed` event emitted at drop.
+    succeeded: Arc<AtomicBool>,
 }
 
 impl TurnCompletionGuard {
@@ -3233,12 +3247,14 @@ impl TurnCompletionGuard {
         agent_index: Option<usize>,
         channel_id: Option<uuid::Uuid>,
         turn_id: String,
+        succeeded: Arc<AtomicBool>,
     ) -> Self {
         Self {
             observer,
             agent_index,
             channel_id,
             turn_id,
+            succeeded,
         }
     }
 }
@@ -3247,11 +3263,23 @@ impl Drop for TurnCompletionGuard {
     fn drop(&mut self) {
         if let Some(observer) = self.observer.take() {
             let context = observer::context_for(self.channel_id, None, Some(self.turn_id.clone()));
+            // Tag the completion with a coarse outcome. `turn_completed` fires on
+            // EVERY exit path, so a cancelled/failed turn must not read as a
+            // healthy completion in the desktop store: only the success paths set
+            // `succeeded`. A genuine failure additionally carries its detail on the
+            // separate `turn_error`/`agent_panic` event; this field just gates the
+            // store's "clear the failure badge" decision. Harnesses that predate
+            // this field emit no `outcome`, which the store treats as success.
+            let outcome = if self.succeeded.load(Ordering::Relaxed) {
+                "ok"
+            } else {
+                "incomplete"
+            };
             observer.emit(
                 "turn_completed",
                 self.agent_index,
                 &context,
-                serde_json::json!({}),
+                serde_json::json!({ "outcome": outcome }),
             );
         }
     }

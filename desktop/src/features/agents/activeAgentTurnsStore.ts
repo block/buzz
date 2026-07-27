@@ -331,10 +331,12 @@ function setLastTurnFailure(agentKey: string, failure: TurnFailure) {
 }
 
 /**
- * Clear the agent's last turn failure. Called on `turn_completed` — a
- * successful completion is the "demonstrably healthy again" signal (unlike
- * `turn_started`, which proves nothing: a turn that starts and immediately
- * fails the same way would otherwise make the badge flicker off and back on).
+ * Clear the agent's last turn failure. Called from the `turn_completed` branch
+ * only when the event's `outcome` marks a genuine success — a successful
+ * completion is the "demonstrably healthy again" signal (unlike `turn_started`,
+ * which proves nothing: a turn that starts and immediately fails the same way
+ * would otherwise make the badge flicker off and back on). A cancelled turn is
+ * NOT a success and must not clear the badge, so the gate lives at the call site.
  */
 function clearLastTurnFailure(agentKey: string) {
   lastFailureByAgent.delete(agentKey);
@@ -424,18 +426,27 @@ function processEvent(agentPubkey: string, event: ObserverEvent) {
         return;
       }
       break;
-    case "turn_completed":
+    case "turn_completed": {
       endTurn(
         agentPubkey,
         event.turnId ?? null,
         event.channelId ?? null,
         Date.parse(event.timestamp),
       );
-      // A successful completion is the "agent is healthy again" signal —
-      // clear any previously-persisted failure so its badge disappears.
-      clearLastTurnFailure(key);
+      // `turn_completed` fires on EVERY turn exit path — success, error, timeout,
+      // cancel, panic (TurnCompletionGuard in crates/buzz-acp/src/pool.rs). Only a
+      // genuine success proves the agent is healthy again, so clear a persisted
+      // failure ONLY then. The backend tags the payload with `outcome`; treat "ok"
+      // — or an absent field, from a harness build that predates it — as success.
+      // A cancelled/failed turn now reports a non-"ok" outcome and no longer
+      // erases the badge from a prior genuinely-failed turn.
+      const completionOutcome = asString(asRecord(event.payload).outcome);
+      if (completionOutcome == null || completionOutcome === "ok") {
+        clearLastTurnFailure(key);
+      }
       notifyListeners();
       return;
+    }
     case "turn_error":
     case "agent_panic":
       endTurn(
