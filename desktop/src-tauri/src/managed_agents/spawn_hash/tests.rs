@@ -544,6 +544,72 @@ fn linked_instance_stale_prompt_bytes_are_inert_at_hash_time() {
 }
 
 #[test]
+fn display_name_edit_changes_hash() {
+    // The spawn writes BUZZ_ACP_SESSION_TITLE from display_name-or-name, so a
+    // rename must trip the badge: the running process keeps the old title
+    // until it restarts, and the operator has to be told that.
+    let rec = record();
+    let mut renamed = record();
+    renamed.display_name = Some("Fizz".into());
+    assert_ne!(
+        spawn_config_hash(&rec, &[], &[], "wss://ws.example", &Default::default()),
+        spawn_config_hash(&renamed, &[], &[], "wss://ws.example", &Default::default()),
+        "a display-name rename changes the spawned session title and must badge"
+    );
+}
+
+#[test]
+fn name_edit_changes_hash_when_display_name_is_absent() {
+    // With no display_name the title falls back to the unique handle, so the
+    // handle is what the env write carries and what must be hashed.
+    let rec = record();
+    let mut renamed = record();
+    renamed.name = "agent-2".into();
+    assert_ne!(
+        spawn_config_hash(&rec, &[], &[], "wss://ws.example", &Default::default()),
+        spawn_config_hash(&renamed, &[], &[], "wss://ws.example", &Default::default()),
+        "the fallback title source must reach the hash too"
+    );
+}
+
+#[test]
+fn display_name_edit_does_not_change_hash_under_an_explicit_title_override() {
+    // User env is written AFTER the Buzz-set title (last-wins), so an explicit
+    // BUZZ_ACP_SESSION_TITLE is what the child actually runs with. Renaming the
+    // record changes nothing about the spawned process, so badging it would be
+    // a false restart prompt. The override itself still reaches the hash
+    // through the effective env.
+    let mut rec = record();
+    rec.env_vars
+        .insert("BUZZ_ACP_SESSION_TITLE".into(), "Pinned Title".into());
+    let mut renamed = rec.clone();
+    renamed.display_name = Some("Fizz".into());
+    assert_eq!(
+        spawn_config_hash(&rec, &[], &[], "wss://ws.example", &Default::default()),
+        spawn_config_hash(&renamed, &[], &[], "wss://ws.example", &Default::default()),
+        "a rename shadowed by an explicit title override must not badge"
+    );
+}
+
+#[test]
+fn title_override_edit_changes_hash() {
+    // Counterpart to the test above: the override is not inert — editing it
+    // changes what the child runs with and must badge.
+    let mut rec = record();
+    rec.env_vars
+        .insert("BUZZ_ACP_SESSION_TITLE".into(), "Pinned Title".into());
+    let mut edited = record();
+    edited
+        .env_vars
+        .insert("BUZZ_ACP_SESSION_TITLE".into(), "Other Title".into());
+    assert_ne!(
+        spawn_config_hash(&rec, &[], &[], "wss://ws.example", &Default::default()),
+        spawn_config_hash(&edited, &[], &[], "wss://ws.example", &Default::default()),
+        "editing an explicit title override must badge"
+    );
+}
+
+#[test]
 fn linked_instance_prompt_model_provider_resolve_from_one_call() {
     // The prompt for a linked instance must track the definition, exactly
     // like model/provider — a definition prompt edit trips the hash even

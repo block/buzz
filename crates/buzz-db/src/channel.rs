@@ -332,6 +332,40 @@ pub async fn set_canvas(
     Ok(())
 }
 
+/// Namespace for the per-channel membership advisory lock. Serializes the
+/// role-authorization + last-owner-count + write sequences in [`add_member`]
+/// and [`remove_member`] against each other.
+///
+/// Both functions read an owner COUNT and then write a *different* row than the
+/// one they counted, so `READ COMMITTED` snapshot isolation alone permits two
+/// concurrent demotions (or a demotion racing a removal) to each observe two
+/// owners, each pass, and together leave zero — the exact governance loss the
+/// guards exist to prevent. An advisory key rather than `SELECT ... FOR UPDATE`
+/// on the channel row: membership is its own contention domain and must not
+/// serialize against unrelated channel metadata writers (`update_channel`,
+/// `set_topic`, the TTL transition). Distinct key domain from
+/// `buzz_channel_ttl:`.
+const CHANNEL_MEMBERSHIP_LOCK_NAMESPACE: &str = "buzz_channel_membership:";
+
+/// Take the per-channel membership lock. MUST be the first statement in the
+/// transaction that then reads roles/owner counts and writes membership, so the
+/// whole check-then-write sequence is atomic against a concurrent one.
+async fn acquire_channel_membership_lock(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    channel_id: Uuid,
+) -> Result<()> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!(
+            "{CHANNEL_MEMBERSHIP_LOCK_NAMESPACE}{}:{}",
+            community_id.as_uuid(),
+            channel_id
+        ))
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
 /// Add a member to a channel.
 ///
 /// Role enforcement:
@@ -359,6 +393,10 @@ pub async fn add_member(
     }
 
     let mut tx = pool.begin().await?;
+
+    // First statement: serialize the whole role-check / owner-count / upsert
+    // sequence against concurrent membership writes on this channel.
+    acquire_channel_membership_lock(&mut tx, community_id, channel_id).await?;
 
     let channel = get_channel_tx(&mut tx, community_id, channel_id).await?;
 
@@ -411,6 +449,56 @@ pub async fn add_member(
         }
     };
 
+    // Changing an *active* member's role is privileged in BOTH directions.
+    // Demotion is as consequential as promotion: only owners/admins may grant
+    // elevated roles, so a demoted owner cannot restore themselves. Guarding
+    // only `role.is_elevated()` above therefore left owner→member demotion
+    // unauthorized-by-anyone. Re-adding an active member with the role they
+    // already hold stays idempotent and unguarded — the huddle bot-add and
+    // kind:9021 join paths rely on that.
+    //
+    // Deliberately keyed on the *active* role. A soft-removed row's stored role
+    // is history, not live authority: `removed_at` says it is no longer in
+    // force. Reactivation therefore lands at whatever `effective_role` the
+    // checks above already authorized — `Member` for any unprivileged caller,
+    // elevated only when a currently-elevated granter asked for it. Inferring
+    // current authority from a removed row would make soft-deleted ownership a
+    // resurrection token: an owner removed by another owner could self-rejoin
+    // via kind:9021 (`Member, None`) and silently regain ownership.
+    let current_role = get_active_role_tx(&mut tx, community_id, channel_id, pubkey).await?;
+    if let Some(current_role) = current_role.filter(|r| r != effective_role.as_str()) {
+        let actor_role = match invited_by {
+            Some(inviter) => get_active_role_tx(&mut tx, community_id, channel_id, inviter).await?,
+            None => None,
+        };
+        let actor_role: Option<MemberRole> = actor_role.and_then(|r| r.parse().ok());
+        if !actor_role.is_some_and(|r| r.is_elevated()) {
+            return Err(DbError::AccessDenied(
+                "only owners/admins may change an active member's role".to_string(),
+            ));
+        }
+
+        // Defense-in-depth, mirroring `remove_member`: a demotion must not
+        // strip the channel of its last owner, which would leave nobody able
+        // to moderate, edit metadata, or re-grant ownership.
+        if current_role == "owner" && effective_role != MemberRole::Owner {
+            let row = sqlx::query(
+                "SELECT COUNT(*) as cnt FROM channel_members \
+                 WHERE community_id = $1 AND channel_id = $2 AND role = 'owner' AND removed_at IS NULL",
+            )
+            .bind(community_id.as_uuid())
+            .bind(channel_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            let owner_count: i64 = row.try_get("cnt")?;
+            if owner_count <= 1 {
+                return Err(DbError::AccessDenied(
+                    "cannot demote the last owner — transfer ownership first".to_string(),
+                ));
+            }
+        }
+    }
+
     sqlx::query(
         r#"
         INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by)
@@ -452,10 +540,19 @@ pub async fn add_member(
 /// removing themselves.
 ///
 /// Returns `Err(DbError::MemberNotFound)` if the target is not an active member.
-/// The actor's role check and the UPDATE run inside a transaction to prevent a
-/// TOCTOU race where the actor's role changes between the check and the update.
-/// The `is_agent_owner` check runs outside the transaction against the main pool
-/// because `agent_owner_pubkey` is immutable (set once at token mint).
+///
+/// The per-channel membership lock is the transaction's first statement, so the
+/// actor's role check, the last-owner count, and the UPDATE are all serialized
+/// against concurrent membership writes — otherwise a concurrent demotion of the
+/// actor could commit after their role was read and this removal would proceed on
+/// a stale elevated role.
+///
+/// The `is_agent_owner` lookup deliberately runs *before* the transaction opens:
+/// it borrows a second connection from `pool`, and issuing it while holding the
+/// lock could deadlock against ourselves on a small pool. That is safe because
+/// `agent_owner_pubkey` is immutable — [`crate::user::set_agent_owner`] only
+/// updates it when it `IS NULL` (first-mint-wins), so its value cannot change
+/// under us and needs no serialization.
 pub async fn remove_member(
     pool: &PgPool,
     community_id: CommunityId,
@@ -463,9 +560,24 @@ pub async fn remove_member(
     pubkey: &[u8],
     actor_pubkey: &[u8],
 ) -> Result<()> {
+    let is_self_remove = pubkey == actor_pubkey;
+
+    // Immutable, and must not be queried while holding the lock (second pool
+    // connection). Resolved up front so every *mutable* authorization read can
+    // sit behind the serialization point below.
+    let actor_is_agent_owner = if is_self_remove {
+        false
+    } else {
+        crate::user::is_agent_owner(pool, community_id, pubkey, actor_pubkey).await?
+    };
+
     let mut tx = pool.begin().await?;
 
-    let is_self_remove = pubkey == actor_pubkey;
+    // First statement: serialize the actor-role check, the last-owner count and
+    // the UPDATE against concurrent membership writes on this channel (same key
+    // as `add_member`).
+    acquire_channel_membership_lock(&mut tx, community_id, channel_id).await?;
+
     if !is_self_remove {
         let actor_role_str = get_active_role_tx(&mut tx, community_id, channel_id, actor_pubkey)
             .await?
@@ -473,11 +585,7 @@ pub async fn remove_member(
         let actor_role: MemberRole = actor_role_str.parse().map_err(|_| {
             DbError::InvalidData(format!("invalid role in database: {actor_role_str}"))
         })?;
-        // Safe to query outside the transaction: agent_owner_pubkey is immutable
-        // (set once at token mint, first-mint-wins).
-        if !actor_role.is_elevated()
-            && !crate::user::is_agent_owner(pool, community_id, pubkey, actor_pubkey).await?
-        {
+        if !actor_role.is_elevated() && !actor_is_agent_owner {
             return Err(DbError::AccessDenied(
                 "only owners/admins or the agent's owner may remove other members".to_string(),
             ));
@@ -1891,5 +1999,689 @@ mod tests {
             result.is_err(),
             "random user should not be able to remove someone else's bot"
         );
+    }
+
+    /// SECURITY REPRO (Dawn, kind:9000 demotion report): an unprivileged plain
+    /// member calls add_member with role=Member against the channel OWNER.
+    /// If this succeeds, add_member has no demotion authorization and no
+    /// last-owner guard.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn repro_unprivileged_member_can_demote_owner() {
+        let pool = setup_pool().await;
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let victim_owner = random_pubkey();
+        let attacker = random_pubkey();
+
+        for pk in [&victim_owner, &attacker] {
+            ensure_user(&pool, community, pk)
+                .await
+                .expect("ensure user");
+        }
+
+        let channel = create_test_channel(
+            &pool,
+            community_id,
+            "repro-demote-owner",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            &victim_owner,
+            None,
+        )
+        .await
+        .expect("create channel");
+
+        // create_test_channel already seeds the creator as 'owner', mirroring
+        // create_channel's own INSERT (channel.rs:131-145).
+        let role_of = |members: Vec<MemberRecord>, pk: Vec<u8>| -> Option<String> {
+            members.into_iter().find(|m| m.pubkey == pk).map(|m| m.role)
+        };
+        let before = role_of(
+            get_members(&pool, community, channel.id)
+                .await
+                .expect("members"),
+            victim_owner.clone(),
+        );
+        assert_eq!(
+            before.as_deref(),
+            Some("owner"),
+            "victim must start as owner"
+        );
+
+        // Attacker: plain member, not owner/admin.
+        add_member(
+            &pool,
+            community,
+            channel.id,
+            &attacker,
+            MemberRole::Member,
+            None,
+        )
+        .await
+        .expect("attacker self-joins open channel");
+
+        // The attack: attacker is `invited_by` and demotes the owner.
+        let res = add_member(
+            &pool,
+            community,
+            channel.id,
+            &victim_owner,
+            MemberRole::Member,
+            Some(&attacker),
+        )
+        .await;
+
+        let after = role_of(
+            get_members(&pool, community, channel.id)
+                .await
+                .expect("members"),
+            victim_owner.clone(),
+        );
+        let owners = get_members(&pool, community, channel.id)
+            .await
+            .expect("members")
+            .into_iter()
+            .filter(|m| m.role == "owner")
+            .count();
+
+        assert!(
+            res.is_err(),
+            "unprivileged member must not be able to demote the owner"
+        );
+        assert_eq!(after.as_deref(), Some("owner"), "owner role must survive");
+        assert_eq!(owners, 1, "channel must still have its owner");
+    }
+
+    /// SECURITY REPRO (Dawn): same demotion on a PRIVATE channel, where the
+    /// attacker is a plain member. The report claims any member suffices here.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn repro_private_channel_member_can_demote_owner() {
+        let pool = setup_pool().await;
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let victim_owner = random_pubkey();
+        let attacker = random_pubkey();
+
+        for pk in [&victim_owner, &attacker] {
+            ensure_user(&pool, community, pk)
+                .await
+                .expect("ensure user");
+        }
+
+        let channel = create_test_channel(
+            &pool,
+            community_id,
+            "repro-demote-owner-private",
+            ChannelType::Stream,
+            ChannelVisibility::Private,
+            None,
+            &victim_owner,
+            None,
+        )
+        .await
+        .expect("create private channel");
+
+        // Owner invites the attacker as a plain member (legitimate).
+        add_member(
+            &pool,
+            community,
+            channel.id,
+            &attacker,
+            MemberRole::Member,
+            Some(&victim_owner),
+        )
+        .await
+        .expect("owner invites attacker");
+
+        // Attack: plain member demotes the owner.
+        let res = add_member(
+            &pool,
+            community,
+            channel.id,
+            &victim_owner,
+            MemberRole::Member,
+            Some(&attacker),
+        )
+        .await;
+
+        let members = get_members(&pool, community, channel.id)
+            .await
+            .expect("members");
+        let victim_role = members
+            .iter()
+            .find(|m| m.pubkey == victim_owner)
+            .map(|m| m.role.clone());
+        let owners = members.iter().filter(|m| m.role == "owner").count();
+
+        assert!(
+            res.is_err(),
+            "plain member must not be able to demote the owner on a private channel"
+        );
+        assert_eq!(
+            victim_role.as_deref(),
+            Some("owner"),
+            "owner role must survive"
+        );
+        assert_eq!(owners, 1, "channel must still have its owner");
+    }
+
+    /// The fix must not break legitimate role management: an owner demoting a
+    /// co-owner (while another owner remains) must still succeed, and promotion
+    /// by an owner must still succeed.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn owner_can_still_manage_roles_after_demotion_guard() {
+        let pool = setup_pool().await;
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let owner = random_pubkey();
+        let other = random_pubkey();
+
+        for pk in [&owner, &other] {
+            ensure_user(&pool, community, pk)
+                .await
+                .expect("ensure user");
+        }
+
+        let channel = create_test_channel(
+            &pool,
+            community_id,
+            "roles-still-manageable",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            &owner,
+            None,
+        )
+        .await
+        .expect("create channel");
+
+        // Owner promotes `other` to owner — allowed (actor is elevated).
+        add_member(
+            &pool,
+            community,
+            channel.id,
+            &other,
+            MemberRole::Owner,
+            Some(&owner),
+        )
+        .await
+        .expect("owner may promote to owner");
+
+        // Owner demotes the co-owner back to member — allowed: actor is elevated
+        // and another owner remains, so the last-owner guard does not trip.
+        add_member(
+            &pool,
+            community,
+            channel.id,
+            &other,
+            MemberRole::Member,
+            Some(&owner),
+        )
+        .await
+        .expect("owner may demote a co-owner while another owner remains");
+
+        let members = get_members(&pool, community, channel.id)
+            .await
+            .expect("members");
+        let role_of = |pk: &Vec<u8>| {
+            members
+                .iter()
+                .find(|m| &m.pubkey == pk)
+                .map(|m| m.role.clone())
+        };
+        assert_eq!(role_of(&other).as_deref(), Some("member"));
+        assert_eq!(role_of(&owner).as_deref(), Some("owner"));
+
+        // Idempotent re-add at the SAME role must stay unguarded even from a
+        // non-elevated actor — the huddle bot-add path depends on this.
+        let bot = random_pubkey();
+        ensure_user(&pool, community, &bot)
+            .await
+            .expect("ensure bot");
+        add_member(
+            &pool,
+            community,
+            channel.id,
+            &bot,
+            MemberRole::Bot,
+            Some(&owner),
+        )
+        .await
+        .expect("add bot");
+        add_member(
+            &pool,
+            community,
+            channel.id,
+            &bot,
+            MemberRole::Bot,
+            Some(&other),
+        )
+        .await
+        .expect("re-adding at the same role must remain idempotent");
+
+        // But the last owner cannot be demoted, even by themselves.
+        let err = add_member(
+            &pool,
+            community,
+            channel.id,
+            &owner,
+            MemberRole::Member,
+            Some(&owner),
+        )
+        .await
+        .expect_err("last owner must not be demotable");
+        println!("last-owner demotion rejected: {err}");
+    }
+
+    /// Isolates the actor-authorization guard from the last-owner guard.
+    ///
+    /// `repro_unprivileged_member_can_demote_owner` demotes the *sole* owner, so
+    /// the last-owner guard alone is enough to reject it: stubbing out the actor
+    /// check leaves that test green and the authorization hole invisible. Here a
+    /// second owner remains, so the last-owner guard cannot fire and only the
+    /// actor check stands between an unprivileged member and a co-owner's role.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn unprivileged_member_cannot_demote_a_co_owner() {
+        let pool = setup_pool().await;
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let owner = random_pubkey();
+        let co_owner = random_pubkey();
+        let attacker = random_pubkey();
+
+        for pk in [&owner, &co_owner, &attacker] {
+            ensure_user(&pool, community, pk)
+                .await
+                .expect("ensure user");
+        }
+
+        let channel = create_test_channel(
+            &pool,
+            community_id,
+            "co-owner-demotion-authz",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            &owner,
+            None,
+        )
+        .await
+        .expect("create channel");
+
+        add_member(
+            &pool,
+            community,
+            channel.id,
+            &co_owner,
+            MemberRole::Owner,
+            Some(&owner),
+        )
+        .await
+        .expect("owner may promote a co-owner");
+
+        add_member(
+            &pool,
+            community,
+            channel.id,
+            &attacker,
+            MemberRole::Member,
+            None,
+        )
+        .await
+        .expect("attacker self-joins the open channel");
+
+        // Two owners remain, so the last-owner guard cannot reject this. Only
+        // the actor-authorization check can.
+        let err = add_member(
+            &pool,
+            community,
+            channel.id,
+            &co_owner,
+            MemberRole::Member,
+            Some(&attacker),
+        )
+        .await
+        .expect_err("an unprivileged member must not demote a co-owner");
+        println!("co-owner demotion by unprivileged actor rejected: {err}");
+
+        let members = get_members(&pool, community, channel.id)
+            .await
+            .expect("members");
+        let role_of = |pk: &Vec<u8>| {
+            members
+                .iter()
+                .find(|m| &m.pubkey == pk)
+                .map(|m| m.role.clone())
+        };
+        assert_eq!(
+            role_of(&co_owner).as_deref(),
+            Some("owner"),
+            "co-owner must keep their role"
+        );
+        assert_eq!(
+            members.iter().filter(|m| m.role == "owner").count(),
+            2,
+            "both owners must survive"
+        );
+    }
+
+    /// Sets up an open channel with exactly two owners, returning
+    /// `(community, channel_id, owner_a, owner_b)`.
+    async fn channel_with_two_owners(
+        pool: &PgPool,
+        name: &str,
+    ) -> (CommunityId, Uuid, Vec<u8>, Vec<u8>) {
+        let community_id = make_test_community(pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let owner_a = random_pubkey();
+        let owner_b = random_pubkey();
+        for pk in [&owner_a, &owner_b] {
+            ensure_user(pool, community, pk).await.expect("ensure user");
+        }
+
+        let channel = create_test_channel(
+            pool,
+            community_id,
+            name,
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            &owner_a,
+            None,
+        )
+        .await
+        .expect("create channel");
+
+        add_member(
+            pool,
+            community,
+            channel.id,
+            &owner_b,
+            MemberRole::Owner,
+            Some(&owner_a),
+        )
+        .await
+        .expect("promote second owner");
+
+        (community, channel.id, owner_a, owner_b)
+    }
+
+    /// The lock must be shared with `remove_member`: a demotion racing an owner
+    /// removal goes through a separate count/update path, so both must serialize
+    /// on the same key or they can jointly empty the owner set.
+    ///
+    /// Deterministic rather than timing-based: an outer transaction takes the
+    /// per-channel membership key first, then each membership writer must block
+    /// until it is released. Verified by mutation — dropping the lock from either
+    /// function makes that call return immediately and fails this test.
+    #[tokio::test]
+    #[ignore]
+    async fn membership_writes_serialize_on_the_shared_channel_lock() {
+        let pool = setup_pool().await;
+        let (community, channel_id, owner_a, owner_b) =
+            channel_with_two_owners(&pool, "membership-lock-shared").await;
+
+        for label in ["add_member", "remove_member"] {
+            // Hold the same advisory key an in-tree membership write would take.
+            let mut holder = pool.begin().await.expect("begin lock holder");
+            acquire_channel_membership_lock(&mut holder, community, channel_id)
+                .await
+                .expect("holder acquires membership key");
+
+            let pool2 = pool.clone();
+            let (target, actor) = (owner_a.clone(), owner_b.clone());
+            let mut writer = tokio::spawn(async move {
+                match label {
+                    "add_member" => add_member(
+                        &pool2,
+                        community,
+                        channel_id,
+                        &target,
+                        MemberRole::Member,
+                        Some(&actor),
+                    )
+                    .await
+                    .map(|_| ()),
+                    _ => remove_member(&pool2, community, channel_id, &target, &actor).await,
+                }
+            });
+
+            // While the key is held, the writer must make no progress.
+            let blocked =
+                tokio::time::timeout(std::time::Duration::from_millis(750), &mut writer).await;
+            assert!(
+                blocked.is_err(),
+                "{label} completed while the channel membership key was held — \
+                 it is not serializing on the shared lock"
+            );
+            println!("{label} blocked on the held membership key, as required");
+
+            // Releasing the key lets it proceed.
+            holder.rollback().await.expect("release membership key");
+            tokio::time::timeout(std::time::Duration::from_secs(10), writer)
+                .await
+                .expect("writer must proceed once the key is released")
+                .expect("writer task panicked")
+                .expect("writer must succeed after the key is released");
+
+            // Restore two owners for the next iteration.
+            add_member(
+                &pool,
+                community,
+                channel_id,
+                &owner_a,
+                MemberRole::Owner,
+                Some(&owner_b),
+            )
+            .await
+            .expect("restore second owner");
+        }
+    }
+
+    /// Every *mutable* authorization read must sit behind the membership lock.
+    /// A remover that reads its elevated role before acquiring the lock can be
+    /// demoted by a concurrent writer and still proceed on the stale role.
+    ///
+    /// Deterministic: the holder takes the key, `remove_member` blocks on it, the
+    /// holder then demotes the remover and commits. Once the key is released the
+    /// remover must re-read its (now unprivileged) role and be rejected.
+    #[tokio::test]
+    #[ignore]
+    async fn remove_member_rejects_an_actor_demoted_while_it_waited() {
+        let pool = setup_pool().await;
+        let (community, channel_id, owner_a, owner_b) =
+            channel_with_two_owners(&pool, "stale-actor-role").await;
+        // owner_b removes a plain member, so the last-owner guard is not what
+        // rejects this — only the actor's own role can.
+        let victim = random_pubkey();
+        ensure_user(&pool, community, &victim)
+            .await
+            .expect("ensure victim");
+        add_member(
+            &pool,
+            community,
+            channel_id,
+            &victim,
+            MemberRole::Member,
+            Some(&owner_a),
+        )
+        .await
+        .expect("add victim");
+
+        let mut holder = pool.begin().await.expect("begin lock holder");
+        acquire_channel_membership_lock(&mut holder, community, channel_id)
+            .await
+            .expect("holder acquires membership key");
+
+        let pool2 = pool.clone();
+        let (actor, target) = (owner_b.clone(), victim.clone());
+        let mut remover = tokio::spawn(async move {
+            remove_member(&pool2, community, channel_id, &target, &actor).await
+        });
+
+        // Must be waiting on the key, not already authorized past it.
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(750), &mut remover)
+                .await
+                .is_err(),
+            "remove_member must block on the membership key before authorizing"
+        );
+
+        // Demote the waiting actor to a plain member and release the key.
+        sqlx::query(
+            "UPDATE channel_members SET role = 'member' \
+             WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3",
+        )
+        .bind(community.as_uuid())
+        .bind(channel_id)
+        .bind(&owner_b)
+        .execute(&mut *holder)
+        .await
+        .expect("demote the waiting actor");
+        holder.commit().await.expect("commit demotion");
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), remover)
+            .await
+            .expect("remover must proceed once the key is released")
+            .expect("remover task panicked");
+
+        let err = result.expect_err("a demoted actor must not remove another member");
+        println!("stale-role removal rejected: {err}");
+
+        // The victim must still be an active member.
+        let members = get_members(&pool, community, channel_id)
+            .await
+            .expect("members");
+        assert!(
+            members.iter().any(|m| m.pubkey == victim),
+            "victim must not have been removed by a demoted actor"
+        );
+    }
+
+    /// A soft-removed row keeps its stored `role`, but that role is history,
+    /// not live authority — `removed_at` says it is no longer in force. So
+    /// reactivation must land at the baseline the caller was authorized for,
+    /// never at the role the row happens to remember.
+    ///
+    /// Regression for the sharper vulnerability the alternative would create:
+    /// an owner kicked by another owner self-rejoins through the kind:9021
+    /// path (`Member`, no inviter) and must come back as a plain member. If
+    /// `add_member` inferred authority from the removed row, soft-deleted
+    /// ownership would be a resurrection token.
+    ///
+    /// Two owners on purpose, so the last-owner guard can never be what
+    /// decides the outcome — only role resolution can.
+    #[tokio::test]
+    #[ignore]
+    async fn kicked_owner_rejoins_as_member_not_owner() {
+        let pool = setup_pool().await;
+        let (community, channel_id, owner_a, owner_b) =
+            channel_with_two_owners(&pool, "kicked-owner-rejoin").await;
+
+        // owner_a kicks owner_b (allowed: owner_a remains as the last owner).
+        remove_member(&pool, community, channel_id, &owner_b, &owner_a)
+            .await
+            .expect("an owner may remove another owner");
+
+        let stored: String = sqlx::query_scalar(
+            "SELECT role::text FROM channel_members \
+             WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3",
+        )
+        .bind(community.as_uuid())
+        .bind(channel_id)
+        .bind(&owner_b)
+        .fetch_one(&pool)
+        .await
+        .expect("stored role survives soft removal");
+        assert_eq!(
+            stored, "owner",
+            "the removed row still remembers `owner` — which is exactly why \
+             authorization must not read it"
+        );
+
+        // The kind:9021 self-rejoin path: `Member`, no inviter.
+        add_member(
+            &pool,
+            community,
+            channel_id,
+            &owner_b,
+            MemberRole::Member,
+            None,
+        )
+        .await
+        .expect("a removed member may rejoin an open channel");
+
+        let rejoined = get_member_role(&pool, community, channel_id, &owner_b)
+            .await
+            .expect("read role after rejoin");
+        assert_eq!(
+            rejoined.as_deref(),
+            Some("member"),
+            "a kicked owner must rejoin at baseline privilege, not regain ownership"
+        );
+    }
+
+    /// The other side of the same boundary: reactivation may reach an elevated
+    /// role, but only because a *currently* elevated granter asked for it.
+    #[tokio::test]
+    #[ignore]
+    async fn removed_owner_is_restored_only_by_a_current_owner() {
+        let pool = setup_pool().await;
+        let (community, channel_id, owner_a, owner_b) =
+            channel_with_two_owners(&pool, "removed-owner-restore").await;
+
+        remove_member(&pool, community, channel_id, &owner_b, &owner_a)
+            .await
+            .expect("an owner may remove another owner");
+
+        // An unprivileged member cannot re-add them at `owner`.
+        let rando = random_pubkey();
+        ensure_user(&pool, community, &rando)
+            .await
+            .expect("ensure rando");
+        add_member(
+            &pool,
+            community,
+            channel_id,
+            &rando,
+            MemberRole::Member,
+            None,
+        )
+        .await
+        .expect("rando self-joins open channel");
+        let denied = add_member(
+            &pool,
+            community,
+            channel_id,
+            &owner_b,
+            MemberRole::Owner,
+            Some(&rando),
+        )
+        .await;
+        assert!(
+            matches!(denied, Err(DbError::AccessDenied(_))),
+            "an unprivileged actor must not re-add anyone at `owner`, got {denied:?}"
+        );
+
+        // The remaining owner can.
+        add_member(
+            &pool,
+            community,
+            channel_id,
+            &owner_b,
+            MemberRole::Owner,
+            Some(&owner_a),
+        )
+        .await
+        .expect("a current owner may restore ownership");
+        let restored = get_member_role(&pool, community, channel_id, &owner_b)
+            .await
+            .expect("read role after restore");
+        assert_eq!(restored.as_deref(), Some("owner"));
     }
 }

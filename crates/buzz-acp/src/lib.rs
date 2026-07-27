@@ -1535,6 +1535,7 @@ async fn tokio_main() -> Result<()> {
         turn_liveness_interval: Duration::from_secs(config.turn_liveness_secs),
         dedup_mode: config.dedup_mode,
         system_prompt: config.system_prompt.clone(),
+        session_title: config.session_title.clone(),
         team_instructions: config.team_instructions.clone(),
         base_prompt: if config.no_base_prompt {
             None
@@ -4026,7 +4027,7 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
     // so shutdown() runs on all paths (success, error, timeout).
     let protocol_result = tokio::time::timeout(MODELS_TIMEOUT, async {
         let init = client.initialize().await?;
-        let session = client.session_new_full(&cwd, vec![], None).await?;
+        let session = client.session_new_full(&cwd, vec![], None, None).await?;
         Ok::<_, acp::AcpError>((init, session))
     })
     .await;
@@ -4175,6 +4176,18 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
                     env.push(EnvVar {
                         name: "BUZZ_AUTH_TAG".into(),
                         value: auth_tag,
+                    });
+                }
+            }
+            // Forward the agent's display name so dev-mcp can use it as the git
+            // author name instead of the raw npub. Read from the process env
+            // rather than Config: this is a pass-through of a contract owned
+            // upstream, and absent simply means dev-mcp falls back to the npub.
+            if let Ok(display_name) = std::env::var("BUZZ_ACP_DISPLAY_NAME") {
+                if !display_name.is_empty() {
+                    env.push(EnvVar {
+                        name: "BUZZ_ACP_DISPLAY_NAME".into(),
+                        value: display_name,
                     });
                 }
             }
@@ -4973,6 +4986,7 @@ mod build_mcp_servers_tests {
             typing_enabled: true,
             memory_enabled: false,
             model: None,
+            session_title: None,
             permission_mode: config::PermissionMode::BypassPermissions,
             respond_to: config::RespondTo::Anyone,
             respond_to_allowlist: std::collections::HashSet::new(),
@@ -5034,6 +5048,60 @@ mod build_mcp_servers_tests {
         let server = &servers[0];
         let has_auth_tag = server.env.iter().any(|e| e.name == "BUZZ_AUTH_TAG");
         assert!(!has_auth_tag, "empty BUZZ_AUTH_TAG should not be forwarded");
+    }
+
+    #[test]
+    fn test_display_name_set_is_forwarded_to_mcp_server() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("BUZZ_ACP_DISPLAY_NAME", "Duncan");
+        let config = test_config();
+        let servers = build_mcp_servers(&config);
+        std::env::remove_var("BUZZ_ACP_DISPLAY_NAME");
+
+        let entry = servers[0]
+            .env
+            .iter()
+            .find(|e| e.name == "BUZZ_ACP_DISPLAY_NAME");
+        assert_eq!(
+            entry.map(|e| e.value.as_str()),
+            Some("Duncan"),
+            "a set display name should reach the MCP server verbatim"
+        );
+    }
+
+    #[test]
+    fn test_display_name_unset_omits_the_key_entirely() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("BUZZ_ACP_DISPLAY_NAME");
+        let config = test_config();
+        let servers = build_mcp_servers(&config);
+
+        // Absent, not empty-valued: dev-mcp distinguishes the two and only
+        // falls back to the npub when the key is missing or blank.
+        assert!(
+            !servers[0]
+                .env
+                .iter()
+                .any(|e| e.name == "BUZZ_ACP_DISPLAY_NAME"),
+            "unset display name should not add the key"
+        );
+    }
+
+    #[test]
+    fn test_display_name_empty_omits_the_key_entirely() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("BUZZ_ACP_DISPLAY_NAME", "");
+        let config = test_config();
+        let servers = build_mcp_servers(&config);
+        std::env::remove_var("BUZZ_ACP_DISPLAY_NAME");
+
+        assert!(
+            !servers[0]
+                .env
+                .iter()
+                .any(|e| e.name == "BUZZ_ACP_DISPLAY_NAME"),
+            "empty display name should not be forwarded"
+        );
     }
 
     #[test]
@@ -5139,6 +5207,7 @@ mod error_outcome_emission_tests {
             typing_enabled: true,
             memory_enabled: false,
             model: None,
+            session_title: None,
             permission_mode: config::PermissionMode::BypassPermissions,
             respond_to: config::RespondTo::Anyone,
             respond_to_allowlist: HashSet::new(),
