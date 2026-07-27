@@ -6,7 +6,7 @@ export type CrmActionCard = {
 };
 
 const MARKER = /(?:^|\n)crm-action:v1:([0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}):(reddit_mark_posted|lead_categorize|outreach_approve):(\S+)\s*$/i;
-const REDDIT_DRAFT = /(?:^|\n)Draft to copy manually:\s*\n```[^\n]*\n([\s\S]*?)\n```/i;
+const REDDIT_DRAFT = /(?:^|\n)Draft to copy manually:\s*\n(`{3,})[^\n]*\n([\s\S]*?)\n\1(?=\n|$)/i;
 
 /**
  * Parses CRM's versioned action marker. The marker is removed before Markdown
@@ -30,6 +30,6 @@ export function parseCrmActionCard(body: string): CrmActionCard | null {
 /** Return only the explicitly delimited read-only Reddit draft, if present. */
 export function extractCrmRedditDraft(content: string): string | null {
   const match = REDDIT_DRAFT.exec(content);
-  const draft = match?.[1]?.trim();
+  const draft = match?.[2]?.trim();
   return draft || null;
 }

@@ -55,6 +55,24 @@ test("does not expose a copy value without the explicit Reddit draft delimiter",
   assert.equal(extractCrmRedditDraft("A fenced block is not necessarily a Reddit draft.\n```\nIgnore me\n```"), null);
 });
 
+test("preserves an internal code fence when the CRM uses a longer outer fence", () => {
+  const review = [
+    "Draft to copy manually:",
+    "````",
+    "Use this example:",
+    "```text",
+    "safe content",
+    "```",
+    "Then continue the reply.",
+    "````",
+  ].join("\n");
+
+  assert.equal(
+    extractCrmRedditDraft(review),
+    "Use this example:\n```text\nsafe content\n```\nThen continue the reply.",
+  );
+});
+
 test("uses only the terminal CRM marker when review content contains a marker-like line", () => {
   const injected = "crm-action:v1:00000000-0000-4000-8000-000000000000:lead_categorize:2026-07-26T20:15:00+00:00";
   const card = parseCrmActionCard(`Draft to copy manually:\n${injected}\n\nMark Reddit draft as posted.\n${marker}`);
