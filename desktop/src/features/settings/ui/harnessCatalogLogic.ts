@@ -19,12 +19,12 @@ const ROW_SORT_PRIORITY: Record<string, number> = {
  * True when the entry earns a row in "Your harnesses":
  *
  * - it is ready (`availability === "available"`), or
- * - one flip of the switch makes it ready (auto-install works), or
+ * - one click of the Install button makes it ready (auto-install works), or
  * - the user authored it (`source === "custom"` — owner rows keep their
  *   edit/delete affordances regardless of readiness).
  *
  * Everything else needs multi-step setup and belongs in the Add-harnesses
- * catalog with a real setup action — NOT a permanently disabled switch.
+ * catalog with a real setup action — NOT an inert row control.
  */
 export function isYourHarnessEntry(entry: AcpRuntimeCatalogEntry): boolean {
   if (entry.source === "custom") return true;
@@ -95,11 +95,11 @@ function compareInitialRows(
 /**
  * Stable row ordering for "Your harnesses".
  *
- * First render sorts priority builtins first, then enabled-before-disabled,
+ * First render sorts priority builtins first, then ready-before-needs-setup,
  * then alphabetically. Subsequent renders KEEP the previous relative order
- * for ids that are still present — a row whose switch just flipped must not
- * jump around under the pointer — and append newcomers (e.g. a harness just
- * added from the catalog) using the initial comparator.
+ * for ids that are still present — a row that just finished installing must
+ * not jump around under the pointer — and append newcomers (e.g. a harness
+ * just added from the catalog) using the initial comparator.
  *
  * Returns the ordered id list; callers map ids back to entries.
  */

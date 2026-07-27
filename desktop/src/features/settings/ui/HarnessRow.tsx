@@ -33,7 +33,6 @@ import {
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
 import { Spinner } from "@/shared/ui/spinner";
-import { Switch } from "@/shared/ui/switch";
 
 import { CustomHarnessForm } from "./CustomHarnessForm";
 import { formValuesFromCatalogEntry } from "./harnessFormLogic";
@@ -212,10 +211,6 @@ function RuntimeActions({
   const isAvailable = runtime.availability === "available";
   const canInstall = runtime.canAutoInstall && !runtime.nodeRequired;
   const isWorking = isInstalling || isConnecting;
-  // "Needs setup, can't be fixed by one flip" rows never render a disabled
-  // switch — a disabled OFF switch implies a broken toggle when the real job
-  // is setup. Custom rows in that state keep their ••• menu instead.
-  const showSwitch = isAvailable || canInstall;
 
   return (
     <div className="ml-auto flex shrink-0 items-center justify-end gap-1">
@@ -229,26 +224,34 @@ function RuntimeActions({
         runtime={runtime}
       />
       {isWorking ? (
-        <div className="flex h-5 w-9 items-center justify-center text-muted-foreground">
+        <div className="flex h-7 w-9 items-center justify-center text-muted-foreground">
           <Spinner
             aria-label={`${runtime.label} ${isInstalling ? "installing" : "connecting"}`}
             className="h-4 w-4 border-2"
             data-testid={`doctor-runtime-loading-${runtime.id}`}
           />
         </div>
-      ) : showSwitch ? (
-        <Switch
-          aria-label={`${runtime.label} availability`}
-          checked={isAvailable}
-          className="disabled:cursor-default disabled:opacity-100"
-          data-testid={`doctor-runtime-toggle-${runtime.id}`}
-          disabled={isAvailable || !canInstall}
-          onCheckedChange={(checked) => {
-            if (checked) {
-              onInstall();
-            }
-          }}
-        />
+      ) : isAvailable ? (
+        <span
+          className="inline-flex shrink-0 items-center rounded-md bg-emerald-500/15 px-2 py-0.5 text-xs font-medium text-emerald-600 dark:text-emerald-400"
+          data-testid={`doctor-runtime-ready-${runtime.id}`}
+        >
+          Ready
+        </span>
+      ) : canInstall ? (
+        // Rows needing multi-step setup render no action here — setup lives in
+        // the Add-harnesses catalog. Custom rows keep their ••• menu instead.
+        <Button
+          aria-label={`Install ${runtime.label}`}
+          className="h-7 px-3 text-xs"
+          data-testid={`doctor-runtime-install-${runtime.id}`}
+          onClick={onInstall}
+          size="sm"
+          type="button"
+          variant="outline"
+        >
+          {runtime.availability === "adapter_outdated" ? "Update" : "Install"}
+        </Button>
       ) : null}
     </div>
   );

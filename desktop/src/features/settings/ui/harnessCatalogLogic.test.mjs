@@ -148,7 +148,7 @@ describe("filterCatalogEntries", () => {
 // ── stableRowOrder ───────────────────────────────────────────────────────────
 
 describe("stableRowOrder", () => {
-  it("initial order: priority builtins, then enabled, then alpha", () => {
+  it("initial order: priority builtins, then ready, then alpha", () => {
     const entries = [
       entry({ id: "zeta", label: "Zeta", availability: "available" }),
       entry({
@@ -173,7 +173,7 @@ describe("stableRowOrder", () => {
     ]);
   });
 
-  it("keeps previous relative order when availability flips (no reorder on toggle)", () => {
+  it("keeps previous relative order when availability changes (no reorder on install)", () => {
     const before = ["buzz-agent", "zeta", "off"];
     const entries = [
       entry({ id: "off", label: "Aardvark", availability: "available" }), // just installed

@@ -144,7 +144,7 @@ test("after: consolidated harnesses panel + catalog dialog", async ({
   });
   await page.waitForTimeout(700);
 
-  // 1. The consolidated panel — ready rows only, no disabled switches.
+  // 1. The consolidated panel — ready rows only, no inert controls.
   await page.getByTestId("settings-harnesses").screenshot({
     path: `${SHOTS}/after-harnesses-panel.png`,
   });

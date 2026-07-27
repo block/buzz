@@ -78,8 +78,8 @@ function GitBashCard({
  * harness" (HarnessManagementCard) pair with one operational area:
  *
  * - **Your harnesses** — stable rows for ready (or one-click-ready) harnesses
- *   and everything the user authored. Row order never changes when a switch
- *   flips (stableRowOrder), so the page doesn't jump under the pointer.
+ *   and everything the user authored. Row order never changes when a harness
+ *   installs (stableRowOrder), so the page doesn't jump under the pointer.
  * - **Add harnesses** — a master-detail catalog dialog for everything that
  *   needs multi-step setup, plus the custom-harness form.
  */
@@ -114,7 +114,7 @@ export function HarnessesSettingsPanel() {
       <SectionHeader
         className="items-center"
         title="Harnesses"
-        description="Choose which agent harnesses Buzz can use on this device."
+        description="Agent harnesses available to Buzz on this device."
         action={
           <Button
             disabled={isRefreshing}
@@ -160,7 +160,7 @@ export function HarnessesSettingsPanel() {
                 Your harnesses
               </h2>
               <p className="mt-1 text-sm font-normal text-muted-foreground">
-                Ready to use, or one switch-flip away.
+                Ready to use, or one click from installed.
               </p>
             </div>
           ) : null}

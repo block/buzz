@@ -190,17 +190,17 @@ test.describe("your harnesses split", () => {
     });
     await openHarnessSettings(page);
 
-    // Ready preset row with a checked, non-interactive switch.
+    // Ready preset row with a Ready status chip.
     const hermesRow = page.getByTestId("doctor-runtime-hermes");
     await expect(hermesRow).toBeVisible();
-    await expect(
-      page.getByTestId("doctor-runtime-toggle-hermes"),
-    ).toBeChecked();
+    await expect(page.getByTestId("doctor-runtime-ready-hermes")).toHaveText(
+      "Ready",
+    );
 
-    // Needs-setup preset must NOT render a row (and thus no disabled switch).
+    // Needs-setup preset must NOT render a row (and thus no Install button).
     await expect(page.getByTestId("doctor-runtime-openclaw")).toHaveCount(0);
     await expect(
-      page.getByTestId("doctor-runtime-toggle-openclaw"),
+      page.getByTestId("doctor-runtime-install-openclaw"),
     ).toHaveCount(0);
   });
 
@@ -237,11 +237,7 @@ test.describe("your harnesses split", () => {
       page.getByTestId("harness-catalog-setup-openclaw"),
     ).toBeVisible();
 
-    // Technical details are collapsed until opened.
-    await expect(
-      page.getByTestId("harness-catalog-technical-openclaw"),
-    ).toHaveCount(0);
-    await page.getByTestId("harness-catalog-technical-toggle-openclaw").click();
+    // Technical details are visible by default.
     const technical = page.getByTestId("harness-catalog-technical-openclaw");
     await expect(technical).toBeVisible();
     await expect(technical).toContainText("openclaw");
@@ -527,9 +523,7 @@ test.describe("delete custom harness", () => {
 
 // ── Custom harness row readiness ─────────────────────────────────────────────
 
-test("available custom harness row shows a checked switch", async ({
-  page,
-}) => {
+test("available custom harness row shows a Ready chip", async ({ page }) => {
   await installMockBridge(page, {
     acpRuntimesCatalog: [
       HERMES_AVAILABLE,
@@ -542,11 +536,11 @@ test("available custom harness row shows a checked switch", async ({
   const row = page.getByTestId("doctor-runtime-my-custom-agent");
   await expect(row).toBeVisible();
   await expect(
-    page.getByTestId("doctor-runtime-toggle-my-custom-agent"),
-  ).toBeChecked();
+    page.getByTestId("doctor-runtime-ready-my-custom-agent"),
+  ).toHaveText("Ready");
 });
 
-test("not-ready custom harness row shows status, no switch", async ({
+test("not-ready custom harness row shows status, no install action", async ({
   page,
 }) => {
   await installMockBridge(page, {
@@ -563,9 +557,13 @@ test("not-ready custom harness row shows status, no switch", async ({
   await expect(
     page.getByTestId("doctor-runtime-status-my-custom-agent"),
   ).toHaveText("CLI needed");
-  // A row that setup can't fix with one flip renders no disabled switch.
+  // A row that setup can't fix with one click renders no Install button (and
+  // is not ready).
   await expect(
-    page.getByTestId("doctor-runtime-toggle-my-custom-agent"),
+    page.getByTestId("doctor-runtime-install-my-custom-agent"),
+  ).toHaveCount(0);
+  await expect(
+    page.getByTestId("doctor-runtime-ready-my-custom-agent"),
   ).toHaveCount(0);
 });
 
