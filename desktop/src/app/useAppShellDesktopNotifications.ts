@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import {
+  feedOwnsThreadReplyNotification,
   shouldBounceForChannelNotification,
   toSearchHit,
 } from "@/app/AppShell.helpers";
@@ -94,10 +95,11 @@ export function useAppShellDesktopNotifications({
 
   const handleThreadReplyDesktopNotification = React.useEffectEvent(
     (channelId: string, event: RelayEvent) => {
+      const channelNotify = resolveChannelNotify(channelId);
       if (
         !notificationSettings.desktopEnabled ||
         !notificationSettings.slotAlertsEnabled.thread_reply ||
-        !resolveChannelNotify(channelId).desktop
+        !channelNotify.desktop
       ) {
         return;
       }
@@ -106,6 +108,16 @@ export function useAppShellDesktopNotifications({
       // path — skip them here so they don't notify (and sound) twice.
       const normalizedPubkey = pubkey?.trim().toLowerCase() ?? "";
       if (hasMentionForEvent(event, normalizedPubkey)) {
+        return;
+      }
+      // Same for @channel / @here markers the feed will carry as mentions.
+      if (
+        feedOwnsThreadReplyNotification(
+          channelNotify,
+          event.tags,
+          normalizedPubkey,
+        )
+      ) {
         return;
       }
 

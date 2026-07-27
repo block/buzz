@@ -126,6 +126,10 @@ export function notifyDecisionForEvent(
     return MENTION_NOTIFY;
   }
 
+  // Trust seam: the `notify` marker is validated by the relay at ingest
+  // (NIP-CM — channel membership plus a kind allowlist), not verified here. This
+  // client re-reads the tag at notify time and cannot re-check membership, so an
+  // event stored by a relay predating that validation is trusted for good.
   if (
     eventNotifyMode(event.tags) !== null &&
     state.level !== "mute" &&

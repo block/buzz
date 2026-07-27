@@ -1,5 +1,10 @@
-import { isThreadReply } from "@/features/messages/lib/threading";
+import {
+  eventNotifyMode,
+  isThreadReply,
+} from "@/features/messages/lib/threading";
 import type { DesktopNotificationTarget } from "@/features/notifications/lib/desktop";
+import type { ResolvedChannelNotifyState } from "@/features/notifications/lib/resolveChannelNotifyState";
+import { allowsFeedItemForChannel } from "@/features/notifications/lib/shouldNotify";
 import type { SearchHit } from "@/shared/api/types";
 
 export type AppView =
@@ -84,6 +89,30 @@ export function isWindowDragHandleEvent(event: MouseEvent | PointerEvent) {
 
 export function shouldBounceForChannelNotification(tags: string[][]): boolean {
   return !isThreadReply(tags);
+}
+
+/**
+ * True when a thread reply's *live* desktop banner must be suppressed because
+ * the Home-feed mention path owns the same event.
+ *
+ * Direct `p`-tag mentions are handled by their own guard. This covers the other
+ * mention-tier source: a NIP-CM `@channel` / `@here` marker. The relay persists
+ * `@channel` events as feed mentions, so an unguarded marker-carrying reply
+ * banners twice — once live, once when the mentions feed next polls — with two
+ * independent dedupe sets that cannot see each other.
+ *
+ * The suppression is conditioned on the feed actually accepting the item
+ * (`allowsFeedItemForChannel`, the ladder's channel dimension): a marker in a
+ * `broadcasts: false` or muted channel is dropped by the feed, so its single
+ * live banner must survive.
+ */
+export function feedOwnsThreadReplyNotification(
+  state: ResolvedChannelNotifyState,
+  tags: string[][],
+  normalizedPubkey: string,
+): boolean {
+  if (eventNotifyMode(tags) === null) return false;
+  return allowsFeedItemForChannel(state, false, tags, normalizedPubkey);
 }
 
 export function toSearchHit(
