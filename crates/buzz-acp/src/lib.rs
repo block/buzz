@@ -66,6 +66,10 @@ const MODELS_TIMEOUT: Duration = Duration::from_secs(10);
 /// human interaction, so it must not share the short probe timeout.
 const AUTHENTICATE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
+/// Cold OpenClaw bridges can spend over a minute loading their Gateway plugin
+/// surface after host restart. Keep the supervisor attached through that boot.
+const AGENT_INITIALIZE_TIMEOUT: Duration = Duration::from_secs(3 * 60);
+
 /// Publish a kind:20001 presence update event via the WebSocket connection.
 ///
 /// Ephemeral kinds (20000-29999) are rejected by the HTTP bridge, so presence
@@ -217,9 +221,9 @@ async fn is_owner_or_sibling(
 
 /// Inbound author gate decision: does this author's event fire a turn?
 ///
-/// Coarse security policy applied before subscription rules. Both `OwnerOnly`
-/// and `Allowlist` accept the owner and same-owner siblings; `Allowlist`
-/// additionally accepts the explicit external pubkey list.
+/// Coarse security policy applied before subscription rules. `OwnerOnly` and
+/// `Allowlist` accept same-owner siblings. `StrictAllowlist` deliberately
+/// excludes siblings so deployments can name every inbound principal.
 ///
 /// # DM hardening (`is_dm`)
 ///
@@ -228,9 +232,10 @@ async fn is_owner_or_sibling(
 /// agent-initiated DMs (the agent can be asked to DM a third party), that
 /// turns `anyone`/`allowlist` modes into transitive access grants: whoever
 /// lands in a DM with the agent can prompt it. To close that hole, when
-/// `is_dm` is true only the owner and cryptographically verified same-owner
-/// siblings may fire a turn — the explicit allowlist and `anyone` mode do
-/// NOT apply inside DMs. `Nobody` still drops everything. Callers must
+/// `is_dm` is true, ordinary modes admit only the owner and cryptographically
+/// verified same-owner siblings. `StrictAllowlist` admits only the owner.
+/// Explicit allowlists and `anyone` do not apply inside DMs. `Nobody` still
+/// drops everything. Callers must
 /// resolve `is_dm` fail-closed: unknown channel type ⇒ treat as DM.
 async fn author_allowed(
     respond_to: &RespondTo,
@@ -243,6 +248,7 @@ async fn author_allowed(
     if is_dm {
         return match respond_to {
             RespondTo::Nobody => false,
+            RespondTo::StrictAllowlist => owner_cache.get() == Some(author),
             _ => is_owner_or_sibling(author, owner_cache, rest_client).await,
         };
     }
@@ -253,6 +259,9 @@ async fn author_allowed(
         RespondTo::Allowlist => {
             allowlist.contains(author)
                 || is_owner_or_sibling(author, owner_cache, rest_client).await
+        }
+        RespondTo::StrictAllowlist => {
+            allowlist.contains(author) || owner_cache.get() == Some(author)
         }
     }
 }
@@ -1380,11 +1389,12 @@ async fn tokio_main() -> Result<()> {
                      dropped. Set BUZZ_AUTH_TAG or --agent-owner, or use --respond-to=anyone."
                 );
             }
-            RespondTo::Allowlist => {
+            RespondTo::Allowlist | RespondTo::StrictAllowlist => {
                 tracing::warn!(
-                    "respond-to=allowlist but no owner is set — allowlisted pubkeys \
+                    "respond-to={} but no owner is set — allowlisted pubkeys \
                      will still be accepted, but owner-based matching is unavailable \
-                     until owner is resolved."
+                     until owner is resolved.",
+                    config.respond_to
                 );
             }
             _ => {} // anyone/nobody don't depend on owner
@@ -1526,6 +1536,11 @@ async fn tokio_main() -> Result<()> {
         );
     }
 
+    let session_cwd = config
+        .session_cwd
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("session cwd must be valid UTF-8 for the ACP protocol"))?
+        .to_owned();
     let base_prompt_content = config.base_prompt_content.take();
     let ctx = Arc::new(PromptContext {
         mcp_servers: build_mcp_servers(&config),
@@ -1545,10 +1560,7 @@ async fn tokio_main() -> Result<()> {
             Some(include_str!("base_prompt.md"))
         },
         heartbeat_prompt: config.heartbeat_prompt.clone(),
-        cwd: std::env::current_dir()
-            .unwrap_or_else(|_| std::path::PathBuf::from("/"))
-            .to_string_lossy()
-            .to_string(),
+        cwd: session_cwd,
         rest_client: relay.rest_client(),
         channel_info: pool::ChannelInfoResolver::new(channel_info_map, relay.rest_client()),
         context_message_limit: config.context_message_limit,
@@ -1760,7 +1772,7 @@ async fn tokio_main() -> Result<()> {
                 tracing::info!(agent = idx, "slot refill: spawning background respawn");
                 let cmd = config.agent_command.clone();
                 let args = config.agent_args.clone();
-                let env = config.persona_env_vars.clone();
+                let env = config.agent_spawn_env();
                 let has_codex = config.has_generated_codex_config;
                 let observer = observer.clone();
                 let guard = RespawnGuard::new(idx, respawn_tx.clone());
@@ -2138,12 +2150,15 @@ async fn tokio_main() -> Result<()> {
                             // agent. Must be AFTER !shutdown (owner can always
                             // shut down regardless of gate mode).
                             //
-                            // Both OwnerOnly and Allowlist accept events from
+                            // OwnerOnly and Allowlist accept events from
                             // "siblings" — pubkeys whose agent_owner_pubkey
                             // matches this agent's owner (e.g. other bots
                             // launched by the same human). Allowlist adds the
                             // explicit pubkey list on top, for external people;
                             // it never revokes same-owner team bots.
+                            // StrictAllowlist accepts only the owner and named
+                            // pubkeys, so sibling bots do not inherit execution
+                            // authority from a shared owner.
                             {
                                 let author = buzz_event.event.pubkey.to_hex();
                                 // DM hardening: resolve channel type (fail-closed
@@ -3486,7 +3501,7 @@ fn recover_panicked_agent(
     slot.respawn_in_flight = true;
     let cmd = config.agent_command.clone();
     let args = config.agent_args.clone();
-    let env = config.persona_env_vars.clone();
+    let env = config.agent_spawn_env();
     let has_codex = config.has_generated_codex_config;
     let guard = RespawnGuard::new(i, respawn_tx.clone());
     respawn_tasks.spawn(async move {
@@ -3664,7 +3679,7 @@ fn spawn_respawn_task(
     // Spawn the actual work (shutdown + sleep + spawn + init) off the main loop.
     let cmd = config.agent_command.clone();
     let args = config.agent_args.clone();
-    let env = config.persona_env_vars.clone();
+    let env = config.agent_spawn_env();
     let has_codex = config.has_generated_codex_config;
     let guard = RespawnGuard::new(index, respawn_tx.clone());
     respawn_tasks.spawn(async move {
@@ -3731,7 +3746,7 @@ impl PoolStartup {
             agents: config.agents,
             command: config.agent_command.clone(),
             args: config.agent_args.clone(),
-            extra_env: config.persona_env_vars.clone(),
+            extra_env: config.agent_spawn_env(),
             has_generated_codex_config: config.has_generated_codex_config,
             model: config.model.clone(),
             observer,
@@ -3744,7 +3759,7 @@ async fn initialize_agent_pool(
     mut shutdown: Option<watch::Receiver<()>>,
 ) -> Result<AgentPool> {
     // One agent failing to start must not kill the whole pool.
-    // Attempt each spawn under a 60-second timeout; a partial pool is valid.
+    // Attempt each spawn under the bounded cold-start timeout; a partial pool is valid.
     let mut agent_slots: Vec<Option<OwnedAgent>> = Vec::with_capacity(startup.agents as usize);
     for i in 0..startup.agents as usize {
         let spawn_result = AcpClient::spawn(
@@ -3757,7 +3772,7 @@ async fn initialize_agent_pool(
         match spawn_result {
             Ok(mut acp) => {
                 acp.set_observer(startup.observer.clone(), i);
-                let initialize = tokio::time::timeout(Duration::from_secs(60), acp.initialize());
+                let initialize = acp.initialize_with_timeout(AGENT_INITIALIZE_TIMEOUT);
                 let initialize_result = match shutdown.as_mut() {
                     Some(shutdown) => tokio::select! {
                         biased;
@@ -3771,7 +3786,7 @@ async fn initialize_agent_pool(
                     None => initialize.await,
                 };
                 match initialize_result {
-                    Ok(Ok(init_result)) => {
+                    Ok(init_result) => {
                         tracing::info!(agent = i, "agent initialized: {init_result}");
                         let protocol_version =
                             init_result["protocolVersion"].as_u64().unwrap_or(1) as u32;
@@ -3805,13 +3820,8 @@ async fn initialize_agent_pool(
                             protocol_version,
                         }));
                     }
-                    Ok(Err(e)) => {
+                    Err(e) => {
                         tracing::error!(agent = i, "agent initialize failed: {e}");
-                        acp.shutdown().await;
-                        agent_slots.push(None);
-                    }
-                    Err(_) => {
-                        tracing::error!(agent = i, "agent timed out during init (60s)");
                         acp.shutdown().await;
                         agent_slots.push(None);
                     }
@@ -4481,6 +4491,44 @@ mod author_gate_tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_strict_allowlist_rejects_unlisted_sibling() {
+        let cache = cache_with_sibling();
+        let allowlist = HashSet::from([EXTERNAL.to_string()]);
+        assert!(
+            !author_allowed(
+                &RespondTo::StrictAllowlist,
+                &allowlist,
+                SIBLING,
+                false,
+                &cache,
+                &dummy_rest_client()
+            )
+            .await,
+            "a same-owner sibling absent from a strict allowlist must be dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_strict_allowlist_accepts_owner_and_explicit_pubkey() {
+        let cache = cache_with_sibling();
+        let allowlist = HashSet::from([EXTERNAL.to_string()]);
+        for (who, label) in [(OWNER, "owner"), (EXTERNAL, "explicit pubkey")] {
+            assert!(
+                author_allowed(
+                    &RespondTo::StrictAllowlist,
+                    &allowlist,
+                    who,
+                    false,
+                    &cache,
+                    &dummy_rest_client()
+                )
+                .await,
+                "strict allowlist must accept the {label}"
+            );
+        }
+    }
+
     // The default `respond-to` is OwnerOnly. Under steering, "an ineligible
     // author must NOT steer" is enforced *here* — author_allowed drops the
     // event before it reaches the mode gate — not in the gate itself. These
@@ -4526,7 +4574,7 @@ mod author_gate_tests {
     // In a DM, clients auto-p-tag every participant, and an agent can be
     // asked to open a DM with a third party. The gate must therefore ignore
     // the allowlist and `anyone` mode inside DMs: only owner + verified
-    // siblings fire turns.
+    // siblings fire turns. Strict allowlists narrow that further to owner-only.
 
     #[tokio::test]
     async fn test_dm_rejects_allowlisted_external_pubkey() {
@@ -4586,6 +4634,35 @@ mod author_gate_tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn test_dm_strict_allowlist_accepts_owner_but_rejects_sibling() {
+        let cache = cache_with_sibling();
+        let allowlist = HashSet::from([SIBLING.to_string()]);
+        assert!(
+            author_allowed(
+                &RespondTo::StrictAllowlist,
+                &allowlist,
+                OWNER,
+                true,
+                &cache,
+                &dummy_rest_client()
+            )
+            .await
+        );
+        assert!(
+            !author_allowed(
+                &RespondTo::StrictAllowlist,
+                &allowlist,
+                SIBLING,
+                true,
+                &cache,
+                &dummy_rest_client()
+            )
+            .await,
+            "strict allowlist must not grant same-owner sibling authority inside DMs"
+        );
     }
 
     #[tokio::test]
@@ -4960,7 +5037,9 @@ mod build_mcp_servers_tests {
         Config {
             keys: nostr::Keys::generate(),
             relay_url: "ws://localhost:3000".into(),
+            session_cwd: std::path::PathBuf::from("."),
             agent_command: "goose".into(),
+            agent_publisher_credentials: false,
             agent_args: vec!["acp".into()],
             mcp_command: "test-mcp-server".into(),
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
@@ -5178,10 +5257,12 @@ mod error_outcome_emission_tests {
         Config {
             keys: nostr::Keys::generate(),
             relay_url: "ws://localhost:3000".into(),
+            session_cwd: std::path::PathBuf::from("."),
             // `true` exits cleanly, so the async respawn fails fast and
             // harmlessly off the JoinSet — irrelevant to the synchronous
             // feed emission under test.
             agent_command: "true".into(),
+            agent_publisher_credentials: false,
             agent_args: vec![],
             mcp_command: "test-mcp-server".into(),
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,

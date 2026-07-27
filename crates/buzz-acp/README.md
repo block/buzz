@@ -135,19 +135,20 @@ Controls which authors' events the harness forwards to the agent. Events from di
 
 | Flag | Env Var | Default | Description |
 |------|---------|---------|-------------|
-| `--respond-to` | `BUZZ_ACP_RESPOND_TO` | `owner-only` | Author gate mode: `owner-only`, `allowlist`, `anyone`, `nobody`. |
-| `--respond-to-allowlist` | `BUZZ_ACP_RESPOND_TO_ALLOWLIST` | — | Comma-separated 64-char hex pubkeys (required when mode is `allowlist`). Owner is always implicitly included. |
+| `--respond-to` | `BUZZ_ACP_RESPOND_TO` | `owner-only` | Author gate mode: `owner-only`, `allowlist`, `strict-allowlist`, `anyone`, `nobody`. |
+| `--respond-to-allowlist` | `BUZZ_ACP_RESPOND_TO_ALLOWLIST` | — | Comma-separated 64-char hex pubkeys (required by both allowlist modes). Owner is always implicitly included. |
 
 **Modes:**
 
 | Mode | Behavior |
 |------|----------|
-| `owner-only` | Forward only events from the agent's registered owner. If no owner is set, all events are dropped until the owner is resolved. |
-| `allowlist` | Forward events from the listed pubkeys plus the owner. |
+| `owner-only` | Forward events from the agent's registered owner and verified same-owner siblings. If no owner is set, all events are dropped until the owner is resolved. |
+| `allowlist` | Forward events from the listed pubkeys, the owner, and verified same-owner siblings. |
+| `strict-allowlist` | In channels, forward events only from the listed pubkeys and the owner. In DMs, only the owner is accepted. Same-owner siblings receive no implicit authority. |
 | `anyone` | Forward all events (no author filtering). |
 | `nobody` | Drop all inbound events. Agent only acts on heartbeat prompts. |
 
-The gate applies to **all** inbound events — @mentions, DMs, thread replies, and any event delivered by the relay. Owner control commands are checked **before** the gate, so the owner can still manage the harness regardless of mode:
+The gate applies to **all** inbound events — @mentions, DMs, thread replies, and any event delivered by the relay. DMs intentionally ignore explicit allowlist entries: the owner and verified same-owner siblings are accepted by the legacy responding modes, while `strict-allowlist` accepts only the owner. Owner control commands are checked **before** the gate, so the owner can still manage the harness regardless of mode:
 
 | Command | Effect |
 |---------|--------|

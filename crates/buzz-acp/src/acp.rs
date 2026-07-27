@@ -202,6 +202,10 @@ pub struct AcpClient {
     goose_usage: UsageTracker,
 }
 
+fn harness_bound_agent_env(key: &str) -> bool {
+    matches!(key, "BUZZ_RELAY_URL" | "BUZZ_PRIVATE_KEY")
+}
+
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
 /// collisions.  When both sides have an object for the same key, the merge recurses so
 /// unrelated nested keys from `base` are preserved.
@@ -422,6 +426,17 @@ impl AcpClient {
             // Ensure the child is killed when the AcpClient is dropped (best-effort).
             // Callers MUST still call shutdown().await for guaranteed cleanup.
             .kill_on_drop(true);
+        // Buzz signing authority is opt-in through `extra_env`; never inherit
+        // credentials from the harness process into an arbitrary ACP child.
+        for key in [
+            "BUZZ_RELAY_URL",
+            "BUZZ_PRIVATE_KEY",
+            "BUZZ_ACP_PRIVATE_KEY",
+            "BUZZ_PRIVATE_KEY_FILE",
+            "BUZZ_EXPECTED_PUBLIC_KEY",
+        ] {
+            cmd.env_remove(key);
+        }
 
         // Per-persona env vars (e.g., GOOSE_PROVIDER, BUZZ_AGENT_PROVIDER).
         // For most keys, operator precedence wins: skip injection if already set
@@ -452,7 +467,7 @@ impl AcpClient {
                 // Handled by build_codex_config_env; skip here to avoid double-setting.
                 continue;
             }
-            if std::env::var(key).is_err() {
+            if harness_bound_agent_env(key) || std::env::var(key).is_err() {
                 cmd.env(key, value);
             }
         }
@@ -537,10 +552,23 @@ impl AcpClient {
     /// Must be called exactly once, before any other ACP method.
     /// The caller may inspect `agentCapabilities` in the returned value.
     pub async fn initialize(&mut self) -> Result<serde_json::Value, AcpError> {
+        self.initialize_with_timeout(Self::REQUEST_TIMEOUT).await
+    }
+
+    /// Initialize with a caller-owned deadline.
+    ///
+    /// Supervisors use a longer bound for cold agent processes; probes retain
+    /// the normal request deadline through [`Self::initialize`].
+    pub async fn initialize_with_timeout(
+        &mut self,
+        timeout: std::time::Duration,
+    ) -> Result<serde_json::Value, AcpError> {
         // Requesting version 2 is an intentional temporary pin — we are squatting
         // on ACP v2 ahead of the upstream ACP RFD. Revisit when that RFD merges.
         let params = build_initialize_params();
-        let result = self.send_request("initialize", params).await?;
+        let result = self
+            .send_request_with_timeout("initialize", params, timeout)
+            .await?;
         tracing::debug!(target: "acp::init", "initialize response: {result}");
         Ok(result)
     }
@@ -989,6 +1017,16 @@ impl AcpClient {
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, AcpError> {
+        self.send_request_with_timeout(method, params, Self::REQUEST_TIMEOUT)
+            .await
+    }
+
+    async fn send_request_with_timeout(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+        timeout: std::time::Duration,
+    ) -> Result<serde_json::Value, AcpError> {
         let id = self.next_id;
         self.next_id += 1;
 
@@ -1004,13 +1042,17 @@ impl AcpClient {
         // Wrap write + read in a single timeout so a hung agent can't block forever.
         // We cannot use an async block that borrows `self` mutably across two awaits
         // inside timeout(), so we sequence them with early-return on timeout.
-        let timeout = Self::REQUEST_TIMEOUT;
+        let deadline = tokio::time::Instant::now() + timeout;
         match tokio::time::timeout(timeout, self.write_ndjson(&msg)).await {
             Ok(result) => result?,
             Err(_) => return Err(AcpError::Timeout(timeout)),
         }
 
-        match tokio::time::timeout(timeout, self.read_until_response(id)).await {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(AcpError::Timeout(timeout));
+        }
+        match tokio::time::timeout(remaining, self.read_until_response(id)).await {
             Ok(result) => result,
             Err(_) => Err(AcpError::Timeout(timeout)),
         }
@@ -1888,7 +1930,11 @@ pub fn resolve_model_switch_method(
     // 1. Search stable configOptions for a "model"-category entry whose
     //    options contain a value matching desired_model.
     for config_opt in extract_model_config_options(session_new_result) {
-        let config_id = match config_opt.get("configId").and_then(|v| v.as_str()) {
+        let config_id = match config_opt
+            .get("configId")
+            .or_else(|| config_opt.get("id"))
+            .and_then(|v| v.as_str())
+        {
             Some(id) => id,
             None => continue,
         };
@@ -3776,5 +3822,13 @@ mod tests {
             msg.contains("sandbox_workspace_write"),
             "error must mention sandbox_workspace_write"
         );
+    }
+
+    #[test]
+    fn harness_buzz_credentials_override_parent_environment() {
+        assert!(harness_bound_agent_env("BUZZ_RELAY_URL"));
+        assert!(harness_bound_agent_env("BUZZ_PRIVATE_KEY"));
+        assert!(!harness_bound_agent_env("CODEX_CONFIG"));
+        assert!(!harness_bound_agent_env("INITIAL_AGENT_MODE"));
     }
 }

@@ -4,6 +4,7 @@
 //! Config file (TOML) for complex subscription rules.
 
 use std::collections::{HashMap, HashSet};
+use std::io::Read;
 use std::path::PathBuf;
 
 use clap::Parser;
@@ -47,6 +48,54 @@ pub enum ConfigError {
     ConfigFile(String),
 }
 
+fn read_owned_secret_file(path: &std::path::Path) -> Result<String, ConfigError> {
+    if !path.is_absolute() {
+        return Err(ConfigError::ConfigFile(
+            "--private-key-file must be an absolute path".into(),
+        ));
+    }
+
+    #[cfg(unix)]
+    let mut file = {
+        use nix::fcntl::{open, OFlag};
+        use nix::sys::stat::Mode;
+
+        let fd = open(path, OFlag::O_RDONLY | OFlag::O_NOFOLLOW, Mode::empty())
+            .map_err(|error| ConfigError::Io(error.into()))?;
+        std::fs::File::from(fd)
+    };
+    #[cfg(not(unix))]
+    let mut file = std::fs::OpenOptions::new().read(true).open(path)?;
+
+    // Validate the same handle that supplies the secret so the path cannot be
+    // swapped between metadata inspection and the read.
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(ConfigError::ConfigFile(
+            "--private-key-file must be a regular, non-symlink file".into(),
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        if metadata.permissions().mode() & 0o777 != 0o600 {
+            return Err(ConfigError::ConfigFile(
+                "--private-key-file permissions must be 0600".into(),
+            ));
+        }
+        if metadata.uid() != nix::unistd::getuid().as_raw() {
+            return Err(ConfigError::ConfigFile(
+                "--private-key-file must be owned by the current user".into(),
+            ));
+        }
+    }
+
+    let mut secret = String::new();
+    file.read_to_string(&mut secret)?;
+    Ok(secret.trim().to_string())
+}
+
 #[derive(Debug, Clone, PartialEq, clap::ValueEnum)]
 pub enum SubscribeMode {
     Mentions,
@@ -87,8 +136,9 @@ pub enum MultipleEventHandling {
 
 /// Inbound author gate: which authors' events the harness forwards to the agent.
 ///
-/// - `owner-only` — only the agent's registered owner (default).
-/// - `allowlist`  — owner + explicit pubkey list (`--respond-to-allowlist`).
+/// - `owner-only` — owner + verified same-owner siblings (default).
+/// - `allowlist`  — owner + same-owner siblings + explicit pubkey list.
+/// - `strict-allowlist` — owner + explicit pubkey list, excluding siblings.
 /// - `anyone`     — all events forwarded (no author filtering).
 /// - `nobody`     — all events dropped (proactive/heartbeat-only mode).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, clap::ValueEnum)]
@@ -96,6 +146,7 @@ pub enum RespondTo {
     #[default]
     OwnerOnly,
     Allowlist,
+    StrictAllowlist,
     Anyone,
     Nobody,
 }
@@ -105,6 +156,7 @@ impl std::fmt::Display for RespondTo {
         match self {
             Self::OwnerOnly => f.write_str("owner-only"),
             Self::Allowlist => f.write_str("allowlist"),
+            Self::StrictAllowlist => f.write_str("strict-allowlist"),
             Self::Anyone => f.write_str("anyone"),
             Self::Nobody => f.write_str("nobody"),
         }
@@ -240,15 +292,56 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_RELAY_URL", default_value = "ws://localhost:3000")]
     pub relay_url: String,
 
-    #[arg(long, env = "BUZZ_PRIVATE_KEY")]
-    pub private_key: String,
+    #[arg(
+        long,
+        env = "BUZZ_PRIVATE_KEY",
+        conflicts_with = "private_key_file",
+        required_unless_present = "private_key_file"
+    )]
+    pub private_key: Option<String>,
 
-    /// Agent owner pubkey (64-char hex). Used for --respond-to=owner-only gate.
+    /// Read the Nostr private key from an operator-owned regular file.
+    #[arg(
+        long,
+        env = "BUZZ_PRIVATE_KEY_FILE",
+        conflicts_with = "private_key",
+        required_unless_present = "private_key"
+    )]
+    pub private_key_file: Option<PathBuf>,
+
+    /// Expected public key derived from `--private-key-file`.
+    #[arg(long, env = "BUZZ_EXPECTED_PUBLIC_KEY", requires = "private_key_file")]
+    pub expected_public_key: Option<String>,
+
+    /// Absolute workspace path sent as `cwd` in every ACP `session/new`.
+    /// Defaults to the harness process working directory.
+    #[arg(long, env = "BUZZ_ACP_SESSION_CWD")]
+    pub session_cwd: Option<PathBuf>,
+
+    /// Agent owner pubkey (64-char hex). Used by owner-aware author gates.
     #[arg(long, env = "BUZZ_ACP_AGENT_OWNER")]
     pub agent_owner: Option<String>,
 
     #[arg(long, env = "BUZZ_ACP_AGENT_COMMAND", default_value = "goose")]
     pub agent_command: String,
+
+    /// Forward this harness identity to the managed agent for direct Buzz CLI use.
+    /// Disabled by default because it grants the child signing authority.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_AGENT_PUBLISHER_CREDENTIALS",
+        default_value_t = false,
+        conflicts_with = "no_agent_publisher_credentials"
+    )]
+    pub agent_publisher_credentials: bool,
+
+    /// Prevent the managed agent from inheriting this harness's Buzz signer.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_NO_AGENT_PUBLISHER_CREDENTIALS",
+        default_value_t = false
+    )]
+    pub no_agent_publisher_credentials: bool,
 
     #[arg(
         long,
@@ -444,7 +537,7 @@ pub struct CliArgs {
     pub permission_mode: PermissionMode,
 
     /// Inbound author gate: which authors' events the harness forwards.
-    /// Modes: owner-only (default), allowlist, anyone, nobody.
+    /// Modes: owner-only (default), allowlist, strict-allowlist, anyone, nobody.
     #[arg(
         long,
         env = "BUZZ_ACP_RESPOND_TO",
@@ -453,14 +546,14 @@ pub struct CliArgs {
     )]
     pub respond_to: RespondTo,
 
-    /// Comma-separated 64-char hex pubkeys for allowlist mode.
+    /// Comma-separated 64-char hex pubkeys for allowlist modes.
     /// Owner pubkey is always implicitly included.
     #[arg(long, env = "BUZZ_ACP_RESPOND_TO_ALLOWLIST", value_delimiter = ',')]
     pub respond_to_allowlist: Option<Vec<String>>,
 
     /// Comma-separated list of allowed `--respond-to` modes.
     /// When set, the harness rejects startup if `--respond-to` is not in this list.
-    /// Modes: owner-only, allowlist, anyone, nobody.
+    /// Modes: owner-only, allowlist, strict-allowlist, anyone, nobody.
     /// Default: empty (all modes allowed — no restriction).
     /// Example: `BUZZ_ACP_ALLOWED_RESPOND_TO=owner-only,allowlist`
     #[arg(long, env = "BUZZ_ACP_ALLOWED_RESPOND_TO", value_delimiter = ',')]
@@ -492,7 +585,9 @@ pub struct ChannelFilter {
 pub struct Config {
     pub keys: Keys,
     pub relay_url: String,
+    pub session_cwd: PathBuf,
     pub agent_command: String,
+    pub agent_publisher_credentials: bool,
     pub agent_args: Vec<String>,
     pub mcp_command: String,
     pub idle_timeout_secs: u64,
@@ -535,7 +630,7 @@ pub struct Config {
     pub permission_mode: PermissionMode,
     /// Inbound author gate mode.
     pub respond_to: RespondTo,
-    /// Validated allowlist of pubkey hex strings (used when respond_to == Allowlist).
+    /// Validated pubkeys used by both allowlist modes.
     pub respond_to_allowlist: HashSet<String>,
     /// Allowed `respond_to` modes. Empty = all modes allowed.
     pub allowed_respond_to: Vec<String>,
@@ -809,13 +904,65 @@ impl Config {
     /// tests can construct `CliArgs` via `CliArgs::try_parse_from` and exercise the full
     /// validation path without going through process args.
     pub fn from_args(mut args: CliArgs) -> Result<Self, ConfigError> {
-        let keys = Keys::parse(&args.private_key)?;
+        // Preserve only credentials that a child would already have inherited
+        // from the harness environment. Arg/file signers require explicit opt-in.
+        let inherited_publisher_credentials = std::env::var_os("BUZZ_PRIVATE_KEY").is_some()
+            || std::env::var_os("BUZZ_ACP_PRIVATE_KEY").is_some();
+        let agent_publisher_credentials = args.agent_publisher_credentials
+            || (inherited_publisher_credentials && !args.no_agent_publisher_credentials);
+        let mut private_key = if let Some(value) = args.private_key.take() {
+            value
+        } else if let Some(path) = args.private_key_file.as_ref() {
+            read_owned_secret_file(path)?
+        } else {
+            return Err(ConfigError::ConfigFile(
+                "one of --private-key or --private-key-file is required".into(),
+            ));
+        };
+        let keys = Keys::parse(&private_key)?;
+        if let Some(expected) = args.expected_public_key.as_deref() {
+            if keys.public_key().to_hex() != expected.trim().to_ascii_lowercase() {
+                return Err(ConfigError::ConfigFile(
+                    "private-key file does not derive the expected public key".into(),
+                ));
+            }
+        }
         // Best-effort zeroize: overwrite the raw private key string to reduce
         // exposure via core dumps or heap inspection (#41). Without the `zeroize`
         // crate we can only clear the String — the allocator may retain copies.
-        args.private_key
-            .replace_range(.., &"0".repeat(args.private_key.len()));
-        args.private_key.clear();
+        private_key.replace_range(.., &"0".repeat(private_key.len()));
+        private_key.clear();
+
+        let session_cwd = if let Some(path) = args.session_cwd {
+            if !path.is_absolute() {
+                return Err(ConfigError::ConfigFile(
+                    "--session-cwd must be an absolute path".into(),
+                ));
+            }
+            if path.to_str().is_none() {
+                return Err(ConfigError::ConfigFile(
+                    "--session-cwd must be valid UTF-8 for the ACP protocol".into(),
+                ));
+            }
+            let metadata = std::fs::metadata(&path).map_err(|error| {
+                ConfigError::ConfigFile(format!(
+                    "--session-cwd must be an existing directory: {error}"
+                ))
+            })?;
+            if !metadata.is_dir() {
+                return Err(ConfigError::ConfigFile(
+                    "--session-cwd must be an existing directory".into(),
+                ));
+            }
+            path
+        } else {
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
+        };
+        if session_cwd.to_str().is_none() {
+            return Err(ConfigError::ConfigFile(
+                "--session-cwd must be valid UTF-8 for the ACP protocol".into(),
+            ));
+        }
 
         let system_prompt = if let Some(text) = args.system_prompt {
             Some(text)
@@ -969,18 +1116,23 @@ impl Config {
             )));
         }
 
-        let respond_to_allowlist = if args.respond_to == RespondTo::Allowlist {
+        let uses_allowlist = matches!(
+            args.respond_to,
+            RespondTo::Allowlist | RespondTo::StrictAllowlist
+        );
+        let respond_to_allowlist = if uses_allowlist {
             let raw = args.respond_to_allowlist.unwrap_or_default();
             if raw.is_empty() {
-                return Err(ConfigError::ConfigFile(
-                    "--respond-to=allowlist requires --respond-to-allowlist with at least one pubkey".into(),
-                ));
+                return Err(ConfigError::ConfigFile(format!(
+                    "--respond-to={} requires --respond-to-allowlist with at least one pubkey",
+                    args.respond_to
+                )));
             }
             validate_allowlist(&raw)?
         } else {
             if args.respond_to_allowlist.is_some() {
                 tracing::warn!(
-                    "--respond-to-allowlist is ignored when --respond-to is not 'allowlist'"
+                    "--respond-to-allowlist is ignored when --respond-to is not an allowlist mode"
                 );
             }
             HashSet::new()
@@ -993,7 +1145,7 @@ impl Config {
                 RespondTo::from_str(s.trim(), true).map_err(|_| {
                     ConfigError::ConfigFile(format!(
                         "invalid value in BUZZ_ACP_ALLOWED_RESPOND_TO: '{s}' \
-                         (valid values: owner-only, allowlist, anyone, nobody)"
+                         (valid values: owner-only, allowlist, strict-allowlist, anyone, nobody)"
                     ))
                 })?;
             }
@@ -1032,7 +1184,9 @@ impl Config {
         let config = Config {
             keys,
             relay_url: args.relay_url,
+            session_cwd,
             agent_command,
+            agent_publisher_credentials,
             agent_args,
             mcp_command: args.mcp_command,
             idle_timeout_secs,
@@ -1086,9 +1240,11 @@ impl Config {
     /// Human-readable summary (no secrets).
     pub fn summary(&self) -> String {
         let respond_to_detail = match &self.respond_to {
-            RespondTo::Allowlist => {
-                format!("respond_to=allowlist({})", self.respond_to_allowlist.len())
-            }
+            RespondTo::Allowlist | RespondTo::StrictAllowlist => format!(
+                "respond_to={}({})",
+                self.respond_to,
+                self.respond_to_allowlist.len()
+            ),
             other => format!("respond_to={other}"),
         };
         let allowed_respond_to_detail = if self.allowed_respond_to.is_empty() {
@@ -1099,9 +1255,10 @@ impl Config {
             format!(" allowed_respond_to=[{}]", modes.join(","))
         };
         format!(
-            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
+            "relay={} pubkey={} session_cwd={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
             self.relay_url,
             self.keys.public_key().to_hex(),
+            self.session_cwd.display(),
             self.agent_command,
             self.agent_args.join(" "),
             self.mcp_command,
@@ -1123,6 +1280,22 @@ impl Config {
             respond_to_detail,
             allowed_respond_to_detail,
         )
+    }
+
+    /// Build the managed agent runtime environment. Buzz publisher credentials
+    /// are present only for deployments that explicitly grant the child signer
+    /// authority; the spawn path removes inherited values in every other case.
+    pub fn agent_spawn_env(&self) -> Vec<(String, String)> {
+        let mut env = self.persona_env_vars.clone();
+        env.retain(|(key, _)| !matches!(key.as_str(), "BUZZ_RELAY_URL" | "BUZZ_PRIVATE_KEY"));
+        if self.agent_publisher_credentials {
+            env.push(("BUZZ_RELAY_URL".into(), self.relay_url.clone()));
+            env.push((
+                "BUZZ_PRIVATE_KEY".into(),
+                self.keys.secret_key().to_secret_hex(),
+            ));
+        }
+        env
     }
 }
 
@@ -1410,7 +1583,9 @@ mod tests {
         Config {
             keys: nostr::Keys::generate(),
             relay_url: "ws://localhost:3000".into(),
+            session_cwd: PathBuf::from("."),
             agent_command: "goose".into(),
+            agent_publisher_credentials: false,
             agent_args: vec!["acp".into()],
             mcp_command: "".into(),
             idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
@@ -2350,6 +2525,10 @@ channels = "ALL"
     fn test_respond_to_display() {
         assert_eq!(format!("{}", RespondTo::OwnerOnly), "owner-only");
         assert_eq!(format!("{}", RespondTo::Allowlist), "allowlist");
+        assert_eq!(
+            format!("{}", RespondTo::StrictAllowlist),
+            "strict-allowlist"
+        );
         assert_eq!(format!("{}", RespondTo::Anyone), "anyone");
         assert_eq!(format!("{}", RespondTo::Nobody), "nobody");
     }
@@ -2364,6 +2543,10 @@ channels = "ALL"
         assert_eq!(
             RespondTo::from_str("allowlist", true).unwrap(),
             RespondTo::Allowlist
+        );
+        assert_eq!(
+            RespondTo::from_str("strict-allowlist", true).unwrap(),
+            RespondTo::StrictAllowlist
         );
         assert_eq!(
             RespondTo::from_str("anyone", true).unwrap(),
@@ -2394,6 +2577,18 @@ channels = "ALL"
         assert!(
             s.contains("respond_to=allowlist(2)"),
             "should show allowlist count, got: {s}"
+        );
+    }
+
+    #[test]
+    fn test_summary_respond_to_strict_allowlist_shows_count() {
+        let mut config = test_config(SubscribeMode::Mentions);
+        config.respond_to = RespondTo::StrictAllowlist;
+        config.respond_to_allowlist = HashSet::from(["ab".repeat(32), "cd".repeat(32)]);
+        let s = config.summary();
+        assert!(
+            s.contains("respond_to=strict-allowlist(2)"),
+            "should show strict allowlist count, got: {s}"
         );
     }
 
@@ -2555,7 +2750,7 @@ channels = "ALL"
             let mode = RespondTo::from_str(s.trim(), true).map_err(|_| {
                 ConfigError::ConfigFile(format!(
                     "invalid value in BUZZ_ACP_ALLOWED_RESPOND_TO: '{s}' \
-                     (valid values: owner-only, allowlist, anyone, nobody)"
+                     (valid values: owner-only, allowlist, strict-allowlist, anyone, nobody)"
                 ))
             })?;
             set.insert(mode);
@@ -2712,6 +2907,24 @@ channels = "ALL"
     }
 
     #[test]
+    fn strict_allowlist_full_path_requires_explicit_pubkeys() {
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--respond-to",
+            "strict-allowlist",
+            "--allowed-respond-to",
+            "strict-allowlist",
+        ])
+        .expect("clap should parse args");
+        let error = Config::from_args(args).expect_err("strict allowlist must require pubkeys");
+        assert!(error
+            .to_string()
+            .contains("--respond-to=strict-allowlist requires --respond-to-allowlist"));
+    }
+
+    #[test]
     fn allowed_respond_to_full_path_unset_allows_all() {
         // No --allowed-respond-to flag → anyone is accepted.
         let args = CliArgs::try_parse_from([
@@ -2784,11 +2997,224 @@ channels = "ALL"
     }
 
     #[test]
+    fn session_cwd_defaults_to_current_directory() {
+        let args =
+            CliArgs::try_parse_from(["buzz-acp", "--private-key", TEST_PRIVATE_KEY]).unwrap();
+        let config = Config::from_args(args).unwrap();
+        assert_eq!(
+            config.session_cwd,
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
+        );
+    }
+
+    #[test]
     fn sanitize_session_title_collapses_whitespace_and_strips_control_chars() {
         assert_eq!(
             sanitize_session_title("  Fizz\t\tthe\n Bot\u{7}  "),
             Some("Fizz the Bot".to_string())
         );
+    }
+
+    #[test]
+    fn session_cwd_accepts_an_absolute_existing_directory() {
+        let dir = std::env::temp_dir().join(format!("buzz-acp-session-cwd-{}", Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--session-cwd",
+            dir.to_str().unwrap(),
+        ])
+        .unwrap();
+        let config = Config::from_args(args).unwrap();
+        assert_eq!(config.session_cwd, dir);
+        std::fs::remove_dir_all(&config.session_cwd).unwrap();
+    }
+
+    #[test]
+    fn session_cwd_rejects_relative_missing_and_non_directory_paths() {
+        let relative = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--session-cwd",
+            "relative",
+        ])
+        .unwrap();
+        assert!(matches!(
+            Config::from_args(relative),
+            Err(ConfigError::ConfigFile(message)) if message.contains("absolute path")
+        ));
+
+        let dir = std::env::temp_dir().join(format!("buzz-acp-session-cwd-{}", Uuid::new_v4()));
+        let missing = dir.join("missing");
+        let missing_args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--session-cwd",
+            missing.to_str().unwrap(),
+        ])
+        .unwrap();
+        assert!(matches!(
+            Config::from_args(missing_args),
+            Err(ConfigError::ConfigFile(message)) if message.contains("existing directory")
+        ));
+
+        std::fs::create_dir(&dir).unwrap();
+        let file = dir.join("file");
+        std::fs::write(&file, "not a directory").unwrap();
+        let file_args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--session-cwd",
+            file.to_str().unwrap(),
+        ])
+        .unwrap();
+        assert!(matches!(
+            Config::from_args(file_args),
+            Err(ConfigError::ConfigFile(message)) if message.contains("existing directory")
+        ));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_cwd_rejects_non_utf8_paths() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let dir =
+            std::env::temp_dir().join(OsString::from_vec(b"buzz-acp-session-cwd-\xff".to_vec()));
+        let args = CliArgs::try_parse_from([
+            OsString::from("buzz-acp"),
+            OsString::from("--private-key"),
+            OsString::from(TEST_PRIVATE_KEY),
+            OsString::from("--session-cwd"),
+            dir.clone().into_os_string(),
+        ])
+        .unwrap();
+        assert!(matches!(
+            Config::from_args(args),
+            Err(ConfigError::ConfigFile(message)) if message.contains("valid UTF-8")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_key_file_is_owned_mode_checked_and_binds_expected_pubkey() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let dir = std::env::temp_dir().join(format!("buzz-acp-key-{}", Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("codex-cli.sk");
+        let keys = Keys::generate();
+        std::fs::write(&path, keys.secret_key().to_secret_hex()).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key-file",
+            path.to_str().unwrap(),
+            "--expected-public-key",
+            &keys.public_key().to_hex(),
+        ])
+        .unwrap();
+        let config = Config::from_args(args).expect("valid owned signer file");
+        assert_eq!(config.keys.public_key(), keys.public_key());
+        assert!(!config.agent_publisher_credentials);
+
+        let wrong_mode = dir.join("wrong-mode.sk");
+        std::fs::write(&wrong_mode, keys.secret_key().to_secret_hex()).unwrap();
+        std::fs::set_permissions(&wrong_mode, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(matches!(
+            read_owned_secret_file(&wrong_mode),
+            Err(ConfigError::ConfigFile(message)) if message.contains("0600")
+        ));
+
+        let link = dir.join("signer-link.sk");
+        symlink(&path, &link).unwrap();
+        assert!(read_owned_secret_file(&link).is_err());
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn managed_agent_env_uses_validated_harness_buzz_identity() {
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--relay-url",
+            "ws://127.0.0.1:3000",
+            "--agent-publisher-credentials",
+        ])
+        .unwrap();
+        let mut config = Config::from_args(args).unwrap();
+        config.persona_env_vars.extend([
+            ("BUZZ_RELAY_URL".into(), "ws://wrong.invalid".into()),
+            ("BUZZ_PRIVATE_KEY".into(), "wrong-secret".into()),
+            ("SAFE_PERSONA_SETTING".into(), "kept".into()),
+        ]);
+
+        let env = config.agent_spawn_env();
+        assert_eq!(
+            env.iter()
+                .filter(|(key, _)| key == "BUZZ_RELAY_URL")
+                .count(),
+            1
+        );
+        assert_eq!(
+            env.iter()
+                .find(|(key, _)| key == "BUZZ_RELAY_URL")
+                .map(|(_, value)| value.as_str()),
+            Some("ws://127.0.0.1:3000")
+        );
+        assert_eq!(
+            env.iter()
+                .filter(|(key, _)| key == "BUZZ_PRIVATE_KEY")
+                .count(),
+            1
+        );
+        assert!(env.contains(&("SAFE_PERSONA_SETTING".into(), "kept".into())));
+    }
+
+    #[test]
+    fn managed_agent_env_omits_buzz_identity_without_explicit_grant() {
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--relay-url",
+            "ws://127.0.0.1:3000",
+            "--no-agent-publisher-credentials",
+        ])
+        .unwrap();
+        let mut config = Config::from_args(args).unwrap();
+        config.persona_env_vars.extend([
+            ("BUZZ_RELAY_URL".into(), "ws://wrong.invalid".into()),
+            ("BUZZ_PRIVATE_KEY".into(), "wrong-secret".into()),
+        ]);
+
+        let env = config.agent_spawn_env();
+        assert!(!env
+            .iter()
+            .any(|(key, _)| matches!(key.as_str(), "BUZZ_RELAY_URL" | "BUZZ_PRIVATE_KEY")));
+    }
+
+    #[test]
+    fn direct_signer_does_not_grant_publisher_credentials_by_default() {
+        let args =
+            CliArgs::try_parse_from(["buzz-acp", "--private-key", TEST_PRIVATE_KEY]).unwrap();
+        let config = Config::from_args(args).unwrap();
+
+        assert!(!config.agent_publisher_credentials);
+        assert!(!config
+            .agent_spawn_env()
+            .iter()
+            .any(|(key, _)| key == "BUZZ_PRIVATE_KEY"));
     }
 
     #[test]

@@ -1,0 +1,110 @@
+{
+  "schema": "aeon_buzz_external_cli_worker_v1",
+  "enabled": false,
+  "identityMap": "/Volumes/AEON/aeon-vault/aeon-v6-workspace/contracts/buzz/identity-map.json",
+  "worker": {
+    "selector": "claude_cli",
+    "principal": "claude_code",
+    "displayName": "Claude Code",
+    "label": "org.aeon.buzz-acp.claude-cli",
+    "agents": 1
+  },
+  "buzz": {
+    "relayUrl": "ws://localhost:3000",
+    "owner": "architect",
+    "allowedInbound": [
+      "architect",
+      "nexus",
+      "mechanon",
+      "fontis",
+      "sapientis",
+      "viatica",
+      "voxis"
+    ],
+    "sharedRooms": ["ops", "concilium"],
+    "officeRooms": [
+      "aspect_nexus",
+      "aspect_mechanon",
+      "aspect_fontis",
+      "aspect_sapientis",
+      "aspect_viatica",
+      "aspect_voxis"
+    ]
+  },
+  "runtime": {
+    "buzzAcpBinary": "/Users/architect/Library/Application Support/AEON/aeon-v6/bin/buzz-acp",
+    "buzzAcpSha256": "1d260060a0b790645a0455d23c7a82ac7836193108673a76f44423c5d81be9be",
+    "configPath": "/Users/architect/Library/Application Support/AEON/aeon-v6/buzz/claude-cli.toml",
+    "logDir": "/Users/architect/Library/Application Support/AEON/aeon-v6/logs",
+    "signerPath": "/Users/architect/Library/Application Support/AEON/aeon-v6/secrets/claude-code.sk",
+    "supervisorWorkingDirectory": "/Users/architect/Library/Application Support/AEON/aeon-v6",
+    "node": {
+      "version": "v24.1.0",
+      "sha256": "59450bb6448c8a40b3f3b86da45c3babb2e0503e04c47e5a715e8e137389878b",
+      "mode": "0755",
+      "binary": "/Users/architect/.nvm/versions/node/v24.1.0/bin/node"
+    },
+    "claudeAcp": {
+      "package": "@agentclientprotocol/claude-agent-acp",
+      "version": "0.62.0",
+      "integrity": "sha512-8QRNmyk5Cfy4XVREeg5KCPoCDtmYS0xALY9WqI640PfopLMpeUzMByXbzLkBLbD819zB67DBhLG5ta98uOEPKg==",
+      "gitHead": "53a0c36ce3b0b76929d11d8b9565e319da745608",
+      "entrypointSha256": "260aac90bf75f197b93640087c1de66441761d43c2784efa035fdcee60b5dacd",
+      "closureSha256": "ba5650a750d25811f36f4e6e91ad079d700743ddfb4f52abb90d46c9e9d86002",
+      "root": "/Users/architect/Library/Application Support/AEON/aeon-v6/claude-acp/0.62.0",
+      "binary": "/Users/architect/Library/Application Support/AEON/aeon-v6/claude-acp/0.62.0/node_modules/.bin/claude-agent-acp"
+    },
+    "claudeCode": {
+      "version": "2.1.220",
+      "binary": "/Users/architect/.local/share/claude/versions/2.1.220",
+      "binarySha256": "8addc857f3fe64d5a0368af9ee50321b50afb4a6918ba3ef018ab84f5dbbe081",
+      "auth": {
+        "mode": "existing-claude-subscription",
+        "authMethod": "claude.ai",
+        "provider": "firstParty",
+        "subscriptionTypes": ["pro"]
+      }
+    },
+    "path": [
+      "/Users/architect/.nvm/versions/node/v24.1.0/bin",
+      "/Users/architect/Library/Application Support/AEON/aeon-v6/claude-acp/0.62.0/node_modules/.bin",
+      "/Users/architect/.local/bin",
+      "/usr/bin",
+      "/bin",
+      "/usr/sbin",
+      "/sbin"
+    ]
+  },
+  "workspaces": {
+    "default": "aeon-v6",
+    "allowed": {
+      "aeon-v6": "/Volumes/AEON/Projects/aeon-v6",
+      "buzz": "/Volumes/AEON/Projects/buzz",
+      "codex": "/Volumes/AEON/Projects/codex"
+    }
+  },
+  "posture": {
+    "subscribe": "config",
+    "respondTo": "strict-allowlist",
+    "allowedRespondTo": ["strict-allowlist"],
+    "dedup": "queue",
+    "multipleEventHandling": "queue",
+    "presence": true,
+    "typing": true,
+    "memory": true,
+    "basePrompt": true,
+    "relayObserver": true,
+    "permissionMode": "bypass-permissions",
+    "heartbeatIntervalSecs": 0,
+    "turnLivenessSecs": 10,
+    "idleTimeoutSecs": 900,
+    "maxTurnDurationSecs": 7200,
+    "contextMessageLimit": 24,
+    "maxTurnsPerSession": 0
+  },
+  "supervisor": {
+    "runAtLoad": false,
+    "keepAlive": false,
+    "throttleSeconds": 10
+  }
+}

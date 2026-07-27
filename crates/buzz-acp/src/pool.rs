@@ -785,8 +785,63 @@ const CONTEXT_FETCH_TIMEOUT: Duration = Duration::from_millis(3_000);
 /// Delay between the first failed context fetch and the single retry.
 const CONTEXT_FETCH_RETRY_DELAY: Duration = Duration::from_millis(500);
 
-/// Timeout for model-switch requests (`session/set_config_option`, `session/set_model`).
+/// Default timeout for model-switch requests (`session/set_config_option`, `session/set_model`).
 const MODEL_SWITCH_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Config-option model switches may hydrate provider state before acknowledging.
+const CONFIG_OPTION_MODEL_SWITCH_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn model_switch_timeout(method: &ModelSwitchMethod) -> Duration {
+    match method {
+        ModelSwitchMethod::ConfigOption { .. } => CONFIG_OPTION_MODEL_SWITCH_TIMEOUT,
+        ModelSwitchMethod::SetModel { .. } => MODEL_SWITCH_TIMEOUT,
+    }
+}
+
+fn capture_post_switch_config(
+    session_new: &serde_json::Value,
+    applied_method: Option<&ModelSwitchMethod>,
+) -> (serde_json::Value, serde_json::Value) {
+    let mut config_options = session_new
+        .get("configOptions")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let mut models = session_new
+        .get("models")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    match applied_method {
+        Some(ModelSwitchMethod::ConfigOption {
+            config_id,
+            option_value,
+        }) => {
+            if let Some(options) = config_options.as_array_mut() {
+                for option in options {
+                    if option
+                        .get("configId")
+                        .or_else(|| option.get("id"))
+                        .and_then(|value| value.as_str())
+                        == Some(config_id.as_str())
+                    {
+                        option["currentValue"] =
+                            serde_json::Value::String(option_value.to_string());
+                    }
+                }
+            }
+            models = serde_json::Value::Null;
+        }
+        Some(ModelSwitchMethod::SetModel { model_id }) => {
+            if let Some(models) = models.as_object_mut() {
+                models.insert(
+                    "currentModelId".to_string(),
+                    serde_json::Value::String(model_id.to_string()),
+                );
+            }
+        }
+        None => {}
+    }
+    (config_options, models)
+}
 
 /// Bounded grace window for the post-cancel drain after a control-signal
 /// cancellation (steer fallback, interrupt, or explicit stop). This is a
@@ -922,11 +977,24 @@ async fn create_session_and_apply_model(
     // Apply desired_model if set, matching against the fresh session/new response.
     // Track whether the switch succeeded so session_config_captured reflects
     // the post-switch state (not the pre-switch desired state).
-    let switch_succeeded = if let Some(ref desired) = agent.desired_model {
+    let applied_model_switch = if let Some(ref desired) = agent.desired_model {
         match resolve_model_switch_method(&resp.raw, desired) {
             Some(method) => {
-                apply_model_switch(&mut agent.acp, &resp.session_id, desired, &method).await?;
-                true
+                if matches!(
+                    apply_model_switch(
+                        &mut agent.acp,
+                        &resp.session_id,
+                        desired,
+                        &method,
+                        model_switch_timeout(&method),
+                    )
+                    .await?,
+                    ModelSwitchApplication::Applied
+                ) {
+                    Some(method)
+                } else {
+                    None
+                }
             }
             None => {
                 tracing::warn!(
@@ -945,11 +1013,11 @@ async fn create_session_and_apply_model(
                         "modelId": desired,
                     }),
                 );
-                false
+                None
             }
         }
     } else {
-        false
+        None
     };
 
     // Emit session config for desktop consumption (config bridge tier 1b).
@@ -957,13 +1025,15 @@ async fn create_session_and_apply_model(
     // post-switch state. modelOverridden reflects whether the switch actually
     // applied — false on the unsupported arm so the panel doesn't show a
     // stale override badge.
+    let (captured_config_options, captured_models) =
+        capture_post_switch_config(&resp.raw, applied_model_switch.as_ref());
     agent.acp.observe(
         "session_config_captured",
         serde_json::json!({
-            "configOptions": resp.raw.get("configOptions").cloned().unwrap_or(serde_json::Value::Null),
+            "configOptions": captured_config_options,
             "modes": resp.raw.get("modes").cloned().unwrap_or(serde_json::Value::Null),
-            "models": resp.raw.get("models").cloned().unwrap_or(serde_json::Value::Null),
-            "modelOverridden": agent.model_overridden && switch_succeeded,
+            "models": captured_models,
+            "modelOverridden": agent.model_overridden && applied_model_switch.is_some(),
             // Pair identity for the desktop session-config cache, which is
             // keyed by (agent, relay) like the lifecycle frames.
             "relayUrl": ctx.relay_url,
@@ -989,12 +1059,37 @@ async fn create_session_and_apply_model(
 /// with the agent's default model. This is intentionally non-fatal: a stale
 /// response from a timed-out request is safely ignored by `read_until_response`
 /// (non-matching JSON-RPC IDs are skipped).
+#[derive(Debug, PartialEq, Eq)]
+enum ModelSwitchApplication {
+    Applied,
+    Rejected { reason: String },
+}
+
+fn classify_model_switch_response(
+    response: Result<serde_json::Value, AcpError>,
+) -> Result<ModelSwitchApplication, AcpError> {
+    match response {
+        Ok(_) => Ok(ModelSwitchApplication::Applied),
+        Err(
+            error @ (AcpError::Io(_)
+            | AcpError::WriteTimeout(_)
+            | AcpError::Timeout(_)
+            | AcpError::Protocol(_)
+            | AcpError::AgentExited),
+        ) => Err(error),
+        Err(error) => Ok(ModelSwitchApplication::Rejected {
+            reason: error.to_string(),
+        }),
+    }
+}
+
 async fn apply_model_switch(
     acp: &mut AcpClient,
     session_id: &str,
     desired: &str,
     method: &ModelSwitchMethod,
-) -> Result<(), AcpError> {
+    switch_timeout: Duration,
+) -> Result<ModelSwitchApplication, AcpError> {
     let method_label = match method {
         ModelSwitchMethod::ConfigOption { config_id, .. } => {
             format!("configOption (configId={config_id})")
@@ -1002,7 +1097,7 @@ async fn apply_model_switch(
         ModelSwitchMethod::SetModel { .. } => "set_model".to_string(),
     };
 
-    let result = tokio::time::timeout(MODEL_SWITCH_TIMEOUT, async {
+    let result = tokio::time::timeout(switch_timeout, async {
         match method {
             ModelSwitchMethod::ConfigOption {
                 config_id,
@@ -1019,43 +1114,32 @@ async fn apply_model_switch(
     .await;
 
     match result {
-        Ok(Ok(_)) => {
-            tracing::info!(
-                target: "pool::model",
-                "applied model {desired} via {method_label} on session {session_id}"
-            );
-        }
-        // Transport-class errors may have corrupted the stdio stream — propagate
-        // so the caller can respawn the agent instead of reusing a poisoned one.
-        Ok(Err(e @ AcpError::Io(_)))
-        | Ok(Err(e @ AcpError::WriteTimeout(_)))
-        | Ok(Err(e @ AcpError::Timeout(_)))
-        | Ok(Err(e @ AcpError::Protocol(_)))
-        | Ok(Err(e @ AcpError::AgentExited)) => {
-            tracing::error!(
-                target: "pool::model",
-                "fatal error setting model {desired} via {method_label}: {e}"
-            );
-            return Err(e);
-        }
-        // Application-level errors (Json, etc.) — agent is fine, just uses default model.
-        Ok(Err(e)) => {
-            tracing::warn!(
-                target: "pool::model",
-                "failed to set model {desired} via {method_label}: {e} — proceeding with agent default"
-            );
-        }
+        Ok(response) => match classify_model_switch_response(response)? {
+            ModelSwitchApplication::Applied => {
+                tracing::info!(
+                    target: "pool::model",
+                    "applied model {desired} via {method_label} on session {session_id}"
+                );
+                Ok(ModelSwitchApplication::Applied)
+            }
+            ModelSwitchApplication::Rejected { reason } => {
+                tracing::warn!(
+                    target: "pool::model",
+                    "failed to set model {desired} via {method_label}: {reason} — proceeding with agent default"
+                );
+                Ok(ModelSwitchApplication::Rejected { reason })
+            }
+        },
         Err(_) => {
             // Outer timeout fired — the inner send_request may have left the
             // stream in an unknown state. Treat as transport error.
             tracing::error!(
                 target: "pool::model",
-                "model set via {method_label} timed out ({MODEL_SWITCH_TIMEOUT:?}) — treating as fatal"
+                "model set via {method_label} timed out ({switch_timeout:?}) — treating as fatal"
             );
-            return Err(AcpError::Timeout(MODEL_SWITCH_TIMEOUT));
+            Err(AcpError::Timeout(switch_timeout))
         }
     }
-    Ok(())
 }
 
 /// Set the session permission mode via `session/set_config_option`.
@@ -3715,6 +3799,128 @@ mod tests {
     // These pin the initial_message dispatch path (run_prompt_task, ~line 855):
     // a legacy agent WITH a base_prompt must get [Base] prepended to the user
     // message. This is the exact regression that shipped in the round-2 bug.
+
+    #[test]
+    fn config_option_switch_gets_hydration_window_without_widening_set_model() {
+        let config_option = ModelSwitchMethod::ConfigOption {
+            config_id: "model".to_string(),
+            option_value: "provider-model".to_string(),
+        };
+        let set_model = ModelSwitchMethod::SetModel {
+            model_id: "provider-model".to_string(),
+        };
+        assert_eq!(
+            model_switch_timeout(&config_option),
+            CONFIG_OPTION_MODEL_SWITCH_TIMEOUT
+        );
+        assert_eq!(model_switch_timeout(&set_model), MODEL_SWITCH_TIMEOUT);
+    }
+
+    #[test]
+    fn cursor_id_selector_uses_config_option_hydration_window() {
+        let session_new = json!({
+            "configOptions": [{
+                "id": "model",
+                "category": "model",
+                "currentValue": "default[]",
+                "options": [{"value": "grok-4.5[effort=high,fast=true]"}]
+            }],
+            "models": {
+                "currentModelId": "default[]",
+                "availableModels": [{"modelId": "grok-4.5[effort=high,fast=true]"}]
+            }
+        });
+        let method = resolve_model_switch_method(&session_new, "grok-4.5[effort=high,fast=true]")
+            .expect("Cursor's stable selector should resolve");
+        assert!(matches!(method, ModelSwitchMethod::ConfigOption { .. }));
+        assert_eq!(
+            model_switch_timeout(&method),
+            CONFIG_OPTION_MODEL_SWITCH_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn config_option_switch_updates_only_its_desktop_selector() {
+        let session_new = json!({
+            "configOptions": [
+                {
+                    "configId": "model",
+                    "category": "model",
+                    "currentValue": "default[]"
+                },
+                {
+                    "configId": "secondary-model",
+                    "category": "model",
+                    "currentValue": "secondary-default"
+                }
+            ],
+            "models": {
+                "currentModelId": "default[]",
+                "availableModels": [{"modelId": "grok-4.5[effort=high,fast=true]"}]
+            }
+        });
+        let desired = "grok-4.5[effort=high,fast=true]";
+        let method = ModelSwitchMethod::ConfigOption {
+            config_id: "model".to_string(),
+            option_value: desired.to_string(),
+        };
+        let (config_options, models) = capture_post_switch_config(&session_new, Some(&method));
+        assert_eq!(config_options[0]["currentValue"], desired);
+        assert_eq!(config_options[1]["currentValue"], "secondary-default");
+        assert_eq!(models, serde_json::Value::Null);
+    }
+
+    #[test]
+    fn set_model_switch_updates_only_unstable_desktop_state() {
+        let session_new = json!({
+            "configOptions": [{
+                "configId": "model",
+                "category": "model",
+                "currentValue": "default[]"
+            }],
+            "models": {
+                "currentModelId": "default[]",
+                "availableModels": [{"modelId": "grok-4.5[effort=high,fast=true]"}]
+            }
+        });
+        let desired = "grok-4.5[effort=high,fast=true]";
+        let method = ModelSwitchMethod::SetModel {
+            model_id: desired.to_string(),
+        };
+        let (config_options, models) = capture_post_switch_config(&session_new, Some(&method));
+        assert_eq!(config_options, session_new["configOptions"]);
+        assert_eq!(models["currentModelId"], desired);
+    }
+
+    #[test]
+    fn failed_model_switch_preserves_session_new_state() {
+        let session_new = json!({
+            "configOptions": [{
+                "id": "model",
+                "category": "model",
+                "currentValue": "default[]"
+            }],
+            "models": {"currentModelId": "default[]"}
+        });
+        let (config_options, models) = capture_post_switch_config(&session_new, None);
+        assert_eq!(config_options, session_new["configOptions"]);
+        assert_eq!(models, session_new["models"]);
+    }
+
+    #[test]
+    fn agent_model_switch_rejection_is_not_reported_as_applied() {
+        let result = classify_model_switch_response(Err(AcpError::AgentError {
+            code: -32602,
+            message: "model unavailable".to_string(),
+        }))
+        .expect("application rejection should leave the ACP connection usable");
+        assert_eq!(
+            result,
+            ModelSwitchApplication::Rejected {
+                reason: "Agent reported error (code -32602): model unavailable".to_string(),
+            }
+        );
+    }
 
     #[test]
     fn test_initial_message_legacy_agent_gets_base_prepended() {

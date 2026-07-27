@@ -1,0 +1,109 @@
+{
+  "schema": "aeon_buzz_external_cli_worker_v1",
+  "enabled": false,
+  "identityMap": "/Volumes/AEON/aeon-vault/aeon-v6-workspace/contracts/buzz/identity-map.json",
+  "worker": {
+    "selector": "grok_cli",
+    "principal": "grok_cli",
+    "displayName": "Grok CLI",
+    "label": "org.aeon.buzz-acp.grok-cli",
+    "agents": 1
+  },
+  "buzz": {
+    "relayUrl": "ws://localhost:3000",
+    "owner": "architect",
+    "allowedInbound": [
+      "architect",
+      "nexus",
+      "mechanon",
+      "fontis",
+      "sapientis",
+      "viatica",
+      "voxis"
+    ],
+    "sharedRooms": ["ops", "concilium"],
+    "officeRooms": [
+      "aspect_nexus",
+      "aspect_mechanon",
+      "aspect_fontis",
+      "aspect_sapientis",
+      "aspect_viatica",
+      "aspect_voxis"
+    ]
+  },
+  "runtime": {
+    "buzzAcpBinary": "/Users/architect/Library/Application Support/AEON/aeon-v6/bin/buzz-acp",
+    "buzzAcpSha256": "1d260060a0b790645a0455d23c7a82ac7836193108673a76f44423c5d81be9be",
+    "configPath": "/Users/architect/Library/Application Support/AEON/aeon-v6/buzz/grok-cli.toml",
+    "logDir": "/Users/architect/Library/Application Support/AEON/aeon-v6/logs",
+    "signerPath": "/Users/architect/Library/Application Support/AEON/aeon-v6/secrets/grok-cli.sk",
+    "supervisorWorkingDirectory": "/Users/architect/Library/Application Support/AEON/aeon-v6",
+    "grokAcp": {
+      "package": "grok-build",
+      "version": "0.2.93",
+      "build": "f00f96316d4b",
+      "binary": "/Users/architect/.grok/bin/grok",
+      "realBinary": "/Users/architect/.grok/downloads/grok-0.2.93-macos-aarch64",
+      "entrypointSha256": "2a97ba675bd992aa9b981e2e83776460d94f469b510c0b8efe28b50d236d767c",
+      "args": [
+        "agent",
+        "--model",
+        "grok-4.5",
+        "--reasoning-effort",
+        "high",
+        "--always-approve",
+        "stdio"
+      ],
+      "auth": {
+        "mode": "existing-grok-login",
+        "provider": "grok.com",
+        "authFile": "/Users/architect/.grok/auth.json"
+      },
+      "model": {
+        "requested": "grok-4.5-high",
+        "effective": "grok-4.5",
+        "reasoningEffort": "high"
+      }
+    },
+    "path": [
+      "/Users/architect/.grok/bin",
+      "/Users/architect/.local/bin",
+      "/usr/bin",
+      "/bin",
+      "/usr/sbin",
+      "/sbin"
+    ]
+  },
+  "workspaces": {
+    "default": "aeon-v6",
+    "allowed": {
+      "aeon-v6": "/Volumes/AEON/Projects/aeon-v6",
+      "buzz": "/Volumes/AEON/Projects/buzz",
+      "codex": "/Volumes/AEON/Projects/codex"
+    }
+  },
+  "posture": {
+    "subscribe": "config",
+    "respondTo": "strict-allowlist",
+    "allowedRespondTo": ["strict-allowlist"],
+    "dedup": "queue",
+    "multipleEventHandling": "queue",
+    "presence": true,
+    "typing": true,
+    "memory": true,
+    "basePrompt": true,
+    "relayObserver": true,
+    "permissionMode": "bypass-permissions",
+    "heartbeatIntervalSecs": 0,
+    "turnLivenessSecs": 10,
+    "idleTimeoutSecs": 900,
+    "maxTurnDurationSecs": 7200,
+    "contextMessageLimit": 24,
+    "maxTurnsPerSession": 0
+  },
+  "supervisor": {
+    "runAtLoad": false,
+    "keepAlive": false,
+    "throttleSeconds": 10
+  }
+}
