@@ -495,6 +495,11 @@ reconnects preserve pending avatar verification work):
 - `resetAgentObserverStore()` — agent observer relay store
 - `resetActiveAgentTurnsStore()` — active agent turn timers
 - `resetAgentWorkingSignal()` — agent working indicator signal
+- `resetSpawnerAttestationStore()` — pending spawner attestation prompts
+- `resetSpawnerStatusStore()` — server-agent status rows
+- `resetSpawnerDirectoryStore()` — announced spawner directory
+- `resetTrustedSpawners()` — approved-spawner set (identity-scoped: a spawner
+  trusted under the old identity must not auto-sign under the new one)
 - `resetAvatarProfileSync()` — pending verified-avatar profile writes
 - `resetAvatarPresentations()` — avatar probes, previews, and Retry toasts
 - `resetSidebarRelayConnectionCardState()` — sidebar relay card dismiss state
