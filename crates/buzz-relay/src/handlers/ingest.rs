@@ -930,6 +930,22 @@ fn validate_channel_mention(
     Ok(())
 }
 
+/// NIP-CM: whether this event's notify tag requires the sender to be a member.
+///
+/// True only for a well-formed notify tag on a kind that actually notifies.
+/// Edits (`40003`) re-carry the tag for render continuity and never notify
+/// (see `persists_channel_notification`), so gating them would only break
+/// editing a message that was legitimately notified before the author left the
+/// channel. A malformed tag returns `false` — [`validate_channel_mention`]
+/// rejects those on shape grounds first.
+fn notify_requires_membership(event: &Event) -> bool {
+    event_kind_u32(event) != KIND_STREAM_MESSAGE_EDIT
+        && buzz_core::channel_mentions::event_notify_mode(event)
+            .ok()
+            .flatten()
+            .is_some()
+}
+
 fn validate_diff_event(event: &Event) -> Result<(), String> {
     // Content max 60KB
     if event.content.len() > 61_440 {
@@ -1810,6 +1826,27 @@ async fn ingest_event_inner(
     // notify tag is rejected rather than silently ignored.
     validate_channel_mention(&event, channel_row.as_ref())
         .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+
+    // NIP-CM: only current members may notify a whole channel. The
+    // open-visibility fallback in `check_channel_membership` lets a non-member
+    // post into an open channel; that fallback deliberately does NOT extend to
+    // a notify tag, which would otherwise let anyone blast a channel's roster
+    // without ever appearing on it (no join event, no roster row for
+    // moderators to act on). Edits are exempt — see
+    // `notify_requires_membership`.
+    if notify_requires_membership(&event) {
+        if let Some(ch_id) = channel_id {
+            let is_member = state
+                .is_member_cached(tenant.community(), ch_id, &pubkey_bytes)
+                .await
+                .map_err(|e| IngestError::Internal(format!("error: membership check: {e}")))?;
+            if !is_member {
+                return Err(IngestError::Rejected(
+                    "restricted: only channel members may use @channel or @here".into(),
+                ));
+            }
+        }
+    }
 
     // E1 phase-2 (§4.8 phase-2 addendum): resolve the fan-out visibility once,
     // here, through the same `channel_visibility_cached` gate fan-out uses
@@ -3205,6 +3242,38 @@ mod tests {
         assert!(validate_channel_mention(&event, Some(&make_channel_row("dm"))).is_ok());
         let other_kind = make_event_with_tags(1, "hi", &[]);
         assert!(validate_channel_mention(&other_kind, None).is_ok());
+    }
+
+    #[test]
+    fn notify_tag_demands_membership_on_notifying_kinds_only() {
+        // Both modes gate: `here` blasts every online member, so it is no more
+        // open than `channel`.
+        for mode in ["channel", "here"] {
+            let event = make_event_with_tags(KIND_STREAM_MESSAGE, "hi", &[&["notify", mode]]);
+            assert!(
+                notify_requires_membership(&event),
+                "mode {mode} must require membership"
+            );
+        }
+        for kind in [KIND_FORUM_POST, KIND_FORUM_COMMENT] {
+            let event = make_event_with_tags(kind, "hi", &[&["notify", "channel"]]);
+            assert!(notify_requires_membership(&event), "kind {kind}");
+        }
+
+        let edit = make_event_with_tags(KIND_STREAM_MESSAGE_EDIT, "hi", &[&["notify", "channel"]]);
+        assert!(
+            !notify_requires_membership(&edit),
+            "edits re-carry the tag for rendering and never notify"
+        );
+
+        let untagged = make_event_with_tags(KIND_STREAM_MESSAGE, "hi", &[&["h", "abc"]]);
+        assert!(!notify_requires_membership(&untagged));
+
+        let malformed = make_event_with_tags(KIND_STREAM_MESSAGE, "hi", &[&["notify", "everyone"]]);
+        assert!(
+            !notify_requires_membership(&malformed),
+            "malformed tags are rejected by validate_channel_mention, not by the member gate"
+        );
     }
 
     #[test]

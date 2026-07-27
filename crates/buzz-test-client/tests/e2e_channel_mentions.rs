@@ -281,6 +281,56 @@ async fn notify_tag_rejected_in_dm_channels() {
     );
 }
 
+#[tokio::test]
+#[ignore = "requires a running relay"]
+async fn non_members_may_not_notify_an_open_channel() {
+    let owner = Keys::generate();
+    let outsider = Keys::generate();
+    let channel = create_channel(&owner, "stream").await;
+
+    // Control: an open channel accepts an ordinary message from a non-member.
+    let plain = message(&outsider, KIND_STREAM_MESSAGE, channel, "just passing", &[]);
+    let (status, body) = post_event(&outsider, &plain).await;
+    assert!(
+        status.is_success() && accepted(&body),
+        "open channels accept untagged writes from non-members: {}",
+        rejection_message(status, &body)
+    );
+
+    // The open-posting fallback does not extend to the notify tag.
+    for mode in ["channel", "here"] {
+        let event = message(
+            &outsider,
+            KIND_STREAM_MESSAGE,
+            channel,
+            &format!("blast @{mode}"),
+            &[&["notify", mode]],
+        );
+        let (status, body) = post_event(&outsider, &event).await;
+        assert!(
+            !status.is_success() || !accepted(&body),
+            "non-members must not use @{mode} in an open channel: {}",
+            rejection_message(status, &body)
+        );
+    }
+
+    // Joining the roster unlocks it.
+    join_channel(&outsider, channel).await;
+    let event = message(
+        &outsider,
+        KIND_STREAM_MESSAGE,
+        channel,
+        "now a member @channel",
+        &[&["notify", "channel"]],
+    );
+    let (status, body) = post_event(&outsider, &event).await;
+    assert!(
+        status.is_success() && accepted(&body),
+        "members may notify the channel: {}",
+        rejection_message(status, &body)
+    );
+}
+
 // -- Read path: mentions feed --------------------------------------------------
 
 #[tokio::test]

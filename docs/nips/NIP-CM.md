@@ -96,10 +96,11 @@ Validation, in order:
 1. **Shape** — at most one notify tag; the tag has a mode element; the mode is `channel` or `here`. Shape errors are reported before the kind gate, so a duplicate tag on a disallowed kind reports the duplicate.
 2. **Kind** — if a valid tag is present, the kind MUST be one of `9`, `40003`, `45001`, `45003`.
 3. **Channel type** — a notify tag MUST be rejected on an event addressed to a DM channel. A DM has no "everyone else" to notify, so the tag is meaningless there and its presence signals a confused client.
+4. **Sender membership** — the sender MUST be a current member of the channel. A relay that lets non-members write into open channels MUST NOT extend that fallback to the notify tag: posting into an open room is not the same act as summoning its roster, and a non-member blast leaves no join event and no roster row for a moderator to act on. Message edits (`40003`) are exempt, since they never notify and the author may since have left. (This is the mechanism for the permission rule; *which* members may notify is still out of scope — see Non-Goals.)
 
-Rejection is a normal validation rejection on the relay's existing surface (Buzz: `OK false` with an `invalid: …` message on WebSocket, HTTP `400` on `POST /events`). Accepted events are stored and fanned out exactly as any other message; the notify tag is preserved verbatim in the stored event, which is how clients see it.
+Rejection is a normal validation rejection on the relay's existing surface (Buzz: `OK false` with an `invalid: …` message on WebSocket, HTTP `400` on `POST /events`); step 4 rejects with `restricted: …` like any other membership refusal. Accepted events are stored and fanned out exactly as any other message; the notify tag is preserved verbatim in the stored event, which is how clients see it.
 
-Steps 1–2 are pure functions of the event and are implemented in `buzz_core::channel_mentions`; step 3 needs the channel row and is applied at the ingest seam.
+Steps 1–2 are pure functions of the event and are implemented in `buzz_core::channel_mentions`; step 3 needs the channel row and step 4 needs the roster, so both are applied at the ingest seam.
 
 ### Feed Storage
 
