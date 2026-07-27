@@ -491,7 +491,11 @@ export function HomeView({
       ? (feedProfiles?.[currentPubkey.toLowerCase()]?.avatarUrl ?? null)
       : null;
     const timelineMessages = formatTimelineMessages(
-      [...threadContext.events, ...reactionEvents],
+      [
+        ...threadContext.events,
+        ...reactionEvents,
+        ...threadContext.deletionEvents,
+      ],
       selectedChannel,
       currentPubkey,
       currentUserAvatarUrl,
@@ -522,6 +526,7 @@ export function HomeView({
     selectedItem,
     threadContext.events,
     threadContext.reactionEvents,
+    threadContext.deletionEvents,
   ]);
   const selectedItemReplies = React.useMemo<InboxReply[]>(() => {
     if (!selectedItem) return [];
