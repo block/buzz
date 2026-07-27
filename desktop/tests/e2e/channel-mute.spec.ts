@@ -49,7 +49,11 @@ async function waitForMockLiveSubscription(
 }
 
 test.describe("channel muting", () => {
-  test("01 — context menu shows Mute channel", async ({ page }) => {
+  // Channels carry the NIP-CN "Notifications" submenu instead of the binary
+  // Mute/Unmute pair (which DMs keep); see channel-notify-settings.spec.ts.
+  test("01 — context menu shows the Notifications submenu", async ({
+    page,
+  }) => {
     await installMockBridge(page);
     await page.goto("/");
     await page.getByTestId("channel-general").click();
@@ -59,9 +63,9 @@ test.describe("channel muting", () => {
     await expect(page.getByTestId("chat-title")).toHaveText("random");
 
     await page.getByTestId("channel-general").click({ button: "right" });
-    const muteItem = page.getByRole("menuitem", { name: "Mute channel" });
-    await expect(muteItem).toBeVisible();
-    await muteItem.evaluate((el) =>
+    const submenu = page.getByTestId("channel-notify-submenu");
+    await expect(submenu).toBeVisible();
+    await submenu.evaluate((el) =>
       Promise.all(
         el
           .closest("[data-state]")
@@ -126,7 +130,9 @@ test.describe("channel muting", () => {
     await expect(page.getByTestId("channel-unread-engineering")).toBeVisible();
   });
 
-  test("04 — context menu shows Unmute channel when muted", async ({
+  // A legacy-blob mute resolves to level "mute" (NIP-CN interop) without
+  // hiding the channel, so the submenu opens on the muted radio item.
+  test("04 — submenu shows the mute level for a legacy mute", async ({
     page,
   }) => {
     await seedMuteState(page, ENGINEERING_CHANNEL_ID);
@@ -137,15 +143,12 @@ test.describe("channel muting", () => {
     await expect(page.getByTestId("chat-title")).toHaveText("random");
 
     await page.getByTestId("channel-engineering").click({ button: "right" });
-    const unmuteItem = page.getByRole("menuitem", { name: "Unmute channel" });
-    await expect(unmuteItem).toBeVisible();
-    await unmuteItem.evaluate((el) =>
-      Promise.all(
-        el
-          .closest("[data-state]")
-          ?.getAnimations()
-          .map((a) => a.finished) ?? [],
-      ),
+    const submenu = page.getByTestId("channel-notify-submenu");
+    await expect(submenu).toBeVisible();
+    await submenu.click();
+    await expect(page.getByTestId("channel-notify-level-mute")).toHaveAttribute(
+      "aria-checked",
+      "true",
     );
   });
 

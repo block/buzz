@@ -2784,6 +2784,13 @@ const mockChannels: MockChannel[] = [
 const mockMessages = new Map<string, RelayEvent[]>();
 const mockUserStatuses: RelayEvent[] = [];
 const mockReminderEvents: RelayEvent[] = [];
+/**
+ * NIP-78 app-data blobs (kind 30078) the mock relay stores and replays, keyed by
+ * `<pubkey>|<d-tag>`. Only the d-tags listed below round-trip; the rest are
+ * accepted and dropped as before.
+ */
+const mockAppDataEvents = new Map<string, RelayEvent>();
+const STORED_APP_DATA_D_TAGS = new Set(["channel-notify-prefs"]);
 let mockRelayMembers: RawRelayMember[] = [];
 const mockSockets = new Map<number, MockSocket>();
 let mockWebsocketSendMutexWedged = false;
@@ -8910,6 +8917,21 @@ function sendToMockSocket(args: {
       return;
     }
 
+    const storedAppDataTags = filter.kinds?.includes(30078)
+      ? (filter["#d"] ?? []).filter((dTag) => STORED_APP_DATA_D_TAGS.has(dTag))
+      : [];
+    if (storedAppDataTags.length > 0) {
+      const authors = filter.authors?.map((a) => a.toLowerCase());
+      for (const [key, event] of mockAppDataEvents) {
+        const [pubkey, dTag] = key.split("|");
+        if (!storedAppDataTags.includes(dTag)) continue;
+        if (authors && !authors.includes(pubkey)) continue;
+        sendWsText(socket.handler, ["EVENT", subId, event]);
+      }
+      sendWsText(socket.handler, ["EOSE", subId]);
+      return;
+    }
+
     if (filter.kinds?.includes(KIND_EVENT_REMINDER)) {
       const authors = filter.authors?.map((a) => a.toLowerCase());
       for (const event of mockReminderEvents) {
@@ -9001,6 +9023,15 @@ function sendToMockSocket(args: {
     }
 
     if (event.kind === 30078) {
+      // Upsert by d-tag (replaceable event) so app-data sync managers see their
+      // own blob on the next fetch instead of an empty relay.
+      const dTag = event.tags.find((t) => t[0] === "d")?.[1];
+      if (dTag && STORED_APP_DATA_D_TAGS.has(dTag)) {
+        mockAppDataEvents.set(
+          `${event.pubkey.toLowerCase()}|${dTag}`,
+          structuredClone(event),
+        );
+      }
       sendWsText(socket.handler, ["OK", event.id, true, ""]);
       return;
     }
