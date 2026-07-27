@@ -7,6 +7,7 @@ import {
   personaManagedAgentUpdate,
   profilePanelTabFromSearch,
   profilePanelViewFromSearch,
+  resolveProfileEditTarget,
 } from "./UserProfilePanelUtils.ts";
 
 function agent(overrides = {}) {
@@ -188,4 +189,54 @@ test("profilePanelTabFromSearch falls back to info for invalid values", () => {
   assert.equal(parseProfilePanelTab("missing"), null);
   assert.equal(profilePanelTabFromSearch("missing"), "info");
   assert.equal(profilePanelTabFromSearch(null), "info");
+});
+
+// ── Profile Edit routing: displayed policy must be the enforced policy ───────
+//
+// Regression: a persona-linked agent routed Edit to the DEFINITION editor, so
+// the dialog showed the definition's inbound-author policy while the running
+// agent still enforced the instance's own policy. A definition's behavior
+// group is copied onto an instance only at mint time, so an owner who granted
+// (or revoked) access there changed nothing about the live agent.
+
+test("resolveProfileEditTarget: an instance-backed profile edits the instance", () => {
+  assert.equal(
+    resolveProfileEditTarget({
+      hasManagedInstance: true,
+      hasDefinition: true,
+    }),
+    "instance",
+    "a persona-linked instance must still edit the instance it displays",
+  );
+  assert.equal(
+    resolveProfileEditTarget({
+      hasManagedInstance: true,
+      hasDefinition: false,
+    }),
+    "instance",
+  );
+});
+
+test("resolveProfileEditTarget: a definition-only profile edits the definition", () => {
+  assert.equal(
+    resolveProfileEditTarget({
+      hasManagedInstance: false,
+      hasDefinition: true,
+    }),
+    "definition",
+    "with no minted instance the definition is the only editable record",
+  );
+});
+
+test("resolveProfileEditTarget: no instance and no definition falls back to instance", () => {
+  // Preserves the pre-existing fallback: the caller renders the instance
+  // dialog only when a managed agent exists, so this is inert rather than a
+  // route into a dialog that cannot edit anything.
+  assert.equal(
+    resolveProfileEditTarget({
+      hasManagedInstance: false,
+      hasDefinition: false,
+    }),
+    "instance",
+  );
 });

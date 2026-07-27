@@ -80,6 +80,7 @@ import {
   resolveAgentInstruction,
   resolvePanelProfile,
   resolveProfileDisplayName,
+  resolveProfileEditTarget,
   truncatePubkey,
   type UserProfilePanelProps,
   useRetainedPersona,
@@ -398,12 +399,18 @@ export function UserProfilePanel({
   });
 
   const handleEditAgent = React.useCallback(() => {
-    if (resolvedPersona) {
+    // See resolveProfileEditTarget: an instance-backed profile must edit the
+    // instance, whose respond-to pair is the one enforced at spawn.
+    const target = resolveProfileEditTarget({
+      hasManagedInstance: managedAgent !== undefined,
+      hasDefinition: resolvedPersona !== undefined,
+    });
+    if (target === "definition" && resolvedPersona) {
       setPersonaDialogState(editPersonaDialogState(resolvedPersona));
       return;
     }
     setEditAgentOpen(true);
-  }, [resolvedPersona]);
+  }, [managedAgent, resolvedPersona]);
 
   const { deleteManagedAgentRecord, deleteManagedAgentsForPersona } =
     useProfileAgentDeletion({

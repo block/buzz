@@ -11,6 +11,7 @@ import {
   useStartManagedAgentMutation,
   useUpdateManagedAgentMutation,
 } from "@/features/agents/hooks";
+import { buildAgentRespondToUpdate } from "@/features/agents/lib/agentRespondToUpdate";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import type {
   ManagedAgent,
@@ -631,6 +632,10 @@ export function AgentInstanceEditDialog({
       // all agree. See resolveInheritedRuntimeSubmission.
       const normalizedSubmitProvider = inheritedSubmission.provider;
       const submitEnvVars = inheritedSubmission.envVars;
+      const respondToUpdate = buildAgentRespondToUpdate(
+        respondTo,
+        respondToAllowlist,
+      );
       const input: UpdateManagedAgentInput = {
         pubkey: agent.pubkey,
         name: name.trim() !== agent.name ? name.trim() : undefined,
@@ -688,18 +693,7 @@ export function AgentInstanceEditDialog({
         envVars: envVarsEqual(submitEnvVars, agent.envVars)
           ? undefined
           : submitEnvVars,
-        respondTo: respondTo !== agent.respondTo ? respondTo : undefined,
-        // The allowlist is preserved across mode toggles in local UI state
-        // (so a user can flip away from allowlist and back without losing
-        // their entries), but we only send it on the wire when (a) it
-        // actually changed, AND (b) the saved mode will need it. Sending
-        // an allowlist while switching to a non-allowlist mode would be
-        // harmless server-side, but it's noise in the persisted record.
-        respondToAllowlist:
-          respondTo === "allowlist" &&
-          respondToAllowlist.join(",") !== agent.respondToAllowlist.join(",")
-            ? respondToAllowlist
-            : undefined,
+        ...respondToUpdate,
       };
 
       const result = await updateMutation.mutateAsync(input);
