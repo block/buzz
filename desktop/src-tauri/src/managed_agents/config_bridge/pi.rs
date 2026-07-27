@@ -45,8 +45,7 @@ fn pi_settings_path() -> Option<PathBuf> {
 /// the augmented child PATH.
 pub(super) fn ensure_workdir_mcp_json(workdir: &std::path::Path) -> Result<(), String> {
     let pi_dir = workdir.join(".pi");
-    std::fs::create_dir_all(&pi_dir)
-        .map_err(|e| format!("create {}: {e}", pi_dir.display()))?;
+    std::fs::create_dir_all(&pi_dir).map_err(|e| format!("create {}: {e}", pi_dir.display()))?;
     let path = pi_dir.join("mcp.json");
 
     let mut root: serde_json::Value = match std::fs::read_to_string(&path) {
@@ -165,7 +164,10 @@ mod tests {
         let first_mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
         ensure_workdir_mcp_json(dir.path()).unwrap();
         let second_mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
-        assert_eq!(first_mtime, second_mtime, "no rewrite when content is correct");
+        assert_eq!(
+            first_mtime, second_mtime,
+            "no rewrite when content is correct"
+        );
     }
 
     #[test]

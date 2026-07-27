@@ -178,7 +178,9 @@ const overrides = new Map([
   // configure_runtime_cli (fix #2397). Test-only growth; queued to split.
   // +7 (1041 -> 1048): rebase onto main — this PR's resolver tests land on top
   // of main's #2397 Windows shim tests. Test-only; queued to split.
-  ["src-tauri/src/managed_agents/runtime/tests.rs", 1055],
+  // +10: pi-acp known-binary coverage pins the safe orphan-sweep boundary:
+  // recognize the adapter shims without prefix-matching unrelated bare `pi` processes.
+  ["src-tauri/src/managed_agents/runtime/tests.rs", 1065],
   // applyWorkspace reposDir parameter plus the validateReposDir binding,
   // threaded through Tauri invokes for configurable repos_dir, plus the
   // harness-persona-sync `harnessOverride` create-input bit — load-bearing
@@ -280,7 +282,9 @@ const overrides = new Map([
   // Buzz-managed Node path helpers and resolution tests moved to
   // managed_node_paths.rs and discovery/tests/managed_path_resolution.rs;
   // ratcheting 1366 -> 1392 after adding the managed-path probes to discovery.
-  ["src-tauri/src/managed_agents/discovery.rs", 1393],
+  // +23: Pi's catalog metadata adds the pinned ACP adapter, MCP extension,
+  // pi-owned model/provider policy, install guidance, and config/skills paths.
+  ["src-tauri/src/managed_agents/discovery.rs", 1416],
   // rebase over codex-acp-package-swap: its version-probe tests union with the
   // doctor-install-reliability nvm/login-shell/semver tests — each side alone
   // stayed under the 1000 default; the union exceeds it.
