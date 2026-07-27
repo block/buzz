@@ -121,4 +121,33 @@ mod tests {
         assert!(codex.adapter_install_instructions_url.contains("codex-acp"));
         assert!(codex.cli_install_hint.contains("desktop app alone"));
     }
+
+    #[test]
+    fn pi_metadata_pins_adapter_and_defers_model_to_pi() {
+        let pi = known_acp_runtime_exact("pi").unwrap();
+        assert_eq!(pi.label, "Pi");
+        assert_eq!(pi.commands, &["pi-acp"]);
+        assert_eq!(pi.underlying_cli, Some("pi"));
+        // Adapter is version-pinned (third-party MVP; bump deliberately).
+        assert!(pi
+            .adapter_install_commands
+            .iter()
+            .any(|c| c.contains("@victor-software-house/pi-acp@0.17.1")));
+        // MCP extension install so pi loads the nest .pi/mcp.json.
+        assert!(pi
+            .adapter_install_commands
+            .iter()
+            .any(|c| c.contains("pi-mcp-extension")));
+        assert_eq!(pi.cli_install_instructions_url, "https://pi.dev");
+        // Model/provider are pi-owned — Buzz must not inject them.
+        assert!(pi.model_env_var.is_none());
+        assert!(pi.provider_env_var.is_none());
+        assert!(!pi.provider_locked);
+        assert!(pi.required_normalized_fields.is_empty());
+        assert_eq!(pi.mcp_command, Some("buzz-dev-mcp"));
+        assert_eq!(pi.skill_dir, Some(".pi/skills"));
+        assert_eq!(pi.config_file_path, Some("~/.pi/agent/settings.json"));
+        assert!(pi.auth_probe_args.is_none());
+        assert!(pi.login_hint.is_some());
+    }
 }

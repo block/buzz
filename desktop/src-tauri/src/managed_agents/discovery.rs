@@ -16,6 +16,7 @@ pub(crate) use runtime_metadata::KnownAcpRuntime;
 const GOOSE_AVATAR_URL: &str = "https://goose-docs.ai/img/logo_dark.png";
 const CLAUDE_CODE_AVATAR_URL: &str = "https://anthropic.gallerycdn.vsassets.io/extensions/anthropic/claude-code/2.1.77/1773707456892/Microsoft.VisualStudio.Services.Icons.Default";
 const CODEX_AVATAR_URL: &str = "https://openai.gallerycdn.vsassets.io/extensions/openai/chatgpt/26.5313.41514/1773706730621/Microsoft.VisualStudio.Services.Icons.Default";
+const PI_AVATAR_URL: &str = "https://avatars.githubusercontent.com/earendil-works";
 const BUZZ_AGENT_AVATAR_URL: &str =
     "https://raw.githubusercontent.com/block/buzz/refs/heads/main/crates/buzz-agent/buzz-agent.png";
 
@@ -161,6 +162,52 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         login_hint: Some("Run `codex login` to authenticate."),
         // Verified: `codex login status` exits 0 when logged in, non-zero otherwise.
         auth_probe_args: Some(&["codex", "login", "status"]),
+    },
+    KnownAcpRuntime {
+        id: "pi",
+        label: "Pi",
+        commands: &["pi-acp"],
+        aliases: &["pi.dev", "pi-dev"],
+        avatar_url: PI_AVATAR_URL,
+        // Sent in session/new; a no-op with today's adapter (known upstream
+        // gap — mcpServers accepted but not wired into pi). Harmless and
+        // future-proof. The working path is the nest .pi/mcp.json bridge.
+        mcp_command: Some("buzz-dev-mcp"),
+        mcp_hooks: false,
+        underlying_cli: Some("pi"),
+        cli_install_commands: &["npm install -g @earendil-works/pi-coding-agent"],
+        cli_install_commands_windows: &[],
+        // Adapter pinned: third-party MVP that self-describes minor breaking
+        // changes — bump the pin deliberately after testing.
+        adapter_install_commands: &[
+            "npm install -g @victor-software-house/pi-acp@0.17.1",
+            "pi install npm:pi-mcp-extension",
+        ],
+        cli_install_instructions_url: "https://pi.dev",
+        adapter_install_instructions_url: "https://github.com/victor-software-house/pi-acp",
+        cli_install_hint: "Buzz requires the pi CLI (Node.js 24+); install via npm.",
+        adapter_install_hint: "Install the pi ACP adapter via npm (Node.js 24+).",
+        skill_dir: Some(".pi/skills"),
+        supports_acp_model_switching: false,
+        // Model/provider are pi-owned (Claude Code pattern): pi's own config
+        // and /login flow decide the model; Buzz does not inject either.
+        model_env_var: None,
+        provider_env_var: None,
+        provider_locked: false,
+        default_env: &[],
+        config_file_path: Some("~/.pi/agent/settings.json"),
+        config_file_format: Some("json"),
+        supports_acp_native_config: false,
+        thinking_env_var: None,
+        max_tokens_env_var: None,
+        context_limit_env_var: None,
+        required_normalized_fields: &[],
+        login_hint: Some(
+            "Run `pi` and use /login, or set a provider API key (e.g. ANTHROPIC_API_KEY).",
+        ),
+        // Pi has no `auth status` CLI subcommand — no probe (same as Goose).
+        // Auth failures surface as runtime errors in agent output.
+        auth_probe_args: None,
     },
     KnownAcpRuntime {
         id: "buzz-agent",
