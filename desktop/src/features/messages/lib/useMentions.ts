@@ -9,6 +9,8 @@ import {
   useChannelMembersQuery,
   useChannelsQuery,
 } from "@/features/channels/hooks";
+import { useCommunities } from "@/features/communities/useCommunities";
+import { foreignPinnedAgentPubkeys } from "./foreignPinnedAgentPubkeys";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import type { MentionSuggestion } from "@/features/messages/ui/MentionAutocomplete";
 import {
@@ -56,6 +58,19 @@ export type PersonaMentionTarget = {
 type UseMentionsOptions = {
   channelType?: ChannelType | null;
 };
+function dedupeTrimmedNames(names: Iterable<string | null | undefined>) {
+  const output: string[] = [];
+  const seen = new Set<string>();
+  for (const name of names) {
+    const trimmed = name?.trim();
+    if (trimmed && !seen.has(trimmed.toLowerCase())) {
+      output.push(trimmed);
+      seen.add(trimmed.toLowerCase());
+    }
+  }
+  return output;
+}
+
 function formatSearchUserDisplayName(user: UserSearchResult) {
   return user.displayName?.trim() || user.nip05Handle?.trim() || null;
 }
@@ -169,6 +184,16 @@ export function useMentions(
       ),
     [managedAgentsQuery.data],
   );
+  // #2515: instances pinned to another community answer mentions only there.
+  const { activeCommunity } = useCommunities();
+  const foreignAgentPubkeys = React.useMemo(
+    () =>
+      foreignPinnedAgentPubkeys(
+        managedAgentsQuery.data ?? [],
+        activeCommunity?.relayUrl,
+      ),
+    [activeCommunity?.relayUrl, managedAgentsQuery.data],
+  );
   const relayAgentNamesByPubkey = React.useMemo(
     () =>
       new Map(
@@ -244,6 +269,9 @@ export function useMentions(
     const addCandidate = (candidate: MentionCandidate & { pubkey: string }) => {
       const pubkey = normalizePubkey(candidate.pubkey);
       if (isArchivedDiscovery(pubkey)) {
+        return;
+      }
+      if (foreignAgentPubkeys.has(pubkey)) {
         return;
       }
       if (!isAgentIdentityInManagedList(candidate, managedAgentPubkeys)) {
@@ -416,6 +444,7 @@ export function useMentions(
     canSearchGlobalUsers,
     currentPubkey,
     directoryAgentPubkeys,
+    foreignAgentPubkeys,
     isArchivedDiscovery,
     managedAgentNamesByPubkey,
     managedAgentPersonaIds,
@@ -457,56 +486,27 @@ export function useMentions(
     enabled: ownerPubkeys.length > 0,
   });
 
-  const searchableNames = React.useMemo<string[]>(() => {
-    const names: string[] = [];
-    const seen = new Set<string>();
+  const searchableNames = React.useMemo<string[]>(
+    () =>
+      dedupeTrimmedNames(
+        mentionCandidatesWithTeams.flatMap((candidate) => [
+          candidate.displayName,
+          candidate.personaName,
+          candidate.secondaryLabel,
+        ]),
+      ),
+    [mentionCandidatesWithTeams],
+  );
 
-    for (const candidate of mentionCandidatesWithTeams) {
-      for (const name of [
-        candidate.displayName,
-        candidate.personaName,
-        candidate.secondaryLabel,
-      ]) {
-        const trimmed = name?.trim();
-        if (trimmed && !seen.has(trimmed.toLowerCase())) {
-          names.push(trimmed);
-          seen.add(trimmed.toLowerCase());
-        }
-      }
-    }
+  const highlightNames = React.useMemo<string[]>(
+    () => dedupeTrimmedNames(selectedMentionNames),
+    [selectedMentionNames],
+  );
 
-    return names;
-  }, [mentionCandidatesWithTeams]);
-
-  const highlightNames = React.useMemo<string[]>(() => {
-    const names: string[] = [];
-    const seen = new Set<string>();
-
-    for (const name of selectedMentionNames) {
-      const trimmed = name.trim();
-      if (trimmed && !seen.has(trimmed.toLowerCase())) {
-        names.push(trimmed);
-        seen.add(trimmed.toLowerCase());
-      }
-    }
-
-    return names;
-  }, [selectedMentionNames]);
-
-  const agentHighlightNames = React.useMemo<string[]>(() => {
-    const names: string[] = [];
-    const seen = new Set<string>();
-
-    for (const name of selectedAgentMentionNames) {
-      const trimmed = name.trim();
-      if (trimmed && !seen.has(trimmed.toLowerCase())) {
-        names.push(trimmed);
-        seen.add(trimmed.toLowerCase());
-      }
-    }
-
-    return names;
-  }, [selectedAgentMentionNames]);
+  const agentHighlightNames = React.useMemo<string[]>(
+    () => dedupeTrimmedNames(selectedAgentMentionNames),
+    [selectedAgentMentionNames],
+  );
 
   const searchableNamesLower = React.useMemo<string[]>(
     () => searchableNames.map((n) => n.toLowerCase()),
