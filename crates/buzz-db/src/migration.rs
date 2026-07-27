@@ -898,6 +898,12 @@ mod tests {
         assert!(relay_invites
             .contains("CREATE INDEX relay_invites_expires_at_idx ON relay_invites (expires_at)"));
         assert!(!relay_invites.contains("_operator_global_tables"));
+
+        let desired_schema = include_str!("../../../schema/schema.sql");
+        assert!(
+            desired_schema.contains("CREATE TABLE join_policy_acceptances"),
+            "desired-state schema must include join-policy evidence used by invite claims",
+        );
     }
 
     #[test]
