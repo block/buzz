@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Check, Copy, X } from "lucide-react";
+import { Check, Copy, Pencil, X } from "lucide-react";
 
 import type { TimelineReaction } from "@/features/messages/types";
 import {
@@ -11,6 +11,7 @@ import { Button } from "@/shared/ui/button";
 
 const APPROVE_EMOJI = "✅";
 const CANCEL_EMOJI = "❌";
+const EDIT_EMOJI = "✏️";
 const LEAD_CATEGORY_CHOICES = [
   { label: "Interested", reaction: "👍" },
   { label: "Meeting Request", reaction: "📅" },
@@ -20,6 +21,17 @@ const LEAD_CATEGORY_CHOICES = [
   { label: "Do Not Contact", reaction: "⛔" },
   { label: "Wrong Person", reaction: "🔀" },
 ] as const;
+
+function isFinalDecisionReaction(
+  actionType: CrmAction["actionType"],
+  emoji: string,
+): boolean {
+  if (emoji === APPROVE_EMOJI || emoji === CANCEL_EMOJI) return true;
+  if (actionType === "lead_categorize") {
+    return LEAD_CATEGORY_CHOICES.some((choice) => choice.reaction === emoji);
+  }
+  return false;
+}
 
 export function CrmActionCard({
   action,
@@ -34,20 +46,21 @@ export function CrmActionCard({
   reactions: TimelineReaction[];
   onSelect: (emoji: string) => Promise<void>;
 }) {
-  const [selectedReaction, setSelectedReaction] = React.useState<string | null>(null);
+  const [selectedReaction, setSelectedReaction] = React.useState<string | null>(
+    null,
+  );
   const expiresAt = Date.parse(action.expiresAt);
   const expired = !Number.isFinite(expiresAt) || Date.now() >= expiresAt;
   const decided = reactions.some(
     (reaction) =>
       reaction.reactedByCurrentUser &&
-      (reaction.emoji === APPROVE_EMOJI ||
-        reaction.emoji === CANCEL_EMOJI ||
-        LEAD_CATEGORY_CHOICES.some((choice) => choice.reaction === reaction.emoji)),
+      isFinalDecisionReaction(action.actionType, reaction.emoji),
   );
   const disabled = !canToggle || pending || expired || decided;
-  const redditDraft = action.actionType === "reddit_mark_posted"
-    ? extractCrmRedditDraft(action.content)
-    : null;
+  const redditDraft =
+    action.actionType === "reddit_mark_posted"
+      ? extractCrmRedditDraft(action.content)
+      : null;
 
   if (action.actionType === "lead_categorize") {
     return (
@@ -61,7 +74,9 @@ export function CrmActionCard({
               onClick={() => setSelectedReaction(choice.reaction)}
               size="sm"
               type="button"
-              variant={selectedReaction === choice.reaction ? "default" : "outline"}
+              variant={
+                selectedReaction === choice.reaction ? "default" : "outline"
+              }
             >
               {choice.label}
             </Button>
@@ -97,11 +112,32 @@ export function CrmActionCard({
       <div className="my-2 max-w-md rounded-lg border border-input/50 bg-muted/20 p-3">
         <p className="text-sm font-medium">Review outreach draft</p>
         <div className="mt-3 flex gap-2">
-          <Button disabled={disabled} onClick={() => void onSelect(APPROVE_EMOJI)} size="sm" type="button">
+          <Button
+            disabled={disabled}
+            onClick={() => void onSelect(APPROVE_EMOJI)}
+            size="sm"
+            type="button"
+          >
             <Check aria-hidden="true" />
             Approve and send
           </Button>
-          <Button disabled={disabled} onClick={() => void onSelect(CANCEL_EMOJI)} size="sm" type="button" variant="outline">
+          <Button
+            disabled={disabled}
+            onClick={() => void onSelect(EDIT_EMOJI)}
+            size="sm"
+            type="button"
+            variant="outline"
+          >
+            <Pencil aria-hidden="true" />
+            Edit draft
+          </Button>
+          <Button
+            disabled={disabled}
+            onClick={() => void onSelect(CANCEL_EMOJI)}
+            size="sm"
+            type="button"
+            variant="outline"
+          >
             <X aria-hidden="true" />
             Reject draft
           </Button>
@@ -112,9 +148,7 @@ export function CrmActionCard({
 
   return (
     <div className="my-2 max-w-md rounded-lg border border-input/50 bg-muted/20 p-3">
-      <p className="text-sm font-medium">
-        Mark Reddit draft as posted
-      </p>
+      <p className="text-sm font-medium">Mark Reddit draft as posted</p>
       <div className="mt-3 flex gap-2">
         {redditDraft ? (
           <Button
