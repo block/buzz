@@ -210,6 +210,14 @@ void main() {
     expect(find.text('Recent searches'), findsOneWidget);
     expect(find.text('design systems'), findsOneWidget);
     expect(find.text('launch plan'), findsOneWidget);
+    expect(
+      tester.getSize(find.byKey(const ValueKey('recent-search-0'))).height,
+      greaterThanOrEqualTo(Grid.xl),
+    );
+    expect(
+      tester.getSize(find.byKey(const ValueKey('recent-search-1'))).height,
+      greaterThanOrEqualTo(Grid.xl),
+    );
 
     await tester.tap(find.byKey(const ValueKey('recent-search-1')));
     await tester.pumpAndSettle();

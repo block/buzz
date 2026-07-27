@@ -423,33 +423,36 @@ class _RecentSearches extends StatelessWidget {
           InkWell(
             key: ValueKey('recent-search-$index'),
             onTap: () => onSelected(searches[index]),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(
-                horizontal: Grid.gutter,
-                vertical: Grid.twelve,
-              ),
-              child: Row(
-                children: [
-                  Icon(
-                    LucideIcons.clock,
-                    size: 18,
-                    color: context.colors.onSurfaceVariant,
-                  ),
-                  const SizedBox(width: Grid.twelve),
-                  Expanded(
-                    child: Text(
-                      searches[index],
-                      style: contentListTitleTextStyle.copyWith(
-                        color: context.colors.onSurface,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(minHeight: Grid.xl),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: Grid.gutter,
+                  vertical: Grid.twelve,
+                ),
+                child: Row(
+                  children: [
+                    Icon(
+                      LucideIcons.clock,
+                      size: 18,
+                      color: context.colors.onSurfaceVariant,
+                    ),
+                    const SizedBox(width: Grid.twelve),
+                    Expanded(
+                      child: Text(
+                        searches[index],
+                        style: contentListTitleTextStyle.copyWith(
+                          color: context.colors.onSurface,
+                        ),
                       ),
                     ),
-                  ),
-                  Icon(
-                    LucideIcons.chevronRight,
-                    size: 16,
-                    color: context.colors.onSurfaceVariant,
-                  ),
-                ],
+                    Icon(
+                      LucideIcons.chevronRight,
+                      size: 16,
+                      color: context.colors.onSurfaceVariant,
+                    ),
+                  ],
+                ),
               ),
             ),
           ),
