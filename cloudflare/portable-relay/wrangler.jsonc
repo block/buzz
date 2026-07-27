@@ -6,7 +6,7 @@
   // Opt-in identity, mirroring the laptop adapter's --require-auth flag.
   // Set to "1" (or deploy with --var) to require NIP-42/NIP-98 identity.
   "vars": {
-    "BUZZ_REQUIRE_AUTH": "",
+    "BUZZ_REQUIRE_AUTH": "1",
     // Destination-controlled replication trust: JSON mapping a source stream
     // ID to { "principal": string, "verification_keys": [pubkey hex] }.
     // Empty means no replication peers are admitted (fail closed).
@@ -23,12 +23,20 @@
     // BUZZ_REPLICATION_* vars above become bootstrap-only (consulted solely
     // for domains with no declaration head). Identity, not policy — stable
     // across deploys.
-    "BUZZ_OWNER_PUBKEY": "",
+    "BUZZ_OWNER_PUBKEY": "9c2fd8696a630bdf27c3d54394739bb3cbbf81b7cf7fa1e205a806eca33fa90e",
     // This node's label. Only declarations n-tagged with it govern here:
     // journals replicate whole, so one owner's declarations for different
     // nodes coexist in every copy, and each node evaluates only its own.
-    "BUZZ_NODE_LABEL": ""
+    "BUZZ_NODE_LABEL": "cf-rendezvous"
   },
+  // Content-addressed blob custody (artifact store). Create the bucket once:
+  //   wrangler r2 bucket create buzz-portable-relay-artifacts
+  "r2_buckets": [
+    {
+      "binding": "ARTIFACTS",
+      "bucket_name": "buzz-portable-relay-artifacts"
+    }
+  ],
   "durable_objects": {
     "bindings": [
       {

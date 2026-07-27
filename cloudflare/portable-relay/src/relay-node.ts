@@ -134,6 +134,20 @@ export class RelayNode extends DurableObject<Env> {
       WHERE replacement_key IS NOT NULL AND effective = 1
     `);
     this.#sql.exec(`
+      CREATE TABLE IF NOT EXISTS artifact_refs (
+        sha TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        PRIMARY KEY (sha, event_id)
+      ) WITHOUT ROWID, STRICT
+    `);
+    this.#sql.exec(`
+      CREATE TABLE IF NOT EXISTS maintenance (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      ) WITHOUT ROWID, STRICT
+    `);
+    this.#backfillArtifactRefs();
+    this.#sql.exec(`
       CREATE TABLE IF NOT EXISTS subscriptions (
         connection_id TEXT NOT NULL,
         subscription_id TEXT NOT NULL,
@@ -443,6 +457,149 @@ export class RelayNode extends DurableObject<Env> {
     );
   }
 
+  /**
+   * May this authenticated principal store a blob? Uploads accompany stream
+   * pushes: the owner and admitted replication peers only.
+   */
+  authorizeArtifactUpload(
+    stableNodeKey: string,
+    auth: HttpAuthEvidence,
+  ): RpcOutcome<{ principal: string }> {
+    this.initializeNode(stableNodeKey);
+    const verified = this.#verifyHttpEvidence(auth);
+    if ("denied" in verified) {
+      return verified;
+    }
+    const owner: string = this.env.BUZZ_OWNER_PUBKEY ?? "";
+    if (owner !== "" && verified.principal === owner) {
+      return { result: { principal: verified.principal } };
+    }
+    const admitted = Object.values(this.#resolvedPeers()).some((trust) =>
+      trust.verification_keys.includes(verified.principal),
+    );
+    return admitted
+      ? { result: { principal: verified.principal } }
+      : { denied: "scope_denied" };
+  }
+
+  /**
+   * Artifact access follows reference (evaluation rule 4): a blob is served
+   * only to the owner or to a principal holding a read grant on a stream
+   * whose journal events reference it via `x` tags. An unreferenced blob is
+   * invisible to everyone but the owner.
+   */
+  authorizeArtifactFetch(
+    stableNodeKey: string,
+    sha: string,
+    auth: HttpAuthEvidence,
+  ): RpcOutcome<{ principal: string }> {
+    this.initializeNode(stableNodeKey);
+    const verified = this.#verifyHttpEvidence(auth);
+    if ("denied" in verified) {
+      return verified;
+    }
+    const owner: string = this.env.BUZZ_OWNER_PUBKEY ?? "";
+    if (owner !== "" && verified.principal === owner) {
+      return { result: { principal: verified.principal } };
+    }
+    const readers = this.#resolvedReaders();
+    const streams = this.#resolvedStreams();
+    const readable = Object.keys(readers).filter((stream) =>
+      readers[stream].verification_keys.includes(verified.principal),
+    );
+    if (readable.length === 0) {
+      return { denied: "scope_denied" };
+    }
+    const referencing = Array.from(
+      this.#sql.exec<
+        { event_json: string; ingest_source: string | null } & Record<
+          string,
+          SqlStorageValue
+        >
+      >(
+        `SELECT j.event_json, j.ingest_source
+         FROM artifact_refs r JOIN event_journal j ON j.event_id = r.event_id
+         WHERE r.sha = ?`,
+        sha,
+      ),
+    ).map((row) => ({
+      event: JSON.parse(row.event_json) as Event,
+      ingestSource: row.ingest_source,
+    }));
+    for (const stream of readable) {
+      const selection = streams[stream];
+      if (selection === undefined) {
+        continue;
+      }
+      for (const row of referencing) {
+        const visible =
+          selection.mode === "mirror"
+            ? true
+            : selection.mode === "filter"
+              ? matchFilters(selection.filters as Filter[], row.event)
+              : row.ingestSource === selection.source;
+        if (visible) {
+          return { result: { principal: verified.principal } };
+        }
+      }
+    }
+    return { denied: "scope_denied" };
+  }
+
+  /** Records every well-formed `x`-tag content reference carried by an event. */
+  #indexArtifactRefs(eventId: string, tags: string[][]): void {
+    for (const tag of tags) {
+      if (tag[0] !== "x" || typeof tag[1] !== "string") {
+        continue;
+      }
+      const sha = tag[1].toLowerCase();
+      if (!/^[0-9a-f]{64}$/.test(sha)) {
+        continue;
+      }
+      this.#sql.exec(
+        `INSERT INTO artifact_refs (sha, event_id) VALUES (?, ?)
+         ON CONFLICT (sha, event_id) DO NOTHING`,
+        sha,
+        eventId,
+      );
+    }
+  }
+
+  /** One-time index of `x`-tag references already present in the journal. */
+  #backfillArtifactRefs(): void {
+    const done = Array.from(
+      this.#sql.exec<{ value: string } & Record<string, SqlStorageValue>>(
+        `SELECT value FROM maintenance WHERE key = 'artifact_refs_backfilled'`,
+      ),
+    )[0];
+    if (done !== undefined) {
+      return;
+    }
+    this.ctx.storage.transactionSync(() => {
+      const rows = Array.from(
+        this.#sql.exec<
+          { event_id: string; event_json: string } & Record<
+            string,
+            SqlStorageValue
+          >
+        >(
+          `SELECT event_id, event_json FROM event_journal
+           WHERE event_json LIKE '%"x"%'`,
+        ),
+      );
+      for (const row of rows) {
+        this.#indexArtifactRefs(
+          row.event_id,
+          (JSON.parse(row.event_json) as Event).tags,
+        );
+      }
+      this.#sql.exec(
+        `INSERT INTO maintenance (key, value)
+         VALUES ('artifact_refs_backfilled', '1')`,
+      );
+    });
+  }
+
   #applyReplicationRecord(
     source: string,
     record: ReplicationRecordWire,
@@ -639,6 +796,7 @@ export class RelayNode extends DurableObject<Env> {
         candidateKey,
         ingestSource,
       );
+      this.#indexArtifactRefs(event.id, event.tags);
     });
     this.#publishLive(event);
 

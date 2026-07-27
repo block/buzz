@@ -7,6 +7,15 @@ export default defineConfig({
       wrangler: {
         configPath: "./wrangler.jsonc",
       },
+      miniflare: {
+        // Tests pin their own identity posture; deployed wrangler.jsonc var
+        // values (e.g. BUZZ_REQUIRE_AUTH="1") must not leak into suites.
+        bindings: {
+          BUZZ_REQUIRE_AUTH: "",
+          BUZZ_OWNER_PUBKEY: "",
+          BUZZ_NODE_LABEL: "",
+        },
+      },
     }),
   ],
   test: {

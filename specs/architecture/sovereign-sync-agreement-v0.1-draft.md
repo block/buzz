@@ -214,6 +214,13 @@ adapter at each replication request. Three rules:
    to files.
 3. **Fail closed.** No owner anchor means no journal-derived configuration.
    No heads and no bootstrap config means empty trust.
+4. **Artifact access follows reference.** A custodian serves a
+   content-addressed blob only to (a) the owner, or (b) a principal holding
+   an active `read` grant on a stream whose journal events reference the
+   blob (`x` tag). Uploads are accepted only from the owner or admitted
+   replication peers. An unreferenced blob is invisible to everyone but the
+   owner. Events are the manifest; the reference closure extends per-stream
+   visibility to blob custody with no separate artifact ACL.
 
 ## Security invariants
 

@@ -19,6 +19,11 @@ export default defineConfig({
       },
       miniflare: {
         bindings: {
+          // Pin the identity posture; deployed wrangler.jsonc var values
+          // (BUZZ_REQUIRE_AUTH, owner anchors) must not leak into suites.
+          BUZZ_REQUIRE_AUTH: "",
+          BUZZ_OWNER_PUBKEY: "",
+          BUZZ_NODE_LABEL: "",
           BUZZ_REPLICATION_PEERS: JSON.stringify({
             [TEST_REPLICATION_SOURCE]: {
               principal: TEST_PEER_PRINCIPAL,
