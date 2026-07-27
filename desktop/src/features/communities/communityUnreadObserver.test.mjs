@@ -1094,6 +1094,28 @@ test("fetchCommunityUnread lets a newer legacy unmute revive a stale prefs mute"
   });
 });
 
+test("fetchCommunityUnread ignores a notify-prefs blob authored by someone else", async () => {
+  // A relay that ignores the `authors` filter and replays one of the user's own
+  // older ciphertexts under a foreign key would otherwise roll the prefs back —
+  // here a stale level "mute" that would silence the community rail.
+  const relay = relayWithPrefs({
+    prefs: [
+      event({
+        pubkey: "beef".padEnd(64, "0"),
+        content: notifyPrefsContent({
+          [CHANNEL_ID]: { level: "mute", updatedAt: 10 },
+        }),
+      }),
+    ],
+    perChannel: [() => [unreadEvent()], () => []],
+  });
+
+  assert.deepEqual(await pollWithPrefs(relay), {
+    hasUnread: true,
+    mentionCount: 0,
+  });
+});
+
 test("fetchCommunityUnread treats a corrupt notify-prefs blob as no prefs", async () => {
   const relay = relayWithPrefs({
     prefs: [event({ pubkey: PUBKEY, content: "not-json" })],

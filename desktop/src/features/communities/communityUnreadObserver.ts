@@ -227,7 +227,12 @@ export async function fetchCommunityUnread(args: {
   }
 
   let notifyPrefs: ChannelNotifyPrefsStore = DEFAULT_NOTIFY_PREFS_STORE;
-  if (notifyPrefsEvents.length > 0) {
+  // NIP-CN: ignore any returned event not authored by the user, mirroring
+  // `ChannelNotifyPrefsSyncManager`. The REQ carries `authors: [pubkey]`, so
+  // this only bites on a relay that ignores the filter — but a relay that also
+  // replays one of the user's own older ciphertexts under a foreign key would
+  // otherwise roll the prefs back (e.g. a stale "mute" silencing the rail).
+  if (notifyPrefsEvents.length > 0 && notifyPrefsEvents[0].pubkey === pubkey) {
     try {
       const plaintext = await decryptNotifyPrefs(notifyPrefsEvents[0].content);
       notifyPrefs =
