@@ -54,7 +54,7 @@ class ThreadDetailPage extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final repliesState = ref.watch(
-      threadRepliesProvider(
+      threadRepliesWithLocalProvider(
         ThreadRepliesArgs(channelId: channelId, rootId: threadHead.id),
       ),
     );

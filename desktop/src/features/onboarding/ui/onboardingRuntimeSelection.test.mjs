@@ -12,12 +12,12 @@ function runtime(id, availability, status) {
   return { id, availability, authStatus: { status } };
 }
 
-test("Claude Code, Codex, and Oh My Pi are visible in onboarding", () => {
+test("all bundled harnesses are visible in onboarding", () => {
   assert.equal(runtimeIsVisibleInOnboarding("claude"), true);
   assert.equal(runtimeIsVisibleInOnboarding("codex"), true);
+  assert.equal(runtimeIsVisibleInOnboarding("goose"), true);
+  assert.equal(runtimeIsVisibleInOnboarding("buzz-agent"), true);
   assert.equal(runtimeIsVisibleInOnboarding("omp"), true);
-  assert.equal(runtimeIsVisibleInOnboarding("goose"), false);
-  assert.equal(runtimeIsVisibleInOnboarding("buzz-agent"), false);
   assert.equal(runtimeIsVisibleInOnboarding("custom"), false);
 });
 
@@ -32,7 +32,7 @@ test("visible onboarding runtimes use the product order", () => {
 
   assert.deepEqual(
     getVisibleOnboardingRuntimes(runtimes).map(({ id }) => id),
-    ["claude", "codex", "omp"],
+    ["claude", "codex", "goose", "buzz-agent", "omp"],
   );
 });
 
@@ -57,16 +57,18 @@ test("readiness requires an available and authenticated runtime", () => {
   );
 });
 
-test("ready onboarding runtimes exclude hidden ready harnesses", () => {
+test("ready onboarding runtimes exclude unknown and non-ready harnesses", () => {
   const runtimes = [
     runtime("goose", "available", "not_applicable"),
     runtime("codex", "available", "logged_out"),
     runtime("buzz-agent", "available", "not_applicable"),
+    runtime("omp", "available", "not_applicable"),
     runtime("claude", "available", "logged_in"),
+    runtime("custom", "available", "not_applicable"),
   ];
 
   assert.deepEqual(
     getReadyOnboardingRuntimes(runtimes).map(({ id }) => id),
-    ["claude"],
+    ["claude", "goose", "buzz-agent", "omp"],
   );
 });
