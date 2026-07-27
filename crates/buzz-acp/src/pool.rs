@@ -1104,7 +1104,7 @@ pub(crate) fn prepend_base_for_legacy(
 ///
 /// Protocol-v2 agents already receive the canvas in `systemPrompt`; only
 /// legacy (protocol_version < 2) agents need it injected here so it arrives
-/// before the first prompt — the same "every turn" semantics as per-turn core.
+/// before the first prompt, alongside the other session-scoped preamble data.
 /// Heartbeats never have an initial_message, so the caller is responsible for
 /// not passing a canvas when `source` is `Heartbeat`.
 pub(crate) fn prepend_canvas_for_legacy(
@@ -1589,7 +1589,7 @@ pub async fn run_prompt_task(
             // Legacy agents receive it via [Base] in the user message instead.
             // Canvas is also injected here for legacy agents: protocol-v2 agents
             // already have it in systemPrompt; legacy agents need it before the
-            // first prompt, matching the "every turn" per-turn delivery semantics.
+            // first prompt, alongside the other session-scoped preamble data.
             let init_msg = prepend_base_for_legacy(
                 if agent.has_system_prompt_support() {
                     2
@@ -1728,15 +1728,19 @@ pub async fn run_prompt_task(
     let prompt_sections: Vec<String> = if let Some(text) = prompt_text {
         // Heartbeats create their session before this point, so a Goose method-not-found
         // probe has already selected the correct framing for this process.
-        let text = prepend_base_for_legacy(
-            if agent.has_system_prompt_support() {
-                2
-            } else {
-                1
-            },
-            ctx.base_prompt,
-            &text,
-        );
+        let text = if is_new_session {
+            prepend_base_for_legacy(
+                if agent.has_system_prompt_support() {
+                    2
+                } else {
+                    1
+                },
+                ctx.base_prompt,
+                &text,
+            )
+        } else {
+            text
+        };
         vec![text]
     } else if let Some(ref b) = batch {
         // Build prompt from batch with context enrichment.
@@ -1780,6 +1784,7 @@ pub async fn run_prompt_task(
                 system_prompt: ctx.system_prompt.as_deref(),
                 team_instructions: ctx.team_instructions.as_deref(),
                 agent_canvas: agent_canvas.as_deref(),
+                include_legacy_session_preamble: is_new_session,
             },
         )
     } else {
@@ -1819,6 +1824,26 @@ pub async fn run_prompt_task(
             .collect(),
         None => prompt_sections.iter().map(String::as_str).collect(),
     };
+    let prompt_bytes: usize = prompt_blocks.iter().map(|block| block.len()).sum();
+    tracing::info!(
+        target: "pool::prompt",
+        prompt_bytes,
+        prompt_blocks = prompt_blocks.len(),
+        is_new_session,
+        system_prompt_transport = if agent.has_system_prompt_support() {
+            "system"
+        } else {
+            "legacy-user-prefix"
+        },
+        "prompt prepared"
+    );
+    if prompt_bytes > 50_000 {
+        tracing::warn!(
+            target: "pool::prompt",
+            prompt_bytes,
+            "large prompt prepared — inspect repeated base, system, memory, and conversation context"
+        );
+    }
 
     // When control_rx is Some (channel tasks), wrap the prompt in select! so
     // the main loop can cancel, interrupt, or rotate it. Heartbeats

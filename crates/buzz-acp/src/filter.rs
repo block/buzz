@@ -371,6 +371,21 @@ pub async fn match_event(
     rules: &[SubscriptionRule],
     agent_pubkey_hex: &str,
 ) -> Option<MatchedRule> {
+    // UI activity signals are never actionable agent input. Keep this guard
+    // ahead of operator-authored rules so an accidental wildcard subscription
+    // cannot turn high-frequency typing/presence traffic into LLM prompts or
+    // mid-turn steer signals. Huddle reaction bursts are similarly visual-only.
+    // Durable message reactions (kind 7) are intentionally not included here:
+    // callers may explicitly subscribe to those for an agent workflow.
+    if matches!(
+        event.kind.as_u16() as u32,
+        buzz_core::kind::KIND_PRESENCE_UPDATE
+            | buzz_core::kind::KIND_TYPING_INDICATOR
+            | buzz_core::kind::KIND_HUDDLE_REACTION
+    ) {
+        return None;
+    }
+
     let filter_ctx = FilterContext::from_event(event, channel_id);
 
     for (index, rule) in rules.iter().enumerate() {
@@ -633,6 +648,39 @@ mod tests {
         let matched = match_event(&event, channel_id, &rules, "").await.unwrap();
         assert_eq!(matched.rule_index, 1);
         assert_eq!(matched.prompt_tag, "matched");
+    }
+
+    #[tokio::test]
+    async fn test_match_event_rejects_ui_activity_signals_under_wildcard_rule() {
+        let channel_id = any_channel();
+        let rules = vec![make_rule(
+            "wildcard",
+            ChannelScope::All("all".into()),
+            vec![],
+            false,
+            None,
+            Some("all"),
+        )];
+
+        for kind in [
+            buzz_core::kind::KIND_PRESENCE_UPDATE,
+            buzz_core::kind::KIND_TYPING_INDICATOR,
+            buzz_core::kind::KIND_HUDDLE_REACTION,
+        ] {
+            let event = make_event(kind, "");
+            assert!(
+                match_event(&event, channel_id, &rules, "").await.is_none(),
+                "UI activity kind {kind} must never become an agent prompt"
+            );
+        }
+
+        let message = make_event(buzz_core::kind::KIND_STREAM_MESSAGE, "hello");
+        assert!(
+            match_event(&message, channel_id, &rules, "")
+                .await
+                .is_some(),
+            "the wildcard rule must still accept actionable messages"
+        );
     }
 
     #[tokio::test]

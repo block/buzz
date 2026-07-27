@@ -10,11 +10,13 @@
 
 use futures_util::StreamExt;
 use tokio::io::AsyncWriteExt;
-use tokio::process::{Child, ChildStdin, ChildStdout};
+use tokio::process::{Child, ChildStdout};
 use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
 
 use crate::observer::{ObserverContext, ObserverHandle};
 use crate::usage::{TurnUsage, UsageTracker};
+
+type StdinWriteRequest = (Vec<u8>, tokio::sync::oneshot::Sender<std::io::Result<()>>);
 
 /// Maximum allowed size of a single NDJSON line from the agent's stdout.
 /// Lines exceeding this limit are rejected to prevent OOM from rogue agents.
@@ -139,8 +141,13 @@ fn build_initialize_params() -> serde_json::Value {
 pub struct AcpClient {
     /// The agent child process (kept alive to prevent zombie).
     child: Child,
-    /// Write end of the agent's stdin pipe.
-    stdin: ChildStdin,
+    /// Cancellation-safe writer queue for the agent's stdin pipe.
+    ///
+    /// A dedicated task owns `ChildStdin` and finishes each complete NDJSON
+    /// frame after accepting it. This prevents a cancelled prompt future from
+    /// leaving a partial JSON payload that the next control frame would append
+    /// to on the same stream.
+    stdin_tx: tokio::sync::mpsc::Sender<StdinWriteRequest>,
     /// Framed reader over the agent's stdout pipe (line-oriented, bounded).
     /// Uses `LinesCodec::new_with_max_length` to enforce MAX_LINE_SIZE at the
     /// read level — prevents OOM from rogue agents writing infinite non-newline bytes.
@@ -481,9 +488,26 @@ impl AcpClient {
             .take()
             .ok_or_else(|| AcpError::Protocol("failed to open agent stdout".into()))?;
 
+        let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<StdinWriteRequest>(8);
+        tokio::spawn(async move {
+            let mut stdin = stdin;
+            while let Some((frame, completion_tx)) = stdin_rx.recv().await {
+                let result = async {
+                    stdin.write_all(&frame).await?;
+                    stdin.flush().await
+                }
+                .await;
+                let write_failed = result.is_err();
+                let _ = completion_tx.send(result);
+                if write_failed {
+                    break;
+                }
+            }
+        });
+
         Ok(Self {
             child,
-            stdin,
+            stdin_tx,
             reader: FramedRead::new(stdout, LinesCodec::new_with_max_length(MAX_LINE_SIZE)),
             next_id: 0,
             pending_permission_id: None,
@@ -944,18 +968,32 @@ impl AcpClient {
         self.parse_stop_reason(&result)
     }
 
-    /// Serialize `value` as a single NDJSON line and flush to the agent's stdin.
+    /// Serialize `value` as a single NDJSON frame and enqueue it for the
+    /// dedicated stdin writer.
     ///
     /// Bounded by a 30-second write timeout. If the agent stops reading stdin
     /// (e.g., it's stuck or dead), the write would otherwise block forever.
     async fn write_ndjson(&mut self, value: &serde_json::Value) -> Result<(), AcpError> {
         const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-        let line = serde_json::to_string(value)?;
+        let mut frame = serde_json::to_vec(value)?;
+        frame.push(b'\n');
+        let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
         tokio::time::timeout(WRITE_TIMEOUT, async {
-            self.stdin.write_all(line.as_bytes()).await?;
-            self.stdin.write_all(b"\n").await?;
-            self.stdin.flush().await?;
-            Ok::<(), std::io::Error>(())
+            self.stdin_tx
+                .send((frame, completion_tx))
+                .await
+                .map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        "agent stdin writer stopped",
+                    )
+                })?;
+            completion_rx.await.map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "agent stdin writer dropped completion",
+                )
+            })?
         })
         .await
         .map_err(|_| AcpError::WriteTimeout(WRITE_TIMEOUT))?
