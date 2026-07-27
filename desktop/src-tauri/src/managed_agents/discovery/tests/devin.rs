@@ -83,7 +83,14 @@ fn runtime_catalog_exposes_devin_once() {
             ("BUZZ_ACP_SELF_PUBLISH_COMPLETION_GRACE", "30"),
         ]
     );
-    assert_eq!(devin.scrub_env_vars, &["WINDSURF_API_KEY"]);
+    // ACP_BACKEND must stay scrubbed: inherited from the Devin IDE it flips the
+    // adapter to host-supplied credentials only, and every turn then fails with
+    // "ACP host has not authenticated" despite a valid `devin auth login`.
+    assert_eq!(
+        devin.scrub_env_vars,
+        &["WINDSURF_API_KEY", "ACP_BACKEND"],
+        "ambient IDE state must not redefine Devin's credential policy"
+    );
     assert!(!devin.supports_acp_model_switching);
     assert!(!devin.accepts_harness_model);
 }

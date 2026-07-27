@@ -212,7 +212,7 @@ mod tests {
                 ("BUZZ_ACP_SELF_PUBLISH_COMPLETION_GRACE", "30"),
             ]
         );
-        assert_eq!(devin.scrub_env_vars, &["WINDSURF_API_KEY"]);
+        assert_eq!(devin.scrub_env_vars, &["WINDSURF_API_KEY", "ACP_BACKEND"]);
         assert_eq!(
             devin.cli_install_instructions_url,
             "https://docs.devin.ai/cli"

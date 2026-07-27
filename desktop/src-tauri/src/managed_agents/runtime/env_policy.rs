@@ -104,6 +104,26 @@ mod tests {
             .any(|(key, value)| { key == "WINDSURF_API_KEY" && value.is_none() }));
     }
 
+    /// Regression: Buzz launched from a terminal inside the Devin IDE inherits
+    /// `ACP_BACKEND=windsurf`. Passing it through makes `devin acp` treat the
+    /// ACP host as the sole credential source, so it refuses the stored CLI
+    /// credentials and every turn fails with "ACP host has not authenticated"
+    /// even though `devin auth login` succeeded.
+    #[test]
+    fn devin_policy_scrubs_inherited_acp_backend() {
+        let mut command = std::process::Command::new("buzz-acp");
+        command.env("ACP_BACKEND", "windsurf");
+
+        apply_runtime_env_policy(&mut command, known_acp_runtime("devin"));
+
+        assert!(
+            command
+                .get_envs()
+                .any(|(key, value)| { key == "ACP_BACKEND" && value.is_none() }),
+            "ACP_BACKEND must be removed before spawning the Devin adapter"
+        );
+    }
+
     #[test]
     fn existing_runtime_policy_remains_unchanged() {
         let mut command = std::process::Command::new("buzz-acp");

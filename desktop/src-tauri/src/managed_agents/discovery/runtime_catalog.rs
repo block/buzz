@@ -212,10 +212,19 @@ pub(super) const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
             ("BUZZ_ACP_INTERACTIVE_PERMISSIONS", "true"),
             ("BUZZ_ACP_SELF_PUBLISH_COMPLETION_GRACE", "30"),
         ],
-        // The official CLI gives this legacy ambient key precedence over the
-        // account established by `devin auth login`. Remove it without reading
-        // its value so readiness and usage attribution share one identity.
-        scrub_env_vars: &["WINDSURF_API_KEY"],
+        // WINDSURF_API_KEY: the official CLI gives this legacy ambient key
+        // precedence over the account established by `devin auth login`. Remove
+        // it without reading its value so readiness and usage attribution share
+        // one identity.
+        //
+        // ACP_BACKEND: set by the Devin IDE for its own ACP integration. When it
+        // leaks in — Buzz launched from a terminal inside that IDE, for example
+        // — `devin acp` switches to "ACP host is the sole source of
+        // credentials", refuses the stored CLI credentials, and fails every turn
+        // with "ACP host has not authenticated" even though `devin auth login`
+        // succeeded. Ambient state must not redefine the adapter's credential
+        // policy.
+        scrub_env_vars: &["WINDSURF_API_KEY", "ACP_BACKEND"],
         config_file_path: None,
         config_file_format: None,
         supports_acp_native_config: false,

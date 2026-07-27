@@ -17,7 +17,7 @@ fn uses_native_acp_without_mcp_hooks() {
             ("BUZZ_ACP_SELF_PUBLISH_COMPLETION_GRACE", "30"),
         ]
     );
-    assert_eq!(runtime.scrub_env_vars, &["WINDSURF_API_KEY"]);
+    assert_eq!(runtime.scrub_env_vars, &["WINDSURF_API_KEY", "ACP_BACKEND"]);
     assert!(!runtime.mcp_hooks);
     assert_eq!(runtime.mcp_command, None);
 }
