@@ -59,10 +59,13 @@ jobs:
             mobile:
               - 'mobile/**'
               - 'scripts/mobile-release.sh'
+              - 'scripts/mobile-worktree-overrides.sh'
+              - 'scripts/mobile-worktree-clean.sh'
               - 'scripts/publish-mobile-release-candidate.sh'
               - 'scripts/release-rulesets.sh'
               - 'scripts/test-mobile-release-contract.sh'
               - 'scripts/test-mobile-release-candidate-publisher.sh'
+              - 'scripts/test-mobile-worktree-overrides.sh'
               - '.github/workflows/mobile-release-candidate.yml'
               - '.github/workflows/ci.yml'
       - name: Release workflow source contract
@@ -71,6 +74,8 @@ jobs:
         run: |
           scripts/test-mobile-release-contract.sh
           scripts/test-mobile-release-candidate-publisher.sh
+      - name: Mobile worktree identity contract
+        run: scripts/test-mobile-worktree-overrides.sh
 
   rust-lint:
     name: Rust Lint

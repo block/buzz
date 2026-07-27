@@ -1,7 +1,7 @@
 {
   "name": "buzz",
   "private": true,
-  "version": "0.4.24",
+  "version": "0.4.26",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -66,6 +66,7 @@
     "jdenticon": "^3.3.0",
     "lucide-react": "^1.0.0",
     "motion": "^12.38.0",
+    "qrcode": "^1.5.4",
     "qrcode.react": "^4.2.0",
     "react": "^19.1.0",
     "react-diff-view": "^3.3.2",

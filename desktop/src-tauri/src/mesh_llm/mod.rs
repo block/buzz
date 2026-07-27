@@ -22,6 +22,16 @@ pub use identity::ensure_owner_identity;
 mod progress;
 pub use progress::install_progress_sink;
 
+mod recovery;
+pub use recovery::MeshRecoveryState;
+pub(crate) use recovery::{
+    rearm_relay_mesh_for_running_agents, recover_stale_mesh_runtime, MeshRecoveryUrgency,
+    MeshRuntimeRecovery,
+};
+
+mod usage;
+pub use usage::{serving_usage_from_payload, MeshServingUsage};
+
 mod transport_policy;
 #[cfg(test)]
 use transport_policy::iroh_relay_mode_from;
@@ -48,6 +58,17 @@ const MESH_IROH_RELAYS_ENV: &str = "BUZZ_MESH_IROH_RELAYS";
 /// First model load can include a multi-GB download plus Metal warmup; the
 /// SDK default (30s) times out long before that. Matches mesh-console.
 const MESH_STARTUP_TIMEOUT: Duration = Duration::from_secs(180);
+/// The pinned SDK defines startup readiness as the management API on `:3131`.
+/// Buzz defines client readiness by the OpenAI ingress agents consume on
+/// `:9337`, so it supervises client startup independently and gives the SDK a
+/// long management deadline. A live ingress is therefore not torn down merely
+/// because the optional management API is delayed; Buzz's ingress watchdog is
+/// responsible for aborting and re-arming genuinely dead attempts.
+const MESH_CLIENT_MANAGEMENT_TIMEOUT: Duration = Duration::from_secs(365 * 24 * 60 * 60);
+/// Bound explicit and watchdog-driven shutdowns. `EmbeddedNodeHandle::stop`
+/// sends the shutdown signal before awaiting the runtime thread, so dropping
+/// that wait after the deadline still leaves a graceful shutdown in flight.
+const MESH_STOP_TIMEOUT: Duration = Duration::from_secs(12);
 /// Sentinel model id meaning "let the mesh router pick". mesh-llm's OpenAI
 /// ingress auto-routes `"model": "auto"` to a context-compatible live target
 /// (`resolve_auto_routed_model`), so agents don't have to name a model and
@@ -66,6 +87,15 @@ pub struct MeshServeTarget {
     pub model_id: String,
     pub model_name: Option<String>,
     pub endpoint_addr: String,
+    /// Buzz member that signed the discovery note containing this target.
+    /// Populated after signature/membership validation; never trusted from the
+    /// note payload itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reporter_pubkey: Option<String>,
+    /// Per-runtime MeshLLM owner identity verified by the signed Buzz status.
+    /// Distinguishes two devices logged into the same Buzz member account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_id: Option<String>,
     pub node_name: Option<String>,
     pub capacity: Option<MeshTargetCapacity>,
     #[serde(default)]
@@ -166,6 +196,10 @@ pub struct StartMeshNodeRequest {
     pub max_vram_gb: Option<u64>,
     #[serde(default)]
     pub join_token: Option<String>,
+    /// Stable, relay-scoped mesh name injected by the Buzz backend. It is not
+    /// accepted from the frontend and contains no relay address.
+    #[serde(default, skip_deserializing)]
+    pub mesh_name: Option<String>,
     /// Mesh owner ids admitted to this node (the member roster from
     /// member-signed discovery notes). `None` = caller did not resolve a roster
     /// (tests, direct invocations): the node runs without allowlist
@@ -196,80 +230,6 @@ pub struct MeshNodeStatus {
     pub device_name: Option<String>,
 }
 
-/// Host-side "who is using the compute I'm sharing" snapshot.
-///
-/// Read-only projection of the serving node's own runtime metrics (the same
-/// `routing_metrics` / `inflight_requests` the SDK already exposes on the local
-/// console). No new trust surface: it reads the node's own status payload.
-///
-/// The local/remote/endpoint attempt split is what distinguishes *my own*
-/// agent (local) from *another member consuming my compute* (remote/endpoint).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct MeshServingUsage {
-    /// Requests being served right now.
-    pub inflight: u64,
-    /// Highest concurrent in-flight seen this session.
-    pub peak_inflight: u64,
-    /// Total requests routed through this node.
-    pub requests_served: u64,
-    /// Completion tokens produced.
-    pub tokens_served: u64,
-    /// Recent decode throughput.
-    pub tokens_per_second: f64,
-    /// Requests served for this machine's own agents.
-    pub local_attempts: u64,
-    /// Requests served for a remote peer (someone else consuming my compute).
-    pub remote_attempts: u64,
-    /// Requests served via an advertised endpoint (also a remote consumer).
-    pub endpoint_attempts: u64,
-    /// Other nodes currently visible as peers.
-    pub peers: u64,
-}
-
-impl MeshServingUsage {
-    /// True when at least one request has been served for a non-local consumer.
-    pub fn has_remote_consumers(&self) -> bool {
-        self.remote_attempts > 0 || self.endpoint_attempts > 0
-    }
-}
-
-/// Pure extractor: project a raw SDK status payload into [`MeshServingUsage`].
-///
-/// Every field is read defensively (missing → 0) so an SDK shape change
-/// degrades to "no usage shown" rather than an error. Kept pure so it can be
-/// unit-tested against a captured payload without a live runtime.
-pub fn serving_usage_from_payload(payload: &serde_json::Value) -> MeshServingUsage {
-    let u64_at = |v: &serde_json::Value| v.as_u64().unwrap_or(0);
-    let rm = payload.get("routing_metrics");
-    let local = rm.and_then(|m| m.get("local_node"));
-    let get_u64 = |obj: Option<&serde_json::Value>, key: &str| {
-        obj.and_then(|o| o.get(key)).map(u64_at).unwrap_or(0)
-    };
-    MeshServingUsage {
-        inflight: local
-            .and_then(|l| l.get("current_inflight_requests"))
-            .map(u64_at)
-            .or_else(|| payload.get("inflight_requests").map(u64_at))
-            .unwrap_or(0),
-        peak_inflight: get_u64(local, "peak_inflight_requests"),
-        requests_served: get_u64(rm, "request_count"),
-        tokens_served: get_u64(rm, "completion_tokens_observed"),
-        tokens_per_second: rm
-            .and_then(|m| m.get("avg_tokens_per_second"))
-            .and_then(serde_json::Value::as_f64)
-            .unwrap_or(0.0),
-        local_attempts: get_u64(local, "local_attempt_count"),
-        remote_attempts: get_u64(local, "remote_attempt_count"),
-        endpoint_attempts: get_u64(local, "endpoint_attempt_count"),
-        peers: payload
-            .get("peers")
-            .and_then(serde_json::Value::as_array)
-            .map(|a| a.len() as u64)
-            .unwrap_or(0),
-    }
-}
-
 pub fn stopped_status() -> MeshNodeStatus {
     MeshNodeStatus {
         state: MeshNodeState::Off,
@@ -286,9 +246,31 @@ pub fn stopped_status() -> MeshNodeStatus {
     }
 }
 
+/// Monotonic id source so callers can compare runtime *identity* across an
+/// `.await` point. The re-arm watchdog must not evict a fresh replacement that
+/// a concurrent stop/start swapped in while the ingress probe was in flight
+/// (Brad #2304 race), so it captures the id before probing and only evicts if
+/// the same handle is still installed on lock reacquire.
+static MESH_RUNTIME_ID_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+enum DesktopMeshHandle {
+    /// The pinned SDK does not return its handle until `:3131/api/status` is
+    /// available. Keep that wait off the agent-save path while Buzz supervises
+    /// the real `:9337` ingress independently.
+    Starting {
+        task: tokio::task::JoinHandle<anyhow::Result<EmbeddedNodeHandle>>,
+        queued_join_tokens: Vec<String>,
+    },
+    Ready(EmbeddedNodeHandle),
+    Failed(String),
+}
+
 pub struct DesktopMeshRuntime {
-    handle: EmbeddedNodeHandle,
+    id: u64,
+    handle: tokio::sync::Mutex<DesktopMeshHandle>,
     mode: MeshNodeMode,
+    api_base_url: String,
+    console_url: String,
     model_id: Option<String>,
     model_name: Option<String>,
     /// The request this node was started with. Kept so the coordinator can
@@ -362,6 +344,8 @@ impl DesktopMeshRuntime {
                 ensure_model_downloaded(model).await?;
             }
         }
+        let api_port = mesh_api_port()?;
+        let console_port = mesh_console_port()?;
         let handle = match request.mode {
             MeshNodeMode::Serve => {
                 let model = model_id
@@ -369,8 +353,8 @@ impl DesktopMeshRuntime {
                     .ok_or_else(|| anyhow::anyhow!("modelId is required for serve mode"))?;
                 let mut builder = serve::EmbeddedServeConfig::builder()
                     .model(model)
-                    .api_port(mesh_api_port()?)
-                    .console_port(mesh_console_port()?)
+                    .api_port(api_port)
+                    .console_port(console_port)
                     // No-leak invariants: never publish mesh presence, never
                     // auto-discover other meshes, no public Nostr relays.
                     // Iroh relays are transport-only and enabled by default
@@ -380,6 +364,9 @@ impl DesktopMeshRuntime {
                     .discovery_mode(MeshDiscoveryMode::Nostr)
                     .startup_timeout(MESH_STARTUP_TIMEOUT)
                     .console_ui(true);
+                if let Some(mesh_name) = request.mesh_name.as_deref() {
+                    builder = builder.mesh_name(mesh_name);
+                }
                 builder = match iroh_relay_mode()? {
                     IrohRelayMode::Disabled => builder.disable_iroh_relays(true),
                     IrohRelayMode::Default => builder.disable_iroh_relays(false),
@@ -405,18 +392,21 @@ impl DesktopMeshRuntime {
                         .trust_policy(TrustPolicy::Allowlist)
                         .trust_owners(owners);
                 }
-                serve::start(builder.build()).await?
+                DesktopMeshHandle::Ready(serve::start(builder.build()).await?)
             }
             MeshNodeMode::Client => {
                 let mut builder = client::EmbeddedClientConfig::builder()
-                    .api_port(mesh_api_port()?)
-                    .console_port(mesh_console_port()?)
+                    .api_port(api_port)
+                    .console_port(console_port)
                     // Same no-leak invariants as serve mode above.
                     .publish(false)
                     .auto_join(false)
                     .discovery_mode(MeshDiscoveryMode::Nostr)
-                    .startup_timeout(MESH_STARTUP_TIMEOUT)
+                    .startup_timeout(MESH_CLIENT_MANAGEMENT_TIMEOUT)
                     .console_ui(true);
+                if let Some(mesh_name) = request.mesh_name.as_deref() {
+                    builder = builder.mesh_name(mesh_name);
+                }
                 builder = match iroh_relay_mode()? {
                     IrohRelayMode::Disabled => builder.disable_iroh_relays(true),
                     IrohRelayMode::Default => builder.disable_iroh_relays(false),
@@ -437,17 +427,31 @@ impl DesktopMeshRuntime {
                         .trust_policy(TrustPolicy::Allowlist)
                         .trust_owners(owners);
                 }
-                client::start(builder.build()).await?
+                let config = builder.build();
+                DesktopMeshHandle::Starting {
+                    task: tokio::spawn(async move { client::start(config).await }),
+                    queued_join_tokens: Vec::new(),
+                }
             }
         };
 
         Ok(Self {
-            handle,
+            id: MESH_RUNTIME_ID_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            handle: tokio::sync::Mutex::new(handle),
             mode: request.mode,
+            api_base_url: format!("http://127.0.0.1:{api_port}/v1"),
+            console_url: format!("http://127.0.0.1:{console_port}"),
             model_id,
             model_name,
             start_request: request,
         })
+    }
+
+    /// Process-unique identity for this runtime instance. Used by the re-arm
+    /// watchdog to detect a concurrent handle swap across the ingress probe
+    /// `.await` so it never evicts a fresh replacement runtime (Brad #2304).
+    pub fn id(&self) -> u64 {
+        self.id
     }
 
     /// The request this node was started with (roster drift detection).
@@ -463,13 +467,117 @@ impl DesktopMeshRuntime {
         self.mode
     }
 
+    async fn promote_finished_startup(handle: &mut DesktopMeshHandle) {
+        let startup_finished = matches!(
+            handle,
+            DesktopMeshHandle::Starting { task, .. } if task.is_finished()
+        );
+        if !startup_finished {
+            return;
+        }
+
+        let previous = std::mem::replace(
+            handle,
+            DesktopMeshHandle::Failed("mesh client startup state was unavailable".to_string()),
+        );
+        let (task, queued_join_tokens) = match previous {
+            DesktopMeshHandle::Starting {
+                task,
+                queued_join_tokens,
+            } => (task, queued_join_tokens),
+            other => {
+                *handle = other;
+                return;
+            }
+        };
+        *handle = match task.await {
+            Ok(Ok(ready)) => {
+                for token in queued_join_tokens {
+                    if let Err(error) = ready.join_token(token).await {
+                        eprintln!(
+                            "buzz-mesh: failed to apply a dial request queued during startup: {error:#}"
+                        );
+                    }
+                }
+                DesktopMeshHandle::Ready(ready)
+            }
+            Ok(Err(error)) => {
+                DesktopMeshHandle::Failed(format!("embedded mesh client startup failed: {error:#}"))
+            }
+            Err(error) if error.is_cancelled() => {
+                DesktopMeshHandle::Failed("embedded mesh client startup was cancelled".to_string())
+            }
+            Err(error) => DesktopMeshHandle::Failed(format!(
+                "embedded mesh client startup task failed: {error}"
+            )),
+        };
+    }
+
+    pub async fn is_starting(&self) -> bool {
+        let mut handle = self.handle.lock().await;
+        Self::promote_finished_startup(&mut handle).await;
+        matches!(*handle, DesktopMeshHandle::Starting { .. })
+    }
+
     pub async fn status(&self) -> anyhow::Result<MeshNodeStatus> {
-        let status = self.handle.status().await?;
-        self.status_from_sdk(status)
+        let mut handle = self.handle.lock().await;
+        Self::promote_finished_startup(&mut handle).await;
+        match &*handle {
+            DesktopMeshHandle::Ready(ready) => {
+                let status = ready.status().await;
+                drop(handle);
+                match status {
+                    Ok(status) => self.status_from_sdk(status),
+                    Err(error)
+                        if self.mode == MeshNodeMode::Client
+                            && recovery::mesh_ingress_is_live_at(&self.api_base_url).await =>
+                    {
+                        Ok(self.ingress_only_client_status(&format!(
+                            "management status is unavailable: {error:#}"
+                        )))
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            DesktopMeshHandle::Starting { .. } => {
+                drop(handle);
+                if recovery::mesh_ingress_is_live_at(&self.api_base_url).await {
+                    Ok(self.ingress_only_client_status("management status is still starting"))
+                } else {
+                    Ok(self.starting_client_status())
+                }
+            }
+            DesktopMeshHandle::Failed(error) => {
+                let error = error.clone();
+                Err(anyhow::anyhow!(error))
+            }
+        }
     }
 
     pub async fn status_report_payload(&self) -> anyhow::Result<serde_json::Value> {
-        let status = self.handle.status().await?;
+        let mut handle = self.handle.lock().await;
+        Self::promote_finished_startup(&mut handle).await;
+        let ready = match &*handle {
+            DesktopMeshHandle::Ready(ready) => ready,
+            DesktopMeshHandle::Starting { .. } if self.mode == MeshNodeMode::Client => {
+                // Consumer identities must keep publishing owner bindings while
+                // the SDK is still waiting for its management API. Serving
+                // peers derive their admission roster from these fresh member
+                // notes; withholding heartbeats here would make an otherwise
+                // working `:9337` client age out of the host's allowlist.
+                return Ok(serde_json::json!({
+                    "serveTargets": [],
+                    "models": [],
+                }));
+            }
+            DesktopMeshHandle::Starting { .. } => {
+                anyhow::bail!("mesh management status is not ready")
+            }
+            DesktopMeshHandle::Failed(error) => {
+                anyhow::bail!("mesh runtime failed: {error}")
+            }
+        };
+        let status = ready.status().await?;
         let mut payload = status.payload;
         enrich_status_payload_identity(&mut payload, status.invite_token.as_deref());
         if let Ok(identity) = ensure_owner_identity() {
@@ -485,6 +593,8 @@ impl DesktopMeshRuntime {
                     model_id: model.id,
                     model_name: model.name,
                     endpoint_addr: endpoint_addr.clone(),
+                    reporter_pubkey: None,
+                    owner_id: None,
                     node_name: payload
                         .get("node_id")
                         .and_then(serde_json::Value::as_str)
@@ -504,18 +614,43 @@ impl DesktopMeshRuntime {
 
     /// Read-only host-side usage snapshot from the node's own runtime metrics.
     pub async fn serving_usage(&self) -> anyhow::Result<MeshServingUsage> {
-        let status = self.handle.status().await?;
+        let mut handle = self.handle.lock().await;
+        Self::promote_finished_startup(&mut handle).await;
+        let DesktopMeshHandle::Ready(ready) = &*handle else {
+            anyhow::bail!("mesh management status is not ready");
+        };
+        let status = ready.status().await?;
         Ok(serving_usage_from_payload(&status.payload))
     }
 
     pub async fn dial_endpoint_addr(&self, endpoint_addr: impl Into<String>) -> anyhow::Result<()> {
         let endpoint_addr = endpoint_addr.into();
         let validated = validate_advertised_endpoint(&endpoint_addr)?;
-        self.handle.join_token(validated.join_token).await
+        let mut handle = self.handle.lock().await;
+        Self::promote_finished_startup(&mut handle).await;
+        match &mut *handle {
+            DesktopMeshHandle::Ready(ready) => ready.join_token(validated.join_token).await,
+            DesktopMeshHandle::Starting {
+                queued_join_tokens, ..
+            } => {
+                if !queued_join_tokens.contains(&validated.join_token) {
+                    queued_join_tokens.push(validated.join_token);
+                }
+                Ok(())
+            }
+            DesktopMeshHandle::Failed(error) => {
+                anyhow::bail!("cannot dial from failed mesh client: {error}")
+            }
+        }
     }
 
     pub async fn installed_models(&self) -> anyhow::Result<Vec<MeshModelOption>> {
-        let status = self.handle.status().await?;
+        let mut handle = self.handle.lock().await;
+        Self::promote_finished_startup(&mut handle).await;
+        let DesktopMeshHandle::Ready(ready) = &*handle else {
+            anyhow::bail!("mesh management status is not ready");
+        };
+        let status = ready.status().await?;
         Ok(models_from_status_payload(Some(&status.payload)))
     }
 
@@ -543,8 +678,60 @@ impl DesktopMeshRuntime {
         })
     }
 
+    fn ingress_only_client_status(&self, reason: &str) -> MeshNodeStatus {
+        MeshNodeStatus {
+            state: MeshNodeState::Running,
+            mode: Some(MeshNodeMode::Client),
+            health: MeshHealth::degraded(format!("OpenAI ingress is live; {reason}")),
+            api_base_url: Some(self.api_base_url.clone()),
+            console_url: Some(self.console_url.clone()),
+            model_id: self.model_id.clone(),
+            model_name: self.model_name.clone(),
+            invite_token: None,
+            endpoint_id: None,
+            device_id: None,
+            device_name: None,
+        }
+    }
+
+    fn starting_client_status(&self) -> MeshNodeStatus {
+        MeshNodeStatus {
+            state: MeshNodeState::Starting,
+            mode: Some(MeshNodeMode::Client),
+            health: MeshHealth::degraded("OpenAI ingress and management status are still starting"),
+            api_base_url: Some(self.api_base_url.clone()),
+            console_url: Some(self.console_url.clone()),
+            model_id: self.model_id.clone(),
+            model_name: self.model_name.clone(),
+            invite_token: None,
+            endpoint_id: None,
+            device_id: None,
+            device_name: None,
+        }
+    }
+
     pub async fn stop(self) -> anyhow::Result<()> {
-        self.handle.stop().await
+        match self.handle.into_inner() {
+            DesktopMeshHandle::Ready(ready) => {
+                match tokio::time::timeout(MESH_STOP_TIMEOUT, ready.stop()).await {
+                    Ok(result) => result,
+                    Err(_) => anyhow::bail!(
+                        "timed out after {}s waiting for embedded mesh runtime to stop",
+                        MESH_STOP_TIMEOUT.as_secs()
+                    ),
+                }
+            }
+            DesktopMeshHandle::Starting { task, .. } => {
+                // The pinned SDK has not exposed its shutdown handle yet.
+                // Abort only the Buzz-side waiter; normal callers never replace
+                // a pending runtime, and app shutdown/restart then terminates
+                // the process-owned embedded thread. Recovery requests that
+                // controlled restart instead of racing a second runtime.
+                task.abort();
+                Ok(())
+            }
+            DesktopMeshHandle::Failed(_) => Ok(()),
+        }
     }
 }
 

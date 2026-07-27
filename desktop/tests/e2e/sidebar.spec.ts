@@ -1,8 +1,11 @@
 import { expect, test, type Page } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
+import { openSettings } from "../helpers/settings";
 
 const SIDEBAR_WIDTH_STORAGE_KEY = "buzz-sidebar-width";
+const COMMUNITY_ONBOARDING_STORAGE_KEY =
+  "buzz-community-onboarding-transaction.v1";
 const DEFAULT_SIDEBAR_WIDTH = 300;
 
 test.beforeEach(async ({ page }) => {
@@ -28,6 +31,12 @@ async function loadTheme(page: Page, theme: string) {
   }, theme);
   await installMockBridge(page);
   await page.goto("/");
+}
+
+async function openAddCommunityDialog(page: Page) {
+  await page.getByTestId("sidebar-profile-avatar-button").click();
+  await page.getByTestId("community-switcher").click();
+  await page.getByRole("menuitem", { name: "Add a community" }).click();
 }
 
 // Regression guard for the "Leave channel" lockup: with two bundled copies of
@@ -65,9 +74,44 @@ async function dragSidebarRail(page: Page, deltaX: number) {
   await page.mouse.up();
 }
 
-test("automatically shows relay join requirements near the relay URL", async ({
+test("add community starts with create and join choices", async ({ page }) => {
+  await installMockBridge(page, {});
+  await page.goto("/");
+
+  await openAddCommunityDialog(page);
+
+  await expect(
+    page.getByRole("heading", { name: "Add community" }),
+  ).toBeVisible();
+  await expect(page.getByTestId("add-community-create")).toContainText(
+    "Create a new community",
+  );
+  await expect(page.getByTestId("add-community-join")).toContainText(
+    "Join an existing community",
+  );
+  await expect(page.getByLabel("API Token")).toHaveCount(0);
+  await expect(page.getByLabel("Repos Directory")).toHaveCount(0);
+
+  await page.getByTestId("add-community-join").click();
+  await expect(
+    page.getByRole("heading", { name: "Join an existing community" }),
+  ).toBeVisible();
+  await expect(page.getByLabel("Community URL or invite link")).toBeVisible();
+  await page.getByTestId("add-community-back").click();
+
+  await page.getByTestId("add-community-create").click();
+  await expect(
+    page.getByRole("heading", { name: "Create a new community" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Continue to Builderlab" }).click();
+  await page.getByRole("button", { name: "Connect and continue" }).click();
+  await expect(page.getByLabel("Community address")).toBeVisible();
+});
+
+test("automatically shows community join requirements near the community URL", async ({
   page,
 }) => {
+  await installMockBridge(page, { applyCommunityDelayMs: 1_000 });
   await page.route(
     "https://policy.example.com/api/join-policy",
     async (route) => {
@@ -87,9 +131,11 @@ test("automatically shows relay join requirements near the relay URL", async ({
   );
   await page.goto("/");
 
-  await page.getByTestId("sidebar-profile-card").click();
-  await page.getByText("Add Community", { exact: true }).click();
-  await page.getByLabel("Relay URL").fill("wss://policy.example.com");
+  await openAddCommunityDialog(page);
+  await page.getByTestId("add-community-join").click();
+  await page
+    .getByLabel("Community URL or invite link")
+    .fill("https://policy.example.com");
 
   const ageConfirmation = page.getByLabel("I am 18 years of age or older.");
   const agreementConfirmation = page.getByLabel(
@@ -102,21 +148,87 @@ test("automatically shows relay join requirements near the relay URL", async ({
   ).toHaveCount(0);
   await expect(page.getByText(/By continuing, you agree/)).toHaveCount(0);
 
-  const addCommunityButton = page.getByRole("button", {
-    name: "Add Community",
-  });
-  await expect(addCommunityButton).toBeDisabled();
+  const joinCommunityButton = page.getByTestId("invite-redeem-submit");
+  await expect(joinCommunityButton).toBeDisabled();
   await ageConfirmation.check();
   await expect(ageConfirmation.locator("svg path")).toBeVisible();
-  await expect(addCommunityButton).toBeDisabled();
+  await expect(joinCommunityButton).toBeDisabled();
   await agreementConfirmation.check();
-  await expect(addCommunityButton).toBeEnabled();
+  await expect(joinCommunityButton).toBeEnabled();
+  await expect(joinCommunityButton).toHaveText("Accept and join");
 
   const consentBox = await agreementConfirmation.boundingBox();
-  const reposInput = await page.locator("#ws-repos-dir").boundingBox();
-  const addButtonBox = await addCommunityButton.boundingBox();
-  expect(consentBox?.y).toBeGreaterThan(reposInput?.y ?? Number.MAX_VALUE);
-  expect(consentBox?.y).toBeLessThan(addButtonBox?.y ?? 0);
+  const communityInput = await page
+    .getByLabel("Community URL or invite link")
+    .boundingBox();
+  const joinButtonBox = await joinCommunityButton.boundingBox();
+  expect(consentBox?.y).toBeGreaterThan(communityInput?.y ?? Number.MAX_VALUE);
+  expect(consentBox?.y).toBeLessThan(joinButtonBox?.y ?? 0);
+
+  await joinCommunityButton.click();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (key) => window.localStorage.getItem(key),
+        COMMUNITY_ONBOARDING_STORAGE_KEY,
+      ),
+    )
+    .toContain('"relayUrl":"wss://policy.example.com"');
+});
+
+test("supports API tokens without cluttering the default join form", async ({
+  page,
+}) => {
+  await installMockBridge(page, { applyCommunityDelayMs: 1_000 });
+  await page.route(
+    "https://token.example.com/api/join-policy",
+    async (route) => {
+      await route.fulfill({ status: 404 });
+    },
+  );
+  await page.goto("/");
+
+  await openAddCommunityDialog(page);
+  await page.getByTestId("add-community-join").click();
+
+  await expect(page.getByLabel("API token")).toHaveCount(0);
+  await expect(page.getByTestId("community-api-token-reveal")).toHaveCount(0);
+
+  await page
+    .getByLabel("Community URL or invite link")
+    .fill("token.example.com");
+  await page.getByTestId("community-api-token-reveal").click();
+  await page.getByLabel("API token").fill("buzz_secret");
+  await page.getByTestId("invite-redeem-submit").click();
+
+  await expect
+    .poll(() =>
+      page.evaluate((key) => {
+        const raw = window.localStorage.getItem(key);
+        if (!raw) return null;
+        const transaction = JSON.parse(raw) as {
+          relayUrl?: string;
+          token?: string;
+        };
+        return {
+          relayUrl: transaction.relayUrl,
+          token: transaction.token,
+        };
+      }, COMMUNITY_ONBOARDING_STORAGE_KEY),
+    )
+    .toEqual({
+      relayUrl: "wss://token.example.com",
+      token: "buzz_secret",
+    });
+});
+
+test("hides Invites settings on open relays", async ({ page }) => {
+  await page.goto("/");
+  await openSettings(page);
+
+  await expect(page.getByTestId("settings-nav-community-members")).toHaveCount(
+    0,
+  );
 });
 
 test("leaving a channel from the context menu never freezes the app", async ({

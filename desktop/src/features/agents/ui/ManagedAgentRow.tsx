@@ -238,7 +238,12 @@ function AgentSummary({
               <Badge variant="secondary">{personaLabel}</Badge>
             ) : null}
             <AgentOriginBadge agent={agent} />
-            {agent.needsRestart ? (
+            {agent.personaOrphaned ? (
+              <Badge className="gap-1" variant="warning">
+                <AlertTriangle className="h-3 w-3" />
+                Configuration missing
+              </Badge>
+            ) : agent.needsRestart ? (
               <Badge className="gap-1" variant="warning">
                 <RefreshCw className="h-3 w-3" />
                 Restart required
@@ -261,7 +266,12 @@ function AgentSummary({
               <span>Remote deployment</span>
             )}
           </div>
-          {agent.needsRestart ? (
+          {agent.personaOrphaned ? (
+            <p className="mt-1.5 text-xs text-amber-600 dark:text-amber-400">
+              This agent's configuration is missing — it may still be syncing or
+              was deleted on another device.
+            </p>
+          ) : agent.needsRestart ? (
             <p className="mt-1.5 text-xs text-amber-600 dark:text-amber-400">
               Configuration changed since this agent started. Restart to apply
               it.

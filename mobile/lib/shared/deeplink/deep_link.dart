@@ -7,6 +7,8 @@
 /// half-formed target.
 library;
 
+import '../relay/relay_validation.dart';
+
 /// A parsed deep link supported by the app.
 sealed class BuzzDeepLink {
   const BuzzDeepLink();
@@ -107,8 +109,9 @@ MessageDeepLink? parseMessageDeepLink(Uri uri) {
 ///
 /// Accepted forms:
 /// - `https://<relay>/invite/<code>` -> `wss://<relay>` + code
-/// - `http://<relay>/invite/<code>` -> `ws://<relay>` + code
-/// - `buzz://join?relay=<ws(s)://relay>&code=<code>` -> relay + code
+/// - `http://localhost/invite/<code>` -> `ws://localhost` + code in debug builds
+/// - `buzz://join?relay=<wss://relay>&code=<code>` -> relay + code
+/// - `buzz://join?relay=<ws://localhost>&code=<code>` -> local relay in debug
 ///
 /// Rejects credentials, fragments, missing params, nested relay credentials, and
 /// non-invite paths so scanners do not accidentally treat arbitrary URLs as
@@ -129,6 +132,11 @@ InviteDeepLink? parseInviteDeepLink(Uri uri) {
         relayUri.host.isEmpty ||
         relayUri.userInfo.isNotEmpty ||
         relayUri.hasFragment) {
+      return null;
+    }
+    try {
+      validateInviteRelayUri(relayUri);
+    } on FormatException {
       return null;
     }
     final normalizedRelay = Uri(
@@ -155,6 +163,16 @@ InviteDeepLink? parseInviteDeepLink(Uri uri) {
       return null;
     }
     final relayScheme = uri.scheme == 'https' ? 'wss' : 'ws';
+    final relayUri = Uri(
+      scheme: relayScheme,
+      host: uri.host,
+      port: uri.hasPort ? uri.port : null,
+    );
+    try {
+      validateInviteRelayUri(relayUri);
+    } on FormatException {
+      return null;
+    }
     final relay = Uri(
       scheme: relayScheme,
       host: uri.host,

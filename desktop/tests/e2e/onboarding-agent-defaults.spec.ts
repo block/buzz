@@ -84,6 +84,40 @@ test("setup shows only Claude Code and Codex as detected harnesses", async ({
   await expect(page.getByRole("checkbox")).toHaveCount(0);
 });
 
+test("setup distinguishes a missing CLI from an installed desktop app", async ({
+  page,
+}) => {
+  await installMockBridge(
+    page,
+    {
+      acpRuntimesCatalog: [
+        runtime(
+          "codex",
+          "not_installed",
+          { status: "unknown" },
+          {
+            install_hint:
+              "Buzz requires the Codex CLI; the desktop app alone is not enough.",
+            install_instructions_url:
+              "https://developers.openai.com/codex/cli/",
+          },
+        ),
+      ],
+    },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+  await navigateToSetupPage(page);
+
+  const card = page.getByTestId("onboarding-runtime-codex");
+  await expect(card).toContainText(
+    "CLI not detected; the desktop app alone isn’t enough.",
+  );
+  await expect(card.getByTestId("onboarding-runtime-install-codex")).toHaveText(
+    "INSTALL",
+  );
+});
+
 test("ready state is detected and enables Next without persisting a default", async ({
   page,
 }) => {
