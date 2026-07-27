@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
   Bot,
@@ -216,6 +216,11 @@ export function HuddleBar({
   }, []);
   // Huddle state: event-driven + slow fallback poll.
   React.useEffect(() => {
+    // The huddle backend (state + audio pipeline) is native Tauri-only — none
+    // of this works in a browser (web) runtime, and `listen()` throws without
+    // Tauri internals.
+    if (!isTauri()) return;
+
     let cancelled = false;
     let unlisten: (() => void) | null = null;
 

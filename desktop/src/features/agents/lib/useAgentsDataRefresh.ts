@@ -1,3 +1,4 @@
+import { isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
@@ -26,6 +27,11 @@ export function useAgentsDataRefresh(): void {
   const queryClient = useQueryClient();
 
   useEffect(() => {
+    // Both events come from the local Rust agents backend — no on-disk agents
+    // data exists in a browser (web) runtime, and `listen()` throws without
+    // Tauri internals.
+    if (!isTauri()) return;
+
     let timer: ReturnType<typeof setTimeout> | undefined;
 
     const unlistenRuntime = listen("managed-agent-runtime-status", () => {

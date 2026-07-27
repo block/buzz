@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import * as React from "react";
 
@@ -616,6 +616,10 @@ export function HuddleProvider({ children }: { children: React.ReactNode }) {
   // in-flight guard collapses duplicate disconnect events from failed dials.
   const audioReconnectInFlightRef = React.useRef(false);
   React.useEffect(() => {
+    // Huddle audio is a native Tauri pipeline — no such event exists in a
+    // browser (web) runtime, and `listen()` throws without Tauri internals.
+    if (!isTauri()) return;
+
     let cancelled = false;
     let unlisten: (() => void) | null = null;
     listen("huddle-audio-disconnected", () => {

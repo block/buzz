@@ -1,4 +1,4 @@
-import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import { invoke as tauriInvoke, isTauri } from "@tauri-apps/api/core";
 import {
   activateRateLimit,
   parseRateLimitHint,
@@ -374,7 +374,12 @@ export function autoConnectDefaultRelayEnabled(): Promise<boolean> {
   return invokeTauri<boolean>("auto_connect_default_relay_enabled");
 }
 
+// Called unconditionally at app boot, before any Tauri-availability gate —
+// unlike most of this file's exports, which only run once the app has
+// already reached a native-only screen. Guard so it resolves cleanly to
+// `false` in a browser (web) runtime instead of throwing.
 export function isSharedIdentity(): Promise<boolean> {
+  if (!isTauri()) return Promise.resolve(false);
   return invokeTauri<boolean>("is_shared_identity");
 }
 
