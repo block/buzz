@@ -1,5 +1,8 @@
 import { signRelayEvent } from "@/shared/api/tauri";
-import { buildSpawnerPromptUpdate } from "@/shared/api/tauriSpawner";
+import {
+  buildSpawnerCredentialUpdate,
+  buildSpawnerPromptUpdate,
+} from "@/shared/api/tauriSpawner";
 import type { SpawnerPromptMaterial } from "@/shared/api/tauriSpawner";
 import type { RelayEvent } from "@/shared/api/types";
 import {
@@ -109,6 +112,8 @@ export type SpawnerAgentStatus = {
   restartCount: number;
   /** Hash of the prompt material last acknowledged by this agent, when reported. */
   promptHash?: string;
+  /** True when the spawner holds this agent stopped awaiting an owner credential. */
+  needsCredential: boolean;
 };
 
 /** Inbound author gate for a spawned agent, mirroring `RespondTo` in Rust. */
@@ -298,6 +303,26 @@ export async function sendSpawnerPromptUpdate(input: {
   return promptHash;
 }
 
+/**
+ * Build and publish an owner credential update over the WebSocket — same
+ * ephemeral-kind routing rationale as `sendSpawnerPromptUpdate`. Deliberately
+ * no persistent queue: a queued plaintext credential on disk is exactly what
+ * this feature exists to avoid. Confirmation arrives as an encrypted ack; see
+ * `waitForSpawnerCredentialAck`.
+ */
+export async function sendSpawnerCredentialUpdate(input: {
+  spawnerPubkey: string;
+  credential: string;
+}): Promise<void> {
+  const { event } = await buildSpawnerCredentialUpdate(input);
+  await relayClient.preconnect();
+  await relayClient.publishEvent(
+    event,
+    "Timed out sending the credential.",
+    "Failed to send the credential.",
+  );
+}
+
 /** Parse a kind:30179 content body, returning null when it is unusable. */
 export function parseSpawnerStatus(content: string): SpawnerAgentStatus | null {
   if (!content.trim()) return null;
@@ -313,6 +338,7 @@ export function parseSpawnerStatus(content: string): SpawnerAgentStatus | null {
       restartCount:
         typeof raw.restart_count === "number" ? raw.restart_count : 0,
       promptHash: asOptionalString(raw.prompt_hash),
+      needsCredential: raw.needs_credential === true,
     };
   } catch {
     return null;
