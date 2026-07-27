@@ -115,7 +115,7 @@ test("reports connected only after successful relay and local-compute probes", (
     {
       detail: "Authenticated relay connection is active.",
       id: "relay",
-      label: "Buzz relay",
+      label: "Command workspace",
       state: "connected",
       statusLabel: "Connected",
     },

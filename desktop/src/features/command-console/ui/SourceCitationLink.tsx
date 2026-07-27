@@ -5,6 +5,10 @@ function revealSource(sourceId: string): void {
   if (!(target instanceof HTMLElement)) {
     return;
   }
+  const disclosure = target.closest("details");
+  if (disclosure instanceof HTMLDetailsElement) {
+    disclosure.open = true;
+  }
   target.scrollIntoView({ block: "center" });
   target.focus({ preventScroll: true });
 }

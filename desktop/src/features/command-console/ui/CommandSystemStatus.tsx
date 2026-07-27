@@ -98,8 +98,8 @@ export function CommandSystemStatus({
           System status
         </h2>
         <p className="text-sm text-muted-foreground">
-          Live status from the Buzz relay, LM Studio, RAG, Memory, and Apple
-          inputs used by the Command Adviser.
+          Live status from the command workspace, LM Studio, RAG, Memory, and
+          Apple inputs used by the Command Adviser.
         </p>
       </div>
 

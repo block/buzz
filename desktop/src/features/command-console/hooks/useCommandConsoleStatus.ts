@@ -78,7 +78,7 @@ const LOCAL_COMPUTE_FRESHNESS_MS = 10_000;
 function relayStatus(connection: ConnectionState): CommandServiceStatus {
   const base = {
     id: "relay" as const,
-    label: "Buzz relay",
+    label: "Command workspace",
   };
 
   switch (connection) {

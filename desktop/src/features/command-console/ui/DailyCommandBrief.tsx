@@ -1,47 +1,24 @@
 import { AlertTriangle, Ban, Play, RefreshCw } from "lucide-react";
 
-import {
-  BRIEF_SECTIONS,
-  type BriefRunState,
-  type BriefRunStatus,
-  type BriefSchedule,
-  type BriefSection,
-  type PublishedCommandBrief,
+import type {
+  BriefRunState,
+  BriefRunStatus,
+  BriefSchedule,
+  PublishedCommandBrief,
 } from "@/features/command-console/domain/briefContracts";
-import type { CommandBriefSchedulePatch } from "../hooks/useDailyCommandBrief";
+import type { CommandConsoleStatusViewModel } from "@/features/command-console/hooks/useCommandConsoleStatus";
 import { Alert, AlertDescription, AlertTitle } from "@/shared/ui/alert";
 import { Badge } from "@/shared/ui/badge";
 import { Button } from "@/shared/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/shared/ui/card";
 import { Progress } from "@/shared/ui/progress";
-import { AdviserContributionCard } from "./AdviserContributionCard";
+
+import type { CommandBriefSchedulePatch } from "../hooks/useDailyCommandBrief";
+import { STATE_LABELS, SECTION_LABELS } from "./briefPresentation";
+import { BriefEvidenceDisclosure } from "./BriefEvidenceDisclosure";
 import { BriefScheduleControls } from "./BriefScheduleControls";
+import { BriefSectionCard } from "./BriefSectionCard";
 import { SourceCitationLink } from "./SourceCitationLink";
-import { SourceLedger } from "./SourceLedger";
-
-const SECTION_LABELS: Record<BriefSection, string> = {
-  today: "Today at a glance",
-  operations: "Operational priorities and risks",
-  navigation: "Navigation considerations",
-  daily_routine: "Daily routine and calendar",
-  reports: "Reports and returns due",
-  planning_30_60_90: "30, 60 and 90 day planning horizon",
-  decisions: "Decisions required",
-  conflicts_and_gaps: "Conflicts and gaps",
-  sources: "Sources",
-};
-
-const STATE_LABELS: Record<BriefRunState, string> = {
-  queued: "Queued",
-  collecting_sources: "Collecting sources",
-  running_specialists: "Running specialists",
-  consolidating: "Consolidating",
-  persisting: "Securing brief",
-  completed: "Complete",
-  degraded: "Complete with limitations",
-  cancelled: "Cancelled",
-  failed: "Failed",
-};
 
 const PROGRESS: Record<BriefRunState, number | null> = {
   queued: 5,
@@ -124,47 +101,109 @@ function BriefStatus({
   );
 }
 
-function BriefSections({ published }: { published: PublishedCommandBrief }) {
+function WatchItems({ published }: { published: PublishedCommandBrief }) {
+  const { brief } = published;
+  const conflicts = brief.sections.conflicts_and_gaps;
+  const hasItems =
+    brief.degradedSections.length > 0 ||
+    brief.missingInformation.length > 0 ||
+    brief.dissent.length > 0 ||
+    conflicts.length > 0;
+
+  if (!hasItems) return null;
+
+  return (
+    <Alert className="border border-warning/30 bg-warning/10">
+      <AlertTitle className="flex items-center gap-2">
+        <AlertTriangle aria-hidden="true" className="h-4 w-4" />
+        Watch items
+      </AlertTitle>
+      <AlertDescription className="grid gap-4 md:grid-cols-2">
+        {brief.degradedSections.length > 0 ? (
+          <div>
+            <h4 className="font-semibold">Complete with limitations</h4>
+            <ul className="mt-1 list-disc pl-5">
+              {brief.degradedSections.map((section) => (
+                <li key={section}>{SECTION_LABELS[section]}</li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+        {brief.missingInformation.length > 0 ? (
+          <div>
+            <h4 className="font-semibold">Missing information</h4>
+            <ul className="mt-1 list-disc pl-5">
+              {brief.missingInformation.map((item) => (
+                <li key={item}>{item}</li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+        {conflicts.length > 0 ? (
+          <div>
+            <h4 className="font-semibold">Conflicts and gaps</h4>
+            <ul className="mt-1 list-disc pl-5">
+              {conflicts.map((finding) => (
+                <li key={`${finding.text}-${finding.sourceIds.join("-")}`}>
+                  {finding.text}{" "}
+                  {finding.sourceIds.map((sourceId) => (
+                    <SourceCitationLink key={sourceId} sourceId={sourceId} />
+                  ))}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+        {brief.dissent.length > 0 ? (
+          <div>
+            <h4 className="font-semibold">Dissent retained</h4>
+            <ul className="mt-1 list-disc pl-5">
+              {brief.dissent.map((item) => (
+                <li key={item}>{item}</li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+      </AlertDescription>
+    </Alert>
+  );
+}
+
+function MainBriefSections({
+  published,
+}: {
+  published: PublishedCommandBrief;
+}) {
   const { brief } = published;
   return (
-    <>
-      <div className="grid gap-4 lg:grid-cols-2">
-        {BRIEF_SECTIONS.map((section) => (
-          <Card key={section}>
-            <CardHeader className="pb-3">
-              <CardTitle className="text-base">
-                {SECTION_LABELS[section]}
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              {brief.sections[section].length === 0 ? (
-                <p className="text-sm text-muted-foreground">
-                  No supported finding was available for this section.
-                </p>
-              ) : (
-                <ul className="space-y-2 text-sm">
-                  {brief.sections[section].map((finding) => (
-                    <li key={`${finding.text}-${finding.sourceIds.join("-")}`}>
-                      {finding.text}{" "}
-                      {finding.sourceIds.map((sourceId) => (
-                        <SourceCitationLink
-                          key={sourceId}
-                          sourceId={sourceId}
-                        />
-                      ))}
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </CardContent>
-          </Card>
-        ))}
-      </div>
-      <SourceLedger
-        entries={brief.sourceLedger}
-        freshness={brief.sourceFreshness}
+    <div className="space-y-4" data-testid="brief-main-sections">
+      <BriefSectionCard
+        findings={brief.sections.decisions}
+        prominent
+        section="decisions"
       />
-    </>
+      <BriefSectionCard findings={brief.sections.today} section="today" />
+      <WatchItems published={published} />
+      <div className="grid gap-4 lg:grid-cols-2">
+        <BriefSectionCard
+          findings={brief.sections.operations}
+          section="operations"
+        />
+        <BriefSectionCard
+          findings={brief.sections.navigation}
+          section="navigation"
+        />
+        <BriefSectionCard
+          findings={brief.sections.daily_routine}
+          section="daily_routine"
+        />
+        <BriefSectionCard findings={brief.sections.reports} section="reports" />
+      </div>
+      <BriefSectionCard
+        findings={brief.sections.planning_30_60_90}
+        section="planning_30_60_90"
+      />
+    </div>
   );
 }
 
@@ -173,6 +212,7 @@ export type DailyCommandBriefProps = {
   readonly history: readonly BriefRunStatus[];
   readonly latest: PublishedCommandBrief | null;
   readonly schedule: BriefSchedule | null;
+  readonly systemStatus: CommandConsoleStatusViewModel;
   readonly loading: boolean;
   readonly busy: boolean;
   readonly error: string | null;
@@ -186,6 +226,7 @@ export function DailyCommandBrief({
   history,
   latest,
   schedule,
+  systemStatus,
   loading,
   busy,
   error,
@@ -201,15 +242,18 @@ export function DailyCommandBrief({
     >
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
+          <p className="text-xs font-semibold uppercase tracking-widest text-[#d8aa4f]">
+            Quarterdeck brief
+          </p>
           <h2
-            className="text-xl font-semibold"
+            className="mt-1 text-xl font-semibold"
             id="daily-command-brief-heading"
           >
             Daily Command Brief
           </h2>
-          <p className="text-sm text-muted-foreground">
-            Evidence-cited advice from your configured RAG, Memory, and Apple
-            sources.
+          <p className="mt-1 text-sm text-muted-foreground">
+            Decisions, priorities and forward planning from your configured
+            command sources.
           </p>
         </div>
         <Button
@@ -219,8 +263,8 @@ export function DailyCommandBrief({
         >
           {loading ? (
             <RefreshCw
-              className="motion-safe:animate-spin"
               aria-hidden="true"
+              className="motion-safe:animate-spin"
             />
           ) : (
             <Play aria-hidden="true" />
@@ -238,32 +282,6 @@ export function DailyCommandBrief({
 
       <BriefStatus status={status} busy={busy} onCancel={onCancel} />
 
-      {history.length > 0 ? (
-        <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="text-base">Lifecycle history</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <ol className="grid gap-2 sm:grid-cols-2">
-              {history.map((entry) => (
-                <li
-                  className="flex items-center justify-between gap-3 rounded-lg border p-3 text-sm"
-                  key={`${entry.runId}-${entry.sequence}`}
-                >
-                  <span>{STATE_LABELS[entry.state]}</span>
-                  <time
-                    className="text-muted-foreground"
-                    dateTime={entry.updatedAt}
-                  >
-                    {entry.updatedAt}
-                  </time>
-                </li>
-              ))}
-            </ol>
-          </CardContent>
-        </Card>
-      ) : null}
-
       {!latest ? (
         <Card>
           <CardContent className="py-8 text-center">
@@ -271,103 +289,21 @@ export function DailyCommandBrief({
               No Daily Command Brief has been generated.
             </p>
             <p className="mt-1 text-sm text-muted-foreground">
-              Generation remains unavailable until the native identity, local
-              model, and protected knowledge sources pass readiness checks.
+              Generate a brief to assemble the latest available RAG, Memory,
+              Calendar, Reminders, Notes and selected-file inputs.
             </p>
           </CardContent>
         </Card>
       ) : (
-        <div className="space-y-5">
-          <Card>
-            <CardContent className="flex flex-wrap items-start justify-between gap-4 py-4">
-              <div>
-                <p className="font-medium">
-                  Generated{" "}
-                  <time dateTime={latest.brief.generatedAt}>
-                    {latest.brief.generatedAt}
-                  </time>
-                </p>
-                <p className="text-sm text-muted-foreground">
-                  Snapshot{" "}
-                  <span className="break-all font-mono">
-                    {latest.brief.snapshotId}
-                  </span>
-                </p>
-              </div>
-              <Badge
-                variant={
-                  latest.publicationState === "published"
-                    ? "success"
-                    : "warning"
-                }
-              >
-                {latest.publicationState === "published"
-                  ? "Signed and published"
-                  : "Relay publication queued — offline capable"}
-              </Badge>
-            </CardContent>
-          </Card>
-
-          {latest.brief.degradedSections.length > 0 ? (
-            <Alert className="border border-warning/30 bg-warning/10">
-              <AlertTitle className="flex items-center gap-2">
-                <AlertTriangle className="h-4 w-4" aria-hidden="true" />
-                Complete with limitations
-              </AlertTitle>
-              <AlertDescription>
-                <p>Degraded sections</p>
-                <ul className="mt-1 list-disc pl-5">
-                  {latest.brief.degradedSections.map((section) => (
-                    <li key={section}>{SECTION_LABELS[section]}</li>
-                  ))}
-                </ul>
-              </AlertDescription>
-            </Alert>
-          ) : null}
-
-          <Alert>
-            <AlertTitle className="flex items-center gap-2">
-              <AlertTriangle className="h-4 w-4" aria-hidden="true" />
-              Advisory, non-accredited decision support
-            </AlertTitle>
-            <AlertDescription>
-              {latest.brief.advisoryLimitation}
-            </AlertDescription>
-          </Alert>
-
-          {latest.brief.missingInformation.length > 0 ? (
-            <Alert>
-              <AlertTitle>Missing information</AlertTitle>
-              <AlertDescription>
-                <ul className="list-disc pl-5">
-                  {latest.brief.missingInformation.map((item) => (
-                    <li key={item}>{item}</li>
-                  ))}
-                </ul>
-              </AlertDescription>
-            </Alert>
-          ) : null}
-
-          <BriefSections published={latest} />
-
-          <section aria-labelledby="adviser-contributions-heading">
-            <h3
-              className="mb-3 text-base font-semibold"
-              id="adviser-contributions-heading"
-            >
-              Specialist adviser contributions
-            </h3>
-            <div className="grid gap-4 lg:grid-cols-2">
-              {latest.brief.contributions.map((contribution) => (
-                <AdviserContributionCard
-                  contribution={contribution}
-                  key={contribution.adviser}
-                />
-              ))}
-            </div>
-          </section>
-        </div>
+        <MainBriefSections published={latest} />
       )}
+
+      <BriefEvidenceDisclosure
+        history={history}
+        published={latest}
+        status={status}
+        systemStatus={systemStatus}
+      />
 
       {schedule ? (
         <BriefScheduleControls

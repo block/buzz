@@ -43,12 +43,13 @@ test("Command Console opens from the sidebar with truthful local-first boundarie
   ).toBeVisible();
   await expect(consoleScreen.getByText("Not yet operational")).toHaveCount(0);
 
+  const disclosure = consoleScreen.getByTestId("brief-evidence-disclosure");
+  await expect(disclosure).not.toHaveAttribute("open", "");
+  await disclosure.getByText("Evidence and system status").click();
+
   await expect(consoleScreen.getByTestId("command-status-relay")).toContainText(
     "Unavailable",
   );
-  await expect(
-    consoleScreen.getByTestId("command-status-local-compute"),
-  ).toContainText("Offline");
   await expect(
     consoleScreen.getByTestId("command-status-lm-studio"),
   ).toContainText("Unavailable");

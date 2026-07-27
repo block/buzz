@@ -4,7 +4,6 @@ import { useCommandConsoleStatus } from "../hooks/useCommandConsoleStatus";
 import { useDailyCommandBrief } from "../hooks/useDailyCommandBrief";
 import { useModelRoutingPreference } from "../hooks/useModelRoutingPreference";
 import { CommandAdviserHero } from "./CommandAdviserHero";
-import { CommandSystemStatus } from "./CommandSystemStatus";
 import { CommandTeamStrip } from "./CommandTeamStrip";
 import { DailyCommandBrief } from "./DailyCommandBrief";
 import { ModelRoutingControls } from "./ModelRoutingControls";
@@ -66,8 +65,6 @@ export function CommandConsoleScreen() {
 
         <CommandTeamStrip />
 
-        <CommandSystemStatus status={systemStatus} />
-
         <DailyCommandBrief
           busy={commandBrief.busy}
           error={commandBrief.error}
@@ -85,6 +82,7 @@ export function CommandConsoleScreen() {
           }}
           schedule={commandBrief.schedule}
           status={commandBrief.status}
+          systemStatus={systemStatus}
         />
       </main>
     </div>

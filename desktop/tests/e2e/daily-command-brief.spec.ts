@@ -148,44 +148,51 @@ test("renders a complete degraded brief with retained evidence boundaries", asyn
   await expect(brief).toBeVisible();
 
   for (const heading of [
+    "Decisions and approvals required",
     "Today at a glance",
     "Operational priorities and risks",
     "Navigation considerations",
     "Daily routine and calendar",
     "Reports and returns due",
-    "30, 60 and 90 day planning horizon",
-    "Decisions required",
-    "Conflicts and gaps",
-    "Sources",
+    "30, 60 and 90-day outlook",
   ]) {
     await expect(
       brief.getByText(heading, { exact: true }).first(),
     ).toBeVisible();
   }
 
-  for (const adviser of [
-    "Operations",
-    "Navigation",
-    "Daily Routine",
-    "Reporting",
-    "Plans",
-  ]) {
-    await expect(
-      brief.getByText(adviser, { exact: true }).first(),
-    ).toBeVisible();
-  }
+  const headings = brief.locator("[data-testid='brief-main-sections'] h3");
+  await expect(headings.first()).toHaveText("Decisions and approvals required");
 
+  const disclosure = brief.getByTestId("brief-evidence-disclosure");
+  await expect(disclosure).not.toHaveAttribute("open", "");
+  await expect(brief.getByText("Source ledger", { exact: true })).toBeHidden();
+  await expect(
+    brief.getByText("Specialist adviser contributions", { exact: true }),
+  ).toBeHidden();
+  await expect(brief.getByText("snapshot-verified").first()).toBeHidden();
+  await expect(brief.getByTestId("command-status-rag")).toBeHidden();
+
+  const citation = brief
+    .locator('a[href="#command-brief-source-ledger-1"]')
+    .first();
+  await expect(citation).toBeVisible();
+  await citation.click();
+
+  await expect(disclosure).toHaveAttribute("open", "");
   await expect(
     brief.getByText("Relay publication queued — offline capable"),
   ).toBeVisible();
   await expect(
-    brief.getByText("Reminders permission is denied."),
+    brief.getByText("Reminders permission is denied.").first(),
   ).toBeVisible();
   await expect(
-    brief.getByText("Plans retains a dissenting view."),
+    brief
+      .getByTestId("brief-main-sections")
+      .getByText("Plans retains a dissenting view."),
   ).toBeVisible();
   await expect(
-    brief.getByText("Chart update age requires review."),
+    brief.getByText("Chart update age requires review.").first(),
   ).toBeVisible();
   await expect(brief.getByText(ADVISORY_LIMITATION)).toBeVisible();
   await expect(
@@ -194,11 +201,7 @@ test("renders a complete degraded brief with retained evidence boundaries", asyn
   await expect(brief.getByText("Pending proposal").first()).toBeVisible();
   await expect(brief.getByText("snapshot-verified").first()).toBeVisible();
   await expect(brief.getByText("Stale source")).toBeVisible();
-  const citation = brief
-    .locator('a[href="#command-brief-source-ledger-1"]')
-    .first();
-  await expect(citation).toBeVisible();
-  await citation.click();
+  await expect(brief.getByTestId("command-status-rag")).toBeVisible();
 
   const citedSource = brief.locator("#command-brief-source-ledger-1");
   await expect(citedSource).toBeFocused();

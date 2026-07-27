@@ -100,6 +100,54 @@ const schedule = {
   concurrency: 1,
 };
 
+const systemStatus = {
+  degradedSections: ["navigation"],
+  liveServices: [
+    {
+      id: "relay",
+      label: "Command workspace",
+      state: "connected",
+      statusLabel: "Connected",
+      detail: "Authenticated workspace connection is active.",
+    },
+    {
+      id: "local-compute",
+      label: "Local compute",
+      state: "offline",
+      statusLabel: "Offline",
+      detail: "Local compute is not running.",
+    },
+    {
+      id: "lm-studio",
+      label: "LM Studio",
+      state: "connected",
+      statusLabel: "Connected",
+      detail: "Local model is ready.",
+    },
+    {
+      id: "memory",
+      label: "Memory",
+      state: "connected",
+      statusLabel: "Connected",
+      detail: "Memory is available.",
+    },
+    {
+      id: "rag",
+      label: "RAG",
+      state: "connected",
+      statusLabel: "Connected",
+      detail: "RAG is available.",
+    },
+    {
+      id: "apple-inputs",
+      label: "Apple inputs",
+      state: "degraded",
+      statusLabel: "Degraded",
+      detail: "Reminders permission is denied.",
+    },
+  ],
+};
+
 function render(overrides = {}) {
   return renderToStaticMarkup(
     React.createElement(DailyCommandBrief, {
@@ -113,6 +161,7 @@ function render(overrides = {}) {
       onGenerate: () => {},
       onCancel: () => {},
       onScheduleChange: () => {},
+      systemStatus,
       ...overrides,
     }),
   );
@@ -121,7 +170,10 @@ function render(overrides = {}) {
 test("renders no-brief and queued/running/failed lifecycle states with truthful controls", () => {
   const initial = render();
   assert.match(initial, /No Daily Command Brief has been generated/);
-  assert.match(initial, /configured RAG, Memory, and Apple sources/i);
+  assert.match(
+    initial,
+    /latest available RAG, Memory, Calendar, Reminders, Notes/i,
+  );
   assert.doesNotMatch(initial, /frozen OFFICIAL knowledge snapshot/i);
 
   const running = render({
@@ -197,7 +249,7 @@ test("renders the bounded native lifecycle history as metadata only", () => {
   assert.doesNotMatch(html, /prompt|reasoning|provider body/i);
 });
 
-test("renders complete degraded queued-offline brief with all nine sections and adviser evidence", () => {
+test("renders a decision-first brief with supporting evidence collapsed after command content", () => {
   const html = render({
     latest: published,
     status: {
@@ -212,19 +264,23 @@ test("renders complete degraded queued-offline brief with all nine sections and 
     },
   });
 
-  for (const heading of [
-    "Today at a glance",
-    "Operational priorities and risks",
-    "Navigation considerations",
-    "Daily routine and calendar",
-    "Reports and returns due",
-    "30, 60 and 90 day planning horizon",
-    "Decisions required",
-    "Conflicts and gaps",
-    "Sources",
-  ]) {
-    assert.match(html, new RegExp(`>${heading}<`));
-  }
+  const decisions = html.indexOf(">Decisions and approvals required<");
+  const today = html.indexOf(">Today at a glance<");
+  const operations = html.indexOf(">Operational priorities and risks<");
+  assert.ok(decisions >= 0 && decisions < today && today < operations);
+
+  const disclosure = html.indexOf('data-testid="brief-evidence-disclosure"');
+  assert.ok(disclosure > operations);
+  assert.match(html, /<details[^>]*data-testid="brief-evidence-disclosure"/);
+  assert.doesNotMatch(
+    html.slice(0, disclosure),
+    />Sources<|>Source ledger<|>Lifecycle history</,
+  );
+  assert.match(html, /Evidence and system status/);
+  assert.match(html, /Specialist adviser contributions/);
+  assert.match(html, /Source ledger/);
+  assert.match(html, /System status/);
+
   for (const adviser of [
     "Operations",
     "Navigation",
@@ -243,6 +299,8 @@ test("renders complete degraded queued-offline brief with all nine sections and 
   assert.match(html, /Reminders permission is denied/);
   assert.match(html, /snapshot-verified/);
   assert.match(html, /Stale source/);
+  assert.match(html, />Watch items</);
+  assert.match(html, />Conflicts and gaps</);
   assert.doesNotMatch(html, /hidden evidence/);
   assert.doesNotMatch(html, /approve|execute action/i);
 });
@@ -251,7 +309,8 @@ test("restart view derives prominent degraded status and exact section labels fr
   const html = render({ latest: published, status: null, history: [] });
 
   assert.match(html, />Complete with limitations</);
-  assert.match(html, />Degraded sections</);
+  assert.match(html, />Watch items</);
+  assert.match(html, />Complete with limitations</);
   assert.match(html, />Navigation considerations</);
 });
 

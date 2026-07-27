@@ -12,7 +12,7 @@ const status = {
     {
       detail: "Authenticated relay connection is active.",
       id: "relay",
-      label: "Buzz relay",
+      label: "Command workspace",
       state: "connected",
       statusLabel: "Connected",
     },
@@ -72,7 +72,7 @@ test("renders the composed read-only service status with explicit labels", () =>
 
   assert.match(html, /data-testid="command-system-status"/);
   assert.match(html, />System status</);
-  assert.match(html, />Buzz relay</);
+  assert.match(html, />Command workspace</);
   assert.match(html, />Connected</);
   assert.match(html, />Local compute</);
   assert.match(html, />Degraded</);

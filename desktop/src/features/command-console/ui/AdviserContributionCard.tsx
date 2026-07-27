@@ -5,6 +5,7 @@ import { Badge } from "@/shared/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/shared/ui/card";
 import { Progress } from "@/shared/ui/progress";
 
+import { AdviserInsignia } from "./AdviserInsignia";
 import { SourceCitationLink } from "./SourceCitationLink";
 
 const ADVISER_LABELS: Record<AdviserContribution["adviser"], string> = {
@@ -25,9 +26,15 @@ export function AdviserContributionCard({
     <Card data-testid={`adviser-${contribution.adviser}`}>
       <CardHeader className="gap-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <CardTitle className="text-base">
-            {ADVISER_LABELS[contribution.adviser]}
-          </CardTitle>
+          <div className="flex items-center gap-3">
+            <AdviserInsignia
+              adviser={contribution.adviser}
+              className="h-10 w-10"
+            />
+            <CardTitle className="text-base">
+              {ADVISER_LABELS[contribution.adviser]}
+            </CardTitle>
+          </div>
           <Badge variant="info">{confidence}% confidence</Badge>
         </div>
         <Progress
