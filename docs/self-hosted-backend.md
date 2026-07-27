@@ -82,7 +82,9 @@ openssl rand -hex 32 > ~/.buzz-demo-spawner/nsec.hex
 
 BUZZ_SPAWNER_NSEC=$(cat ~/.buzz-demo-spawner/nsec.hex) \
 BUZZ_SPAWNER_RELAY_URL=ws://localhost:3000 \
+BUZZ_SPAWNER_AGENT_RELAY_URL=ws://localhost:3000 \
 BUZZ_SPAWNER_STATE_DIR=~/.buzz-demo-spawner/state \
+BUZZ_SPAWNER_AGENT_IMAGE=buzz-acp:local \
 BUZZ_SPAWNER_AGENT_COMMAND=claude-agent-acp \
 BUZZ_SPAWNER_DEFAULT_PROVIDER=anthropic \
 BUZZ_SPAWNER_DEFAULT_MODEL=claude-sonnet-5 \
@@ -90,6 +92,16 @@ BUZZ_SPAWNER_NAME=demo-vps \
 BUZZ_SPAWNER_AI_CATALOG='[{"id":"anthropic","models":["claude-opus-5","claude-sonnet-5"]}]' \
 cargo run -p buzz-spawner
 ```
+
+- `BUZZ_SPAWNER_AGENT_RELAY_URL` is the relay address handed to agent
+  *containers* — it defaults to `BUZZ_SPAWNER_RELAY_URL`, but must be a host
+  the containers can actually reach **and** the same public host your desktop
+  uses (the Host header is the tenant). On macOS with a host-run relay, use
+  a LAN hostname like `ws://<your-mac>.local:3000` for both, or
+  `ws://host.docker.internal:3000` for the agent URL.
+- `BUZZ_SPAWNER_AGENT_IMAGE=buzz-acp:local` points at a locally built agent
+  image instead of the default `ghcr.io/block/buzz-acp:main` — build one with
+  `docker build -t buzz-acp:local .` (see the GHCR pull-auth trick below).
 
 ### VPS (Docker Compose)
 
