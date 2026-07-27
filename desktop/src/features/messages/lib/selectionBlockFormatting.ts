@@ -14,6 +14,20 @@ function canSplitInsideTextblock(
   );
 }
 
+function mapRangeThroughLatestStep(
+  transaction: Transaction,
+  from: number,
+  to: number,
+): { from: number; to: number } {
+  const stepMap = transaction.steps.at(-1)?.getMap();
+  return stepMap
+    ? {
+        from: stepMap.map(from, 1),
+        to: stepMap.map(to, -1),
+      }
+    : { from, to };
+}
+
 /**
  * Isolate a non-empty text selection at exact block boundaries.
  *
@@ -38,22 +52,26 @@ export function isolateSelectionForBlockFormatting(
 
   let { from, to } = transaction.selection;
 
+  const nodeAfterSelection = transaction.doc.resolve(to).nodeAfter;
+  if (nodeAfterSelection?.type.name === "hardBreak") {
+    transaction.delete(to, to + nodeAfterSelection.nodeSize);
+    ({ from, to } = mapRangeThroughLatestStep(transaction, from, to));
+  }
+
+  const nodeBeforeSelection = transaction.doc.resolve(from).nodeBefore;
+  if (nodeBeforeSelection?.type.name === "hardBreak") {
+    transaction.delete(from - nodeBeforeSelection.nodeSize, from);
+    ({ from, to } = mapRangeThroughLatestStep(transaction, from, to));
+  }
+
   if (canSplitInsideTextblock(transaction, to)) {
     transaction.split(to);
-    const splitMap = transaction.steps.at(-1)?.getMap();
-    if (splitMap) {
-      from = splitMap.map(from, 1);
-      to = splitMap.map(to, -1);
-    }
+    ({ from, to } = mapRangeThroughLatestStep(transaction, from, to));
   }
 
   if (canSplitInsideTextblock(transaction, from)) {
     transaction.split(from);
-    const splitMap = transaction.steps.at(-1)?.getMap();
-    if (splitMap) {
-      from = splitMap.map(from, 1);
-      to = splitMap.map(to, -1);
-    }
+    ({ from, to } = mapRangeThroughLatestStep(transaction, from, to));
   }
 
   transaction.setSelection(TextSelection.create(transaction.doc, from, to));

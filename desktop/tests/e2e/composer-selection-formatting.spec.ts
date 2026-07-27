@@ -173,6 +173,20 @@ test("block formatting preserves the lines around a selected composer line", asy
   await expect(input.locator(":scope > p").first()).toHaveText("before");
   await expect(input.locator(":scope > ul")).toHaveText("selected");
   await expect(input.locator(":scope > p").last()).toHaveText("after");
+
+  await page.getByTestId("send-message").click();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (
+            window as Window & {
+              __BUZZ_E2E_SIGNED_EVENTS__?: Array<{ content: string }>;
+            }
+          ).__BUZZ_E2E_SIGNED_EVENTS__?.at(-1)?.content,
+      ),
+    )
+    .toBe("before\n\n- selected\n\nafter");
 });
 
 test("block formatting restores a selection collapsed by the toolbar interaction", async ({
