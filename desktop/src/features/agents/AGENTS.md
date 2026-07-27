@@ -106,6 +106,13 @@ with a TypeScript lookup table or an id comparison in a component.
    Edit. In Edit,
    selecting Custom command keeps its required command field beside the harness
    picker rather than hiding it in Advanced.
+10. **Persona behavior edits update only the explicitly targeted linked
+    instance.** Existing instances may intentionally override their persona's
+    mint-time defaults. When a definition edit changes `respondTo`, its
+    allowlist, or `parallelism`, mirror that behavior group onto the selected
+    persona-linked managed agent so its running process restarts with the saved
+    policy. Do not fan the edit out to every instance of the definition, and do
+    not overwrite instance behavior for unrelated definition edits.
 
 ## The tests that enforce this
 

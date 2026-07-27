@@ -75,6 +75,7 @@ type MockManagedAgentSeed = {
   name: string;
   avatarUrl?: string | null;
   personaId?: string | null;
+  parallelism?: number;
   /** Harness/runtime id pin; `null` = inherit from persona (native default). */
   runtime?: string | null;
   status?: RawManagedAgent["status"];
@@ -119,6 +120,9 @@ type MockPersonaSeed = {
   model?: string | null;
   provider?: string | null;
   namePool?: string[];
+  respondTo?: "owner-only" | "allowlist" | "anyone";
+  respondToAllowlist?: string[];
+  parallelism?: number | null;
 };
 
 type MockTeamSeed = {
@@ -2012,7 +2016,7 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     turn_timeout_seconds: 320,
     idle_timeout_seconds: null,
     max_turn_duration_seconds: null,
-    parallelism: 1,
+    parallelism: seed.parallelism ?? 1,
     system_prompt: null,
     avatar_url: seed.avatarUrl ?? null,
     model: null,
@@ -2179,6 +2183,9 @@ function resetMockPersonas(config?: E2eConfig) {
       is_active: persona.isActive ?? true,
       source_team: persona.sourceTeam ?? null,
       env_vars: { ...(persona.envVars ?? {}) },
+      respond_to: persona.respondTo ?? null,
+      respond_to_allowlist: [...(persona.respondToAllowlist ?? [])],
+      parallelism: persona.parallelism ?? null,
       created_at: now,
       updated_at: now,
     });
@@ -7958,6 +7965,7 @@ async function handleUpdateManagedAgent(args: {
     model?: string | null;
     systemPrompt?: string | null;
     envVars?: Record<string, string>;
+    parallelism?: number;
     respondTo?: "owner-only" | "allowlist" | "anyone";
     respondToAllowlist?: string[];
   };
@@ -7974,6 +7982,9 @@ async function handleUpdateManagedAgent(args: {
   }
   if (args.input.envVars !== undefined) {
     agent.env_vars = { ...args.input.envVars };
+  }
+  if (args.input.parallelism !== undefined) {
+    agent.parallelism = args.input.parallelism;
   }
   if (args.input.respondTo !== undefined) {
     agent.respond_to = args.input.respondTo;

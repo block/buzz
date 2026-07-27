@@ -65,6 +65,39 @@ async function openEditDialog(page: import("@playwright/test").Page) {
   });
 }
 
+async function readManagedAgent(
+  page: import("@playwright/test").Page,
+  pubkey: string,
+): Promise<{
+  parallelism: number;
+  respondTo: string;
+  respondToAllowlist: string[];
+}> {
+  return page.evaluate(async (targetPubkey) => {
+    const tauriWindow = window as Window & {
+      __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
+        command: string,
+        payload?: Record<string, unknown>,
+      ) => Promise<unknown>;
+    };
+    const invoke = tauriWindow.__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
+    if (!invoke) throw new Error("Mock invoke bridge is unavailable.");
+    const agents = (await invoke("list_managed_agents")) as Array<{
+      pubkey: string;
+      parallelism: number;
+      respond_to: string;
+      respond_to_allowlist: string[];
+    }>;
+    const agent = agents.find((candidate) => candidate.pubkey === targetPubkey);
+    if (!agent) throw new Error(`Managed agent ${targetPubkey} not found.`);
+    return {
+      parallelism: agent.parallelism,
+      respondTo: agent.respond_to,
+      respondToAllowlist: agent.respond_to_allowlist,
+    };
+  }, pubkey);
+}
+
 /**
  * Pick an option from a PersonaDropdownField (menu-based, not a native
  * <select> — Create's fields are selects, Edit's are not).
@@ -276,6 +309,56 @@ test.describe("edit agent dialog", () => {
     await expect(
       defaults.getByText("claude-opus-4-5", { exact: true }),
     ).toBeVisible();
+  });
+
+  test("profile Edit applies behavior changes to the linked instance", async ({
+    page,
+  }) => {
+    await installMockBridge(page, {
+      bakedBuildEnv: BAKED_DEFAULTS,
+      managedAgents: [
+        {
+          pubkey: AGENT_PUBKEY,
+          name: AGENT_NAME,
+          personaId: PERSONA_ID,
+          status: "stopped",
+          channelNames: ["agents"],
+          respondTo: "allowlist",
+          respondToAllowlist: ["a".repeat(64)],
+          parallelism: 4,
+        },
+      ],
+      personas: [
+        {
+          id: PERSONA_ID,
+          displayName: AGENT_NAME,
+          systemPrompt: "You are the edit-agent e2e persona.",
+          respondTo: "allowlist",
+          respondToAllowlist: ["a".repeat(64)],
+          parallelism: 4,
+        },
+      ],
+    });
+
+    await page.goto("/");
+    await page.getByTestId("open-agents-view").click();
+    await page
+      .getByRole("button", { name: `${AGENT_NAME} agent profile` })
+      .click();
+    await page.getByTestId("user-profile-edit-agent").click();
+    await page.getByRole("button", { name: "Advanced", exact: true }).click();
+    await pickDropdownOption(page, "agent-respond-to", "Anyone");
+    await page.locator("#persona-parallelism").fill("8");
+    await page.getByTestId("persona-dialog-submit").click();
+    await expect(page.getByTestId("persona-dialog")).not.toBeVisible();
+
+    await expect
+      .poll(() => readManagedAgent(page, AGENT_PUBKEY))
+      .toEqual({
+        parallelism: 8,
+        respondTo: "anyone",
+        respondToAllowlist: [],
+      });
   });
 
   test("profile Edit routes persona-linked agents to the definition editor", async ({

@@ -47,6 +47,7 @@ type MockManagedAgentSeed = {
   pubkey: string;
   name: string;
   personaId?: string | null;
+  parallelism?: number;
   status?: "running" | "stopped" | "deployed" | "not_deployed";
   channelNames?: string[];
   channelIds?: string[];
@@ -103,6 +104,9 @@ type MockPersonaSeed = {
   /** Provider pinned on the persona. Leave empty for Codex/Claude runtimes. */
   provider?: string | null;
   namePool?: string[];
+  respondTo?: "owner-only" | "allowlist" | "anyone";
+  respondToAllowlist?: string[];
+  parallelism?: number | null;
 };
 
 type MockTeamSeed = {
