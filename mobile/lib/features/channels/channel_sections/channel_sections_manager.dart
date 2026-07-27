@@ -108,6 +108,12 @@ class ChannelSectionsManager {
   void _scheduleStartupRetry() {
     if (_disposed) return;
     _startupRetryTimer?.cancel();
+    // The inner shift cap is overflow protection, not the delay policy: the
+    // attempt counter grows for the process lifetime, and an unchecked `<<`
+    // past 62 wraps negative, which would make the Timer fire immediately in
+    // a hot loop. At the default 2s base the outer 30s clamp is what callers
+    // actually observe (2s, 4s, …, 30s); the shift cap only bites for the
+    // tiny injected bases used in tests.
     final delayMs = min(
       _startupRetryBaseDelay.inMilliseconds << min(_startupRetryAttempt, 5),
       30000,
