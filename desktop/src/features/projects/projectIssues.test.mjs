@@ -99,6 +99,32 @@ test("tag helpers drop malformed value-less tags", () => {
   assert.equal(issue.title, "Something is broken");
 });
 
+test("preserves root and comment tags for rich content rendering", () => {
+  const root = issueEvent({
+    tags: [
+      ["a", REPO_ADDRESS],
+      ["subject", "Something is broken"],
+      ["imeta", "url https://relay.example/media/root.png", "m image/png"],
+    ],
+  });
+  const comment = {
+    id: "comment-rich-content",
+    kind: 1,
+    pubkey: ATTACKER,
+    created_at: 200,
+    content: "![Screenshot](https://relay.example/media/comment.png)",
+    tags: [
+      ["e", root.id, "", "root"],
+      ["imeta", "url https://relay.example/media/comment.png", "m image/png"],
+    ],
+  };
+
+  const issue = eventToProjectIssue(root, [], [comment]);
+
+  assert.deepEqual(issue.tags, [root.tags[2]]);
+  assert.deepEqual(issue.comments[0].tags, [comment.tags[1]]);
+});
+
 test("builds repository-scoped issue creation tags", () => {
   assert.deepEqual(
     buildGitIssueTags({

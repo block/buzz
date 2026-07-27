@@ -127,7 +127,11 @@ const overrides = new Map([
   // receipts (write_agent_runtime_receipt atomic JSON + remove/read_all
   // helpers) replace the pubkey-keyed PID file, plus the hashed pair-scoped
   // runtime log path. Load-bearing crash-recovery surface; queued to split.
-  ["src-tauri/src/managed_agents/storage.rs", 1383],
+  // harness-log reader fix: the inline test module moved to storage_tests.rs
+  // (`#[path]`-included), ratcheting 1383 -> 826. Both halves are now under the
+  // 1000 default; entries kept as ratchets.
+  ["src-tauri/src/managed_agents/storage.rs", 826],
+  ["src-tauri/src/managed_agents/storage_tests.rs", 701],
   // config-bridge setup-payload env-boundary fix adds readiness wiring in
   // spawn_agent_child; load-bearing security fix, queued to split.
   ["src-tauri/src/managed_agents/config_bridge/reader.rs", 1016],
