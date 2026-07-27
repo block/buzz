@@ -213,7 +213,7 @@ impl Store {
 /// every agent's secret key, and creating it under the process umask would
 /// leave a window — however brief — where anything on the host could read it.
 #[cfg(unix)]
-fn write_private(path: &Path, contents: &str) -> Result<()> {
+pub(crate) fn write_private(path: &Path, contents: &str) -> Result<()> {
     use std::io::Write;
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
@@ -231,7 +231,7 @@ fn write_private(path: &Path, contents: &str) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn write_private(path: &Path, contents: &str) -> Result<()> {
+pub(crate) fn write_private(path: &Path, contents: &str) -> Result<()> {
     std::fs::write(path, contents)?;
     Ok(())
 }
