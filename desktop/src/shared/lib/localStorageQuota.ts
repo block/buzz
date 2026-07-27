@@ -10,6 +10,7 @@
 const PURE_CACHE_KEY_PREFIXES = [
   "buzz-channel-messages.v1",
   "buzz-channels.v1",
+  "buzz-agent-command-catalog.v1",
   "buzz-timeline-skeleton-shape.v1",
 ];
 

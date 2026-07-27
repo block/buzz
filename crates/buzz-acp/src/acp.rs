@@ -1571,16 +1571,25 @@ impl AcpClient {
             }
             "available_commands_update" => {
                 // Advertised slash commands (ACP slash-commands extension).
-                // Logged for observability; UI surfacing is a follow-up.
-                let names: Vec<&str> = update["availableCommands"]
+                // Forward the complete latest list through the encrypted observer
+                // stream so Desktop can offer commands for the originating agent.
+                let commands = update["availableCommands"]
                     .as_array()
-                    .map(|cmds| cmds.iter().filter_map(|c| c["name"].as_str()).collect())
+                    .cloned()
                     .unwrap_or_default();
+                let names: Vec<&str> = commands
+                    .iter()
+                    .filter_map(|command| command["name"].as_str())
+                    .collect();
                 tracing::info!(
                     target: "acp::update",
                     "available_commands_update: {} commands [{}]",
                     names.len(),
                     names.join(", ")
+                );
+                self.observe(
+                    "available_commands_captured",
+                    serde_json::json!({ "commands": commands }),
                 );
                 false
             }
@@ -3088,6 +3097,43 @@ mod tests {
                 },
             }
         })
+    }
+
+    #[tokio::test]
+    async fn available_commands_update_emits_complete_semantic_snapshot() {
+        let mut client = spawn_inert_client().await;
+        let observer = ObserverHandle::in_process();
+        client.set_observer(Some(observer.clone()), 3);
+
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "test-session",
+                "update": {
+                    "sessionUpdate": "available_commands_update",
+                    "availableCommands": [
+                        { "name": "review", "description": "Review changes" },
+                        { "name": "deploy", "description": "Ship it" }
+                    ]
+                }
+            }
+        });
+        let _ = client.handle_session_update(&msg);
+
+        let events = observer.snapshot();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, "available_commands_captured");
+        assert_eq!(events[0].agent_index, Some(3));
+        assert_eq!(
+            events[0].payload,
+            serde_json::json!({
+                "commands": [
+                    { "name": "review", "description": "Review changes" },
+                    { "name": "deploy", "description": "Ship it" }
+                ]
+            })
+        );
     }
 
     #[tokio::test]

@@ -12,6 +12,10 @@ import assert from "node:assert/strict";
 import { beforeEach, describe, it } from "node:test";
 
 import {
+  getAgentCommandCatalog,
+  resetAgentCommandCatalogForTests,
+} from "@/features/agents/agentCommandCatalog.ts";
+import {
   ingestArchivedObserverEvents,
   injectObserverEventsForE2E,
   getAgentObserverSnapshot,
@@ -74,6 +78,7 @@ function makeDecryptFail() {
 describe("ingestArchivedObserverEvents", () => {
   beforeEach(() => {
     resetAgentObserverStore();
+    resetAgentCommandCatalogForTests();
   });
 
   it("test_unknown_agent_drops_event_before_decrypt", async () => {
@@ -92,6 +97,28 @@ describe("ingestArchivedObserverEvents", () => {
     );
     const snap = getAgentObserverSnapshot(AGENT_PUBKEY, true);
     assert.equal(snap.events.length, 0);
+  });
+
+  it("hydrates command catalogs from trusted archived semantic frames", async () => {
+    _testRegisterKnownAgents(SUB_ID, [AGENT_PUBKEY]);
+    const ownerPubkey = "c".repeat(64);
+    const commandEvent = makeObserverEvent({
+      kind: "available_commands_captured",
+      payload: {
+        commands: [{ name: "review", description: "Review changes" }],
+      },
+    });
+
+    await ingestArchivedObserverEvents(
+      [makeRawEvent()],
+      makeDecrypt(commandEvent),
+      async () => ownerPubkey,
+    );
+
+    assert.deepEqual(
+      getAgentCommandCatalog(ownerPubkey).get(AGENT_PUBKEY)?.commands,
+      [{ name: "review", description: "Review changes" }],
+    );
   });
 
   it("test_mismatched_sender_drops_event_before_decrypt", async () => {
@@ -687,6 +714,7 @@ describe("eager initial hydration loop control flow (production runHydrationLoop
 describe("archive window holds more than MAX_OBSERVER_EVENTS (3000) frames", () => {
   beforeEach(() => {
     resetAgentObserverStore();
+    resetAgentCommandCatalogForTests();
   });
 
   it("test_archive_window_retains_all_events_beyond_3000_cap", async () => {
@@ -804,6 +832,7 @@ import { mergeObserverEventWindows } from "@/features/agents/ui/agentSessionPane
 describe("archive page subscription notification", () => {
   beforeEach(() => {
     resetAgentObserverStore();
+    resetAgentCommandCatalogForTests();
   });
 
   it("test_full_archive_page_notifies_subscribers", async () => {
@@ -882,6 +911,7 @@ describe("archive page subscription notification", () => {
 describe("raw-event-level merge: stateful aggregates across live/archive boundary", () => {
   beforeEach(() => {
     resetAgentObserverStore();
+    resetAgentCommandCatalogForTests();
   });
 
   it("test_tool_start_in_archive_plus_update_in_live_yields_complete_row", () => {
