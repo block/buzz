@@ -1,0 +1,220 @@
+#!/usr/bin/env bash
+# buzz-ctx — identity-bound context on the sovereign relay.
+#
+# Context heads are NIP-AE engrams (kind 30174): NIP-44 encrypted, HMAC-
+# addressed, last-write-wins per slug via addressable replacement. Session
+# records are append-only kind-1 events tagged for agent/project/machine.
+# Writes go to the local sovereign node; reads prefer local and fall back to
+# the Cloudflare replica, so context resolves from any environment.
+#
+# Usage:
+#   buzz-ctx save <scope> [file]        # head from file or stdin
+#   buzz-ctx load <scope>               # print current head content
+#   buzz-ctx ls                         # list context heads
+#   buzz-ctx log <project> <message>    # append a session record
+#   buzz-ctx sessions <project> [n]     # recent session records (default 10)
+#   buzz-ctx sync                       # push journal to the cloud replica
+#   buzz-ctx bind-agent <name> [days]   # mint an agent key + NIP-OA binding
+#   buzz-ctx artifact <file>            # store an immutable content-addressed blob
+#   buzz-ctx fetch <sha256> [out]       # fetch + verify an artifact
+#   buzz-ctx agreement export <stream> <reader-pubkey>...  # declare (offer)
+#   buzz-ctx agreement match <stream>   # evaluate the matched-pair rule
+#   buzz-ctx agreement list             # all declaration heads
+#
+# Environment (defaults for the sovereign laptop):
+#   BUZZ_CTX_HOME   ~/.buzz-local
+#   BUZZ_CTX_LOCAL  http://127.0.0.1:7777
+#   BUZZ_CTX_CLOUD  https://buzz-portable-relay.ted-slusser-a00.workers.dev
+#   BUZZ_CTX_AGENT  agent label for attribution (default: unattributed)
+set -euo pipefail
+
+HOME_DIR="${BUZZ_CTX_HOME:-$HOME/.buzz-local}"
+LOCAL_URL="${BUZZ_CTX_LOCAL:-http://127.0.0.1:7777}"
+CLOUD_URL="${BUZZ_CTX_CLOUD:-https://buzz-portable-relay.ted-slusser-a00.workers.dev}"
+AGENT="${BUZZ_CTX_AGENT:-unattributed}"
+CLIENT="$HOME_DIR/bin/sovereign-client"
+KEY="$HOME_DIR/node.key"
+MACHINE="$(hostname -s)"
+
+die() { echo "buzz-ctx: $*" >&2; exit 1; }
+[ -x "$CLIENT" ] || die "missing client at $CLIENT"
+[ -f "$KEY" ] || die "missing node key at $KEY"
+PUBKEY="$("$CLIENT" pubkey "$KEY")"
+
+relay_for_write() {
+  curl -sf --max-time 2 "$LOCAL_URL/health" >/dev/null || die "local sovereign node is not reachable at $LOCAL_URL (writes go to the source of truth; start it or set BUZZ_CTX_LOCAL)"
+  echo "$LOCAL_URL"
+}
+
+relay_for_read() {
+  if curl -sf --max-time 2 "$LOCAL_URL/health" >/dev/null; then
+    echo "$LOCAL_URL"
+  else
+    echo "cloud fallback: local node unreachable, reading $CLOUD_URL" >&2
+    echo "$CLOUD_URL"
+  fi
+}
+
+post_event() { # $1 = unsigned event JSON
+  local relay tmp
+  relay="$(relay_for_write)"
+  tmp="$(mktemp)"
+  printf '%s' "$1" > "$tmp"
+  "$CLIENT" post "$KEY" "$relay" "$tmp" >/dev/null
+  rm -f "$tmp"
+}
+
+case "${1:-}" in
+  save)
+    # Context heads are NIP-AE engrams (kind 30174): NIP-44 encrypted,
+    # slug-addressed via HMAC d tags, written with upstream buzz-cli.
+    scope="${2:?usage: buzz-ctx save <scope> [file]}"
+    relay="$(relay_for_write)"
+    cat "${3:-/dev/stdin}" | BUZZ_RELAY_URL="$relay" BUZZ_PRIVATE_KEY="$(cat "$KEY")" \
+      "$HOME_DIR/bin/buzz" mem set "mem/ctx/$scope" - --owner "$PUBKEY"
+    echo "saved encrypted head mem/ctx/$scope as $AGENT@$MACHINE"
+    ;;
+  load)
+    scope="${2:?usage: buzz-ctx load <scope>}"
+    relay="$(relay_for_read)"
+    BUZZ_RELAY_URL="$relay" BUZZ_PRIVATE_KEY="$(cat "$KEY")" \
+      "$HOME_DIR/bin/buzz" mem get "mem/ctx/$scope" --owner "$PUBKEY" \
+      || die "no head found for mem/ctx/$scope"
+    echo
+    ;;
+  ls)
+    relay="$(relay_for_read)"
+    BUZZ_RELAY_URL="$relay" BUZZ_PRIVATE_KEY="$(cat "$KEY")" \
+      "$HOME_DIR/bin/buzz" mem ls --owner "$PUBKEY"
+    ;;
+  artifact)
+    file="${2:?usage: buzz-ctx artifact <file>}"
+    relay="$(relay_for_write)"
+    "$CLIENT" upload "$KEY" "$relay" "$file" | sed 's/^200 //' | jq -r '"stored artifact " + .sha256 + " (" + (.size|tostring) + " bytes) — reference with tag [\"x\",\"" + .sha256 + "\"]"'
+    ;;
+  fetch)
+    sha="${2:?usage: buzz-ctx fetch <sha256> [out]}"
+    relay="$(relay_for_read)"
+    "$CLIENT" fetch "$KEY" "$relay" "$sha" ${3:+"$3"}
+    ;;
+  agreement)
+    # Sync declarations per sovereign-sync-agreement-v0.1-draft.
+    # Kind 30700 is PROVISIONAL pending upstream registry assignment.
+    AGREEMENT_KIND=30700
+    sub="${2:?usage: buzz-ctx agreement export|match|list ...}"
+    case "$sub" in
+      export)
+        stream="${3:?usage: buzz-ctx agreement export <stream> <reader-pubkey>...}"
+        shift 3
+        [ $# -ge 1 ] || die "at least one reader/destination pubkey required"
+        selection="$(jq -e --arg s "$stream" '.[$s]' "$HOME_DIR/streams.json")"           || die "stream $stream not declared in streams.json"
+        readers="$(printf '%s\n' "$@" | jq -R . | jq -sc 'map(["p", .])')"
+        event="$(jq -n --arg pk "$PUBKEY" --arg d "export/$stream" \
+          --argjson sel "$selection" --argjson readers "$readers" \
+          --arg ts "$(date +%s)" \
+          '{pubkey:$pk, created_at:($ts|tonumber), kind:30700,
+            tags:([["d",$d]] + $readers),
+            content:({status:"active", selection:$sel, artifacts:"referenced"}|tojson)}')"
+        post_event "$event"
+        echo "declared export/$stream (offer to: $*)"
+        ;;
+      match)
+        stream="${3:?usage: buzz-ctx agreement match <stream>}"
+        relay="$(relay_for_read)"
+        heads="$("$CLIENT" query "$KEY" "$relay" \
+          "[{\"kinds\":[30700],\"#d\":[\"export/$stream\",\"admit/$stream\"]}]" \
+          | sed 's/^200 //')"
+        printf '%s' "$heads" | jq -r --arg me "$PUBKEY" --arg s "$stream" '
+          def dtag(e): e.tags[] | select(.[0]=="d") | .[1];
+          def status(e): (e.content | fromjson).status // "active";
+          [.[] | select(dtag(.) == ("export/" + $s))] as $exports |
+          [.[] | select(dtag(.) == ("admit/" + $s))] as $admits |
+          if ($exports | length) == 0 then "UNMATCHED: no export declaration for \($s)"
+          elif ($admits | length) == 0 then
+            "OFFER OPEN: export by \($exports[0].pubkey[0:12])… (event \($exports[0].id[0:12])…), no admit half yet"
+          else
+            $exports[0] as $e | $admits[0] as $a |
+            ($a.tags[] | select(.[0]=="e") | .[1]) as $pin |
+            (if status($e) != "active" then "UNMATCHED: export status \(status($e))"
+             elif status($a) != "active" then "UNMATCHED: admit status \(status($a))"
+             elif $pin != $e.id then
+               "DRIFT: admit by \($a.pubkey[0:12])… pins \($pin[0:12])… but export head is \($e.id[0:12])… — re-pin required"
+             elif ([$e.tags[] | select(.[0]=="p") | .[1]] | index($a.pubkey)) == null then
+               "UNMATCHED: admit author \($a.pubkey[0:12])… is not an offered party on the export"
+             else
+               "MATCHED: \($s) — export \($e.id[0:12])… (\($e.pubkey[0:12])…) ⇄ admit \($a.id[0:12])… (\($a.pubkey[0:12])…)"
+             end)
+          end'
+        ;;
+      list)
+        relay="$(relay_for_read)"
+        "$CLIENT" query "$KEY" "$relay" '[{"kinds":[30700]}]' | sed 's/^200 //' \
+          | jq -r '.[] | (.tags[] | select(.[0]=="d") | .[1]) + "  " + ((.content|fromjson).status // "?") + "  by " + .pubkey[0:12] + "…  event " + .id[0:12] + "…"' \
+          | sort
+        ;;
+      *) die "unknown agreement subcommand: $sub" ;;
+    esac
+    ;;
+  bind-agent)
+    # Session binding v1: the agent gets its own key; the node (owner) key
+    # signs a time-bounded NIP-OA capability. Agent events stay authored by
+    # the agent key — attribution becomes a signature, not a claimed tag.
+    name="${2:?usage: buzz-ctx bind-agent <name> [days]}"
+    days="${3:-30}"
+    mkdir -p "$HOME_DIR/agents"
+    agent_key="$HOME_DIR/agents/$name.key"
+    [ -f "$agent_key" ] && die "agent $name already bound (key exists); remove $agent_key first to rebind"
+    agent_pub="$("$CLIENT" keygen "$agent_key")"
+    chmod 600 "$agent_key"
+    expiry=$(( $(date +%s) + days * 86400 ))
+    "$CLIENT" mint-auth "$KEY" "$agent_pub" "created_at<$expiry" > "$HOME_DIR/agents/$name.auth"
+    echo "bound agent $name ($agent_pub), capability expires $(date -r $expiry '+%Y-%m-%d')"
+    ;;
+  log)
+    project="${2:?usage: buzz-ctx log <project> <message>}"
+    message="${3:?usage: buzz-ctx log <project> <message>}"
+    signer_key="$KEY"
+    signer_pub="$PUBKEY"
+    auth_tag="null"
+    if [ -f "$HOME_DIR/agents/$AGENT.key" ]; then
+      signer_key="$HOME_DIR/agents/$AGENT.key"
+      signer_pub="$("$CLIENT" pubkey "$signer_key")"
+      auth_tag="$(cat "$HOME_DIR/agents/$AGENT.auth" 2>/dev/null || echo null)"
+    fi
+    event="$(jq -n --arg pk "$signer_pub" --arg c "$message" --arg p "$project" \
+      --arg agent "$AGENT" --arg machine "$MACHINE" --arg ts "$(date +%s)" \
+      --argjson auth "$auth_tag" \
+      '{pubkey:$pk, created_at:($ts|tonumber), kind:1,
+        tags:([["t","session:\($p)"],["agent",$agent],["machine",$machine]]
+              + (if $auth == null then [] else [$auth] end)),
+        content:$c}')"
+    relay="$(relay_for_write)"
+    tmp="$(mktemp)"; printf '%s' "$event" > "$tmp"
+    "$CLIENT" post "$signer_key" "$relay" "$tmp" >/dev/null; rm -f "$tmp"
+    if [ "$auth_tag" != "null" ]; then
+      echo "logged session record for $project as $AGENT@$MACHINE (agent-signed, owner-attested)"
+    else
+      echo "logged session record for $project as $AGENT@$MACHINE (node-signed)"
+    fi
+    ;;
+  sessions)
+    project="${2:?usage: buzz-ctx sessions <project> [n]}"
+    limit="${3:-10}"
+    relay="$(relay_for_read)"
+    result="$("$CLIENT" query "$KEY" "$relay" \
+      "[{\"kinds\":[1],\"#t\":[\"session:$project\"],\"limit\":$limit}]")"
+    printf '%s' "$result" | sed 's/^200 //' | jq -r \
+      '.[] | "\(.created_at | todate)  [\((.tags[]|select(.[0]=="agent"))[1] // "?")@\((.tags[]|select(.[0]=="machine"))[1] // "?")\(if any(.tags[]; .[0]=="auth") then " ✓" else "" end)]  \(.content)"'
+    ;;
+  sync)
+    exec "$HOME_DIR/bin/buzz-relay-push" \
+      --data "$HOME_DIR/sovereign.ndjson" \
+      --to "$CLOUD_URL" \
+      --source ted-laptop/sovereign \
+      --key "$KEY"
+    ;;
+  *)
+    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+    exit 1
+    ;;
+esac
