@@ -132,6 +132,11 @@ export class ChannelNotifyPrefsSyncManager {
         this.pendingStore = null;
         return;
       }
+      // Size seam: NIP-44 rejects plaintext over 65,535 bytes and the catch
+      // below only warns, so an oversized blob silently stops syncing while
+      // local state keeps working. Sparse entries keep the ceiling at several
+      // hundred *customized* channels. Shared with the four sibling kind-30078
+      // sidebar blobs; a common pre-encrypt budget is tracked separately.
       const ciphertext = await nip44EncryptToSelf(
         JSON.stringify({ version: 1, channels: merged.channels }),
       );

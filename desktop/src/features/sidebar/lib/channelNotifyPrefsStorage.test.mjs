@@ -111,6 +111,113 @@ test("parseNotifyEntry: ignores a zero muteUntil", () => {
   });
 });
 
+// ── hydration republish predicate (what applyRemote gates the republish on) ───
+
+test("merge/storesEqual: a local edit the remote blob lacks is detected, then settles", () => {
+  // The F2 sequence at the store level: a remote blob already exists from an
+  // earlier session, the user edits #random, and the debounce window is cut
+  // short (community switch / reload) so nothing pending survives. On return,
+  // the merge keeps the local edit — and comparing against the remote blob is
+  // what tells the hook it still has to publish.
+  const remote = {
+    version: 1,
+    channels: { eng: { level: "mentions", updatedAt: 100 } },
+  };
+  const localAfterLostDebounce = {
+    version: 1,
+    channels: {
+      eng: { level: "mentions", updatedAt: 100 },
+      random: { level: "mute", updatedAt: 200 },
+    },
+  };
+
+  const merged = mergeStores(localAfterLostDebounce, remote);
+  assert.deepEqual(merged.channels.random, { level: "mute", updatedAt: 200 });
+  assert.equal(storesEqual(merged, remote), false);
+
+  // Terminates: once our republished blob comes back on the subscription, the
+  // merge result equals it and the hook stops republishing.
+  assert.equal(storesEqual(mergeStores(merged, merged), merged), true);
+});
+
+test("merge/storesEqual: a remote blob that already holds every local entry needs no republish", () => {
+  const store = {
+    version: 1,
+    channels: { eng: { level: "mute", desktop: false, updatedAt: 100 } },
+  };
+  const remote = {
+    version: 1,
+    channels: { eng: { level: "mute", desktop: false, updatedAt: 100 } },
+  };
+  assert.equal(storesEqual(mergeStores(store, remote), remote), true);
+});
+
+// ── updatedAt clock-skew clamp ────────────────────────────────────────────────
+
+test("parse: an in-tolerance skewed updatedAt is preserved verbatim", () => {
+  const now = 1_800_000_000;
+  const parsed = parseNotifyPrefsPayload(
+    {
+      version: 1,
+      channels: { eng: { level: "mute", updatedAt: now + 120 } },
+    },
+    now,
+  );
+  assert.equal(parsed.channels.eng.updatedAt, now + 120);
+});
+
+test("parse: a far-future updatedAt is clamped, keeping every other field", () => {
+  const now = 1_800_000_000;
+  const parsed = parseNotifyPrefsPayload(
+    {
+      version: 1,
+      channels: {
+        eng: {
+          level: "mute",
+          muteUntil: now + 315_360_000,
+          desktop: false,
+          broadcasts: false,
+          followAllThreads: true,
+          mobile: false,
+          updatedAt: now + 315_360_000,
+        },
+      },
+    },
+    now,
+  );
+  assert.deepEqual(parsed.channels.eng, {
+    level: "mute",
+    // muteUntil is a legitimate absolute future timestamp — never clamped.
+    muteUntil: now + 315_360_000,
+    desktop: false,
+    broadcasts: false,
+    followAllThreads: true,
+    mobile: false,
+    updatedAt: now + 3_600,
+  });
+});
+
+test("merge: a local edit beats a clamped far-future remote entry", () => {
+  const now = 1_800_000_000;
+  // One of the user's own devices has a clock set to 2030 and published a mute.
+  const remote = parseNotifyPrefsPayload(
+    {
+      version: 1,
+      channels: { eng: { level: "mute", updatedAt: now + 315_360_000 } },
+    },
+    now,
+  );
+  // The correctly-clocked device then picks "All new posts".
+  const local = {
+    version: 1,
+    channels: { eng: { level: "all", updatedAt: now + 3_601 } },
+  };
+  assert.deepEqual(mergeStores(local, remote).channels.eng, {
+    level: "all",
+    updatedAt: now + 3_601,
+  });
+});
+
 // ── merge (per-channel max-updatedAt LWW, local wins ties) ────────────────────
 
 test("merge: unions keys and keeps the newer entry per channel", () => {

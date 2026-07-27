@@ -199,6 +199,15 @@ keys:
 There is no field-level merge and no per-field timestamp. Entries are opaque
 units under one `updatedAt`.
 
+Because the merge is a bare timestamp comparison, a single device with a badly
+wrong clock could otherwise pin an entry permanently: every correctly-clocked
+edit loses the merge, is overwritten by the remote blob, and the level silently
+reverts. On parse — of both the local mirror and a decrypted remote blob —
+clients therefore MUST clamp `updatedAt` to at most one hour ahead of their own
+clock. Legitimate cross-device skew is far below that bound, and the clamp caps
+the damage from a wrong clock at an hour. `muteUntil` MUST NOT be clamped: it is
+an absolute future timestamp by design.
+
 ### Writing
 
 Clients SHOULD debounce writes (the reference implementation uses 2 s), and MUST
@@ -213,9 +222,15 @@ Clients SHOULD suppress a publish whose merged payload is identical to the last
 one they published, comparing **all** entry fields — comparing only the mute
 dimension suppresses legitimate republishes of the other toggles.
 
-A local edge made before the first remote fetch completed MUST NOT be clobbered
-by the fetched snapshot: merge the fetched blob into the pending local state and
-republish the result.
+A local edit MUST NOT be clobbered by a fetched or subscribed snapshot: merge
+the snapshot into the local state, and republish whenever the merge result still
+holds anything the snapshot does not. Clients MUST decide this by comparing the
+merge result against the snapshot, **not** by checking whether a debounced
+publish is still outstanding — a debounce cancelled by a client restart, sign-out
+or community switch would otherwise lose the edit permanently and silently, since
+the local mirror keeps it while no device ever publishes it. The comparison
+terminates: once the client's own republished blob comes back, the merge result
+equals it.
 
 ## Levels
 

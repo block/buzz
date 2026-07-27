@@ -60,11 +60,34 @@ function isValidTimestamp(value: unknown): value is number {
 }
 
 /**
+ * How far into the future an `updatedAt` is trusted. `mergeStores` is a pure
+ * max-`updatedAt` comparison with no clock reference, so one of the user's own
+ * devices with a badly wrong clock would otherwise pin a channel's entry
+ * permanently: every correctly-clocked edit loses the merge, gets overwritten by
+ * the remote blob, and the level silently reverts (a legacy `channel-mutes`
+ * unmute cannot win either). One hour absorbs realistic NTP-less cross-device
+ * skew while capping the damage from a wrong clock to an hour.
+ */
+const MAX_FUTURE_SKEW_SECONDS = 3_600;
+
+function nowSeconds(): number {
+  return Math.floor(Date.now() / 1_000);
+}
+
+/**
  * Coerce one raw entry, dropping malformed known fields but preserving any
  * unknown fields. Returns null when the entry has no usable `updatedAt` (it
  * cannot participate in LWW merges, so it is not worth keeping).
+ *
+ * `updatedAt` is clamped to `now + MAX_FUTURE_SKEW_SECONDS`. This is the single
+ * choke point for both inbound paths (the localStorage mirror and the decrypted
+ * remote blob), which keeps `mergeStores` clock-free. `muteUntil` is *not*
+ * clamped — it is a legitimate absolute future timestamp.
  */
-export function parseNotifyEntry(value: unknown): ChannelNotifyEntry | null {
+export function parseNotifyEntry(
+  value: unknown,
+  now: number = nowSeconds(),
+): ChannelNotifyEntry | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return null;
   }
@@ -80,7 +103,10 @@ export function parseNotifyEntry(value: unknown): ChannelNotifyEntry | null {
   if (!isValidTimestamp(updatedAt)) return null;
   // Cast: `unknownFields` is intentionally opaque (forward-compat fields we
   // pass through untouched); the known fields are validated below.
-  const entry = { ...unknownFields, updatedAt } as ChannelNotifyEntry;
+  const entry = {
+    ...unknownFields,
+    updatedAt: Math.min(updatedAt, now + MAX_FUTURE_SKEW_SECONDS),
+  } as ChannelNotifyEntry;
   if (level === "all" || level === "mentions" || level === "mute") {
     entry.level = level;
   }
@@ -95,6 +121,7 @@ export function parseNotifyEntry(value: unknown): ChannelNotifyEntry | null {
 
 export function parseNotifyPrefsPayload(
   json: unknown,
+  now: number = nowSeconds(),
 ): ChannelNotifyPrefsStore | null {
   if (typeof json !== "object" || json === null) return null;
   const obj = json as Record<string, unknown>;
@@ -108,7 +135,7 @@ export function parseNotifyPrefsPayload(
     for (const [channelId, value] of Object.entries(
       obj.channels as Record<string, unknown>,
     )) {
-      const entry = parseNotifyEntry(value);
+      const entry = parseNotifyEntry(value, now);
       if (entry) channels[channelId] = entry;
     }
   }

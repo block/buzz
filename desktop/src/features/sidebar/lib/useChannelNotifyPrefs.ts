@@ -21,6 +21,7 @@ import {
   readChannelNotifyPrefsStore,
   setChannelEntry,
   storageKey,
+  storesEqual,
   writeChannelNotifyPrefsStore,
   type ChannelNotifyEntry,
   type ChannelNotifyLevel,
@@ -133,15 +134,22 @@ export function useChannelNotifyPrefs(
         }
         lastAppliedRemoteTs.current = remote.createdAt;
         lastAppliedEventId.current = remote.eventId;
-        // Hydration guard (#2947): an edit made before the first remote blob
-        // arrived is still in the debounce window. Cancel that publish, but
-        // re-publish the merged store so the local edit is not silently dropped.
-        const pending = managerRef.current?.getPendingStore() ?? null;
+        // Hydration guard (#2947), generalized: republish whenever the merge
+        // result still holds local state the remote blob does not. Gating this
+        // on a surviving pending publish lost the edit outright whenever the
+        // debounce window (2 s) was cut short — a community switch, sign-out or
+        // reload runs `destroy()`, which drops `pendingStore`, and the fresh
+        // manager built on return has nothing pending to rescue. The comparison
+        // subsumes the pending case (a still-debounced edit is by definition
+        // absent from the remote blob) and terminates: once the subscription
+        // delivers our own new blob, `merged` equals `remote.store`.
         managerRef.current?.cancelPendingPublish();
         const merged = mergeStores(prev, remote.store);
         if (!writeChannelNotifyPrefsStore(pubkey, relayUrl, merged))
           return prev;
-        if (pending) managerRef.current?.publishPrefs(merged);
+        if (!storesEqual(merged, remote.store)) {
+          managerRef.current?.publishPrefs(merged);
+        }
         return merged;
       };
     },
