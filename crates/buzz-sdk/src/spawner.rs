@@ -68,6 +68,9 @@ pub const MAX_RESPOND_TO_ALLOWLIST: usize = 256;
 /// Byte length of the attestation handshake nonce.
 pub const ATTESTATION_NONCE_BYTES: usize = 32;
 
+/// Maximum byte length of an owner credential in a `CredentialUpdate` frame.
+pub const MAX_CREDENTIAL_BYTES: usize = 512;
+
 // ---------------------------------------------------------------------------
 // Announcement (kind 10180)
 // ---------------------------------------------------------------------------
@@ -372,10 +375,18 @@ pub struct SpawnerAgentStatus {
     /// prompt update has been applied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_hash: Option<String>,
+    /// True when the agent is held stopped because its owner has not delivered
+    /// a provider credential (see [`AttestationFrame::CredentialUpdate`]).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub needs_credential: bool,
 }
 
 fn is_zero(n: &u32) -> bool {
     *n == 0
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 impl SpawnerAgentStatus {
@@ -540,16 +551,38 @@ pub enum AttestationFrame {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
     },
+    /// Owner → spawner: set or replace the owner's provider credential.
+    ///
+    /// Owner-scoped, not agent-scoped: one token covers every agent this owner
+    /// runs on the spawner. An empty string clears it. The token never appears
+    /// in any hash or public event — unlike prompt updates there is no
+    /// world-readable echo; delivery is confirmed by [`Self::CredentialAck`].
+    CredentialUpdate {
+        /// The raw token (`sk-ant-oat…` OAuth token or `sk-ant-api…` API key).
+        /// Empty clears the stored credential.
+        credential: String,
+    },
+    /// Spawner → owner: delivery confirmation for a `CredentialUpdate`.
+    CredentialAck {
+        /// Whether the update was stored.
+        accepted: bool,
+        /// Human-readable detail when `accepted` is false.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
 }
 
 impl AttestationFrame {
     /// The agent pubkey this frame concerns, regardless of variant.
+    ///
+    /// Empty for the owner-scoped credential variants, which concern no agent.
     pub fn agent_pubkey(&self) -> &str {
         match self {
             Self::Request { agent_pubkey, .. }
             | Self::Response { agent_pubkey, .. }
             | Self::Reject { agent_pubkey, .. }
             | Self::PromptUpdate { agent_pubkey, .. } => agent_pubkey,
+            Self::CredentialUpdate { .. } | Self::CredentialAck { .. } => "",
         }
     }
 
@@ -561,22 +594,47 @@ impl AttestationFrame {
             Self::Request { nonce, .. }
             | Self::Response { nonce, .. }
             | Self::Reject { nonce, .. } => nonce,
-            Self::PromptUpdate { .. } => "",
+            Self::PromptUpdate { .. }
+            | Self::CredentialUpdate { .. }
+            | Self::CredentialAck { .. } => "",
         }
     }
 
     /// The spec slug this frame concerns.
+    ///
+    /// Empty for the owner-scoped credential variants.
     pub fn spec_slug(&self) -> &str {
         match self {
             Self::Request { spec_slug, .. }
             | Self::Response { spec_slug, .. }
             | Self::Reject { spec_slug, .. }
             | Self::PromptUpdate { spec_slug, .. } => spec_slug,
+            Self::CredentialUpdate { .. } | Self::CredentialAck { .. } => "",
         }
     }
 
     /// Validate structural invariants shared by every variant.
     pub fn validate(&self) -> Result<(), SdkError> {
+        match self {
+            Self::CredentialUpdate { credential } => {
+                // The error deliberately does not echo the credential.
+                if credential.len() > MAX_CREDENTIAL_BYTES {
+                    return Err(SdkError::InvalidInput(format!(
+                        "credential exceeds {MAX_CREDENTIAL_BYTES} bytes"
+                    )));
+                }
+                return Ok(());
+            }
+            Self::CredentialAck { message, .. } => {
+                if message.as_ref().is_some_and(|m| m.len() > 2048) {
+                    return Err(SdkError::InvalidInput(
+                        "credential ack message exceeds 2048 bytes".into(),
+                    ));
+                }
+                return Ok(());
+            }
+            _ => {}
+        }
         check_spec_slug(self.spec_slug())?;
         check_pubkey_hex(self.agent_pubkey(), "agent_pubkey")?;
         // A prompt update opens no handshake round, so it carries no nonce.
@@ -912,6 +970,7 @@ mod tests {
             error: None,
             restart_count: 3,
             prompt_hash: None,
+            needs_credential: false,
         };
         assert!(status.validate().is_err());
         status.error = Some("image pull failed".into());
@@ -930,6 +989,7 @@ mod tests {
             error: None,
             restart_count: 0,
             prompt_hash: None,
+            needs_credential: false,
         };
         let event = build_spawner_agent_status("fizz-prod", &owner.public_key().to_hex(), &status)
             .unwrap()
@@ -1016,6 +1076,7 @@ mod tests {
             error: None,
             restart_count: 0,
             prompt_hash: Some("ab".repeat(32)),
+            needs_credential: false,
         };
         let back: SpawnerAgentStatus =
             serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
@@ -1097,6 +1158,83 @@ mod tests {
             nonce: "tooshort".into(),
         };
         assert!(frame.validate().is_err());
+    }
+
+    #[test]
+    fn credential_update_round_trips_and_is_owner_scoped() {
+        let frame = AttestationFrame::CredentialUpdate {
+            credential: "sk-ant-oat01-abc".into(),
+        };
+        assert!(frame.validate().is_ok());
+        // Owner-scoped: no agent, no slug, no nonce.
+        assert_eq!(frame.agent_pubkey(), "");
+        assert_eq!(frame.spec_slug(), "");
+        assert_eq!(frame.nonce(), "");
+        let json = serde_json::to_string(&frame).unwrap();
+        assert!(json.contains(r#""type":"credential_update""#));
+        assert_eq!(
+            serde_json::from_str::<AttestationFrame>(&json).unwrap(),
+            frame
+        );
+    }
+
+    #[test]
+    fn credential_update_may_be_empty_to_clear() {
+        let frame = AttestationFrame::CredentialUpdate {
+            credential: String::new(),
+        };
+        assert!(frame.validate().is_ok());
+    }
+
+    #[test]
+    fn credential_update_rejects_oversized_tokens() {
+        let frame = AttestationFrame::CredentialUpdate {
+            credential: "x".repeat(MAX_CREDENTIAL_BYTES + 1),
+        };
+        assert!(frame.validate().is_err());
+    }
+
+    #[test]
+    fn credential_ack_round_trips() {
+        let frame = AttestationFrame::CredentialAck {
+            accepted: true,
+            message: None,
+        };
+        assert!(frame.validate().is_ok());
+        let json = serde_json::to_string(&frame).unwrap();
+        assert!(json.contains(r#""type":"credential_ack""#));
+        assert_eq!(
+            serde_json::from_str::<AttestationFrame>(&json).unwrap(),
+            frame
+        );
+    }
+
+    #[test]
+    fn status_needs_credential_round_trips_and_defaults_false() {
+        let s = SpawnerAgentStatus {
+            phase: SpawnPhase::Stopped,
+            agent_pubkey: None,
+            spec_hash: None,
+            error: None,
+            restart_count: 0,
+            prompt_hash: None,
+            needs_credential: true,
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("needs_credential"));
+        let back: SpawnerAgentStatus = serde_json::from_str(&json).unwrap();
+        assert!(back.needs_credential);
+        // Old events without the field still parse, and false is omitted.
+        let legacy: SpawnerAgentStatus =
+            serde_json::from_str(r#"{"phase":"running"}"#).unwrap();
+        assert!(!legacy.needs_credential);
+        let quiet = SpawnerAgentStatus {
+            needs_credential: false,
+            ..s
+        };
+        assert!(!serde_json::to_string(&quiet)
+            .unwrap()
+            .contains("needs_credential"));
     }
 
     #[test]
