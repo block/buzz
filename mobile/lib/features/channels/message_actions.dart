@@ -434,12 +434,12 @@ class _FastActionTile extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             children: [
               Icon(icon, size: 20, color: context.colors.secondary),
-              const SizedBox(height: Grid.half),
+              const SizedBox(height: Grid.xxs),
               Text(
                 label,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: context.textTheme.labelSmall?.copyWith(
+                style: context.textTheme.labelMedium?.copyWith(
                   color: context.colors.onSurface,
                   fontWeight: FontWeight.w600,
                 ),
