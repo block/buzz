@@ -178,15 +178,24 @@ fn persona_prompt_edit_changes_hash() {
 }
 
 #[test]
-fn workspace_relay_change_trips_hash_even_for_stored_record_relay() {
-    // The legacy per-record relay pin is ignored (#2122): every record spawns
-    // against the active workspace relay, so a workspace relay change means a
-    // restart would change what runs — pinned records included.
+fn workspace_relay_change_does_not_trip_hash_for_pinned_record() {
+    // #2515: a pinned record spawns against its pinned relay in every
+    // workspace, so a workspace relay change leaves what a restart would run
+    // untouched — no restart badge.
     let rec = record();
-    assert!(
-        !rec.relay_url.is_empty(),
-        "fixture should carry a legacy pin"
+    assert!(!rec.relay_url.is_empty(), "fixture should carry a pin");
+    assert_eq!(
+        spawn_config_hash(&rec, &[], &[], "wss://relay-a.example", &Default::default()),
+        spawn_config_hash(&rec, &[], &[], "wss://relay-b.example", &Default::default())
     );
+}
+
+#[test]
+fn workspace_relay_change_trips_hash_for_unpinned_record() {
+    // An unpinned record still follows the active workspace relay, so a
+    // workspace change means a restart would change what runs.
+    let mut rec = record();
+    rec.relay_url = String::new();
     assert_ne!(
         spawn_config_hash(&rec, &[], &[], "wss://relay-a.example", &Default::default()),
         spawn_config_hash(&rec, &[], &[], "wss://relay-b.example", &Default::default())
@@ -194,14 +203,14 @@ fn workspace_relay_change_trips_hash_even_for_stored_record_relay() {
 }
 
 #[test]
-fn stored_record_relay_does_not_affect_hash() {
-    // Editing the (ignored) stored pin must not badge a restart: what a
-    // restart would run is identical either way.
+fn stored_record_relay_affects_hash() {
+    // Editing the pin changes which relay a restart would connect to, so it
+    // must badge a restart.
     let mut a = record();
     let mut b = record();
     a.relay_url = String::new();
-    b.relay_url = "wss://legacy-pin.example".into();
-    assert_eq!(
+    b.relay_url = "wss://pin.example".into();
+    assert_ne!(
         spawn_config_hash(&a, &[], &[], "wss://ws.example", &Default::default()),
         spawn_config_hash(&b, &[], &[], "wss://ws.example", &Default::default())
     );

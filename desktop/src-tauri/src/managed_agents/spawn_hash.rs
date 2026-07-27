@@ -16,9 +16,9 @@
 //!   re-snapshot. Harness command, args/mcp, env layering, and the record
 //!   fields the spawn env writes read are hashed as spawn resolves them.
 //! - The relay URL is hashed in resolved form (`effective_agent_relay_url`):
-//!   every record spawns against the active workspace relay (legacy per-record
-//!   pins are ignored), so a workspace relay change means a restart would
-//!   change what runs.
+//!   a pinned record spawns against its pinned relay (#2515) and an unpinned
+//!   one against the active workspace relay, so the hash trips exactly when a
+//!   restart would change which relay the child connects to.
 //! - Channel membership is not an input: agents pick up channel changes live
 //!   (#1468), never via restart.
 //!

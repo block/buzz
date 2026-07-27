@@ -1008,10 +1008,10 @@ fn unpinned_record_resolves_pair_key_per_workspace() {
 }
 
 #[test]
-fn stored_relay_pin_is_ignored_in_pair_key_resolution() {
-    // Legacy pins are ignored (#2122): a record carrying a creation-era
-    // `relay_url` resolves the same per-workspace pair key an unpinned record
-    // does, so summaries/stop act on the community being viewed.
+fn stored_relay_pin_wins_pair_key_resolution() {
+    // #2515: a pinned record resolves the same pair key in every workspace —
+    // summaries, start, and stop all act on the instance's own community no
+    // matter which one is being viewed.
     let pubkey = "aa".repeat(32);
     let from_a =
         super::resolve_workspace_pair_key(&pubkey, "wss://pinned.example", "wss://one.example")
@@ -1019,9 +1019,8 @@ fn stored_relay_pin_is_ignored_in_pair_key_resolution() {
     let from_b =
         super::resolve_workspace_pair_key(&pubkey, "wss://pinned.example", "wss://two.example")
             .unwrap();
-    assert_ne!(from_a, from_b);
-    assert_eq!(from_a.relay_url, "wss://one.example");
-    assert_eq!(from_b.relay_url, "wss://two.example");
+    assert_eq!(from_a, from_b);
+    assert_eq!(from_a.relay_url, "wss://pinned.example");
 }
 
 #[test]

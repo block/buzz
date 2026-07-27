@@ -469,9 +469,11 @@ pub async fn reconcile_managed_agent_runtimes(
         for record in records
             .iter()
             .filter(|record| record.start_on_app_launch && record.backend == BackendKind::Local)
-        // The legacy per-record relay pin is deliberately ignored here — see
-        // `effective_agent_relay_url`. Every local auto-start agent fans out
-        // to every configured community.
+        // Relay resolution happens per job via `effective_agent_relay_url`:
+        // an unpinned local auto-start agent fans out to every configured
+        // community, while a pinned record resolves every job to its pinned
+        // relay — the duplicate jobs collapse in start_pair's already-running
+        // check, so the instance starts once, on its own community (#2515).
         {
             jobs.push((record.clone(), community.relay_url.clone()));
         }
@@ -607,19 +609,21 @@ mod tests {
     }
 
     #[test]
-    fn legacy_relay_pin_is_ignored_for_fan_out() {
-        // Zero-touch cutover (#2122): a record carrying a creation-era
-        // `relay_url` pin must fan out exactly like an unpinned one — the
-        // stored field is parsed but never consulted. See
+    fn relay_pin_scopes_fan_out() {
+        // #2515: an unpinned record fans out to the requested community, while
+        // a pinned record resolves every fan-out job to its pinned relay so
+        // the instance only ever connects to its own community. See
         // `effective_agent_relay_url`.
         let unpinned = record_with_relay("");
         let pinned = record_with_relay("wss://one.example");
-        for record in [&unpinned, &pinned] {
-            assert_eq!(
-                crate::relay::effective_agent_relay_url(&record.relay_url, "wss://two.example"),
-                "wss://two.example"
-            );
-        }
+        assert_eq!(
+            crate::relay::effective_agent_relay_url(&unpinned.relay_url, "wss://two.example"),
+            "wss://two.example"
+        );
+        assert_eq!(
+            crate::relay::effective_agent_relay_url(&pinned.relay_url, "wss://two.example"),
+            "wss://one.example"
+        );
     }
 
     #[test]
