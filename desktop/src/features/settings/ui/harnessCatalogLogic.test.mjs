@@ -297,7 +297,16 @@ describe("catalogPrimaryAction", () => {
       catalogPrimaryAction(
         entry({ installInstructionsUrl: "https://example.com" }),
       ),
-      { kind: "docs", label: "Open setup guide" },
+      { kind: "docs", label: "Setup guide" },
+    );
+  });
+
+  it("docs fallback labels download pages honestly", () => {
+    assert.deepEqual(
+      catalogPrimaryAction(
+        entry({ installInstructionsUrl: "https://cursor.com/downloads" }),
+      ),
+      { kind: "docs", label: "Download page" },
     );
   });
 
@@ -310,7 +319,7 @@ describe("catalogPrimaryAction", () => {
           installInstructionsUrl: "https://example.com",
         }),
       ),
-      { kind: "docs", label: "Open setup guide" },
+      { kind: "docs", label: "Setup guide" },
     );
   });
 

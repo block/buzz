@@ -59,7 +59,9 @@ export function RuntimeIcon({
   const shouldForceForegroundColor = !imageUrl && id === "goose";
 
   if (isBuzzRuntime(runtime)) {
-    return <BuzzMark className="h-7 w-10 text-foreground" />;
+    // The mark's wide viewBox letterboxes inside a square box, so honoring
+    // the caller's size keeps it optically in line with the square logos.
+    return <BuzzMark className={cn(className, "text-foreground")} />;
   }
 
   if (imageUrl && !imageFailed) {

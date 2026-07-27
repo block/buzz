@@ -141,11 +141,32 @@ export type CatalogPrimaryAction =
   | { kind: "none" };
 
 /**
+ * True when the vendor's install link is a plain download page (e.g.
+ * cursor.com/downloads, kimi.ai/download) rather than written setup docs —
+ * "Setup guide" would over-promise for those.
+ */
+export function isDownloadPageUrl(url: string): boolean {
+  try {
+    return /download/i.test(new URL(url.trim()).pathname);
+  } catch {
+    return false;
+  }
+}
+
+/** Label for a link that opens `installInstructionsUrl`. */
+export function installLinkLabel(entry: AcpRuntimeCatalogEntry): string {
+  return isDownloadPageUrl(entry.installInstructionsUrl)
+    ? "Download page"
+    : "Setup guide";
+}
+
+/**
  * Primary action for the catalog detail pane.
  *
  * - Ready → no action (the entry already has a row in Your harnesses).
  * - One-click installable → Install.
- * - Otherwise → open the vendor's setup guide, when one exists.
+ * - Otherwise → open the vendor's setup guide or download page, when one
+ *   exists.
  */
 export function catalogPrimaryAction(
   entry: AcpRuntimeCatalogEntry,
@@ -158,7 +179,7 @@ export function catalogPrimaryAction(
     };
   }
   if (entry.installInstructionsUrl.trim().length > 0) {
-    return { kind: "docs", label: "Open setup guide" };
+    return { kind: "docs", label: installLinkLabel(entry) };
   }
   return { kind: "none" };
 }

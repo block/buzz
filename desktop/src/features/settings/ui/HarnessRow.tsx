@@ -35,6 +35,7 @@ import {
 import { Spinner } from "@/shared/ui/spinner";
 
 import { CustomHarnessForm } from "./CustomHarnessForm";
+import { isDownloadPageUrl } from "./harnessCatalogLogic";
 import { formValuesFromCatalogEntry } from "./harnessFormLogic";
 import { deleteConfirmState } from "./harnessGalleryLogic";
 
@@ -53,9 +54,14 @@ const RUNTIME_LOGO_SCALE: Record<string, string> = {
 };
 
 function runtimeInstallGuideLabel(runtime: AcpRuntimeCatalogEntry) {
-  return runtime.availability === "adapter_missing" ||
+  if (
+    runtime.availability === "adapter_missing" ||
     runtime.availability === "adapter_outdated"
-    ? "Adapter install guide"
+  ) {
+    return "Adapter install guide";
+  }
+  return isDownloadPageUrl(runtime.installInstructionsUrl)
+    ? "Download page"
     : "CLI setup guide";
 }
 

@@ -1,5 +1,5 @@
 import * as React from "react";
-import { ChevronRight, ExternalLink, Plus, Search } from "lucide-react";
+import { ExternalLink, Plus, Search } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
 import {
@@ -26,6 +26,7 @@ import {
   catalogPrimaryAction,
   entryStatusLabel,
   filterCatalogEntries,
+  installLinkLabel,
 } from "./harnessCatalogLogic";
 
 /** Sentinel list selection for the "+ Custom harness" entry. */
@@ -34,8 +35,8 @@ const CUSTOM_ENTRY_ID = "\u0000custom";
 /**
  * "Add harnesses" — master-detail catalog dialog, modeled on the Agent
  * Catalog (PersonaCatalogDialog): searchable left chooser, right detail pane
- * with one neutral vendor-sourced sentence, operational setup state, a
- * primary Install / setup-guide action, and collapsed technical details.
+ * with a primary Install / setup-guide CTA under the header, one neutral
+ * vendor-sourced sentence, operational setup state, and technical details.
  * "+ Custom harness" opens the progressive-disclosure form in the same pane.
  */
 export function HarnessCatalogDialog({
@@ -249,8 +250,8 @@ function CatalogDetail({ entry }: { entry: AcpRuntimeCatalogEntry }) {
 
   return (
     <div className="flex min-h-full flex-col gap-6">
-      <div className="flex items-center gap-3">
-        <RuntimeIcon className="h-12 w-12" runtime={entry} />
+      <div className="flex items-center gap-4">
+        <RuntimeIcon className="h-16 w-16" runtime={entry} />
         <div className="min-w-0">
           <h3 className="truncate text-xl font-semibold leading-snug">
             {getRuntimeDisplayLabel(entry)}
@@ -267,6 +268,39 @@ function CatalogDetail({ entry }: { entry: AcpRuntimeCatalogEntry }) {
               {statusLabel}
             </span>
           ) : null}
+          <div className="mt-2">
+            {action.kind === "install" ? (
+              <Button
+                data-testid={`harness-catalog-install-${entry.id}`}
+                disabled={install.isPending}
+                onClick={handleInstall}
+                size="sm"
+                type="button"
+              >
+                {install.isPending ? (
+                  <Spinner className="mr-2 h-3.5 w-3.5" />
+                ) : null}
+                {action.label}
+              </Button>
+            ) : docsUrl ? (
+              <Button
+                data-testid={
+                  action.kind === "docs"
+                    ? `harness-catalog-setup-${entry.id}`
+                    : `harness-catalog-docs-${entry.id}`
+                }
+                onClick={() => void openUrl(docsUrl)}
+                size="sm"
+                type="button"
+                variant="outline"
+              >
+                <ExternalLink className="mr-1 h-4 w-4" />
+                {action.kind === "docs"
+                  ? action.label
+                  : installLinkLabel(entry)}
+              </Button>
+            ) : null}
+          </div>
         </div>
       </div>
 
@@ -283,66 +317,18 @@ function CatalogDetail({ entry }: { entry: AcpRuntimeCatalogEntry }) {
         </div>
       ) : null}
 
-      {isReady ? (
-        <p className="text-sm text-muted-foreground">
-          This harness is ready — manage it under Your harnesses.
-        </p>
-      ) : null}
-
       {installError ? (
         <p className="whitespace-pre-line rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-1.5 text-sm text-destructive">
           {installError}
         </p>
       ) : null}
 
-      {docsUrl ? (
-        <button
-          className="inline-flex w-fit items-center gap-1 text-sm text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
-          data-testid={`harness-catalog-docs-${entry.id}`}
-          onClick={() => void openUrl(docsUrl)}
-          type="button"
-        >
-          <ExternalLink className="h-4 w-4" />
-          Documentation
-        </button>
-      ) : null}
-
       <TechnicalDetails entry={entry} />
-
-      {action.kind !== "none" ? (
-        <div className="mt-auto flex justify-end pt-2">
-          {action.kind === "install" ? (
-            <Button
-              data-testid={`harness-catalog-install-${entry.id}`}
-              disabled={install.isPending}
-              onClick={handleInstall}
-              size="sm"
-              type="button"
-            >
-              {install.isPending ? (
-                <Spinner className="mr-2 h-3.5 w-3.5" />
-              ) : null}
-              {action.label}
-            </Button>
-          ) : (
-            <Button
-              data-testid={`harness-catalog-setup-${entry.id}`}
-              onClick={() => void openUrl(docsUrl)}
-              size="sm"
-              type="button"
-            >
-              <ExternalLink className="mr-1 h-4 w-4" />
-              {action.label}
-            </Button>
-          )}
-        </div>
-      ) : null}
     </div>
   );
 }
 
 function TechnicalDetails({ entry }: { entry: AcpRuntimeCatalogEntry }) {
-  const [open, setOpen] = React.useState(false);
   const rows: Array<{ label: string; value: string }> = [
     { label: "ID", value: entry.id },
     ...(entry.command ? [{ label: "Command", value: entry.command }] : []),
@@ -360,40 +346,21 @@ function TechnicalDetails({ entry }: { entry: AcpRuntimeCatalogEntry }) {
   ];
 
   return (
-    <div>
-      <button
-        aria-expanded={open}
-        className="flex items-center gap-1 text-xs font-medium text-muted-foreground hover:text-foreground"
-        data-testid={`harness-catalog-technical-toggle-${entry.id}`}
-        onClick={() => setOpen((o) => !o)}
-        type="button"
-      >
-        <ChevronRight
-          className={cn(
-            "h-3.5 w-3.5 transition-transform",
-            open && "rotate-90",
-          )}
-        />
-        Technical details
-      </button>
-      {open ? (
-        <dl
-          className="mt-2 space-y-1.5 rounded-lg border border-border/70 bg-card/70 px-4 py-3"
-          data-testid={`harness-catalog-technical-${entry.id}`}
-        >
-          {rows.map((row) => (
-            <div className="flex gap-3 text-sm" key={row.label}>
-              <dt className="w-28 shrink-0 text-xs font-semibold leading-5 text-muted-foreground">
-                {row.label}
-              </dt>
-              <dd className="min-w-0 break-all font-mono text-xs leading-5">
-                {row.value}
-              </dd>
-            </div>
-          ))}
-        </dl>
-      ) : null}
-    </div>
+    <dl
+      className="space-y-1.5 rounded-lg border border-border/70 bg-card/70 px-4 py-3"
+      data-testid={`harness-catalog-technical-${entry.id}`}
+    >
+      {rows.map((row) => (
+        <div className="flex gap-3 text-sm" key={row.label}>
+          <dt className="w-28 shrink-0 text-xs font-semibold leading-5 text-muted-foreground">
+            {row.label}
+          </dt>
+          <dd className="min-w-0 break-all font-mono text-xs leading-5">
+            {row.value}
+          </dd>
+        </div>
+      ))}
+    </dl>
   );
 }
 
