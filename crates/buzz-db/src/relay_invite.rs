@@ -149,6 +149,23 @@ pub async fn mint_relay_invite(
     })
 }
 
+fn log_claim_outcome(
+    community: CommunityId,
+    invite_id: Option<uuid::Uuid>,
+    outcome: &'static str,
+    max_uses: Option<i32>,
+    use_count: Option<i32>,
+) {
+    tracing::info!(
+        community = %community,
+        invite_id = ?invite_id,
+        outcome,
+        max_uses = ?max_uses,
+        use_count = ?use_count,
+        "relay invite claim completed"
+    );
+}
+
 /// Atomically claim a v2 relay invite.
 ///
 /// Executes the full redemption in one PostgreSQL transaction:
@@ -192,6 +209,7 @@ pub async fn claim_relay_invite(
     // 3. No matching invite.
     let Some(invite) = row else {
         tx.rollback().await?;
+        log_claim_outcome(community, None, "invalid", None, None);
         return Ok(ClaimOutcome::Invalid);
     };
 
@@ -203,6 +221,13 @@ pub async fn claim_relay_invite(
     // 4. Expired check.
     if expires_at <= Utc::now() {
         tx.rollback().await?;
+        log_claim_outcome(
+            community,
+            Some(invite_id),
+            "expired",
+            max_uses,
+            Some(use_count),
+        );
         return Ok(ClaimOutcome::Expired);
     }
 
@@ -230,6 +255,13 @@ pub async fn claim_relay_invite(
             .await?;
         }
         tx.commit().await?;
+        log_claim_outcome(
+            community,
+            Some(invite_id),
+            "already_member",
+            max_uses,
+            Some(use_count),
+        );
         return Ok(ClaimOutcome::AlreadyMember {
             use_count,
             uses_remaining: uses_remaining(),
@@ -240,6 +272,13 @@ pub async fn claim_relay_invite(
     if let Some(mu) = max_uses {
         if use_count >= mu {
             tx.rollback().await?;
+            log_claim_outcome(
+                community,
+                Some(invite_id),
+                "exhausted",
+                max_uses,
+                Some(use_count),
+            );
             return Ok(ClaimOutcome::Exhausted);
         }
     }
@@ -275,6 +314,13 @@ pub async fn claim_relay_invite(
 
     if !inserted {
         tx.commit().await?;
+        log_claim_outcome(
+            community,
+            Some(invite_id),
+            "already_member",
+            max_uses,
+            Some(use_count),
+        );
         return Ok(ClaimOutcome::AlreadyMember {
             use_count,
             uses_remaining: uses_remaining(),
@@ -295,12 +341,12 @@ pub async fn claim_relay_invite(
 
     let new_uses_remaining = max_uses.map(|mu| mu - new_use_count);
 
-    tracing::info!(
-        community = %community,
-        invite_id = %invite_id,
-        use_count = new_use_count,
-        max_uses = ?max_uses,
-        "relay invite claimed"
+    log_claim_outcome(
+        community,
+        Some(invite_id),
+        "joined",
+        max_uses,
+        Some(new_use_count),
     );
 
     Ok(ClaimOutcome::Joined {
