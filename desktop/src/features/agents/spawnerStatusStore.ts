@@ -103,7 +103,11 @@ export async function ensureSpawnerStatusSubscription(): Promise<void> {
   try {
     await startPromise;
   } finally {
-    if (unsubscribeRelay) startPromise = null;
+    // Cleared unconditionally — see the same guard in
+    // `spawnerAttestationStore`. Retaining a settled promise from an attempt
+    // that opened no subscription (no identity yet, or a throw) wedged this
+    // store shut for the rest of the session.
+    startPromise = null;
   }
 }
 

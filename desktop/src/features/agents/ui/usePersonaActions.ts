@@ -247,7 +247,15 @@ export function usePersonaActions() {
         // — the spawner resolves the prompt from it.
         const runLocation = location ?? LOCAL;
         if (runLocation.kind === "spawner") {
-          await deployToSpawner(persona, runLocation.spawnerPubkey);
+          // The publish can fail (relay down, slug already taken). The hook has
+          // already explained it in a toast, but the dialog must stay open —
+          // closing it reads as "deployed", and the only trace of the failure
+          // would be a toast that disappears.
+          const deployed = await deployToSpawner(
+            persona,
+            runLocation.spawnerPubkey,
+          );
+          if (!deployed) return false;
           setPersonaDialogState(null);
           return true;
         }
