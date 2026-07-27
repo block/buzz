@@ -505,9 +505,7 @@ export const MessageRow = React.memo(
       message.pending || message.edited ? (
         <>
           {message.pending ? (
-            <p className="font-medium uppercase tracking-[0.14em] text-primary/80">
-              Sending
-            </p>
+            <p className="font-medium text-primary/80">Sending</p>
           ) : null}
           {message.edited ? (
             <Tooltip>
