@@ -1,5 +1,5 @@
 import { AlertTriangle } from "lucide-react";
-import type { CSSProperties } from "react";
+import type { CSSProperties, ReactNode } from "react";
 
 import { useCommandConsoleStatus } from "../hooks/useCommandConsoleStatus";
 import { useDailyCommandBrief } from "../hooks/useDailyCommandBrief";
@@ -37,7 +37,11 @@ const COMMAND_ADVISER_THEME = {
   "--secondary-foreground": "210 40% 96%",
 } as CSSProperties;
 
-export function CommandConsoleScreen() {
+export function CommandConsoleScreen({
+  commandTeam,
+}: {
+  commandTeam?: ReactNode;
+} = {}) {
   const systemStatus = useCommandConsoleStatus();
   const commandBrief = useDailyCommandBrief();
   const modelRouting = useModelRoutingPreference();
@@ -105,7 +109,7 @@ export function CommandConsoleScreen() {
           systemStatus={systemStatus}
         />
 
-        <CommandTeamStrip />
+        {commandTeam ?? <CommandTeamStrip />}
       </main>
     </div>
   );

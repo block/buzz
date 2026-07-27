@@ -1,5 +1,10 @@
 import * as React from "react";
-import { ChevronDown, ChevronRight, RefreshCw } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronRight,
+  MessageCircle,
+  RefreshCw,
+} from "lucide-react";
 
 import { formatAgentModelLabel } from "@/features/agents/lib/formatAgentModelLabel";
 import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
@@ -10,6 +15,7 @@ import type { ProfilePanelOpenOptions } from "@/shared/context/ProfilePanelConte
 import { useFeedbackToasts } from "@/shared/hooks/useToastEffect";
 import { useFileImportZone } from "@/shared/hooks/useFileImportZone";
 import { Badge } from "@/shared/ui/badge";
+import { Button } from "@/shared/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -40,6 +46,9 @@ type UnifiedAgentsSectionProps = {
   onOpenPersonaProfile: (persona: AgentPersona) => void;
   onStartAgent: (pubkey: string) => void;
   onStartPersona: (persona: AgentPersona) => void;
+  messagingPersonaIds: ReadonlySet<string>;
+  conversationErrorMessage: string | null;
+  onMessagePersona: (personaId: string) => void;
   canChooseCatalog: boolean;
   personas: AgentPersona[];
   personasError: Error | null;
@@ -78,6 +87,9 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
     onOpenPersonaProfile,
     onStartAgent,
     onStartPersona,
+    messagingPersonaIds,
+    conversationErrorMessage,
+    onMessagePersona,
     canChooseCatalog,
     personas,
     personasError,
@@ -95,7 +107,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
     onImportSnapshotFile,
   } = props;
 
-  const { groups, ungrouped, unknown } = React.useMemo(
+  const { commandTeamGroups, groups, ungrouped, unknown } = React.useMemo(
     () => buildUnifiedGroups(personas, agents),
     [personas, agents],
   );
@@ -147,6 +159,70 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
 
       {!isLoading ? (
         <div className="space-y-3" data-testid="unified-agents-groups">
+          {commandTeamGroups.length > 0 ? (
+            <section
+              aria-labelledby="command-team-agents-heading"
+              className="space-y-3"
+              data-testid="command-team-agent-group"
+            >
+              <h2
+                className="text-sm font-semibold text-foreground"
+                id="command-team-agents-heading"
+              >
+                Command Team
+              </h2>
+              <div className={AGENT_CARD_GRID_CLASS}>
+                {commandTeamGroups.map((group) => {
+                  const profileAgent = pickProfileAgent(group.agents);
+                  return (
+                    <AgentPersonaCard
+                      actions={
+                        <div className="flex items-center gap-1">
+                          <Button
+                            disabled={messagingPersonaIds.has(group.persona.id)}
+                            onClick={() => onMessagePersona(group.persona.id)}
+                            size="sm"
+                            type="button"
+                            variant="secondary"
+                          >
+                            <MessageCircle />
+                            Message
+                          </Button>
+                          <PersonaActionsMenu
+                            isActionPending={isActionPending}
+                            isPending={isPersonasPending}
+                            persona={group.persona}
+                            linkedAgent={profileAgent}
+                            onDeactivate={onDeactivatePersona}
+                            onDelete={onDeletePersona}
+                            onDuplicate={onDuplicatePersona}
+                            onEdit={onEditPersona}
+                            onShare={onSharePersona}
+                          />
+                        </div>
+                      }
+                      agent={profileAgent}
+                      defaultModel={defaultModel}
+                      key={group.persona.id}
+                      persona={group.persona}
+                      startingAgentPubkey={startingAgentPubkey}
+                      startingPersonaIds={startingPersonaIds}
+                      onOpenAgentProfile={onOpenAgentProfile}
+                      onOpenPersonaProfile={onOpenPersonaProfile}
+                      onStartAgent={onStartAgent}
+                      onStartPersona={onStartPersona}
+                    />
+                  );
+                })}
+              </div>
+              {conversationErrorMessage ? (
+                <p className="rounded-xl border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                  {conversationErrorMessage}
+                </p>
+              ) : null}
+            </section>
+          ) : null}
+
           <div className={AGENT_CARD_GRID_CLASS}>
             {groups.map((group) => {
               const profileAgent = pickProfileAgent(group.agents);

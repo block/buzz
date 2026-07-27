@@ -46,9 +46,12 @@ export const COMMAND_TEAM_PERSONAS = Object.freeze([
   },
 ] as const satisfies readonly CommandTeamPersona[]);
 
-const COMMAND_TEAM_BY_PERSONA = new Map(
-  COMMAND_TEAM_PERSONAS.map((persona) => [persona.personaId, persona] as const),
-);
+const COMMAND_TEAM_BY_PERSONA: ReadonlyMap<string, CommandTeamPersona> =
+  new Map(
+    COMMAND_TEAM_PERSONAS.map(
+      (persona) => [persona.personaId, persona] as const,
+    ),
+  );
 
 export function isCommandTeamPersonaId(id: string): boolean {
   return COMMAND_TEAM_BY_PERSONA.has(id);

@@ -1,7 +1,32 @@
+import { MessageCircle } from "lucide-react";
+
+import { usePersonaConversation } from "@/features/agents/usePersonaConversation";
+import { Button } from "@/shared/ui/button";
 import { COMMAND_TEAM_PERSONAS } from "../domain/commandTeam";
 import { AdviserInsignia } from "./AdviserInsignia";
 
 export function CommandTeamStrip() {
+  const conversation = usePersonaConversation();
+  return (
+    <CommandTeamStripView
+      error={conversation.error}
+      onMessage={(personaId) => {
+        void conversation.open(personaId);
+      }}
+      pendingPersonaIds={conversation.pendingPersonaIds}
+    />
+  );
+}
+
+export function CommandTeamStripView({
+  error,
+  onMessage,
+  pendingPersonaIds,
+}: {
+  error: string | null;
+  onMessage: (personaId: string) => void;
+  pendingPersonaIds: ReadonlySet<string>;
+}) {
   return (
     <section
       aria-labelledby="command-team-heading"
@@ -24,15 +49,30 @@ export function CommandTeamStrip() {
             key={personaId}
           >
             <AdviserInsignia adviser={adviser} />
-            <div className="min-w-0">
+            <div className="min-w-0 flex-1">
               <h3 className="text-sm font-semibold">{label}</h3>
               <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
                 {detail}
               </p>
             </div>
+            <Button
+              disabled={pendingPersonaIds.has(personaId)}
+              onClick={() => onMessage(personaId)}
+              size="sm"
+              type="button"
+              variant="secondary"
+            >
+              <MessageCircle />
+              Message
+            </Button>
           </div>
         ))}
       </div>
+      {error ? (
+        <p className="rounded-xl border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+          {error}
+        </p>
+      ) : null}
     </section>
   );
 }

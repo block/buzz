@@ -5,9 +5,22 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { CommandConsoleScreen } from "./CommandConsoleScreen.tsx";
+import { CommandTeamStripView } from "./CommandTeamStrip.tsx";
+
+function renderCommandConsole() {
+  return renderToStaticMarkup(
+    React.createElement(CommandConsoleScreen, {
+      commandTeam: React.createElement(CommandTeamStripView, {
+        error: null,
+        onMessage: () => {},
+        pendingPersonaIds: new Set(),
+      }),
+    }),
+  );
+}
 
 test("CommandConsoleScreen renders the usable Command Adviser route", () => {
-  const html = renderToStaticMarkup(React.createElement(CommandConsoleScreen));
+  const html = renderCommandConsole();
 
   assert.match(html, /data-testid="command-console-screen"/);
   assert.match(html, /data-testid="command-console-official-banner"/);
@@ -28,12 +41,13 @@ test("CommandConsoleScreen renders the usable Command Adviser route", () => {
   ]) {
     assert.match(html, new RegExp(`data-testid="adviser-insignia-${adviser}"`));
   }
+  assert.equal((html.match(/>Message</g) ?? []).length, 6);
   assert.doesNotMatch(html, />Command Console</);
   assert.doesNotMatch(html, /unsigned|fingerprint|replication/i);
 });
 
 test("CommandConsoleScreen installs the real advisory Daily Command Brief without placeholder claims", () => {
-  const html = renderToStaticMarkup(React.createElement(CommandConsoleScreen));
+  const html = renderCommandConsole();
 
   assert.match(html, /data-testid="daily-command-brief"/);
   assert.match(html, />Daily Command Brief</);

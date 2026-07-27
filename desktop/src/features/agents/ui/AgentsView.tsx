@@ -29,6 +29,7 @@ import { useProfilePanel } from "@/shared/context/ProfilePanelContext";
 import { useBakedBuildEnvQuery } from "@/features/agents/hooks";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import { useGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
+import { usePersonaConversation } from "@/features/agents/usePersonaConversation";
 import { Button } from "@/shared/ui/button";
 import { PageHeader } from "@/shared/ui/PageHeader";
 import { getInheritedAgentDefaults } from "./bakedEnvHelpers";
@@ -40,6 +41,7 @@ export function AgentsView() {
   const inheritedDefaults = getInheritedAgentDefaults(globalConfig, bakedEnv);
   const agents = useManagedAgentActions();
   const personas = usePersonaActions();
+  const conversation = usePersonaConversation();
   const teamImportInputRef = React.useRef<HTMLInputElement | null>(null);
   const aiDefaultsTriggerRef = React.useRef<HTMLButtonElement>(null);
   const [isAiDefaultsOpen, setIsAiDefaultsOpen] = React.useState(false);
@@ -166,6 +168,11 @@ export function AgentsView() {
               }}
               onStartPersona={(persona) => {
                 void agents.handleStartPersona(persona);
+              }}
+              messagingPersonaIds={conversation.pendingPersonaIds}
+              conversationErrorMessage={conversation.error}
+              onMessagePersona={(personaId) => {
+                void conversation.open(personaId);
               }}
               // Persona props
               canChooseCatalog={personas.catalogPersonas.length > 0}

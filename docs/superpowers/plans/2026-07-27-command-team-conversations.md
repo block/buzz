@@ -174,7 +174,7 @@ git commit -m "feat(command-team): add built-in adviser personas"
 - Modify: `desktop/src/features/command-console/ui/CommandTeamStrip.tsx`
 - Modify: `desktop/src/features/command-console/ui/CommandConsoleScreen.test.mjs`
 
-- [ ] **Step 1: Add failing grouping and conversation tests**
+- [x] **Step 1: Add failing grouping and conversation tests**
 
 Test that:
 
@@ -207,7 +207,7 @@ export async function openPersonaConversation(
 ): Promise<void>;
 ```
 
-- [ ] **Step 2: Run the frontend tests and confirm they fail**
+- [x] **Step 2: Run the frontend tests and confirm they fail**
 
 ```bash
 cd desktop
@@ -219,11 +219,11 @@ node --import ./test-loader.mjs --experimental-strip-types --test \
 
 Expected: missing module, grouping, and Message-action failures.
 
-- [ ] **Step 3: Implement Command Team grouping**
+- [x] **Step 3: Implement Command Team grouping**
 
 Change `buildUnifiedGroups` to emit a dedicated `Command Team` group based on `isCommandTeamPersonaId`. Preserve all existing agent/profile selection behavior. Do not clone persona records or generate parallel console-only definitions.
 
-- [ ] **Step 4: Implement the shared open-or-reuse operation**
+- [x] **Step 4: Implement the shared open-or-reuse operation**
 
 In `openPersonaConversation.ts`:
 
@@ -239,7 +239,7 @@ In `openPersonaConversation.ts`:
 
 Wrap the operation in `usePersonaConversation` to bind existing queries, mutations, navigation, per-persona pending state, and user-visible error handling.
 
-- [ ] **Step 5: Add Message actions to both existing surfaces**
+- [x] **Step 5: Add Message actions to both existing surfaces**
 
 - `UnifiedAgentsSection`: render `Message` for command-team persona cards and call the shared hook.
 - `CommandTeamStrip`: render the same action using the same stable persona ID and hook.
@@ -248,7 +248,7 @@ Wrap the operation in `usePersonaConversation` to bind existing queries, mutatio
 
 Do not modify `useMentionSendFlow`: active built-in persona definitions are already provisioned/reused and attached when mentioned in a channel. Add a regression assertion instead of replacing that working path.
 
-- [ ] **Step 6: Run the focused frontend suite**
+- [x] **Step 6: Run the focused frontend suite**
 
 ```bash
 cd desktop
@@ -258,7 +258,7 @@ node --import ./test-loader.mjs --experimental-strip-types --test \
   src/features/command-console/ui/CommandConsoleScreen.test.mjs
 ```
 
-- [ ] **Step 7: Commit the reusable conversation path**
+- [x] **Step 7: Commit the reusable conversation path**
 
 ```bash
 . ./bin/activate-hermit
