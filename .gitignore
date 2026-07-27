@@ -68,3 +68,8 @@ identity.key
 
 # Helm dependency tarballs — regenerable from Chart.lock via `helm dependency build`
 deploy/charts/*/charts/*.tgz
+
+# zap/superpowers run-state and lavish pages
+.superpowers/
+.lavish/
+.worktrees/
