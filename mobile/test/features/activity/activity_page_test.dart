@@ -423,7 +423,11 @@ class _FakeReadStateNotifier extends ReadStateNotifier {
   );
 
   @override
-  void markContextRead(String contextId, int unixTimestamp) {
+  void markContextRead(
+    String contextId,
+    int unixTimestamp, {
+    bool clearForcedMessages = false,
+  }) {
     state = state.copyWithContext(contextId, unixTimestamp);
   }
 }
