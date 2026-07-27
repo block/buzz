@@ -136,6 +136,89 @@ attributable record that it moved, and the anchor for rotation discipline.
 }
 ```
 
+### `steward` — operational role grant
+
+Delegates bounded *operational* attention over a node to an agent principal.
+Never configuration authority, never key custody: a steward watches and
+reports; every power beyond that requires its own future vocabulary
+revision, granted one declaration at a time as observed reporting earns it
+(the apprenticeship discipline).
+
+```jsonc
+{
+  "tags": [
+    ["d", "steward/cf-rendezvous"],
+    ["n", "cf-rendezvous"],                      // the node under stewardship
+    ["p", "<steward-agent-pubkey>"],             // NIP-OA-capable agent key
+    ["h", "<shared-context-id>"]                 // where reports land
+  ],
+  "content": {
+    "status": "active",
+    "principal": "did:buzz:steward-cf",
+    "powers": ["observe", "report"]
+      // v0 closed set. "observe": read journal, declaration heads, and
+      // derived config state. "report": publish plain events into the
+      // named shared context. A steward declaration confers NOTHING else —
+      // not admits, not grants, not deploys.
+  }
+}
+```
+
+Steward reports are ordinary kind-1 events tagged into the shared context —
+deliberately, so any upstream client renders the steward's work as channel
+conversation and the delegation history stays humanly auditable.
+
+## Compatibility invariant: degrades to plain events
+
+Every primitive in this specification is expressible as NIP-01 signed
+events and filters. Declarations are addressable events; streams are
+filters; agreements are matched event pairs; artifact manifests are `x`
+tags on events; operating configuration is the evaluation of declaration
+heads. The replication ports, rendezvous read endpoint, and artifact store
+are **optimizations, not dependencies**.
+
+Consequently: **any Buzz or Nostr relay can custody sovereign primitives
+without understanding them.** A vanilla community relay stores declarations
+as ordinary addressable events and serves them over ordinary REQ. Adapters
+that do understand the vocabulary get governance, provenance, and blob
+custody; adapters that do not still get correct storage and delivery.
+Nothing in the sovereign layer may break this property.
+
+## Shared contexts: the binding is a space
+
+A binding between two sovereigns is not a config artifact — it is a
+**shared context**: a space both parties write into, carrying the
+relationship's own record (declaration halves, session records, shared
+tooling, steward reports). The context does not describe the binding; it
+*is* the binding.
+
+Shared contexts are scoped with NIP-29 `h` tags — deliberately upstream's
+group vocabulary, so:
+
+- a **two-member shared context** is a sovereign binding;
+- a **community Buzz relay** is the N-member case of the same object, with
+  relay-equals-group-equals-boundary as its (legitimate) governance model;
+- an unmodified upstream client can open a binding as a channel — the
+  relationship is browsable with tools that know nothing of this spec.
+
+Custody of a shared context can live on either party's node or on a
+rendezvous custodian; authority stays with the members' keys (custody and
+authority separate, as everywhere else in this architecture).
+
+## Unilateral bindings (legacy counterparties)
+
+Matching (below) requires both halves — correct between vocabulary-speaking
+sovereigns, impossible when the counterparty is a legacy relay that will
+never mint declarations. A binding to such a counterparty is declared
+**unilaterally**: the sovereign side publishes its half with
+`"mode": "unilateral"` in content, documenting what it exports to and
+admits from the counterparty. The counterparty's *observed behavior* is the
+de facto other half; the unilateral declaration is the attributable record
+of intent that drift reporting (a steward duty) measures behavior against.
+A unilateral declaration governs only its author's own adapters — it
+confers nothing on the counterparty and claims nothing about consent
+(security invariant 5 is unchanged).
+
 ## Matching
 
 An agreement over stream `S` between source `A` and destination `B` exists
@@ -239,9 +322,12 @@ adapter at each replication request. Three rules:
 
 ## Explicitly outside v0.1
 
-- Kind number assignment (upstream registry decision).
+- Kind number assignment (upstream registry decision; 30700 provisional).
 - Relay-side enforcement of matching (adapter policy for now).
-- Multi-party (>2) agreements and delegation chains.
+- Steward powers beyond `observe`/`report` (each future power is its own
+  vocabulary revision, granted per-act as reporting earns it).
+- Multi-party (>2) agreements and delegation chains (shared contexts hold
+  N members, but agreement matching stays pairwise).
 - Negotiation protocol (offers are just unmatched declarations).
 - Retention auditing and proof-of-custody.
 - NIP-77-style set reconciliation (orthogonal efficiency upgrade).
