@@ -292,6 +292,104 @@ pub async fn send_spawner_prompt_update(
     build_prompt_update_event(&keys, &spawner_pubkey, &spec_slug, &agent_pubkey, prompt)
 }
 
+/// Output of [`send_spawner_credential_update`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpawnerCredentialUpdateOut {
+    /// The signed kind:24201 event to publish over the WebSocket.
+    pub event_json: String,
+}
+
+/// A decoded `CredentialAck` frame from a spawner.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpawnerCredentialAck {
+    /// Whether the spawner stored the update.
+    pub accepted: bool,
+    /// Detail when it did not.
+    pub message: Option<String>,
+}
+
+/// Build a signed, NIP-44-encrypted `CredentialUpdate` frame.
+///
+/// The token is encrypted here, in Rust, and the renderer only ever handles
+/// the resulting ciphertext event — nothing persists it on this device. An
+/// empty `credential` clears the spawner-side token.
+fn build_credential_update_event(
+    owner: &nostr::Keys,
+    spawner_pubkey: &str,
+    credential: &str,
+) -> Result<SpawnerCredentialUpdateOut, String> {
+    let spawner = nostr::PublicKey::from_hex(spawner_pubkey)
+        .map_err(|e| format!("invalid spawner pubkey: {e}"))?;
+
+    let frame = AttestationFrame::CredentialUpdate {
+        credential: credential.to_string(),
+    };
+    frame
+        .validate()
+        .map_err(|e| format!("invalid credential update: {e}"))?;
+
+    let plaintext = serde_json::to_string(&frame)
+        .map_err(|e| format!("failed to serialize credential frame: {e}"))?;
+    let ciphertext = nostr::nips::nip44::encrypt(
+        owner.secret_key(),
+        &spawner,
+        plaintext,
+        nostr::nips::nip44::Version::V2,
+    )
+    .map_err(|e| format!("failed to encrypt credential frame: {e}"))?;
+
+    let event = build_spawner_attestation(&spawner.to_hex(), &ciphertext)
+        .map_err(|e| format!("failed to build credential event: {e}"))?
+        .sign_with_keys(owner)
+        .map_err(|e| format!("failed to sign credential event: {e}"))?;
+
+    Ok(SpawnerCredentialUpdateOut {
+        event_json: event.as_json(),
+    })
+}
+
+/// Decrypt a frame and return it only when it is a `CredentialAck`.
+fn decode_credential_ack_frame(
+    keys: &nostr::Keys,
+    spawner: &nostr::PublicKey,
+    encrypted_content: &str,
+) -> Result<Option<SpawnerCredentialAck>, String> {
+    match decrypt_frame(keys, spawner, encrypted_content)? {
+        AttestationFrame::CredentialAck { accepted, message } => {
+            Ok(Some(SpawnerCredentialAck { accepted, message }))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Sign an owner credential update for a spawner. See
+/// [`respond_to_spawner_attestation`] for why the event is returned rather
+/// than published: kind 24201 is ephemeral and must go over the WebSocket.
+#[tauri::command]
+pub async fn send_spawner_credential_update(
+    state: tauri::State<'_, AppState>,
+    spawner_pubkey: String,
+    credential: String,
+) -> Result<SpawnerCredentialUpdateOut, String> {
+    let keys = state.signing_keys()?;
+    build_credential_update_event(&keys, &spawner_pubkey, &credential)
+}
+
+/// Decode an inbound frame as a credential ack, `Ok(None)` for anything else.
+#[tauri::command]
+pub async fn decode_spawner_credential_ack(
+    state: tauri::State<'_, AppState>,
+    spawner_pubkey: String,
+    encrypted_content: String,
+) -> Result<Option<SpawnerCredentialAck>, String> {
+    let keys = state.signing_keys()?;
+    let spawner = nostr::PublicKey::from_hex(&spawner_pubkey)
+        .map_err(|e| format!("invalid spawner pubkey: {e}"))?;
+    decode_credential_ack_frame(&keys, &spawner, &encrypted_content)
+}
+
 fn decrypt_frame(
     keys: &nostr::Keys,
     spawner: &nostr::PublicKey,
@@ -408,6 +506,66 @@ mod tests {
             }
             other => panic!("wrong frame: {other:?}"),
         }
+    }
+
+    #[test]
+    fn credential_update_round_trips_to_the_spawner() {
+        let owner = Keys::generate();
+        let spawner = Keys::generate();
+        let out = build_credential_update_event(
+            &owner,
+            &spawner.public_key().to_hex(),
+            "sk-ant-oat01-abc",
+        )
+        .unwrap();
+        let event: nostr::Event = serde_json::from_str(&out.event_json).unwrap();
+        // Ciphertext on the wire — the token must not be readable.
+        assert!(!event.content.as_str().contains("sk-ant-oat01-abc"));
+        let plain = nostr::nips::nip44::decrypt(
+            spawner.secret_key(),
+            &owner.public_key(),
+            event.content.as_str(),
+        )
+        .unwrap();
+        match serde_json::from_str::<AttestationFrame>(&plain).unwrap() {
+            AttestationFrame::CredentialUpdate { credential } => {
+                assert_eq!(credential, "sk-ant-oat01-abc");
+            }
+            other => panic!("wrong frame: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decoding_an_ack_ignores_other_frames() {
+        let owner = Keys::generate();
+        let spawner = Keys::generate();
+        let encrypt = |frame: &AttestationFrame| {
+            nostr::nips::nip44::encrypt(
+                spawner.secret_key(),
+                &owner.public_key(),
+                serde_json::to_string(frame).unwrap(),
+                nostr::nips::nip44::Version::V2,
+            )
+            .unwrap()
+        };
+        let ack = encrypt(&AttestationFrame::CredentialAck {
+            accepted: true,
+            message: None,
+        });
+        let decoded = decode_credential_ack_frame(&owner, &spawner.public_key(), &ack).unwrap();
+        assert_eq!(
+            decoded,
+            Some(SpawnerCredentialAck {
+                accepted: true,
+                message: None
+            })
+        );
+
+        let request = encrypted_request(&spawner, &owner, &Keys::generate().public_key().to_hex());
+        assert_eq!(
+            decode_credential_ack_frame(&owner, &spawner.public_key(), &request).unwrap(),
+            None
+        );
     }
 
     #[test]
