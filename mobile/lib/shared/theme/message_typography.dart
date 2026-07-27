@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import 'grid.dart';
+
 const _fontFamily = 'Inter';
 
 /// Avatar size for full channel and thread messages.
@@ -12,7 +14,7 @@ const activityAvatarSize = messageAvatarSize;
 const compactMessageAvatarSize = messageAvatarSize;
 
 /// Horizontal space between a message avatar and its content.
-const messageAvatarContentGap = 10.0;
+const messageAvatarContentGap = Grid.ten;
 
 /// Primary message copy: 15sp regular on a 20sp line height.
 const messageBodyTextStyle = TextStyle(

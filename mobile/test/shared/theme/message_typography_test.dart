@@ -136,6 +136,6 @@ void main() {
     expect(messageAvatarSize, 42);
     expect(activityAvatarSize, 42);
     expect(compactMessageAvatarSize, 42);
-    expect(messageAvatarContentGap, 10);
+    expect(messageAvatarContentGap, Grid.ten);
   });
 }
