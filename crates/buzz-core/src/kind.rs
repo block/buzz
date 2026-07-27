@@ -314,7 +314,9 @@ pub const KIND_SPAWNER_ANNOUNCEMENT: u32 = 10180;
 /// key, NIP-OA auth tag, env vars, or provider config. The system prompt is
 /// resolved through the referenced [`KIND_PERSONA`], never inlined here.
 ///
-/// Deleting the spec (NIP-09) is the signal to tear the agent down.
+/// Publishing an empty-content replacement is the signal to tear the agent
+/// down. A NIP-09 deletion does not work here: it leaves nothing to fan out, so
+/// a spawner that is already connected never learns the spec is gone.
 pub const KIND_SPAWNER_AGENT_SPEC: u32 = 30178;
 
 /// NIP-AS: Spawner Agent Status (parameterized replaceable, spawner-authored).
@@ -325,9 +327,14 @@ pub const KIND_SPAWNER_AGENT_SPEC: u32 = 30178;
 /// slug but differ in author.
 ///
 /// Content carries the reconciliation phase, the minted agent pubkey once it
-/// exists, and a human-readable error when the phase is failed. The relay
-/// accepts this kind only from the pubkey the referenced spec designates as its
-/// spawner — owners cannot forge status for their own specs.
+/// exists, and a human-readable error when the phase is failed.
+///
+/// The relay applies no author gate: anyone may publish this kind, and a client
+/// must therefore match a status to the spawner its own spec named rather than
+/// trusting the kind alone. Nothing is granted by a status event — access comes
+/// only from the owner's NIP-OA signature in a
+/// [`KIND_SPAWNER_ATTESTATION`] exchange — so a forged one misreports a badge
+/// and nothing more.
 pub const KIND_SPAWNER_AGENT_STATUS: u32 = 30179;
 
 // NIP-56 reporting
