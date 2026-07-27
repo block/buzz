@@ -6,7 +6,8 @@ use super::{
     codex_adapter_is_outdated, create_time_agent_command_override, default_agent_command,
     effective_agent_command, find_nvm_default_bin, find_via_login_shell,
     is_login_shell_path_uninit, is_safe_nvm_tag, managed_agent_avatar_url, normalize_agent_args,
-    parse_semver_tag, preset_catalog_entry, probe_codex_acp_major_version, record_agent_command,
+    parse_semver_tag, preset_catalog_entry, probe_codex_acp_major_version,
+    probe_codex_acp_version, record_agent_command,
     refresh_login_shell_path, try_record_agent_command, PresetHarness, BUZZ_AGENT_AVATAR_URL,
     CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL, GOOSE_AVATAR_URL,
 };
@@ -758,13 +759,13 @@ mod managed_path_resolution;
 fn probe_codex_acp_major_version_parses_1x_output() {
     use std::os::unix::fs::PermissionsExt;
 
-    // Simulate `@agentclientprotocol/codex-acp 1.1.2` output (1.x adapter)
+    // Simulate a current `@agentclientprotocol/codex-acp` output.
     let dir = std::env::temp_dir().join(format!("buzz-probe-1x-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).expect("create temp dir");
     let bin = dir.join("codex-acp");
     std::fs::write(
         &bin,
-        "#!/bin/sh\necho '@agentclientprotocol/codex-acp 1.1.2'\nexit 0\n",
+        "#!/bin/sh\necho '@agentclientprotocol/codex-acp 1.1.7'\nexit 0\n",
     )
     .expect("write script");
     std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod script");
@@ -773,6 +774,24 @@ fn probe_codex_acp_major_version_parses_1x_output() {
     let _ = std::fs::remove_dir_all(dir);
 
     assert_eq!(major, Some(1), "1.x adapter must return major version 1");
+}
+
+#[cfg(unix)]
+#[test]
+fn probe_codex_acp_version_parses_full_semver_output() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let bin = dir.path().join("codex-acp");
+    std::fs::write(
+        &bin,
+        "#!/bin/sh\necho '@agentclientprotocol/codex-acp 1.1.7'\nexit 0\n",
+    )
+    .expect("write script");
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod script");
+
+    assert_eq!(probe_codex_acp_version(&bin), Some((1, 1, 7)));
 }
 
 mod codex_version;
@@ -813,7 +832,7 @@ fn probe_codex_acp_major_version_returns_none_for_missing_binary() {
 
 #[cfg(unix)]
 #[test]
-fn codex_adapter_availability_available_for_1x_binary() {
+fn codex_adapter_availability_available_for_minimum_supported_binary() {
     use std::os::unix::fs::PermissionsExt;
 
     let dir = std::env::temp_dir().join(format!("buzz-avail-1x-{}", uuid::Uuid::new_v4()));
@@ -821,7 +840,7 @@ fn codex_adapter_availability_available_for_1x_binary() {
     let bin = dir.join("codex-acp");
     std::fs::write(
         &bin,
-        "#!/bin/sh\necho '@agentclientprotocol/codex-acp 1.1.2'\nexit 0\n",
+        "#!/bin/sh\necho '@agentclientprotocol/codex-acp 1.1.7'\nexit 0\n",
     )
     .expect("write script");
     std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod script");
@@ -832,7 +851,29 @@ fn codex_adapter_availability_available_for_1x_binary() {
     assert_eq!(
         status,
         AcpAvailabilityStatus::Available,
-        "1.x adapter must classify as Available"
+        "minimum supported adapter must classify as Available"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_adapter_availability_outdated_for_older_1x_binary() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let bin = dir.path().join("codex-acp");
+    std::fs::write(
+        &bin,
+        "#!/bin/sh\necho '@agentclientprotocol/codex-acp 1.1.5'\nexit 0\n",
+    )
+    .expect("write script");
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod script");
+
+    assert_eq!(
+        codex_adapter_availability(&bin),
+        AcpAvailabilityStatus::AdapterOutdated,
+        "older 1.x adapter must be offered an upgrade"
     );
 }
 
