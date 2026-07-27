@@ -5,6 +5,7 @@ import 'package:buzz/features/activity/activity_provider.dart';
 import 'package:buzz/features/activity/feed_item.dart';
 import 'package:buzz/features/activity/reminders_provider.dart';
 import 'package:buzz/features/channels/channel.dart';
+import 'package:buzz/features/channels/channel_detail_page.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/read_state/read_state_provider.dart';
 import 'package:buzz/features/profile/user_cache_provider.dart';
@@ -292,6 +293,44 @@ void main() {
     expect(find.text('Nothing needs your action'), findsOneWidget);
   });
 
+  testWidgets('opens a thread mention at the referenced message', (
+    tester,
+  ) async {
+    final threadMention = FeedItem(
+      id: 'reply-event',
+      kind: 9,
+      pubkey: 'alice_pk',
+      content: 'Reply in a thread',
+      createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+      channelId: 'ch1',
+      channelName: 'general',
+      tags: const [
+        ['e', 'thread-root', '', 'root'],
+        ['e', 'parent-reply', '', 'reply'],
+      ],
+      category: 'mention',
+    );
+    final feed = HomeFeedResponse(
+      mentions: [threadMention],
+      needsAction: const [],
+      activity: const [],
+      agentActivity: const [],
+    );
+
+    await tester.pumpWidget(await buildTestable(feed: feed));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('inbox-row-reply-event')));
+    await tester.pumpAndSettle();
+
+    final page = tester.widget<ChannelDetailPage>(
+      find.byType(ChannelDetailPage),
+    );
+    expect(page.channel.id, 'ch1');
+    expect(page.initialThreadRootId, 'parent-reply');
+    expect(page.initialMessageId, 'reply-event');
+  });
+
   testWidgets('thread filter matches grouped thread replies', (tester) async {
     await tester.pumpWidget(await buildTestable());
     await tester.pumpAndSettle();
@@ -423,7 +462,11 @@ class _FakeReadStateNotifier extends ReadStateNotifier {
   );
 
   @override
-  void markContextRead(String contextId, int unixTimestamp) {
+  void markContextRead(
+    String contextId,
+    int unixTimestamp, {
+    bool clearForcedMessages = false,
+  }) {
     state = state.copyWithContext(contextId, unixTimestamp);
   }
 }

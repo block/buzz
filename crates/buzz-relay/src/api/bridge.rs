@@ -280,112 +280,6 @@ fn extension_flag(raw: &Value, key: &str) -> bool {
     raw.get(key).and_then(Value::as_bool).unwrap_or(false)
 }
 
-fn extract_agent_owner(raw: &Value) -> Result<Option<Vec<u8>>, (StatusCode, Json<Value>)> {
-    let Some(value) = raw.get("agent_owner") else {
-        return Ok(None);
-    };
-    if value.is_null() {
-        return Ok(None);
-    }
-    let owner = value.as_str().ok_or_else(|| {
-        api_error(
-            StatusCode::BAD_REQUEST,
-            "agent_owner must be a 64-char hex pubkey",
-        )
-    })?;
-    let bytes = hex::decode(owner)
-        .ok()
-        .filter(|bytes| bytes.len() == 32)
-        .ok_or_else(|| {
-            api_error(
-                StatusCode::BAD_REQUEST,
-                "agent_owner must be a 64-char hex pubkey",
-            )
-        })?;
-    Ok(Some(bytes))
-}
-
-fn include_agent_owner(raw_filters: &[Value]) -> bool {
-    raw_filters
-        .iter()
-        .any(|raw| extension_flag(raw, "include_agent_owner"))
-}
-
-fn apply_agent_owner_authors(raw: &mut Value, owned_pubkeys: &[Vec<u8>]) {
-    let mut owned_hex: std::collections::HashSet<String> =
-        owned_pubkeys.iter().map(hex::encode).collect();
-    if let Some(requested) = raw.get("authors").and_then(Value::as_array) {
-        let requested: std::collections::HashSet<&str> =
-            requested.iter().filter_map(Value::as_str).collect();
-        owned_hex.retain(|pubkey| requested.contains(pubkey.as_str()));
-    }
-    raw["authors"] = Value::Array(owned_hex.into_iter().map(Value::String).collect());
-}
-
-fn reject_unsupported_agent_owner_filter(raw: &Value) -> Result<(), (StatusCode, Json<Value>)> {
-    if raw.get("agent_owner").is_some()
-        && (extension_flag(raw, "top_level")
-            || raw.get("feed_types").is_some()
-            || raw.get("depth_limit").is_some())
-    {
-        return Err(api_error(
-            StatusCode::BAD_REQUEST,
-            "agent_owner is not supported with channel-window, feed, or thread filters",
-        ));
-    }
-    Ok(())
-}
-
-async fn enrich_agent_owners(
-    state: &AppState,
-    tenant: &buzz_core::tenant::TenantContext,
-    events: &mut [Value],
-) -> Result<(), (StatusCode, Json<Value>)> {
-    let pubkeys: Vec<Vec<u8>> = events
-        .iter()
-        .filter_map(|event| event.get("pubkey").and_then(Value::as_str))
-        .filter_map(|pubkey| hex::decode(pubkey).ok())
-        .collect();
-    let owners = state
-        .db
-        .get_agent_owners(tenant.community(), &pubkeys)
-        .await
-        .map_err(|e| internal_error(&format!("agent owner lookup error: {e}")))?;
-    let owners: std::collections::HashMap<Vec<u8>, buzz_db::user::AgentOwner> = owners
-        .into_iter()
-        .map(|owner| (owner.agent_pubkey.clone(), owner))
-        .collect();
-
-    for event in events {
-        let Some(agent_pubkey) = event
-            .get("pubkey")
-            .and_then(Value::as_str)
-            .and_then(|pubkey| hex::decode(pubkey).ok())
-        else {
-            continue;
-        };
-        let Some(owner) = owners.get(&agent_pubkey) else {
-            continue;
-        };
-        let Some(object) = event.as_object_mut() else {
-            continue;
-        };
-        object.insert(
-            "agent_owner_pubkey".into(),
-            Value::String(hex::encode(&owner.owner_pubkey)),
-        );
-        object.insert(
-            "agent_owner_display_name".into(),
-            owner
-                .owner_display_name
-                .clone()
-                .map(Value::String)
-                .unwrap_or(Value::Null),
-        );
-    }
-    Ok(())
-}
-
 fn extract_depth_limit(raw: &Value) -> Option<u32> {
     raw.get("depth_limit")?
         .as_u64()
@@ -1073,20 +967,8 @@ async fn query_events_authed(
 
     // Two-pass parse: preserve raw JSON for custom extension fields (before_id,
     // depth_limit, feed_types) that nostr::Filter silently drops.
-    let mut raw_filters: Vec<Value> = serde_json::from_slice(body)
+    let raw_filters: Vec<Value> = serde_json::from_slice(body)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid filters: {e}")))?;
-    for raw in &mut raw_filters {
-        reject_unsupported_agent_owner_filter(raw)?;
-        let Some(owner_pubkey) = extract_agent_owner(raw)? else {
-            continue;
-        };
-        let owned_pubkeys = state
-            .db
-            .list_agent_pubkeys_by_owner(tenant.community(), &owner_pubkey)
-            .await
-            .map_err(|e| internal_error(&format!("agent owner filter error: {e}")))?;
-        apply_agent_owner_authors(raw, &owned_pubkeys);
-    }
     let filters: Vec<nostr::Filter> = raw_filters
         .iter()
         .map(|v| serde_json::from_value(v.clone()))
@@ -1323,14 +1205,6 @@ async fn query_events_authed(
         if handled.contains(&idx) {
             continue;
         }
-        if raw.get("agent_owner").is_some()
-            && raw
-                .get("authors")
-                .and_then(Value::as_array)
-                .is_some_and(Vec::is_empty)
-        {
-            continue;
-        }
 
         if let Some(ch_id) = extract_channel_from_filter(filter) {
             if !accessible_channels.contains(&ch_id) {
@@ -1432,9 +1306,6 @@ async fn query_events_authed(
         }
     }
 
-    if include_agent_owner(&raw_filters) {
-        enrich_agent_owners(state, tenant, &mut events).await?;
-    }
     Ok(Json(Value::Array(events)))
 }
 
@@ -1779,14 +1650,6 @@ async fn handle_bridge_search(
     for (raw, filter) in raw_filters.iter().zip(filters) {
         let search_mode = extract_search_mode(raw);
         let search_page = extract_search_page(raw);
-        if raw.get("agent_owner").is_some()
-            && raw
-                .get("authors")
-                .and_then(Value::as_array)
-                .is_some_and(Vec::is_empty)
-        {
-            continue;
-        }
         let search_text = match &filter.search {
             Some(s) if !s.is_empty() => s.clone(),
             _ => continue,
@@ -1900,9 +1763,6 @@ async fn handle_bridge_search(
         }
     }
 
-    if include_agent_owner(raw_filters) {
-        enrich_agent_owners(state, tenant, &mut events).await?;
-    }
     Ok(Json(Value::Array(events)))
 }
 
@@ -2928,66 +2788,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn extract_agent_owner_accepts_hex_and_rejects_invalid_values() {
-        let owner = "a".repeat(64);
-        assert_eq!(
-            extract_agent_owner(&serde_json::json!({"agent_owner": owner}))
-                .unwrap()
-                .unwrap(),
-            vec![0xaa; 32]
-        );
-        assert!(extract_agent_owner(&serde_json::json!({"agent_owner": "bad"})).is_err());
-        assert!(extract_agent_owner(&serde_json::json!({"agent_owner": true})).is_err());
-        assert!(extract_agent_owner(&serde_json::json!({"agent_owner": 42})).is_err());
-        assert_eq!(
-            extract_agent_owner(&serde_json::json!({"agent_owner": null})).unwrap(),
-            None
-        );
-        assert_eq!(extract_agent_owner(&serde_json::json!({})).unwrap(), None);
-    }
-
-    #[test]
-    fn agent_owner_authors_fail_closed_and_intersect_requested_authors() {
-        let agent_a = vec![0xaa; 32];
-        let agent_b = vec![0xbb; 32];
-        let owned = vec![agent_a.clone(), agent_b];
-
-        let mut unscoped = serde_json::json!({});
-        apply_agent_owner_authors(&mut unscoped, &owned);
-        let authors = unscoped["authors"].as_array().unwrap();
-        assert_eq!(authors.len(), 2);
-        assert!(authors.contains(&serde_json::json!(hex::encode(&agent_a))));
-
-        let mut intersected = serde_json::json!({
-            "authors": [hex::encode(&agent_a), "cc".repeat(32)]
-        });
-        apply_agent_owner_authors(&mut intersected, &owned);
-        assert_eq!(
-            intersected["authors"],
-            serde_json::json!([hex::encode(agent_a)])
-        );
-
-        let mut empty = serde_json::json!({"authors": ["cc".repeat(32)]});
-        apply_agent_owner_authors(&mut empty, &owned);
-        assert_eq!(empty["authors"], serde_json::json!([]));
-    }
-
-    #[test]
-    fn agent_owner_rejects_specialized_filters_that_cannot_enforce_authors() {
-        for raw in [
-            serde_json::json!({"agent_owner": "aa".repeat(32), "top_level": true}),
-            serde_json::json!({"agent_owner": "aa".repeat(32), "feed_types": ["activity"]}),
-            serde_json::json!({"agent_owner": "aa".repeat(32), "depth_limit": 1}),
-        ] {
-            assert!(reject_unsupported_agent_owner_filter(&raw).is_err());
-        }
-        assert!(reject_unsupported_agent_owner_filter(
-            &serde_json::json!({"agent_owner": "aa".repeat(32), "kinds": [0]})
-        )
-        .is_ok());
-    }
-
     /// `nip42_expected_relay_url` derives scheme from `config_relay_url`'s
     /// prefix: `wss://` → `wss`, everything else → `ws`. Deployments that run
     /// `ws://` in dev/test must produce a `ws://` URL that matches what
@@ -3555,36 +3355,6 @@ mod tests {
 
     /// Drive a single POST /events request through the router and return the
     /// HTTP status code.
-    async fn post_query(
-        state: Arc<crate::state::AppState>,
-        host: &str,
-        pubkey_hex: &str,
-        body: &[u8],
-    ) -> (axum::http::StatusCode, Value) {
-        use axum::body::{to_bytes, Body};
-        use axum::http::{header, Request};
-        use tower::ServiceExt;
-
-        let response = crate::router::build_router(state)
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/query")
-                    .header(header::HOST, host)
-                    .header("x-pubkey", pubkey_hex)
-                    .body(Body::from(body.to_vec()))
-                    .expect("build request"),
-            )
-            .await
-            .expect("router oneshot");
-        let status = response.status();
-        let bytes = to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("read response body");
-        let body = serde_json::from_slice(&bytes).expect("parse response JSON");
-        (status, body)
-    }
-
     async fn post_events(
         state: Arc<crate::state::AppState>,
         host: &str,
@@ -3608,102 +3378,6 @@ mod tests {
             .await
             .expect("router oneshot")
             .status()
-    }
-
-    #[tokio::test]
-    #[ignore = "requires Postgres and Redis"]
-    async fn query_agent_owner_returns_only_verified_owner_matches() {
-        let state = bridge_handler_test_state()
-            .await
-            .expect("local Postgres and Redis required");
-        let host = format!("bridge-owner-{}.local", uuid::Uuid::new_v4().simple());
-        let community = state
-            .db
-            .ensure_configured_community(&host)
-            .await
-            .expect("ensure community")
-            .id;
-        let requester = Keys::generate();
-        let owner_a = Keys::generate();
-        let owner_b = Keys::generate();
-        let agent_a = Keys::generate();
-        let agent_b = Keys::generate();
-
-        for keys in [&requester, &owner_a, &owner_b, &agent_a, &agent_b] {
-            state
-                .db
-                .ensure_user(community, &keys.public_key().to_bytes())
-                .await
-                .expect("ensure user");
-        }
-        state
-            .db
-            .set_agent_owner(
-                community,
-                &agent_a.public_key().to_bytes(),
-                &owner_a.public_key().to_bytes(),
-            )
-            .await
-            .expect("set first owner");
-        state
-            .db
-            .set_agent_owner(
-                community,
-                &agent_b.public_key().to_bytes(),
-                &owner_b.public_key().to_bytes(),
-            )
-            .await
-            .expect("set second owner");
-
-        for keys in [&agent_a, &agent_b] {
-            let event = EventBuilder::new(Kind::Metadata, r#"{"display_name":"Honey"}"#)
-                .sign_with_keys(keys)
-                .expect("sign profile");
-            state
-                .db
-                .insert_event(community, &event, None)
-                .await
-                .expect("insert profile");
-        }
-
-        let filter = serde_json::json!([{
-            "kinds": [0],
-            "search": "Honey",
-            "agent_owner": owner_a.public_key().to_hex(),
-            "include_agent_owner": true,
-            "limit": 100
-        }]);
-        let (status, body) = post_query(
-            state.clone(),
-            &host,
-            &requester.public_key().to_hex(),
-            filter.to_string().as_bytes(),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "query response: {body}");
-        let results = body.as_array().expect("array response");
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0]["pubkey"], agent_a.public_key().to_hex());
-        assert_eq!(
-            results[0]["agent_owner_pubkey"],
-            owner_a.public_key().to_hex()
-        );
-
-        let no_match = serde_json::json!([{
-            "kinds": [0],
-            "search": "Honey",
-            "agent_owner": requester.public_key().to_hex(),
-            "limit": 100
-        }]);
-        let (status, body) = post_query(
-            state,
-            &host,
-            &requester.public_key().to_hex(),
-            no_match.to_string().as_bytes(),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "query response: {body}");
-        assert_eq!(body, serde_json::json!([]));
     }
 
     /// Collect buzz_events_rejected_total with (transport, reason) labels from

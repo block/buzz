@@ -83,8 +83,7 @@ const CODEX_NOT_INSTALLED = {
   binary_path: null,
   default_args: [],
   mcp_command: null,
-  install_hint:
-    "Buzz requires the Codex CLI; the desktop app alone is not enough.",
+  install_hint: "Buzz talks to Codex through the Codex CLI.",
   install_instructions_url: "https://developers.openai.com/codex/cli/",
   can_auto_install: true,
   underlying_cli_path: null,
@@ -177,7 +176,7 @@ test.describe("Doctor panel state screenshots", () => {
     expect(codexColors).toEqual(gooseColors);
     await expect(
       page
-        .getByRole("heading", { name: "Agent runtimes" })
+        .getByRole("heading", { name: "Agent runtimes", exact: true })
         .locator("..")
         .locator(".."),
     ).toHaveCSS("align-items", "center");
@@ -186,15 +185,9 @@ test.describe("Doctor panel state screenshots", () => {
         page.getByTestId(`doctor-runtime-menu-${runtimeId}`),
       ).toHaveCount(0);
     }
-    await expect(
-      page.getByTestId("doctor-runtime-toggle-codex"),
-    ).not.toBeChecked();
-    await expect(page.getByTestId("doctor-runtime-toggle-codex")).toBeEnabled();
-    for (const runtimeId of ["goose", "codex"]) {
-      const toggle = page.getByTestId(`doctor-runtime-toggle-${runtimeId}`);
-      await expect(toggle).toHaveClass(/shadow-none/);
-      await expect(toggle.locator("span")).toHaveClass(/shadow-none/);
-    }
+    const codexInstallButton = page.getByTestId("doctor-runtime-install-codex");
+    await expect(codexInstallButton).toBeEnabled();
+    await expect(codexInstallButton).toHaveText("Install");
     await expect(
       page.getByRole("menuitem", { name: "CLI setup guide" }),
     ).toHaveCount(0);
@@ -207,10 +200,12 @@ test.describe("Doctor panel state screenshots", () => {
       path: `${SHOTS}/00-runtime-overflow-menu.png`,
     });
     await page.keyboard.press("Escape");
-    await expect(page.getByTestId("doctor-runtime-toggle-goose")).toBeChecked();
-    await expect(
-      page.getByTestId("doctor-runtime-toggle-goose"),
-    ).toBeDisabled();
+    await expect(page.getByTestId("doctor-runtime-ready-goose")).toHaveText(
+      "Ready",
+    );
+    await expect(page.getByTestId("doctor-runtime-install-goose")).toHaveCount(
+      0,
+    );
     await expect(page.getByTestId("doctor-runtime-codex")).not.toContainText(
       "Not installed",
     );
@@ -219,7 +214,7 @@ test.describe("Doctor panel state screenshots", () => {
     );
     await expect(
       page.getByTestId("doctor-runtime-guidance-codex"),
-    ).toContainText("desktop app alone is not enough");
+    ).toContainText("Buzz talks to Codex through the Codex CLI.");
     await expect(
       page
         .getByTestId("doctor-runtime-guidance-codex")
@@ -249,9 +244,9 @@ test.describe("Doctor panel state screenshots", () => {
 
     const row = page.getByTestId("doctor-runtime-claude");
     await expect(row).toBeVisible({ timeout: 10_000 });
-    await expect(
-      page.getByTestId("doctor-runtime-toggle-claude"),
-    ).toBeChecked();
+    await expect(page.getByTestId("doctor-runtime-ready-claude")).toHaveText(
+      "Ready",
+    );
     await expect(row).not.toContainText("Authenticated");
     await expect(row).not.toContainText("Available");
     await expect(row).not.toContainText("claude-agent-acp");
@@ -264,8 +259,10 @@ test.describe("Doctor panel state screenshots", () => {
   });
 
   /**
-   * 02 — an available runtime that needs authentication stays the same height
-   * as the others and moves setup instructions into its overflow menu.
+   * 02 — an available runtime that needs authentication shows an explicit
+   * "Sign-in needed" chip on the row face (never a green Ready chip), stays
+   * the same height as the others, and keeps setup instructions in its
+   * overflow menu.
    */
   test("02-auth-logged-out", async ({ page }) => {
     await installMockBridge(page, {
@@ -290,6 +287,12 @@ test.describe("Doctor panel state screenshots", () => {
 
     const row = page.getByTestId("doctor-runtime-codex");
     await expect(row).toBeVisible({ timeout: 10_000 });
+    // Auth-required is an explicit row-face state: amber "Sign-in needed"
+    // chip (single source: entryStatusLabel), no green Ready chip.
+    await expect(page.getByTestId("doctor-runtime-status-codex")).toHaveText(
+      "Sign-in needed",
+    );
+    await expect(page.getByTestId("doctor-runtime-ready-codex")).toHaveCount(0);
     await expect(row).not.toContainText("Not authenticated");
     await expect(row).not.toContainText("Run `codex login` to authenticate.");
     await expect(row).toHaveCSS(
@@ -354,8 +357,10 @@ test.describe("Doctor panel state screenshots", () => {
   });
 
   /**
-   * 04 — adapter_missing runtime with node_required: true: the off toggle is
-   * disabled, and the Node.js action moves into the overflow menu.
+   * 04 — adapter_missing runtime with node_required: true is NOT a
+   * one-click-ready row: it must be catalog-only (no Install button), and its
+   * catalog detail must offer the setup guide instead of a one-click Install
+   * that would fail without Node.
    */
   test("04-node-required", async ({ page }) => {
     await installMockBridge(page, {
@@ -378,44 +383,50 @@ test.describe("Doctor panel state screenshots", () => {
     await page.goto("/", { waitUntil: "domcontentloaded" });
     await openSettings(page, "agents");
 
-    const row = page.getByTestId("doctor-runtime-codex");
-    await expect(row).toBeVisible({ timeout: 10_000 });
-    const toggle = page.getByTestId("doctor-runtime-toggle-codex");
-    await expect(toggle).not.toBeChecked();
-    await expect(toggle).toBeDisabled();
-    await expect(page.getByTestId("doctor-runtime-status-codex")).toHaveText(
+    // Node-gated entries never get a Your-harnesses row (and thus never an
+    // Install button) — setup happens in the catalog.
+    await expect(page.getByTestId("doctor-runtime-goose")).toBeVisible({
+      timeout: 10_000,
+    });
+    await expect(page.getByTestId("doctor-runtime-codex")).toHaveCount(0);
+    await expect(page.getByTestId("doctor-runtime-install-codex")).toHaveCount(
+      0,
+    );
+    await expect(page.getByTestId("doctor-runtime-ready-codex")).toHaveCount(0);
+
+    await page.getByTestId("harness-add-button").click();
+    await expect(page.getByTestId("harness-catalog-dialog")).toBeVisible();
+    await page.getByTestId("harness-catalog-list-item-codex").click();
+    await expect(page.getByTestId("harness-catalog-status-codex")).toHaveText(
       "Adapter needed",
     );
-    await expect(row).not.toContainText("Node.js is required");
-    expect(
-      await row.evaluate((element) => element.getBoundingClientRect().height),
-    ).toBeGreaterThan(
-      await page
-        .getByTestId("doctor-runtime-goose")
-        .evaluate((element) => element.getBoundingClientRect().height),
+    // Node gate blocks one-click install; the primary action is the vendor
+    // setup guide instead — a single pinned bottom-bar CTA
+    // (harness-catalog-setup-*), not a separate docs button.
+    await expect(page.getByTestId("harness-catalog-install-codex")).toHaveCount(
+      0,
     );
-    await page.getByTestId("doctor-runtime-menu-codex").click();
-    await expect(
-      page.getByRole("menuitem", { name: "Install Node.js" }),
-    ).toBeVisible();
-    await expect(
-      page.getByRole("menuitem", { name: "Adapter install guide" }),
-    ).toBeVisible();
-    await page.keyboard.press("Escape");
+    await expect(page.getByTestId("harness-catalog-setup-codex")).toBeVisible();
+    await expect(page.getByTestId("harness-catalog-setup-codex")).toHaveText(
+      /Setup guide/,
+    );
+    await expect(page.getByTestId("harness-catalog-docs-codex")).toHaveCount(0);
 
-    await row.scrollIntoViewIfNeeded();
+    const detail = page.getByTestId("harness-catalog-detail-pane");
+    await expect(detail).toContainText("Install the Codex ACP adapter");
     await waitForAnimations(page);
-    await row.screenshot({ path: `${SHOTS}/04-node-required.png` });
+    await detail.screenshot({ path: `${SHOTS}/04-node-required.png` });
   });
 
   /**
-   * 05 — a failed toggle install returns to off; toggling again retries.
+   * 05 — a failed install brings the Install button back; clicking it again
+   * retries.
    *
    * The mock is configured with a two-call sequence:
    *   call 1 → failure (E404)
    *   call 2 → installer exit 0, but post-install discovery still cannot find
    *            the runtime
-   * This exercises the full retry path: fail state → toggle on again →
+   * This exercises the full retry path: fail state → Install again →
    * verified failure without a false installed state.
    */
   test("05-retry-after-failure", async ({ page }) => {
@@ -479,19 +490,19 @@ test.describe("Doctor panel state screenshots", () => {
     await expect(row).not.toContainText("Not installed");
 
     // Trigger the first install — the mock returns a failure.
-    const toggle = page.getByTestId("doctor-runtime-toggle-codex");
-    await expect(toggle).not.toBeChecked();
-    await expect(toggle).toBeEnabled();
-    await toggle.click();
+    const installButton = page.getByTestId("doctor-runtime-install-codex");
+    await expect(installButton).toBeEnabled();
+    await expect(installButton).toHaveText("Install");
+    await installButton.click();
     const loading = page.getByTestId("doctor-runtime-loading-codex");
     await expect(loading).toBeVisible();
     await expect(loading).toContainText("Codex installing");
-    await expect(toggle).toHaveCount(0);
+    await expect(installButton).toHaveCount(0);
 
-    // After failure: the toggle returns to off and the error is visible.
+    // After failure: the Install button returns and the error is visible.
     await expect(loading).toHaveCount(0, { timeout: 5_000 });
-    await expect(toggle).not.toBeChecked({ timeout: 5_000 });
-    await expect(toggle).toBeEnabled();
+    await expect(installButton).toBeVisible({ timeout: 5_000 });
+    await expect(installButton).toBeEnabled();
     await expect(row).toContainText("Step");
     await expect(row).toContainText("failed");
 
@@ -499,18 +510,18 @@ test.describe("Doctor panel state screenshots", () => {
     await waitForAnimations(page);
     await row.screenshot({ path: `${SHOTS}/05-retry-after-failure.png` });
 
-    // Toggle on again — the install command exits 0, but verification fails.
-    await toggle.click();
+    // Install again — the install command exits 0, but verification fails.
+    await installButton.click();
     await expect(loading).toBeVisible();
-    await expect(toggle).toHaveCount(0);
+    await expect(installButton).toHaveCount(0);
 
     // The runtime remains retryable and never renders a false success state.
     await expect(loading).toHaveCount(0, { timeout: 5_000 });
     await expect(row).toContainText("desktop app", { timeout: 5_000 });
     await expect(row).toContainText('Step "verify" failed');
     await expect(row.getByText(/installed\. Checking/)).toHaveCount(0);
-    await expect(toggle).not.toBeChecked();
-    await expect(toggle).toBeEnabled();
+    await expect(installButton).toBeVisible();
+    await expect(installButton).toBeEnabled();
 
     await row.scrollIntoViewIfNeeded();
     await waitForAnimations(page);
@@ -556,11 +567,13 @@ test.describe("Doctor panel state screenshots", () => {
     await page.goto("/", { waitUntil: "domcontentloaded" });
     await openSettings(page, "agents");
 
-    const toggle = page.getByTestId("doctor-runtime-toggle-codex");
-    await expect(toggle).toBeEnabled();
-    await toggle.click();
-    await expect(toggle).toBeChecked({ timeout: 5_000 });
-    await expect(toggle).toBeDisabled();
+    const installButton = page.getByTestId("doctor-runtime-install-codex");
+    await expect(installButton).toBeEnabled();
+    await installButton.click();
+    await expect(page.getByTestId("doctor-runtime-ready-codex")).toBeVisible({
+      timeout: 5_000,
+    });
+    await expect(installButton).toHaveCount(0);
     await expect(page.getByTestId("doctor-runtime-guidance-codex")).toHaveCount(
       0,
     );
@@ -568,7 +581,9 @@ test.describe("Doctor panel state screenshots", () => {
 
   /**
    * 06 — adapter-provided account methods appear in the overflow menu and
-   * launch the vendor-owned flow without expanding the runtime row.
+   * launch the vendor-owned flow without expanding the runtime row. The
+   * row face flips "Sign-in needed" → Ready once the connect settles and
+   * discovery reports logged_in.
    */
   test("06-connect-account-methods", async ({ page }) => {
     await installMockBridge(page, {
@@ -583,6 +598,21 @@ test.describe("Doctor panel state screenshots", () => {
           underlying_cli_path: "/usr/local/bin/codex",
           auth_status: { status: "logged_out" },
           login_hint: "Run `codex login` to authenticate.",
+        },
+        BUZZ_AGENT_AVAILABLE,
+      ],
+      // After the mocked connect succeeds, discovery reports logged_in so
+      // the row face can flip from "Sign-in needed" to Ready.
+      acpRuntimesCatalogAfterConnect: [
+        GOOSE_AVAILABLE,
+        CLAUDE_AVAILABLE_LOGGED_IN,
+        {
+          ...CODEX_NOT_INSTALLED,
+          availability: "available",
+          command: "codex-acp",
+          binary_path: "/usr/local/bin/codex-acp",
+          underlying_cli_path: "/usr/local/bin/codex",
+          auth_status: { status: "logged_in" },
         },
         BUZZ_AGENT_AVAILABLE,
       ],
@@ -606,6 +636,11 @@ test.describe("Doctor panel state screenshots", () => {
 
     const row = page.getByTestId("doctor-runtime-codex");
     await expect(row).toBeVisible({ timeout: 10_000 });
+    // Signed-out row face: explicit auth chip, no green Ready chip.
+    await expect(page.getByTestId("doctor-runtime-status-codex")).toHaveText(
+      "Sign-in needed",
+    );
+    await expect(page.getByTestId("doctor-runtime-ready-codex")).toHaveCount(0);
     await expect(row).not.toContainText("Not authenticated");
     await expect(row).toHaveCSS(
       "height",
@@ -623,11 +658,14 @@ test.describe("Doctor panel state screenshots", () => {
     const loading = page.getByTestId("doctor-runtime-loading-codex");
     await expect(loading).toBeVisible();
     await expect(loading).toContainText("Codex connecting");
-    await expect(page.getByTestId("doctor-runtime-toggle-codex")).toHaveCount(
+    await expect(page.getByTestId("doctor-runtime-ready-codex")).toHaveCount(0);
+    await expect(loading).toHaveCount(0, { timeout: 5_000 });
+    // Connect settled and discovery reports logged_in — sign-in chip gone,
+    // Ready chip on.
+    await expect(page.getByTestId("doctor-runtime-ready-codex")).toBeVisible();
+    await expect(page.getByTestId("doctor-runtime-status-codex")).toHaveCount(
       0,
     );
-    await expect(loading).toHaveCount(0, { timeout: 5_000 });
-    await expect(page.getByTestId("doctor-runtime-toggle-codex")).toBeChecked();
   });
 
   /**
@@ -794,7 +832,9 @@ test.describe("Doctor panel state screenshots", () => {
     await expect(page.getByTestId("doctor-runtime-status-codex")).toHaveText(
       "Update needed",
     );
-    await page.getByTestId("doctor-runtime-toggle-codex").click();
+    const updateButton = page.getByTestId("doctor-runtime-install-codex");
+    await expect(updateButton).toHaveText("Update");
+    await updateButton.click();
 
     const dialog = page.getByRole("alertdialog");
     await expect(dialog).toContainText("Update Codex adapter?");
@@ -903,35 +943,39 @@ test.describe("Doctor panel state screenshots", () => {
     await expect(claudeRow).toBeVisible({ timeout: 10_000 });
     await expect(codexRow).toBeVisible();
 
-    const claudeToggle = page.getByTestId("doctor-runtime-toggle-claude");
-    const codexToggle = page.getByTestId("doctor-runtime-toggle-codex");
+    const claudeInstallButton = page.getByTestId(
+      "doctor-runtime-install-claude",
+    );
+    const codexInstallButton = page.getByTestId("doctor-runtime-install-codex");
+    const codexReadyChip = page.getByTestId("doctor-runtime-ready-codex");
 
     // Start both installs before either settles.
-    await claudeToggle.click();
-    await codexToggle.click();
+    await claudeInstallButton.click();
+    await codexInstallButton.click();
 
-    // Codex settles first (shorter delay): toggle flips on, no error on codex.
-    // The catalog refresh triggered by codex's success immediately returns
-    // availability === "available", so the transient "installed. Checking..."
-    // banner is replaced by the stable isOn state — assert the toggle instead.
-    await expect(codexToggle).toBeChecked({ timeout: 3_000 });
+    // Codex settles first (shorter delay): Ready chip appears, no error on
+    // codex. The catalog refresh triggered by codex's success immediately
+    // returns availability === "available", so the transient "installed.
+    // Checking..." banner is replaced by the stable ready state — assert the
+    // Ready chip instead.
+    await expect(codexReadyChip).toBeVisible({ timeout: 3_000 });
     await expect(
       page.getByTestId("doctor-runtime-install-error-codex"),
     ).toHaveCount(0);
 
     // Claude settles (after its longer delay): failure error visible with
-    // multiline stderr. Codex toggle must still be on — unaffected by claude.
+    // multiline stderr. Codex must still be ready — unaffected by claude.
     const claudeError = page.getByTestId("doctor-runtime-install-error-claude");
     await expect(claudeError).toBeVisible({ timeout: 3_000 });
     await expect(claudeError).toContainText("npm ERR!");
-    await expect(codexToggle).toBeChecked();
+    await expect(codexReadyChip).toBeVisible();
 
     // Click Check again — epoch increments, RuntimeRow useEffect clears
     // local installResult state, so the stale claude error disappears.
     await page.getByRole("button", { name: "Check again" }).click();
     await expect(claudeError).toHaveCount(0, { timeout: 5_000 });
-    // Codex toggle stays on (catalog still reports available after refresh).
-    await expect(codexToggle).toBeChecked({ timeout: 5_000 });
+    // Codex stays ready (catalog still reports available after refresh).
+    await expect(codexReadyChip).toBeVisible({ timeout: 5_000 });
 
     await claudeRow.scrollIntoViewIfNeeded();
     await waitForAnimations(page);

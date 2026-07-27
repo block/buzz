@@ -92,8 +92,7 @@ test("setup distinguishes a missing CLI from an installed desktop app", async ({
           "not_installed",
           { status: "unknown" },
           {
-            install_hint:
-              "Buzz requires the Codex CLI; the desktop app alone is not enough.",
+            install_hint: "Buzz talks to Codex through the Codex CLI.",
             install_instructions_url:
               "https://developers.openai.com/codex/cli/",
           },
@@ -106,9 +105,7 @@ test("setup distinguishes a missing CLI from an installed desktop app", async ({
   await navigateToSetupPage(page);
 
   const card = page.getByTestId("onboarding-runtime-codex");
-  await expect(card).toContainText(
-    "CLI not detected; the desktop app alone isn’t enough.",
-  );
+  await expect(card).toContainText("CLI not detected.");
   await expect(card.getByTestId("onboarding-runtime-install-codex")).toHaveText(
     "INSTALL",
   );

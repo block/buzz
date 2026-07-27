@@ -388,7 +388,7 @@ function runtimeDetailText(runtime: AcpRuntimeCatalogEntry): string {
     runtime.availability === "cli_missing" ||
     runtime.availability === "not_installed"
   ) {
-    return "CLI not detected; the desktop app alone isn’t enough.";
+    return "CLI not detected.";
   }
   return "";
 }
