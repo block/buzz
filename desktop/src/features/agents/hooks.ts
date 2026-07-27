@@ -40,6 +40,7 @@ import {
 } from "@/shared/api/tauri";
 import type { HarnessDefinitionInput } from "@/shared/api/tauri";
 import {
+  getManagedAgentDefaults,
   setManagedAgentAutoRestart,
   setManagedAgentStartOnAppLaunch,
   startManagedAgent,
@@ -106,6 +107,7 @@ export type {
 
 export const relayAgentsQueryKey = ["relay-agents"] as const;
 export const managedAgentsQueryKey = ["managed-agents"] as const;
+export const managedAgentDefaultsQueryKey = ["managed-agent-defaults"] as const;
 export const personasQueryKey = ["personas"] as const;
 export const acpRuntimesQueryKey = ["acp-runtimes"] as const;
 export const acpAuthMethodsQueryKey = ["acp-auth-methods"] as const;
@@ -356,6 +358,15 @@ export function useManagedAgentsQuery(options?: { enabled?: boolean }) {
         ? 5_000
         : false;
     },
+  });
+}
+
+export function useManagedAgentDefaultsQuery(options?: { enabled?: boolean }) {
+  return useQuery({
+    enabled: options?.enabled ?? true,
+    queryKey: managedAgentDefaultsQueryKey,
+    queryFn: getManagedAgentDefaults,
+    staleTime: Number.POSITIVE_INFINITY,
   });
 }
 

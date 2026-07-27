@@ -10530,6 +10530,8 @@ export function maybeInstallE2eTauriMocks() {
           }
         );
       }
+      case "get_managed_agent_defaults":
+        return { parallelism: 10 };
       case "set_global_agent_config": {
         // Echo back the submitted config as the saved value (mirrors the
         // backend's strip-on-write pass in tests where all values are already

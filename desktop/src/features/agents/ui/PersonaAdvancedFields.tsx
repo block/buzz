@@ -13,6 +13,7 @@ import {
 
 export function PersonaAdvancedFields({
   behaviorDraft,
+  defaultParallelism,
   disabled,
   envVars,
   inheritedEnvVars = {},
@@ -28,6 +29,8 @@ export function PersonaAdvancedFields({
   hiddenEnvKeys = [],
 }: {
   behaviorDraft: PersonaBehaviorDraft;
+  /** Desktop default applied when the definition leaves parallelism unset. */
+  defaultParallelism: number | null;
   disabled: boolean;
   envVars: EnvVarsValue;
   /** Env vars to display as inherited defaults in tuning-field placeholders.
@@ -96,13 +99,20 @@ export function PersonaAdvancedFields({
                   parallelism: event.target.value,
                 })
               }
-              placeholder="1"
+              placeholder={
+                defaultParallelism == null
+                  ? "Desktop default"
+                  : String(defaultParallelism)
+              }
               type="number"
               value={behaviorDraft.parallelism}
             />
           </div>
           <p className="text-xs text-muted-foreground">
-            How many conversations each running instance handles at once (1–32).
+            Leave blank to use the Desktop default
+            {defaultParallelism == null ? "" : ` (${defaultParallelism})`}.
+            Higher values allow more simultaneous conversations and use more
+            worker processes (1–32).
           </p>
         </div>
       </div>

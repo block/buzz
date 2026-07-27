@@ -339,6 +339,10 @@ export type ManagedAgentBackend =
   | { type: "local" }
   | { type: "provider"; id: string; config: Record<string, unknown> };
 
+export type ManagedAgentDefaults = {
+  parallelism: number;
+};
+
 export type ManagedAgent = {
   pubkey: string;
   name: string;

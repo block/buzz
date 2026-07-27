@@ -67,7 +67,11 @@ import {
   MODEL_DISCOVERY_LOADING_VALUE,
   usePersonaModelDiscovery,
 } from "./usePersonaModelDiscovery";
-import { useBakedBuildEnvKeysQuery, useRuntimeFileConfigQuery } from "../hooks";
+import {
+  useBakedBuildEnvKeysQuery,
+  useManagedAgentDefaultsQuery,
+  useRuntimeFileConfigQuery,
+} from "../hooks";
 import { useAgentDialogDefaults } from "./useAgentDialogDefaults";
 import { AgentDefaultsDialog } from "./AgentDefaultsDialog";
 import { AgentHarnessField } from "./AgentHarnessField";
@@ -158,6 +162,9 @@ export function AgentDefinitionDialog({
   const [showAdvancedFields, setShowAdvancedFields] = React.useState(false);
   const [isAvatarUploadPending, setIsAvatarUploadPending] =
     React.useState(false);
+  const managedAgentDefaultsQuery = useManagedAgentDefaultsQuery({
+    enabled: open,
+  });
   const {
     globalConfig,
     inheritedDefaults: {
@@ -998,6 +1005,9 @@ export function AgentDefinitionDialog({
                   >
                     <PersonaAdvancedFields
                       behaviorDraft={behaviorDraft}
+                      defaultParallelism={
+                        managedAgentDefaultsQuery.data?.parallelism ?? null
+                      }
                       disabled={isPending}
                       envVars={envVars}
                       fileSatisfiedEnvKeys={localModeGate.fileSatisfiedEnvKeys}

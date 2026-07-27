@@ -248,8 +248,15 @@ test("create agent supports parallelism and system prompt overrides", async ({
   await page
     .locator("#persona-parallelism")
     .evaluate((el) => el.scrollIntoView({ block: "nearest" }));
-  await expect(page.locator("#persona-parallelism")).toBeVisible();
-  await page.locator("#persona-parallelism").fill("3");
+  const parallelism = page.locator("#persona-parallelism");
+  await expect(parallelism).toBeVisible();
+  await expect(parallelism).toHaveAttribute("placeholder", "10");
+  await expect(
+    page.getByText(
+      "Leave blank to use the Desktop default (10). Higher values allow more simultaneous conversations and use more worker processes (1–32).",
+    ),
+  ).toBeVisible();
+  await parallelism.fill("3");
 
   // Submitting mints a running instance whose behavioral quad resolves from
   // the definition (agents always start after creation).
