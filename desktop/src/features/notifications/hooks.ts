@@ -26,8 +26,7 @@ import {
 } from "./use-feed-desktop-notifications";
 import {
   buildHomeBadgeFeedItems,
-  isHomeBadgeFeedItemUnread,
-  shouldCountTowardHomeBadgeSubtotal,
+  countHomeBadgeFeedItems,
 } from "./lib/homeBadge";
 
 export type { DesktopNotificationPermissionState } from "./lib/desktop";
@@ -431,44 +430,17 @@ export function useHomeFeedNotificationState(
       return zero;
     }
 
-    const seenFeedIdSet = new Set(seenFeedIds);
-    let total = 0;
-    let excludingHighPriority = 0;
-    for (const item of currentFeedItems) {
-      const isLocallyUnread = localUnreadFeedIds.has(item.id);
-      if (isHomeActive && !isLocallyUnread) {
-        continue;
-      }
-      if (
-        item.channelId &&
-        mutedChannelIds?.has(item.channelId) &&
-        item.category !== "mention"
-      ) {
-        continue;
-      }
-      const isUnread = isHomeBadgeFeedItemUnread(item, {
-        getChannelReadAt,
-        getMessageReadAt,
-        getThreadReadAt,
-        isLocallyUnread,
-        seenFeedIdSet,
-      });
-      if (!isUnread) continue;
-      total++;
-      if (
-        shouldCountTowardHomeBadgeSubtotal(
-          item,
-          highPriorityChannelIds,
-          isLocallyUnread,
-        )
-      ) {
-        excludingHighPriority++;
-      }
-    }
-    return {
-      homeBadgeCount: total,
-      homeBadgeCountExcludingHighPriority: excludingHighPriority,
-    };
+    return countHomeBadgeFeedItems(currentFeedItems, {
+      currentPubkey: normalizedPubkey,
+      getChannelReadAt,
+      getMessageReadAt,
+      getThreadReadAt,
+      highPriorityChannelIds,
+      isHomeActive,
+      localUnreadFeedIds,
+      mutedChannelIds,
+      seenFeedIdSet: new Set(seenFeedIds),
+    });
   }, [
     currentFeedItems,
     getChannelReadAt,
@@ -478,6 +450,7 @@ export function useHomeFeedNotificationState(
     isHomeActive,
     localUnreadFeedIds,
     mutedChannelIds,
+    normalizedPubkey,
     readStateVersion,
     seenFeedIds,
     settings.homeBadgeEnabled,

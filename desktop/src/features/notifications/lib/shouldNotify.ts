@@ -8,8 +8,14 @@ import {
   type ChannelNotifyContext,
 } from "@/features/notifications/lib/channelNotifyEscalation";
 
+/**
+ * Whether `event` directly `p`-tags the reader.
+ *
+ * Only the tag list is read, so feed rows (which carry the same raw tags)
+ * can share this definition with live relay events.
+ */
 export function hasMentionForEvent(
-  event: RelayEvent,
+  event: Pick<RelayEvent, "tags">,
   currentPubkey: string,
 ): boolean {
   return (

@@ -169,7 +169,13 @@ export function useFeedDesktopNotifications(
           channels,
         )
           .filter((item) => !nextSeenItemIds.has(item.id))
-          .filter((item) => feedItemSurvivesChannelMute(item, mutedChannelIds))
+          .filter((item) =>
+            feedItemSurvivesChannelMute(
+              item,
+              mutedChannelIds,
+              normalizedPubkey,
+            ),
+          )
       : [];
 
     for (const item of currentFeedItems) {

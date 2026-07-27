@@ -152,3 +152,44 @@ test("everything survives when the channel is not muted", () => {
   assert.equal(feedItemSurvivesChannelMute(item, new Set()), true);
   assert.equal(feedItemSurvivesChannelMute(item, undefined), true);
 });
+
+// One event can be both a direct mention and an @channel/@here marker; the
+// relay collapses that pair into a single mention row. The NIP-CM ladder puts
+// the direct mention above the mute rung, so the row must still notify —
+// otherwise the reader silently loses a mention addressed to them by name.
+
+test("a direct mention riding an @channel event pierces a channel mute", () => {
+  const item = feedItem({
+    category: "mention",
+    tags: [
+      ["h", "channel-id"],
+      ["p", "me"],
+      ["notify", "channel"],
+    ],
+  });
+  assert.equal(feedItemSurvivesChannelMute(item, MUTED, "me"), true);
+});
+
+test("a direct mention riding an @here event pierces a channel mute", () => {
+  const item = feedItem({
+    category: "mention",
+    tags: [
+      ["h", "channel-id"],
+      ["p", "me"],
+      ["notify", "here"],
+    ],
+  });
+  assert.equal(feedItemSurvivesChannelMute(item, MUTED, "me"), true);
+});
+
+test("an @channel event that p-tags someone else stays suppressed", () => {
+  const item = feedItem({
+    category: "mention",
+    tags: [
+      ["h", "channel-id"],
+      ["p", "someone-else"],
+      ["notify", "channel"],
+    ],
+  });
+  assert.equal(feedItemSurvivesChannelMute(item, MUTED, "me"), false);
+});

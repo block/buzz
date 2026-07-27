@@ -5,6 +5,7 @@ import {
   isBroadcastReply,
   isThreadReply,
 } from "@/features/messages/lib/threading";
+import { feedItemSurvivesChannelMute } from "@/features/notifications/lib/feed";
 
 function dedupeFeedItemsById(items: readonly FeedItem[]): FeedItem[] {
   const seen = new Set<string>();
@@ -38,6 +39,79 @@ export function buildHomeBadgeFeedItems(
   }
 
   return dedupeFeedItemsById(items);
+}
+
+export type HomeBadgeCounts = {
+  homeBadgeCount: number;
+  homeBadgeCountExcludingHighPriority: number;
+};
+
+/**
+ * Count the unread rows the home badge should show.
+ *
+ * Pure counterpart of the badge memo in `useHomeFeedNotificationState`. Mute
+ * suppression runs through the shared `feedItemSurvivesChannelMute` predicate,
+ * so the badge and the toast path apply the same NIP-CM ladder: a direct
+ * mention pierces a channel mute, a channel-wide `@channel`/`@here` marker
+ * does not.
+ */
+export function countHomeBadgeFeedItems(
+  items: readonly FeedItem[],
+  options: {
+    currentPubkey?: string;
+    getChannelReadAt: (channelId: string) => number | null;
+    getMessageReadAt?: (messageId: string) => number | null;
+    getThreadReadAt: (
+      rootId: string,
+      channelId?: string | null,
+    ) => number | null;
+    highPriorityChannelIds: ReadonlySet<string>;
+    isHomeActive: boolean;
+    localUnreadFeedIds: ReadonlySet<string>;
+    mutedChannelIds?: ReadonlySet<string>;
+    seenFeedIdSet: ReadonlySet<string>;
+  },
+): HomeBadgeCounts {
+  let homeBadgeCount = 0;
+  let homeBadgeCountExcludingHighPriority = 0;
+
+  for (const item of items) {
+    const isLocallyUnread = options.localUnreadFeedIds.has(item.id);
+    if (options.isHomeActive && !isLocallyUnread) {
+      continue;
+    }
+    if (
+      !feedItemSurvivesChannelMute(
+        item,
+        options.mutedChannelIds,
+        options.currentPubkey,
+      )
+    ) {
+      continue;
+    }
+    const isUnread = isHomeBadgeFeedItemUnread(item, {
+      getChannelReadAt: options.getChannelReadAt,
+      getMessageReadAt: options.getMessageReadAt,
+      getThreadReadAt: options.getThreadReadAt,
+      isLocallyUnread,
+      seenFeedIdSet: options.seenFeedIdSet,
+    });
+    if (!isUnread) {
+      continue;
+    }
+    homeBadgeCount++;
+    if (
+      shouldCountTowardHomeBadgeSubtotal(
+        item,
+        options.highPriorityChannelIds,
+        isLocallyUnread,
+      )
+    ) {
+      homeBadgeCountExcludingHighPriority++;
+    }
+  }
+
+  return { homeBadgeCount, homeBadgeCountExcludingHighPriority };
 }
 
 export function shouldCountTowardHomeBadgeSubtotal(
