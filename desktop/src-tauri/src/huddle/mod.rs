@@ -71,8 +71,10 @@ use tauri::State;
 use uuid::Uuid;
 
 use crate::{app_state::AppState, events, relay::submit_event};
-
-use pipeline::{maybe_start_stt_pipeline, maybe_start_tts_pipeline, post_connect_setup};
+use pipeline::{
+    maybe_start_stt_pipeline, maybe_start_tts_pipeline, post_connect_setup,
+    start_auto_enabled_transcription,
+};
 use relay_api::{
     count_human_members, fetch_channel_members, parse_channel_uuid, validate_pubkey_hex,
     MAX_HUDDLE_AGENTS,
@@ -790,15 +792,8 @@ pub async fn check_pipeline_hotstart(state: State<'_, AppState>) -> Result<(), S
             } else {
                 false
             };
-
             if transcription_auto_enabled {
-                if let Some(manager) = models::global_model_manager() {
-                    manager.start_stt_download(state.http_client.clone());
-                }
-                if let Err(e) = maybe_start_stt_pipeline(&state, eph_id).await {
-                    eprintln!("buzz-desktop: STT agent-presence start failed: {e}");
-                }
-                state.emit_huddle_state_changed();
+                start_auto_enabled_transcription(&state, eph_id).await;
             }
         }
     }
@@ -987,9 +982,6 @@ pub async fn add_agent_to_huddle(
 
     // No guidelines re-post needed — the agent sees the original kind:48106
     // guidelines via EOSE replay when it subscribes to the ephemeral channel.
-
-    // Also add the agent to the visible participants list. The first agent
-    // auto-enables transcription unless the user already chose a state.
     let transcription_auto_enabled = {
         let mut hs = state.huddle()?;
         if !hs.participants.contains(&agent_pubkey) {
@@ -997,16 +989,11 @@ pub async fn add_agent_to_huddle(
         }
         hs.maybe_auto_enable_transcription_for_agents()
     };
-
     if transcription_auto_enabled {
-        if let Some(manager) = models::global_model_manager() {
-            manager.start_stt_download(state.http_client.clone());
-        }
-        if let Err(e) = maybe_start_stt_pipeline(&state, &eph_id).await {
-            eprintln!("buzz-desktop: STT agent-add start failed: {e}");
-        }
+        start_auto_enabled_transcription(&state, &eph_id).await;
+    } else {
+        state.emit_huddle_state_changed();
     }
-    state.emit_huddle_state_changed();
 
     Ok(result)
 }

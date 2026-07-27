@@ -185,6 +185,17 @@ pub(crate) async fn maybe_start_stt_pipeline(
     Ok(true)
 }
 
+/// Start STT after agent presence automatically enables transcription.
+pub(crate) async fn start_auto_enabled_transcription(state: &AppState, ephemeral_channel_id: &str) {
+    if let Some(manager) = models::global_model_manager() {
+        manager.start_stt_download(state.http_client.clone());
+    }
+    if let Err(error) = maybe_start_stt_pipeline(state, ephemeral_channel_id).await {
+        eprintln!("buzz-desktop: auto-enabled STT failed to start: {error}");
+    }
+    state.emit_huddle_state_changed();
+}
+
 /// Attempt to start the TTS pipeline if TTS models are present and TTS is enabled.
 ///
 /// Returns `Ok(true)` if the pipeline was started, `Ok(false)` if preconditions
