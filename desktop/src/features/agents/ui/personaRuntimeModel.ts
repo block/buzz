@@ -226,6 +226,12 @@ export interface EditAgentFormValidityInput {
    * {@link hasMissingRequiredEnvKey}.
    */
   requiredEnvKeyMissing: boolean;
+  /**
+   * True when the agent is hosted on a spawner. Credentials then live on the
+   * server (e.g. OAuth), so {@link requiredEnvKeyMissing} is ignored — a key
+   * missing on this machine is not a spawn risk for a server-hosted agent.
+   */
+  serverManaged?: boolean;
 }
 
 /**
@@ -266,7 +272,7 @@ export function computeEditAgentFormValidity(
     acpCommandValid &&
     respondToValid &&
     customCommandValid &&
-    !input.requiredEnvKeyMissing
+    (input.serverManaged === true || !input.requiredEnvKeyMissing)
   );
 }
 
