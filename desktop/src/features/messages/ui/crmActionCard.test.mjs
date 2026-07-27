@@ -65,6 +65,30 @@ test("extracts only numbered calendar slots in their displayed order", () => {
   ]);
 });
 
+test("keeps calendar slots for controls but removes their duplicate text from the message", () => {
+  const card = parseCrmActionCard(
+    [
+      "# Schedule a meeting",
+      "",
+      "**Contact:** Arnaud Lafosse",
+      "**Timezone:** Europe/Paris",
+      "",
+      "**Slot 1:** Tue 28 Jul, 10:00 CEST",
+      "**Slot 2:** Tue 28 Jul, 10:15 CEST",
+      "",
+      "Choose a meeting slot using the action card.",
+      "Expires: 2026-07-27T13:38:32.008779+00:00",
+      "crm-action:v1:8ca5bd14-00d4-45cc-88ec-4bb1609e7d4a:calendar_book:2026-07-27T13:38:32.008779+00:00",
+    ].join("\n"),
+  );
+
+  assert.equal(card?.content.includes("**Slot 1:**"), false);
+  assert.deepEqual(card?.calendarSlots, [
+    { label: "Tue 28 Jul, 10:00 CEST", reaction: "1️⃣" },
+    { label: "Tue 28 Jul, 10:15 CEST", reaction: "2️⃣" },
+  ]);
+});
+
 test("preserves read-only Reddit review content ahead of the action controls", () => {
   const review = [
     "Reddit post: Storage question",

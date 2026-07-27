@@ -3,7 +3,6 @@ import { Check, Copy, Pencil, X } from "lucide-react";
 
 import type { TimelineReaction } from "@/features/messages/types";
 import {
-  extractCrmCalendarSlots,
   extractCrmRedditDraft,
   type CrmActionCard as CrmAction,
 } from "@/features/messages/ui/crmActionCardParser";
@@ -73,7 +72,7 @@ export function CrmActionCard({
       : null;
   const calendarSlots =
     action.actionType === "calendar_book"
-      ? extractCrmCalendarSlots(action.content)
+      ? action.calendarSlots ?? []
       : [];
 
   if (action.actionType === "lead_categorize") {

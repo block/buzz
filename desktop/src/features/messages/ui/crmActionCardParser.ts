@@ -7,7 +7,10 @@ export type CrmActionCard = {
     | "calendar_book";
   expiresAt: string;
   content: string;
+  calendarSlots?: CrmCalendarSlot[];
 };
+
+export type CrmCalendarSlot = { label: string; reaction: string };
 
 const MARKER =
   /(?:^|\n)crm-action:v1:([0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}):(reddit_mark_posted|lead_categorize|outreach_approve|calendar_book):(\S+)\s*$/i;
@@ -31,10 +34,14 @@ function readableContent(
   body: string,
   actionType: CrmActionCard["actionType"],
 ): string {
-  return body
+  const readable = body
     .replace(ACTION_HEADER, "")
-    .replace(ACTION_FOOTERS[actionType], "")
-    .trim();
+    .replace(ACTION_FOOTERS[actionType], "");
+
+  return (actionType === "calendar_book"
+    ? readable.replace(CALENDAR_SLOT, "").replace(/\n{3,}/g, "\n\n")
+    : readable
+  ).trim();
 }
 
 /**
@@ -48,7 +55,7 @@ export function parseCrmActionCard(body: string): CrmActionCard | null {
   const expiresAt = match[3];
   if (!Number.isFinite(Date.parse(expiresAt))) return null;
 
-  return {
+  const action: CrmActionCard = {
     actionId: match[1],
     actionType: match[2] as CrmActionCard["actionType"],
     expiresAt,
@@ -57,6 +64,12 @@ export function parseCrmActionCard(body: string): CrmActionCard | null {
       match[2] as CrmActionCard["actionType"],
     ),
   };
+
+  if (action.actionType === "calendar_book") {
+    action.calendarSlots = extractCrmCalendarSlots(body);
+  }
+
+  return action;
 }
 
 /** Return only the explicitly delimited read-only Reddit draft, if present. */
@@ -69,8 +82,8 @@ export function extractCrmRedditDraft(content: string): string | null {
 /** Return the booked-slot choices that CRM explicitly rendered for this card. */
 export function extractCrmCalendarSlots(
   content: string,
-): Array<{ label: string; reaction: string }> {
-  const slots: Array<{ label: string; reaction: string }> = [];
+): CrmCalendarSlot[] {
+  const slots: CrmCalendarSlot[] = [];
   const seen = new Set<number>();
 
   for (const match of content.matchAll(CALENDAR_SLOT)) {
