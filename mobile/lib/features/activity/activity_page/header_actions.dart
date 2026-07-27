@@ -68,24 +68,81 @@ class _FilterMenuButton extends StatelessWidget {
                 fontWeight: FontWeight.w600,
               ),
             ),
-            const SizedBox(width: Grid.quarter),
-            Icon(
-              LucideIcons.chevronDown,
-              size: 16,
-              color: context.colors.onSurfaceVariant,
-            ),
-            if (dueReminderCount > 0 || draftCount > 0) ...[
-              const SizedBox(width: Grid.quarter),
-              Container(
-                width: 6,
-                height: 6,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: context.colors.primary,
+            surfaceKey: const ValueKey('activity-filter-popover'),
+            items: [
+              for (final entry in _filterLabels.entries)
+                PopupMenuItem(
+                  value: entry.key,
+                  height: Grid.xl,
+                  padding: const EdgeInsets.symmetric(horizontal: Grid.twelve),
+                  child: Row(
+                    children: [
+                      SizedBox(
+                        width: Grid.sm,
+                        child: entry.key == filter
+                            ? Icon(
+                                LucideIcons.check,
+                                size: 16,
+                                color: context.colors.primary,
+                              )
+                            : null,
+                      ),
+                      Expanded(
+                        child: Text(
+                          entry.value,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: context.textTheme.labelLarge?.copyWith(
+                            color: context.colors.onSurface,
+                          ),
+                        ),
+                      ),
+                      if (entry.key == InboxFilter.reminders &&
+                          dueReminderCount > 0)
+                        _CountBadge(count: dueReminderCount)
+                      else if (entry.key == InboxFilter.drafts &&
+                          draftCount > 0)
+                        _CountBadge(count: draftCount),
+                    ],
+                  ),
                 ),
-              ),
             ],
-          ],
+          );
+          if (buttonContext.mounted && selected != null) onChanged(selected);
+        },
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: Grid.xl),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: Grid.xxs),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  _filterLabels[filter]!,
+                  style: context.textTheme.labelLarge?.copyWith(
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(width: Grid.quarter),
+                Icon(
+                  LucideIcons.chevronDown,
+                  size: 16,
+                  color: context.colors.onSurfaceVariant,
+                ),
+                if (dueReminderCount > 0 || draftCount > 0) ...[
+                  const SizedBox(width: Grid.quarter),
+                  Container(
+                    width: 6,
+                    height: 6,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: context.colors.primary,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
         ),
       ),
     );

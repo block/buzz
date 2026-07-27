@@ -197,7 +197,14 @@ void main() {
     await tester.pumpWidget(await buildTestable());
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byKey(const ValueKey('activity-filter-menu')));
+    final filterTrigger = find.byKey(const ValueKey('activity-filter-menu'));
+    expect(
+      tester.getSize(filterTrigger).height,
+      greaterThanOrEqualTo(Grid.xl),
+      reason: 'The Activity filter trigger must keep a 48dp touch target.',
+    );
+
+    await tester.tap(filterTrigger);
     await tester.pump();
 
     final surface = find.byKey(const ValueKey('activity-filter-popover'));
