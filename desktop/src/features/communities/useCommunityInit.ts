@@ -24,6 +24,7 @@ import {
 import { resetAgentWorkingSignal } from "@/features/agents/agentWorkingSignal";
 import { resetAgentObserverStore } from "@/features/agents/observerRelayStore";
 import { resetSpawnerAttestationStore } from "@/features/agents/spawnerAttestationStore";
+import { resetSpawnerCredentialAcks } from "@/features/agents/spawnerCredentialAcks";
 import { resetSpawnerDirectoryStore } from "@/features/agents/spawnerDirectoryStore";
 import { resetSpawnerPromptUpdateQueue } from "@/features/agents/spawnerPromptUpdateQueue";
 import { resetSpawnerStatusStore } from "@/features/agents/spawnerStatusStore";
@@ -59,6 +60,7 @@ function resetCommunityState({
   // Attestation prompts are identity-scoped: showing one after a switch would
   // ask the user to sign with the wrong key. Status is community-scoped too.
   resetSpawnerAttestationStore();
+  resetSpawnerCredentialAcks();
   resetSpawnerStatusStore();
   // The spawner directory is community-scoped: announcements come from the
   // relay we just left.

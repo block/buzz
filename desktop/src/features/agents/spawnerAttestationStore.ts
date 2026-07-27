@@ -13,11 +13,13 @@ import {
 import {
   buildSpawnerAttestationResponse,
   decodeSpawnerAttestation,
+  decodeSpawnerCredentialAck,
   type SpawnerAttestationRequest,
   type SpawnerAttestationResponse,
   type SpawnerPromptMaterial,
 } from "@/shared/api/tauriSpawner";
 import type { RelayEvent } from "@/shared/api/types";
+import { deliverSpawnerCredentialAck } from "./spawnerCredentialAcks";
 import { isSpawnerTrusted, trustSpawner } from "./trustedSpawners";
 
 /**
@@ -167,7 +169,15 @@ async function handleAttestationEvent(event: RelayEvent): Promise<void> {
     // worth surfacing.
     return;
   }
-  if (!request) return;
+  if (!request) {
+    try {
+      const ack = await decodeSpawnerCredentialAck(event.pubkey, event.content);
+      if (ack) deliverSpawnerCredentialAck(event.pubkey, ack);
+    } catch {
+      // Same expected-traffic rationale as the request decode above.
+    }
+    return;
+  }
 
   // The verified event author is the spawner. The frame body does not name its
   // own sender, so there is nothing to cross-check here — Rust decrypts with
