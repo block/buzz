@@ -167,19 +167,11 @@ test("after: consolidated harnesses panel + catalog dialog", async ({
     path: `${SHOTS}/after-catalog-ready-detail.png`,
   });
 
-  // 4. Custom harness form — progressive disclosure collapsed.
+  // 4. Custom harness form — all fields inline.
   await page.getByTestId("harness-catalog-list-item-custom").click();
   await expect(page.getByTestId("custom-harness-form")).toBeVisible();
   await page.waitForTimeout(300);
   await page.getByTestId("harness-catalog-dialog").screenshot({
     path: `${SHOTS}/after-catalog-custom-form.png`,
-  });
-
-  // 5. Custom harness form — advanced disclosure open.
-  await page.getByTestId("custom-harness-advanced-toggle").click();
-  await expect(page.getByTestId("custom-harness-advanced")).toBeVisible();
-  await page.waitForTimeout(300);
-  await page.getByTestId("harness-catalog-dialog").screenshot({
-    path: `${SHOTS}/after-catalog-custom-advanced.png`,
   });
 });

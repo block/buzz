@@ -145,10 +145,7 @@ async function openCatalog(page: import("@playwright/test").Page) {
   await expect(page.getByTestId("harness-catalog-dialog")).toBeVisible();
 }
 
-/**
- * Fill the custom harness form (name + command visible by default; ID and
- * env live behind the Advanced disclosure).
- */
+/** Fill the custom harness form (all fields render inline). */
 async function fillHarnessForm(
   page: import("@playwright/test").Page,
   values: {
@@ -160,13 +157,6 @@ async function fillHarnessForm(
 ) {
   await page.fill("#ch-label", values.label);
   await page.fill("#ch-command", values.command);
-  if (values.id !== undefined || (values.env ?? []).length > 0) {
-    const advanced = page.getByTestId("custom-harness-advanced");
-    if (!(await advanced.isVisible())) {
-      await page.getByTestId("custom-harness-advanced-toggle").click();
-    }
-    await expect(advanced).toBeVisible();
-  }
   if (values.id !== undefined) {
     await page.fill("#ch-id", values.id);
   }
@@ -254,7 +244,6 @@ test.describe("your harnesses split", () => {
     await page.getByTestId("harness-catalog-list-item-hermes").click();
     const detail = page.getByTestId("harness-catalog-detail-pane");
     await expect(detail).toContainText("Ready");
-    await expect(detail).toContainText("manage it under Your harnesses");
     await expect(
       page.getByTestId("harness-catalog-install-hermes"),
     ).toHaveCount(0);
@@ -340,19 +329,17 @@ test.describe("add custom harness", () => {
     await page.getByTestId("harness-catalog-list-item-custom").click();
     await expect(page.getByTestId("custom-harness-form")).toBeVisible();
 
-    // Progressive disclosure: name + command visible, advanced hidden.
+    // All fields render inline.
     await expect(page.locator("#ch-label")).toBeVisible();
     await expect(page.locator("#ch-command")).toBeVisible();
-    await expect(page.getByTestId("custom-harness-advanced")).toHaveCount(0);
-    await expect(page.locator("#ch-id")).toHaveCount(0);
+    await expect(page.locator("#ch-id")).toBeVisible();
 
     await fillHarnessForm(page, {
       label: "My Custom Agent",
       command: "my-custom-acp",
     });
 
-    // ID auto-derives from the label behind Advanced.
-    await page.getByTestId("custom-harness-advanced-toggle").click();
+    // ID auto-derives from the label.
     await expect(page.locator("#ch-id")).toHaveValue("my-custom-agent");
 
     await page
@@ -387,9 +374,7 @@ test.describe("add custom harness", () => {
     await page.getByTestId("custom-harness-edit-my-custom-agent").click();
     await expect(page.getByTestId("custom-harness-form")).toBeVisible();
 
-    // Advanced opens automatically because env vars exist; KEY and value
-    // must be pre-populated.
-    await expect(page.getByTestId("custom-harness-advanced")).toBeVisible();
+    // Existing env vars must be pre-populated.
     await expect(page.locator('input[placeholder="KEY"]').first()).toHaveValue(
       "MY_API_KEY",
     );

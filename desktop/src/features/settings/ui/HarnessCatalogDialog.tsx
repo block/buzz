@@ -34,7 +34,7 @@ import {
 const CUSTOM_ENTRY_ID = "\u0000custom";
 
 /**
- * "Add harnesses" — master-detail catalog dialog, modeled on the Agent
+ * "Add runtimes" — master-detail catalog dialog, modeled on the Agent
  * Catalog (PersonaCatalogDialog): searchable left chooser, right detail pane
  * with a primary Install / setup-guide CTA under the header, one neutral
  * vendor-sourced sentence, operational setup state, and technical details.
@@ -101,7 +101,7 @@ export function HarnessCatalogDialog({
         scrollAreaClassName="flex min-h-0 overflow-hidden px-0"
         scrollAreaTestId="harness-catalog-dialog-body"
         tabIndex={-1}
-        title="Add harnesses"
+        title="Add runtimes"
       >
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-sidebar sm:flex-row">
           {/* Left: search + chooser list */}
@@ -110,11 +110,11 @@ export function HarnessCatalogDialog({
               <div className="relative">
                 <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-sidebar-foreground/50" />
                 <Input
-                  aria-label="Search harnesses"
+                  aria-label="Search runtimes"
                   className="h-8 border-sidebar-border bg-sidebar-accent/40 pl-8 text-sm"
                   data-testid="harness-catalog-search"
                   onChange={(e) => setQuery(e.target.value)}
-                  placeholder="Search harnesses…"
+                  placeholder="Search runtimes…"
                   value={query}
                 />
               </div>
@@ -138,7 +138,7 @@ export function HarnessCatalogDialog({
                     ))}
                     {filtered.length === 0 ? (
                       <p className="px-4 py-2 text-sm text-sidebar-foreground/60">
-                        No harnesses match.
+                        No runtimes match.
                       </p>
                     ) : null}
                   </>
@@ -170,7 +170,12 @@ export function HarnessCatalogDialog({
           {/* Right: detail pane */}
           <div className="relative z-10 ml-px flex min-h-0 flex-1 flex-col overflow-hidden rounded-tl-xl bg-background shadow-[-1px_0_0_0_hsl(var(--sidebar-border)/0.45)]">
             <div
-              className="min-h-0 flex-1 overflow-y-auto px-5 py-5"
+              className={cn(
+                "min-h-0 flex-1",
+                selectedId === CUSTOM_ENTRY_ID
+                  ? "flex flex-col overflow-hidden"
+                  : "overflow-y-auto px-5 py-5",
+              )}
               data-testid="harness-catalog-detail-pane"
             >
               {selectedId === CUSTOM_ENTRY_ID ? (
@@ -182,7 +187,7 @@ export function HarnessCatalogDialog({
               ) : (
                 <div className="flex min-h-80 items-center justify-center rounded-lg border border-dashed border-border/70 px-6 text-center">
                   <p className="max-w-sm text-sm text-muted-foreground">
-                    Select a harness on the left, or add a custom one.
+                    Select a runtime on the left, or add a custom one.
                   </p>
                 </div>
               )}
@@ -199,7 +204,7 @@ function CatalogListSkeleton() {
   const widths = ["w-24", "w-32", "w-20", "w-28", "w-24", "w-16"];
   return (
     <div
-      aria-label="Loading harnesses"
+      aria-label="Loading runtimes"
       className="space-y-1"
       data-testid="harness-catalog-list-skeleton"
       role="status"
@@ -223,7 +228,7 @@ function CatalogListSkeleton() {
 function CatalogDetailSkeleton() {
   return (
     <div
-      aria-label="Loading harness details"
+      aria-label="Loading runtime details"
       className="flex min-h-full flex-col gap-6"
       data-testid="harness-catalog-detail-skeleton"
       role="status"
@@ -428,14 +433,25 @@ function TechnicalDetails({ entry }: { entry: AcpRuntimeCatalogEntry }) {
 
 function CustomHarnessDetail({ onDone }: { onDone: () => void }) {
   return (
-    <div className="space-y-4" data-testid="harness-catalog-custom-detail">
-      <div>
-        <h3 className="text-xl font-semibold leading-snug">Custom harness</h3>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Register any ACP-speaking agent tool as a selectable harness.
-        </p>
-      </div>
-      <CustomHarnessForm chromeless onCancel={onDone} onSaved={onDone} />
+    <div
+      className="flex min-h-0 flex-1 flex-col"
+      data-testid="harness-catalog-custom-detail"
+    >
+      <CustomHarnessForm
+        chromeless
+        header={
+          <div>
+            <h3 className="text-xl font-semibold leading-snug">
+              Custom harness
+            </h3>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Register any ACP-speaking agent tool as a selectable runtime.
+            </p>
+          </div>
+        }
+        onCancel={onDone}
+        onSaved={onDone}
+      />
     </div>
   );
 }
