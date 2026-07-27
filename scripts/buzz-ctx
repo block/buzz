@@ -18,8 +18,10 @@
 #   buzz-ctx artifact <file>            # store an immutable content-addressed blob
 #   buzz-ctx fetch <sha256> [out]       # fetch + verify an artifact
 #   buzz-ctx agreement export <stream> <reader-pubkey>...  # declare (offer)
+#   buzz-ctx agreement admit <source> <principal> <pubkey>...  # sink trust half
 #   buzz-ctx agreement match <stream>   # evaluate the matched-pair rule
 #   buzz-ctx agreement list             # all declaration heads
+#   buzz-ctx agreement migrate          # sweep config files into declarations
 #
 # Environment (defaults for the sovereign laptop):
 #   BUZZ_CTX_HOME   ~/.buzz-local
@@ -117,6 +119,59 @@ case "${1:-}" in
             content:({status:"active", selection:$sel, artifacts:"referenced"}|tojson)}')"
         post_event "$event"
         echo "declared export/$stream (offer to: $*)"
+        ;;
+      admit)
+        # Destination-side half: which principal, under which verification
+        # keys, may push this source stream into our sink. Owner-signed admit
+        # heads govern the relay's peer trust wholesale (runtime evaluation
+        # policy); peer-trust.json becomes bootstrap-only.
+        source_id="${3:?usage: buzz-ctx agreement admit <source> <principal> <verification-pubkey>...}"
+        principal="${4:?a stable principal label (e.g. did:buzz:node-c) is required}"
+        shift 4
+        [ $# -ge 1 ] || die "at least one verification pubkey required"
+        keys="$(printf '%s\n' "$@" | jq -R . | jq -sc 'map(["p", .])')"
+        event="$(jq -n --arg pk "$PUBKEY" --arg d "admit/$source_id" \
+          --arg principal "$principal" --argjson keys "$keys" \
+          --arg ts "$(date +%s)" \
+          '{pubkey:$pk, created_at:($ts|tonumber), kind:30700,
+            tags:([["d",$d]] + $keys),
+            content:({status:"active", principal:$principal,
+                      retention:{keep:"journal"}}|tojson)}')"
+        post_event "$event"
+        echo "declared admit/$source_id (principal $principal, $# key(s))"
+        ;;
+      migrate)
+        # Sweep bootstrap config files into owner-signed declarations, per
+        # "Mapping from current operator configuration" in the draft spec.
+        # Idempotent: sources already declared are reported, not re-minted.
+        relay="$(relay_for_read)"
+        heads="$("$CLIENT" query "$KEY" "$relay" \
+          "[{\"kinds\":[30700],\"authors\":[\"$PUBKEY\"]}]" | sed 's/^200 //')"
+        if [ -f "$HOME_DIR/peer-trust.json" ]; then
+          while IFS=$'\t' read -r source_id principal keys_csv; do
+            if printf '%s' "$heads" | jq -e --arg d "admit/$source_id" \
+              '[.[] | select(any(.tags[]; .[0]=="d" and .[1]==$d))] | length > 0' >/dev/null; then
+              echo "admit/$source_id: already declared — journal governs"
+            else
+              # shellcheck disable=SC2046
+              "$0" agreement admit "$source_id" "$principal" $(echo "$keys_csv" | tr ',' ' ')
+            fi
+          done < <(jq -r 'to_entries[] |
+            [.key, .value.principal, (.value.verification_keys|join(","))] | @tsv' \
+            "$HOME_DIR/peer-trust.json")
+        else
+          echo "no peer-trust.json — admit domain has nothing to migrate"
+        fi
+        if [ -f "$HOME_DIR/streams.json" ]; then
+          for stream in $(jq -r 'keys[]' "$HOME_DIR/streams.json"); do
+            if printf '%s' "$heads" | jq -e --arg d "export/$stream" \
+              '[.[] | select(any(.tags[]; .[0]=="d" and .[1]==$d))] | length > 0' >/dev/null; then
+              echo "export/$stream: already declared — journal governs"
+            else
+              echo "export/$stream: MISSING — mint with: buzz-ctx agreement export $stream <reader-pubkey>..."
+            fi
+          done
+        fi
         ;;
       match)
         stream="${3:?usage: buzz-ctx agreement match <stream>}"
