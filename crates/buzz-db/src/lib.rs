@@ -2639,6 +2639,23 @@ impl Db {
         workflow::set_workflow_enabled(&self.pool, community_id, id, enabled).await
     }
 
+    /// Disable all of an owner's workflows in a channel (SEC-006, on
+    /// membership loss). Returns the number of workflows disabled.
+    pub async fn disable_workflows_for_owner_in_channel(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        owner_pubkey: &[u8],
+    ) -> Result<u64> {
+        workflow::disable_workflows_for_owner_in_channel(
+            &self.pool,
+            community_id,
+            channel_id,
+            owner_pubkey,
+        )
+        .await
+    }
+
     /// Delete a workflow and all its runs/approvals.
     pub async fn delete_workflow(&self, community_id: CommunityId, id: Uuid) -> Result<()> {
         workflow::delete_workflow(&self.pool, community_id, id).await
