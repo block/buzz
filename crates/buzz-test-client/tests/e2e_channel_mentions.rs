@@ -21,6 +21,8 @@ const KIND_STREAM_MESSAGE: u16 = 9;
 const KIND_STREAM_MESSAGE_V2: u16 = 40002;
 const KIND_CREATE_GROUP: u16 = 9007;
 const KIND_JOIN_REQUEST: u16 = 9021;
+const KIND_REPORT: u16 = 1984;
+const KIND_PRODUCT_FEEDBACK: u16 = 42000;
 
 fn relay_url() -> String {
     std::env::var("RELAY_URL").unwrap_or_else(|_| "ws://localhost:3000".to_string())
@@ -279,6 +281,31 @@ async fn notify_tag_rejected_in_dm_channels() {
         "untagged DM messages must still be accepted: {}",
         rejection_message(status, &body)
     );
+}
+
+#[tokio::test]
+#[ignore = "requires a running relay"]
+async fn notify_tag_rejected_on_kinds_with_their_own_handlers() {
+    // Product feedback (42000) and reports (1984) are answered by dedicated
+    // handlers that report success before the channel-row gate is reached.
+    // The tag must still be rejected — and rejected *as* a notify tag, which
+    // only happens if the gate runs ahead of the handler dispatch.
+    let author = Keys::generate();
+    let channel = create_channel(&author, "stream").await;
+
+    for kind in [KIND_PRODUCT_FEEDBACK, KIND_REPORT] {
+        let event = message(&author, kind, channel, "hi", &[&["notify", "channel"]]);
+        let (status, body) = post_event(&author, &event).await;
+        let detail = rejection_message(status, &body);
+        assert!(
+            !status.is_success() || !accepted(&body),
+            "kind {kind} must not accept a notify tag: {detail}"
+        );
+        assert!(
+            detail.contains("notify tag"),
+            "kind {kind} must be rejected as a notify tag, not by its own handler: {detail}"
+        );
+    }
 }
 
 #[tokio::test]

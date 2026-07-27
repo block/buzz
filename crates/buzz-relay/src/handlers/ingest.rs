@@ -905,7 +905,6 @@ async fn validate_forum_vote_target(
     Ok(())
 }
 
-/// Validate kind:40008 diff event metadata tags.
 /// NIP-CM: validate a `["notify", "channel"|"here"]` channel-wide mention tag.
 ///
 /// Tag shape, mode spelling, at-most-one, and the allowed-kind gate are pure
@@ -946,6 +945,7 @@ fn notify_requires_membership(event: &Event) -> bool {
             .is_some()
 }
 
+/// Validate kind:40008 diff event metadata tags.
 fn validate_diff_event(event: &Event) -> Result<(), String> {
     // Content max 60KB
     if event.content.len() > 61_440 {
@@ -1608,6 +1608,18 @@ async fn ingest_event_inner(
         )));
     }
 
+    // NIP-CM: the pure half of the notify-tag gate — shape, mode spelling,
+    // at-most-one, allowed kind — must run BEFORE every early-return handler
+    // dispatch below (commands, product feedback, reports, moderation
+    // commands). Those handlers answer `accepted: true` without ever reaching
+    // the channel-row gate further down, so without this the sender would be
+    // told the channel was notified while the tag was silently stored (product
+    // feedback and command kinds persist the event's tags verbatim). No kind
+    // handled by those branches is notify-allowed, so this pure check is their
+    // complete gate; the channel-row-dependent rules stay below.
+    buzz_core::channel_mentions::event_notify_mode(&event)
+        .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+
     // Command kinds are routed AFTER signature verification, timestamp check,
     // pubkey/auth match, and scope validation — never before.
     if buzz_core::kind::is_command_kind(kind_u32) {
@@ -1822,8 +1834,10 @@ async fn ingest_event_inner(
         None => None,
     };
     // NIP-CM: gate the channel-wide mention tag before anything stores or
-    // fans out the event. Runs for every kind so an unlisted kind carrying a
-    // notify tag is rejected rather than silently ignored.
+    // fans out the event. The shape/kind half already ran above the
+    // early-return handler dispatch, so every kind is covered; this call adds
+    // the DM-channel rule, which needs the channel row. Re-running the pure
+    // check here is a tag scan, and keeps the seam readable in one place.
     validate_channel_mention(&event, channel_row.as_ref())
         .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
 
@@ -3242,6 +3256,35 @@ mod tests {
         assert!(validate_channel_mention(&event, Some(&make_channel_row("dm"))).is_ok());
         let other_kind = make_event_with_tags(1, "hi", &[]);
         assert!(validate_channel_mention(&other_kind, None).is_ok());
+    }
+
+    #[test]
+    fn notify_tag_rejected_on_kinds_answered_before_the_channel_row_gate() {
+        // These kinds are answered by their own handlers, which return
+        // `accepted: true` before `validate_channel_mention` is reached. The
+        // pure check hoisted above the handler dispatch is therefore their
+        // only gate — and it is sufficient exactly because none of them is
+        // notify-allowed. If that ever changes, this test fails first.
+        for kind in [
+            KIND_PRODUCT_FEEDBACK, // 42000 — sidecar table, tags stored verbatim
+            KIND_REPORT,           // 1984 — mod queue
+            KIND_DM_OPEN,          // 41010 — command kind, event stored verbatim
+            KIND_MODERATION_BAN,   // 9040 — moderation command
+        ] {
+            assert!(
+                !buzz_core::channel_mentions::NOTIFY_ALLOWED_KINDS.contains(&kind),
+                "kind {kind} must stay outside NOTIFY_ALLOWED_KINDS, or the \
+                 hoisted pure check stops being a complete gate for it"
+            );
+            let event = make_event_with_tags(kind, "hi", &[&["notify", "channel"]]);
+            assert_eq!(
+                buzz_core::channel_mentions::event_notify_mode(&event),
+                Err(buzz_core::channel_mentions::NotifyTagError::KindNotAllowed(
+                    kind
+                )),
+                "kind {kind} must reject a notify tag"
+            );
+        }
     }
 
     #[test]
