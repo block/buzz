@@ -39,6 +39,10 @@ fn common_binary_paths() -> &'static [PathBuf] {
             paths.extend([
                 home.join(".local/share/mise/shims"),
                 home.join(".local/bin"),
+                // Kimi Code's standalone installer places the binary here.
+                // GUI-launched desktop processes may not inherit the PATH
+                // update written by the installer, so probe it explicitly.
+                home.join(".kimi-code/bin"),
                 home.join(".volta/bin"),
                 home.join(".asdf/shims"),
             ]);
@@ -1554,8 +1558,8 @@ const PRESET_HARNESSES: &[PresetHarness] = &[
         label: "Kimi Code",
         command: "kimi",
         args: &["acp"],
-        install_instructions_url: "https://kimi.ai/download",
-        install_hint: "Install Kimi Code from kimi.ai/download.",
+        install_instructions_url: "https://moonshotai.github.io/kimi-code/",
+        install_hint: "Install Kimi Code CLI using the official installer.",
         underlying_cli: None,
     },
     PresetHarness {
