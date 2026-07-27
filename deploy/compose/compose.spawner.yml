@@ -64,6 +64,13 @@ services:
       # unavailable from this server") — a client cannot know what the host can
       # run unless the host says so.
       BUZZ_SPAWNER_AI_CATALOG: ${BUZZ_SPAWNER_AI_CATALOG:-}
+      # BREAKING: server agents now require a per-owner Claude credential,
+      # delivered from the desktop (Settings → Server agents). Host-global
+      # ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN passthrough no longer
+      # reaches agent containers; agents whose owner has not provisioned a
+      # token are held stopped and report needs_credential on their status.
+      # Keep passthrough for non-Anthropic variables only.
+      #
       # Names of variables to forward into agent containers — not KEY=VALUE
       # pairs. The value is read from this service's own environment, so a
       # rotated credential is picked up by restarting the spawner.

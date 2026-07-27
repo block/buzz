@@ -1225,8 +1225,7 @@ mod tests {
         let back: SpawnerAgentStatus = serde_json::from_str(&json).unwrap();
         assert!(back.needs_credential);
         // Old events without the field still parse, and false is omitted.
-        let legacy: SpawnerAgentStatus =
-            serde_json::from_str(r#"{"phase":"running"}"#).unwrap();
+        let legacy: SpawnerAgentStatus = serde_json::from_str(r#"{"phase":"running"}"#).unwrap();
         assert!(!legacy.needs_credential);
         let quiet = SpawnerAgentStatus {
             needs_credential: false,

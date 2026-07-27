@@ -1456,7 +1456,11 @@ test("localModeGateSatisfiedForSubmit_serverManaged_ignoresMissingCredentialKeys
     provider: "anthropic",
     runtimeId: "buzz-agent",
   });
-  assert.equal(gate.satisfied, false, "precondition: local gate is unsatisfied");
+  assert.equal(
+    gate.satisfied,
+    false,
+    "precondition: local gate is unsatisfied",
+  );
   assert.deepEqual(gate.missingEnvKeys, ["ANTHROPIC_API_KEY"]);
 
   assert.equal(localModeGateSatisfiedForSubmit(gate, true), true);
