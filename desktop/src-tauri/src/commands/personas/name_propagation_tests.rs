@@ -45,6 +45,7 @@ fn agent(persona_id: &str, name: &str, display_name: Option<&str>) -> ManagedAge
         respond_to: Default::default(),
         respond_to_allowlist: vec![],
         display_name: display_name.map(str::to_string),
+        description: None,
         slug: None,
         runtime: None,
         name_pool: vec![],

@@ -44,6 +44,7 @@ fn record() -> ManagedAgentRecord {
         respond_to: Default::default(),
         respond_to_allowlist: vec![],
         display_name: None,
+        description: None,
         slug: None,
         runtime: None,
         name_pool: Vec::new(),
@@ -62,6 +63,7 @@ fn persona(id: &str, runtime: Option<&str>, prompt: &str) -> AgentDefinition {
     AgentDefinition {
         id: id.into(),
         display_name: id.into(),
+        description: None,
         avatar_url: None,
         system_prompt: prompt.into(),
         runtime: runtime.map(str::to_string),

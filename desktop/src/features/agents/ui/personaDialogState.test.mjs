@@ -62,6 +62,7 @@ test("createPersonaDialogState returns a fresh empty draft", () => {
   assert.equal(first.title, "Create agent");
   assert.deepEqual(first.initialValues, {
     displayName: "",
+    description: "",
     avatarUrl: "",
     systemPrompt: "",
     runtime: undefined,
@@ -74,6 +75,7 @@ test("duplicatePersonaDialogState copies persona fields into a new draft", () =>
   const state = duplicatePersonaDialogState({
     id: "persona-1",
     displayName: "Solo",
+    description: "Keeps plans direct and focused.",
     avatarUrl: "avatar://solo",
     systemPrompt: "Be direct.",
     runtime: "provider-a",
@@ -87,6 +89,7 @@ test("duplicatePersonaDialogState copies persona fields into a new draft", () =>
 
   assert.deepEqual(state.initialValues, {
     displayName: "Solo copy",
+    description: "Keeps plans direct and focused.",
     avatarUrl: "avatar://solo",
     systemPrompt: "Be direct.",
     runtime: "provider-a",
@@ -127,6 +130,7 @@ test("editPersonaDialogState preserves the persona id for updates", () => {
   const state = editPersonaDialogState({
     id: "persona-2",
     displayName: "Kit",
+    description: "Keeps it weird.",
     avatarUrl: null,
     systemPrompt: "Keep it weird.",
     runtime: null,
@@ -144,6 +148,7 @@ test("editPersonaDialogState preserves the persona id for updates", () => {
   assert.deepEqual(state.initialValues, {
     id: "persona-2",
     displayName: "Kit",
+    description: "Keeps it weird.",
     avatarUrl: "",
     systemPrompt: "Keep it weird.",
     runtime: undefined,

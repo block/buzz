@@ -396,6 +396,7 @@ pub async fn confirm_agent_snapshot_import(
         let persona = AgentDefinition {
             id: persona_id.clone(),
             display_name: display_name.clone(),
+            description: snapshot.profile.about.clone(),
             avatar_url: effective_avatar.clone(),
             system_prompt: snapshot
                 .definition
@@ -430,6 +431,7 @@ pub async fn confirm_agent_snapshot_import(
             pubkey: pubkey.clone(),
             name: display_name.clone(),
             display_name: None,
+            description: persona.description.clone(),
             slug: None,
             persona_id: Some(persona_id.clone()),
             private_key_nsec: private_key_nsec.clone(),

@@ -56,6 +56,7 @@ fn make_agent(
         respond_to: RespondTo::OwnerOnly,
         respond_to_allowlist: vec![],
         display_name: None,
+        description: None,
         slug: None,
         runtime: None,
         name_pool: vec![],

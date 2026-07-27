@@ -75,6 +75,8 @@ pub fn apply_persona_behavior(
 #[serde(rename_all = "camelCase")]
 pub struct CreatePersonaRequest {
     pub display_name: String,
+    #[serde(default)]
+    pub description: Option<String>,
     pub avatar_url: Option<String>,
     pub system_prompt: String,
     #[serde(default)]
@@ -98,6 +100,8 @@ pub struct CreatePersonaRequest {
 pub struct UpdatePersonaRequest {
     pub id: String,
     pub display_name: String,
+    #[serde(default)]
+    pub description: Option<String>,
     pub avatar_url: Option<String>,
     pub system_prompt: String,
     #[serde(default)]
@@ -267,6 +271,7 @@ mod tests {
         AgentDefinition {
             id: "p-1".to_string(),
             display_name: "Test".to_string(),
+            description: None,
             avatar_url: None,
             system_prompt: "prompt".to_string(),
             runtime: None,

@@ -121,6 +121,7 @@ fn definition_from_snapshot(
     Ok(AgentDefinition {
         id: Uuid::new_v4().to_string(),
         display_name: member.profile.display_name.trim().to_string(),
+        description: member.profile.about.clone(),
         avatar_url: effective_avatar(member),
         system_prompt: member.definition.system_prompt.clone().unwrap_or_default(),
         runtime: member.definition.runtime.clone(),
@@ -551,6 +552,7 @@ pub async fn confirm_team_snapshot_import(
             pubkey: pubkey.clone(),
             name: display_name.clone(),
             display_name: None,
+            description: definition.description.clone(),
             slug: None,
             persona_id: Some(definition.id.clone()),
             private_key_nsec: private_key_nsec.clone(),

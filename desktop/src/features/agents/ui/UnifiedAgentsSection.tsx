@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 
 import { resolveAgentCardModelLabel } from "@/features/agents/lib/agentCardModelLabel";
+import { resolveAgentDescriptor } from "@/features/agents/lib/agentDescriptor";
 import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import { useUserProfileQuery } from "@/features/profile/hooks";
@@ -315,6 +316,10 @@ function AgentPersonaCard({
       }
       avatarUrl={avatarUrl}
       dataTestId={`persona-agent-row-${persona.id}`}
+      description={resolveAgentDescriptor(
+        persona.description,
+        persona.systemPrompt,
+      )}
       label={title}
       modelLabel={modelLabel}
       onClick={() => {
@@ -390,6 +395,10 @@ function StandaloneAgentCard({
       }
       avatarUrl={profileQuery.data?.avatarUrl}
       dataTestId={`managed-agent-${agent.pubkey}`}
+      description={resolveAgentDescriptor(
+        profileQuery.data?.about,
+        agent.systemPrompt,
+      )}
       label={title}
       modelLabel={resolveAgentCardModelLabel({
         agent,

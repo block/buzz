@@ -7,6 +7,7 @@ use crate::{managed_agents::AgentDefinition, util::now_iso};
 struct BuiltInPersona {
     id: &'static str,
     display_name: &'static str,
+    description: &'static str,
     avatar_url: Option<&'static str>,
     system_prompt: &'static str,
     name_pool: &'static [&'static str],
@@ -29,6 +30,7 @@ const BUILT_IN_PERSONAS: &[BuiltInPersona] = &[
     BuiltInPersona {
         id: "builtin:fizz",
         display_name: "Fizz",
+        description: "Turns ideas into finished work.",
         avatar_url: Some(FIZZ_AVATAR),
         system_prompt: FIZZ_SYSTEM_PROMPT,
         name_pool: &[
@@ -42,6 +44,7 @@ const BUILT_IN_PERSONAS: &[BuiltInPersona] = &[
     BuiltInPersona {
         id: "builtin:honey",
         display_name: "Honey",
+        description: "Makes ideas clear, warm, and well-shaped.",
         avatar_url: Some(HONEY_AVATAR),
         system_prompt: HONEY_SYSTEM_PROMPT,
         name_pool: &["Honey"],
@@ -52,6 +55,7 @@ const BUILT_IN_PERSONAS: &[BuiltInPersona] = &[
     BuiltInPersona {
         id: "builtin:bumble",
         display_name: "Bumble",
+        description: "Explores questions and brings back useful evidence.",
         avatar_url: Some(BUMBLE_AVATAR),
         system_prompt: BUMBLE_SYSTEM_PROMPT,
         name_pool: &["Bumble"],
@@ -113,6 +117,7 @@ fn built_in_persona_records(now: &str) -> Vec<AgentDefinition> {
         .map(|persona| AgentDefinition {
             id: persona.id.to_string(),
             display_name: persona.display_name.to_string(),
+            description: Some(persona.description.to_string()),
             avatar_url: persona.avatar_url.map(|s| s.to_string()),
             system_prompt: persona.system_prompt.to_string(),
             runtime: persona.runtime.map(|s| s.to_string()),
@@ -174,6 +179,10 @@ fn merge_personas(mut stored: Vec<AgentDefinition>, now: &str) -> (Vec<AgentDefi
         if let Some(existing) = stored.iter_mut().find(|record| record.id == built_in.id) {
             if !existing.is_builtin {
                 existing.is_builtin = true;
+                changed = true;
+            }
+            if existing.description.is_none() {
+                existing.description = built_in.description;
                 changed = true;
             }
         } else {

@@ -45,6 +45,7 @@ fn sample_record() -> ManagedAgentRecord {
         respond_to: RespondTo::OwnerOnly,
         respond_to_allowlist: vec![],
         display_name: None,
+        description: None,
         slug: None,
         runtime: None,
         name_pool: Vec::new(),
@@ -141,6 +142,7 @@ fn sample_persona() -> AgentDefinition {
     AgentDefinition {
         id: "test-persona".to_string(),
         display_name: "Test Persona".to_string(),
+        description: None,
         avatar_url: Some("https://example.com/avatar.png".to_string()),
         system_prompt: "You are a test assistant.".to_string(),
         runtime: Some("goose".to_string()),
@@ -252,7 +254,8 @@ fn build_persona_event_produces_correct_kind() {
 
 #[test]
 fn round_trip_serialization() {
-    let record = sample_persona();
+    let mut record = sample_persona();
+    record.description = Some("Handles focused test work.".to_string());
     let builder = build_persona_event(&record).unwrap();
     let keys = nostr::Keys::generate();
     let event = builder.sign_with_keys(&keys).unwrap();
@@ -260,6 +263,10 @@ fn round_trip_serialization() {
     let restored = persona_from_event(&event).unwrap();
     assert_eq!(restored.id, "test-slug");
     assert_eq!(restored.display_name, "Test Persona");
+    assert_eq!(
+        restored.description.as_deref(),
+        Some("Handles focused test work.")
+    );
     assert_eq!(
         restored.avatar_url,
         Some("https://example.com/avatar.png".to_string())
@@ -299,6 +306,7 @@ fn content_matches_nip_ap_vector() {
         model: Some("claude-opus-4".to_string()),
         provider: Some("anthropic".to_string()),
         name_pool: vec!["Alpha".to_string(), "Beta".to_string()],
+        description: None,
         respond_to: None,
         respond_to_allowlist: Vec::new(),
         parallelism: None,
@@ -347,6 +355,7 @@ fn content_matches_nip_ap_vector() {
     let record = AgentDefinition {
         id: "test-agent".to_string(),
         display_name: "Test Agent".to_string(),
+        description: None,
         avatar_url: Some("https://example.com/avatar.png".to_string()),
         system_prompt: "You are a test assistant.".to_string(),
         runtime: Some("goose".to_string()),
@@ -376,6 +385,7 @@ fn round_trip_minimal_persona() {
     let record = AgentDefinition {
         id: "minimal".to_string(),
         display_name: "Minimal".to_string(),
+        description: None,
         avatar_url: None,
         system_prompt: "Hello".to_string(),
         runtime: None,
@@ -471,6 +481,7 @@ fn quad_absent_definition_hash_stable_across_activation() {
     let record = AgentDefinition {
         id: "quad-absent".to_string(),
         display_name: "Test".to_string(),
+        description: None,
         avatar_url: None,
         system_prompt: "Hello".to_string(),
         runtime: Some("goose".to_string()),
@@ -513,6 +524,7 @@ fn persona_from_event_content_for_test(content: PersonaEventContent) -> AgentDef
     AgentDefinition {
         id: "staged".to_string(),
         display_name: content.display_name,
+        description: None,
         avatar_url: content.avatar_url,
         system_prompt: content.system_prompt.unwrap_or_default(),
         runtime: content.runtime,
@@ -536,6 +548,7 @@ fn persona_from_event_content_for_test(content: PersonaEventContent) -> AgentDef
 fn persona_content_hash_is_deterministic() {
     let content = PersonaEventContent {
         display_name: "Test".to_string(),
+        description: None,
         avatar_url: None,
         system_prompt: Some("Hello".to_string()),
         runtime: None,
@@ -556,6 +569,7 @@ fn persona_content_hash_is_deterministic() {
 fn persona_content_hash_changes_on_edit() {
     let content1 = PersonaEventContent {
         display_name: "Test".to_string(),
+        description: None,
         avatar_url: None,
         system_prompt: Some("Hello".to_string()),
         runtime: None,

@@ -27,6 +27,7 @@ fn refresh_builtin_agent_avatars_updates_seeded_values_and_preserves_customizati
     let definition = crate::managed_agents::AgentDefinition {
         id: "builtin:fizz".to_string(),
         display_name: "Fizz".to_string(),
+        description: None,
         avatar_url: Some(old_fizz.to_string()),
         system_prompt: "A customized built-in prompt".to_string(),
         runtime: Some("goose".to_string()),

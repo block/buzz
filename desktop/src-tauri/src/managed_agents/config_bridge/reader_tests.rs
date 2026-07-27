@@ -101,6 +101,7 @@ fn test_record() -> ManagedAgentRecord {
         respond_to: crate::managed_agents::types::RespondTo::OwnerOnly,
         respond_to_allowlist: vec![],
         display_name: None,
+        description: None,
         slug: None,
         runtime: None,
         name_pool: Vec::new(),

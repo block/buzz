@@ -170,6 +170,7 @@ fn fixture(
         respond_to,
         respond_to_allowlist: allowlist,
         display_name: None,
+        description: None,
         slug: None,
         runtime: None,
         name_pool: Vec::new(),
@@ -286,6 +287,7 @@ fn persona_with_provider(
     crate::managed_agents::AgentDefinition {
         id: id.to_string(),
         display_name: id.to_string(),
+        description: None,
         avatar_url: None,
         system_prompt: prompt.to_string(),
         runtime: None,

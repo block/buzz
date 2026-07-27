@@ -680,6 +680,7 @@ mod tests {
             respond_to: RespondTo::OwnerOnly,
             respond_to_allowlist: vec![],
             display_name: None,
+            description: None,
             slug: None,
             runtime: None,
             name_pool: Vec::new(),
@@ -701,6 +702,7 @@ mod tests {
         AgentDefinition {
             id: "persona-1".to_string(),
             display_name: "Persona".to_string(),
+            description: None,
             avatar_url: None,
             system_prompt: "You are a persona.".to_string(),
             runtime: None,

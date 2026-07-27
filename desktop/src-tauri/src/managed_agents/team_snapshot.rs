@@ -255,6 +255,7 @@ mod tests {
             pubkey: format!("{name}-pubkey"),
             name: name.to_string(),
             display_name: Some(format!("{name} Display")),
+            description: None,
             persona_id: Some("SENTINEL_PERSONA_ID".to_string()), // MUST NOT appear
             private_key_nsec: "nsec1secret".to_string(),         // MUST NOT appear
             auth_tag: Some("auth-tag-secret".to_string()),       // MUST NOT appear

@@ -110,6 +110,7 @@ type MockRelayAgentSeed = {
 type MockPersonaSeed = {
   id?: string;
   displayName: string;
+  description?: string | null;
   avatarUrl?: string | null;
   systemPrompt: string;
   isActive?: boolean;
@@ -792,6 +793,7 @@ type RawManagedAgentPrereqs = {
 type RawPersona = {
   id: string;
   display_name: string;
+  description?: string | null;
   avatar_url: string | null;
   system_prompt: string;
   runtime?: string | null;
@@ -2133,18 +2135,21 @@ function resetMockPersonas(config?: E2eConfig) {
     {
       id: "builtin:fizz",
       display_name: "Fizz",
+      description: "Turns ideas into finished work.",
       avatar_url: null,
       system_prompt: "You are Fizz.",
     },
     {
       id: "builtin:honey",
       display_name: "Honey",
+      description: "Makes ideas clear, warm, and well-shaped.",
       avatar_url: null,
       system_prompt: "You are Honey.",
     },
     {
       id: "builtin:bumble",
       display_name: "Bumble",
+      description: "Explores questions and brings back useful evidence.",
       avatar_url: null,
       system_prompt: "You are Bumble.",
     },
@@ -2152,6 +2157,7 @@ function resetMockPersonas(config?: E2eConfig) {
   mockPersonas = builtInPersonas.map((persona) => ({
     id: persona.id,
     display_name: persona.display_name,
+    description: persona.description,
     avatar_url: persona.avatar_url,
     system_prompt: persona.system_prompt,
     runtime: null,
@@ -2169,6 +2175,7 @@ function resetMockPersonas(config?: E2eConfig) {
     mockPersonas.push({
       id: persona.id ?? crypto.randomUUID(),
       display_name: persona.displayName,
+      description: persona.description ?? null,
       avatar_url: persona.avatarUrl ?? null,
       system_prompt: persona.systemPrompt,
       runtime: persona.runtime ?? null,
@@ -7302,6 +7309,7 @@ function applyMockPersonaBehavior(
 async function handleCreatePersona(args: {
   input: {
     displayName: string;
+    description?: string;
     avatarUrl?: string;
     systemPrompt: string;
     runtime?: string;
@@ -7315,6 +7323,7 @@ async function handleCreatePersona(args: {
   const persona: RawPersona = {
     id: crypto.randomUUID(),
     display_name: args.input.displayName.trim(),
+    description: args.input.description?.trim() || null,
     avatar_url: args.input.avatarUrl?.trim() || null,
     system_prompt: args.input.systemPrompt.trim(),
     runtime: args.input.runtime?.trim() || null,
@@ -7336,6 +7345,7 @@ async function handleUpdatePersona(args: {
   input: {
     id: string;
     displayName: string;
+    description?: string;
     avatarUrl?: string;
     systemPrompt: string;
     runtime?: string;
@@ -7352,6 +7362,7 @@ async function handleUpdatePersona(args: {
     throw new Error(`agent ${args.input.id} not found`);
   }
   persona.display_name = args.input.displayName.trim();
+  persona.description = args.input.description?.trim() || null;
   persona.avatar_url = args.input.avatarUrl?.trim() || null;
   persona.system_prompt = args.input.systemPrompt.trim();
   persona.runtime = args.input.runtime?.trim() || null;
@@ -7721,7 +7732,14 @@ async function handleCreateManagedAgent(
     pubkey,
     display_name: name,
     avatar_url: avatarUrl,
-    about: args.input.systemPrompt?.trim() || null,
+    about:
+      linkedPersona?.description ??
+      args.input.systemPrompt
+        ?.trim()
+        .match(/^.*?[.!?](?:\s|$)/)?.[0]
+        ?.trim() ??
+      args.input.systemPrompt?.trim() ??
+      null,
     nip05_handle: null,
     owner_pubkey: MOCK_IDENTITY_PUBKEY,
     is_agent: true,

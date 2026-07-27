@@ -68,6 +68,7 @@ The `content` field is a **plaintext** (unencrypted) JSON object:
   "model": "<string | null>",
   "provider": "<string | null>",
   "name_pool": ["<string>", ...],
+  "description": "<string | null>",
   "respond_to": "<string | null>",
   "respond_to_allowlist": ["<64-hex pubkey>", ...],
   "parallelism": "<integer | null>"
@@ -90,6 +91,7 @@ The `content` field is a **plaintext** (unencrypted) JSON object:
 | `model` | string \| null | `null` | Model identifier (e.g. `"claude-opus-4"`). |
 | `provider` | string \| null | `null` | Model provider (e.g. `"anthropic"`). |
 | `name_pool` | string[] | `[]` | Pool of display names for agent instances spawned from this definition. When non-empty, the spawning system picks a name from this pool for each new agent instance, enabling multiple concurrent agents from the same definition to have distinct identities. |
+| `description` | string \| null | `null` | Short human-readable summary shown beneath the agent name. Writers SHOULD keep this to a single line and at most 160 characters. |
 | `respond_to` | string \| null | `null` | **Reserved.** Default respond-to policy for instances spawned from this definition: `"anyone"`, `"owner-only"`, or `"allowlist"`. `null` defers to the client default. |
 | `respond_to_allowlist` | string[] | `[]` | **Reserved.** Allowlisted author pubkeys (64-char lowercase hex) when `respond_to` is `"allowlist"`. Ignored otherwise. |
 | `parallelism` | integer \| null | `null` | **Reserved.** Default max concurrent turns for spawned instances. `null` defers to the client default. |

@@ -44,6 +44,7 @@ export function createPersonaDialogState(): PersonaDialogState {
     submitLabel: "Create agent",
     initialValues: {
       displayName: "",
+      description: "",
       avatarUrl: "",
       systemPrompt: "",
       runtime: undefined,
@@ -62,6 +63,7 @@ export function duplicatePersonaDialogState(
     submitLabel: "Create agent",
     initialValues: {
       displayName: `${persona.displayName} copy`,
+      description: persona.description ?? "",
       avatarUrl: persona.avatarUrl ?? "",
       systemPrompt: persona.systemPrompt,
       runtime: persona.runtime ?? undefined,
@@ -112,6 +114,7 @@ export function editPersonaDialogState(
     initialValues: {
       id: persona.id,
       displayName: persona.displayName,
+      description: persona.description ?? "",
       avatarUrl: persona.avatarUrl ?? "",
       systemPrompt: persona.systemPrompt,
       runtime: persona.runtime ?? undefined,

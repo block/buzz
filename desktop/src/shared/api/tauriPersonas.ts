@@ -9,6 +9,7 @@ import type {
 export type RawPersona = {
   id: string;
   display_name: string;
+  description?: string | null;
   avatar_url: string | null;
   system_prompt: string;
   runtime?: string | null;
@@ -32,6 +33,7 @@ export function fromRawPersona(persona: RawPersona): AgentPersona {
   return {
     id: persona.id,
     displayName: persona.display_name,
+    description: persona.description ?? null,
     avatarUrl: persona.avatar_url,
     systemPrompt: persona.system_prompt,
     runtime: persona.runtime ?? null,
@@ -61,6 +63,7 @@ export async function createPersona(
     await invokeTauri<RawPersona>("create_persona", {
       input: {
         displayName: input.displayName,
+        description: input.description,
         avatarUrl: input.avatarUrl,
         systemPrompt: input.systemPrompt,
         runtime: input.runtime,
@@ -81,6 +84,7 @@ export async function updatePersona(
     input: {
       id: input.id,
       displayName: input.displayName,
+      description: input.description,
       avatarUrl: input.avatarUrl,
       systemPrompt: input.systemPrompt,
       runtime: input.runtime,

@@ -402,6 +402,7 @@ mod tests {
         let mut record = crate::managed_agents::AgentDefinition {
             id: pubkey.to_string(),
             display_name: pubkey.to_string(),
+            description: None,
             avatar_url: None,
             system_prompt: String::new(),
             runtime: None,

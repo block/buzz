@@ -189,8 +189,15 @@ function PersonaCatalogChooser({
                       className="h-6 w-6 text-3xs"
                       label={persona.displayName}
                     />
-                    <span className="min-w-0 flex-1 truncate text-sm font-medium">
-                      {persona.displayName}
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-sm font-medium">
+                        {persona.displayName}
+                      </span>
+                      {persona.description ? (
+                        <span className="block truncate text-xs text-sidebar-foreground/55">
+                          {persona.description}
+                        </span>
+                      ) : null}
                     </span>
                   </button>
                 );
@@ -274,6 +281,11 @@ function PersonaCatalogDetail({ persona }: { persona: AgentPersona }) {
           <h3 className="truncate text-xl font-semibold leading-snug">
             {persona.displayName}
           </h3>
+          {persona.description ? (
+            <p className="mt-0.5 truncate text-sm text-muted-foreground">
+              {persona.description}
+            </p>
+          ) : null}
           {persona.isBuiltIn ? null : <PersonaAddedBy className="mt-0.5" />}
         </div>
       </div>
