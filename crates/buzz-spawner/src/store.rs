@@ -189,24 +189,39 @@ impl Store {
         // Write-then-rename: a crash leaves either the old complete file or the
         // new complete file, never a truncated one holding half the agent keys.
         let tmp = self.path.with_extension("json.tmp");
-        std::fs::write(&tmp, &json)
-            .with_context(|| format!("failed to write {}", tmp.display()))?;
-        restrict_permissions(&tmp)?;
+        write_private(&tmp, &json).with_context(|| format!("failed to write {}", tmp.display()))?;
         std::fs::rename(&tmp, &self.path)
             .with_context(|| format!("failed to rename into {}", self.path.display()))?;
         Ok(())
     }
 }
 
+/// Create `path` mode 0600 and write `contents`.
+///
+/// The mode is set at open rather than chmod-ed afterwards: this file holds
+/// every agent's secret key, and creating it under the process umask would
+/// leave a window — however brief — where anything on the host could read it.
 #[cfg(unix)]
-fn restrict_permissions(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-        .with_context(|| format!("failed to chmod {}", path.display()))
+fn write_private(path: &Path, contents: &str) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(contents.as_bytes())?;
+    // An existing temp file keeps its old mode, so set it explicitly too.
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    file.sync_all()?;
+    Ok(())
 }
 
 #[cfg(not(unix))]
-fn restrict_permissions(_path: &Path) -> Result<()> {
+fn write_private(path: &Path, contents: &str) -> Result<()> {
+    std::fs::write(path, contents)?;
     Ok(())
 }
 
