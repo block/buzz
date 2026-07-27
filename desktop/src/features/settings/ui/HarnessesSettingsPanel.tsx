@@ -72,15 +72,15 @@ function GitBashCard({
 }
 
 /**
- * Consolidated "Harnesses" surface for Settings → Agents.
+ * Consolidated "Agent runtimes" surface for Settings → Agents.
  *
  * Replaces the old "Agent runtimes" (DoctorSettingsPanel) + "Bring your own
  * harness" (HarnessManagementCard) pair with one operational area:
  *
- * - **Your harnesses** — stable rows for ready (or one-click-ready) harnesses
- *   and everything the user authored. Row order never changes when a harness
+ * - **Your runtimes** — stable rows for ready (or one-click-ready) runtimes
+ *   and everything the user authored. Row order never changes when a runtime
  *   installs (stableRowOrder), so the page doesn't jump under the pointer.
- * - **Add harnesses** — a master-detail catalog dialog for everything that
+ * - **Add runtimes** — a master-detail catalog dialog for everything that
  *   needs multi-step setup, plus the custom-harness form.
  */
 export function HarnessesSettingsPanel() {
@@ -113,8 +113,8 @@ export function HarnessesSettingsPanel() {
     <section className="min-w-0 space-y-4" data-testid="settings-harnesses">
       <SectionHeader
         className="items-center"
-        title="Harnesses"
-        description="Agent harnesses available to Buzz on this device."
+        title="Agent runtimes"
+        description="Choose which agent tools Buzz can use on this device."
         action={
           <Button
             disabled={isRefreshing}
@@ -150,14 +150,14 @@ export function HarnessesSettingsPanel() {
           </section>
         ) : null}
 
-        <section aria-label="Your harnesses">
+        <section aria-label="Your runtimes">
           {/* The sub-header only earns its keep when another section (System
               prerequisites, Windows-only) shares the page; otherwise it just
               restates the page header. */}
           {gitBashQuery.data ? (
             <div className="mb-3 text-sm">
               <h2 className="text-lg font-semibold tracking-tight">
-                Your harnesses
+                Your runtimes
               </h2>
               <p className="mt-1 text-sm font-normal text-muted-foreground">
                 Ready to use, or one click from installed.
@@ -167,7 +167,7 @@ export function HarnessesSettingsPanel() {
 
           {runtimesQuery.isLoading ? (
             <div className="rounded-2xl bg-muted/20 px-4 py-4 text-sm font-normal text-muted-foreground">
-              Checking harnesses...
+              Checking agent runtimes...
             </div>
           ) : rows.length > 0 ? (
             <div className="space-y-3" data-testid="doctor-runtime-list">
@@ -181,7 +181,7 @@ export function HarnessesSettingsPanel() {
             </div>
           ) : (
             <div className="rounded-2xl bg-amber-500/10 px-4 py-4 text-sm text-warning">
-              No harnesses ready yet — add one below.
+              No agent runtimes ready yet — add one below.
             </div>
           )}
 
@@ -200,7 +200,7 @@ export function HarnessesSettingsPanel() {
             variant="outline"
           >
             <Plus className="h-4 w-4" />
-            Add harnesses
+            Add runtimes
           </Button>
         </section>
       </div>

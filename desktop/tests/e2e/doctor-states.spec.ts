@@ -176,7 +176,7 @@ test.describe("Doctor panel state screenshots", () => {
     expect(codexColors).toEqual(gooseColors);
     await expect(
       page
-        .getByRole("heading", { name: "Harnesses", exact: true })
+        .getByRole("heading", { name: "Agent runtimes", exact: true })
         .locator("..")
         .locator(".."),
     ).toHaveCSS("align-items", "center");

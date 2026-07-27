@@ -246,7 +246,7 @@ function RuntimeActions({
         </span>
       ) : canInstall ? (
         // Rows needing multi-step setup render no action here — setup lives in
-        // the Add-harnesses catalog. Custom rows keep their ••• menu instead.
+        // the Add-runtimes catalog. Custom rows keep their ••• menu instead.
         <Button
           aria-label={`Install ${runtime.label}`}
           className="h-7 px-3 text-xs"
@@ -303,7 +303,7 @@ function RuntimeStatusChip({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
 }
 
 /**
- * One row in "Your harnesses".
+ * One row in "Your runtimes".
  *
  * Carries the full operational surface for a ready (or one-click-ready)
  * harness: logo, status chip, auth/overflow menu, install/connect flows, and

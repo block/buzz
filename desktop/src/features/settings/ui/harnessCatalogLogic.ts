@@ -1,13 +1,13 @@
 /**
  * Pure logic for the consolidated Harnesses settings surface and the
- * Add-harnesses catalog dialog.
+ * Add-runtimes catalog dialog.
  *
  * Extracted for deterministic unit-testing — no React, no Tauri, no network.
  */
 
 import type { AcpRuntimeCatalogEntry } from "@/shared/api/types";
 
-// Builtins that anchor the top of "Your harnesses" — mirrors the old
+// Builtins that anchor the top of "Your runtimes" — mirrors the old
 // DoctorSettingsPanel RUNTIME_SORT_PRIORITY so the Buzz + Goose rows stay
 // where users learned to find them.
 const ROW_SORT_PRIORITY: Record<string, number> = {
@@ -16,14 +16,14 @@ const ROW_SORT_PRIORITY: Record<string, number> = {
 };
 
 /**
- * True when the entry earns a row in "Your harnesses":
+ * True when the entry earns a row in "Your runtimes":
  *
  * - it is ready (`availability === "available"`), or
  * - one click of the Install button makes it ready (auto-install works), or
  * - the user authored it (`source === "custom"` — owner rows keep their
  *   edit/delete affordances regardless of readiness).
  *
- * Everything else needs multi-step setup and belongs in the Add-harnesses
+ * Everything else needs multi-step setup and belongs in the Add-runtimes
  * catalog with a real setup action — NOT an inert row control.
  */
 export function isYourHarnessEntry(entry: AcpRuntimeCatalogEntry): boolean {
@@ -32,7 +32,7 @@ export function isYourHarnessEntry(entry: AcpRuntimeCatalogEntry): boolean {
   return entry.canAutoInstall && !entry.nodeRequired;
 }
 
-/** Entries that render as rows in "Your harnesses". */
+/** Entries that render as rows in "Your runtimes". */
 export function yourHarnessEntries(
   catalog: readonly AcpRuntimeCatalogEntry[],
 ): AcpRuntimeCatalogEntry[] {
@@ -40,7 +40,7 @@ export function yourHarnessEntries(
 }
 
 /**
- * Entries offered in the Add-harnesses catalog: every non-custom entry.
+ * Entries offered in the Add-runtimes catalog: every non-custom entry.
  * Ready ones still show (marked as such) so the catalog doubles as a
  * browsable inventory, like the Agent Catalog.
  */
@@ -93,7 +93,7 @@ function compareInitialRows(
 }
 
 /**
- * Stable row ordering for "Your harnesses".
+ * Stable row ordering for "Your runtimes".
  *
  * First render sorts priority builtins first, then ready-before-needs-setup,
  * then alphabetically. Subsequent renders KEEP the previous relative order
@@ -163,7 +163,7 @@ export function installLinkLabel(entry: AcpRuntimeCatalogEntry): string {
 /**
  * Primary action for the catalog detail pane.
  *
- * - Ready → no action (the entry already has a row in Your harnesses).
+ * - Ready → no action (the entry already has a row in Your runtimes).
  * - One-click installable → Install.
  * - Otherwise → open the vendor's setup guide or download page, when one
  *   exists.
