@@ -89,9 +89,16 @@ test("Buzz Git pull request renders and stays actionable in Inbox", async ({
   await expect(
     page.getByRole("button", { name: "Approve", exact: true }),
   ).toBeVisible();
+  const commentComposer = page.getByTestId(
+    "project-pull-request-comment-composer",
+  );
+  await commentComposer
+    .getByRole("button", { name: "Comment", exact: true })
+    .click();
   await expect(
-    page.getByRole("button", { name: "Request changes", exact: true }),
+    page.getByRole("menuitemradio", { name: "Request changes" }),
   ).toBeVisible();
+  await page.keyboard.press("Escape");
   await expect(
     page.getByRole("button", { name: "Merge", exact: true }),
   ).toBeVisible();
