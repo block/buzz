@@ -191,3 +191,58 @@ fn legacy_managed_agent_auth_tag_skips_self_attestation() {
 
     assert_eq!(tag, None);
 }
+
+fn record_with_auth_tag(auth_tag: Option<&str>) -> ManagedAgentRecord {
+    let mut record: ManagedAgentRecord = serde_json::from_str(
+        r#"{
+            "pubkey": "agent",
+            "name": "agent",
+            "relay_url": "wss://localhost:3000",
+            "acp_command": "buzz-acp",
+            "agent_command": "goose",
+            "agent_args": [],
+            "mcp_command": "",
+            "turn_timeout_seconds": 320,
+            "system_prompt": "",
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "last_started_at": null,
+            "last_stopped_at": null,
+            "last_exit_code": null,
+            "last_error": null
+        }"#,
+    )
+    .expect("record fixture should parse");
+    record.auth_tag = auth_tag.map(str::to_string);
+    record
+}
+
+#[test]
+fn managed_agent_submission_auth_tag_prefers_stored_tag() {
+    let owner_keys = Keys::generate();
+    let agent_keys = Keys::generate();
+    let record = record_with_auth_tag(Some(r#"["auth","owner","","sig"]"#));
+
+    let tag = managed_agent_submission_auth_tag(&record, &owner_keys, &agent_keys.public_key())
+        .expect("stored tag should resolve");
+
+    assert_eq!(tag.as_deref(), Some(r#"["auth","owner","","sig"]"#));
+}
+
+#[test]
+fn managed_agent_submission_auth_tag_computes_fallback_for_legacy_records() {
+    let owner_keys = Keys::generate();
+    let agent_keys = Keys::generate();
+
+    for stored in [None, Some("   ")] {
+        let record = record_with_auth_tag(stored);
+
+        let tag = managed_agent_submission_auth_tag(&record, &owner_keys, &agent_keys.public_key())
+            .expect("fallback should compute")
+            .expect("fallback tag should be present");
+
+        let owner = buzz_sdk_pkg::nip_oa::verify_auth_tag(&tag, &agent_keys.public_key())
+            .expect("fallback tag should verify");
+        assert_eq!(owner, owner_keys.public_key());
+    }
+}

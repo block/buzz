@@ -1,10 +1,11 @@
 //! Local clone and pull-request merge commands for the Projects workflow.
 
+use super::messages::managed_agent_submission_auth_tag;
 use super::project_git::{first_output_line, normalize_branch_option};
 use super::project_git_diff::clean_commit;
 use super::project_git_exec::{
-    build_git_auth_config, build_git_auth_config_for_keys, clone_url_owner, run_git,
-    validate_clone_url, validate_workspace_clone_url, GitAuthConfig,
+    build_git_auth_config, build_git_auth_config_for_identity, clone_url_owner, run_git,
+    validate_clone_url, validate_workspace_clone_url, GitAuthConfig, ProjectOwnerIdentity,
 };
 use super::project_repo_paths::{
     canonical_repos_roots, canonicalize_repos_root, default_repos_root_candidates,
@@ -155,11 +156,6 @@ fn normalize_event_id(value: &str) -> Option<String> {
     (value.len() == 64 && value.chars().all(|c| c.is_ascii_hexdigit())).then_some(value)
 }
 
-struct ProjectOwnerIdentity {
-    keys: Keys,
-    auth_tag: Option<String>,
-}
-
 fn project_owner_identity(
     app: &AppHandle,
     state: &AppState,
@@ -173,19 +169,22 @@ fn project_owner_identity(
         });
     }
 
-    let _store_guard = state
-        .managed_agents_store_lock
-        .lock()
-        .map_err(|error| error.to_string())?;
-    let records = load_managed_agents(app)?;
-    let record = records
-        .iter()
-        .find(|record| record.pubkey.eq_ignore_ascii_case(target_owner))
-        .ok_or_else(|| {
-            "Only the repository owner or the owner of its managed agent can merge pull requests."
-                .to_string()
-        })?;
-    if let Some(error) = spawn_key_refusal(record) {
+    let record = {
+        let _store_guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|error| error.to_string())?;
+        let records = load_managed_agents(app)?;
+        records
+            .iter()
+            .find(|record| record.pubkey.eq_ignore_ascii_case(target_owner))
+            .cloned()
+            .ok_or_else(|| {
+                "Only the repository owner or the owner of its managed agent can merge pull requests."
+                    .to_string()
+            })?
+    };
+    if let Some(error) = spawn_key_refusal(&record) {
         return Err(error);
     }
     let keys = Keys::parse(&record.private_key_nsec)
@@ -193,10 +192,11 @@ fn project_owner_identity(
     if keys.public_key().to_hex() != target_owner {
         return Err("Managed agent key does not match the repository owner.".to_string());
     }
-    Ok(ProjectOwnerIdentity {
-        keys,
-        auth_tag: record.auth_tag.clone(),
-    })
+    // Stored attestation, or a freshly computed one for pre-NIP-OA records;
+    // the same fallback the managed-agent message path uses. Computed from the
+    // viewer keys captured above so the identity is one coherent snapshot.
+    let auth_tag = managed_agent_submission_auth_tag(&record, &viewer_keys, &keys.public_key())?;
+    Ok(ProjectOwnerIdentity { keys, auth_tag })
 }
 
 fn validate_repo_address(repo_address: &str, owner: &str) -> Result<(), String> {
@@ -604,7 +604,7 @@ pub async fn merge_project_pull_request(
         &pull_request_id,
         &pull_request_author,
     )?;
-    let auth = build_git_auth_config_for_keys(&owner_identity.keys)?;
+    let auth = build_git_auth_config_for_identity(&owner_identity)?;
 
     let git_result = tauri::async_runtime::spawn_blocking(
         move || -> Result<ProjectRepoMergeGitResult, ProjectPullRequestMergeError> {

@@ -211,8 +211,9 @@ pub struct ManagedAgentRecord {
     /// NIP-OA auth tag JSON. Computed at agent creation time.
     ///
     /// Pre-existing agents created before NIP-OA will have `None` here.
-    /// This is intentional — they continue to work without attestation.
-    /// Re-attestation requires agent recreation (v2 migration scope).
+    /// This is intentional; message and project submissions compute a
+    /// non-persisted fallback from the owner's keys on demand, so agent
+    /// recreation is only needed to persist a tag (v2 migration scope).
     #[serde(default)]
     pub auth_tag: Option<String>,
     pub relay_url: String,

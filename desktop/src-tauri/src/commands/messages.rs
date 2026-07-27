@@ -691,17 +691,16 @@ fn legacy_managed_agent_auth_tag(
         .map_err(|error| format!("failed to compute managed agent auth tag: {error}"))
 }
 
-fn managed_agent_submission_auth_tag(
+pub(crate) fn managed_agent_submission_auth_tag(
     record: &ManagedAgentRecord,
-    state: &AppState,
+    owner_keys: &Keys,
     agent_pubkey: &PublicKey,
 ) -> Result<Option<String>, String> {
     if let Some(auth_tag) = stored_managed_agent_auth_tag(record.auth_tag.as_deref()) {
         return Ok(Some(auth_tag));
     }
 
-    let owner_keys = state.keys.lock().map_err(|error| error.to_string())?;
-    legacy_managed_agent_auth_tag(&owner_keys, agent_pubkey)
+    legacy_managed_agent_auth_tag(owner_keys, agent_pubkey)
 }
 
 fn build_managed_agent_channel_message(
@@ -769,8 +768,10 @@ pub async fn send_managed_agent_channel_message(
             record.pubkey
         ));
     }
-    let submission_auth_tag =
-        managed_agent_submission_auth_tag(&record, &state, &keys.public_key())?;
+    let submission_auth_tag = {
+        let owner_keys = state.keys.lock().map_err(|error| error.to_string())?;
+        managed_agent_submission_auth_tag(&record, &owner_keys, &keys.public_key())?
+    };
     let thread_ref = match parent_event_id.as_deref() {
         Some(parent_id) => Some(resolve_thread_ref(parent_id, &state).await?),
         None => None,
