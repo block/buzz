@@ -84,7 +84,10 @@ export function resolve(specifier, context, nextResolve) {
     // Otherwise paths like `@/.../foo.mjs` would be coerced into `foo.mjs.ts`
     // and fail to resolve.
     const resolved = resolveSourcePath(`${srcRoot}/${stripped}`);
-    return nextResolve(toFileSpecifier(resolved ?? `${srcRoot}/${stripped}`), context);
+    return nextResolve(
+      toFileSpecifier(resolved ?? `${srcRoot}/${stripped}`),
+      context,
+    );
   }
   // Resolve extensionless relative TS imports (e.g. `./parseImeta`) — the app's
   // bundler adds the extension, but node's ESM resolver does not. Without this,
