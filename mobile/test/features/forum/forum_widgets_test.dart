@@ -61,6 +61,7 @@ Widget _buildPostCard({
   Map<String, UserProfile> users = const {},
   VoidCallback? onTap,
   void Function(String)? onDelete,
+  TextScaler textScaler = TextScaler.noScaling,
 }) {
   return ProviderScope(
     overrides: [
@@ -68,12 +69,15 @@ Widget _buildPostCard({
     ],
     child: MaterialApp(
       theme: AppTheme.light(),
-      home: Scaffold(
-        body: ForumPostCard(
-          post: post,
-          currentPubkey: currentPubkey,
-          onTap: onTap ?? () {},
-          onDelete: onDelete,
+      home: MediaQuery(
+        data: MediaQueryData(textScaler: textScaler),
+        child: Scaffold(
+          body: ForumPostCard(
+            post: post,
+            currentPubkey: currentPubkey,
+            onTap: onTap ?? () {},
+            onDelete: onDelete,
+          ),
         ),
       ),
     ),
@@ -170,6 +174,36 @@ void main() {
 
       expect(find.text('abcdef12\u2026'), findsOneWidget);
     });
+
+    testWidgets(
+      'constrains an older timestamp at large accessible text sizes',
+      (tester) async {
+        _setSurfaceSize(tester, const Size(240, 600));
+        addTearDown(tester.view.resetPhysicalSize);
+
+        await tester.pumpWidget(
+          _buildPostCard(
+            post: _makePost(
+              createdAt:
+                  DateTime.utc(2025, 12, 31, 12).millisecondsSinceEpoch ~/ 1000,
+            ),
+            users: const {
+              'alice': UserProfile(
+                pubkey: 'alice',
+                displayName: 'A very long display name',
+              ),
+            },
+            textScaler: const TextScaler.linear(2),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final timestamp = tester.widget<Text>(find.text('12/31/2025'));
+        expect(timestamp.maxLines, 1);
+        expect(timestamp.overflow, TextOverflow.ellipsis);
+        expect(tester.takeException(), isNull);
+      },
+    );
 
     testWidgets('truncates long content', (tester) async {
       final longContent = 'A' * 300;
