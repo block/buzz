@@ -102,7 +102,18 @@ pub fn agent_event_content(record: &ManagedAgentRecord) -> ManagedAgentEventCont
         },
         parallelism: record.parallelism,
         respond_to: record.respond_to,
-        respond_to_allowlist: record.respond_to_allowlist.clone(),
+        // The allowlist only means something in allowlist mode. The instance
+        // record deliberately retains it across mode toggles so an owner can
+        // flip away and back without retyping entries, but publishing it under
+        // another mode would advertise pubkeys the owner has already revoked —
+        // the same reason `apply_persona_behavior` clears it on the definition
+        // side. Spawn agrees: `build_respond_to_env` emits no allowlist
+        // variable unless the mode is Allowlist.
+        respond_to_allowlist: if record.respond_to == RespondTo::Allowlist {
+            record.respond_to_allowlist.clone()
+        } else {
+            Vec::new()
+        },
     }
 }
 
@@ -334,6 +345,44 @@ mod tests {
         let a = serde_json::to_string(&agent_event_content(&agent)).unwrap();
         let b = serde_json::to_string(&agent_event_content(&agent)).unwrap();
         assert_eq!(a, b);
+    }
+
+    /// Revoking an allowlist by switching modes must not keep advertising the
+    /// revoked pubkeys. The record retains them on purpose (so the owner can
+    /// toggle back without retyping), so the projection is what has to drop
+    /// them — otherwise a revoked association stays publicly readable.
+    #[test]
+    fn projection_omits_allowlist_for_non_allowlist_modes() {
+        let mut agent = sample_agent();
+        agent.respond_to = RespondTo::Allowlist;
+        agent.respond_to_allowlist = vec!["a".repeat(64)];
+        assert_eq!(
+            agent_event_content(&agent).respond_to_allowlist,
+            vec!["a".repeat(64)],
+            "allowlist mode must still publish its entries"
+        );
+
+        // `nobody` is intentionally absent from this enum (harness-only).
+        for mode in [RespondTo::OwnerOnly, RespondTo::Anyone] {
+            let mut revoked = agent.clone();
+            revoked.respond_to = mode;
+            let content = agent_event_content(&revoked);
+            assert!(
+                content.respond_to_allowlist.is_empty(),
+                "{mode:?} must not publish a retained allowlist"
+            );
+            assert!(
+                !serde_json::to_string(&content)
+                    .unwrap()
+                    .contains(&"a".repeat(64)),
+                "{mode:?} projection must not carry the revoked pubkey on the wire"
+            );
+            assert_eq!(
+                revoked.respond_to_allowlist,
+                vec!["a".repeat(64)],
+                "the local record keeps its entries for mode round-tripping"
+            );
+        }
     }
 
     /// Mutating only runtime fields must NOT change the projection — the
