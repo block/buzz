@@ -1,0 +1,10 @@
+{
+  "linear": { "team": null, "projects": [] },
+  "pr": { "repo": "block/buzz", "base": "main" },
+  "paths": {
+    "specs": "docs/superpowers/specs",
+    "plans": "docs/superpowers/plans",
+    "findings": "docs/superpowers/reviews"
+  },
+  "git": { "branch": "feat/{slug}", "worktrees": ".worktrees" }
+}
