@@ -13,6 +13,16 @@ import {
 import type { AcpRuntimeCatalogEntry } from "@/shared/api/types";
 import { getInstallErrorMessage } from "@/shared/lib/installError";
 import { cn } from "@/shared/lib/cn";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/shared/ui/alert-dialog";
 import { Button } from "@/shared/ui/button";
 import { ChooserDialogContent } from "@/shared/ui/chooser-dialog-content";
 import { Dialog } from "@/shared/ui/dialog";
@@ -23,6 +33,7 @@ import { Spinner } from "@/shared/ui/spinner";
 import { CustomHarnessForm } from "./CustomHarnessForm";
 import { harnessDescription } from "./harnessCatalogCopy";
 import {
+  adapterUpdateWarning,
   catalogDialogEntries,
   catalogPrimaryAction,
   entryStatusLabel,
@@ -382,6 +393,7 @@ function CatalogListItem({
 function CatalogDetail({ entry }: { entry: AcpRuntimeCatalogEntry }) {
   const install = useInstallAcpRuntimeMutation();
   const [installError, setInstallError] = React.useState<string | null>(null);
+  const [isUpdateWarningOpen, setIsUpdateWarningOpen] = React.useState(false);
   const action = catalogPrimaryAction(entry);
   const statusLabel = entryStatusLabel(entry);
   const description = harnessDescription(entry.id);
@@ -404,6 +416,17 @@ function CatalogDetail({ entry }: { entry: AcpRuntimeCatalogEntry }) {
     });
   }
 
+  // Replacing an outdated adapter is a machine-wide mutation — gate it behind
+  // the same confirmation the runtime row shows (adapterUpdateWarning is the
+  // shared copy source). Fresh installs stay one-click.
+  function handlePrimaryClick() {
+    if (entry.availability === "adapter_outdated") {
+      setIsUpdateWarningOpen(true);
+      return;
+    }
+    handleInstall();
+  }
+
   // The outline docs button only shows when the entry needs no setup action
   // (already ready) — pair it with a hint so the muted styling reads as
   // "nothing to do here" rather than a broken primary button.
@@ -414,7 +437,7 @@ function CatalogDetail({ entry }: { entry: AcpRuntimeCatalogEntry }) {
       <Button
         data-testid={`harness-catalog-install-${entry.id}`}
         disabled={install.isPending}
-        onClick={handleInstall}
+        onClick={handlePrimaryClick}
         type="button"
       >
         {install.isPending ? <Spinner className="mr-2 h-3.5 w-3.5" /> : null}
@@ -501,6 +524,28 @@ function CatalogDetail({ entry }: { entry: AcpRuntimeCatalogEntry }) {
           {primaryCta}
         </div>
       ) : null}
+      <AlertDialog
+        onOpenChange={setIsUpdateWarningOpen}
+        open={isUpdateWarningOpen}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Update {entry.label} adapter?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {adapterUpdateWarning(entry)}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              data-testid={`harness-catalog-confirm-update-${entry.id}`}
+              onClick={handleInstall}
+            >
+              Update
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

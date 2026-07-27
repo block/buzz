@@ -261,6 +261,65 @@ test.describe("your harnesses split", () => {
     );
   });
 
+  test("catalog Update for an outdated adapter requires confirmation before installing", async ({
+    page,
+  }) => {
+    // Wes's review blocker: Add runtimes → Setup → Update must honor the
+    // same machine-wide replacement confirmation the runtime row shows —
+    // never mutate straight from the catalog CTA.
+    await installMockBridge(page, {
+      acpRuntimesCatalog: [
+        HERMES_AVAILABLE,
+        {
+          ...OPENCLAW_NOT_INSTALLED,
+          availability: "adapter_outdated",
+          binary_path: "/usr/local/bin/openclaw",
+          can_auto_install: true,
+        },
+      ],
+    });
+    await openHarnessSettings(page);
+    await openCatalog(page);
+
+    const installCalls = () =>
+      page.evaluate(
+        () =>
+          (
+            (window as Window & { __BUZZ_E2E_COMMANDS__?: string[] })
+              .__BUZZ_E2E_COMMANDS__ ?? []
+          ).filter((command) => command === "install_acp_runtime").length,
+      );
+
+    await page.getByTestId("harness-catalog-list-item-openclaw").click();
+    await expect(
+      page.getByTestId("harness-catalog-status-openclaw"),
+    ).toHaveText("Update needed");
+    const updateButton = page.getByTestId("harness-catalog-install-openclaw");
+    await expect(updateButton).toHaveText("Update");
+
+    // Cancel path: clicking Update opens the warning, no mutation fires.
+    await updateButton.click();
+    const dialog = page.getByRole("alertdialog");
+    await expect(dialog).toContainText("Update OpenClaw adapter?");
+    await expect(dialog).toContainText(
+      "This replaces the machine-wide openclaw adapter.",
+    );
+    // Generic runtimes must never get Codex's package copy.
+    await expect(dialog).not.toContainText("codex-acp");
+    expect(await installCalls()).toBe(0);
+    await dialog.getByRole("button", { name: "Cancel" }).click();
+    await expect(dialog).toHaveCount(0);
+    expect(await installCalls()).toBe(0);
+
+    // Confirm path: exactly one install fires after confirmation.
+    await updateButton.click();
+    await page.getByTestId("harness-catalog-confirm-update-openclaw").click();
+    await expect(page.getByRole("alertdialog")).toHaveCount(0);
+    await expect.poll(installCalls).toBe(1);
+    // No duplicate mutation after the flow settles.
+    expect(await installCalls()).toBe(1);
+  });
+
   test("catalog search filters the list", async ({ page }) => {
     await installMockBridge(page, {
       acpRuntimesCatalog: [
