@@ -23,6 +23,8 @@
 #   buzz-ctx agreement match <stream>   # evaluate the matched-pair rule
 #   buzz-ctx agreement list             # all declaration heads
 #   buzz-ctx agreement migrate          # sweep config files into declarations
+#   buzz-ctx status [node-label]        # per-node governance view of the journal
+#   buzz-ctx share <file|-> | -m <msg>  # post to the shared tooling/proposal space
 #
 # Environment (defaults for the sovereign laptop):
 #   BUZZ_CTX_HOME   ~/.buzz-local
@@ -233,6 +235,95 @@ case "${1:-}" in
         ;;
       *) die "unknown agreement subcommand: $sub" ;;
     esac
+    ;;
+  status)
+    # Perspective viewer: one journal, one lens per node. Renders each
+    # governed node's effective configuration by evaluating declaration
+    # heads under the SAME policy the adapters run (owner-signed, n-tagged,
+    # active-confers, per-domain wholesale). What this shows is what the
+    # nodes enforce — it is also the read-only steward's future sensor.
+    only="${2:-}"
+    relay="$(relay_for_read)"
+    heads="$("$CLIENT" query "$KEY" "$relay" '[{"kinds":[30700]}]' | sed 's/^200 //')"
+    printf '%s' "$heads" | jq -r --arg me "$PUBKEY" --arg only "$only" '
+      def tag(e; k): [e.tags[] | select(.[0]==k) | .[1]][0];
+      def st(e): ((e.content | fromjson).status // "active");
+      def dtag(e): tag(e; "d");
+      def ntag(e): tag(e; "n");
+      def role(e): dtag(e) | split("/")[0];
+      def stream(e): dtag(e) as $d | $d | ltrimstr(($d | split("/")[0]) + "/");
+      def pcount(e): [e.tags[] | select(.[0]=="p")] | length;
+      def principal(e): ((e.content | fromjson).principal // "-");
+      def sel(e): ((e.content | fromjson).selection // null)
+        | if . == null then "-"
+          elif .mirror == true then "mirror"
+          elif .filter then "filter"
+          elif .from_source then "from_source=\(.from_source)"
+          else "?" end;
+      [.[] | select(.pubkey == $me and dtag(.) != null)] as $mine
+      | [.[] | select(.pubkey != $me and dtag(.) != null)] as $foreign
+      | ([$mine[] | ntag(.) // empty] | unique) as $nodes
+      | (if $only == "" then $nodes else [$only] end) as $show
+      | (
+          $show[] as $node
+          | "■ node \($node)",
+            ( ["admit","read","export"][] as $r
+              | [$mine[] | select(ntag(.) == $node and role(.) == $r)] as $hs
+              | [$hs[] | select(st(.) == "active")] as $act
+              | ( if ($hs | length) == 0
+                  then "  \($r): unclaimed — bootstrap file/env governs"
+                  else "  \($r): journal-governed (\($act | length) active / \($hs | length) heads)"
+                  end ),
+                ( $act[]
+                  | if role(.) == "export"
+                    then "    \(stream(.))  [\(sel(.))]  offered to \(pcount(.)) key(s)"
+                    else "    \(stream(.))  \(principal(.))  \(pcount(.)) key(s)"
+                    end )
+            ),
+            ""
+        ),
+        ( [$mine[] | select(ntag(.) == null)]
+          | if length == 0 then empty else
+              "■ unscoped heads (govern no node)",
+              (.[] | "  \(dtag(.))  \(st(.))"), "" end ),
+        ( $foreign
+          | if length == 0 then empty else
+              "■ foreign halves (relationship state, never config)",
+              (.[] | "  \(dtag(.))  \(st(.))  by \(.pubkey[0:12])…") end )
+    '
+    ;;
+  share)
+    # Shared tooling/proposal space: plaintext kind-1 events tagged
+    # shared:tooling, drained by peer nodes through the cf-rendezvous
+    # shared/tooling stream. Plaintext by design — scripts and proposals,
+    # never secrets or personal context (compartments exist for that).
+    src="${2:?usage: buzz-ctx share <file|-> | buzz-ctx share -m <message>}"
+    if [ "$src" = "-m" ]; then
+      content="${3:?message required after -m}"
+    elif [ "$src" = "-" ]; then
+      content="$(cat)"
+    else
+      content="$(cat "$src")"
+    fi
+    signer_key="$KEY"
+    signer_pub="$PUBKEY"
+    auth_tag="null"
+    if [ -f "$HOME_DIR/agents/$AGENT.key" ]; then
+      signer_key="$HOME_DIR/agents/$AGENT.key"
+      signer_pub="$("$CLIENT" pubkey "$signer_key")"
+      auth_tag="$(cat "$HOME_DIR/agents/$AGENT.auth" 2>/dev/null || echo null)"
+    fi
+    event="$(jq -n --arg pk "$signer_pub" --arg c "$content" \
+      --arg agent "$AGENT" --arg machine "$MACHINE" --arg ts "$(date +%s)" \
+      --argjson auth "$auth_tag" \
+      '{pubkey:$pk, created_at:($ts|tonumber), kind:1,
+        tags:([["t","shared:tooling"],["agent",$agent],["machine",$machine]]
+              + (if $auth == null then [] else [$auth] end)),
+        content:$c}')"
+    relay="$(relay_for_write)"
+    tmp="$(mktemp)"; printf '%s' "$event" > "$tmp"
+    "$CLIENT" post "$signer_key" "$relay" "$tmp" >/dev/null; rm -f "$tmp"
+    echo "shared to tooling space as $AGENT@$MACHINE ($(printf '%s' "$content" | wc -c | tr -d ' ') bytes)"
     ;;
   bind-agent)
     # Session binding v1: the agent gets its own key; the node (owner) key
