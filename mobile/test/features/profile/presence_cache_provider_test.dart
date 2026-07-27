@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -41,6 +43,24 @@ void main() {
 
     expect(relaySession.queries, hasLength(1));
     expect(relaySession.queries.single.single.authors, ['alice', 'bob']);
+  });
+
+  test('snapshot does not overwrite a newer live presence update', () async {
+    final snapshot = Completer<List<NostrEvent>>();
+    final relaySession = _RecordingRelaySessionNotifier()
+      ..queryCompleter = snapshot;
+    final container = _buildContainer(relaySession: relaySession);
+    addTearDown(container.dispose);
+
+    container.read(presenceCacheProvider);
+    container.read(presenceCacheProvider.notifier).track(['alice']);
+    await _pumpEventQueue();
+
+    relaySession.emit(_presence('alice', 'offline'));
+    snapshot.complete([_snapshotPresence('alice', 'online')]);
+    await _pumpEventQueue();
+
+    expect(container.read(presenceCacheProvider)['alice'], 'offline');
   });
 
   test('WS presence event updates cache for tracked pubkey', () async {
@@ -233,6 +253,7 @@ class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
   final List<List<NostrFilter>> queries = [];
   final List<void Function(NostrEvent)> _listeners = [];
   List<NostrEvent> queryResults = [];
+  Completer<List<NostrEvent>>? queryCompleter;
 
   @override
   SessionState build() => const SessionState(status: SessionStatus.connected);
@@ -243,6 +264,8 @@ class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
     Duration timeout = const Duration(seconds: 8),
   }) async {
     queries.add(filters);
+    final completer = queryCompleter;
+    if (completer != null) return completer.future;
     return queryResults;
   }
 

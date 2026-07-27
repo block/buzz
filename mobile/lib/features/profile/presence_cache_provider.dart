@@ -14,6 +14,7 @@ import '../../shared/relay/relay.dart';
 class PresenceCacheNotifier extends Notifier<Map<String, String>> {
   final Set<String> _tracked = {};
   final Set<String> _pendingSnapshotPubkeys = {};
+  final Map<String, int> _liveUpdateVersions = {};
   void Function()? _presenceUnsub;
   Timer? _snapshotBatchTimer;
   int _subscriptionVersion = 0;
@@ -60,6 +61,9 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
     if (_pendingSnapshotPubkeys.isEmpty) return;
     final pubkeys = _pendingSnapshotPubkeys.toList();
     _pendingSnapshotPubkeys.clear();
+    final liveVersionsAtStart = {
+      for (final pubkey in pubkeys) pubkey: _liveUpdateVersions[pubkey] ?? 0,
+    };
 
     try {
       final session = ref.read(relaySessionProvider.notifier);
@@ -71,7 +75,11 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
         ),
       ]);
       for (final event in events) {
-        _handlePresenceEvent(event, useTaggedSubject: true);
+        _handlePresenceEvent(
+          event,
+          useTaggedSubject: true,
+          expectedLiveVersion: liveVersionsAtStart[event.getTagValue('p')],
+        );
       }
     } catch (error) {
       debugPrint('[PresenceCacheNotifier] presence snapshot failed: $error');
@@ -105,7 +113,11 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
     }
   }
 
-  void _handlePresenceEvent(NostrEvent event, {bool useTaggedSubject = false}) {
+  void _handlePresenceEvent(
+    NostrEvent event, {
+    bool useTaggedSubject = false,
+    int? expectedLiveVersion,
+  }) {
     // Relay snapshot events are signed by the relay and identify the queried
     // subject with a p-tag. Live events are self-signed, so their author is the
     // subject and an arbitrary p-tag must not be allowed to impersonate it.
@@ -114,6 +126,13 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
     if (!_tracked.contains(pubkey)) return;
     final status = event.content;
     if (status != 'online' && status != 'away' && status != 'offline') return;
+    if (expectedLiveVersion != null &&
+        (_liveUpdateVersions[pubkey] ?? 0) != expectedLiveVersion) {
+      return;
+    }
+    if (!useTaggedSubject) {
+      _liveUpdateVersions[pubkey] = (_liveUpdateVersions[pubkey] ?? 0) + 1;
+    }
     if (state[pubkey] == status) return;
     final updated = Map<String, String>.from(state);
     updated[pubkey] = status;
