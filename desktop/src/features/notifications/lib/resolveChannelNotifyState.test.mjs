@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   DEFAULT_CHANNEL_NOTIFY_STATE,
+  foldLegacyMuteDecision,
   nextTimedMuteExpiry,
   resolveChannelNotifyState,
 } from "./resolveChannelNotifyState.ts";
@@ -187,6 +188,15 @@ test("a timed mute still applies over a newer legacy unmute", () => {
   assert.equal(state.hidden, false);
 });
 
+test("a newer legacy mute keeps hidden true when prefs explicitly says 'mute'", () => {
+  const state = resolve(
+    { level: "mute", updatedAt: 10 },
+    { muted: true, updatedAt: 20 },
+  );
+  assert.equal(state.level, "mute");
+  assert.equal(state.hidden, true);
+});
+
 test("other channels' entries do not leak into the resolved state", () => {
   const state = resolveChannelNotifyState(
     "c",
@@ -195,6 +205,99 @@ test("other channels' entries do not leak into the resolved state", () => {
     NOW,
   );
   assert.equal(state, DEFAULT_CHANNEL_NOTIFY_STATE);
+});
+
+// ── foldLegacyMuteDecision (shared read/write interop rule) ───────────────────
+
+test("foldLegacyMuteDecision: a newer legacy unmute clears a stale prefs 'mute'", () => {
+  assert.equal(
+    foldLegacyMuteDecision(
+      { level: "mute", updatedAt: 10 },
+      { muted: false, updatedAt: 20 },
+    ),
+    "all",
+  );
+});
+
+test("foldLegacyMuteDecision: a newer legacy mute overrides prefs 'mentions'", () => {
+  assert.equal(
+    foldLegacyMuteDecision(
+      { level: "mentions", updatedAt: 10 },
+      { muted: true, updatedAt: 20 },
+    ),
+    "mute",
+  );
+});
+
+test("foldLegacyMuteDecision: a newer legacy unmute leaves non-mute levels alone", () => {
+  assert.equal(
+    foldLegacyMuteDecision(
+      { level: "mentions", updatedAt: 10 },
+      { muted: false, updatedAt: 20 },
+    ),
+    "mentions",
+  );
+});
+
+test("foldLegacyMuteDecision: prefs newer than legacy keeps the stored level", () => {
+  assert.equal(
+    foldLegacyMuteDecision(
+      { level: "mute", updatedAt: 30 },
+      { muted: false, updatedAt: 20 },
+    ),
+    "mute",
+  );
+  // Ties go to prefs.
+  assert.equal(
+    foldLegacyMuteDecision(
+      { level: "mentions", updatedAt: 20 },
+      { muted: true, updatedAt: 20 },
+    ),
+    "mentions",
+  );
+});
+
+test("foldLegacyMuteDecision: no legacy entry keeps the stored level", () => {
+  assert.equal(
+    foldLegacyMuteDecision({ level: "mentions", updatedAt: 10 }, undefined),
+    "mentions",
+  );
+  assert.equal(foldLegacyMuteDecision(undefined, undefined), "all");
+});
+
+test("foldLegacyMuteDecision: a legacy-only entry decides on its own", () => {
+  assert.equal(
+    foldLegacyMuteDecision(undefined, { muted: true, updatedAt: 20 }),
+    "mute",
+  );
+  assert.equal(
+    foldLegacyMuteDecision(undefined, { muted: false, updatedAt: 20 }),
+    "all",
+  );
+});
+
+test("an advanced-toggle write over a newer legacy unmute does not re-mute or hide", () => {
+  // Composed write path (useChannelNotifyPrefs.updateEntry): seed from the entry
+  // folded against the legacy blob, apply the patch, stamp a fresh updatedAt.
+  const raw = { level: "mute", updatedAt: 10 };
+  const legacyEntry = { muted: false, updatedAt: 20 };
+  const seeded = { ...raw, level: foldLegacyMuteDecision(raw, legacyEntry) };
+  const written = { ...seeded, desktop: false, updatedAt: 30 };
+  assert.equal(written.level, "all");
+
+  const state = resolve(written, legacyEntry);
+  assert.equal(state.level, "all");
+  assert.equal(state.hidden, false);
+  assert.equal(state.desktop, false);
+});
+
+test("an advanced-toggle write over a newer legacy mute keeps the mute", () => {
+  const raw = { level: "mentions", updatedAt: 10 };
+  const legacyEntry = { muted: true, updatedAt: 20 };
+  const seeded = { ...raw, level: foldLegacyMuteDecision(raw, legacyEntry) };
+  const written = { ...seeded, desktop: false, updatedAt: 30 };
+  assert.equal(written.level, "mute");
+  assert.equal(resolve(written, legacyEntry).level, "mute");
 });
 
 // ── nextTimedMuteExpiry ───────────────────────────────────────────────────────

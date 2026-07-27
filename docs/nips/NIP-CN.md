@@ -279,12 +279,24 @@ not implement this NIP. Clients that implement both MUST keep them consistent:
 - A channel muted **only** in the legacy blob resolves to level `mute` but MUST
   NOT be hidden — users who muted under the old UI must not have channels
   disappear on them.
+- **Writes MUST fold the read decision.** A preference write stamps a fresh
+  `updatedAt`, so a client MUST first apply the rule above to the entry it seeds
+  from. Otherwise a stale stored `level` wins retroactively over a newer legacy
+  write and the channel is silently re-muted (or un-muted) because the user
+  toggled an unrelated preference. One consequence is deliberate: folding a
+  newer legacy *mute* materializes an explicit `level: "mute"`, so the
+  "legacy-only mute never hides" rule holds only until the user next edits that
+  channel's preferences on a client implementing this NIP. Keeping the two
+  dimensions independent past that point would require a stored `hidden` (or a
+  per-dimension timestamp) and is out of scope for this version.
 
 ### Hiding
 
 `hidden` is derived, never stored: it is true if and only if this blob's entry
-explicitly sets `level: "mute"`. Legacy-only mutes and running timed mutes never
-hide.
+explicitly sets `level: "mute"` **and** the resolved level is `mute`. A newer
+legacy unmute therefore clears hiding together with the mute, while a newer
+legacy mute leaves hiding in place. Legacy-only mutes and running timed mutes
+never hide.
 
 A client that hides channels SHOULD keep two escape hatches, so a hidden channel
 cannot swallow something addressed to the user:

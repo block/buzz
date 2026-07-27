@@ -1,5 +1,9 @@
-import type { ChannelMuteStore } from "@/features/sidebar/lib/channelMutesStorage";
 import type {
+  ChannelMuteEntry,
+  ChannelMuteStore,
+} from "@/features/sidebar/lib/channelMutesStorage";
+import type {
+  ChannelNotifyEntry,
   ChannelNotifyLevel,
   ChannelNotifyPrefsStore,
 } from "@/features/sidebar/lib/channelNotifyPrefsStorage";
@@ -35,6 +39,31 @@ export const DEFAULT_CHANNEL_NOTIFY_STATE: ResolvedChannelNotifyState =
   });
 
 /**
+ * The NIP-CN legacy interop rule (N2) for the **mute dimension only**: a
+ * `channel-mutes` write that is newer than the prefs entry owns the channel's
+ * durable mute state, so an unmute performed on an old client (or mobile) beats
+ * a stale prefs "mute" and a newer legacy mute beats a stale prefs level. Prefs
+ * wins ties.
+ *
+ * Exported because writers need it too: a mutation that reseeds an entry has to
+ * fold this decision in before stamping a fresh `updatedAt`, otherwise the new
+ * timestamp flips the tie-break and silently resurrects the level the legacy
+ * blob had already overruled.
+ */
+export function foldLegacyMuteDecision(
+  entry: ChannelNotifyEntry | undefined,
+  legacy: ChannelMuteEntry | undefined,
+): ChannelNotifyLevel {
+  const stored = entry?.level ?? "all";
+  if (!legacy) return stored;
+  if (entry && legacy.updatedAt <= entry.updatedAt) return stored;
+  if (legacy.muted) return "mute";
+  // Old clients can only express muted/unmuted; a newer unmute clears the mute
+  // dimension and leaves the channel at the default level.
+  return stored === "mute" ? "all" : stored;
+}
+
+/**
  * Resolve a channel's effective notification state from the prefs blob and the
  * legacy `channel-mutes` blob.
  *
@@ -43,6 +72,11 @@ export const DEFAULT_CHANNEL_NOTIFY_STATE: ResolvedChannelNotifyState =
  * on an old client (or mobile) must beat a stale prefs "mute", and prefs wins
  * ties. A legacy-only mute resolves to level "mute" without `hidden`, so
  * channels muted under the old UI never disappear unexpectedly.
+ *
+ * `hidden` needs both terms: the prefs entry must explicitly say "mute" AND the
+ * interop decision must still resolve to "mute". A newer legacy unmute clears
+ * hiding along with the mute; a newer legacy *mute* leaves hiding in place
+ * instead of silently downgrading "Mute and hide" to plain mute.
  *
  * A running `muteUntil` is a lazy overlay: it forces level "mute" without
  * touching the stored level, so expiry restores the prior level automatically
@@ -59,24 +93,13 @@ export function resolveChannelNotifyState(
   if (!entry && !legacy) return DEFAULT_CHANNEL_NOTIFY_STATE;
 
   const storedLevel: ChannelNotifyLevel = entry?.level ?? "all";
-  let level = storedLevel;
-  let hidden = Boolean(entry) && storedLevel === "mute";
+  const durableLevel = foldLegacyMuteDecision(entry, legacy);
+  // Derived from the durable level, before the timed-mute overlay: a timed mute
+  // must never hide, and it must not resurrect hiding a legacy unmute cleared.
+  const hidden =
+    Boolean(entry) && storedLevel === "mute" && durableLevel === "mute";
 
-  if (legacy) {
-    const legacyWins = !entry || legacy.updatedAt > entry.updatedAt;
-    if (legacyWins) {
-      if (legacy.muted) {
-        level = "mute";
-        hidden = false;
-      } else if (storedLevel === "mute") {
-        // Old clients can only express muted/unmuted; a newer unmute clears the
-        // mute dimension and leaves the channel at the default level.
-        level = "all";
-        hidden = false;
-      }
-    }
-  }
-
+  let level = durableLevel;
   const timedMuteActive =
     entry?.muteUntil !== undefined && entry.muteUntil > nowSeconds;
   if (timedMuteActive) level = "mute";

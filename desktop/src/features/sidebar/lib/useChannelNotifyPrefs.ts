@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import {
+  foldLegacyMuteDecision,
   nextTimedMuteExpiry,
   resolveChannelNotifyState,
   type ResolvedChannelNotifyState,
@@ -238,7 +239,21 @@ export function useChannelNotifyPrefs(
     ) => {
       if (!pubkey || !relayUrl) return;
       setStore((prev) => {
-        const current = prev.channels[channelId] ?? { updatedAt: 0 };
+        const raw = prev.channels[channelId];
+        // Seed from the entry as *resolved* against the legacy blob, not raw:
+        // the write stamps a fresh `updatedAt`, which would otherwise make a
+        // stale stored level win retroactively over a newer legacy mute/unmute
+        // — silently re-muting (or un-muting) a channel because the user
+        // toggled an unrelated switch.
+        const current: ChannelNotifyEntry = raw
+          ? {
+              ...raw,
+              level: foldLegacyMuteDecision(
+                raw,
+                legacyMutes.channels[channelId],
+              ),
+            }
+          : { updatedAt: 0 };
         const nextEntry: ChannelNotifyEntry = {
           ...mutate(current),
           updatedAt: nowSeconds(),
@@ -250,7 +265,7 @@ export function useChannelNotifyPrefs(
         return next;
       });
     },
-    [pubkey, relayUrl],
+    [pubkey, relayUrl, legacyMutes.channels],
   );
 
   const setChannelLevel = React.useCallback(
