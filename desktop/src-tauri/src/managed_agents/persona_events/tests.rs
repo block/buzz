@@ -25,6 +25,7 @@ fn sample_record() -> ManagedAgentRecord {
         model: None,
         provider: None,
         persona_source_version: None,
+        relocated_to_spawner: None,
         env_vars: BTreeMap::new(),
         start_on_app_launch: false,
         auto_restart_on_config_change: true,
