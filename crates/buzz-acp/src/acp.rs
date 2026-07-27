@@ -826,6 +826,28 @@ impl AcpClient {
         self.send_notification("session/cancel", params).await
     }
 
+    /// Close a session and release its adapter-owned resources.
+    ///
+    /// Session retirement is intentionally bounded more tightly than ordinary
+    /// non-prompt RPCs. A close that cannot complete promptly leaves ownership
+    /// uncertain, so callers must treat any error as poisoning the adapter
+    /// rather than deleting the local session ID and reusing the process.
+    pub async fn session_close(&mut self, session_id: &str) -> Result<(), AcpError> {
+        const SESSION_CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+        let params = serde_json::json!({
+            "sessionId": session_id,
+        });
+        match tokio::time::timeout(
+            SESSION_CLOSE_TIMEOUT,
+            self.send_request("session/close", params),
+        )
+        .await
+        {
+            Ok(result) => result.map(|_| ()),
+            Err(_) => Err(AcpError::Timeout(SESSION_CLOSE_TIMEOUT)),
+        }
+    }
+
     /// Returns `true` if a `session/prompt` request is currently in flight.
     pub fn has_in_flight_prompt(&self) -> bool {
         self.last_prompt_id.is_some()
@@ -1211,7 +1233,12 @@ impl AcpClient {
                     if let Some(error) = msg.get("error") {
                         return Err(agent_error_from_json(error));
                     }
-                    return Ok(msg["result"].clone());
+                    if let Some(result) = msg.get("result") {
+                        return Ok(result.clone());
+                    }
+                    return Err(AcpError::Protocol(
+                        "matching JSON-RPC response omitted both result and error".into(),
+                    ));
                 }
             }
 
@@ -2919,6 +2946,21 @@ mod tests {
             observed,
             vec!["true", "delivered"],
             "a persona extra_env entry must not override {GOOSE_SCHEDULER_DISABLED_ENV}"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_close_rejects_matching_response_without_result_or_error() {
+        let script = "read -r _close; \
+                      echo '{\"jsonrpc\":\"2.0\",\"id\":0}'; \
+                      sleep 10";
+        let mut client = spawn_script(script).await;
+
+        let result = client.session_close("session-old").await;
+
+        assert!(
+            matches!(result, Err(AcpError::Protocol(_))),
+            "a close response without result or error is not a positive acknowledgement: {result:?}"
         );
     }
 

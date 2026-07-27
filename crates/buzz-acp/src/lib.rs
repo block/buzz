@@ -2789,9 +2789,23 @@ fn signal_in_flight_task(
 
     if let Some(meta) = entry {
         if let Some(tx) = meta.control_tx.take() {
-            tracing::info!(channel = %channel_id, ?mode, "control signal sent to in-flight task");
-            let _ = tx.send(mode);
-            return true;
+            return match tx.send(mode) {
+                Ok(()) => {
+                    tracing::info!(
+                        channel = %channel_id,
+                        "control signal sent to in-flight task"
+                    );
+                    true
+                }
+                Err(mode) => {
+                    tracing::debug!(
+                        channel = %channel_id,
+                        ?mode,
+                        "in-flight task stopped accepting control signals"
+                    );
+                    false
+                }
+            };
         }
     }
     false
@@ -3091,7 +3105,9 @@ fn handle_prompt_result(
         if !removed_channels.contains(&batch.channel_id) {
             if matches!(
                 result.outcome,
-                PromptOutcome::Cancelled | PromptOutcome::CancelDrainTimeout(_)
+                PromptOutcome::Cancelled
+                    | PromptOutcome::CancelDrainTimeout(_)
+                    | PromptOutcome::SessionCloseFailed(_)
             ) {
                 // Cancel re-prompt: store as cancelled events so flush_next()
                 // merges them into the next FlushBatch.cancelled_events,
@@ -3102,11 +3118,11 @@ fn handle_prompt_result(
                 // — consistent with MergeFraming::for_reason(None) and the
                 // system default — rather than telling the agent to supersede.
                 //
-                // CancelDrainTimeout shares this path with Cancelled: a failed
-                // 5s drain after a control-signal cancel is a cleanup-deadline
-                // problem, not the deterministic hard-cap death below — the
-                // original batch must survive with no retry/dead-letter
-                // accounting, same as a clean cancel.
+                // CancelDrainTimeout and SessionCloseFailed share this path
+                // with Cancelled: cleanup did not complete, but that is not
+                // the deterministic hard-cap death below — the original batch
+                // must survive with no retry/dead-letter accounting, same as
+                // a clean cancel.
                 let reason = batch.cancel_reason.unwrap_or(CancelReason::Steer);
                 queue.requeue_as_cancelled(batch, reason);
             } else if matches!(
@@ -3208,6 +3224,7 @@ fn handle_prompt_result(
         PromptOutcome::AgentExited => "exited",
         PromptOutcome::Cancelled => "cancelled",
         PromptOutcome::CancelDrainTimeout(_) => "cancel_drain_timeout",
+        PromptOutcome::SessionCloseFailed(_) => "session_close_failed",
     };
     let agent_index = result.agent.index;
     // Capture the spawn-time configured model and our PID before the agent is
@@ -3337,6 +3354,44 @@ fn handle_prompt_result(
                     tracing::error!("all agents dead — exiting");
                     return LoopAction::Exit;
                 }
+            }
+        }
+        // Session retirement is fail-closed: once `session/close` fails, Buzz
+        // no longer knows whether the adapter still owns the session's query
+        // tree. Error class is irrelevant — even method-not-found is unsafe to
+        // reuse because local invalidation would abandon those resources.
+        PromptOutcome::SessionCloseFailed(error) => {
+            tracing::warn!(
+                agent = agent_index,
+                outcome = outcome_label,
+                configured_model = %harness_configured_model,
+                pid = harness_pid,
+                error = %error,
+                "agent_returned — respawning (session close failed)"
+            );
+            let error_code = match &error {
+                acp::AcpError::AgentError { code, .. } => Some(*code),
+                _ => None,
+            };
+            let death_message = format!(
+                "Agent session cleanup failed ({error}); the agent process is being replaced."
+            );
+            emit_turn_error(&death_message, error_code);
+
+            let index = result.agent.index;
+            let slot_history = &mut crash_history[index];
+            if !spawn_respawn_task(
+                result.agent,
+                config,
+                slot_history,
+                respawn_tx,
+                respawn_tasks,
+                observer.clone(),
+            ) && pool.live_count() == 0
+                && !any_respawn_in_flight(crash_history)
+            {
+                tracing::error!("all agents dead — exiting");
+                return LoopAction::Exit;
             }
         }
         // Errors fall into two categories:
@@ -4375,6 +4430,36 @@ mod owner_control_command_tests {
             ControlSignal::Rotate
         ));
     }
+
+    #[tokio::test]
+    async fn signal_in_flight_task_reports_closed_receiver_as_not_sent() {
+        let mut pool = AgentPool::from_slots(vec![]);
+        let channel_id = Uuid::new_v4();
+        let (control_tx, control_rx) = tokio::sync::oneshot::channel();
+        drop(control_rx);
+
+        let abort_handle = pool.join_set.spawn(async {});
+        pool.task_map_mut().insert(
+            abort_handle.id(),
+            pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                turn_id: "post-prompt-cleanup".to_string(),
+                recoverable_batch: None,
+                control_tx: Some(control_tx),
+                steer_tx: None,
+            },
+        );
+
+        assert!(
+            !signal_in_flight_task(
+                &mut pool,
+                channel_id,
+                ControlSignal::SwitchModel("gpt-5".into())
+            ),
+            "a dropped task receiver must not be reported as a delivered control"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -5189,9 +5274,11 @@ mod error_outcome_emission_tests {
     use crate::acp::{AcpClient, AcpError};
     use crate::observer::ObserverHandle;
     use crate::pool::{
-        AgentPool, OwnedAgent, PromptOutcome, PromptResult, PromptSource, TimeoutKind,
+        AgentPool, ChannelInfoResolver, ControlSignal, OwnedAgent, PromptContext, PromptOutcome,
+        PromptResult, PromptSource, SessionState, TimeoutKind,
     };
     use crate::queue::{BatchEvent, FlushBatch};
+    use crate::relay::{ChannelInfo, RestClient};
     use nostr::{EventBuilder, Keys, Kind};
     use std::collections::HashSet;
 
@@ -5280,9 +5367,220 @@ mod error_outcome_emission_tests {
         }
     }
 
-    /// Drive one error outcome through `handle_prompt_result` and return how
-    /// many `turn_error` events it emitted to the observer feed.
-    async fn turn_errors_emitted_for(outcome: PromptOutcome) -> usize {
+    #[tokio::test]
+    async fn rejected_session_close_preserves_batch_and_respawns_poisoned_adapter() {
+        let capture =
+            std::env::temp_dir().join(format!("buzz-acp-close-rejected-{}.ndjson", Uuid::new_v4()));
+        let script = r#"
+            capture="$1"
+            IFS= read -r prompt
+            printf '%s\n' "$prompt" >> "$capture"
+            IFS= read -r cancel
+            printf '%s\n' "$cancel" >> "$capture"
+            printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"stopReason":"cancelled"}}'
+            IFS= read -r close
+            printf '%s\n' "$close" >> "$capture"
+            printf '%s\n' '{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"Method not found"}}'
+            sleep 10
+        "#;
+        let acp = AcpClient::spawn(
+            "bash",
+            &[
+                "-c".to_string(),
+                script.to_string(),
+                "buzz-acp-close-rejected-test".to_string(),
+                capture.to_string_lossy().into_owned(),
+            ],
+            &[],
+            false,
+        )
+        .await
+        .expect("failed to spawn fake ACP adapter");
+
+        let channel_id = Uuid::new_v4();
+        let mut state = SessionState::default();
+        state.sessions.insert(channel_id, "session-old".into());
+        let agent = OwnedAgent {
+            index: 0,
+            acp,
+            state,
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            agent_name: "claude-code-acp".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 2,
+        };
+        let keys = Keys::generate();
+        let rest_client = RestClient {
+            http: reqwest::Client::new(),
+            base_url: "http://127.0.0.1:0".into(),
+            keys: keys.clone(),
+            auth_tag_json: None,
+        };
+        let ctx = Arc::new(PromptContext {
+            mcp_servers: vec![],
+            initial_message: None,
+            idle_timeout: Duration::from_secs(60),
+            max_turn_duration: Duration::from_secs(120),
+            turn_liveness_interval: Duration::ZERO,
+            dedup_mode: config::DedupMode::Queue,
+            system_prompt: None,
+            team_instructions: None,
+            heartbeat_prompt: None,
+            base_prompt: None,
+            cwd: ".".into(),
+            rest_client: rest_client.clone(),
+            channel_info: ChannelInfoResolver::new(
+                std::collections::HashMap::from([(
+                    channel_id,
+                    ChannelInfo {
+                        name: "test".into(),
+                        channel_type: "public".into(),
+                    },
+                )]),
+                rest_client,
+            ),
+            context_message_limit: 0,
+            max_turns_per_session: 0,
+            permission_mode: config::PermissionMode::Default,
+            agent_keys: keys.clone(),
+            agent_owner_pubkey: None,
+            memory_enabled: false,
+            harness_name: "claude-code-acp".into(),
+            relay_url: "ws://127.0.0.1:3000".into(),
+        });
+        let event = EventBuilder::new(Kind::Custom(9), "original")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let event_id = event.id;
+        let batch = FlushBatch {
+            channel_id,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+        let (control_tx, control_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(crate::pool::run_prompt_task(
+            agent,
+            Some(batch),
+            Some("prompt".into()),
+            ctx,
+            result_tx,
+            Some(control_rx),
+            "turn-close-rejected".into(),
+        ));
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if std::fs::read_to_string(&capture)
+                    .is_ok_and(|contents| contents.lines().next().is_some())
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("prompt request must reach the fake adapter");
+        control_tx
+            .send(ControlSignal::Steer)
+            .expect("control receiver must still be live");
+        let result = tokio::time::timeout(Duration::from_secs(5), result_rx.recv())
+            .await
+            .expect("prompt task must return after close rejection")
+            .expect("prompt result channel must stay open");
+        task.await.expect("prompt task must not panic");
+
+        assert_eq!(
+            result
+                .agent
+                .state
+                .sessions
+                .get(&channel_id)
+                .map(String::as_str),
+            Some("session-old"),
+            "failed close must not silently discard local session ownership"
+        );
+
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                turn_id: "turn-close-rejected".into(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+            },
+        );
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let removed_channels = HashSet::new();
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+
+        handle_prompt_result(
+            &mut pool,
+            &mut queue,
+            &config,
+            result,
+            &mut heartbeat_in_flight,
+            &removed_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            None,
+            None,
+        );
+
+        assert_eq!(
+            pool.live_count(),
+            0,
+            "an adapter with uncertain remote ownership must never return idle"
+        );
+        assert_eq!(
+            respawn_tasks.len(),
+            1,
+            "close rejection must enter process-group shutdown and respawn"
+        );
+        let requeued = queue
+            .flush_next()
+            .expect("steer-cancelled work must remain queued");
+        assert_eq!(
+            requeued.events.len(),
+            1,
+            "with no newer event to merge, the queue re-dispatches the cancelled batch"
+        );
+        assert!(requeued.cancelled_events.is_empty());
+        assert_eq!(requeued.events[0].event.id, event_id);
+        assert_eq!(requeued.cancel_reason, Some(CancelReason::Steer));
+
+        let _ = std::fs::remove_file(capture);
+    }
+
+    struct OutcomeDisposition {
+        turn_errors: usize,
+        live_agents: usize,
+        respawn_tasks: usize,
+    }
+
+    /// Drive one outcome through `handle_prompt_result` and report its
+    /// observable supervisor disposition.
+    async fn outcome_disposition_for(outcome: PromptOutcome) -> OutcomeDisposition {
         let agent = dummy_agent(0).await;
         let mut pool = AgentPool::from_slots(vec![None]);
 
@@ -5349,7 +5647,17 @@ mod error_outcome_emission_tests {
                 .all(|event| event.turn_id.as_deref() == Some("test-turn-id")),
             "turn_error must retain the completed turn id"
         );
-        turn_errors.len()
+        OutcomeDisposition {
+            turn_errors: turn_errors.len(),
+            live_agents: pool.live_count(),
+            respawn_tasks: respawn_tasks.len(),
+        }
+    }
+
+    /// Drive one error outcome through `handle_prompt_result` and return how
+    /// many `turn_error` events it emitted to the observer feed.
+    async fn turn_errors_emitted_for(outcome: PromptOutcome) -> usize {
+        outcome_disposition_for(outcome).await.turn_errors
     }
 
     #[tokio::test]
@@ -5450,6 +5758,47 @@ mod error_outcome_emission_tests {
             .await,
             1
         );
+    }
+
+    #[tokio::test]
+    async fn every_session_close_failure_poison_class_respawns_the_adapter() {
+        let cases = [
+            (
+                "unsupported",
+                AcpError::AgentError {
+                    code: -32601,
+                    message: "method not found".into(),
+                },
+            ),
+            (
+                "adapter error",
+                AcpError::AgentError {
+                    code: -32000,
+                    message: "close rejected".into(),
+                },
+            ),
+            (
+                "timeout",
+                AcpError::Timeout(std::time::Duration::from_secs(5)),
+            ),
+        ];
+
+        for (name, error) in cases {
+            let disposition =
+                outcome_disposition_for(PromptOutcome::SessionCloseFailed(error)).await;
+            assert_eq!(
+                disposition.live_agents, 0,
+                "{name}: poisoned adapter must not return to the idle pool"
+            );
+            assert_eq!(
+                disposition.respawn_tasks, 1,
+                "{name}: poisoned adapter must enter process-group replacement"
+            );
+            assert_eq!(
+                disposition.turn_errors, 1,
+                "{name}: operator feed must record the cleanup failure"
+            );
+        }
     }
 
     /// idle_timeout outcome_label is "idle_timeout"; hard_timeout is "hard_timeout".

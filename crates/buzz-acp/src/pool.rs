@@ -439,6 +439,13 @@ pub enum PromptOutcome {
     /// `CancelReason` on the batch (steer/interrupt requeue, explicit cancel
     /// drops) rather than the hard-cap's unconditional dead-letter.
     CancelDrainTimeout(Duration),
+    /// An adapter-owned session could not be closed after Buzz decided to
+    /// retire it. Remote resource ownership is now uncertain, so the adapter
+    /// must never be reused regardless of whether the underlying error looks
+    /// transport- or application-class. The supervisor replaces the process
+    /// group, which is the only fail-closed cleanup available when close did
+    /// not positively acknowledge.
+    SessionCloseFailed(AcpError),
 }
 
 /// Immutable config subset shared (via `Arc`) by all spawned prompt tasks.
@@ -999,6 +1006,20 @@ async fn create_session_and_apply_model(
     }
 
     Ok(resp.session_id)
+}
+
+/// Close an adapter-owned session before forgetting its local routing state.
+///
+/// If close fails, the local session remains present so callers cannot
+/// accidentally reuse the adapter as though retirement had succeeded.
+async fn retire_session(
+    agent: &mut OwnedAgent,
+    source: &PromptSource,
+    session_id: &str,
+) -> Result<(), AcpError> {
+    agent.acp.session_close(session_id).await?;
+    agent.state.invalidate(source);
+    Ok(())
 }
 
 /// Send the appropriate ACP model-switch request with a timeout.
@@ -1944,18 +1965,33 @@ pub async fn run_prompt_task(
                         {
                             Ok(stop_reason) => {
                                 log_stop_reason(&source, &stop_reason);
-                                agent.state.invalidate(&source);
                                 let retry_batch =
                                     requeue_cancelled_batch(&ctx, control_signal, batch);
+                                let outcome =
+                                    match retire_session(&mut agent, &source, &session_id).await {
+                                        Ok(()) => PromptOutcome::Cancelled,
+                                        Err(error) => {
+                                        tracing::error!(
+                                            target: "pool::session",
+                                            "failed to close retired session {session_id}: {error}"
+                                        );
+                                            PromptOutcome::SessionCloseFailed(error)
+                                        }
+                                    };
 
                                 let usage = agent.acp.take_turn_usage();
+                                let metric_stop = if matches!(&outcome, PromptOutcome::Cancelled) {
+                                    buzz_core::agent_turn_metric::StopReason::Cancelled
+                                } else {
+                                    buzz_core::agent_turn_metric::StopReason::Error
+                                };
                                 publish_agent_turn_metric(
                                     &ctx,
                                     usage,
                                     observer_channel_id,
                                     &session_id,
                                     &turn_id,
-                                    Some(buzz_core::agent_turn_metric::StopReason::Cancelled),
+                                    Some(metric_stop),
                                 )
                                 .await;
                                 send_prompt_result(
@@ -1963,7 +1999,7 @@ pub async fn run_prompt_task(
                                     &turn_id,
                                     agent,
                                     source,
-                                    PromptOutcome::Cancelled,
+                                    outcome,
                                     retry_batch,
                                 );
                                 return;
@@ -2092,15 +2128,17 @@ pub async fn run_prompt_task(
                 }
             };
 
-            if should_rotate {
+            let retirement_error = if should_rotate {
                 tracing::info!(
                     target: "pool::session",
                     "rotating session for {source:?} after {stop_reason:?}",
                 );
-                agent.state.invalidate(&source);
-            }
+                retire_session(&mut agent, &source, &session_id).await.err()
+            } else {
+                None
+            };
 
-            let core_stop = acp_stop_to_core(&stop_reason);
+            let core_stop = completed_turn_metric_stop(&stop_reason, retirement_error.is_some());
             let usage = agent.acp.take_turn_usage();
             publish_agent_turn_metric(
                 &ctx,
@@ -2112,14 +2150,17 @@ pub async fn run_prompt_task(
             )
             .await;
 
-            send_prompt_result(
-                &result_tx,
-                &turn_id,
-                agent,
-                source,
-                PromptOutcome::Ok(stop_reason),
-                None,
-            );
+            let outcome = match retirement_error {
+                Some(error) => {
+                    tracing::error!(
+                        target: "pool::session",
+                        "failed to close rotated session {session_id}: {error}"
+                    );
+                    PromptOutcome::SessionCloseFailed(error)
+                }
+                None => PromptOutcome::Ok(stop_reason),
+            };
+            send_prompt_result(&result_tx, &turn_id, agent, source, outcome, None);
         }
         Err(AcpError::AgentExited) => {
             tracing::error!(target: "pool::prompt", "agent {} exited during prompt", agent.index);
@@ -3390,6 +3431,17 @@ fn acp_stop_to_core(r: &StopReason) -> buzz_core::agent_turn_metric::StopReason 
     }
 }
 
+fn completed_turn_metric_stop(
+    stop_reason: &StopReason,
+    retirement_failed: bool,
+) -> buzz_core::agent_turn_metric::StopReason {
+    if retirement_failed {
+        buzz_core::agent_turn_metric::StopReason::Error
+    } else {
+        acp_stop_to_core(stop_reason)
+    }
+}
+
 /// Best-effort: build and publish a `kind:44200` NIP-AM agent turn metric event.
 ///
 /// Does nothing when `usage` is `None` (goose emitted no usage notification
@@ -4535,6 +4587,255 @@ mod tests {
         }
     }
 
+    fn capture_path(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("buzz-acp-{label}-{}.ndjson", Uuid::new_v4()))
+    }
+
+    async fn wait_for_capture_lines(path: &std::path::Path, minimum: usize) -> String {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(contents) = std::fs::read_to_string(path) {
+                    if contents.lines().count() >= minimum {
+                        return contents;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "timed out waiting for {minimum} captured ACP messages at {}",
+                path.display()
+            )
+        })
+    }
+
+    #[tokio::test]
+    async fn clean_control_cancel_closes_session_before_local_invalidation() {
+        let capture = capture_path("cancel-close");
+        let script = r#"
+            capture="$1"
+            IFS= read -r prompt
+            printf '%s\n' "$prompt" >> "$capture"
+            IFS= read -r cancel
+            printf '%s\n' "$cancel" >> "$capture"
+            printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"stopReason":"cancelled"}}'
+            if IFS= read -r close; then
+                printf '%s\n' "$close" >> "$capture"
+                printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{}}'
+            fi
+            sleep 10
+        "#;
+        let acp = AcpClient::spawn(
+            "bash",
+            &[
+                "-c".to_string(),
+                script.to_string(),
+                "buzz-acp-close-test".to_string(),
+                capture.to_string_lossy().into_owned(),
+            ],
+            &[],
+            false,
+        )
+        .await
+        .expect("failed to spawn fake ACP adapter");
+
+        let channel_id = Uuid::new_v4();
+        let mut state = SessionState::default();
+        state.sessions.insert(channel_id, "session-old".into());
+        let agent = OwnedAgent {
+            index: 0,
+            acp,
+            state,
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            agent_name: "claude-code-acp".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 2,
+        };
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.dedup_mode = DedupMode::Queue;
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+        let (control_tx, control_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(run_prompt_task(
+            agent,
+            Some(one_event_batch(channel_id)),
+            Some("prompt".into()),
+            Arc::new(ctx),
+            result_tx,
+            Some(control_rx),
+            "turn-cancel-close".into(),
+        ));
+
+        let _ = wait_for_capture_lines(&capture, 1).await;
+        control_tx
+            .send(ControlSignal::Steer)
+            .expect("control receiver must still be live");
+        let result = tokio::time::timeout(Duration::from_secs(5), result_rx.recv())
+            .await
+            .expect("prompt task must return")
+            .expect("prompt result channel must stay open");
+        task.await.expect("prompt task must not panic");
+
+        assert!(
+            matches!(result.outcome, PromptOutcome::Cancelled),
+            "clean cancel must remain a non-error outcome"
+        );
+        assert!(
+            !result.agent.state.sessions.contains_key(&channel_id),
+            "local session state must be invalidated after the remote close succeeds"
+        );
+        assert_eq!(
+            result.batch.as_ref().and_then(|batch| batch.cancel_reason),
+            Some(CancelReason::Steer),
+            "queue-mode steer must preserve the cancelled batch"
+        );
+
+        let captured = wait_for_capture_lines(&capture, 3).await;
+        let messages: Vec<serde_json::Value> = captured
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("captured line must be JSON"))
+            .collect();
+        assert_eq!(messages[0]["method"], "session/prompt");
+        assert_eq!(messages[1]["method"], "session/cancel");
+        assert_eq!(
+            messages[2]["method"], "session/close",
+            "the retired ACP session must be closed before the adapter is reused"
+        );
+        assert_eq!(messages[2]["params"]["sessionId"], "session-old");
+
+        let _ = std::fs::remove_file(capture);
+    }
+
+    #[tokio::test]
+    async fn token_rotation_closes_old_session_before_next_session_new() {
+        let capture = capture_path("rotation-close");
+        let script = r#"
+            capture="$1"
+            IFS= read -r first_prompt
+            printf '%s\n' "$first_prompt" >> "$capture"
+            printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"stopReason":"max_tokens"}}'
+            IFS= read -r close
+            printf '%s\n' "$close" >> "$capture"
+            printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{}}'
+            IFS= read -r new_session
+            printf '%s\n' "$new_session" >> "$capture"
+            printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"sessionId":"session-new"}}'
+            IFS= read -r second_prompt
+            printf '%s\n' "$second_prompt" >> "$capture"
+            printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}'
+            sleep 10
+        "#;
+        let acp = AcpClient::spawn(
+            "bash",
+            &[
+                "-c".to_string(),
+                script.to_string(),
+                "buzz-acp-rotation-test".to_string(),
+                capture.to_string_lossy().into_owned(),
+            ],
+            &[],
+            false,
+        )
+        .await
+        .expect("failed to spawn fake ACP adapter");
+
+        let channel_id = Uuid::new_v4();
+        let mut state = SessionState::default();
+        state.sessions.insert(channel_id, "session-old".into());
+        let agent = OwnedAgent {
+            index: 0,
+            acp,
+            state,
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            agent_name: "claude-code-acp".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 2,
+        };
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.channel_info = ChannelInfoResolver::new(
+            std::collections::HashMap::from([(
+                channel_id,
+                crate::relay::ChannelInfo {
+                    name: "test".into(),
+                    channel_type: "public".into(),
+                },
+            )]),
+            ctx.rest_client.clone(),
+        );
+        let ctx = Arc::new(ctx);
+
+        let (first_tx, mut first_rx) = mpsc::unbounded_channel();
+        run_prompt_task(
+            agent,
+            Some(one_event_batch(channel_id)),
+            Some("first prompt".into()),
+            Arc::clone(&ctx),
+            first_tx,
+            None,
+            "turn-rotation-first".into(),
+        )
+        .await;
+        let first = first_rx.recv().await.expect("first result must be sent");
+        assert!(
+            matches!(first.outcome, PromptOutcome::Ok(StopReason::MaxTokens)),
+            "the completed turn must preserve its max_tokens outcome"
+        );
+        assert!(
+            !first.agent.state.sessions.contains_key(&channel_id),
+            "the rotated session must be absent after close succeeds"
+        );
+
+        let (second_tx, mut second_rx) = mpsc::unbounded_channel();
+        run_prompt_task(
+            first.agent,
+            Some(one_event_batch(channel_id)),
+            Some("second prompt".into()),
+            Arc::clone(&ctx),
+            second_tx,
+            None,
+            "turn-rotation-second".into(),
+        )
+        .await;
+        let second = second_rx.recv().await.expect("second result must be sent");
+        assert!(
+            matches!(second.outcome, PromptOutcome::Ok(StopReason::EndTurn)),
+            "the replacement session must run the next turn successfully"
+        );
+        assert_eq!(
+            second
+                .agent
+                .state
+                .sessions
+                .get(&channel_id)
+                .map(String::as_str),
+            Some("session-new")
+        );
+
+        let captured = wait_for_capture_lines(&capture, 4).await;
+        let messages: Vec<serde_json::Value> = captured
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("captured line must be JSON"))
+            .collect();
+        assert_eq!(messages[0]["method"], "session/prompt");
+        assert_eq!(
+            messages[1]["method"], "session/close",
+            "the old session must close as part of rotation"
+        );
+        assert_eq!(messages[1]["params"]["sessionId"], "session-old");
+        assert_eq!(
+            messages[2]["method"], "session/new",
+            "a replacement session may be created only after close succeeds"
+        );
+        assert_eq!(messages[3]["method"], "session/prompt");
+
+        let _ = std::fs::remove_file(capture);
+    }
+
     #[test]
     fn test_requeue_cancelled_batch_maps_control_signal_to_cancel_reason() {
         let cases = [
@@ -4589,6 +4890,7 @@ mod tests {
             PromptOutcome::Timeout(TimeoutKind::Idle) => "Timeout(Idle)",
             PromptOutcome::Timeout(TimeoutKind::Hard { .. }) => "Timeout(Hard)",
             PromptOutcome::CancelDrainTimeout(_) => "CancelDrainTimeout",
+            PromptOutcome::SessionCloseFailed(_) => "SessionCloseFailed",
             PromptOutcome::Error(_) => "Error",
             PromptOutcome::Cancelled => "Cancelled",
             PromptOutcome::Ok(_) => "Ok",
@@ -5191,6 +5493,20 @@ mod tests {
             CoreStop::Unknown
         );
         assert_eq!(acp_stop_to_core(&StopReason::Refusal), CoreStop::Unknown);
+    }
+
+    #[test]
+    fn failed_session_retirement_marks_completed_turn_metric_as_error() {
+        use buzz_core::agent_turn_metric::StopReason as CoreStop;
+
+        assert_eq!(
+            completed_turn_metric_stop(&StopReason::MaxTokens, true),
+            CoreStop::Error
+        );
+        assert_eq!(
+            completed_turn_metric_stop(&StopReason::MaxTurnRequests, true),
+            CoreStop::Error
+        );
     }
 
     /// `publish_agent_turn_metric` is a no-op when `usage` is `None`.
