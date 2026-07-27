@@ -392,7 +392,11 @@ impl Daemon {
                 slug,
                 container_id,
             } => {
-                let volume = volume_name(&owner_pubkey, &slug);
+                let volume = volume_name(
+                    &self.config.keys.public_key().to_hex(),
+                    &owner_pubkey,
+                    &slug,
+                );
                 if let Some(id) = container_id {
                     self.containers.remove(&id, Some(&volume)).await?;
                 }
@@ -551,7 +555,7 @@ impl Daemon {
         let (cpu_millis, memory_mib) = self.resources_for(&desired.spec);
 
         let spec = ContainerSpec {
-            name: record.container_name(),
+            name: record.container_name(&self.config.keys.public_key().to_hex()),
             image: self.config.agent_image.clone(),
             agent_pubkey: record.agent_pubkey.clone(),
             slug: record.slug.clone(),
@@ -569,7 +573,11 @@ impl Daemon {
             ),
             cpu_millis,
             memory_mib,
-            volume_name: volume_name(&desired.owner_pubkey, &desired.slug),
+            volume_name: volume_name(
+                &self.config.keys.public_key().to_hex(),
+                &desired.owner_pubkey,
+                &desired.slug,
+            ),
         };
 
         match self.containers.create(&spec).await {
@@ -818,9 +826,10 @@ struct PersonaContent {
 
 /// Per-agent volume name, scoped by owner for the same reason container names
 /// are: slugs are only unique per owner.
-fn volume_name(owner_pubkey: &str, slug: &str) -> String {
+fn volume_name(spawner_pubkey: &str, owner_pubkey: &str, slug: &str) -> String {
     format!(
-        "buzz-agent-{}-{}",
+        "buzz-agent-{}-{}-{}",
+        &spawner_pubkey[..12.min(spawner_pubkey.len())],
         &owner_pubkey[..12.min(owner_pubkey.len())],
         slug
     )
@@ -832,9 +841,22 @@ mod tests {
 
     #[test]
     fn volume_names_are_scoped_per_owner() {
+        let spawner = "s".repeat(64);
         assert_ne!(
-            volume_name(&"a".repeat(64), "fizz"),
-            volume_name(&"b".repeat(64), "fizz")
+            volume_name(&spawner, &"a".repeat(64), "fizz"),
+            volume_name(&spawner, &"b".repeat(64), "fizz")
+        );
+    }
+
+    #[test]
+    fn volume_names_are_scoped_per_spawner() {
+        // Two spawners on one host must not share a workspace volume: deleting
+        // an agent purges its volume, and an unscoped name would wipe the other
+        // spawner's still-running agent out from under it.
+        let owner = "a".repeat(64);
+        assert_ne!(
+            volume_name(&"s".repeat(64), &owner, "fizz"),
+            volume_name(&"t".repeat(64), &owner, "fizz")
         );
     }
 

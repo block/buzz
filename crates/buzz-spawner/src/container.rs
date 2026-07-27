@@ -291,11 +291,12 @@ impl DockerOps {
         {
             Ok(created) => created,
             // The name can be squatted by a container a previous spawner
-            // identity created (names are owner+slug scoped, but list() only
-            // sees the current identity's label) — self-heal by removing it,
-            // but only after verifying the labels say it is an agent container.
+            // The name can be squatted by a container we created and then lost
+            // track of (a crash between create and the store write) — self-heal
+            // by removing it, but only after the labels confirm it is an agent
+            // container belonging to this spawner.
             Err(e) if is_name_conflict(&e) => {
-                self.remove_name_squatter(&spec.name)
+                self.remove_name_squatter(&spec.name, &spec.spawner_pubkey)
                     .await
                     .with_context(|| {
                         format!(
@@ -374,12 +375,21 @@ impl DockerOps {
 
     /// Remove an agent container squatting on `name`.
     ///
-    /// Only containers carrying the `com.buzz.agent` label are removed — that
-    /// label marks them as spawner-managed regardless of which spawner
-    /// identity created them, so orphans left by a retired identity are fair
-    /// game while an operator's unrelated container of the same name is not.
+    /// Two gates, both required. The container must carry the `com.buzz.agent`
+    /// label, so an operator's unrelated container of the same name is never
+    /// touched. And its `com.buzz.spawner` label must name *us* — a container
+    /// belonging to another spawner identity is left alone even though the name
+    /// blocks us, because that spawner may be alive and still serving it, and
+    /// force-removing a live agent to free a name is never the right trade.
+    ///
+    /// What that leaves is the case this exists for: a leftover from a crash
+    /// between `create` and the store write, under our own identity. Names
+    /// carry the spawner prefix (see [`AgentRecord::container_name`]), so a
+    /// conflict from any other identity means a genuine collision an operator
+    /// needs to see rather than something to silently resolve.
+    ///
     /// The workspace volume is a named mount and survives the removal.
-    async fn remove_name_squatter(&self, name: &str) -> Result<()> {
+    async fn remove_name_squatter(&self, name: &str, spawner_pubkey: &str) -> Result<()> {
         use bollard::query_parameters::InspectContainerOptions;
 
         let squatter = self
@@ -394,13 +404,19 @@ impl DockerOps {
                  refusing to remove a container the spawner does not manage"
             );
         }
-        let spawner = labels
-            .and_then(|labels| labels.get(SPAWNER_LABEL).cloned())
+        let owner = labels
+            .and_then(|labels| labels.get(SPAWNER_LABEL))
+            .map(String::as_str)
             .unwrap_or_default();
+        if owner != spawner_pubkey {
+            anyhow::bail!(
+                "conflicting container {name} belongs to spawner {owner}, not {spawner_pubkey}; \
+                 refusing to remove another spawner's agent to free the name"
+            );
+        }
         tracing::info!(
             container = %name,
-            previous_spawner = %spawner,
-            "removing orphaned agent container squatting on required name"
+            "removing our own orphaned agent container squatting on required name"
         );
         self.remove_inner(name, None).await
     }
