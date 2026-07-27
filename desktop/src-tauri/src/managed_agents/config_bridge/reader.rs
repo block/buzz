@@ -22,6 +22,7 @@ pub(crate) fn read_config_surface(
             "goose" => super::goose::read_config_file().map(|c| (c, true)),
             "claude" => super::claude::read_config_file().map(|c| (c, true)),
             "codex" => super::codex::read_config_file().map(|c| (c, true)),
+            "pi" => super::pi::read_config_file().map(|c| (c, true)),
             "buzz-agent" => super::buzz_agent::read_config_file().map(|c| (c, true)),
             _ => None,
         })
@@ -222,6 +223,10 @@ fn mcp_config_file_path_for_runtime(runtime: &KnownAcpRuntime) -> Option<String>
         "codex" => {
             super::codex::codex_config_path().map(|path| path.to_string_lossy().into_owned())
         }
+        // Pi's MCP servers come from the Buzz-owned nest project file
+        // (written at spawn time), not from ~/.pi/agent.
+        "pi" => crate::managed_agents::default_agent_workdir()
+            .map(|dir| dir.join(".pi/mcp.json").to_string_lossy().into_owned()),
         _ => None,
     }
 }
