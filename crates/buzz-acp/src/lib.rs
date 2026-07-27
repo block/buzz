@@ -21,8 +21,8 @@ use std::time::Duration;
 use acp::{AcpClient, EnvVar, McpServer};
 use anyhow::Result;
 use buzz_core::kind::{
-    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_STREAM_MESSAGE,
-    KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
+    KIND_HUDDLE_GUIDELINES, KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION,
+    KIND_STREAM_MESSAGE, KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
 };
 use buzz_core::observer::{
     decrypt_observer_payload, encrypt_observer_payload, OBSERVER_FRAME_TELEMETRY,
@@ -1230,6 +1230,64 @@ impl Drop for RespawnGuard {
 // sync entry point — `std::env::set_var` is only safe before tokio spawns
 // worker threads (Rust 2024 edition safety requirement).
 
+/// Event kinds the default `mentions` subscription rule matches.
+///
+/// `KIND_HUDDLE_GUIDELINES` belongs here: Buzz Desktop posts the voice-mode
+/// etiquette for a huddle to the ephemeral channel, `p`-tagged to each
+/// enrolled agent. Leaving it out drops the event at both the REQ `kinds`
+/// filter and [`filter::match_event`], so agents join huddles without it and
+/// behave like ordinary chat agents — long, markdown-shaped replies that
+/// never reach TTS in time.
+fn default_mention_kinds() -> Vec<u32> {
+    vec![
+        KIND_STREAM_MESSAGE,
+        KIND_WORKFLOW_APPROVAL_REQUESTED,
+        KIND_STREAM_REMINDER,
+        KIND_HUDDLE_GUIDELINES,
+    ]
+}
+
+#[cfg(test)]
+mod default_mention_kinds_tests {
+    use super::*;
+    use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    /// A huddle guidelines event addressed to this agent must survive the
+    /// default `mentions` rule. Without `KIND_HUDDLE_GUIDELINES` in the kind
+    /// list this returns `None`, and agents never see voice-mode etiquette.
+    #[tokio::test]
+    async fn default_mentions_rule_admits_huddle_guidelines() {
+        let agent = Keys::generate();
+        let agent_hex = agent.public_key().to_hex();
+        let channel_id = uuid::Uuid::new_v4();
+
+        let rule = filter::SubscriptionRule {
+            name: "mentions".into(),
+            channels: filter::ChannelScope::All("all".into()),
+            kinds: default_mention_kinds(),
+            require_mention: true,
+            filter: None,
+            compiled_filter: None,
+            consecutive_timeouts: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            prompt_tag: Some("@mention".into()),
+        };
+
+        let event = EventBuilder::new(
+            Kind::Custom(KIND_HUDDLE_GUIDELINES as u16),
+            "You are in a live voice huddle",
+        )
+        .tags(vec![Tag::parse(["p", &agent_hex]).unwrap()])
+        .sign_with_keys(&Keys::generate())
+        .unwrap();
+
+        let matched = filter::match_event(&event, channel_id, &[rule], &agent_hex).await;
+        assert!(
+            matched.is_some(),
+            "huddle guidelines must match the default mentions rule"
+        );
+    }
+}
+
 pub fn run() -> Result<()> {
     config::propagate_legacy_env_vars();
     tokio_main()
@@ -1441,13 +1499,10 @@ async fn tokio_main() -> Result<()> {
             vec![SubscriptionRule {
                 name: "mentions".into(),
                 channels: filter::ChannelScope::All("all".into()),
-                kinds: config.kinds_override.clone().unwrap_or_else(|| {
-                    vec![
-                        KIND_STREAM_MESSAGE,
-                        KIND_WORKFLOW_APPROVAL_REQUESTED,
-                        KIND_STREAM_REMINDER,
-                    ]
-                }),
+                kinds: config
+                    .kinds_override
+                    .clone()
+                    .unwrap_or_else(default_mention_kinds),
                 require_mention: !config.no_mention_filter,
                 filter: None,
                 compiled_filter: None,

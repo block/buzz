@@ -16,9 +16,10 @@ use crate::{app_state::AppState, events, relay::submit_event};
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 /// Voice-mode guidelines posted as kind:48106 (huddle guidelines) to the
-/// ephemeral channel at huddle start. Agents see them via EOSE replay.
-/// Instructs agents on voice-mode etiquette: TTS constraints, brevity,
-/// self-selection, and sentence-at-a-time delivery.
+/// ephemeral channel, `p`-tagged to the agents being enrolled — the ACP
+/// harness subscribes with `#p=[agent_pubkey]` and would otherwise never
+/// receive them. Instructs agents on voice-mode etiquette: TTS constraints,
+/// brevity, self-selection, and sentence-at-a-time delivery.
 ///
 /// Why sentence-at-a-time: the desktop speaks each agent message as it
 /// arrives (queued, in order), so an agent that sends its first sentence
@@ -87,6 +88,31 @@ pub async fn add_agent_to_huddle(
     agent_pubkey: &str,
     state: &AppState,
 ) -> Result<AgentAddResult, String> {
+    // 0. Post voice-mode guidelines addressed to this agent, before the add.
+    //    The guidelines event published at huddle start only carries `p` tags
+    //    for the agents enrolled then, and the agent's channel subscription
+    //    replays from its own membership event — so a late-added agent sees
+    //    neither. Re-posting per agent is cheap (the channel is ephemeral and
+    //    the TTS pipeline filters kind:48106 out) and keeps every agent on the
+    //    same etiquette. Best-effort: never block enrollment.
+    let guidelines = voice_mode_guidelines(&parent_channel_id.to_string());
+    match events::build_huddle_guidelines(
+        &ephemeral_channel_id.to_string(),
+        &guidelines,
+        &[agent_pubkey],
+    ) {
+        Ok(builder) => {
+            if let Err(e) = submit_event(builder, state).await {
+                eprintln!(
+                    "buzz-desktop: huddle guidelines (kind:48106) for {agent_pubkey} failed: {e}"
+                );
+            }
+        }
+        Err(e) => {
+            eprintln!("buzz-desktop: build huddle guidelines for {agent_pubkey} failed: {e}");
+        }
+    }
+
     // 1. Add agent to ephemeral channel (required — fail hard on rejection).
     let add_eph = events::build_add_member(ephemeral_channel_id, agent_pubkey, Some("bot"))?;
     submit_event(add_eph, state).await?;
