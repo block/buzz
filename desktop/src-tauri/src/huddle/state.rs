@@ -80,6 +80,15 @@ pub struct HuddleState {
     pub tts_enabled: bool,
     /// Whether STT transcript posting is enabled for this huddle.
     pub transcription_enabled: bool,
+    /// Whether the user has explicitly used the transcription control in this
+    /// huddle. Agent presence may auto-enable transcription only while this is
+    /// false, so membership refreshes never undo an explicit user choice.
+    ///
+    /// This is backend-only session state: keeping it in `HuddleState` makes it
+    /// survive frontend remounts and audio reconnects, while huddle teardown
+    /// resets it for the next session.
+    #[serde(skip)]
+    pub transcription_user_controlled: bool,
     /// Shared flag: true while TTS is playing audio.
     /// Shared with the STT pipeline for barge-in / echo gating.
     #[serde(skip)]
@@ -157,6 +166,7 @@ impl Clone for HuddleState {
             is_creator: self.is_creator,
             tts_enabled: self.tts_enabled,
             transcription_enabled: self.transcription_enabled,
+            transcription_user_controlled: self.transcription_user_controlled,
             tts_active: Arc::clone(&self.tts_active),
             tts_cancel: Arc::clone(&self.tts_cancel),
             tts_starting: Arc::clone(&self.tts_starting),
@@ -184,6 +194,7 @@ impl Default for HuddleState {
             is_creator: false,
             tts_enabled: true,
             transcription_enabled: false,
+            transcription_user_controlled: false,
             tts_active: Arc::new(AtomicBool::new(false)),
             tts_cancel: Arc::new(AtomicBool::new(false)),
             tts_starting: Arc::new(AtomicBool::new(false)),
@@ -197,6 +208,32 @@ impl Default for HuddleState {
 }
 
 impl HuddleState {
+    /// Record an explicit transcription choice made through the existing user
+    /// control. Later agent membership refreshes must preserve this choice.
+    pub(crate) fn set_transcription_enabled_by_user(&mut self, enabled: bool) {
+        self.transcription_enabled = enabled;
+        self.transcription_user_controlled = true;
+    }
+
+    /// Enable transcription when an agent is present and the user has not
+    /// explicitly chosen a transcription state for this huddle.
+    ///
+    /// Returns true only for the transition from disabled to enabled, allowing
+    /// callers to start models/pipelines and emit state exactly once. Removing
+    /// the last agent deliberately leaves the current state unchanged.
+    pub(crate) fn maybe_auto_enable_transcription_for_agents(&mut self) -> bool {
+        let has_agent = !self
+            .agent_pubkeys
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty();
+        if has_agent && !self.transcription_user_controlled && !self.transcription_enabled {
+            self.transcription_enabled = true;
+            return true;
+        }
+        false
+    }
+
     /// Reset to default state while preserving the session generation counter.
     /// Used by start_huddle rollback, join_huddle rollback, and teardown_huddle
     /// to invalidate in-flight transcription tasks without losing the generation.
@@ -204,6 +241,65 @@ impl HuddleState {
         let gen = Arc::clone(&self.session_generation);
         *self = Self::default();
         self.session_generation = gen;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HuddleState;
+
+    fn set_agents(state: &HuddleState, agents: &[&str]) {
+        *state
+            .agent_pubkeys
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) =
+            agents.iter().map(|agent| (*agent).to_owned()).collect();
+    }
+
+    #[test]
+    fn first_agent_auto_enables_transcription_once() {
+        let mut state = HuddleState::default();
+        set_agents(&state, &["agent"]);
+
+        assert!(state.maybe_auto_enable_transcription_for_agents());
+        assert!(state.transcription_enabled);
+        assert!(!state.maybe_auto_enable_transcription_for_agents());
+    }
+
+    #[test]
+    fn explicit_user_disable_is_not_undone_by_agent_presence() {
+        let mut state = HuddleState::default();
+        set_agents(&state, &["agent"]);
+        assert!(state.maybe_auto_enable_transcription_for_agents());
+
+        state.set_transcription_enabled_by_user(false);
+
+        assert!(!state.maybe_auto_enable_transcription_for_agents());
+        assert!(!state.transcription_enabled);
+    }
+
+    #[test]
+    fn last_agent_leaving_preserves_current_transcription_state() {
+        let mut state = HuddleState::default();
+        set_agents(&state, &["agent"]);
+        assert!(state.maybe_auto_enable_transcription_for_agents());
+
+        set_agents(&state, &[]);
+
+        assert!(!state.maybe_auto_enable_transcription_for_agents());
+        assert!(state.transcription_enabled);
+    }
+
+    #[test]
+    fn clone_preserves_user_control_across_frontend_state_reads() {
+        let mut state = HuddleState::default();
+        state.set_transcription_enabled_by_user(false);
+
+        let mut clone = state.clone();
+        set_agents(&clone, &["agent"]);
+
+        assert!(clone.transcription_user_controlled);
+        assert!(!clone.maybe_auto_enable_transcription_for_agents());
     }
 }
 

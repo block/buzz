@@ -267,6 +267,7 @@ pub async fn start_huddle(
                 // Only store agents that were successfully enrolled.
                 *hs.agent_pubkeys.lock().unwrap_or_else(|e| e.into_inner()) =
                     successful_agents.clone();
+                hs.maybe_auto_enable_transcription_for_agents();
                 // Include the current user + successfully enrolled agents as participants.
                 // Use successful_agents (not member_pubkeys) so failed enrollments
                 // are not reflected in the participant list.
@@ -776,7 +777,7 @@ pub async fn check_pipeline_hotstart(state: State<'_, AppState>) -> Result<(), S
                 .ok();
             let fresh_members = fetch_channel_members(eph_id, None, &state).await.ok();
 
-            if fresh_agents.is_some() || fresh_members.is_some() {
+            let transcription_auto_enabled = if fresh_agents.is_some() || fresh_members.is_some() {
                 let mut hs = state.huddle()?;
                 if let Some(agents) = fresh_agents {
                     *hs.agent_pubkeys.lock().unwrap_or_else(|e| e.into_inner()) = agents;
@@ -785,6 +786,19 @@ pub async fn check_pipeline_hotstart(state: State<'_, AppState>) -> Result<(), S
                     hs.participants = members;
                 }
                 hs.last_agent_refresh = Some(std::time::Instant::now());
+                hs.maybe_auto_enable_transcription_for_agents()
+            } else {
+                false
+            };
+
+            if transcription_auto_enabled {
+                if let Some(manager) = models::global_model_manager() {
+                    manager.start_stt_download(state.http_client.clone());
+                }
+                if let Err(e) = maybe_start_stt_pipeline(&state, eph_id).await {
+                    eprintln!("buzz-desktop: STT agent-presence start failed: {e}");
+                }
+                state.emit_huddle_state_changed();
             }
         }
     }
@@ -974,13 +988,25 @@ pub async fn add_agent_to_huddle(
     // No guidelines re-post needed — the agent sees the original kind:48106
     // guidelines via EOSE replay when it subscribes to the ephemeral channel.
 
-    // Also add the agent to the visible participants list.
-    {
+    // Also add the agent to the visible participants list. The first agent
+    // auto-enables transcription unless the user already chose a state.
+    let transcription_auto_enabled = {
         let mut hs = state.huddle()?;
         if !hs.participants.contains(&agent_pubkey) {
-            hs.participants.push(agent_pubkey);
+            hs.participants.push(agent_pubkey.clone());
+        }
+        hs.maybe_auto_enable_transcription_for_agents()
+    };
+
+    if transcription_auto_enabled {
+        if let Some(manager) = models::global_model_manager() {
+            manager.start_stt_download(state.http_client.clone());
+        }
+        if let Err(e) = maybe_start_stt_pipeline(&state, &eph_id).await {
+            eprintln!("buzz-desktop: STT agent-add start failed: {e}");
         }
     }
+    state.emit_huddle_state_changed();
 
     Ok(result)
 }

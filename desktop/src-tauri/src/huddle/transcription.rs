@@ -15,10 +15,12 @@ use super::{models, pipeline::maybe_start_stt_pipeline};
 pub async fn start_stt_pipeline(state: State<'_, AppState>) -> Result<(), String> {
     let ephemeral_channel_id = {
         let mut hs = state.huddle()?;
-        hs.transcription_enabled = true;
-        hs.ephemeral_channel_id
+        let ephemeral_channel_id = hs
+            .ephemeral_channel_id
             .clone()
-            .ok_or("no active huddle — start or join a huddle first")?
+            .ok_or("no active huddle — start or join a huddle first")?;
+        hs.set_transcription_enabled_by_user(true);
+        ephemeral_channel_id
     };
 
     match maybe_start_stt_pipeline(&state, &ephemeral_channel_id).await {
@@ -41,14 +43,18 @@ pub async fn set_huddle_transcription_enabled(
 ) -> Result<(), String> {
     let (ephemeral_channel_id, old_stt) = {
         let mut hs = state.huddle()?;
-        hs.transcription_enabled = enabled;
+        let ephemeral_channel_id = hs
+            .ephemeral_channel_id
+            .clone()
+            .ok_or("no active huddle — start or join a huddle first")?;
+        hs.set_transcription_enabled_by_user(enabled);
 
         if enabled {
-            (hs.ephemeral_channel_id.clone(), None)
+            (ephemeral_channel_id, None)
         } else {
             hs.session_generation.fetch_add(1, Ordering::Release);
             hs.stt_starting.store(false, Ordering::Release);
-            (hs.ephemeral_channel_id.clone(), hs.stt_pipeline.take())
+            (ephemeral_channel_id, hs.stt_pipeline.take())
         }
     };
 
@@ -58,12 +64,10 @@ pub async fn set_huddle_transcription_enabled(
     drop(old_stt);
 
     if enabled {
-        let eph_id =
-            ephemeral_channel_id.ok_or("no active huddle — start or join a huddle first")?;
         if let Some(manager) = models::global_model_manager() {
             manager.start_stt_download(state.http_client.clone());
         }
-        if let Err(e) = maybe_start_stt_pipeline(&state, &eph_id).await {
+        if let Err(e) = maybe_start_stt_pipeline(&state, &ephemeral_channel_id).await {
             eprintln!("buzz-desktop: STT transcript start failed: {e}");
         }
     }

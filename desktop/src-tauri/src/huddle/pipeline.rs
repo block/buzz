@@ -31,8 +31,9 @@ pub(crate) async fn post_connect_setup(
         fetch_channel_members(ephemeral_channel_id, None, state),
     );
     if let Ok(agents) = agents_result {
-        let hs = state.huddle()?;
+        let mut hs = state.huddle()?;
         *hs.agent_pubkeys.lock().unwrap_or_else(|e| e.into_inner()) = agents;
+        hs.maybe_auto_enable_transcription_for_agents();
     }
 
     if let Ok(all_members) = all_members_result {
@@ -42,10 +43,13 @@ pub(crate) async fn post_connect_setup(
         }
     }
 
-    // Prepare TTS for agent voice. STT is transcript-specific and starts only
-    // when transcription is explicitly enabled.
+    // Prepare voice models. Agent presence may have auto-enabled transcription;
+    // explicit user choices remain authoritative.
     if let Some(mgr) = models::global_model_manager() {
         mgr.start_tts_download(state.http_client.clone());
+        if state.huddle()?.transcription_enabled {
+            mgr.start_stt_download(state.http_client.clone());
+        }
     }
 
     // Connect audio relay WebSocket (Opus encode/decode pipeline).
@@ -62,10 +66,13 @@ pub(crate) async fn post_connect_setup(
         hs.audio_relay_pcm_tx = Some(pcm_tx);
     }
 
-    // Start TTS immediately. STT/transcript posting is opt-in and starts only
-    // after the user explicitly enables transcription.
+    // Start TTS immediately, then STT when transcription is enabled either by
+    // the user or by authoritative agent membership.
     if let Err(e) = maybe_start_tts_pipeline(state).await {
         eprintln!("buzz-desktop: TTS pipeline failed to start: {e}");
+    }
+    if let Err(e) = maybe_start_stt_pipeline(state, ephemeral_channel_id).await {
+        eprintln!("buzz-desktop: STT pipeline failed to start: {e}");
     }
 
     Ok(())
