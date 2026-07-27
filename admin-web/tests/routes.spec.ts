@@ -80,6 +80,7 @@ test("event report detail renders the reported message content", async ({
           content:
             "This is the complete reported message.\nIt preserves lines.",
           createdAt: "2026-07-17T17:25:00Z",
+          deletedAt: null,
         },
       }),
     }),
@@ -112,6 +113,7 @@ test("event report detail explains when message content is unavailable", async (
         reportType: "spam",
         status: "open",
         createdAt: "2026-07-17T17:30:00Z",
+        message: null,
       }),
     }),
   );

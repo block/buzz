@@ -362,6 +362,40 @@ mod tests {
         id
     }
 
+    async fn insert_pubkey_report(pool: &PgPool, community_id: Uuid) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            r#"
+            INSERT INTO moderation_reports (
+                community_id, id, report_event_id, reporter_pubkey,
+                target_kind, target_pubkey, report_type
+            ) VALUES ($1, $2, $3, $4, 'pubkey', $5, 'spam')
+            "#,
+        )
+        .bind(community_id)
+        .bind(id)
+        .bind(Uuid::new_v4().as_bytes().repeat(2))
+        .bind(vec![4_u8; 32])
+        .bind(vec![7_u8; 32])
+        .execute(pool)
+        .await
+        .expect("insert report");
+        id
+    }
+
+    async fn delete_report_fixture(pool: &PgPool, community_id: Uuid) {
+        sqlx::query("DELETE FROM moderation_reports WHERE community_id = $1")
+            .bind(community_id)
+            .execute(pool)
+            .await
+            .expect("delete report fixture");
+        sqlx::query("DELETE FROM communities WHERE id = $1")
+            .bind(community_id)
+            .execute(pool)
+            .await
+            .expect("delete community fixture");
+    }
+
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn report_detail_reads_only_the_same_community_target_and_includes_deleted_content() {
@@ -414,5 +448,41 @@ mod tests {
             .execute(&pool)
             .await
             .expect("delete community fixtures");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn report_detail_has_no_message_for_non_event_target() {
+        let pool = setup_pool().await;
+        let community_id = insert_community(&pool, "pubkey-target").await;
+        let report_id = insert_pubkey_report(&pool, community_id).await;
+
+        let detail = get_report(&pool, report_id)
+            .await
+            .expect("query report")
+            .expect("report exists");
+        assert_eq!(detail.report.target_kind, "pubkey");
+        assert!(detail.message.is_none());
+
+        delete_report_fixture(&pool, community_id).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn report_detail_has_no_message_when_event_row_is_missing() {
+        let pool = setup_pool().await;
+        let community_id = insert_community(&pool, "missing-event").await;
+        let missing_event_id = vec![8_u8; 32];
+        let report_id = insert_event_report(&pool, community_id, &missing_event_id).await;
+
+        let detail = get_report(&pool, report_id)
+            .await
+            .expect("query report")
+            .expect("report exists");
+        assert_eq!(detail.report.target_kind, "event");
+        assert_eq!(detail.report.target, hex::encode(missing_event_id));
+        assert!(detail.message.is_none());
+
+        delete_report_fixture(&pool, community_id).await;
     }
 }

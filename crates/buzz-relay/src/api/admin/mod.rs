@@ -390,6 +390,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn report_detail_rejects_unknown_report() {
+        let response = router(test_state().await)
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/reports/{}", Uuid::nil()))
+                    .header(header::HOST, "admin.example")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
     async fn feedback_attachment_requires_admin_host_before_database_access() {
         let response = router(test_state().await)
             .oneshot(
