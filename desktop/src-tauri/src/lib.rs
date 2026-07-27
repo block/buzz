@@ -438,6 +438,21 @@ pub fn run() {
                 eprintln!("buzz-desktop: persona-snapshot backfill failed: {e}");
             }
 
+            // Warm the loaded-harness registry BEFORE restore so cold-launch
+            // agent spawns can resolve custom/preset runtime ids without
+            // waiting for the frontend's discover_acp_providers call.  This is
+            // a pure directory scan — no PATH probing, no async work.
+            {
+                let custom_dir = app_handle
+                    .path()
+                    .app_data_dir()
+                    .ok()
+                    .map(|d| d.join("custom_harnesses"));
+                managed_agents::custom_harnesses::warm_harness_registry_from_dir(
+                    custom_dir.as_deref(),
+                );
+            }
+
             // Store the AppHandle so huddle commands can emit `huddle-state-changed`
             // events via `huddle::emit_huddle_state` without threading the handle
             // through every call site.
@@ -461,7 +476,7 @@ pub fn run() {
             }
 
             // Start the localhost media streaming proxy. Uses the shared HTTP
-            // client so WARP tunnelling applies. The port is stored in AppState
+            // client so VPN tunnelling applies. The port is stored in AppState
             // and exposed to the frontend via the `get_media_proxy_port` command.
             let proxy_client = state.http_client.clone();
             let proxy_handle = app_handle.clone();
@@ -683,6 +698,7 @@ pub fn run() {
             delete_project_remote_branch,
             push_project_local_repository,
             pull_project_local_repository,
+            sign_project_pull_request_status,
             sign_project_pull_request_review_request,
             publish_project_pull_request_merged_status,
             merge_project_pull_request,
@@ -703,6 +719,8 @@ pub fn run() {
             discover_acp_providers,
             discover_git_bash_prerequisite,
             install_acp_runtime,
+            save_custom_harness,
+            delete_custom_harness,
             connect_acp_runtime,
             discover_managed_agent_prereqs,
             sign_event,

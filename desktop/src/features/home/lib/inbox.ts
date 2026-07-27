@@ -6,6 +6,10 @@ import {
   getThreadReference,
   isBroadcastReply,
 } from "@/features/messages/lib/threading";
+import {
+  getProjectInboxReference,
+  isProjectInboxItem,
+} from "@/features/home/lib/projectInbox";
 import type { TimelineReaction } from "@/features/messages/types";
 import type {
   Channel,
@@ -18,6 +22,7 @@ import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
 
 export type InboxFilter =
   | "all"
+  | "project"
   | "mention"
   | "thread"
   | "needs_action"
@@ -29,10 +34,10 @@ export type InboxFilter =
 export type InboxItem = {
   avatarUrl: string | null;
   /**
-   * Stable conversation identity: `rootId ?? parentId ?? event.id` for the
-   * thread group. Does NOT change when a new reply advances the representative
-   * latest event. Use this for lifecycle continuity: scroll gating, draft
-   * keys, local-reply storage, and selection identity.
+   * Stable conversation identity: the NIP-10 root for messages, or a
+   * repository-scoped root for Buzz Git work. Does NOT change when a new reply
+   * advances the representative latest event. Use this for lifecycle
+   * continuity: scroll gating, draft keys, local-reply storage, and selection.
    */
   conversationId: string;
   id: string;
@@ -136,7 +141,33 @@ function diffInDays(from: Date, to: Date) {
   );
 }
 
-function feedHeadline(item: FeedItem) {
+function tagValue(item: FeedItem, name: string) {
+  return item.tags.find((tag) => tag[0] === name)?.[1]?.trim() || null;
+}
+
+function projectRootItem(item: FeedItem, groupItems: readonly FeedItem[]) {
+  return (
+    groupItems.find(
+      (candidate) => candidate.kind === 1618 || candidate.kind === 1621,
+    ) ?? item
+  );
+}
+
+function projectTypeLabel(item: FeedItem) {
+  if (item.kind === 1618) return "Pull request";
+  if (item.kind === 1621) return "Issue";
+  return "Project update";
+}
+
+function feedHeadline(item: FeedItem, groupItems: readonly FeedItem[] = []) {
+  if (isProjectInboxItem(item)) {
+    const root = projectRootItem(item, groupItems);
+    return (
+      (tagValue(root, "subject") ?? root.content.trim().split("\n")[0]) ||
+      projectTypeLabel(root)
+    );
+  }
+
   switch (item.kind) {
     case 40007:
       return "Reminder";
@@ -242,6 +273,14 @@ function resolveGroupChannel(
 export function getInboxTypeLabel(item: InboxItem): InboxTypeLabel {
   const channelName = item.channelLabel;
 
+  if (item.groupItems.some(isProjectInboxItem)) {
+    const root = projectRootItem(item.item, item.groupItems);
+    return {
+      text: projectTypeLabel(root),
+      channelLabel: null,
+    };
+  }
+
   if (item.item.channelType === "dm") {
     return {
       text: item.senderLabel ? `DM from ${item.senderLabel}` : "DM",
@@ -300,21 +339,48 @@ function categoryPriority(category: FeedItemCategory) {
 }
 
 function getInboxThreadKey(item: FeedItem) {
+  const projectReference = getProjectInboxReference(item);
+  if (projectReference) {
+    return `project:${projectReference.repoAddress}:${projectReference.rootId}`;
+  }
+
   const thread = getThreadReference(item.tags);
   return thread.rootId ?? thread.parentId ?? item.id;
 }
 
+function getStableConversationId(item: FeedItem) {
+  return getInboxItemConversationId(item);
+}
+
 /**
- * Returns the stable conversation ID for any FeedItem or relay event: the
- * NIP-10 root tag id, falling back to parent-reply tag id, then event id.
+ * Returns the stable conversation ID for any FeedItem or relay event. Buzz Git
+ * roots include their repository coordinate; messages use the NIP-10 root,
+ * parent-reply tag, then event id.
  * This is the same derivation used by `buildInboxItems` for `conversationId`.
  */
 export function getInboxConversationId(
   tags: string[][],
   eventId: string,
+  kind?: number,
 ): string {
+  if (kind !== undefined) {
+    const projectReference = getProjectInboxReference({
+      id: eventId,
+      kind,
+      tags,
+    });
+    if (projectReference) {
+      return `project:${projectReference.repoAddress}:${projectReference.rootId}`;
+    }
+  }
+
   const thread = getThreadReference(tags);
   return thread.rootId ?? thread.parentId ?? eventId;
+}
+
+/** Returns the stable conversation identity for a complete Inbox feed item. */
+export function getInboxItemConversationId(item: FeedItem) {
+  return getInboxConversationId(item.tags, item.id, item.kind);
 }
 
 function formatInboxTimestamp(unixSeconds: number) {
@@ -436,7 +502,7 @@ export function buildInboxItems({
 
     group.items.push(item);
     group.latestActivityAt = Math.max(group.latestActivityAt, item.createdAt);
-    if (item.id === threadKey) {
+    if (item.id === getStableConversationId(item)) {
       group.rootItem = item;
     }
 
@@ -447,7 +513,8 @@ export function buildInboxItems({
     .sort(
       ([, left], [, right]) => right.latestActivityAt - left.latestActivityAt,
     )
-    .map(([conversationId, group]) => {
+    .map(([, group]) => {
+      const conversationId = getStableConversationId(group.items[0]);
       const latestItem = group.items.reduce((latest, current) =>
         current.createdAt > latest.createdAt ? current : latest,
       );
@@ -461,7 +528,7 @@ export function buildInboxItems({
         profiles,
         preferResolvedSelfLabel: true,
       });
-      const subject = feedHeadline(item);
+      const subject = feedHeadline(item, group.items);
       const preview = feedPreview(item);
       const { mentionNames, mentionPubkeysByName } = resolveMentionProps(
         item.tags,

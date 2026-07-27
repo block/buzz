@@ -38,13 +38,11 @@ export type RelayMembershipLookup = {
   membership: RelayMember | null;
 };
 
-export function canEditCommunityProfile(
+export function canManageCommunityMembers(
   lookup: RelayMembershipLookup | undefined,
 ): boolean {
   const role = lookup?.membership?.role;
-  return (
-    lookup?.membershipRequired === false || role === "owner" || role === "admin"
-  );
+  return role === "owner" || role === "admin";
 }
 
 export function shouldWarnMissingMembershipSnapshot(
@@ -106,12 +104,10 @@ export function relayMembershipLookupFromEvent(
 }
 
 async function fetchMembershipListEvent(): Promise<RelayEvent | null> {
-  const events = await relayClient.fetchEvents({
+  return relayClient.fetchFirstEvent({
     kinds: [KIND_NIP43_MEMBERSHIP_LIST],
     limit: 1,
   });
-
-  return events[events.length - 1] ?? null;
 }
 
 /** Loads the NIP-43 snapshot only when the relay advertises membership support. */

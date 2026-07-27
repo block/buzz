@@ -291,41 +291,78 @@ pub async fn validate_admin_event(
 
     match kind {
         9000 => {
-            // Validate role tag if present
-            let role_str = extract_tag_value(event, "role").unwrap_or_else(|| "member".to_string());
-            if role_str.parse::<buzz_db::channel::MemberRole>().is_err() {
-                return Err(anyhow::anyhow!("invalid role: {role_str}"));
-            }
+            // An absent role tag means "no role change requested": for an existing
+            // member that preserves the role they already hold, and only defaults
+            // to Member for a genuinely new member. Defaulting unconditionally to
+            // Member made a bare self-targeted PUT_USER silently demote an owner.
+            let role_str = extract_tag_value(event, "role");
+            let requested_role = match role_str {
+                Some(ref s) => match s.parse::<buzz_db::channel::MemberRole>() {
+                    Ok(r) => Some(r),
+                    Err(_) => return Err(anyhow::anyhow!("invalid role: {s}")),
+                },
+                None => None,
+            };
+
+            let members = state.db.get_members(tenant.community(), channel_id).await?;
+            let actor_role: Option<buzz_db::channel::MemberRole> = members
+                .iter()
+                .find(|m| m.pubkey == actor_bytes)
+                .and_then(|m| m.role.parse().ok());
 
             // PUT_USER: open channels allow any authenticated user; private channels
             // require the actor to be an existing member (any role can invite).
             if channel.visibility == "private" {
-                let members = state.db.get_members(tenant.community(), channel_id).await?;
-                let actor_member = members.iter().find(|m| m.pubkey == actor_bytes);
-                match actor_member {
-                    Some(_) => {}
-                    None => return Err(anyhow::anyhow!("actor not authorized")),
+                if actor_role.is_none() {
+                    return Err(anyhow::anyhow!("actor not authorized"));
                 }
 
                 // Only owners/admins may grant elevated roles.
-                let role: buzz_db::channel::MemberRole = role_str.parse().unwrap();
-                if role.is_elevated() {
-                    let actor_role: buzz_db::channel::MemberRole = actor_member
-                        .unwrap()
-                        .role
-                        .parse()
-                        .unwrap_or(buzz_db::channel::MemberRole::Member);
-                    if !actor_role.is_elevated() {
-                        return Err(anyhow::anyhow!(
-                            "only owners/admins may grant elevated roles"
-                        ));
-                    }
+                if requested_role.is_some_and(|r| r.is_elevated())
+                    && !actor_role.is_some_and(|r| r.is_elevated())
+                {
+                    return Err(anyhow::anyhow!(
+                        "only owners/admins may grant elevated roles"
+                    ));
                 }
             }
 
             // Extract target pubkey from p tag
             let target_pubkey =
                 extract_p_tag(event).ok_or_else(|| anyhow::anyhow!("missing p tag"))?;
+
+            // Changing an ACTIVE existing member's role is privileged in both
+            // directions, on every visibility. `get_members` filters
+            // `removed_at IS NULL`, so a soft-removed row is deliberately not an
+            // "existing member" here: its stored role is history, not live
+            // authority, and reactivation is governed by the elevated-granter
+            // check above rather than by the role the row remembers.
+            //
+            // `add_member` is the authority (it also covers the desktop/admin
+            // callers that skip this validator); rejecting here too means the
+            // client gets a real error instead of an OK for an event whose side
+            // effect then fails. Re-adding at the same role stays idempotent —
+            // the huddle bot-add path relies on that.
+            if let Some((target, role)) = members
+                .iter()
+                .find(|m| m.pubkey == target_pubkey)
+                .zip(requested_role)
+                .filter(|(m, role)| m.role != role.as_str())
+            {
+                if !actor_role.is_some_and(|r| r.is_elevated()) {
+                    return Err(anyhow::anyhow!(
+                        "only owners/admins may change an active member's role"
+                    ));
+                }
+                if target.role == "owner"
+                    && role != buzz_db::channel::MemberRole::Owner
+                    && members.iter().filter(|m| m.role == "owner").count() <= 1
+                {
+                    return Err(anyhow::anyhow!(
+                        "cannot demote the last owner — transfer ownership first"
+                    ));
+                }
+            }
 
             // Self-add: always allowed regardless of policy.
             if target_pubkey == actor_bytes {
@@ -1208,10 +1245,22 @@ async fn handle_put_user(
     let channel_id =
         extract_h_tag_channel(event).ok_or_else(|| anyhow::anyhow!("missing h tag"))?;
     let target_pubkey = extract_p_tag(event).ok_or_else(|| anyhow::anyhow!("missing p tag"))?;
-    let role_str = extract_tag_value(event, "role").unwrap_or_else(|| "member".to_string());
-    let role: MemberRole = role_str
-        .parse()
-        .map_err(|_| anyhow::anyhow!("invalid role: {role_str}"))?;
+    // No role tag = no role change: preserve an existing member's current role and
+    // fall back to Member only for a new member. Unconditionally defaulting to
+    // Member let a bare PUT_USER silently demote an existing owner/admin.
+    let role: MemberRole = match extract_tag_value(event, "role") {
+        Some(role_str) => role_str
+            .parse()
+            .map_err(|_| anyhow::anyhow!("invalid role: {role_str}"))?,
+        None => state
+            .db
+            .get_members(tenant.community(), channel_id)
+            .await?
+            .iter()
+            .find(|m| m.pubkey == target_pubkey)
+            .and_then(|m| m.role.parse().ok())
+            .unwrap_or(MemberRole::Member),
+    };
 
     let actor_bytes = event.pubkey.to_bytes().to_vec();
 

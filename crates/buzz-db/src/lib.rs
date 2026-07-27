@@ -898,7 +898,7 @@ impl Db {
             .fetch_one(&mut *tx)
             .await?;
 
-            if owned_count >= relay_members::MAX_COMMUNITIES_PER_OWNER {
+            if owned_count >= relay_members::max_communities_per_owner() {
                 tx.rollback().await?;
                 return Ok(CreateCommunityWithOwnerResult::LimitReached);
             }

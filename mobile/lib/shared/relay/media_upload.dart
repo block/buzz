@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:file_selector/file_selector.dart' as file_selector;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -46,10 +47,12 @@ const _allowedImageMimeTypes = {
 };
 const _allowedVideoMimeTypes = {'video/mp4'};
 const _maxVideoSizeBytes = 100 * 1024 * 1024; // 100MB
+const _maxFileSizeBytes = 100 * 1024 * 1024; // 100MB
 const _mediaPolicyUploadMessage = "We couldn't prepare this image for upload.";
 
 typedef PickGalleryImage = Future<XFile?> Function();
 typedef PickGalleryVideo = Future<XFile?> Function();
+typedef PickAttachmentFile = Future<XFile?> Function();
 typedef SanitizeImageBytes =
     Future<Uint8List> Function(Uint8List bytes, String mimeType);
 typedef TranscodeImageToJpeg = Future<Uint8List> Function(Uint8List bytes);
@@ -83,6 +86,7 @@ class BlobDescriptor {
   final String? thumb;
   final double? duration;
   final String? image;
+  final String? filename;
 
   const BlobDescriptor({
     required this.url,
@@ -95,6 +99,7 @@ class BlobDescriptor {
     this.thumb,
     this.duration,
     this.image,
+    this.filename,
   });
 
   factory BlobDescriptor.fromJson(Map<String, dynamic> json) => BlobDescriptor(
@@ -108,6 +113,21 @@ class BlobDescriptor {
     thumb: json['thumb'] as String?,
     duration: (json['duration'] as num?)?.toDouble(),
     image: json['image'] as String?,
+    filename: json['filename'] as String?,
+  );
+
+  BlobDescriptor withFilename(String value) => BlobDescriptor(
+    url: url,
+    sha256: sha256,
+    size: size,
+    type: type,
+    uploaded: uploaded,
+    dim: dim,
+    blurhash: blurhash,
+    thumb: thumb,
+    duration: duration,
+    image: image,
+    filename: value,
   );
 
   List<String> toImetaTag() => [
@@ -121,10 +141,18 @@ class BlobDescriptor {
     if (thumb != null) 'thumb $thumb',
     if (duration != null) 'duration $duration',
     if (image != null) 'image $image',
+    if (filename != null) 'filename $filename',
   ];
 
-  String toMarkdownImage() =>
-      type.startsWith('video/') ? '![video]($url)' : '![image]($url)';
+  String toMarkdownImage() {
+    if (type.startsWith('video/')) return '![video]($url)';
+    if (type.startsWith('image/')) return '![image]($url)';
+    final label = (filename ?? 'file').replaceAllMapped(
+      RegExp(r'[\\\[\]]'),
+      (match) => '\\${match[0]}',
+    );
+    return '[$label]($url)';
+  }
 }
 
 class MediaUploadService {
@@ -132,6 +160,7 @@ class MediaUploadService {
   final String? _nsec;
   final PickGalleryImage _pickGalleryImage;
   final PickGalleryVideo _pickGalleryVideo;
+  final PickAttachmentFile? _pickAttachmentFile;
   final SanitizeImageBytes _sanitizeImageBytes;
   final TranscodeImageToJpeg _transcodeImageToJpeg;
   final TranscodeVideoToMp4 _transcodeVideoToMp4;
@@ -145,6 +174,7 @@ class MediaUploadService {
     required String? nsec,
     required PickGalleryImage pickGalleryImage,
     required PickGalleryVideo pickGalleryVideo,
+    PickAttachmentFile? pickAttachmentFile,
     SanitizeImageBytes? sanitizeImageBytes,
     TranscodeImageToJpeg? transcodeImageToJpeg,
     TranscodeVideoToMp4? transcodeVideoToMp4,
@@ -155,6 +185,7 @@ class MediaUploadService {
        _nsec = nsec,
        _pickGalleryImage = pickGalleryImage,
        _pickGalleryVideo = pickGalleryVideo,
+       _pickAttachmentFile = pickAttachmentFile,
        _sanitizeImageBytes = sanitizeImageBytes ?? _sanitizePickedImageBytes,
        _transcodeImageToJpeg =
            transcodeImageToJpeg ?? _transcodePickedImageToJpeg,
@@ -234,6 +265,32 @@ class MediaUploadService {
     }
   }
 
+  Future<BlobDescriptor?> pickAndUploadFile() async {
+    final pickAttachmentFile = _pickAttachmentFile;
+    if (pickAttachmentFile == null) {
+      throw Exception("File attachments aren't available on this device.");
+    }
+    final pickedFile = await pickAttachmentFile();
+    if (pickedFile == null) return null;
+
+    final length = await pickedFile.length();
+    if (length == 0) {
+      throw Exception('File is empty.');
+    }
+    if (length > _maxFileSizeBytes) {
+      throw Exception(
+        'File is too large (${(length / 1024 / 1024).toStringAsFixed(0)}MB). Maximum is 100MB.',
+      );
+    }
+    final bytes = await pickedFile.readAsBytes();
+    final descriptor = await _uploadPreparedBytes(
+      bytes,
+      mimeType: 'application/octet-stream',
+      allowGenericFile: true,
+    );
+    return descriptor.withFilename(_safeAttachmentFilename(pickedFile.name));
+  }
+
   Future<BlobDescriptor> uploadBytes(
     Uint8List bytes, {
     required String mimeType,
@@ -253,8 +310,10 @@ class MediaUploadService {
   Future<BlobDescriptor> _uploadPreparedBytes(
     Uint8List bytes, {
     required String mimeType,
+    bool allowGenericFile = false,
   }) async {
-    if (!_allowedImageMimeTypes.contains(mimeType) &&
+    if (!allowGenericFile &&
+        !_allowedImageMimeTypes.contains(mimeType) &&
         !_allowedVideoMimeTypes.contains(mimeType)) {
       throw Exception('unsupported file type: $mimeType');
     }
@@ -419,6 +478,29 @@ class MediaUploadService {
     }
     return sanitizedBytes;
   }
+}
+
+String _safeAttachmentFilename(String filename) {
+  final segments = filename.split(RegExp(r'[/\\]'));
+  final basename = segments.isEmpty ? '' : segments.last;
+  final sanitized = StringBuffer();
+  var byteLength = 0;
+
+  for (final rune in basename.runes) {
+    if ((rune >= 0 && rune <= 0x1f) || (rune >= 0x7f && rune <= 0x9f)) {
+      continue;
+    }
+
+    final character = String.fromCharCode(rune);
+    final characterByteLength = utf8.encode(character).length;
+    if (byteLength + characterByteLength > 255) break;
+
+    sanitized.write(character);
+    byteLength += characterByteLength;
+  }
+
+  final safeBasename = sanitized.toString().trim();
+  return safeBasename.isEmpty ? 'file' : safeBasename;
 }
 
 String _sha256Hex(Uint8List bytes) {
@@ -687,6 +769,7 @@ final mediaUploadServiceProvider = Provider<MediaUploadService>((ref) {
       requestFullMetadata: false,
     ),
     pickGalleryVideo: () => picker.pickVideo(source: ImageSource.gallery),
+    pickAttachmentFile: file_selector.openFile,
   );
   ref.onDispose(service.dispose);
   return service;

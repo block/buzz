@@ -1,5 +1,24 @@
 part of '../channel_detail_page.dart';
 
+double _scaledTextHeight(BuildContext context, TextStyle style) {
+  final scaledFontSize = MediaQuery.textScalerOf(
+    context,
+  ).scale(style.fontSize ?? 0);
+  return scaledFontSize * (style.height ?? 1);
+}
+
+double _dmAppBarTitleContentHeight(BuildContext context) {
+  final titleStyle = context.textTheme.titleSmall;
+  final presenceStyle = context.textTheme.bodySmall;
+  if (titleStyle == null || presenceStyle == null) {
+    return 30;
+  }
+  final textHeight =
+      _scaledTextHeight(context, titleStyle) +
+      _scaledTextHeight(context, presenceStyle);
+  return textHeight > 30 ? textHeight : 30;
+}
+
 class _TypingIndicator extends ConsumerWidget {
   final List<TypingEntry> entries;
 
@@ -82,6 +101,7 @@ class _MembersButton extends ConsumerWidget {
         .isNotEmpty;
 
     return IconButton(
+      color: context.colors.primary,
       onPressed: () {
         showModalBottomSheet<void>(
           context: context,
@@ -95,7 +115,7 @@ class _MembersButton extends ConsumerWidget {
       icon: Stack(
         clipBehavior: Clip.none,
         children: [
-          const Icon(LucideIcons.users),
+          const Icon(LucideIcons.users, size: 22),
           if (hasWorkingBot)
             Positioned(
               top: -2,

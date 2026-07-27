@@ -1,5 +1,7 @@
 import * as React from "react";
 
+import { CommunityIconSettingsCard } from "@/features/communities/ui/CommunityIconSettingsCard";
+import { useMyRelayMembershipLookupQuery } from "@/features/community-members/hooks";
 import type { Community } from "@/features/communities/types";
 import {
   expandTilde,
@@ -28,6 +30,7 @@ type EditCommunityDialogProps = {
   ) => void;
   onRemove?: (id: string) => void;
   canRemove?: boolean;
+  showIconEditor?: boolean;
 };
 
 export function EditCommunityDialog({
@@ -37,12 +40,20 @@ export function EditCommunityDialog({
   onSave,
   onRemove,
   canRemove,
+  showIconEditor = false,
 }: EditCommunityDialogProps) {
   const [name, setName] = React.useState("");
   const [relayUrl, setRelayUrl] = React.useState("");
   const [token, setToken] = React.useState("");
   const [reposDir, setReposDir] = React.useState("");
   const [reposDirError, setReposDirError] = React.useState<string | null>(null);
+  const membershipQuery = useMyRelayMembershipLookupQuery();
+  const activeRole = membershipQuery.data?.membership?.role;
+  const canEditIcon =
+    showIconEditor &&
+    (membershipQuery.data?.membershipRequired === false ||
+      activeRole === "owner" ||
+      activeRole === "admin");
 
   // Sync form state when the dialog opens with a community
   React.useEffect(() => {
@@ -135,6 +146,17 @@ export function EditCommunityDialog({
           className="flex flex-col gap-4"
           onSubmit={(e) => void handleSubmit(e)}
         >
+          {canEditIcon ? (
+            <div className="flex items-center justify-between gap-4 rounded-xl border border-border/70 bg-muted/20 p-3">
+              <div className="min-w-0">
+                <p className="text-sm font-medium">Community icon</p>
+                <p className="text-xs text-muted-foreground">
+                  Shown in the community rail and switcher.
+                </p>
+              </div>
+              <CommunityIconSettingsCard compact />
+            </div>
+          ) : null}
           <div className="flex flex-col gap-1.5">
             <label
               className="text-sm font-medium text-foreground"
