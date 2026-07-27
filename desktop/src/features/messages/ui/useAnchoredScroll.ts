@@ -846,6 +846,32 @@ export function useAnchoredScroll({
     virtualizerOwnsPrependAnchoring,
   ]);
 
+  // Viewport resize: if the reader is semantically pinned to the bottom,
+  // re-arm the virtualizer's persistent floor settle. This covers window
+  // resizing and zoom without guessing how many animation frames layout needs.
+  React.useEffect(() => {
+    const container = scrollContainerRef.current;
+    if (
+      !container ||
+      !virtualizerOwnsPrependAnchoring ||
+      !virtualSettleAtBottom ||
+      typeof ResizeObserver === "undefined"
+    ) {
+      return;
+    }
+    const observer = new ResizeObserver(() => {
+      if (anchorRef.current.kind === "at-bottom") {
+        virtualSettleAtBottom();
+      }
+    });
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, [
+    scrollContainerRef,
+    virtualizerOwnsPrependAnchoring,
+    virtualSettleAtBottom,
+  ]);
+
   // Pinned centers survive our own corrections but release as soon as the
   // reader deliberately takes control of the scroll position or the caller
   // retires the temporary target after layout settlement.

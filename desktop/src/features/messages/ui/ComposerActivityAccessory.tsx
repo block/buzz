@@ -27,7 +27,10 @@ export function ComposerActivityAccessory({
       {visible ? (
         <motion.div
           animate={{ opacity: 1 }}
-          className={cn("absolute inset-x-0 bottom-2 bg-background", className)}
+          className={cn(
+            "absolute inset-x-0 bottom-2 z-10 bg-background",
+            className,
+          )}
           data-testid={testId}
           exit={{ opacity: 0 }}
           initial={{ opacity: 0 }}

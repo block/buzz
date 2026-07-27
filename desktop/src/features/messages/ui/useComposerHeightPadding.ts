@@ -15,7 +15,11 @@ export function useComposerHeightPadding(
   composerRef: React.RefObject<HTMLElement | null>,
   resetKey?: unknown,
   mode: "padding" | "css-variable" = "padding",
+  settleAtBottom?: () => boolean,
 ) {
+  const settleAtBottomRef = React.useRef(settleAtBottom);
+  settleAtBottomRef.current = settleAtBottom;
+
   React.useEffect(() => {
     void resetKey;
     const scrollEl = scrollContainerRef.current;
@@ -72,8 +76,11 @@ export function useComposerHeightPadding(
 
       if (
         wasAtBottom &&
-        (previousPadding === null || padding > previousPadding)
+        (previousPadding === null || padding !== previousPadding)
       ) {
+        if (settleAtBottomRef.current?.()) {
+          return;
+        }
         followBottom();
         if (followBottomFrame !== null) {
           cancelAnimationFrame(followBottomFrame);

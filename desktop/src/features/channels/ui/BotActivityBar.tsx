@@ -187,6 +187,7 @@ export function BotActivityComposerAction({
                   isInline ? "!h-4.5 !w-4.5 text-3xs" : "shrink-0",
                 )}
                 displayName={agent.name}
+                fallbackDelayMs={isInline ? 0 : undefined}
                 key={agent.pubkey}
                 size="xs"
               />
@@ -200,12 +201,14 @@ export function BotActivityComposerAction({
           <span
             className={cn(
               isInline
-                ? "flex h-4.5 min-w-0 flex-1 items-center overflow-hidden leading-none"
+                ? "flex h-4.5 min-w-0 flex-1 items-center overflow-visible leading-none"
                 : "sr-only",
             )}
           >
             {isInline ? (
-              <Shimmer className="truncate">{visibleStatusLabel}</Shimmer>
+              <Shimmer className="-my-px truncate py-px">
+                {visibleStatusLabel}
+              </Shimmer>
             ) : (
               "working"
             )}

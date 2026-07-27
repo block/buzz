@@ -3,6 +3,7 @@ import { Hash, LogIn } from "lucide-react";
 import { AnimatePresence } from "motion/react";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useMediaUpload } from "@/features/messages/lib/useMediaUpload";
+import { ComposerDockBackdrop } from "@/features/messages/ui/ComposerDockBackdrop";
 import { MessageComposer } from "@/features/messages/ui/MessageComposer";
 import { ComposerTimeoutBanner } from "@/features/moderation/ui/ComposerTimeoutBanner";
 import { useTimeoutState } from "@/features/moderation/lib/timeoutStore";
@@ -218,6 +219,7 @@ export const ChannelPane = React.memo(function ChannelPane({
     composerWrapperRef,
     `${activeChannelId}:${isSinglePanelView}:${hasMainComposerOverlay}`,
     "css-variable",
+    () => messageTimelineRef.current?.settleAtBottom() ?? false,
   );
   const clearWelcomeComposerDismissTimer = React.useCallback(() => {
     if (welcomeComposerDismissTimerRef.current !== null) {
@@ -408,29 +410,18 @@ export const ChannelPane = React.memo(function ChannelPane({
     activeChannel?.id ?? null,
   );
   const hasComposerBotActivity = composerWorkingBotPubkeys.length > 0;
-  // Whether the composer dock trades its quiet-state spacer for the
-  // conditional activity accessory (agent working and/or someone typing).
   const hasComposerBottomActivity = hasComposerBotActivity || hasTypingActivity;
   const threadComposerBotTypingPubkeys = React.useMemo(() => {
-    if (!openThreadHeadId) {
-      return [];
-    }
-
-    const pubkeys: string[] = [];
-    for (const entry of botTypingEntries) {
-      if (entry.threadHeadId !== openThreadHeadId) {
-        continue;
-      }
-
-      if (
-        !pubkeys.some(
-          (pubkey) => pubkey.toLowerCase() === entry.pubkey.toLowerCase(),
-        )
-      ) {
-        pubkeys.push(entry.pubkey);
-      }
-    }
-    return pubkeys;
+    if (!openThreadHeadId) return [];
+    return botTypingEntries
+      .filter((entry) => entry.threadHeadId === openThreadHeadId)
+      .map((entry) => entry.pubkey)
+      .filter(
+        (pubkey, index, all) =>
+          all.findIndex(
+            (candidate) => candidate.toLowerCase() === pubkey.toLowerCase(),
+          ) === index,
+      );
   }, [botTypingEntries, openThreadHeadId]);
   const hasThreadComposerBotActivity =
     threadComposerBotTypingPubkeys.length > 0;
@@ -757,6 +748,10 @@ export const ChannelPane = React.memo(function ChannelPane({
                     />
                   </div>
                 ) : null}
+                <ComposerDockBackdrop
+                  accessoryVisible={hasComposerBottomActivity}
+                  gutterClassName="inset-x-5"
+                />
                 <MessageComposer
                   channelId={activeChannel?.id ?? null}
                   channelName={activeChannel?.name ?? "channel"}
