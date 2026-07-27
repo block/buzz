@@ -10,6 +10,8 @@ pub(crate) const KNOWN_AGENT_BINARIES: &[&str] = &[
     "buzz_acp",
     "buzz-agent",
     "buzz_agent",
+    "buzz-a2a-acp",
+    "buzz_a2a_acp",
     "claude-agent-acp",
     "claude_agent_acp",
     "claude-code-acp",
@@ -466,4 +468,16 @@ pub(crate) fn terminate_untracked_pair_runtime(
         process_is_running,
         super::super::remove_agent_runtime_receipt_path,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn known_binary_accepts_remote_a2a_adapter_variants() {
+        assert!(super::name_matches_known_binary("buzz-a2a-acp"));
+        assert!(super::name_matches_known_binary("buzz_a2a_acp"));
+        assert!(super::name_matches_known_binary(
+            "buzz-a2a-acp-aarch64-apple-darwin"
+        ));
+    }
 }

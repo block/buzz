@@ -955,6 +955,13 @@ impl Config {
             } else {
                 false
             };
+        if normalize_agent_command_identity(&agent_command) == "buzz-a2a-acp" {
+            if let Ok(token) = std::env::var("BUZZ_A2A_BEARER_TOKEN") {
+                if !token.is_empty() {
+                    persona_env_vars.push(("BUZZ_A2A_BEARER_TOKEN".to_string(), token));
+                }
+            }
+        }
 
         validate_multiple_event_handling(args.multiple_event_handling, args.dedup)?;
 

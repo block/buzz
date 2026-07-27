@@ -15,6 +15,7 @@ fn dispatch() -> Result<(), String> {
 
     match cmd.as_str() {
         "buzz-acp" => buzz_acp::run().map_err(|e| e.to_string()),
+        "buzz-a2a-acp" => buzz_a2a_acp::run_cli(),
         "buzz-agent" => buzz_agent::run().map_err(|e| e.to_string()),
         "sprig" => match std::env::args().nth(1).as_deref() {
             Some("-V") | Some("--version") => {
@@ -46,8 +47,8 @@ fn print_usage() {
     println!(
         "Sprig — all-in-one Buzz ACP harness, agent, and developer MCP\n\n\
 Sprig is a multicall binary. Invoke it through one of the personality names:\n\n\
-  buzz-acp       ACP harness\n  buzz-agent     ACP-compliant agent\n  buzz-dev-mcp   Developer MCP server\n\n\
+  buzz-acp       ACP harness\n  buzz-agent     ACP-compliant agent\n  buzz-a2a-acp   OASF/A2A remote-agent ACP adapter\n  buzz-dev-mcp   Developer MCP server\n\n\
 Developer MCP helper names are also supported: rg, tree, buzz, git-credential-nostr, git-sign-nostr.\n\n\
-Installers can create links with:\n  ln -s sprig buzz-acp\n  ln -s sprig buzz-agent\n  ln -s sprig buzz-dev-mcp"
+Installers can create links with:\n  ln -s sprig buzz-acp\n  ln -s sprig buzz-agent\n  ln -s sprig buzz-a2a-acp\n  ln -s sprig buzz-dev-mcp"
     );
 }
