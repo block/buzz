@@ -106,21 +106,6 @@ fn codex_has_mcp_command() {
 }
 
 #[test]
-fn pi_mcp_write_target_rejects_non_nest_workdir() {
-    let temp = tempfile::tempdir().unwrap();
-    let nest = temp.path().join("nest");
-    let fallback_home = temp.path().join("home");
-    std::fs::create_dir(&nest).unwrap();
-    std::fs::create_dir(&fallback_home).unwrap();
-    let pi = known_acp_runtime("pi-acp").expect("should resolve");
-
-    assert_eq!(
-        super::pi_mcp_write_target(Some(pi), Some(&fallback_home), Some(&nest)),
-        None
-    );
-}
-
-#[test]
 fn goose_has_no_mcp_hooks() {
     let p = known_acp_runtime("goose").expect("should resolve");
     assert!(!p.mcp_hooks);
@@ -574,15 +559,6 @@ fn runtime_metadata_env_vars_injects_model_even_with_acp_model_switching() {
             ("BUZZ_AGENT_MODEL", "goose-claude-4-6-opus"),
             ("BUZZ_AGENT_PROVIDER", "databricks"),
         ]
-    );
-}
-
-#[test]
-fn pi_suppresses_global_model_from_buzz_acp_env() {
-    let pi = known_acp_runtime("pi-acp").expect("should resolve");
-    assert_eq!(
-        super::buzz_acp_model_for_runtime(Some(pi), Some("global-model")),
-        None
     );
 }
 

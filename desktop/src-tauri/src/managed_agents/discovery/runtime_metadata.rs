@@ -1,3 +1,5 @@
+use crate::managed_agents::{AcpAvailabilityStatus, AuthStatus};
+
 /// Static capabilities and installation metadata for a known ACP runtime.
 pub(crate) struct KnownAcpRuntime {
     pub id: &'static str,
@@ -69,6 +71,22 @@ pub(crate) struct KnownAcpRuntime {
 }
 
 impl KnownAcpRuntime {
+    pub(super) fn unprobed_auth(
+        &self,
+        availability: &AcpAvailabilityStatus,
+    ) -> (AuthStatus, Option<String>) {
+        if matches!(availability, AcpAvailabilityStatus::Available)
+            && self.auth_probe_args.is_none()
+        {
+            (
+                AuthStatus::NotApplicable,
+                self.login_hint.map(str::to_string),
+            )
+        } else {
+            (AuthStatus::Unknown, None)
+        }
+    }
+
     /// Return the CLI install commands for the current platform.
     ///
     /// On Windows, returns `cli_install_commands_windows` when non-empty,
@@ -88,6 +106,16 @@ impl KnownAcpRuntime {
 #[cfg(test)]
 mod tests {
     use super::super::known_acp_runtime_exact;
+    use crate::managed_agents::{AcpAvailabilityStatus, AuthStatus};
+
+    #[test]
+    fn available_unprobed_runtime_surfaces_login_hint() {
+        let pi = known_acp_runtime_exact("pi").unwrap();
+        assert_eq!(
+            pi.unprobed_auth(&AcpAvailabilityStatus::Available),
+            (AuthStatus::NotApplicable, pi.login_hint.map(str::to_string))
+        );
+    }
 
     #[test]
     fn vendor_metadata_distinguishes_cli_and_adapter_guidance() {

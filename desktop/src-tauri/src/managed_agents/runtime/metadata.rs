@@ -1,3 +1,18 @@
+use crate::managed_agents::KnownAcpRuntime;
+
+/// Return the model desktop should forward through `BUZZ_ACP_MODEL`.
+/// Runtimes that own model selection suppress the effective Buzz/global model.
+pub(crate) fn buzz_acp_model_for_runtime<'a>(
+    runtime: Option<&KnownAcpRuntime>,
+    effective_model: Option<&'a str>,
+) -> Option<&'a str> {
+    if runtime.is_some_and(|runtime| !runtime.forwards_model_to_acp) {
+        None
+    } else {
+        effective_model
+    }
+}
+
 /// Returns the (key, value) env var pairs that should be forwarded to the
 /// agent process for model and provider selection.
 ///
@@ -47,5 +62,17 @@ pub(crate) fn resolve_effective_prompt_model_provider(
             (prompt, model, provider)
         }
         None => (record_prompt, record_model, record_provider),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn pi_suppresses_global_model_from_buzz_acp_env() {
+        let pi = crate::managed_agents::known_acp_runtime("pi-acp").expect("should resolve");
+        assert_eq!(
+            super::buzz_acp_model_for_runtime(Some(pi), Some("global-model")),
+            None
+        );
     }
 }

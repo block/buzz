@@ -464,6 +464,46 @@ fn verify_node_tree(dir: &std::path::Path) -> Result<(), String> {
 
 // ── managed npm CLI and adapter installs ──────────────────────────────────────
 
+pub(super) fn should_prepare_managed_npm(commands: &[&str], managed_node_supported: bool) -> bool {
+    managed_node_supported
+        && commands
+            .iter()
+            .any(|command| is_npm_global_install(command))
+}
+
+/// Plan adapter installation without spawning npm or the runtime CLI.
+pub(super) fn plan_adapter_install<'c>(
+    runtime_id: &str,
+    adapter_path: Option<&std::path::Path>,
+    adapter_install_commands: &'c [&'c str],
+    adapter_probe_path: Option<&str>,
+) -> Option<Vec<&'c str>> {
+    match adapter_path {
+        Some(_) if runtime_id == "pi" => {
+            let follow_up_commands: Vec<&str> = adapter_install_commands
+                .iter()
+                .copied()
+                .filter(|command| !is_npm_global_install(command))
+                .collect();
+            (!follow_up_commands.is_empty()).then_some(follow_up_commands)
+        }
+        Some(_) if runtime_id != "codex" => None,
+        Some(path)
+            if !crate::managed_agents::codex_adapter_is_outdated_with_path(
+                path,
+                adapter_probe_path,
+            ) =>
+        {
+            None
+        }
+        Some(_) => Some(vec![
+            "npm uninstall -g @zed-industries/codex-acp",
+            "npm install -g @agentclientprotocol/codex-acp",
+        ]),
+        None => Some(adapter_install_commands.to_vec()),
+    }
+}
+
 /// Guidance text shown when the Buzz-private npm prefix is not available.
 fn managed_npm_prefix_hint() -> String {
     "Buzz could not create its private Node tools directory. Check app-data directory permissions, restart Buzz, then click Install again.".to_string()
@@ -543,6 +583,93 @@ pub(super) fn npm_eacces_hint(stderr: &str, _command: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn npm_backed_pi_cli_install_prepares_managed_node() {
+        assert!(should_prepare_managed_npm(
+            &["npm install -g @earendil-works/pi-coding-agent"],
+            true,
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn plan_adapter_install_selects_npm_command_for_outdated_codex() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("codex-acp");
+        std::fs::write(&bin, "#!/bin/sh\nexit 1\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let install_cmds = &["npm install -g @agentclientprotocol/codex-acp"];
+
+        assert_eq!(
+            plan_adapter_install("codex", Some(&bin), install_cmds, Some("/usr/bin:/bin")),
+            Some(vec![
+                "npm uninstall -g @zed-industries/codex-acp",
+                "npm install -g @agentclientprotocol/codex-acp",
+            ])
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn plan_adapter_install_skips_current_codex() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("codex-acp");
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\necho '@agentclientprotocol/codex-acp 1.1.2'\nexit 0\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let install_cmds = &["npm install -g @agentclientprotocol/codex-acp"];
+
+        assert!(
+            plan_adapter_install("codex", Some(&bin), install_cmds, Some("/usr/bin:/bin"))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn plan_adapter_install_uses_catalog_commands_when_missing() {
+        let install_cmds = &["npm install -g @agentclientprotocol/codex-acp"];
+        assert_eq!(
+            plan_adapter_install("codex", None, install_cmds, None),
+            Some(vec!["npm install -g @agentclientprotocol/codex-acp"])
+        );
+    }
+
+    #[test]
+    fn plan_adapter_install_skips_present_non_codex_runtime() {
+        let install_cmds = &["npm install -g @block/goose-acp"];
+        assert!(plan_adapter_install(
+            "goose",
+            Some(std::path::Path::new("/managed/bin/goose-acp")),
+            install_cmds,
+            None,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn plan_adapter_install_keeps_pi_extension_when_adapter_exists() {
+        let install_cmds = &[
+            "npm install -g @victor-software-house/pi-acp@0.17.1",
+            "pi install npm:pi-mcp-extension@1.5.0",
+        ];
+        assert_eq!(
+            plan_adapter_install(
+                "pi",
+                Some(std::path::Path::new("/managed/bin/pi-acp")),
+                install_cmds,
+                None,
+            ),
+            Some(vec!["pi install npm:pi-mcp-extension@1.5.0"])
+        );
+    }
 
     #[test]
     fn test_npm_eacces_hint_guidance_mentions_buzz_private_dir() {

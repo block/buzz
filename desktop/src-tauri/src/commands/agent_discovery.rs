@@ -21,66 +21,6 @@ fn active_installs() -> &'static std::sync::Mutex<std::collections::HashSet<Stri
     ACTIVE.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
-/// Returns the adapter install commands that `install_acp_runtime_blocking` would
-/// run for `runtime_id` given a resolved adapter binary at `adapter_path` (or
-/// `None` if none was found).
-///
-/// Returns `None` when no install is needed (adapter is present and current).
-/// Pi is the exception: its idempotent MCP-extension command remains planned
-/// even when the adapter binary is already present.
-/// Returns `Some(cmds)` when the adapter is missing, codex is outdated, or pi's
-/// post-install extension must be ensured.
-///
-/// For the codex **outdated** case the returned sequence is a two-step
-/// reinstall: first uninstall the old `@zed-industries/codex-acp` package
-/// (idempotent — exit 0 when absent), then install the new
-/// `@agentclientprotocol/codex-acp`.  This is required because both packages
-/// install a global binary named `codex-acp`, and npm ≥7 refuses to overwrite
-/// a bin file owned by a different package with `EEXIST`.
-///
-/// For the **missing** case the catalog's `adapter_install_commands` are used
-/// as-is (no prior package to remove).
-///
-/// This is a pure planning function: it never spawns a process.  Tests use it to
-/// assert the correct install command is selected without touching real npm.
-pub(crate) fn plan_adapter_install<'c>(
-    runtime_id: &str,
-    adapter_path: Option<&std::path::Path>,
-    adapter_install_commands: &'c [&'c str],
-    adapter_probe_path: Option<&str>,
-) -> Option<Vec<&'c str>> {
-    match adapter_path {
-        // Pi's MCP extension is an independent post-install requirement. Keep
-        // running that idempotent command even when the adapter binary exists.
-        Some(_) if runtime_id == "pi" => {
-            let follow_up_commands: Vec<&str> = adapter_install_commands
-                .iter()
-                .copied()
-                .filter(|command| !is_npm_global_install(command))
-                .collect();
-            (!follow_up_commands.is_empty()).then_some(follow_up_commands)
-        }
-        // Adapter present and current — no install needed.
-        Some(_) if runtime_id != "codex" => None,
-        Some(path)
-            if !crate::managed_agents::codex_adapter_is_outdated_with_path(
-                path,
-                adapter_probe_path,
-            ) =>
-        {
-            None
-        }
-        // Codex adapter is outdated: uninstall the old package first so npm
-        // doesn't hit EEXIST on the shared `codex-acp` bin-link, then install.
-        Some(_) => Some(vec![
-            "npm uninstall -g @zed-industries/codex-acp",
-            "npm install -g @agentclientprotocol/codex-acp",
-        ]),
-        // Adapter missing: use the catalog's install commands directly.
-        None => Some(adapter_install_commands.to_vec()),
-    }
-}
-
 #[tauri::command]
 pub async fn discover_acp_providers() -> Result<Vec<AcpRuntimeCatalogEntry>, String> {
     tokio::task::spawn_blocking(|| {
@@ -128,13 +68,6 @@ pub async fn install_acp_runtime(
         restarted_count,
         failed_restart_count,
     })
-}
-
-fn should_prepare_managed_npm(commands: &[&str], managed_node_supported: bool) -> bool {
-    managed_node_supported
-        && commands
-            .iter()
-            .any(|command| is_npm_global_install(command))
 }
 
 /// Err(_) = infrastructure failure (panic, concurrency guard).
@@ -1168,7 +1101,7 @@ fn floor_char_boundary(s: &str, mut index: usize) -> usize {
 mod managed_node;
 use managed_node::{
     ensure_managed_node_runtime_blocking, managed_node_runtime_supported, managed_npm_command,
-    npm_eacces_hint,
+    npm_eacces_hint, plan_adapter_install, should_prepare_managed_npm,
 };
 
 #[tauri::command]
@@ -1273,14 +1206,6 @@ mod tests {
         assert!(!is_npm_global_install("cargo install some-tool"));
     }
 
-    #[test]
-    fn npm_backed_pi_cli_install_prepares_managed_node() {
-        assert!(should_prepare_managed_npm(
-            &["npm install -g @earendil-works/pi-coding-agent"],
-            true,
-        ));
-    }
-
     // ── npm_eacces_hint ───────────────────────────────────────────────────────
 
     #[test]
@@ -1299,117 +1224,6 @@ mod tests {
     fn test_npm_eacces_hint_returns_none_for_404_stderr() {
         let stderr = "npm error 404 Not Found - GET https://registry.npmjs.org/no-such-pkg";
         assert!(npm_eacces_hint(stderr, "npm install -g no-such-pkg").is_none());
-    }
-
-    // ── adapter_needs_install (codex version gate) ────────────────────────────
-
-    /// plan_adapter_install is the pure install-plan seam used by
-    /// install_acp_runtime_blocking. These tests verify:
-    ///   - A 0.x binary (AdapterOutdated) → uninstall-then-install sequence returned
-    ///   - A 1.x binary (Available) → None (no reinstall)
-    ///   - Missing binary (None path) → catalog install commands returned
-    #[cfg(unix)]
-    #[test]
-    fn test_plan_adapter_install_selects_npm_command_for_outdated_0x_codex_binary() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = tempfile::tempdir().unwrap();
-        let bin = dir.path().join("codex-acp");
-        // Simulate old 0.16.x: --version exits non-zero (unrecognised flag)
-        std::fs::write(&bin, "#!/bin/sh\nexit 1\n").expect("write script");
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
-            .expect("chmod script");
-
-        let install_cmds = &["npm install -g @agentclientprotocol/codex-acp"];
-        let plan = plan_adapter_install("codex", Some(&bin), install_cmds, Some("/usr/bin:/bin"));
-
-        assert!(
-            plan.is_some(),
-            "0.x codex adapter must trigger install plan"
-        );
-        let cmds = plan.unwrap();
-        // Outdated arm: must uninstall the old package first, then install new.
-        assert_eq!(
-            cmds,
-            vec![
-                "npm uninstall -g @zed-industries/codex-acp",
-                "npm install -g @agentclientprotocol/codex-acp",
-            ],
-            "outdated codex adapter must produce uninstall-then-install sequence; got {cmds:?}"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn test_plan_adapter_install_returns_none_for_current_1x_codex_binary() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = tempfile::tempdir().unwrap();
-        let bin = dir.path().join("codex-acp");
-        // Simulate 1.x adapter: outputs version and exits 0
-        std::fs::write(
-            &bin,
-            "#!/bin/sh\necho '@agentclientprotocol/codex-acp 1.1.2'\nexit 0\n",
-        )
-        .expect("write script");
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
-            .expect("chmod script");
-
-        let install_cmds = &["npm install -g @agentclientprotocol/codex-acp"];
-        let plan = plan_adapter_install("codex", Some(&bin), install_cmds, Some("/usr/bin:/bin"));
-
-        assert!(
-            plan.is_none(),
-            "1.x codex adapter must not trigger install plan (no reinstall needed)"
-        );
-    }
-
-    #[test]
-    fn test_plan_adapter_install_returns_catalog_cmds_when_no_adapter_path() {
-        let install_cmds = &["npm install -g @agentclientprotocol/codex-acp"];
-        let plan = plan_adapter_install("codex", None, install_cmds, None);
-        assert!(plan.is_some(), "missing adapter must trigger install plan");
-        // Missing arm: use the catalog's install commands directly (no prior
-        // package to uninstall — fresh install, not a reinstall).
-        assert_eq!(
-            plan.unwrap(),
-            vec!["npm install -g @agentclientprotocol/codex-acp"],
-            "missing codex adapter must use catalog install commands only"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn test_plan_adapter_install_non_codex_runtime_never_reinstalls() {
-        use std::os::unix::fs::PermissionsExt;
-
-        // For non-codex runtimes, any resolved binary means no install needed.
-        let dir = tempfile::tempdir().unwrap();
-        let bin = dir.path().join("goose-acp");
-        std::fs::write(&bin, "#!/bin/sh\nexit 1\n").expect("write script");
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
-            .expect("chmod script");
-
-        let install_cmds = &["npm install -g @block/goose-acp"];
-        let plan = plan_adapter_install("goose", Some(&bin), install_cmds, None);
-        assert!(
-            plan.is_none(),
-            "non-codex runtime with resolved binary must not trigger reinstall"
-        );
-    }
-
-    #[test]
-    fn test_plan_adapter_install_keeps_pi_extension_when_adapter_exists() {
-        let adapter = std::path::Path::new("/managed/bin/pi-acp");
-        let install_cmds = &[
-            "npm install -g @victor-software-house/pi-acp@0.17.1",
-            "pi install npm:pi-mcp-extension@1.5.0",
-        ];
-
-        assert_eq!(
-            plan_adapter_install("pi", Some(adapter), install_cmds, None),
-            Some(vec!["pi install npm:pi-mcp-extension@1.5.0"])
-        );
     }
 
     // ── should_restart_after_install ─────────────────────────────────────────
