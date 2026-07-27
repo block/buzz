@@ -262,6 +262,70 @@ void main() {
   });
 
   group('ComposeBar', () {
+    testWidgets('return key inserts a newline instead of sending', (
+      tester,
+    ) async {
+      var sendCount = 0;
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {
+                sendCount++;
+              },
+        ),
+      );
+
+      await _expandComposer(tester);
+      await tester.enterText(find.byType(TextField), 'first line');
+
+      final textField = tester.widget<TextField>(find.byType(TextField));
+      expect(textField.textInputAction, TextInputAction.newline);
+      expect(textField.keyboardType, TextInputType.multiline);
+
+      // Guards the regression directly: a submit action must never send.
+      await tester.testTextInput.receiveAction(TextInputAction.newline);
+      await tester.pumpAndSettle();
+
+      expect(sendCount, 0);
+    });
+
+    testWidgets('keeps the send button reachable while formatting is open', (
+      tester,
+    ) async {
+      final sent = <String>[];
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {
+                sent.add(content);
+              },
+        ),
+      );
+
+      await _expandComposer(tester);
+      await tester.enterText(find.byType(TextField), 'hello');
+      await tester.tap(find.byIcon(LucideIcons.aLargeSmall));
+      await tester.pumpAndSettle();
+
+      expect(find.byIcon(LucideIcons.bold), findsOneWidget);
+      expect(find.byIcon(LucideIcons.arrowUp).hitTestable(), findsOneWidget);
+
+      await tester.tap(find.byIcon(LucideIcons.arrowUp).hitTestable());
+      await tester.pumpAndSettle();
+
+      expect(sent, ['hello']);
+    });
+
     testWidgets('inserts a community emoji at the cursor from the action row', (
       tester,
     ) async {

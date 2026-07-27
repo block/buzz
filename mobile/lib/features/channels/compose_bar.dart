@@ -752,13 +752,17 @@ class ComposeBar extends HookConsumerWidget {
                 TextField(
                   controller: controller,
                   focusNode: focusNode,
-                  textInputAction: TextInputAction.send,
+                  // Return inserts a newline; sending is the send button's
+                  // job alone. A `send` action here turned the keyboard's
+                  // return key into a second send control and left no way to
+                  // type a multi-line message.
+                  keyboardType: TextInputType.multiline,
+                  textInputAction: TextInputAction.newline,
                   contextMenuBuilder: buildContextMenu,
                   contentInsertionConfiguration: ContentInsertionConfiguration(
                     allowedMimeTypes: _pastedImageMimeTypes,
                     onContentInserted: uploadPastedImage,
                   ),
-                  onSubmitted: (_) => send(),
                   minLines: 1,
                   maxLines: 5,
                   style: context.textTheme.bodyLarge,
@@ -902,15 +906,17 @@ class ComposeBar extends HookConsumerWidget {
                                                   showFormatting.value = true;
                                                 },
                                               ),
-                                              const Spacer(),
-                                              _SendButton(
-                                                isDisabled: hasPendingUploads,
-                                                isSending: isSending.value,
-                                                onTap: send,
-                                              ),
                                             ],
                                           ),
                                   ),
+                                ),
+                                // Outside the switcher: the send button is the
+                                // only way to send, so it must stay visible
+                                // while the formatting toolbar is open.
+                                _SendButton(
+                                  isDisabled: hasPendingUploads,
+                                  isSending: isSending.value,
+                                  onTap: send,
                                 ),
                               ],
                             ),
