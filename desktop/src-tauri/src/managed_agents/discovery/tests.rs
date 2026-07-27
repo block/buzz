@@ -6,9 +6,9 @@ use super::{
     codex_adapter_is_outdated, create_time_agent_command_override, default_agent_command,
     effective_agent_command, find_nvm_default_bin, find_via_login_shell,
     is_login_shell_path_uninit, is_safe_nvm_tag, managed_agent_avatar_url, normalize_agent_args,
-    parse_semver_tag, preset_catalog_entry, probe_codex_acp_version, record_agent_command,
-    refresh_login_shell_path, try_record_agent_command, PresetHarness, BUZZ_AGENT_AVATAR_URL,
-    CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL, GOOSE_AVATAR_URL,
+    parse_semver_tag, probe_codex_acp_version, record_agent_command, refresh_login_shell_path,
+    try_record_agent_command, BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL,
+    GOOSE_AVATAR_URL,
 };
 use crate::managed_agents::AcpAvailabilityStatus;
 
@@ -185,90 +185,6 @@ fn classifies_cli_missing_when_adapter_found_but_cli_absent() {
     assert_eq!(status, AcpAvailabilityStatus::CliMissing);
     assert_eq!(cmd.as_deref(), Some("codex-acp"));
     assert_eq!(path.as_deref(), Some("/opt/homebrew/bin/codex-acp"));
-}
-
-/// Amp-shaped preset: an ACP adapter (`amp-acp`) wrapping a separately
-/// installed vendor CLI (`amp`).
-const ADAPTER_PRESET: PresetHarness = PresetHarness {
-    id: "amp-test",
-    label: "Amp Test",
-    command: "amp-acp",
-    args: &[],
-    install_instructions_url: "https://example.com/install",
-    install_hint: "Install the amp-acp npm adapter.",
-    underlying_cli: Some("amp"),
-};
-
-#[test]
-fn preset_entry_adapter_missing_when_underlying_cli_present() {
-    // Vendor CLI resolves, adapter does not — the state Tyler's Amp
-    // hand-test hit. Must NOT degrade to the misleading NotInstalled.
-    let entry = preset_catalog_entry(&ADAPTER_PRESET, |cmd| {
-        (cmd == "amp").then(|| PathBuf::from("/usr/local/bin/amp"))
-    });
-    assert_eq!(entry.availability, AcpAvailabilityStatus::AdapterMissing);
-    assert!(entry.command.is_none());
-    assert!(entry.binary_path.is_none());
-    assert_eq!(
-        entry.underlying_cli_path.as_deref(),
-        Some("/usr/local/bin/amp")
-    );
-    assert!(!entry.requires_external_cli);
-    assert_eq!(entry.install_hint, "Install the amp-acp npm adapter.");
-}
-
-#[test]
-fn preset_entry_not_installed_when_both_missing() {
-    let entry = preset_catalog_entry(&ADAPTER_PRESET, |_| None);
-    assert_eq!(entry.availability, AcpAvailabilityStatus::NotInstalled);
-    assert!(entry.underlying_cli_path.is_none());
-    assert!(!entry.requires_external_cli);
-}
-
-#[test]
-fn preset_entry_available_when_adapter_and_cli_present() {
-    let entry = preset_catalog_entry(&ADAPTER_PRESET, |cmd| match cmd {
-        "amp-acp" => Some(PathBuf::from("/usr/local/bin/amp-acp")),
-        "amp" => Some(PathBuf::from("/usr/local/bin/amp")),
-        _ => None,
-    });
-    assert_eq!(entry.availability, AcpAvailabilityStatus::Available);
-    assert_eq!(entry.command.as_deref(), Some("amp-acp"));
-    assert_eq!(entry.binary_path.as_deref(), Some("/usr/local/bin/amp-acp"));
-    assert_eq!(
-        entry.underlying_cli_path.as_deref(),
-        Some("/usr/local/bin/amp")
-    );
-}
-
-#[test]
-fn preset_entry_stays_available_when_adapter_present_but_cli_absent() {
-    // Wren's regression guard: today an `amp-acp` install without `amp`
-    // is Available and selectable. Feeding underlying_cli through the
-    // FULL classify_runtime predicate would flip this to CliMissing
-    // (unselectable, with backwards install copy) — the adapter-missing
-    // arm is the only one presets consume.
-    let entry = preset_catalog_entry(&ADAPTER_PRESET, |cmd| {
-        (cmd == "amp-acp").then(|| PathBuf::from("/usr/local/bin/amp-acp"))
-    });
-    assert_eq!(entry.availability, AcpAvailabilityStatus::Available);
-    assert_eq!(entry.command.as_deref(), Some("amp-acp"));
-    assert_eq!(entry.binary_path.as_deref(), Some("/usr/local/bin/amp-acp"));
-    assert!(entry.underlying_cli_path.is_none());
-}
-
-#[test]
-fn preset_entry_without_underlying_cli_stays_simple() {
-    // Most presets: the command IS the vendor CLI. No external-CLI flag,
-    // absent command means plain NotInstalled.
-    let preset = PresetHarness {
-        underlying_cli: None,
-        ..ADAPTER_PRESET
-    };
-    let entry = preset_catalog_entry(&preset, |_| None);
-    assert_eq!(entry.availability, AcpAvailabilityStatus::NotInstalled);
-    assert!(!entry.requires_external_cli);
-    assert!(entry.underlying_cli_path.is_none());
 }
 
 fn persona_with_runtime(id: &str, runtime: Option<&str>) -> crate::managed_agents::AgentDefinition {
