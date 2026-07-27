@@ -995,6 +995,7 @@ pub struct ContextMessage {
 pub struct PromptChannelInfo {
     pub name: String,
     pub channel_type: String,
+    pub participant_pubkeys: Vec<String>,
 }
 
 /// Minimal profile fields needed to label users in ACP prompts.
@@ -2976,6 +2977,7 @@ mod tests {
         let ci = PromptChannelInfo {
             name: "engineering".into(),
             channel_type: "stream".into(),
+            participant_pubkeys: Vec::new(),
         };
 
         let prompt = format_prompt(
@@ -3007,6 +3009,7 @@ mod tests {
         let ci = PromptChannelInfo {
             name: "DM".into(),
             channel_type: "dm".into(),
+            participant_pubkeys: Vec::new(),
         };
 
         let prompt = format_prompt(
@@ -3117,6 +3120,7 @@ mod tests {
         let ci = PromptChannelInfo {
             name: "DM".into(),
             channel_type: "dm".into(),
+            participant_pubkeys: Vec::new(),
         };
         let ctx = ConversationContext::Dm {
             messages: vec![ContextMessage {
@@ -3373,6 +3377,7 @@ mod tests {
         let ci = PromptChannelInfo {
             name: "DM".into(),
             channel_type: "dm".into(),
+            participant_pubkeys: Vec::new(),
         };
         // Thread context fetched (as the fetch path does for DM replies).
         let ctx = ConversationContext::Thread {
@@ -3430,6 +3435,7 @@ mod tests {
         let ci = PromptChannelInfo {
             name: "DM".into(),
             channel_type: "dm".into(),
+            participant_pubkeys: Vec::new(),
         };
 
         // No context fetched — hints only.
@@ -3925,6 +3931,7 @@ mod tests {
         let ci = PromptChannelInfo {
             name: "DM".into(),
             channel_type: "dm".into(),
+            participant_pubkeys: Vec::new(),
         };
 
         let prompt = format_prompt(
@@ -3988,6 +3995,7 @@ mod tests {
         let ci = PromptChannelInfo {
             name: "DM".into(),
             channel_type: "dm".into(),
+            participant_pubkeys: Vec::new(),
         };
 
         let prompt = format_prompt(

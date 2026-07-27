@@ -133,6 +133,7 @@ use crate::config::ChannelFilter;
 pub struct ChannelInfo {
     pub name: String,
     pub channel_type: String,
+    pub participant_pubkeys: Vec<String>,
 }
 
 pub(crate) fn channel_type_from_tags(tags: &[serde_json::Value]) -> String {
@@ -158,6 +159,34 @@ pub(crate) fn channel_type_from_tags(tags: &[serde_json::Value]) -> String {
     }
 }
 
+/// Extract valid, unique participant pubkeys from channel metadata `p` tags.
+///
+/// Buzz includes all DM participants on the kind:39000 metadata event. Invalid
+/// or duplicate values are ignored so they cannot accidentally make a channel
+/// look like a verified one-to-one DM.
+pub(crate) fn participant_pubkeys_from_tags(tags: &[serde_json::Value]) -> Vec<String> {
+    let mut participants = Vec::new();
+    for tag in tags {
+        let Some(arr) = tag.as_array() else {
+            continue;
+        };
+        if arr.first().and_then(|value| value.as_str()) != Some("p") {
+            continue;
+        }
+        let Some(raw_pubkey) = arr.get(1).and_then(|value| value.as_str()) else {
+            return Vec::new();
+        };
+        let pubkey = raw_pubkey.trim().to_ascii_lowercase();
+        if pubkey.len() != 64 || !pubkey.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Vec::new();
+        }
+        if !participants.contains(&pubkey) {
+            participants.push(pubkey);
+        }
+    }
+    participants
+}
+
 /// Build the discovered-channel subscribe set from the membership UUIDs and the
 /// kind:39000 metadata events, **skipping any channel flagged `archived=true`**.
 ///
@@ -172,7 +201,7 @@ pub(crate) fn merge_discovered_channels(
     channel_uuids: Vec<Uuid>,
     meta_events: &serde_json::Value,
 ) -> HashMap<Uuid, ChannelInfo> {
-    let mut meta_map: HashMap<Uuid, (String, String)> = HashMap::new();
+    let mut meta_map: HashMap<Uuid, (String, String, Vec<String>)> = HashMap::new();
     let mut archived: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
     if let Some(arr) = meta_events.as_array() {
         for ev in arr {
@@ -203,7 +232,8 @@ pub(crate) fn merge_discovered_channels(
                     }
                     let ch_name = name.unwrap_or("unknown").to_string();
                     let ch_type = channel_type_from_tags(tags);
-                    meta_map.insert(uuid, (ch_name, ch_type));
+                    let participant_pubkeys = participant_pubkeys_from_tags(tags);
+                    meta_map.insert(uuid, (ch_name, ch_type, participant_pubkeys));
                 }
             }
         }
@@ -214,10 +244,17 @@ pub(crate) fn merge_discovered_channels(
         if archived.contains(&uuid) {
             continue;
         }
-        let (name, channel_type) = meta_map
+        let (name, channel_type, participant_pubkeys) = meta_map
             .remove(&uuid)
-            .unwrap_or_else(|| ("unknown".to_string(), "unknown".to_string()));
-        map.insert(uuid, ChannelInfo { name, channel_type });
+            .unwrap_or_else(|| ("unknown".to_string(), "unknown".to_string(), Vec::new()));
+        map.insert(
+            uuid,
+            ChannelInfo {
+                name,
+                channel_type,
+                participant_pubkeys,
+            },
+        );
     }
     map
 }
@@ -4093,9 +4130,39 @@ mod tests {
     #[test]
     fn merge_discovered_channels_uses_declared_dm_type_without_hidden_hint() {
         let channel = Uuid::new_v4();
-        let meta = serde_json::json!([meta_event(channel, "dm", &["t", "dm"])]);
+        let agent = "a".repeat(64);
+        let human = "b".repeat(64);
+        let meta = serde_json::json!([meta_event(
+            channel,
+            "dm",
+            &["t", "dm", "p", &agent, "p", &human, "p", &agent],
+        )]);
         let map = merge_discovered_channels(vec![channel], &meta);
         assert_eq!(map[&channel].channel_type, "dm");
+        assert_eq!(
+            map[&channel].participant_pubkeys,
+            vec![agent, human],
+            "DM participant metadata is normalized and deduplicated"
+        );
+    }
+
+    #[test]
+    fn merge_discovered_channels_rejects_incomplete_dm_participant_metadata() {
+        let channel = Uuid::new_v4();
+        let agent = "a".repeat(64);
+        let human = "b".repeat(64);
+        let meta = serde_json::json!([meta_event(
+            channel,
+            "dm",
+            &["t", "dm", "p", &agent, "p", &human, "p", "invalid"],
+        )]);
+
+        let map = merge_discovered_channels(vec![channel], &meta);
+
+        assert!(
+            map[&channel].participant_pubkeys.is_empty(),
+            "malformed participant metadata must fail closed"
+        );
     }
 
     #[test]

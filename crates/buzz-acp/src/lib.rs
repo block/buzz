@@ -257,7 +257,7 @@ async fn author_allowed(
     }
 }
 
-/// Resolve whether `channel_id` is a DM, for the inbound author gate.
+/// DM classification used by both implicit addressing and the inbound author gate.
 ///
 /// Resolution order:
 /// 1. Startup discovery metadata (`startup_info`) — covers channels known at
@@ -267,21 +267,58 @@ async fn author_allowed(
 ///    the agent was added to *after* startup (the exploit path: an
 ///    agent-initiated DM is exactly such a channel).
 ///
-/// Fail-closed: if the fetch fails or times out, the channel is treated as a
-/// DM for this event and the result is NOT cached, so a later event retries
-/// the fetch instead of pinning a mis-classification.
-pub(crate) async fn is_dm_channel(
+/// Only a DM whose metadata names exactly two participants, including this
+/// agent, is implicitly addressed. Group DMs and incomplete metadata still
+/// require an explicit mention.
+///
+/// Fail-closed: if the fetch fails or times out, the channel is treated as a DM
+/// for author authorization but not for implicit addressing. The result is NOT
+/// cached, so a later event retries resolution instead of pinning a
+/// mis-classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DmChannelClassification {
+    pub implicitly_addressed: bool,
+    pub for_author_gate: bool,
+}
+
+pub(crate) fn is_one_to_one_agent_dm(
+    channel_type: &str,
+    participant_pubkeys: &[String],
+    agent_pubkey_hex: &str,
+) -> bool {
+    channel_type == "dm"
+        && participant_pubkeys.len() == 2
+        && participant_pubkeys
+            .iter()
+            .any(|pubkey| pubkey.eq_ignore_ascii_case(agent_pubkey_hex))
+}
+
+pub(crate) async fn classify_dm_channel(
     channel_id: Uuid,
     channel_info: &pool::ChannelInfoResolver,
-) -> bool {
+    agent_pubkey_hex: &str,
+) -> DmChannelClassification {
     match channel_info.resolve(channel_id).await {
-        Some(info) => info.channel_type == "dm",
+        Some(info) => {
+            let is_dm = info.channel_type == "dm";
+            DmChannelClassification {
+                implicitly_addressed: is_one_to_one_agent_dm(
+                    &info.channel_type,
+                    &info.participant_pubkeys,
+                    agent_pubkey_hex,
+                ),
+                for_author_gate: is_dm,
+            }
+        }
         None => {
             tracing::warn!(
                 channel_id = %channel_id,
                 "channel type unresolved — treating as DM for author gate (fail closed)"
             );
-            true
+            DmChannelClassification {
+                implicitly_addressed: false,
+                for_author_gate: true,
+            }
         }
     }
 }
@@ -1435,6 +1472,13 @@ async fn tokio_main() -> Result<()> {
 
     tracing::info!("discovered {} channel(s)", channel_info_map.len());
     let channel_ids: Vec<Uuid> = channel_info_map.keys().copied().collect();
+    let implicitly_addressed_channels: HashSet<Uuid> = channel_info_map
+        .iter()
+        .filter_map(|(id, info)| {
+            is_one_to_one_agent_dm(&info.channel_type, &info.participant_pubkeys, &pubkey_hex)
+                .then_some(*id)
+        })
+        .collect();
 
     let rules: Vec<SubscriptionRule> = match config.subscribe_mode {
         SubscribeMode::Mentions => {
@@ -1473,7 +1517,12 @@ async fn tokio_main() -> Result<()> {
         }
     };
 
-    let channel_filters = config::resolve_channel_filters(&config, &channel_ids, &rules);
+    let channel_filters = config::resolve_channel_filters(
+        &config,
+        &channel_ids,
+        &implicitly_addressed_channels,
+        &rules,
+    );
     if channel_filters.is_empty() {
         tracing::warn!("no channel subscriptions resolved — agent will sit idle");
     }
@@ -1968,15 +2017,33 @@ async fn tokio_main() -> Result<()> {
 
                                     if subscribed_channel_ids.contains(&ch) {
                                         tracing::debug!(channel_id = %ch, "membership notification: channel already subscribed");
-                                    } else if let Some(filter) = config::resolve_dynamic_channel_filter(&config, ch, &rules) {
-                                        tracing::info!(channel_id = %ch, "membership notification: subscribing to new channel");
-                                        if let Err(e) = relay.subscribe_channel_from(ch, filter, Some(ts)).await {
-                                            tracing::warn!("failed to subscribe to new channel {ch}: {e}");
-                                        } else {
-                                            subscribed_channel_ids.insert(ch);
-                                        }
                                     } else {
-                                        tracing::debug!(channel_id = %ch, "membership notification: no matching rules — skipping");
+                                        let is_implicitly_addressed = ctx
+                                            .channel_info
+                                            .resolve(ch)
+                                            .await
+                                            .is_some_and(|info| {
+                                                is_one_to_one_agent_dm(
+                                                    &info.channel_type,
+                                                    &info.participant_pubkeys,
+                                                    &pubkey_hex,
+                                                )
+                                            });
+                                        if let Some(filter) = config::resolve_dynamic_channel_filter(
+                                            &config,
+                                            ch,
+                                            is_implicitly_addressed,
+                                            &rules,
+                                        ) {
+                                            tracing::info!(channel_id = %ch, is_implicitly_addressed, "membership notification: subscribing to new channel");
+                                            if let Err(e) = relay.subscribe_channel_from(ch, filter, Some(ts)).await {
+                                                tracing::warn!("failed to subscribe to new channel {ch}: {e}");
+                                            } else {
+                                                subscribed_channel_ids.insert(ch);
+                                            }
+                                        } else {
+                                            tracing::debug!(channel_id = %ch, "membership notification: no matching rules — skipping");
+                                        }
                                     }
                                 } else {
                                     subscribed_channel_ids.remove(&ch);
@@ -2144,18 +2211,21 @@ async fn tokio_main() -> Result<()> {
                             // launched by the same human). Allowlist adds the
                             // explicit pubkey list on top, for external people;
                             // it never revokes same-owner team bots.
+                            let dm_classification =
+                                classify_dm_channel(
+                                    buzz_event.channel_id,
+                                    &ctx.channel_info,
+                                    &pubkey_hex,
+                                )
+                                .await;
+
                             {
                                 let author = buzz_event.event.pubkey.to_hex();
-                                // DM hardening: resolve channel type (fail-closed
-                                // to DM) so allowlist/anyone modes cannot be
-                                // exercised by non-owner authors inside DMs.
-                                let is_dm =
-                                    is_dm_channel(buzz_event.channel_id, &ctx.channel_info).await;
                                 let allowed = author_allowed(
                                     &config.respond_to,
                                     &config.respond_to_allowlist,
                                     &author,
-                                    is_dm,
+                                    dm_classification.for_author_gate,
                                     &owner_cache,
                                     &ctx.rest_client,
                                 )
@@ -2165,14 +2235,22 @@ async fn tokio_main() -> Result<()> {
                                         channel_id = %buzz_event.channel_id,
                                         author = %buzz_event.event.pubkey.to_hex(),
                                         mode = %config.respond_to,
-                                        is_dm,
+                                        is_dm = dm_classification.for_author_gate,
                                         "inbound author gate — dropping event"
                                     );
                                     continue;
                                 }
                             }
 
-                            let matched = filter::match_event(&buzz_event.event, buzz_event.channel_id, &rules, &pubkey_hex).await;
+                            let matched = filter::match_event(
+                                &buzz_event.event,
+                                buzz_event.channel_id,
+                                &rules,
+                                &pubkey_hex,
+                                dm_classification.implicitly_addressed,
+                                dm_classification.for_author_gate,
+                            )
+                            .await;
                             let prompt_tag = match matched {
                                 Some(m) => m.prompt_tag,
                                 None => {
@@ -4605,14 +4683,16 @@ mod author_gate_tests {
         );
     }
 
-    // ── is_dm_channel resolution ──────────────────────────────────────────
+    // ── DM channel classification ─────────────────────────────────────────
 
     fn resolver(startup: HashMap<Uuid, relay::ChannelInfo>) -> pool::ChannelInfoResolver {
         pool::ChannelInfoResolver::new(startup, dummy_rest_client())
     }
 
     #[tokio::test]
-    async fn test_is_dm_channel_uses_definitive_startup_metadata() {
+    async fn test_dm_classification_uses_definitive_startup_metadata() {
+        let agent_pubkey = "a".repeat(64);
+        let human_pubkey = "b".repeat(64);
         let dm_id = Uuid::new_v4();
         let stream_id = Uuid::new_v4();
         let startup = HashMap::from([
@@ -4621,6 +4701,7 @@ mod author_gate_tests {
                 relay::ChannelInfo {
                     name: "dm".into(),
                     channel_type: "dm".into(),
+                    participant_pubkeys: vec![agent_pubkey.clone(), human_pubkey],
                 },
             ),
             (
@@ -4628,26 +4709,68 @@ mod author_gate_tests {
                 relay::ChannelInfo {
                     name: "stream".into(),
                     channel_type: "stream".into(),
+                    participant_pubkeys: Vec::new(),
                 },
             ),
         ]);
         let resolver = resolver(startup);
-        assert!(is_dm_channel(dm_id, &resolver).await);
-        assert!(!is_dm_channel(stream_id, &resolver).await);
+        let dm = classify_dm_channel(dm_id, &resolver, &agent_pubkey).await;
+        assert!(dm.implicitly_addressed);
+        assert!(dm.for_author_gate);
+        let stream = classify_dm_channel(stream_id, &resolver, &agent_pubkey).await;
+        assert!(!stream.implicitly_addressed);
+        assert!(!stream.for_author_gate);
+    }
+
+    #[test]
+    fn test_only_one_to_one_dm_containing_agent_is_implicitly_addressed() {
+        let agent = "a".repeat(64);
+        let human = "b".repeat(64);
+        let third = "c".repeat(64);
+
+        assert!(is_one_to_one_agent_dm(
+            "dm",
+            &[agent.clone(), human.clone()],
+            &agent,
+        ));
+        assert!(
+            !is_one_to_one_agent_dm("dm", &[agent.clone(), human.clone(), third.clone()], &agent,),
+            "group DMs must still require an explicit mention"
+        );
+        assert!(
+            !is_one_to_one_agent_dm("dm", &[human, third], &agent),
+            "a two-person DM without this agent must not be implicitly addressed"
+        );
+        assert!(!is_one_to_one_agent_dm(
+            "stream",
+            &[agent.clone(), "d".repeat(64)],
+            &agent,
+        ));
+        assert!(
+            !is_one_to_one_agent_dm("dm", &[], &agent),
+            "missing participant metadata must require a mention"
+        );
     }
 
     #[tokio::test]
-    async fn test_is_dm_channel_fails_closed_for_unknown_startup_metadata() {
+    async fn test_dm_classification_fails_closed_for_unknown_startup_metadata() {
+        let agent_pubkey = "a".repeat(64);
         let id = Uuid::new_v4();
         let startup = HashMap::from([(
             id,
             relay::ChannelInfo {
                 name: "unknown".into(),
                 channel_type: "unknown".into(),
+                participant_pubkeys: Vec::new(),
             },
         )]);
+        let classification = classify_dm_channel(id, &resolver(startup), &agent_pubkey).await;
         assert!(
-            is_dm_channel(id, &resolver(startup)).await,
+            !classification.implicitly_addressed,
+            "unknown metadata must not enable implicit addressing"
+        );
+        assert!(
+            classification.for_author_gate,
             "missing startup metadata must not be trusted as a stream"
         );
     }
@@ -4699,17 +4822,33 @@ mod author_gate_tests {
     }
 
     #[tokio::test]
-    async fn test_is_dm_channel_lazy_resolves_declared_dm_and_caches_it() {
+    async fn test_dm_classification_lazy_resolves_declared_dm_and_caches_it() {
         use std::sync::atomic::Ordering;
 
         let id = Uuid::new_v4();
+        let agent_pubkey = "a".repeat(64);
+        let human_pubkey = "b".repeat(64);
         let response = serde_json::json!([{
-            "tags": [["d", id.to_string()], ["name", "DM"], ["t", "dm"]]
+            "tags": [
+                ["d", id.to_string()],
+                ["name", "DM"],
+                ["t", "dm"],
+                ["p", agent_pubkey],
+                ["p", human_pubkey]
+            ]
         }]);
         let (resolver, requests, server) = lazy_resolver_with_response(response).await;
 
-        assert!(is_dm_channel(id, &resolver).await);
-        assert!(is_dm_channel(id, &resolver).await);
+        assert!(
+            classify_dm_channel(id, &resolver, &agent_pubkey)
+                .await
+                .implicitly_addressed
+        );
+        assert!(
+            classify_dm_channel(id, &resolver, &agent_pubkey)
+                .await
+                .implicitly_addressed
+        );
         assert_eq!(
             requests.load(Ordering::SeqCst),
             1,
@@ -4720,20 +4859,28 @@ mod author_gate_tests {
 
     #[tokio::test]
     async fn test_discovery_without_metadata_stays_fail_closed_at_author_gate() {
+        let agent_pubkey = "a".repeat(64);
         let id = Uuid::new_v4();
         let discovered = relay::merge_discovered_channels(vec![id], &serde_json::json!([]));
         let channel_info = resolver(discovered);
         let owner_cache = cache_with_sibling();
         let allowlist = HashSet::from([EXTERNAL.to_string()]);
 
-        let is_dm = is_dm_channel(id, &channel_info).await;
-        assert!(is_dm, "unknown startup metadata must fail closed as DM");
+        let dm_classification = classify_dm_channel(id, &channel_info, &agent_pubkey).await;
+        assert!(
+            !dm_classification.implicitly_addressed,
+            "unknown startup metadata must not enable implicit addressing"
+        );
+        assert!(
+            dm_classification.for_author_gate,
+            "unknown startup metadata must fail closed as DM"
+        );
         assert!(
             !author_allowed(
                 &RespondTo::Allowlist,
                 &allowlist,
                 EXTERNAL,
-                is_dm,
+                dm_classification.for_author_gate,
                 &owner_cache,
                 &dummy_rest_client(),
             )
@@ -4743,10 +4890,14 @@ mod author_gate_tests {
     }
 
     #[tokio::test]
-    async fn test_is_dm_channel_fails_closed_when_lazy_resolution_fails() {
+    async fn test_dm_classification_fails_closed_when_lazy_resolution_fails() {
+        let agent_pubkey = "a".repeat(64);
+        let classification =
+            classify_dm_channel(Uuid::new_v4(), &resolver(HashMap::new()), &agent_pubkey).await;
+        assert!(!classification.implicitly_addressed);
         assert!(
-            is_dm_channel(Uuid::new_v4(), &resolver(HashMap::new())).await,
-            "an unresolvable channel type must be treated as a DM"
+            classification.for_author_gate,
+            "an unresolvable channel type must be treated as a DM for author authorization"
         );
     }
 }

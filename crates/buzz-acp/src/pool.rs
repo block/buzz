@@ -451,6 +451,7 @@ impl ChannelInfoResolver {
                     PromptChannelInfo {
                         name: info.name,
                         channel_type: info.channel_type,
+                        participant_pubkeys: info.participant_pubkeys,
                     },
                 ))
             })
@@ -2326,9 +2327,11 @@ pub(crate) async fn fetch_channel_info(
                     }
                 }
                 let channel_type = crate::relay::channel_type_from_tags(tags);
+                let participant_pubkeys = crate::relay::participant_pubkeys_from_tags(tags);
                 Some(PromptChannelInfo {
                     name: name.unwrap_or(UNKNOWN_CHANNEL_NAME).to_string(),
                     channel_type,
+                    participant_pubkeys,
                 })
             }
             Ok(Err(e)) => {
