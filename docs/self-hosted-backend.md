@@ -2,32 +2,19 @@
 
 This guide stands up the entire server side of Buzz from scratch: your own
 relay, the optional `buzz-spawner` for server-hosted agents, and the desktop
-app pointed at both. It also collects the tricks and failure modes we hit while
-doing exactly this, so you don't have to rediscover them.
+app pointed at both. It also collects the tricks and failure modes we hit
+while doing exactly this, so you don't have to rediscover them. The single
+most important rule: **every client — desktop, CLI, spawner, and agent
+containers — must reach the relay via the same public hostname**, because the
+relay derives the community (tenant) from the HTTP `Host` header.
 
-Two paths are covered:
-
-- **Local development** — everything from source on one machine (`just`,
-  `cargo`). Best for hacking on Buzz itself.
-- **Single-node VPS** — the production Docker Compose bundle in
-  [`deploy/compose/`](../deploy/compose/README.md). Best for a real deployment.
+It covers the **single-node VPS** path — the production Docker Compose bundle
+in [`deploy/compose/`](../deploy/compose/README.md). (For hacking on Buzz
+itself from source, see [CONTRIBUTING.md](../CONTRIBUTING.md).)
 
 ---
 
 ## 1. The relay
-
-### Local development
-
-```bash
-git clone https://github.com/block/buzz.git && cd buzz
-. ./bin/activate-hermit   # pinned Rust/Node/just toolchain
-cp .env.example .env
-just setup                # deps, Docker services (Postgres/Redis/MinIO), migrations
-just relay                # relay at ws://localhost:3000
-```
-
-`just dev` starts relay + desktop together; `just relay` + `just desktop-dev`
-in two terminals gives you separate logs.
 
 ### VPS (Docker Compose)
 
@@ -50,6 +37,11 @@ production notes (image pinning, secrets, backups).
   different communities*. Every client — desktop, CLI, spawner, agents — must
   use the same public host, or they end up in communities that can't see each
   other (or hit a 404 because the internal name has no community row).
+  The failure is **silent**: a spawner on a different host than the desktop
+  never sees the desktop's agent specs or deletions — deleting an agent shows
+  "Removing…" but nothing happens, and a stale status card (e.g. FAILED with an
+  old error) sticks around forever because no spawner in that community is
+  alive to replace or tombstone it. Pick one hostname and use it everywhere.
 - **Keep `BUZZ_RELAY_PRIVATE_KEY` stable.** It anchors relay identity across
   restarts; rotating it is a new relay as far as clients are concerned.
 - **Migrations:** local dev auto-applies from `migrations/`; the compose bundle
@@ -69,39 +61,6 @@ production notes (image pinning, secrets, backups).
 By default agents are spawned by the desktop app and die when the laptop
 sleeps. `buzz-spawner` watches the relay for agent specs (kind:30178) and
 reconciles them into one Docker container per agent.
-
-### Local development
-
-The spawner is an ordinary relay client — it can run anywhere with outbound
-WebSocket and a Docker socket. From source:
-
-```bash
-# One-time: mint a stable identity for the spawner.
-mkdir -p ~/.buzz-demo-spawner/state
-openssl rand -hex 32 > ~/.buzz-demo-spawner/nsec.hex
-
-BUZZ_SPAWNER_NSEC=$(cat ~/.buzz-demo-spawner/nsec.hex) \
-BUZZ_SPAWNER_RELAY_URL=ws://localhost:3000 \
-BUZZ_SPAWNER_AGENT_RELAY_URL=ws://localhost:3000 \
-BUZZ_SPAWNER_STATE_DIR=~/.buzz-demo-spawner/state \
-BUZZ_SPAWNER_AGENT_IMAGE=buzz-acp:local \
-BUZZ_SPAWNER_AGENT_COMMAND=claude-agent-acp \
-BUZZ_SPAWNER_DEFAULT_PROVIDER=anthropic \
-BUZZ_SPAWNER_DEFAULT_MODEL=claude-sonnet-5 \
-BUZZ_SPAWNER_NAME=demo-vps \
-BUZZ_SPAWNER_AI_CATALOG='[{"id":"anthropic","models":["claude-opus-5","claude-sonnet-5"]}]' \
-cargo run -p buzz-spawner
-```
-
-- `BUZZ_SPAWNER_AGENT_RELAY_URL` is the relay address handed to agent
-  *containers* — it defaults to `BUZZ_SPAWNER_RELAY_URL`, but must be a host
-  the containers can actually reach **and** the same public host your desktop
-  uses (the Host header is the tenant). On macOS with a host-run relay, use
-  a LAN hostname like `ws://<your-mac>.local:3000` for both, or
-  `ws://host.docker.internal:3000` for the agent URL.
-- `BUZZ_SPAWNER_AGENT_IMAGE=buzz-acp:local` points at a locally built agent
-  image instead of the default `ghcr.io/block/buzz-acp:main` — build one with
-  `docker build -t buzz-acp:local .` (see the GHCR pull-auth trick below).
 
 ### VPS (Docker Compose)
 
@@ -142,9 +101,18 @@ variable for non-Anthropic env only.
 
 - **Point the spawner at the relay's *public* host** (both
   `BUZZ_SPAWNER_RELAY_URL` and `BUZZ_SPAWNER_AGENT_RELAY_URL`). Internal
-  compose names are a different tenant — see the Host-header trick above. On
-  macOS, agents inside Docker reach a host-run relay at
-  `ws://host.docker.internal:3000`.
+  compose names are a different tenant — see the Host-header trick above.
+  `BUZZ_SPAWNER_AGENT_RELAY_URL` is the address handed to agent *containers*:
+  it defaults to `BUZZ_SPAWNER_RELAY_URL`, and must be a host the containers
+  can reach — never `localhost`, which inside a container is the container
+  itself (agents crash-loop with `Connection refused (os error 111)`). Avoid
+  `host.docker.internal` too: it works network-wise but is a different Host
+  header, i.e. a different community than the one your desktop is in.
+- **mDNS `.local` hostnames resolve to `127.0.0.1` first inside containers.**
+  Docker's DNS can return both `127.0.0.1` and the LAN IP for `<host>.local`;
+  clients that try addresses in order fall through to the LAN IP and work, but
+  expect confusing intermittent `Connection refused` noise. A plain DNS name
+  or LAN IP is more predictable.
 - **`BUZZ_ALLOW_NIP_OA_AUTH=true` on the relay is required.** Spawned agents
   authenticate by owner attestation; without it none of them can connect.
 - **`BUZZ_SPAWNER_NSEC` must stay stable.** Specs are addressed to this pubkey
@@ -166,8 +134,9 @@ variable for non-Anthropic env only.
 - **The default agent image lives on GHCR and may need auth.** A
   `denied`/`unauthorized` pull of `ghcr.io/block/buzz-acp:main` means the
   Docker daemon isn't logged in to ghcr.io (`docker login ghcr.io` with a PAT
-  that has `read:packages`), or the image/tag isn't public — override with
-  `BUZZ_SPAWNER_AGENT_IMAGE` if you build your own.
+  that has `read:packages`), or the image/tag isn't public. Build your own
+  from the repo root with `docker build -f Dockerfile.acp -t buzz-acp:local .`
+  and point `BUZZ_SPAWNER_AGENT_IMAGE=buzz-acp:local` at it.
 - **Creating an agent needs a one-time owner approval.** The spawner mints the
   agent's key, then asks the owner's client to sign a NIP-OA attestation — it
   cannot self-attest. Until approved, status reports `pending_attestation`; if
@@ -181,13 +150,10 @@ variable for non-Anthropic env only.
 
 ## 3. The desktop app
 
-```bash
-just dev            # full Tauri app (relay + app together in local dev)
-just desktop-dev    # web-only dev server, faster iteration
-```
-
-To point the app at your own relay instead of `ws://localhost:3000`, set
-`BUZZ_RELAY_URL` before launching, or switch the relay from inside the app.
+Install a desktop build (see [RELEASING.md](../RELEASING.md)), then point it at
+your relay: set `BUZZ_RELAY_URL` before launching, or switch the relay from
+inside the app. Use the same public host as the spawner and agents — the Host
+header is the tenant (see § 1).
 
 Wiring it all together, in order:
 
