@@ -5,8 +5,8 @@ use crate::{
     app_state::AppState,
     managed_agents::{
         build_managed_agent_summary, current_instance_id, find_managed_agent_mut,
-        load_managed_agents, load_personas, save_managed_agents, sync_managed_agent_processes,
-        ManagedAgentSummary,
+        load_managed_agents, load_personas, save_managed_agents, stop_managed_agent_process,
+        sync_managed_agent_processes, ManagedAgentSummary,
     },
     util::now_iso,
 };
@@ -73,9 +73,13 @@ pub async fn set_managed_agent_start_on_app_launch(
 /// relocation). Pass `Some(spawner_pubkey)` right after a successful
 /// attestation hand-off, `None` to move the agent back to this device.
 ///
-/// This is state, not an action: the flag is what every local start path —
+/// This is state *and* an action: the flag is what every local start path —
 /// manual start, app-launch restore, runtime reconcile, auto-restart — checks
-/// before spawning, so a relocated identity can never run in two places.
+/// before spawning, so a relocated identity can never be started again here.
+/// Relocating also stops any process already running for that key, in the same
+/// locked section: the flag alone only blocks *future* starts, and an agent
+/// mid-run would otherwise keep answering alongside its server copy until it
+/// happened to exit.
 #[tauri::command]
 pub async fn set_managed_agent_relocated(
     pubkey: String,
@@ -103,10 +107,20 @@ pub async fn set_managed_agent_relocated(
             state.clear_agent_session_caches(pubkey);
         }
 
+        let relocating = relocated_to_spawner.is_some();
         {
             let record = find_managed_agent_mut(&mut records, &pubkey)?;
             record.relocated_to_spawner = relocated_to_spawner;
             record.updated_at = now_iso();
+            if relocating {
+                // Stop before the flag is persisted rather than after, so a
+                // failure here aborts the whole hand-off instead of leaving a
+                // record that claims the agent moved while it is still running.
+                stop_managed_agent_process(&app, record, &mut runtimes)?;
+            }
+        }
+        if relocating {
+            state.clear_agent_session_caches(&pubkey);
         }
 
         save_managed_agents(&app, &records)?;
