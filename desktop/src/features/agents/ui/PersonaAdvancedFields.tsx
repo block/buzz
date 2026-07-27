@@ -10,10 +10,10 @@ import {
   PERSONA_FIELD_SHELL_CLASS,
   PERSONA_LABEL_OPTIONAL_CLASS,
 } from "./agentConfigOptions";
+import { useManagedAgentDefaultsQuery } from "../hooks";
 
 export function PersonaAdvancedFields({
   behaviorDraft,
-  defaultParallelism,
   disabled,
   envVars,
   inheritedEnvVars = {},
@@ -29,8 +29,6 @@ export function PersonaAdvancedFields({
   hiddenEnvKeys = [],
 }: {
   behaviorDraft: PersonaBehaviorDraft;
-  /** Desktop default applied when the definition leaves parallelism unset. */
-  defaultParallelism: number | null;
   disabled: boolean;
   envVars: EnvVarsValue;
   /** Env vars to display as inherited defaults in tuning-field placeholders.
@@ -50,6 +48,10 @@ export function PersonaAdvancedFields({
   fileSatisfiedEnvKeys?: readonly string[];
   hiddenEnvKeys?: readonly string[];
 }) {
+  const managedAgentDefaultsQuery = useManagedAgentDefaultsQuery();
+  const defaultParallelism =
+    managedAgentDefaultsQuery.data?.parallelism ?? null;
+
   return (
     <div className="space-y-5 pt-2">
       <CreateAgentRespondToField

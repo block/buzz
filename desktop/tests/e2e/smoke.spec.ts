@@ -177,6 +177,10 @@ test("create agent persists Buzz shared compute with auto model", async ({
 
   const model = page.locator("#persona-model");
   await expect(model).toContainText("Automatic");
+  await page.getByRole("button", { name: "Advanced", exact: true }).click();
+  const parallelism = page.locator("#persona-parallelism");
+  await expect(parallelism).toHaveAttribute("placeholder", "10");
+  await expect(parallelism).toHaveValue("");
   await page.getByTestId("persona-dialog-submit").click();
   await expect(
     page.getByRole("heading", { name: "Agent created" }),
@@ -204,6 +208,17 @@ test("create agent persists Buzz shared compute with auto model", async ({
     spawnAfterCreate: true,
     startOnAppLaunch: true,
   });
+  expect(createPayload?.parallelism).toBeUndefined();
+
+  await page.getByRole("button", { name: "Done" }).click();
+  await page
+    .getByRole("button", { name: `${agentName} agent profile` })
+    .click();
+  await page.getByTestId("user-profile-tab-runtime").click();
+  await page.getByTestId("user-profile-diagnostics-ingress").click();
+  await expect(page.getByTestId("managed-agent-log-content")).toContainText(
+    "parallelism=10",
+  );
 });
 
 test("create agent supports parallelism and system prompt overrides", async ({

@@ -5,9 +5,12 @@ import {
 } from "@/shared/api/tauri";
 import type {
   ManagedAgent,
-  ManagedAgentDefaults,
   ManagedAgentRuntimeStatus,
 } from "@/shared/api/types";
+
+export type ManagedAgentDefaults = {
+  parallelism: number;
+};
 
 export async function getManagedAgentDefaults(): Promise<ManagedAgentDefaults> {
   return invokeTauri<ManagedAgentDefaults>("get_managed_agent_defaults");

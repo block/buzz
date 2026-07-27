@@ -751,6 +751,8 @@ type RawManagedAgent = {
   respond_to_allowlist: string[];
 };
 
+const MOCK_MANAGED_AGENT_DEFAULT_PARALLELISM = 10;
+
 type RawCreateManagedAgentResponse = {
   agent: RawManagedAgent;
   private_key_nsec: string;
@@ -7626,7 +7628,7 @@ async function handleCreateManagedAgent(
   }
   // Mint-parity with resolve_mint_behavioral_defaults: an explicit input
   // wins; otherwise the linked definition's stored quad applies (mode+list
-  // travel together); otherwise the schema default.
+  // travel together); otherwise the Desktop default.
   const linkedPersona = args.input.personaId
     ? (mockPersonas.find((persona) => persona.id === args.input.personaId) ??
       null)
@@ -7640,7 +7642,9 @@ async function handleCreateManagedAgent(
       ? (args.input.respondToAllowlist ?? [])
       : (linkedPersona?.respond_to_allowlist ?? []);
   const mintParallelism =
-    args.input.parallelism ?? linkedPersona?.parallelism ?? 1;
+    args.input.parallelism ??
+    linkedPersona?.parallelism ??
+    MOCK_MANAGED_AGENT_DEFAULT_PARALLELISM;
   const personaAvatarUrl =
     args.input.personaId === undefined
       ? null
@@ -10531,7 +10535,7 @@ export function maybeInstallE2eTauriMocks() {
         );
       }
       case "get_managed_agent_defaults":
-        return { parallelism: 10 };
+        return { parallelism: MOCK_MANAGED_AGENT_DEFAULT_PARALLELISM };
       case "set_global_agent_config": {
         // Echo back the submitted config as the saved value (mirrors the
         // backend's strip-on-write pass in tests where all values are already
