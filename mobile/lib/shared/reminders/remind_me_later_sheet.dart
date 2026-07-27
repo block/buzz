@@ -77,8 +77,10 @@ void showRemindMeLaterSheet({
                 onTap: () async {
                   final navigator = Navigator.of(sheetContext);
                   final timestamp = await _pickCustomDateTime(context);
-                  if (navigator.mounted) navigator.pop();
+                  // Cancelled or not-in-the-future: keep the preset sheet
+                  // open so retrying doesn't mean long-pressing again.
                   if (timestamp == null) return;
+                  if (navigator.mounted) navigator.pop();
                   await submit(timestamp);
                 },
               ),
