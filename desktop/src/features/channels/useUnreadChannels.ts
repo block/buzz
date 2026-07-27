@@ -433,6 +433,9 @@ export function useUnreadChannels(
           createdAt: event.created_at,
           rootId: resolveObservedUnreadRootId(event.tags),
           highPriority: isHighPriority,
+          directMention:
+            normalizedPubkey !== null &&
+            hasMentionForEvent(event, normalizedPubkey),
           channelType: channel?.channelType,
           isThreadedReply,
         }),
@@ -728,6 +731,9 @@ export function useUnreadChannels(
                 createdAt: event.created_at,
                 rootId: resolveObservedUnreadRootId(event.tags),
                 highPriority: isHighPriority,
+                directMention:
+                  normalizedPubkey !== null &&
+                  hasMentionForEvent(event, normalizedPubkey),
                 channelType: chType,
                 isThreadedReply,
               }),

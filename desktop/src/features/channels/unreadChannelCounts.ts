@@ -5,6 +5,16 @@ export type ObservedUnreadEvent = {
   createdAt: number;
   rootId: string | null;
   highPriority: boolean;
+  /**
+   * True for a direct `p`-tag mention of the current user. Unlike
+   * `highPriority`, this is state-independent, so it stays correct after the
+   * channel's NIP-CN level changes — which is what makes it safe to freeze on
+   * the record. A muted channel's mention tier is keyed off this, not
+   * `highPriority`: an `@channel` marker or a NIP-CW broadcast reply earns
+   * `highPriority` only from the level it was observed under, and muting the
+   * channel afterwards must retire it.
+   */
+  directMention: boolean;
   countsTowardBadge: boolean;
   countsTowardAppBadge: boolean;
 };
@@ -14,6 +24,7 @@ export function makeObservedUnreadEvent(input: {
   createdAt: number;
   rootId: string | null;
   highPriority: boolean;
+  directMention: boolean;
   channelType: string | undefined;
   isThreadedReply: boolean;
 }): ObservedUnreadEvent {
@@ -23,6 +34,7 @@ export function makeObservedUnreadEvent(input: {
     createdAt: input.createdAt,
     rootId: input.rootId,
     highPriority: input.highPriority,
+    directMention: input.directMention,
     countsTowardBadge: isDm || input.isThreadedReply || input.highPriority,
     countsTowardAppBadge:
       isDm || (!input.isThreadedReply && input.highPriority),
@@ -120,6 +132,20 @@ export function countUnreadHighPriorityObservedEvents(
   return count;
 }
 
+export function countUnreadDirectMentionObservedEvents(
+  eventsById: ReadonlyMap<string, ObservedUnreadEvent> | undefined,
+  getReadAt: (event: ObservedUnreadEvent) => number | null,
+): number {
+  if (!eventsById) return 0;
+  let count = 0;
+  for (const event of eventsById.values()) {
+    if (!event.directMention) continue;
+    const readAt = getReadAt(event);
+    if (readAt === null || event.createdAt > readAt) count += 1;
+  }
+  return count;
+}
+
 export type UnreadAggregation = {
   unreadChannelIds: Set<string>;
   highPriorityUnreadChannelIds: Set<string>;
@@ -134,9 +160,13 @@ export type UnreadAggregation = {
  * NIP-CN mute predicate, which is evaluated against the channel's *current*
  * resolved level — so changing a level re-tiers immediately without rewriting
  * the frozen `ObservedUnreadEvent` records (and therefore never re-notifies).
- * A muted channel contributes only its mention-tier events, mirroring the
+ * A muted channel contributes only its **direct-mention** events, mirroring the
  * sidebar escape hatch that keeps a hidden channel visible while it holds a
- * mention.
+ * mention. It deliberately does not use the frozen `highPriority` flag: that was
+ * decided under the level in force when the event arrived, so a broadcast reply
+ * or `@channel` marker observed at level "all" would otherwise keep badging (and
+ * un-hiding) the channel after the user mutes it. Direct mentions pierce every
+ * level, so their frozen flag stays correct forever.
  */
 export function aggregateUnreadChannels(input: {
   channels: readonly { id: string; channelType?: string }[];
@@ -179,26 +209,27 @@ export function aggregateUnreadChannels(input: {
 
     if (countUnreadObservedEvents(observedEvents, readAtFor) === 0) continue;
 
-    const highPriorityCount = countUnreadHighPriorityObservedEvents(
-      observedEvents,
-      readAtFor,
-    );
-    if (isMuted && highPriorityCount === 0) continue;
+    // Muted channels are tiered on direct mentions only (see the doc comment);
+    // unmuted channels use the frozen decision from the ladder.
+    const mentionTierCount = isMuted
+      ? countUnreadDirectMentionObservedEvents(observedEvents, readAtFor)
+      : countUnreadHighPriorityObservedEvents(observedEvents, readAtFor);
+    if (isMuted && mentionTierCount === 0) continue;
 
     unread.add(channel.id);
     counts.set(
       channel.id,
       isMuted
-        ? highPriorityCount
+        ? mentionTierCount
         : countUnreadBadgeObservedEvents(observedEvents, readAtFor),
     );
     unreadChannelNotificationCount += isMuted
-      ? highPriorityCount
+      ? mentionTierCount
       : countUnreadAppBadgeObservedEvents(observedEvents, readAtFor);
 
     // DM channels: any unread DM is high-priority. Non-DM: only when at least
     // one mention/broadcast remains unread in its own channel/thread context.
-    if (channel.channelType === "dm" || highPriorityCount > 0) {
+    if (channel.channelType === "dm" || mentionTierCount > 0) {
       highPriority.add(channel.id);
     }
   }

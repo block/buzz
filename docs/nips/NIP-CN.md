@@ -238,7 +238,7 @@ equals it.
 |---|---|---|
 | `all` | All new posts | Every new post in the channel is recorded unread. The default. |
 | `mentions` | Just mentions | Posts are recorded unread but do not alert; mentions and followed threads still alert. |
-| `mute` | Mute and hide | The channel contributes nothing except mentions, and is hidden from channel lists. |
+| `mute` | Mute and hide | The channel contributes nothing except direct `p`-tag mentions, and is hidden from channel lists. |
 
 ### Timed Mute
 
@@ -317,7 +317,15 @@ A client that hides channels SHOULD keep two escape hatches, so a hidden channel
 cannot swallow something addressed to the user:
 
 1. the channel currently being viewed is always rendered; and
-2. a channel holding a mention-tier unread is rendered (in muted styling).
+2. a channel holding an unread direct `p`-tag mention is rendered (in muted
+   styling).
+
+Only direct mentions qualify for hatch 2. A client that records a per-event
+mention-tier classification alongside its unread evidence MUST NOT reuse it
+here: that classification was decided under the level in force when the event
+arrived, so a `@channel` marker or broadcast reply seen at level `all` would keep
+resurfacing the channel after the user mutes it. Direct mentions pierce every
+level, so their classification stays correct across later level changes.
 
 Hidden channels MUST remain reachable through channel browse / search surfaces.
 

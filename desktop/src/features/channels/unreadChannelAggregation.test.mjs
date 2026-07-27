@@ -14,6 +14,7 @@ function observed(overrides = {}) {
     createdAt: overrides.createdAt ?? 100,
     rootId: overrides.rootId ?? null,
     highPriority: overrides.highPriority ?? false,
+    directMention: overrides.directMention ?? false,
     channelType: overrides.channelType,
     isThreadedReply: overrides.isThreadedReply ?? false,
   });
@@ -59,12 +60,43 @@ test("a muted channel still contributes its mention-tier events", () => {
     muted: [CHANNEL],
     events: [
       observed({ id: "plain" }),
-      observed({ id: "mention", highPriority: true }),
+      observed({ id: "mention", highPriority: true, directMention: true }),
     ],
   });
   assert.deepEqual([...result.unreadChannelIds], [CHANNEL]);
   assert.deepEqual([...result.highPriorityUnreadChannelIds], [CHANNEL]);
   // Only the mention counts — the ordinary post stays suppressed.
+  assert.equal(result.unreadChannelCounts.get(CHANNEL), 1);
+  assert.equal(result.unreadChannelNotificationCount, 1);
+});
+
+test("a muted channel drops a frozen broadcast-reply highPriority row", () => {
+  // Observed at level "all" (so the ladder froze highPriority:true), then the
+  // user mutes the channel. A broadcast reply / @channel marker is not
+  // mention-tier below level "all", so it must retire — only direct p-tag
+  // mentions pierce a mute.
+  const result = aggregate({
+    muted: [CHANNEL],
+    events: [
+      observed({ id: "broadcast-reply", highPriority: true, rootId: "root-1" }),
+    ],
+  });
+  assert.equal(result.unreadChannelIds.size, 0);
+  assert.equal(result.highPriorityUnreadChannelIds.size, 0);
+  assert.equal(result.unreadChannelCounts.size, 0);
+  assert.equal(result.unreadChannelNotificationCount, 0);
+});
+
+test("a muted channel counts only the direct mention beside a frozen broadcast row", () => {
+  const result = aggregate({
+    muted: [CHANNEL],
+    events: [
+      observed({ id: "broadcast-reply", highPriority: true }),
+      observed({ id: "mention", highPriority: true, directMention: true }),
+    ],
+  });
+  assert.deepEqual([...result.unreadChannelIds], [CHANNEL]);
+  assert.deepEqual([...result.highPriorityUnreadChannelIds], [CHANNEL]);
   assert.equal(result.unreadChannelCounts.get(CHANNEL), 1);
   assert.equal(result.unreadChannelNotificationCount, 1);
 });
