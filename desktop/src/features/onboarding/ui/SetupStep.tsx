@@ -201,14 +201,19 @@ function RuntimeStatus({
   }
 
   if (isInstalling) {
+    const isUpdating = runtimeNeedsCliUpdate(runtime);
     return (
       <div
-        aria-label={`Installing ${runtime.label}`}
+        aria-label={
+          isUpdating
+            ? `Updating ${runtime.label}`
+            : `Installing ${runtime.label}`
+        }
         className="flex h-5 items-center gap-2 rounded-full bg-white/60 px-2.5 font-mono text-badge font-normal uppercase text-foreground"
         role="status"
       >
         <Spinner className="h-3 w-3 border-2 text-foreground" />
-        INSTALLING
+        {isUpdating ? "UPDATING" : "INSTALLING"}
       </div>
     );
   }
@@ -238,6 +243,22 @@ function RuntimeStatus({
     runtime.availability === "available" &&
     runtime.authStatus.status === "unknown"
   ) {
+    // Only offer UPDATE CLI when discovery attached an update diagnostic
+    // (e.g. outdated Claude Code). Generic unknown stays on CHECK AGAIN.
+    if (runtimeNeedsCliUpdate(runtime) && runtime.canAutoInstall) {
+      return (
+        <Button
+          aria-label={`Update ${runtime.label} CLI`}
+          className="buzz-onboarding-runtime-setup h-5 rounded-full bg-[var(--buzz-welcome-chartreuse)]/30 px-2.5 font-mono !text-badge font-normal uppercase text-foreground hover:bg-[var(--buzz-welcome-chartreuse)]/40"
+          data-testid={`onboarding-runtime-install-${runtime.id}`}
+          onClick={onInstall}
+          type="button"
+          variant="ghost"
+        >
+          UPDATE CLI
+        </Button>
+      );
+    }
     return (
       <Button
         aria-label={`Check ${runtime.label} again`}
@@ -440,6 +461,15 @@ function getOnboardingAuthMethods(
   return supported;
 }
 
+/** True when discovery identified a repairable outdated/incompatible CLI. */
+function runtimeNeedsCliUpdate(runtime: AcpRuntimeCatalogEntry): boolean {
+  return (
+    runtime.availability === "available" &&
+    runtime.authStatus.status === "unknown" &&
+    Boolean(runtime.authStatus.diagnostic)
+  );
+}
+
 function RuntimeAuthError({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
   if (runtime.authStatus.status === "config_invalid") {
     return (
@@ -450,18 +480,8 @@ function RuntimeAuthError({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
       />
     );
   }
-  if (
-    runtime.availability === "available" &&
-    runtime.authStatus.status === "unknown"
-  ) {
-    return (
-      <RuntimeErrorTooltip
-        className="absolute inset-x-3 bottom-2 truncate text-xs leading-4 text-destructive"
-        detail="Couldn’t verify authentication."
-        label="Status unavailable"
-      />
-    );
-  }
+  // Unknown auth with an update diagnostic is rendered inline under the CTA
+  // in RuntimeCard — keep this slot for bottom-pinned errors only.
   return null;
 }
 
@@ -542,7 +562,18 @@ function RuntimeCard({
           onInstall={handleInstall}
           runtime={runtime}
         />
-        {!isAvailable && runtimeDetailText(runtime) ? (
+        {runtimeNeedsCliUpdate(runtime) &&
+        runtime.authStatus.status === "unknown" &&
+        runtime.authStatus.diagnostic &&
+        !installError &&
+        !isInstalling ? (
+          <RuntimeErrorTooltip
+            className="max-w-[13rem] text-2xs leading-4 text-muted-foreground"
+            detail={runtime.authStatus.diagnostic}
+            label="Update required"
+            testId={`onboarding-runtime-update-hint-${runtime.id}`}
+          />
+        ) : !isAvailable && runtimeDetailText(runtime) ? (
           <p
             aria-hidden={installError ? "true" : undefined}
             className={cn(

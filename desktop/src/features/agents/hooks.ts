@@ -66,6 +66,7 @@ import {
 import { teamsQueryKey } from "@/features/agents/teamHooks";
 import type {
   AcpRuntime,
+  AcpRuntimeCatalogEntry,
   AgentPersona,
   Channel,
   CreateManagedAgentInput,
@@ -232,10 +233,39 @@ export function useConnectAcpRuntimeMutation() {
 export function useInstallAcpRuntimeMutation() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (runtimeId: string) => installAcpRuntime(runtimeId),
-    onSettled: () => {
-      void queryClient.invalidateQueries({ queryKey: acpRuntimesQueryKey });
-      void queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey });
+    mutationFn: async (runtimeId: string) => {
+      const result = await installAcpRuntime(runtimeId);
+      // Await the active catalog refetch inside mutationFn so `isPending`
+      // stays true until discovery reflects the new install. Fire-and-forget
+      // invalidation in onSettled left a gap where onboarding reverted to
+      // UPDATE CLI / INSTALL on stale `unknown` catalog data.
+      await queryClient.invalidateQueries({ queryKey: acpRuntimesQueryKey });
+      if (result.success) {
+        const catalog =
+          queryClient.getQueryData<AcpRuntimeCatalogEntry[]>(
+            acpRuntimesQueryKey,
+          );
+        const entry = catalog?.find((item) => item.id === runtimeId);
+        // CLI repair can exit before the replacement binary is visible to the
+        // next auth probe. Retry once when discovery still reports an update
+        // diagnostic (catalog-driven — not a harness-id special case).
+        if (
+          entry?.availability === "available" &&
+          entry.authStatus.status === "unknown" &&
+          entry.authStatus.diagnostic
+        ) {
+          await new Promise<void>((resolve) => {
+            window.setTimeout(resolve, 1_500);
+          });
+          await queryClient.invalidateQueries({
+            queryKey: acpRuntimesQueryKey,
+          });
+        }
+      }
+      await queryClient.invalidateQueries({
+        queryKey: managedAgentsQueryKey,
+      });
+      return result;
     },
   });
 }

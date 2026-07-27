@@ -127,7 +127,9 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         max_tokens_env_var: None,
         context_limit_env_var: None,
         required_normalized_fields: &[],
-        login_hint: Some("Run the Claude CLI to complete authentication."),
+        login_hint: Some(
+            "Sign in with Claude Code, or run `claude update` if status checks fail.",
+        ),
         auth_probe_args: Some(&["claude", "auth", "status"]),
     },
     KnownAcpRuntime {
@@ -1013,6 +1015,10 @@ pub(crate) fn is_npm_global_install(cmd: &str) -> bool {
         || t.starts_with("npm uninstall -g ")
 }
 
+fn unknown_auth_status(diagnostic: Option<String>) -> AuthStatus {
+    AuthStatus::Unknown { diagnostic }
+}
+
 /// Run a CLI auth probe with a 10-second process-level timeout.
 ///
 /// Spawns the probe CLI as a child process. Stdout and stderr are drained on
@@ -1023,6 +1029,9 @@ fn probe_auth_status(binary_path: &Path, probe_args: &[&str]) -> AuthStatus {
     use crate::managed_agents::readiness::cli_probe;
 
     let augmented_path = cli_probe::augmented_path();
+    let claude_probe = cli_probe::is_claude_auth_status_probe(probe_args);
+    let timeout_diagnostic =
+        claude_probe.then(|| cli_probe::CLAUDE_AUTH_PROBE_UPDATE_HINT.to_string());
 
     let mut command = std::process::Command::new(binary_path);
     command.args(&probe_args[1..]);
@@ -1037,7 +1046,7 @@ fn probe_auth_status(binary_path: &Path, probe_args: &[&str]) -> AuthStatus {
 
     let mut child = match command.spawn() {
         Ok(c) => c,
-        Err(_) => return AuthStatus::Unknown,
+        Err(_) => return unknown_auth_status(timeout_diagnostic),
     };
 
     // Drain stdout/stderr on background threads to prevent pipe-buffer deadlock.
@@ -1049,6 +1058,7 @@ fn probe_auth_status(binary_path: &Path, probe_args: &[&str]) -> AuthStatus {
         if let Some(mut pipe) = stdout_pipe {
             let _ = pipe.read_to_end(&mut buf);
         }
+        buf
     });
     let stderr_thread = std::thread::spawn(move || {
         let mut buf = Vec::new();
@@ -1080,7 +1090,7 @@ fn probe_auth_status(binary_path: &Path, probe_args: &[&str]) -> AuthStatus {
             let _ = wait_thread.join();
             let _ = stdout_thread.join();
             let _ = stderr_thread.join();
-            return AuthStatus::Unknown;
+            return unknown_auth_status(timeout_diagnostic);
         }
         match rx.recv_timeout(Duration::from_millis(100).min(remaining)) {
             Ok(Ok(status)) => break status,
@@ -1088,27 +1098,35 @@ fn probe_auth_status(binary_path: &Path, probe_args: &[&str]) -> AuthStatus {
                 let _ = wait_thread.join();
                 let _ = stdout_thread.join();
                 let _ = stderr_thread.join();
-                return AuthStatus::Unknown;
+                return unknown_auth_status(timeout_diagnostic);
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                 let _ = stdout_thread.join();
                 let _ = stderr_thread.join();
-                return AuthStatus::Unknown;
+                return unknown_auth_status(timeout_diagnostic);
             }
         }
     };
 
     let _ = wait_thread.join();
-    let _ = stdout_thread.join();
+    let stdout_bytes = stdout_thread.join().unwrap_or_default();
     let stderr_bytes = stderr_thread.join().unwrap_or_default();
 
-    match cli_probe::classify_probe_output(&stderr_bytes, exit_status.success()) {
+    match cli_probe::classify_auth_probe_output(
+        probe_args,
+        &stdout_bytes,
+        &stderr_bytes,
+        exit_status.success(),
+    ) {
         cli_probe::ProbeOutcome::LoggedIn => AuthStatus::LoggedIn,
         cli_probe::ProbeOutcome::LoggedOut => AuthStatus::LoggedOut,
         cli_probe::ProbeOutcome::ConfigInvalid { stderr_excerpt } => AuthStatus::ConfigInvalid {
             diagnostic: stderr_excerpt,
         },
+        cli_probe::ProbeOutcome::Unsupported { diagnostic } => {
+            unknown_auth_status(Some(diagnostic))
+        }
     }
 }
 
@@ -1392,7 +1410,7 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime) -> PartialEntr
             underlying_cli_path,
             node_required,
             // Filled in by the auth-probe phase in full catalog discovery.
-            auth_status: AuthStatus::Unknown,
+            auth_status: AuthStatus::Unknown { diagnostic: None },
             login_hint: None,
             source: HarnessSource::Builtin,
             // Builtin entries have no user-editable env; definition_env is empty.
@@ -1680,27 +1698,33 @@ pub fn discover_acp_runtimes_from(
 
     // Collect probe results and patch entries.
     for (idx, handle) in probe_handles {
-        let status = handle.join().unwrap_or(AuthStatus::Unknown);
+        let status = handle
+            .join()
+            .unwrap_or(AuthStatus::Unknown { diagnostic: None });
         let partial = &mut partials[idx];
-        partial.entry.login_hint =
-            if matches!(status, AuthStatus::LoggedIn | AuthStatus::NotApplicable) {
-                None
-            } else {
-                partial.runtime.login_hint.map(str::to_string)
-            };
+        partial.entry.login_hint = match &status {
+            AuthStatus::LoggedIn | AuthStatus::NotApplicable => None,
+            AuthStatus::Unknown {
+                diagnostic: Some(diagnostic),
+            } => Some(diagnostic.clone()),
+            _ => partial.runtime.login_hint.map(str::to_string),
+        };
         partial.entry.auth_status = status;
     }
 
     // Fill NotApplicable / Unknown for non-probed entries.
     for partial in &mut partials {
-        if partial.entry.auth_status == AuthStatus::Unknown {
+        if matches!(
+            partial.entry.auth_status,
+            AuthStatus::Unknown { diagnostic: None }
+        ) {
             partial.entry.auth_status = if partial.entry.availability
                 == AcpAvailabilityStatus::Available
                 && partial.runtime.auth_probe_args.is_none()
             {
                 AuthStatus::NotApplicable
             } else {
-                AuthStatus::Unknown
+                AuthStatus::Unknown { diagnostic: None }
             };
         }
     }

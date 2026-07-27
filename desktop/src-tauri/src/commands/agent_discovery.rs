@@ -299,26 +299,13 @@ fn install_acp_runtime_blocking(runtime_id: &str) -> Result<InstallRuntimeResult
 
     let mut steps = Vec::new();
 
-    // Phase 1: Install CLI if missing and commands are available.
+    // Phase 1: Install CLI if missing (or repair outdated Claude Code).
     // Today every entry in `cli_install_commands` is a curl-pipe; npm-backed
     // adapter installs live in Phase 2 below where they are rewritten to a
     // Buzz-private prefix before execution.
-    if let Some(cli) = runtime.underlying_cli {
-        if crate::managed_agents::resolve_command(cli).is_none() {
-            for cmd in runtime.cli_install_commands_for_os() {
-                let result = run_install_command_with_retry("cli", cmd);
-                let success = result.success;
-                steps.push(result);
-                if !success {
-                    return Ok(InstallRuntimeResult {
-                        success: false,
-                        steps,
-                        restarted_count: 0,
-                        failed_restart_count: 0,
-                    });
-                }
-            }
-        }
+    match cli_install::install_or_repair_underlying_cli(runtime_id, runtime) {
+        Ok(cli_steps) => steps.extend(cli_steps),
+        Err(failed) => return Ok(failed),
     }
 
     // Phase 2: Install adapter if missing (or outdated) and commands are available.
@@ -1256,6 +1243,7 @@ fn floor_char_boundary(s: &str, mut index: usize) -> usize {
 }
 
 // ── managed Node/npm runtime ──────────────────────────────────────────────────
+mod cli_install;
 mod managed_node;
 use managed_node::{
     ensure_managed_node_runtime_blocking, managed_node_runtime_supported, managed_npm_command,

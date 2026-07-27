@@ -164,7 +164,63 @@ test("setup shows runtime discovery loading before rendering harnesses", async (
   await expect(page.getByTestId("onboarding-runtime-loading")).toHaveCount(0);
 });
 
-test("unknown authentication can be checked again", async ({ page }) => {
+test("unknown authentication offers UPDATE CLI when auto-install is available", async ({
+  page,
+}) => {
+  const diagnostic =
+    "This Claude Code build doesn’t support `claude auth status`. Run `claude update`, then try again.";
+  const unknown = runtime(
+    "claude",
+    "available",
+    { status: "unknown", diagnostic },
+    { login_hint: diagnostic },
+  );
+  const loggedIn = runtime("claude", "available", { status: "logged_in" });
+  await installMockBridge(
+    page,
+    {
+      acpRuntimesCatalog: [unknown],
+      acpRuntimesCatalogAfterInstall: [loggedIn],
+      installAcpRuntimeResult: {
+        success: true,
+        steps: [
+          {
+            step: "cli",
+            command: "claude update",
+            success: true,
+            stdout: "updated",
+            stderr: "",
+            exit_code: 0,
+          },
+        ],
+        restarted_count: 0,
+        failed_restart_count: 0,
+      },
+    },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+  await navigateToSetupPage(page);
+
+  const card = page.getByTestId("onboarding-runtime-claude");
+  await expect(
+    card.getByTestId("onboarding-runtime-update-hint-claude"),
+  ).toHaveText("Update required");
+  const updateCli = page.getByRole("button", {
+    name: "Update Claude Code CLI",
+  });
+  await expect(updateCli).toHaveText("UPDATE CLI");
+  await updateCli.click();
+  await expect(page.getByTestId("onboarding-runtime-ready-claude")).toHaveText(
+    "READY",
+  );
+});
+
+test("unknown authentication without diagnostic can be checked again", async ({
+  page,
+}) => {
+  // can_auto_install stays true — UPDATE CLI is gated on a diagnostic, not
+  // installability alone, so a bare unknown must keep CHECK AGAIN.
   const unknown = runtime("claude", "available", { status: "unknown" });
   const loggedIn = runtime("claude", "available", { status: "logged_in" });
   await installMockBridge(

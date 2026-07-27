@@ -580,8 +580,15 @@ pub enum AuthStatus {
     },
     /// This runtime does not have a login step (e.g. goose, buzz-agent).
     NotApplicable,
-    /// Probe was not attempted (runtime unavailable or probe timed out).
-    Unknown,
+    /// Probe was not attempted, timed out, or is incompatible with this CLI.
+    ///
+    /// `diagnostic` carries actionable guidance when we can identify the
+    /// failure mode (e.g. outdated Claude Code lacking `auth status`).
+    Unknown {
+        /// Optional guidance shown in Doctor / onboarding tooltips.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        diagnostic: Option<String>,
+    },
 }
 
 /// Origin of an ACP runtime catalog entry. Serializes as a lowercase string
