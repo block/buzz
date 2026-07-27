@@ -21,6 +21,7 @@ fn run_helper(input: &str, env_vars: &[(&str, &str)]) -> std::process::Output {
         .current_dir(std::env::temp_dir())
         .env_remove("NOSTR_PRIVATE_KEY")
         .env_remove("BUZZ_AUTH_TAG")
+        .env_remove("BUZZ_NOSTR_GIT_AUTH_REQUIRED")
         .env_remove("GIT_CONFIG_COUNT")
         // Prevent git config on the test machine from supplying credentials.
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -183,9 +184,10 @@ fn malformed_nip_oa_auth_tag_fails_closed() {
     assert!(!String::from_utf8_lossy(&out.stdout).contains("credential="));
 }
 
-/// Old git (no `capability[]=authtype` in input) → empty line on stdout, exit 0.
+/// A globally configured helper must still decline silently for old Git when
+/// Buzz has not marked the operation as requiring Nostr authentication.
 #[test]
-fn old_git_no_authtype_capability() {
+fn old_git_without_buzz_requirement_declines_silently() {
     let input = "protocol=https\n\
                  host=relay.example.com\n\
                  path=git/owner/repo.git/info/refs\n\
@@ -211,6 +213,34 @@ fn old_git_no_authtype_capability() {
         !stdout.contains("credential="),
         "should not emit credential= for old git"
     );
+}
+
+/// Buzz explicitly supplies a Nostr key for relay git operations. If Git is
+/// too old to support `authtype`, fail with the real requirement instead of
+/// silently falling through to Git's misleading username prompt.
+#[test]
+fn old_git_with_buzz_requirement_reports_minimum_version() {
+    let input = "protocol=https\n\
+                 host=relay.example.com\n\
+                 path=git/owner/repo.git/info/refs\n\
+                 \n";
+
+    let nsec = fresh_nsec();
+    let out = run_helper(
+        input,
+        &[
+            ("NOSTR_PRIVATE_KEY", &nsec),
+            ("BUZZ_NOSTR_GIT_AUTH_REQUIRED", "1"),
+        ],
+    );
+
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("Git 2.46 or newer"),
+        "expected minimum Git version diagnostic, got:\n{stderr}"
+    );
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("credential="));
 }
 
 /// No key configured at all → exit 1, stderr mentions "no nostr key configured".
