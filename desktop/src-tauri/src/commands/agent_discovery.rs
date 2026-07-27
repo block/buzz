@@ -1271,18 +1271,18 @@ pub async fn discover_managed_agent_prereqs(
 
 #[tauri::command]
 pub async fn list_relay_agents(state: State<'_, AppState>) -> Result<Vec<RelayAgentInfo>, String> {
-    // Query kind:10100 agent profile events from the relay.
+    // Kind:30177 carries identity + inbound-author policy; 10100 is channel-add.
     let events = query_relay(
         &state,
         &[serde_json::json!({
-            "kinds": [10100],
+            "kinds": [buzz_core_pkg::kind::KIND_MANAGED_AGENT],
         })],
     )
     .await?;
 
     // The convert helper returns `{"agents": [...]}`. Extract and re-deserialize
     // into the strongly-typed `Vec<RelayAgentInfo>` the frontend expects.
-    let value = nostr_convert::agents_from_events(&events);
+    let value = nostr_convert::managed_agents_from_events(&events);
     let agents = value
         .get("agents")
         .cloned()
