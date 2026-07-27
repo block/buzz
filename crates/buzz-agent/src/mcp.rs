@@ -830,15 +830,30 @@ fn timeout_msg(stage: &str, name: &str, t: Duration) -> String {
     format!("{stage} {name}: timeout after {}s", t.as_secs())
 }
 
+/// Replace an oversized tool schema with the smallest schema that still
+/// describes "an object taking no arguments".
+///
+/// This must remain a *valid* JSON Schema: providers reject a bare `{}`.
+/// Anthropic's `/v1/messages` requires `input_schema.type`, and answers a
+/// missing one with `400 tools.N.custom.input_schema.type: Field required`,
+/// which fails the whole request — so one oversized tool would otherwise
+/// break every turn for that session, not just that tool.
+fn empty_object_schema() -> Value {
+    let mut schema = Map::new();
+    schema.insert("type".to_string(), Value::String("object".to_string()));
+    schema.insert("properties".to_string(), Value::Object(Map::new()));
+    Value::Object(schema)
+}
+
 fn cap_schema(qname: &str, schema: Value) -> Value {
     let size = serde_json::to_vec(&schema).map(|b| b.len()).unwrap_or(0);
     if size <= MAX_SCHEMA_BYTES {
         return schema;
     }
     tracing::warn!(
-        "tool {qname} schema is {size} bytes (>{MAX_SCHEMA_BYTES}); replacing with empty object"
+        "tool {qname} schema is {size} bytes (>{MAX_SCHEMA_BYTES}); replacing with empty object schema"
     );
-    Value::Object(Map::new())
+    empty_object_schema()
 }
 
 #[cfg(unix)]
@@ -1135,5 +1150,78 @@ mod content_tests {
         // CommandExt — but tokio wraps it; we verify by ensuring the call compiles and
         // the resulting spawn wouldn't OOM (build+flag-set is the full contract here).
         // The real protection is the cfg-gated production path in spawn_one().
+    }
+}
+
+#[cfg(test)]
+mod cap_schema_tests {
+    use super::*;
+
+    fn big_schema(bytes: usize) -> Value {
+        let mut props = Map::new();
+        props.insert("blob".to_string(), Value::String("x".repeat(bytes)));
+        let mut schema = Map::new();
+        schema.insert("type".to_string(), Value::String("object".to_string()));
+        schema.insert("properties".to_string(), Value::Object(props));
+        Value::Object(schema)
+    }
+
+    #[test]
+    fn under_the_cap_is_returned_unchanged() {
+        let schema = big_schema(16);
+        assert_eq!(cap_schema("srv__small", schema.clone()), schema);
+    }
+
+    #[test]
+    fn oversized_schema_is_replaced() {
+        let schema = big_schema(MAX_SCHEMA_BYTES * 2);
+        let capped = cap_schema("srv__big", schema.clone());
+        assert_ne!(capped, schema, "oversized schema must not pass through");
+    }
+
+    /// The replacement must stay a valid JSON Schema. A bare `{}` is rejected by
+    /// Anthropic with `input_schema.type: Field required`, which 400s the entire
+    /// request — so a single oversized tool would break every turn.
+    #[test]
+    fn replacement_declares_object_type() {
+        let capped = cap_schema("srv__big", big_schema(MAX_SCHEMA_BYTES * 2));
+        let obj = capped
+            .as_object()
+            .expect("replacement must be a JSON object");
+        assert_eq!(
+            obj.get("type").and_then(Value::as_str),
+            Some("object"),
+            "replacement schema must declare type=object"
+        );
+        assert!(
+            obj.get("properties").map(Value::is_object).unwrap_or(false),
+            "replacement schema must carry an object `properties`"
+        );
+    }
+
+    #[test]
+    fn replacement_is_itself_within_the_cap() {
+        let capped = cap_schema("srv__big", big_schema(MAX_SCHEMA_BYTES * 2));
+        let size = serde_json::to_vec(&capped).expect("serializable").len();
+        assert!(size <= MAX_SCHEMA_BYTES, "replacement must fit the cap");
+    }
+
+    #[test]
+    fn exactly_at_the_cap_is_not_replaced() {
+        // Boundary: the guard is `<=`, so a schema landing exactly on the cap
+        // must survive untouched.
+        let mut filler = 1;
+        let schema = loop {
+            let candidate = big_schema(filler);
+            let size = serde_json::to_vec(&candidate).expect("serializable").len();
+            if size == MAX_SCHEMA_BYTES {
+                break candidate;
+            }
+            if size > MAX_SCHEMA_BYTES {
+                panic!("could not construct a schema of exactly {MAX_SCHEMA_BYTES} bytes");
+            }
+            filler += 1;
+        };
+        assert_eq!(cap_schema("srv__edge", schema.clone()), schema);
     }
 }
