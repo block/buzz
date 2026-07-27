@@ -34,8 +34,8 @@ export function isReservedMentionName(name: string): boolean {
  *
  * Uses the shared `@mention` matcher, so tokens inside code fences, indented
  * blocks, or backtick spans are masked and never notify. `@channel` wins over
- * `@here` when both appear: it is the broader audience, so confirming it also
- * covers everyone `@here` would have reached.
+ * `@here` when both appear: it reaches the broader set of recipients, so
+ * confirming it also covers everyone `@here` would have reached.
  */
 export function detectNotifyMode(text: string): NotifyMode | null {
   return NOTIFY_MODES.find((mode) => hasMention(text, mode)) ?? null;
