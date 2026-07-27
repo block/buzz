@@ -658,9 +658,15 @@ pub const HANDOFF_MAX_TOOL_NAMES: usize = 20;
 const DEFAULT_SYSTEM_PROMPT: &str =
     "You are buzz-agent. Use the provided tools to act. Tool calls are your only output.";
 
+/// Default OpenAI-compatible endpoint for a local Ollama server, used when
+/// `BUZZ_AGENT_PROVIDER=ollama` and `OPENAI_COMPAT_BASE_URL` is unset.
+pub const OLLAMA_DEFAULT_BASE_URL: &str = "http://localhost:11434/v1";
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Provider {
     Anthropic,
+    /// Also selected by the `ollama` alias: Ollama serves an OpenAI-compatible
+    /// API, so it rides the same dispatch with local-friendly defaults.
     OpenAi,
     /// Databricks model serving. Routes to `{base_url}/serving-endpoints/{model}/invocations`
     /// with a dynamically-acquired bearer (OAuth 2.0 PKCE, or static `DATABRICKS_TOKEN`).
@@ -772,13 +778,19 @@ impl Config {
                 OpenAiApi::Auto, // unused for Anthropic
             ),
             Provider::OpenAi => (
-                req("OPENAI_COMPAT_API_KEY")?,
+                resolve_openai_api_key(
+                    env("BUZZ_AGENT_PROVIDER").as_deref(),
+                    env("OPENAI_COMPAT_API_KEY"),
+                )?,
                 resolve_model(
                     buzz_agent_model.as_deref(),
                     env("OPENAI_COMPAT_MODEL").as_deref(),
                 )
                 .ok_or_else(|| "config: OPENAI_COMPAT_MODEL required".to_string())?,
-                env_or("OPENAI_COMPAT_BASE_URL", "https://api.openai.com/v1"),
+                resolve_openai_base_url(
+                    env("BUZZ_AGENT_PROVIDER").as_deref(),
+                    env("OPENAI_COMPAT_BASE_URL"),
+                ),
                 parse_openai_api(env("OPENAI_COMPAT_API").as_deref())?,
             ),
             Provider::Databricks | Provider::DatabricksV2 => (
@@ -987,6 +999,39 @@ fn present_nonempty(v: Option<&str>) -> bool {
     v.map(str::trim).is_some_and(|s| !s.is_empty())
 }
 
+/// True when `BUZZ_AGENT_PROVIDER` selects the `ollama` alias.
+fn is_ollama_provider(requested: Option<&str>) -> bool {
+    requested
+        .map(str::trim)
+        .is_some_and(|s| s.eq_ignore_ascii_case("ollama"))
+}
+
+/// Resolve the OpenAI-compatible API key. Ollama ignores the key but the
+/// header must exist, so the alias supplies a placeholder when unset; every
+/// other OpenAI-compatible provider still requires a real key.
+fn resolve_openai_api_key(
+    requested_provider: Option<&str>,
+    key: Option<String>,
+) -> Result<String, String> {
+    match key {
+        Some(k) if present_nonempty(Some(&k)) => Ok(k),
+        _ if is_ollama_provider(requested_provider) => Ok("ollama".to_owned()),
+        _ => Err("config: OPENAI_COMPAT_API_KEY required".into()),
+    }
+}
+
+/// Resolve the OpenAI-compatible base URL, defaulting to the well-known local
+/// Ollama endpoint for the `ollama` alias and api.openai.com otherwise.
+fn resolve_openai_base_url(requested_provider: Option<&str>, base_url: Option<String>) -> String {
+    base_url.unwrap_or_else(|| {
+        if is_ollama_provider(requested_provider) {
+            OLLAMA_DEFAULT_BASE_URL.to_owned()
+        } else {
+            "https://api.openai.com/v1".to_owned()
+        }
+    })
+}
+
 fn resolve_provider(
     requested: Option<&str>,
     anthropic_key: Option<&str>,
@@ -1004,6 +1049,8 @@ fn resolve_provider(
                 "openai" | "openai-compat" => Err(
                     "config: OPENAI_COMPAT_API_KEY required".into(),
                 ),
+                // Ollama speaks the OpenAI-compatible API and needs no key.
+                "ollama" => Ok(Provider::OpenAi),
                 "databricks" => Ok(Provider::Databricks),
                 "databricks_v2" | "databricks-v2" => Ok(Provider::DatabricksV2),
                 _ => Err(format!(
@@ -1012,7 +1059,7 @@ fn resolve_provider(
             }
         }
         None => Err(
-            "config: BUZZ_AGENT_PROVIDER is required — set it to your provider (e.g. anthropic, openai, databricks)".into(),
+            "config: BUZZ_AGENT_PROVIDER is required — set it to your provider (e.g. anthropic, openai, ollama, databricks)".into(),
         ),
     }
 }
@@ -1269,6 +1316,68 @@ mod tests {
     fn resolve_provider_unsupported_error_preserves_user_casing() {
         let err = resolve_provider(Some("OpenAIish"), None, None).unwrap_err();
         assert!(err.contains("BUZZ_AGENT_PROVIDER=OpenAIish"));
+    }
+
+    #[test]
+    fn resolve_provider_ollama_needs_no_api_key() {
+        // The ollama alias maps onto the OpenAI-compatible path and never
+        // requires a key, present or absent.
+        assert_eq!(
+            resolve_provider(Some("ollama"), None, None).unwrap(),
+            Provider::OpenAi
+        );
+        assert_eq!(
+            resolve_provider(Some("Ollama"), None, Some("anything")).unwrap(),
+            Provider::OpenAi
+        );
+    }
+
+    #[test]
+    fn resolve_openai_api_key_ollama_defaults_to_placeholder() {
+        assert_eq!(
+            resolve_openai_api_key(Some("ollama"), None).unwrap(),
+            "ollama"
+        );
+        // Whitespace-only keys are treated as unset.
+        assert_eq!(
+            resolve_openai_api_key(Some("ollama"), Some("   ".to_owned())).unwrap(),
+            "ollama"
+        );
+        // An explicit key always wins.
+        assert_eq!(
+            resolve_openai_api_key(Some("ollama"), Some("sk-real".to_owned())).unwrap(),
+            "sk-real"
+        );
+    }
+
+    #[test]
+    fn resolve_openai_api_key_non_ollama_still_required() {
+        let err = resolve_openai_api_key(Some("openai"), None).unwrap_err();
+        assert!(err.contains("OPENAI_COMPAT_API_KEY required"), "{err}");
+        let err = resolve_openai_api_key(Some("openai-compat"), Some(String::new())).unwrap_err();
+        assert!(err.contains("OPENAI_COMPAT_API_KEY required"), "{err}");
+        assert_eq!(
+            resolve_openai_api_key(Some("openai"), Some("sk-openai".to_owned())).unwrap(),
+            "sk-openai"
+        );
+    }
+
+    #[test]
+    fn resolve_openai_base_url_ollama_defaults_to_local_endpoint() {
+        assert_eq!(
+            resolve_openai_base_url(Some("ollama"), None),
+            OLLAMA_DEFAULT_BASE_URL
+        );
+        // Explicit override wins for remote Ollama servers.
+        assert_eq!(
+            resolve_openai_base_url(Some("ollama"), Some("http://gpu-box:11434/v1".to_owned())),
+            "http://gpu-box:11434/v1"
+        );
+        // Non-ollama default unchanged.
+        assert_eq!(
+            resolve_openai_base_url(Some("openai"), None),
+            "https://api.openai.com/v1"
+        );
     }
 
     #[test]
