@@ -40,7 +40,7 @@
 - Modify: `desktop/src/features/command-console/ui/AdviserInsignia.tsx`
 - Test: `desktop/src/features/command-console/ui/AdviserInsignia.test.mjs`
 
-- [ ] **Step 1: Add failing Rust catalogue tests**
+- [x] **Step 1: Add failing Rust catalogue tests**
 
 Extend `personas/tests.rs` to require these definitions exactly once and active by default:
 
@@ -72,7 +72,7 @@ Pin these prompt guarantees:
 - acknowledgement occurs only after `buzz mem` succeeds;
 - raw transcript text is not copied into memory.
 
-- [ ] **Step 2: Run the persona test and confirm the intended failure**
+- [x] **Step 2: Run the persona test and confirm the intended failure**
 
 ```bash
 . ./bin/activate-hermit
@@ -81,7 +81,7 @@ cargo test --manifest-path desktop/src-tauri/Cargo.toml managed_agents::personas
 
 Expected: failures because the six command-team definitions do not yet exist.
 
-- [ ] **Step 3: Add one shared frontend command-team identity contract**
+- [x] **Step 3: Add one shared frontend command-team identity contract**
 
 Create `commandTeam.ts` with a typed ordered mapping:
 
@@ -109,7 +109,7 @@ export function commandAdviserForPersona(id: string): AdviserId | undefined;
 
 Use this mapping in `CommandTeamStrip` and `AdviserInsignia` so the console and My Agents refer to the same stable IDs and approved symbols.
 
-- [ ] **Step 4: Implement the built-in personas and shared memory protocol**
+- [x] **Step 4: Implement the built-in personas and shared memory protocol**
 
 Add six `BuiltInPersona` entries. Use compact percent-encoded SVG data URLs for the symbolic avatars:
 
@@ -134,7 +134,7 @@ Each system prompt must contain its role boundary plus an identical recording pr
 
 Keep `runtime` and `model` unset so the current Cloud/Local preference remains authoritative.
 
-- [ ] **Step 5: Run focused Rust and frontend identity tests**
+- [x] **Step 5: Run focused Rust and frontend identity tests**
 
 ```bash
 . ./bin/activate-hermit
@@ -144,7 +144,7 @@ node --import ./test-loader.mjs --experimental-strip-types --test \
   src/features/command-console/ui/AdviserInsignia.test.mjs
 ```
 
-- [ ] **Step 6: Commit the persona contract**
+- [x] **Step 6: Commit the persona contract**
 
 ```bash
 . ./bin/activate-hermit

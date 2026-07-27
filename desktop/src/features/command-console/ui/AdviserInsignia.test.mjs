@@ -4,6 +4,11 @@ import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
+import {
+  COMMAND_TEAM_PERSONAS,
+  commandAdviserForPersona,
+  isCommandTeamPersonaId,
+} from "../domain/commandTeam.ts";
 import { AdviserInsignia } from "./AdviserInsignia.tsx";
 
 const EXPECTED = {
@@ -30,4 +35,25 @@ test("renders six distinct accessible naval adviser symbols", () => {
   }
 
   assert.equal(symbols.size, 6);
+});
+
+test("maps each stable command persona to one adviser identity", () => {
+  assert.deepEqual(
+    COMMAND_TEAM_PERSONAS.map(({ adviser, personaId }) => [adviser, personaId]),
+    [
+      ["chief_of_staff", "builtin:command-chief-of-staff"],
+      ["operations", "builtin:command-operations"],
+      ["navigation", "builtin:command-navigation"],
+      ["daily_routine", "builtin:command-daily-routine"],
+      ["reporting", "builtin:command-reporting"],
+      ["plans", "builtin:command-plans"],
+    ],
+  );
+
+  for (const { adviser, personaId } of COMMAND_TEAM_PERSONAS) {
+    assert.equal(isCommandTeamPersonaId(personaId), true);
+    assert.equal(commandAdviserForPersona(personaId), adviser);
+  }
+  assert.equal(isCommandTeamPersonaId("builtin:fizz"), false);
+  assert.equal(commandAdviserForPersona("builtin:fizz"), undefined);
 });

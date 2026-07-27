@@ -6,6 +6,39 @@ use super::{
 use crate::managed_agents::discovery::{default_agent_command, effective_agent_command};
 use crate::managed_agents::AgentDefinition;
 
+const COMMAND_TEAM_PERSONAS: [(&str, &str, &str); 6] = [
+    (
+        "builtin:command-chief-of-staff",
+        "Chief of Staff",
+        "challenge inconsistencies",
+    ),
+    (
+        "builtin:command-operations",
+        "Operations Adviser",
+        "readiness, dependencies, risks",
+    ),
+    (
+        "builtin:command-navigation",
+        "Navigation Adviser",
+        "navigation evidence",
+    ),
+    (
+        "builtin:command-daily-routine",
+        "Daily Routine Adviser",
+        "calendar, reminders, deadlines",
+    ),
+    (
+        "builtin:command-reporting",
+        "Reporting Adviser",
+        "reports, returns, missing inputs",
+    ),
+    (
+        "builtin:command-plans",
+        "Plans Adviser",
+        "medium- and long-range",
+    ),
+];
+
 fn custom_persona(id: &str, display_name: &str) -> AgentDefinition {
     AgentDefinition {
         id: id.to_string(),
@@ -43,7 +76,20 @@ fn merge_personas_adds_missing_built_ins() {
         .iter()
         .map(|record| record.display_name.as_str())
         .collect();
-    assert_eq!(display_names, vec!["Fizz", "Honey", "Bumble"]);
+    assert_eq!(
+        display_names,
+        vec![
+            "Fizz",
+            "Honey",
+            "Bumble",
+            "Chief of Staff",
+            "Operations Adviser",
+            "Navigation Adviser",
+            "Daily Routine Adviser",
+            "Reporting Adviser",
+            "Plans Adviser",
+        ]
+    );
     let active_ids: Vec<&str> = records
         .iter()
         .filter(|record| record.is_active)
@@ -51,8 +97,80 @@ fn merge_personas_adds_missing_built_ins() {
         .collect();
     assert_eq!(
         active_ids,
-        vec!["builtin:fizz", "builtin:honey", "builtin:bumble"]
+        vec![
+            "builtin:fizz",
+            "builtin:honey",
+            "builtin:bumble",
+            "builtin:command-chief-of-staff",
+            "builtin:command-operations",
+            "builtin:command-navigation",
+            "builtin:command-daily-routine",
+            "builtin:command-reporting",
+            "builtin:command-plans",
+        ]
     );
+}
+
+#[test]
+fn command_team_builtins_are_active_symbolic_and_route_independent() {
+    let records = built_in_persona_records("2026-07-27T00:00:00Z");
+
+    for (id, display_name, role_fragment) in COMMAND_TEAM_PERSONAS {
+        let matches = records
+            .iter()
+            .filter(|record| record.id == id)
+            .collect::<Vec<_>>();
+        assert_eq!(matches.len(), 1, "{id} should appear exactly once");
+        let record = matches[0];
+        assert_eq!(record.display_name, display_name);
+        assert!(record.is_builtin);
+        assert!(record.is_active);
+        assert_eq!(record.runtime, None);
+        assert_eq!(record.model, None);
+        assert!(
+            record
+                .avatar_url
+                .as_deref()
+                .is_some_and(|avatar| avatar.starts_with("data:image/svg+xml,")),
+            "{id} should use a compact symbolic SVG avatar"
+        );
+        assert!(
+            record.system_prompt.contains(role_fragment),
+            "{id} should retain its adviser role boundary"
+        );
+        assert!(record
+            .system_prompt
+            .contains("command-discussion-outcome-v1"));
+        assert!(record
+            .system_prompt
+            .contains("mem/command-brief/<adviser>/<yyyy-mm-dd>/<outcome-id>"));
+        assert!(record.system_prompt.contains("Recorded for future briefs"));
+        assert!(record
+            .system_prompt
+            .contains("only after `buzz mem set` succeeds"));
+        assert!(record
+            .system_prompt
+            .contains("Do not copy the raw Buzz transcript"));
+        assert!(record
+            .system_prompt
+            .contains("<persona-id>\\n<channel-id>\\n<triggering-event-id>"));
+    }
+}
+
+#[test]
+fn navigation_builtin_remains_advisory() {
+    let records = built_in_persona_records("2026-07-27T00:00:00Z");
+    let navigation = records
+        .iter()
+        .find(|record| record.id == "builtin:command-navigation")
+        .expect("navigation adviser should exist");
+
+    assert!(navigation
+        .system_prompt
+        .contains("do not make navigational decisions"));
+    assert!(navigation
+        .system_prompt
+        .contains("do not generate executable navigation orders"));
 }
 
 #[test]

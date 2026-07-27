@@ -10,13 +10,9 @@ import {
 import sextantInsignia from "@/assets/command-adviser/sextant-insignia.png";
 import { cn } from "@/shared/lib/cn";
 
-export type CommandAdviserId =
-  | "chief_of_staff"
-  | "operations"
-  | "navigation"
-  | "daily_routine"
-  | "reporting"
-  | "plans";
+import type { AdviserId } from "../domain/briefContracts";
+
+export type CommandAdviserId = AdviserId;
 
 type AdviserIdentity = {
   readonly label: string;
