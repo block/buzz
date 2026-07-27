@@ -37,6 +37,7 @@ type SidebarLoadingShape = {
 };
 
 type SidebarLoadingCachePayload = SidebarLoadingShape & {
+  updatedAt: number;
   version: 1;
 };
 
@@ -131,6 +132,7 @@ function writeSidebarLoadingShape(
   const payload: SidebarLoadingCachePayload = {
     channels: shape.channels.slice(0, 3),
     directMessages: shape.directMessages.slice(0, 2),
+    updatedAt: Date.now(),
     version: 1,
   };
 

@@ -109,6 +109,26 @@ test("startup recovery retries after marker write fails", () => {
   assert.equal(ls.getItem("buzz-local-storage-quota-recovery.v1"), "1");
 });
 
+test("global cache byte budget evicts only oldest entries needed", () => {
+  const ls = makeQuotaLocalStorage({ maxEntries: 20 });
+  install(ls);
+  ls.store.set("buzz-communities", "keep");
+  const snapshot = (updatedAt) =>
+    JSON.stringify({ updatedAt, payload: "x".repeat(400_000) });
+  const oldestKey = "buzz-channel-messages.v1:relay:oldest";
+  const newerKey = "buzz-channels.v1:relay-newer";
+  const newestKey = "buzz-channel-messages.v1:relay:newest";
+
+  assert.equal(setLocalStorageItemWithRecovery(oldestKey, snapshot(1)), true);
+  assert.equal(setLocalStorageItemWithRecovery(newerKey, snapshot(2)), true);
+  assert.equal(setLocalStorageItemWithRecovery(newestKey, snapshot(3)), true);
+
+  assert.equal(ls.getItem(oldestKey), null);
+  assert.notEqual(ls.getItem(newerKey), null);
+  assert.notEqual(ls.getItem(newestKey), null);
+  assert.equal(ls.getItem("buzz-communities"), "keep");
+});
+
 test("global cache byte budget spans relays and preserves durable state", () => {
   const ls = makeQuotaLocalStorage({ maxEntries: 20 });
   install(ls);

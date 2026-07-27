@@ -52,8 +52,21 @@ export function writeChannelSnapshot(
 ): void {
   try {
     const key = channelSnapshotKey(relayUrl);
-    const serialized = JSON.stringify({ version: 1, channels });
-    if (window.localStorage.getItem(key) === serialized) return;
+    const previous = window.localStorage.getItem(key);
+    if (previous) {
+      try {
+        const parsed = parseChannelSnapshot(JSON.parse(previous));
+        if (parsed && JSON.stringify(parsed) === JSON.stringify(channels))
+          return;
+      } catch {
+        // Malformed snapshots are replaced below.
+      }
+    }
+    const serialized = JSON.stringify({
+      version: 1,
+      updatedAt: Date.now(),
+      channels,
+    });
     setLocalStorageItemWithRecovery(key, serialized);
   } catch {
     // Storage access failures are non-fatal.

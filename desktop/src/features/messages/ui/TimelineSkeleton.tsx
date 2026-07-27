@@ -36,6 +36,7 @@ export type TimelineSkeletonRowShape = {
 
 type TimelineSkeletonCachePayload = {
   rows: TimelineSkeletonRowShape[];
+  updatedAt: number;
   version: 1;
 };
 
@@ -134,6 +135,7 @@ function writeTimelineSkeletonRows(
 
   const payload: TimelineSkeletonCachePayload = {
     rows: rows.slice(0, 4),
+    updatedAt: Date.now(),
     version: 1,
   };
 

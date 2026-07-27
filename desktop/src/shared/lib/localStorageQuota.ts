@@ -43,15 +43,46 @@ function evictPureCacheEntries(): number {
   return toRemove.length;
 }
 
-function pureCacheBytesExcluding(excludedKey: string): number {
-  let bytes = 0;
+function pureCacheEntriesExcluding(excludedKey: string): Array<{
+  bytes: number;
+  key: string;
+  updatedAt: number;
+}> {
+  const entries: Array<{ bytes: number; key: string; updatedAt: number }> = [];
   for (let i = 0; i < window.localStorage.length; i++) {
     const key = window.localStorage.key(i);
     if (key === null || key === excludedKey || !isPureCacheKey(key)) continue;
     const value = window.localStorage.getItem(key);
-    if (value !== null) bytes += storageEntryBytes(key, value);
+    if (value === null) continue;
+
+    let updatedAt = 0;
+    try {
+      const parsed = JSON.parse(value) as { updatedAt?: unknown };
+      if (
+        typeof parsed.updatedAt === "number" &&
+        Number.isFinite(parsed.updatedAt)
+      ) {
+        updatedAt = parsed.updatedAt;
+      }
+    } catch {
+      // Legacy or malformed cache entries are safe to evict first.
+    }
+    entries.push({ bytes: storageEntryBytes(key, value), key, updatedAt });
   }
-  return bytes;
+  return entries;
+}
+
+function trimPureCacheForWrite(key: string, writeBytes: number): void {
+  const entries = pureCacheEntriesExcluding(key);
+  let totalBytes = entries.reduce((total, entry) => total + entry.bytes, 0);
+  if (totalBytes + writeBytes <= PURE_CACHE_BYTE_BUDGET) return;
+
+  entries.sort((a, b) => a.updatedAt - b.updatedAt);
+  for (const entry of entries) {
+    window.localStorage.removeItem(entry.key);
+    totalBytes -= entry.bytes;
+    if (totalBytes + writeBytes <= PURE_CACHE_BYTE_BUDGET) return;
+  }
 }
 
 function preparePureCacheWrite(key: string, value: string): boolean {
@@ -63,9 +94,7 @@ function preparePureCacheWrite(key: string, value: string): boolean {
     return false;
   }
 
-  if (pureCacheBytesExcluding(key) + writeBytes > PURE_CACHE_BYTE_BUDGET) {
-    evictPureCacheEntries();
-  }
+  trimPureCacheForWrite(key, writeBytes);
   return true;
 }
 
