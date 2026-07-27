@@ -1,0 +1,164 @@
+/**
+ * Pure logic for the consolidated Harnesses settings surface and the
+ * Add-harnesses catalog dialog.
+ *
+ * Extracted for deterministic unit-testing — no React, no Tauri, no network.
+ */
+
+import type { AcpRuntimeCatalogEntry } from "@/shared/api/types";
+
+// Builtins that anchor the top of "Your harnesses" — mirrors the old
+// DoctorSettingsPanel RUNTIME_SORT_PRIORITY so the Buzz + Goose rows stay
+// where users learned to find them.
+const ROW_SORT_PRIORITY: Record<string, number> = {
+  "buzz-agent": 0,
+  goose: 1,
+};
+
+/**
+ * True when the entry earns a row in "Your harnesses":
+ *
+ * - it is ready (`availability === "available"`), or
+ * - one flip of the switch makes it ready (auto-install works), or
+ * - the user authored it (`source === "custom"` — owner rows keep their
+ *   edit/delete affordances regardless of readiness).
+ *
+ * Everything else needs multi-step setup and belongs in the Add-harnesses
+ * catalog with a real setup action — NOT a permanently disabled switch.
+ */
+export function isYourHarnessEntry(entry: AcpRuntimeCatalogEntry): boolean {
+  if (entry.source === "custom") return true;
+  if (entry.availability === "available") return true;
+  return entry.canAutoInstall && !entry.nodeRequired;
+}
+
+/** Entries that render as rows in "Your harnesses". */
+export function yourHarnessEntries(
+  catalog: readonly AcpRuntimeCatalogEntry[],
+): AcpRuntimeCatalogEntry[] {
+  return catalog.filter(isYourHarnessEntry);
+}
+
+/**
+ * Entries offered in the Add-harnesses catalog: every non-custom entry.
+ * Ready ones still show (marked as such) so the catalog doubles as a
+ * browsable inventory, like the Agent Catalog.
+ */
+export function catalogDialogEntries(
+  catalog: readonly AcpRuntimeCatalogEntry[],
+): AcpRuntimeCatalogEntry[] {
+  return catalog
+    .filter((e) => e.source !== "custom")
+    .sort(compareCatalogEntries);
+}
+
+/** Needs-setup entries first (that's why the user opened the dialog), then
+ * ready ones; alphabetical within each group. */
+function compareCatalogEntries(
+  a: AcpRuntimeCatalogEntry,
+  b: AcpRuntimeCatalogEntry,
+): number {
+  const aReady = a.availability === "available" ? 1 : 0;
+  const bReady = b.availability === "available" ? 1 : 0;
+  if (aReady !== bReady) return aReady - bReady;
+  return a.label.localeCompare(b.label);
+}
+
+/** Case-insensitive catalog search across label, id, and command. */
+export function filterCatalogEntries(
+  entries: readonly AcpRuntimeCatalogEntry[],
+  query: string,
+): AcpRuntimeCatalogEntry[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return [...entries];
+  return entries.filter(
+    (e) =>
+      e.label.toLowerCase().includes(q) ||
+      e.id.toLowerCase().includes(q) ||
+      (e.command ?? "").toLowerCase().includes(q),
+  );
+}
+
+function compareInitialRows(
+  a: AcpRuntimeCatalogEntry,
+  b: AcpRuntimeCatalogEntry,
+): number {
+  const aPriority = ROW_SORT_PRIORITY[a.id] ?? Number.MAX_SAFE_INTEGER;
+  const bPriority = ROW_SORT_PRIORITY[b.id] ?? Number.MAX_SAFE_INTEGER;
+  if (aPriority !== bPriority) return aPriority - bPriority;
+  const aOn = a.availability === "available" ? 0 : 1;
+  const bOn = b.availability === "available" ? 0 : 1;
+  if (aOn !== bOn) return aOn - bOn;
+  return a.label.localeCompare(b.label);
+}
+
+/**
+ * Stable row ordering for "Your harnesses".
+ *
+ * First render sorts priority builtins first, then enabled-before-disabled,
+ * then alphabetically. Subsequent renders KEEP the previous relative order
+ * for ids that are still present — a row whose switch just flipped must not
+ * jump around under the pointer — and append newcomers (e.g. a harness just
+ * added from the catalog) using the initial comparator.
+ *
+ * Returns the ordered id list; callers map ids back to entries.
+ */
+export function stableRowOrder(
+  previousOrder: readonly string[],
+  entries: readonly AcpRuntimeCatalogEntry[],
+): string[] {
+  const present = new Set(entries.map((e) => e.id));
+  const kept = previousOrder.filter((id) => present.has(id));
+  const keptSet = new Set(kept);
+  const appended = entries
+    .filter((e) => !keptSet.has(e.id))
+    .sort(compareInitialRows)
+    .map((e) => e.id);
+  return [...kept, ...appended];
+}
+
+/** Human status label for a catalog entry; null when nothing needs saying. */
+export function entryStatusLabel(entry: AcpRuntimeCatalogEntry): string | null {
+  if (entry.authStatus.status === "config_invalid") return "Config error";
+  switch (entry.availability) {
+    case "adapter_missing":
+      return "Adapter needed";
+    case "adapter_outdated":
+      return "Update needed";
+    case "cli_missing":
+    case "not_installed":
+      return "CLI needed";
+    case "available":
+      return entry.authStatus.status === "logged_out" ? "Sign-in needed" : null;
+    default:
+      return null;
+  }
+}
+
+export type CatalogPrimaryAction =
+  | { kind: "install"; label: string }
+  | { kind: "docs"; label: string }
+  | { kind: "none" };
+
+/**
+ * Primary action for the catalog detail pane.
+ *
+ * - Ready → no action (the entry already has a row in Your harnesses).
+ * - One-click installable → Install.
+ * - Otherwise → open the vendor's setup guide, when one exists.
+ */
+export function catalogPrimaryAction(
+  entry: AcpRuntimeCatalogEntry,
+): CatalogPrimaryAction {
+  if (entry.availability === "available") return { kind: "none" };
+  if (entry.canAutoInstall && !entry.nodeRequired) {
+    return {
+      kind: "install",
+      label: entry.availability === "adapter_outdated" ? "Update" : "Install",
+    };
+  }
+  if (entry.installInstructionsUrl.trim().length > 0) {
+    return { kind: "docs", label: "Open setup guide" };
+  }
+  return { kind: "none" };
+}

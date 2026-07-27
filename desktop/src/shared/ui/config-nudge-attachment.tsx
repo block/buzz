@@ -45,7 +45,7 @@ function requirementKey(
 /**
  * Returns true when every requirement in the nudge is a `cli_login` surface.
  * Non-authOnly all-cli_login cards (at least one install-state row) route to
- * Agent runtimes — install/login problems can't be fixed in Edit Agent. AuthOnly cards
+ * Harness settings — install/login problems can't be fixed in Edit Agent. AuthOnly cards
  * (every row is `availability === "available"`) are purely informational and
  * do not route anywhere.
  */
@@ -142,7 +142,7 @@ function firstFocusTarget(
  * Mirrors `firstFocusTarget` but operates on one row — used so per-row
  * Edit Agent CTAs focus the field that row describes, not the first editable
  * field on the card.
- * Returns `undefined` for `cli_login` requirements (Agent runtimes, not Edit Agent).
+ * Returns `undefined` for `cli_login` requirements (Harness settings, not Edit Agent).
  */
 export function focusTargetForRequirement(
   req: ConfigNudgePayload["requirements"][number],
@@ -166,15 +166,15 @@ export function focusTargetForRequirement(
  *
  * Routing:
  * (A) Any card with a `git_bash` requirement, or one whose requirements are all
- *     install-state `cli_login`, opens Settings → Agent runtimes. A card-level
- *     Agent runtimes label in `AttachmentActions` confirms the action at rest.
+ *     install-state `cli_login`, opens Settings → Harness settings. A card-level
+ *     Harness settings label in `AttachmentActions` confirms the action at rest.
  * (A-auth) A card whose requirements are all available `cli_login` surfaces is
- *     purely informational: Agent runtimes cannot authenticate a CLI, and `setup_copy`
+ *     purely informational: Harness settings cannot authenticate a CLI, and `setup_copy`
  *     already gives the needed command.
  * (B) Other mixed cards open Edit Agent as the card-level fallback. Their rows
  *     carry inline CTAs for the matching destination: install-state `cli_login`
- *     opens Agent runtimes; `env_key` and `normalized_field` open Edit Agent. A
- *     `git_bash` row is covered by the card-level Agent runtimes route, so it does not
+ *     opens Harness settings; `env_key` and `normalized_field` open Edit Agent. A
+ *     `git_bash` row is covered by the card-level Harness settings route, so it does not
  *     render a redundant row action.
  */
 export function ConfigNudgeCard({
@@ -198,7 +198,7 @@ export function ConfigNudgeCard({
   const openDoctor = () => {
     if (!onOpenSettings) {
       console.warn(
-        "[ConfigNudgeCard] onOpenSettings is null — Agent runtimes deep-link unavailable on this surface",
+        "[ConfigNudgeCard] onOpenSettings is null — Harness settings deep-link unavailable on this surface",
       );
     }
     onOpenSettings?.("agents");
@@ -211,7 +211,7 @@ export function ConfigNudgeCard({
 
   const handleOpen = () => {
     if (shouldOpenDoctor(nudge.requirements)) {
-      // Git Bash and install-state CLI requirements both resolve in Agent runtimes.
+      // Git Bash and install-state CLI requirements both resolve in Harness settings.
       // Informational-only cards never mount this trigger.
       openDoctor();
     } else {
@@ -221,7 +221,7 @@ export function ConfigNudgeCard({
   };
 
   const handleOpenDoctor = (e: React.MouseEvent) => {
-    // (B) Per-row Agent runtimes CTA — stop propagation so the card trigger doesn't
+    // (B) Per-row Harness settings CTA — stop propagation so the card trigger doesn't
     // double-fire to Edit Agent on mixed cards.
     e.stopPropagation();
     openDoctor();
@@ -273,7 +273,7 @@ export function ConfigNudgeCard({
       {opensDoctor && !informationalOnly && (
         <AttachmentActions className="items-end self-end">
           <span className="text-xs text-muted-foreground">
-            Open Agent runtimes →
+            Open Harness settings →
           </span>
         </AttachmentActions>
       )}
@@ -282,7 +282,7 @@ export function ConfigNudgeCard({
         <AttachmentTrigger
           aria-label={
             opensDoctor
-              ? `Open Agent runtimes settings for ${nudge.agent_name}`
+              ? `Open Harness settings for ${nudge.agent_name}`
               : `Open Edit Agent for ${nudge.agent_name}`
           }
           onClick={handleOpen}
@@ -356,11 +356,11 @@ function RequirementRow({
           <span className="flex-1 [overflow-wrap:anywhere]">
             {cliLoginMessage(requirement)}
           </span>
-          {/* (B) Per-row Agent runtimes CTA — shown only on mixed cards where the
+          {/* (B) Per-row Harness settings CTA — shown only on mixed cards where the
               card-level trigger opens Edit Agent (not auth-only cards). When
-              allCliLogin is true the card trigger already routes to Agent runtimes; the
+              allCliLogin is true the card trigger already routes to Harness settings; the
               per-row button is redundant and is suppressed. Also suppressed for
-              `available` cli_login rows — Agent runtimes has no auth functionality and
+              `available` cli_login rows — Harness settings has no auth functionality and
               the setup_copy already provides the exact login command.
               stopPropagation prevents double-fire on mixed cards where both
               card and row CTAs are visible. */}
@@ -370,7 +370,7 @@ function RequirementRow({
               onClick={onOpenDoctor}
               type="button"
             >
-              Open Agent runtimes →
+              Open Harness settings →
             </button>
           )}
         </div>
@@ -399,7 +399,7 @@ function RequirementRow({
     }
     case "cli_config_invalid": {
       // Config-invalid rows are purely informational — the user must edit an
-      // external file. No Agent runtimes CTA (Buzz can't repair ~/.codex/config.toml)
+      // external file. No Harness settings CTA (Buzz can't repair ~/.codex/config.toml)
       // and no Edit Agent CTA (the field isn't managed by Buzz).
       const cli = requirement.probe_args[0] ?? "the CLI";
       const configFile = `~/.${cli}/config.toml`;

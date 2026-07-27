@@ -121,6 +121,7 @@ export default defineConfig({
         "**/mesh-compute.spec.ts",
         "**/observer-archive-policy.spec.ts",
         "**/harness-management.spec.ts",
+        "**/harness-catalog-screenshots.spec.ts",
       ],
       use: {
         ...devices["Desktop Chrome"],

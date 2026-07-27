@@ -1,13 +1,14 @@
 import * as React from "react";
-import { EllipsisVertical, ExternalLink, RefreshCw } from "lucide-react";
+import { EllipsisVertical, ExternalLink } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
 import {
   useAcpAuthMethodsQuery,
-  useAcpRuntimesQuery,
   useConnectAcpRuntimeMutation,
-  useGitBashPrerequisiteQuery,
+  useDeleteCustomHarnessMutation,
   useInstallAcpRuntimeMutation,
+  useManagedAgentsQuery,
+  usePersonasQuery,
 } from "@/features/agents/hooks";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { RuntimeIcon } from "@/features/onboarding/ui/RuntimeIcon";
@@ -31,9 +32,12 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
-import { SectionHeader } from "@/shared/ui/PageHeader";
 import { Spinner } from "@/shared/ui/spinner";
 import { Switch } from "@/shared/ui/switch";
+
+import { CustomHarnessForm } from "./CustomHarnessForm";
+import { formValuesFromCatalogEntry } from "./harnessFormLogic";
+import { deleteConfirmState } from "./harnessGalleryLogic";
 
 const RUNTIME_LOGO_URLS: Record<string, string> = {
   "buzz-agent": "/app-icon@2x.png",
@@ -49,11 +53,6 @@ const RUNTIME_LOGO_SCALE: Record<string, string> = {
   goose: "scale-125",
 };
 
-const RUNTIME_SORT_PRIORITY: Record<string, number> = {
-  "buzz-agent": 0,
-  goose: 1,
-};
-
 function runtimeInstallGuideLabel(runtime: AcpRuntimeCatalogEntry) {
   return runtime.availability === "adapter_missing" ||
     runtime.availability === "adapter_outdated"
@@ -62,15 +61,13 @@ function runtimeInstallGuideLabel(runtime: AcpRuntimeCatalogEntry) {
 }
 
 function RuntimeLogo({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
-  // Presets deliberately emit an empty avatar_url (no remote or user-supplied
-  // icon URLs), so route them through RuntimeIcon — the same component the
-  // preset gallery uses — which owns the PRESET_LOGOS map, the per-logo
-  // contrast treatments (omp needs a dark chip, grok a light one), and the
-  // terminal-glyph fallback for logo-less presets like Cursor (brand assets
-  // not licensed for bundling). Keying on `source` rather than logo presence
-  // keeps both surfaces identical for every preset. Builtins keep the
-  // ProfileAvatar path below.
-  if (runtime.source === "preset") {
+  // Presets and customs deliberately emit an empty avatar_url (no remote or
+  // user-supplied icon URLs), so route them through RuntimeIcon — which owns
+  // the PRESET_LOGOS map, the per-logo contrast treatments (omp needs a dark
+  // chip, grok a light one), and the terminal-glyph fallback for logo-less
+  // entries like Cursor (brand assets not licensed for bundling). Builtins
+  // keep the ProfileAvatar path below.
+  if (runtime.source === "preset" || runtime.source === "custom") {
     return (
       <span
         className="flex h-9 w-9 shrink-0 items-center justify-center"
@@ -99,12 +96,16 @@ function RuntimeOverflowMenu({
   connectingMethodId,
   isConnecting,
   onConnect,
+  onDelete,
+  onEdit,
   runtime,
 }: {
   authMethods: AcpAuthMethod[];
   connectingMethodId: string | null;
   isConnecting: boolean;
   onConnect: (method: AcpAuthMethod) => void;
+  onDelete?: () => void;
+  onEdit?: () => void;
   runtime: AcpRuntimeCatalogEntry;
 }) {
   const hasInstructions =
@@ -113,7 +114,11 @@ function RuntimeOverflowMenu({
       runtime.authStatus.status === "logged_out" ||
       runtime.authStatus.status === "config_invalid");
   const hasActions =
-    runtime.nodeRequired || hasInstructions || authMethods.length > 0;
+    runtime.nodeRequired ||
+    hasInstructions ||
+    authMethods.length > 0 ||
+    Boolean(onEdit) ||
+    Boolean(onDelete);
 
   if (!hasActions) {
     return null;
@@ -161,6 +166,23 @@ function RuntimeOverflowMenu({
             {runtimeInstallGuideLabel(runtime)}
           </DropdownMenuItem>
         ) : null}
+        {onEdit ? (
+          <DropdownMenuItem
+            data-testid={`custom-harness-edit-${runtime.id}`}
+            onSelect={onEdit}
+          >
+            Edit
+          </DropdownMenuItem>
+        ) : null}
+        {onDelete ? (
+          <DropdownMenuItem
+            className="text-destructive focus:text-destructive"
+            data-testid={`custom-harness-delete-${runtime.id}`}
+            onSelect={onDelete}
+          >
+            Delete
+          </DropdownMenuItem>
+        ) : null}
       </DropdownMenuContent>
     </DropdownMenu>
   );
@@ -172,6 +194,8 @@ function RuntimeActions({
   isConnecting,
   isInstalling,
   onConnect,
+  onDelete,
+  onEdit,
   onInstall,
   runtime,
 }: {
@@ -180,12 +204,18 @@ function RuntimeActions({
   isConnecting: boolean;
   isInstalling: boolean;
   onConnect: (method: AcpAuthMethod) => void;
+  onDelete?: () => void;
+  onEdit?: () => void;
   onInstall: () => void;
   runtime: AcpRuntimeCatalogEntry;
 }) {
   const isAvailable = runtime.availability === "available";
   const canInstall = runtime.canAutoInstall && !runtime.nodeRequired;
   const isWorking = isInstalling || isConnecting;
+  // "Needs setup, can't be fixed by one flip" rows never render a disabled
+  // switch — a disabled OFF switch implies a broken toggle when the real job
+  // is setup. Custom rows in that state keep their ••• menu instead.
+  const showSwitch = isAvailable || canInstall;
 
   return (
     <div className="ml-auto flex shrink-0 items-center justify-end gap-1">
@@ -194,6 +224,8 @@ function RuntimeActions({
         connectingMethodId={connectingMethodId}
         isConnecting={isConnecting}
         onConnect={onConnect}
+        onDelete={onDelete}
+        onEdit={onEdit}
         runtime={runtime}
       />
       {isWorking ? (
@@ -204,7 +236,7 @@ function RuntimeActions({
             data-testid={`doctor-runtime-loading-${runtime.id}`}
           />
         </div>
-      ) : (
+      ) : showSwitch ? (
         <Switch
           aria-label={`${runtime.label} availability`}
           checked={isAvailable}
@@ -217,7 +249,7 @@ function RuntimeActions({
             }
           }}
         />
-      )}
+      ) : null}
     </div>
   );
 }
@@ -261,56 +293,28 @@ function RuntimeStatusChip({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
   );
 }
 
-function RuntimeHeader({
-  authMethods,
-  connectingMethodId,
-  isConnecting,
-  isInstalling,
-  onConnect,
-  onInstall,
-  runtime,
-}: {
-  authMethods: AcpAuthMethod[];
-  connectingMethodId: string | null;
-  isConnecting: boolean;
-  isInstalling: boolean;
-  onConnect: (method: AcpAuthMethod) => void;
-  onInstall: () => void;
-  runtime: AcpRuntimeCatalogEntry;
-}) {
-  return (
-    <div className="flex items-center justify-between gap-4">
-      <div className="flex min-w-0 items-center gap-3">
-        <RuntimeLogo runtime={runtime} />
-        <div className="flex min-w-0 flex-wrap items-center gap-2">
-          <p className="min-w-0 text-sm font-medium">{runtime.label}</p>
-          <RuntimeStatusChip runtime={runtime} />
-        </div>
-      </div>
-      <RuntimeActions
-        authMethods={authMethods}
-        connectingMethodId={connectingMethodId}
-        isConnecting={isConnecting}
-        isInstalling={isInstalling}
-        onConnect={onConnect}
-        onInstall={onInstall}
-        runtime={runtime}
-      />
-    </div>
-  );
-}
-
-function RuntimeRow({
+/**
+ * One row in "Your harnesses".
+ *
+ * Carries the full operational surface for a ready (or one-click-ready)
+ * harness: logo, status chip, auth/overflow menu, install/connect flows, and
+ * — for custom harnesses — edit and delete with the blast-radius guard.
+ */
+export function HarnessRow({
   resetEpoch,
   runtime,
 }: {
   resetEpoch: number;
   runtime: AcpRuntimeCatalogEntry;
 }) {
+  const isCustom = runtime.source === "custom";
   const [terminalLaunchMethodId, setTerminalLaunchMethodId] = React.useState<
     string | null
   >(null);
   const [isUpdateWarningOpen, setIsUpdateWarningOpen] = React.useState(false);
+  const [editing, setEditing] = React.useState(false);
+  const [confirmingDelete, setConfirmingDelete] = React.useState(false);
+  const [deleteError, setDeleteError] = React.useState<string | null>(null);
   // Each row owns its mutation instance so concurrent installs each track
   // their own isPending / result state independently.
   const installMutation = useInstallAcpRuntimeMutation();
@@ -327,6 +331,20 @@ function RuntimeRow({
   }, [resetEpoch]);
   const isInstalling = installMutation.isPending;
   const installError = installResult?.error ?? null;
+
+  const del = useDeleteCustomHarnessMutation();
+  // Blast-radius data for the delete confirmation — only fetched while the
+  // confirmation is open, so the row list doesn't poll agents. Confirm stays
+  // disabled until both queries settle (deleteConfirmState) so a quick click
+  // can't beat the "N agents will stop launching" warning.
+  const agentsQuery = useManagedAgentsQuery({ enabled: confirmingDelete });
+  const personasQuery = usePersonasQuery({ enabled: confirmingDelete });
+  const confirmState = deleteConfirmState(
+    runtime.id,
+    runtime.label,
+    agentsQuery,
+    personasQuery,
+  );
 
   function handleInstall() {
     setInstallResult(null);
@@ -374,42 +392,71 @@ function RuntimeRow({
         }`
       : null;
 
+  if (editing) {
+    return (
+      <CustomHarnessForm
+        initial={formValuesFromCatalogEntry(runtime)}
+        originalId={runtime.id}
+        onCancel={() => setEditing(false)}
+        onSaved={() => setEditing(false)}
+      />
+    );
+  }
+
   return (
     <div
       className="min-h-16 rounded-2xl border border-border/60 bg-muted/20 px-4 py-3.5 text-sm"
       data-testid={`doctor-runtime-${runtime.id}`}
     >
       <div className="min-w-0">
-        <RuntimeHeader
-          authMethods={authMethods}
-          connectingMethodId={connectMutation.variables?.methodId ?? null}
-          isConnecting={connectMutation.isPending}
-          isInstalling={isInstalling}
-          onConnect={(method) => {
-            setTerminalLaunchMethodId(null);
-            connectMutation.mutate(
-              {
-                runtimeId: runtime.id,
-                methodId: method.id,
-              },
-              {
-                onSuccess: (result) => {
-                  if (result.launched && method.type === "terminal") {
-                    setTerminalLaunchMethodId(method.id);
-                  }
+        <div className="flex items-center justify-between gap-4">
+          <div className="flex min-w-0 items-center gap-3">
+            <RuntimeLogo runtime={runtime} />
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
+              <p className="min-w-0 text-sm font-medium">{runtime.label}</p>
+              <RuntimeStatusChip runtime={runtime} />
+            </div>
+          </div>
+          <RuntimeActions
+            authMethods={authMethods}
+            connectingMethodId={connectMutation.variables?.methodId ?? null}
+            isConnecting={connectMutation.isPending}
+            isInstalling={isInstalling}
+            onConnect={(method) => {
+              setTerminalLaunchMethodId(null);
+              connectMutation.mutate(
+                {
+                  runtimeId: runtime.id,
+                  methodId: method.id,
                 },
-              },
-            );
-          }}
-          onInstall={() => {
-            if (runtime.availability === "adapter_outdated") {
-              setIsUpdateWarningOpen(true);
-              return;
+                {
+                  onSuccess: (result) => {
+                    if (result.launched && method.type === "terminal") {
+                      setTerminalLaunchMethodId(method.id);
+                    }
+                  },
+                },
+              );
+            }}
+            onDelete={
+              isCustom
+                ? () => {
+                    setDeleteError(null);
+                    setConfirmingDelete(true);
+                  }
+                : undefined
             }
-            handleInstall();
-          }}
-          runtime={runtime}
-        />
+            onEdit={isCustom ? () => setEditing(true) : undefined}
+            onInstall={() => {
+              if (runtime.availability === "adapter_outdated") {
+                setIsUpdateWarningOpen(true);
+                return;
+              }
+              handleInstall();
+            }}
+            runtime={runtime}
+          />
+        </div>
 
         {runtime.availability !== "available" ? (
           <div
@@ -464,6 +511,57 @@ function RuntimeRow({
             to re-check {runtime.label}.
           </p>
         ) : null}
+        {confirmingDelete ? (
+          <div className="mt-2 space-y-2">
+            <p
+              className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-sm text-amber-600 dark:text-amber-400"
+              data-testid={`custom-harness-delete-warning-${runtime.id}`}
+            >
+              {confirmState.message}
+            </p>
+            <div className="flex justify-end gap-2">
+              <Button
+                className="h-7 px-3 text-xs"
+                onClick={() => {
+                  setConfirmingDelete(false);
+                  setDeleteError(null);
+                }}
+                size="sm"
+                type="button"
+                variant="ghost"
+              >
+                Cancel
+              </Button>
+              <Button
+                className="h-7 px-3 text-xs"
+                data-testid={`custom-harness-delete-confirm-${runtime.id}`}
+                disabled={del.isPending || !confirmState.canConfirm}
+                onClick={() => {
+                  setDeleteError(null);
+                  del.mutate(runtime.id, {
+                    onSuccess: () => setConfirmingDelete(false),
+                    onError: (err) => {
+                      setDeleteError(
+                        err instanceof Error ? err.message : String(err),
+                      );
+                      // Keep confirmation open so user sees the error.
+                    },
+                  });
+                }}
+                size="sm"
+                type="button"
+                variant="destructive"
+              >
+                {del.isPending ? <Spinner className="h-3.5 w-3.5" /> : "Delete"}
+              </Button>
+            </div>
+          </div>
+        ) : null}
+        {deleteError ? (
+          <p className="mt-2 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-1.5 text-sm text-destructive">
+            {deleteError}
+          </p>
+        ) : null}
       </div>
       <AlertDialog
         onOpenChange={setIsUpdateWarningOpen}
@@ -490,154 +588,5 @@ function RuntimeRow({
         </AlertDialogContent>
       </AlertDialog>
     </div>
-  );
-}
-
-function GitBashCard({
-  prerequisite,
-}: {
-  prerequisite: NonNullable<
-    ReturnType<typeof useGitBashPrerequisiteQuery>["data"]
-  >;
-}) {
-  return (
-    <div
-      className={cn(
-        "min-h-16 rounded-2xl border px-4 py-4 text-sm",
-        prerequisite.available
-          ? "border-border/60 bg-muted/20"
-          : "border-amber-500/20 bg-amber-500/5",
-      )}
-      data-testid="doctor-git-bash"
-    >
-      <div className="min-w-0">
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <div className="flex min-w-0 flex-wrap items-center gap-2">
-            <p className="text-sm font-medium">Git Bash</p>
-            <span aria-hidden="true" className="text-muted-foreground/50">
-              ·
-            </span>
-            <span
-              className={cn(
-                "inline-flex shrink-0 items-center rounded-md px-2 py-0.5 text-xs font-medium",
-                prerequisite.available
-                  ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
-                  : "bg-amber-500/15 text-amber-600 dark:text-amber-400",
-              )}
-            >
-              {prerequisite.available ? "Available" : "Action needed"}
-            </span>
-          </div>
-          {!prerequisite.available ? (
-            <button
-              className="inline-flex shrink-0 items-center gap-1 text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
-              onClick={() => void openUrl(prerequisite.installInstructionsUrl)}
-              type="button"
-            >
-              <ExternalLink className="h-4 w-4" /> Install Git for Windows
-            </button>
-          ) : null}
-        </div>
-        {!prerequisite.available ? (
-          <div className="mt-3 space-y-1 text-sm text-muted-foreground">
-            <p>Required for buzz-agent shell tools on Windows.</p>
-            <p>{prerequisite.installHint}</p>
-          </div>
-        ) : null}
-      </div>
-    </div>
-  );
-}
-
-export function DoctorSettingsPanel() {
-  const runtimesQuery = useAcpRuntimesQuery();
-  const gitBashQuery = useGitBashPrerequisiteQuery();
-  const runtimes = React.useMemo(
-    () =>
-      [...(runtimesQuery.data ?? [])].sort(
-        (left, right) =>
-          (RUNTIME_SORT_PRIORITY[left.id] ?? Number.MAX_SAFE_INTEGER) -
-          (RUNTIME_SORT_PRIORITY[right.id] ?? Number.MAX_SAFE_INTEGER),
-      ),
-    [runtimesQuery.data],
-  );
-  const isRefreshing = runtimesQuery.isFetching;
-  // Incremented each time the user clicks "Check again" so RuntimeRow
-  // useEffect clears stale install results from before the refresh.
-  const [resetEpoch, setResetEpoch] = React.useState(0);
-
-  return (
-    <section
-      className="min-w-0 space-y-4"
-      data-testid="settings-agent-runtimes"
-    >
-      <SectionHeader
-        className="items-center"
-        title="Agent runtimes"
-        description="Choose which agent tools Buzz can use on this device."
-        action={
-          <Button
-            disabled={isRefreshing}
-            onClick={() => {
-              setResetEpoch((e) => e + 1);
-              void runtimesQuery.refetch();
-              void gitBashQuery.refetch();
-            }}
-            size="sm"
-            type="button"
-            variant="outline"
-          >
-            <RefreshCw
-              className={cn("h-4 w-4", isRefreshing && "animate-spin")}
-            />
-            Check again
-          </Button>
-        }
-      />
-
-      <div className="space-y-8">
-        {gitBashQuery.data ? (
-          <section>
-            <div className="mb-3 text-sm">
-              <h2 className="text-lg font-semibold tracking-tight">
-                System prerequisites
-              </h2>
-              <p className="mt-1 text-sm font-normal text-muted-foreground">
-                Windows tools required by supported agents.
-              </p>
-            </div>
-            <GitBashCard prerequisite={gitBashQuery.data} />
-          </section>
-        ) : null}
-
-        <section aria-label="Supported agent runtimes">
-          {runtimesQuery.isLoading ? (
-            <div className="rounded-2xl bg-muted/20 px-4 py-4 text-sm font-normal text-muted-foreground">
-              Checking agent runtimes...
-            </div>
-          ) : runtimes.length > 0 ? (
-            <div className="space-y-3" data-testid="doctor-runtime-list">
-              {runtimes.map((runtime) => (
-                <RuntimeRow
-                  key={runtime.id}
-                  resetEpoch={resetEpoch}
-                  runtime={runtime}
-                />
-              ))}
-            </div>
-          ) : (
-            <div className="rounded-2xl bg-amber-500/10 px-4 py-4 text-sm text-warning">
-              No supported agent runtimes found.
-            </div>
-          )}
-
-          {runtimesQuery.error instanceof Error ? (
-            <p className="mt-3 rounded-2xl bg-destructive/10 px-4 py-4 text-sm text-destructive">
-              {runtimesQuery.error.message}
-            </p>
-          ) : null}
-        </section>
-      </div>
-    </section>
   );
 }

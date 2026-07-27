@@ -156,7 +156,7 @@ test.describe("doctor CTA nudge card screenshots", () => {
     const card = page.locator("[data-config-nudge]").last();
     await expect(card).toBeVisible({ timeout: 10_000 });
     // Auth-only card is informational — no runtime settings CTA anywhere.
-    await expect(card.getByText("Open Agent runtimes →")).toHaveCount(0);
+    await expect(card.getByText("Open Harness settings →")).toHaveCount(0);
 
     await card.scrollIntoViewIfNeeded();
     await settleAnimations(page);
@@ -245,7 +245,7 @@ test.describe("doctor CTA nudge card screenshots", () => {
     const card = page.locator("[data-config-nudge]").last();
     await expect(card).toBeVisible({ timeout: 10_000 });
     // Mixed card: cli_login opens Agent runtimes; env_key opens Edit Agent.
-    await expect(card.getByText("Open Agent runtimes →")).toBeVisible();
+    await expect(card.getByText("Open Harness settings →")).toBeVisible();
     // Both per-row CTAs share the same right edge (vertically aligned).
     await expect(card.getByText("Edit Agent →", { exact: true })).toBeVisible();
 

@@ -177,7 +177,7 @@ test.describe("Doctor panel state screenshots", () => {
     expect(codexColors).toEqual(gooseColors);
     await expect(
       page
-        .getByRole("heading", { name: "Agent runtimes" })
+        .getByRole("heading", { name: "Harnesses", exact: true })
         .locator("..")
         .locator(".."),
     ).toHaveCSS("align-items", "center");
@@ -354,8 +354,10 @@ test.describe("Doctor panel state screenshots", () => {
   });
 
   /**
-   * 04 — adapter_missing runtime with node_required: true: the off toggle is
-   * disabled, and the Node.js action moves into the overflow menu.
+   * 04 — adapter_missing runtime with node_required: true is NOT a
+   * one-flip-ready row: it must be catalog-only (no permanently disabled
+   * switch), and its catalog detail must offer the setup guide instead of a
+   * one-click Install that would fail without Node.
    */
   test("04-node-required", async ({ page }) => {
     await installMockBridge(page, {
@@ -378,34 +380,34 @@ test.describe("Doctor panel state screenshots", () => {
     await page.goto("/", { waitUntil: "domcontentloaded" });
     await openSettings(page, "agents");
 
-    const row = page.getByTestId("doctor-runtime-codex");
-    await expect(row).toBeVisible({ timeout: 10_000 });
-    const toggle = page.getByTestId("doctor-runtime-toggle-codex");
-    await expect(toggle).not.toBeChecked();
-    await expect(toggle).toBeDisabled();
-    await expect(page.getByTestId("doctor-runtime-status-codex")).toHaveText(
+    // Node-gated entries never get a Your-harnesses row (and thus never a
+    // disabled switch) — setup happens in the catalog.
+    await expect(page.getByTestId("doctor-runtime-goose")).toBeVisible({
+      timeout: 10_000,
+    });
+    await expect(page.getByTestId("doctor-runtime-codex")).toHaveCount(0);
+    await expect(page.getByTestId("doctor-runtime-toggle-codex")).toHaveCount(
+      0,
+    );
+
+    await page.getByTestId("harness-add-button").click();
+    await expect(page.getByTestId("harness-catalog-dialog")).toBeVisible();
+    await page.getByTestId("harness-catalog-list-item-codex").click();
+    await expect(page.getByTestId("harness-catalog-status-codex")).toHaveText(
       "Adapter needed",
     );
-    await expect(row).not.toContainText("Node.js is required");
-    expect(
-      await row.evaluate((element) => element.getBoundingClientRect().height),
-    ).toBeGreaterThan(
-      await page
-        .getByTestId("doctor-runtime-goose")
-        .evaluate((element) => element.getBoundingClientRect().height),
+    // Node gate blocks one-click install; the primary action is the vendor
+    // setup guide instead.
+    await expect(page.getByTestId("harness-catalog-install-codex")).toHaveCount(
+      0,
     );
-    await page.getByTestId("doctor-runtime-menu-codex").click();
-    await expect(
-      page.getByRole("menuitem", { name: "Install Node.js" }),
-    ).toBeVisible();
-    await expect(
-      page.getByRole("menuitem", { name: "Adapter install guide" }),
-    ).toBeVisible();
-    await page.keyboard.press("Escape");
+    await expect(page.getByTestId("harness-catalog-setup-codex")).toBeVisible();
+    await expect(page.getByTestId("harness-catalog-docs-codex")).toBeVisible();
 
-    await row.scrollIntoViewIfNeeded();
+    const detail = page.getByTestId("harness-catalog-detail-pane");
+    await expect(detail).toContainText("Install the Codex ACP adapter");
     await waitForAnimations(page);
-    await row.screenshot({ path: `${SHOTS}/04-node-required.png` });
+    await detail.screenshot({ path: `${SHOTS}/04-node-required.png` });
   });
 
   /**
