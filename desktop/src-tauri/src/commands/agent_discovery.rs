@@ -1080,7 +1080,6 @@ fn build_install_command(command: &str) -> Result<std::process::Command, String>
     }
     install_shell_command(command)
 }
-
 fn run_install_command(step: &str, command: &str) -> InstallStepResult {
     let mut cmd = match build_install_command(command) {
         Ok(cmd) => cmd,
@@ -1096,7 +1095,9 @@ fn run_install_command(step: &str, command: &str) -> InstallStepResult {
             };
         }
     };
-
+    if let Some(workdir) = crate::managed_agents::default_agent_workdir() {
+        cmd.current_dir(workdir);
+    }
     let mut child = match cmd
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -1613,17 +1614,16 @@ mod tests {
             "expected /bin/zsh or /bin/bash, got {shell:?}"
         );
     }
-
-    /// install_shell_command returns a valid Command on Unix.
     #[cfg(unix)]
     #[test]
-    fn test_install_shell_command_returns_ok_on_unix() {
-        let result = super::install_shell_command("echo test");
-        assert!(result.is_ok(), "install_shell_command must succeed on Unix");
+    fn test_install_command_uses_default_workdir() {
+        let expected =
+            crate::managed_agents::default_agent_workdir().expect("missing default workdir");
+        let result = super::run_install_command("test", "pwd");
+        assert!(result.success, "pwd must succeed: {}", result.stderr);
+        assert_eq!(std::path::Path::new(result.stdout.trim()), expected);
     }
-
     // ── pipefail: install pipes must not mask a failing left-hand side ────────
-
     /// The command handed to the install shell must run under `set -o pipefail;`
     /// with the vendor command preserved verbatim, so `curl … | bash` fails when
     /// `curl` does. Platform-agnostic: only the PATH prelude differs by OS, and
