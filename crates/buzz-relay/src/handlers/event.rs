@@ -677,6 +677,23 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
         return;
     }
 
+    // NIP-CM: ephemeral kinds — including the observer-frame branch below —
+    // return before `ingest_event`, so their notify-tag gate runs here. No
+    // ephemeral kind is notify-allowed, so the pure core check is the whole
+    // gate: it rejects every notify tag on this path, which leaves the
+    // channel-row-dependent DM rule unreachable and no DB lookup needed.
+    if is_ephemeral(kind_u32) {
+        if let Err(e) = buzz_core::channel_mentions::event_notify_mode(&event) {
+            reject("invalid");
+            conn.send(RelayMessage::ok(
+                &event_id_hex,
+                false,
+                &format!("invalid: {e}"),
+            ));
+            return;
+        }
+    }
+
     if kind_u32 == KIND_AGENT_OBSERVER_FRAME {
         if !scopes.is_empty() && !scopes.contains(&buzz_auth::Scope::MessagesWrite) {
             reject("scope");
@@ -1236,6 +1253,36 @@ mod tests {
             !super::super::ingest::requires_h_channel_scope(KIND_PRESENCE_UPDATE),
             "presence updates are global/ephemeral"
         );
+    }
+
+    #[test]
+    fn no_ephemeral_kind_may_carry_a_notify_tag() {
+        // The WS ephemeral seam returns before ingest_event, so it gates
+        // notify tags with the pure core check alone. That is sufficient only
+        // while no ephemeral kind is notify-allowed — assert both halves.
+        for kind in buzz_core::channel_mentions::NOTIFY_ALLOWED_KINDS {
+            assert!(
+                !super::is_ephemeral(kind),
+                "notify-allowed kind {kind} must not be ephemeral, or the \
+                 ephemeral seam needs the channel-row rules too"
+            );
+        }
+
+        let keys = Keys::generate();
+        for kind in [KIND_PRESENCE_UPDATE, KIND_AGENT_OBSERVER_FRAME, 20002] {
+            assert!(super::is_ephemeral(kind), "kind {kind} should be ephemeral");
+            let event = EventBuilder::new(Kind::Custom(kind as u16), "")
+                .tags([Tag::parse(["notify", "here"]).expect("notify tag")])
+                .sign_with_keys(&keys)
+                .expect("sign event");
+            assert_eq!(
+                buzz_core::channel_mentions::event_notify_mode(&event),
+                Err(buzz_core::channel_mentions::NotifyTagError::KindNotAllowed(
+                    kind
+                )),
+                "ephemeral kind {kind} must reject a notify tag"
+            );
+        }
     }
 
     #[test]
