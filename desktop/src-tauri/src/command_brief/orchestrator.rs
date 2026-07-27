@@ -22,8 +22,9 @@ use super::lmstudio::{
 use super::provenance::ValidatedSource;
 use super::scheduler::{LocalModelScheduler, SchedulerError, SchedulerJobKey};
 use super::sources::{
-    FrozenSourceContext, ProductionSourceBackend, SourceBackend, SourceCollectionError,
-    SourceCollector, TrustedLanSourceBackend,
+    load_command_team_discussions, CommandTeamDiscussionBatch, FrozenSourceContext,
+    ProductionSourceBackend, SourceBackend, SourceCollectionError, SourceCollector,
+    TrustedLanSourceBackend,
 };
 use super::types::{
     AdviserContribution, AdviserId, BriefRunState, BriefRunStatus, BriefSection, CitedFinding,
@@ -299,6 +300,7 @@ impl CommandBriefOrchestrator {
                 }),
                 Arc::new(TrustedLanSourceBackendLoader {
                     config: config.clone(),
+                    app: app.clone(),
                 }),
             )
         } else {
@@ -307,7 +309,7 @@ impl CommandBriefOrchestrator {
                     AdviserExecutor::from_catalog(model.to_string(), timeout)
                         .map_err(|_| ProductionOrchestratorError)?,
                 ),
-                Arc::new(ProductionSourceBackendLoader { app }),
+                Arc::new(ProductionSourceBackendLoader { app: app.clone() }),
             )
         };
         Ok(Self::new(

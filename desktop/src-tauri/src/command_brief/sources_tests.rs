@@ -5,8 +5,8 @@ use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 
 use super::sources::{
-    FixedRetrievalIntent, FrozenSourceContext, ProductionSourceBackend, SourceBackend,
-    SourceCollectionError, SourceCollector, SourceReadError, SourceToolCaller,
+    CommandTeamDiscussionBatch, FixedRetrievalIntent, FrozenSourceContext, ProductionSourceBackend,
+    SourceBackend, SourceCollectionError, SourceCollector, SourceReadError, SourceToolCaller,
 };
 use super::types::{AdviserId, BriefSection, SourceKind, MAX_ARRAY_ITEMS, MAX_TEXT_BYTES};
 use crate::command_services::apple_inputs::{
@@ -34,6 +34,7 @@ struct FakeState {
     requests: Vec<Value>,
     recheck_snapshot: Option<String>,
     post_recheck_limitations: Vec<String>,
+    command_team_discussions: CommandTeamDiscussionBatch,
     memory_conflict_count: u64,
     bind_rag_query: bool,
 }
@@ -144,6 +145,14 @@ impl SourceBackend for FakeBackend {
 
     fn memory_conflict_count(&self) -> u64 {
         self.state.lock().expect("fake state").memory_conflict_count
+    }
+
+    fn command_team_discussions(&self) -> CommandTeamDiscussionBatch {
+        self.state
+            .lock()
+            .expect("fake state")
+            .command_team_discussions
+            .clone()
     }
 
     fn collect_apple(
@@ -644,6 +653,46 @@ fn fresh_collection_freezes_one_snapshot_and_all_local_source_kinds() {
         .validated_sources()
         .iter()
         .all(|source| source.snapshot_id() == SNAPSHOT_A));
+}
+
+#[test]
+fn command_team_discussion_outcome_is_cited_as_memory_without_degrading_the_brief() {
+    let backend = FakeBackend::with_state(|state| {
+        state.command_team_discussions = CommandTeamDiscussionBatch::for_test(1, Vec::new());
+    });
+
+    let context = collector(backend, "Prepare today's command brief.")
+        .freeze()
+        .expect("discussion outcome remains an optional source");
+
+    let discussion = context
+        .ledger()
+        .iter()
+        .find(|source| source.collection() == "command_team_discussions")
+        .expect("validated discussion source");
+    assert_eq!(discussion.source_kind(), SourceKind::Memory);
+    assert!(discussion.location().contains("builtin:command-operations"));
+    assert!(context.degraded_sections().is_empty());
+}
+
+#[test]
+fn command_team_discussion_failure_is_a_warning_without_section_degradation() {
+    let backend = FakeBackend::with_state(|state| {
+        state.command_team_discussions = CommandTeamDiscussionBatch::for_test(
+            0,
+            vec!["Command-team discussion memory was unavailable.".to_string()],
+        );
+    });
+
+    let context = collector(backend, "Prepare today's command brief.")
+        .freeze()
+        .expect("discussion failure remains fail soft");
+
+    assert!(context
+        .limitations()
+        .iter()
+        .any(|item| item.contains("discussion memory was unavailable")));
+    assert!(context.degraded_sections().is_empty());
 }
 
 #[test]

@@ -28,14 +28,48 @@ pub(super) struct DiscussionMemoryRecord {
     pub(super) entry: EngramEntry,
 }
 
-#[derive(Clone, Default)]
-#[allow(
-    dead_code,
-    reason = "Task 4 wires the parsed batch into both command-brief source backends"
-)]
-pub(super) struct CommandTeamDiscussionBatch {
+#[derive(Clone, Debug, Default)]
+pub(crate) struct CommandTeamDiscussionBatch {
     pub(super) candidates: Vec<CandidateSource>,
     pub(super) limitations: Vec<String>,
+}
+
+impl CommandTeamDiscussionBatch {
+    pub(crate) fn unavailable(limitation: &str) -> Self {
+        Self {
+            candidates: Vec::new(),
+            limitations: vec![limitation.to_string()],
+        }
+    }
+}
+
+#[cfg(test)]
+impl CommandTeamDiscussionBatch {
+    pub(crate) fn for_test(candidate_count: usize, limitations: Vec<String>) -> Self {
+        let candidates = (0..candidate_count)
+            .map(|index| {
+                let source_id = format!("{index:064x}");
+                CandidateSource {
+                    source_id: source_id.clone(),
+                    source_kind: SourceKind::Memory,
+                    collection: COMMAND_TEAM_COLLECTION.to_string(),
+                    document_id: format!("discussion-{index}"),
+                    chunk_id: source_id,
+                    timestamp: "2026-07-27T02:00:00Z".to_string(),
+                    location: format!(
+                        "command adviser persona builtin:command-operations Buzz channel test-{index}"
+                    ),
+                    retrieved_at: "2026-07-27T02:01:00Z".to_string(),
+                    observed_at: "2026-07-27T02:01:00Z".to_string(),
+                    quote: format!("Validated command-team outcome {index}."),
+                }
+            })
+            .collect();
+        Self {
+            candidates,
+            limitations,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -287,11 +321,7 @@ pub(super) fn select_discussions(
     }
 }
 
-#[allow(
-    dead_code,
-    reason = "Task 4 invokes the native loader at each source-backend boundary"
-)]
-pub(super) async fn load_command_team_discussions(
+pub(crate) async fn load_command_team_discussions(
     app: &tauri::AppHandle,
     observed_at: DateTime<Utc>,
 ) -> Result<CommandTeamDiscussionBatch, String> {

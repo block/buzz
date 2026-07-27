@@ -117,6 +117,10 @@ pub(crate) trait SourceBackend: Send + Sync {
 
     fn memory_conflict_count(&self) -> u64;
 
+    fn command_team_discussions(&self) -> CommandTeamDiscussionBatch {
+        CommandTeamDiscussionBatch::default()
+    }
+
     fn collect_rag(
         &self,
         snapshot: &VerifiedRagSnapshot,
@@ -157,6 +161,10 @@ where
 
     fn memory_conflict_count(&self) -> u64 {
         (**self).memory_conflict_count()
+    }
+
+    fn command_team_discussions(&self) -> CommandTeamDiscussionBatch {
+        (**self).command_team_discussions()
     }
 
     fn collect_rag(
@@ -233,6 +241,7 @@ pub(crate) struct ProductionSourceBackend {
     rag: AuthenticatedSourceService,
     memory: Option<AuthenticatedSourceService>,
     memory_conflict_count: u64,
+    command_team_discussions: CommandTeamDiscussionBatch,
     caller: Arc<dyn SourceToolCaller>,
 }
 
@@ -268,8 +277,17 @@ impl ProductionSourceBackend {
             rag: rag.service,
             memory,
             memory_conflict_count,
+            command_team_discussions: CommandTeamDiscussionBatch::default(),
             caller: Arc::new(AuthenticatedMcpSourceCaller),
         })
+    }
+
+    pub(super) fn with_command_team_discussions(
+        mut self,
+        command_team_discussions: CommandTeamDiscussionBatch,
+    ) -> Self {
+        self.command_team_discussions = command_team_discussions;
+        self
     }
 
     #[cfg(test)]
@@ -285,6 +303,7 @@ impl ProductionSourceBackend {
             rag,
             memory: Some(memory),
             memory_conflict_count,
+            command_team_discussions: CommandTeamDiscussionBatch::default(),
             caller,
         }
     }
@@ -300,6 +319,10 @@ impl SourceBackend for ProductionSourceBackend {
 
     fn memory_conflict_count(&self) -> u64 {
         self.memory_conflict_count
+    }
+
+    fn command_team_discussions(&self) -> CommandTeamDiscussionBatch {
+        self.command_team_discussions.clone()
     }
 
     fn collect_rag(
@@ -410,6 +433,7 @@ impl SourceBackend for ProductionSourceBackend {
 pub(crate) struct TrustedLanSourceBackend {
     snapshot: VerifiedRagSnapshot,
     client: TrustedLanSourceClient,
+    command_team_discussions: CommandTeamDiscussionBatch,
     post_recheck_warning: Arc<Mutex<Option<String>>>,
 }
 
@@ -436,8 +460,17 @@ impl TrustedLanSourceBackend {
         Ok(Self {
             snapshot,
             client,
+            command_team_discussions: CommandTeamDiscussionBatch::default(),
             post_recheck_warning: Arc::new(Mutex::new(None)),
         })
+    }
+
+    pub(super) fn with_command_team_discussions(
+        mut self,
+        command_team_discussions: CommandTeamDiscussionBatch,
+    ) -> Self {
+        self.command_team_discussions = command_team_discussions;
+        self
     }
 }
 
@@ -448,6 +481,10 @@ impl SourceBackend for TrustedLanSourceBackend {
 
     fn memory_conflict_count(&self) -> u64 {
         0
+    }
+
+    fn command_team_discussions(&self) -> CommandTeamDiscussionBatch {
+        self.command_team_discussions.clone()
     }
 
     fn collect_rag(
@@ -726,6 +763,10 @@ impl<B: SourceBackend> SourceCollector<B> {
         let mut candidates = vec![snapshot_catalogue_source(&snapshot)?];
         let mut degraded = BTreeSet::new();
         let mut limitations = BTreeSet::new();
+        let command_team_discussions = self.backend.command_team_discussions();
+        ensure_collection_active(cancellation)?;
+        candidates.extend(command_team_discussions.candidates);
+        limitations.extend(command_team_discussions.limitations);
         if snapshot.assurance() == RagSnapshotAssurance::TrustedLanObserved {
             limitations.insert(
                 "Unsigned trusted-LAN evidence was observed directly from the approved LAN services; it is not a signed RAG snapshot or replicated Memory revision."
@@ -895,6 +936,11 @@ impl<B: SourceBackend> SourceCollector<B> {
         limitations.append(&mut canonical.limitations);
         apply_ledger_omissions(&canonical.omitted_by_kind, &mut degraded, &mut limitations);
         apply_ledger_rejections(&canonical.rejected_by_kind, &mut degraded, &mut limitations);
+        apply_command_team_ledger_losses(
+            canonical.omitted_command_team_discussions,
+            canonical.rejected_command_team_discussions,
+            &mut limitations,
+        );
         let validated_sources = canonical
             .ledger
             .iter()
@@ -990,6 +1036,9 @@ fn fixed_retrieval_intents(
 mod canonical;
 use canonical::*;
 mod command_team_discussions;
+pub(crate) use command_team_discussions::{
+    load_command_team_discussions, CommandTeamDiscussionBatch,
+};
 mod limitations;
 use limitations::*;
 mod trusted_lan_evidence;

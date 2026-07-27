@@ -317,7 +317,19 @@ impl SourceBackendLoader for ProductionSourceBackendLoader {
             if cancellation.is_cancelled() {
                 return Err(SourceCollectionError::Cancelled);
             }
-            let backend = ProductionSourceBackend::from_app(app).await?;
+            let command_team_discussions = load_command_team_discussions(&app, Utc::now())
+                .await
+                .unwrap_or_else(|_| {
+                    CommandTeamDiscussionBatch::unavailable(
+                        "Command-team discussion memory was unavailable.",
+                    )
+                });
+            if cancellation.is_cancelled() {
+                return Err(SourceCollectionError::Cancelled);
+            }
+            let backend = ProductionSourceBackend::from_app(app)
+                .await?
+                .with_command_team_discussions(command_team_discussions);
             if cancellation.is_cancelled() {
                 return Err(SourceCollectionError::Cancelled);
             }
@@ -329,6 +341,7 @@ impl SourceBackendLoader for ProductionSourceBackendLoader {
 #[derive(Clone)]
 pub(super) struct TrustedLanSourceBackendLoader {
     pub(super) config: TrustedLanConfig,
+    pub(super) app: tauri::AppHandle,
 }
 
 impl SourceBackendLoader for TrustedLanSourceBackendLoader {
@@ -337,13 +350,26 @@ impl SourceBackendLoader for TrustedLanSourceBackendLoader {
         cancellation: CancellationToken,
     ) -> BriefFuture<'a, Result<Arc<dyn SourceBackend + Send + Sync>, SourceCollectionError>> {
         let config = self.config.clone();
+        let app = self.app.clone();
         Box::pin(async move {
             if cancellation.is_cancelled() {
                 return Err(SourceCollectionError::Cancelled);
             }
-            let observed_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+            let observed_at_value = Utc::now();
+            let command_team_discussions = load_command_team_discussions(&app, observed_at_value)
+                .await
+                .unwrap_or_else(|_| {
+                    CommandTeamDiscussionBatch::unavailable(
+                        "Command-team discussion memory was unavailable.",
+                    )
+                });
+            if cancellation.is_cancelled() {
+                return Err(SourceCollectionError::Cancelled);
+            }
+            let observed_at = observed_at_value.to_rfc3339_opts(SecondsFormat::Millis, true);
             let backend = tokio::task::spawn_blocking(move || {
                 TrustedLanSourceBackend::from_config(&config, &observed_at)
+                    .map(|backend| backend.with_command_team_discussions(command_team_discussions))
             })
             .await
             .map_err(|_| SourceCollectionError::RagInvalid)??;

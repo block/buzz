@@ -426,7 +426,7 @@ git commit -m "feat(command-team): read structured discussion outcomes"
 - Modify: `desktop/src-tauri/src/command_brief/orchestrator/providers.rs`
 - Modify: `desktop/src-tauri/src/command_brief/orchestrator.rs`
 
-- [ ] **Step 1: Add failing source-collector tests**
+- [x] **Step 1: Add failing source-collector tests**
 
 Extend `FakeBackend` and add tests proving:
 
@@ -439,14 +439,14 @@ Extend `FakeBackend` and add tests proving:
 - ordinary LAN Memory candidate omissions retain their current degradation behavior;
 - cancellation still propagates.
 
-- [ ] **Step 2: Run source tests and confirm the intended failure**
+- [x] **Step 2: Run source tests and confirm the intended failure**
 
 ```bash
 . ./bin/activate-hermit
 cargo test --manifest-path desktop/src-tauri/Cargo.toml command_brief::sources_tests
 ```
 
-- [ ] **Step 3: Load command-team evidence for both backend modes**
+- [x] **Step 3: Load command-team evidence for both backend modes**
 
 Extend the source abstraction:
 
@@ -465,7 +465,7 @@ bounded limitation; it must not make either backend loader fail.
 
 This local evidence path must operate identically whether the current RAG source is production or trusted LAN.
 
-- [ ] **Step 4: Merge the optional candidates without global degradation**
+- [x] **Step 4: Merge the optional candidates without global degradation**
 
 In `SourceCollector::freeze_with_cancellation`:
 
@@ -478,7 +478,7 @@ In `canonical.rs`, classify omission/rejection counts by both source kind and wh
 
 Do not add a new `SourceKind`; downstream prompts and cloud/local routing already accept bounded Memory evidence.
 
-- [ ] **Step 5: Run focused and adjacent Rust suites**
+- [x] **Step 5: Run focused and adjacent Rust suites**
 
 ```bash
 . ./bin/activate-hermit
@@ -487,7 +487,7 @@ cargo test --manifest-path desktop/src-tauri/Cargo.toml command_brief::orchestra
 cargo test --manifest-path desktop/src-tauri/Cargo.toml command_brief
 ```
 
-- [ ] **Step 6: Commit brief integration**
+- [x] **Step 6: Commit brief integration**
 
 ```bash
 . ./bin/activate-hermit

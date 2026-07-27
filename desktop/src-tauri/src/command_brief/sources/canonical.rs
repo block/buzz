@@ -1,3 +1,4 @@
+use super::command_team_discussions::COMMAND_TEAM_COLLECTION;
 use super::*;
 
 const MAX_CANONICAL_LEDGER_ITEMS: usize = 48;
@@ -386,11 +387,16 @@ pub(super) fn canonical_ledger(
     let mut by_source = BTreeMap::<String, CandidateSource>::new();
     let mut limitations = BTreeSet::new();
     let mut rejected_by_kind = [0_usize; 6];
+    let mut rejected_command_team_discussions = 0_usize;
     for mut candidate in candidates {
         let Some((quote, truncated)) =
             canonical_quote(&candidate.quote, MAX_CANONICAL_SOURCE_QUOTE_BYTES)
         else {
-            rejected_by_kind[source_priority(candidate.source_kind) as usize] += 1;
+            if is_command_team_discussion(&candidate) {
+                rejected_command_team_discussions += 1;
+            } else {
+                rejected_by_kind[source_priority(candidate.source_kind) as usize] += 1;
+            }
             continue;
         };
         candidate.quote = quote;
@@ -422,15 +428,21 @@ pub(super) fn canonical_ledger(
             .then_with(|| left.source_id.cmp(&right.source_id))
     });
     let mut omitted_by_kind = [0_usize; 6];
+    let mut omitted_command_team_discussions = 0_usize;
     if candidates.len() > MAX_CANONICAL_LEDGER_ITEMS {
         for candidate in &candidates[MAX_CANONICAL_LEDGER_ITEMS..] {
-            omitted_by_kind[source_priority(candidate.source_kind) as usize] += 1;
+            if is_command_team_discussion(candidate) {
+                omitted_command_team_discussions += 1;
+            } else {
+                omitted_by_kind[source_priority(candidate.source_kind) as usize] += 1;
+            }
         }
         candidates.truncate(MAX_CANONICAL_LEDGER_ITEMS);
     }
     let mut ledger = Vec::with_capacity(candidates.len());
     for candidate in candidates {
         let priority = source_priority(candidate.source_kind);
+        let command_team_discussion = is_command_team_discussion(&candidate);
         let ledger_id = format!(
             "source-{}",
             &digest_text(&format!(
@@ -457,6 +469,9 @@ pub(super) fn canonical_ledger(
         });
         match SourceLedgerEntry::parse_for_snapshot(value, snapshot_id) {
             Ok(entry) => ledger.push(entry),
+            Err(_) if command_team_discussion => {
+                rejected_command_team_discussions += 1;
+            }
             Err(_) => rejected_by_kind[priority as usize] += 1,
         }
     }
@@ -465,7 +480,13 @@ pub(super) fn canonical_ledger(
         limitations,
         omitted_by_kind,
         rejected_by_kind,
+        omitted_command_team_discussions,
+        rejected_command_team_discussions,
     })
+}
+
+fn is_command_team_discussion(candidate: &CandidateSource) -> bool {
+    candidate.source_kind == SourceKind::Memory && candidate.collection == COMMAND_TEAM_COLLECTION
 }
 
 const fn retention_priority(kind: SourceKind) -> u8 {
@@ -484,6 +505,25 @@ pub(super) struct CanonicalLedgerOutput {
     pub(super) limitations: BTreeSet<String>,
     pub(super) omitted_by_kind: [usize; 6],
     pub(super) rejected_by_kind: [usize; 6],
+    pub(super) omitted_command_team_discussions: usize,
+    pub(super) rejected_command_team_discussions: usize,
+}
+
+pub(super) fn apply_command_team_ledger_losses(
+    omitted: usize,
+    rejected: usize,
+    limitations: &mut BTreeSet<String>,
+) {
+    if omitted > 0 {
+        limitations.insert(format!(
+            "{omitted} Command-team discussion sources were omitted by the canonical ledger limit."
+        ));
+    }
+    if rejected > 0 {
+        limitations.insert(format!(
+            "{rejected} malformed Command-team discussion sources were excluded from the canonical ledger."
+        ));
+    }
 }
 
 pub(super) fn apply_ledger_omissions(
@@ -627,5 +667,83 @@ impl From<RagSnapshotError> for SourceCollectionError {
             RagSnapshotError::Invalid => Self::RagInvalid,
             RagSnapshotError::Changed => Self::SnapshotChanged,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::command_brief::sources::command_team_discussions::COMMAND_TEAM_COLLECTION;
+
+    fn candidate(index: usize, kind: SourceKind, collection: &str, quote: &str) -> CandidateSource {
+        let identity = format!("{index:064x}");
+        CandidateSource {
+            source_id: identity.clone(),
+            source_kind: kind,
+            collection: collection.to_string(),
+            document_id: identity.clone(),
+            chunk_id: identity,
+            timestamp: "2026-07-27T02:00:00Z".to_string(),
+            location: format!("test source {index}"),
+            retrieved_at: "2026-07-27T02:01:00Z".to_string(),
+            observed_at: "2026-07-27T02:01:00Z".to_string(),
+            quote: quote.to_string(),
+        }
+    }
+
+    #[test]
+    fn omitted_command_team_discussions_warn_without_degrading_sections() {
+        let mut candidates = (0..MAX_CANONICAL_LEDGER_ITEMS)
+            .map(|index| candidate(index, SourceKind::Calendar, "calendar", "calendar evidence"))
+            .collect::<Vec<_>>();
+        candidates.push(candidate(
+            MAX_CANONICAL_LEDGER_ITEMS + 1,
+            SourceKind::Memory,
+            COMMAND_TEAM_COLLECTION,
+            "discussion evidence",
+        ));
+
+        let canonical =
+            canonical_ledger("brief-run:test", "a".repeat(64).as_str(), candidates).unwrap();
+        let mut degraded = BTreeSet::new();
+        let mut limitations = BTreeSet::new();
+        apply_ledger_omissions(&canonical.omitted_by_kind, &mut degraded, &mut limitations);
+        apply_ledger_rejections(&canonical.rejected_by_kind, &mut degraded, &mut limitations);
+        apply_command_team_ledger_losses(
+            canonical.omitted_command_team_discussions,
+            canonical.rejected_command_team_discussions,
+            &mut limitations,
+        );
+
+        assert!(degraded.is_empty());
+        assert!(limitations
+            .iter()
+            .any(|item| item.contains("Command-team discussion")));
+    }
+
+    #[test]
+    fn malformed_command_team_discussions_warn_without_degrading_sections() {
+        let candidates = vec![candidate(
+            1,
+            SourceKind::Memory,
+            COMMAND_TEAM_COLLECTION,
+            "",
+        )];
+
+        let canonical =
+            canonical_ledger("brief-run:test", "a".repeat(64).as_str(), candidates).unwrap();
+        let mut degraded = BTreeSet::new();
+        let mut limitations = BTreeSet::new();
+        apply_ledger_rejections(&canonical.rejected_by_kind, &mut degraded, &mut limitations);
+        apply_command_team_ledger_losses(
+            canonical.omitted_command_team_discussions,
+            canonical.rejected_command_team_discussions,
+            &mut limitations,
+        );
+
+        assert!(degraded.is_empty());
+        assert!(limitations
+            .iter()
+            .any(|item| item.contains("malformed Command-team discussion")));
     }
 }
