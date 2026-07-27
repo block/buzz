@@ -417,6 +417,19 @@ pub(crate) fn configure_runtime_cli(
     }
 }
 
+/// Return the model desktop should forward through `BUZZ_ACP_MODEL`.
+/// Runtimes that own model selection suppress the effective Buzz/global model.
+fn buzz_acp_model_for_runtime<'a>(
+    runtime: Option<&KnownAcpRuntime>,
+    effective_model: Option<&'a str>,
+) -> Option<&'a str> {
+    if runtime.is_some_and(|runtime| !runtime.forwards_model_to_acp) {
+        None
+    } else {
+        effective_model
+    }
+}
+
 /// Select the pi MCP write target only when the process workdir is the real
 /// Buzz nest. `default_agent_workdir()` may fall back to `$HOME`; that fallback
 /// must never receive Buzz-owned `.pi/mcp.json` state.
@@ -756,7 +769,7 @@ pub fn spawn_agent_child(
     } else {
         command.env_remove("BUZZ_ACP_SYSTEM_PROMPT");
     }
-    if let Some(model) = effective_model.as_deref() {
+    if let Some(model) = buzz_acp_model_for_runtime(runtime_meta, effective_model.as_deref()) {
         command.env("BUZZ_ACP_MODEL", model);
     } else {
         command.env_remove("BUZZ_ACP_MODEL");

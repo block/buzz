@@ -577,6 +577,15 @@ fn runtime_metadata_env_vars_injects_model_even_with_acp_model_switching() {
     );
 }
 
+#[test]
+fn pi_suppresses_global_model_from_buzz_acp_env() {
+    let pi = known_acp_runtime("pi-acp").expect("should resolve");
+    assert_eq!(
+        super::buzz_acp_model_for_runtime(Some(pi), Some("global-model")),
+        None
+    );
+}
+
 // ── name_matches_known_binary / name_matches_interpreter tests ───────────
 
 #[test]

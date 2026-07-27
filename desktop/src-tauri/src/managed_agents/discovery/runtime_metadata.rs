@@ -38,6 +38,10 @@ pub(crate) struct KnownAcpRuntime {
     /// this value. Retained as scaffolding for when ACP model switching matures.
     #[allow(dead_code)]
     pub supports_acp_model_switching: bool,
+    /// Whether desktop forwards the resolved model through `BUZZ_ACP_MODEL` so
+    /// buzz-acp applies it after session creation. False when the runtime owns
+    /// model selection entirely (pi).
+    pub forwards_model_to_acp: bool,
     pub model_env_var: Option<&'static str>,
     pub provider_env_var: Option<&'static str>,
     pub provider_locked: bool,
