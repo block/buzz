@@ -51,6 +51,9 @@ function resolveChannelIdFromOperator(
     return { status: "none" };
   }
   const value = normalizeInChannel(raw);
+  if (!value) {
+    return { status: "none" };
+  }
   if (isChannelUuid(value)) {
     return { status: "resolved", value };
   }
@@ -217,14 +220,15 @@ export function useSearchResults({
         : undefined,
     since: parsedQuery.since,
     until: parsedQuery.until,
+    unresolvedOperator: hasUnresolvedOperator,
   });
 
   const messageResults = React.useMemo(() => {
-    if (hasUnresolvedOperator && !waitingOnFromResolution) {
+    if (hasUnresolvedOperator) {
       return [];
     }
     return dedupeSearchHits(searchQuery.data?.hits ?? []);
-  }, [hasUnresolvedOperator, waitingOnFromResolution, searchQuery.data?.hits]);
+  }, [hasUnresolvedOperator, searchQuery.data?.hits]);
   const channelResults = React.useMemo(() => {
     if (ftsQuery.length < MIN_SEARCH_QUERY_LENGTH) {
       return [];
@@ -465,6 +469,7 @@ export function useSearchResults({
     channelLookup,
     channelResults,
     debouncedQuery,
+    isWaitingOnFromResolution: waitingOnFromResolution,
     messageResults,
     query,
     resultProfiles: resultProfilesQuery.data?.profiles,

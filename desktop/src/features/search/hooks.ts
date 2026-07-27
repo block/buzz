@@ -11,6 +11,7 @@ export function useSearchMessagesQuery(
     until?: number | null;
     enabled?: boolean;
     limit?: number;
+    unresolvedOperator?: boolean;
   },
 ) {
   const trimmedQuery = query.trim();
@@ -20,6 +21,7 @@ export function useSearchMessagesQuery(
   const authors = options?.authors;
   const since = options?.since ?? null;
   const until = options?.until ?? null;
+  const unresolvedOperator = options?.unresolvedOperator ?? false;
 
   return useQuery({
     queryKey: [
@@ -30,6 +32,7 @@ export function useSearchMessagesQuery(
       authors ?? null,
       since,
       until,
+      unresolvedOperator,
     ],
     queryFn: () =>
       searchMessages({
