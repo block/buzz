@@ -5,7 +5,7 @@ class _ChannelsBody extends StatelessWidget {
   final AsyncValue<List<Channel>> channelsAsync;
   final bool showError;
   final SessionStatus sessionStatus;
-  final bool showConnectionBanner;
+  final bool showConnectionSkeleton;
   final String? currentPubkey;
   final Future<void> Function() onRefresh;
   final Future<void> Function(Channel channel) onSelectChannel;
@@ -15,7 +15,7 @@ class _ChannelsBody extends StatelessWidget {
     required this.channelsAsync,
     required this.showError,
     required this.sessionStatus,
-    required this.showConnectionBanner,
+    required this.showConnectionSkeleton,
     required this.currentPubkey,
     required this.onRefresh,
     required this.onSelectChannel,
@@ -24,59 +24,40 @@ class _ChannelsBody extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final barHeight = frostedAppBarHeight(context);
-
-    if (channels != null) {
-      return Stack(
-        children: [
-          RefreshIndicator(
+    final loadedChannels = channels;
+    final loading =
+        showConnectionSkeleton || (loadedChannels == null && !showError);
+    final content = showError && channelsAsync.hasError
+        ? Padding(
+            padding: EdgeInsets.only(top: barHeight),
+            child: _ErrorView(error: channelsAsync.error!, onRetry: onRefresh),
+          )
+        : loadedChannels == null
+        ? const SizedBox.shrink()
+        : RefreshIndicator(
             edgeOffset: barHeight,
             onRefresh: onRefresh,
             child: CustomScrollView(
               slivers: [
                 SliverToBoxAdapter(child: SizedBox(height: barHeight)),
-                // Extra space for the connection banner when visible.
-                if (showConnectionBanner)
-                  const SliverToBoxAdapter(
-                    child: SizedBox(height: _kBannerHeight),
-                  ),
                 _SliverChannelsList(
-                  channels: channels!,
+                  channels: loadedChannels,
                   currentPubkey: currentPubkey,
                   onSelectChannel: onSelectChannel,
                 ),
               ],
             ),
-          ),
-          Positioned(
-            top: barHeight,
-            left: 0,
-            right: 0,
-            child: showConnectionBanner
-                ? _ConnectionBanner(status: sessionStatus)
-                : const SizedBox.shrink(),
-          ),
-        ],
-      );
-    }
+          );
 
-    // The error view is gated on a grace timer in the parent — see the
-    // useEffect in ChannelsPage. While the grace window is in flight we fall
-    // through to the connection banner so transient relay-cancellation errors
-    // don't flash the error UI.
-    if (showError && channelsAsync.hasError) {
-      return Padding(
-        padding: EdgeInsets.only(top: barHeight),
-        child: _ErrorView(error: channelsAsync.error!, onRetry: onRefresh),
-      );
-    }
-
-    return Padding(
-      padding: EdgeInsets.only(top: barHeight),
-      child: _ConnectionBanner(
-        status: sessionStatus == SessionStatus.connected
-            ? SessionStatus.connecting
-            : sessionStatus,
+    return SkeletonReveal(
+      loading: loading,
+      shimmerEnabled: sessionStatus != SessionStatus.disconnected,
+      skeleton: _ChannelsSkeleton(
+        channels: loadedChannels,
+        topInset: barHeight,
+        status: sessionStatus,
       ),
+      content: content,
     );
   }
 }

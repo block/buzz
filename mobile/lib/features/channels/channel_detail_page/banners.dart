@@ -54,45 +54,100 @@ class _HeaderEphemeralBadge extends StatelessWidget {
   }
 }
 
-class _DetailConnectionBanner extends StatelessWidget {
+class _MessageTimelineSkeleton extends StatelessWidget {
+  final double appBarTitleContentHeight;
   final SessionStatus status;
 
-  const _DetailConnectionBanner({required this.status});
+  const _MessageTimelineSkeleton({
+    required this.appBarTitleContentHeight,
+    required this.status,
+  });
 
   @override
   Widget build(BuildContext context) {
-    if (status == SessionStatus.connected ||
-        status == SessionStatus.disconnected) {
-      return const SizedBox.shrink();
-    }
+    final semanticsLabel = status == SessionStatus.reconnecting
+        ? 'Reconnecting'
+        : 'Connecting';
+    return Semantics(
+      key: const Key('channel-detail-connection-skeleton'),
+      liveRegion: true,
+      label: semanticsLabel,
+      child: ExcludeSemantics(
+        child: ListView.separated(
+          physics: const NeverScrollableScrollPhysics(),
+          padding: EdgeInsets.fromLTRB(
+            Grid.gutter,
+            frostedAppBarHeight(
+                  context,
+                  titleContentHeight: appBarTitleContentHeight,
+                ) +
+                Grid.xs,
+            Grid.gutter,
+            Grid.xs,
+          ),
+          itemCount: 4,
+          separatorBuilder: (_, _) => const SizedBox(height: Grid.xs),
+          itemBuilder: (_, index) => _MessageSkeletonRow(index: index),
+        ),
+      ),
+    );
+  }
+}
 
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.symmetric(
-        horizontal: Grid.gutter,
-        vertical: Grid.quarter + 2,
-      ),
-      color: context.colors.surfaceContainerHighest,
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          SizedBox(
-            width: 12,
-            height: 12,
-            child: CircularProgressIndicator(
-              strokeWidth: 2,
-              color: context.colors.onSurfaceVariant,
-            ),
+class _MessageSkeletonRow extends StatelessWidget {
+  final int index;
+
+  const _MessageSkeletonRow({required this.index});
+
+  @override
+  Widget build(BuildContext context) {
+    const authorWidths = <double>[112, 96, 128, 80];
+    const lineWidths = <List<double>>[
+      [280, 224],
+      [272, 184],
+      [232],
+      [288, 216],
+    ];
+    final availableWidth = MediaQuery.sizeOf(context).width - 88;
+
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SkeletonBar(
+          width: 36,
+          height: 36,
+          borderRadius: BorderRadius.circular(18),
+        ),
+        const SizedBox(width: Grid.xxs),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  SkeletonBar(width: authorWidths[index], height: 15),
+                  const SizedBox(width: Grid.xxs),
+                  const SkeletonBar(width: 40, height: 12),
+                ],
+              ),
+              const SizedBox(height: Grid.half),
+              for (final width in lineWidths[index]) ...[
+                SkeletonBar(width: min(width, availableWidth), height: 16),
+                const SizedBox(height: Grid.half),
+              ],
+              const Row(
+                children: [
+                  SkeletonBar(width: 32, height: 16),
+                  SizedBox(width: Grid.xs),
+                  SkeletonBar(width: 32, height: 16),
+                  SizedBox(width: Grid.xs),
+                  SkeletonBar(width: 32, height: 16),
+                ],
+              ),
+            ],
           ),
-          const SizedBox(width: Grid.xxs),
-          Text(
-            'Reconnecting…',
-            style: context.textTheme.labelSmall?.copyWith(
-              color: context.colors.onSurfaceVariant,
-            ),
-          ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 }
