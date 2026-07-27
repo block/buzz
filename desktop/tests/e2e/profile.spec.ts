@@ -1542,6 +1542,6 @@ test("shows agent runtimes in agent settings", async ({ page }) => {
 
   await openSettings(page, "agents");
 
-  await expect(page.getByTestId("settings-agent-runtimes")).toBeVisible();
+  await expect(page.getByTestId("settings-harnesses")).toBeVisible();
   await expect(page.getByTestId("doctor-runtime-goose")).toContainText("Goose");
 });

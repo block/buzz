@@ -149,7 +149,9 @@ Widget _buildTestable({
   ReadStateNotifier? readStateNotifier,
   _FakeMessagesNotifier? messagesNotifier,
   String? canvasContent,
-  List<NostrEvent>? threadReplies,
+  String? initialMessageId,
+  String? initialThreadRootId,
+  Map<String, List<NostrEvent>> threadReplies = const {},
   TextScaler textScaler = TextScaler.noScaling,
   RelaySessionNotifier? relaySessionNotifier,
 }) {
@@ -186,10 +188,10 @@ Widget _buildTestable({
         channelActionsProvider.overrideWith(createChannelActions),
       if (readStateNotifier != null)
         readStateProvider.overrideWith(() => readStateNotifier),
-      if (threadReplies != null)
+      for (final entry in threadReplies.entries)
         threadRepliesProvider(
-          const ThreadRepliesArgs(channelId: _channelId, rootId: 'thread-root'),
-        ).overrideWith((ref) async => threadReplies),
+          ThreadRepliesArgs(channelId: _channelId, rootId: entry.key),
+        ).overrideWith((ref) async => entry.value),
       // Stub the relay client provider so preloadMembers doesn't crash.
       relayClientProvider.overrideWithValue(
         RelayClient(baseUrl: 'http://localhost:3000'),
@@ -205,7 +207,11 @@ Widget _buildTestable({
       home: Builder(
         builder: (context) => MediaQuery(
           data: MediaQuery.of(context).copyWith(textScaler: textScaler),
-          child: ChannelDetailPage(channel: resolvedChannel),
+          child: ChannelDetailPage(
+            channel: resolvedChannel,
+            initialMessageId: initialMessageId,
+            initialThreadRootId: initialThreadRootId,
+          ),
         ),
       ),
     ),
@@ -1601,6 +1607,69 @@ void main() {
     });
   });
 
+  group('Deep-link navigation', () {
+    testWidgets('opens a nested reply in its direct-parent thread', (
+      tester,
+    ) async {
+      final root = _textMsg(
+        id: 'root',
+        pubkey: 'alice',
+        content: 'Outer root',
+        createdAt: 1000,
+      );
+      final parent = _textMsg(
+        id: 'parent',
+        pubkey: 'bob',
+        content: 'Nested thread head',
+        createdAt: 1100,
+        extraTags: const [
+          ['e', 'root', '', 'reply'],
+        ],
+      );
+      final target = _textMsg(
+        id: 'target',
+        pubkey: 'carol',
+        content: 'Deeply nested target',
+        createdAt: 1200,
+        extraTags: const [
+          ['e', 'root', '', 'root'],
+          ['e', 'parent', '', 'reply'],
+        ],
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [root, parent, target],
+          initialMessageId: 'target',
+          initialThreadRootId: 'parent',
+          threadReplies: {
+            // Relay subtree filtering is keyed by thread_metadata.root_event_id,
+            // so nested replies are returned by the outer-root query.
+            'root': [parent, target],
+          },
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+            'carol': UserProfile(pubkey: 'carol', displayName: 'Carol'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final threadPage = tester.widget<ThreadDetailPage>(
+        find.byType(ThreadDetailPage),
+      );
+      expect(threadPage.threadHead.id, 'parent');
+      expect(threadPage.initialMessageId, 'target');
+
+      final highlighted = tester.widget<DecoratedBox>(
+        find.byKey(const ValueKey('thread-message-target')),
+      );
+      final decoration = highlighted.decoration as BoxDecoration;
+      expect(decoration.color, isNot(Colors.transparent));
+    });
+  });
+
   group('Channel links', () {
     testWidgets('tapping a channel link opens that channel', (tester) async {
       final randomChannel = _channel(id: 'random-channel', name: 'random');
@@ -1755,7 +1824,7 @@ void main() {
       await tester.pumpWidget(
         _buildTestable(
           messages: [rootEvent],
-          threadReplies: replies,
+          threadReplies: {'thread-root': replies},
           users: {
             'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
             'bob': const UserProfile(pubkey: 'bob', displayName: 'Bob'),

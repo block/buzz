@@ -149,7 +149,7 @@ class ActivityPage extends HookConsumerWidget {
       final thread = threadReferenceOf(target.tags);
       final threadRootId = isBroadcastReply(target.tags)
           ? null
-          : (thread.rootId ?? thread.parentId);
+          : thread.parentId;
 
       Navigator.of(context).push(
         MaterialPageRoute<void>(
