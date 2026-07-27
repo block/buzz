@@ -149,6 +149,7 @@ Widget _buildTestable({
   _FakeMessagesNotifier? messagesNotifier,
   String? canvasContent,
   List<NostrEvent>? threadReplies,
+  TextScaler textScaler = TextScaler.noScaling,
 }) {
   final resolvedChannel = channel ?? _testChannel;
   final fakeChannelsNotifier =
@@ -196,6 +197,10 @@ Widget _buildTestable({
     ],
     child: MaterialApp(
       theme: AppTheme.light(),
+      builder: (context, child) => MediaQuery(
+        data: MediaQuery.of(context).copyWith(textScaler: textScaler),
+        child: child!,
+      ),
       navigatorObservers: navigatorObservers,
       home: ChannelDetailPage(channel: resolvedChannel),
     ),
@@ -797,7 +802,49 @@ void main() {
       );
     });
 
-    testWidgets('can jump back to latest when newer messages are offscreen', (
+    testWidgets('constrains reply summaries at accessibility text sizes', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(400, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final lastReplyAt =
+          DateTime.now().millisecondsSinceEpoch ~/ 1000 - 59 * 60;
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _textMsg(
+              id: 'root',
+              pubkey: 'alice',
+              content: 'Thread head',
+              createdAt: lastReplyAt - 300,
+            ),
+            for (var i = 0; i < 3; i++)
+              _textMsg(
+                id: 'reply-$i',
+                pubkey: 'participant-$i',
+                content: 'Reply $i',
+                createdAt: lastReplyAt - 2 + i,
+                extraTags: const [
+                  ['e', 'root', '', 'reply'],
+                ],
+              ),
+          ],
+          channel: _testChannel.copyWith(archivedAt: DateTime.now()),
+          textScaler: const TextScaler.linear(2),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final summaryText = tester.widget<RichText>(findRichText('3 replies'));
+      expect(summaryText.maxLines, 2);
+      expect(summaryText.overflow, TextOverflow.ellipsis);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('can jump back to latest after a non-drag user scroll', (
       tester,
     ) async {
       final initialMessages = [

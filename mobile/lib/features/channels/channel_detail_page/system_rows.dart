@@ -531,34 +531,38 @@ class _ThreadSummaryRow extends ConsumerWidget {
               ),
             ),
             const SizedBox(width: Grid.xxs),
-            Text.rich(
-              TextSpan(
-                children: [
-                  TextSpan(
-                    text:
-                        '${summary.replyCount} ${summary.replyCount == 1 ? 'reply' : 'replies'}',
-                    style: replyPreviewTextStyle.copyWith(
-                      color: context.colors.primary,
-                    ),
-                  ),
-                  if (summary.lastReplyAt case final lastReplyAt?) ...[
-                    TextSpan(
-                      text: ' · ',
-                      style: replyPreviewTextStyle.copyWith(
-                        color: context.colors.onSurfaceVariant.withValues(
-                          alpha: 0.5,
-                        ),
-                      ),
-                    ),
+            Flexible(
+              child: Text.rich(
+                TextSpan(
+                  children: [
                     TextSpan(
                       text:
-                          'last reply ${formatThreadSummaryLastReplyTime(lastReplyAt)}',
+                          '${summary.replyCount} ${summary.replyCount == 1 ? 'reply' : 'replies'}',
                       style: replyPreviewTextStyle.copyWith(
-                        color: context.colors.onSurfaceVariant,
+                        color: context.colors.primary,
                       ),
                     ),
+                    if (summary.lastReplyAt case final lastReplyAt?) ...[
+                      TextSpan(
+                        text: ' · ',
+                        style: replyPreviewTextStyle.copyWith(
+                          color: context.colors.onSurfaceVariant.withValues(
+                            alpha: 0.5,
+                          ),
+                        ),
+                      ),
+                      TextSpan(
+                        text:
+                            'last reply ${formatThreadSummaryLastReplyTime(lastReplyAt)}',
+                        style: replyPreviewTextStyle.copyWith(
+                          color: context.colors.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
                   ],
-                ],
+                ),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
               ),
             ),
           ],
