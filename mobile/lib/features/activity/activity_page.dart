@@ -384,13 +384,16 @@ class _FilterMenuButton extends StatelessWidget {
                               )
                             : null,
                       ),
-                      Text(
-                        entry.value,
-                        style: context.textTheme.labelLarge?.copyWith(
-                          color: context.colors.onSurface,
+                      Expanded(
+                        child: Text(
+                          entry.value,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: context.textTheme.labelLarge?.copyWith(
+                            color: context.colors.onSurface,
+                          ),
                         ),
                       ),
-                      const Spacer(),
                       if (entry.key == InboxFilter.reminders &&
                           dueReminderCount > 0)
                         _CountBadge(count: dueReminderCount)

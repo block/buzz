@@ -109,6 +109,7 @@ void main() {
     Map<String, UserProfile>? users,
     Map<String, int> readContexts = const {},
     List<Channel>? channels,
+    TextScaler? textScaler,
   }) async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
@@ -129,7 +130,16 @@ void main() {
         ),
         remindersProvider.overrideWith(() => _FakeRemindersNotifier(const [])),
       ],
-      child: MaterialApp(theme: AppTheme.light(), home: const ActivityPage()),
+      child: MaterialApp(
+        theme: AppTheme.light(),
+        builder: textScaler == null
+            ? null
+            : (context, child) => MediaQuery(
+                data: MediaQuery.of(context).copyWith(textScaler: textScaler),
+                child: child!,
+              ),
+        home: const ActivityPage(),
+      ),
     );
   }
 
@@ -425,6 +435,24 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Nothing needs your action'), findsOneWidget);
+  });
+
+  testWidgets('filter menu supports accessibility text scaling', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      await buildTestable(textScaler: const TextScaler.linear(3)),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('activity-filter-menu')));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey('activity-filter-popover')),
+      findsOneWidget,
+    );
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('thread filter matches grouped thread replies', (tester) async {
