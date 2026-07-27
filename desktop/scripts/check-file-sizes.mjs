@@ -127,7 +127,11 @@ const overrides = new Map([
   // receipts (write_agent_runtime_receipt atomic JSON + remove/read_all
   // helpers) replace the pubkey-keyed PID file, plus the hashed pair-scoped
   // runtime log path. Load-bearing crash-recovery surface; queued to split.
-  ["src-tauri/src/managed_agents/storage.rs", 1383],
+  // harness-log reader fix: the inline test module moved to storage_tests.rs
+  // (`#[path]`-included), ratcheting 1383 -> 826. Both halves are now under the
+  // 1000 default; entries kept as ratchets.
+  ["src-tauri/src/managed_agents/storage.rs", 826],
+  ["src-tauri/src/managed_agents/storage_tests.rs", 701],
   // config-bridge setup-payload env-boundary fix adds readiness wiring in
   // spawn_agent_child; load-bearing security fix, queued to split.
   ["src-tauri/src/managed_agents/config_bridge/reader.rs", 1016],
@@ -185,10 +189,11 @@ const overrides = new Map([
   // ownership (valid_agent_runtime_receipt uses buzz_sweep_owns_process).
   ["src-tauri/src/managed_agents/runtime/tests.rs", 1320],
   // runtime.rs re-entered the list after the #1968 merge: main's
-  // definition-authoritative resolver comments grew it to 982, and this PR's
-  // typed harness-descriptor resolution in spawn_agent_child (+38) lands on
-  // top. Queued to shrink with the next runtime split pass (#2974 follow-up).
-  ["src-tauri/src/managed_agents/runtime.rs", 1020],
+  // definition-authoritative resolver comments grew it to 982, and the BYOH
+  // typed harness-descriptor resolution in spawn_agent_child landed on top at
+  // 1020. This PR's session-title env write in spawn_agent_child adds 12.
+  // Queued to shrink with the next runtime split pass (#2974 follow-up).
+  ["src-tauri/src/managed_agents/runtime.rs", 1032],
   // applyWorkspace reposDir parameter plus the validateReposDir binding,
   // threaded through Tauri invokes for configurable repos_dir, plus the
   // harness-persona-sync `harnessOverride` create-input bit — load-bearing
@@ -670,6 +675,10 @@ const overrides = new Map([
   // runtimeSupportsLlmProviderSelection guard on discovery provider (codex fix);
   // hideProviderIds computation for Databricks v1 gate. Queued to split.
   ["src/features/agents/ui/AgentDefinitionDialog.tsx", 1035],
+  // #2630 emoji picker search: the shadow-root search-input autofocus effect
+  // (rAF retry loop) took this file 999 -> 1026 and landed without this entry,
+  // so main's Desktop Core went red. Queued to split with the rest of this list.
+  ["src/features/agents/ui/AgentCreationPreview.tsx", 1026],
 ]);
 
 await runFileSizeCheck({

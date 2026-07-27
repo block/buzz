@@ -8,7 +8,7 @@ import type {
 import { relativeTime } from "@/features/projects/lib/projectsViewHelpers";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
-import { Markdown } from "@/shared/ui/markdown";
+import { ProjectRichContent } from "./ProjectRichContent";
 
 function commentAuthor(
   pubkey: string,
@@ -68,10 +68,9 @@ export function ProjectPullRequestInlineCommentThread({
                   {relativeTime(comment.createdAt)}
                 </span>
               </div>
-              <Markdown
-                className="text-sm"
+              <ProjectRichContent
                 content={comment.content}
-                interactive={false}
+                tags={comment.tags}
               />
             </article>
           ))}

@@ -12,6 +12,7 @@ import 'package:buzz/features/profile/user_cache_provider.dart';
 import 'package:buzz/features/profile/user_profile.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 const _channelId = 'forum-channel';
 
@@ -103,6 +104,10 @@ Widget _buildPostsView({
   );
 }
 
+/// Shared mock prefs for the compose bar's draft store. Initialized in
+/// [main].
+late SharedPreferences _testPrefs;
+
 Widget _buildThreadPage({
   required ForumThreadResponse threadResponse,
   String postEventId = 'post1',
@@ -119,6 +124,7 @@ Widget _buildThreadPage({
         channelId: _channelId,
         eventId: postEventId,
       )).overrideWith((ref) async => threadResponse),
+      savedPrefsProvider.overrideWithValue(_testPrefs),
       relayClientProvider.overrideWithValue(
         RelayClient(baseUrl: 'http://localhost:3000'),
       ),
@@ -137,6 +143,11 @@ Widget _buildThreadPage({
 }
 
 void main() {
+  setUp(() async {
+    SharedPreferences.setMockInitialValues({});
+    _testPrefs = await SharedPreferences.getInstance();
+  });
+
   group('ForumPostCard', () {
     testWidgets('renders author name and content', (tester) async {
       await tester.pumpWidget(

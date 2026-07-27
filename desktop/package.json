@@ -14,7 +14,7 @@
     "lint": "biome lint .",
     "check": "biome check . && pnpm check:file-sizes && pnpm check:px-text && pnpm check:pubkey-truncation",
     "format": "biome format --write .",
-    "test": "node --import ./test-loader.mjs --experimental-strip-types --test 'src/**/*.test.mjs'",
+    "test": "node --import ./test-loader.mjs --experimental-strip-types --test \"src/**/*.test.mjs\"",
     "preview": "vite preview",
     "tauri": "tauri",
     "test:e2e": "pnpm build:e2e && playwright test",

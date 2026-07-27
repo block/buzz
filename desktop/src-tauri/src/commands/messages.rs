@@ -68,7 +68,20 @@ pub async fn get_feed(
 
     // Mentions: messages that reference me via #p.
     let mut mention_filter = serde_json::json!({
-        "kinds": [9, 40002, 1, 45001, 45003],
+        "kinds": [
+            9,
+            40002,
+            1,
+            45001,
+            45003,
+            buzz_core_pkg::kind::KIND_GIT_PULL_REQUEST,
+            buzz_core_pkg::kind::KIND_GIT_PR_UPDATE,
+            buzz_core_pkg::kind::KIND_GIT_ISSUE,
+            buzz_core_pkg::kind::KIND_GIT_STATUS_OPEN,
+            buzz_core_pkg::kind::KIND_GIT_STATUS_MERGED,
+            buzz_core_pkg::kind::KIND_GIT_STATUS_CLOSED,
+            buzz_core_pkg::kind::KIND_GIT_STATUS_DRAFT,
+        ],
         "#p": [my_pubkey],
         "limit": cap,
     });
