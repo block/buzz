@@ -6,6 +6,9 @@ import { Switch } from "@/shared/ui/switch";
 import { cn } from "@/shared/lib/cn";
 
 import {
+  meshDebugLog,
+  meshDebugLoggingEnabled,
+  setMeshDebugLoggingEnabled,
   meshStartNode,
   meshStopNode,
   meshInstalledModels,
@@ -22,6 +25,7 @@ import {
   SettingsOptionRow,
 } from "@/features/settings/ui/SettingsOptionGroup";
 import { SettingsSectionHeader } from "@/features/settings/ui/SettingsSectionHeader";
+import { defaultShareModelFromCatalog } from "../catalogDefault";
 import { classifyModelRef } from "../classifyModelRef";
 import {
   downloadPercent,
@@ -76,6 +80,10 @@ export function MeshComputeSettingsCard() {
     readDraft(MAX_VRAM_DRAFT_STORAGE_KEY),
   );
   const [advancedOpen, setAdvancedOpen] = React.useState(false);
+  const [diagnosticLoggingEnabled, setDiagnosticLoggingEnabled] =
+    React.useState(false);
+  const [diagnosticLoggingInFlight, setDiagnosticLoggingInFlight] =
+    React.useState(false);
   const [actionInFlight, setActionInFlight] = React.useState(false);
   const [pendingAction, setPendingAction] = React.useState<
     "start" | "stop" | null
@@ -84,16 +92,67 @@ export function MeshComputeSettingsCard() {
   const { progress: downloadProgress, reset: resetDownloadProgress } =
     useMeshDownloadProgress();
 
+  React.useEffect(() => {
+    meshDebugLog("MeshComputeSettingsCard mounted");
+    return () => meshDebugLog("MeshComputeSettingsCard unmounted");
+  }, []);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    meshDebugLoggingEnabled()
+      .then((enabled) => {
+        if (!cancelled) setDiagnosticLoggingEnabled(enabled);
+      })
+      .catch(() => {
+        // Diagnostics state is non-critical; leave the switch off on failure.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function handleDiagnosticLoggingChange(enabled: boolean) {
+    setDiagnosticLoggingInFlight(true);
+    setDiagnosticLoggingEnabled(enabled);
+    try {
+      const saved = await setMeshDebugLoggingEnabled(enabled);
+      setDiagnosticLoggingEnabled(saved);
+      meshDebugLog(`diagnostic logging toggled enabled=${saved}`);
+    } catch (err) {
+      setDiagnosticLoggingEnabled(!enabled);
+      setActionError(
+        err instanceof Error
+          ? err.message
+          : "Could not update MeshLLM diagnostic logging.",
+      );
+    } finally {
+      setDiagnosticLoggingInFlight(false);
+    }
+  }
+
+  React.useEffect(() => {
+    meshDebugLog(
+      `MeshComputeSettingsCard state status=${status?.state ?? "null"} mode=${status?.mode ?? "null"} model=${status?.modelId ?? "null"} error=${error ?? "null"}`,
+    );
+  }, [status?.state, status?.mode, status?.modelId, error]);
+
   // Fetch installed models. Called on mount and whenever the running state
   // changes (a fresh start may have downloaded a new model). Stale-tolerant —
   // the picklist is a convenience, not load-bearing.
   const refreshInstalled = React.useCallback(() => {
     let cancelled = false;
+    meshDebugLog("refreshInstalled start");
     (async () => {
       try {
         const list = await meshInstalledModels();
-        if (!cancelled) setInstalledModels(list);
-      } catch {
+        if (!cancelled) {
+          meshDebugLog(`refreshInstalled success count=${list.length}`);
+          setInstalledModels(list);
+        }
+      } catch (err) {
+        meshDebugLog(
+          `refreshInstalled error ${err instanceof Error ? err.message : String(err)}`,
+        );
         // Non-fatal — picklist just stays empty; user can still type a ref.
       }
     })();
@@ -110,12 +169,29 @@ export function MeshComputeSettingsCard() {
   // Keep an empty draft empty so the UI can explicitly ask the member to choose.
   React.useEffect(() => {
     let cancelled = false;
+    meshDebugLog("catalog fetch start");
     (async () => {
       try {
         const value = await meshModelCatalog();
         if (cancelled) return;
+        meshDebugLog(
+          `catalog fetch success entries=${value.entries.length} recommended=${value.recommended ?? "null"}`,
+        );
         setCatalog(value);
-      } catch {
+        setModelInput((current) => {
+          if (current.trim() !== "") return current;
+          const fallback = defaultShareModelFromCatalog(value.entries);
+          if (fallback) {
+            meshDebugLog(`catalog auto-select model=${fallback}`);
+            writeDraft(MODEL_DRAFT_STORAGE_KEY, fallback);
+            return fallback;
+          }
+          return current;
+        });
+      } catch (err) {
+        meshDebugLog(
+          `catalog fetch error ${err instanceof Error ? err.message : String(err)}`,
+        );
         // Non-fatal — picker just doesn't render.
       }
     })();
@@ -135,6 +211,9 @@ export function MeshComputeSettingsCard() {
       status.modelId &&
       status.modelId !== modelInput
     ) {
+      meshDebugLog(
+        `mirror running status model into field model=${status.modelId}`,
+      );
       setModelInput(status.modelId);
       writeDraft(MODEL_DRAFT_STORAGE_KEY, status.modelId);
     }
@@ -155,14 +234,37 @@ export function MeshComputeSettingsCard() {
   // occupants remain locked until stopped/recovered.
   const controlsDisabled = actionInFlight || (slotOccupied && !isConsuming);
   const refClass = classifyModelRef(modelInput);
-  const canStart = refClass.kind !== "unknown" && !actionInFlight;
+  const canStart =
+    refClass.kind !== "unknown" &&
+    !actionInFlight &&
+    status?.state !== "starting";
+  const visibleDownloadProgress =
+    actionInFlight && pendingAction === "start" ? downloadProgress : null;
+
+  React.useEffect(() => {
+    meshDebugLog(
+      `derived sharing=${isSharing} consuming=${isConsuming} slotOccupied=${slotOccupied} controlsDisabled=${controlsDisabled} canStart=${canStart} refKind=${refClass.kind} modelInput=${modelInput.trim()}`,
+    );
+  }, [
+    isSharing,
+    isConsuming,
+    slotOccupied,
+    controlsDisabled,
+    canStart,
+    refClass.kind,
+    modelInput,
+  ]);
 
   async function handleToggle(next: boolean) {
     // Never let the Share switch tear down a consume session. The switch is
     // already disabled while consuming, but status can be stale between polls,
     // so refuse a stop that isn't stopping OUR serve node as a belt-and-braces
     // guard (the backend enforces this authoritatively too).
+    meshDebugLog(
+      `handleToggle next=${next} isSharing=${isSharing} isConsuming=${isConsuming} slotOccupied=${slotOccupied} canStart=${canStart} model=${modelInput.trim()} maxVram=${maxVramGb.trim()}`,
+    );
     if (!next && !isSharing) {
+      meshDebugLog("handleToggle ignored stop because not sharing");
       return;
     }
     setActionError(null);
@@ -172,21 +274,29 @@ export function MeshComputeSettingsCard() {
       if (next) {
         const maxVram =
           maxVramGb.trim() === "" ? undefined : Number.parseFloat(maxVramGb);
-        await meshStartNode({
-          mode: "serve",
+        const request = {
+          mode: "serve" as const,
           modelId: modelInput.trim() || undefined,
           maxVramGb:
             typeof maxVram === "number" && !Number.isNaN(maxVram)
               ? maxVram
               : undefined,
-        });
+        };
+        meshDebugLog(`handleToggle start invoking ${JSON.stringify(request)}`);
+        await meshStartNode(request);
+        meshDebugLog("handleToggle start completed");
       } else {
+        meshDebugLog("handleToggle stop invoking");
         await meshStopNode();
+        meshDebugLog("handleToggle stop completed");
       }
       refresh();
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : String(err));
+      const message = err instanceof Error ? err.message : String(err);
+      meshDebugLog(`handleToggle error ${message}`);
+      setActionError(message);
     } finally {
+      meshDebugLog("handleToggle finally");
       setActionInFlight(false);
       setPendingAction(null);
       resetDownloadProgress();
@@ -215,8 +325,8 @@ export function MeshComputeSettingsCard() {
           {actionError}
         </p>
       ) : null}
-      {downloadProgress ? (
-        <DownloadProgressBar progress={downloadProgress} />
+      {visibleDownloadProgress ? (
+        <DownloadProgressBar progress={visibleDownloadProgress} />
       ) : null}
 
       <SettingsOptionGroup>
@@ -287,6 +397,7 @@ export function MeshComputeSettingsCard() {
               id="mesh-share-compute-model"
               onChange={(e) => {
                 const next = e.target.value;
+                meshDebugLog(`model input changed value=${next}`);
                 setModelInput(next);
                 writeDraft(MODEL_DRAFT_STORAGE_KEY, next);
               }}
@@ -302,6 +413,7 @@ export function MeshComputeSettingsCard() {
                 catalog={catalog}
                 disabled={controlsDisabled}
                 onPick={(name) => {
+                  meshDebugLog(`catalog picked model=${name}`);
                   setModelInput(name);
                   writeDraft(MODEL_DRAFT_STORAGE_KEY, name);
                 }}
@@ -323,6 +435,7 @@ export function MeshComputeSettingsCard() {
                         className="rounded border border-border/60 bg-muted/20 px-2 py-0.5 text-sm hover:bg-muted/40 disabled:cursor-not-allowed disabled:opacity-50"
                         disabled={controlsDisabled}
                         onClick={() => {
+                          meshDebugLog(`installed model picked id=${m.id}`);
                           setModelInput(m.id);
                           writeDraft(MODEL_DRAFT_STORAGE_KEY, m.id);
                         }}
@@ -340,9 +453,11 @@ export function MeshComputeSettingsCard() {
 
         <details
           className="px-4 py-3"
-          onToggle={(e) =>
-            setAdvancedOpen((e.target as HTMLDetailsElement).open)
-          }
+          onToggle={(e) => {
+            const open = (e.target as HTMLDetailsElement).open;
+            meshDebugLog(`advanced toggled open=${open}`);
+            setAdvancedOpen(open);
+          }}
           open={advancedOpen}
         >
           <summary className="flex cursor-pointer items-center gap-1.5 text-sm font-medium text-foreground">
@@ -354,22 +469,47 @@ export function MeshComputeSettingsCard() {
             />
             Advanced
           </summary>
-          <div className="mt-3 flex flex-col gap-2">
-            <label className="text-sm font-medium" htmlFor="mesh-vram">
-              Max VRAM (GB)
-            </label>
-            <Input
-              data-testid="mesh-share-compute-vram"
-              id="mesh-vram"
-              inputMode="decimal"
-              onChange={(e) => {
-                const next = e.target.value;
-                setMaxVramGb(next);
-                writeDraft(MAX_VRAM_DRAFT_STORAGE_KEY, next);
-              }}
-              placeholder="No limit"
-              value={maxVramGb}
-            />
+          <div className="mt-3 flex flex-col gap-4">
+            <div className="flex items-start justify-between gap-4 rounded-lg border border-border/60 bg-muted/20 px-3 py-2">
+              <div className="min-w-0">
+                <label
+                  className="text-sm font-medium"
+                  htmlFor="mesh-diagnostic-logging"
+                >
+                  Enable MeshLLM diagnostic logging
+                </label>
+                <p className="mt-0.5 text-sm font-normal text-muted-foreground">
+                  Writes troubleshooting logs to your temp folder and Buzz app
+                  data. Turn this off when finished.
+                </p>
+              </div>
+              <Switch
+                aria-label="Enable MeshLLM diagnostic logging"
+                checked={diagnosticLoggingEnabled}
+                disabled={diagnosticLoggingInFlight}
+                id="mesh-diagnostic-logging"
+                onCheckedChange={handleDiagnosticLoggingChange}
+              />
+            </div>
+
+            <div className="flex flex-col gap-2">
+              <label className="text-sm font-medium" htmlFor="mesh-vram">
+                Max VRAM (GB)
+              </label>
+              <Input
+                data-testid="mesh-share-compute-vram"
+                id="mesh-vram"
+                inputMode="decimal"
+                onChange={(e) => {
+                  const next = e.target.value;
+                  meshDebugLog(`max vram input changed value=${next}`);
+                  setMaxVramGb(next);
+                  writeDraft(MAX_VRAM_DRAFT_STORAGE_KEY, next);
+                }}
+                placeholder="No limit"
+                value={maxVramGb}
+              />
+            </div>
             {status?.consoleUrl ? (
               <p className="text-sm font-normal text-muted-foreground">
                 Debug console:{" "}

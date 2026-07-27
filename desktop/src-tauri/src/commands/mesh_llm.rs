@@ -1,4 +1,7 @@
+use std::collections::HashSet;
+use std::io::Write;
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager, State};
@@ -13,12 +16,123 @@ struct MeshSharingConfig {
     max_vram_gb: Option<u64>,
 }
 
+#[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MeshDiagnosticsConfig {
+    debug_logging_enabled: bool,
+}
+
 fn mesh_sharing_config_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(app
         .path()
         .app_data_dir()
         .map_err(|error| format!("failed to resolve app data dir: {error}"))?
         .join("mesh-sharing.json"))
+}
+
+fn mesh_diagnostics_config_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("failed to resolve app data dir: {error}"))?
+        .join("mesh-diagnostics.json"))
+}
+
+fn load_mesh_diagnostics_config(app: &AppHandle) -> MeshDiagnosticsConfig {
+    let Ok(path) = mesh_diagnostics_config_path(app) else {
+        return MeshDiagnosticsConfig::default();
+    };
+    std::fs::read(path)
+        .ok()
+        .and_then(|payload| serde_json::from_slice(&payload).ok())
+        .unwrap_or_default()
+}
+
+fn save_mesh_diagnostics_config(
+    app: &AppHandle,
+    config: &MeshDiagnosticsConfig,
+) -> Result<(), String> {
+    let path = mesh_diagnostics_config_path(app)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            format!("failed to create mesh diagnostics config directory: {error}")
+        })?;
+    }
+    let payload = serde_json::to_vec_pretty(config)
+        .map_err(|error| format!("failed to encode mesh diagnostics config: {error}"))?;
+    crate::managed_agents::atomic_write_json(&path, &payload)
+}
+
+static MESH_DEBUG_LOG_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn env_mesh_debug_logging_enabled() -> bool {
+    std::env::var("BUZZ_MESH_DEBUG_LOG")
+        .map(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn is_mesh_debug_logging_enabled(app: &AppHandle) -> bool {
+    env_mesh_debug_logging_enabled() || load_mesh_diagnostics_config(app).debug_logging_enabled
+}
+
+pub(crate) fn append_mesh_debug_log(app: &AppHandle, message: impl AsRef<str>) {
+    if !is_mesh_debug_logging_enabled(app) {
+        return;
+    }
+
+    let lock = MESH_DEBUG_LOG_LOCK.get_or_init(|| Mutex::new(()));
+    let _guard = lock.lock().ok();
+
+    let mut paths = vec![std::env::temp_dir().join("buzz-mesh-debug.log")];
+    if let Ok(data_dir) = app.path().app_data_dir() {
+        paths.push(data_dir.join("mesh-debug.log"));
+    }
+
+    let line = format!("{} {}\n", chrono::Utc::now().to_rfc3339(), message.as_ref());
+    for path in paths {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = file.write_all(line.as_bytes());
+            let _ = file.flush();
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn mesh_debug_log(app: AppHandle, message: String) -> CmdResult<()> {
+    append_mesh_debug_log(&app, format!("frontend {message}"));
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn mesh_debug_logging_enabled(app: AppHandle) -> CmdResult<bool> {
+    Ok(is_mesh_debug_logging_enabled(&app))
+}
+
+#[tauri::command]
+pub async fn set_mesh_debug_logging_enabled(app: AppHandle, enabled: bool) -> CmdResult<bool> {
+    save_mesh_diagnostics_config(
+        &app,
+        &MeshDiagnosticsConfig {
+            debug_logging_enabled: enabled,
+        },
+    )?;
+    append_mesh_debug_log(
+        &app,
+        format!("mesh diagnostic logging setting changed enabled={enabled}"),
+    );
+    Ok(is_mesh_debug_logging_enabled(&app))
 }
 
 fn save_mesh_sharing_config(app: &AppHandle, config: &MeshSharingConfig) -> Result<(), String> {
@@ -42,6 +156,128 @@ fn load_mesh_sharing_config(app: &AppHandle) -> Result<Option<MeshSharingConfig>
         Err(error) => Err(format!("failed to read {}: {error}", path.display())),
     }
 }
+
+#[cfg(target_os = "windows")]
+const WINDOWS_MESH_RUNTIME_DEP_DLLS: &[&str] = &[
+    "libgcc_s_seh-1.dll",
+    "libstdc++-6.dll",
+    "libgomp-1.dll",
+    "libwinpthread-1.dll",
+];
+
+#[cfg(target_os = "windows")]
+fn windows_mesh_runtime_dependency_dirs(app: &AppHandle) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        dirs.push(resource_dir.join("mesh-llm").join("windows-x86_64"));
+        dirs.push(
+            resource_dir
+                .join("resources")
+                .join("mesh-llm")
+                .join("windows-x86_64"),
+        );
+    }
+    dirs.into_iter()
+        .filter(|dir| {
+            WINDOWS_MESH_RUNTIME_DEP_DLLS
+                .iter()
+                .all(|name| dir.join(name).is_file())
+        })
+        .collect()
+}
+
+#[cfg(target_os = "windows")]
+static WINDOWS_MESH_DLL_DIRS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+
+#[cfg(target_os = "windows")]
+fn register_windows_dll_directory(app: &AppHandle, dir: &std::path::Path) {
+    use std::os::windows::ffi::OsStrExt;
+
+    let canonical = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let seen = WINDOWS_MESH_DLL_DIRS.get_or_init(|| Mutex::new(HashSet::new()));
+    if let Ok(mut seen) = seen.lock() {
+        if !seen.insert(canonical.clone()) {
+            return;
+        }
+    }
+
+    let wide: Vec<u16> = canonical
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let cookie =
+        unsafe { windows_sys::Win32::System::LibraryLoader::AddDllDirectory(wide.as_ptr()) };
+    append_mesh_debug_log(
+        app,
+        format!(
+            "registered windows DLL directory dir={} ok={}",
+            canonical.display(),
+            !cookie.is_null()
+        ),
+    );
+}
+
+#[cfg(target_os = "windows")]
+fn prepare_windows_mesh_runtime_dependencies(app: &AppHandle) {
+    let dependency_dirs = windows_mesh_runtime_dependency_dirs(app);
+    if dependency_dirs.is_empty() {
+        append_mesh_debug_log(app, "windows mesh runtime dependency resources not found");
+        return;
+    }
+
+    let mut registered_dirs = dependency_dirs.clone();
+    let Some(local_data_dir) = dirs::data_local_dir() else {
+        return;
+    };
+    let native_root = local_data_dir.join("mesh-llm").join("native-runtimes");
+    if let Ok(version_dirs) = std::fs::read_dir(native_root) {
+        for version_dir in version_dirs.flatten() {
+            let Ok(runtime_dirs) = std::fs::read_dir(version_dir.path()) else {
+                continue;
+            };
+            for runtime_dir in runtime_dirs.flatten() {
+                let lib_dir = runtime_dir.path().join("lib");
+                if !lib_dir.is_dir() {
+                    continue;
+                }
+                registered_dirs.push(lib_dir.clone());
+                for dependency_dir in &dependency_dirs {
+                    for name in WINDOWS_MESH_RUNTIME_DEP_DLLS {
+                        let src = dependency_dir.join(name);
+                        let dst = lib_dir.join(name);
+                        let _ = std::fs::copy(src, dst);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut path_entries: Vec<PathBuf> = registered_dirs.clone();
+    if let Some(existing) = std::env::var_os("PATH") {
+        path_entries.extend(std::env::split_paths(&existing));
+    }
+    if let Ok(joined) = std::env::join_paths(path_entries) {
+        std::env::set_var("PATH", joined);
+    }
+    for dir in &registered_dirs {
+        register_windows_dll_directory(app, dir);
+    }
+    append_mesh_debug_log(
+        app,
+        format!(
+            "prepared windows mesh runtime dependency dirs={}",
+            registered_dirs
+                .iter()
+                .map(|dir| dir.display().to_string())
+                .collect::<Vec<_>>()
+                .join(";")
+        ),
+    );
+}
+
+#[cfg(not(target_os = "windows"))]
+fn prepare_windows_mesh_runtime_dependencies(_app: &AppHandle) {}
 
 const RELAY_MESH_RUNTIME_NO_TARGET: &str =
     "Buzz shared compute requires a live serving member; start serving the selected model on a member, then try again";
@@ -305,6 +541,7 @@ pub(crate) async fn restore_mesh_sharing(app: &AppHandle, state: &AppState) -> C
     if runtime.is_some() {
         return Ok(());
     }
+    prepare_windows_mesh_runtime_dependencies(app);
     let request = mesh_llm::StartMeshNodeRequest {
         mode: mesh_llm::MeshNodeMode::Serve,
         model_id: Some(config.model_id),
@@ -325,9 +562,57 @@ pub(crate) async fn restore_mesh_sharing(app: &AppHandle, state: &AppState) -> C
 #[tauri::command]
 pub async fn mesh_start_node(
     app: AppHandle,
+    request: mesh_llm::StartMeshNodeRequest,
+) -> CmdResult<mesh_llm::MeshNodeStatus> {
+    append_mesh_debug_log(
+        &app,
+        format!(
+            "mesh_start_node dispatch received mode={:?} model_id={:?} stack={}",
+            request.mode,
+            request.model_id,
+            std::env::var("MESH_TOKIO_STACK_SIZE").unwrap_or_else(|_| "unset".to_string())
+        ),
+    );
+
+    // Keep Tauri's generated command future tiny. The real mesh start future is
+    // deep enough to overflow Windows stacks before the command body can log;
+    // run it on an explicit large-stack OS thread and await only the result.
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let app_for_thread = app.clone();
+    std::thread::Builder::new()
+        .name("buzz-mesh-start".to_string())
+        .stack_size(crate::mesh_llm::MESH_WORKER_STACK_SIZE)
+        .spawn(move || {
+            let result = tauri::async_runtime::block_on(async move {
+                let app_for_inner = app_for_thread.clone();
+                let state = app_for_thread.state::<AppState>();
+                mesh_start_node_inner(app_for_inner, state, request).await
+            });
+            let _ = sender.send(result);
+        })
+        .map_err(|error| format!("failed to spawn mesh start thread: {error}"))?;
+
+    receiver
+        .await
+        .map_err(|error| format!("mesh start thread exited before returning: {error}"))?
+}
+
+async fn mesh_start_node_inner(
+    app: AppHandle,
     state: State<'_, AppState>,
     mut request: mesh_llm::StartMeshNodeRequest,
 ) -> CmdResult<mesh_llm::MeshNodeStatus> {
+    prepare_windows_mesh_runtime_dependencies(&app);
+    append_mesh_debug_log(
+        &app,
+        format!(
+            "mesh_start_node_inner requested mode={:?} model_id={:?} stack={}",
+            request.mode,
+            request.model_id,
+            std::env::var("MESH_TOKIO_STACK_SIZE").unwrap_or_else(|_| "unset".to_string())
+        ),
+    );
+
     let sharing_config = if request.mode == mesh_llm::MeshNodeMode::Serve {
         Some(sharing_config_from_request(&request)?)
     } else {
@@ -352,7 +637,11 @@ pub async fn mesh_start_node(
                     return restart_to_share(&app, config);
                 }
                 MeshStartPlan::RejectOccupied => {
-                    return Err("mesh node is already running".to_string());
+                    append_mesh_debug_log(
+                        &app,
+                        "start requested while mesh node already running; returning current status",
+                    );
+                    return existing.status().await.map_err(|error| error.to_string());
                 }
                 MeshStartPlan::Start => {}
             }
@@ -362,12 +651,23 @@ pub async fn mesh_start_node(
     // Frontend requests never carry a roster. Resolve it and the bootstrap
     // endpoint from one snapshot so UI startup does not repeat relay probes.
     if request.trusted_owner_ids.is_none() || request.join_token.is_none() {
+        append_mesh_debug_log(&app, "resolving Buzz mesh startup metadata");
         let (trusted_owner_ids, join_token) = resolve_buzz_mesh_startup(&state).await;
         request.trusted_owner_ids.get_or_insert(trusted_owner_ids);
         if request.join_token.is_none() {
             request.join_token = join_token;
         }
     }
+    append_mesh_debug_log(
+        &app,
+        format!(
+            "trusted owner ids resolved count={}",
+            request
+                .trusted_owner_ids
+                .as_ref()
+                .map_or(0, std::vec::Vec::len)
+        ),
+    );
     request.mesh_name = Some(buzz_mesh_name(&state));
     let mut runtime = state.mesh_llm_runtime.lock().await;
 
@@ -383,12 +683,30 @@ pub async fn mesh_start_node(
         return restart_to_share(&app, config);
     }
     if plan == MeshStartPlan::RejectOccupied {
-        return Err("mesh node is already running".to_string());
+        if let Some(existing) = runtime.as_ref() {
+            append_mesh_debug_log(
+                &app,
+                "start requested while mesh node already running; returning current status",
+            );
+            return existing.status().await.map_err(|error| error.to_string());
+        }
     }
 
-    let started = mesh_llm::DesktopMeshRuntime::start(request)
-        .await
-        .map_err(|error| format!("{error:#}"))?;
+    append_mesh_debug_log(&app, "starting DesktopMeshRuntime");
+    let started = match mesh_llm::DesktopMeshRuntime::start(request).await {
+        Ok(started) => {
+            append_mesh_debug_log(&app, "DesktopMeshRuntime::start returned ok");
+            started
+        }
+        Err(error) => {
+            append_mesh_debug_log(
+                &app,
+                format!("DesktopMeshRuntime::start returned error: {error:#}"),
+            );
+            return Err(format!("{error:#}"));
+        }
+    };
+    append_mesh_debug_log(&app, "probing mesh node status");
     let status = match started.status().await {
         Ok(status) => status,
         Err(error) => {
@@ -398,6 +716,10 @@ pub async fn mesh_start_node(
                     "buzz-mesh: started node status failed and cleanup was incomplete: {cleanup_error:#}"
                 );
             }
+            append_mesh_debug_log(
+                &app,
+                format!("mesh node started but status probe failed: {error:#}; restarting"),
+            );
             // The handle was never installed into AppState, so shutdown cannot
             // see it again. Restart even when stop reported success: the
             // process boundary guarantees native :9337/:3131 listeners cannot
@@ -768,6 +1090,7 @@ pub(crate) async fn ensure_relay_mesh_for_record(
         }
     };
 
+    prepare_windows_mesh_runtime_dependencies(app);
     // Serve→Client re-arm transition (micspiral review #3, intentional-by-design):
     // if the dead ingress belonged to a *serve* node with running consumer
     // agents, this re-arms it as a Client (`MeshNodeMode::Client`). That is the
@@ -817,12 +1140,27 @@ pub async fn mesh_stop_node(
 }
 
 #[tauri::command]
-pub async fn mesh_node_status(state: State<'_, AppState>) -> CmdResult<mesh_llm::MeshNodeStatus> {
+pub async fn mesh_node_status(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> CmdResult<mesh_llm::MeshNodeStatus> {
+    append_mesh_debug_log(&app, "mesh_node_status requested");
     let runtime = state.mesh_llm_runtime.lock().await;
-    match runtime.as_ref() {
+    let result = match runtime.as_ref() {
         Some(runtime) => runtime.status().await.map_err(|error| error.to_string()),
         None => Ok(mesh_llm::stopped_status()),
+    };
+    match &result {
+        Ok(status) => append_mesh_debug_log(
+            &app,
+            format!(
+                "mesh_node_status returned state={:?} mode={:?} model_id={:?} health={:?}",
+                status.state, status.mode, status.model_id, status.health
+            ),
+        ),
+        Err(error) => append_mesh_debug_log(&app, format!("mesh_node_status error: {error}")),
     }
+    result
 }
 
 /// Read-only host-side usage: who/what is using the compute this machine is
@@ -830,27 +1168,51 @@ pub async fn mesh_node_status(state: State<'_, AppState>) -> CmdResult<mesh_llm:
 /// surface — it reads the serving node's own runtime metrics.
 #[tauri::command]
 pub async fn mesh_serving_usage(
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> CmdResult<mesh_llm::MeshServingUsage> {
+    append_mesh_debug_log(&app, "mesh_serving_usage requested");
     let runtime = state.mesh_llm_runtime.lock().await;
-    match runtime.as_ref() {
+    let result = match runtime.as_ref() {
         Some(runtime) => runtime.serving_usage().await.map_err(|e| e.to_string()),
         None => Ok(mesh_llm::MeshServingUsage::default()),
+    };
+    match &result {
+        Ok(usage) => append_mesh_debug_log(
+            &app,
+            format!(
+                "mesh_serving_usage returned inflight={} requests_served={} remote_attempts={} endpoint_attempts={}",
+                usage.inflight, usage.requests_served, usage.remote_attempts, usage.endpoint_attempts
+            ),
+        ),
+        Err(error) => append_mesh_debug_log(&app, format!("mesh_serving_usage error: {error}")),
     }
+    result
 }
 
 #[tauri::command]
 pub async fn mesh_installed_models(
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> CmdResult<Vec<mesh_llm::MeshModelOption>> {
+    append_mesh_debug_log(&app, "mesh_installed_models requested");
     let runtime = state.mesh_llm_runtime.lock().await;
-    if let Some(runtime) = runtime.as_ref() {
-        return runtime
+    let result = if let Some(runtime) = runtime.as_ref() {
+        runtime
             .installed_models()
             .await
-            .map_err(|error| error.to_string());
+            .map_err(|error| error.to_string())
+    } else {
+        Ok(Vec::new())
+    };
+    match &result {
+        Ok(models) => append_mesh_debug_log(
+            &app,
+            format!("mesh_installed_models returned count={}", models.len()),
+        ),
+        Err(error) => append_mesh_debug_log(&app, format!("mesh_installed_models error: {error}")),
     }
-    Ok(Vec::new())
+    result
 }
 
 /// Hardware-aware curated model catalog for the Share-compute picker: the
@@ -858,10 +1220,24 @@ pub async fn mesh_installed_models(
 /// ranked by fit with installed-state flags. Runs the hardware survey +
 /// HF-cache scan off the async runtime (both do blocking I/O).
 #[tauri::command]
-pub async fn mesh_model_catalog() -> CmdResult<mesh_llm::MeshModelCatalog> {
-    tokio::task::spawn_blocking(mesh_llm::model_catalog)
+pub async fn mesh_model_catalog(app: AppHandle) -> CmdResult<mesh_llm::MeshModelCatalog> {
+    append_mesh_debug_log(&app, "mesh_model_catalog requested");
+    let result = tokio::task::spawn_blocking(mesh_llm::model_catalog)
         .await
-        .map_err(|error| format!("mesh catalog task failed: {error}"))
+        .map_err(|error| format!("mesh catalog task failed: {error}"));
+    match &result {
+        Ok(catalog) => append_mesh_debug_log(
+            &app,
+            format!(
+                "mesh_model_catalog returned entries={} recommended={:?} vram_gb={}",
+                catalog.entries.len(),
+                catalog.recommended,
+                catalog.vram_gb
+            ),
+        ),
+        Err(error) => append_mesh_debug_log(&app, format!("mesh_model_catalog error: {error}")),
+    }
+    result
 }
 
 #[cfg(all(test, feature = "mesh-llm"))]

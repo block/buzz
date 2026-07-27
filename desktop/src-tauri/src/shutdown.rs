@@ -69,15 +69,18 @@ fn updated_macos_binary(current_binary: &std::path::Path) -> Option<std::path::P
     Some(macos_directory.join(binary_name))
 }
 
-#[cfg(all(feature = "mesh-llm", target_os = "macos"))]
-pub(crate) fn relaunch_after_mesh_shutdown(app: &tauri::AppHandle) -> ! {
+#[cfg(feature = "mesh-llm")]
+pub(crate) fn relaunch_after_mesh_shutdown(app: &tauri::AppHandle) {
     use std::process::Command;
 
     tauri_plugin_single_instance::destroy(app);
     let env = app.env();
     match tauri::process::current_binary(&env) {
         Ok(current_binary) => {
+            #[cfg(target_os = "macos")]
             let binary = updated_macos_binary(&current_binary).unwrap_or(current_binary);
+            #[cfg(not(target_os = "macos"))]
+            let binary = current_binary;
             if let Err(error) = Command::new(binary)
                 .args(env.args_os.iter().skip(1))
                 .spawn()
@@ -87,7 +90,6 @@ pub(crate) fn relaunch_after_mesh_shutdown(app: &tauri::AppHandle) -> ! {
         }
         Err(error) => eprintln!("buzz-desktop: failed to locate app for relaunch: {error}"),
     }
-    hard_exit_after_mesh_shutdown();
 }
 
 #[cfg(all(feature = "mesh-llm", target_os = "macos"))]

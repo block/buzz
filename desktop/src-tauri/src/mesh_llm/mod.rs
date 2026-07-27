@@ -299,9 +299,15 @@ async fn initialize_mesh_native_runtime() -> anyhow::Result<()> {
 /// stack-guard SIGABRT inside `download_model_ref_with_progress_details`
 /// when polled on Tauri's stock runtime. Upstream runs its own binary on
 /// 8 MiB worker stacks for exactly this reason (mesh-llm `main.rs`,
-/// `DEFAULT_WORKER_STACK_SIZE`), as does mesh-console. `lib.rs` installs a
-/// runtime with this stack size via `tauri::async_runtime::set` before the
-/// app starts, so every command future gets the same headroom.
+/// `DEFAULT_WORKER_STACK_SIZE`), as does mesh-console. Windows needs more
+/// headroom in the packaged Tauri process: starting a serving node overflowed
+/// at 8 MiB and still failed before command-body entry on some Windows builds.
+/// `lib.rs` installs a runtime with this stack size before the app starts, and
+/// the start command also runs the real start path on a dedicated thread with
+/// this stack size.
+#[cfg(target_os = "windows")]
+pub const MESH_WORKER_STACK_SIZE: usize = 128 * 1024 * 1024;
+#[cfg(not(target_os = "windows"))]
 pub const MESH_WORKER_STACK_SIZE: usize = 8 * 1024 * 1024;
 
 /// Pre-download the model (with byte progress through the output sink)

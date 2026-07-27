@@ -767,6 +767,7 @@ fn openai_body(
     effort: Option<ThinkingEffort>,
 ) -> Value {
     let mut messages: Vec<Value> = vec![json!({ "role": "system", "content": system_prompt })];
+    let include_tool_images = openai_chat_tool_images_enabled(cfg);
     // Images returned from tool calls ride on a trailing `role:"user"`
     // message because OpenAI Chat's `role:"tool"` content is text-only. We
     // batch them across a run of adjacent ToolResult items so that all
@@ -810,8 +811,10 @@ fn openai_body(
             HistoryItem::ToolResult(r) => {
                 messages.push(json!({
                     "role": "tool", "tool_call_id": r.provider_id,
-                    "content": openai_tool_text_content(&r.content) }));
-                pending_images.extend(openai_image_user_content(&r.content));
+                    "content": openai_tool_text_content(&r.content, include_tool_images) }));
+                if include_tool_images {
+                    pending_images.extend(openai_image_user_content(&r.content));
+                }
             }
         }
     }
@@ -837,13 +840,25 @@ fn openai_body(
     body
 }
 
-fn openai_tool_text_content(content: &[ToolResultContent]) -> String {
+fn openai_chat_tool_images_enabled(cfg: &Config) -> bool {
+    let base_url = cfg.base_url.trim().trim_end_matches('/');
+    !matches!(
+        base_url,
+        "http://127.0.0.1:9337/v1" | "http://localhost:9337/v1"
+    )
+}
+
+fn openai_tool_text_content(content: &[ToolResultContent], images_forwarded: bool) -> String {
     let mut parts = Vec::new();
     for c in content {
         match c {
             ToolResultContent::Text(text) => parts.push(text.clone()),
-            ToolResultContent::Image { data, mime_type } => parts.push(format!(
+            ToolResultContent::Image { data, mime_type } if images_forwarded => parts.push(format!(
                 "This tool result included an image ({mime_type}, {} base64 bytes) that is provided in the next user message.",
+                data.len()
+            )),
+            ToolResultContent::Image { data, mime_type } => parts.push(format!(
+                "This tool result included an image ({mime_type}, {} base64 bytes) that was omitted because this OpenAI-compatible endpoint does not support image inputs.",
                 data.len()
             )),
         }
@@ -907,7 +922,7 @@ fn responses_body(
                 input.push(json!({
                     "type": "function_call_output",
                     "call_id": r.provider_id,
-                    "output": openai_tool_text_content(&r.content),
+                    "output": openai_tool_text_content(&r.content, true),
                 }));
                 // Responses takes images as `input_image` parts on a user message.
                 let images: Vec<Value> = r
@@ -2520,6 +2535,24 @@ mod tests {
             body["messages"][4]["content"][0]["image_url"]["url"],
             "data:image/png;base64,aW1n"
         );
+    }
+
+    #[test]
+    fn openai_tool_result_omits_followup_image_for_relay_mesh() {
+        let mut cfg = cfg(Provider::OpenAi);
+        cfg.base_url = "http://127.0.0.1:9337/v1".into();
+        let body = openai_body(&cfg, "system", &image_history(), &[], "auto", None);
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(
+            messages.len(),
+            4,
+            "relay mesh must not receive image_url messages"
+        );
+        assert_eq!(messages[3]["role"], "tool");
+        let tool_content = messages[3]["content"].as_str().unwrap();
+        assert!(tool_content.contains("included an image"));
+        assert!(tool_content.contains("was omitted"));
+        assert!(!body.to_string().contains("image_url"));
     }
 
     /// Regression for Databricks model serving (and any OpenAI-Chat frontend

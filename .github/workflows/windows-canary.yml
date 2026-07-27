@@ -5,7 +5,7 @@ name: Windows Canary
 # only as a short-lived GitHub Actions artifact for explicit testing.
 #
 # Design notes vs. signed-macos-canary.yml:
-#   - No mesh-llm: release-windows doesn't build it.
+#   - Mesh-llm is enabled to match stock Windows release behavior.
 #   - pnpm store restore/save pattern mirrors ci.yml:149-196.
 on:
   workflow_dispatch:
@@ -125,9 +125,13 @@ jobs:
           cargo build --release --target "$TARGET" -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p git-credential-nostr -p buzz-cli
           ./scripts/bundle-sidecars.sh "$TARGET"
 
+      - name: Bundle Windows MeshLLM runtime dependencies
+        shell: pwsh
+        run: ./scripts/bundle-windows-mesh-runtime-deps.ps1
+
       - name: Build Windows NSIS installer (unsigned)
         shell: bash
-        run: cd desktop && pnpm tauri build --target "$TARGET" --bundles nsis --config src-tauri/tauri.canary.conf.json
+        run: cd desktop && pnpm tauri build --target "$TARGET" --bundles nsis --features mesh-llm --config src-tauri/tauri.canary.conf.json
         env:
           CMAKE_POLICY_VERSION_MINIMUM: "3.5"
 

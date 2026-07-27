@@ -1,5 +1,5 @@
 use nostr::{Keys, ToBech32};
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 
 use crate::{
     app_state::AppState,
@@ -21,6 +21,12 @@ use crate::{
 /// Read the workspace owner's pubkey hex from app state without holding the
 /// lock for longer than necessary. Used to populate `BUZZ_ACP_AGENT_OWNER`
 /// as a fallback for legacy agent records that have no NIP-OA `auth_tag`.
+#[cfg(target_os = "windows")]
+const WINDOWS_AGENT_COMMAND_STACK_SIZE: usize = 128 * 1024 * 1024;
+
+#[cfg(not(target_os = "windows"))]
+const WINDOWS_AGENT_COMMAND_STACK_SIZE: usize = 8 * 1024 * 1024;
+
 pub(super) fn workspace_owner_hex(state: &AppState) -> Result<String, String> {
     let keys = state.keys.lock().map_err(|e| e.to_string())?;
     Ok(keys.public_key().to_hex())
@@ -572,6 +578,30 @@ pub async fn list_managed_agents(app: AppHandle) -> Result<Vec<ManagedAgentSumma
 pub async fn create_managed_agent(
     input: CreateManagedAgentRequest,
     app: AppHandle,
+) -> Result<CreateManagedAgentResponse, String> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let app_for_thread = app.clone();
+    std::thread::Builder::new()
+        .name("buzz-agent-create".to_string())
+        .stack_size(WINDOWS_AGENT_COMMAND_STACK_SIZE)
+        .spawn(move || {
+            let result = tauri::async_runtime::block_on(async move {
+                let app_for_inner = app_for_thread.clone();
+                let state = app_for_thread.state::<AppState>();
+                create_managed_agent_inner(input, app_for_inner, state).await
+            });
+            let _ = sender.send(result);
+        })
+        .map_err(|error| format!("failed to spawn agent create thread: {error}"))?;
+
+    receiver
+        .await
+        .map_err(|error| format!("agent create thread exited before returning: {error}"))?
+}
+
+async fn create_managed_agent_inner(
+    input: CreateManagedAgentRequest,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<CreateManagedAgentResponse, String> {
     let name = input.name.trim().to_string();
@@ -1069,6 +1099,30 @@ pub async fn create_managed_agent(
 /// Data needed for background profile reconciliation after agent start.
 #[tauri::command]
 pub async fn start_managed_agent(
+    pubkey: String,
+    app: AppHandle,
+) -> Result<ManagedAgentSummary, String> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let app_for_thread = app.clone();
+    std::thread::Builder::new()
+        .name("buzz-agent-start".to_string())
+        .stack_size(WINDOWS_AGENT_COMMAND_STACK_SIZE)
+        .spawn(move || {
+            let result = tauri::async_runtime::block_on(async move {
+                let app_for_inner = app_for_thread.clone();
+                let state = app_for_thread.state::<AppState>();
+                start_managed_agent_inner(pubkey, app_for_inner, state).await
+            });
+            let _ = sender.send(result);
+        })
+        .map_err(|error| format!("failed to spawn agent start thread: {error}"))?;
+
+    receiver
+        .await
+        .map_err(|error| format!("agent start thread exited before returning: {error}"))?
+}
+
+async fn start_managed_agent_inner(
     pubkey: String,
     app: AppHandle,
     state: State<'_, AppState>,
