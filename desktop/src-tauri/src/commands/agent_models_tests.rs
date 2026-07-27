@@ -1,38 +1,38 @@
 use super::*;
 
+/// An entry as OpenAI-shaped providers return it: id + creation time only.
+fn model_item(id: &str, created: i64) -> OpenAiModelListItem {
+    OpenAiModelListItem {
+        id: id.to_string(),
+        created: Some(created),
+        kind: None,
+        display_name: None,
+    }
+}
+
+/// An entry as Together returns it, with the modality and readable name that
+/// only its catalog carries.
+fn together_item(id: &str, created: i64, kind: &str, display_name: &str) -> OpenAiModelListItem {
+    OpenAiModelListItem {
+        id: id.to_string(),
+        created: Some(created),
+        kind: Some(kind.to_string()),
+        display_name: Some(display_name.to_string()),
+    }
+}
+
 #[test]
 fn openai_model_normalization_keeps_agent_text_models() {
     let models = normalize_openai_compatible_models(
-        OpenAiModelListResponse {
+        OpenAiModelListResponse::Wrapped {
             data: vec![
-                OpenAiModelListItem {
-                    id: "text-embedding-3-large".to_string(),
-                    created: Some(4),
-                },
-                OpenAiModelListItem {
-                    id: "gpt-image-2".to_string(),
-                    created: Some(5),
-                },
-                OpenAiModelListItem {
-                    id: "chatgpt-5.5-pro-2026-04-23".to_string(),
-                    created: Some(7),
-                },
-                OpenAiModelListItem {
-                    id: "chatgpt-5.5-pro".to_string(),
-                    created: Some(6),
-                },
-                OpenAiModelListItem {
-                    id: "gpt-5.4-mini".to_string(),
-                    created: Some(2),
-                },
-                OpenAiModelListItem {
-                    id: "o4-mini".to_string(),
-                    created: Some(3),
-                },
-                OpenAiModelListItem {
-                    id: "gpt-5.4-mini".to_string(),
-                    created: Some(1),
-                },
+                model_item("text-embedding-3-large", 4),
+                model_item("gpt-image-2", 5),
+                model_item("chatgpt-5.5-pro-2026-04-23", 7),
+                model_item("chatgpt-5.5-pro", 6),
+                model_item("gpt-5.4-mini", 2),
+                model_item("o4-mini", 3),
+                model_item("gpt-5.4-mini", 1),
             ],
         },
         Some("openai"),
@@ -58,28 +58,13 @@ fn openai_model_normalization_keeps_agent_text_models() {
 #[test]
 fn openai_compat_model_normalization_preserves_provider_specific_ids() {
     let models = normalize_openai_compatible_models(
-        OpenAiModelListResponse {
+        OpenAiModelListResponse::Wrapped {
             data: vec![
-                OpenAiModelListItem {
-                    id: "meta-llama/Llama-3.3-70B-Instruct".to_string(),
-                    created: Some(5),
-                },
-                OpenAiModelListItem {
-                    id: "mistral-large-latest".to_string(),
-                    created: Some(4),
-                },
-                OpenAiModelListItem {
-                    id: "anthropic/claude-sonnet-4-6".to_string(),
-                    created: Some(3),
-                },
-                OpenAiModelListItem {
-                    id: "text-embedding-compatible".to_string(),
-                    created: Some(2),
-                },
-                OpenAiModelListItem {
-                    id: "meta-llama/Llama-3.3-70B-Instruct".to_string(),
-                    created: Some(1),
-                },
+                model_item("meta-llama/Llama-3.3-70B-Instruct", 5),
+                model_item("mistral-large-latest", 4),
+                model_item("anthropic/claude-sonnet-4-6", 3),
+                model_item("text-embedding-compatible", 2),
+                model_item("meta-llama/Llama-3.3-70B-Instruct", 1),
             ],
         },
         Some("openai-compat"),
@@ -95,6 +80,58 @@ fn openai_compat_model_normalization_preserves_provider_specific_ids() {
             "text-embedding-compatible".to_string(),
         ]
     );
+}
+
+#[test]
+fn together_model_list_is_parsed_from_a_bare_array() {
+    // Together answers `GET /v1/models` with the array itself rather than
+    // OpenAI's `{"data": [...]}` envelope.
+    let response: OpenAiModelListResponse = serde_json::from_str(
+        r#"[
+            {"id":"zai-org/GLM-5.2","object":"model","created":1785026761,"type":"chat","display_name":"GLM 5.2"},
+            {"id":"BAAI/bge-large-en-v1.5","object":"model","created":0,"type":"embedding","display_name":"BAAI-Bge-Large-1p5"}
+        ]"#,
+    )
+    .expect("Together's bare array must parse");
+
+    assert_eq!(response.into_items().len(), 2);
+}
+
+#[test]
+fn together_model_normalization_keeps_only_chat_endpoints() {
+    // Together serves ~2k endpoints across every modality from one list, and
+    // its namespaced ids defeat the id-shape heuristic used for OpenAI.
+    let models = normalize_openai_compatible_models(
+        OpenAiModelListResponse::Bare(vec![
+            together_item("zai-org/GLM-5.2", 3, "chat", "GLM 5.2"),
+            together_item("BAAI/bge-large-en-v1.5", 2, "embedding", "BAAI Bge Large"),
+            together_item("black-forest-labs/FLUX.2", 4, "image", "FLUX.2"),
+            together_item("moonshotai/Kimi-K2.6", 1, "chat", "Kimi K2.6 Fp4"),
+        ]),
+        Some("together"),
+    );
+
+    let ids_and_names = models
+        .into_iter()
+        .map(|model| (model.id, model.name))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ids_and_names,
+        vec![
+            ("zai-org/GLM-5.2".to_string(), Some("GLM 5.2".to_string())),
+            (
+                "moonshotai/Kimi-K2.6".to_string(),
+                Some("Kimi K2.6 Fp4".to_string()),
+            ),
+        ]
+    );
+}
+
+#[test]
+fn together_is_discovered_over_the_openai_compatible_transport() {
+    assert!(is_together_provider(Some("together")));
+    assert!(is_openai_compatible_provider(Some("together")));
+    assert!(!is_together_provider(Some("openai")));
 }
 
 #[test]

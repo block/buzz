@@ -376,9 +376,22 @@ pub async fn discover_agent_models(
     run_agent_models_command(resolved_acp, resolved_agent, agent_args, None, merged_env).await
 }
 
+/// A `GET /v1/models` payload. OpenAI wraps the list in `{"data": [...]}`;
+/// Together returns the bare array, so both shapes are accepted.
 #[derive(Debug, Deserialize)]
-struct OpenAiModelListResponse {
-    data: Vec<OpenAiModelListItem>,
+#[serde(untagged)]
+enum OpenAiModelListResponse {
+    Wrapped { data: Vec<OpenAiModelListItem> },
+    Bare(Vec<OpenAiModelListItem>),
+}
+
+impl OpenAiModelListResponse {
+    fn into_items(self) -> Vec<OpenAiModelListItem> {
+        match self {
+            Self::Wrapped { data } => data,
+            Self::Bare(items) => items,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -386,6 +399,17 @@ struct OpenAiModelListItem {
     id: String,
     #[serde(default)]
     created: Option<i64>,
+    /// Together-only: the endpoint's modality. Its catalog mixes chat with
+    /// image, audio, embedding, and rerank entries in one list.
+    #[serde(default, rename = "type")]
+    kind: Option<String>,
+    /// Together-only: a readable name ("Kimi K2.6" for `moonshotai/Kimi-K2.6`).
+    #[serde(default)]
+    display_name: Option<String>,
+}
+
+fn is_together_provider(provider: Option<&str>) -> bool {
+    provider.map(str::trim) == Some(crate::managed_agents::TOGETHER_PROVIDER_ID)
 }
 
 fn is_openai_compatible_provider(provider: Option<&str>) -> bool {
@@ -394,7 +418,7 @@ fn is_openai_compatible_provider(provider: Option<&str>) -> bool {
             .map(str::trim)
             .map(str::to_ascii_lowercase)
             .as_deref(),
-        Some("openai" | "openai-compat")
+        Some("openai" | "openai-compat" | "together")
     )
 }
 
@@ -492,7 +516,7 @@ fn normalize_openai_compatible_models(
     provider: Option<&str>,
 ) -> Vec<AgentModelInfo> {
     let mut seen = HashSet::new();
-    let mut items = response.data;
+    let mut items = response.into_items();
     let filter_to_openai_text_models = matches!(
         provider
             .map(str::trim)
@@ -500,6 +524,13 @@ fn normalize_openai_compatible_models(
             .as_deref(),
         Some("openai")
     );
+    // Together publishes every modality it serves — roughly two thousand
+    // endpoints — under one list. Only `chat` ones can back an agent, and the
+    // id-shape heuristic used for OpenAI does not apply to its namespaced ids
+    // (`moonshotai/Kimi-K2.6`), so filter on the declared type instead.
+    if is_together_provider(provider) {
+        items.retain(|item| item.kind.as_deref() == Some("chat"));
+    }
     let all_ids = items
         .iter()
         .map(|item| item.id.clone())
@@ -520,7 +551,14 @@ fn normalize_openai_compatible_models(
         })
         .filter(|item| seen.insert(item.id.clone()))
         .map(|item| AgentModelInfo {
-            name: Some(openai_model_display_name(&item.id)),
+            name: Some(
+                item.display_name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| openai_model_display_name(&item.id)),
+            ),
             id: item.id,
             description: None,
         })
@@ -535,21 +573,33 @@ async fn discover_openai_compatible_models(
 ) -> Result<Option<AgentModelsResponse>, String> {
     let relay_mesh =
         provider.as_deref().map(str::trim) == Some(crate::managed_agents::RELAY_MESH_PROVIDER_ID);
+    let together = is_together_provider(provider.as_deref());
     if !relay_mesh && !is_openai_compatible_provider(provider.as_deref()) {
         return Ok(None);
     }
 
+    // Each native preset keeps its own credential name. Discovery runs before
+    // spawn, so the OPENAI_COMPAT_* mapping in `apply_together_env` has not
+    // happened yet — asking for the mapped name would miss the key the user
+    // actually typed.
+    let api_key_env = if together {
+        crate::managed_agents::TOGETHER_API_KEY_ENV
+    } else {
+        "OPENAI_COMPAT_API_KEY"
+    };
     let api_key = if relay_mesh {
         crate::managed_agents::RELAY_MESH_API_KEY_PLACEHOLDER.to_string()
     } else {
-        match provider.required_env(env, "OPENAI_COMPAT_API_KEY")? {
+        match provider.required_env(env, api_key_env)? {
             Some(api_key) => api_key,
             None => return Ok(None),
         }
     };
-    let redaction_env = redaction_env_with_value(env, "OPENAI_COMPAT_API_KEY", &api_key);
+    let redaction_env = redaction_env_with_value(env, api_key_env, &api_key);
     let url = if relay_mesh {
         format!("{}/models", crate::managed_agents::RELAY_MESH_API_BASE_URL)
+    } else if together {
+        format!("{}/models", crate::managed_agents::TOGETHER_API_BASE_URL)
     } else {
         openai_compatible_models_url_for_discovery(env)
     };

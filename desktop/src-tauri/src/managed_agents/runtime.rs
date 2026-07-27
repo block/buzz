@@ -868,6 +868,29 @@ pub fn spawn_agent_child(
         }
     }
 
+    // Together AI is stored as a native provider for the same reason: derive the
+    // OpenAI-compatible transport at spawn time. Both OpenAI credentials are
+    // scrubbed first so an unrelated key left in the env or inherited from the
+    // shell can never be sent to Together's ingress — only the key
+    // `apply_together_env` writes back from TOGETHER_API_KEY survives.
+    if effective_provider.as_deref().map(str::trim) == Some(super::TOGETHER_PROVIDER_ID) {
+        let mut together_env = std::collections::BTreeMap::new();
+        super::apply_together_env(
+            &mut together_env,
+            effective_provider.as_deref(),
+            effective_model.as_deref(),
+            descriptor
+                .env
+                .get(super::TOGETHER_API_KEY_ENV)
+                .map(String::as_str),
+        );
+        command.env_remove("OPENAI_API_KEY");
+        command.env_remove("OPENAI_COMPAT_API_KEY");
+        for (key, value) in together_env {
+            command.env(key, value);
+        }
+    }
+
     // Stamp desktop ownership and an unpredictable harness-generation identity.
     let start_nonce = uuid::Uuid::new_v4().simple().to_string();
     command

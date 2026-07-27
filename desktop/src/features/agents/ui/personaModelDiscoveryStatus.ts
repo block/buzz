@@ -25,6 +25,8 @@ function providerObjectLabel(provider: string): string {
       return "OpenAI";
     case "openai-compat":
       return "OpenAI-compatible";
+    case "together":
+      return "Together AI";
     default:
       return provider.trim() || "this provider";
   }
@@ -111,6 +113,13 @@ export function formatModelDiscoveryErrorStatus(
   if (message.includes("OPENAI_COMPAT_API_KEY required")) {
     return {
       message: "Enter an OpenAI API key to load OpenAI models.",
+      tone: "warning",
+    };
+  }
+
+  if (message.includes("TOGETHER_API_KEY required")) {
+    return {
+      message: "Enter a Together AI API key to load Together AI models.",
       tone: "warning",
     };
   }

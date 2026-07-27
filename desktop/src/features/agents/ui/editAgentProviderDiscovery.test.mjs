@@ -4,6 +4,9 @@ import test from "node:test";
 import {
   runtimeSupportsLlmProviderSelection,
   getPersonaProviderOptions,
+  providerApiKeyFieldLabel,
+  providerDisplayLabel,
+  providerRequiresExplicitModel,
   requiredCredentialEnvKeys,
   isMissingRequiredDropdownField,
 } from "./agentConfigOptions.tsx";
@@ -109,6 +112,45 @@ test("editAgent_providerOptions_includesDatabricksV1AsCurrentEvenWhenHidden", ()
     ids.includes("databricks"),
     "databricks must appear as current provider when it is the saved value",
   );
+});
+
+// ── Together AI ─────────────────────────────────────────────────────────────
+//
+// Together is offered as a first-class option even though it runs over the
+// OpenAI-compatible transport, so the credential it asks for and the labels it
+// shows must follow Together rather than the env var it is mapped onto at
+// spawn (see managed_agents/together.rs).
+
+test("editAgent_providerOptions_includesTogetherAi", () => {
+  const options = getPersonaProviderOptions("", "buzz-agent");
+  const together = options.find((o) => o.id === "together");
+  assert.ok(together, "together must be offered in the provider dropdown");
+  assert.equal(together.label, "Together AI");
+});
+
+test("together_usesItsOwnCredentialNotTheMappedOpenAiKey", () => {
+  assert.deepEqual(requiredCredentialEnvKeys("buzz-agent", "together"), [
+    "TOGETHER_API_KEY",
+  ]);
+  assert.deepEqual(requiredCredentialEnvKeys("goose", "together"), [
+    "TOGETHER_API_KEY",
+  ]);
+});
+
+test("together_labelsFollowTheProviderNotTheTransport", () => {
+  assert.equal(providerApiKeyFieldLabel("together"), "Together AI API Key");
+  assert.equal(providerDisplayLabel("together"), "Together AI");
+  // The refactor to a label table must not change the existing providers.
+  assert.equal(providerApiKeyFieldLabel("anthropic"), "Anthropic API Key");
+  assert.equal(providerApiKeyFieldLabel("openai-compat"), "OpenAI API Key");
+  assert.equal(providerDisplayLabel("relay-mesh"), "Buzz shared compute");
+  assert.equal(providerDisplayLabel("databricks_v2"), "databricks_v2");
+});
+
+test("together_requiresAnExplicitModel", () => {
+  // Together serves well over a thousand chat models and picks no default, so
+  // there is no "Default model" option to inherit.
+  assert.equal(providerRequiresExplicitModel("together"), true);
 });
 
 test("editAgent_providerOptions_includesDefaultEntry", () => {

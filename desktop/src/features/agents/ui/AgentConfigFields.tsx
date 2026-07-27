@@ -35,6 +35,7 @@ import {
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
   getPersonaProviderOptions,
   getProviderApiKeyEnvVar,
+  providerApiKeyFieldLabel,
   runtimeSupportsLlmProviderSelection,
 } from "@/features/agents/ui/agentConfigOptions";
 import {
@@ -754,11 +755,7 @@ export function AgentConfigFields({
             }
             isInherited={apiKeyInherited}
             isRequired={!apiKeyInherited && apiKeyValue.length === 0}
-            label={
-              effectiveProvider === "anthropic"
-                ? "Anthropic API Key"
-                : "OpenAI API Key"
-            }
+            label={providerApiKeyFieldLabel(effectiveProvider)}
             onValueChange={(value) =>
               onConfigChange({
                 ...config,

@@ -515,6 +515,16 @@ fn buzz_agent_requirements(effective: &EffectiveAgentEnv) -> Vec<Requirement> {
                     key: "OPENAI_COMPAT_API_KEY".to_string(),
                 });
             }
+        // Together is an OpenAI-compatible preset, but the credential the user
+        // owns is TOGETHER_API_KEY — `apply_together_env` maps it onto
+        // OPENAI_COMPAT_API_KEY at spawn, so requiring the mapped name here
+        // would ask for a key the dialog never offers.
+        Some(crate::managed_agents::TOGETHER_PROVIDER_ID)
+            if env_key_missing(crate::managed_agents::TOGETHER_API_KEY_ENV) => {
+                missing.push(Requirement::EnvKey {
+                    key: crate::managed_agents::TOGETHER_API_KEY_ENV.to_string(),
+                });
+            }
         Some("databricks") | Some("databricks_v2") | Some("databricks-v2")
             // DATABRICKS_HOST is hard-required; DATABRICKS_TOKEN is optional
             // (OAuth PKCE is the normal path — see buzz-agent/src/config.rs:143).
@@ -621,6 +631,14 @@ fn goose_requirements(
         {
             missing.push(Requirement::EnvKey {
                 key: "OPENAI_COMPAT_API_KEY".to_string(),
+            });
+        }
+        Some(crate::managed_agents::TOGETHER_PROVIDER_ID)
+            if env_key_missing(crate::managed_agents::TOGETHER_API_KEY_ENV)
+                && !file_key_present(crate::managed_agents::TOGETHER_API_KEY_ENV) =>
+        {
+            missing.push(Requirement::EnvKey {
+                key: crate::managed_agents::TOGETHER_API_KEY_ENV.to_string(),
             });
         }
         Some("databricks") | Some("databricks_v2") | Some("databricks-v2")
@@ -731,6 +749,64 @@ mod tests {
         assert!(!result.is_ready());
         assert!(result.requirements().contains(&Requirement::EnvKey {
             key: "OPENAI_COMPAT_API_KEY".to_string()
+        }));
+    }
+
+    #[test]
+    fn buzz_agent_missing_together_key_asks_for_together_not_the_mapped_openai_key() {
+        let env = make_env(
+            "buzz-agent",
+            env_with(&[
+                ("BUZZ_AGENT_PROVIDER", "together"),
+                ("BUZZ_AGENT_MODEL", "moonshotai/Kimi-K2.6"),
+            ]),
+        );
+        let result = agent_readiness(&env);
+        assert!(!result.is_ready());
+        let reqs = result.requirements();
+        assert!(reqs.contains(&Requirement::EnvKey {
+            key: "TOGETHER_API_KEY".to_string()
+        }));
+        // Asking for OPENAI_COMPAT_API_KEY would name a key the dialog never
+        // offers for this provider — the spawn-time mapping owns that name.
+        assert!(
+            !reqs.contains(&Requirement::EnvKey {
+                key: "OPENAI_COMPAT_API_KEY".to_string()
+            }),
+            "together must not surface the mapped OpenAI key; got {reqs:?}"
+        );
+    }
+
+    #[test]
+    fn buzz_agent_together_with_key_and_model_is_ready() {
+        let env = make_env(
+            "buzz-agent",
+            env_with(&[
+                ("BUZZ_AGENT_PROVIDER", "together"),
+                ("BUZZ_AGENT_MODEL", "moonshotai/Kimi-K2.6"),
+                ("TOGETHER_API_KEY", "tgp-test"),
+            ]),
+        );
+        assert!(agent_readiness(&env).is_ready());
+    }
+
+    #[test]
+    fn buzz_agent_empty_string_together_key_is_not_ready() {
+        let env = make_env(
+            "buzz-agent",
+            env_with(&[
+                ("BUZZ_AGENT_PROVIDER", "together"),
+                ("BUZZ_AGENT_MODEL", "moonshotai/Kimi-K2.6"),
+                ("TOGETHER_API_KEY", ""),
+            ]),
+        );
+        let result = agent_readiness(&env);
+        assert!(
+            !result.is_ready(),
+            "empty-string TOGETHER_API_KEY must be treated as missing"
+        );
+        assert!(result.requirements().contains(&Requirement::EnvKey {
+            key: "TOGETHER_API_KEY".to_string()
         }));
     }
 
