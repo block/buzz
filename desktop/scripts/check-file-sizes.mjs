@@ -189,10 +189,11 @@ const overrides = new Map([
   // ownership (valid_agent_runtime_receipt uses buzz_sweep_owns_process).
   ["src-tauri/src/managed_agents/runtime/tests.rs", 1320],
   // runtime.rs re-entered the list after the #1968 merge: main's
-  // definition-authoritative resolver comments grew it to 982, and this PR's
-  // typed harness-descriptor resolution in spawn_agent_child (+38) lands on
-  // top. Queued to shrink with the next runtime split pass (#2974 follow-up).
-  ["src-tauri/src/managed_agents/runtime.rs", 1020],
+  // definition-authoritative resolver comments grew it to 982, and the BYOH
+  // typed harness-descriptor resolution in spawn_agent_child landed on top at
+  // 1020. This PR's session-title env write in spawn_agent_child adds 12.
+  // Queued to shrink with the next runtime split pass (#2974 follow-up).
+  ["src-tauri/src/managed_agents/runtime.rs", 1032],
   // applyWorkspace reposDir parameter plus the validateReposDir binding,
   // threaded through Tauri invokes for configurable repos_dir, plus the
   // harness-persona-sync `harnessOverride` create-input bit — load-bearing
