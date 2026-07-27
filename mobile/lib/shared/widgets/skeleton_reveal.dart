@@ -65,7 +65,13 @@ class SkeletonReveal extends HookWidget {
                 ),
                 child: IgnorePointer(
                   ignoring: loading || progress < 1,
-                  child: ExcludeSemantics(excluding: loading, child: content),
+                  child: ExcludeFocus(
+                    excluding: loading || progress < 1,
+                    child: ExcludeSemantics(
+                      excluding: loading || progress < 1,
+                      child: content,
+                    ),
+                  ),
                 ),
               ),
             ),

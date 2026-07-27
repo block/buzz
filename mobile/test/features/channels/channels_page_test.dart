@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
@@ -238,6 +239,33 @@ void main() {
 
     await tester.pump(const Duration(milliseconds: 200));
     expect(find.text('general'), findsOneWidget);
+  });
+
+  testWidgets('announces neutral loading outside connection transitions', (
+    tester,
+  ) async {
+    final relaySession = _ReconnectingRelaySession(
+      initialStatus: SessionStatus.connected,
+    );
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(() => _LoadingNotifier()),
+          relaySessionProvider.overrideWith(() => relaySession),
+        ],
+      ),
+    );
+    await tester.pump();
+
+    expect(
+      tester
+          .widget<Semantics>(
+            find.byKey(const Key('channels-connection-skeleton')),
+          )
+          .properties
+          .label,
+      'Loading',
+    );
   });
 
   testWidgets('opens the settings page supplied by the app layer', (
@@ -1371,10 +1399,18 @@ class _ErrorNotifier extends ChannelsNotifier {
   Future<List<Channel>> build() => Future.error('Connection refused');
 }
 
-class _ReconnectingRelaySession extends RelaySessionNotifier {
+class _LoadingNotifier extends ChannelsNotifier {
   @override
-  SessionState build() =>
-      const SessionState(status: SessionStatus.reconnecting);
+  Future<List<Channel>> build() => Completer<List<Channel>>().future;
+}
+
+class _ReconnectingRelaySession extends RelaySessionNotifier {
+  final SessionStatus initialStatus;
+
+  _ReconnectingRelaySession({this.initialStatus = SessionStatus.reconnecting});
+
+  @override
+  SessionState build() => SessionState(status: initialStatus);
 
   @override
   Future<List<NostrEvent>> fetchHistory(

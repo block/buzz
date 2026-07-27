@@ -28,6 +28,12 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   /// UI can show stale data instead of a blank loading spinner.
   List<NostrEvent>? _lastKnownMessages;
 
+  /// Whether this channel has completed at least one message history load.
+  ///
+  /// This distinguishes a genuinely loaded empty channel from the synthetic
+  /// empty value returned while the relay is not yet connected.
+  bool get hasLoadedMessages => _lastKnownMessages != null;
+
   Map<String, ChannelWindowThreadSummary> get threadSummaries =>
       channelWindowThreadSummaries(_windowStore);
 

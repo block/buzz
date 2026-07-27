@@ -151,14 +151,18 @@ class ChannelDetailPage extends HookConsumerWidget {
         channel;
     final resolvedChannel =
         detailsAsync.whenData(baseChannel.mergeDetails).value ?? baseChannel;
+    final messagesNotifier = ref.read(
+      channelMessagesProvider(channel.id).notifier,
+    );
+    final isConnectionInProgress =
+        sessionStatus == SessionStatus.connecting ||
+        sessionStatus == SessionStatus.reconnecting;
     final showConnectionSkeleton = useState(false);
-    final isReconnectingWithContent =
-        !resolvedChannel.isForum &&
-        messagesState.value != null &&
-        (sessionStatus == SessionStatus.connecting ||
-            sessionStatus == SessionStatus.reconnecting);
+    final shouldDebounceConnectionSkeleton =
+        isConnectionInProgress &&
+        (resolvedChannel.isForum || messagesNotifier.hasLoadedMessages);
     useEffect(() {
-      if (!isReconnectingWithContent) {
+      if (!shouldDebounceConnectionSkeleton) {
         showConnectionSkeleton.value = false;
         return null;
       }
@@ -166,7 +170,11 @@ class ChannelDetailPage extends HookConsumerWidget {
         showConnectionSkeleton.value = true;
       });
       return timer.cancel;
-    }, [isReconnectingWithContent]);
+    }, [shouldDebounceConnectionSkeleton]);
+    final showInitialConnectionSkeleton =
+        !resolvedChannel.isForum &&
+        isConnectionInProgress &&
+        !messagesNotifier.hasLoadedMessages;
     final appBarTitleContentHeight = resolvedChannel.isDm
         ? _dmAppBarTitleContentHeight(context)
         : 0.0;
@@ -278,13 +286,34 @@ class ChannelDetailPage extends HookConsumerWidget {
         children: [
           Expanded(
             child: resolvedChannel.isForum
-                ? ForumPostsView(
-                    channel: resolvedChannel,
-                    currentPubkey: currentPubkey,
+                ? Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      ForumPostsView(
+                        channel: resolvedChannel,
+                        currentPubkey: currentPubkey,
+                      ),
+                      if (showConnectionSkeleton.value)
+                        Positioned(
+                          top:
+                              frostedAppBarHeight(
+                                context,
+                                titleContentHeight: appBarTitleContentHeight,
+                              ) +
+                              Grid.xs,
+                          left: Grid.gutter,
+                          right: Grid.gutter,
+                          child: _ForumConnectionSkeleton(
+                            status: sessionStatus,
+                          ),
+                        ),
+                    ],
                   )
                 : SkeletonReveal(
                     loading:
-                        showConnectionSkeleton.value || messagesState.isLoading,
+                        showInitialConnectionSkeleton ||
+                        showConnectionSkeleton.value ||
+                        messagesState.isLoading,
                     shimmerEnabled: sessionStatus != SessionStatus.disconnected,
                     skeleton: _MessageTimelineSkeleton(
                       appBarTitleContentHeight: appBarTitleContentHeight,

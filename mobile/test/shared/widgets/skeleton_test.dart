@@ -54,6 +54,15 @@ void main() {
   double layerOpacity(WidgetTester tester, String key) =>
       tester.widget<Opacity>(find.byKey(Key(key))).opacity;
 
+  bool contentFocusExcluded(WidgetTester tester) => tester
+      .widget<ExcludeFocus>(
+        find.descendant(
+          of: find.byKey(const Key('skeleton-reveal-content')),
+          matching: find.byType(ExcludeFocus),
+        ),
+      )
+      .excluding;
+
   testWidgets('sweeps a highlight across skeleton elements while loading', (
     tester,
   ) async {
@@ -122,6 +131,7 @@ void main() {
 
     expect(layerOpacity(tester, 'skeleton-reveal-placeholder'), 1);
     expect(layerOpacity(tester, 'skeleton-reveal-content'), 0);
+    expect(contentFocusExcluded(tester), isTrue);
 
     loading.value = false;
     await tester.pump();
@@ -132,11 +142,13 @@ void main() {
       closeTo(0.5, 0.01),
     );
     expect(layerOpacity(tester, 'skeleton-reveal-content'), closeTo(0.5, 0.01));
+    expect(contentFocusExcluded(tester), isTrue);
 
     await tester.pump(const Duration(milliseconds: 200));
 
     expect(layerOpacity(tester, 'skeleton-reveal-placeholder'), 0);
     expect(layerOpacity(tester, 'skeleton-reveal-content'), 1);
+    expect(contentFocusExcluded(tester), isFalse);
     expect(find.text('Loaded content'), findsOneWidget);
   });
 

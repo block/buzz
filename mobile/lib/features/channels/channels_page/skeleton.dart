@@ -43,9 +43,11 @@ class _ChannelsSkeleton extends StatelessWidget {
     final firstSection = widths.take(splitAt).toList();
     final secondSection = widths.skip(splitAt).toList();
 
-    final semanticsLabel = status == SessionStatus.reconnecting
-        ? 'Reconnecting'
-        : 'Connecting';
+    final semanticsLabel = switch (status) {
+      SessionStatus.connecting => 'Connecting',
+      SessionStatus.reconnecting => 'Reconnecting',
+      SessionStatus.connected || SessionStatus.disconnected => 'Loading',
+    };
     return Semantics(
       key: const Key('channels-connection-skeleton'),
       liveRegion: true,
@@ -114,7 +116,7 @@ class _ChannelSkeletonSection extends StatelessWidget {
                       width: _kChannelIconSize,
                       height: _kChannelIconSize,
                       borderRadius: BorderRadius.circular(
-                        index.isEven ? 4 : _kChannelIconSize / 2,
+                        index.isEven ? Radii.xs : Radii.full,
                       ),
                     ),
                   ),

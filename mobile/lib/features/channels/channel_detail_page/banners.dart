@@ -65,9 +65,11 @@ class _MessageTimelineSkeleton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final semanticsLabel = status == SessionStatus.reconnecting
-        ? 'Reconnecting'
-        : 'Connecting';
+    final semanticsLabel = switch (status) {
+      SessionStatus.connecting => 'Connecting',
+      SessionStatus.reconnecting => 'Reconnecting',
+      SessionStatus.connected || SessionStatus.disconnected => 'Loading',
+    };
     return Semantics(
       key: const Key('channel-detail-connection-skeleton'),
       liveRegion: true,
@@ -116,7 +118,7 @@ class _MessageSkeletonRow extends StatelessWidget {
         SkeletonBar(
           width: 36,
           height: 36,
-          borderRadius: BorderRadius.circular(18),
+          borderRadius: BorderRadius.circular(Radii.full),
         ),
         const SizedBox(width: Grid.xxs),
         Expanded(
@@ -148,6 +150,65 @@ class _MessageSkeletonRow extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+class _ForumConnectionSkeleton extends StatelessWidget {
+  final SessionStatus status;
+
+  const _ForumConnectionSkeleton({required this.status});
+
+  @override
+  Widget build(BuildContext context) {
+    final semanticsLabel = switch (status) {
+      SessionStatus.connecting => 'Connecting',
+      SessionStatus.reconnecting => 'Reconnecting',
+      SessionStatus.connected || SessionStatus.disconnected => 'Loading',
+    };
+    return Semantics(
+      key: const Key('forum-connection-skeleton'),
+      liveRegion: true,
+      label: semanticsLabel,
+      child: ExcludeSemantics(
+        child: IgnorePointer(
+          child: ExcludeFocus(
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                color: context.colors.surface,
+                borderRadius: BorderRadius.circular(Radii.lg),
+                border: Border.all(color: context.colors.outlineVariant),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.all(Grid.twelve),
+                child: SkeletonShimmer(
+                  child: const Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Row(
+                        children: [
+                          SkeletonBar(
+                            width: 28,
+                            height: 28,
+                            borderRadius: BorderRadius.all(
+                              Radius.circular(Radii.full),
+                            ),
+                          ),
+                          SizedBox(width: Grid.xxs),
+                          SkeletonBar(width: 112, height: 14),
+                        ],
+                      ),
+                      SizedBox(height: Grid.xxs),
+                      SkeletonBar(width: 240, height: 14),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

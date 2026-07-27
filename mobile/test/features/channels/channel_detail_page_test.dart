@@ -333,7 +333,46 @@ void main() {
       );
     });
 
-    testWidgets('keeps forum content visible while reconnecting', (
+    testWidgets('shows the first-load connection skeleton immediately', (
+      tester,
+    ) async {
+      final relaySession = _ReconnectingRelaySession();
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          messagesNotifier: _FakeMessagesNotifier(
+            const [],
+            hasLoadedMessages: false,
+          ),
+          relaySessionNotifier: relaySession,
+        ),
+      );
+      await tester.pump();
+
+      expect(
+        tester.widget<SkeletonReveal>(find.byType(SkeletonReveal)).loading,
+        isTrue,
+      );
+      expect(
+        tester
+            .widget<Opacity>(
+              find.byKey(const Key('skeleton-reveal-placeholder')),
+            )
+            .opacity,
+        1,
+      );
+      expect(
+        tester
+            .widget<Semantics>(
+              find.byKey(const Key('channel-detail-connection-skeleton')),
+            )
+            .properties
+            .label,
+        'Reconnecting',
+      );
+    });
+
+    testWidgets('keeps forum content visible with reconnect shimmer feedback', (
       tester,
     ) async {
       final relaySession = _ReconnectingRelaySession();
@@ -356,14 +395,23 @@ void main() {
           relaySessionNotifier: relaySession,
         ),
       );
-      await tester.pump(const Duration(seconds: 2));
       await tester.pump();
 
       expect(find.byType(SkeletonReveal), findsNothing);
+      expect(find.byKey(const Key('forum-connection-skeleton')), findsNothing);
+
+      await tester.pump(const Duration(milliseconds: 1999));
+      expect(find.byKey(const Key('forum-connection-skeleton')), findsNothing);
+
+      await tester.pump(const Duration(milliseconds: 1));
+      await tester.pump();
+      final skeleton = find.byKey(const Key('forum-connection-skeleton'));
+      expect(skeleton, findsOneWidget);
       expect(
-        find.byKey(const Key('channel-detail-connection-skeleton')),
-        findsNothing,
+        find.descendant(of: skeleton, matching: find.byType(SkeletonBar)),
+        findsWidgets,
       );
+      expect(find.byType(SkeletonReveal), findsNothing);
     });
 
     testWidgets('defers read-state mark until after build', (tester) async {
@@ -1752,10 +1800,17 @@ Channel _channel({required String id, required String name}) => Channel(
 
 class _FakeMessagesNotifier extends ChannelMessagesNotifier {
   List<NostrEvent> _messages;
-  _FakeMessagesNotifier(this._messages) : super(_channelId);
+  bool _hasLoadedMessages;
+
+  _FakeMessagesNotifier(this._messages, {bool hasLoadedMessages = true})
+    : _hasLoadedMessages = hasLoadedMessages,
+      super(_channelId);
 
   @override
   AsyncValue<List<NostrEvent>> build() => AsyncData(_messages);
+
+  @override
+  bool get hasLoadedMessages => _hasLoadedMessages;
 
   @override
   bool get reachedOldest => true;
@@ -1765,6 +1820,7 @@ class _FakeMessagesNotifier extends ChannelMessagesNotifier {
 
   void setMessages(List<NostrEvent> messages) {
     _messages = messages;
+    _hasLoadedMessages = true;
     state = AsyncData(messages);
   }
 }
