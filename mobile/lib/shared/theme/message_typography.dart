@@ -14,7 +14,7 @@ const activityAvatarSize = messageAvatarSize;
 const compactMessageAvatarSize = messageAvatarSize;
 
 /// Horizontal space between a message avatar and its content.
-const messageAvatarContentGap = Grid.ten;
+const messageAvatarContentGap = Grid.twelve;
 
 /// Primary message copy: 15sp regular on a 20sp line height.
 const messageBodyTextStyle = TextStyle(
