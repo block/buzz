@@ -675,6 +675,10 @@ const overrides = new Map([
   // runtimeSupportsLlmProviderSelection guard on discovery provider (codex fix);
   // hideProviderIds computation for Databricks v1 gate. Queued to split.
   ["src/features/agents/ui/AgentDefinitionDialog.tsx", 1035],
+  // #2630 emoji picker search: the shadow-root search-input autofocus effect
+  // (rAF retry loop) took this file 999 -> 1026 and landed without this entry,
+  // so main's Desktop Core went red. Queued to split with the rest of this list.
+  ["src/features/agents/ui/AgentCreationPreview.tsx", 1026],
 ]);
 
 await runFileSizeCheck({
