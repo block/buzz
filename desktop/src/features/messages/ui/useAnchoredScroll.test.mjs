@@ -7,8 +7,7 @@ import {
   shouldIgnorePinnedCenterScroll,
   shouldSettleForSplitPanel,
   shouldSettleVirtualizedBottom,
-  shouldSettleVirtualizedViewportResize,
-} from "./useAnchoredScroll.ts";
+} from "./anchoredScrollPolicy.ts";
 
 function fakeContainer({ clientHeight, scrollHeight, scrollTop }) {
   const writes = [];
@@ -35,17 +34,6 @@ test("split panel settles only an already-bottomed timeline", () => {
   );
   assert.equal(
     shouldSettleForSplitPanel({ isAtBottom: true, splitPanelOpen: false }),
-    false,
-  );
-});
-
-test("viewport resize follows the virtualizer's explicit bottom state", () => {
-  assert.equal(
-    shouldSettleVirtualizedViewportResize({ virtualizerAtBottom: true }),
-    true,
-  );
-  assert.equal(
-    shouldSettleVirtualizedViewportResize({ virtualizerAtBottom: false }),
     false,
   );
 });

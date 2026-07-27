@@ -5,7 +5,7 @@ import { MessageComposerToolbar } from "@/features/messages/ui/MessageComposerTo
 type ComposerDockToolbarProps = ComponentProps<
   typeof MessageComposerToolbar
 > & {
-  accessoryVisible?: boolean;
+  layoutMode: "dock" | "standalone";
 };
 
 /**
@@ -13,12 +13,12 @@ type ComposerDockToolbarProps = ComponentProps<
  * for the equal-height activity rail outside the composer.
  */
 export function ComposerDockToolbar({
-  accessoryVisible,
+  layoutMode,
   ...toolbarProps
 }: ComposerDockToolbarProps) {
   return (
     <>
-      {accessoryVisible !== undefined ? (
+      {layoutMode === "dock" ? (
         <div
           aria-hidden="true"
           className="composer-dock-quiet-spacer shrink-0"

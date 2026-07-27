@@ -2,13 +2,24 @@ import * as React from "react";
 
 import { observeElementBlockSize } from "@/shared/layout/observeElementBlockSize";
 
+export function shouldUseComposerPaddingFallback({
+  nextPadding,
+  previousPadding,
+}: {
+  nextPadding: number;
+  previousPadding: number | null;
+}): boolean {
+  return previousPadding === null || nextPadding > previousPadding;
+}
+
 /**
  * Observes the height of the composer overlay and sets the scroll
  * container's `paddingBottom` to match, so content is never hidden
  * behind the absolutely-positioned composer.
  *
- * If the user is already scrolled to the bottom when padding increases,
- * auto-scrolls to keep them at the bottom (no visible gap).
+ * If the reader is already near the bottom, the legacy fallback follows only
+ * initial measurement and growth. Consumers with semantic bottom ownership may
+ * provide `settleAtBottom` to handle both growth and shrink safely.
  */
 export function useComposerHeightPadding(
   scrollContainerRef: React.RefObject<HTMLElement | null>,
@@ -74,11 +85,16 @@ export function useComposerHeightPadding(
       }
       lastPadding = padding;
 
-      if (
-        wasAtBottom &&
-        (previousPadding === null || padding !== previousPadding)
-      ) {
+      if (wasAtBottom && previousPadding !== padding) {
         if (settleAtBottomRef.current?.()) {
+          return;
+        }
+        if (
+          !shouldUseComposerPaddingFallback({
+            nextPadding: padding,
+            previousPadding,
+          })
+        ) {
           return;
         }
         followBottom();

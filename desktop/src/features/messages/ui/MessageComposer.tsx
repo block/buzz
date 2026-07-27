@@ -64,7 +64,7 @@ function MessageComposerImpl({
   channelName,
   channelType = null,
   containerClassName,
-  bottomAccessoryVisible,
+  layoutMode = "standalone",
   disabled = false,
   draftKey,
   autoSubmitDraftKey = null,
@@ -901,7 +901,7 @@ function MessageComposerImpl({
           <form
             className={cn(
               "relative z-10 isolate rounded-2xl border border-border/50 bg-background/80 px-3 pb-2 pt-3 shadow-none supports-[backdrop-filter]:bg-background/70 dark:bg-background/70 dark:supports-[backdrop-filter]:bg-background/55 sm:px-4",
-              bottomAccessoryVisible === undefined &&
+              layoutMode === "standalone" &&
                 "backdrop-blur-md dark:backdrop-blur-xl",
             )}
             data-testid="message-composer"
@@ -986,7 +986,7 @@ function MessageComposerImpl({
             </div>
 
             <ComposerDockToolbar
-              accessoryVisible={bottomAccessoryVisible}
+              layoutMode={layoutMode}
               composerDisabled={disabled}
               editor={richText.editor}
               extraActions={toolbarExtraActions}

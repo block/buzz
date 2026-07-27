@@ -752,7 +752,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                   channelName={activeChannel?.name ?? "channel"}
                   channelType={activeChannel?.channelType ?? null}
                   containerClassName="px-5 pb-0"
-                  bottomAccessoryVisible={hasComposerBottomActivity}
+                  layoutMode="dock"
                   disabled={isComposerDisabled}
                   editTarget={mainEditTarget}
                   autoSubmitDraftKey={autoSendDraftKey}
@@ -885,7 +885,8 @@ export const ChannelPane = React.memo(function ChannelPane({
                 )}
                 threadReplyUnreadCounts={threadReplyUnreadCounts}
                 threadTypingPubkeys={threadTypingPubkeys}
-                toolbarExtraActions={
+                activityAccessoryVisible={hasThreadComposerBotActivity}
+                activityAccessoryContent={
                   hasThreadComposerBotActivity ? (
                     <BotActivityComposerAction
                       agents={activityAgents}

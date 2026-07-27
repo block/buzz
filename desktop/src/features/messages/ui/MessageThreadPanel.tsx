@@ -109,7 +109,8 @@ type MessageThreadPanelProps = ThreadPanelLayoutProps & {
   threadReplyUnreadCounts?: ReadonlyMap<string, number>;
   threadTypingPubkeys: string[];
   threadHeadVideoReviewContext?: VideoReviewContext;
-  toolbarExtraActions?: React.ReactNode;
+  activityAccessoryContent?: React.ReactNode;
+  activityAccessoryVisible: boolean;
   widthPx: number;
   isFollowingThread?: boolean;
   isMessageUnreadById?: (messageId: string) => boolean;
@@ -226,7 +227,8 @@ export function MessageThreadPanel({
   threadUnreadCount,
   threadReplyUnreadCounts,
   threadTypingPubkeys,
-  toolbarExtraActions,
+  activityAccessoryContent,
+  activityAccessoryVisible,
   widthPx,
   transparentChrome = false,
   autoSendDraftKey = null,
@@ -248,7 +250,7 @@ export function MessageThreadPanel({
   // Whether the composer dock trades its quiet-state spacer for the
   // conditional activity accessory (agent working and/or someone typing).
   const hasComposerBottomActivity =
-    Boolean(toolbarExtraActions) || threadTypingPubkeys.length > 0;
+    activityAccessoryVisible || threadTypingPubkeys.length > 0;
   useComposerHeightPadding(
     threadBodyRef,
     threadComposerWrapperRef,
@@ -851,7 +853,7 @@ export function MessageThreadPanel({
                 THREAD_PANEL_COMPOSER_GUTTER_CLASS,
                 "pb-0",
               )}
-              bottomAccessoryVisible={hasComposerBottomActivity}
+              layoutMode="dock"
               disabled={disabled || isSending || !channelId}
               draftKey={`thread:${threadHead.id}`}
               autoSubmitDraftKey={autoSendDraftKey}
@@ -878,9 +880,9 @@ export function MessageThreadPanel({
               visible={hasComposerBottomActivity}
             >
               <div className="mx-auto flex w-full max-w-4xl items-center gap-2 overflow-visible pl-2">
-                {toolbarExtraActions ? (
+                {activityAccessoryVisible && activityAccessoryContent ? (
                   <div className="flex min-w-0 flex-1 overflow-visible">
-                    {toolbarExtraActions}
+                    {activityAccessoryContent}
                   </div>
                 ) : null}
                 {threadTypingPubkeys.length > 0 ? (
