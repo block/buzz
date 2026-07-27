@@ -1349,6 +1349,7 @@ fn format_conversation_context(
 }
 
 /// Arguments for [`format_prompt`] beyond the required [`FlushBatch`].
+#[derive(Default)]
 pub struct FormatPromptArgs<'a> {
     pub agent_core: Option<&'a str>,
     pub channel_info: Option<&'a PromptChannelInfo>,
@@ -1368,33 +1369,9 @@ pub struct FormatPromptArgs<'a> {
     ///
     /// For modern agents (protocol_version >= 2) the section is delivered via
     /// the system role in session/new; omit here to avoid duplication.
-    /// For legacy agents it rides in the first user message of the session,
-    /// alongside `[Base]`/`[System]`/`[Agent Memory — core]`.
+    /// For legacy agents it rides in the user message on every turn of the
+    /// session, alongside `[Base]`/`[System]`/`[Agent Memory — core]`.
     pub agent_canvas: Option<&'a str>,
-    /// Whether the stable legacy-only session preamble should be included.
-    ///
-    /// Legacy ACP agents have no system-prompt transport, so Buzz sends the
-    /// base, persona, team, core memory, and canvas sections in the first user
-    /// turn. The ACP session retains that turn; repeating the same sections on
-    /// every later turn wastes input tokens without adding information.
-    pub include_legacy_session_preamble: bool,
-}
-
-impl Default for FormatPromptArgs<'_> {
-    fn default() -> Self {
-        Self {
-            agent_core: None,
-            channel_info: None,
-            conversation_context: None,
-            profile_lookup: None,
-            has_system_prompt_support: false,
-            base_prompt: None,
-            system_prompt: None,
-            team_instructions: None,
-            agent_canvas: None,
-            include_legacy_session_preamble: true,
-        }
-    }
 }
 
 /// Format the `[Base]` section for the base prompt.
@@ -1449,7 +1426,7 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
     // For legacy agents (protocol_version < 2), inject base_prompt and
     // system_prompt as user-message sections. Modern agents receive these
     // via the system role in session/new.
-    if !args.has_system_prompt_support && args.include_legacy_session_preamble {
+    if !args.has_system_prompt_support {
         if let Some(bp) = args.base_prompt {
             sections.push(base_section(bp));
         }
@@ -1470,7 +1447,7 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
     // system role in session/new, so it is omitted here to avoid duplication.
     // Legacy agents have no system role, so core rides in the user message
     // alongside `[Base]`/`[System]`.
-    if !args.has_system_prompt_support && args.include_legacy_session_preamble {
+    if !args.has_system_prompt_support {
         if let Some(core) = args.agent_core {
             sections.push(core.to_string());
         }
@@ -2463,44 +2440,6 @@ mod tests {
             "[System] should be suppressed for modern agents"
         );
         assert!(prompt.starts_with("[Context]"));
-    }
-
-    #[test]
-    fn test_format_prompt_legacy_followup_omits_stable_session_preamble() {
-        let ch = Uuid::new_v4();
-        let event = make_event("follow up");
-        let batch = FlushBatch {
-            channel_id: ch,
-            events: vec![BatchEvent {
-                event,
-                prompt_tag: "test".into(),
-                received_at: Instant::now(),
-            }],
-            cancelled_events: vec![],
-            cancel_reason: None,
-        };
-
-        let prompt = format_prompt(
-            &batch,
-            &FormatPromptArgs {
-                base_prompt: Some("large shared base"),
-                system_prompt: Some("persona instructions"),
-                team_instructions: Some("team instructions"),
-                agent_core: Some("[Agent Memory — core]\nremember this"),
-                agent_canvas: Some("[Channel Canvas]\ncanvas metadata"),
-                include_legacy_session_preamble: false,
-                ..Default::default()
-            },
-        )
-        .join("\n\n");
-
-        assert!(!prompt.contains("large shared base"));
-        assert!(!prompt.contains("persona instructions"));
-        assert!(!prompt.contains("team instructions"));
-        assert!(!prompt.contains("[Agent Memory — core]"));
-        assert!(!prompt.contains("[Channel Canvas]"));
-        assert!(prompt.starts_with("[Context]"));
-        assert!(prompt.contains("follow up"));
     }
 
     #[test]
