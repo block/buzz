@@ -234,7 +234,7 @@ double? effectiveFontSizeForText(
 
 void main() {
   group('ChannelDetailPage', () {
-    testWidgets('reveals messages from same-slot reconnect skeletons', (
+    testWidgets('debounces same-slot reconnect skeletons before revealing', (
       tester,
     ) async {
       final relaySession = _ReconnectingRelaySession();
@@ -256,6 +256,20 @@ void main() {
       );
       await tester.pump();
 
+      expect(find.text('Existing message'), findsOneWidget);
+      expect(
+        tester.widget<SkeletonReveal>(find.byType(SkeletonReveal)).loading,
+        isFalse,
+      );
+
+      await tester.pump(const Duration(milliseconds: 1999));
+      expect(
+        tester.widget<SkeletonReveal>(find.byType(SkeletonReveal)).loading,
+        isFalse,
+      );
+
+      await tester.pump(const Duration(milliseconds: 1));
+      await tester.pump();
       final skeleton = find.byKey(
         const Key('channel-detail-connection-skeleton'),
       );
@@ -305,6 +319,39 @@ void main() {
             .widget<Opacity>(find.byKey(const Key('skeleton-reveal-content')))
             .opacity,
         1,
+      );
+    });
+
+    testWidgets('keeps forum content visible while reconnecting', (
+      tester,
+    ) async {
+      final relaySession = _ReconnectingRelaySession();
+      final forumChannel = Channel(
+        id: _channelId,
+        name: 'design-forum',
+        channelType: 'forum',
+        visibility: 'open',
+        description: 'Talk through design changes',
+        createdBy: 'abc123',
+        createdAt: DateTime(2025),
+        memberCount: 5,
+        isMember: true,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          channel: forumChannel,
+          relaySessionNotifier: relaySession,
+        ),
+      );
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pump();
+
+      expect(find.byType(SkeletonReveal), findsNothing);
+      expect(
+        find.byKey(const Key('channel-detail-connection-skeleton')),
+        findsNothing,
       );
     });
 

@@ -124,9 +124,6 @@ class ChannelDetailPage extends HookConsumerWidget {
     final channelsAsync = ref.watch(channelsProvider);
     final messagesState = ref.watch(channelMessagesProvider(channel.id));
     final sessionStatus = ref.watch(relaySessionProvider).status;
-    final showConnectionSkeleton =
-        sessionStatus == SessionStatus.connecting ||
-        sessionStatus == SessionStatus.reconnecting;
     final readState = ref.watch(readStateProvider);
     final currentPubkey = ref
         .watch(profileProvider)
@@ -154,6 +151,22 @@ class ChannelDetailPage extends HookConsumerWidget {
         channel;
     final resolvedChannel =
         detailsAsync.whenData(baseChannel.mergeDetails).value ?? baseChannel;
+    final showConnectionSkeleton = useState(false);
+    final isReconnectingWithContent =
+        !resolvedChannel.isForum &&
+        messagesState.value != null &&
+        (sessionStatus == SessionStatus.connecting ||
+            sessionStatus == SessionStatus.reconnecting);
+    useEffect(() {
+      if (!isReconnectingWithContent) {
+        showConnectionSkeleton.value = false;
+        return null;
+      }
+      final timer = Timer(const Duration(seconds: 2), () {
+        showConnectionSkeleton.value = true;
+      });
+      return timer.cancel;
+    }, [isReconnectingWithContent]);
     final appBarTitleContentHeight = resolvedChannel.isDm
         ? _dmAppBarTitleContentHeight(context)
         : 0.0;
@@ -264,21 +277,20 @@ class ChannelDetailPage extends HookConsumerWidget {
       body: Column(
         children: [
           Expanded(
-            child: SkeletonReveal(
-              loading:
-                  showConnectionSkeleton ||
-                  (!resolvedChannel.isForum && messagesState.isLoading),
-              shimmerEnabled: sessionStatus != SessionStatus.disconnected,
-              skeleton: _MessageTimelineSkeleton(
-                appBarTitleContentHeight: appBarTitleContentHeight,
-                status: sessionStatus,
-              ),
-              content: resolvedChannel.isForum
-                  ? ForumPostsView(
-                      channel: resolvedChannel,
-                      currentPubkey: currentPubkey,
-                    )
-                  : messagesState.when(
+            child: resolvedChannel.isForum
+                ? ForumPostsView(
+                    channel: resolvedChannel,
+                    currentPubkey: currentPubkey,
+                  )
+                : SkeletonReveal(
+                    loading:
+                        showConnectionSkeleton.value || messagesState.isLoading,
+                    shimmerEnabled: sessionStatus != SessionStatus.disconnected,
+                    skeleton: _MessageTimelineSkeleton(
+                      appBarTitleContentHeight: appBarTitleContentHeight,
+                      status: sessionStatus,
+                    ),
+                    content: messagesState.when(
                       loading: SizedBox.shrink,
                       error: (e, _) => Padding(
                         padding: EdgeInsets.only(
@@ -321,7 +333,7 @@ class ChannelDetailPage extends HookConsumerWidget {
                         );
                       },
                     ),
-            ),
+                  ),
           ),
           if (!resolvedChannel.isForum && typingEntries.isNotEmpty)
             _TypingIndicator(entries: typingEntries),
