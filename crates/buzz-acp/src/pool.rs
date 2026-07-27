@@ -1250,6 +1250,36 @@ fn send_prompt_result(
     });
 }
 
+fn log_prompt_metrics(
+    prompt_bytes: usize,
+    prompt_blocks: usize,
+    is_new_session: bool,
+    supports_system_prompt: bool,
+) {
+    // Keep this target under `buzz_acp`: Desktop intentionally runs managed
+    // harnesses with `warn,buzz_acp=info`, so a separate `pool::prompt` target
+    // silently drops ordinary usage measurements.
+    tracing::info!(
+        target: "buzz_acp::pool::prompt",
+        prompt_bytes,
+        prompt_blocks,
+        is_new_session,
+        system_prompt_transport = if supports_system_prompt {
+            "system"
+        } else {
+            "legacy-user-prefix"
+        },
+        "prompt prepared"
+    );
+    if prompt_bytes > 50_000 {
+        tracing::warn!(
+            target: "buzz_acp::pool::prompt",
+            prompt_bytes,
+            "large prompt prepared — inspect repeated base, system, memory, and conversation context"
+        );
+    }
+}
+
 /// Core async function spawned for each prompt.
 ///
 /// Lifecycle:
@@ -1820,25 +1850,12 @@ pub async fn run_prompt_task(
         None => prompt_sections.iter().map(String::as_str).collect(),
     };
     let prompt_bytes: usize = prompt_blocks.iter().map(|block| block.len()).sum();
-    tracing::info!(
-        target: "pool::prompt",
+    log_prompt_metrics(
         prompt_bytes,
-        prompt_blocks = prompt_blocks.len(),
+        prompt_blocks.len(),
         is_new_session,
-        system_prompt_transport = if agent.has_system_prompt_support() {
-            "system"
-        } else {
-            "legacy-user-prefix"
-        },
-        "prompt prepared"
+        agent.has_system_prompt_support(),
     );
-    if prompt_bytes > 50_000 {
-        tracing::warn!(
-            target: "pool::prompt",
-            prompt_bytes,
-            "large prompt prepared — inspect repeated base, system, memory, and conversation context"
-        );
-    }
 
     // When control_rx is Some (channel tasks), wrap the prompt in select! so
     // the main loop can cancel, interrupt, or rotate it. Heartbeats
@@ -3672,6 +3689,58 @@ mod tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
     use serde_json::json;
+    use std::io::Write;
+
+    #[derive(Clone)]
+    struct CapturingMakeWriter {
+        buffer: Arc<Mutex<Vec<u8>>>,
+    }
+
+    struct CapturingWriter {
+        buffer: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl Write for CapturingWriter {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            self.buffer.lock().unwrap().extend_from_slice(data);
+            Ok(data.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturingMakeWriter {
+        type Writer = CapturingWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            CapturingWriter {
+                buffer: Arc::clone(&self.buffer),
+            }
+        }
+    }
+
+    #[test]
+    fn prompt_metrics_survive_desktop_child_log_filter() {
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::new("warn,buzz_acp=info"))
+            .with_writer(CapturingMakeWriter {
+                buffer: Arc::clone(&buffer),
+            })
+            .with_ansi(false)
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            log_prompt_metrics(321, 4, true, false);
+        });
+
+        let captured = String::from_utf8(buffer.lock().unwrap().clone()).unwrap();
+        assert!(captured.contains("buzz_acp::pool::prompt"), "{captured}");
+        assert!(captured.contains("prompt prepared"), "{captured}");
+        assert!(captured.contains("prompt_bytes=321"), "{captured}");
+    }
 
     // These pin the initial_message dispatch path (run_prompt_task, ~line 855):
     // a legacy agent WITH a base_prompt must get [Base] prepended to the user
