@@ -563,7 +563,7 @@ impl Db {
     pub async fn admin_get_report(
         &self,
         id: Uuid,
-    ) -> Result<Option<admin_moderation::AdminReport>> {
+    ) -> Result<Option<admin_moderation::AdminReportDetail>> {
         admin_moderation::get_report(&self.pool, id).await
     }
 
