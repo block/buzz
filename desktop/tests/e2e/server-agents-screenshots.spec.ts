@@ -86,7 +86,17 @@ test.describe("server agents section", () => {
         JSON.stringify([spawner]),
       );
     }, SPAWNER);
-    await installMockBridge(page);
+    // The deploy menu offers *active* personas, so one has to exist for the
+    // action to be enabled at all — the mock bridge seeds none by default.
+    await installMockBridge(page, {
+      personas: [
+        {
+          displayName: "Fizz",
+          isActive: true,
+          systemPrompt: "You are Fizz.",
+        },
+      ],
+    });
     await gotoAgents(page);
 
     const section = page.locator("section", { hasText: "Server agents" });
@@ -109,9 +119,23 @@ test.describe("server agents section", () => {
     await expect(menu).toBeVisible();
     await expect(menu).toContainText("Fizz");
     await waitForAnimations(page);
+    // Clip around where the menu actually opened, clamped to the viewport —
+    // a fixed offset drifts as the page above the section grows, and a clip
+    // outside the viewport is a hard Playwright error, not an empty image.
+    const box = await menu.boundingBox();
+    if (!box) throw new Error("deploy menu has no bounding box");
+    const viewport = page.viewportSize() ?? { width: 1280, height: 720 };
+    const pad = 160;
+    const x = Math.max(0, box.x - pad);
+    const y = Math.max(0, box.y - pad / 2);
     await page.screenshot({
       path: `${SCREENSHOT_DIR}/03-deploy-menu.png`,
-      clip: { x: 300, y: 1200, width: 980, height: 620 },
+      clip: {
+        x,
+        y,
+        width: Math.min(box.width + pad * 2, viewport.width - x),
+        height: Math.min(box.height + pad, viewport.height - y),
+      },
     });
   });
 
