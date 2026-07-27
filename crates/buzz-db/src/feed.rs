@@ -15,6 +15,22 @@
 //! full-table scan with an indexed lookup, keeping feed queries
 //! sub-millisecond at scale (>100k events).
 //!
+//! The NIP-CM branch of `query_mentions` has a deliberately different shape.
+//! `channel_notifications` holds one row per `@channel` *event* (never one per
+//! member), so recipients are resolved at read time by joining the caller's
+//! roster — which means `channel_id` is join-derived, not an equality literal,
+//! and the `(community_id, channel_id, event_created_at DESC)` index cannot
+//! yield community-wide `created_at` order. That branch is therefore a
+//! roster-driven gather plus a bounded top-N sort, not the early-terminating
+//! ordered scan branch 1 gets. Accepted on purpose: the table grows one row per
+//! `@channel` message (`@here` and edits store nothing), so the candidate set
+//! stays far smaller than branch 1's row-per-p-tag index. If `@channel` volume
+//! ever grows large, the escape hatch is an additional
+//! `(community_id, event_created_at DESC)` index, which lets the planner scan
+//! in order and stop at `LIMIT`; it is not added now because it does not
+//! dominate — for a caller in few channels of a busy community it scans past
+//! many non-roster rows.
+//!
 //! **Phase 2 implemented**: the `event_mentions` table is populated by
 //! [`crate::insert_mentions`] on every event insert.  `query_mentions` and
 //! `query_needs_action` now use `INNER JOIN event_mentions` instead of
