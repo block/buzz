@@ -197,15 +197,59 @@ fn is_git_crud(c: char) -> bool {
     c <= ' ' || matches!(c, '"' | '\'' | ',' | ':' | ';' | '<' | '>' | '\\')
 }
 
+/// Characters in Unicode general category `Cf` (format): zero-width space and
+/// joiners, bidi embedding/override marks, invisible math operators, interlinear
+/// annotations, and tag characters.
+///
+/// `char::is_control` covers only `Cc`, so every one of these survives it — and
+/// none is whitespace or [`is_git_crud`]. A display name of nothing but U+200B
+/// ZERO WIDTH SPACE would therefore satisfy the "at least one non-crud
+/// character" gate and hand git a visually blank author instead of falling back
+/// to the npub. An embedded U+202E RIGHT-TO-LEFT OVERRIDE is worse: it makes a
+/// commit's persisted author line render as something other than what it says,
+/// the same confusion the angle-bracket filter exists to prevent.
+///
+/// The whole category is rejected rather than the two known-bad marks, because
+/// the boundary that matters is "invisible or reorders text", not "the codepoint
+/// someone thought of". Ranges transcribed from the UCD's
+/// `DerivedGeneralCategory.txt` (17.0.0) and independently cross-checked against
+/// Python's `unicodedata` (16.0.0); both yield exactly these 21 ranges. Inlined
+/// rather than taking a Unicode-tables dependency for one predicate.
+fn is_unicode_format(c: char) -> bool {
+    matches!(c,
+        '\u{00AD}'
+        | '\u{0600}'..='\u{0605}'
+        | '\u{061C}'
+        | '\u{06DD}'
+        | '\u{070F}'
+        | '\u{0890}'..='\u{0891}'
+        | '\u{08E2}'
+        | '\u{180E}'
+        | '\u{200B}'..='\u{200F}'
+        | '\u{202A}'..='\u{202E}'
+        | '\u{2060}'..='\u{2064}'
+        | '\u{2066}'..='\u{206F}'
+        | '\u{FEFF}'
+        | '\u{FFF9}'..='\u{FFFB}'
+        | '\u{110BD}'
+        | '\u{110CD}'
+        | '\u{13430}'..='\u{1343F}'
+        | '\u{1BCA0}'..='\u{1BCA3}'
+        | '\u{1D173}'..='\u{1D17A}'
+        | '\u{E0001}'
+        | '\u{E0020}'..='\u{E007F}'
+    )
+}
+
 /// Normalize a Buzz display name into a git author name, or `None` to fall
 /// back to the npub.
 ///
-/// Strips control characters and angle brackets, collapses whitespace runs,
-/// trims, and caps at [`MAX_GIT_USER_NAME_CHARS`] by `chars()` so a multi-byte
-/// name cannot be split mid-UTF-8. Angle brackets go because git silently
-/// drops them rather than erroring — `Duncan <evil@x.com>` would render as
-/// `Duncan evil@x.com <hex@relay>`, which forges nothing but reads as though
-/// it might.
+/// Strips control and Unicode format characters plus angle brackets, collapses
+/// whitespace runs, trims, and caps at [`MAX_GIT_USER_NAME_CHARS`] by `chars()`
+/// so a multi-byte name cannot be split mid-UTF-8. Angle brackets go because git
+/// silently drops them rather than erroring — `Duncan <evil@x.com>` would
+/// render as `Duncan evil@x.com <hex@relay>`, which forges nothing but reads as
+/// though it might.
 ///
 /// Returns `None` unless at least one non-crud character survives. A bare
 /// emptiness check is not sufficient: git rejects a name built only of crud,
@@ -216,7 +260,7 @@ fn sanitize_git_user_name(raw: &str) -> Option<String> {
         .split_whitespace()
         .map(|word| {
             word.chars()
-                .filter(|c| !c.is_control() && *c != '<' && *c != '>')
+                .filter(|c| !c.is_control() && !is_unicode_format(*c) && *c != '<' && *c != '>')
                 .collect::<String>()
         })
         .filter(|word| !word.is_empty())
@@ -317,7 +361,8 @@ pub fn artifact_dir(session_root: &Path) -> PathBuf {
 #[cfg(test)]
 mod git_user_name_tests {
     use super::{
-        build_git_env, is_git_crud, sanitize_git_user_name, KeyInfo, MAX_GIT_USER_NAME_CHARS,
+        build_git_env, is_git_crud, is_unicode_format, sanitize_git_user_name, KeyInfo,
+        MAX_GIT_USER_NAME_CHARS,
     };
     use std::sync::Mutex;
 
@@ -456,6 +501,129 @@ mod git_user_name_tests {
     }
 
     #[test]
+    fn test_format_only_name_falls_back_to_npub() {
+        // U+200B is neither control, nor whitespace, nor crud, so before Cf
+        // filtering this passed the non-crud gate and handed git a visually
+        // blank author instead of falling back.
+        assert_eq!(sanitize_git_user_name("\u{200B}\u{200B}"), None);
+        // Same class, different marks: joiner, word joiner, BOM, bidi override.
+        for raw in ["\u{200D}", "\u{2060}", "\u{FEFF}", "\u{202E}", "\u{00AD}"] {
+            assert_eq!(
+                sanitize_git_user_name(raw),
+                None,
+                "format-only name {raw:?} must fall back to the npub"
+            );
+        }
+    }
+
+    #[test]
+    fn test_bidi_override_is_stripped_and_the_name_is_kept() {
+        // A trailing RLO would reorder everything after it in `git log`, so the
+        // mark goes and the readable name stays.
+        assert_eq!(
+            sanitize_git_user_name("Duncan\u{202E}"),
+            Some("Duncan".into())
+        );
+        assert_eq!(
+            sanitize_git_user_name("Dun\u{202E}can Idaho"),
+            Some("Duncan Idaho".into())
+        );
+    }
+
+    #[test]
+    fn test_zero_width_space_inside_a_word_is_removed_without_splitting_it() {
+        // U+200B is not whitespace, so it must not become a separator: the word
+        // rejoins rather than turning into "Dun can".
+        assert_eq!(
+            sanitize_git_user_name("Dun\u{200B}can"),
+            Some("Duncan".into())
+        );
+    }
+
+    #[test]
+    fn test_format_characters_do_not_consume_the_length_budget() {
+        // Filtering happens before truncation, so invisible padding cannot
+        // shorten the visible name.
+        let raw = format!("{}{}", "\u{200B}".repeat(200), "a".repeat(90));
+        let got = sanitize_git_user_name(&raw).expect("non-empty");
+        assert_eq!(got.chars().count(), MAX_GIT_USER_NAME_CHARS);
+        assert!(got.chars().all(|c| c == 'a'), "got {got:?}");
+    }
+
+    #[test]
+    fn test_unicode_format_covers_every_cf_range_and_nothing_adjacent() {
+        // Both endpoints of each of the 21 `Cf` ranges in UCD 17.0.0. Endpoints
+        // are what a transcription error moves, so they are what gets asserted.
+        for c in [
+            '\u{00AD}',
+            '\u{0600}',
+            '\u{0605}',
+            '\u{061C}',
+            '\u{06DD}',
+            '\u{070F}',
+            '\u{0890}',
+            '\u{0891}',
+            '\u{08E2}',
+            '\u{180E}',
+            '\u{200B}',
+            '\u{200F}',
+            '\u{202A}',
+            '\u{202E}',
+            '\u{2060}',
+            '\u{2064}',
+            '\u{2066}',
+            '\u{206F}',
+            '\u{FEFF}',
+            '\u{FFF9}',
+            '\u{FFFB}',
+            '\u{110BD}',
+            '\u{110CD}',
+            '\u{13430}',
+            '\u{1343F}',
+            '\u{1BCA0}',
+            '\u{1BCA3}',
+            '\u{1D173}',
+            '\u{1D17A}',
+            '\u{E0001}',
+            '\u{E0020}',
+            '\u{E007F}',
+        ] {
+            assert!(is_unicode_format(c), "U+{:04X} is Cf", c as u32);
+        }
+        // Codepoints immediately outside those ranges, plus ordinary characters.
+        // U+2065 is the notable one: it sits *inside* the 2060..206F block but
+        // is unassigned, not `Cf`.
+        for c in [
+            '\u{00AC}',
+            '\u{00AE}',
+            '\u{05FF}',
+            '\u{0606}',
+            '\u{061B}',
+            '\u{061D}',
+            '\u{200A}',
+            '\u{2010}',
+            '\u{2029}',
+            '\u{202F}',
+            '\u{2065}',
+            '\u{205F}',
+            '\u{2070}',
+            '\u{FEFE}',
+            '\u{FFF8}',
+            '\u{FFFC}',
+            '\u{110BC}',
+            '\u{1342F}',
+            '\u{E0000}',
+            '\u{E0080}',
+            'a',
+            ' ',
+            '🐝',
+            'É',
+        ] {
+            assert!(!is_unicode_format(c), "U+{:04X} is not Cf", c as u32);
+        }
+    }
+
+    #[test]
     fn test_build_git_env_uses_display_name_and_leaves_email_on_the_pubkey() {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("BUZZ_ACP_DISPLAY_NAME", "Duncan");
@@ -497,13 +665,21 @@ mod git_user_name_tests {
     #[test]
     fn test_build_git_env_falls_back_to_npub_when_display_name_is_unusable() {
         let _guard = ENV_LOCK.lock().unwrap();
-        std::env::set_var("BUZZ_ACP_DISPLAY_NAME", "<>");
         std::env::remove_var("BUZZ_RELAY_URL");
         std::env::remove_var("GIT_CONFIG_COUNT");
-        let env = build_git_env(&key_info());
-        std::env::remove_var("BUZZ_ACP_DISPLAY_NAME");
 
-        assert_eq!(git_config(&env, "user.name").as_deref(), Some(NPUB));
+        // Crud-only and format-only names both reach git as the npub — one
+        // would abort every commit, the other would render as blank.
+        for raw in ["<>", "\u{200B}"] {
+            std::env::set_var("BUZZ_ACP_DISPLAY_NAME", raw);
+            let env = build_git_env(&key_info());
+            assert_eq!(
+                git_config(&env, "user.name").as_deref(),
+                Some(NPUB),
+                "unusable display name {raw:?} must reach git as the npub"
+            );
+        }
+        std::env::remove_var("BUZZ_ACP_DISPLAY_NAME");
     }
 
     #[test]
