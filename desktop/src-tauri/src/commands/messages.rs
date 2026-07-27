@@ -27,10 +27,11 @@ use crate::{
 /// (`p_gated_filters_authorized`) without a `#p` tag — load-bearing for the
 /// thread-subtree read, whose relay routing keys off `#e`+`depth_limit` (not
 /// kind) but still passes through the p-gate before it runs.
-const TIMELINE_KINDS: [u32; 11] = [
+const TIMELINE_KINDS: [u32; 12] = [
     9,
     40002,
     40008,
+    buzz_core_pkg::kind::KIND_SURFACE,
     40099,
     43001,
     43002,
@@ -463,7 +464,7 @@ pub async fn get_event(event_id: String, state: State<'_, AppState>) -> Result<S
         &state,
         &[serde_json::json!({
             "ids": [event_id],
-            "kinds": [0, 1, 3, 5, 7, 9, 30078, 40002, 40003, 40008, 40099, 40100, 45001, 45003, buzz_core_pkg::kind::KIND_HUDDLE_STARTED],
+            "kinds": [0, 1, 3, 5, 7, 9, 30078, 40002, 40003, 40008, 40099, 40100, 45001, 45003, buzz_core_pkg::kind::KIND_SURFACE, buzz_core_pkg::kind::KIND_HUDDLE_STARTED],
             "limit": 1
         })],
     )

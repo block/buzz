@@ -42,6 +42,10 @@ buzz messages delete --event <event-id>
 # Diffs
 buzz messages send-diff --channel <uuid> --diff - --repo https://github.com/org/repo --commit abc123 < diff.patch
 
+# Surface cards (data-only UI specs rendered as native cards)
+buzz messages send-surface --channel <uuid> --spec ./card.json
+buzz messages edit-surface --event <event-id> --spec ./card-v2.json   # live update, full replacement
+
 # Channels
 buzz channels list
 buzz channels create --name "my-channel" --type stream --visibility open
@@ -104,6 +108,8 @@ stored rules in `validation_error` so an owner can remove and repair them.
 |-------|-----------|-------------|
 | `messages` | `send` | Send a message to a channel |
 | | `send-diff` | Send a code diff with metadata |
+| | `send-surface` | Publish a surface card (SurfaceSpec v1 JSON) |
+| | `edit-surface` | Replace a surface card's spec in place |
 | | `edit` | Edit a message you sent |
 | | `delete` | Delete a message |
 | | `get` | List messages in a channel |
@@ -182,3 +188,43 @@ stdout: raw relay JSON
 stderr: {"error": "category", "message": "detail"}
 exit:   0=ok  1=user  2=network  3=auth  4=other  5=write conflict
 ```
+
+## Surface cards
+
+A surface card is a signed event whose content is a small JSON spec the client
+renders as a native card — no markup, links, or scripts; you control content,
+never layout. Editing replaces the whole spec in place, so one card can track
+a changing process (healthy → incident → recovered) inside a single message.
+
+```bash
+buzz messages send-surface --channel <uuid> --spec - <<'JSON'
+{
+  "version": 1,
+  "fallbackText": "Deploy v2.4.1: 2/2 pods running, rollout 100%",
+  "title": "Deployment — api-gateway",
+  "nodes": [
+    {"type": "badge", "text": "HEALTHY", "tone": "success"},
+    {"type": "keyValue", "items": [{"label": "Version", "value": "v2.4.1", "tone": "info"}]},
+    {"type": "statGrid", "stats": [{"label": "Pods", "value": 2, "tone": "success"}, {"label": "Errors", "value": 0}]},
+    {"type": "table", "columns": ["Pod", "Status"], "rows": [["web-7d9f", "Running"], ["web-a1c2", "Running"]]},
+    {"type": "progress", "label": "Rollout", "value": 100}
+  ]
+}
+JSON
+```
+
+Nodes: `heading` (section heading), `text` (plain paragraph), `badge` (status
+pill), `keyValue` (label/value list), `statGrid` (stat tiles with optional
+`delta`), `table` (`columns` + `rows`), `progress` (0–100 bar). Tones
+everywhere: `default | success | warning | danger | info`.
+
+**Save the returned `event_id`** — it is required to update the card:
+
+```bash
+buzz messages edit-surface --event <event-id> --spec ./card-incident.json
+```
+
+Limits: ≤32 nodes, ≤32 KiB canonical JSON, tables ≤12×100, text ≤4096 chars,
+labels/values ≤512 chars. Validation errors name the exact field
+(`nodes[3].table: 13 columns exceeds max 12`) — fix and resend, no relay
+round-trip wasted. Only the surface author can edit it.

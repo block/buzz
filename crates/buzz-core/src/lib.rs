@@ -34,6 +34,9 @@ pub mod pairing;
 pub mod presence;
 /// Canonical relay runtime identities.
 pub mod relay;
+/// Surface Cards — versioned data-only UI spec: payload types, validation,
+/// canonicalization, and producer-side alias normalization.
+pub mod surface;
 /// Tenant identity — the server-resolved community key carried on scoped paths.
 pub mod tenant;
 /// Schnorr signature and event ID verification.

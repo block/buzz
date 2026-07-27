@@ -2913,3 +2913,246 @@ async fn test_nip29_relay_rejects_last_owner_self_demotion() {
         "the last owner must keep their role"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Surface Cards (KIND_SURFACE) — ingest validation, membership, edit gating.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const KIND_SURFACE_U16: u16 = 40110;
+const KIND_EDIT_U16: u16 = 40003;
+
+fn surface_demo_spec(fallback: &str, badge_tone: &str, progress: u32) -> String {
+    format!(
+        r#"{{"version":1,"fallbackText":"{fallback}","title":"Deployment — api-gateway","nodes":[{{"type":"badge","text":"STATE","tone":"{badge_tone}"}},{{"type":"statGrid","stats":[{{"label":"Pods","value":2,"tone":"success"}},{{"label":"Errors","value":0}}]}},{{"type":"table","columns":["Pod","Status"],"rows":[["web-7d9f","Running"],["web-a1c2","Running"]]}},{{"type":"progress","label":"Rollout","value":{progress}}}]}}"#
+    )
+}
+
+fn build_surface_event(channel_id: &str, keys: &Keys, content: &str) -> nostr::Event {
+    EventBuilder::new(Kind::Custom(KIND_SURFACE_U16), content)
+        .tags(vec![Tag::parse(["h", channel_id]).unwrap()])
+        .sign_with_keys(keys)
+        .unwrap()
+}
+
+fn build_surface_edit_event(
+    channel_id: &str,
+    target_id: &str,
+    keys: &Keys,
+    content: &str,
+) -> nostr::Event {
+    EventBuilder::new(Kind::Custom(KIND_EDIT_U16), content)
+        .tags(vec![
+            Tag::parse(["h", channel_id]).unwrap(),
+            Tag::parse(["e", target_id]).unwrap(),
+        ])
+        .sign_with_keys(keys)
+        .unwrap()
+}
+
+/// A channel member's valid surface is accepted; a non-member's is rejected.
+#[tokio::test]
+#[ignore]
+async fn test_surface_member_accepted_nonmember_rejected() {
+    let url = relay_url();
+    let owner_keys = Keys::generate();
+    let outsider_keys = Keys::generate();
+
+    let mut owner_client = BuzzTestClient::connect(&url, &owner_keys)
+        .await
+        .expect("connect as owner");
+    let channel_id = create_private_channel_ws(&mut owner_client, &owner_keys).await;
+
+    let ok = owner_client
+        .send_event(build_surface_event(
+            &channel_id,
+            &owner_keys,
+            &surface_demo_spec("Deploy healthy", "success", 100),
+        ))
+        .await
+        .expect("send surface");
+    assert!(ok.accepted, "member surface rejected: {}", ok.message);
+
+    let mut outsider_client = BuzzTestClient::connect(&url, &outsider_keys)
+        .await
+        .expect("connect as outsider");
+    let ok = outsider_client
+        .send_event(build_surface_event(
+            &channel_id,
+            &outsider_keys,
+            &surface_demo_spec("Deploy healthy", "success", 100),
+        ))
+        .await
+        .expect("send outsider surface");
+    assert!(
+        !ok.accepted,
+        "non-member surface must be rejected, got: {}",
+        ok.message
+    );
+
+    owner_client.disconnect().await.expect("disconnect owner");
+    outsider_client
+        .disconnect()
+        .await
+        .expect("disconnect outsider");
+}
+
+/// Invalid schema, unknown version, unknown tone, and oversize payloads are
+/// all rejected at ingest with a field-specific error.
+#[tokio::test]
+#[ignore]
+async fn test_surface_invalid_payloads_rejected() {
+    let url = relay_url();
+    let keys = Keys::generate();
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+    let channel_id = create_private_channel_ws(&mut client, &keys).await;
+
+    let cases: Vec<(&str, String)> = vec![
+        ("broken JSON", "{not json".to_string()),
+        (
+            "unknown version",
+            r#"{"version":2,"fallbackText":"x","nodes":[{"type":"text","text":"y"}]}"#.to_string(),
+        ),
+        (
+            "unknown node type",
+            r#"{"version":1,"fallbackText":"x","nodes":[{"type":"iframe","src":"https://x"}]}"#
+                .to_string(),
+        ),
+        (
+            "unknown tone",
+            r#"{"version":1,"fallbackText":"x","nodes":[{"type":"badge","text":"B","tone":"sparkly"}]}"#
+                .to_string(),
+        ),
+        (
+            "boolean cell",
+            r#"{"version":1,"fallbackText":"x","nodes":[{"type":"table","columns":["A"],"rows":[[true]]}]}"#
+                .to_string(),
+        ),
+        (
+            "13 columns",
+            format!(
+                r#"{{"version":1,"fallbackText":"x","nodes":[{{"type":"table","columns":[{}],"rows":[]}}]}}"#,
+                (0..13)
+                    .map(|i| format!("\"c{i}\""))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+        ),
+        ("oversize", {
+            let body = "y".repeat(4096);
+            let node = format!(r#"{{"type":"text","text":"{body}"}}"#);
+            format!(
+                r#"{{"version":1,"fallbackText":"x","nodes":[{}]}}"#,
+                vec![node.as_str(); 32].join(",")
+            )
+        }),
+    ];
+
+    for (name, content) in cases {
+        let ok = client
+            .send_event(build_surface_event(&channel_id, &keys, &content))
+            .await
+            .unwrap_or_else(|e| panic!("send {name}: {e}"));
+        assert!(!ok.accepted, "{name} must be rejected");
+        assert!(
+            ok.message.starts_with("invalid:"),
+            "{name}: expected field-specific 'invalid:' error, got: {}",
+            ok.message
+        );
+    }
+
+    client.disconnect().await.expect("disconnect");
+}
+
+/// Live-update semantics: the author's edits replace the spec (latest wins);
+/// an invalid replacement spec is rejected; a non-author's edit is rejected.
+#[tokio::test]
+#[ignore]
+async fn test_surface_edit_replacement_author_gated() {
+    let url = relay_url();
+    let alice = Keys::generate();
+    let bob = Keys::generate();
+
+    let mut alice_client = BuzzTestClient::connect(&url, &alice)
+        .await
+        .expect("connect as alice");
+    let channel_id = create_private_channel_ws(&mut alice_client, &alice).await;
+    let (accepted, msg) = add_member_ws(
+        &mut alice_client,
+        &channel_id,
+        &bob.public_key().to_hex(),
+        &alice,
+    )
+    .await;
+    assert!(accepted, "add bob: {msg}");
+
+    // Alice publishes the surface.
+    let surface = build_surface_event(
+        &channel_id,
+        &alice,
+        &surface_demo_spec("Deploy healthy", "success", 100),
+    );
+    let surface_id = surface.id.to_hex();
+    let ok = alice_client.send_event(surface).await.expect("publish");
+    assert!(ok.accepted, "publish surface: {}", ok.message);
+
+    // Alice edits twice — healthy → incident → recovered. Both accepted.
+    for (fallback, tone, progress) in [
+        ("Deploy DEGRADED: 1/2 pods", "danger", 35),
+        ("Deploy recovered", "success", 100),
+    ] {
+        let ok = alice_client
+            .send_event(build_surface_edit_event(
+                &channel_id,
+                &surface_id,
+                &alice,
+                &surface_demo_spec(fallback, tone, progress),
+            ))
+            .await
+            .expect("send edit");
+        assert!(ok.accepted, "author edit rejected: {}", ok.message);
+    }
+
+    // An edit whose content is not a valid spec is rejected.
+    let ok = alice_client
+        .send_event(build_surface_edit_event(
+            &channel_id,
+            &surface_id,
+            &alice,
+            r#"{"version":1,"fallbackText":"x","nodes":[]}"#,
+        ))
+        .await
+        .expect("send invalid edit");
+    assert!(!ok.accepted, "invalid surface edit must be rejected");
+    assert!(
+        ok.message.contains("surface edit"),
+        "expected surface-edit validation error, got: {}",
+        ok.message
+    );
+
+    // Bob (member, but not the author) cannot edit Alice's surface.
+    let mut bob_client = BuzzTestClient::connect(&url, &bob)
+        .await
+        .expect("connect as bob");
+    let ok = bob_client
+        .send_event(build_surface_edit_event(
+            &channel_id,
+            &surface_id,
+            &bob,
+            &surface_demo_spec("Bob was here", "danger", 1),
+        ))
+        .await
+        .expect("send bob edit");
+    assert!(
+        !ok.accepted,
+        "non-author edit must be rejected, got: {}",
+        ok.message
+    );
+    assert!(
+        ok.message.contains("author"),
+        "expected author-gating error, got: {}",
+        ok.message
+    );
+
+    alice_client.disconnect().await.expect("disconnect alice");
+    bob_client.disconnect().await.expect("disconnect bob");
+}

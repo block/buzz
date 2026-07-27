@@ -363,7 +363,7 @@ pub async fn cmd_get_messages(
     let limit = limit.unwrap_or(50).min(200);
 
     let mut filter = serde_json::json!({
-        "kinds": [9, 40002, 40008, 45001, 45003],
+        "kinds": [9, 40002, 40008, 40110, 45001, 45003],
         "#h": [channel_id],
         "limit": limit
     });
@@ -407,7 +407,7 @@ pub async fn cmd_get_thread(
     // 1. Replies referencing this event via e-tag (no kind restriction)
     // 2. The root event itself by ID
     let mut reply_filter = serde_json::json!({
-        "kinds": [9, 40002, 40003, 40008, 45003],
+        "kinds": [9, 40002, 40003, 40008, 40110, 45003],
         "#h": [channel_id],
         "#e": [event_id],
         "limit": limit
@@ -834,6 +834,105 @@ pub async fn cmd_edit_message(
     Ok(())
 }
 
+/// Read a `--spec` argument: `-` for stdin, an existing file path, or inline JSON.
+fn read_spec_arg(value: &str) -> Result<String, CliError> {
+    if value == "-" {
+        return read_or_stdin(value);
+    }
+    let trimmed = value.trim_start();
+    if trimmed.starts_with('{') {
+        return Ok(value.to_string());
+    }
+    std::fs::read_to_string(value)
+        .map_err(|e| CliError::Usage(format!("--spec: cannot read file {value}: {e}")))
+}
+
+/// Parse, alias-normalize, and validate a SurfaceSpec v1 JSON document.
+///
+/// Errors are field-specific (`nodes[3].table: 14 columns exceeds max 12`) so
+/// the payload can be fixed without a relay round-trip.
+fn parse_surface_spec(raw: &str) -> Result<buzz_core::surface::SurfaceSpecV1, CliError> {
+    let mut value: serde_json::Value = serde_json::from_str(raw)
+        .map_err(|e| CliError::Usage(format!("--spec is not valid JSON: {e}")))?;
+    buzz_core::surface::normalize_spec_aliases(&mut value);
+    let canonical_input = value.to_string();
+    buzz_core::surface::parse_and_validate(&canonical_input)
+        .map_err(|e| CliError::Usage(format!("invalid surface spec: {e}")))
+}
+
+/// Publish a surface card to a channel.
+pub async fn cmd_send_surface(
+    client: &BuzzClient,
+    channel_id: &str,
+    spec_arg: &str,
+    reply_to: Option<&str>,
+) -> Result<(), CliError> {
+    let channel_uuid = parse_uuid(channel_id)?;
+    if let Some(r) = &reply_to {
+        validate_hex64(r)?;
+    }
+    let spec = parse_surface_spec(&read_spec_arg(spec_arg)?)?;
+    let thread_ref = match reply_to {
+        Some(r) => Some(resolve_thread_ref(client, r).await?),
+        None => None,
+    };
+    let builder = buzz_sdk::build_surface(channel_uuid, &spec, thread_ref.as_ref(), &[])
+        .map_err(crate::validate::sdk_err)?;
+    let event = client.sign_event(builder)?;
+    let resp = client.submit_event(event).await?;
+    println!("{}", normalize_write_response(&resp));
+    Ok(())
+}
+
+/// Replace a surface card's spec in place (live update via the edit kind).
+pub async fn cmd_edit_surface(
+    client: &BuzzClient,
+    event_id: &str,
+    spec_arg: &str,
+) -> Result<(), CliError> {
+    validate_hex64(event_id)?;
+    let spec = parse_surface_spec(&read_spec_arg(spec_arg)?)?;
+
+    // Resolve the target and verify it is a surface before signing anything.
+    let filter = serde_json::json!({ "ids": [event_id], "limit": 1 });
+    let raw = client.query(&filter).await?;
+    let events: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| CliError::Other(format!("failed to parse query response: {e}")))?;
+    let event = events
+        .as_array()
+        .and_then(|a| a.first())
+        .ok_or_else(|| CliError::Other(format!("event {event_id} not found")))?;
+    let kind = event.get("kind").and_then(|k| k.as_u64()).unwrap_or(0);
+    if kind != u64::from(buzz_core::kind::KIND_SURFACE) {
+        return Err(CliError::Usage(format!(
+            "event {event_id} is kind {kind}, not a surface (kind {}) — use 'messages edit' for regular messages",
+            buzz_core::kind::KIND_SURFACE
+        )));
+    }
+    let channel_uuid = event
+        .get("tags")
+        .and_then(|t| t.as_array())
+        .and_then(|tags| {
+            tags.iter().find_map(|tag| {
+                let arr = tag.as_array()?;
+                if arr.first()?.as_str()? == "h" {
+                    Uuid::parse_str(arr.get(1)?.as_str()?).ok()
+                } else {
+                    None
+                }
+            })
+        })
+        .ok_or_else(|| CliError::Other("surface event has no valid h tag".into()))?;
+
+    let target_eid = parse_event_id(event_id)?;
+    let builder = buzz_sdk::build_surface_edit(channel_uuid, target_eid, &spec)
+        .map_err(crate::validate::sdk_err)?;
+    let event = client.sign_event(builder)?;
+    let resp = client.submit_event(event).await?;
+    println!("{}", normalize_write_response(&resp));
+    Ok(())
+}
+
 /// Vote on a forum post or comment.
 pub async fn cmd_vote_on_post(
     client: &BuzzClient,
@@ -929,6 +1028,12 @@ pub async fn dispatch(
             .await
         }
         MessagesCmd::Edit { event, content } => cmd_edit_message(client, &event, &content).await,
+        MessagesCmd::SendSurface {
+            channel,
+            spec,
+            reply_to,
+        } => cmd_send_surface(client, &channel, &spec, reply_to.as_deref()).await,
+        MessagesCmd::EditSurface { event, spec } => cmd_edit_surface(client, &event, &spec).await,
         MessagesCmd::Delete {
             event,
             action_id,

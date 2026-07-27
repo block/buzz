@@ -37,7 +37,8 @@ use buzz_core::kind::{
     KIND_FORUM_COMMENT, KIND_FORUM_POST, KIND_GIT_ISSUE, KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST,
     KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN,
     KIND_JOB_PROGRESS, KIND_JOB_REQUEST, KIND_JOB_RESULT, KIND_STREAM_MESSAGE,
-    KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEXT_NOTE, KIND_WORKFLOW_APPROVAL_REQUESTED,
+    KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_SURFACE, KIND_TEXT_NOTE,
+    KIND_WORKFLOW_APPROVAL_REQUESTED,
 };
 use buzz_core::{CommunityId, StoredEvent};
 
@@ -103,7 +104,7 @@ fn build_mentions_query(
     qb.push(" AND m.pubkey_hex = ").push_bind(pubkey_hex);
     qb.push(" AND e.deleted_at IS NULL");
     qb.push(format!(
-        " AND e.kind IN ({KIND_STREAM_MESSAGE}, {KIND_STREAM_MESSAGE_V2}, \
+        " AND e.kind IN ({KIND_STREAM_MESSAGE}, {KIND_STREAM_MESSAGE_V2}, {KIND_SURFACE}, \
          {KIND_TEXT_NOTE}, {KIND_FORUM_POST}, {KIND_FORUM_COMMENT}, {KIND_GIT_PULL_REQUEST}, \
          {KIND_GIT_PR_UPDATE}, {KIND_GIT_ISSUE}, {KIND_GIT_STATUS_OPEN}, \
          {KIND_GIT_STATUS_MERGED}, {KIND_GIT_STATUS_CLOSED}, {KIND_GIT_STATUS_DRAFT})"
@@ -262,8 +263,8 @@ fn build_activity_query(
     qb.push_bind(*community.as_uuid());
     qb.push(" AND deleted_at IS NULL");
     qb.push(format!(
-        " AND kind IN ({KIND_STREAM_MESSAGE}, {KIND_STREAM_MESSAGE_V2}, {KIND_FORUM_POST}, \
-         {KIND_JOB_REQUEST}, {KIND_JOB_PROGRESS}, {KIND_JOB_RESULT})"
+        " AND kind IN ({KIND_STREAM_MESSAGE}, {KIND_STREAM_MESSAGE_V2}, {KIND_SURFACE}, \
+         {KIND_FORUM_POST}, {KIND_JOB_REQUEST}, {KIND_JOB_PROGRESS}, {KIND_JOB_RESULT})"
     ));
     push_visible_channel_filter(&mut qb, "channel_id", accessible_channel_ids);
     if let Some(s) = since {
@@ -624,10 +625,15 @@ mod tests {
         let mention_kinds: &[u32] = &[
             KIND_STREAM_MESSAGE,
             KIND_STREAM_MESSAGE_V2,
+            KIND_SURFACE,
             KIND_FORUM_POST,
             KIND_FORUM_COMMENT,
         ];
 
+        assert!(
+            mention_kinds.contains(&KIND_SURFACE),
+            "surface kind must be in mentions"
+        );
         assert!(
             mention_kinds.contains(&KIND_STREAM_MESSAGE),
             "stream message kind must be in mentions"
@@ -670,6 +676,7 @@ mod tests {
         let activity_kinds: &[u32] = &[
             KIND_STREAM_MESSAGE,
             KIND_STREAM_MESSAGE_V2,
+            KIND_SURFACE,
             KIND_FORUM_POST,
             KIND_JOB_REQUEST,
             KIND_JOB_PROGRESS,
@@ -707,6 +714,7 @@ mod tests {
         let activity_kinds: &[u32] = &[
             KIND_STREAM_MESSAGE,
             KIND_STREAM_MESSAGE_V2,
+            KIND_SURFACE,
             KIND_FORUM_POST,
             KIND_JOB_REQUEST,
             KIND_JOB_PROGRESS,
@@ -733,6 +741,7 @@ mod tests {
         let activity_kinds: &[u32] = &[
             KIND_STREAM_MESSAGE,
             KIND_STREAM_MESSAGE_V2,
+            KIND_SURFACE,
             KIND_FORUM_POST,
             KIND_JOB_REQUEST,
             KIND_JOB_PROGRESS,

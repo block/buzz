@@ -480,6 +480,15 @@ pub const KIND_STREAM_REMINDER: u32 = 40007;
 pub const KIND_STREAM_MESSAGE_DIFF: u32 = 40008;
 /// Canvas (shared document) for a channel.
 pub const KIND_CANVAS: u32 = 40100;
+/// Surface Card — versioned, data-only UI spec rendered as a native card.
+///
+/// Content is canonical `SurfaceSpec v1` JSON (see [`crate::surface`]).
+/// Regular, stored, channel-scoped like stream messages; live updates reuse
+/// [`KIND_STREAM_MESSAGE_EDIT`] with full-spec replacement.
+///
+/// Number pending maintainer assignment on block/buzz#2480 — 40110 proposed
+/// (free, adjacent to canvas at 40100).
+pub const KIND_SURFACE: u32 = 40110;
 /// System message for channel state changes (join, leave, rename, etc.).
 pub const KIND_SYSTEM_MESSAGE: u32 = 40099;
 
@@ -694,6 +703,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_STREAM_REMINDER,
     KIND_STREAM_MESSAGE_DIFF,
     KIND_CANVAS,
+    KIND_SURFACE,
     KIND_SYSTEM_MESSAGE,
     KIND_CHANNEL_SUMMARY,
     KIND_PRESENCE_SNAPSHOT,

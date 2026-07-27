@@ -27,6 +27,7 @@ import {
 import {
   KIND_HUDDLE_STARTED,
   KIND_STREAM_MESSAGE_DIFF,
+  KIND_SURFACE,
 } from "@/shared/constants/kinds";
 import { getConfigNudgeAuthorPubkey } from "@/features/messages/ui/configNudgeAuthPubkey";
 import { cn } from "@/shared/lib/cn";
@@ -48,6 +49,9 @@ import { WaveMessageAttachment } from "./WaveMessageAttachment";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
 const DiffMessage = React.lazy(() => import("./DiffMessage"));
+const SurfaceMessage = React.lazy(
+  () => import("@/features/surfaces/ui/SurfaceMessage"),
+);
 const DiffMessageExpanded = React.lazy(() => import("./DiffMessageExpanded"));
 
 export type ThreadDepthGuideAction = {
@@ -328,6 +332,18 @@ export const MessageRow = React.memo(
                 repoUrl={getTag("repo")}
                 truncated={getTag("truncated") === "true"}
               />
+            </React.Suspense>
+          );
+        case KIND_SURFACE:
+          return (
+            <React.Suspense
+              fallback={
+                <div className="p-3 text-sm text-muted-foreground">
+                  Loading surface…
+                </div>
+              }
+            >
+              <SurfaceMessage content={message.body} />
             </React.Suspense>
           );
         case KIND_HUDDLE_STARTED:
