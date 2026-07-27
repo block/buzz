@@ -579,7 +579,7 @@ git commit -m "test(command-team): cover adviser conversation reuse"
 - Modify if evidence requires correction: files changed in Tasks 1-5 only
 - Create: `docs/superpowers/evidence/2026-07-27-command-team-conversations-acceptance.md`
 
-- [ ] **Step 1: Run the full repository gate**
+- [x] **Step 1: Run the full repository gate**
 
 ```bash
 . ./bin/activate-hermit

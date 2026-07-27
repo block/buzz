@@ -144,7 +144,7 @@ pub(crate) async fn read_agent_memory_listing(
     // wrongly locked legitimate owners out of their own memory. The declared-
     // owner path is cleared (PR #917 author signed off); decryption still
     // does the real guarding.)
-    let agent = PublicKey::from_hex(&agent_pubkey)
+    let agent = PublicKey::from_hex(agent_pubkey)
         .map_err(|e| format!("agent pubkey must be 64-hex: {e}"))?;
 
     let viewer_pubkey = {
@@ -158,7 +158,7 @@ pub(crate) async fn read_agent_memory_listing(
         false // already authorized; skip the relay roundtrip
     } else {
         // Verify the agent's live `kind:0` declares the viewer as owner.
-        let kind0 = fetch_kind0(&state, &agent_pubkey).await?;
+        let kind0 = fetch_kind0(state, agent_pubkey).await?;
         kind0_declares_viewer_owner(kind0.as_ref(), &viewer_pubkey)
     };
 
@@ -186,7 +186,7 @@ pub(crate) async fn read_agent_memory_listing(
         "#p": [owner_pubkey.to_hex()],
         "limit": ENGRAM_FETCH_LIMIT,
     });
-    let events = query_relay(&state, &[filter]).await?;
+    let events = query_relay(state, &[filter]).await?;
     // `>=` is intentional and accepts a false-positive at exactly
     // ENGRAM_FETCH_LIMIT events: if the relay returned the cap, we can't
     // distinguish "exactly cap" from "cap because clipped". The banner copy
