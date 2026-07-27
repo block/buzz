@@ -26,6 +26,7 @@ import type {
   ProjectRepoFile,
   ProjectRepoSnapshot,
 } from "@/features/projects/hooks";
+import { relativeTime } from "@/features/projects/lib/projectsViewHelpers";
 import { useUserSearchQuery } from "@/features/profile/hooks";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { UserSearchResult } from "@/shared/api/types";
@@ -39,31 +40,6 @@ import {
   RepoSyncActionButton,
   RepositoryBranchDropdown,
 } from "./ProjectRepositorySource";
-
-function relativeCommitTime(createdAt: number) {
-  const elapsedSeconds = Math.max(
-    1,
-    Math.floor(Date.now() / 1_000 - createdAt),
-  );
-  const units = [
-    { label: "year", seconds: 365 * 24 * 60 * 60 },
-    { label: "month", seconds: 30 * 24 * 60 * 60 },
-    { label: "week", seconds: 7 * 24 * 60 * 60 },
-    { label: "day", seconds: 24 * 60 * 60 },
-    { label: "hour", seconds: 60 * 60 },
-    { label: "minute", seconds: 60 },
-    { label: "second", seconds: 1 },
-  ];
-
-  for (const unit of units) {
-    const value = Math.floor(elapsedSeconds / unit.seconds);
-    if (value >= 1) {
-      return `${value} ${unit.label}${value === 1 ? "" : "s"} ago`;
-    }
-  }
-
-  return "just now";
-}
 
 function pluralize(count: number, singular: string) {
   return `${count} ${singular}${count === 1 ? "" : "s"}`;
@@ -575,7 +551,7 @@ function FileContentPanel({
 
   return (
     <div className="overflow-hidden rounded-xl border border-border/60 bg-card">
-      <div className="flex min-h-10 items-center gap-1 border-border/50 border-b bg-muted/20 px-3">
+      <div className="flex min-h-14 items-center gap-1 border-border/50 border-b bg-muted/20 px-3 py-3">
         <BreadcrumbButton onClick={() => onOpenPath("")}>
           Files
         </BreadcrumbButton>
@@ -718,13 +694,22 @@ export function RepositoryFilesPanel({
     }
     return (
       <div className="overflow-hidden rounded-xl border border-border/60 bg-card">
-        <div className="flex min-h-10 min-w-0 items-center gap-1 border-border/50 border-b px-3 py-1.5">
+        <div className="flex min-h-14 min-w-0 items-center gap-1 border-border/50 border-b px-3 py-3">
           <RepoSourceDropdown controls={sourceControls} />
           <RepositoryBranchDropdown
             branch={sourceControls.branch}
             branchOptions={sourceControls.branchOptions}
             compact
+            createBranchDisabled={sourceControls.createBranchDisabled}
+            createBranchTitle={sourceControls.createBranchTitle}
+            deleteBranchDisabled={sourceControls.deleteBranchDisabled}
+            deleteBranchTitle={sourceControls.deleteBranchTitle}
             onBranchChange={sourceControls.onBranchChange}
+            onCreateBranch={sourceControls.onCreateBranch}
+            onDeleteBranch={sourceControls.onDeleteBranch}
+            onTagChange={sourceControls.onTagChange}
+            selectedTag={sourceControls.selectedTag}
+            tagOptions={sourceControls.tagOptions}
           />
           <div className="ml-auto flex shrink-0 items-center">
             <RepoSyncActionButton controls={sourceControls} />
@@ -749,7 +734,7 @@ export function RepositoryFilesPanel({
 
   return (
     <div className="overflow-hidden rounded-xl border border-border/60 bg-card">
-      <div className="flex min-h-10 min-w-0 items-center gap-1 border-border/50 border-b px-3 py-1.5">
+      <div className="flex min-h-14 min-w-0 items-center gap-1 border-border/50 border-b px-3 py-3">
         {sourceControls ? (
           <>
             <RepoSourceDropdown controls={sourceControls} />
@@ -757,7 +742,16 @@ export function RepositoryFilesPanel({
               branch={sourceControls.branch}
               branchOptions={sourceControls.branchOptions}
               compact
+              createBranchDisabled={sourceControls.createBranchDisabled}
+              createBranchTitle={sourceControls.createBranchTitle}
+              deleteBranchDisabled={sourceControls.deleteBranchDisabled}
+              deleteBranchTitle={sourceControls.deleteBranchTitle}
               onBranchChange={sourceControls.onBranchChange}
+              onCreateBranch={sourceControls.onCreateBranch}
+              onDeleteBranch={sourceControls.onDeleteBranch}
+              onTagChange={sourceControls.onTagChange}
+              selectedTag={sourceControls.selectedTag}
+              tagOptions={sourceControls.tagOptions}
             />
           </>
         ) : (
@@ -834,7 +828,7 @@ export function RepositoryFilesPanel({
                         latestCommit.timestamp * 1_000,
                       ).toISOString()}
                     >
-                      {relativeCommitTime(latestCommit.timestamp)}
+                      {relativeTime(latestCommit.timestamp)}
                     </time>
                   </div>
                 ) : (
@@ -887,7 +881,7 @@ export function RepositoryFilesPanel({
                           latestCommit.timestamp * 1_000,
                         ).toISOString()}
                       >
-                        {relativeCommitTime(latestCommit.timestamp)}
+                        {relativeTime(latestCommit.timestamp)}
                       </time>
                     ) : (
                       "—"

@@ -55,14 +55,14 @@ function levelFor(count: number) {
 }
 
 /** Week columns (each 7 days, Sunday first) ending with the current week. */
-function buildWeeks(today: Date) {
+function buildWeeks(today: Date, weekCount: number) {
   const start = new Date(
     today.getFullYear(),
     today.getMonth(),
-    today.getDate() - today.getDay() - (WEEK_COUNT - 1) * DAYS_PER_WEEK,
+    today.getDate() - today.getDay() - (weekCount - 1) * DAYS_PER_WEEK,
   );
 
-  return Array.from({ length: WEEK_COUNT }, (_, weekIndex) =>
+  return Array.from({ length: weekCount }, (_, weekIndex) =>
     Array.from({ length: DAYS_PER_WEEK }, (_, dayIndex) => {
       const date = new Date(start);
       date.setDate(start.getDate() + weekIndex * DAYS_PER_WEEK + dayIndex);
@@ -92,19 +92,24 @@ function monthLabels(weeks: Date[][]) {
 export function ProjectsContributionGraph({
   activityByDay,
   className,
+  compact = false,
 }: {
   activityByDay: Record<string, number>;
   className?: string;
+  compact?: boolean;
 }) {
   const today = new Date();
-  const weeks = buildWeeks(today);
+  const weeks = buildWeeks(today, compact ? 18 : WEEK_COUNT);
   const labels = monthLabels(weeks);
   const gridTemplateColumns = `repeat(${weeks.length}, minmax(0, 1fr))`;
   const todayKey = dayKeyOf(today);
 
   return (
     <div className={cn("space-y-2", className)}>
-      <div className="grid gap-2" style={{ gridTemplateColumns }}>
+      <div
+        className={cn("grid", compact ? "gap-1" : "gap-2")}
+        style={{ gridTemplateColumns }}
+      >
         {labels.map((label, index) => (
           <span
             className="overflow-visible whitespace-nowrap text-2xs font-medium text-muted-foreground"
@@ -117,7 +122,10 @@ export function ProjectsContributionGraph({
         ))}
       </div>
       <div
-        className="grid grid-flow-col grid-rows-7 gap-2"
+        className={cn(
+          "grid grid-flow-col grid-rows-7",
+          compact ? "gap-1" : "gap-2",
+        )}
         style={{ gridTemplateColumns }}
       >
         {weeks.map((week) =>

@@ -1,11 +1,13 @@
 import * as React from "react";
 import { UserRound } from "lucide-react";
 
+import { useAvatarPresentation } from "@/features/profile/avatarPresentationStore";
 import { parseAnimatedAvatarUrl } from "@/shared/lib/animatedAvatar";
 import { cn } from "@/shared/lib/cn";
 import { getInitials } from "@/shared/lib/initials";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import { Avatar, AvatarFallback, AvatarImage } from "@/shared/ui/avatar";
+import { Spinner } from "@/shared/ui/spinner";
 
 type ProfileAvatarProps = {
   avatarUrl: string | null;
@@ -13,6 +15,7 @@ type ProfileAvatarProps = {
   label: string;
   className?: string;
   iconClassName?: string;
+  imageClassName?: string;
   plain?: boolean;
   testId?: string;
 };
@@ -23,20 +26,23 @@ export function ProfileAvatar({
   label,
   className,
   iconClassName,
+  imageClassName,
   plain = false,
   testId,
 }: ProfileAvatarProps) {
   const initials = getInitials(label);
+  const presentation = useAvatarPresentation(avatarUrl);
+  const presentedAvatarUrl = presentation?.displayUrl ?? avatarUrl;
 
   // Animated avatars show their static poster frame until hovered, then play
   // the animation.
-  const animated = parseAnimatedAvatarUrl(avatarUrl);
+  const animated = parseAnimatedAvatarUrl(presentedAvatarUrl);
   const [isHovered, setIsHovered] = React.useState(false);
   const baseUrl = animated
     ? isHovered
       ? animated.animationUrl
       : animated.posterUrl
-    : avatarUrl;
+    : presentedAvatarUrl;
 
   // Compute the live (proxied) source. Failures are tracked per resolved URL so
   // the poster and hover animation can recover independently.
@@ -67,7 +73,11 @@ export function ProfileAvatar({
       {src !== undefined ? (
         <AvatarImage
           alt={`${label} avatar`}
-          className="object-cover"
+          className={cn(
+            "object-cover",
+            presentation?.state === "pending" && "brightness-75",
+            imageClassName,
+          )}
           data-testid={testId ? `${testId}-image` : undefined}
           onLoadingStatusChange={(status) => {
             if (status === "error") setFailedSrc(liveSrc);
@@ -94,6 +104,18 @@ export function ProfileAvatar({
             <UserRound className={iconClassName} />
           )}
         </AvatarFallback>
+      ) : null}
+      {presentation?.state === "pending" ? (
+        <span
+          aria-label="Avatar upload pending"
+          className="pointer-events-none absolute inset-0 flex items-center justify-center text-white drop-shadow-sm"
+          data-testid={testId ? `${testId}-upload-pending` : undefined}
+          role="status"
+        >
+          <span className="flex size-7 items-center justify-center rounded-full bg-black/35">
+            <Spinner aria-hidden="true" className="border-2" size={16} />
+          </span>
+        </span>
       ) : null}
     </Avatar>
   );

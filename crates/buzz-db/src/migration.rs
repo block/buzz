@@ -14,6 +14,14 @@ static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
 pub async fn run_migrations(pool: &PgPool) -> Result<()> {
     reject_legacy_nip_rs_cardinality_ambiguity(pool).await?;
     MIGRATOR.run(pool).await?;
+    // The replica-fence proof (see `replica_fence`) requires the commit-time
+    // `created_at` floor trigger from migration 0021 — correctly shaped — on
+    // the `events` parent and every partition. `CREATE TABLE .. PARTITION OF`
+    // clones parent triggers, but a partition attached with `ATTACH
+    // PARTITION` or created by an older code path would silently escape the
+    // guard, so migration fails closed if any is missing. (The fence probe
+    // re-runs this same check at startup on non-migrating relays.)
+    crate::replica_fence::verify_floor_guard_catalog(pool).await?;
     Ok(())
 }
 
@@ -524,9 +532,12 @@ mod tests {
                 let normalized = normalize_sql(statement);
                 let updates_channels =
                     identifier_after_keyword(statement, "update").as_deref() == Some("channels");
+                let update_assignments = normalized
+                    .split_once(" set ")
+                    .map(|(_, tail)| tail.split_once(" where ").map_or(tail, |(set, _)| set));
                 let mutates_with_update = updates_channels
-                    && normalized.contains(" set ")
-                    && normalized.contains("community_id");
+                    && update_assignments
+                        .is_some_and(|assignments| assignments.contains("community_id"));
                 let alters_channels = identifier_after_keyword(statement, "alter table").as_deref()
                     == Some("channels");
                 let drops_channels = identifier_after_keyword(statement, "drop table").as_deref()
@@ -549,7 +560,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 20);
+        assert_eq!(migrations.len(), 24);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -820,10 +831,54 @@ mod tests {
             .sql
             .as_str()
             .contains("CREATE TABLE join_policy_acceptances"));
+
+        // Replica-fence commit-time floor guard on channel-bearing events.
+        assert_eq!(migrations[20].version, 21);
+        assert!(migrations[20]
+            .sql
+            .as_str()
+            .contains("events_created_at_floor_guard"));
         assert!(!migrations[0]
             .sql
             .as_str()
             .contains("join_policy_acceptances"));
+
+        // Channel TTL refresh belongs to the event insertion transaction so a
+        // concurrent permanent -> ephemeral transition cannot be missed.
+        assert_eq!(migrations[21].version, 22);
+        let ttl_refresh = migrations[21].sql.as_str();
+        assert!(ttl_refresh.contains("CREATE CONSTRAINT TRIGGER events_refresh_channel_ttl"));
+        assert!(ttl_refresh.contains("AFTER INSERT ON events"));
+        assert!(ttl_refresh.contains("DEFERRABLE INITIALLY DEFERRED"));
+        assert!(ttl_refresh.contains("clock_timestamp()"));
+        assert!(ttl_refresh.contains("NEW.kind <> 9007"));
+
+        // T1b push gate: the match-queue trigger only enqueues when the
+        // community has an eligible lease, ordered against lease activations
+        // through the shared/exclusive per-community advisory lock.
+        assert_eq!(migrations[22].version, 23);
+        let push_gate = migrations[22].sql.as_str();
+        assert!(push_gate.contains("CREATE OR REPLACE FUNCTION enqueue_push_match_job"));
+        assert!(push_gate.contains("pg_advisory_xact_lock_shared"));
+        assert!(push_gate.contains("'buzz_push_gate:' || NEW.community_id::text"));
+        assert!(push_gate.contains("endpoint_enabled"));
+
+        // T1a repair: the TTL refresh trigger synchronizes on a shared
+        // per-channel advisory lock instead of FOR UPDATE on the channel row,
+        // so permanent-channel commits no longer serialize.
+        assert_eq!(migrations[23].version, 24);
+        let ttl_shared = migrations[23].sql.as_str();
+        assert!(ttl_shared
+            .contains("CREATE OR REPLACE FUNCTION refresh_channel_ttl_after_event_insert"));
+        assert!(ttl_shared.contains("pg_advisory_xact_lock_shared"));
+        assert!(ttl_shared.contains("'buzz_channel_ttl:' || NEW.community_id::text"));
+        // The row read must be a bare SELECT (comments describe the removed
+        // FOR UPDATE; the executable body must not reintroduce it).
+        assert!(ttl_shared.contains("SELECT ttl_seconds INTO channel_ttl"));
+        assert!(!strip_sql_comments(ttl_shared)
+            .to_lowercase()
+            .contains("for update"));
+        assert!(ttl_shared.contains("NEW.kind <> 9007"));
     }
 
     #[test]
@@ -1066,7 +1121,7 @@ mod tests {
         run_migrations(&pool)
             .await
             .expect("retry succeeds after operator repair");
-        assert_eq!(applied_versions(&pool).await.last().copied(), Some(20));
+        assert_eq!(applied_versions(&pool).await.last().copied(), Some(24));
     }
 
     #[tokio::test]

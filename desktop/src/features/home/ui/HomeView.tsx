@@ -14,7 +14,7 @@ import {
   type InboxReply,
   buildInboxItems,
   formatInboxFullTimestamp,
-  getInboxConversationId,
+  getInboxItemConversationId,
 } from "@/features/home/lib/inbox";
 import { useInboxSelectionAnchor } from "@/features/home/useInboxSelectionAnchor";
 import {
@@ -23,6 +23,7 @@ import {
   toInboxContextMessage,
 } from "@/features/home/lib/inboxViewHelpers";
 import { useHomeInboxReadState } from "@/features/home/useHomeInboxReadState";
+import { useHomeDrafts } from "@/features/home/useHomeDrafts";
 import { useInboxThreadContext } from "@/features/home/useInboxThreadContext";
 import {
   type ProfilePanelTab,
@@ -41,6 +42,7 @@ import {
 import { HomeLoadingState } from "@/features/home/ui/HomeLoadingState";
 import { InboxDetailPane } from "@/features/home/ui/InboxDetailPane";
 import { InboxListPane } from "@/features/home/ui/InboxListPane";
+import { DraftDetailPane } from "@/features/messages/ui/DraftDetailPane";
 import {
   useChannelMessagesQuery,
   useToggleReactionMutation,
@@ -52,7 +54,6 @@ import {
 import { formatTime } from "@/features/messages/lib/dateFormatters";
 import { splitOutgoingTags } from "@/features/messages/lib/imetaMediaMarkdown";
 import { getThreadReference } from "@/features/messages/lib/threading";
-import { useActiveDraftCount } from "@/features/messages/ui/DraftsPanel";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import { useRelaySelfQuery } from "@/features/moderation/hooks";
 import { resolveUserLabel } from "@/features/profile/lib/identity";
@@ -143,10 +144,18 @@ export function HomeView({
   const isMessagesMode = !isReminders && !isDrafts;
   const remindersQuery = useRemindersQuery(currentPubkey);
   const dueReminderCount = countDueReminders(remindersQuery.data ?? []);
-  // Active draft count for the badge. When the Drafts panel is closed,
-  // rootStatusMap is empty so orphaned drafts are counted optimistically.
-  // They drop from the count once the panel opens and relay confirms deletion.
-  const activeDraftCount = useActiveDraftCount(new Map());
+  const {
+    activeCount: activeDraftCount,
+    deleteDraft: handleDeleteDraft,
+    items: draftItems,
+    selectedItem: selectedDraftItem,
+    selectedKey: selectedDraftKey,
+    selectDraft: setSelectedDraftKey,
+  } = useHomeDrafts({
+    isDrafts,
+    isNarrowHomeViewport,
+    viewportWidthPx: homeInboxWidthPx,
+  });
   // `?item=` is Messages-mode-only machinery: a reminder never enters the
   // FeedItem selection model, so reload while in Reminders mode keeps a stale
   // `?item=` unconsumed and does not snap back to a feed-item detail view.
@@ -404,7 +413,7 @@ export function HomeView({
   // correct row selected (by conversationId) even after the anchor event has
   // been displaced from groupItems by a newer representative.
   const latchedConversationId = activeLatchedItem
-    ? getInboxConversationId(activeLatchedItem.tags, activeLatchedItem.id)
+    ? getInboxItemConversationId(activeLatchedItem)
     : null;
   const selectedConversationId =
     selectedItemFromAll?.conversationId ?? latchedConversationId;
@@ -645,11 +654,19 @@ export function HomeView({
     isNarrowHomeViewport &&
     selectedEventId !== null &&
     !isSinglePanelAuxiliaryView;
-  const showListPane = !isSinglePanelDetailView && !isSinglePanelAuxiliaryView;
+  const isSinglePanelDraftDetailView =
+    isDrafts &&
+    isNarrowHomeViewport &&
+    selectedDraftItem !== null &&
+    !isSinglePanelAuxiliaryView;
+  const showListPane =
+    !isSinglePanelDetailView &&
+    !isSinglePanelDraftDetailView &&
+    !isSinglePanelAuxiliaryView;
   const showDetailPane =
-    isMessagesMode &&
     !isSinglePanelAuxiliaryView &&
-    (!isNarrowHomeViewport || isSinglePanelDetailView);
+    ((isMessagesMode && (!isNarrowHomeViewport || isSinglePanelDetailView)) ||
+      (isDrafts && (!isNarrowHomeViewport || isSinglePanelDraftDetailView)));
   const auxiliaryPaneWidthPx = isSinglePanelAuxiliaryView
     ? homeInboxWidthPx
     : threadPanelWidthPx;
@@ -695,15 +712,25 @@ export function HomeView({
             } as React.CSSProperties
           }
         >
+          {showListPane || showDetailPane ? (
+            <div
+              aria-hidden="true"
+              className="pointer-events-none absolute inset-x-0 top-0 z-30 h-13 bg-background/80 backdrop-blur-md supports-backdrop-filter:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-backdrop-filter:bg-background/55"
+              data-testid="home-inbox-shared-header-backdrop"
+            />
+          ) : null}
+
           {showListPane ? (
             <InboxListPane
               activeReminderEventIds={activeReminderEventIds}
               agentPubkeys={inboxAgentPubkeys}
               activeDraftCount={activeDraftCount}
+              draftItems={draftItems}
               doneSet={effectiveDoneSet}
               dueReminderCount={dueReminderCount}
               filter={filter}
               items={filteredItems}
+              onDeleteDraft={handleDeleteDraft}
               onFilterChange={setFilter}
               onMarkRead={markItemRead}
               onMarkUnread={markItemUnread}
@@ -734,9 +761,11 @@ export function HomeView({
                 handleUserSelectItem(itemId);
                 markItemRead(itemId);
               }}
+              onSelectDraft={setSelectedDraftKey}
               onUnreadOnlyChange={setUnreadOnly}
               reminderPubkey={currentPubkey}
               selectedConversationId={selectedConversationId}
+              selectedDraftKey={selectedDraftKey}
               showRightDivider={showListPane && showDetailPane}
               unreadOnly={unreadOnly}
             />
@@ -765,7 +794,7 @@ export function HomeView({
             <span className="absolute bottom-0 left-1/2 top-0 w-px -translate-x-1/2 bg-transparent transition-colors group-hover:bg-border/80 group-focus-visible:bg-border/80" />
           </button>
 
-          {showDetailPane ? (
+          {showDetailPane && isMessagesMode ? (
             <InboxDetailPane
               agentPubkeys={inboxAgentPubkeys}
               canDelete={canDelete}
@@ -900,6 +929,18 @@ export function HomeView({
                   : undefined
               }
               replies={selectedItemReplies}
+            />
+          ) : null}
+          {showDetailPane && isDrafts ? (
+            <DraftDetailPane
+              item={selectedDraftItem}
+              key={selectedDraftItem?.entry.key ?? "empty"}
+              onBack={
+                isSinglePanelDraftDetailView
+                  ? () => setSelectedDraftKey(null)
+                  : undefined
+              }
+              onDelete={handleDeleteDraft}
             />
           ) : null}
           {profilePanelPubkey ? (

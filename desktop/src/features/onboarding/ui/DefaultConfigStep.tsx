@@ -1,13 +1,15 @@
 import * as React from "react";
 
-import { useAcpRuntimesQuery } from "@/features/agents/hooks";
 import {
-  GlobalAgentConfigFields,
+  useAcpRuntimesQuery,
+  useRuntimeFileConfigQuery,
+} from "@/features/agents/hooks";
+import {
+  AgentConfigFields,
   EMPTY_GLOBAL_CONFIG,
-} from "@/features/agents/ui/GlobalAgentConfigFields";
-import { BUZZ_AGENT_THINKING_EFFORT } from "@/features/agents/ui/buzzAgentConfig";
-import { runtimeSupportsLlmProviderSelection } from "@/features/agents/ui/personaDialogPickers";
-import { AgentDropdownSelect } from "@/features/agents/ui/personaProviderModelFields";
+} from "@/features/agents/ui/AgentConfigFields";
+import { resetConfigForHarnessChange } from "@/features/agents/ui/agentConfigOptions";
+import { AgentDropdownSelect } from "@/features/agents/ui/agentConfigControls";
 import { createSaveCoalescer } from "./saveCoalescer";
 import { getBakedBuildEnv, type BakedEnvEntry } from "@/shared/api/tauri";
 import {
@@ -26,42 +28,32 @@ import {
   type OnboardingTransitionDirection,
   OnboardingSlideTransition,
 } from "./OnboardingSlideTransition";
+import {
+  getReadyOnboardingRuntimes,
+  getVisibleOnboardingRuntimes,
+} from "./onboardingRuntimeSelection";
 import type { DefaultConfigStepActions } from "./types";
 
 type DefaultConfigStepProps = {
   actions: DefaultConfigStepActions;
   direction: OnboardingTransitionDirection;
-  selectedRuntimeIds: readonly string[];
+  readyRuntimeIds: readonly string[];
 };
-
-const RUNTIME_ORDER = ["claude", "codex", "goose", "buzz-agent"];
 
 function formatHarnessLabel(runtime: AcpRuntimeCatalogEntry | undefined) {
   if (!runtime) return "Select a harness";
   return runtime.id === "buzz-agent" ? "Buzz" : runtime.label;
 }
 
-function sortSelectedRuntimes(
-  runtimes: readonly AcpRuntimeCatalogEntry[],
-  selectedRuntimeIds: readonly string[],
-) {
-  const selectedRuntimeIdSet = new Set(selectedRuntimeIds);
-  return runtimes
-    .filter((runtime) => selectedRuntimeIdSet.has(runtime.id))
-    .sort((left, right) => {
-      const leftIndex = RUNTIME_ORDER.indexOf(left.id);
-      const rightIndex = RUNTIME_ORDER.indexOf(right.id);
-      return (
-        (leftIndex === -1 ? RUNTIME_ORDER.length : leftIndex) -
-        (rightIndex === -1 ? RUNTIME_ORDER.length : rightIndex)
-      );
-    });
-}
-
 function AgentDefaultsSection({
-  selectedRuntimeIds,
+  onPersistenceStateChange,
+  readyRuntimeIds,
 }: {
-  selectedRuntimeIds: readonly string[];
+  onPersistenceStateChange: (state: {
+    canComplete: boolean;
+    flush: () => Promise<void>;
+  }) => void;
+  readyRuntimeIds: readonly string[];
 }) {
   const runtimesQuery = useAcpRuntimesQuery();
   const [config, setConfig] =
@@ -72,8 +64,11 @@ function AgentDefaultsSection({
   const [bakedEnv, setBakedEnv] = React.useState<BakedEnvEntry[]>([]);
   const coalescerRef = React.useRef<{
     enqueue: (value: GlobalAgentConfig) => void;
+    flush: () => Promise<void>;
     cancel: () => void;
   } | null>(null);
+  const [isSaving, setIsSaving] = React.useState(false);
+  const [configIsValid, setConfigIsValid] = React.useState(false);
 
   React.useEffect(() => {
     let unmounted = false;
@@ -104,7 +99,9 @@ function AgentDefaultsSection({
       // set_global_agent_config returns a save result (config + restart
       // counts); the coalescer round-trips the persisted config only.
       async (next) => (await setGlobalAgentConfig(next)).config,
-      () => undefined, // saving state not surfaced in this autosave UX
+      (saving) => {
+        if (!unmounted) setIsSaving(saving);
+      },
       (saved) => {
         if (!unmounted) setConfig(saved);
       },
@@ -117,57 +114,105 @@ function AgentDefaultsSection({
     };
   }, []);
 
-  const selectedRuntimes = React.useMemo(
-    () => sortSelectedRuntimes(runtimesQuery.data ?? [], selectedRuntimeIds),
-    [runtimesQuery.data, selectedRuntimeIds],
+  const effectiveReadyRuntimeIds = React.useMemo(
+    () =>
+      readyRuntimeIds.length > 0
+        ? readyRuntimeIds
+        : getReadyOnboardingRuntimes(runtimesQuery.data ?? []).map(
+            (runtime) => runtime.id,
+          ),
+    [readyRuntimeIds, runtimesQuery.data],
   );
-  const selectedRuntime = React.useMemo(() => {
-    const preferredRuntime = selectedRuntimes.find(
-      (runtime) => runtime.id === config.preferred_runtime,
-    );
-    return preferredRuntime ?? selectedRuntimes[0];
-  }, [config.preferred_runtime, selectedRuntimes]);
-  const selectedRuntimeId =
-    selectedRuntime?.id ?? config.preferred_runtime ?? "";
-  const selectedRuntimeSupportsModelProvider =
-    runtimeSupportsLlmProviderSelection(selectedRuntimeId);
+  const readyRuntimeIdSet = React.useMemo(
+    () => new Set(effectiveReadyRuntimeIds),
+    [effectiveReadyRuntimeIds],
+  );
+  // Setup already confirmed readiness. Re-filter only for onboarding
+  // visibility here; a transient auth recheck must not invalidate that handoff.
+  const readyRuntimes = React.useMemo(
+    () =>
+      getVisibleOnboardingRuntimes(runtimesQuery.data ?? []).filter((runtime) =>
+        readyRuntimeIdSet.has(runtime.id),
+      ),
+    [readyRuntimeIdSet, runtimesQuery.data],
+  );
+  const selectedRuntime = React.useMemo(
+    () =>
+      readyRuntimes.find((runtime) => runtime.id === config.preferred_runtime),
+    [config.preferred_runtime, readyRuntimes],
+  );
+  const selectedRuntimeId = selectedRuntime?.id ?? "";
+  const { data: runtimeFileConfig } =
+    useRuntimeFileConfigQuery(selectedRuntimeId);
+  const configSurfaceLoading = isLoading || runtimesQuery.isLoading;
+
+  const configSurfaceError =
+    runtimesQuery.isError ||
+    (!configSurfaceLoading &&
+      effectiveReadyRuntimeIds.length > 0 &&
+      readyRuntimes.length === 0);
   const harnessOptions = React.useMemo(
     () =>
-      selectedRuntimes.map((runtime) => ({
+      readyRuntimes.map((runtime) => ({
         label: formatHarnessLabel(runtime),
         value: runtime.id,
       })),
-    [selectedRuntimes],
+    [readyRuntimes],
   );
 
-  function handleHarnessChange(runtimeId: string) {
-    const nextEnvVars = { ...config.env_vars };
-    delete nextEnvVars[BUZZ_AGENT_THINKING_EFFORT];
-    const nextProvider =
-      runtimeSupportsLlmProviderSelection(runtimeId) &&
-      config.provider !== "relay-mesh"
-        ? config.provider
-        : null;
-    const next = {
-      ...config,
-      env_vars: nextEnvVars,
-      model: null,
-      preferred_runtime: runtimeId || null,
-      provider: nextProvider,
-    };
-    setIsCustomModelEditing(false);
-    setIsCustomProvider(false);
-    setConfig(next);
-    coalescerRef.current?.enqueue(next);
-  }
+  const handleHarnessChange = React.useCallback(
+    (runtimeId: string) => {
+      const next = resetConfigForHarnessChange(config, runtimeId);
+      setIsCustomModelEditing(false);
+      setIsCustomProvider(false);
+      setConfig(next);
+      coalescerRef.current?.enqueue(next);
+    },
+    [config],
+  );
+
+  React.useEffect(() => {
+    if (configSurfaceLoading || selectedRuntimeId) return;
+    if (readyRuntimes.length !== 1) return;
+    handleHarnessChange(readyRuntimes[0].id);
+  }, [
+    configSurfaceLoading,
+    handleHarnessChange,
+    readyRuntimes,
+    selectedRuntimeId,
+  ]);
+
+  const flushPersistence = React.useCallback(
+    () => coalescerRef.current?.flush() ?? Promise.resolve(),
+    [],
+  );
+  React.useEffect(() => {
+    onPersistenceStateChange({
+      // configIsValid comes from AgentConfigFields' onValidityChange and
+      // covers model + provider credentials — a harness selection alone is
+      // not a working default (e.g. buzz-agent with no provider configured).
+      canComplete: selectedRuntimeId.length > 0 && configIsValid && !isSaving,
+      flush: flushPersistence,
+    });
+  }, [
+    configIsValid,
+    flushPersistence,
+    isSaving,
+    onPersistenceStateChange,
+    selectedRuntimeId,
+  ]);
 
   return (
     <section className="w-full space-y-4 text-left text-sm">
-      {isLoading ? (
+      {configSurfaceLoading ? (
         <div className="flex items-center justify-center gap-2 py-4 text-sm text-muted-foreground">
           <Spinner className="h-4 w-4 border-2" />
           Loading…
         </div>
+      ) : configSurfaceError ? (
+        <p className="py-4 text-center text-sm text-destructive">
+          Couldn't load harness settings. Go back and try again.
+        </p>
       ) : (
         <div className="space-y-7">
           <div className="space-y-4">
@@ -189,17 +234,12 @@ function AgentDefaultsSection({
             />
           </div>
 
-          <GlobalAgentConfigFields
+          <AgentConfigFields
             bakedEnv={bakedEnv}
             selectedRuntime={selectedRuntime}
             config={config}
             isCustomModelEditing={isCustomModelEditing}
             isCustomProvider={isCustomProvider}
-            autoSelectModelOnProviderChange
-            disableModelSelectDuringDiscovery={false}
-            effortPlaceholderLabel="Select effort level"
-            keepSelectedModelValueLabel
-            modelPlaceholderLabel="Select a model"
             onConfigChange={(next) => {
               // Always apply optimistically so the UI never reverts mid-save,
               // then enqueue the persist — the coalescer serialises multiple
@@ -209,20 +249,11 @@ function AgentDefaultsSection({
             }}
             onCustomModelEditingChange={setIsCustomModelEditing}
             onIsCustomProviderChange={setIsCustomProvider}
-            preserveCredentialEnvVarsOnProviderChange
-            effortLabel="Effort"
+            onValidityChange={setConfigIsValid}
             placeholderClassName="text-foreground/70"
-            providerLabel="Provider"
-            requireProviderForModelAndEffort
+            runtimeFileConfig={runtimeFileConfig}
             selectClassName="h-12 rounded-2xl border-foreground/15 bg-white px-4 py-2 text-sm shadow-none hover:bg-white/95"
-            showAdvancedFields={false}
-            showCustomModelOption={false}
-            showCustomProviderOption={false}
-            showDescriptions={false}
-            showProviderField={selectedRuntimeSupportsModelProvider}
-            showRequiredIndicators={false}
-            showProviderPlaceholderOption={false}
-            showUnavailableEffortOptions={false}
+            disclosure="onboarding-essential"
             unstyled
             useCustomSelect
           />
@@ -240,8 +271,29 @@ function AgentDefaultsSection({
 export function DefaultConfigStep({
   actions,
   direction,
-  selectedRuntimeIds,
+  readyRuntimeIds,
 }: DefaultConfigStepProps) {
+  const [persistenceState, setPersistenceState] = React.useState<{
+    canComplete: boolean;
+    flush: () => Promise<void>;
+  }>({ canComplete: false, flush: () => Promise.resolve() });
+  const [completionError, setCompletionError] = React.useState<string | null>(
+    null,
+  );
+  const [isCompleting, setIsCompleting] = React.useState(false);
+
+  const handleComplete = React.useCallback(async () => {
+    setIsCompleting(true);
+    setCompletionError(null);
+    try {
+      await persistenceState.flush();
+      actions.complete();
+    } catch {
+      setCompletionError("Couldn't save your default harness. Try again.");
+      setIsCompleting(false);
+    }
+  }, [actions, persistenceState]);
+
   return (
     <OnboardingSlideTransition
       className="flex min-h-full w-full flex-col items-center"
@@ -254,14 +306,26 @@ export function DefaultConfigStep({
           Configure your default model settings
         </h1>
         <p className="mx-auto mt-3 max-w-[440px] text-sm leading-5 text-foreground/80">
-          These settings will be used by your agents in Buzz. You can always
-          change them in your Settings.
+          This will be set as your default model configuration across Buzz. You
+          can always change this in your Settings or give specific agents a
+          different configuration.
         </p>
       </div>
 
       <div className="flex w-full flex-1 items-center justify-center py-10">
         <div className="w-full max-w-[328px]">
-          <AgentDefaultsSection selectedRuntimeIds={selectedRuntimeIds} />
+          <AgentDefaultsSection
+            onPersistenceStateChange={setPersistenceState}
+            readyRuntimeIds={readyRuntimeIds}
+          />
+          {completionError ? (
+            <p
+              className="mt-3 text-center text-xs text-destructive"
+              role="alert"
+            >
+              {completionError}
+            </p>
+          ) : null}
         </div>
       </div>
 
@@ -269,7 +333,8 @@ export function DefaultConfigStep({
         <Button
           className={`${ONBOARDING_PRIMARY_CTA_CLASS} text-sm`}
           data-testid="onboarding-finish"
-          onClick={actions.complete}
+          disabled={!persistenceState.canComplete || isCompleting}
+          onClick={() => void handleComplete()}
           type="button"
         >
           Next

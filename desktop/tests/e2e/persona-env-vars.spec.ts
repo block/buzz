@@ -272,7 +272,7 @@ test("env vars editor renders in PersonaDialog new-persona form", async ({
   await page.getByTestId("new-agent-card").click();
   await page.getByRole("menuitem", { name: "Create from scratch" }).click();
 
-  // Scope all env-vars queries to the dialog: GlobalAgentConfigSettingsCard
+  // Scope all env-vars queries to the dialog: AgentDefaultsSettingsCard
   // also renders an EnvVarsEditor in the background settings pane (introduced
   // by this branch), so page-wide testid queries would match both.
   const dialog = page.getByRole("dialog");

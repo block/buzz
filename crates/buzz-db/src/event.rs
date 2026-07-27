@@ -63,13 +63,29 @@ pub struct EventQuery {
     /// Restrict results to events with an `e` tag referencing any of these event IDs (hex).
     /// Uses JSONB containment (`tags @> ...`) against the `tags` column.
     pub e_tags: Option<Vec<String>>,
-    /// Restrict results to events in any of these channels (multi-channel `IN` pushdown).
-    /// Used by NIP-45 COUNT to enforce channel access without fetching all rows.
+    /// Restrict results to events in any of these channels, while retaining
+    /// channel-less global events. Applied before SQL `LIMIT` so access-filtered
+    /// historical pages have exact exhaustion semantics.
     pub channel_ids: Option<Vec<uuid::Uuid>>,
     /// Override the default limit clamp (1000). Used by COUNT fallback path
     /// which needs to fetch all matching events for post-filter counting.
     /// When None, the default clamp of 1000 applies.
     pub max_limit: Option<i64>,
+    /// Persona visibility reader: when set, append an SQL visibility clause
+    /// for kind 30175 before ORDER/LIMIT so private personas are excluded from
+    /// the candidate page rather than discarded after it.
+    ///
+    /// The clause is: `AND (kind != 30175 OR pubkey = $reader OR tags @> ?)`,
+    /// where `?` is the JSONB literal `[["shared","true"]]`.  The GIN index on
+    /// `tags` (migration 0004, jsonb_path_ops) makes the containment check fast.
+    ///
+    /// NOTE: `tags @> '[["shared","true"]]'` uses JSONB containment, which
+    /// matches any tag array that is a superset of `[["shared","true"]]` — it
+    /// would match `["shared","true","extra"]` too.  The ingest `parts.len() ==
+    /// 2` exact-shape check ensures such malformed tags are never stored, so the
+    /// SQL pushdown is sound.  Keeping `event_visible_to_reader` as post-filter
+    /// defense-in-depth catches any residual mismatch.
+    pub persona_reader: Option<Vec<u8>>,
 }
 
 impl EventQuery {
@@ -98,6 +114,7 @@ impl EventQuery {
             e_tags: None,
             channel_ids: None,
             max_limit: None,
+            persona_reader: None,
         }
     }
 }
@@ -482,6 +499,31 @@ pub async fn query_events(pool: &PgPool, q: &EventQuery) -> Result<Vec<StoredEve
             }
             qb.push(")");
         }
+    }
+
+    // Persona visibility pushdown: exclude kind 30175 events that are neither
+    // authored by the reader nor explicitly shared.  Applied BEFORE ORDER/LIMIT
+    // so that a page of newer private personas does not push visible shared ones
+    // off the end of the result set (the catalog query pattern).
+    //
+    // Clause: AND (kind != 30175 OR pubkey = $reader OR tags @> '[["shared","true"]]')
+    //
+    // The JSONB containment check is served by idx_events_tags_gin (migration
+    // 0004, jsonb_path_ops).  `tags @> '[["shared","true"]]'` matches any array
+    // that contains exactly the sub-array — a two-element `["shared","true"]`
+    // tag passes; a tag-absent event does not.  Because ingest now requires
+    // exactly two elements for the shared tag (parts.len() == 2), no stored
+    // event can carry a three-element superset.
+    if let Some(ref reader_bytes) = q.persona_reader {
+        let kind_30175: i32 = 30175;
+        let shared_containment = serde_json::json!([["shared", "true"]]);
+        qb.push(format!(" AND ({col_prefix}kind != "));
+        qb.push_bind(kind_30175);
+        qb.push(format!(" OR {col_prefix}pubkey = "));
+        qb.push_bind(reader_bytes.clone());
+        qb.push(format!(" OR {col_prefix}tags @> "));
+        qb.push_bind(shared_containment);
+        qb.push(")");
     }
 
     // Composite ordering for deterministic pagination across ALL callers of
@@ -1454,6 +1496,258 @@ mod tests {
         id
     }
 
+    async fn make_test_channel(
+        pool: &PgPool,
+        community_id: Uuid,
+        ttl_seconds: Option<i32>,
+    ) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO channels \
+             (id, community_id, name, created_by, ttl_seconds, ttl_deadline) \
+             VALUES ($1, $2, $3, $4, $5, \
+                     CASE WHEN $5 IS NULL THEN NULL \
+                          ELSE clock_timestamp() + make_interval(secs => $5) END)",
+        )
+        .bind(id)
+        .bind(community_id)
+        .bind(format!("event-ttl-test-{}", id.simple()))
+        .bind(vec![7_u8; 32])
+        .bind(ttl_seconds)
+        .execute(pool)
+        .await
+        .expect("insert test channel");
+        id
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn event_insert_ttl_trigger_handles_permanent_ephemeral_duplicate_and_activation_race() {
+        let pool = setup_pool().await;
+        let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+
+        let permanent = make_test_channel(&pool, community_uuid, None).await;
+        let permanent_event = make_text_event("permanent channel event");
+        assert!(
+            insert_event(&pool, community, &permanent_event, Some(permanent))
+                .await
+                .expect("insert permanent event")
+                .1
+        );
+        let permanent_deadline: Option<DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT ttl_deadline FROM channels WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community_uuid)
+        .bind(permanent)
+        .fetch_one(&pool)
+        .await
+        .expect("read permanent deadline");
+        assert_eq!(permanent_deadline, None);
+
+        let ephemeral = make_test_channel(&pool, community_uuid, Some(60)).await;
+        let initial_deadline: DateTime<Utc> = sqlx::query_scalar(
+            "SELECT ttl_deadline FROM channels WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community_uuid)
+        .bind(ephemeral)
+        .fetch_one(&pool)
+        .await
+        .expect("read initial ephemeral deadline");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let ephemeral_event = make_text_event("ephemeral channel event");
+        assert!(
+            insert_event(&pool, community, &ephemeral_event, Some(ephemeral))
+                .await
+                .expect("insert ephemeral event")
+                .1
+        );
+        let bumped_deadline: DateTime<Utc> = sqlx::query_scalar(
+            "SELECT ttl_deadline FROM channels WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community_uuid)
+        .bind(ephemeral)
+        .fetch_one(&pool)
+        .await
+        .expect("read bumped ephemeral deadline");
+        assert!(bumped_deadline > initial_deadline);
+        assert!(
+            !insert_event(&pool, community, &ephemeral_event, Some(ephemeral))
+                .await
+                .expect("insert duplicate event")
+                .1
+        );
+        let duplicate_deadline: DateTime<Utc> = sqlx::query_scalar(
+            "SELECT ttl_deadline FROM channels WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community_uuid)
+        .bind(ephemeral)
+        .fetch_one(&pool)
+        .await
+        .expect("read deadline after duplicate");
+        assert_eq!(duplicate_deadline, bumped_deadline);
+
+        // Reproduce the blocked stale-prefetch ordering: ingest has already
+        // observed a permanent channel, then TTL activation locks/updates the
+        // row before the event INSERT reaches its trigger. The trigger must
+        // wait and refresh from the later event after activation commits.
+        let racing = make_test_channel(&pool, community_uuid, None).await;
+        let stale_ttl: Option<i32> = sqlx::query_scalar(
+            "SELECT ttl_seconds FROM channels WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community_uuid)
+        .bind(racing)
+        .fetch_one(&pool)
+        .await
+        .expect("prefetch permanent channel");
+        assert_eq!(stale_ttl, None);
+
+        let mut activation = pool.begin().await.expect("begin TTL activation");
+        // Model the repaired update_channel protocol (migration 0024): the
+        // TTL transition holds the per-channel advisory key EXCLUSIVE, which
+        // is what the event trigger's shared acquisition now waits on.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!("buzz_channel_ttl:{community_uuid}:{racing}"))
+            .execute(&mut *activation)
+            .await
+            .expect("acquire exclusive channel TTL key");
+        let activation_deadline: DateTime<Utc> = sqlx::query_scalar(
+            "UPDATE channels \
+             SET ttl_seconds = 60, ttl_deadline = clock_timestamp() + interval '60 seconds' \
+             WHERE community_id = $1 AND id = $2 RETURNING ttl_deadline",
+        )
+        .bind(community_uuid)
+        .bind(racing)
+        .fetch_one(&mut *activation)
+        .await
+        .expect("activate TTL while holding channel row lock");
+
+        let race_pool = pool.clone();
+        let racing_event = make_text_event("event after stale permanent prefetch");
+        let insert = tokio::spawn(async move {
+            insert_event(&race_pool, community, &racing_event, Some(racing)).await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            !insert.is_finished(),
+            "event trigger must wait on TTL activation"
+        );
+        activation.commit().await.expect("commit TTL activation");
+        assert!(
+            insert
+                .await
+                .expect("join racing insert")
+                .expect("racing insert")
+                .1
+        );
+
+        let final_deadline: DateTime<Utc> = sqlx::query_scalar(
+            "SELECT ttl_deadline FROM channels WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community_uuid)
+        .bind(racing)
+        .fetch_one(&pool)
+        .await
+        .expect("read deadline after racing event");
+        assert!(
+            final_deadline > activation_deadline + chrono::Duration::milliseconds(50),
+            "later event must extend TTL beyond activation deadline: activation={activation_deadline}, final={final_deadline}"
+        );
+    }
+
+    /// T1a repair regression test (migration 0024): permanent-channel event
+    /// commits must not serialize on the channel row. The 0022 trigger took
+    /// `FOR UPDATE` on the channel tuple before testing `ttl_seconds`, so
+    /// concurrent commits into one hot permanent channel queued at commit
+    /// time (deferred trigger) — invisible to any single-connection test.
+    /// This holds N insert transactions at a barrier past their INSERTs,
+    /// then proves (a) while all N sit pre-commit, no transaction holds a
+    /// row-level lock on the channel tuple, and (b) all N commits succeed
+    /// with the channel row untouched (permanent ⇒ no deadline write).
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn permanent_channel_event_commits_do_not_lock_the_channel_row() {
+        const N: usize = 8;
+        // setup_pool's default cap (10) covers N held transactions plus the
+        // pg_locks inspector connection.
+        let pool = setup_pool().await;
+        let community_uuid = make_test_community(&pool).await;
+        let channel = make_test_channel(&pool, community_uuid, None).await;
+
+        // Open N transactions, run the full event INSERT in each (the deferred
+        // trigger fires at COMMIT), and park them at a barrier.
+        let mut txs = Vec::new();
+        for i in 0..N {
+            let mut tx = pool.begin().await.expect("begin insert txn");
+            let event = make_text_event(&format!("hot channel event {i}"));
+            sqlx::query(
+                "INSERT INTO events (community_id,id,pubkey,created_at,kind,tags,content,sig,received_at,channel_id) \
+                 VALUES ($1,$2,$3,$4,9,$5,$6,$7,now(),$8)",
+            )
+            .bind(community_uuid)
+            .bind(event.id.as_bytes().as_slice())
+            .bind(event.pubkey.as_bytes().as_slice())
+            .bind(DateTime::from_timestamp(event.created_at.as_secs() as i64, 0).unwrap())
+            .bind(serde_json::to_value(&event.tags).unwrap())
+            .bind(&event.content)
+            .bind(event.sig.serialize().as_slice())
+            .bind(channel)
+            .execute(&mut *tx)
+            .await
+            .expect("insert event inside held txn");
+            txs.push(tx);
+        }
+
+        // With all N transactions holding completed INSERTs, none may hold a
+        // row-level lock on the channels tuple. (The 0022 trigger would not
+        // have taken it yet either — it locks at COMMIT — so also verify the
+        // commit phase below completes without mutual blocking.)
+        let tuple_locks: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_locks l \
+             JOIN pg_class c ON c.oid = l.relation \
+             WHERE c.relname = 'channels' AND l.locktype = 'tuple'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("inspect pg_locks");
+        assert_eq!(tuple_locks, 0, "no channel tuple locks while txns are held");
+
+        // Release all commits concurrently. Under 0022 these serialized on the
+        // channel row (each holding it across its WAL flush); under 0024 the
+        // shared advisory key admits them all. Join with a timeout so a
+        // regression fails fast instead of hanging the suite.
+        let commits = txs
+            .into_iter()
+            .map(|tx| tokio::spawn(async move { tx.commit().await }))
+            .collect::<Vec<_>>();
+        for c in commits {
+            tokio::time::timeout(std::time::Duration::from_secs(10), c)
+                .await
+                .expect("concurrent permanent-channel commits must not block")
+                .expect("join commit task")
+                .expect("commit succeeds");
+        }
+
+        let deadline: Option<DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT ttl_deadline FROM channels WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community_uuid)
+        .bind(channel)
+        .fetch_one(&pool)
+        .await
+        .expect("read deadline after commits");
+        assert_eq!(deadline, None, "permanent channel must remain untouched");
+        let stored: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM events WHERE community_id = $1 AND channel_id = $2",
+        )
+        .bind(community_uuid)
+        .bind(channel)
+        .fetch_one(&pool)
+        .await
+        .expect("count stored events");
+        assert_eq!(stored as usize, N);
+    }
+
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn get_event_by_id_is_scoped_when_event_id_collides_across_communities() {
@@ -1506,6 +1800,60 @@ mod tests {
             .tags(tags)
             .sign_with_keys(&keys)
             .expect("sign")
+    }
+
+    fn make_event_at(kind: u16, content: &str, created_at: u64) -> nostr::Event {
+        EventBuilder::new(Kind::Custom(kind), content)
+            .custom_created_at(nostr::Timestamp::from(created_at))
+            .sign_with_keys(&Keys::generate())
+            .expect("sign timestamped event")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn access_scope_is_applied_before_historical_page_limit() {
+        let pool = setup_pool().await;
+        let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let accessible = make_test_channel(&pool, community_uuid, None).await;
+        let inaccessible = make_test_channel(&pool, community_uuid, None).await;
+        let base = 1_800_000_000;
+
+        // This is the bridge underfetch shape: newer inaccessible candidates
+        // outnumber the requested page, while the visible match is older.
+        for offset in 10..13 {
+            let event = make_event_at(39_000, "newer inaccessible", base + offset);
+            insert_event(&pool, community, &event, Some(inaccessible))
+                .await
+                .expect("insert inaccessible candidate");
+        }
+        let global = make_event_at(39_000, "newer global", base + 2);
+        insert_event(&pool, community, &global, None)
+            .await
+            .expect("insert global candidate");
+        let older_accessible = make_event_at(39_000, "older accessible", base + 1);
+        insert_event(&pool, community, &older_accessible, Some(accessible))
+            .await
+            .expect("insert accessible candidate");
+
+        let events = query_events(
+            &pool,
+            &EventQuery {
+                kinds: Some(vec![39_000]),
+                channel_ids: Some(vec![accessible]),
+                limit: Some(2),
+                ..EventQuery::for_community(community)
+            },
+        )
+        .await
+        .expect("query access-scoped page");
+
+        assert_eq!(events.len(), 2, "visible page must be filled before EOF");
+        assert_eq!(events[0].event.id, global.id, "global rows remain visible");
+        assert_eq!(
+            events[1].event.id, older_accessible.id,
+            "older accessible row must not be hidden behind newer inaccessible rows"
+        );
     }
 
     fn make_text_event(content: &str) -> nostr::Event {

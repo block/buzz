@@ -7,6 +7,7 @@ import 'package:nostr/nostr.dart' as nostr;
 import '../../shared/auth/auth.dart';
 import '../../shared/deeplink/deep_link.dart';
 import '../../shared/relay/relay_session.dart';
+import '../../shared/relay/relay_validation.dart';
 
 final inviteJoinHttpClientProvider = Provider<http.Client>((ref) {
   final client = http.Client();
@@ -68,6 +69,7 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
   InviteJoinState build() => const InviteJoinState();
 
   Future<void> prepare(InviteDeepLink invite) async {
+    validateInviteRelayUri(Uri.parse(invite.relayUrl));
     final communities = await ref.read(communityListProvider.future);
     final existing = _existingCommunity(communities, invite.relayUrl);
     if (existing != null) {
@@ -121,22 +123,25 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
         if (invite.policyReceipt != null)
           'policy_receipt': invite.policyReceipt,
       });
+      final relayUri = Uri.parse(invite.relayUrl);
+      validateInviteRelayUri(relayUri);
       final url = _claimUrlFromRelay(invite.relayUrl);
-      final response = await ref
+      final request = http.Request('POST', Uri.parse(url))
+        ..followRedirects = false
+        ..headers.addAll({
+          'Authorization': buildNip98AuthHeader(
+            method: 'POST',
+            url: url,
+            bodyBytes: utf8.encode(body),
+            nsec: keys.nsec,
+          ),
+          'Content-Type': 'application/json',
+        })
+        ..body = body;
+      final streamedResponse = await ref
           .read(inviteJoinHttpClientProvider)
-          .post(
-            Uri.parse(url),
-            headers: {
-              'Authorization': buildNip98AuthHeader(
-                method: 'POST',
-                url: url,
-                bodyBytes: utf8.encode(body),
-                nsec: keys.nsec,
-              ),
-              'Content-Type': 'application/json',
-            },
-            body: body,
-          );
+          .send(request);
+      final response = await http.Response.fromStream(streamedResponse);
       final decoded = jsonDecode(response.body.isEmpty ? '{}' : response.body);
       if (response.statusCode < 200 || response.statusCode >= 300) {
         final message = decoded is Map && decoded['error'] is String

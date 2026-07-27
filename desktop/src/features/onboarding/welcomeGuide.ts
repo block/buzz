@@ -229,6 +229,37 @@ export async function buildWelcomeStarterCreateInput(
   };
 }
 
+export function welcomeStarterRuntimeUpdate(
+  existing: ManagedAgent,
+  desired: CreateManagedAgentInput,
+) {
+  if (!desired.agentCommand) return null;
+
+  const desiredArgs = desired.agentArgs ?? [];
+  const desiredModel = desired.model ?? null;
+  const desiredProvider = desired.provider ?? null;
+  const desiredMcpCommand = desired.mcpCommand ?? "";
+  if (
+    existing.agentCommand === desired.agentCommand &&
+    existing.agentArgs.join(",") === desiredArgs.join(",") &&
+    existing.model === desiredModel &&
+    existing.provider === desiredProvider &&
+    existing.mcpCommand === desiredMcpCommand
+  ) {
+    return null;
+  }
+
+  return {
+    pubkey: existing.pubkey,
+    agentCommand: desired.agentCommand,
+    harnessOverride: true,
+    agentArgs: desiredArgs,
+    mcpCommand: desiredMcpCommand,
+    model: desiredModel,
+    provider: desiredProvider,
+  };
+}
+
 /**
  * Ensure the complete built-in Welcome Team is ready for kickoff.
  * The team itself is Rust-seeded; this only activates personas, creates any
@@ -254,29 +285,33 @@ async function provisionWelcomeTeam(
 
   const agents: ManagedAgent[] = [];
   for (const starter of WELCOME_TEAM_STARTERS) {
+    const persona = personasById.get(starter.personaId);
+    if (!persona) {
+      throw new Error(`${starter.name} agent not found.`);
+    }
+    const desired = await buildWelcomeStarterCreateInput(
+      starter,
+      persona,
+      runtimes,
+      globalConfig.preferred_runtime,
+      relayUrl,
+    );
     const existing = pickWelcomeTeamStarterAgentForRelay(
       existingAgents,
       starter,
       relayUrl,
     );
     if (existing) {
-      agents.push(existing);
+      const runtimeUpdate = welcomeStarterRuntimeUpdate(existing, desired);
+      agents.push(
+        runtimeUpdate
+          ? (await updateManagedAgent(runtimeUpdate)).agent
+          : existing,
+      );
       continue;
     }
 
-    const persona = personasById.get(starter.personaId);
-    if (!persona) {
-      throw new Error(`${starter.name} agent not found.`);
-    }
-    const created = await createManagedAgent(
-      await buildWelcomeStarterCreateInput(
-        starter,
-        persona,
-        runtimes,
-        globalConfig.preferred_runtime,
-        relayUrl,
-      ),
-    );
+    const created = await createManagedAgent(desired);
     agents.push(created.agent);
   }
   const [lead, honey, bumble] = agents;

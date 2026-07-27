@@ -8,7 +8,7 @@ import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 
 const SELECTED_MENU_ITEM_CLASSES =
-  "bg-sidebar-active text-sidebar-active-foreground shadow-xs hover:bg-sidebar-active hover:text-sidebar-active-foreground";
+  "font-semibold text-foreground after:opacity-100 hover:text-foreground";
 
 type ProjectsToolbarProps = {
   filter: ProjectsFilter;
@@ -56,52 +56,46 @@ export function ProjectsToolbar({
   onFilterChange,
 }: ProjectsToolbarProps) {
   const filterOptions: Array<{
-    compactLabel?: string;
     label: string;
     value: ProjectsFilter;
   }> = [
     { label: "Overview", value: "all" },
-    {
-      compactLabel: "Repos",
-      label: "Repositories",
-      value: "repositories",
-    },
-    { compactLabel: "PRs", label: "Pull Requests", value: "prs" },
+    { label: "Repositories", value: "repositories" },
+    { label: "Pull Requests", value: "prs" },
     { label: "Issues", value: "issues" },
-    { compactLabel: "Mine", label: "My Repositories", value: "mine" },
-    { label: "Local", value: "local" },
   ];
 
   return (
     <div
-      className="pointer-events-auto flex min-h-[3.25rem] min-w-0 items-center px-4 py-2"
+      className="pointer-events-auto flex h-full min-w-0 items-center"
       data-tauri-drag-region
     >
-      <div className="flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden">
-        <fieldset className="flex min-w-0 flex-1 flex-nowrap items-center gap-1 overflow-x-auto scrollbar-none [&::-webkit-scrollbar]:hidden">
+      <div className="flex h-full min-w-0 flex-1 items-center gap-0.5 overflow-hidden">
+        <fieldset className="flex h-full min-w-0 flex-1 flex-nowrap items-stretch gap-1 overflow-x-auto scrollbar-none [&::-webkit-scrollbar]:hidden">
           <legend className="sr-only">Project owner filter</legend>
           {filterOptions.map((option) => (
             <Button
               aria-label={option.label}
               aria-pressed={filter === option.value}
               className={cn(
-                "h-8 shrink-0 gap-1.5 rounded-full px-3 text-xs xl:px-3.5 xl:text-sm",
+                "relative h-full shrink-0 gap-1.5 rounded-none px-2.5 text-base leading-5 tracking-tight text-muted-foreground after:absolute after:inset-x-2.5 after:bottom-0 after:h-0.5 after:bg-current after:opacity-0 after:transition-opacity after:content-[''] hover:bg-transparent hover:text-foreground hover:after:opacity-100",
+                option.value === "all" && "pl-0 after:left-0",
                 filter === option.value && SELECTED_MENU_ITEM_CLASSES,
               )}
               key={option.value}
               onClick={() => onFilterChange(option.value)}
-              size="sm"
               type="button"
               variant="ghost"
             >
-              {option.compactLabel ? (
-                <>
-                  <span className="xl:hidden">{option.compactLabel}</span>
-                  <span className="hidden xl:inline">{option.label}</span>
-                </>
-              ) : (
-                option.label
-              )}
+              <span className="grid">
+                <span
+                  aria-hidden="true"
+                  className="invisible col-start-1 row-start-1 font-semibold"
+                >
+                  {option.label}
+                </span>
+                <span className="col-start-1 row-start-1">{option.label}</span>
+              </span>
             </Button>
           ))}
         </fieldset>

@@ -62,7 +62,7 @@ via direct DB access. Use this for testing admin operations (archive,
 delete-channel, add/remove-channel-member).
 
 ```bash
-DATABASE_URL=postgres://buzz:buzz_dev@localhost:5432/buzz \
+DATABASE_URL="${DATABASE_URL:?set DATABASE_URL for the local Buzz database}" \
 cargo run -p buzz-admin -- mint-token \
   --name "cli-test" \
   --scopes "messages:read,messages:write,channels:read,channels:write,users:read,users:write,files:read,files:write,admin:channels"
@@ -596,10 +596,13 @@ buzz channels delete --channel "$FORUM_ID" | jq .
 | 49 | `repos create` | ☐ | |
 | 50 | `repos get` | ☐ | |
 | 51 | `repos list` | ☐ | |
-| 52 | `upload file` | ☐ | |
-| 53 | `pack validate` | ☐ | Local, no relay |
-| 54 | `pack inspect` | ☐ | Local, no relay |
-| 55 | `notes set` | ☐ | First publish, edit/carry, --clear-tags, ambiguity, empty-stdin guard |
-| 56 | `notes get` | ☐ | By name, by naddr, --content-only, cross-author, ambiguous → exit 1 |
-| 57 | `notes ls` | ☐ | Own, --author all, --tag, --limit |
-| 58 | `notes rm` | ☐ | Delete→get 404, double-delete idempotent, missing slug → NotFound |
+| 52 | `repos protect list` | ☐ | Empty/populated rules; unknown rules visible; malformed rule reported in validation_error |
+| 53 | `repos protect set` | ☐ | Create and replace complete exact-ref rule; verify metadata is preserved |
+| 54 | `repos protect remove` | ☐ | Remove exact ref; missing rule → NotFound |
+| 55 | `upload file` | ☐ | |
+| 56 | `pack validate` | ☐ | Local, no relay |
+| 57 | `pack inspect` | ☐ | Local, no relay |
+| 58 | `notes set` | ☐ | First publish, edit/carry, --clear-tags, ambiguity, empty-stdin guard |
+| 59 | `notes get` | ☐ | By name, by naddr, --content-only, cross-author, ambiguous → exit 1 |
+| 60 | `notes ls` | ☐ | Own, --author all, --tag, --limit |
+| 61 | `notes rm` | ☐ | Delete→get 404, double-delete idempotent, missing slug → NotFound |

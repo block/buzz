@@ -22,7 +22,7 @@ buzz channels list
 
 ## Usage
 
-All output is JSON on stdout. Errors are JSON on stderr. Exit codes: 0=ok, 1=user error, 2=network, 3=auth, 4=other.
+All output is JSON on stdout. Errors are JSON on stderr. Exit codes: 0=ok, 1=user error, 2=network, 3=auth, 4=other, 5=write conflict.
 
 ```bash
 # Set relay URL (defaults to http://localhost:3000)
@@ -82,11 +82,20 @@ buzz mem set <slug> "my-value"
 buzz mem patch <slug> --base-hash <hex> < diff.patch  # or --no-base-hash
 buzz mem rm <slug>
 
+# Repository protection
+buzz repos protect list --id my-repo
+buzz repos protect set --id my-repo --ref refs/heads/main --push admin --no-force-push --no-delete
+buzz repos protect remove --id my-repo --ref refs/heads/main
+
 # Pipe to jq
 buzz channels list | jq '.[].name'
 ```
 
-## 60 Subcommands across 13 Groups
+`protect set` replaces every existing rule for the exact ref pattern. Any
+constraint omitted from the command is removed. `protect list` reports malformed
+stored rules in `validation_error` so an owner can remove and repair them.
+
+## Commands
 
 | Group | Subcommand | Description |
 |-------|-----------|-------------|
@@ -141,6 +150,9 @@ buzz channels list | jq '.[].name'
 | `repos` | `create` | Announce a git repository (NIP-34) |
 | | `get` | Get a repository announcement |
 | | `list` | List repository announcements |
+| | `protect list` | List branch and tag protection rules |
+| | `protect set` | Create or replace a protection rule |
+| | `protect remove` | Remove a protection rule |
 | `upload` | `file` | Upload a file to the Blossom store |
 | `pack` | `validate` | Validate a persona pack (local, no relay) |
 | | `inspect` | Inspect a persona pack (local, no relay) |
@@ -164,5 +176,5 @@ buzz <group> <subcommand> [flags]
 
 stdout: raw relay JSON
 stderr: {"error": "category", "message": "detail"}
-exit:   0=ok  1=user  2=network  3=auth  4=other
+exit:   0=ok  1=user  2=network  3=auth  4=other  5=write conflict
 ```

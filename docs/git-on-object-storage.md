@@ -51,13 +51,19 @@ to three stated axioms, each empirically gated per backend" does.
 
 ### v1 deployment architecture
 
-The implementation has *no per-repo persistent filesystem state*. Every request
-hydrates an ephemeral working tree from the published manifest, runs the
-appropriate git subprocess against it, and drops the tree on scope exit:
+The implementation has *no authoritative per-repo filesystem state*. Every
+request hydrates an ephemeral working tree from the published manifest, runs
+the appropriate git subprocess against it, and drops the tree on scope exit:
 read paths (`info/refs`, `upload-pack`) via `hydrate_for_read`, the write path
 (`receive-pack`) via `hydrate_for_write`, which also returns the `ParentState`
 the CAS at §Push step 7 predicates on. The relay is multi-instance-ready by
 construction: nothing on local disk needs to be coordinated between instances.
+Each process may retain a byte-bounded, process-lifetime cache of immutable
+pack/index pairs keyed by verified digest. Deployment mounts that cache on a
+per-pod ephemeral volume, so accounting and single-flight coordination stay
+local. Cache misses, restarts, and evictions only affect performance; object
+storage remains the source of truth, and per-request refs/HEAD are still
+materialized from the current manifest.
 
 The accepted v1 tradeoff: under concurrent same-repo pushes, every contender
 hydrates and runs receive-pack, and the CAS losers' subprocess work is
@@ -279,24 +285,28 @@ against a pinned minimum `git` ≥ 2.31, the first release with `git index-pack
 --fsck-objects` defaults relied on here). It remains
 to show `manifest(d).packs` *covers* the reachable closure of `m.refs`. By
 induction on the push chain: the empty repo's manifest names ∅ and refs ∅
-(covered vacuously). Step 5 sets `m_after.packs = m_before.packs ∪ keys(O)` where
-`O` is every object this push introduced; and `m_after.refs` only points at
-objects in `m_before.refs`' closure (unchanged or deleted refs) or in `O` (new or
-force-moved refs). So every object reachable from `m_after.refs` is in
-`m_before.packs` (covered by IH) or in `keys(O)` — hence in `m_after.packs`. ∎
+(covered vacuously). A normal step sets
+`m_after.packs = m_before.packs ∪ keys(O)` where `O` is every object this push
+introduced; and `m_after.refs` only points at objects in `m_before.refs`'
+closure (unchanged or deleted refs) or in `O` (new or force-moved refs). A
+compaction step instead feeds every `m_after.refs` tip to `git pack-objects
+--revs` with no negative revisions, then names only the resulting bounded pack
+set. The normal case preserves coverage by induction; the compaction case
+re-establishes coverage directly from the complete post-push ref closure. ∎
 
 **Remark (force-push, delete, and GC).** Coverage is a *superset*, not equality,
 and that is the correct invariant. A delete-ref drops a key from `m.refs`; a
-force-push repoints a ref off its old history. Neither removes packs from
-`m.packs`, so objects reachable only from the old/deleted ref become unreachable
+force-push repoints a ref off its old history. Neither normal ref operation
+removes packs from `m.packs`, so objects reachable only from the old/deleted ref become unreachable
 but remain named. This is safe — reconstruction of the *current* refs is
-unaffected — but it means `m.packs` grows monotonically under the protocol as
-specified. Garbage collection (computing reachability from `m.refs` and
-publishing a manifest with a pruned pack set) is a separate, *also CAS-guarded*
-operation: it is just another `Push` whose `m_after` happens to name fewer packs,
-so Theorems 1 and 3 apply to it unchanged. GC correctness (that it never prunes a
-reachable pack) is an obligation on the GC's reachability computation, out of
-scope here and called out as future work.
+unaffected. Before the bounded manifest reaches its pack limit, an accepted push
+proactively captures the complete post-push reachable closure and CAS-publishes
+a replacement manifest that normally has fewer packs. At the hard cap, an
+equal-count replacement is also valid when it incorporates the newly reachable
+objects while remaining within the bound. The old immutable objects are not
+deleted, so readers holding an earlier manifest remain valid. Physical
+object-store deletion remains a separate retention concern outside this proof
+boundary.
 
 ### Theorem 3 (Linearizable Refs / No Lost Update)
 
@@ -475,6 +485,8 @@ symbol search, not line counts.)
 | `GitStore::{put_pack, put_manifest, put_pointer}` (create-only + CAS) | `store.rs` |
 | `run_conformance_probe` (A1/A3 fail-closed startup gate) | `store.rs` + `main.rs` |
 | `hydrate_for_read` / `hydrate_for_write` | `hydrate.rs` |
+| Bounded digest-keyed pack/index cache and single-flight population | `pack_cache.rs` |
+| Proactive full-closure pack compaction before manifest capacity | `cas_publish.rs` |
 | `ParentState { if_match, parent_digest, parent }` + `from_loaded`/`fresh` | `cas_publish.rs:154` |
 | `cas_publish(.., &parent_state) -> Result<CasSuccess, CasError>` | `cas_publish.rs:410` |
 | `CasError::Conflict { winner_manifest, winner_manifest_key }` (typed 412) | `cas_publish.rs:92` |
@@ -512,7 +524,9 @@ snapshot reads succeed (`snapErr`); whether it *changes* refs is then **derived*
 (`DidChange == newVal ≠ value-in-the-manifest-it-read`), not a free boolean. The
 skip predicate is `MustPublish(p) == DidChange(p) \/ snapErr(p)` — "publish unless
 we *observed* no change," never "publish unless `b == a`" with failed reads
-compared equal.
+compared equal. A `compacted` marker distinguishes normal delta-pack stages
+from stages whose own pack is the trusted full closure produced from every
+post-push ref tip.
 
 Crucially the model carries the **real ref value** per manifest (`refs[m]` = the
 objectId `main` holds in manifest `m`) and explicit **history** (`parent[m]`).
@@ -524,7 +538,7 @@ TLC checks eight invariants (a finiteness constraint, `BoundedManifests`, caps p
 |---|---|---|
 | `Inv_Fence` | T1 | an obligated push's manifest is published before success is observed |
 | `Inv_ChangedPublished` | T1 | a ref-changing push is always published (fallible-snapshot bite) |
-| `Inv_Closed` | T2 | a published manifest's pack set *covers* its published parent's |
+| `Inv_Closed` | T2 | a normal manifest covers its parent's packs; a compacted manifest names its trusted full-closure pack |
 | `Inv_NoFork` | T3 | no two published manifests share a parent (a fork = a lost update) |
 | `Inv_RefEffectApplied` | T3 | an installed push's committed ref value equals the value it proposed |
 | `Inv_RefDerivedFromParent` | T3 | an install is derived from the pointer it read (no build on superseded state) |
@@ -534,7 +548,6 @@ TLC checks eight invariants (a finiteness constraint, `BoundedManifests`, caps p
 ```
 $ tlc GitOnObjectStore.tla -config GitOnObjectStore.cfg
 Model checking completed. No error has been found.
-1435102 states generated, 435745 distinct states found, 0 states left on queue.
 ```
 
 **Every invariant is proven non-vacuous** by a mutation that trips it (each
@@ -544,14 +557,16 @@ checked in isolation against each mutant). This is the discipline that catches
 | Mutation | Trips |
 |---|---|
 | skip predicate `DidChange /\ ~snapErr` (ref change + both snapshots fail → silently skipped) | `Inv_ChangedPublished` |
-| `packs[m] = {m}` (manifest drops predecessor's packs) | `Inv_Closed` |
+| a normal stage uses `packs[m] = {m}` without the full-closure marker | `Inv_Closed` |
 | drop CAS guard (two pushers install off one parent — a fork) | `Inv_NoFork` |
 | install records the *read* ref value, not the push's proposal (effect dropped) | `Inv_RefEffectApplied` |
 | record parent as root instead of the pointer actually read | `Inv_RefDerivedFromParent` (+ `Inv_NoFork`) |
 
-The `packs[m]={m}` and CAS-guard mutations are exactly the two vacuity tests an
-external reviewer ran against an earlier draft, where the then-invariants passed
-unchanged; the history + real-ref-value vocabulary is what makes them fail now.
+The unmarked `packs[m]={m}` and CAS-guard mutations are the two core closure and
+serialization vacuity tests. The full-closure marker is only assigned by the
+compaction branch; reusing it for a normal delta stage would make the closure
+claim vacuous, so the model explicitly clears stale markers when manifest ids
+are reused.
 The ref-value mutations (effect-dropped, wrong-parent) are what close the gap from
 "pointer CAS serializes" to "ref *updates* are linearizable" — the user-visible
 theorem the title promises. (A weaker mutation, `MustPublish == DidChange` alone,
@@ -567,9 +582,8 @@ The model is checked at `Pushers = {p1,p2,p3}`, `MaxManifests = 3`, under the
 the retry loop otherwise lets pushers churn fresh manifest ids and ref values
 without bound, so the model is *finite-state only with the bound*. Three
 concurrent pushers exercise every CAS race relevant to these invariants (a fourth
-adds no qualitatively new interleaving); the real-ref-value domain is what makes
-even three a ~436K-state check. This is a *bounded* model check, not an unbounded
-proof: it exhaustively verifies the invariants within the bound and is mutation-
+adds no qualitatively new interleaving). This is a *bounded* model check, not an
+unbounded proof: it exhaustively verifies the invariants within the bound and is mutation-
 shown non-vacuous, which is the standard claim for a TLC-checked safety spec.
 
 ## Summary

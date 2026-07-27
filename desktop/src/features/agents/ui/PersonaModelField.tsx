@@ -10,7 +10,7 @@ import {
   PERSONA_FIELD_CONTROL_CLASS,
   PERSONA_FIELD_SHELL_CLASS,
   PERSONA_LABEL_OPTIONAL_CLASS,
-} from "./personaDialogPickers";
+} from "./agentConfigOptions";
 
 type PersonaModelFieldProps = {
   disabled: boolean;
@@ -92,7 +92,8 @@ export function PersonaModelField({
         ) : null}
         {showSharedComputeAutoHint ? (
           <p className="text-xs text-muted-foreground">
-            Buzz will choose an available shared model when the agent starts.
+            Auto uses Mesh collective intelligence when two or more models stay
+            available, otherwise it chooses one available model.
           </p>
         ) : null}
         {modelDiscoveryStatus ? (

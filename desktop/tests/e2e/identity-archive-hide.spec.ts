@@ -166,38 +166,38 @@ test.describe("NIP-IA hide archived from discovery", () => {
   });
 
   // Member-adder (ChannelMemberInviteCard) — the invite search excludes
-  // existing channel members, so we test in #agents where Alice is NOT a
+  // existing channel members, so we test in #agents where Bob is NOT a
   // member (only the mock identity + Charlie are): the ONLY thing that can
-  // drop her from results is the archive filter. The control run (nothing
-  // archived) proves she would otherwise appear — guarding a vacuous green.
+  // drop Bob from results is the archive filter. The control run (nothing
+  // archived) proves he would otherwise appear — guarding a vacuous green.
   test("member-adder: archived non-member is omitted from invite search", async ({
     page,
   }) => {
-    await installMockBridge(page, { archivedIdentities: [ALICE_PUBKEY] });
+    await installMockBridge(page, { archivedIdentities: [BOB_PUBKEY] });
     await page.goto("/");
     await page.getByTestId("channel-agents").click();
     await page.getByTestId("channel-members-trigger").click();
     await expect(page.getByTestId("members-sidebar")).toBeVisible();
-    await page.getByTestId("channel-management-search-users").fill("alice");
+    await page.getByTestId("channel-management-search-users").fill("bob");
     await expect(
-      page.getByTestId(`channel-user-search-result-${ALICE_PUBKEY}`),
+      page.getByTestId(`channel-user-search-result-${BOB_PUBKEY}`),
     ).toHaveCount(0);
   });
 
   test("member-adder: control — non-archived non-member IS in invite search", async ({
     page,
   }) => {
-    // Same channel/query, nothing archived: Alice now appears. This is the
-    // companion that makes the test above non-vacuous (proves she was dropped
+    // Same channel/query, nothing archived: Bob now appears. This is the
+    // companion that makes the test above non-vacuous (proves he was dropped
     // by the archive filter, not by member-exclusion or a broken search).
     await installMockBridge(page, { archivedIdentities: [] });
     await page.goto("/");
     await page.getByTestId("channel-agents").click();
     await page.getByTestId("channel-members-trigger").click();
     await expect(page.getByTestId("members-sidebar")).toBeVisible();
-    await page.getByTestId("channel-management-search-users").fill("alice");
+    await page.getByTestId("channel-management-search-users").fill("bob");
     await expect(
-      page.getByTestId(`channel-user-search-result-${ALICE_PUBKEY}`),
+      page.getByTestId(`channel-user-search-result-${BOB_PUBKEY}`),
     ).toBeVisible();
   });
 });

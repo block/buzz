@@ -30,6 +30,14 @@ type AuxiliaryPanelHeaderGroupProps = Omit<
   align?: "center" | "start";
   backButtonAriaLabel?: string;
   backButtonTestId?: string;
+  /**
+   * Panel-specific control rendered ahead of the title, after any back button.
+   *
+   * A slot rather than a header-level feature because this header is shared by
+   * every auxiliary panel and the controls that belong here are not: only the
+   * thread has view modes. Each panel passes what it owns.
+   */
+  leading?: React.ReactNode;
   mode?: AuxiliaryPanelMode;
   onBack?: () => void;
 };
@@ -248,6 +256,7 @@ export function AuxiliaryPanelHeaderGroup({
   align = "center",
   backButtonAriaLabel = "Back",
   backButtonTestId,
+  leading,
   mode,
   children,
   onBack,
@@ -280,6 +289,15 @@ export function AuxiliaryPanelHeaderGroup({
         >
           <ArrowLeft />
         </Button>
+      ) : null}
+      {/*
+       * Sits inside the header's normal inset rather than pulled flush like the
+       * back button: a back button is chrome and belongs on the panel edge, but
+       * this is a control acting on the panel's own content, so it reads as part
+       * of the title row and lets the title shift right off it.
+       */}
+      {leading ? (
+        <div className="flex shrink-0 items-center">{leading}</div>
       ) : null}
       {children}
     </div>

@@ -70,7 +70,7 @@ bool agentIsSharedWithUser(
       agent.channelIds.any(sharedChannelIds.contains);
 }
 
-/// Format the "owned by …" label. Mirrors desktop's `formatOwnerLabel`.
+/// Format the "managed by …" label. Mirrors desktop's `formatOwnerLabel`.
 String? formatOwnerLabel(
   String? ownerPubkey,
   String? currentPubkey,

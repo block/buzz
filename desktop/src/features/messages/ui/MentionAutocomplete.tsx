@@ -184,16 +184,16 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                         className="min-w-0 truncate"
                         title={
                           suggestion.ownerLabel && suggestion.notInChannel
-                            ? `owned by ${suggestion.ownerLabel} · not in channel`
+                            ? `managed by ${suggestion.ownerLabel} · not in channel`
                             : suggestion.ownerLabel
-                              ? `owned by ${suggestion.ownerLabel}`
+                              ? `managed by ${suggestion.ownerLabel}`
                               : "not in channel"
                         }
                       >
                         {suggestion.ownerLabel && suggestion.notInChannel
-                          ? `owned by ${suggestion.ownerLabel} · not in channel`
+                          ? `managed by ${suggestion.ownerLabel} · not in channel`
                           : suggestion.ownerLabel
-                            ? `owned by ${suggestion.ownerLabel}`
+                            ? `managed by ${suggestion.ownerLabel}`
                             : "not in channel"}
                       </span>
                     ) : null}

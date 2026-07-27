@@ -481,6 +481,7 @@ test("timeline prepend plus late row reflow keeps the reading row stable", async
   await page.waitForTimeout(100);
   await timeline.evaluate((element) => {
     const scroller = element as HTMLDivElement;
+    scroller.dispatchEvent(new WheelEvent("wheel", { deltaY: -1 }));
     scroller.scrollTop = 150;
     scroller.dispatchEvent(new Event("scroll", { bubbles: true }));
   });

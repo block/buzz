@@ -1,8 +1,10 @@
 import { EllipsisVertical, Settings2, Users } from "lucide-react";
 import * as React from "react";
+import { toast } from "sonner";
 import { useQueryClient } from "@tanstack/react-query";
 import { useHuddle } from "@/features/huddle";
 import { HuddleIndicator } from "@/features/huddle/components/HuddleIndicator";
+import { formatHuddleActionError } from "@/features/huddle/lib/huddleError";
 import { buildHuddleChannelName } from "@/features/huddle/lib/huddleChannelName";
 import {
   useAvailableAcpRuntimes,
@@ -15,6 +17,7 @@ import { canStartHuddleInChannel } from "@/features/channels/lib/huddleAvailabil
 import type { Channel } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -126,6 +129,7 @@ export function ChannelMembersBar({
           void queryClient.invalidateQueries({ queryKey: ["channels"] });
         } catch (e) {
           console.error("Failed to start huddle:", e);
+          toast.error(formatHuddleActionError(e, "start"));
         }
       }}
       renderMode={variant === "compact" ? "menu-item" : "button"}
@@ -170,32 +174,42 @@ export function ChannelMembersBar({
       </DropdownMenu>
     ) : (
       <div className="flex items-center gap-[6px]">
-        <Button
-          aria-label={`View channel members (${memberCount})`}
-          className="h-8 px-2.5"
-          data-testid="channel-members-trigger"
-          onClick={onToggleMembers}
-          type="button"
-          variant="outline"
-        >
-          <Users />
-          <span className="min-w-[1ch] text-sm font-medium tabular-nums">
-            {memberCount}
-          </span>
-        </Button>
+        <Tooltip disableHoverableContent>
+          <TooltipTrigger asChild>
+            <Button
+              aria-label={`View channel members (${memberCount})`}
+              className="h-8 px-2.5"
+              data-testid="channel-members-trigger"
+              onClick={onToggleMembers}
+              type="button"
+              variant="outline"
+            >
+              <Users />
+              <span className="min-w-[1ch] text-sm font-medium tabular-nums">
+                {memberCount}
+              </span>
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Channel members</TooltipContent>
+        </Tooltip>
 
         {huddleIndicator}
 
-        <Button
-          aria-label="Manage channel"
-          data-testid="channel-management-trigger"
-          onClick={onManageChannel}
-          size="icon"
-          type="button"
-          variant="outline"
-        >
-          <Settings2 />
-        </Button>
+        <Tooltip disableHoverableContent>
+          <TooltipTrigger asChild>
+            <Button
+              aria-label="Manage channel"
+              data-testid="channel-management-trigger"
+              onClick={onManageChannel}
+              size="icon"
+              type="button"
+              variant="outline"
+            >
+              <EllipsisVertical />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Channel settings</TooltipContent>
+        </Tooltip>
       </div>
     );
 

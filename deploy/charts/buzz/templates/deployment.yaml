@@ -145,6 +145,9 @@ spec:
             # ── Git ──────────────────────────────────────────────────
             - { name: BUZZ_GIT_REPO_PATH,         value: {{ .Values.persistence.git.mountPath | quote }} }
             - { name: BUZZ_GIT_MAX_PACK_BYTES,    value: {{ .Values.git.maxPackBytes | quote }} }
+            - { name: BUZZ_GIT_PACK_CACHE_PATH,   value: {{ .Values.git.packCachePath | quote }} }
+            - { name: BUZZ_GIT_PACK_CACHE_MAX_BYTES, value: {{ .Values.git.packCacheMaxBytes | quote }} }
+            - { name: BUZZ_GIT_PACK_CACHE_MAX_CONCURRENT_POPULATIONS, value: {{ .Values.git.packCacheMaxConcurrentPopulations | quote }} }
             - { name: BUZZ_GIT_MAX_REPOS_PER_PUBKEY, value: {{ .Values.git.maxReposPerPubkey | quote }} }
             - { name: BUZZ_GIT_MAX_CONCURRENT_OPS, value: {{ .Values.git.maxConcurrentOps | quote }} }
 
@@ -173,6 +176,12 @@ spec:
                 secretKeyRef:
                   name: {{ include "buzz.envSecretName" . }}
                   key: DATABASE_URL
+            - name: READ_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "buzz.envSecretName" . }}
+                  key: READ_DATABASE_URL
+                  optional: true
             - name: REDIS_URL
               valueFrom:
                 secretKeyRef:
@@ -215,6 +224,7 @@ spec:
 
           volumeMounts:
             - { name: git-repos, mountPath: {{ .Values.persistence.git.mountPath | quote }} }
+            - { name: git-pack-cache, mountPath: {{ .Values.git.packCachePath | quote }} }
 
       volumes:
         - name: git-repos
@@ -225,3 +235,6 @@ spec:
           emptyDir:
             sizeLimit: {{ .Values.persistence.git.size | quote }}
         {{- end }}
+        - name: git-pack-cache
+          emptyDir:
+            sizeLimit: {{ .Values.git.packCacheVolumeSize | quote }}

@@ -15,6 +15,7 @@ use crate::{
         current_instance_id, known_acp_runtime, load_managed_agents, load_personas,
         resolve_effective_prompt_model_provider, save_managed_agents, sync_managed_agent_processes,
         AgentDefinition, GlobalAgentConfig, KnownAcpRuntime, ManagedAgentRecord,
+        ManagedAgentRuntimeKey,
     },
 };
 
@@ -38,6 +39,13 @@ pub struct RuntimeFileConfigSubset {
 
 /// Resolve the config surface with persona and global default values applied.
 ///
+/// Linked instances are definition-authoritative: the record's own
+/// system_prompt/model/provider are cleared before applying, so a stale
+/// materialized snapshot can never shadow the persona's current values or a
+/// blank-definition fallthrough to global defaults (mirrors
+/// `effective_config::resolve_linked`). Definition-less instances keep their
+/// own explicit values.
+///
 /// The pipeline: resolve the linked persona's prompt/model/provider, inject
 /// each into the record only where the record lacks its own value, let
 /// `read_config_surface` tag those injected fields `BuzzExplicit`, then re-tag
@@ -58,6 +66,22 @@ fn resolve_config_surface(
     session_cache: Option<&SessionConfigCache>,
     global: &GlobalAgentConfig,
 ) -> RuntimeConfigSurface {
+    // Linked instances are definition-authoritative (mirrors
+    // `effective_config::resolve_linked`): the record's own
+    // system_prompt/model/provider fields are, at best, a stale materialized
+    // snapshot from the last `apply_persona_snapshot` — never a legitimate
+    // live override, since `update_managed_agent` blocks writing these three
+    // fields for linked instances. Clear them before computing `had_*` below
+    // so a stale byte can never masquerade as BuzzExplicit and suppress
+    // definition/global injection. Env var overrides (set via the advanced
+    // env-vars editor) are untouched — those remain a legitimate
+    // per-instance override regardless of link status.
+    if record.persona_id.is_some() {
+        record.system_prompt = None;
+        record.model = None;
+        record.provider = None;
+    }
+
     let had_prompt =
         record.system_prompt.is_some() || record.env_vars.contains_key("BUZZ_ACP_SYSTEM_PROMPT");
     let had_model = record.model.is_some();
@@ -169,22 +193,6 @@ fn resolve_config_surface(
     }
     if inject_global_provider {
         retag_global_default(&mut surface.normalized.provider);
-    }
-
-    // Re-tag persona-snapshotted model from BuzzExplicit to PersonaDefault.
-    // Persona-created agents have record.model set at create time from the
-    // persona snapshot — had_model is true, but the model came from the persona,
-    // not an explicit user choice. Re-tag when the record model matches the
-    // persona model and no live override is active. Only applies when a persona
-    // is actually linked — non-persona agents with an explicit model keep BuzzExplicit.
-    if had_model && !model_overridden && record.persona_id.is_some() {
-        if let (Some(ref record_model), Some(ref persona_model_val)) =
-            (&record.model, &persona_model)
-        {
-            if record_model == persona_model_val {
-                retag_persona_default(&mut surface.normalized.model);
-            }
-        }
     }
 
     surface
@@ -357,7 +365,7 @@ pub async fn get_agent_config_surface(
             save_managed_agents(&app, &records)?;
         }
         for pubkey in &exited_pubkeys {
-            state.clear_session_cache(pubkey);
+            state.clear_agent_session_caches(pubkey);
         }
         records
             .into_iter()
@@ -368,7 +376,14 @@ pub async fn get_agent_config_surface(
     let personas = load_personas(&app).unwrap_or_default();
     let effective_cmd = crate::managed_agents::record_agent_command(&record, &personas);
     let runtime_meta = known_acp_runtime(&effective_cmd);
-    let session_cache = state.get_session_cache(&pubkey);
+    let runtime_key = ManagedAgentRuntimeKey::new(
+        pubkey.clone(),
+        &crate::relay::effective_agent_relay_url(
+            &record.relay_url,
+            &crate::relay::relay_ws_url_with_override(&state),
+        ),
+    )?;
+    let session_cache = state.get_session_cache(&runtime_key);
     let global = crate::managed_agents::load_global_agent_config(&app).unwrap_or_default();
 
     Ok(resolve_config_surface(
@@ -391,16 +406,35 @@ pub fn put_agent_session_config(
     app: AppHandle,
     state: State<'_, AppState>,
 ) {
-    {
+    let record_relay_url = {
         let _guard = match state.managed_agents_store_lock.lock() {
             Ok(g) => g,
             Err(_) => return,
         };
         match load_managed_agents(&app) {
-            Ok(records) if records.iter().any(|r| r.pubkey == pubkey) => {}
+            Ok(records) => match records.into_iter().find(|r| r.pubkey == pubkey) {
+                Some(record) => record.relay_url,
+                None => return,
+            },
             _ => return,
         }
-    }
+    };
+
+    // Pair identity: prefer the relay URL the harness attached to the payload
+    // (same pattern as lifecycle frames). Older harnesses don't attach one;
+    // fall back to the record's effective relay — with no attached URL the
+    // frame can only have arrived over the active workspace relay, which is
+    // exactly what effective_agent_relay_url resolves to absent a pin.
+    let relay_url = payload
+        .get("relayUrl")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            crate::relay::effective_agent_relay_url(
+                &record_relay_url,
+                &crate::relay::relay_ws_url_with_override(&state),
+            )
+        });
 
     let config_options = parse_config_options(payload.get("configOptions"));
     let available_modes = parse_modes(&config_options, payload.get("modes"));
@@ -420,7 +454,10 @@ pub fn put_agent_session_config(
         captured_at: crate::util::now_iso(),
     };
 
-    state.put_session_cache(&pubkey, cache);
+    let Ok(runtime_key) = ManagedAgentRuntimeKey::new(pubkey, &relay_url) else {
+        return;
+    };
+    state.put_session_cache(runtime_key, cache);
 }
 
 fn parse_config_options(raw: Option<&serde_json::Value>) -> Vec<AcpConfigOptionEntry> {
@@ -566,8 +603,6 @@ fn parse_models(raw: Option<&serde_json::Value>) -> (Vec<AcpModelEntry>, Option<
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
     use super::*;
     use crate::managed_agents::{BackendKind, RespondTo};
 
@@ -584,7 +619,8 @@ mod tests {
             cli_install_commands: &[],
             cli_install_commands_windows: &[],
             adapter_install_commands: &[],
-            install_instructions_url: "",
+            cli_install_instructions_url: "",
+            adapter_install_instructions_url: "",
             cli_install_hint: "",
             adapter_install_hint: "",
             skill_dir: None,
@@ -624,7 +660,7 @@ mod tests {
             parallelism: 1,
             system_prompt: None,
             model: None,
-            env_vars: BTreeMap::new(),
+            env_vars: Default::default(),
             start_on_app_launch: false,
             auto_restart_on_config_change: true,
             runtime_pid: None,
@@ -675,7 +711,7 @@ mod tests {
             is_active: true,
             source_team: None,
             source_team_persona_slug: None,
-            env_vars: BTreeMap::new(),
+            env_vars: Default::default(),
             respond_to: None,
             respond_to_allowlist: Vec::new(),
             parallelism: None,
@@ -699,11 +735,64 @@ mod tests {
         }
     }
 
-    /// A model the user set explicitly in Buzz must never be re-tagged to
-    /// `PersonaDefault`, even when the linked persona also has a model.
+    /// Definition-authoritative: a stale materialized `record.model` on a
+    /// linked instance must never outrank (or even be consulted against) the
+    /// linked persona's model. `update_managed_agent` already blocks writing
+    /// model/provider/prompt for linked instances, so a non-`None` value here
+    /// can only be leftover snapshot bytes from before a persona edit — the
+    /// panel must report the persona's current model, tagged `PersonaDefault`,
+    /// not the stale byte as `BuzzExplicit`.
     #[test]
-    fn explicit_record_model_outranks_persona_and_keeps_buzz_explicit_origin() {
+    fn linked_stale_record_model_never_outranks_persona_model() {
         let mut record = agent_record();
+        record.model = Some("stale-explicit-model".to_string());
+        let personas = vec![persona_with_model("persona-model")];
+
+        let surface = resolve_config_surface(
+            record,
+            &personas,
+            Some(goose_runtime()),
+            None,
+            &Default::default(),
+        );
+
+        let model = surface.normalized.model.as_ref().expect("model resolved");
+        assert_eq!(model.value.as_deref(), Some("persona-model"));
+        assert_eq!(model.origin, ConfigOrigin::PersonaDefault);
+    }
+
+    /// Definition-authoritative, blank-definition case: a linked instance
+    /// whose persona has no model of its own must fall through to the global
+    /// default, tagged `GlobalDefault` — mirroring
+    /// `effective_config::resolve_linked`'s `None => global` arm. A stale
+    /// materialized record model must not shadow this fallthrough either.
+    #[test]
+    fn linked_blank_definition_model_falls_through_to_global_default() {
+        let mut record = agent_record();
+        record.model = Some("stale-explicit-model".to_string());
+        let mut persona = persona_with_model("unused");
+        persona.model = None;
+        let personas = vec![persona];
+        let global = crate::managed_agents::GlobalAgentConfig {
+            model: Some("global-model".to_string()),
+            ..Default::default()
+        };
+
+        let surface =
+            resolve_config_surface(record, &personas, Some(goose_runtime()), None, &global);
+
+        let model = surface.normalized.model.as_ref().expect("model resolved");
+        assert_eq!(model.value.as_deref(), Some("global-model"));
+        assert_eq!(model.origin, ConfigOrigin::GlobalDefault);
+    }
+
+    /// A definition-less (no `persona_id`) instance's own explicit model IS
+    /// authoritative — the stale-record clearing above is scoped to linked
+    /// instances only.
+    #[test]
+    fn definition_less_explicit_record_model_keeps_buzz_explicit_origin() {
+        let mut record = agent_record();
+        record.persona_id = None;
         record.model = Some("explicit-model".to_string());
         let personas = vec![persona_with_model("persona-model")];
 

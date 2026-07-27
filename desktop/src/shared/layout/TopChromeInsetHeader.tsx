@@ -6,6 +6,8 @@ import { cn } from "@/shared/lib/cn";
 type TopChromeInsetHeaderProps = React.ComponentProps<"div"> & {
   /** Keep the header flush with its parent content row. */
   flush?: boolean;
+  /** Render without a local backdrop when a parent supplies shared chrome. */
+  transparent?: boolean;
 };
 
 /**
@@ -16,12 +18,13 @@ export function TopChromeInsetHeader({
   className,
   children,
   flush = false,
+  transparent = false,
   ...props
 }: TopChromeInsetHeaderProps) {
   return (
     <div
       className={cn(
-        topChromeInset.headerBase,
+        transparent ? "relative z-40 shrink-0" : topChromeInset.headerBase,
         !flush && topChromeInset.padding,
         !flush && topChromeInset.divider,
         className,

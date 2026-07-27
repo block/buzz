@@ -5,7 +5,10 @@ import {
   GitBranch,
   HardDrive,
   Loader2,
+  Plus,
   RefreshCw,
+  Tag,
+  Trash2,
   UploadCloud,
 } from "lucide-react";
 
@@ -13,26 +16,50 @@ import { Button } from "@/shared/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
+import { PROJECT_PANEL_ACTION_BUTTON_CLASS } from "./projectPanelStyles";
 
 /** Branch picker shared by the readme and files panel headers. */
 export function RepositoryBranchDropdown({
   branch,
   branchOptions,
+  selectedTag,
+  tagOptions = [],
   compact,
+  createBranchDisabled,
+  createBranchTitle,
+  deleteBranchDisabled,
+  deleteBranchTitle,
   onBranchChange,
+  onTagChange,
+  onCreateBranch,
+  onDeleteBranch,
 }: {
   branch: string;
   branchOptions: string[];
+  selectedTag?: string | null;
+  tagOptions?: Array<{ name: string; commit: string }>;
   /** Smaller trigger for inline headers. */
   compact?: boolean;
+  createBranchDisabled?: boolean;
+  createBranchTitle?: string;
+  deleteBranchDisabled?: boolean;
+  deleteBranchTitle?: string;
   onBranchChange: (branch: string) => void;
+  onTagChange?: (tag: string) => void;
+  onCreateBranch?: () => void;
+  onDeleteBranch?: () => void;
 }) {
   const selectableBranches =
     branchOptions.length > 0 ? branchOptions : [branch];
+  const selectedValue = selectedTag ? `tag:${selectedTag}` : `branch:${branch}`;
+  const RefIcon = selectedTag ? Tag : GitBranch;
   if (!branch) {
     return (
       <span className="truncate font-mono text-sm font-semibold text-foreground">
@@ -46,26 +73,90 @@ export function RepositoryBranchDropdown({
         <Button
           className={
             compact
-              ? "h-6 max-w-full gap-1 px-1.5 font-mono text-xs font-medium"
-              : "h-6 max-w-full gap-1.5 px-2 font-mono text-sm font-semibold"
+              ? "h-7 max-w-full gap-1.5 rounded-md px-3 font-mono text-sm font-medium hover:border-input"
+              : "h-6 max-w-full gap-1.5 px-2 font-mono text-sm font-semibold hover:border-input"
           }
           size="sm"
           type="button"
-          variant="ghost"
+          variant="outline"
         >
-          <GitBranch className="h-3 w-3 shrink-0 text-muted-foreground" />
-          <span className="truncate">{branch}</span>
+          <RefIcon className="h-4 w-4 shrink-0 text-muted-foreground" />
+          <span className="truncate">{selectedTag ?? branch}</span>
           <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="min-w-56">
-        <DropdownMenuRadioGroup onValueChange={onBranchChange} value={branch}>
+        <DropdownMenuRadioGroup
+          onValueChange={(value) => {
+            if (value.startsWith("tag:")) {
+              onTagChange?.(value.slice("tag:".length));
+            } else {
+              onBranchChange(value.slice("branch:".length));
+            }
+          }}
+          value={selectedValue}
+        >
+          <DropdownMenuLabel>Branches</DropdownMenuLabel>
           {selectableBranches.map((option) => (
-            <DropdownMenuRadioItem key={option} value={option}>
+            <DropdownMenuRadioItem key={option} value={`branch:${option}`}>
+              <GitBranch className="mr-1.5 h-3.5 w-3.5 text-muted-foreground" />
               <span className="truncate font-mono">{option}</span>
             </DropdownMenuRadioItem>
           ))}
+          {tagOptions.length > 0 ? (
+            <>
+              <DropdownMenuSeparator />
+              <DropdownMenuLabel>Tags</DropdownMenuLabel>
+              {tagOptions.map((option) => (
+                <DropdownMenuRadioItem
+                  key={option.name}
+                  value={`tag:${option.name}`}
+                >
+                  <Tag className="mr-1.5 h-3.5 w-3.5 text-muted-foreground" />
+                  <span className="truncate font-mono">{option.name}</span>
+                  <span className="ml-auto font-mono text-xs text-muted-foreground">
+                    {option.commit.slice(0, 7)}
+                  </span>
+                </DropdownMenuRadioItem>
+              ))}
+            </>
+          ) : null}
         </DropdownMenuRadioGroup>
+        {!selectedTag && (onCreateBranch || onDeleteBranch) ? (
+          <>
+            <DropdownMenuSeparator />
+            {onCreateBranch ? (
+              <>
+                <DropdownMenuItem
+                  data-testid="project-create-branch"
+                  disabled={createBranchDisabled}
+                  onSelect={onCreateBranch}
+                  title={createBranchTitle}
+                >
+                  <Plus className="h-4 w-4" />
+                  Create branch…
+                </DropdownMenuItem>
+                {createBranchDisabled && createBranchTitle ? (
+                  <p className="max-w-56 px-2 py-1 text-xs text-muted-foreground">
+                    {createBranchTitle}
+                  </p>
+                ) : null}
+              </>
+            ) : null}
+            {onDeleteBranch ? (
+              <DropdownMenuItem
+                className="text-destructive focus:text-destructive"
+                data-testid="project-delete-branch"
+                disabled={deleteBranchDisabled}
+                onSelect={onDeleteBranch}
+                title={deleteBranchTitle}
+              >
+                <Trash2 className="h-4 w-4" />
+                Delete {branch}
+              </DropdownMenuItem>
+            ) : null}
+          </>
+        ) : null}
       </DropdownMenuContent>
     </DropdownMenu>
   );
@@ -75,12 +166,24 @@ export function RepositoryBranchDropdown({
 export type RepoSourceHeaderControls = {
   branch: string;
   branchOptions: string[];
+  selectedTag?: string | null;
+  tagOptions?: Array<{ name: string; commit: string }>;
   onBranchChange: (branch: string) => void;
+  onTagChange?: (tag: string) => void;
+  onCreateBranch?: () => void;
+  createBranchDisabled?: boolean;
+  createBranchTitle?: string;
+  onDeleteBranch?: () => void;
+  deleteBranchDisabled?: boolean;
+  deleteBranchTitle?: string;
   source: "remote" | "local";
   onSourceChange: (source: "remote" | "local") => void;
   localDisabled: boolean;
   localLabel: string;
   remoteLabel: string;
+  /** Clones the repository when no local checkout is available. */
+  onCloneLocal?: () => void;
+  clonePending?: boolean;
   /** Push of local commits, available when the local checkout is ahead. */
   canPush?: boolean;
   onPush?: () => void;
@@ -109,17 +212,18 @@ export function RepoSourceDropdown({
   controls: RepoSourceHeaderControls;
 }) {
   const isLocal = controls.source === "local";
+  const cloneLocal = controls.localDisabled && controls.onCloneLocal;
   const SourceIcon = isLocal ? HardDrive : Cloud;
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <Button
-          className="h-6 max-w-full shrink-0 gap-1 px-1.5 text-xs font-medium"
+          className="h-7 max-w-full shrink-0 gap-1.5 rounded-md px-3 text-sm font-medium hover:border-input"
           size="sm"
           type="button"
-          variant="ghost"
+          variant="outline"
         >
-          <SourceIcon className="h-3 w-3 shrink-0 text-muted-foreground" />
+          <SourceIcon className="h-4 w-4 shrink-0 text-muted-foreground" />
           <span className="truncate">
             {isLocal ? controls.localLabel : controls.remoteLabel}
           </span>
@@ -137,14 +241,33 @@ export function RepoSourceDropdown({
             <Cloud className="mr-1.5 h-3.5 w-3.5 text-muted-foreground" />
             {controls.remoteLabel}
           </DropdownMenuRadioItem>
-          <DropdownMenuRadioItem
-            disabled={controls.localDisabled}
-            value="local"
-          >
-            <HardDrive className="mr-1.5 h-3.5 w-3.5 text-muted-foreground" />
-            {controls.localLabel}
-          </DropdownMenuRadioItem>
+          {!cloneLocal ? (
+            <DropdownMenuRadioItem
+              disabled={controls.localDisabled}
+              value="local"
+            >
+              <HardDrive className="mr-1.5 h-3.5 w-3.5 text-muted-foreground" />
+              {controls.localLabel}
+            </DropdownMenuRadioItem>
+          ) : null}
         </DropdownMenuRadioGroup>
+        {cloneLocal ? (
+          <DropdownMenuItem
+            className="group"
+            disabled={controls.clonePending}
+            onSelect={controls.onCloneLocal}
+          >
+            {controls.clonePending ? (
+              <Loader2 className="animate-spin text-muted-foreground" />
+            ) : (
+              <DownloadCloud className="text-muted-foreground" />
+            )}
+            <span className="text-muted-foreground">{controls.localLabel}</span>
+            <span className="ml-auto rounded-md border border-input/60 bg-background px-2 py-0.5 text-xs font-medium text-foreground shadow-xs group-focus:border-input">
+              {controls.clonePending ? "Cloning…" : "Clone"}
+            </span>
+          </DropdownMenuItem>
+        ) : null}
       </DropdownMenuContent>
     </DropdownMenu>
   );
@@ -164,7 +287,7 @@ export function RepoSyncActionButton({
     const count = controls.behindCount ?? 0;
     return (
       <Button
-        className="h-6 shrink-0 gap-1 rounded-full px-2.5 text-xs"
+        className={PROJECT_PANEL_ACTION_BUTTON_CLASS}
         disabled={controls.pullDisabled}
         onClick={controls.onPull}
         size="sm"
@@ -172,9 +295,9 @@ export function RepoSyncActionButton({
         variant="ghost"
       >
         {controls.pullPending ? (
-          <Loader2 className="h-3 w-3 animate-spin" />
+          <Loader2 className="h-4 w-4 animate-spin" />
         ) : (
-          <DownloadCloud className="h-3 w-3" />
+          <DownloadCloud className="h-4 w-4" />
         )}
         Pull{count > 0 ? ` ${count}` : ""}
       </Button>
@@ -182,10 +305,9 @@ export function RepoSyncActionButton({
   }
 
   if (push) {
-    const count = controls.aheadCount ?? 0;
     return (
       <Button
-        className="h-6 shrink-0 gap-1 rounded-full px-2.5 text-xs"
+        className={PROJECT_PANEL_ACTION_BUTTON_CLASS}
         disabled={controls.pushDisabled}
         onClick={controls.onPush}
         size="sm"
@@ -193,11 +315,11 @@ export function RepoSyncActionButton({
         variant="ghost"
       >
         {controls.pushPending ? (
-          <Loader2 className="h-3 w-3 animate-spin" />
+          <Loader2 className="h-4 w-4 animate-spin" />
         ) : (
-          <UploadCloud className="h-3 w-3" />
+          <UploadCloud className="h-4 w-4" />
         )}
-        Push{count > 0 ? ` ${count}` : ""}
+        Push
       </Button>
     );
   }
@@ -205,7 +327,7 @@ export function RepoSyncActionButton({
   if (!controls.onFetch) return null;
   return (
     <Button
-      className="h-6 shrink-0 gap-1 rounded-full px-2.5 text-xs"
+      className={PROJECT_PANEL_ACTION_BUTTON_CLASS}
       disabled={controls.fetchPending}
       onClick={controls.onFetch}
       size="sm"
@@ -213,9 +335,9 @@ export function RepoSyncActionButton({
       variant="ghost"
     >
       {controls.fetchPending ? (
-        <Loader2 className="h-3 w-3 animate-spin" />
+        <Loader2 className="h-4 w-4 animate-spin" />
       ) : (
-        <RefreshCw className="h-3 w-3" />
+        <RefreshCw className="h-4 w-4" />
       )}
       Fetch
     </Button>

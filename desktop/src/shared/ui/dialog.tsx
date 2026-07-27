@@ -45,6 +45,8 @@ type DialogContentProps = React.ComponentPropsWithoutRef<
 > & {
   /** Extra classes for the built-in close button (e.g. a themed icon color). */
   closeButtonClassName?: string;
+  /** Extra classes for this dialog's backdrop. */
+  overlayClassName?: string;
   overlayVariant?: "default" | "transparent";
   showCloseButton?: boolean;
   /**
@@ -66,6 +68,7 @@ const DialogContent = React.forwardRef<
       className,
       children,
       closeButtonClassName,
+      overlayClassName,
       overlayVariant = "default",
       showCloseButton = true,
       surface = "default",
@@ -76,11 +79,12 @@ const DialogContent = React.forwardRef<
     <DialogPortal>
       <DialogOverlay
         data-testid="dialog-overlay"
-        className={
+        className={cn(
           overlayVariant === "transparent"
             ? "bg-transparent backdrop-blur-none"
-            : undefined
-        }
+            : undefined,
+          overlayClassName,
+        )}
       />
       <div
         className={cn(

@@ -1,57 +1,4 @@
 @layer components {
-  [data-testid="app-sidebar"] [data-testid="sidebar-pinned-header"],
-  [data-testid="app-sidebar"] [data-sidebar="footer"] {
-    --buzz-sidebar-edge-fade-size: 0.5rem;
-    --buzz-sidebar-edge-fade-surface: hsl(var(--sidebar-background));
-    --buzz-sidebar-edge-fade-transparent: hsl(var(--sidebar-background) / 0);
-
-    background: var(--buzz-sidebar-edge-fade-surface);
-    box-shadow: none;
-    isolation: isolate;
-    position: relative;
-    z-index: 30;
-  }
-
-  [data-testid="app-sidebar"] [data-testid="sidebar-pinned-header"]::before,
-  [data-testid="app-sidebar"] [data-sidebar="footer"]::before {
-    box-shadow: none;
-    content: "";
-    filter: none;
-    pointer-events: none;
-    position: absolute;
-    z-index: 5;
-  }
-
-  [data-testid="app-sidebar"] [data-testid="sidebar-pinned-header"] > *,
-  [data-testid="app-sidebar"] [data-sidebar="footer"] > * {
-    position: relative;
-    z-index: 10;
-  }
-
-  [data-testid="app-sidebar"] [data-testid="sidebar-pinned-header"]::before {
-    background: linear-gradient(
-      to bottom,
-      var(--buzz-sidebar-edge-fade-surface) 0%,
-      var(--buzz-sidebar-edge-fade-transparent) 100%
-    );
-    bottom: calc(var(--buzz-sidebar-edge-fade-size) * -1);
-    height: var(--buzz-sidebar-edge-fade-size);
-    left: 0;
-    right: 0;
-  }
-
-  [data-testid="app-sidebar"] [data-sidebar="footer"]::before {
-    background: linear-gradient(
-      to top,
-      var(--buzz-sidebar-edge-fade-surface) 0%,
-      var(--buzz-sidebar-edge-fade-transparent) 100%
-    );
-    height: var(--buzz-sidebar-edge-fade-size);
-    left: 0;
-    right: 0;
-    top: calc(var(--buzz-sidebar-edge-fade-size) * -1);
-  }
-
   .buzz-side-panel-enter {
     animation: buzz-side-panel-enter 260ms cubic-bezier(0.32, 0.72, 0, 1) both;
     transform-origin: right center;
@@ -285,6 +232,13 @@
     --buzz-onboarding-emoji-picker-background: 245, 245, 245;
     --buzz-onboarding-emoji-picker-color: 23, 23, 23;
     --buzz-onboarding-emoji-picker-input: 255, 255, 255;
+    --buzz-onboarding-avatar-dialog-bg: 255 255 255;
+    --buzz-onboarding-avatar-accent-bg: 240 240 205;
+    --buzz-onboarding-avatar-accent-fg: 113 113 6;
+    --buzz-onboarding-avatar-action-bg: 23 23 23;
+    --buzz-onboarding-avatar-action-fg: 240 240 205;
+    --buzz-onboarding-avatar-control-fg: 113 113 6;
+    --buzz-onboarding-avatar-dialog-shadow: 0 0 0;
   }
 
   .buzz-onboarding-key-text {
@@ -310,9 +264,20 @@
     --buzz-onboarding-emoji-picker-background: 38, 38, 38;
     --buzz-onboarding-emoji-picker-color: 250, 250, 250;
     --buzz-onboarding-emoji-picker-input: 10, 10, 10;
+    --buzz-onboarding-avatar-dialog-bg: 24 24 20;
+    --buzz-onboarding-avatar-accent-bg: 211 211 163;
+    --buzz-onboarding-avatar-accent-fg: 24 24 20;
+    --buzz-onboarding-avatar-action-bg: 113 113 6;
+    --buzz-onboarding-avatar-action-fg: 240 240 205;
+    --buzz-onboarding-avatar-control-fg: 224 224 176;
+    --buzz-onboarding-avatar-dialog-shadow: 0 0 0;
   }
 
-  .buzz-onboarding-neutral-theme[data-system-color-scheme="light"] {
+  .buzz-onboarding-neutral-theme[data-system-color-scheme="light"],
+  .dark
+    .buzz-onboarding-neutral-theme[data-system-color-scheme="light"]:not(
+      .buzz-startup-shell
+    ) {
     --background: 0 0% 100%;
     --foreground: 0 0% 9%;
     --primary: 0 0% 9%;
@@ -329,6 +294,13 @@
     --buzz-onboarding-emoji-picker-background: 245, 245, 245;
     --buzz-onboarding-emoji-picker-color: 23, 23, 23;
     --buzz-onboarding-emoji-picker-input: 255, 255, 255;
+    --buzz-onboarding-avatar-dialog-bg: 255 255 255;
+    --buzz-onboarding-avatar-accent-bg: 240 240 205;
+    --buzz-onboarding-avatar-accent-fg: 113 113 6;
+    --buzz-onboarding-avatar-action-bg: 23 23 23;
+    --buzz-onboarding-avatar-action-fg: 240 240 205;
+    --buzz-onboarding-avatar-control-fg: 113 113 6;
+    --buzz-onboarding-avatar-dialog-shadow: 0 0 0;
   }
 
   .buzz-onboarding-neutral-theme[data-system-color-scheme="dark"]:not(
@@ -350,6 +322,13 @@
     --buzz-onboarding-emoji-picker-background: 38, 38, 38;
     --buzz-onboarding-emoji-picker-color: 250, 250, 250;
     --buzz-onboarding-emoji-picker-input: 10, 10, 10;
+    --buzz-onboarding-avatar-dialog-bg: 24 24 20;
+    --buzz-onboarding-avatar-accent-bg: 211 211 163;
+    --buzz-onboarding-avatar-accent-fg: 24 24 20;
+    --buzz-onboarding-avatar-action-bg: 113 113 6;
+    --buzz-onboarding-avatar-action-fg: 240 240 205;
+    --buzz-onboarding-avatar-control-fg: 224 224 176;
+    --buzz-onboarding-avatar-dialog-shadow: 0 0 0;
   }
 
   /* The key-import card is viewport-centered on ordinary windows, independent

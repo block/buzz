@@ -319,6 +319,10 @@ function AgentDeleteConfirmDialog({
           <li>Removes the local management record and saved agent key</li>
           <li>Removes the agent from every channel it belongs to</li>
           <li>
+            Archives the agent&apos;s identity on the relay so it no longer
+            appears in member lists or mention suggestions
+          </li>
+          <li>
             {isProviderAgent
               ? "Requests remote deletion; if it is online, Buzz first sends a shutdown command when possible. If the deployment cannot be reached through a channel, the remote process may keep running without local management."
               : "Stops any local agent process before deleting the record"}

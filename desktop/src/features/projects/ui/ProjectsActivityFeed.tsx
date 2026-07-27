@@ -1,15 +1,4 @@
 import {
-  Check,
-  CircleDot,
-  FolderGit2,
-  GitCommitHorizontal,
-  GitPullRequest,
-  MessageSquare,
-  UserPlus,
-} from "lucide-react";
-import type { ComponentType } from "react";
-
-import {
   resolveUserLabel,
   type UserProfileLookup,
 } from "@/features/profile/lib/identity";
@@ -27,19 +16,20 @@ import {
   markdownToPlainText,
   relativeTime,
 } from "@/features/projects/lib/projectsViewHelpers";
+import {
+  projectPullRequestCommentTimelineKind,
+  projectPullRequestEffectiveReviewDecision,
+} from "@/features/projects/projectPullRequests.mjs";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
+import {
+  PROJECT_EVENT_VISUALS,
+  type ProjectEventKind,
+} from "./ProjectEventTypeIcon";
 
-type ActivityKind =
-  | "repository"
-  | "commit"
-  | "pull-request"
-  | "issue"
-  | "comment"
-  | "approval"
-  | "review-request";
+type ActivityKind = ProjectEventKind;
 
 type ActivityTarget =
   | { type: "project"; project: Project }
@@ -82,66 +72,6 @@ type ProjectsActivityFeedProps = {
 };
 
 const ACTIVITY_LIMIT = 30;
-
-const KIND_VISUALS: Record<
-  ActivityKind,
-  {
-    icon: ComponentType<{ className?: string }>;
-    iconClassName: string;
-    badgeClassName: string;
-    detailClassName: string;
-  }
-> = {
-  repository: {
-    icon: FolderGit2,
-    iconClassName: "text-primary",
-    badgeClassName: "bg-primary/10 text-primary",
-    detailClassName: "border-primary/30 text-primary",
-  },
-  commit: {
-    icon: GitCommitHorizontal,
-    iconClassName: "text-primary",
-    badgeClassName: "bg-primary/10 text-primary",
-    detailClassName: "border-primary/30 text-primary",
-  },
-  "pull-request": {
-    icon: GitPullRequest,
-    iconClassName: "text-green-600 dark:text-green-500",
-    badgeClassName:
-      "bg-green-600/10 text-green-700 dark:bg-green-500/10 dark:text-green-400",
-    detailClassName:
-      "border-green-600/30 text-green-700 dark:border-green-500/30 dark:text-green-400",
-  },
-  issue: {
-    icon: CircleDot,
-    iconClassName: "text-orange-500",
-    badgeClassName: "bg-orange-500/10 text-orange-700 dark:text-orange-300",
-    detailClassName:
-      "border-orange-500/30 text-orange-700 dark:text-orange-300",
-  },
-  comment: {
-    icon: MessageSquare,
-    iconClassName: "text-muted-foreground",
-    badgeClassName: "bg-muted text-muted-foreground",
-    detailClassName: "border-border/60 text-muted-foreground",
-  },
-  approval: {
-    icon: Check,
-    iconClassName: "text-green-600 dark:text-green-500",
-    badgeClassName:
-      "bg-green-600/10 text-green-700 dark:bg-green-500/10 dark:text-green-400",
-    detailClassName:
-      "border-green-600/30 text-green-700 dark:border-green-500/30 dark:text-green-400",
-  },
-  "review-request": {
-    icon: UserPlus,
-    iconClassName: "text-blue-600 dark:text-blue-400",
-    badgeClassName:
-      "bg-blue-600/10 text-blue-700 dark:bg-blue-500/10 dark:text-blue-300",
-    detailClassName:
-      "border-blue-600/30 text-blue-700 dark:border-blue-500/30 dark:text-blue-300",
-  },
-};
 
 function contentPreview(content: string) {
   return markdownToPlainText(content).replace(/\s+/g, " ").trim().slice(0, 280);
@@ -228,25 +158,41 @@ function buildActivityItems({
       });
     }
     for (const comment of pullRequest.comments) {
-      const kind = comment.isApproval
-        ? "approval"
-        : comment.isReviewRequest
-          ? "review-request"
-          : "comment";
+      const reviewDecision = projectPullRequestEffectiveReviewDecision(
+        pullRequest,
+        comment,
+      );
+      const timelineKind = projectPullRequestCommentTimelineKind(comment);
+      const kind =
+        reviewDecision === "approved"
+          ? "approval"
+          : reviewDecision === "changes-requested"
+            ? "changes-requested"
+            : timelineKind === "review-request"
+              ? "review-request"
+              : "comment";
       items.push({
         id: `pr-comment:${comment.id}`,
         kind,
         createdAt: comment.createdAt,
         actorPubkey: comment.author,
         actorName: null,
-        action: comment.isApproval
-          ? "approved a pull request in"
-          : comment.isReviewRequest
-            ? "requested review in"
-            : "commented on a pull request in",
+        action:
+          kind === "approval"
+            ? "approved a pull request in"
+            : kind === "changes-requested"
+              ? "requested changes to a pull request in"
+              : kind === "review-request"
+                ? "requested review in"
+                : "commented on a pull request in",
         title: pullRequest.title,
         body: contentPreview(comment.content),
-        detail: null,
+        detail:
+          kind === "approval"
+            ? "Approved"
+            : kind === "changes-requested"
+              ? "Changes requested"
+              : null,
         target,
       });
     }
@@ -300,7 +246,7 @@ function ActivityCard({
   onOpenProject: () => void;
   profiles?: UserProfileLookup;
 }) {
-  const visual = KIND_VISUALS[item.kind];
+  const visual = PROJECT_EVENT_VISUALS[item.kind];
   const profile = item.actorPubkey
     ? profiles?.[normalizePubkey(item.actorPubkey)]
     : undefined;
@@ -401,7 +347,7 @@ function ActivityCard({
             ) : null}
           </div>
           <div className={compact ? "mt-2" : "mt-3"}>
-            <p className="min-w-0 truncate text-sm font-semibold text-foreground">
+            <p className="min-w-0 truncate text-sm font-semibold leading-5 text-foreground">
               {item.title}
             </p>
             {item.body ? (
@@ -458,32 +404,9 @@ export function ProjectsActivityFeed(props: ProjectsActivityFeedProps) {
     <div
       className={cn("relative", props.compact ? "space-y-2.5" : "space-y-3")}
     >
-      <div
-        aria-hidden="true"
-        className="absolute bottom-2 left-[7px] top-2 w-px bg-border/45"
-      />
       {items.map((item) => {
-        const visual = KIND_VISUALS[item.kind];
-        const Icon = visual.icon;
         return (
-          <div className="relative pl-7" key={item.id}>
-            <span
-              aria-hidden="true"
-              className={cn(
-                "absolute left-2 h-px w-5 bg-border/60",
-                props.compact ? "top-[1.375rem]" : "top-[2.125rem]",
-              )}
-            />
-            <span
-              aria-hidden="true"
-              className={cn(
-                "absolute left-0 z-10 flex h-4 w-4 items-center justify-center rounded-full ring-1 ring-border/60",
-                props.compact ? "top-3.5" : "top-[1.625rem]",
-                visual.badgeClassName,
-              )}
-            >
-              <Icon className={cn("h-3 w-3", visual.iconClassName)} />
-            </span>
+          <div className="relative" key={item.id}>
             <ActivityCard
               compact={props.compact === true}
               item={item}

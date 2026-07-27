@@ -8,6 +8,7 @@ import {
   pickWelcomeGuideAgent,
   pickWelcomeGuideAgentForRelay,
   pickWelcomeTeamStarterAgentForRelay,
+  welcomeStarterRuntimeUpdate,
   WELCOME_GUIDE_AGENT_NAME,
   WELCOME_GUIDE_PERSONA_ID,
   WELCOME_TEAM_ID,
@@ -28,6 +29,7 @@ function makeAgent(overrides = {}) {
     relayUrl: RELAY_A,
     acpCommand: "buzz-acp",
     agentCommand: "buzz-agent",
+    agentCommandOverride: null,
     agentArgs: [],
     mcpCommand: "buzz-dev-mcp",
     turnTimeoutSeconds: 120,
@@ -36,6 +38,7 @@ function makeAgent(overrides = {}) {
     parallelism: 1,
     systemPrompt: null,
     model: null,
+    provider: null,
     envVars: {},
     status: "stopped",
     pid: null,
@@ -203,6 +206,87 @@ test("all Welcome starters use the onboarding runtime preference", async () => {
     assert.equal(input.spawnAfterCreate, false);
     assert.equal(input.startOnAppLaunch, false);
   }
+});
+
+test("existing Welcome starter rematerializes runtime-specific fields atomically", () => {
+  const existing = makeAgent({
+    pubkey: PUB_A,
+    personaId: WELCOME_GUIDE_PERSONA_ID,
+    agentCommand: "claude-agent-acp",
+    agentCommandOverride: "claude-agent-acp",
+    agentArgs: ["--old"],
+    mcpCommand: "",
+    model: "claude-sonnet",
+    provider: "anthropic",
+  });
+
+  assert.deepEqual(
+    welcomeStarterRuntimeUpdate(existing, {
+      name: "Fizz",
+      agentCommand: "codex-acp",
+      agentArgs: ["--new"],
+      mcpCommand: "buzz-dev-mcp",
+      model: "gpt-5.6-sol",
+      provider: null,
+    }),
+    {
+      pubkey: PUB_A,
+      agentCommand: "codex-acp",
+      harnessOverride: true,
+      agentArgs: ["--new"],
+      mcpCommand: "buzz-dev-mcp",
+      model: "gpt-5.6-sol",
+      provider: null,
+    },
+  );
+});
+
+test("existing Welcome starter clears stale model and provider for Claude", () => {
+  const existing = makeAgent({
+    personaId: WELCOME_GUIDE_PERSONA_ID,
+    agentCommand: "codex-acp",
+    agentArgs: [],
+    model: "gpt-5.6-sol",
+    provider: "openai",
+  });
+
+  assert.deepEqual(
+    welcomeStarterRuntimeUpdate(existing, {
+      name: "Fizz",
+      agentCommand: "claude-agent-acp",
+      agentArgs: [],
+      mcpCommand: "",
+    }),
+    {
+      pubkey: PUB_A,
+      agentCommand: "claude-agent-acp",
+      harnessOverride: true,
+      agentArgs: [],
+      mcpCommand: "",
+      model: null,
+      provider: null,
+    },
+  );
+});
+
+test("existing Welcome starter needs no update when runtime already matches", () => {
+  const existing = makeAgent({
+    personaId: WELCOME_GUIDE_PERSONA_ID,
+    agentCommand: "codex-acp",
+    agentArgs: ["--same"],
+  });
+
+  assert.equal(
+    welcomeStarterRuntimeUpdate(existing, {
+      name: "Fizz",
+      agentCommand: "codex-acp",
+      agentArgs: ["--same"],
+      mcpCommand: "buzz-dev-mcp",
+      model: null,
+      provider: null,
+    }),
+    null,
+  );
 });
 
 test("welcome team starter definitions and role identities are stable", () => {

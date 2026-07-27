@@ -54,7 +54,12 @@ async function makeGlobalDefaultsDirty(
   page: import("@playwright/test").Page,
   effort = "high",
 ) {
-  await page.locator("#global-agent-thinking-effort").selectOption(effort);
+  // The defaults editor renders the app's styled dropdown (not a native
+  // <select>): open the trigger, then click the option row.
+  await page.getByTestId("global-agent-thinking-effort-select").click();
+  await page
+    .getByTestId(`global-agent-thinking-effort-select-option-${effort}`)
+    .click();
 }
 
 test.describe("agent lifecycle feedback screenshots", () => {
@@ -118,8 +123,11 @@ test.describe("agent lifecycle feedback screenshots", () => {
     const dialog = page.getByRole("alertdialog");
     await expect(dialog).toBeVisible({ timeout: 5_000 });
 
-    // Core assertion: the cascade copy shows the correct instance count (plural).
-    await expect(dialog).toContainText("Also deletes 2 agent instances.");
+    // Core assertion: the cascade copy shows the correct instance count
+    // (plural) and discloses the relay-side archival (PR #2135).
+    await expect(dialog).toContainText(
+      "Also deletes 2 agent instances and archives their identities on the relay",
+    );
 
     await waitForAnimations(page);
 
@@ -136,7 +144,7 @@ test.describe("agent lifecycle feedback screenshots", () => {
       globalAgentConfig: {
         provider: "anthropic",
         model: "claude-opus-4-5",
-        env_vars: {},
+        env_vars: { ANTHROPIC_API_KEY: "sk-ant-test" },
       },
       globalConfigRestartedCount: 2,
     });
@@ -173,7 +181,7 @@ test.describe("agent lifecycle feedback screenshots", () => {
       globalAgentConfig: {
         provider: "anthropic",
         model: "claude-opus-4-5",
-        env_vars: {},
+        env_vars: { ANTHROPIC_API_KEY: "sk-ant-test" },
       },
     });
 
@@ -243,8 +251,10 @@ test.describe("agent lifecycle feedback screenshots", () => {
     const dialog = page.getByRole("alertdialog");
     await expect(dialog).toBeVisible({ timeout: 5_000 });
 
-    // Singular copy: "Also deletes 1 agent instance." (not "instances").
-    await expect(dialog).toContainText("Also deletes 1 agent instance.");
+    // Singular copy ("instance", "its identity") plus the archival disclosure.
+    await expect(dialog).toContainText(
+      "Also deletes 1 agent instance and archives its identity on the relay",
+    );
 
     await waitForAnimations(page);
     await dialog.screenshot({
@@ -291,7 +301,7 @@ test.describe("agent lifecycle feedback screenshots", () => {
       globalAgentConfig: {
         provider: "anthropic",
         model: "claude-opus-4-5",
-        env_vars: {},
+        env_vars: { ANTHROPIC_API_KEY: "sk-ant-test" },
       },
       globalConfigRestartedCount: 1,
     });
@@ -319,7 +329,7 @@ test.describe("agent lifecycle feedback screenshots", () => {
       globalAgentConfig: {
         provider: "anthropic",
         model: "claude-opus-4-5",
-        env_vars: {},
+        env_vars: { ANTHROPIC_API_KEY: "sk-ant-test" },
       },
       globalConfigFailedRestartCount: 1,
     });
@@ -356,7 +366,7 @@ test.describe("agent lifecycle feedback screenshots", () => {
       globalAgentConfig: {
         provider: "anthropic",
         model: "claude-opus-4-5",
-        env_vars: {},
+        env_vars: { ANTHROPIC_API_KEY: "sk-ant-test" },
       },
       globalConfigSaveDelayMs: 2_000,
     });
@@ -364,7 +374,7 @@ test.describe("agent lifecycle feedback screenshots", () => {
     await openAiDefaultsSettings(page);
 
     const card = page.getByTestId("settings-global-agent-config");
-    const effort = page.locator("#global-agent-thinking-effort");
+    const effort = page.getByTestId("global-agent-thinking-effort-select");
     const saveButton = page.getByRole("button", { name: "Save defaults" });
 
     await makeGlobalDefaultsDirty(page, "high");
@@ -372,14 +382,14 @@ test.describe("agent lifecycle feedback screenshots", () => {
     await saveButton.click();
 
     // While the save is held open by the mock delay, make a newer edit.
-    await effort.selectOption("low");
+    await makeGlobalDefaultsDirty(page, "low");
 
     // The save resolves with the OLD submitted config; the newer edit must
     // survive and the card must stay dirty so it can be saved again.
     await expect(card.getByText("Saved.", { exact: true })).toBeVisible({
       timeout: 10_000,
     });
-    await expect(effort).toHaveValue("low");
+    await expect(effort).toHaveAttribute("data-value", "low");
     await expect(saveButton).toBeEnabled();
   });
 });

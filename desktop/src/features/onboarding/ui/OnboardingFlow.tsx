@@ -7,6 +7,7 @@ import {
 } from "@/features/profile/hooks";
 import { relayClient } from "@/shared/api/relayClient";
 import { getMyRelayMembershipLookup } from "@/shared/api/relayMembers";
+import { isRelayUnreachableError } from "@/shared/lib/relayError";
 import {
   getIdentity,
   importIdentity,
@@ -57,6 +58,10 @@ async function checkMembershipStatus(): Promise<MembershipCheckResult> {
     return "ok";
   } catch (error) {
     if (isRelayMembershipDeniedError(error)) return "denied";
+    // Native Tauri commands report connectivity failures with the stable
+    // "relay unreachable:" prefix (see desktop/src-tauri/src/relay.rs), which
+    // the legacy browser-fetch substrings below do not match.
+    if (isRelayUnreachableError(error)) return "unreachable";
     if (error instanceof Error) {
       const msg = error.message.toLowerCase();
       if (

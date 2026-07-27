@@ -145,6 +145,47 @@ test("saveCoalescer_isSaving_transitions_true_then_false", async () => {
   assert.deepEqual(states, [true, false]);
 });
 
+test("saveCoalescer_flush_waits_for_the_latest_pending_save", async () => {
+  const d = deferred();
+  const persisted = [];
+
+  const coalescer = createSaveCoalescer(
+    async (v) => {
+      if (v.n === 0) await d.promise;
+      persisted.push(v.n);
+      return v;
+    },
+    () => {},
+    () => {},
+  );
+
+  coalescer.enqueue({ n: 0 });
+  coalescer.enqueue({ n: 1 });
+  let flushed = false;
+  const flush = coalescer.flush().then(() => {
+    flushed = true;
+  });
+  await tick();
+  assert.equal(flushed, false);
+
+  d.resolve();
+  await flush;
+  assert.deepEqual(persisted, [0, 1]);
+});
+
+test("saveCoalescer_flush_rejects_when_the_final_save_fails", async () => {
+  const coalescer = createSaveCoalescer(
+    async () => {
+      throw new Error("save failed");
+    },
+    () => {},
+    () => {},
+  );
+
+  coalescer.enqueue({ n: 0 });
+  await assert.rejects(coalescer.flush(), /save failed/);
+});
+
 test("saveCoalescer_cancel_prevents_onSaved_and_onSaving_false", async () => {
   const d = deferred();
   const states = [];

@@ -199,6 +199,10 @@
       "additionalProperties": false,
       "properties": {
         "maxPackBytes": { "type": "integer", "minimum": 1 },
+        "packCachePath": { "type": "string", "minLength": 1 },
+        "packCacheMaxBytes": { "type": "integer", "minimum": 0 },
+        "packCacheMaxConcurrentPopulations": { "type": "integer", "minimum": 1 },
+        "packCacheVolumeSize": { "type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?(E|P|T|G|M|K|Ei|Pi|Ti|Gi|Mi|Ki)?$" },
         "maxReposPerPubkey": { "type": "integer", "minimum": 1 },
         "maxConcurrentOps": { "type": "integer", "minimum": 1 }
       }

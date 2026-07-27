@@ -6,7 +6,7 @@ import {
   getPersonaProviderOptions,
   requiredCredentialEnvKeys,
   isMissingRequiredDropdownField,
-} from "./personaDialogPickers.tsx";
+} from "./agentConfigOptions.tsx";
 import {
   computeEditAgentFormValidity,
   hasMissingRequiredEnvKey,
@@ -142,7 +142,7 @@ test("editAgent_providerOptions_includesCurrentIfCustom", () => {
 
 test("editAgent_requiredDropdownField_onlyMarksMissingKnownField", async () => {
   const { isMissingRequiredDropdownField } = await import(
-    "./personaDialogPickers.tsx"
+    "./agentConfigOptions.tsx"
   );
 
   assert.equal(
@@ -539,86 +539,6 @@ test("editAgent_resolveAgentCommandUpdate_inheritSentinelOnlyWhenPinToClear", ()
     }),
     undefined,
     "name-only edit on an inheriting agent must leave the command alone",
-  );
-});
-
-test("editAgent_customCommandSelected_autoExpandsAdvancedSection", () => {
-  // Selecting "Custom command" must reveal the Advanced command input, which is
-  // otherwise collapsed. Without this the user can Save without ever seeing the
-  // field, leaving agentCommand equal to the original effective command (so the
-  // update is omitted) and the custom selection silently no-ops.
-  let showAdvancedFields = false; // starts collapsed on open
-
-  const NO_RUNTIME_DROPDOWN_VALUE = "__none__";
-  const nextValue = "custom";
-  const nextRuntimeId =
-    nextValue === NO_RUNTIME_DROPDOWN_VALUE ? "" : nextValue;
-  const resolvedRuntimeId = nextRuntimeId || "custom";
-  const isCustomCommand = resolvedRuntimeId === "custom";
-
-  // Mirror the handler's auto-expand branch.
-  if (isCustomCommand) {
-    showAdvancedFields = true;
-  }
-
-  assert.equal(
-    showAdvancedFields,
-    true,
-    "selecting 'Custom command' must auto-expand Advanced so the command input is visible",
-  );
-});
-
-test("editAgent_missingRequiredEnvKey_autoExpandsAdvancedOnTransition", () => {
-  // Codex P2: when a provider change makes a credential newly required, the
-  // EnvVarsEditor lives inside the collapsed Advanced section, so the amber
-  // required row would stay unmounted (invisible) while Save is disabled. The
-  // effect auto-expands Advanced on the missing→present-requirement transition.
-  let showAdvancedFields = false; // collapsed by default on open
-  let previousMissing = false;
-
-  // Mirror the effect's transition guard.
-  function applyMissingEffect(requiredEnvKeyMissing) {
-    if (requiredEnvKeyMissing && !previousMissing) {
-      showAdvancedFields = true;
-    }
-    previousMissing = requiredEnvKeyMissing;
-  }
-
-  // Initial render: buzz-agent with no provider — nothing required yet.
-  applyMissingEffect(
-    hasMissingRequiredEnvKey(requiredCredentialEnvKeys("buzz-agent", ""), {}),
-  );
-  assert.equal(
-    showAdvancedFields,
-    false,
-    "Advanced stays collapsed while no credential is required",
-  );
-
-  // User picks anthropic → ANTHROPIC_API_KEY becomes required and is unset.
-  applyMissingEffect(
-    hasMissingRequiredEnvKey(
-      requiredCredentialEnvKeys("buzz-agent", "anthropic"),
-      {},
-    ),
-  );
-  assert.equal(
-    showAdvancedFields,
-    true,
-    "Advanced auto-expands when a required credential is newly missing",
-  );
-
-  // User fills the key, then collapses Advanced manually — no re-expand.
-  showAdvancedFields = false;
-  applyMissingEffect(
-    hasMissingRequiredEnvKey(
-      requiredCredentialEnvKeys("buzz-agent", "anthropic"),
-      { ANTHROPIC_API_KEY: "sk-ant-test" },
-    ),
-  );
-  assert.equal(
-    showAdvancedFields,
-    false,
-    "Advanced does not re-expand once the required credential is filled",
   );
 });
 

@@ -26,6 +26,10 @@ class ActivityPage extends HookConsumerWidget {
     final feedAsync = ref.watch(activityProvider);
     final channelsAsync = ref.watch(channelsProvider);
     final filter = useState(_Filter.all);
+    final headerTitleStyle = context.textTheme.titleMedium?.copyWith(
+      fontSize: 22,
+      fontWeight: FontWeight.w600,
+    );
 
     // Cache last successful feed so the UI doesn't flash on rebuild.
     final cachedFeed = useRef<HomeFeedResponse?>(null);
@@ -34,7 +38,7 @@ class ActivityPage extends HookConsumerWidget {
     }
     final feed = cachedFeed.value;
 
-    final Widget body;
+    final Widget content;
     if (feed != null && !feed.isEmpty) {
       final items = _filteredItems(feed, filter.value);
       final channels = channelsAsync.asData?.value ?? [];
@@ -43,79 +47,85 @@ class ActivityPage extends HookConsumerWidget {
       final pubkeys = items.map((i) => i.pubkey).toSet().toList();
       ref.read(userCacheProvider.notifier).preload(pubkeys);
 
-      body = Column(
-        children: [
-          FilterChipBar<_Filter>(
-            selected: filter.value,
-            onSelected: (f) => filter.value = f,
-            items: [
-              const FilterChipItem(id: _Filter.all, label: 'All'),
-              FilterChipItem(
-                id: _Filter.mentions,
-                label: 'Mentions',
-                icon: LucideIcons.atSign,
-                count: feed.mentions.length,
+      content = items.isEmpty
+          ? _EmptyFilterState(filter: filter.value)
+          : RefreshIndicator(
+              onRefresh: () => ref.read(activityProvider.notifier).refresh(),
+              child: ListView.separated(
+                padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
+                itemCount: items.length,
+                separatorBuilder: (_, _) => const SizedBox(height: Grid.half),
+                itemBuilder: (context, index) {
+                  final item = items[index];
+                  return _FeedItemTile(
+                    item: item,
+                    onTap: () => _openItem(context, item, channels),
+                  );
+                },
               ),
-              FilterChipItem(
-                id: _Filter.needsAction,
-                label: 'Action',
-                icon: LucideIcons.circleAlert,
-                count: feed.needsAction.length,
-              ),
-              FilterChipItem(
-                id: _Filter.activity,
-                label: 'Activity',
-                icon: LucideIcons.activity,
-                count: feed.activity.length,
-              ),
-              FilterChipItem(
-                id: _Filter.agents,
-                label: 'Agents',
-                icon: LucideIcons.bot,
-                count: feed.agentActivity.length,
-              ),
-            ],
-          ),
-          Expanded(
-            child: items.isEmpty
-                ? _EmptyFilterState(filter: filter.value)
-                : RefreshIndicator(
-                    onRefresh: () =>
-                        ref.read(activityProvider.notifier).refresh(),
-                    child: ListView.separated(
-                      padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
-                      itemCount: items.length,
-                      separatorBuilder: (_, _) =>
-                          const SizedBox(height: Grid.half),
-                      itemBuilder: (context, index) {
-                        final item = items[index];
-                        return _FeedItemTile(
-                          item: item,
-                          onTap: () => _openItem(context, item, channels),
-                        );
-                      },
-                    ),
-                  ),
-          ),
-        ],
-      );
+            );
     } else if (feedAsync.hasError) {
-      body = _ErrorView(
+      content = _ErrorView(
         onRetry: () => ref.read(activityProvider.notifier).refresh(),
       );
     } else if (feedAsync.hasValue) {
-      body = const _EmptyState();
+      content = const _EmptyState();
     } else {
-      body = const _LoadingSkeleton();
+      content = const _LoadingSkeleton();
     }
 
     return FrostedScaffold(
-      appBar: const FrostedAppBar(title: Text('Activity')),
+      appBar: FrostedAppBar(
+        gradient: context.appColors.topSectionGradient,
+        title: const Text('Activity'),
+        titleStyle: headerTitleStyle,
+      ),
       body: SafeArea(
         top: false,
         child: Padding(
-          padding: EdgeInsets.only(top: frostedAppBarHeight(context)),
-          child: body,
+          padding: EdgeInsets.only(
+            top: frostedAppBarHeight(context, titleStyle: headerTitleStyle),
+          ),
+          child: Column(
+            children: [
+              FilterChipBar<_Filter>(
+                expandItems: false,
+                visualDensity: const VisualDensity(horizontal: -2),
+                chipVerticalPadding: Grid.xxs,
+                barVerticalPadding: Grid.twelve,
+                selected: filter.value,
+                onSelected: (f) => filter.value = f,
+                items: [
+                  const FilterChipItem(id: _Filter.all, label: 'All'),
+                  FilterChipItem(
+                    id: _Filter.mentions,
+                    label: 'Mentions',
+                    icon: LucideIcons.atSign,
+                    count: feed?.mentions.length,
+                  ),
+                  FilterChipItem(
+                    id: _Filter.needsAction,
+                    label: 'Action',
+                    icon: LucideIcons.circleAlert,
+                    count: feed?.needsAction.length,
+                  ),
+                  FilterChipItem(
+                    id: _Filter.activity,
+                    label: 'Activity',
+                    icon: LucideIcons.activity,
+                    count: feed?.activity.length,
+                  ),
+                  FilterChipItem(
+                    id: _Filter.agents,
+                    label: 'Agents',
+                    icon: LucideIcons.bot,
+                    count: feed?.agentActivity.length,
+                  ),
+                ],
+              ),
+              Expanded(child: content),
+            ],
+          ),
         ),
       ),
     );

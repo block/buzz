@@ -32,13 +32,9 @@ import {
   buildInstanceInputForDefinition,
   resolveStartRuntimeForDefinition,
 } from "@/features/agents/lib/instanceInputForDefinition";
-import {
-  isManagedAgentActive,
-  startManagedAgentWithRules,
-  stopManagedAgentWithRules,
-} from "@/features/agents/lib/managedAgentControlActions";
 import { describeLogFile } from "@/features/agents/ui/agentUi";
 import { AgentDialog } from "@/features/agents/ui/AgentDialog";
+import { useAgentLifecycleActions } from "@/features/profile/ui/useAgentLifecycleActions";
 import {
   consumePendingOpenEditAgent,
   type EditAgentFocusTarget,
@@ -199,6 +195,12 @@ export function UserProfilePanel({
     }
     return undefined;
   }, [managedAgentsQuery.data, persona, pubkey]);
+  const personaInstances = React.useMemo(() => {
+    if (!managedAgent?.personaId) return managedAgent ? [managedAgent] : [];
+    return (managedAgentsQuery.data ?? []).filter(
+      (agent) => agent.personaId === managedAgent.personaId,
+    );
+  }, [managedAgent, managedAgentsQuery.data]);
   const resolvedPersonaFromSource = React.useMemo(() => {
     const personaId = persona?.id ?? managedAgent?.personaId;
     if (personaId) {
@@ -445,42 +447,14 @@ export function UserProfilePanel({
     ],
   );
 
-  const handleAgentPrimaryAction = React.useCallback(async () => {
-    if (!managedAgent) return;
-
-    try {
-      if (isManagedAgentActive(managedAgent)) {
-        const result = await stopManagedAgentWithRules({
-          agent: managedAgent,
-          channels: channelsQuery.data ?? [],
-          relayAgents: relayAgentsQuery.data ?? [],
-          stopManagedAgent: stopAgentMutation.mutateAsync,
-        });
-        toast.success(result.noticeMessage ?? `Stopped ${managedAgent.name}.`);
-        return;
-      }
-
-      await startManagedAgentWithRules({
-        agent: managedAgent,
-        startManagedAgent: startAgentMutation.mutateAsync,
-      });
-      toast.success(
-        managedAgent.backend.type === "provider"
-          ? `Deploying ${managedAgent.name}.`
-          : `Started ${managedAgent.name}.`,
-      );
-    } catch (error) {
-      toast.error(
-        error instanceof Error ? error.message : "Agent action failed.",
-      );
-    }
-  }, [
-    channelsQuery.data,
-    managedAgent,
-    relayAgentsQuery.data,
-    startAgentMutation.mutateAsync,
-    stopAgentMutation.mutateAsync,
-  ]);
+  const { handleAgentPrimaryAction, handleAgentRestart } =
+    useAgentLifecycleActions({
+      channels: channelsQuery.data,
+      managedAgent,
+      relayAgents: relayAgentsQuery.data,
+      startManagedAgent: startAgentMutation.mutateAsync,
+      stopManagedAgent: stopAgentMutation.mutateAsync,
+    });
 
   const handleInstantiateAgent = React.useCallback(async () => {
     if (!resolvedPersona) return;
@@ -822,6 +796,7 @@ export function UserProfilePanel({
           followMutation={followMutation}
           agentInstruction={agentInstruction}
           handleAgentPrimaryAction={handleAgentPrimaryAction}
+          handleAgentRestart={handleAgentRestart}
           handleEditAgent={handleEditAgent}
           handleEditPersona={canEditPersona ? handleEditPersona : undefined}
           handleInstantiateAgent={handleInstantiateAgent}
@@ -833,6 +808,7 @@ export function UserProfilePanel({
           isFollowing={isFollowing}
           isOwner={viewerIsOwner}
           isSelf={isSelf}
+          instances={personaInstances}
           activityAgent={activityAgent}
           managedAgent={managedAgent}
           memoriesLoading={memoryQuery.isLoading}
@@ -841,6 +817,7 @@ export function UserProfilePanel({
           agentSettingsFields={agentSettingsFields}
           diagnosticsFields={diagnosticsFields}
           onAddToChannel={() => setAddToChannelOpen(true)}
+          onOpenInstance={(instancePubkey) => onOpenProfile?.(instancePubkey)}
           onOpenActivity={handleOpenActivity}
           onOpenChannel={handleOpenChannel}
           onOpenDiagnostics={() => setView("diagnostics")}

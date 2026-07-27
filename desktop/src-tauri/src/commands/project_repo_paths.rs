@@ -25,10 +25,88 @@ fn clone_url_repo_name(clone_url: &str) -> Option<String> {
     local_repo_name_candidate(last_segment)
 }
 
+fn clone_url_owner_repo_name(clone_url: &str) -> Option<String> {
+    let parsed = Url::parse(clone_url).ok()?;
+    let parts = parsed
+        .path_segments()?
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    let [.., owner, repo] = parts.as_slice() else {
+        return None;
+    };
+    local_repo_name_candidate(&format!(
+        "{}--{}",
+        local_repo_name_candidate(owner)?,
+        local_repo_name_candidate(repo)?
+    ))
+}
+
+fn normalized_clone_url(value: &str) -> &str {
+    value.trim().trim_end_matches('/').trim_end_matches(".git")
+}
+
+fn checkout_git_config(
+    repo_dir: &std::path::Path,
+    repos_root: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    let dot_git = repo_dir.join(".git");
+    let git_dir = if dot_git.is_dir() {
+        dot_git
+    } else {
+        let pointer = std::fs::read_to_string(dot_git).ok()?;
+        let git_dir = std::path::PathBuf::from(pointer.trim().strip_prefix("gitdir:")?.trim());
+        if git_dir.is_absolute() {
+            git_dir
+        } else {
+            repo_dir.join(git_dir)
+        }
+    };
+    let git_dir = git_dir.canonicalize().ok()?;
+    if !git_dir.starts_with(repos_root) {
+        return None;
+    }
+    let config = git_dir.join("config").canonicalize().ok()?;
+    config.starts_with(repos_root).then_some(config)
+}
+
+fn checkout_origin_matches(
+    repo_dir: &std::path::Path,
+    repos_root: &std::path::Path,
+    clone_url: &str,
+) -> bool {
+    let Some(config_path) = checkout_git_config(repo_dir, repos_root) else {
+        return false;
+    };
+    let Ok(config) = std::fs::read_to_string(config_path) else {
+        return false;
+    };
+    let mut in_origin = false;
+    for line in config.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_origin = line == r#"[remote "origin"]"#;
+            continue;
+        }
+        if in_origin {
+            if let Some((key, value)) = line.split_once('=') {
+                if key.trim() == "url" {
+                    return normalized_clone_url(value) == normalized_clone_url(clone_url);
+                }
+            }
+        }
+    }
+    false
+}
+
 pub(crate) fn local_repo_candidates(project_dtag: &str, clone_url: Option<&str>) -> Vec<String> {
     let mut candidates = Vec::new();
-    if let Some(candidate) = local_repo_name_candidate(project_dtag) {
+    if let Some(candidate) = clone_url.and_then(clone_url_owner_repo_name) {
         candidates.push(candidate);
+    }
+    if let Some(candidate) = local_repo_name_candidate(project_dtag) {
+        if !candidates.iter().any(|existing| existing == &candidate) {
+            candidates.push(candidate);
+        }
     }
     if let Some(candidate) = clone_url.and_then(clone_url_repo_name) {
         if !candidates.iter().any(|existing| existing == &candidate) {
@@ -54,7 +132,11 @@ pub(crate) fn find_local_repo_dir(
             if !candidate_path.starts_with(&repos_root) || !candidate_path.is_dir() {
                 continue;
             }
-            if candidate_path.join(".git").exists() {
+            if candidate_path.join(".git").exists()
+                && clone_url
+                    .map(|url| checkout_origin_matches(&candidate_path, &repos_root, url))
+                    .unwrap_or(true)
+            {
                 return Ok(Some(candidate_path));
             }
         }

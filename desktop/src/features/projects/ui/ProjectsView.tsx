@@ -1,4 +1,3 @@
-import { Plus } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
 
@@ -11,9 +10,8 @@ import {
   useDeleteProjectMutation,
   useProjectActivitySummariesQuery,
   useProjectLocalRepositoriesQuery,
-  useProjectsIssuesQuery,
-  useProjectsPullRequestsQuery,
   useProjectsQuery,
+  useProjectsWorkItemsQuery,
 } from "@/features/projects/hooks";
 import { useCreateProjectMutation } from "@/features/projects/useCreateProject";
 import { useProjectsRepoSnapshotsQuery } from "@/features/projects/useProjectsRepoSnapshots";
@@ -23,13 +21,18 @@ import {
   EmptyState,
   ProjectGridCard,
   ProjectListRow,
-  ProjectRailRow,
 } from "@/features/projects/ui/ProjectCards";
 import { CreateProjectDialog } from "@/features/projects/ui/CreateProjectDialog";
+import { CreateProjectIssueDialog } from "@/features/projects/ui/CreateProjectIssueDialog";
+import { CreatePullRequestDialog } from "@/features/projects/ui/CreatePullRequestDialog";
+import { ProjectsCreateMenu } from "@/features/projects/ui/ProjectsCreateMenu";
 import { ProjectsIssuesList } from "@/features/projects/ui/ProjectsIssuesList";
 import { ProjectsOverviewPanel } from "@/features/projects/ui/ProjectsOverviewPanel";
 import { ProjectsOverviewRail } from "@/features/projects/ui/ProjectsOverviewRail";
 import { ProjectsPullRequestsList } from "@/features/projects/ui/ProjectsPullRequestsList";
+import { ProjectsWorkItemsLoadNotice } from "@/features/projects/ui/ProjectsWorkItemsLoadNotice";
+import { ProjectsListScopeDropdown } from "@/features/projects/ui/ProjectsListScopeDropdown";
+import { PROJECT_LIST_CONTAINER_CLASS } from "@/features/projects/ui/projectListRowStyles";
 import {
   ProjectsToolbar,
   ProjectsViewModeToggle,
@@ -43,26 +46,56 @@ import {
   projectOwnerIsUser,
   projectPeople,
   type ProjectsFilter,
+  type ProjectsRepositoryScope,
   type ProjectsSort,
   type ProjectsViewMode,
+  type ProjectsWorkItemScope,
   readStoredFilter,
+  readStoredIssueScope,
+  readStoredPullRequestScope,
+  readStoredRepositoryScope,
   readStoredSort,
   readStoredViewMode,
   uniqueRepositories,
   writeStoredFilter,
+  writeStoredIssueScope,
+  writeStoredPullRequestScope,
+  writeStoredRepositoryScope,
   writeStoredSort,
   writeStoredViewMode,
 } from "@/features/projects/lib/projectsViewHelpers";
 import { useOpenProjectTerminal } from "@/features/projects/ui/useOpenProjectTerminal";
 import { useCommunities } from "@/features/communities/useCommunities";
-import { CommunityEmojiIcon } from "@/features/communities/ui/CommunitySwitcher";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { topChromeInset } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
+import { PageHeader } from "@/shared/ui/PageHeader";
 
 const MANY_PROJECTS_THRESHOLD = 12;
+const REPOSITORY_SCOPE_OPTIONS: Array<{
+  label: string;
+  value: ProjectsRepositoryScope;
+}> = [
+  { label: "All", value: "all" },
+  { label: "My Repositories", value: "mine" },
+  { label: "Local", value: "local" },
+];
+const PULL_REQUEST_SCOPE_OPTIONS: Array<{
+  label: string;
+  value: ProjectsWorkItemScope;
+}> = [
+  { label: "All", value: "all" },
+  { label: "My Pull Requests", value: "mine" },
+];
+const ISSUE_SCOPE_OPTIONS: Array<{
+  label: string;
+  value: ProjectsWorkItemScope;
+}> = [
+  { label: "All", value: "all" },
+  { label: "My Issues", value: "mine" },
+];
 
 export function ProjectsView() {
   const { goProject } = useAppNavigation();
@@ -109,16 +142,27 @@ export function ProjectsView() {
   const projectsQuery = useProjectsQuery();
   const identityQuery = useIdentityQuery();
   const projects = projectsQuery.data ?? [];
-  const activitySummariesQuery = useProjectActivitySummariesQuery(projects);
   const localRepositoriesQuery = useProjectLocalRepositoriesQuery(
     activeCommunity?.reposDir,
   );
-  const projectPullRequestsQuery = useProjectsPullRequestsQuery(projects);
-  const [filter, setFilter] = React.useState<ProjectsFilter>(() =>
-    readStoredFilter(),
+  const [filter, setFilter] = React.useState<ProjectsFilter>(() => {
+    const storedFilter = readStoredFilter();
+    return storedFilter === "mine" || storedFilter === "local"
+      ? "repositories"
+      : storedFilter;
+  });
+  const activitySummariesQuery = useProjectActivitySummariesQuery(
+    filter === "prs" || filter === "issues" ? [] : projects,
   );
-  const projectIssuesQuery = useProjectsIssuesQuery(
-    filter === "issues" || filter === "all" ? projects : [],
+  const [repositoryScope, setRepositoryScope] =
+    React.useState<ProjectsRepositoryScope>(() => readStoredRepositoryScope());
+  const [pullRequestScope, setPullRequestScope] =
+    React.useState<ProjectsWorkItemScope>(() => readStoredPullRequestScope());
+  const [issueScope, setIssueScope] = React.useState<ProjectsWorkItemScope>(
+    () => readStoredIssueScope(),
+  );
+  const projectsWorkItemsQuery = useProjectsWorkItemsQuery(
+    filter === "all" || filter === "prs" || filter === "issues" ? projects : [],
   );
   // One blobless clone per unique repository — only scan while the overview
   // header (filter === "all") is actually visible.
@@ -131,6 +175,9 @@ export function ProjectsView() {
     activeCommunity?.reposDir,
   );
   const [createProjectOpen, setCreateProjectOpen] = React.useState(false);
+  const [createIssueOpen, setCreateIssueOpen] = React.useState(false);
+  const [createPullRequestOpen, setCreatePullRequestOpen] =
+    React.useState(false);
   const createProjectMutation = useCreateProjectMutation();
   const [storedViewMode, setStoredViewMode] =
     React.useState<ProjectsViewMode | null>(() => readStoredViewMode());
@@ -149,15 +196,17 @@ export function ProjectsView() {
               activitySummariesQuery.data?.[project.repoAddress],
             ),
           ),
-          ...(projectPullRequestsQuery.data?.flatMap(({ pullRequest }) => [
-            pullRequest.author,
-            ...pullRequest.recipients,
-            ...pullRequest.reviewers,
-            ...pullRequest.approvals.map((approval) => approval.author),
-            ...pullRequest.updates.map((update) => update.author),
-            ...pullRequest.comments.map((comment) => comment.author),
-          ]) ?? []),
-          ...(projectIssuesQuery.data?.flatMap(({ issue }) => [
+          ...(projectsWorkItemsQuery.data?.pullRequests.items.flatMap(
+            ({ pullRequest }) => [
+              pullRequest.author,
+              ...pullRequest.recipients,
+              ...pullRequest.reviewers,
+              ...pullRequest.approvals.map((approval) => approval.author),
+              ...pullRequest.updates.map((update) => update.author),
+              ...pullRequest.comments.map((comment) => comment.author),
+            ],
+          ) ?? []),
+          ...(projectsWorkItemsQuery.data?.issues.items.flatMap(({ issue }) => [
             issue.author,
             ...issue.recipients,
             ...issue.comments.map((comment) => comment.author),
@@ -165,12 +214,7 @@ export function ProjectsView() {
         ].map(normalizePubkey),
       ),
     ],
-    [
-      activitySummariesQuery.data,
-      projectIssuesQuery.data,
-      projectPullRequestsQuery.data,
-      projects,
-    ],
+    [activitySummariesQuery.data, projects, projectsWorkItemsQuery.data],
   );
   const profilesQuery = useUsersBatchQuery(projectPubkeys, {
     enabled: projectPubkeys.length > 0,
@@ -191,6 +235,30 @@ export function ProjectsView() {
     setFilter(nextFilter);
     writeStoredFilter(nextFilter);
   }, []);
+
+  const handleRepositoryScopeChange = React.useCallback(
+    (scope: ProjectsRepositoryScope) => {
+      setRepositoryScope(scope);
+      writeStoredRepositoryScope(scope);
+    },
+    [],
+  );
+
+  const handlePullRequestScopeChange = React.useCallback(
+    (scope: ProjectsWorkItemScope) => {
+      setPullRequestScope(scope);
+      writeStoredPullRequestScope(scope);
+    },
+    [],
+  );
+
+  const handleIssueScopeChange = React.useCallback(
+    (scope: ProjectsWorkItemScope) => {
+      setIssueScope(scope);
+      writeStoredIssueScope(scope);
+    },
+    [],
+  );
 
   const handleSortChange = React.useCallback((nextSort: ProjectsSort) => {
     setSort(nextSort);
@@ -227,8 +295,9 @@ export function ProjectsView() {
       .filter((project) => {
         const summary = activitySummariesQuery.data?.[project.repoAddress];
         const people = projectPeople(project, summary);
-        if (filter === "mine") return isProjectMine(project, currentPubkey);
-        if (filter === "local")
+        if (repositoryScope === "mine")
+          return isProjectMine(project, currentPubkey);
+        if (repositoryScope === "local")
           return hasLocalCheckout(project, localRepoNames);
         if (filter === "agents") {
           return projectHasAgent(project, people, profiles);
@@ -261,12 +330,21 @@ export function ProjectsView() {
     localRepoNames,
     profiles,
     projects,
+    repositoryScope,
     sort,
   ]);
 
   const visiblePullRequests = React.useMemo(() => {
-    const pullRequests = projectPullRequestsQuery.data ?? [];
-    return [...pullRequests].sort((left, right) => {
+    const pullRequests = projectsWorkItemsQuery.data?.pullRequests.items ?? [];
+    const scopedPullRequests =
+      pullRequestScope === "mine" && currentPubkey
+        ? pullRequests.filter(
+            ({ pullRequest }) =>
+              normalizePubkey(pullRequest.author) ===
+              normalizePubkey(currentPubkey),
+          )
+        : pullRequests;
+    return [...scopedPullRequests].sort((left, right) => {
       if (sort === "name") {
         return left.pullRequest.title.localeCompare(right.pullRequest.title);
       }
@@ -275,11 +353,18 @@ export function ProjectsView() {
       }
       return right.pullRequest.updatedAt - left.pullRequest.updatedAt;
     });
-  }, [projectPullRequestsQuery.data, sort]);
+  }, [currentPubkey, projectsWorkItemsQuery.data, pullRequestScope, sort]);
 
   const visibleIssues = React.useMemo(() => {
-    const issues = projectIssuesQuery.data ?? [];
-    return [...issues].sort((left, right) => {
+    const issues = projectsWorkItemsQuery.data?.issues.items ?? [];
+    const scopedIssues =
+      issueScope === "mine" && currentPubkey
+        ? issues.filter(
+            ({ issue }) =>
+              normalizePubkey(issue.author) === normalizePubkey(currentPubkey),
+          )
+        : issues;
+    return [...scopedIssues].sort((left, right) => {
       if (sort === "name") {
         return left.issue.title.localeCompare(right.issue.title);
       }
@@ -288,7 +373,7 @@ export function ProjectsView() {
       }
       return right.issue.updatedAt - left.issue.updatedAt;
     });
-  }, [projectIssuesQuery.data, sort]);
+  }, [currentPubkey, issueScope, projectsWorkItemsQuery.data, sort]);
 
   // Route by the canonical `owner:dtag` project ID — a bare dtag is
   // ambiguous across owners (forks can share the same dtag).
@@ -396,7 +481,7 @@ export function ProjectsView() {
         })}
       </div>
     ) : (
-      <div className="-mx-4 divide-y divide-border/60 border-y border-border/60 bg-card">
+      <div className={PROJECT_LIST_CONTAINER_CLASS}>
         {visibleProjects.map((project) => {
           const summary = activitySummariesQuery.data?.[project.repoAddress];
           return (
@@ -410,43 +495,6 @@ export function ProjectsView() {
               onOpenTerminal={handleOpenTerminal}
               people={projectPeople(project, summary)}
               profiles={profiles}
-              project={project}
-              summary={summary}
-            />
-          );
-        })}
-      </div>
-    );
-
-  const mostActiveProjects = [...projects]
-    .sort((left, right) => {
-      const leftSummary = activitySummariesQuery.data?.[left.repoAddress];
-      const rightSummary = activitySummariesQuery.data?.[right.repoAddress];
-      const activityDifference =
-        (rightSummary?.activityCount ?? 0) - (leftSummary?.activityCount ?? 0);
-      if (activityDifference !== 0) return activityDifference;
-      // `updatedAt: 0` means a summary exists but recorded no activity —
-      // treat it like a missing summary and use the announcement time.
-      return (
-        (rightSummary?.updatedAt || right.createdAt) -
-        (leftSummary?.updatedAt || left.createdAt)
-      );
-    })
-    .slice(0, 3);
-
-  const mostActiveRepositoryItems =
-    mostActiveProjects.length === 0 ? (
-      <p className="px-2 py-8 text-center text-sm text-muted-foreground">
-        No repository activity yet
-      </p>
-    ) : (
-      <div className="space-y-1">
-        {mostActiveProjects.map((project) => {
-          const summary = activitySummariesQuery.data?.[project.repoAddress];
-          return (
-            <ProjectRailRow
-              key={project.id}
-              onOpen={handleOpenProject}
               project={project}
               summary={summary}
             />
@@ -478,42 +526,63 @@ export function ProjectsView() {
     </div>
   );
 
+  const workItemFailedSections = [
+    ...new Set([
+      ...(projectsWorkItemsQuery.data?.issues.failedSections ?? []),
+      ...(projectsWorkItemsQuery.data?.pullRequests.failedSections ?? []),
+    ]),
+  ];
   const activityFeed = (
-    <ProjectsActivityFeed
-      isLoading={
-        repoSnapshotsQuery.isLoading ||
-        projectPullRequestsQuery.isLoading ||
-        projectIssuesQuery.isLoading
-      }
-      issues={projectIssuesQuery.data ?? []}
-      onOpenCommit={handleOpenCommit}
-      onOpenIssue={handleOpenIssue}
-      onOpenProject={handleOpenProject}
-      onOpenPullRequest={handleOpenPullRequest}
-      profiles={profiles}
-      projects={projects}
-      pullRequests={projectPullRequestsQuery.data ?? []}
-      snapshots={repoSnapshotsQuery.data}
+    <>
+      <ProjectsWorkItemsLoadNotice
+        error={projectsWorkItemsQuery.error}
+        failedSections={workItemFailedSections}
+        isRetrying={
+          projectsWorkItemsQuery.isFetching && !projectsWorkItemsQuery.isLoading
+        }
+        onRetry={() => void projectsWorkItemsQuery.refetch()}
+        subject="project activity"
+      />
+      <ProjectsActivityFeed
+        isLoading={
+          repoSnapshotsQuery.isLoading || projectsWorkItemsQuery.isLoading
+        }
+        issues={projectsWorkItemsQuery.data?.issues.items ?? []}
+        onOpenCommit={handleOpenCommit}
+        onOpenIssue={handleOpenIssue}
+        onOpenProject={handleOpenProject}
+        onOpenPullRequest={handleOpenPullRequest}
+        profiles={profiles}
+        projects={projects}
+        pullRequests={projectsWorkItemsQuery.data?.pullRequests.items ?? []}
+        snapshots={repoSnapshotsQuery.data}
+      />
+    </>
+  );
+
+  const createMenu = (
+    <ProjectsCreateMenu
+      onCreateIssue={() => setCreateIssueOpen(true)}
+      onCreatePullRequest={() => setCreatePullRequestOpen(true)}
+      onCreateRepository={() => setCreateProjectOpen(true)}
     />
   );
 
   const projectsHeader = (
-    <div className="pointer-events-auto flex min-w-0 items-center gap-3 px-4 pb-1 pt-4">
-      <CommunityEmojiIcon className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border border-border/60 bg-muted/40 text-3xl" />
-      <div className="min-w-0 flex-1 space-y-0.5">
-        <h2 className="text-xl font-semibold leading-6 tracking-tight text-foreground">
-          {activeCommunity?.name || "Relay"} Projects
-        </h2>
-        <p className="line-clamp-2 max-w-2xl text-base font-normal text-muted-foreground sm:line-clamp-none">
-          Browse shared repositories, pull requests, and local project checkouts
-          in this workspace.
-        </p>
-      </div>
-    </div>
+    <PageHeader
+      className="pointer-events-auto mb-8"
+      description="Set up and manage your projects."
+      title="Projects"
+    />
   );
 
-  const renderProjectsToolbar = () => (
-    <ProjectsToolbar filter={filter} onFilterChange={handleFilterChange} />
+  const projectsNavigation = (
+    <div className="flex h-[3.25rem] min-w-0 items-center">
+      <div className="h-full min-w-0 flex-1">
+        <ProjectsToolbar filter={filter} onFilterChange={handleFilterChange} />
+      </div>
+      {createMenu}
+    </div>
   );
 
   return (
@@ -530,23 +599,6 @@ export function ProjectsView() {
         className="pointer-events-none absolute right-[3px] top-0 z-50 w-1 rounded-full bg-border/80 opacity-0 transition-opacity duration-200"
         ref={scrollIndicatorRef}
       />
-      {/* Pinned above the scroll container so it stays put while scrolling. */}
-      <div className="absolute right-4 top-4 z-40">
-        <Button
-          aria-label="Create project"
-          className="group h-8 gap-0 rounded-full px-2 transition-all duration-200 ease-out hover:gap-1.5 hover:px-3"
-          data-testid="create-project-button"
-          onClick={() => setCreateProjectOpen(true)}
-          size="sm"
-          type="button"
-          variant="default"
-        >
-          <Plus className="h-4 w-4 shrink-0" />
-          <span className="max-w-0 overflow-hidden whitespace-nowrap opacity-0 transition-all duration-200 ease-out group-hover:max-w-[4.5rem] group-hover:opacity-100">
-            Project
-          </span>
-        </Button>
-      </div>
       <CreateProjectDialog
         isCreating={createProjectMutation.isPending}
         onCreate={async (input) => {
@@ -554,78 +606,138 @@ export function ProjectsView() {
           toast.success(`Project "${project.name}" created.`);
           // Land on the list that actually shows the new project — the
           // Overview only surfaces the top few most-active repositories.
+          handleRepositoryScopeChange("all");
           handleFilterChange("repositories");
         }}
         onOpenChange={setCreateProjectOpen}
         open={createProjectOpen}
       />
+      {createPullRequestOpen ? (
+        <CreatePullRequestDialog
+          onCreated={async (createdProject, pullRequestId) => {
+            await goProject(createdProject.id, { pullRequestId });
+          }}
+          onOpenChange={setCreatePullRequestOpen}
+          open
+          projects={projects}
+          reposDir={activeCommunity?.reposDir}
+        />
+      ) : null}
+      <CreateProjectIssueDialog
+        onCreated={async (createdProject, issueId) => {
+          await goProject(createdProject.id, { issueId });
+        }}
+        onOpenChange={setCreateIssueOpen}
+        open={createIssueOpen}
+        projects={projects}
+      />
       <div
-        className="buzz-content-scrollbar flex min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden overflow-y-auto"
+        className="buzz-content-scrollbar min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-scroll"
         onScroll={handleContentScroll}
       >
-        {projectsHeader}
-        {filter === "all" ? null : (
-          <div className="sticky top-0 z-30 bg-background/80 backdrop-blur-md supports-backdrop-filter:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-backdrop-filter:bg-background/55">
-            {renderProjectsToolbar()}
+        <div className="px-4 pb-7 pt-7 sm:px-6 sm:pb-8 sm:pt-8">
+          <div className="mx-auto w-full max-w-6xl">{projectsHeader}</div>
+          <div className="sticky top-0 z-30 -mx-4 bg-background/80 backdrop-blur-xl supports-backdrop-filter:bg-background/65 dark:bg-background/75 dark:supports-backdrop-filter:bg-background/60 sm:-mx-6">
+            <div className="px-4 sm:px-6">
+              <div className="mx-auto w-full max-w-6xl">
+                {projectsNavigation}
+              </div>
+            </div>
           </div>
-        )}
-        <div className="w-full min-w-0 px-4 pb-4 pt-4">
-          {filter === "all" ? (
-            <ProjectsOverviewPanel
-              localRepositoryCount={localProjectCount}
-              metadata={
-                <ProjectsOverviewRail
-                  profiles={profiles}
+          <div className="mx-auto w-full max-w-6xl">
+            <div className="w-full min-w-0 pb-4 pt-4">
+              {filter === "all" ? (
+                <ProjectsOverviewPanel
+                  localRepositoryCount={localProjectCount}
+                  metadata={
+                    <ProjectsOverviewRail
+                      profiles={profiles}
+                      projects={projects}
+                      summaries={activitySummariesQuery.data}
+                    />
+                  }
+                  onSelectSection={(section) => {
+                    if (section === "local") {
+                      handleRepositoryScopeChange("local");
+                      handleFilterChange("repositories");
+                      return;
+                    }
+                    handleFilterChange(section);
+                  }}
                   projects={projects}
-                  snapshots={repoSnapshotsQuery.data}
-                  snapshotsLoading={repoSnapshotsQuery.isLoading}
                   summaries={activitySummariesQuery.data}
                 >
-                  {mostActiveRepositoryItems}
-                </ProjectsOverviewRail>
-              }
-              onSelectSection={handleFilterChange}
-              projects={projects}
-              summaries={activitySummariesQuery.data}
-            >
-              <div className="sticky top-0 z-30 -mx-4 mb-4 mt-2 bg-card/80 backdrop-blur-md supports-backdrop-filter:bg-card/70">
-                {renderProjectsToolbar()}
-              </div>
-              <section className="space-y-3">{activityFeed}</section>
-            </ProjectsOverviewPanel>
-          ) : (
-            <section className="space-y-3">
-              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                <h3 className="text-base font-semibold text-foreground">
-                  {filter === "prs"
-                    ? "Pull requests"
-                    : filter === "issues"
-                      ? "Issues"
-                      : "Repositories"}
-                </h3>
-                {listControls}
-              </div>
-              {filter === "prs" ? (
-                <ProjectsPullRequestsList
-                  isLoading={projectPullRequestsQuery.isLoading}
-                  onOpen={handleOpenPullRequest}
-                  profiles={profiles}
-                  pullRequests={visiblePullRequests}
-                  viewMode={viewMode}
-                />
-              ) : filter === "issues" ? (
-                <ProjectsIssuesList
-                  isLoading={projectIssuesQuery.isLoading}
-                  issues={visibleIssues}
-                  onOpen={handleOpenIssue}
-                  profiles={profiles}
-                  viewMode={viewMode}
-                />
+                  <section className="space-y-3">{activityFeed}</section>
+                </ProjectsOverviewPanel>
               ) : (
-                repositoryItems
+                <section className="space-y-3">
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    {filter === "prs" ? (
+                      <ProjectsListScopeDropdown
+                        label="Filter pull requests"
+                        onChange={handlePullRequestScopeChange}
+                        options={PULL_REQUEST_SCOPE_OPTIONS}
+                        value={pullRequestScope}
+                      />
+                    ) : filter === "issues" ? (
+                      <ProjectsListScopeDropdown
+                        label="Filter issues"
+                        onChange={handleIssueScopeChange}
+                        options={ISSUE_SCOPE_OPTIONS}
+                        value={issueScope}
+                      />
+                    ) : (
+                      <ProjectsListScopeDropdown
+                        label="Filter repositories"
+                        onChange={handleRepositoryScopeChange}
+                        options={REPOSITORY_SCOPE_OPTIONS}
+                        value={repositoryScope}
+                      />
+                    )}
+                    {listControls}
+                  </div>
+                  {filter === "prs" ? (
+                    <ProjectsPullRequestsList
+                      error={projectsWorkItemsQuery.error}
+                      failedSections={
+                        projectsWorkItemsQuery.data?.pullRequests
+                          .failedSections ?? []
+                      }
+                      isLoading={projectsWorkItemsQuery.isLoading}
+                      isRetrying={
+                        projectsWorkItemsQuery.isFetching &&
+                        !projectsWorkItemsQuery.isLoading
+                      }
+                      onOpen={handleOpenPullRequest}
+                      onRetry={() => void projectsWorkItemsQuery.refetch()}
+                      profiles={profiles}
+                      pullRequests={visiblePullRequests}
+                      viewMode={viewMode}
+                    />
+                  ) : filter === "issues" ? (
+                    <ProjectsIssuesList
+                      error={projectsWorkItemsQuery.error}
+                      failedSections={
+                        projectsWorkItemsQuery.data?.issues.failedSections ?? []
+                      }
+                      isLoading={projectsWorkItemsQuery.isLoading}
+                      isRetrying={
+                        projectsWorkItemsQuery.isFetching &&
+                        !projectsWorkItemsQuery.isLoading
+                      }
+                      issues={visibleIssues}
+                      onOpen={handleOpenIssue}
+                      onRetry={() => void projectsWorkItemsQuery.refetch()}
+                      profiles={profiles}
+                      viewMode={viewMode}
+                    />
+                  ) : (
+                    repositoryItems
+                  )}
+                </section>
               )}
-            </section>
-          )}
+            </div>
+          </div>
         </div>
       </div>
     </div>

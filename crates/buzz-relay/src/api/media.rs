@@ -420,24 +420,25 @@ pub async fn upload_blob(
     .increment(1);
 
     // Audit via bounded channel — same pattern as event audit.
-    let desc = descriptor.clone();
-    if let Err(e) = state
-        .audit_tx
-        .send(NewAuditEntry {
-            community_id: auth.tenant.community(),
-            action: AuditAction::MediaUploaded,
-            actor_pubkey: Some(auth.auth_event.pubkey.to_bytes().to_vec()),
-            object_id: Some(desc.sha256.clone()),
-            detail: serde_json::json!({
-                "sha256": desc.sha256,
-                "size": desc.size,
-                "mime": desc.mime_type,
-            }),
-        })
-        .await
-    {
-        tracing::error!("Media audit channel closed — entry lost: {e}");
-        metrics::counter!("buzz_audit_send_errors_total").increment(1);
+    if let Some(audit_tx) = &state.audit_tx {
+        let desc = descriptor.clone();
+        if let Err(e) = audit_tx
+            .send(NewAuditEntry {
+                community_id: auth.tenant.community(),
+                action: AuditAction::MediaUploaded,
+                actor_pubkey: Some(auth.auth_event.pubkey.to_bytes().to_vec()),
+                object_id: Some(desc.sha256.clone()),
+                detail: serde_json::json!({
+                    "sha256": desc.sha256,
+                    "size": desc.size,
+                    "mime": desc.mime_type,
+                }),
+            })
+            .await
+        {
+            tracing::error!("Media audit channel closed — entry lost: {e}");
+            metrics::counter!("buzz_audit_send_errors_total").increment(1);
+        }
     }
 
     Ok(Json(descriptor))

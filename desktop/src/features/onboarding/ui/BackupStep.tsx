@@ -3,6 +3,7 @@ import * as React from "react";
 
 import { getNsec } from "@/shared/api/tauriIdentity";
 import { Button } from "@/shared/ui/button";
+import { Card } from "@/shared/ui/card";
 import { Spinner } from "@/shared/ui/spinner";
 import { ONBOARDING_PRIMARY_CTA_CLASS } from "./OnboardingChrome";
 import { OnboardingFooter } from "./OnboardingFooter";
@@ -10,10 +11,7 @@ import {
   type OnboardingTransitionDirection,
   OnboardingSlideTransition,
 } from "./OnboardingSlideTransition";
-import {
-  NsecMaskedDisplay,
-  ONBOARDING_KEY_FRAME_CLASS,
-} from "./NsecMaskedDisplay";
+import { NsecMaskedDisplay } from "./NsecMaskedDisplay";
 
 /**
  * Pure helper so the disabled logic can be unit-tested without a DOM.
@@ -78,14 +76,14 @@ export function BackupStep({ direction, onBack, onNext }: BackupStepProps) {
 
   return (
     <OnboardingSlideTransition
-      className="flex w-full flex-col items-center"
+      className="flex min-h-0 w-full flex-col items-center"
       data-testid="onboarding-page-backup"
       direction={direction}
       transitionKey={`backup-${direction}`}
     >
-      <div className="w-full max-w-[500px] text-center">
+      <div className="flex w-full max-w-[500px] shrink-0 flex-col text-center">
         <h1 className="text-title font-normal text-foreground">
-          Your unique identity has been created
+          Your unique identity key has been created
         </h1>
         <p className="mt-5 text-sm leading-6 text-foreground/80">
           This key is stored in your system keychain, but save it some place
@@ -93,7 +91,7 @@ export function BackupStep({ direction, onBack, onNext }: BackupStepProps) {
         </p>
       </div>
 
-      <div className="mt-10 w-full max-w-4xl">
+      <div className="flex w-full max-w-[1040px] flex-1 flex-col justify-center py-10">
         {isLoading ? (
           <div className="flex items-center justify-center gap-2 py-6 text-sm text-foreground/70">
             <Spinner className="h-4 w-4 border-2" />
@@ -125,10 +123,11 @@ export function BackupStep({ direction, onBack, onNext }: BackupStepProps) {
             </Button>
           </div>
         ) : nsec ? (
-          // Translucent white card frames the key with equal padding.
-          <div className={ONBOARDING_KEY_FRAME_CLASS}>
-            <NsecMaskedDisplay nsec={nsec} variant="bare" />
-          </div>
+          <Card className="w-full px-8 py-6" variant="textured">
+            <div className="mx-auto w-full max-w-[832px]">
+              <NsecMaskedDisplay nsec={nsec} variant="bare" />
+            </div>
+          </Card>
         ) : (
           <p className="text-center text-sm text-foreground/70">
             No key available to back up.
@@ -139,8 +138,8 @@ export function BackupStep({ direction, onBack, onNext }: BackupStepProps) {
           <p className="mx-auto mt-6 flex max-w-[440px] items-start justify-center gap-1.5 text-center text-xs leading-5 text-[var(--buzz-onboarding-backup-ink)]">
             <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
             <span>
-              Never share your private key. Anyone can impersonate you and
-              access everything in your account.
+              Never share your private key. Anyone with this key can impersonate
+              you and access everything in your account.
             </span>
           </p>
         ) : null}

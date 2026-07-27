@@ -49,7 +49,7 @@ type AppShellContextValue = {
   feedItemState: FeedItemState;
   // Open the Settings panel at the given section. Available on all surfaces
   // that render under AppShell (channel, home, projects, pulse, agents).
-  // Used by config-nudge cards to deep-link to Settings → Doctor.
+  // Used by config-nudge cards to deep-link to Settings → Agents.
   onOpenSettings: ((section: SettingsSection) => void) | null;
 };
 

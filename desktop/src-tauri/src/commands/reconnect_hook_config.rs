@@ -18,7 +18,7 @@ pub struct ReconnectHookConfig {
     pub ready_probe: Vec<String>,
     /// RAW SUBSTRING matched in the probe's stdout to consider the transport
     /// ready — NOT a parsed field. Pick a token unlikely to collide with other
-    /// substrings in the probe output (e.g. `warp-cli -j status` JSON, where
+    /// substrings in the probe output (e.g. a VPN CLI's JSON status output, where
     /// "Connected" can collide with "Connecting"/"Disconnected").
     pub ready_match: String,
     /// Per-process wall-clock cap (ms) for each step and the readiness probe

@@ -1,10 +1,39 @@
+use serde::Deserialize;
 use tauri::State;
 
 use crate::{
     app_state::AppState,
     events, nostr_convert,
-    relay::{query_relay, submit_event},
+    relay::{
+        classify_request_error, parse_json_response, query_relay, relay_api_base_url_with_override,
+        relay_error_message, submit_event,
+    },
 };
+
+#[derive(Deserialize)]
+struct RelayInformationDocument {
+    #[serde(default)]
+    supported_nips: Vec<u32>,
+}
+
+#[tauri::command]
+pub async fn relay_requires_membership(state: State<'_, AppState>) -> Result<bool, String> {
+    let url = format!("{}/info", relay_api_base_url_with_override(&state));
+    let response = state
+        .http_client
+        .get(url)
+        .header("Accept", "application/nostr+json")
+        .send()
+        .await
+        .map_err(|error| classify_request_error(&error))?;
+
+    if !response.status().is_success() {
+        return Err(relay_error_message(response).await);
+    }
+
+    let info = parse_json_response::<RelayInformationDocument>(response).await?;
+    Ok(info.supported_nips.contains(&43))
+}
 
 #[tauri::command]
 pub async fn list_relay_members(state: State<'_, AppState>) -> Result<serde_json::Value, String> {

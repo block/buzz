@@ -1,5 +1,5 @@
 use super::project_git_exec::{
-    build_git_auth_config, clean_branch, run_git, validate_clone_url, GitAuthConfig,
+    build_git_auth_config, clean_branch, run_git, validate_workspace_clone_url, GitAuthConfig,
 };
 use super::project_repo_paths::find_local_repo_dir;
 use crate::app_state::AppState;
@@ -25,6 +25,7 @@ pub struct ProjectRepoDiffInfo {
     pub files: Vec<ProjectRepoDiffFileInfo>,
     pub additions: usize,
     pub deletions: usize,
+    pub commit_body: Option<String>,
 }
 
 fn clean_target_ref(value: Option<String>) -> Option<String> {
@@ -37,7 +38,7 @@ fn clean_target_ref(value: Option<String>) -> Option<String> {
     })
 }
 
-fn clean_commit(value: Option<String>) -> Option<String> {
+pub(crate) fn clean_commit(value: Option<String>) -> Option<String> {
     value
         .filter(|value| matches!(value.len(), 40 | 64))
         .filter(|value| value.chars().all(|c| c.is_ascii_hexdigit()))
@@ -340,7 +341,25 @@ fn diff_from_repo(
     repo_dir: &std::path::Path,
     auth: &GitAuthConfig,
     range: &str,
+    target_commit: Option<&str>,
 ) -> Result<ProjectRepoDiffInfo, String> {
+    let commit_body = target_commit
+        .map(|commit| {
+            run_git(
+                &[
+                    "show",
+                    "--no-patch",
+                    "--format=%b",
+                    "--end-of-options",
+                    commit,
+                ],
+                Some(repo_dir),
+                auth,
+            )
+            .map(|body| body.trim_end().to_string())
+        })
+        .transpose()?
+        .filter(|body| !body.is_empty());
     let numstat = run_git(&["diff", "--numstat", range], Some(repo_dir), auth)?;
     let files = parse_numstat(&numstat)
         .into_iter()
@@ -375,6 +394,7 @@ fn diff_from_repo(
     Ok(ProjectRepoDiffInfo {
         additions: files.iter().map(|file| file.additions).sum(),
         deletions: files.iter().map(|file| file.deletions).sum(),
+        commit_body,
         files,
     })
 }
@@ -388,7 +408,7 @@ pub async fn get_project_repo_diff(
     target_commit: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<ProjectRepoDiffInfo, String> {
-    validate_clone_url(&clone_url)?;
+    validate_workspace_clone_url(&clone_url, &state)?;
     let auth = build_git_auth_config(&state)?;
     let branch = clean_branch(default_branch);
     let base_branch = clean_branch(base_branch);
@@ -430,7 +450,12 @@ pub async fn get_project_repo_diff(
                 diff_base_ref(&repo_dir, &auth, base_branch.as_deref()),
             ),
         };
-        diff_from_repo(&repo_dir, &auth, &range)
+        let commit_body_ref = if target_ref.is_none() && base_branch.is_none() {
+            target_commit.as_deref()
+        } else {
+            None
+        };
+        diff_from_repo(&repo_dir, &auth, &range, commit_body_ref)
     })
     .await
     .map_err(|error| format!("repo diff task failed: {error}"))?
@@ -468,7 +493,12 @@ pub async fn get_project_local_repo_diff(
             base_commit.as_deref(),
             target_commit.as_deref(),
         );
-        diff_from_repo(&repo_dir, &auth, &range).map(Some)
+        let commit_body_ref = if base_commit.is_none() && base_branch.is_none() {
+            target_commit.as_deref()
+        } else {
+            None
+        };
+        diff_from_repo(&repo_dir, &auth, &range, commit_body_ref).map(Some)
     })
     .await
     .map_err(|error| format!("local repo diff task failed: {error}"))?

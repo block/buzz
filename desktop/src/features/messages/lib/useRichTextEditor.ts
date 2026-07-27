@@ -7,6 +7,7 @@ import Placeholder from "@tiptap/extension-placeholder";
 import Link from "@tiptap/extension-link";
 import { Extension, type KeyboardShortcutCommand } from "@tiptap/core";
 import { Plugin, Selection, TextSelection } from "@tiptap/pm/state";
+import type { ResolvedPos } from "@tiptap/pm/model";
 
 import {
   hasPrimaryShortcutModifier,
@@ -34,6 +35,24 @@ import {
   insertNewlineInCodeBlock,
 } from "./codeBlockExtensions";
 import { SpoilerMark } from "./spoilerMark";
+
+function hardBreakLineBounds($from: ResolvedPos) {
+  const parentStart = $from.start();
+  let start = parentStart;
+  let end = parentStart + $from.parent.content.size;
+
+  $from.parent.forEach((node, offset) => {
+    if (node.type.name !== "hardBreak") return;
+    const breakPosition = parentStart + offset;
+    if (breakPosition < $from.pos) {
+      start = breakPosition + node.nodeSize;
+    } else if (breakPosition >= $from.pos && end > breakPosition) {
+      end = breakPosition;
+    }
+  });
+
+  return { end, start };
+}
 
 /**
  * Plain-text edit descriptor returned by autocomplete hooks
@@ -243,8 +262,8 @@ export function useRichTextEditor({
           link: false,
         }),
         // macOS text fields traditionally support a small set of Emacs-style
-        // Control shortcuts. ProseMirror already handles Ctrl-A/E/H/D on macOS;
-        // these fill in the common movement and kill-line gaps for the composer.
+        // Control shortcuts. Keep movement and kill-line scoped to the current
+        // hard-break-delimited line rather than the whole ProseMirror block.
         Extension.create({
           name: "macEmacsTextShortcuts",
           addKeyboardShortcuts() {
@@ -254,6 +273,20 @@ export function useRichTextEditor({
             }
 
             return {
+              "Ctrl-a": ({ editor: ed }) => {
+                const { $from } = ed.state.selection;
+                if (!$from.parent.inlineContent) return false;
+                return ed.commands.setTextSelection(
+                  hardBreakLineBounds($from).start,
+                );
+              },
+              "Ctrl-e": ({ editor: ed }) => {
+                const { $from } = ed.state.selection;
+                if (!$from.parent.inlineContent) return false;
+                return ed.commands.setTextSelection(
+                  hardBreakLineBounds($from).end,
+                );
+              },
               "Ctrl-b": ({ editor: ed }) => {
                 const { empty, from } = ed.state.selection;
                 if (!empty || from <= 0) return false;
@@ -270,6 +303,21 @@ export function useRichTextEditor({
 
                 if (!empty) {
                   return ed.commands.deleteSelection();
+                }
+
+                if ($from.parent.inlineContent) {
+                  const lineEnd = hardBreakLineBounds($from).end;
+                  if (from < lineEnd) {
+                    return ed.commands.deleteRange({ from, to: lineEnd });
+                  }
+
+                  const nodeAfter = $from.nodeAfter;
+                  if (nodeAfter?.type.name === "hardBreak") {
+                    return ed.commands.deleteRange({
+                      from,
+                      to: from + nodeAfter.nodeSize,
+                    });
+                  }
                 }
 
                 const blockEnd = $from.end();
@@ -460,6 +508,30 @@ export function useRichTextEditor({
         // command/caret logic, fires regardless of selection state, and works
         // the same across browser engines. Returning `true` consumes the key.
         handleKeyDown: (view, event) => {
+          // Chromium handles Ctrl-A/E as whole-content movement before the
+          // keymap on macOS. Claim them at the raw DOM layer so hard breaks
+          // behave like actual line boundaries.
+          if (
+            isMacPlatform() &&
+            event.ctrlKey &&
+            !event.metaKey &&
+            !event.altKey &&
+            !event.shiftKey &&
+            (event.key.toLowerCase() === "a" || event.key.toLowerCase() === "e")
+          ) {
+            const { $from } = view.state.selection;
+            if (!$from.parent.inlineContent) return false;
+            const bounds = hardBreakLineBounds($from);
+            const position =
+              event.key.toLowerCase() === "a" ? bounds.start : bounds.end;
+            view.dispatch(
+              view.state.tr.setSelection(
+                TextSelection.create(view.state.doc, position),
+              ),
+            );
+            return true;
+          }
+
           // ⌘K / Ctrl+K → link editor. The formatting toolbar has always
           // advertised this shortcut on its link button; bind it here so it
           // actually works. Kept alongside the ArrowUp handling below rather

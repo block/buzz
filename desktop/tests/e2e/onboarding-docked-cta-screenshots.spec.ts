@@ -53,7 +53,7 @@ test("machine onboarding: landing, backup, setup docked CTAs", async ({
   await page.getByRole("button", { name: "Create a new identity key" }).click();
   await expect(
     page.getByRole("heading", {
-      name: "Your unique identity has been created",
+      name: "Your unique identity key has been created",
     }),
   ).toBeVisible();
   await waitForAnimations(page);
@@ -67,7 +67,7 @@ test("machine onboarding: landing, backup, setup docked CTAs", async ({
 
   await page.getByTestId("onboarding-next").click();
   await expect(
-    page.getByRole("heading", { name: "Use the models that fit the task" }),
+    page.getByRole("heading", { name: "Set up your agent harnesses" }),
   ).toBeVisible();
   await waitForAnimations(page);
   await page.screenshot({ path: `${SHOT_DIR}/03-setup.png` });

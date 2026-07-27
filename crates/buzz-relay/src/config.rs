@@ -53,8 +53,17 @@ pub struct Config {
     pub bind_addr: SocketAddr,
     /// Postgres database connection URL.
     pub database_url: String,
+    /// Optional read-replica connection URL (e.g. an Aurora `cluster-ro-`
+    /// endpoint). Unset means all reads stay on the writer.
+    pub read_database_url: Option<String>,
     /// Redis connection URL used by the pub/sub manager.
     pub redis_url: String,
+    /// Maximum connections in the shared Redis pool. Defaults to 16.
+    ///
+    /// deadpool's own default is `CPU_COUNT * 2`, which on a 2-vCPU relay
+    /// pod is only 4 — small enough that rate-limit checks, presence, and
+    /// pub/sub publishes queue behind each other under load.
+    pub redis_pool_size: usize,
     /// Public WebSocket URL of this relay, advertised in NIP-11.
     pub relay_url: String,
     /// Public WebSocket URL of the dedicated device-pairing relay, when configured.
@@ -187,6 +196,11 @@ pub struct Config {
     /// serving media GET/HEAD. Default off for staged client rollout.
     pub require_media_get_auth: bool,
 
+    /// Whether tamper-evident event/media audit logging is enabled. Defaults to true.
+    /// This does not control the separate `moderation_actions` audit trail.
+    /// Set `BUZZ_AUDIT_ENABLED=false` for deployments that do not require it.
+    pub audit_enabled: bool,
+
     /// Optional override for ephemeral channel TTL (in seconds).
     /// When set, any channel created with a TTL tag will use this value instead
     /// of the client-provided one. Useful for testing ephemeral expiry quickly.
@@ -194,13 +208,16 @@ pub struct Config {
     /// 60 seconds after the last message.
     pub ephemeral_ttl_override: Option<i32>,
 
-    /// Root directory for the relay's local git scratch. No per-repo bare repos
-    /// or persistent git state live here — runtime reads/writes hydrate
-    /// ephemeral repos from object storage per request, and all temporary Git
-    /// workspaces and buffered subprocess output are created beneath this path.
+    /// Root directory for the relay's local git scratch. No authoritative
+    /// repository state lives here — runtime reads/writes hydrate ephemeral
+    /// repos from object storage per request. Temporary workspaces, buffered
+    /// subprocess output, and the disposable immutable pack cache live below
+    /// this path.
     /// Repo-name uniqueness lives in Postgres (`git_repo_names`), not on disk,
     /// so this directory need not be persistent or shared across replicas.
     pub git_repo_path: std::path::PathBuf,
+    /// Parent directory for process-isolated immutable pack cache sessions.
+    pub git_pack_cache_path: std::path::PathBuf,
     /// Maximum pack file size for git push (bytes). Default: 500 MB.
     pub git_max_pack_bytes: u64,
     /// Maximum total bytes materialized for one git repo request. Default: 1 GB.
@@ -208,6 +225,11 @@ pub struct Config {
     /// This bounds clone/fetch hydration work across a repo's historical pack
     /// set rather than only bounding one incoming push body.
     pub git_max_repo_bytes: u64,
+    /// Maximum bytes retained in the process-local immutable pack/index cache.
+    /// Zero disables retention while preserving request-local hydration.
+    pub git_pack_cache_max_bytes: u64,
+    /// Maximum pack digests populated concurrently in one relay process.
+    pub git_pack_cache_max_concurrent_populations: usize,
     /// Maximum number of repos per pubkey. Default: 100.
     pub git_max_repos_per_pubkey: u32,
     /// Maximum concurrent git subprocess operations. Default: 20.
@@ -338,9 +360,9 @@ fn parse_push_gateway_delivery_url(raw: &str) -> Result<url::Url, ConfigError> {
     Ok(url)
 }
 
-fn parse_optional_bool(name: &str) -> Result<bool, ConfigError> {
+fn parse_bool(name: &str, default: bool) -> Result<bool, ConfigError> {
     match std::env::var(name) {
-        Err(std::env::VarError::NotPresent) => Ok(false),
+        Err(std::env::VarError::NotPresent) => Ok(default),
         Err(error) => Err(ConfigError::InvalidValue(format!(
             "{name} must be valid UTF-8: {error}"
         ))),
@@ -354,13 +376,24 @@ fn parse_optional_bool(name: &str) -> Result<bool, ConfigError> {
     }
 }
 
+fn parse_optional_bool(name: &str) -> Result<bool, ConfigError> {
+    parse_bool(name, false)
+}
+
 fn ensure_git_repo_path(
+    raw: impl Into<std::path::PathBuf>,
+) -> Result<std::path::PathBuf, ConfigError> {
+    ensure_git_path("BUZZ_GIT_REPO_PATH", raw)
+}
+
+fn ensure_git_path(
+    setting: &str,
     raw: impl Into<std::path::PathBuf>,
 ) -> Result<std::path::PathBuf, ConfigError> {
     let git_repo_path = raw.into();
     if let Err(e) = std::fs::create_dir_all(&git_repo_path) {
         return Err(ConfigError::InvalidValue(format!(
-            "BUZZ_GIT_REPO_PATH={} could not be created: {e}",
+            "{setting}={} could not be created: {e}",
             git_repo_path.display()
         )));
     }
@@ -377,8 +410,19 @@ impl Config {
         let database_url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string()); // sadscan:disable np.postgres.1
 
+        let read_database_url = std::env::var("READ_DATABASE_URL")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
+
         let redis_url =
             std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string());
+
+        let redis_pool_size = std::env::var("BUZZ_REDIS_POOL_SIZE")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(16);
 
         let relay_url =
             std::env::var("RELAY_URL").unwrap_or_else(|_| "ws://localhost:3000".to_string());
@@ -660,6 +704,12 @@ impl Config {
         let git_repo_path = ensure_git_repo_path(
             std::env::var("BUZZ_GIT_REPO_PATH").unwrap_or_else(|_| "./repos".to_string()),
         )?;
+        let git_pack_cache_path = ensure_git_path(
+            "BUZZ_GIT_PACK_CACHE_PATH",
+            std::env::var("BUZZ_GIT_PACK_CACHE_PATH")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| git_repo_path.join(".pack-cache")),
+        )?;
         let git_max_pack_bytes: u64 = std::env::var("BUZZ_GIT_MAX_PACK_BYTES")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -668,6 +718,16 @@ impl Config {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or_else(|| git_max_pack_bytes.saturating_mul(2)); // 1 GB at defaults
+        let git_pack_cache_max_bytes: u64 = std::env::var("BUZZ_GIT_PACK_CACHE_MAX_BYTES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(|| git_max_repo_bytes.saturating_mul(5)); // 5 GB at defaults
+        let git_pack_cache_max_concurrent_populations: usize =
+            std::env::var("BUZZ_GIT_PACK_CACHE_MAX_CONCURRENT_POPULATIONS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(2);
         let git_max_repos_per_pubkey: u32 = std::env::var("BUZZ_GIT_MAX_REPOS_PER_PUBKEY")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -730,6 +790,7 @@ impl Config {
         let terms_markdown = read_policy_markdown("BUZZ_TERMS_OF_SERVICE_MARKDOWN")?;
         let privacy_markdown = read_policy_markdown("BUZZ_PRIVACY_POLICY_MARKDOWN")?;
         let age_attestation_required = parse_optional_bool("BUZZ_AGE_ATTESTATION_REQUIRED")?;
+        let audit_enabled = parse_bool("BUZZ_AUDIT_ENABLED", true)?;
         let join_policy = if terms_markdown.is_none()
             && privacy_markdown.is_none()
             && !age_attestation_required
@@ -811,7 +872,9 @@ impl Config {
         Ok(Self {
             bind_addr,
             database_url,
+            read_database_url,
             redis_url,
+            redis_pool_size,
             relay_url,
             pairing_relay_url,
             max_connections,
@@ -840,10 +903,14 @@ impl Config {
             media_max_concurrent_uploads_per_pubkey,
             media_uploads_per_minute,
             require_media_get_auth,
+            audit_enabled,
             ephemeral_ttl_override,
             git_repo_path,
+            git_pack_cache_path,
             git_max_pack_bytes,
             git_max_repo_bytes,
+            git_pack_cache_max_bytes,
+            git_pack_cache_max_concurrent_populations,
             git_max_repos_per_pubkey,
             git_max_concurrent_ops,
             git_hook_hmac_secret,
@@ -874,6 +941,7 @@ mod tests {
         assert!(config.bind_addr.port() > 0);
         assert!(!config.database_url.is_empty());
         assert!(!config.redis_url.is_empty());
+        assert_eq!(config.redis_pool_size, 16);
         assert!(config.max_connections > 0);
         assert!(config.send_buffer_size > 0);
         assert_eq!(config.max_frame_bytes, DEFAULT_MAX_FRAME_BYTES);
@@ -914,6 +982,92 @@ mod tests {
             config.huddle_audio_available,
             "huddle_audio_available should default to true so single-pod (N=1) keeps today's huddle behavior"
         );
+    }
+
+    #[test]
+    fn redis_pool_size_env_override_and_invalid_fallback() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous = std::env::var_os("BUZZ_REDIS_POOL_SIZE");
+
+        std::env::set_var("BUZZ_REDIS_POOL_SIZE", "32");
+        let overridden = Config::from_env().expect("config").redis_pool_size;
+
+        std::env::set_var("BUZZ_REDIS_POOL_SIZE", "0");
+        let zero = Config::from_env().expect("config").redis_pool_size;
+
+        std::env::set_var("BUZZ_REDIS_POOL_SIZE", "not-a-number");
+        let junk = Config::from_env().expect("config").redis_pool_size;
+
+        if let Some(value) = previous {
+            std::env::set_var("BUZZ_REDIS_POOL_SIZE", value);
+        } else {
+            std::env::remove_var("BUZZ_REDIS_POOL_SIZE");
+        }
+
+        assert_eq!(overridden, 32);
+        assert_eq!(zero, 16, "zero must fall back to the default");
+        assert_eq!(junk, 16, "unparsable value must fall back to the default");
+    }
+
+    #[test]
+    fn read_database_url_unset_or_blank_is_none() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous = std::env::var_os("READ_DATABASE_URL");
+
+        std::env::remove_var("READ_DATABASE_URL");
+        let unset = Config::from_env().expect("config").read_database_url;
+
+        std::env::set_var("READ_DATABASE_URL", "   ");
+        let blank = Config::from_env().expect("config").read_database_url;
+
+        std::env::set_var("READ_DATABASE_URL", "postgres://buzz:pw@replica:5432/buzz"); // sadscan:disable np.postgres.1
+        let set = Config::from_env().expect("config").read_database_url;
+
+        if let Some(value) = previous {
+            std::env::set_var("READ_DATABASE_URL", value);
+        } else {
+            std::env::remove_var("READ_DATABASE_URL");
+        }
+
+        assert_eq!(unset, None, "unset READ_DATABASE_URL must disable routing");
+        assert_eq!(blank, None, "blank READ_DATABASE_URL must disable routing");
+        assert_eq!(
+            set.as_deref(),
+            Some("postgres://buzz:pw@replica:5432/buzz") // sadscan:disable np.postgres.1
+        );
+    }
+
+    #[test]
+    fn audit_logging_defaults_on_and_accepts_explicit_off() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous = std::env::var_os("BUZZ_AUDIT_ENABLED");
+        std::env::remove_var("BUZZ_AUDIT_ENABLED");
+        assert!(parse_bool("BUZZ_AUDIT_ENABLED", true).unwrap());
+        std::env::set_var("BUZZ_AUDIT_ENABLED", "false");
+        assert!(!parse_bool("BUZZ_AUDIT_ENABLED", true).unwrap());
+        if let Some(value) = previous {
+            std::env::set_var("BUZZ_AUDIT_ENABLED", value);
+        } else {
+            std::env::remove_var("BUZZ_AUDIT_ENABLED");
+        }
+    }
+
+    #[test]
+    fn audit_logging_rejects_invalid_boolean() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous = std::env::var_os("BUZZ_AUDIT_ENABLED");
+        std::env::set_var("BUZZ_AUDIT_ENABLED", "sometimes");
+        let result = parse_bool("BUZZ_AUDIT_ENABLED", true);
+        if let Some(value) = previous {
+            std::env::set_var("BUZZ_AUDIT_ENABLED", value);
+        } else {
+            std::env::remove_var("BUZZ_AUDIT_ENABLED");
+        }
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidValue(ref message))
+                if message.contains("BUZZ_AUDIT_ENABLED")
+        ));
     }
 
     #[test]

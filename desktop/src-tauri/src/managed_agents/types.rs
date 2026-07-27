@@ -188,7 +188,7 @@ pub struct RelayAgentInfo {
     #[serde(default)]
     pub respond_to_allowlist: Vec<String>,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ManagedAgentRecord {
     pub pubkey: String,
     pub name: String,
@@ -259,13 +259,19 @@ pub struct ManagedAgentRecord {
     /// Desired LLM model ID. Matches AgentModelInfo.id from discovery.
     /// The harness re-discovers the correct ACP switching metadata at session
     /// creation by matching this ID against the fresh session/new response.
+    /// For a linked instance this is a legacy/display snapshot only — spawn
+    /// and deploy resolve the effective model from the definition, never
+    /// from this field (see `effective_config::resolve_effective_config`).
+    /// For a definition-less instance this field is authoritative.
     #[serde(default)]
     pub model: Option<String>,
-    /// LLM inference provider snapshotted from the persona at create time
-    /// (e.g. 'databricks', 'anthropic'). Spawn and deploy read this, never the
-    /// live persona — so the agent stays pinned to the provider it was created
-    /// with across restarts. `#[serde(default)]` so pre-existing records
-    /// deserialize as `None` and get backfilled on first load.
+    /// LLM inference provider. For a linked instance this is a legacy/display
+    /// snapshot only — spawn and deploy resolve the effective provider from
+    /// the definition, never from this field (see
+    /// `effective_config::resolve_effective_config`). For a definition-less
+    /// instance this field is authoritative. `#[serde(default)]` so
+    /// pre-existing records deserialize as `None` and get backfilled on
+    /// first load.
     #[serde(default)]
     pub provider: Option<String>,
     /// Content hash of the persona at the time this agent was created — the
@@ -390,12 +396,15 @@ pub struct ManagedAgentRecord {
     /// inference through Buzz's relay-mesh local endpoint; the `model_ref` is
     /// the served model id to route to. `None` is a normal agent.
     ///
-    /// This is the source of truth for "is this a mesh agent + which model" —
-    /// replacing the old practice of sniffing it back out of `env_vars`
-    /// (`relay_mesh_config`). Spawn-time env vars are *derived from* this, not
-    /// the other way around. `#[serde(default)]` so pre-existing saved records
-    /// deserialize as `None` and are resolved via the env-var fallback until
-    /// they are rewritten with this field.
+    /// Not the source of truth. `provider == "relay-mesh"` is, resolved through
+    /// `effective_config::resolve_effective_config`; spawn-time env vars are
+    /// derived from that resolution. This field is retained solely as a
+    /// backward-compatibility signal for records written before the record had
+    /// a `provider` field, and is consulted only for definition-less records
+    /// that carry no provider — after which the env-var preset is the last
+    /// fallback. A linked instance's marker is never read: its definition is
+    /// authoritative. `#[serde(default)]` so records predating the field
+    /// deserialize as `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_mesh: Option<RelayMeshConfig>,
 }
@@ -441,6 +450,8 @@ pub struct ManagedAgentProcess {
     /// cached availability and sets `needs_restart` on drift, catching out-of-
     /// band adapter changes that Phase-1 auto-restart doesn't cover.
     pub adapter_availability: Option<AcpAvailabilityStatus>,
+    /// Unpredictable identity shared only with this harness generation.
+    pub start_nonce: String,
     /// Win32 Job Object owning the harness + its entire process tree. Closing
     /// the handle (via `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`) kills the whole
     /// tree — the Windows mirror of the Unix process-group teardown. `None`
@@ -454,6 +465,10 @@ pub struct ManagedAgentSummary {
     pub pubkey: String,
     pub name: String,
     pub persona_id: Option<String>,
+    /// The record's harness/runtime id (mirror of `ManagedAgentRecord.runtime`).
+    /// Lets the UI count agents referencing a harness definition (e.g. in the
+    /// delete-confirmation flow). `None` = inherit from the linked persona.
+    pub runtime: Option<String>,
     pub team_id: Option<String>,
     pub relay_url: String,
     pub acp_command: String,
@@ -476,7 +491,11 @@ pub struct ManagedAgentSummary {
     pub system_prompt: Option<String>,
     pub avatar_url: Option<String>,
     pub model: Option<String>,
-    /// LLM inference provider, from the agent's pinned record snapshot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_source: Option<super::effective_config::ConfigSource>,
+    /// LLM inference provider, resolved the same way as `model`/`model_source`
+    /// (definition → global for linked instances; instance → global for
+    /// definition-less instances). `None` for an orphaned instance.
     pub provider: Option<String>,
     /// `true` when the linked persona has been edited since this agent was
     /// created — the running agent uses the older pinned snapshot. The UI
@@ -485,9 +504,11 @@ pub struct ManagedAgentSummary {
     /// persona is gone, so there is nothing newer to drift toward).
     pub persona_out_of_date: bool,
     /// `true` when the agent was created from a persona that no longer exists.
-    /// Distinct from out-of-date: there is no current persona to respawn into,
-    /// so the UI should not prompt a respawn — the pinned snapshot is all the
-    /// config that remains.
+    /// Distinct from out-of-date: there is no current persona to respawn into.
+    /// An orphaned agent also cannot be (re)started — `spawn_agent_child`
+    /// refuses it (see `effective_config::resolve_effective_config`'s
+    /// `OrphanedInstance` arm via `require_resolved`) — so the UI
+    /// should surface that it's stuck, not merely stale.
     pub persona_orphaned: bool,
     /// `true` when the running process was spawned with a config that no
     /// longer matches what a spawn would use today — a plain restart would
@@ -563,6 +584,19 @@ pub enum AuthStatus {
     Unknown,
 }
 
+/// Origin of an ACP runtime catalog entry. Serializes as a lowercase string
+/// so the TypeScript consumer can switch on it without numeric comparisons.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HarnessSource {
+    /// Compiled into the app — one of the four first-class runtimes.
+    Builtin,
+    /// Static preset entry with bundled logo, PATH-probed, not editable/deletable.
+    Preset,
+    /// Loaded at runtime from the user's `custom_harnesses/` directory.
+    Custom,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct AcpRuntimeCatalogEntry {
     pub id: String,
@@ -573,10 +607,18 @@ pub struct AcpRuntimeCatalogEntry {
     pub binary_path: Option<String>,
     pub default_args: Vec<String>,
     pub mcp_command: Option<String>,
+    /// Environment variable used to apply the initial model, when supported.
+    pub model_env_var: Option<String>,
+    /// Environment variable used to apply the selected LLM provider, when supported.
+    pub provider_env_var: Option<String>,
+    /// Environment variable used to apply thinking effort, when supported.
+    pub thinking_env_var: Option<String>,
     pub install_hint: String,
     pub install_instructions_url: String,
     /// true when at least one automated install step is available
     pub can_auto_install: bool,
+    /// true when this runtime depends on a separately installed vendor CLI.
+    pub requires_external_cli: bool,
     pub underlying_cli_path: Option<String>,
     /// true when an npm adapter step is pending but Node.js / npm is absent.
     /// The UI hides the Install button and shows a Node.js install callout.
@@ -586,6 +628,19 @@ pub struct AcpRuntimeCatalogEntry {
     /// Hint for completing authentication, shown when `auth_status` is not `logged_in`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub login_hint: Option<String>,
+    /// Whether this entry came from the compiled-in catalog or a user-supplied
+    /// JSON file in `custom_harnesses/`. The UI uses this to decide editability.
+    pub source: HarnessSource,
+    /// Definition-level environment variables for `source: custom` entries.
+    ///
+    /// Populated from `HarnessDefinition.env` so the edit form can read them
+    /// back and the user doesn't silently lose env vars when saving.  Always
+    /// empty for `builtin` and `preset` entries (those env values come from the
+    /// runtime metadata path, not user-editable JSON).
+    ///
+    /// Skipped in serialization when empty to keep the catalog payload compact.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub definition_env: BTreeMap<String, String>,
 }
 
 /// Result of a single install step (CLI or adapter).
@@ -720,9 +775,7 @@ pub struct UpdateTeamRequest {
 pub const DEFAULT_ACP_COMMAND: &str = "buzz-acp";
 /// ~5 min (320s) — matches the CLI harness default (BUZZ_ACP_IDLE_TIMEOUT).
 pub const DEFAULT_AGENT_TURN_TIMEOUT_SECONDS: u64 = 320;
-/// 1 hour — absolute wall-clock safety cap per turn.
-pub const DEFAULT_AGENT_MAX_TURN_DURATION_SECONDS: u64 = 3600;
-pub const DEFAULT_AGENT_PARALLELISM: u32 = 24;
+pub const DEFAULT_AGENT_PARALLELISM: u32 = 10;
 
 fn default_agent_parallelism() -> u32 {
     DEFAULT_AGENT_PARALLELISM

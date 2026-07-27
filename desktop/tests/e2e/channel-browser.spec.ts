@@ -213,13 +213,22 @@ test("channel browser ranks the best match first", async ({ page }) => {
   );
 });
 
-test("sidebar add-channel button opens the browser", async ({ page }) => {
+test("sidebar add-channel button creates without treating the click as a callback", async ({
+  page,
+}) => {
   await page.goto("/");
   await expect(page.getByTestId("app-sidebar")).toBeVisible();
 
   await page.getByTestId("section-actions-channels-quick-create").click();
 
   await expect(page.getByTestId("channel-browser-dialog")).toBeVisible();
+  const channelName = `sidebar-created-${Date.now()}`;
+  await page.getByTestId("channel-browser-search").fill(channelName);
+  await page.getByTestId("channel-browser-create-row").click();
+  await page.getByTestId("create-channel-submit").click();
+
+  await expect(page.getByTestId("channel-browser-dialog")).not.toBeVisible();
+  await expect(page.getByTestId("stream-list")).toContainText(channelName);
 });
 
 test("custom section add button creates directly into that section", async ({
@@ -257,8 +266,16 @@ test("canceling section create does not affect the next global create", async ({
   await page
     .getByTestId(`section-actions-${CUSTOM_SECTION.id}-quick-create`)
     .click();
+  // Gate on the dialog mounting before dismissing it. Escape sent before mount
+  // is dropped (no handler yet), and not.toBeVisible() then passes vacuously
+  // against a dialog that hasn't rendered — so the dialog opens *after* the
+  // assertion and its overlay swallows every later click.
+  await expect(page.getByTestId("channel-browser-dialog")).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(page.getByTestId("channel-browser-dialog")).not.toBeVisible();
+  // The overlay outlives the content by one exit animation; wait for it to
+  // detach so it can't intercept the next click.
+  await expect(page.getByTestId("dialog-overlay")).toHaveCount(0);
 
   await page.getByTestId("section-actions-channels-quick-create").click();
   const channelName = `global-after-cancel-${Date.now()}`;

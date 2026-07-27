@@ -190,11 +190,14 @@ export type UserStatusLookup = Record<string, UserStatus | null>;
 export type {
   ProjectLocalRepository,
   ProjectLocalRepoSnapshot,
+  ProjectRepoBranchResult,
   ProjectRepoCommit,
   ProjectRepoContributor,
+  ProjectRepoCloneResult,
   ProjectRepoDiff,
   ProjectRepoDiffFile,
   ProjectRepoFile,
+  ProjectRepoMergeResult,
   ProjectRepoPullResult,
   ProjectRepoPushResult,
   ProjectRepoSnapshot,
@@ -311,6 +314,27 @@ export type RelayAgent = {
   respondToAllowlist: string[];
 };
 
+export type ManagedAgentRuntimeLifecycle =
+  | "starting"
+  | "listening"
+  | "waking"
+  | "ready"
+  | "failed"
+  | "stopped";
+
+export type ManagedAgentRuntimeStatus = {
+  pubkey: string;
+  /** Exact submitted descriptor, present only on startup reconcile results. */
+  requestedRelayUrl?: string;
+  /** Canonical, backend-owned pair identity component. Do not normalize in TS. */
+  relayUrl: string;
+  localSetup: boolean;
+  lifecycle: ManagedAgentRuntimeLifecycle;
+  pid: number | null;
+  error: string | null;
+  logPath: string | null;
+};
+
 export type ManagedAgentBackend =
   | { type: "local" }
   | { type: "provider"; id: string; config: Record<string, unknown> };
@@ -319,6 +343,12 @@ export type ManagedAgent = {
   pubkey: string;
   name: string;
   personaId: string | null;
+  /**
+   * The record's harness/runtime id (e.g. "goose", "my-custom-harness").
+   * `null` means the agent inherits its harness from the linked persona.
+   * Used to count agents referencing a harness definition (delete confirm).
+   */
+  runtime: string | null;
   teamId?: string | null;
   relayUrl: string;
   acpCommand: string;
@@ -339,6 +369,7 @@ export type ManagedAgent = {
   systemPrompt: string | null;
   avatarUrl: string | null;
   model: string | null;
+  modelSource: "definition" | "global" | "instance_legacy" | null;
   /** LLM inference provider, from the agent's pinned record snapshot. */
   provider: string | null;
   /**
@@ -515,9 +546,17 @@ export type AcpRuntimeCatalogEntry = {
   binaryPath: string | null;
   defaultArgs: string[];
   mcpCommand: string | null;
+  /** Environment variable used to apply the initial model, when supported. */
+  modelEnvVar: string | null;
+  /** Environment variable used to apply the selected LLM provider, when supported. */
+  providerEnvVar: string | null;
+  /** Environment variable used to apply thinking effort, when supported. */
+  thinkingEnvVar: string | null;
   installHint: string;
   installInstructionsUrl: string;
   canAutoInstall: boolean;
+  /** True when the runtime depends on a separately installed vendor CLI. */
+  requiresExternalCli: boolean;
   underlyingCliPath: string | null;
   /** True when an npm adapter step is pending but Node.js / npm is absent. */
   nodeRequired: boolean;
@@ -525,6 +564,21 @@ export type AcpRuntimeCatalogEntry = {
   authStatus: AuthStatus;
   /** Hint for completing authentication; null when not applicable or already logged in. */
   loginHint: string | null;
+  /**
+   * Whether this entry is compiled into the app ("builtin"), a bundled preset
+   * ("preset" — PATH-probed, not editable/deletable), or loaded from a user
+   * JSON file in `custom_harnesses/` ("custom"). Controls editability in the
+   * UI — only "custom" entries can be edited or deleted.
+   */
+  source: "builtin" | "preset" | "custom";
+  /**
+   * Definition-level environment variables for `source: custom` entries.
+   *
+   * Populated by the backend from `HarnessDefinition.env` so the edit form can
+   * read them back without losing existing env vars on save. Always absent/empty
+   * for `builtin` and `preset` entries.
+   */
+  definitionEnv?: Record<string, string>;
 };
 
 /** An AcpRuntimeCatalogEntry that is confirmed available — command and binaryPath are non-null. */

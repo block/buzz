@@ -7,6 +7,11 @@ type NsecMaskedDisplayProps = {
   nsec: string;
   /** "bare" drops the boxed chrome for the onboarding spotlight treatment. */
   variant?: "boxed" | "bare";
+  /**
+   * Called when the user reveals or copies the key. Lets flows that require
+   * a backup (e.g. sign-out) gate on actual interaction with the key.
+   */
+  onKeyInteraction?: () => void;
 };
 
 export const ONBOARDING_KEY_FRAME_CLASS =
@@ -25,6 +30,7 @@ export const ONBOARDING_KEY_TEXT_CLASS = "buzz-onboarding-key-text";
 export function NsecMaskedDisplay({
   nsec,
   variant = "boxed",
+  onKeyInteraction,
 }: NsecMaskedDisplayProps) {
   const [isRevealed, setIsRevealed] = React.useState(false);
   const [isCopied, setIsCopied] = React.useState(false);
@@ -40,11 +46,13 @@ export function NsecMaskedDisplay({
   }, []);
 
   function handleRevealToggle() {
+    if (!isRevealed) onKeyInteraction?.();
     setIsRevealed((prev) => !prev);
   }
 
   async function handleCopy() {
     await writeTextToClipboard(nsec);
+    onKeyInteraction?.();
     setIsCopied(true);
     if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
     copyTimerRef.current = setTimeout(() => setIsCopied(false), 2000);

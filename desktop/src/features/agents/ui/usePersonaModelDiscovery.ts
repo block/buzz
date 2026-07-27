@@ -10,8 +10,8 @@ import {
   formatModelDiscoveryErrorStatus,
   type PersonaModelDiscoveryStatus,
 } from "./personaModelDiscoveryStatus";
-import type { PersonaModelOption } from "./personaDialogPickers";
-import { providerRequiresExplicitModel } from "./personaDialogPickers";
+import type { PersonaModelOption } from "./agentConfigOptions";
+import { providerRequiresExplicitModel } from "./agentConfigOptions";
 
 export const MODEL_DISCOVERY_LOADING_VALUE = "__model_discovery_loading__";
 
@@ -25,7 +25,18 @@ function stableModelDiscoveryEnvKey(envVars: EnvVarsValue): string {
   );
 }
 
-function getDiscoveredPersonaModelOptions(
+/**
+ * True when a harness catalog entry is the harness's own "use my default"
+ * row (e.g. Claude Code ships a literal `default` model id). Such entries
+ * mean the same thing as leaving the model unset, so the UI merges them
+ * into the single canonical default row instead of showing two rows for
+ * one idea.
+ */
+function isHarnessDefaultModelEntry(model: { id: string }) {
+  return model.id.trim().toLowerCase() === "default";
+}
+
+export function getDiscoveredPersonaModelOptions(
   response: AgentModelsResponse | null,
   provider: string,
 ): readonly PersonaModelOption[] | null {
@@ -33,27 +44,121 @@ function getDiscoveredPersonaModelOptions(
     return null;
   }
 
-  const defaultModelOption = providerRequiresExplicitModel(provider)
-    ? []
-    : [
-        {
-          id: "",
-          label:
-            provider === "relay-mesh"
-              ? "Default (auto)"
-              : response.agentDefaultModel?.trim()
-                ? `Default model (${response.agentDefaultModel})`
-                : "Default model",
-        },
-      ];
+  // One row per idea: the harness's own default catalog entry (if any) is
+  // absorbed into the canonical default row. Selecting it keeps the stored
+  // model unset — behaviorally identical, and it avoids two saved states
+  // ("default" vs unset) that mean the same thing.
+  const explicitModels = response.models.filter(
+    (model) => !isHarnessDefaultModelEntry(model),
+  );
+  const harnessDefaultEntry = response.models.find(isHarnessDefaultModelEntry);
+  const agentDefaultModel = response.agentDefaultModel?.trim();
+
+  const defaultModelOption =
+    providerRequiresExplicitModel(provider) && harnessDefaultEntry === undefined
+      ? []
+      : [
+          {
+            id: "",
+            label:
+              provider === "relay-mesh"
+                ? "Default (auto)"
+                : agentDefaultModel
+                  ? `Default model (${agentDefaultModel})`
+                  : "Default model",
+          },
+        ];
+
+  if (explicitModels.length === 0 && defaultModelOption.length === 0) {
+    return null;
+  }
 
   return [
     ...defaultModelOption,
-    ...response.models.map((model) => ({
+    ...explicitModels.map((model) => ({
       id: model.id,
       label: model.name?.trim() || model.id,
     })),
   ];
+}
+
+/**
+ * Returns a warning status when a discovery response resolves but contains no
+ * usable model options (either because the harness does not support model
+ * switching, or because it returned an empty model list). When options ARE
+ * available, returns null so callers can clear any prior status.
+ */
+export function synthesizeEmptyDiscoveryStatus(
+  response: AgentModelsResponse,
+  provider: string,
+): PersonaModelDiscoveryStatus | null {
+  if (getDiscoveredPersonaModelOptions(response, provider) !== null) {
+    return null;
+  }
+  const agentLabel = response.agentName.trim() || "This agent";
+  return {
+    message: `${agentLabel} reported no models. Check that the CLI is installed and signed in, then reopen this screen.`,
+    tone: "warning",
+  };
+}
+
+/**
+ * True when a discovery response is worth caching.  Responses that yielded no
+ * usable model options are intentionally excluded so that close → reopen
+ * re-runs discovery, letting the user's CLI install or sign-in be reflected
+ * without a hard refresh.
+ */
+export function isCacheableDiscoveryResponse(
+  response: AgentModelsResponse,
+  provider: string,
+): boolean {
+  return getDiscoveredPersonaModelOptions(response, provider) !== null;
+}
+
+/**
+ * Pure derivation of the "discovery is still pending" flag exposed by the
+ * hook.  Extracted so tests can verify resolved-but-empty responses do not
+ * count as pending.
+ */
+export function deriveModelDiscoveryPending({
+  modelDiscoveryLoading,
+  modelDiscoveryKey,
+  activeModelDiscoveryData,
+  activeModelDiscoveryStatus,
+}: {
+  modelDiscoveryLoading: boolean;
+  modelDiscoveryKey: string | null;
+  activeModelDiscoveryData: AgentModelsResponse | null;
+  activeModelDiscoveryStatus: PersonaModelDiscoveryStatus | null;
+}): boolean {
+  return (
+    modelDiscoveryLoading ||
+    (modelDiscoveryKey !== null &&
+      activeModelDiscoveryData === null &&
+      activeModelDiscoveryStatus === null)
+  );
+}
+
+/**
+ * True when discovery IPC resolved with a response that yielded no usable
+ * model options. Distinct from a thrown/unavailable failure (data stays null).
+ * Callers that omit the Model control or heal persisted values must gate on
+ * this — not on `discoveredModelOptions === null` alone.
+ */
+export function isSuccessfulEmptyDiscovery({
+  activeModelDiscoveryData,
+  discoveredModelOptions,
+  modelDiscoveryPending,
+}: {
+  activeModelDiscoveryData: AgentModelsResponse | null;
+  discoveredModelOptions: readonly PersonaModelOption[] | null;
+  modelDiscoveryPending: boolean;
+}): boolean {
+  return (
+    !modelDiscoveryPending &&
+    activeModelDiscoveryData !== null &&
+    discoveredModelOptions === null
+  );
 }
 
 export function usePersonaModelDiscovery({
@@ -98,7 +203,9 @@ export function usePersonaModelDiscovery({
   // reference from a React Query refetch (same data, unstable ref) does not
   // abandon and re-issue an in-flight discovery IPC call.
   const selectedRuntimeAvailability = selectedRuntime?.availability;
+  const selectedRuntimeLabel = selectedRuntime?.label;
   const selectedRuntimeDefaultArgs = selectedRuntime?.defaultArgs;
+  const selectedRuntimeDefinitionEnv = selectedRuntime?.definitionEnv;
   const canDiscoverModelOptions =
     open &&
     modelFieldVisible &&
@@ -146,6 +253,7 @@ export function usePersonaModelDiscovery({
           formatModelDiscoveryErrorStatus(
             new Error(`Runtime not available: ${selectedRuntimeAvailability}`),
             trimmedProvider,
+            selectedRuntimeLabel,
           ),
         );
         setModelDiscoveryStatusKey(null);
@@ -165,7 +273,9 @@ export function usePersonaModelDiscovery({
     if (cached) {
       setModelDiscoveryData(cached);
       setModelDiscoveryDataKey(activeModelDiscoveryKey);
-      setModelDiscoveryStatus(null);
+      setModelDiscoveryStatus(
+        synthesizeEmptyDiscoveryStatus(cached, trimmedProvider),
+      );
       setModelDiscoveryStatusKey(activeModelDiscoveryKey);
       setModelDiscoveryLoading(false);
       return;
@@ -182,15 +292,27 @@ export function usePersonaModelDiscovery({
         agentArgs: selectedRuntimeDefaultArgs ?? [],
         provider: trimmedProvider || undefined,
         envVars,
+        definitionEnv: selectedRuntimeDefinitionEnv ?? {},
       })
         .then((response) => {
           if (modelDiscoveryRequestRef.current !== requestId) {
             return;
           }
-          modelDiscoveryCacheRef.current.set(activeModelDiscoveryKey, response);
+          // Only cache responses that yielded usable model options.  An
+          // empty/no-switching result gets the "reopen this screen" warning,
+          // and closing → reopening the dialog must re-run discovery so the
+          // user's CLI-install/sign-in is actually reflected.
+          if (isCacheableDiscoveryResponse(response, trimmedProvider)) {
+            modelDiscoveryCacheRef.current.set(
+              activeModelDiscoveryKey,
+              response,
+            );
+          }
           setModelDiscoveryData(response);
           setModelDiscoveryDataKey(activeModelDiscoveryKey);
-          setModelDiscoveryStatus(null);
+          setModelDiscoveryStatus(
+            synthesizeEmptyDiscoveryStatus(response, trimmedProvider),
+          );
           setModelDiscoveryStatusKey(activeModelDiscoveryKey);
         })
         .catch((error) => {
@@ -200,7 +322,11 @@ export function usePersonaModelDiscovery({
           setModelDiscoveryData(null);
           setModelDiscoveryDataKey(null);
           setModelDiscoveryStatus(
-            formatModelDiscoveryErrorStatus(error, trimmedProvider),
+            formatModelDiscoveryErrorStatus(
+              error,
+              trimmedProvider,
+              selectedRuntimeLabel,
+            ),
           );
           setModelDiscoveryStatusKey(activeModelDiscoveryKey);
         })
@@ -234,6 +360,8 @@ export function usePersonaModelDiscovery({
     modelDiscoveryKey,
     selectedRuntimeAvailability,
     selectedRuntimeDefaultArgs,
+    selectedRuntimeDefinitionEnv,
+    selectedRuntimeLabel,
     shouldDebounceModelDiscovery,
     trimmedProvider,
   ]);
@@ -256,11 +384,17 @@ export function usePersonaModelDiscovery({
       ),
     [activeModelDiscoveryData, trimmedProvider],
   );
-  const modelDiscoveryPending =
-    modelDiscoveryLoading ||
-    (modelDiscoveryKey !== null &&
-      activeModelDiscoveryData === null &&
-      activeModelDiscoveryStatus === null);
+  const modelDiscoveryPending = deriveModelDiscoveryPending({
+    modelDiscoveryLoading,
+    modelDiscoveryKey,
+    activeModelDiscoveryData,
+    activeModelDiscoveryStatus,
+  });
+  const modelDiscoverySuccessfulEmpty = isSuccessfulEmptyDiscovery({
+    activeModelDiscoveryData,
+    discoveredModelOptions,
+    modelDiscoveryPending,
+  });
 
   return {
     discoveredModelOptions,
@@ -269,5 +403,6 @@ export function usePersonaModelDiscovery({
       modelDiscoveryPending || discoveredModelOptions !== null
         ? null
         : activeModelDiscoveryStatus,
+    modelDiscoverySuccessfulEmpty,
   };
 }

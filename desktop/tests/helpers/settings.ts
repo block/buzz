@@ -8,11 +8,11 @@ type SettingsSection =
   | "compute"
   | "appearance"
   | "shortcuts"
+  | "hosted-communities"
   | "tokens"
   | "community-members"
   | "mobile"
-  | "updates"
-  | "doctor";
+  | "updates";
 
 export async function openProfileMenu(page: Page) {
   await page.getByTestId("open-settings").click();

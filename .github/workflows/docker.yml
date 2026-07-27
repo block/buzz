@@ -18,15 +18,13 @@ name: Docker image
 #   - push tags relay-v*.*.* → :{version} + :{major}.{minor} + :{major}
 #                              (+ :latest for stable, NOT for prereleases)
 #   - pull_request           → build only (no push), cache stays warm
-#   - workflow_dispatch      → relay-tag rescue, dispatched at the tag itself
+#   - workflow_dispatch      → manual relay-tag rescue at the tag itself
 #
 # Why workflow_dispatch carries a version input:
-#   auto-tag-on-release-pr-merge.yml pushes relay-v* with the default
-#   GITHUB_TOKEN, which GitHub deliberately does NOT let fire on:push triggers
-#   (recursion guard). So the push:tags trigger above never runs for releases.
-#   auto-tag instead dispatches this workflow at the immutable tag and supplies
-#   the bare version for metadata-action. The workflow rejects a dispatch whose
-#   github.ref, checked-out HEAD, and relay-v tag do not resolve to one commit.
+#   Normal releases arrive through the push:tags trigger above. The input is
+#   retained only for an operator to rerun publication manually at an immutable
+#   relay tag. The workflow rejects a dispatch whose github.ref, checked-out
+#   HEAD, and relay-v tag do not resolve to one commit.
 #   On the rescue path inputs.version is already bare (e.g. 0.3.0), so the
 #   match=^relay-v(.*)$ regex simply no-ops (it warns, leaving the value
 #   intact) and the bare version flows straight to the semver parser. On a
@@ -146,7 +144,7 @@ jobs:
           # own — it only strips refs/tags/, then runs the raw ref through
           # semver.valid(), which rejects "relay-v0.3.0". The match capture
           # group feeds the bare version to the semver parser. value= supplies
-          # the version on the auto-tag rescue dispatch (github.ref is `main`
+          # the version on a manual rescue dispatch (github.ref is `main`
           # there, not the tag): it is already bare, so match no-ops (warns,
           # value intact) and the bare version validates as-is. On push value=
           # is empty, so the ref drives it and match strips relay-v — push

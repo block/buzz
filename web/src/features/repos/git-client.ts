@@ -49,9 +49,15 @@ function repoAuthUrl(owner: string, repoName: string): string {
   return `${relayHttpBaseUrl()}/git/${owner}/${repoName}.git`;
 }
 
-function authHeaders(owner: string, repoName: string): Record<string, string> {
+async function authHeaders(
+  owner: string,
+  repoName: string,
+): Promise<Record<string, string>> {
   return {
-    Authorization: makeNip98AuthHeader(repoAuthUrl(owner, repoName), "GET"),
+    Authorization: await makeNip98AuthHeader(
+      repoAuthUrl(owner, repoName),
+      "GET",
+    ),
   };
 }
 
@@ -67,7 +73,7 @@ export async function ensureClone(
   const fs = getFs(owner, repoName);
   const dir = getDir(owner, repoName);
   const url = repoGitUrl(owner, repoName);
-  const headers = authHeaders(owner, repoName);
+  const headers = await authHeaders(owner, repoName);
 
   let exists = false;
   try {

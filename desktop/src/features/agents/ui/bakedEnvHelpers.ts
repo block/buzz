@@ -9,7 +9,7 @@
  * baked provider is present. Falls back to the raw provider id when the id
  * doesn't appear in the options table.
  *
- * Used in GlobalAgentConfigSettingsCard to relabel the provider dropdown's
+ * Used in AgentDefaultsSettingsCard to relabel the provider dropdown's
  * empty-selection option when a baked build provider is set.
  */
 export function getBakedProviderInheritLabel(

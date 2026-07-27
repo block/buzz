@@ -56,7 +56,7 @@ test("buildCompactToolSummary treats buzz messages send commands as messages", (
   assert.equal(summary.presentation, "message");
 });
 
-test("buildCompactToolSummary extracts simple piped buzz message content", () => {
+test("buildCompactToolSummary returns null preview for piped stdin sends", () => {
   const summary = buildCompactToolSummary(
     makeTool({
       toolName: "shell",
@@ -68,7 +68,7 @@ test("buildCompactToolSummary extracts simple piped buzz message content", () =>
   );
 
   assert.equal(summary.label, "Send Message");
-  assert.equal(summary.preview, "hello from stdin");
+  assert.equal(summary.preview, null);
   assert.equal(summary.presentation, "message");
 });
 

@@ -13,6 +13,15 @@ use crate::message::{build_auth_event, parse_relay_message, OkResponse, RelayMes
 
 type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
+/// Seconds to wait for the relay to send the NIP-42 AUTH challenge after connecting.
+pub const AUTH_CHALLENGE_TIMEOUT_SECS: u64 = 20;
+
+/// Seconds to wait for the relay's OK response to the AUTH event.
+pub const AUTH_OK_TIMEOUT_SECS: u64 = 20;
+
+/// Seconds to wait for the relay's OK response to a published event.
+pub const PUBLISH_OK_TIMEOUT_SECS: u64 = 30;
+
 /// A NIP-42-capable WebSocket connection to a Nostr relay.
 pub struct NostrWsConnection {
     ws: WsStream,
@@ -63,14 +72,18 @@ impl NostrWsConnection {
         keys: &Keys,
         auth_tag: Option<&Tag>,
     ) -> Result<(), WsClientError> {
-        let challenge = self.wait_for_auth_challenge(Duration::from_secs(5)).await?;
+        let challenge = self
+            .wait_for_auth_challenge(Duration::from_secs(AUTH_CHALLENGE_TIMEOUT_SECS))
+            .await?;
 
         let auth_event = build_auth_event(&challenge, &self.relay_url, keys, auth_tag)?;
         let event_id = auth_event.id.to_hex();
 
         self.send_raw(&json!(["AUTH", auth_event])).await?;
 
-        let ok = self.wait_for_ok(&event_id, Duration::from_secs(5)).await?;
+        let ok = self
+            .wait_for_ok(&event_id, Duration::from_secs(AUTH_OK_TIMEOUT_SECS))
+            .await?;
         if !ok.accepted {
             return Err(WsClientError::AuthFailed(ok.message));
         }
@@ -83,7 +96,8 @@ impl NostrWsConnection {
     pub async fn send_event(&mut self, event: Event) -> Result<OkResponse, WsClientError> {
         let event_id = event.id.to_hex();
         self.send_raw(&json!(["EVENT", event])).await?;
-        self.wait_for_ok(&event_id, Duration::from_secs(10)).await
+        self.wait_for_ok(&event_id, Duration::from_secs(PUBLISH_OK_TIMEOUT_SECS))
+            .await
     }
 
     /// Receives the next relay message, waiting up to `timeout_dur`.
@@ -277,4 +291,24 @@ pub async fn publish_event(
     .await
     .map_err(|_| WsClientError::Timeout)?;
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auth_challenge_timeout_meets_floor() {
+        const { assert!(AUTH_CHALLENGE_TIMEOUT_SECS >= 20) };
+    }
+
+    #[test]
+    fn auth_ok_timeout_meets_floor() {
+        const { assert!(AUTH_OK_TIMEOUT_SECS >= 20) };
+    }
+
+    #[test]
+    fn publish_ok_timeout_meets_floor() {
+        const { assert!(PUBLISH_OK_TIMEOUT_SECS >= 30) };
+    }
 }

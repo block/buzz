@@ -33,7 +33,7 @@ export const topChromeInset = {
     "before:pointer-events-none before:absolute before:inset-x-0 before:top-0 before:h-px before:bg-border/35 before:content-['']",
   /** Shared header backdrop and bottom border below the inset row. */
   headerBase:
-    "relative z-40 shrink-0 bg-background/75 backdrop-blur-md supports-backdrop-filter:bg-background/65 dark:bg-background/45 dark:backdrop-blur-xl dark:supports-backdrop-filter:bg-background/35",
+    "relative z-40 shrink-0 bg-background/80 backdrop-blur-md supports-backdrop-filter:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-backdrop-filter:bg-background/55",
   /** Vertical pane divider starting at the top of the content row. */
   verticalDivider:
     "after:pointer-events-none after:absolute after:bottom-0 after:right-0 after:top-0 after:z-40 after:w-px after:bg-border/35 after:content-['']",

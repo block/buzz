@@ -6,7 +6,7 @@ import {
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
   getProviderApiKeyEnvVar,
   shouldClearKnownModelForSelectionScope,
-} from "./personaDialogPickers";
+} from "./agentConfigOptions";
 import { shouldClearModelForRuntimeChange } from "./personaRuntimeModel";
 import {
   envVarsClearingManagedApiKey,

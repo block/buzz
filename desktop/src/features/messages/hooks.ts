@@ -31,7 +31,7 @@ import {
   clearTimeoutState,
   recordTimeoutFromRejection,
 } from "@/features/moderation/lib/timeoutStore";
-import { relayClient } from "@/shared/api/relayClient";
+import { relayClient, setVisibleChannel } from "@/shared/api/relayClient";
 import { customEmojiQueryKey } from "@/features/custom-emoji/hooks";
 import { channelsQueryKey } from "@/features/channels/hooks";
 import { reactionEmojiUrl } from "@/shared/api/customEmoji";
@@ -329,6 +329,17 @@ export function useChannelSubscription(channel: Channel | null) {
       }
     }
   });
+
+  // Notify the relay client which channel is currently visible so its live
+  // subscriptions are replayed first on reconnect, reducing latency on
+  // degraded networks.
+  useEffect(() => {
+    if (!channelId || channelType === "forum") return;
+    setVisibleChannel(channelId);
+    return () => {
+      setVisibleChannel(null);
+    };
+  }, [channelId, channelType]);
 
   useEffect(() => {
     if (!channelId || channelType === "forum") {

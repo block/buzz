@@ -1,9 +1,9 @@
 /**
  * Rewrite relay media URLs to use the localhost streaming proxy.
  *
- * WKWebView's networking stack bypasses WARP, so direct <img src> requests
+ * WKWebView's networking stack bypasses the VPN tunnel, so direct <img src> requests
  * to the relay get 403'd by Cloudflare Access. The localhost proxy routes
- * fetches through the Rust backend (via reqwest), which goes through WARP.
+ * fetches through the Rust backend (via reqwest), which goes through the VPN.
  *
  * For video, the proxy streams via axum — no buffering the entire file.
  * Images and other media also benefit from this path.

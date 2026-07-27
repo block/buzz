@@ -69,9 +69,6 @@ const MONITOR_TICK: Duration = Duration::from_millis(10);
 /// Pocket TTS is a one-step consistency model, not diffusion. Kept for API compat.
 const SYNTH_STEPS: usize = 1;
 
-/// Synthesis speed multiplier. Slightly faster than natural speech.
-const SYNTH_SPEED: f32 = 1.05;
-
 /// Fade-out length in samples (8 ms at 24 kHz ≈ 192 samples).
 ///
 /// Applied only at the *end* of each synthesised sentence to eliminate the
@@ -94,10 +91,24 @@ const FADE_OUT_SAMPLES: usize = (SAMPLE_RATE as f64 * 0.008) as usize;
 /// existing inter-sentence pause, so it does not lengthen multi-sentence gaps.
 const SENTENCE_LEAD_IN_SAMPLES: usize = (SAMPLE_RATE as f64 * 0.020) as usize;
 
-/// Sentence-by-sentence synthesis — keeps first-sentence latency low and lets
-/// playback of sentence N overlap with synthesis of sentence N+1 (see the
-/// lookahead pipelining note in the module doc-comment above).
-const BATCH_SIZE: usize = 1;
+/// Approximate character budget for one synthesis chunk.
+///
+/// Upstream pocket-tts groups sentences into chunks of up to
+/// `MAX_TOKEN_PER_CHUNK = 50` tokenizer tokens (`default_parameters.py`) —
+/// typically multi-sentence chunks — because every `generate()` call is an
+/// independent generation with a cold FlowLM start, and each chunk boundary
+/// is an exposed prosody seam (kyutai-labs/pocket-tts #151; the Kyutai team
+/// names chunk stitching as the reliability lever). Our previous
+/// sentence-per-call path created ~2–4× more seams than upstream.
+///
+/// We don't ship the SentencePiece tokenizer, so 50 tokens is approximated
+/// with a character budget. The bundled 4k-entry vocab averages ~4 chars per
+/// token, but usage-weighted English text leans on short common tokens, so
+/// the effective ratio is ~2–4 chars/token and 200 chars ≈ 60–100 tokens —
+/// modestly above upstream's 50, deliberately: erring large means fewer
+/// seams, and even ~100 tokens is far below the model's 500-LM-step (~40 s)
+/// ceiling. Do not shrink this budget to chase an exact 50-token match.
+const MAX_CHUNK_CHARS: usize = 200;
 
 /// Silence inserted between sentences by the TTS pipeline (seconds).
 /// Injected as a silent buffer between each synthesized sentence chunk.
@@ -275,7 +286,7 @@ fn tts_worker(
     // and discard the output so the first real utterance runs at warm-session speed.
     {
         let t = std::time::Instant::now();
-        match engine.synth_chunk("warmup", "en", &style, SYNTH_STEPS, SYNTH_SPEED) {
+        match engine.synth_chunk("warmup", "en", &style, SYNTH_STEPS) {
             Ok(_) => eprintln!(
                 "buzz-desktop: TTS warmup completed in {:.0}ms",
                 t.elapsed().as_millis()
@@ -480,15 +491,20 @@ fn tts_worker(
             continue;
         }
 
-        // Split into sentences. Each sentence is synthesized individually and
-        // appended to the Player immediately — synthesis of sentence N+1 overlaps
-        // with playback of sentence N (lookahead pipelining).
+        // Split into sentences, then group into synthesis chunks: the first
+        // sentence stays alone (fast time-to-first-audio), the rest pack
+        // greedily up to MAX_CHUNK_CHARS. Each chunk is one `generate()`
+        // call; playback of chunk N overlaps synthesis of chunk N+1
+        // (lookahead pipelining). Grouping matches upstream's ~50-token
+        // chunking and halves the exposed prosody seams on multi-sentence
+        // replies — see MAX_CHUNK_CHARS.
         let sentences: Vec<String> = split_sentences(&text)
             .into_iter()
             .filter(|s| !s.trim().is_empty())
             .collect();
+        let chunks = group_sentences_into_chunks(&sentences, MAX_CHUNK_CHARS);
 
-        for sentence in &sentences {
+        for chunk in &chunks {
             if handle_cancel_or_shutdown(
                 &cancel,
                 &shutdown,
@@ -500,12 +516,12 @@ fn tts_worker(
                 break;
             }
 
-            let text = sentence.trim();
+            let text = chunk.trim();
             if text.is_empty() {
                 continue;
             }
 
-            match engine.synth_chunk(text, "en", &style, SYNTH_STEPS, SYNTH_SPEED) {
+            match engine.synth_chunk(text, "en", &style, SYNTH_STEPS) {
                 Ok(samples) if !samples.is_empty() => {
                     let mut audio = clamp_to_full_scale(samples);
                     // Fade-out only — fading-in would attenuate the consonant
@@ -711,12 +727,49 @@ fn build_sentence_append_buffer(
     buf
 }
 
+/// Group sentences into synthesis chunks.
+///
+/// The first sentence always stands alone — it is what the listener hears
+/// first, and synthesizing it by itself keeps time-to-first-audio at the
+/// single-sentence cost. Subsequent sentences pack greedily: a sentence
+/// joins the current chunk while the combined length stays within
+/// `max_chars`; otherwise it starts a new chunk. A single sentence longer
+/// than `max_chars` becomes its own chunk unsplit — Pocket TTS handles long
+/// single sentences fine (the ceiling is the 500-LM-step default), it's the
+/// *seams* we're minimizing.
+///
+/// Sentences within a chunk are joined with a single space; sentence-ending
+/// punctuation is preserved by `split_sentences`, so the model sees natural
+/// multi-sentence prose — the same shape upstream's ~50-token chunker feeds it.
+fn group_sentences_into_chunks(sentences: &[String], max_chars: usize) -> Vec<String> {
+    let mut chunks: Vec<String> = Vec::new();
+    for (i, sentence) in sentences.iter().enumerate() {
+        let sentence = sentence.trim();
+        if sentence.is_empty() {
+            continue;
+        }
+        if i == 0 || chunks.is_empty() {
+            chunks.push(sentence.to_string());
+            continue;
+        }
+        // Never merge into the first chunk — it's the latency-critical one.
+        let can_merge = chunks.len() > 1
+            && chunks
+                .last()
+                .is_some_and(|c| c.len() + 1 + sentence.len() <= max_chars);
+        if can_merge {
+            let last = chunks.last_mut().expect("non-empty checked above");
+            last.push(' ');
+            last.push_str(sentence);
+        } else {
+            chunks.push(sentence.to_string());
+        }
+    }
+    chunks
+}
+
 // drain_until_shutdown lives in super (huddle/mod.rs) — shared with stt.rs.
 use super::drain_until_shutdown;
-
-// BATCH_SIZE is used implicitly (one sentence per iteration). Suppress dead_code
-// lint since it documents the design intent.
-const _: () = assert!(BATCH_SIZE == 1);
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 

@@ -27,7 +27,7 @@ test("normal first launch uses the already-persisted identity", async ({
 
   await expect(
     page.getByRole("heading", {
-      name: "Your unique identity has been created",
+      name: "Your unique identity key has been created",
     }),
   ).toBeVisible();
   // Non-landing pages layer the dot grid over the chartreuse→light-blue gradient.

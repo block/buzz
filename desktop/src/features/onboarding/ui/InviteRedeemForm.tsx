@@ -4,6 +4,7 @@ import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
   inviteErrorMessage,
   parseInviteInput,
+  type ParsedInvite,
 } from "@/shared/api/inviteHelpers";
 import {
   acceptJoinPolicy,
@@ -11,13 +12,14 @@ import {
   isJoinPolicyDiscoveryCandidate,
   type JoinPolicy,
 } from "@/shared/api/invites";
+import { normalizeRelayUrl } from "@/features/communities/relayProbe";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
+import { Card } from "@/shared/ui/card";
 import { Input } from "@/shared/ui/input";
 import { Spinner } from "@/shared/ui/spinner";
 import { JoinPolicyNotice } from "./JoinPolicyNotice";
 import {
-  ONBOARDING_KEY_FRAME_CLASS,
   ONBOARDING_KEY_ROW_CLASS,
   ONBOARDING_KEY_TEXT_CLASS,
 } from "./NsecMaskedDisplay";
@@ -26,6 +28,19 @@ import { OnboardingFooter } from "./OnboardingFooter";
 
 const POLICY_DISCOVERY_DELAY_MS = 250;
 const POLICY_REVEAL_EASE = [0.23, 1, 0.32, 1] as const;
+const SPOTLIGHT_TEXTURE_CONTENT_CLASS = "mx-auto w-full max-w-[920px]";
+const SPOTLIGHT_OVERFLOW_FADE = {
+  WebkitMaskImage:
+    "linear-gradient(to right, transparent, black 2rem, black calc(100% - 2rem), transparent)",
+  maskImage:
+    "linear-gradient(to right, transparent, black 2rem, black calc(100% - 2rem), transparent)",
+};
+
+function hasInviteRelay(
+  invite: ParsedInvite,
+): invite is Extract<ParsedInvite, { relayWsUrl: string }> {
+  return "relayWsUrl" in invite;
+}
 
 type InviteRedeemFormProps = {
   /**
@@ -36,29 +51,37 @@ type InviteRedeemFormProps = {
    */
   defaultRelayUrl?: string;
   error: string | null;
+  initialValue?: string;
   isRedeeming: boolean;
   onCancel: () => void;
+  onConnect?: (relayWsUrl: string, token?: string) => void;
   onRedeem: (relayWsUrl: string, code: string, policyReceipt?: string) => void;
-  variant?: "default" | "onboarding-spotlight";
+  placeholder?: string;
+  variant?: "add-community" | "default" | "onboarding-spotlight";
 };
 
 export function InviteRedeemForm({
   defaultRelayUrl,
   error,
+  initialValue = "",
   isRedeeming,
   onCancel,
+  onConnect,
   onRedeem,
+  placeholder,
   variant = "default",
 }: InviteRedeemFormProps) {
   const formId = React.useId();
-  const [inviteInput, setInviteInput] = React.useState("");
+  const [inviteInput, setInviteInput] = React.useState(initialValue);
   const [bareCodeRelayUrl, setBareCodeRelayUrl] = React.useState(
     defaultRelayUrl ?? "",
   );
+  const [apiToken, setApiToken] = React.useState("");
+  const [showApiToken, setShowApiToken] = React.useState(false);
   const [joinPolicy, setJoinPolicy] = React.useState<JoinPolicy | null>(null);
-  const [policyInvite, setPolicyInvite] = React.useState<{
+  const [policyTarget, setPolicyTarget] = React.useState<{
     relayWsUrl: string;
-    code: string;
+    code?: string;
   } | null>(null);
   const [ageConfirmed, setAgeConfirmed] = React.useState(false);
   const [agreementConfirmed, setAgreementConfirmed] = React.useState(false);
@@ -70,23 +93,36 @@ export function InviteRedeemForm({
     () => parseInviteInput(inviteInput),
     [inviteInput],
   );
-  const isBareCode = parsed !== null && !("relayWsUrl" in parsed);
+  const normalizedRelayUrl = React.useMemo(
+    () =>
+      onConnect &&
+      (!parsed || (variant === "add-community" && !hasInviteRelay(parsed)))
+        ? normalizeRelayUrl(inviteInput)
+        : null,
+    [inviteInput, onConnect, parsed, variant],
+  );
+  const parsedInvite: ParsedInvite | null = normalizedRelayUrl ? null : parsed;
+  const isBareCode = parsedInvite !== null && !hasInviteRelay(parsedInvite);
   const needsRelayField = isBareCode && defaultRelayUrl !== undefined;
 
   React.useEffect(() => {
-    if (!parsed) return;
-
-    const relayWsUrl =
-      "relayWsUrl" in parsed ? parsed.relayWsUrl : bareCodeRelayUrl.trim();
+    const relayWsUrl = normalizedRelayUrl
+      ? normalizedRelayUrl
+      : parsedInvite && hasInviteRelay(parsedInvite)
+        ? parsedInvite.relayWsUrl
+        : parsedInvite
+          ? bareCodeRelayUrl.trim()
+          : "";
     if (!relayWsUrl || !isJoinPolicyDiscoveryCandidate(relayWsUrl)) return;
 
+    const code = parsedInvite?.code;
     let cancelled = false;
     const timeoutId = window.setTimeout(() => {
       void getJoinPolicy(relayWsUrl)
         .then((policy) => {
           if (cancelled || !policy) return;
           setJoinPolicy(policy);
-          setPolicyInvite({ relayWsUrl, code: parsed.code });
+          setPolicyTarget({ relayWsUrl, code });
           setAgeConfirmed(false);
           setAgreementConfirmed(false);
           setPolicyError(null);
@@ -101,21 +137,69 @@ export function InviteRedeemForm({
       cancelled = true;
       window.clearTimeout(timeoutId);
     };
-  }, [bareCodeRelayUrl, parsed]);
+  }, [bareCodeRelayUrl, normalizedRelayUrl, parsedInvite]);
 
   const canSubmit =
-    parsed !== null &&
-    ("relayWsUrl" in parsed ||
-      (isBareCode && bareCodeRelayUrl.trim().length > 0));
+    (parsedInvite !== null &&
+      ("relayWsUrl" in parsedInvite ||
+        (isBareCode && bareCodeRelayUrl.trim().length > 0))) ||
+    normalizedRelayUrl !== null;
   const isOnboardingSpotlight = variant === "onboarding-spotlight";
+  const isAddCommunity = variant === "add-community";
+  const showInvalidInviteTip =
+    isOnboardingSpotlight && inviteInput.trim().length > 0 && !canSubmit;
 
   const handleSubmit = React.useCallback(
     async (event: React.FormEvent) => {
       event.preventDefault();
-      if (!parsed) return;
+      if (normalizedRelayUrl) {
+        setPolicyError(null);
+        setIsLoadingPolicy(true);
+        try {
+          const policy = await getJoinPolicy(normalizedRelayUrl);
+          if (!policy) {
+            onConnect?.(normalizedRelayUrl, apiToken.trim() || undefined);
+            return;
+          }
 
-      const relayWsUrl =
-        "relayWsUrl" in parsed ? parsed.relayWsUrl : bareCodeRelayUrl.trim();
+          if (
+            !joinPolicy ||
+            joinPolicy.version !== policy.version ||
+            policyTarget?.relayWsUrl !== normalizedRelayUrl ||
+            policyTarget.code !== undefined
+          ) {
+            setJoinPolicy(policy);
+            setPolicyTarget({ relayWsUrl: normalizedRelayUrl });
+            setAgeConfirmed(false);
+            setAgreementConfirmed(false);
+            return;
+          }
+
+          if (policy.ageAttestationRequired && !ageConfirmed) {
+            setPolicyError("Confirm that you are at least 18 years old.");
+            return;
+          }
+          if (
+            (policy.termsMarkdown || policy.privacyMarkdown) &&
+            !agreementConfirmed
+          ) {
+            setPolicyError("Agree to the Terms of Service and Privacy Policy.");
+            return;
+          }
+
+          onConnect?.(normalizedRelayUrl, apiToken.trim() || undefined);
+        } catch (policyFetchError) {
+          setPolicyError(inviteErrorMessage(policyFetchError));
+        } finally {
+          setIsLoadingPolicy(false);
+        }
+        return;
+      }
+      if (!parsedInvite) return;
+
+      const relayWsUrl = hasInviteRelay(parsedInvite)
+        ? parsedInvite.relayWsUrl
+        : bareCodeRelayUrl.trim();
       if (!relayWsUrl) return;
 
       setPolicyError(null);
@@ -123,18 +207,18 @@ export function InviteRedeemForm({
       try {
         const policy = await getJoinPolicy(relayWsUrl);
         if (!policy) {
-          onRedeem(relayWsUrl, parsed.code);
+          onRedeem(relayWsUrl, parsedInvite.code);
           return;
         }
 
         if (
           !joinPolicy ||
           joinPolicy.version !== policy.version ||
-          policyInvite?.relayWsUrl !== relayWsUrl ||
-          policyInvite.code !== parsed.code
+          policyTarget?.relayWsUrl !== relayWsUrl ||
+          policyTarget.code !== parsedInvite.code
         ) {
           setJoinPolicy(policy);
-          setPolicyInvite({ relayWsUrl, code: parsed.code });
+          setPolicyTarget({ relayWsUrl, code: parsedInvite.code });
           setAgeConfirmed(false);
           setAgreementConfirmed(false);
           return;
@@ -154,11 +238,11 @@ export function InviteRedeemForm({
 
         const receipt = await acceptJoinPolicy(
           relayWsUrl,
-          parsed.code,
+          parsedInvite.code,
           policy.version,
           ageConfirmed,
         );
-        onRedeem(relayWsUrl, parsed.code, receipt);
+        onRedeem(relayWsUrl, parsedInvite.code, receipt);
       } catch (policyFetchError) {
         setPolicyError(inviteErrorMessage(policyFetchError));
       } finally {
@@ -168,11 +252,14 @@ export function InviteRedeemForm({
     [
       ageConfirmed,
       agreementConfirmed,
+      apiToken,
       bareCodeRelayUrl,
       joinPolicy,
+      normalizedRelayUrl,
+      onConnect,
       onRedeem,
-      parsed,
-      policyInvite,
+      parsedInvite,
+      policyTarget,
     ],
   );
 
@@ -181,7 +268,7 @@ export function InviteRedeemForm({
   ) => {
     setInviteInput(event.target.value);
     setJoinPolicy(null);
-    setPolicyInvite(null);
+    setPolicyTarget(null);
     setAgeConfirmed(false);
     setAgreementConfirmed(false);
     setPolicyError(null);
@@ -192,7 +279,7 @@ export function InviteRedeemForm({
   ) => {
     setBareCodeRelayUrl(event.target.value);
     setJoinPolicy(null);
-    setPolicyInvite(null);
+    setPolicyTarget(null);
     setAgeConfirmed(false);
     setAgreementConfirmed(false);
     setPolicyError(null);
@@ -201,7 +288,11 @@ export function InviteRedeemForm({
   const submitButton = (
     <Button
       className={
-        isOnboardingSpotlight ? ONBOARDING_PRIMARY_CTA_CLASS : "h-10 w-full"
+        isOnboardingSpotlight
+          ? ONBOARDING_PRIMARY_CTA_CLASS
+          : isAddCommunity
+            ? "h-10"
+            : "h-10 w-full"
       }
       data-testid="invite-redeem-submit"
       disabled={
@@ -225,6 +316,12 @@ export function InviteRedeemForm({
         />
       ) : isOnboardingSpotlight ? (
         "Next"
+      ) : isAddCommunity ? (
+        joinPolicy ? (
+          "Accept and join"
+        ) : (
+          "Join community"
+        )
       ) : joinPolicy ? (
         "Accept and redeem invite"
       ) : (
@@ -253,62 +350,99 @@ export function InviteRedeemForm({
     <form
       className={cn(
         "flex w-full flex-col",
-        isOnboardingSpotlight ? "items-center gap-4" : "gap-3",
+        isOnboardingSpotlight
+          ? "relative items-center"
+          : isAddCommunity
+            ? "gap-4"
+            : "gap-3",
       )}
       id={formId}
       onSubmit={handleSubmit}
     >
       {isOnboardingSpotlight ? (
-        <label
-          className={cn("w-full max-w-4xl", ONBOARDING_KEY_FRAME_CLASS)}
+        <Card
+          className="w-[min(calc(100%+12rem),calc(100vw-2rem))] max-w-[1120px] translate-y-8 px-8 py-6"
           data-testid="invite-redeem-input-frame"
-          htmlFor="invite-input"
+          variant="textured"
         >
-          <span className="sr-only">Invite link or code</span>
-          <span className={ONBOARDING_KEY_ROW_CLASS}>
-            <input
-              autoCapitalize="none"
-              autoComplete="off"
-              autoCorrect="off"
-              className={cn(
-                ONBOARDING_KEY_TEXT_CLASS,
-                "block border-0 bg-transparent p-0 text-center shadow-none outline-none placeholder:text-[var(--buzz-onboarding-backup-ink)] placeholder:opacity-40 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50",
-              )}
-              data-testid="invite-redeem-input"
-              disabled={isRedeeming}
-              id="invite-input"
-              onChange={handleInviteInputChange}
-              placeholder="https://relay.example.com/invite/abc123"
-              spellCheck={false}
-              type="text"
-              value={inviteInput}
-            />
-          </span>
-        </label>
+          <div
+            className={SPOTLIGHT_TEXTURE_CONTENT_CLASS}
+            style={SPOTLIGHT_OVERFLOW_FADE}
+          >
+            <label className="block w-full" htmlFor="invite-input">
+              <span className="sr-only">Invite link or code</span>
+              <span className={ONBOARDING_KEY_ROW_CLASS}>
+                <input
+                  autoCapitalize="none"
+                  autoComplete="off"
+                  autoCorrect="off"
+                  className={cn(
+                    ONBOARDING_KEY_TEXT_CLASS,
+                    "block border-0 bg-transparent p-0 text-center shadow-none outline-none placeholder:text-[var(--buzz-onboarding-backup-ink)] placeholder:opacity-40 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50",
+                  )}
+                  data-testid="invite-redeem-input"
+                  disabled={isRedeeming}
+                  id="invite-input"
+                  onChange={handleInviteInputChange}
+                  placeholder={
+                    placeholder ?? "https://relay.example.com/invite/abc123"
+                  }
+                  spellCheck={false}
+                  type="text"
+                  value={inviteInput}
+                />
+              </span>
+            </label>
+          </div>
+        </Card>
       ) : (
         <div className="space-y-1.5 text-left">
           <label
             className="text-sm font-medium text-foreground"
             htmlFor="invite-input"
           >
-            Invite link or code
+            {isAddCommunity
+              ? "Community URL or invite link"
+              : "Invite link or code"}
           </label>
           <Input
             autoComplete="off"
             autoCorrect="off"
             autoFocus
-            className="h-10 bg-background"
+            className={
+              isAddCommunity
+                ? "h-11 rounded-xl border-input bg-muted/40 px-3 shadow-none transition-colors duration-150 ease-out hover:border-muted-foreground/40 focus-visible:border-muted-foreground/50 focus-visible:ring-0"
+                : "h-10 bg-background"
+            }
             data-testid="invite-redeem-input"
             disabled={isRedeeming}
             id="invite-input"
             onChange={handleInviteInputChange}
-            placeholder="https://relay.example.com/invite/abc123 or paste a code"
+            placeholder={
+              isAddCommunity
+                ? "https://community.example.com or paste an invite link"
+                : "https://relay.example.com/invite/abc123 or paste a code"
+            }
             spellCheck={false}
             type="text"
             value={inviteInput}
           />
         </div>
       )}
+
+      {isOnboardingSpotlight ? (
+        <p
+          aria-hidden={!showInvalidInviteTip}
+          aria-live="polite"
+          className={cn(
+            "absolute top-[calc(100%+2rem)] mt-4 min-h-5 w-full max-w-4xl text-center text-sm text-[#717106] transition-opacity duration-150 ease-out",
+            showInvalidInviteTip ? "opacity-100" : "opacity-0",
+          )}
+          data-testid="invalid-invite-tip"
+        >
+          Please enter a valid invite link or community URL
+        </p>
+      ) : null}
 
       {needsRelayField ? (
         <div
@@ -335,6 +469,55 @@ export function InviteRedeemForm({
         </div>
       ) : null}
 
+      {isAddCommunity && normalizedRelayUrl ? (
+        showApiToken ? (
+          <div className="space-y-1.5 text-left">
+            <div className="flex items-center justify-between gap-3">
+              <label
+                className="text-sm font-medium text-foreground"
+                htmlFor="community-api-token"
+              >
+                API token
+                <span className="ml-1 text-xs font-normal text-muted-foreground">
+                  (optional)
+                </span>
+              </label>
+              <button
+                className="text-xs text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
+                onClick={() => {
+                  setApiToken("");
+                  setShowApiToken(false);
+                }}
+                type="button"
+              >
+                Remove
+              </button>
+            </div>
+            <Input
+              autoComplete="off"
+              className="h-10 bg-background"
+              data-testid="community-api-token"
+              disabled={isRedeeming}
+              id="community-api-token"
+              onChange={(event) => setApiToken(event.target.value)}
+              placeholder="buzz_…"
+              type="password"
+              value={apiToken}
+            />
+          </div>
+        ) : (
+          <button
+            className="w-fit text-sm text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
+            data-testid="community-api-token-reveal"
+            disabled={isRedeeming}
+            onClick={() => setShowApiToken(true)}
+            type="button"
+          >
+            Use an API token
+          </button>
+        )
+      ) : null}
+
       {policyError ? (
         <p className="text-center text-sm text-destructive">{policyError}</p>
       ) : null}
@@ -344,7 +527,7 @@ export function InviteRedeemForm({
       ) : null}
 
       <AnimatePresence initial={false}>
-        {joinPolicy && policyInvite ? (
+        {joinPolicy && policyTarget ? (
           <motion.div
             animate={{
               height: "auto",
@@ -373,7 +556,7 @@ export function InviteRedeemForm({
                     transform: "translateY(-0.25rem)",
                   }
             }
-            key={`${policyInvite.relayWsUrl}:${joinPolicy.version}`}
+            key={`${policyTarget.relayWsUrl}:${joinPolicy.version}`}
             transition={
               shouldReduceMotion
                 ? { duration: 0 }
@@ -392,7 +575,7 @@ export function InviteRedeemForm({
                 setPolicyError(null);
               }}
               policy={joinPolicy}
-              relayWsUrl={policyInvite.relayWsUrl}
+              relayWsUrl={policyTarget.relayWsUrl}
             />
           </motion.div>
         ) : null}
@@ -403,6 +586,8 @@ export function InviteRedeemForm({
           {submitButton}
           {cancelButton}
         </OnboardingFooter>
+      ) : isAddCommunity ? (
+        <div className="flex justify-end pt-1">{submitButton}</div>
       ) : (
         <>
           {submitButton}

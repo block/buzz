@@ -305,6 +305,11 @@ pub(crate) fn spawn_transcription_task(
                         continue;
                     }
                 };
+            // Wait before signing: the relay enforces NIP-98 freshness (±60s)
+            // and the gate may hold for up to MAX_HINT_SECONDS (300s). Sign
+            // the kind event and build NIP-98 auth after the wait so both
+            // timestamps are fresh — single clean order: wait → sign → auth → send.
+            crate::relay_admission::wait_for_rate_limit().await;
             let event = match builder.sign_with_keys(&keys) {
                 Ok(e) => e,
                 Err(e) => {
@@ -327,21 +332,23 @@ pub(crate) fn spawn_transcription_task(
                 }
             };
 
-            let response = http_client
-                .post(&url)
-                .header("Authorization", auth_header)
-                .header("Content-Type", "application/json")
-                .body(body_bytes)
-                .send()
-                .await;
+            let response = {
+                http_client
+                    .post(&url)
+                    .header("Authorization", auth_header)
+                    .header("Content-Type", "application/json")
+                    .body(body_bytes)
+                    .send()
+                    .await
+            };
 
             match response {
                 Ok(resp) if resp.status().is_success() => {}
                 Ok(resp) => {
-                    eprintln!(
-                        "buzz-desktop: STT kind:9 post failed: HTTP {}",
-                        resp.status()
-                    );
+                    // Route through relay_error_message so a 429 arms the
+                    // admission gate for subsequent relay sends.
+                    let msg = crate::relay::relay_error_message(resp).await;
+                    eprintln!("buzz-desktop: STT kind:9 post failed: {msg}");
                 }
                 Err(e) => {
                     eprintln!("buzz-desktop: STT kind:9 post failed: {e}");

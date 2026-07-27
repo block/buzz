@@ -120,7 +120,12 @@ class ChannelSectionsManager {
       sections: [
         for (final s in _store.sections)
           if (s.id == sectionId)
-            ChannelSection(id: s.id, name: newName.trim(), order: s.order)
+            ChannelSection(
+              id: s.id,
+              name: newName.trim(),
+              icon: s.icon,
+              order: s.order,
+            )
           else
             s,
       ],
@@ -286,7 +291,12 @@ class ChannelSectionsManager {
     for (var i = 0; i < _store.sections.length; i++) {
       final a = last.sections[i];
       final b = _store.sections[i];
-      if (a.id != b.id || a.name != b.name || a.order != b.order) return false;
+      if (a.id != b.id ||
+          a.name != b.name ||
+          a.icon != b.icon ||
+          a.order != b.order) {
+        return false;
+      }
     }
     for (final key in _store.assignments.keys) {
       if (last.assignments[key] != _store.assignments[key]) return false;
@@ -352,9 +362,9 @@ class ChannelSectionsManager {
       sections: [
         for (final s in _store.sections)
           if (s.id == idA)
-            ChannelSection(id: s.id, name: s.name, order: orderB)
+            ChannelSection(id: s.id, name: s.name, icon: s.icon, order: orderB)
           else if (s.id == idB)
-            ChannelSection(id: s.id, name: s.name, order: orderA)
+            ChannelSection(id: s.id, name: s.name, icon: s.icon, order: orderA)
           else
             s,
       ],

@@ -5,10 +5,6 @@ import type {
   Project,
   ProjectActivitySummary,
 } from "@/features/projects/hooks";
-import {
-  ProjectsContributionGraph,
-  ProjectsContributionLegend,
-} from "./ProjectsContributionGraph";
 
 export type ProjectsOverviewSection =
   | "repositories"
@@ -39,21 +35,6 @@ function overviewStats(
     },
     { issues: 0, prs: 0 },
   );
-}
-
-function overviewActivityByDay(
-  projects: Project[],
-  summaries: Record<string, ProjectActivitySummary> | undefined,
-) {
-  const merged: Record<string, number> = {};
-  for (const project of projects) {
-    const byDay = summaries?.[project.repoAddress]?.activityByDay;
-    if (!byDay) continue;
-    for (const [day, count] of Object.entries(byDay)) {
-      merged[day] = (merged[day] ?? 0) + count;
-    }
-  }
-  return merged;
 }
 
 function StatPill({
@@ -95,7 +76,6 @@ export function ProjectsOverviewPanel({
   summaries,
 }: ProjectsOverviewPanelProps) {
   const stats = overviewStats(projects, summaries);
-  const activityByDay = overviewActivityByDay(projects, summaries);
 
   return (
     <section className="-mx-4 mb-4 bg-card">
@@ -126,22 +106,8 @@ export function ProjectsOverviewPanel({
             onClick={() => onSelectSection("issues")}
           />
         </div>
-        <div className="order-2 min-w-0 overflow-hidden xl:order-none xl:col-start-1 xl:row-start-2">
-          <div className="flex items-center justify-between gap-3 px-4 pt-3">
-            <h3 className="text-base font-semibold text-foreground">
-              Contribution Activity
-            </h3>
-            <ProjectsContributionLegend />
-          </div>
-          <div className="overflow-x-auto xl:overflow-visible">
-            <ProjectsContributionGraph
-              activityByDay={activityByDay}
-              className="min-w-[32rem] p-4"
-            />
-          </div>
-        </div>
         {metadata}
-        <div className="order-3 min-w-0 p-4 pt-2 xl:order-none xl:col-start-1 xl:row-start-3">
+        <div className="order-2 min-w-0 p-4 pt-2 xl:order-none xl:col-start-1 xl:row-start-2">
           {children}
         </div>
       </div>

@@ -15,6 +15,18 @@ use crate::{handlers::push_lease::Subscription, state::AppState};
 const CLAIM_SECS: i64 = 30;
 const EVENT_USEFUL_SECS: i64 = 3600;
 const MAX_ATTEMPTS: i32 = 8;
+/// Upper bound on one claimed matcher batch. Bounded well under
+/// `get_events_by_ids`' 500-id batch-fetch contract.
+const MATCH_BATCH_LIMIT: i64 = 64;
+/// Idle poll floor and ceiling. An idle matcher previously issued a claim
+/// transaction every 250ms forever; backing off to the ceiling folds that
+/// steady-state cost while keeping first-message latency at the floor.
+const IDLE_POLL_FLOOR: Duration = Duration::from_millis(250);
+const IDLE_POLL_CEILING: Duration = Duration::from_secs(2);
+/// Cadence of the poison-job sweep, which lives off the claim path: its scan
+/// is not served by the due partial index, so running it inside every claim
+/// made claims slower exactly when a backlog needed them fastest.
+const REAP_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Serialize)]
 struct DeliveryRequest<'a> {
@@ -37,29 +49,37 @@ enum DeliveryResponse {
     },
 }
 
-/// Continuously claim accepted events and match them against active leases.
+/// Continuously claim accepted events in per-community batches and match
+/// them against active leases (T2b). One batch costs one claim statement,
+/// one event load, one lease scan, one membership scan, and one wake-enqueue
+/// transaction — plus one complete/retry statement each — regardless of
+/// batch size or how many (event, lease) pairs match.
 pub async fn run_matcher(state: Arc<AppState>) {
+    let mut idle_delay = IDLE_POLL_FLOOR;
+    let mut last_reap = tokio::time::Instant::now();
     loop {
-        let until = Utc::now() + TimeDelta::seconds(CLAIM_SECS);
-        match state.db.claim_due_push_match(until).await {
-            Ok(Some(job)) => {
-                if let Err(e) = process_match(&state, &job).await {
-                    warn!(event_id=%job.event.event.id, attempt=job.attempt, "push match failed: {e}");
-                    if job.attempt >= buzz_db::push::MAX_MATCH_ATTEMPTS {
-                        // A poison event/lease must not retry forever or pin
-                        // delivered outbox retention through the rematch guard.
-                        let _ = state.db.complete_push_match(&job).await;
-                    } else {
-                        let _ = state
-                            .db
-                            .retry_push_match(&job, Utc::now() + TimeDelta::seconds(2))
-                            .await;
-                    }
-                } else if let Err(e) = state.db.complete_push_match(&job).await {
-                    warn!(event_id=%job.event.event.id, "push match completion failed: {e}");
-                }
+        if last_reap.elapsed() >= REAP_INTERVAL {
+            match state.db.reap_exhausted_push_matches().await {
+                Ok(reaped) if reaped > 0 => warn!(reaped, "reaped exhausted push match jobs"),
+                Ok(_) => {}
+                Err(e) => error!("push match reap failed: {e}"),
             }
-            Ok(None) => tokio::time::sleep(Duration::from_millis(250)).await,
+            last_reap = tokio::time::Instant::now();
+        }
+        let until = Utc::now() + TimeDelta::seconds(CLAIM_SECS);
+        match state
+            .db
+            .claim_due_push_match_batch(MATCH_BATCH_LIMIT, until)
+            .await
+        {
+            Ok(Some(batch)) => {
+                idle_delay = IDLE_POLL_FLOOR;
+                process_match_batch(&state, batch).await;
+            }
+            Ok(None) => {
+                tokio::time::sleep(idle_delay).await;
+                idle_delay = (idle_delay * 2).min(IDLE_POLL_CEILING);
+            }
             Err(e) => {
                 error!("push matcher claim failed: {e}");
                 tokio::time::sleep(Duration::from_secs(2)).await;
@@ -68,18 +88,149 @@ pub async fn run_matcher(state: Arc<AppState>) {
     }
 }
 
-async fn process_match(state: &AppState, job: &buzz_db::push::ClaimedMatch) -> anyhow::Result<()> {
-    let leases = state.db.active_push_match_leases(job.community).await?;
-    for lease in leases {
+/// Per-batch state shared by every job: the community's active leases and
+/// the exact (channel, lease author) membership pairs the jobs can consult.
+struct MatchContext {
+    leases: Vec<buzz_db::push::MatchLease>,
+    memberships: std::collections::HashSet<(uuid::Uuid, Vec<u8>)>,
+}
+
+async fn load_match_context(
+    state: &AppState,
+    batch: &buzz_db::push::ClaimedMatchBatch,
+) -> anyhow::Result<MatchContext> {
+    let leases = state.db.active_push_match_leases(batch.community).await?;
+    let mut channels: Vec<uuid::Uuid> = batch
+        .jobs
+        .iter()
+        .filter_map(|job| job.event.channel_id)
+        .collect();
+    channels.sort_unstable();
+    channels.dedup();
+    let mut authors: Vec<Vec<u8>> = leases.iter().map(|lease| lease.author.clone()).collect();
+    authors.sort_unstable();
+    authors.dedup();
+    let memberships = state
+        .db
+        .membership_pairs(batch.community, &channels, &authors)
+        .await?
+        .into_iter()
+        .collect();
+    Ok(MatchContext {
+        leases,
+        memberships,
+    })
+}
+
+async fn process_match_batch(state: &AppState, batch: buzz_db::push::ClaimedMatchBatch) {
+    let community = batch.community;
+    let context = match load_match_context(state, &batch).await {
+        Ok(context) => context,
+        Err(e) => {
+            // Shared context failed to load, so no job was evaluated: release
+            // the whole batch for retry. Jobs that keep failing are reaped by
+            // the periodic sweep once their attempts are exhausted.
+            warn!(%community, "push match context load failed: {e}");
+            let ids: Vec<Vec<u8>> = batch
+                .jobs
+                .iter()
+                .map(|job| job.event.event.id.as_bytes().to_vec())
+                .collect();
+            if let Err(e) = state
+                .db
+                .retry_push_match_batch(
+                    community,
+                    batch.claim_id,
+                    &ids,
+                    Utc::now() + TimeDelta::seconds(2),
+                )
+                .await
+            {
+                warn!(%community, "push match batch retry failed: {e}");
+            }
+            return;
+        }
+    };
+    let mut completed = Vec::new();
+    let mut retry = Vec::new();
+    // Jobs whose wakes are pending the set-wise enqueue below: their
+    // completion is decided by the flush, not by match evaluation.
+    let mut pending = Vec::new();
+    let mut wakes: Vec<buzz_db::push::WakeRequest> = Vec::new();
+    for job in &batch.jobs {
+        let event_id = job.event.event.id.as_bytes().to_vec();
+        match match_job(job, &context) {
+            Ok(job_wakes) if job_wakes.is_empty() => completed.push(event_id),
+            Ok(job_wakes) => {
+                pending.push((event_id, job.attempt));
+                wakes.extend(job_wakes);
+            }
+            Err(e) => {
+                warn!(event_id=%job.event.event.id, attempt=job.attempt, "push match failed: {e}");
+                if job.attempt >= buzz_db::push::MAX_MATCH_ATTEMPTS {
+                    // A poison event/lease must not retry forever or pin
+                    // delivered outbox retention through the rematch guard.
+                    completed.push(event_id);
+                } else {
+                    retry.push(event_id);
+                }
+            }
+        }
+    }
+    // One transaction for every wake in the batch (T2b). InactiveLease and
+    // Duplicate outcomes are per-request non-errors; only a failed enqueue
+    // transaction sends the contributing jobs back for an idempotent rematch
+    // (the outbox dedup key absorbs any wakes that did commit elsewhere).
+    match state.db.enqueue_push_wakes(community, &wakes).await {
+        Ok(_) => completed.extend(pending.into_iter().map(|(event_id, _)| event_id)),
+        Err(e) => {
+            warn!(%community, "push wake batch enqueue failed: {e}");
+            for (event_id, attempt) in pending {
+                if attempt >= buzz_db::push::MAX_MATCH_ATTEMPTS {
+                    completed.push(event_id);
+                } else {
+                    retry.push(event_id);
+                }
+            }
+        }
+    }
+    if let Err(e) = state
+        .db
+        .complete_push_match_batch(community, batch.claim_id, &completed)
+        .await
+    {
+        warn!(%community, "push match batch completion failed: {e}");
+    }
+    if let Err(e) = state
+        .db
+        .retry_push_match_batch(
+            community,
+            batch.claim_id,
+            &retry,
+            Utc::now() + TimeDelta::seconds(2),
+        )
+        .await
+    {
+        warn!(%community, "push match batch retry failed: {e}");
+    }
+}
+
+/// Pure match evaluation: no DB access. Returns the wake requests this job
+/// owes, which the caller flushes set-wise for the whole batch.
+fn match_job(
+    job: &buzz_db::push::BatchedMatch,
+    context: &MatchContext,
+) -> anyhow::Result<Vec<buzz_db::push::WakeRequest>> {
+    let mut wakes = Vec::new();
+    for lease in &context.leases {
         let author_hex = hex::encode(&lease.author);
         if !reader_authorized_for_event(&job.event.event, &author_hex) {
             continue;
         }
         if let Some(channel) = job.event.channel_id {
-            if !state
-                .db
-                .is_member(job.community, channel, &lease.author)
-                .await?
+            if !context
+                .memberships
+                .contains(&(channel, lease.author.clone()))
             {
                 continue;
             }
@@ -123,22 +274,16 @@ async fn process_match(state: &AppState, job: &buzz_db::push::ClaimedMatch) -> a
         if expires_at <= Utc::now().timestamp() {
             continue;
         }
-        let _ = state
-            .db
-            .enqueue_push_wake(
-                job.community,
-                &lease.author,
-                &lease.installation_id,
-                buzz_db::push::NewWake {
-                    lease_generation: lease.generation,
-                    event_id: job.event.event.id.as_bytes(),
-                    class,
-                    expires_at,
-                },
-            )
-            .await?;
+        wakes.push(buzz_db::push::WakeRequest {
+            author: lease.author.clone(),
+            installation_id: lease.installation_id.clone(),
+            lease_generation: lease.generation,
+            event_id: job.event.event.id.as_bytes().to_vec(),
+            class: class.to_string(),
+            expires_at,
+        });
     }
-    Ok(())
+    Ok(wakes)
 }
 
 /// Match-time counterpart of REQ's filter-level `#p` authorization gate.
@@ -169,6 +314,7 @@ pub async fn run_delivery_worker(state: Arc<AppState>) {
         .timeout(state.config.push_gateway_timeout)
         .build()
         .expect("push HTTP client");
+    let mut idle_delay = Duration::from_millis(500);
     loop {
         let mut found = false;
         match state.db.usage_community_hosts().await {
@@ -189,8 +335,13 @@ pub async fn run_delivery_worker(state: Arc<AppState>) {
             }
             Err(e) => error!("push worker community scan failed: {e}"),
         }
-        if !found {
-            tokio::time::sleep(Duration::from_millis(500)).await;
+        if found {
+            idle_delay = Duration::from_millis(500);
+        } else {
+            // Empty sweeps back off so an idle worker stops paying a full
+            // per-community claim scan every 500ms forever.
+            tokio::time::sleep(idle_delay).await;
+            idle_delay = (idle_delay * 2).min(IDLE_POLL_CEILING);
         }
     }
 }

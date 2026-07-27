@@ -187,11 +187,18 @@ async function expectAgentProfileActionsHidden(
   ).toHaveCount(0);
 }
 
-test("@ trigger prioritizes channel members before runnable personas and other agents", async ({
+test("@ trigger prioritizes channel members before runnable personas and other managed agents", async ({
   page,
 }) => {
   await installMockBridge(page, {
     activePersonaIds: ["builtin:fizz"],
+    managedAgents: [
+      {
+        pubkey: TEST_IDENTITIES.charlie.pubkey,
+        name: "charlie",
+        status: "stopped",
+      },
+    ],
   });
   await page.goto("/");
   await page.getByTestId("channel-general").click();
@@ -202,7 +209,7 @@ test("@ trigger prioritizes channel members before runnable personas and other a
 
   const dropdown = autocomplete(page);
   await expect(dropdown).toBeVisible();
-  await expect(dropdown.getByText("alice")).toBeVisible();
+  await expect(dropdown.getByText("alice")).toHaveCount(0);
   await expect(dropdown.getByText("bob")).toBeVisible();
   await expect(dropdown.getByText("Fizz")).toBeVisible();
   await expect(dropdown.getByText("charlie")).toBeVisible();
@@ -219,7 +226,6 @@ test("@ trigger prioritizes channel members before runnable personas and other a
   const suggestions = dropdown.locator("button");
   const suggestionText = await suggestions.allInnerTexts();
   const fizzIndex = suggestionText.findIndex((text) => text.includes("Fizz"));
-  const aliceIndex = suggestionText.findIndex((text) => text.includes("alice"));
   const bobIndex = suggestionText.findIndex((text) => text.includes("bob"));
   const charlieIndex = suggestionText.findIndex((text) =>
     text.includes("charlie"),
@@ -228,11 +234,9 @@ test("@ trigger prioritizes channel members before runnable personas and other a
     text.includes("outsider"),
   );
   expect(fizzIndex).toBeGreaterThanOrEqual(0);
-  expect(aliceIndex).toBeGreaterThanOrEqual(0);
   expect(bobIndex).toBeGreaterThanOrEqual(0);
   expect(charlieIndex).toBeGreaterThanOrEqual(0);
   expect(outsiderIndex).toEqual(-1);
-  expect(aliceIndex).toBeLessThan(fizzIndex);
   expect(bobIndex).toBeLessThan(fizzIndex);
   expect(fizzIndex).toBeLessThan(charlieIndex);
 });
@@ -300,7 +304,7 @@ test("thread autocomplete keeps multiple long names readable in a narrow panel",
       row.getByTestId("mention-suggestion-avatar-fallback"),
     ).toBeVisible();
     await expect(row.getByText("agent")).toBeVisible();
-    await expect(row.getByText("owned by you")).toBeVisible();
+    await expect(row.getByText("managed by you")).toBeVisible();
 
     await expect(row.getByText(name)).not.toHaveCSS(
       "text-overflow",
@@ -425,7 +429,18 @@ test("defers agent mentions until DM members finish loading", async ({
   await expect(threadPanel).toContainText("before members resolve");
 });
 
-test("autocomplete filters suggestions as user types", async ({ page }) => {
+test("autocomplete filters managed-agent suggestions as user types", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: TEST_IDENTITIES.alice.pubkey,
+        name: "alice",
+        status: "stopped",
+      },
+    ],
+  });
   await page.goto("/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
@@ -462,7 +477,7 @@ test("autocomplete searches global non-member people from the first typed charac
   await expect(tessaRow.getByText("not in channel")).toBeVisible();
 });
 
-test("mention autocomplete pages global people search beyond the first 50 results", async ({
+test("mention autocomplete caps global people search at 50 results", async ({
   page,
 }) => {
   const searchProfiles = Array.from({ length: 55 }, (_, index) => ({
@@ -479,10 +494,8 @@ test("mention autocomplete pages global people search beyond the first 50 result
 
   const dropdown = autocomplete(page);
   await expect(dropdown.locator("button")).toHaveCount(50);
-  await dropdown.evaluate((node) => node.scrollTo(0, node.scrollHeight));
-
-  await expect(dropdown.locator("button")).toHaveCount(55);
-  await expect(dropdown.getByText("Alex 55")).toBeVisible();
+  await expect(dropdown.getByText("Alex 50")).toBeVisible();
+  await expect(dropdown.getByText("Alex 55")).toHaveCount(0);
   await expect(dropdown.getByText("not in channel").last()).toBeVisible();
 
   const searchCalls = (await readCommandPayloadLog(page)).filter(
@@ -493,6 +506,10 @@ test("mention autocomplete pages global people search beyond the first 50 result
       expect.objectContaining({
         payload: expect.objectContaining({ cursor: null, limit: 50 }),
       }),
+    ]),
+  );
+  expect(searchCalls).not.toEqual(
+    expect.arrayContaining([
       expect.objectContaining({
         payload: expect.objectContaining({ cursor: "2", limit: 50 }),
       }),
@@ -521,9 +538,18 @@ test("selecting a person mention inserts @Name into input", async ({
   await expect(mentionChip).not.toHaveClass(/agent-mention-highlight/);
 });
 
-test("selecting an agent mention inserts @Name into input", async ({
+test("selecting a managed agent mention inserts @Name into input", async ({
   page,
 }) => {
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: TEST_IDENTITIES.alice.pubkey,
+        name: "alice",
+        status: "stopped",
+      },
+    ],
+  });
   await page.goto("/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
@@ -691,9 +717,18 @@ test("selecting a persona mention reuses an existing persona agent", async ({
   await expect(mentionChip).toHaveText("Fizz");
 });
 
-test("relay-profile agents with member roles use the agent composer style", async ({
+test("managed relay-profile agents with member roles use the agent composer style", async ({
   page,
 }) => {
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: TEST_IDENTITIES.charlie.pubkey,
+        name: "charlie",
+        status: "stopped",
+      },
+    ],
+  });
   await page.goto("/");
 
   await openChannelBrowser(page);
@@ -759,10 +794,17 @@ test("own profile-only agents are hidden from channel mentions", async ({
   await expect(autocomplete(page)).toHaveCount(0);
 });
 
-test("allowlisted relay agents are visible in channel mentions", async ({
+test("managed relay agents are visible in channel mentions regardless of relay policy", async ({
   page,
 }) => {
   await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+        name: "quinn",
+        status: "stopped",
+      },
+    ],
     relayAgents: [
       {
         pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
@@ -784,7 +826,7 @@ test("allowlisted relay agents are visible in channel mentions", async ({
   await expect(dropdown.getByText("agent")).toBeVisible();
 });
 
-test("non-allowlisted relay agents stay hidden from channel mentions", async ({
+test("relay-only agents stay hidden from channel mentions even when allowlisted", async ({
   page,
 }) => {
   await installMockBridge(page, {
@@ -793,7 +835,7 @@ test("non-allowlisted relay agents stay hidden from channel mentions", async ({
         pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
         name: "quinn",
         respondTo: "allowlist",
-        respondToAllowlist: [TEST_IDENTITIES.outsider.pubkey],
+        respondToAllowlist: [MOCK_VIEWER_PUBKEY],
       },
     ],
   });
@@ -1364,9 +1406,18 @@ test("system member-joined rows render the joined person as a plain profile name
   await expect(joinedPersonName).not.toHaveAttribute("data-mention");
 });
 
-test("selecting a non-member agent from a DM inserts @Name into input", async ({
+test("selecting a managed non-member agent from a DM inserts @Name into input", async ({
   page,
 }) => {
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: TEST_IDENTITIES.charlie.pubkey,
+        name: "charlie",
+        status: "stopped",
+      },
+    ],
+  });
   await page.goto("/");
   await page.getByTestId("channel-bob-tyler").click();
   await expect(page.getByTestId("chat-title")).toHaveText("bob-tyler");
@@ -1450,9 +1501,18 @@ test("sent non-member person mention uses the normal mention style", async ({
   await expect(mentionChip.locator("svg")).toHaveCount(0);
 });
 
-test("sent non-member agent mention uses the agent mention style", async ({
+test("sent managed non-member agent mention uses the agent mention style", async ({
   page,
 }) => {
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: TEST_IDENTITIES.charlie.pubkey,
+        name: "charlie",
+        status: "stopped",
+      },
+    ],
+  });
   await page.goto("/");
   await page.getByTestId("channel-bob-tyler").click();
   await expect(page.getByTestId("chat-title")).toHaveText("bob-tyler");
@@ -1738,7 +1798,7 @@ test("agent profile popover shows its owner", async ({ page }) => {
     profilePopover.getByTestId(
       `user-profile-popover-owner-${OWNED_AGENT_PROFILE_PUBKEY}`,
     ),
-  ).toHaveText("owned by bob");
+  ).toHaveText("managed by bob");
 });
 
 test("agent profile popover labels an agent owned by the viewer as you", async ({
@@ -1778,7 +1838,7 @@ test("agent profile popover labels an agent owned by the viewer as you", async (
     profilePopover.getByTestId(
       `user-profile-popover-owner-${OWNED_AGENT_PROFILE_PUBKEY}`,
     ),
-  ).toHaveText("owned by you");
+  ).toHaveText("managed by you");
 });
 
 test("agent profile popover falls back to the owner's pubkey", async ({
@@ -1818,7 +1878,7 @@ test("agent profile popover falls back to the owner's pubkey", async ({
     profilePopover.getByTestId(
       `user-profile-popover-owner-${OWNED_AGENT_PROFILE_PUBKEY}`,
     ),
-  ).toHaveText("owned by 11111111…1111");
+  ).toHaveText("managed by 11111111…1111");
 });
 
 test("human profile popover does not show an owner", async ({ page }) => {

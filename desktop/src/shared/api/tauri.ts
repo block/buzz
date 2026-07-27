@@ -1,4 +1,8 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import {
+  activateRateLimit,
+  parseRateLimitHint,
+} from "@/shared/api/relayRateLimitGate";
 import type {
   AddChannelMembersInput,
   AddChannelMembersResult,
@@ -54,7 +58,9 @@ type RawFeedItem = {
   created_at: number;
   channel_id: string | null;
   channel_name: string;
-  channel_type: string;
+  // Native FeedItemInfo.channel_type is Option<String>: serde emits `null`,
+  // never omits the key.
+  channel_type: string | null;
   tags: string[][];
   category: "mention" | "needs_action" | "activity" | "agent_activity";
 };
@@ -112,6 +118,8 @@ export type RawManagedAgent = {
   pubkey: string;
   name: string;
   persona_id: string | null;
+  // Optional: pre-feature fixtures may omit it. The record's harness/runtime id.
+  runtime?: string | null;
   team_id?: string | null;
   relay_url: string;
   acp_command: string;
@@ -126,6 +134,7 @@ export type RawManagedAgent = {
   system_prompt: string | null;
   avatar_url?: string | null;
   model: string | null;
+  model_source?: ManagedAgent["modelSource"];
   provider: string | null;
   persona_out_of_date: boolean;
   persona_orphaned: boolean;
@@ -172,14 +181,25 @@ export type RawAcpRuntimeCatalogEntry = {
   binary_path: string | null;
   default_args: string[];
   mcp_command: string | null;
+  model_env_var?: string | null;
+  provider_env_var?: string | null;
+  thinking_env_var?: string | null;
   install_hint: string;
   install_instructions_url: string;
   can_auto_install: boolean;
+  /** Optional only for older E2E fixtures; the Rust catalog always supplies it. */
+  requires_external_cli?: boolean;
   underlying_cli_path: string | null;
   node_required: boolean;
   /** Tagged union with snake_case status values — same shape as `AuthStatus`. */
   auth_status: AuthStatus;
   login_hint?: string;
+  source: "builtin" | "preset" | "custom";
+  /**
+   * Definition-level env vars for `source: custom` entries.
+   * Omitted/absent for builtin and preset — skipped in Rust serialization when empty.
+   */
+  definition_env?: Record<string, string>;
 };
 
 export type RawInstallStepResult = {
@@ -239,13 +259,24 @@ type RawSetCanvasResult = {
   event_id: string;
 };
 
+/** Error normalized from a rejected Tauri invocation with its wire payload. */
+export class TauriInvokeError extends Error {
+  readonly payload: unknown;
+
+  constructor(message: string, payload: unknown) {
+    super(message);
+    this.name = "TauriInvokeError";
+    this.payload = payload;
+  }
+}
+
 function toTauriError(error: unknown): Error {
   if (error instanceof Error) {
     return error;
   }
 
   if (typeof error === "string") {
-    return new Error(error);
+    return new TauriInvokeError(error, error);
   }
 
   if (
@@ -254,13 +285,25 @@ function toTauriError(error: unknown): Error {
     "message" in error &&
     typeof error.message === "string"
   ) {
-    return new Error(error.message);
+    return new TauriInvokeError(error.message, error);
   }
 
   try {
-    return new Error(JSON.stringify(error));
+    return new TauriInvokeError(JSON.stringify(error), error);
   } catch {
-    return new Error("Unknown Tauri error");
+    return new TauriInvokeError("Unknown Tauri error", error);
+  }
+}
+
+/**
+ * Inspect a Tauri error message and activate the shared rate-limit gate when
+ * the Rust relay layer emitted an HTTP 429 response (`relay rate-limited:` prefix).
+ *
+ * Extracted so it can be unit-tested without mocking the Tauri invoke bridge.
+ */
+export function applyTauriRateLimitIfNeeded(message: string): void {
+  if (message.startsWith("relay rate-limited:")) {
+    activateRateLimit(parseRateLimitHint(message));
   }
 }
 
@@ -271,11 +314,15 @@ export async function invokeTauri<T>(
   try {
     return await tauriInvoke<T>(command, args);
   } catch (error) {
-    throw toTauriError(error);
+    const err = toTauriError(error);
+    // Rust emits `relay rate-limited:` for HTTP 429 responses. Activate the
+    // shared gate so the TS relay client backs off for the same window.
+    applyTauriRateLimitIfNeeded(err.message);
+    throw err;
   }
 }
 
-function fromRawFeedItem(item: RawFeedItem) {
+export function fromRawFeedItem(item: RawFeedItem) {
   return {
     id: item.id,
     kind: item.kind,
@@ -284,7 +331,10 @@ function fromRawFeedItem(item: RawFeedItem) {
     createdAt: item.created_at,
     channelId: item.channel_id,
     channelName: item.channel_name,
-    channelType: item.channel_type,
+    // Canonicalize the wire `null` to undefined so FeedItem's optional
+    // channelType contract holds at runtime (enrichment and the DM
+    // notification filter both key off `=== undefined`).
+    channelType: item.channel_type ?? undefined,
     tags: item.tags,
     category: item.category,
   };
@@ -318,6 +368,10 @@ export async function getPresence(pubkeys: string[]): Promise<PresenceLookup> {
 
 export function getDefaultRelayUrl(): Promise<string> {
   return invokeTauri<string>("get_default_relay_url");
+}
+
+export function autoConnectDefaultRelayEnabled(): Promise<boolean> {
+  return invokeTauri<boolean>("auto_connect_default_relay_enabled");
 }
 
 export function isSharedIdentity(): Promise<boolean> {
@@ -642,6 +696,7 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     pubkey: agent.pubkey,
     name: agent.name,
     personaId: agent.persona_id,
+    runtime: agent.runtime ?? null,
     teamId: agent.team_id ?? null,
     relayUrl: agent.relay_url,
     acpCommand: agent.acp_command,
@@ -656,6 +711,8 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     systemPrompt: agent.system_prompt,
     avatarUrl: agent.avatar_url ?? null,
     model: agent.model,
+    modelSource: agent.model_source ?? null,
+    // Fallbacks for pre-feature mocks/fixtures. Real records always carry them.
     provider: agent.provider ?? null,
     personaOutOfDate: agent.persona_out_of_date ?? false,
     personaOrphaned: agent.persona_orphaned ?? false,
@@ -682,7 +739,7 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
   };
 }
 
-function fromRawAcpRuntimeCatalogEntry(
+export function fromRawAcpRuntimeCatalogEntry(
   entry: RawAcpRuntimeCatalogEntry,
 ): AcpRuntimeCatalogEntry {
   return {
@@ -694,13 +751,21 @@ function fromRawAcpRuntimeCatalogEntry(
     binaryPath: entry.binary_path,
     defaultArgs: entry.default_args,
     mcpCommand: entry.mcp_command,
+    modelEnvVar: entry.model_env_var ?? null,
+    providerEnvVar: entry.provider_env_var ?? null,
+    thinkingEnvVar: entry.thinking_env_var ?? null,
     installHint: entry.install_hint,
     installInstructionsUrl: entry.install_instructions_url,
     canAutoInstall: entry.can_auto_install,
+    requiresExternalCli: entry.requires_external_cli ?? false,
     underlyingCliPath: entry.underlying_cli_path,
     nodeRequired: entry.node_required,
     authStatus: entry.auth_status,
     loginHint: entry.login_hint ?? null,
+    source: entry.source,
+    // Map definition_env (snake_case from Rust) to definitionEnv (camelCase).
+    // Absent when empty (Rust serialization skips empty BTreeMap) — default to {}.
+    definitionEnv: entry.definition_env ?? {},
   };
 }
 
@@ -880,6 +945,45 @@ export async function discoverAcpRuntimes(): Promise<AcpRuntimeCatalogEntry[]> {
   return (
     await invokeTauri<RawAcpRuntimeCatalogEntry[]>("discover_acp_providers")
   ).map(fromRawAcpRuntimeCatalogEntry);
+}
+
+/** Input shape for creating or updating a custom harness. */
+export type HarnessDefinitionInput = {
+  id: string;
+  label: string;
+  command: string;
+  args?: string[];
+  env?: Record<string, string>;
+  installInstructionsUrl?: string;
+  installHint?: string;
+};
+
+/** Save (create or overwrite) a custom harness definition. Returns the catalog entry. */
+export async function saveCustomHarness(
+  definition: HarnessDefinitionInput,
+  originalId?: string,
+): Promise<AcpRuntimeCatalogEntry> {
+  const raw = await invokeTauri<RawAcpRuntimeCatalogEntry>(
+    "save_custom_harness",
+    {
+      definition: {
+        id: definition.id,
+        label: definition.label,
+        command: definition.command,
+        args: definition.args ?? [],
+        env: definition.env ?? {},
+        installInstructionsUrl: definition.installInstructionsUrl ?? "",
+        installHint: definition.installHint ?? "",
+      },
+      originalId: originalId ?? null,
+    },
+  );
+  return fromRawAcpRuntimeCatalogEntry(raw);
+}
+
+/** Delete a custom harness definition by id. No-op if already gone. */
+export async function deleteCustomHarness(id: string): Promise<void> {
+  await invokeTauri<void>("delete_custom_harness", { id });
 }
 
 export async function installAcpRuntime(

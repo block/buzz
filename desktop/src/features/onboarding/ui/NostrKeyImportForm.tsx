@@ -7,10 +7,7 @@ import { Button } from "@/shared/ui/button";
 import { Card } from "@/shared/ui/card";
 import { Input } from "@/shared/ui/input";
 import { Spinner } from "@/shared/ui/spinner";
-import {
-  ONBOARDING_INK_ICON_CLASS,
-  ONBOARDING_PRIMARY_CTA_CLASS,
-} from "./OnboardingChrome";
+import { ONBOARDING_PRIMARY_CTA_CLASS } from "./OnboardingChrome";
 import { OnboardingFooter } from "./OnboardingFooter";
 
 const NOSTR_KEY_FILE_MAX_BYTES = 1024;
@@ -184,8 +181,7 @@ export function NostrKeyImportForm({
                   isRevealed ? "Hide private key" : "Reveal private key"
                 }
                 className={cn(
-                  ONBOARDING_INK_ICON_CLASS,
-                  "absolute -right-2 top-1/2 h-10 w-10 -translate-y-1/2 transition-opacity duration-300 motion-reduce:transition-none",
+                  "absolute right-8 top-1/2 h-10 w-10 -translate-y-1/2 text-muted-foreground transition-opacity duration-300 hover:bg-foreground/10 hover:text-foreground motion-reduce:transition-none",
                   hasInput ? "opacity-100" : "pointer-events-none opacity-0",
                 )}
                 data-testid="nostr-import-reveal-toggle"

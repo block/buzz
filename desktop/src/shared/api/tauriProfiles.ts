@@ -83,6 +83,19 @@ export async function updateProfile(
   return fromRawProfile(profile);
 }
 
+export async function updateProfileAtRelay(input: {
+  relayUrl: string;
+  expectedPubkey: string;
+  expectedAvatarUrl: string | null;
+  avatarUrl: string;
+}): Promise<Profile> {
+  const profile = await invokeTauri<RawProfile>(
+    "update_profile_at_relay",
+    input,
+  );
+  return fromRawProfile(profile);
+}
+
 export async function getUserProfile(pubkey?: string): Promise<Profile> {
   const profile = await invokeTauri<RawProfile>("get_user_profile", { pubkey });
   return fromRawProfile(profile);

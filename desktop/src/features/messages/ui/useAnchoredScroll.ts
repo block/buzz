@@ -102,11 +102,14 @@ type UseAnchoredScrollOptions = {
   messages: Array<{ id: string }>;
   splitPanelOpen?: boolean;
 
-  /** When set, scroll to and highlight this message on mount and on change. */
+  /** When set, scroll to this message on mount and on change. */
   targetMessageId?: string | null;
+  /** Whether a targeted message should pulse after scrolling to it. */
+  highlightTargetMessage?: boolean;
   /** Keeps a targeted message centered until the user deliberately scrolls. */
   pinTargetCentered?: boolean;
   onTargetReached?: (messageId: string) => void;
+  virtualCancelBottomIntent?: () => void;
   virtualScrollToMessage?: (
     messageId: string,
     options?: { behavior?: ScrollBehavior },
@@ -224,8 +227,10 @@ export function useAnchoredScroll({
   splitPanelOpen = false,
 
   targetMessageId = null,
+  highlightTargetMessage = true,
   pinTargetCentered = false,
   onTargetReached,
+  virtualCancelBottomIntent,
   virtualScrollToMessage,
   virtualScrollToBottom,
   virtualSettleAtBottom,
@@ -436,6 +441,10 @@ export function useAnchoredScroll({
         `[data-message-id="${messageId}"]`,
       );
       if (virtualizerOwnsPrependAnchoring && virtualScrollToMessage) {
+        // Target navigation owns the viewport before any movement strategy is
+        // chosen. The already-mounted fast path centers the DOM node directly
+        // and would otherwise leave durable bottom intent armed.
+        virtualCancelBottomIntent?.();
         if (el) {
           const rect = el.getBoundingClientRect();
           const containerRect = container.getBoundingClientRect();
@@ -531,6 +540,7 @@ export function useAnchoredScroll({
       highlightMessage,
       pinTargetCentered,
       scrollContainerRef,
+      virtualCancelBottomIntent,
       virtualizerOwnsPrependAnchoring,
       writePinnedCenterScroll,
       virtualScrollToMessage,
@@ -604,10 +614,18 @@ export function useAnchoredScroll({
     // to the requested target message, or to the bottom by default.
     if (!hasInitializedRef.current) {
       if (isLoading) return;
-      // Defer the scroll out of the layout effect so the current paint commits
-      // first; cancelled on channel switch via the reset effect's rAF guard.
+      // The virtualized list owns the actual scroll node. Its API registers in
+      // a child layout effect, after this parent hook's first pass; treating
+      // that API-less pass as initialized writes to the inert outer wrapper
+      // and permanently consumes the channel's initial bottom pin.
+      if (virtualizerOwnsPrependAnchoring && !virtualScrollToBottom) return;
+      // Establish the initial position before the browser paints. The follow-up
+      // frame is a settling pass for content whose measurements land with the
+      // commit (fonts, deferred rows, media), not the first bottom pin. Keeping
+      // both writes in the shared scroll owner gives every conversation surface
+      // the same first-frame behavior regardless of its surrounding animation.
       const pinToBottomOnMount = () => {
-        anchorRef.current = { kind: "at-bottom" };
+        scrollToBottomImperative("auto");
         mountPinRafIdRef.current = requestAnimationFrame(() => {
           mountPinRafIdRef.current = null;
           scrollToBottomImperative("auto");
@@ -619,7 +637,11 @@ export function useAnchoredScroll({
         // render or two later. If centering fails now, leave the timeline at
         // its default position and let the post-mount target effect (keyed on
         // `messages`) retry once the row lands, rather than marking it handled.
-        if (scrollToMessageImperative(targetMessageId, { highlight: true })) {
+        if (
+          scrollToMessageImperative(targetMessageId, {
+            highlight: highlightTargetMessage,
+          })
+        ) {
           handledTargetIdRef.current = targetMessageId;
           onTargetReached?.(targetMessageId);
         } else {
@@ -726,6 +748,7 @@ export function useAnchoredScroll({
     prevMessageCountRef.current = messages.length;
     prevMessagesRef.current = messages;
   }, [
+    highlightTargetMessage,
     isLoading,
     messages,
     onTargetReached,
@@ -831,7 +854,11 @@ export function useAnchoredScroll({
       `[data-message-id="${targetMessageId}"]`,
     );
     if (!el && virtualizerOwnsPrependAnchoring) {
-      if (scrollToMessageImperative(targetMessageId, { highlight: true })) {
+      if (
+        scrollToMessageImperative(targetMessageId, {
+          highlight: highlightTargetMessage,
+        })
+      ) {
         handledTargetIdRef.current = targetMessageId;
         onTargetReached?.(targetMessageId);
       }
@@ -844,9 +871,12 @@ export function useAnchoredScroll({
       return;
     }
     handledTargetIdRef.current = targetMessageId;
-    scrollToMessageImperative(targetMessageId, { highlight: true });
+    scrollToMessageImperative(targetMessageId, {
+      highlight: highlightTargetMessage,
+    });
     onTargetReached?.(targetMessageId);
   }, [
+    highlightTargetMessage,
     isLoading,
     messages,
     onTargetReached,

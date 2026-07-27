@@ -1,5 +1,5 @@
 import { relayClient } from "@/shared/api/relayClient";
-import { getRelayHttpUrl, signRelayEvent } from "@/shared/api/tauri";
+import { invokeTauri, signRelayEvent } from "@/shared/api/tauri";
 import { getIdentity } from "@/shared/api/tauriIdentity";
 import type {
   RelayEvent,
@@ -37,6 +37,13 @@ export type RelayMembershipLookup = {
   membershipRequired: boolean;
   membership: RelayMember | null;
 };
+
+export function canManageCommunityMembers(
+  lookup: RelayMembershipLookup | undefined,
+): boolean {
+  const role = lookup?.membership?.role;
+  return role === "owner" || role === "admin";
+}
 
 export function shouldWarnMissingMembershipSnapshot(
   lookup: RelayMembershipLookup | undefined,
@@ -97,12 +104,22 @@ export function relayMembershipLookupFromEvent(
 }
 
 async function fetchMembershipListEvent(): Promise<RelayEvent | null> {
-  const events = await relayClient.fetchEvents({
+  return relayClient.fetchFirstEvent({
     kinds: [KIND_NIP43_MEMBERSHIP_LIST],
     limit: 1,
   });
+}
 
-  return events[events.length - 1] ?? null;
+/** Loads the NIP-43 snapshot only when the relay advertises membership support. */
+export async function loadRelayMembershipLookup(
+  pubkey: string,
+  membershipRequired: boolean,
+  fetchSnapshot: () => Promise<RelayEvent | null> = fetchMembershipListEvent,
+): Promise<RelayMembershipLookup> {
+  if (!membershipRequired) {
+    return relayMembershipLookupFromEvent(null, pubkey, false);
+  }
+  return relayMembershipLookupFromEvent(await fetchSnapshot(), pubkey, true);
 }
 
 export async function listRelayMembers(): Promise<RelayMember[]> {
@@ -111,28 +128,15 @@ export async function listRelayMembers(): Promise<RelayMember[]> {
 }
 
 async function relayRequiresMembership(): Promise<boolean> {
-  const base = (await getRelayHttpUrl()).replace(/\/+$/, "");
-  const response = await fetch(`${base}/info`, {
-    headers: { Accept: "application/nostr+json" },
-  });
-  if (!response.ok) {
-    throw new Error(`Relay information request failed (${response.status}).`);
-  }
-  const info = (await response.json()) as { supported_nips?: unknown };
-  return (
-    Array.isArray(info.supported_nips) &&
-    info.supported_nips.some((nip) => nip === 43)
-  );
+  return invokeTauri<boolean>("relay_requires_membership");
 }
 
 export async function getMyRelayMembershipLookup(): Promise<RelayMembershipLookup> {
-  const [{ pubkey }, event] = await Promise.all([
+  const [{ pubkey }, membershipRequired] = await Promise.all([
     getIdentity(),
-    fetchMembershipListEvent(),
+    relayRequiresMembership(),
   ]);
-  const membershipRequired =
-    event !== null || (await relayRequiresMembership());
-  return relayMembershipLookupFromEvent(event, pubkey, membershipRequired);
+  return loadRelayMembershipLookup(pubkey, membershipRequired);
 }
 
 export async function getMyRelayMembership(): Promise<RelayMember | null> {

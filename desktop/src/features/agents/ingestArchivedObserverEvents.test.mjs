@@ -354,7 +354,7 @@ describe("load-older cursor advance logic", () => {
 
   it("test_short_page_signals_archive_exhausted", () => {
     // A page with fewer events than the limit signals end-of-archive.
-    const PAGE_SIZE = 50;
+    const PAGE_SIZE = 200;
     const page = Array.from({ length: 30 }, (_, i) => ({
       created_at: 1000 - i,
     }));
@@ -367,8 +367,8 @@ describe("load-older cursor advance logic", () => {
   });
 
   it("test_full_page_signals_more_archive_available", () => {
-    const PAGE_SIZE = 50;
-    const page = Array.from({ length: 50 }, (_, i) => ({
+    const PAGE_SIZE = 200;
+    const page = Array.from({ length: 200 }, (_, i) => ({
       created_at: 1000 - i,
     }));
     const exhausted = page.length < PAGE_SIZE;
@@ -394,6 +394,7 @@ describe("load-older cursor advance logic", () => {
 import {
   createArchivePagingState,
   applyChannelReset,
+  runHydrationLoop,
 } from "@/features/agents/ui/archivePagingState.ts";
 
 describe("archive paging state reset on channel change", () => {
@@ -410,6 +411,12 @@ describe("archive paging state reset on channel change", () => {
       "backfillPromise is eagerly initialized",
     );
     assert.equal(ps.cursor, null, "cursor starts null");
+    assert.equal(
+      ps.initialHydrationDone,
+      false,
+      "initialHydrationDone starts false",
+    );
+    assert.equal(ps.activeChannelId, null, "activeChannelId starts null");
   });
 
   it("test_channel_switch_resets_cursor_exhaustion_and_fetch_lock", () => {
@@ -419,11 +426,13 @@ describe("archive paging state reset on channel change", () => {
     ps.cursor = { createdAt: 1000, id: "event-a5" };
     ps.hasOlderArchived = false; // channel A exhausted
     ps.isFetching = true; // mid-flight request (edge case)
+    ps.initialHydrationDone = true; // hydration ran for channel A
+    ps.activeChannelId = "chan-a";
     ps.backfillStatus = "done"; // backfill ran once already
     const originalPromise = ps.backfillPromise; // must survive reset
 
     // Channel switch — this is what the useEffect([channelId]) calls.
-    applyChannelReset(ps);
+    applyChannelReset(ps, "chan-b");
 
     assert.equal(ps.cursor, null, "cursor resets to null on channel switch");
     assert.equal(
@@ -435,6 +444,16 @@ describe("archive paging state reset on channel change", () => {
       ps.isFetching,
       false,
       "isFetching resets to false on channel switch",
+    );
+    assert.equal(
+      ps.initialHydrationDone,
+      false,
+      "initialHydrationDone resets to false on channel switch so the new channel hydrates",
+    );
+    assert.equal(
+      ps.activeChannelId,
+      "chan-b",
+      "activeChannelId updates to new channel on switch",
     );
 
     // Backfill state must NOT be touched — it is identity-level and should
@@ -459,10 +478,11 @@ describe("archive paging state reset on channel change", () => {
   it("test_multiple_channel_switches_each_start_fresh", () => {
     const ps = createArchivePagingState();
 
-    // Switch to channel A: exhaust it.
+    // Switch to channel A: exhaust it and complete hydration.
     ps.cursor = { createdAt: 500, id: "a-oldest" };
     ps.hasOlderArchived = false;
-    applyChannelReset(ps);
+    ps.initialHydrationDone = true;
+    applyChannelReset(ps, "chan-b");
 
     assert.equal(ps.cursor, null, "switch A→B: cursor reset");
     assert.equal(
@@ -470,17 +490,186 @@ describe("archive paging state reset on channel change", () => {
       true,
       "switch A→B: hasOlderArchived reset",
     );
+    assert.equal(
+      ps.initialHydrationDone,
+      false,
+      "switch A→B: initialHydrationDone reset",
+    );
+    assert.equal(
+      ps.activeChannelId,
+      "chan-b",
+      "switch A→B: activeChannelId updated",
+    );
 
-    // Simulate channel B also being paged.
+    // Simulate channel B also being paged and hydrated.
     ps.cursor = { createdAt: 200, id: "b-oldest" };
     ps.hasOlderArchived = false;
-    applyChannelReset(ps);
+    ps.initialHydrationDone = true;
+    applyChannelReset(ps, "chan-c");
 
     assert.equal(ps.cursor, null, "switch B→C: cursor reset again");
     assert.equal(
       ps.hasOlderArchived,
       true,
       "switch B→C: hasOlderArchived reset again",
+    );
+    assert.equal(
+      ps.initialHydrationDone,
+      false,
+      "switch B→C: initialHydrationDone reset again",
+    );
+    assert.equal(
+      ps.activeChannelId,
+      "chan-c",
+      "switch B→C: activeChannelId updated",
+    );
+  });
+});
+
+// ── Eager initial hydration loop logic ───────────────────────────────────────
+//
+// The initial hydration loop in useLoadArchivedObserverEvents calls
+// fetchOlderArchived up to INITIAL_HYDRATION_BUDGET_PAGES times. The loop must:
+//   - Stop at budget (10 pages) even if more archive exists.
+//   - Stop early when the archive is exhausted (ps.hasOlderArchived → false).
+//   - Respect channel-switch cancellation (signal.cancelled).
+//
+// These tests call the PRODUCTION runHydrationLoop from archivePagingState.ts
+// with mock fetchOnePage functions — so they fail if the production loop logic
+// is deleted or misrouted, not just if a reimplemented copy breaks.
+
+describe("eager initial hydration loop control flow (production runHydrationLoop)", () => {
+  const BUDGET = 10; // mirrors INITIAL_HYDRATION_BUDGET_PAGES
+
+  it("test_hydration_stops_at_budget_when_archive_never_exhausted", async () => {
+    const ps = createArchivePagingState();
+    applyChannelReset(ps, "chan-1");
+    let fetchCount = 0;
+    const fetchOnePage = async () => {
+      fetchCount++;
+      // archive remains non-empty — ps.hasOlderArchived stays true
+    };
+    const signal = { cancelled: false };
+    await runHydrationLoop(ps, fetchOnePage, BUDGET, signal);
+    assert.equal(
+      fetchCount,
+      BUDGET,
+      `production runHydrationLoop must stop after exactly ${BUDGET} pages (budget limit)`,
+    );
+  });
+
+  it("test_hydration_stops_early_when_archive_exhausted", async () => {
+    const ps = createArchivePagingState();
+    applyChannelReset(ps, "chan-1");
+    let fetchCount = 0;
+    const fetchOnePage = async () => {
+      fetchCount++;
+      if (fetchCount >= 3) {
+        ps.hasOlderArchived = false; // mock: archive exhausted on page 3
+      }
+    };
+    const signal = { cancelled: false };
+    await runHydrationLoop(ps, fetchOnePage, BUDGET, signal);
+    assert.equal(
+      fetchCount,
+      3,
+      "production runHydrationLoop must stop as soon as ps.hasOlderArchived is false (before budget)",
+    );
+  });
+
+  it("test_hydration_respects_cancellation_on_channel_switch", async () => {
+    const ps = createArchivePagingState();
+    applyChannelReset(ps, "chan-1");
+    const signal = { cancelled: false };
+    let fetchCount = 0;
+    const fetchOnePage = async () => {
+      fetchCount++;
+      if (fetchCount >= 2) {
+        signal.cancelled = true; // mock: channel switched mid-loop
+      }
+    };
+    await runHydrationLoop(ps, fetchOnePage, BUDGET, signal);
+    assert.equal(
+      fetchCount,
+      2,
+      "production runHydrationLoop must stop when signal.cancelled is true (channel switch)",
+    );
+  });
+
+  it("test_hydration_zero_iterations_when_already_exhausted", async () => {
+    // If ps.hasOlderArchived is already false before the loop starts (e.g.
+    // channel A was exhausted and reset did not run yet), the loop must not
+    // call fetchOnePage at all.
+    const ps = createArchivePagingState();
+    applyChannelReset(ps, "chan-1");
+    ps.hasOlderArchived = false; // already exhausted
+    let fetchCount = 0;
+    const fetchOnePage = async () => {
+      fetchCount++;
+    };
+    const signal = { cancelled: false };
+    await runHydrationLoop(ps, fetchOnePage, BUDGET, signal);
+    assert.equal(
+      fetchCount,
+      0,
+      "must not fetch when archive is already exhausted",
+    );
+  });
+
+  // Regression: stale React closure — the original fetchOlderArchived captured
+  // hasOlderArchived from React state, which was false (exhausted) for channel A
+  // while ps.hasOlderArchived had already been reset to true by applyChannelReset.
+  // The production loop uses ps.hasOlderArchived (the ref) to guard iterations,
+  // so the switch-then-hydrate path must call fetchOnePage for the new channel.
+  it("test_exhausted_channel_A_then_switch_to_B_hydrates_B", async () => {
+    const ps = createArchivePagingState();
+
+    // Simulate exhausting channel A.
+    applyChannelReset(ps, "chan-a");
+    ps.hasOlderArchived = false; // channel A exhausted
+
+    // Switch to channel B — resets hasOlderArchived and activeChannelId.
+    applyChannelReset(ps, "chan-b");
+
+    // ps.hasOlderArchived is now true; the loop should call fetchOnePage.
+    let fetchCount = 0;
+    const fetchOnePage = async () => {
+      fetchCount++;
+      ps.hasOlderArchived = false; // B also exhausted after 1 page
+    };
+    const signal = { cancelled: false };
+    await runHydrationLoop(ps, fetchOnePage, BUDGET, signal);
+
+    assert.equal(
+      fetchCount,
+      1,
+      "after switch from exhausted channel A to B, runHydrationLoop must call fetchOnePage for B (not skip due to stale exhaustion)",
+    );
+  });
+
+  // Regression: stale cursor write — an in-flight read from channel A should
+  // not write A's cursor into ps.cursor after the switch to B. The activeChannelId
+  // token (set by applyChannelReset) is what lets fetchOlderArchived detect and
+  // discard the stale result. This test verifies that applyChannelReset correctly
+  // advances the token so a pre-switch requestChannelId !== ps.activeChannelId.
+  it("test_activeChannelId_token_detects_stale_read_from_prior_channel", () => {
+    const ps = createArchivePagingState();
+    applyChannelReset(ps, "chan-a");
+    const requestChannelId = ps.activeChannelId; // captured at request start = "chan-a"
+
+    // Simulate channel switch before the Tauri read resolves.
+    applyChannelReset(ps, "chan-b");
+
+    // The in-flight A read checks requestChannelId !== ps.activeChannelId.
+    assert.notEqual(
+      requestChannelId,
+      ps.activeChannelId,
+      "requestChannelId from channel A must not match activeChannelId after switching to B — stale read must be discarded",
+    );
+    assert.equal(
+      ps.activeChannelId,
+      "chan-b",
+      "activeChannelId must reflect the current channel after switch",
     );
   });
 });

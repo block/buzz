@@ -2,10 +2,13 @@ package xyz.block.buzz.mobile
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.ColorSpace
 import android.graphics.ImageDecoder
 import android.media.MediaExtractor
 import android.media.MediaMuxer
 import android.os.Build
+import androidx.annotation.RequiresApi
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -13,6 +16,65 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.nio.ByteBuffer
 import java.util.UUID
+
+internal object AndroidImageProcessor {
+    fun decodeSrgbBitmap(bytes: ByteArray): Bitmap? {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            decodeSrgbBitmapWithColorManagement(bytes)
+        } else {
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+        }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.O)
+    private fun decodeSrgbBitmapWithColorManagement(bytes: ByteArray): Bitmap? {
+        val decoded = decodeColorManagedBitmap(bytes) ?: return null
+        val srgb = ColorSpace.get(ColorSpace.Named.SRGB)
+        if (decoded.config == Bitmap.Config.ARGB_8888 && decoded.colorSpace == srgb) return decoded
+
+        val srgbBitmap = Bitmap.createBitmap(
+            decoded.width,
+            decoded.height,
+            Bitmap.Config.ARGB_8888,
+            decoded.hasAlpha(),
+            srgb,
+        )
+        Canvas(srgbBitmap).drawBitmap(decoded, 0f, 0f, null)
+        return srgbBitmap
+    }
+
+    @RequiresApi(Build.VERSION_CODES.O)
+    private fun decodeColorManagedBitmap(bytes: ByteArray): Bitmap? {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            runCatching {
+                val source = ImageDecoder.createSource(ByteBuffer.wrap(bytes))
+                ImageDecoder.decodeBitmap(source) { decoder, _, _ ->
+                    decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+                    decoder.setTargetColorSpace(ColorSpace.get(ColorSpace.Named.SRGB))
+                }
+            }.getOrNull()?.let { return it }
+        }
+
+        val options = BitmapFactory.Options().apply {
+            inPreferredColorSpace = ColorSpace.get(ColorSpace.Named.SRGB)
+        }
+        return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+    }
+
+    fun encodeAndScrub(
+        bitmap: Bitmap,
+        format: Bitmap.CompressFormat,
+    ): ByteArray? {
+        val output = ByteArrayOutputStream()
+        if (!bitmap.compress(format, 100, output)) return null
+
+        return when (format) {
+            Bitmap.CompressFormat.PNG -> AndroidMediaSanitizer.scrubPng(output.toByteArray())
+            Bitmap.CompressFormat.JPEG -> AndroidMediaSanitizer.scrubJpeg(output.toByteArray())
+            else -> error("Unsupported upload image format: $format")
+        }
+    }
+}
 
 class MainActivity : FlutterActivity() {
     private var mediaUploadChannel: MethodChannel? = null
@@ -96,28 +158,6 @@ class MainActivity : FlutterActivity() {
         )
     }
 
-    private fun decodeBitmap(bytes: ByteArray): Bitmap? {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            runCatching {
-                val source = ImageDecoder.createSource(ByteBuffer.wrap(bytes))
-                ImageDecoder.decodeBitmap(source) { decoder, _, _ ->
-                    decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
-                }
-            }.getOrNull()?.let { return it }
-        }
-
-        return BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-    }
-
-    private fun encodeBitmap(
-        bitmap: Bitmap,
-        format: Bitmap.CompressFormat,
-    ): ByteArray? {
-        val output = ByteArrayOutputStream()
-        val encoded = bitmap.compress(format, 100, output)
-        return if (encoded) output.toByteArray() else null
-    }
-
     private fun sanitizeCompressFormatFor(
         mimeType: String,
     ): Bitmap.CompressFormat? {
@@ -136,7 +176,7 @@ class MainActivity : FlutterActivity() {
         encodeFailureMessage: String,
         errorDetails: Any? = null,
     ) {
-        val bitmap = decodeBitmap(bytes) ?: run {
+        val bitmap = AndroidImageProcessor.decodeSrgbBitmap(bytes) ?: run {
             result.error(
                 errorCode,
                 "Unable to decode picked image.",
@@ -145,7 +185,11 @@ class MainActivity : FlutterActivity() {
             return
         }
 
-        val transformedBytes = encodeBitmap(bitmap, format) ?: run {
+        val transformedBytes = try {
+            AndroidImageProcessor.encodeAndScrub(bitmap, format)
+        } catch (_: IllegalArgumentException) {
+            null
+        } ?: run {
             result.error(
                 errorCode,
                 encodeFailureMessage,

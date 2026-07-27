@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  buildGitIssueTags,
   eventToProjectIssue,
   getAllTags,
   getTag,
@@ -96,4 +97,45 @@ test("tag helpers drop malformed value-less tags", () => {
   assert.deepEqual(issue.labels, ["bug"]);
   assert.equal(issue.status, PROJECT_ISSUE_STATUS.BACKLOG);
   assert.equal(issue.title, "Something is broken");
+});
+
+test("preserves root and comment tags for rich content rendering", () => {
+  const root = issueEvent({
+    tags: [
+      ["a", REPO_ADDRESS],
+      ["subject", "Something is broken"],
+      ["imeta", "url https://relay.example/media/root.png", "m image/png"],
+    ],
+  });
+  const comment = {
+    id: "comment-rich-content",
+    kind: 1,
+    pubkey: ATTACKER,
+    created_at: 200,
+    content: "![Screenshot](https://relay.example/media/comment.png)",
+    tags: [
+      ["e", root.id, "", "root"],
+      ["imeta", "url https://relay.example/media/comment.png", "m image/png"],
+    ],
+  };
+
+  const issue = eventToProjectIssue(root, [], [comment]);
+
+  assert.deepEqual(issue.tags, [root.tags[2]]);
+  assert.deepEqual(issue.comments[0].tags, [comment.tags[1]]);
+});
+
+test("builds repository-scoped issue creation tags", () => {
+  assert.deepEqual(
+    buildGitIssueTags({
+      repoAddress: REPO_ADDRESS,
+      repoOwner: OWNER,
+      title: "  Fix the broken workflow  ",
+    }),
+    [
+      ["a", REPO_ADDRESS],
+      ["p", OWNER],
+      ["subject", "Fix the broken workflow"],
+    ],
+  );
 });

@@ -462,7 +462,7 @@ test("inheritedRows_masked_secret_local_override_shows_masked_build_value", () =
 test("inheritedRows_structured_keys_excluded_from_generic_rows", () => {
   // BUZZ_AGENT_PROVIDER, BUZZ_AGENT_MODEL, BUZZ_AGENT_THINKING_EFFORT must
   // be excluded from bakedGenericRows (they go to structured fields instead).
-  // This mirrors the BAKED_STRUCTURED_KEYS filter in GlobalAgentConfigSettingsCard.
+  // This mirrors the BAKED_STRUCTURED_KEYS filter in AgentDefaultsSettingsCard.
   const STRUCTURED = new Set([
     "BUZZ_AGENT_PROVIDER",
     "BUZZ_AGENT_MODEL",

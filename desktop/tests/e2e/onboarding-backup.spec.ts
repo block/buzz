@@ -21,7 +21,7 @@ test("backup step appears on fresh-key path after profile submit", async ({
   await expect(page.getByTestId("onboarding-page-backup")).toBeVisible();
   await expect(
     page.getByRole("heading", {
-      name: "Your unique identity has been created",
+      name: "Your unique identity key has been created",
     }),
   ).toBeVisible();
 });
@@ -85,8 +85,13 @@ test("backup step back button returns to machine identity choice", async ({
   await expect(page.getByTestId("onboarding-page-backup")).toBeVisible();
   await page.getByTestId("onboarding-back").click();
 
+  // Backing out preserves the loaded key — primary CTA continues setup rather
+  // than minting another identity (#2318).
   await expect(
-    page.getByRole("button", { name: "Create a new identity key" }),
+    page.getByRole("button", { name: "Continue setup" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Use a different key instead" }),
   ).toBeVisible();
 });
 

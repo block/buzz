@@ -156,7 +156,7 @@ test("Buzz shared compute explains automatic model selection", async ({
   await expect(page.locator("#persona-model")).toContainText("Automatic");
   await expect(
     page.getByText(
-      "Buzz will choose an available shared model when the agent starts.",
+      "Auto uses Mesh collective intelligence when two or more models stay available, otherwise it chooses one available model.",
     ),
   ).toBeVisible();
   await expect(page.locator("#persona-custom-model")).toHaveCount(0);
@@ -634,6 +634,9 @@ test("does not shift the timeline when the composer grows", async ({
   await page.waitForTimeout(400);
   await page.getByTestId("message-timeline").evaluate((element) => {
     const timeline = element as HTMLDivElement;
+    // The raw position assignment sets up detached history, while wheel is the
+    // same ownership signal a real reader produces before composer reflow.
+    timeline.dispatchEvent(new WheelEvent("wheel", { deltaY: -100 }));
     timeline.scrollTop = 0;
     timeline.dispatchEvent(new Event("scroll"));
   });

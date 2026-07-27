@@ -37,6 +37,12 @@ pub const MANIFEST_VERSION: u32 = 1;
 /// Hydration indexes packs one at a time, but an unbounded pack list still
 /// turns one request into unbounded object-store and git subprocess work.
 pub const MAX_MANIFEST_PACKS: usize = 128;
+/// Pack count that triggers proactive consolidation during the next accepted push.
+///
+/// Keeping one quarter of the manifest capacity in reserve prevents a hot
+/// repository from reaching the hard limit while a prior compaction attempt
+/// falls back to the normal delta-pack path.
+pub const PACK_COMPACTION_THRESHOLD: usize = MAX_MANIFEST_PACKS * 3 / 4;
 /// Maximum number of refs one manifest may advertise.
 pub const MAX_MANIFEST_REFS: usize = 10_000;
 

@@ -467,6 +467,10 @@ pub struct CliArgs {
     /// Publish encrypted ACP observer frames over the relay.
     #[arg(long, env = "BUZZ_ACP_RELAY_OBSERVER", default_value_t = false)]
     pub relay_observer: bool,
+
+    /// Connect and subscribe before starting the ACP/LLM subprocess pool.
+    #[arg(long, env = "BUZZ_ACP_LAZY_POOL", default_value_t = false)]
+    pub lazy_pool: bool,
 }
 
 /// Merged NIP-01 subscription filter for a single channel.
@@ -537,6 +541,8 @@ pub struct Config {
     pub has_generated_codex_config: bool,
     /// Whether to publish encrypted observer frames through the relay.
     pub relay_observer: bool,
+    /// Whether ACP/LLM subprocess initialization is deferred until accepted work arrives.
+    pub lazy_pool: bool,
     /// Agent owner pubkey (hex). Used for `--respond-to=owner-only` gate.
     /// Replaces the old REST-based owner lookup.
     pub agent_owner: Option<String>,
@@ -798,7 +804,6 @@ impl Config {
 
         let agent_command = args.agent_command;
 
-        // Finding #49a — agent_command must not be empty.
         if agent_command.trim().is_empty() {
             return Err(ConfigError::ConfigFile(
                 "agent_command must not be empty".into(),
@@ -807,7 +812,6 @@ impl Config {
 
         let agent_args = normalize_agent_args(&agent_command, args.agent_args);
 
-        // Finding #49b — warn on invalid UUIDs in --channels.
         if let Some(ref channels) = args.channels {
             for ch in channels {
                 if ch.parse::<Uuid>().is_err() {
@@ -819,7 +823,6 @@ impl Config {
             }
         }
 
-        // Finding #49c — cap heartbeat interval at 86400s (24h).
         let heartbeat_interval = if args.heartbeat_interval > 86400 {
             tracing::warn!(
                 interval = args.heartbeat_interval,
@@ -885,9 +888,9 @@ impl Config {
             }
         };
 
-        // Finding #20 — idle_timeout must be strictly less than max_turn_duration.
-        // If idle_timeout >= max_turn_duration, the absolute wall-clock cap would
-        // fire before the idle timeout ever could, making idle_timeout a dead letter.
+        // idle_timeout must be strictly less than max_turn_duration. If idle_timeout
+        // >= max_turn_duration, the absolute wall-clock cap would fire before the idle
+        // timeout ever could, making idle_timeout a dead letter.
         if idle_timeout_secs >= max_turn_duration_secs {
             return Err(ConfigError::ConfigFile(format!(
                 "idle_timeout ({}s) must be less than max_turn_duration ({}s)",
@@ -996,6 +999,7 @@ impl Config {
             persona_env_vars,
             has_generated_codex_config,
             relay_observer: args.relay_observer,
+            lazy_pool: args.lazy_pool,
             agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
             no_base_prompt: args.no_base_prompt,
             base_prompt_content,
@@ -1068,7 +1072,6 @@ pub fn load_rules(path: &std::path::Path) -> Result<Vec<SubscriptionRule>, Confi
         )));
     }
 
-    // Finding #49d — warn when Config mode has no rules; agent will receive nothing.
     if config.rules.is_empty() {
         tracing::warn!(
             path = %path.display(),
@@ -1099,7 +1102,6 @@ pub fn load_rules(path: &std::path::Path) -> Result<Vec<SubscriptionRule>, Confi
             }
             // Fail fast: parse the expression at load time so typos don't
             // silently produce dead rules at runtime.
-            // Finding #34 — store the compiled AST so match_event never re-parses.
             match evalexpr::build_operator_tree(expr) {
                 Ok(node) => {
                     rule.compiled_filter = Some(Arc::new(node));
@@ -1121,9 +1123,7 @@ pub fn load_rules(path: &std::path::Path) -> Result<Vec<SubscriptionRule>, Confi
                 )));
             }
         }
-        // Initialise the consecutive-timeout counter (finding #25).
-        // Deserialization leaves it at default (new Arc<AtomicU32::new(0)>)
-        // but we set it explicitly here for clarity.
+        // Deserialization leaves consecutive_timeouts at its zero default; reset explicitly.
         rule.consecutive_timeouts = Arc::new(AtomicU32::new(0));
     }
 
@@ -1368,6 +1368,7 @@ mod tests {
             persona_env_vars: vec![],
             has_generated_codex_config: false,
             relay_observer: false,
+            lazy_pool: false,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
@@ -2031,6 +2032,20 @@ channels = "ALL"
     fn test_turn_liveness_one_rejected() {
         let err = validate_turn_liveness(1).unwrap_err();
         assert!(err.to_string().contains("turn liveness interval must be 0"));
+    }
+
+    #[test]
+    fn lazy_pool_defaults_off() {
+        let key = "0".repeat(64);
+        assert!(!CliArgs::parse_from(["buzz-acp", "--private-key", &key]).lazy_pool);
+    }
+
+    #[test]
+    fn lazy_pool_cli_flag_enables_deferred_startup() {
+        let key = "0".repeat(64);
+        let args = CliArgs::try_parse_from(["buzz-acp", "--private-key", &key, "--lazy-pool=true"]);
+        assert!(args.is_err(), "bool flags do not take an explicit value");
+        assert!(CliArgs::parse_from(["buzz-acp", "--private-key", &key, "--lazy-pool"]).lazy_pool);
     }
 
     #[test]

@@ -6,13 +6,16 @@ import {
   hasPersonaModelOption,
   type PersonaDropdownOption,
   type PersonaModelOption,
-} from "./personaDialogPickers";
+} from "./agentConfigOptions";
 
 function withSharedComputeAutoOption(
   options: readonly PersonaModelOption[],
 ): readonly PersonaModelOption[] {
   const modelOptions = options.filter((option) => option.id.trim() !== "");
-  return [{ id: "", label: "Default (auto)" }, ...modelOptions];
+  return [
+    { id: "", label: "Auto (collective when available)" },
+    ...modelOptions,
+  ];
 }
 
 export function relayMeshModelPickerState({

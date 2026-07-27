@@ -14,7 +14,7 @@ import { Input } from "@/shared/ui/input";
 import { Textarea } from "@/shared/ui/textarea";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { PersonaDropdownField } from "./PersonaDropdownField";
-import type { PersonaDropdownOption } from "./personaDialogPickers";
+import type { PersonaDropdownOption } from "./agentConfigOptions";
 
 /**
  * Inbound author gate UI for create/edit agent dialogs.

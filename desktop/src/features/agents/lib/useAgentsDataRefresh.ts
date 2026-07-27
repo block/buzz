@@ -8,6 +8,7 @@ import {
   relayAgentsQueryKey,
   teamsQueryKey,
 } from "@/features/agents/hooks";
+import { managedAgentRuntimesQueryKey } from "@/features/agents/managedAgentRuntimeHooks";
 
 // Trailing-coalesce window: a backfill burst (up to 500 inbound events fed
 // one-by-one through reconcile) fires one `agents-data-changed` per event.
@@ -27,6 +28,15 @@ export function useAgentsDataRefresh(): void {
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
 
+    const unlistenRuntime = listen("managed-agent-runtime-status", () => {
+      void queryClient.invalidateQueries({
+        queryKey: managedAgentRuntimesQueryKey,
+      });
+      // Pair startup also changes the legacy managed-agent scalar status.
+      // Keep that cache synchronized for consumers outside pair-runtime UI.
+      void queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey });
+    });
+
     const unlisten = listen("agents-data-changed", () => {
       if (timer !== undefined) clearTimeout(timer);
       timer = setTimeout(() => {
@@ -40,6 +50,7 @@ export function useAgentsDataRefresh(): void {
     return () => {
       if (timer !== undefined) clearTimeout(timer);
       void unlisten.then((fn) => fn());
+      void unlistenRuntime.then((fn) => fn());
     };
   }, [queryClient]);
 }

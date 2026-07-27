@@ -1,8 +1,9 @@
 import { hexToBytes } from "@noble/hashes/utils.js";
-import { expect, test, type Locator, type Page } from "@playwright/test";
-import { npubEncode, nsecEncode } from "nostr-tools/nip19";
+import { expect, test, type Page } from "@playwright/test";
+import { nsecEncode } from "nostr-tools/nip19";
 
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
+import { installFakeCamera } from "../helpers/fakeCamera";
 import {
   E2E_IDENTITY_OVERRIDE_STORAGE_KEY,
   seedActiveIdentity,
@@ -25,28 +26,14 @@ async function setRelayConnectionState(
   page: Page,
   state: RelayConnectionState,
 ) {
-  if (state !== "connected") {
-    await page.waitForFunction(() => {
-      const win = window as Window & {
-        __BUZZ_E2E_GET_RELAY_CONNECTION_STATE__?: () => string;
-        __BUZZ_E2E_SET_RELAY_CONNECTION_STATE__?: unknown;
-      };
-      return (
-        typeof win.__BUZZ_E2E_SET_RELAY_CONNECTION_STATE__ === "function" &&
-        typeof win.__BUZZ_E2E_GET_RELAY_CONNECTION_STATE__ === "function" &&
-        win.__BUZZ_E2E_GET_RELAY_CONNECTION_STATE__() === "connected"
-      );
-    });
-  } else {
-    await page.waitForFunction(
-      () =>
-        typeof (
-          window as Window & {
-            __BUZZ_E2E_SET_RELAY_CONNECTION_STATE__?: unknown;
-          }
-        ).__BUZZ_E2E_SET_RELAY_CONNECTION_STATE__ === "function",
-    );
-  }
+  await page.waitForFunction(
+    () =>
+      typeof (
+        window as Window & {
+          __BUZZ_E2E_SET_RELAY_CONNECTION_STATE__?: unknown;
+        }
+      ).__BUZZ_E2E_SET_RELAY_CONNECTION_STATE__ === "function",
+  );
   await page.evaluate((nextState) => {
     const testWindow = window as Window & {
       __BUZZ_E2E_SET_RELAY_CONNECTION_STATE__?: (
@@ -58,6 +45,12 @@ async function setRelayConnectionState(
     if (!setConnectionState) {
       throw new Error("Mock relay connection state helper is not installed.");
     }
+    // Open-relay onboarding may not start a socket before the test exercises
+    // connectivity UI. Establish the same connected baseline explicitly so a
+    // delayed mock handshake cannot overwrite the degraded state.
+    if (nextState !== "connected") {
+      setConnectionState("connected");
+    }
     setConnectionState(nextState);
   }, state);
 }
@@ -65,6 +58,8 @@ async function setRelayConnectionState(
 const HOME_SEEN_STORAGE_KEY_PREFIX = "buzz-home-feed-seen.v1:";
 const COMMUNITY_ONBOARDING_TRANSACTION_STORAGE_KEY =
   "buzz-community-onboarding-transaction.v1";
+const ONE_PIXEL_PNG_BASE64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 const DEFAULT_MOCK_PUBKEY = "deadbeef".repeat(8);
 const BLANK_TYLER_IDENTITY = {
   ...TEST_IDENTITIES.tyler,
@@ -96,6 +91,48 @@ async function seedOnboardingCompletion(page: Page, pubkey: string) {
   );
 }
 
+async function seedCommunityProfileStage(page: Page, id: string) {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await page.addInitScript(
+    ({ pubkey, transactionId, transactionStorageKey }) => {
+      window.localStorage.setItem(
+        `buzz-machine-onboarding-complete.v2:${pubkey}`,
+        "true",
+      );
+      const timestamp = new Date().toISOString();
+      window.localStorage.setItem(
+        transactionStorageKey,
+        JSON.stringify({
+          id: transactionId,
+          source: "first-community",
+          stage: "profile",
+          relayUrl: "wss://default.example.com",
+          communityName: "Default",
+          communityId: "e2e-default-community",
+          addedCommunity: true,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        }),
+      );
+    },
+    {
+      pubkey: BLANK_TYLER_IDENTITY.pubkey,
+      transactionId: id,
+      transactionStorageKey: COMMUNITY_ONBOARDING_TRANSACTION_STORAGE_KEY,
+    },
+  );
+}
+
+async function uploadCommunityAvatar(page: Page, filename: string) {
+  await page.getByTestId("community-avatar-open").click();
+  await page.getByTestId("community-avatar-input").setInputFiles({
+    buffer: Buffer.from(ONE_PIXEL_PNG_BASE64, "base64"),
+    mimeType: "image/png",
+    name: filename,
+  });
+  await page.getByTestId("community-avatar-done").click();
+}
+
 async function readHomeSeenStorageKeys(page: Page) {
   return page.evaluate((prefix) => {
     return Object.keys(window.localStorage).filter((key) =>
@@ -106,21 +143,6 @@ async function readHomeSeenStorageKeys(page: Page) {
 
 async function expectNoHomeSeenEntries(page: Page) {
   await expect.poll(async () => readHomeSeenStorageKeys(page)).toEqual([]);
-}
-
-async function expectCommunityBranchFramePosition(page: Page, frame: Locator) {
-  const box = await frame.boundingBox();
-  const viewport = page.viewportSize();
-  if (!box || !viewport) {
-    throw new Error("Could not measure community branch frame position");
-  }
-  const chromeOffset = 106;
-  const footerOffset = 144;
-  const frameCenterY = box.y + box.height / 2;
-  const usableLaneCenterY =
-    chromeOffset + (viewport.height - chromeOffset - footerOffset) / 2;
-  expect(frameCenterY).toBeGreaterThan(usableLaneCenterY);
-  expect(box.y + box.height).toBeLessThan(viewport.height - footerOffset);
 }
 
 async function selectFirstEmojiFromPicker(page: Page) {
@@ -434,6 +456,23 @@ async function invokeMockCommand<T>(
   );
 }
 
+async function seedCurrentAvatar(page: Page, avatarUrl: string) {
+  await page.waitForFunction(() => {
+    const bridgeWindow = window as Window & {
+      __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: unknown;
+      __TAURI_INTERNALS__?: { invoke?: unknown };
+    };
+    return (
+      typeof bridgeWindow.__BUZZ_E2E_INVOKE_MOCK_COMMAND__ === "function" ||
+      typeof bridgeWindow.__TAURI_INTERNALS__?.invoke === "function"
+    );
+  });
+  await invokeMockCommand(page, "update_profile", { avatarUrl });
+  await page.evaluate(() => {
+    window.__BUZZ_E2E_COMMAND_PAYLOADS__ = [];
+  });
+}
+
 async function getWelcomeChannelId(page: Page) {
   const channels = await getMockChannels(page);
   return (
@@ -582,7 +621,32 @@ test("first-launch key import continues to machine setup", async ({ page }) => {
   await expect(page.getByTestId("app-loading-gate")).toHaveCount(0);
 });
 
-test("first-community choices expose npub and invite input", async ({
+test("non-local runtime override keeps community selection without release flag", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await page.addInitScript((pubkey) => {
+    window.localStorage.setItem(
+      `buzz-machine-onboarding-complete.v2:${pubkey}`,
+      "true",
+    );
+  }, BLANK_TYLER_IDENTITY.pubkey);
+  await installMockBridge(page, undefined, {
+    relayWsUrl: "wss://override.example.com",
+    skipOnboardingSeed: true,
+    skipCommunitySeed: true,
+  });
+  await page.goto("/");
+
+  await expect(
+    page.getByRole("button", { name: /Join a community/ }),
+  ).toBeVisible();
+  await expect
+    .poll(() => page.evaluate(() => localStorage.getItem("buzz-communities")))
+    .toBeNull();
+});
+
+test("non-local default auto-connects when the release flag is enabled", async ({
   page,
 }) => {
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
@@ -594,141 +658,36 @@ test("first-community choices expose npub and invite input", async ({
   }, BLANK_TYLER_IDENTITY.pubkey);
   await installMockBridge(page, undefined, {
     relayWsUrl: "wss://default.example.com",
+    autoConnectDefaultRelay: true,
     skipOnboardingSeed: true,
     skipCommunitySeed: true,
   });
-  await page.route(
-    "https://default.example.com/api/join-policy",
-    async (route) => {
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: "{}",
-      });
-    },
-  );
   await page.goto("/");
 
-  await expect(
-    page.getByRole("button", { name: "Add me to a community" }),
-  ).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: "I have an invite link" }),
-  ).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: "I want to create a community" }),
-  ).toBeVisible();
-  await page
-    .getByRole("button", { name: "I want to create a community" })
-    .click();
+  await expectIncompleteOnboarding(page);
   await expect
     .poll(() =>
       page.evaluate(() => {
-        const log = (
-          window as Window & {
-            __BUZZ_E2E_COMMAND_LOG__?: Array<{
-              command: string;
-              payload: unknown;
-            }>;
-          }
-        ).__BUZZ_E2E_COMMAND_LOG__;
-        return log?.find((entry) => entry.command === "plugin:opener|open_url")
-          ?.payload;
-      }),
-    )
-    .toMatchObject({ url: "https://buzz.xyz" });
-
-  await page.getByRole("button", { name: "Add me to a community" }).click();
-  await expect(page.getByTestId("welcome-join-npub")).toHaveText(
-    npubEncode(BLANK_TYLER_IDENTITY.pubkey),
-  );
-  const joinKeyFrame = page.getByTestId("welcome-join-npub-frame");
-  const joinNpub = page.getByTestId("welcome-join-npub");
-  await expect(joinKeyFrame).toBeVisible();
-  await expect(joinNpub).toBeVisible();
-  await expectCommunityBranchFramePosition(page, joinKeyFrame);
-  const joinKeyFrameBox = await joinKeyFrame.boundingBox();
-  expect(joinKeyFrameBox?.width).toBeGreaterThan(700);
-  const joinKeyFrameStyles = await joinKeyFrame.evaluate((element) => {
-    const styles = window.getComputedStyle(element);
-    return {
-      backgroundColor: styles.backgroundColor,
-      borderRadius: styles.borderRadius,
-    };
-  });
-  expect(joinKeyFrameStyles.backgroundColor).toMatch(/(0\.5\)|\/ 0\.5\))/);
-  expect(joinKeyFrameStyles.borderRadius).toBe("12px");
-  await expect
-    .poll(() =>
-      joinNpub.evaluate((element) => {
-        const styles = window.getComputedStyle(element);
+        const raw = window.localStorage.getItem("buzz-communities");
+        const communities = raw
+          ? (JSON.parse(raw) as Array<{ id: string; relayUrl: string }>)
+          : [];
         return {
-          color: styles.color,
-          fontFamily: styles.fontFamily,
-          fontSize: styles.fontSize,
+          activeMatchesCommunity:
+            communities.length === 1 &&
+            window.localStorage.getItem("buzz-active-community-id") ===
+              communities[0]?.id,
+          relayUrl: communities[0]?.relayUrl ?? null,
         };
       }),
     )
-    .toMatchObject({
-      color: "rgb(113, 113, 6)",
-      fontSize: "36px",
+    .toEqual({
+      activeMatchesCommunity: true,
+      relayUrl: "wss://default.example.com",
     });
-  expect(
-    (
-      await joinNpub.evaluate((element) =>
-        window.getComputedStyle(element).fontFamily.toLowerCase(),
-      )
-    ).includes("mono"),
-  ).toBe(true);
-  await page.getByRole("button", { name: "Back" }).click();
-
-  await page.getByRole("button", { name: "I have an invite link" }).click();
-  await expect(
-    page.getByRole("heading", { name: "Enter your invite link" }),
-  ).toBeVisible();
-  const inviteInputFrame = page.getByTestId("invite-redeem-input-frame");
-  const inviteInput = page.getByTestId("invite-redeem-input");
-  await expect(inviteInputFrame).toBeVisible();
-  await expect(inviteInput).toBeVisible();
-  await expectCommunityBranchFramePosition(page, inviteInputFrame);
-  const inviteInputFrameBox = await inviteInputFrame.boundingBox();
-  expect(inviteInputFrameBox?.width).toBeGreaterThan(700);
-  const inviteInputFrameStyles = await inviteInputFrame.evaluate((element) => {
-    const styles = window.getComputedStyle(element);
-    return {
-      backgroundColor: styles.backgroundColor,
-      borderRadius: styles.borderRadius,
-    };
-  });
-  expect(inviteInputFrameStyles.backgroundColor).toMatch(/(0\.5\)|\/ 0\.5\))/);
-  expect(inviteInputFrameStyles.borderRadius).toBe("12px");
-  await expect
-    .poll(() =>
-      inviteInput.evaluate((element) => {
-        const styles = window.getComputedStyle(element);
-        return {
-          color: styles.color,
-          fontFamily: styles.fontFamily,
-          fontSize: styles.fontSize,
-        };
-      }),
-    )
-    .toMatchObject({
-      color: "rgb(113, 113, 6)",
-      fontSize: "36px",
-    });
-  expect(
-    (
-      await inviteInput.evaluate((element) =>
-        window.getComputedStyle(element).fontFamily.toLowerCase(),
-      )
-    ).includes("mono"),
-  ).toBe(true);
-  await expect(page.getByTestId("invite-redeem-submit")).toHaveText("Next");
-  await expect(page.getByTestId("invite-redeem-submit")).toBeDisabled();
 });
 
-test("first-community shows the scenario cards for localhost", async ({
+test("first-community choices route join, create, owner, and member intents", async ({
   page,
 }) => {
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
@@ -746,16 +705,516 @@ test("first-community shows the scenario cards for localhost", async ({
   await page.goto("/");
 
   await expect(
+    page.getByRole("button", { name: /Join a community/ }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: /Create a community/ }),
+  ).toBeVisible();
+  const existing = page.getByRole("button", {
+    name: /I already have a community/,
+  });
+  await expect(existing).toBeVisible();
+  await existing.click();
+  // Owner/member split lives on its own page, mirroring the hub layout.
+  await expect(
+    page.getByRole("heading", { name: "Reconnect to your community" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "I own the community" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "I’m a member or admin" }),
+  ).toBeVisible();
+
+  await page.getByRole("button", { name: "I’m a member or admin" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Reconnect to your community" }),
+  ).toBeVisible();
+  const accessInput = page.getByTestId("invite-redeem-input");
+  await expect(accessInput).toHaveAttribute(
+    "placeholder",
+    "Invite link or community URL",
+  );
+  await accessInput.fill("https://default.example.com");
+  await expect(page.getByTestId("invite-redeem-submit")).toBeEnabled();
+  // Back from the member form returns to the role choice, then to the hub.
+  await page.getByRole("button", { name: "Back" }).click();
+  await expect(
+    page.getByRole("button", { name: "I own the community" }),
+  ).toBeVisible();
+  await page.getByTestId("existing-back").click();
+
+  await page.getByRole("button", { name: /Join a community/ }).click();
+  await expect(
+    page.getByRole("heading", { name: "Join a community" }),
+  ).toBeVisible();
+  await expect(page.getByText("Joining a private community?")).toBeVisible();
+  await expect(page.getByTestId("welcome-join-npub")).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Copy public ID" }),
+  ).toBeVisible();
+  await accessInput.fill("https://default.example.com/invite/abc123");
+  await expect(page.getByTestId("invite-redeem-submit")).toBeEnabled();
+});
+
+test("first-community owner can connect an existing hosted community", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await page.addInitScript((pubkey) => {
+    window.localStorage.setItem(
+      `buzz-machine-onboarding-complete.v2:${pubkey}`,
+      "true",
+    );
+  }, BLANK_TYLER_IDENTITY.pubkey);
+  await installMockBridge(
+    page,
+    {
+      builderlabAuth: {
+        email: "owner@example.com",
+        expiresAt: "2099-01-01T00:00:00Z",
+      },
+      builderlabIdentity: { pubkey_hex: BLANK_TYLER_IDENTITY.pubkey },
+      builderlabCommunities: [
+        {
+          id: "owned-community",
+          name: "North Star",
+          normalized_host: "north-star.communities.buzz.xyz",
+        },
+      ],
+    },
+    {
+      relayWsUrl: "ws://localhost:3000",
+      skipOnboardingSeed: true,
+      skipCommunitySeed: true,
+    },
+  );
+  await page.goto("/");
+
+  await page.getByTestId("community-choice-create").click();
+  await expect(page.getByText("North Star")).toBeVisible();
+  await page.getByRole("button", { name: "Connect", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "Build your profile" }),
+  ).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        window.localStorage.getItem("buzz-community-onboarding-transaction.v1"),
+      ),
+    )
+    .toContain('"source":"first-community"');
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        window.localStorage.getItem("buzz-community-onboarding-transaction.v1"),
+      ),
+    )
+    .toContain("wss://north-star.communities.buzz.xyz");
+  await page.getByTestId("community-profile-back").click();
+  await expect(
+    page.getByRole("heading", { name: "Choose a community" }),
+  ).toBeVisible();
+  await expect(page.getByText("North Star")).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Join a community" }),
+  ).toHaveCount(0);
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        window.localStorage.getItem("buzz-community-onboarding-transaction.v1"),
+      ),
+    )
+    .toBeNull();
+});
+
+test("first-community owner can create and connect a hosted community", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await page.addInitScript((pubkey) => {
+    window.localStorage.setItem(
+      `buzz-machine-onboarding-complete.v2:${pubkey}`,
+      "true",
+    );
+  }, BLANK_TYLER_IDENTITY.pubkey);
+  await installMockBridge(
+    page,
+    {},
+    {
+      relayWsUrl: "ws://localhost:3000",
+      skipOnboardingSeed: true,
+      skipCommunitySeed: true,
+    },
+  );
+  await page.goto("/");
+
+  await page.getByTestId("community-choice-create").click();
+  await page.getByRole("button", { name: "Sign in to continue" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Finish connecting Buzz" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Connect and continue" }).click();
+  const createSurface = page.getByTestId("hosted-community-create-surface");
+  const surfaceBoxBeforeFeedback = await createSurface.boundingBox();
+  const communityNameInput = page.getByTestId("hosted-community-address-input");
+  await communityNameInput.fill("bee-lab");
+  await expect(communityNameInput).toHaveAttribute("style", /width: 7ch;/);
+  const availabilityFeedback = page.getByText("That address is available.");
+  await expect(availabilityFeedback).toBeVisible();
+  const [feedbackBox, surfaceBox, inputBox, suffixBox] = await Promise.all([
+    availabilityFeedback.boundingBox(),
+    createSurface.boundingBox(),
+    page.getByTestId("hosted-community-address-input").boundingBox(),
+    page.locator("#hosted-community-suffix").boundingBox(),
+  ]);
+  if (
+    !surfaceBoxBeforeFeedback ||
+    !feedbackBox ||
+    !surfaceBox ||
+    !inputBox ||
+    !suffixBox
+  ) {
+    throw new Error("Could not measure hosted community creation layout");
+  }
+  expect(surfaceBox.y).toBe(surfaceBoxBeforeFeedback.y);
+  expect(surfaceBox.height).toBe(surfaceBoxBeforeFeedback.height);
+  const addressLeft = inputBox.x;
+  const addressRight = suffixBox.x + suffixBox.width;
+  expect(
+    Math.abs(
+      (addressLeft + addressRight) / 2 - (surfaceBox.x + surfaceBox.width / 2),
+    ),
+  ).toBeLessThanOrEqual(1);
+  expect(feedbackBox.y).toBeGreaterThanOrEqual(
+    surfaceBox.y + surfaceBox.height,
+  );
+  await page.getByRole("button", { name: "Next" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Build your profile" }),
+  ).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        window.localStorage.getItem("buzz-community-onboarding-transaction.v1"),
+      ),
+    )
+    .toContain("wss://bee-lab.communities.buzz.xyz");
+});
+
+test("hosted community address line stays within the card for a long name", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await page.addInitScript((pubkey) => {
+    window.localStorage.setItem(
+      `buzz-machine-onboarding-complete.v2:${pubkey}`,
+      "true",
+    );
+  }, BLANK_TYLER_IDENTITY.pubkey);
+  await installMockBridge(
+    page,
+    {},
+    {
+      relayWsUrl: "ws://localhost:3000",
+      skipOnboardingSeed: true,
+      skipCommunitySeed: true,
+    },
+  );
+  // The 800px app minimum is the worst case for the full-width address line.
+  await page.setViewportSize({ width: 800, height: 720 });
+  await page.goto("/");
+
+  await page.getByTestId("community-choice-create").click();
+  await page.getByRole("button", { name: "Sign in to continue" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Finish connecting Buzz" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Connect and continue" }).click();
+
+  const createSurface = page.getByTestId("hosted-community-create-surface");
+  const communityNameInput = page.getByTestId("hosted-community-address-input");
+  // A maximum-length (63 char) valid name — the overflow case Wes flagged; the
+  // 7-char check above cannot catch it.
+  const longName = "a".repeat(63);
+  await communityNameInput.fill(longName);
+  await expect(communityNameInput).toHaveValue(longName);
+
+  const [surfaceBox, inputBox, suffixBox] = await Promise.all([
+    createSurface.boundingBox(),
+    communityNameInput.boundingBox(),
+    page.locator("#hosted-community-suffix").boundingBox(),
+  ]);
+  if (!surfaceBox || !inputBox || !suffixBox) {
+    throw new Error("Could not measure hosted community creation layout");
+  }
+  const addressLeft = inputBox.x;
+  const addressRight = suffixBox.x + suffixBox.width;
+  // The composed `<name>.<suffix>` line must stay within the card — no
+  // horizontal overflow past the surface or the 800px window.
+  expect(addressLeft).toBeGreaterThanOrEqual(surfaceBox.x);
+  expect(addressRight).toBeLessThanOrEqual(surfaceBox.x + surfaceBox.width);
+  expect(addressRight).toBeLessThanOrEqual(800);
+  // …and it stays centered within the card.
+  expect(
+    Math.abs(
+      (addressLeft + addressRight) / 2 - (surfaceBox.x + surfaceBox.width / 2),
+    ),
+  ).toBeLessThanOrEqual(2);
+});
+
+test("first-community reports a created community without a relay address", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await page.addInitScript((pubkey) => {
+    window.localStorage.setItem(
+      `buzz-machine-onboarding-complete.v2:${pubkey}`,
+      "true",
+    );
+  }, BLANK_TYLER_IDENTITY.pubkey);
+  await installMockBridge(
+    page,
+    {
+      builderlabAuth: {
+        email: "owner@example.com",
+        expiresAt: "2099-01-01T00:00:00Z",
+      },
+      builderlabIdentity: { pubkey_hex: BLANK_TYLER_IDENTITY.pubkey },
+      builderlabCreatedCommunity: {
+        id: "hosted-bee-lab",
+        name: "bee-lab",
+      },
+    },
+    {
+      relayWsUrl: "ws://localhost:3000",
+      skipOnboardingSeed: true,
+      skipCommunitySeed: true,
+    },
+  );
+  await page.goto("/");
+
+  await page.getByTestId("community-choice-create").click();
+  await page.getByRole("textbox", { name: "Community name" }).fill("bee-lab");
+  await expect(page.getByText("That address is available.")).toBeVisible();
+  await page.getByRole("button", { name: "Next" }).click();
+  await expect(page.getByRole("alert")).toContainText(
+    "The community was created, but Builderlab did not return its relay address.",
+  );
+  await expect(
+    page.getByRole("heading", { name: "Build your profile" }),
+  ).toHaveCount(0);
+});
+
+test("first-community X cancels a pending sign-in", async ({ page }) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await page.addInitScript((pubkey) => {
+    window.localStorage.setItem(
+      `buzz-machine-onboarding-complete.v2:${pubkey}`,
+      "true",
+    );
+  }, BLANK_TYLER_IDENTITY.pubkey);
+  await installMockBridge(
+    page,
+    { builderlabLoginDelayMs: 5_000 },
+    {
+      relayWsUrl: "ws://localhost:3000",
+      skipOnboardingSeed: true,
+      skipCommunitySeed: true,
+    },
+  );
+  await page.goto("/");
+
+  await page.getByTestId("community-choice-create").click();
+  await page.getByRole("button", { name: "Sign in to continue" }).click();
+  await expect(page.getByText("Waiting for your browser…")).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Cancel sign-in" }),
+  ).toHaveCount(0);
+  await page.getByRole("button", { name: "Close" }).click();
+  await expect(
+    page.getByRole("button", { name: /Create a community/ }),
+  ).toBeVisible();
+  await expect
+    .poll(() => page.evaluate(() => window.__BUZZ_E2E_COMMANDS__ ?? []))
+    .toEqual(expect.arrayContaining(["cancel_builderlab_login"]));
+});
+
+test("first-community owner can replace a mismatched account identity", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await page.addInitScript((pubkey) => {
+    window.localStorage.setItem(
+      `buzz-machine-onboarding-complete.v2:${pubkey}`,
+      "true",
+    );
+  }, BLANK_TYLER_IDENTITY.pubkey);
+  await installMockBridge(
+    page,
+    {
+      builderlabAuth: {
+        email: "old-owner@example.com",
+        expiresAt: "2099-01-01T00:00:00Z",
+      },
+      builderlabIdentity: { pubkey_hex: "f".repeat(64) },
+    },
+    {
+      relayWsUrl: "ws://localhost:3000",
+      skipOnboardingSeed: true,
+      skipCommunitySeed: true,
+    },
+  );
+  await page.goto("/");
+
+  await page.getByTestId("community-choice-create").click();
+  await expect(
+    page.getByRole("heading", {
+      name: "This account uses a different Buzz identity",
+    }),
+  ).toBeVisible();
+  await page
+    .getByRole("button", { name: "Use this device's identity" })
+    .click();
+  await expect(
+    page.getByRole("textbox", { name: "Community name" }),
+  ).toBeVisible();
+  await expect
+    .poll(() => page.evaluate(() => window.__BUZZ_E2E_COMMANDS__ ?? []))
+    .toEqual(
+      expect.arrayContaining([
+        "delete_builderlab_nostr_identity",
+        "bind_builderlab_nostr_identity",
+      ]),
+    );
+});
+
+test("first-community explains when the local identity belongs to another account", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await page.addInitScript((pubkey) => {
+    window.localStorage.setItem(
+      `buzz-machine-onboarding-complete.v2:${pubkey}`,
+      "true",
+    );
+  }, BLANK_TYLER_IDENTITY.pubkey);
+  await installMockBridge(
+    page,
+    {
+      builderlabAuth: {
+        email: "wrong-owner@example.com",
+        expiresAt: "2099-01-01T00:00:00Z",
+      },
+      builderlabIdentity: { pubkey_hex: "e".repeat(64) },
+      builderlabBindError: { code: "pubkey_already_bound" },
+    },
+    {
+      relayWsUrl: "ws://localhost:3000",
+      skipOnboardingSeed: true,
+      skipCommunitySeed: true,
+    },
+  );
+  await page.goto("/");
+
+  await page.getByTestId("community-choice-create").click();
+  await page
+    .getByRole("button", { name: "Use this device's identity" })
+    .click();
+  await expect(
+    page.getByText(
+      "This device's Buzz identity belongs to a different Builderlab account and can't be moved from here. Sign out, then sign in with the account that already owns this identity.",
+    ),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Finish connecting Buzz" }),
+  ).toBeVisible();
+});
+
+test("back clears Builderlab auth before returning to first-community choices", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await page.addInitScript((pubkey) => {
+    window.localStorage.setItem(
+      `buzz-machine-onboarding-complete.v2:${pubkey}`,
+      "true",
+    );
+  }, BLANK_TYLER_IDENTITY.pubkey);
+  await installMockBridge(
+    page,
+    {
+      builderlabAuth: {
+        email: "owner@example.com",
+        expiresAt: "2099-01-01T00:00:00Z",
+      },
+      builderlabIdentity: { pubkey_hex: BLANK_TYLER_IDENTITY.pubkey },
+    },
+    {
+      relayWsUrl: "ws://localhost:3000",
+      skipOnboardingSeed: true,
+      skipCommunitySeed: true,
+    },
+  );
+  await page.goto("/");
+
+  await page.getByTestId("community-choice-create").click();
+  await page.getByRole("button", { name: "Back" }).click();
+  await page.getByTestId("community-choice-create").click();
+  await expect(page.getByRole("button", { name: "Continue" })).toBeVisible();
+});
+
+test("first-community shows the scenario cards for localhost", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await page.addInitScript((pubkey) => {
+    window.localStorage.setItem(
+      `buzz-machine-onboarding-complete.v2:${pubkey}`,
+      "true",
+    );
+  }, BLANK_TYLER_IDENTITY.pubkey);
+  await installMockBridge(
+    page,
+    {
+      acpRuntimesCatalog: [
+        {
+          id: "claude",
+          label: "Claude Code",
+          avatar_url: "",
+          availability: "available",
+          command: "claude",
+          binary_path: "/usr/local/bin/claude",
+          default_args: [],
+          mcp_command: null,
+          install_hint: "Install Claude Code",
+          install_instructions_url: "https://example.com",
+          can_auto_install: true,
+          underlying_cli_path: null,
+          node_required: false,
+          auth_status: { status: "logged_in" },
+          login_hint: "Sign in to Claude Code",
+        },
+      ],
+    },
+    {
+      relayWsUrl: "ws://localhost:3000",
+      skipOnboardingSeed: true,
+      skipCommunitySeed: true,
+    },
+  );
+  await page.goto("/");
+
+  await expect(
     page.getByRole("button", { name: "Join default community" }),
   ).toHaveCount(0);
   await expect(
-    page.getByRole("button", { name: "Add me to a community" }),
+    page.getByRole("button", { name: /Join a community/ }),
   ).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "I have an invite link" }),
-  ).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: "I want to create a community" }),
+    page.getByRole("button", {
+      name: /Create a community/,
+    }),
   ).toBeVisible();
 
   await page.getByTestId("welcome-setup-back").click();
@@ -765,9 +1224,19 @@ test("first-community shows the scenario cards for localhost", async ({
       name: "Configure your default model settings",
     }),
   ).toBeVisible();
+  await expect(page.getByTestId("global-agent-default-harness")).toHaveText(
+    "Claude Code",
+  );
+  await expect(page.getByTestId("onboarding-finish")).toBeEnabled();
 });
 
 test("first-community direct join reaches profile", async ({ page }) => {
+  await page.route(
+    "https://onboarding.communities.buzz.xyz/api/join-policy",
+    async (route) => {
+      await route.fulfill({ status: 404 });
+    },
+  );
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
   await page.addInitScript((pubkey) => {
     window.localStorage.setItem(
@@ -776,17 +1245,17 @@ test("first-community direct join reaches profile", async ({ page }) => {
     );
   }, BLANK_TYLER_IDENTITY.pubkey);
   await installMockBridge(page, undefined, {
-    relayWsUrl: "wss://onboarding.communities.buzz.xyz",
+    relayWsUrl: "ws://localhost:3000",
     skipOnboardingSeed: true,
     skipCommunitySeed: true,
   });
   await page.goto("/");
 
-  await page.getByRole("button", { name: "Add me to a community" }).click();
+  await page.getByRole("button", { name: /Join a community/ }).click();
   await page
-    .getByTestId("welcome-join-community-url")
+    .getByTestId("invite-redeem-input")
     .fill("wss://onboarding.communities.buzz.xyz");
-  await page.getByRole("button", { name: "Join community" }).click();
+  await page.getByTestId("invite-redeem-submit").click();
 
   await expect(
     page.getByRole("heading", { name: "Build your profile" }),
@@ -820,6 +1289,12 @@ test("first-community direct join reaches profile", async ({ page }) => {
 test("first-community direct join cancel returns to request access", async ({
   page,
 }) => {
+  await page.route(
+    "https://onboarding.communities.buzz.xyz/api/join-policy",
+    async (route) => {
+      await route.fulfill({ status: 404 });
+    },
+  );
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
   await page.addInitScript((pubkey) => {
     window.localStorage.setItem(
@@ -831,23 +1306,23 @@ test("first-community direct join cancel returns to request access", async ({
     page,
     { applyCommunityDelayMs: 5_000 },
     {
-      relayWsUrl: "wss://onboarding.communities.buzz.xyz",
+      relayWsUrl: "ws://localhost:3000",
       skipOnboardingSeed: true,
       skipCommunitySeed: true,
     },
   );
   await page.goto("/");
 
-  await page.getByRole("button", { name: "Add me to a community" }).click();
+  await page.getByRole("button", { name: /Join a community/ }).click();
   await page
-    .getByTestId("welcome-join-community-url")
+    .getByTestId("invite-redeem-input")
     .fill("wss://onboarding.communities.buzz.xyz");
-  await page.getByRole("button", { name: "Join community" }).click();
+  await page.getByTestId("invite-redeem-submit").click();
   await expect(page.getByText("Connecting securely…")).toBeVisible();
   await page.getByRole("button", { name: "Cancel" }).click();
 
   await expect(
-    page.getByRole("heading", { name: "Request access to community" }),
+    page.getByRole("heading", { name: "Join a community" }),
   ).toBeVisible();
   await expect(page.getByTestId("community-change-overlay")).toHaveCount(0);
   await expect(page.getByText("Create an identity key")).toHaveCount(0);
@@ -945,7 +1420,7 @@ test("canceling a join to an existing inactive community preserves it", async ({
     .toEqual(["active-community", "existing-community"]);
 });
 
-test("connected first-community profile step cannot discard resumable onboarding", async ({
+test("connected first-community profile step offers equal-width Next and Back controls", async ({
   page,
 }) => {
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
@@ -962,9 +1437,10 @@ test("connected first-community profile step cannot discard resumable onboarding
           id: "txn-profile-step",
           source: "first-community",
           stage: "profile",
-          relayUrl: "wss://default.example.com",
+          relayUrl: "ws://localhost:3000",
           communityName: "Default",
           communityId: "e2e-default-community",
+          addedCommunity: true,
           createdAt: timestamp,
           updatedAt: timestamp,
         }),
@@ -975,10 +1451,44 @@ test("connected first-community profile step cannot discard resumable onboarding
       transactionStorageKey: COMMUNITY_ONBOARDING_TRANSACTION_STORAGE_KEY,
     },
   );
-  await installMockBridge(page, undefined, {
-    relayWsUrl: "wss://default.example.com",
-    skipOnboardingSeed: true,
+  await installFakeCamera(page, { failRequests: 1 });
+  const uploadedAvatarUrl = "https://mock.relay/media/community-avatar.png";
+  let avatarRequestCount = 0;
+  await page.route(`${uploadedAvatarUrl}*`, async (route) => {
+    avatarRequestCount += 1;
+    if (avatarRequestCount === 1) {
+      await route.fulfill({ status: 404 });
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    await route.fulfill({
+      body: Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+        "base64",
+      ),
+      contentType: "image/png",
+    });
   });
+  await installMockBridge(
+    page,
+    {
+      uploadDelayMs: 1_000,
+      uploadDescriptors: [
+        {
+          filename: "community-avatar.png",
+          sha256: "c".repeat(64),
+          size: 128,
+          type: "image/png",
+          uploaded: 1_779_900_000,
+          url: "https://mock.relay/media/community-avatar.png",
+        },
+      ],
+    },
+    {
+      relayWsUrl: "ws://localhost:3000",
+      skipOnboardingSeed: true,
+    },
+  );
   await page.goto("/");
 
   await expect(page.getByTestId("community-onboarding-flow")).toBeVisible();
@@ -986,57 +1496,275 @@ test("connected first-community profile step cannot discard resumable onboarding
     page.getByRole("heading", { name: "Build your profile" }),
   ).toBeVisible();
   const profileMain = page.getByTestId("community-profile-main");
-  const profileMainBox = await profileMain.boundingBox();
-  const viewport = page.viewportSize();
-  if (!profileMainBox || !viewport) {
-    throw new Error("Could not measure community profile body position");
+  const profileHeading = page.getByRole("heading", {
+    name: "Build your profile",
+  });
+  await expect(profileHeading).toBeVisible();
+  const profileHeadingBox = await profileHeading.boundingBox();
+  if (!profileHeadingBox) {
+    throw new Error("Could not measure community profile heading position");
   }
-  const chromeOffset = 106;
-  const footerOffset = 144;
-  const profileMainCenterY = profileMainBox.y + profileMainBox.height / 2;
-  const centeredInUsableLaneY =
-    chromeOffset + (viewport.height - chromeOffset - footerOffset) / 2;
-  expect(Math.abs(profileMainCenterY - centeredInUsableLaneY)).toBeLessThan(32);
-  const keyFrame = page.getByTestId("community-profile-key-frame");
+  expect(Math.abs(profileHeadingBox.y - 106)).toBeLessThan(8);
   const nameKey = page.getByTestId("community-profile-name-key");
-  await expect(keyFrame).toBeVisible();
+  const avatarButton = page.getByTestId("community-avatar-open");
   await expect(nameKey).toBeVisible();
-  const keyFrameBox = await keyFrame.boundingBox();
-  expect(keyFrameBox?.width).toBeGreaterThan(700);
-  const keyFrameStyles = await keyFrame.evaluate((element) => {
+  await expect(avatarButton).toBeVisible();
+  const nameKeyBox = await nameKey.boundingBox();
+  const avatarButtonBox = await avatarButton.boundingBox();
+  expect(nameKeyBox?.width).toBeGreaterThan(380);
+  expect(avatarButtonBox?.width).toBe(144);
+  const nameKeyStyles = await nameKey.evaluate((element) => {
     const styles = window.getComputedStyle(element);
     return {
       backgroundColor: styles.backgroundColor,
+      borderColor: styles.borderColor,
       borderRadius: styles.borderRadius,
+      boxShadow: styles.boxShadow,
+      fontSize: styles.fontSize,
     };
   });
-  expect(keyFrameStyles.backgroundColor).toMatch(/(0\.5\)|\/ 0\.5\))/);
-  expect(keyFrameStyles.borderRadius).toBe("12px");
+  expect(nameKeyStyles.backgroundColor).toMatch(
+    /^(rgba\(255, 255, 255, 0\.95\)|oklab\(.+ \/ 0\.95\))$/,
+  );
+  expect(nameKeyStyles.borderColor).toBe("rgba(113, 113, 6, 0.28)");
+  expect(nameKeyStyles.boxShadow).toContain(
+    "rgba(113, 113, 6, 0.5) 0px 0px 0px 1px inset",
+  );
+  expect(nameKeyStyles).toMatchObject({
+    borderRadius: "16px",
+    fontSize: "14px",
+  });
+  await expect(page.getByText("Your username", { exact: true })).toBeVisible();
+  await expect(page.getByTestId("community-onboarding-flow")).toHaveAttribute(
+    "data-system-color-scheme",
+    /^(light|dark)$/,
+  );
+  await page.emulateMedia({ colorScheme: "dark" });
+  await expect(page.getByTestId("community-onboarding-flow")).toHaveAttribute(
+    "data-system-color-scheme",
+    "dark",
+  );
+  await avatarButton.click();
+  const avatarDialog = page.getByRole("dialog", { name: "Edit your avatar" });
+  await expect(avatarDialog).toBeVisible();
+  await expect(avatarDialog).toHaveAttribute(
+    "data-system-color-scheme",
+    "light",
+  );
+  const dialogStyles = await avatarDialog.evaluate((element) => {
+    const styles = window.getComputedStyle(element);
+    return {
+      backgroundColor: styles.backgroundColor,
+      boxShadow: styles.boxShadow,
+      color: styles.color,
+    };
+  });
+  expect(dialogStyles.backgroundColor).toBe("rgb(255, 255, 255)");
+  expect(dialogStyles.color).toBe("rgb(23, 23, 23)");
+  expect(dialogStyles.boxShadow).not.toBe("none");
+  const dialogOverlay = page.getByTestId("dialog-overlay");
+  const overlayStyles = await dialogOverlay.evaluate((element) => {
+    const styles = window.getComputedStyle(element);
+    return {
+      backdropFilter: styles.backdropFilter,
+      backgroundColor: styles.backgroundColor,
+    };
+  });
+  expect(overlayStyles.backgroundColor).toBe("rgba(0, 0, 0, 0)");
+  expect(overlayStyles.backdropFilter).toBe("none");
+  const dialogLayout = await avatarDialog.evaluate((element) => ({
+    clientHeight: element.clientHeight,
+    clientWidth: element.clientWidth,
+    scrollHeight: element.scrollHeight,
+  }));
+  const editorWidth = await page
+    .getByTestId("community-avatar-editor")
+    .evaluate((element) => element.clientWidth);
+  const uploadHeight = await page
+    .getByTestId("community-avatar-upload")
+    .evaluate((element) => element.clientHeight);
+  const urlBox = await page.getByTestId("community-avatar-url").boundingBox();
+  const dialogBox = await avatarDialog.boundingBox();
+  if (!dialogBox || !urlBox) {
+    throw new Error("Could not measure avatar dialog layout");
+  }
+  expect(dialogLayout.clientWidth).toBeLessThanOrEqual(560);
+  const imageDialogHeight = dialogLayout.clientHeight;
+  const dialogTransition = await avatarDialog.evaluate(
+    (element) => window.getComputedStyle(element).transitionProperty,
+  );
+  expect(dialogTransition).toContain("height");
+  expect(editorWidth).toBe(456);
+  expect(uploadHeight).toBe(126);
+  expect(dialogLayout.scrollHeight).toBeLessThanOrEqual(
+    dialogLayout.clientHeight,
+  );
+  expect(urlBox.y).toBeGreaterThanOrEqual(dialogBox.y);
+  expect(urlBox.y + urlBox.height).toBeLessThanOrEqual(
+    dialogBox.y + dialogBox.height,
+  );
+  const saveButton = page.getByTestId("community-avatar-done");
+  await page.getByTestId("community-avatar-input").setInputFiles({
+    buffer: Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+      "base64",
+    ),
+    mimeType: "image/png",
+    name: "community-avatar.png",
+  });
+  const previewImage = page.getByTestId(
+    "community-avatar-upload-preview-image",
+  );
+  await expect(previewImage).toHaveAttribute("src", /^blob:/);
+  await expect(saveButton).toBeDisabled();
+  await expect(saveButton).toHaveText("Save");
+  const localPreviewUrl = await previewImage.getAttribute("src");
+  await expect(previewImage).toHaveAttribute("src", localPreviewUrl ?? "");
+  await saveButton.click();
+  await expect(avatarDialog).toHaveCount(0);
+  const avatarCircleImage = page.getByTestId("community-avatar-circle-image");
+  await expect(avatarCircleImage).toHaveAttribute("src", /^blob:/);
+  await expect(
+    page.getByTestId("community-avatar-circle-upload-pending"),
+  ).toBeVisible();
+  await expect(page.getByTestId("community-profile-name-key")).toBeEnabled();
   await expect
-    .poll(() =>
-      nameKey.evaluate((element) => {
-        const styles = window.getComputedStyle(element);
-        return {
-          color: styles.color,
-          fontFamily: styles.fontFamily,
-          fontSize: styles.fontSize,
-        };
-      }),
-    )
-    .toMatchObject({
-      color: "rgb(113, 113, 6)",
-      fontSize: "36px",
-    });
+    .poll(() => avatarCircleImage.getAttribute("src"))
+    .not.toMatch(/^blob:/);
+  await expect(
+    page.getByTestId("community-avatar-circle-upload-pending"),
+  ).toHaveCount(0);
+
+  await avatarButton.click();
+  await expect(avatarDialog).toBeVisible();
+  await expect(previewImage).toHaveAttribute(
+    "src",
+    new RegExp(`^${uploadedAvatarUrl}`),
+  );
+  const modeContentShell = page.getByTestId(
+    "community-avatar-mode-content-shell",
+  );
+  await page.waitForTimeout(300);
+  const measureAnchoredEditorLayout = async () => {
+    const [tabsBox, contentShellBox, contentBox, saveBox] = await Promise.all([
+      page.getByRole("tablist", { name: "Avatar type" }).boundingBox(),
+      modeContentShell.boundingBox(),
+      modeContentShell.locator(":scope > div").boundingBox(),
+      saveButton.boundingBox(),
+    ]);
+    if (!tabsBox || !contentShellBox || !contentBox || !saveBox) {
+      throw new Error("Could not measure anchored avatar editor layout");
+    }
+    return { tabsBox, contentShellBox, contentBox, saveBox };
+  };
+  const imageEditorLayout = await measureAnchoredEditorLayout();
   expect(
-    (
-      await nameKey.evaluate((element) =>
-        window.getComputedStyle(element).fontFamily.toLowerCase(),
-      )
-    ).includes("mono"),
-  ).toBe(true);
-  await expect(page.getByTestId("community-profile-next")).toHaveText("Next");
-  await expect(page.getByTestId("community-profile-next")).toBeDisabled();
-  await expect(page.getByTestId("community-profile-back")).toHaveCount(0);
+    Math.abs(
+      imageEditorLayout.contentBox.y +
+        imageEditorLayout.contentBox.height / 2 -
+        (imageEditorLayout.contentShellBox.y +
+          imageEditorLayout.contentShellBox.height / 2),
+    ),
+  ).toBeLessThanOrEqual(1);
+  const saveStyles = await saveButton.evaluate((element) => {
+    const styles = window.getComputedStyle(element);
+    return { backgroundColor: styles.backgroundColor, color: styles.color };
+  });
+  expect(saveStyles).toEqual({
+    backgroundColor: "rgb(23, 23, 23)",
+    color: "rgb(240, 240, 205)",
+  });
+  const defaultDialogHeight = imageDialogHeight;
+  await page.getByRole("tab", { name: "Emoji" }).click();
+  await expect
+    .poll(() => avatarDialog.evaluate((element) => element.clientHeight))
+    .toBe(defaultDialogHeight);
+  await page.waitForTimeout(300);
+  const emojiEditorLayout = await measureAnchoredEditorLayout();
+  expect(emojiEditorLayout.saveBox.y).toBe(imageEditorLayout.saveBox.y);
+  await page.getByRole("tab", { name: "Animated" }).click();
+  await expect(saveButton).toHaveCount(0);
+  await expect(
+    page.getByTestId("community-avatar-animated-error"),
+  ).toContainText("Could not access the camera");
+  const retryCameraButton = page.getByTestId("community-avatar-animated-retry");
+  await expect(retryCameraButton).toHaveText("Try camera again");
+  await retryCameraButton.click();
+  const captureButton = page.getByTestId("community-avatar-animated-record");
+  await expect(captureButton).toHaveText("Capture 3 sec video");
+  await captureButton.click();
+  await expect(
+    page.getByTestId("community-avatar-animated-sections"),
+  ).toBeVisible({ timeout: 60_000 });
+  await expect(saveButton).toBeVisible();
+  await page.getByRole("tab", { name: "Emoji" }).click();
+  await selectFirstEmojiFromPicker(page);
+  await expect
+    .poll(() => avatarDialog.evaluate((element) => element.clientHeight))
+    .toBeGreaterThan(defaultDialogHeight);
+  await page.waitForTimeout(300);
+  const selectedEmojiDialogHeight = await avatarDialog.evaluate(
+    (element) => element.clientHeight,
+  );
+  const expandedEmojiLayout = await measureAnchoredEditorLayout();
+  expect(
+    expandedEmojiLayout.contentBox.y - expandedEmojiLayout.contentShellBox.y,
+  ).toBeGreaterThanOrEqual(24);
+  expect(
+    expandedEmojiLayout.contentShellBox.y +
+      expandedEmojiLayout.contentShellBox.height -
+      (expandedEmojiLayout.contentBox.y +
+        expandedEmojiLayout.contentBox.height),
+  ).toBeGreaterThanOrEqual(24);
+  expect(
+    expandedEmojiLayout.contentBox.y -
+      (expandedEmojiLayout.tabsBox.y + expandedEmojiLayout.tabsBox.height),
+  ).toBeGreaterThanOrEqual(24);
+  expect(
+    expandedEmojiLayout.saveBox.y -
+      (expandedEmojiLayout.contentBox.y +
+        expandedEmojiLayout.contentBox.height),
+  ).toBeGreaterThanOrEqual(24);
+  await page.getByTestId("community-avatar-custom-color").click();
+  await expect
+    .poll(() => avatarDialog.evaluate((element) => element.clientHeight))
+    .toBeGreaterThan(selectedEmojiDialogHeight);
+  await page.getByTestId("community-avatar-custom-color-done").click();
+  await expect
+    .poll(() => avatarDialog.evaluate((element) => element.clientHeight))
+    .toBe(selectedEmojiDialogHeight);
+  await page.getByRole("tab", { name: "Image" }).click();
+  await expect
+    .poll(() => avatarDialog.evaluate((element) => element.clientHeight))
+    .toBe(imageDialogHeight);
+  await expect(profileMain).toHaveClass(/opacity-45/);
+  await expect(profileMain).toHaveClass(/blur-\[3px\]/);
+  await expect(
+    page.getByTestId("community-profile-name-key"),
+  ).not.toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(avatarDialog).toHaveCount(0);
+  await expect(avatarButton).toBeFocused();
+  const nextButton = page.getByTestId("community-profile-next");
+  const backButton = page.getByTestId("community-profile-back");
+  await expect(nextButton).toHaveText("Next");
+  await expect(nextButton).toBeDisabled();
+  await expect(backButton).toHaveText("Back");
+  await expect(backButton).toBeEnabled();
+  const [nextBox, backBox] = await Promise.all([
+    nextButton.boundingBox(),
+    backButton.boundingBox(),
+  ]);
+  if (!nextBox || !backBox) {
+    throw new Error("Could not measure community profile navigation controls");
+  }
+  expect(Math.abs(nextBox.width - backBox.width)).toBeLessThanOrEqual(1);
+  expect(nextBox.width).toBeLessThanOrEqual(160);
+
+  await backButton.click();
+  await expect(
+    page.getByRole("heading", { name: "Join a community" }),
+  ).toBeVisible();
   await expect
     .poll(() =>
       page.evaluate(
@@ -1044,7 +1772,453 @@ test("connected first-community profile step cannot discard resumable onboarding
         COMMUNITY_ONBOARDING_TRANSACTION_STORAGE_KEY,
       ),
     )
-    .not.toBeNull();
+    .toBeNull();
+});
+
+test("name-only community profile save preserves an existing avatar", async ({
+  page,
+}) => {
+  await seedCommunityProfileStage(page, "txn-avatar-preserve-existing");
+  await installMockBridge(page, undefined, {
+    relayWsUrl: "wss://default.example.com",
+    skipOnboardingSeed: true,
+  });
+  await page.goto("/");
+
+  const existingAvatarUrl =
+    "https://mock.relay/media/existing-community-avatar.png";
+  await seedCurrentAvatar(page, existingAvatarUrl);
+  await page.getByTestId("community-profile-name-key").fill("Tyler");
+  await page.getByTestId("community-profile-next").click();
+
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [])
+          .filter(
+            ({ command }) =>
+              command === "update_profile" ||
+              command === "update_profile_at_relay",
+          )
+          .map(({ payload }) => (payload as { avatarUrl?: string }).avatarUrl),
+      ),
+    )
+    .toEqual([undefined]);
+  const profile = await invokeMockCommand<{ avatar_url: string | null }>(
+    page,
+    "get_profile",
+  );
+  expect(profile.avatar_url).toBe(existingAvatarUrl);
+});
+
+test("pending avatar stays navigable, clears failures, and retries", async ({
+  page,
+}) => {
+  await seedCommunityProfileStage(page, "txn-avatar-propagation");
+
+  const uploadedAvatarUrl =
+    "https://mock.relay/media/pending-community-avatar.png";
+  let avatarReady = false;
+  await page.route(`${uploadedAvatarUrl}*`, async (route) => {
+    if (!avatarReady) {
+      await route.fulfill({ status: 404 });
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    await route.fulfill({
+      body: Buffer.from(ONE_PIXEL_PNG_BASE64, "base64"),
+      contentType: "image/png",
+    });
+  });
+  await installMockBridge(
+    page,
+    {
+      uploadDelayMs: 250,
+      uploadDescriptors: [
+        {
+          filename: "pending-community-avatar.png",
+          sha256: "d".repeat(64),
+          size: 128,
+          type: "image/png",
+          uploaded: 1_779_900_000,
+          url: uploadedAvatarUrl,
+        },
+      ],
+    },
+    {
+      relayWsUrl: "wss://default.example.com",
+      skipOnboardingSeed: true,
+    },
+  );
+  await page.goto("/");
+
+  await page.getByTestId("community-profile-name-key").fill("Tyler");
+  await uploadCommunityAvatar(page, "pending-community-avatar.png");
+
+  const avatarImage = page.getByTestId("community-avatar-circle-image");
+  await expect(avatarImage).toHaveAttribute("src", /^blob:/);
+  await expect(
+    page.getByTestId("community-avatar-circle-upload-pending"),
+  ).toBeVisible();
+  await expect(avatarImage).toHaveClass(/brightness-75/);
+  await expect(page.getByTestId("community-profile-next")).toBeEnabled();
+  await page.waitForTimeout(500);
+  await expect(
+    page.getByTestId("community-avatar-circle-upload-pending"),
+  ).toBeVisible();
+
+  const avatar = page.getByTestId("community-avatar-circle");
+  const pendingSpinner = page
+    .getByTestId("community-avatar-circle-upload-pending")
+    .locator(".sprout-arc-spinner");
+  const [avatarBox, spinnerBox] = await Promise.all([
+    avatar.boundingBox(),
+    pendingSpinner.boundingBox(),
+  ]);
+  if (!avatarBox || !spinnerBox) {
+    throw new Error("Could not measure pending avatar spinner");
+  }
+  expect(
+    Math.abs(
+      avatarBox.x + avatarBox.width / 2 - (spinnerBox.x + spinnerBox.width / 2),
+    ),
+  ).toBeLessThanOrEqual(1);
+  expect(
+    Math.abs(
+      avatarBox.y +
+        avatarBox.height / 2 -
+        (spinnerBox.y + spinnerBox.height / 2),
+    ),
+  ).toBeLessThanOrEqual(1);
+  expect(spinnerBox.width / avatarBox.width).toBeLessThanOrEqual(0.2);
+
+  await expect(page.getByTestId("community-avatar-empty")).toBeVisible({
+    timeout: 10_000,
+  });
+  await expect(
+    page.getByRole("button", { name: "Add an avatar" }),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId("community-avatar-circle-fallback"),
+  ).toHaveCount(0);
+  await expect(avatarImage).toHaveCount(0);
+  await expect(
+    page.getByText("Avatar couldn’t finish uploading"),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Your default avatar is showing instead."),
+  ).toBeVisible();
+
+  await page.getByTestId("community-profile-next").click();
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [])
+          .filter(
+            ({ command }) =>
+              command === "update_profile" ||
+              command === "update_profile_at_relay",
+          )
+          .map(({ payload }) => (payload as { avatarUrl?: string }).avatarUrl),
+      ),
+    )
+    .toEqual([undefined]);
+
+  avatarReady = true;
+  await page.getByRole("button", { name: "Retry" }).click();
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [])
+          .filter(
+            ({ command }) =>
+              command === "update_profile" ||
+              command === "update_profile_at_relay",
+          )
+          .map(({ payload }) => (payload as { avatarUrl?: string }).avatarUrl),
+      ),
+    )
+    .toEqual([undefined, uploadedAvatarUrl]);
+  await expect(page.getByText("Avatar couldn’t finish uploading")).toHaveCount(
+    0,
+  );
+});
+
+test("a pending avatar never becomes durable if propagation fails after onboarding unmounts", async ({
+  page,
+}) => {
+  await seedCommunityProfileStage(page, "txn-avatar-saved-before-failure");
+  const uploadedAvatarUrl =
+    "https://mock.relay/media/saved-pending-community-avatar.png";
+  let allowAvatarFailure = false;
+  await page.route(`${uploadedAvatarUrl}*`, async (route) => {
+    while (!allowAvatarFailure) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    await route.fulfill({ status: 404 });
+  });
+  await installMockBridge(
+    page,
+    {
+      uploadDescriptors: [
+        {
+          filename: "saved-pending-community-avatar.png",
+          sha256: "f".repeat(64),
+          size: 128,
+          type: "image/png",
+          uploaded: 1_779_900_002,
+          url: uploadedAvatarUrl,
+        },
+      ],
+    },
+    {
+      relayWsUrl: "wss://default.example.com",
+      skipOnboardingSeed: true,
+    },
+  );
+  await page.goto("/");
+
+  await page.getByTestId("community-profile-name-key").fill("Tyler");
+  await uploadCommunityAvatar(page, "saved-pending-community-avatar.png");
+  await expect(
+    page.getByTestId("community-avatar-circle-upload-pending"),
+  ).toBeVisible();
+  await page.getByTestId("community-profile-next").click();
+  await page.getByTestId("community-team-intro-enter").click();
+  await expect(page.getByTestId("community-onboarding-flow")).toHaveCount(0, {
+    timeout: 10_000,
+  });
+  allowAvatarFailure = true;
+
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [])
+          .filter(
+            ({ command }) =>
+              command === "update_profile" ||
+              command === "update_profile_at_relay",
+          )
+          .map(({ payload }) => (payload as { avatarUrl?: string }).avatarUrl),
+      ),
+    )
+    .toEqual([undefined]);
+  await expect(
+    page.getByText("Avatar couldn’t finish uploading"),
+  ).toBeVisible();
+  const profile = await invokeMockCommand<{ avatar_url: string | null }>(
+    page,
+    "get_profile",
+  );
+  expect(profile.avatar_url).toBeNull();
+});
+
+test("a pending avatar becomes durable after onboarding unmounts once ready", async ({
+  page,
+}) => {
+  await seedCommunityProfileStage(page, "txn-avatar-ready-after-unmount");
+  const uploadedAvatarUrl =
+    "https://mock.relay/media/ready-after-unmount-community-avatar.png";
+  let allowAvatarReady = false;
+  await page.route(`${uploadedAvatarUrl}*`, async (route) => {
+    while (!allowAvatarReady) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    await route.fulfill({
+      body: Buffer.from(ONE_PIXEL_PNG_BASE64, "base64"),
+      contentType: "image/png",
+    });
+  });
+  await installMockBridge(
+    page,
+    {
+      uploadDescriptors: [
+        {
+          filename: "ready-after-unmount-community-avatar.png",
+          sha256: "b".repeat(64),
+          size: 128,
+          type: "image/png",
+          uploaded: 1_779_900_004,
+          url: uploadedAvatarUrl,
+        },
+      ],
+    },
+    {
+      relayWsUrl: "wss://default.example.com",
+      skipOnboardingSeed: true,
+    },
+  );
+  await page.goto("/");
+
+  await page.getByTestId("community-profile-name-key").fill("Tyler");
+  await uploadCommunityAvatar(page, "ready-after-unmount-community-avatar.png");
+  await page.getByTestId("community-profile-next").click();
+  await page.getByTestId("community-team-intro-enter").click();
+  await expect(page.getByTestId("community-onboarding-flow")).toHaveCount(0, {
+    timeout: 10_000,
+  });
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [])
+          .filter(
+            ({ command }) =>
+              command === "update_profile" ||
+              command === "update_profile_at_relay",
+          )
+          .map(({ payload }) => (payload as { avatarUrl?: string }).avatarUrl),
+      ),
+    )
+    .toEqual([undefined]);
+
+  allowAvatarReady = true;
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [])
+          .filter(
+            ({ command }) =>
+              command === "update_profile" ||
+              command === "update_profile_at_relay",
+          )
+          .map(({ payload }) => (payload as { avatarUrl?: string }).avatarUrl),
+      ),
+    )
+    .toEqual([undefined, uploadedAvatarUrl]);
+  const profile = await invokeMockCommand<{ avatar_url: string | null }>(
+    page,
+    "get_profile",
+  );
+  expect(profile.avatar_url).toBe(uploadedAvatarUrl);
+});
+
+test("a failed pending replacement leaves the confirmed avatar untouched", async ({
+  page,
+}) => {
+  await seedCommunityProfileStage(page, "txn-avatar-restore-existing");
+  const existingAvatarUrl =
+    "https://mock.relay/media/existing-community-avatar.png";
+  const uploadedAvatarUrl =
+    "https://mock.relay/media/replacement-community-avatar.png";
+  await page.route(`${uploadedAvatarUrl}*`, (route) =>
+    route.fulfill({ status: 404 }),
+  );
+  await installMockBridge(
+    page,
+    {
+      uploadDescriptors: [
+        {
+          filename: "replacement-community-avatar.png",
+          sha256: "a".repeat(64),
+          size: 128,
+          type: "image/png",
+          uploaded: 1_779_900_003,
+          url: uploadedAvatarUrl,
+        },
+      ],
+    },
+    {
+      relayWsUrl: "wss://default.example.com",
+      skipOnboardingSeed: true,
+    },
+  );
+  await page.goto("/");
+  await seedCurrentAvatar(page, existingAvatarUrl);
+
+  await page.getByTestId("community-profile-name-key").fill("Tyler");
+  await uploadCommunityAvatar(page, "replacement-community-avatar.png");
+  await page.getByTestId("community-profile-next").click();
+
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [])
+          .filter(
+            ({ command }) =>
+              command === "update_profile" ||
+              command === "update_profile_at_relay",
+          )
+          .map(({ payload }) => (payload as { avatarUrl?: string }).avatarUrl),
+      ),
+    )
+    .toEqual([undefined]);
+  const profile = await invokeMockCommand<{ avatar_url: string | null }>(
+    page,
+    "get_profile",
+  );
+  expect(profile.avatar_url).toBe(existingAvatarUrl);
+});
+
+test("replacing a pending upload disposes its verifier and local preview", async ({
+  page,
+}) => {
+  await seedCommunityProfileStage(page, "txn-avatar-replacement");
+  await page.addInitScript(() => {
+    const testWindow = window as Window & {
+      __BUZZ_E2E_REVOKED_OBJECT_URLS__?: string[];
+    };
+    const revokedUrls: string[] = [];
+    const revokeObjectUrl = URL.revokeObjectURL.bind(URL);
+    testWindow.__BUZZ_E2E_REVOKED_OBJECT_URLS__ = revokedUrls;
+    URL.revokeObjectURL = (url) => {
+      revokedUrls.push(url);
+      revokeObjectUrl(url);
+    };
+  });
+
+  const uploadedAvatarUrl =
+    "https://mock.relay/media/superseded-community-avatar.png";
+  await page.route(`${uploadedAvatarUrl}*`, (route) =>
+    route.fulfill({ status: 404 }),
+  );
+  await installMockBridge(
+    page,
+    {
+      uploadDescriptors: [
+        {
+          filename: "superseded-community-avatar.png",
+          sha256: "e".repeat(64),
+          size: 128,
+          type: "image/png",
+          uploaded: 1_779_900_001,
+          url: uploadedAvatarUrl,
+        },
+      ],
+    },
+    {
+      relayWsUrl: "wss://default.example.com",
+      skipOnboardingSeed: true,
+    },
+  );
+  await page.goto("/");
+
+  await page.getByTestId("community-profile-name-key").fill("Tyler");
+  await uploadCommunityAvatar(page, "superseded-community-avatar.png");
+  const supersededPreviewUrl = await page
+    .getByTestId("community-avatar-circle-image")
+    .getAttribute("src");
+  expect(supersededPreviewUrl).toMatch(/^blob:/);
+
+  await page.getByTestId("community-avatar-open").click();
+  await page.getByRole("tab", { name: "Emoji" }).click();
+  await selectFirstEmojiFromPicker(page);
+  await page.getByTestId("community-avatar-done").click();
+
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const testWindow = window as Window & {
+          __BUZZ_E2E_REVOKED_OBJECT_URLS__?: string[];
+        };
+        return testWindow.__BUZZ_E2E_REVOKED_OBJECT_URLS__ ?? [];
+      }),
+    )
+    .toContain(supersededPreviewUrl);
+  await page.waitForTimeout(6_000);
+  await expect(page.getByText("Avatar couldn’t finish uploading")).toHaveCount(
+    0,
+  );
+  await expect(page.getByRole("button", { name: "Retry" })).toHaveCount(0);
 });
 
 test("membership denial on community profile save offers recovery", async ({
@@ -1801,6 +2975,27 @@ test("existing relay profile with display name auto-completes onboarding", async
   await expectHomeView(page);
 });
 
+test("open relay skips membership gating during onboarding", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await installMockBridge(
+    page,
+    {
+      relayRequiresMembership: false,
+      relayRole: null,
+    },
+    { skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+
+  await page.getByTestId("onboarding-display-name").fill("Morty QA");
+  await page.getByTestId("onboarding-next").click();
+
+  await expect(page.getByTestId("onboarding-page-avatar")).toBeVisible();
+  await expect(page.getByTestId("membership-denied")).toHaveCount(0);
+});
+
 test("membership denial can import a different invited key", async ({
   page,
 }) => {
@@ -1808,6 +3003,7 @@ test("membership denial can import a different invited key", async ({
   await installMockBridge(
     page,
     {
+      relayRequiresMembership: true,
       relayRole: null,
     },
     { skipOnboardingSeed: true },
@@ -1946,6 +3142,7 @@ test("membership denied shows all four affordances and change-community edits no
   await installMockBridge(
     page,
     {
+      relayRequiresMembership: true,
       relayRole: null,
     },
     { skipOnboardingSeed: true },
@@ -2021,6 +3218,7 @@ test("cancel from profile Back preserves drafts and denied Back returns to inter
   await installMockBridge(
     page,
     {
+      relayRequiresMembership: true,
       relayRole: null,
     },
     { skipOnboardingSeed: true },
@@ -2064,6 +3262,7 @@ test("denied on relay A then paste relay B invite URL switches community to B", 
   await installMockBridge(
     page,
     {
+      relayRequiresMembership: true,
       relayRole: null,
     },
     { skipOnboardingSeed: true },

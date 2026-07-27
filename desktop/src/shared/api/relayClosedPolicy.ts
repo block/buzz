@@ -3,9 +3,23 @@
  * changing the request; authorization and malformed-filter failures require a
  * caller/state change and would otherwise loop forever.
  */
-export function isRetryableRelayClosed(message: string) {
+
+/**
+ * Three-way classification of a relay CLOSED message.
+ *
+ * - `"retryable"` — transient failure; re-send the REQ after a backoff.
+ * - `"rate-limited"` — relay back-pressure; activate the rate-limit gate and
+ *   retry when the gate expires (subscription survives).
+ * - `"terminal"` — auth, access, or filter error; delete the subscription.
+ */
+export type RelayClosedClass = "retryable" | "rate-limited" | "terminal";
+
+export function classifyRelayClosed(message: string): RelayClosedClass {
   const normalized = message.trim().toLowerCase();
-  return !(
+  if (normalized.startsWith("rate-limited:")) {
+    return "rate-limited";
+  }
+  if (
     normalized.startsWith("restricted:") ||
     normalized.startsWith("auth-required:") ||
     normalized.startsWith("blocked:") ||
@@ -15,5 +29,8 @@ export function isRetryableRelayClosed(message: string) {
     normalized.startsWith("unsupported:") ||
     normalized.startsWith("error: mixed search") ||
     normalized.startsWith("error: too many subscriptions")
-  );
+  ) {
+    return "terminal";
+  }
+  return "retryable";
 }

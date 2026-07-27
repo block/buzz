@@ -27,6 +27,7 @@ type InboxMessageRowProps = {
   /** Channel UUID for "Copy link" — passed straight through to MessageActionBar. */
   channelId?: string | null;
   isContinuation?: boolean;
+  isFirst?: boolean;
   isFocusHighlightVisible: boolean;
   message: InboxDisplayMessage;
   onSelectReplyTarget: (message: InboxDisplayMessage) => void;
@@ -42,6 +43,7 @@ export function InboxMessageRow({
   canReply,
   channelId = null,
   isContinuation = false,
+  isFirst = false,
   isFocusHighlightVisible,
   message,
   onSelectReplyTarget,
@@ -111,7 +113,12 @@ export function InboxMessageRow({
         }
       >
         {canReply || canToggleReactions ? (
-          <div className="absolute right-2 top-1 z-10 sm:top-0 sm:-translate-y-1/2">
+          <div
+            className={cn(
+              "absolute right-2 top-1 z-10",
+              !isFirst && "sm:top-0 sm:-translate-y-1/2",
+            )}
+          >
             <MessageActionBar
               channelId={channelId}
               message={timelineMessage}

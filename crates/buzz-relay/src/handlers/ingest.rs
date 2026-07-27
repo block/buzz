@@ -91,6 +91,11 @@ impl IngestAuth {
         }
     }
 
+    /// Pubkey used for principal-scoped accounting and policy lookups.
+    pub fn principal_pubkey_bytes(&self) -> Vec<u8> {
+        self.pubkey().to_bytes().to_vec()
+    }
+
     /// Permission scopes for this auth context.
     pub fn scopes(&self) -> &[Scope] {
         match self {
@@ -139,6 +144,22 @@ fn emit_product_feedback_success(
         },
         state_for_request(tenant, auth.pubkey()),
     );
+}
+
+/// Increment the rejection counter with a bounded reason and transport label.
+///
+/// Shared by the WS `EVENT` handler and the HTTP `POST /events` handler so
+/// both transports feed the same series — `transport` distinguishes them so
+/// existing WS-only dashboards aren't silently diluted by HTTP volume.
+/// `reason` is one of a small closed set ("auth", "invalid", "scope",
+/// "error") — bounded, no cardinality risk.
+pub fn reject_with_transport(transport: &'static str, reason: &'static str) {
+    metrics::counter!(
+        "buzz_events_rejected_total",
+        "transport" => transport,
+        "reason" => reason
+    )
+    .increment(1);
 }
 
 /// Successful ingestion result.
@@ -1000,16 +1021,42 @@ fn validate_engram_envelope(event: &Event) -> Result<(), String> {
 /// Enforces:
 /// * exactly one `d` tag with a non-empty value matching the slug grammar
 ///   `^[a-z0-9][a-z0-9_-]{0,63}$`.
+/// * at most one `shared` tag; if present, its value must be exactly `"true"`.
 ///
-/// Without this, an empty d-tag collapses every persona into the
+/// Without the `d`-tag check, an empty d-tag collapses every persona into the
 /// `(pubkey, 30175, "")` slot — last-write-wins data loss.
+///
+/// The `shared` tag rule ensures no ambiguous heads: either an event has no
+/// `shared` tag (author-only) or exactly `["shared", "true"]` (community-
+/// readable). Any other value (`"false"`, `"1"`, extra tags) is rejected at
+/// ingest so read-path helpers can treat stored events as unambiguously one or
+/// the other.
 fn validate_persona_envelope(event: &Event) -> Result<(), String> {
     let mut d_tags: Vec<&str> = Vec::new();
+    let mut shared_count = 0usize;
     for tag in event.tags.iter() {
         let parts = tag.as_slice();
         if parts.len() >= 2 && parts[0].as_str() == "d" {
             d_tags.push(&parts[1]);
         }
+        if !parts.is_empty() && parts[0].as_str() == "shared" {
+            // Exact shape required: ["shared", "true"] — exactly two elements,
+            // second element exactly "true". Extra elements are rejected so that
+            // a three-element tag like ["shared","true","extra"] cannot be stored
+            // and later misread as shared by the SQL-level visibility clause.
+            if parts.len() != 2 || parts[1].as_str() != "true" {
+                return Err(format!(
+                    "persona event `shared` tag must be exactly [\"shared\",\"true\"] (got {:?})",
+                    parts.iter().map(|s| s.as_str()).collect::<Vec<_>>()
+                ));
+            }
+            shared_count += 1;
+        }
+    }
+    if shared_count > 1 {
+        return Err(format!(
+            "persona event must have at most one `shared` tag (got {shared_count})"
+        ));
     }
     if d_tags.len() != 1 {
         return Err(format!(
@@ -1299,6 +1346,36 @@ fn validate_event_reminder(event: &Event) -> Result<(), &'static str> {
     Ok(())
 }
 
+/// Resolve the `author_type` metric label (`"agent"` / `"human"`) for an
+/// event author, from `users.agent_owner_pubkey IS NOT NULL` via a
+/// per-community cache. Metric-labeling only — never used for authorization.
+/// Unknown pubkeys and lookup errors count as "human" (the label must not
+/// add a failure path to ingest).
+async fn author_type_label(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    author_pubkey_bytes: Vec<u8>,
+) -> &'static str {
+    let key = (tenant.community(), author_pubkey_bytes);
+    let cached = state.author_type_cache.get(&key);
+    let is_agent = match cached {
+        Some(v) => v,
+        None => {
+            let v = match state.db.get_agent_channel_policy(key.0, &key.1).await {
+                Ok(Some((_, owner))) => owner.is_some(),
+                Ok(None) | Err(_) => false,
+            };
+            state.author_type_cache.insert(key, v);
+            v
+        }
+    };
+    if is_agent {
+        "agent"
+    } else {
+        "human"
+    }
+}
+
 /// Ingest a signed Nostr event through the full validation pipeline.
 ///
 /// Shared by WebSocket and HTTP transports. The caller constructs [`IngestAuth`]
@@ -1319,6 +1396,14 @@ pub async fn ingest_event(
     event: Event,
     auth: IngestAuth,
 ) -> Result<IngestResult, IngestError> {
+    // Captured before `event` moves into the inner fn: the stored-events
+    // counter below is emitted at this shared seam so WebSocket and HTTP
+    // transports are counted identically.
+    let kind_label = super::event::bounded_kind_label(event_kind_u32(&event));
+    // Classify the authenticated principal, not the event envelope signer:
+    // NIP-59 gift wraps deliberately use an unrelated ephemeral pubkey.
+    let author_pubkey_bytes = auth.principal_pubkey_bytes();
+
     let abstract_state = state_for_request(tenant, auth.pubkey());
     let (_guard, tracer) = EmitGuard::arm(
         state.tracer.clone(),
@@ -1327,6 +1412,22 @@ pub async fn ingest_event(
     );
 
     let result = ingest_event_inner(state, &tracer, tenant, event, auth).await;
+
+    // Fleet-wide stored counter: kind + author_type only, no community tag
+    // (see the cardinality rationale on buzz_events_received_total —
+    // author_type is a 2-value label so it merely doubles the kind series).
+    // Emitted here rather than per-transport so HTTP bridge ingests count too.
+    if let Ok(r) = &result {
+        if r.accepted {
+            let author_type = author_type_label(state, tenant, author_pubkey_bytes).await;
+            metrics::counter!(
+                "buzz_events_stored_total",
+                "kind" => kind_label,
+                "author_type" => author_type
+            )
+            .increment(1);
+        }
+    }
 
     // Map terminal error variants onto the closed SanitizedReason
     // alphabet (spec line 778). The inner fn's success path emits
@@ -1964,7 +2065,11 @@ async fn ingest_event_inner(
         });
         if create_name
             .as_ref()
-            .map(|n| n.trim().is_empty())
+            .map(|n| {
+                buzz_core::channel::canonical_channel_name(n)
+                    .trim()
+                    .is_empty()
+            })
             .unwrap_or(true)
         {
             return Err(IngestError::Rejected(
@@ -2007,6 +2112,7 @@ async fn ingest_event_inner(
 
         if let Some(client_uuid) = channel_id {
             let name = create_name.unwrap_or_default();
+            let name = buzz_core::channel::canonical_channel_name(&name);
 
             let description = event.tags.iter().find_map(|t| {
                 if t.kind().to_string() == "about" {
@@ -2024,7 +2130,7 @@ async fn ingest_event_inner(
                 .create_channel_with_id(
                     tenant.community(),
                     client_uuid,
-                    &name,
+                    name,
                     channel_type,
                     visibility,
                     description.as_deref(),
@@ -2349,16 +2455,6 @@ async fn ingest_event_inner(
             accepted: true,
             message: "duplicate:".into(),
         });
-    }
-
-    // Any successfully stored channel-scoped event keeps the channel alive.
-    // Skip kind:9007 (create) — the deadline was just set during creation.
-    if let Some(ch_id) = channel_id {
-        if kind_u32 != KIND_NIP29_CREATE_GROUP {
-            if let Err(e) = state.db.bump_ttl_deadline(tenant.community(), ch_id).await {
-                warn!(channel = %ch_id, "TTL deadline bump failed: {e}");
-            }
-        }
     }
 
     if crate::handlers::side_effects::is_side_effect_kind(kind_u32) {
@@ -2863,6 +2959,24 @@ mod tests {
         assert!(
             required_scope_for_kind(KIND_GIFT_WRAP, &dummy).is_ok(),
             "KIND_GIFT_WRAP should be in the scope allowlist"
+        );
+    }
+
+    #[test]
+    fn accounting_uses_authenticated_principal_pubkey() {
+        let principal = nostr::Keys::generate();
+        let envelope_signer = nostr::Keys::generate();
+        let auth = IngestAuth::Nip42 {
+            pubkey: principal.public_key(),
+            scopes: vec![],
+            channel_ids: None,
+            conn_id: Uuid::new_v4(),
+        };
+
+        assert_ne!(principal.public_key(), envelope_signer.public_key());
+        assert_eq!(
+            auth.principal_pubkey_bytes(),
+            principal.public_key().to_bytes().to_vec()
         );
     }
 
@@ -3446,6 +3560,89 @@ mod tests {
         assert!(err.contains("`d` tag"), "got: {err}");
     }
 
+    // ─── persona shared-tag envelope tests ───────────────────────────────────
+
+    #[test]
+    fn persona_envelope_accepts_shared_true() {
+        // A persona event with exactly one ["shared","true"] tag must be accepted.
+        let ev = make_persona(&[&["d", "my-persona"], &["shared", "true"]]);
+        assert!(validate_persona_envelope(&ev).is_ok());
+    }
+
+    #[test]
+    fn persona_envelope_accepts_no_shared_tag() {
+        // The shared tag is optional; omitting it is the author-only default.
+        let ev = make_persona(&[&["d", "my-persona"]]);
+        assert!(validate_persona_envelope(&ev).is_ok());
+    }
+
+    #[test]
+    fn persona_envelope_rejects_shared_false() {
+        let ev = make_persona(&[&["d", "my-persona"], &["shared", "false"]]);
+        let err = validate_persona_envelope(&ev).unwrap_err();
+        assert!(
+            err.contains("\"true\""),
+            "expected 'true' in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn persona_envelope_rejects_shared_wrong_value() {
+        let ev = make_persona(&[&["d", "my-persona"], &["shared", "yes"]]);
+        let err = validate_persona_envelope(&ev).unwrap_err();
+        assert!(
+            err.contains("\"true\""),
+            "expected 'true' in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn persona_envelope_rejects_shared_missing_value() {
+        // A "shared" tag with no value argument must be rejected.
+        let ev = make_event_with_tags(
+            KIND_PERSONA,
+            r#"{"display_name":"x"}"#,
+            &[&["d", "slug"], &["shared"]],
+        );
+        let err = validate_persona_envelope(&ev).unwrap_err();
+        assert!(
+            err.contains("\"true\""),
+            "expected 'true' in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn persona_envelope_rejects_duplicate_shared_tags() {
+        // More than one shared tag, even if both are "true", must be rejected.
+        let ev = make_persona(&[
+            &["d", "my-persona"],
+            &["shared", "true"],
+            &["shared", "true"],
+        ]);
+        let err = validate_persona_envelope(&ev).unwrap_err();
+        assert!(
+            err.contains("at most one"),
+            "expected 'at most one' in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn persona_envelope_rejects_shared_three_elements() {
+        // ["shared","true","extra"] must be rejected — only exactly two elements
+        // are valid so the SQL containment check tags @> '[["shared","true"]]'
+        // cannot match a three-element stored tag.
+        let ev = make_event_with_tags(
+            KIND_PERSONA,
+            r#"{"display_name":"x"}"#,
+            &[&["d", "slug"], &["shared", "true", "extra"]],
+        );
+        let err = validate_persona_envelope(&ev).unwrap_err();
+        assert!(
+            err.contains("[\"shared\",\"true\"]"),
+            "expected exact-shape error, got: {err}"
+        );
+    }
+
     // ─── agent_turn_metric envelope tests ────────────────────────────────────
 
     /// Build an event for kind:44200 with the given tags and content.
@@ -3544,5 +3741,55 @@ mod tests {
         let err = validate_agent_turn_metric_envelope(&ev).unwrap_err();
         // error comes from validate_engram_nip44_content with label replaced
         assert!(err.contains("agent-turn-metric"), "got: {err}");
+    }
+
+    /// The HTTP bridge's `submit_event` 400 arm and the WS `EVENT` handler's
+    /// reject path must land on the same counter, distinguished only by the
+    /// `transport` label — this is what lets a dashboard tell "server got
+    /// hammered with bad HTTP requests" apart from "a WS client is
+    /// misbehaving" without losing the combined total.
+    #[test]
+    fn reject_with_transport_labels_http_and_ws_as_separate_series() {
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        metrics::with_local_recorder(&recorder, || {
+            reject_with_transport("http", "invalid");
+            reject_with_transport("ws", "invalid");
+            reject_with_transport("http", "invalid");
+        });
+
+        let counts: std::collections::HashMap<(String, String), u64> = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter(|(key, ..)| key.key().name() == "buzz_events_rejected_total")
+            .map(|(key, _, _, value)| {
+                let metrics_util::debugging::DebugValue::Counter(n) = value else {
+                    panic!("buzz_events_rejected_total must be a counter");
+                };
+                let labels: Vec<_> = key.key().labels().collect();
+                let transport = labels
+                    .iter()
+                    .find(|l| l.key() == "transport")
+                    .map(|l| l.value().to_owned())
+                    .unwrap_or_default();
+                let reason = labels
+                    .iter()
+                    .find(|l| l.key() == "reason")
+                    .map(|l| l.value().to_owned())
+                    .unwrap_or_default();
+                ((transport, reason), n)
+            })
+            .collect();
+
+        assert_eq!(
+            counts.get(&("http".to_owned(), "invalid".to_owned())),
+            Some(&2)
+        );
+        assert_eq!(
+            counts.get(&("ws".to_owned(), "invalid".to_owned())),
+            Some(&1)
+        );
     }
 }

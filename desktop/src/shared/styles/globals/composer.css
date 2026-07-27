@@ -1,3 +1,42 @@
+.composer-overlay-corner-masks::before,
+.composer-overlay-corner-masks::after {
+  position: absolute;
+  bottom: 2.5rem;
+  z-index: 0;
+  width: 1rem;
+  height: 1rem;
+  background: hsl(var(--background));
+  content: "";
+}
+
+.composer-overlay-corner-masks::before {
+  left: 1.25rem;
+  mask-image: radial-gradient(
+    circle at top right,
+    transparent 0 1rem,
+    black calc(1rem + 0.5px)
+  );
+  -webkit-mask-image: radial-gradient(
+    circle at top right,
+    transparent 0 1rem,
+    black calc(1rem + 0.5px)
+  );
+}
+
+.composer-overlay-corner-masks::after {
+  right: 1.25rem;
+  mask-image: radial-gradient(
+    circle at top left,
+    transparent 0 1rem,
+    black calc(1rem + 0.5px)
+  );
+  -webkit-mask-image: radial-gradient(
+    circle at top left,
+    transparent 0 1rem,
+    black calc(1rem + 0.5px)
+  );
+}
+
 .rich-text-composer .tiptap {
   outline: none;
   min-height: 1lh;

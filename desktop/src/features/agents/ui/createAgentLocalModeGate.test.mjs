@@ -30,7 +30,7 @@ import {
   isGloballySatisfiedCredentialKey,
   requiredCredentialEnvKeys,
   runtimeSupportsLlmProviderSelection,
-} from "./personaDialogPickers.tsx";
+} from "./agentConfigOptions.tsx";
 import { hasMissingRequiredEnvKey } from "./personaRuntimeModel.ts";
 import {
   countNonSecretInheritedEnvVars,

@@ -16,6 +16,7 @@ import {
   coalesceAutocompleteCandidatesByKey,
   getMentionableAgentPubkeys,
   getSharedChannelIds,
+  isAgentIdentityInManagedList,
   shouldHideAgentFromMentions,
 } from "@/features/agents/lib/agentAutocompleteEligibility";
 import {
@@ -245,6 +246,9 @@ export function useMentions(
       if (isArchivedDiscovery(pubkey)) {
         return;
       }
+      if (!isAgentIdentityInManagedList(candidate, managedAgentPubkeys)) {
+        return;
+      }
       if (
         shouldHideAgentFromMentions({
           isAgent: candidate.isAgent === true,
@@ -256,7 +260,6 @@ export function useMentions(
       ) {
         return;
       }
-
       const current = candidatesByPubkey.get(pubkey);
       if (!current) {
         candidatesByPubkey.set(pubkey, { ...candidate, pubkey });
@@ -289,7 +292,6 @@ export function useMentions(
         isManagedAgent: current.isManagedAgent || candidate.isManagedAgent,
       });
     };
-
     for (const member of members ?? []) {
       const pubkey = normalizePubkey(member.pubkey);
       const linkedPersonaId = activePersonaById.has(pubkey)
@@ -418,6 +420,7 @@ export function useMentions(
     managedAgentNamesByPubkey,
     managedAgentPersonaIds,
     managedAgentPersonaIdsByPubkey,
+    managedAgentPubkeys,
     managedAgentsQuery.data,
     memberPubkeys,
     members,
@@ -540,10 +543,7 @@ export function useMentions(
       mentionQuery,
       activePersonaIds,
     )
-      .slice(
-        0,
-        Math.max(MENTION_SUGGESTION_LIMIT, mentionCandidatesWithTeams.length),
-      )
+      .slice(0, MENTION_SUGGESTION_LIMIT)
       .map(({ candidate, label }) =>
         mapMentionCandidateToSuggestion({
           candidate,
@@ -948,7 +948,7 @@ export function useMentions(
 
       if (event.key === "Escape") {
         event.preventDefault();
-        setMentionQuery(null);
+        cancelMentionAutocomplete(); // full cancel incl. pending debounce
         return { handled: true };
       }
 
@@ -956,6 +956,7 @@ export function useMentions(
     },
     [
       activePersonaIds,
+      cancelMentionAutocomplete,
       currentPubkey,
       isMentionOpen,
       mentionCandidatesWithTeams,

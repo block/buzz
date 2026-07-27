@@ -36,7 +36,7 @@ pub(crate) fn not_found(msg: &str) -> (StatusCode, Json<serde_json::Value>) {
 /// `git/transport.rs`, and `audio/handler.rs`.
 pub mod relay_members {
     use axum::{http::StatusCode, response::Json};
-    use buzz_core::tenant::CommunityId;
+    use buzz_core::{tenant::CommunityId, TenantContext};
     use tracing::{debug, info};
 
     use crate::state::AppState;
@@ -164,6 +164,71 @@ pub mod relay_members {
                 None
             }
         }
+    }
+
+    /// Persist a cryptographically verified NIP-OA agent→owner relationship.
+    ///
+    /// Both principals are ensured first because `agent_owner_pubkey` has a
+    /// community-scoped foreign key. The mapping is first-write-wins; an
+    /// existing mapping is accepted only when it names the same owner.
+    pub async fn materialize_nip_oa_owner(
+        state: &AppState,
+        tenant: &TenantContext,
+        agent: &nostr::PublicKey,
+        owner: &nostr::PublicKey,
+    ) -> bool {
+        for (role, pubkey) in [("agent", agent), ("owner", owner)] {
+            match state
+                .db
+                .ensure_user(tenant.community(), pubkey.as_bytes())
+                .await
+            {
+                Ok(true) => {
+                    metrics::counter!(
+                        "buzz_users_created_total",
+                        "community" => tenant.host().to_owned()
+                    )
+                    .increment(1);
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::warn!(%role, error = %e, "ensure_user failed during NIP-OA backfill");
+                    return false;
+                }
+            }
+        }
+
+        let materialized = match state
+            .db
+            .set_agent_owner(tenant.community(), agent.as_bytes(), owner.as_bytes())
+            .await
+        {
+            Ok(true) => true,
+            Ok(false) => state
+                .db
+                .is_agent_owner(tenant.community(), agent.as_bytes(), owner.as_bytes())
+                .await
+                .unwrap_or(false),
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to backfill agent_owner_pubkey");
+                false
+            }
+        };
+
+        if materialized {
+            state
+                .author_type_cache
+                .insert((tenant.community(), agent.to_bytes().to_vec()), true);
+            state.observer_owner_cache.insert(
+                (
+                    tenant.community(),
+                    agent.to_bytes().to_vec(),
+                    owner.to_bytes().to_vec(),
+                ),
+                true,
+            );
+        }
+        materialized
     }
 
     #[cfg(test)]

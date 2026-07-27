@@ -3,11 +3,15 @@ import type { AgentWorkingSource } from "../agentWorkingSignal";
 /**
  * Chunk F auto-restart policy — the pure decision core.
  *
- * SAFETY-CRITICAL: `stop_managed_agent_process` is SIGTERM → ≤1s → SIGKILL
- * with no in-process drain, so this predicate is the ONLY thing standing
- * between the policy loop and killing a mid-turn agent. Every never-fire
- * condition below is load-bearing; the test matrix enumerates them
- * exhaustively.
+ * SAFETY-CRITICAL: the stop command is SIGTERM → ≤1s → SIGKILL with no
+ * in-process drain, so this predicate is the ONLY thing standing between
+ * the policy loop and killing a mid-turn agent. Every never-fire condition
+ * below is load-bearing; the test matrix enumerates them exhaustively.
+ *
+ * Scope: the stop/start commands the loop fires are pair-scoped to the
+ * active community, and `needsRestart` reports drift for that same pair —
+ * a fire bounces only the community being viewed, never an agent's pairs
+ * in other communities.
  *
  * Decisions:
  * - "fire": restart now (all gates green, continuity window satisfied).

@@ -6,6 +6,7 @@ import UserNotifications
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
   private var mediaUploadChannel: FlutterMethodChannel?
+  private var qrScannerChannel: FlutterMethodChannel?
 
   override func application(
     _ application: UIApplication,
@@ -24,6 +25,63 @@ import UserNotifications
     mediaUploadChannel?.setMethodCallHandler { [weak self] call, result in
       self?.handleMediaUploadMethodCall(call, result: result)
     }
+    qrScannerChannel = FlutterMethodChannel(
+      name: "buzz/qr_scanner",
+      binaryMessenger: engineBridge.applicationRegistrar.messenger()
+    )
+    qrScannerChannel?.setMethodCallHandler { call, result in
+      Self.handleQrScannerMethodCall(call, result: result)
+    }
+  }
+
+  private static func handleQrScannerMethodCall(
+    _ call: FlutterMethodCall,
+    result: @escaping FlutterResult
+  ) {
+    switch call.method {
+    case "usesDynamicIslandQrScannerPortal":
+      result(
+        UIDevice.current.userInterfaceIdiom == .phone
+          && usesDynamicIslandQrScannerPortal(
+            safeAreaTopInset: activeWindowSafeAreaTopInset()
+          )
+      )
+    case "setDynamicIslandScannerStatusBarHidden":
+      guard let hidden = call.arguments as? Bool else {
+        result(
+          FlutterError(
+            code: "invalid_arguments",
+            message: "Expected a Bool status-bar visibility value.",
+            details: nil
+          )
+        )
+        return
+      }
+      UIApplication.shared.setStatusBarHidden(hidden, with: .fade)
+      result(nil)
+    case "performDynamicIslandQrScanSuccessHaptic":
+      let generator = UINotificationFeedbackGenerator()
+      generator.prepare()
+      generator.notificationOccurred(.success)
+      result(nil)
+    default:
+      result(FlutterMethodNotImplemented)
+    }
+  }
+
+  static func usesDynamicIslandQrScannerPortal(
+    safeAreaTopInset: CGFloat
+  ) -> Bool {
+    safeAreaTopInset > 50
+  }
+
+  private static func activeWindowSafeAreaTopInset() -> CGFloat {
+    UIApplication.shared.connectedScenes
+      .compactMap { $0 as? UIWindowScene }
+      .filter { $0.activationState == .foregroundActive }
+      .flatMap(\.windows)
+      .first(where: \.isKeyWindow)?
+      .safeAreaInsets.top ?? 0
   }
 
   private func handleMediaUploadMethodCall(
@@ -58,19 +116,19 @@ import UserNotifications
         return
       }
 
-      let sanitizedData: Data?
-      switch mimeType {
-      case "image/png":
-        sanitizedData = image.pngData()
-      case "image/jpeg":
-        sanitizedData = image.jpegData(compressionQuality: 1.0)
-      case "image/webp":
-        sanitizedData = image.pngData()
-      default:
-        sanitizedData = nil
-      }
-
-      guard let sanitizedData else {
+      do {
+        guard let sanitizedData = try MediaSanitizer.sanitizeImage(image, mimeType: mimeType) else {
+          result(
+            FlutterError(
+              code: "sanitize_failed",
+              message: "Unable to sanitize picked image.",
+              details: mimeType
+            )
+          )
+          return
+        }
+        result(FlutterStandardTypedData(bytes: sanitizedData))
+      } catch {
         result(
           FlutterError(
             code: "sanitize_failed",
@@ -78,10 +136,7 @@ import UserNotifications
             details: mimeType
           )
         )
-        return
       }
-
-      result(FlutterStandardTypedData(bytes: sanitizedData))
     case "transcodeImageToJpeg":
       guard let typedData = call.arguments as? FlutterStandardTypedData else {
         result(
@@ -94,9 +149,7 @@ import UserNotifications
         return
       }
 
-      guard let image = UIImage(data: typedData.data),
-        let jpegData = image.jpegData(compressionQuality: 1.0)
-      else {
+      guard let image = UIImage(data: typedData.data) else {
         result(
           FlutterError(
             code: "transcode_failed",
@@ -107,7 +160,27 @@ import UserNotifications
         return
       }
 
-      result(FlutterStandardTypedData(bytes: jpegData))
+      do {
+        guard let jpegData = try MediaSanitizer.encodeJpeg(image) else {
+          result(
+            FlutterError(
+              code: "transcode_failed",
+              message: "Unable to convert picked image to JPEG.",
+              details: nil
+            )
+          )
+          return
+        }
+        result(FlutterStandardTypedData(bytes: jpegData))
+      } catch {
+        result(
+          FlutterError(
+            code: "transcode_failed",
+            message: "Unable to convert picked image to JPEG.",
+            details: nil
+          )
+        )
+      }
     case "transcodeVideoToMp4":
       guard let sourcePath = call.arguments as? String else {
         result(

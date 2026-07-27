@@ -61,7 +61,7 @@ function isSameBadgeBurstRect(
  * Render a reaction's emoji: a custom (image) emoji when `emojiUrl` is set,
  * otherwise the unicode/text glyph. `className` sizes the image to match the
  * surrounding text. The relay URL is rewritten through the localhost media
- * proxy (like every other relay-hosted <img>) — WKWebView bypasses WARP, so a
+ * proxy (like every other relay-hosted <img>) — WKWebView bypasses the VPN tunnel, so a
  * direct relay URL gets a Cloudflare Access 403 and renders as a broken image.
  */
 function EmojiGlyph({

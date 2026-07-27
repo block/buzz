@@ -7,8 +7,8 @@ use tracing::{debug, error, info, warn};
 
 use buzz_core::event::StoredEvent;
 use buzz_core::kind::{
-    event_kind_u32, is_ephemeral, AUTHOR_ONLY_KINDS, KIND_AGENT_OBSERVER_FRAME, KIND_GIFT_WRAP,
-    KIND_PRESENCE_UPDATE,
+    event_kind_u32, is_ephemeral, is_unshared_persona_event, AUTHOR_ONLY_KINDS,
+    KIND_AGENT_OBSERVER_FRAME, KIND_GIFT_WRAP, KIND_PRESENCE_UPDATE,
 };
 use buzz_core::observer::{
     content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -24,15 +24,15 @@ use crate::connection::{AuthState, ConnectionState};
 use crate::protocol::RelayMessage;
 use crate::state::AppState;
 
-use super::ingest::{IngestAuth, IngestError};
+use super::ingest::{reject_with_transport, IngestAuth, IngestError};
 
 /// Increment the rejection counter with a bounded reason label.
 fn reject(reason: &'static str) {
-    metrics::counter!("buzz_events_rejected_total", "reason" => reason).increment(1);
+    reject_with_transport("ws", reason);
 }
 
 /// Bound the `kind` label to prevent cardinality explosion from arbitrary Nostr kinds.
-fn bounded_kind_label(kind: u32) -> String {
+pub(crate) fn bounded_kind_label(kind: u32) -> String {
     match kind {
         0..=9 | 1059 | 1063 => kind.to_string(),
         8000..=8003 | 9000..=9022 | 9030..=9036 => kind.to_string(),
@@ -145,6 +145,29 @@ pub async fn filter_fanout_by_access(
                     .conn_manager
                     .pubkey_for_conn(*conn_id)
                     .is_some_and(|pk| pk == author)
+            })
+            .collect()
+    } else {
+        matches
+    };
+
+    // Persona shared-read gate (fan-out): kind 30175 events fan out to all
+    // connections only when carrying ["shared","true"]. Unshared personas
+    // are delivered only to the author's own connections, matching REQ semantics.
+    let matches = if buzz_core::kind::is_persona_shared_kind(event_kind_u32(&stored_event.event)) {
+        let author = stored_event.event.pubkey.to_bytes();
+        matches
+            .into_iter()
+            .filter(|(conn_id, _)| {
+                let Some(pk) = state.conn_manager.pubkey_for_conn(*conn_id) else {
+                    return false;
+                };
+                // Author always receives their own events.
+                if pk == author {
+                    return true;
+                }
+                // Foreign connection: allowed only if the event is shared.
+                !is_unshared_persona_event(&stored_event.event, &pk)
             })
             .collect()
     } else {
@@ -545,6 +568,9 @@ async fn enqueue_event_created_audit(
     actor_pubkey_hex: &str,
     event_id_hex: &str,
 ) {
+    let Some(audit_tx) = &state.audit_tx else {
+        return;
+    };
     // Audit via bounded channel (capacity 1000). Uses .send().await so entries
     // are never silently dropped — backpressure propagates to the event handler
     // if the queue is full. This is intentional: the audit advisory lock already
@@ -568,7 +594,7 @@ async fn enqueue_event_created_audit(
             "channel_id": stored_event.channel_id,
         }),
     };
-    if let Err(e) = state.audit_tx.send(audit_entry).await {
+    if let Err(e) = audit_tx.send(audit_entry).await {
         error!(event_id = %event_id_hex, "Audit channel closed — entry lost: {e}");
         metrics::counter!("buzz_audit_send_errors_total").increment(1);
     }
@@ -595,7 +621,7 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
     // Rationale: bounded_kind_label passes through all 10k values in
     // 20000..=29999 (client-controlled ephemeral range). Crossing kind ×
     // community would produce up to millions of series. Keep kind fleet-wide.
-    metrics::counter!("buzz_events_received_total", "kind" => kind_str.clone()).increment(1);
+    metrics::counter!("buzz_events_received_total", "kind" => kind_str).increment(1);
     // Per-community volume counter: community-only, no kind tag.
     // Use this for per-community throughput graphs; the fleet counter above
     // for per-kind breakdowns.
@@ -702,9 +728,8 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
     match super::ingest::ingest_event(&state, &conn.tenant, event, ingest_auth).await {
         Ok(result) => {
             if result.accepted {
-                // Fleet-wide stored counter: kind-only, no community tag.
-                // Same cardinality rationale as buzz_events_received_total above.
-                metrics::counter!("buzz_events_stored_total", "kind" => kind_str).increment(1);
+                // buzz_events_stored_total is emitted inside ingest_event()
+                // (shared WS/HTTP seam), not here.
                 info!(
                     event_id = %result.event_id,
                     kind = kind_u32,
