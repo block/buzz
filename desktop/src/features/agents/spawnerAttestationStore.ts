@@ -279,7 +279,13 @@ export async function ensureSpawnerAttestationSubscription(): Promise<void> {
   try {
     await startPromise;
   } finally {
-    if (unsubscribeRelay) startPromise = null;
+    // Cleared unconditionally. Keeping the settled promise around when no
+    // subscription was opened — no identity yet during onboarding, or a throw
+    // from getIdentity — made every later call return that same finished
+    // promise and report success, so attestation prompts never arrived again
+    // until the app restarted. A later call re-enters instead; the
+    // `unsubscribeRelay` check above is what keeps this idempotent.
+    startPromise = null;
   }
 }
 

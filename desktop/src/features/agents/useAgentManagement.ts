@@ -212,7 +212,15 @@ export function useAgentManagement() {
       if (runLocation.kind === "spawner") {
         // The spawner owns the process and mints the agent's key, so there is
         // no local instance to create and no pubkey to add to the channel yet.
-        await deployToSpawner(persona, runLocation.spawnerPubkey);
+        // A failed publish must not read as success: the hook has already
+        // surfaced the reason, so stop here rather than reporting a deployment
+        // that never happened.
+        if (!(await deployToSpawner(persona, runLocation.spawnerPubkey))) {
+          // The definition was created and is kept — only the deploy failed,
+          // so the user can retry from the Agents screen without re-entering
+          // everything. Returning false keeps the dialog open to say so.
+          return false;
+        }
       } else if (intent === "definition_start") {
         const created = await createAgentMutation.mutateAsync(
           await buildInstanceInputForDefinition(
