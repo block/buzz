@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   eligibleFeedNotificationItems,
   enrichFeedItemChannel,
+  feedItemSurvivesChannelMute,
   notificationTitle,
 } from "./feed.ts";
 
@@ -119,4 +120,35 @@ test("resolves and excludes a DM whose feed item has a name but no type", () => 
   );
 
   assert.equal(items.length, 0);
+});
+
+const MUTED = new Set(["channel-id"]);
+
+test("a direct mention pierces a channel mute", () => {
+  const item = feedItem({ category: "mention", tags: [["p", "me"]] });
+  assert.equal(feedItemSurvivesChannelMute(item, MUTED), true);
+});
+
+test("an @channel mention is suppressed by a channel mute", () => {
+  const item = feedItem({
+    category: "mention",
+    tags: [
+      ["h", "channel-id"],
+      ["notify", "channel"],
+    ],
+  });
+  assert.equal(feedItemSurvivesChannelMute(item, MUTED), false);
+});
+
+test("a needs-action item is suppressed by a channel mute", () => {
+  assert.equal(feedItemSurvivesChannelMute(feedItem(), MUTED), false);
+});
+
+test("everything survives when the channel is not muted", () => {
+  const item = feedItem({
+    category: "mention",
+    tags: [["notify", "channel"]],
+  });
+  assert.equal(feedItemSurvivesChannelMute(item, new Set()), true);
+  assert.equal(feedItemSurvivesChannelMute(item, undefined), true);
 });

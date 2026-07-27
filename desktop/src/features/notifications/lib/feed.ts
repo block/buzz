@@ -1,4 +1,5 @@
 import type { Channel, FeedItem, HomeFeedResponse } from "@/shared/api/types";
+import { notifyModeForTags } from "@/features/notifications/lib/channelNotifyEscalation";
 import {
   formatNotificationTitle,
   truncateNotificationBody,
@@ -29,6 +30,23 @@ export function enrichFeedItemChannel(
     channelName: needsName ? channel.name : item.channelName,
     channelType: needsType ? channel.channelType : item.channelType,
   };
+}
+
+/**
+ * Whether a feed item still notifies once channel mutes are applied.
+ *
+ * Direct mentions pierce a channel mute; channel-wide mentions (NIP-CM) do
+ * not — the mute is the opt-out for `@channel`, so a muted channel's marker
+ * events are dropped here even though the relay files them under `mention`.
+ */
+export function feedItemSurvivesChannelMute(
+  item: FeedItem,
+  mutedChannelIds: ReadonlySet<string> | undefined,
+): boolean {
+  if (!item.channelId || !mutedChannelIds?.has(item.channelId)) {
+    return true;
+  }
+  return item.category === "mention" && notifyModeForTags(item.tags) === null;
 }
 
 export function notificationTitle(item: FeedItem, senderName?: string) {

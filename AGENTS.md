@@ -503,6 +503,7 @@ reconnects preserve pending avatar verification work):
 - `resetRenderScopedReactionHydration()` — reaction hydration cache
 - `clearSearchHitEventCache()` — search result event cache
 - `clearMarkdownNodeCache()` — markdown parse-node cache
+- `resetSelfPresenceStatus()` — self presence signal read by the `@here` check
 
 **If you add a new module-level cache, Map, or class instance that holds
 community-scoped data, you must add its reset to `resetCommunityState()`.**

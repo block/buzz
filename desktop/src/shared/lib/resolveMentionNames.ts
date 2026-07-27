@@ -1,6 +1,13 @@
 import type { UserProfileSummary } from "@/shared/api/types";
+import { NOTIFY_TAG, isNotifyMode } from "@/shared/constants/notify";
 
 export const MENTION_REFERENCE_TAG = "mention";
+
+/** Notify mode carried by a `["notify", mode]` tag, or null for other tags. */
+function getNotifyTagMode(tag: string[]): string | null {
+  const mode = tag[0] === NOTIFY_TAG ? tag[1] : undefined;
+  return mode !== undefined && isNotifyMode(mode) ? mode : null;
+}
 
 export function getMentionTagPubkey(tag: string[]): string | null {
   if ((tag[0] !== "p" && tag[0] !== MENTION_REFERENCE_TAG) || !tag[1]) {
@@ -42,7 +49,10 @@ function collectProfileAliases(
     aliases.push(nip05Local);
   }
 
-  return aliases;
+  // `@channel`/`@here` are reserved (NIP-CM): they must never resolve to an
+  // identity, so a member whose display name collides with one loses that
+  // alias rather than hijacking the channel-wide token.
+  return aliases.filter((alias) => !isNotifyMode(alias.toLowerCase()));
 }
 
 export type ResolvedMentionProps = {
@@ -58,6 +68,10 @@ export type ResolvedMentionProps = {
  * `p` tags drive notification/search semantics. `mention` tags only preserve
  * render metadata for reference-only mentions.
  *
+ * A `["notify", "channel" | "here"]` tag (NIP-CM) contributes its mode as a
+ * render name with no pubkey, so `@channel`/`@here` chip only on events that
+ * actually carry the marker and never open a profile.
+ *
  * Both outputs come from the same alias set, so any `@name` chip the markdown
  * renderer matches is guaranteed to resolve to a pubkey.
  */
@@ -65,7 +79,7 @@ export function resolveMentionProps(
   tags: string[][] | undefined,
   profiles: Record<string, UserProfileSummary> | undefined,
 ): ResolvedMentionProps {
-  if (!profiles || !tags) {
+  if (!tags) {
     return { mentionNames: undefined, mentionPubkeysByName: undefined };
   }
 
@@ -73,12 +87,18 @@ export function resolveMentionProps(
   const pubkeysByName: Record<string, string> = {};
 
   for (const tag of tags) {
-    const pubkey = getMentionTagPubkey(tag);
+    const notifyMode = getNotifyTagMode(tag);
+    if (notifyMode) {
+      names.add(notifyMode);
+      continue;
+    }
+
+    const pubkey = profiles ? getMentionTagPubkey(tag) : null;
     if (!pubkey) {
       continue;
     }
 
-    for (const alias of collectProfileAliases(profiles[pubkey])) {
+    for (const alias of collectProfileAliases(profiles?.[pubkey])) {
       names.add(alias);
       pubkeysByName[alias.toLowerCase()] = pubkey;
     }

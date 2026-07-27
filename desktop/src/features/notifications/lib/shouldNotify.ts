@@ -3,6 +3,10 @@ import {
   getThreadReference,
   isBroadcastReply,
 } from "@/features/messages/lib/threading";
+import {
+  channelNotifyEscalates,
+  type ChannelNotifyContext,
+} from "@/features/notifications/lib/channelNotifyEscalation";
 
 export function hasMentionForEvent(
   event: RelayEvent,
@@ -23,6 +27,8 @@ export type NotifyOptions = {
   mutedRootIds?: ReadonlySet<string>;
   mutedChannelIds?: ReadonlySet<string>;
   channelId?: string | null;
+  /** Observation-time inputs for `@here`; defaults to live presence + clock. */
+  channelNotify?: ChannelNotifyContext;
 };
 
 export function shouldNotifyForEvent(
@@ -37,6 +43,7 @@ export function shouldNotifyForEvent(
     mutedRootIds = new Set(),
     mutedChannelIds = new Set(),
     channelId = null,
+    channelNotify,
   } = options;
   const { parentId, rootId } = getThreadReference(event.tags);
 
@@ -48,8 +55,14 @@ export function shouldNotifyForEvent(
     return true;
   }
 
+  // Channel mute suppresses channel-wide mentions (Slack parity), so this
+  // check sits below the direct-mention/broadcast escapes and above them.
   if (channelId !== null && mutedChannelIds.has(channelId)) {
     return false;
+  }
+
+  if (channelNotifyEscalates(event, currentPubkey, channelNotify)) {
+    return true;
   }
 
   if (parentId === null) {
@@ -78,6 +91,7 @@ export function shouldNotifyForEvent(
 export function isHighPriorityEventForUser(
   event: RelayEvent,
   currentPubkey: string,
+  channelNotify?: ChannelNotifyContext,
 ): boolean {
   if (
     currentPubkey.length > 0 &&
@@ -90,5 +104,8 @@ export function isHighPriorityEventForUser(
   if (isBroadcastReply(event.tags)) {
     return true;
   }
-  return false;
+  // Channel-wide mentions are mention tier, so they badge like a direct
+  // mention. Callers reach this only for events that already survived the
+  // mute gate in shouldNotifyForEvent.
+  return channelNotifyEscalates(event, currentPubkey, channelNotify);
 }

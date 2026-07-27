@@ -10,6 +10,7 @@ import type { FeedItem, HomeFeedResponse } from "@/shared/api/types";
 import {
   collectHomeAlertItems,
   eligibleFeedNotificationItems,
+  feedItemSurvivesChannelMute,
   type NotificationChannel,
   notificationBody,
   notificationTitle,
@@ -168,12 +169,7 @@ export function useFeedDesktopNotifications(
           channels,
         )
           .filter((item) => !nextSeenItemIds.has(item.id))
-          .filter(
-            (item) =>
-              !item.channelId ||
-              !mutedChannelIds?.has(item.channelId) ||
-              item.category === "mention",
-          )
+          .filter((item) => feedItemSurvivesChannelMute(item, mutedChannelIds))
       : [];
 
     for (const item of currentFeedItems) {
