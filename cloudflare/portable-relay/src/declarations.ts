@@ -86,7 +86,10 @@ export function evaluateDeclarations(
   return { peers, readers, streams };
 }
 
-function declarationContent(event: Event, dTag: string): Record<string, unknown> {
+function declarationContent(
+  event: Event,
+  dTag: string,
+): Record<string, unknown> {
   let parsed: unknown;
   try {
     parsed = JSON.parse(event.content);
@@ -161,6 +164,6 @@ function exportEntry(event: Event, dTag: string): StreamExport | null {
   throw new MalformedDeclarationError(
     dTag,
     event.id,
-    "selection must be {mirror:true}, {filter:[...]}, or {from_source:\"...\"}",
+    'selection must be {mirror:true}, {filter:[...]}, or {from_source:"..."}',
   );
 }

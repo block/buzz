@@ -138,7 +138,7 @@ describe("evaluateDeclarations", () => {
           }),
         ],
         owner,
-      NODE,
+        NODE,
       ),
     ).toThrow(MalformedDeclarationError);
   });
@@ -153,7 +153,7 @@ describe("evaluateDeclarations", () => {
           }),
         ],
         owner,
-      NODE,
+        NODE,
       ),
     ).toThrow(MalformedDeclarationError);
   });
