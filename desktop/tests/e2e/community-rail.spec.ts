@@ -182,6 +182,7 @@ test.describe("community rail", () => {
     await installMockBridge(
       page,
       {
+        relayMembershipEoseDelayMs: 30_000,
         relayRequiresMembership: true,
         relayRole: "admin",
       },
@@ -215,7 +216,7 @@ test.describe("community rail", () => {
     ).not.toBeFocused();
     await expect(
       menu.getByRole("menuitem", { name: "Invite to community" }),
-    ).toBeVisible();
+    ).toBeVisible({ timeout: 1_000 });
     await expect(
       menu.getByRole("menuitem", { name: "Community settings" }),
     ).toBeVisible();
@@ -658,9 +659,32 @@ test.describe("community rail", () => {
       `community-rail-button-${COMMUNITY_A.id}`,
     );
     await expect(firstButton).toBeVisible();
-    const box = await firstButton.boundingBox();
-    expect(box).not.toBeNull();
-    expect(box?.y ?? 0).toBeGreaterThanOrEqual(32);
+    const buttonBox = await firstButton.boundingBox();
+    const railBox = await page.getByTestId("community-rail").boundingBox();
+    const searchBox = await page.getByTestId("open-search").boundingBox();
+    const contentBox = await page
+      .locator("[data-buzz-content-surface]")
+      .first()
+      .boundingBox();
+    expect(buttonBox).not.toBeNull();
+    expect(railBox).not.toBeNull();
+    expect(searchBox).not.toBeNull();
+    expect(contentBox).not.toBeNull();
+    expect(buttonBox?.y ?? 0).toBeGreaterThanOrEqual(32);
+    expect(Math.abs((railBox?.y ?? 0) - (contentBox?.y ?? 0))).toBeLessThan(
+      0.5,
+    );
+
+    const leftInset = (buttonBox?.x ?? 0) - (railBox?.x ?? 0);
+    const rightInset =
+      (railBox?.x ?? 0) +
+      (railBox?.width ?? 0) -
+      ((buttonBox?.x ?? 0) + (buttonBox?.width ?? 0));
+    expect(Math.abs(leftInset - 10)).toBeLessThan(0.5);
+    expect(Math.abs(leftInset - rightInset)).toBeLessThan(0.5);
+    const visibleRightGap =
+      (searchBox?.x ?? 0) - ((buttonBox?.x ?? 0) + (buttonBox?.width ?? 0));
+    expect(Math.abs(leftInset - visibleRightGap)).toBeLessThan(0.5);
 
     // With the rail visible, the top-chrome controls (sidebar toggle, back/
     // forward) sit just past the traffic lights near the rail edge — not

@@ -465,6 +465,10 @@ pub struct ManagedAgentSummary {
     pub pubkey: String,
     pub name: String,
     pub persona_id: Option<String>,
+    /// The record's harness/runtime id (mirror of `ManagedAgentRecord.runtime`).
+    /// Lets the UI count agents referencing a harness definition (e.g. in the
+    /// delete-confirmation flow). `None` = inherit from the linked persona.
+    pub runtime: Option<String>,
     pub team_id: Option<String>,
     pub relay_url: String,
     pub acp_command: String,
@@ -580,6 +584,19 @@ pub enum AuthStatus {
     Unknown,
 }
 
+/// Origin of an ACP runtime catalog entry. Serializes as a lowercase string
+/// so the TypeScript consumer can switch on it without numeric comparisons.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HarnessSource {
+    /// Compiled into the app — one of the four first-class runtimes.
+    Builtin,
+    /// Static preset entry with bundled logo, PATH-probed, not editable/deletable.
+    Preset,
+    /// Loaded at runtime from the user's `custom_harnesses/` directory.
+    Custom,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct AcpRuntimeCatalogEntry {
     pub id: String,
@@ -611,6 +628,19 @@ pub struct AcpRuntimeCatalogEntry {
     /// Hint for completing authentication, shown when `auth_status` is not `logged_in`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub login_hint: Option<String>,
+    /// Whether this entry came from the compiled-in catalog or a user-supplied
+    /// JSON file in `custom_harnesses/`. The UI uses this to decide editability.
+    pub source: HarnessSource,
+    /// Definition-level environment variables for `source: custom` entries.
+    ///
+    /// Populated from `HarnessDefinition.env` so the edit form can read them
+    /// back and the user doesn't silently lose env vars when saving.  Always
+    /// empty for `builtin` and `preset` entries (those env values come from the
+    /// runtime metadata path, not user-editable JSON).
+    ///
+    /// Skipped in serialization when empty to keep the catalog payload compact.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub definition_env: BTreeMap<String, String>,
 }
 
 /// Result of a single install step (CLI or adapter).
@@ -745,7 +775,7 @@ pub struct UpdateTeamRequest {
 pub const DEFAULT_ACP_COMMAND: &str = "buzz-acp";
 /// ~5 min (320s) — matches the CLI harness default (BUZZ_ACP_IDLE_TIMEOUT).
 pub const DEFAULT_AGENT_TURN_TIMEOUT_SECONDS: u64 = 320;
-pub const DEFAULT_AGENT_PARALLELISM: u32 = 24;
+pub const DEFAULT_AGENT_PARALLELISM: u32 = 10;
 
 fn default_agent_parallelism() -> u32 {
     DEFAULT_AGENT_PARALLELISM

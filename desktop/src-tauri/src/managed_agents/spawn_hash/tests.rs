@@ -561,3 +561,137 @@ fn linked_instance_prompt_model_provider_resolve_from_one_call() {
         "linked instance prompt must resolve from the live definition, not stale record bytes"
     );
 }
+
+// ── I2: definition args and env reach spawn_config_hash ──────────────────────
+//
+// These tests prove that editing a custom harness definition's args or env
+// changes spawn_config_hash, which trips the "restart required" badge.
+// They would fail if spawn_config_hash used only record.agent_args without
+// falling back to definition args, or if resolve_effective_agent_env did not
+// include definition env.
+
+/// When a record has no instance args but the definition has default args,
+/// changing the definition args changes the spawn hash. This would fail if
+/// spawn_config_hash used only record.agent_args.
+#[test]
+fn spawn_hash_changes_when_definition_default_args_change() {
+    use crate::managed_agents::custom_harnesses::{
+        registry_test_lock, warm_harness_registry_from_dir,
+    };
+    use std::fs;
+    use tempfile::tempdir;
+
+    // The loaded-harness registry is process-global: a parallel test re-warming
+    // it between the two hash computations makes both resolve to no-definition
+    // and h1 == h2 (observed on Windows CI).
+    let _lock = registry_test_lock();
+    let dir = tempdir().unwrap();
+
+    // Write v1 definition (args: ["--mode", "v1"]).
+    fs::write(
+        dir.path().join("my-def.json"),
+        r#"{"id":"my-def","label":"My Def","command":"my-def-bin","args":["--mode","v1"]}"#,
+    )
+    .unwrap();
+    warm_harness_registry_from_dir(Some(dir.path()));
+
+    let mut r = record();
+    r.runtime = Some("my-def".into());
+    r.agent_args = vec![]; // no instance args → definition args are used
+
+    let h1 = spawn_config_hash(&r, &[], &[], "ws://relay", &Default::default());
+
+    // Update to v2 args and re-warm (simulating save + transactional refresh).
+    fs::write(
+        dir.path().join("my-def.json"),
+        r#"{"id":"my-def","label":"My Def","command":"my-def-bin","args":["--mode","v2"]}"#,
+    )
+    .unwrap();
+    warm_harness_registry_from_dir(Some(dir.path()));
+
+    let h2 = spawn_config_hash(&r, &[], &[], "ws://relay", &Default::default());
+
+    assert_ne!(
+        h1, h2,
+        "changing definition default args must change the spawn hash"
+    );
+}
+
+/// When a definition has env vars, adding them changes the spawn hash. This
+/// proves resolve_effective_agent_env includes definition env in the layering.
+#[test]
+fn spawn_hash_changes_when_definition_env_changes() {
+    use crate::managed_agents::custom_harnesses::{
+        registry_test_lock, warm_harness_registry_from_dir,
+    };
+    use std::fs;
+    use tempfile::tempdir;
+
+    // Serialize against parallel registry re-warms (see the args test above).
+    let _lock = registry_test_lock();
+    let dir = tempdir().unwrap();
+
+    // Write definition without env.
+    fs::write(
+        dir.path().join("env-def.json"),
+        r#"{"id":"env-def","label":"Env Def","command":"env-def-bin"}"#,
+    )
+    .unwrap();
+    warm_harness_registry_from_dir(Some(dir.path()));
+
+    let mut r = record();
+    r.runtime = Some("env-def".into());
+
+    let h1 = spawn_config_hash(&r, &[], &[], "ws://relay", &Default::default());
+
+    // Update to include env and re-warm.
+    fs::write(
+        dir.path().join("env-def.json"),
+        r#"{"id":"env-def","label":"Env Def","command":"env-def-bin","env":{"MY_FLAG":"1"}}"#,
+    )
+    .unwrap();
+    warm_harness_registry_from_dir(Some(dir.path()));
+
+    let h2 = spawn_config_hash(&r, &[], &[], "ws://relay", &Default::default());
+
+    assert_ne!(h1, h2, "adding definition env must change the spawn hash");
+}
+
+/// Instance-level args win over definition default args (non-empty instance
+/// args must NOT be overridden by the definition). The hash must match a record
+/// that has the same effective args from either source.
+#[test]
+fn spawn_hash_instance_args_win_over_definition_args() {
+    use crate::managed_agents::custom_harnesses::{
+        registry_test_lock, warm_harness_registry_from_dir,
+    };
+    use std::fs;
+    use tempfile::tempdir;
+
+    // Serialize against parallel registry re-warms (see the args test above).
+    let _lock = registry_test_lock();
+    let dir = tempdir().unwrap();
+    fs::write(
+        dir.path().join("arg-def.json"),
+        r#"{"id":"arg-def","label":"Arg Def","command":"arg-def-bin","args":["--def-arg"]}"#,
+    )
+    .unwrap();
+    warm_harness_registry_from_dir(Some(dir.path()));
+
+    let mut r_instance = record();
+    r_instance.runtime = Some("arg-def".into());
+    r_instance.agent_args = vec!["--instance-arg".to_string()];
+
+    let mut r_no_instance = record();
+    r_no_instance.runtime = Some("arg-def".into());
+    r_no_instance.agent_args = vec![];
+
+    let h_instance = spawn_config_hash(&r_instance, &[], &[], "ws://relay", &Default::default());
+    let h_no_instance =
+        spawn_config_hash(&r_no_instance, &[], &[], "ws://relay", &Default::default());
+
+    assert_ne!(
+        h_instance, h_no_instance,
+        "instance args and definition args must produce different hashes"
+    );
+}

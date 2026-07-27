@@ -54,7 +54,20 @@ const stubModules = new Map([
 
 const STUB_URL_PREFIX = "buzz-test-stub:";
 
+// Vite resolves asset imports (`./logo.png`, `./logo.png?inline`) to a URL or
+// base64 string at bundle time; node's ESM resolver has no such loader and
+// throws on the query suffix. Serve an inert string so components that embed
+// assets stay unit-testable.
+const ASSET_SPECIFIER = /\.(?:png|jpe?g|gif|svg|webp|avif|ico)(?:\?[^/]*)?$/;
+const ASSET_URL_PREFIX = "buzz-test-asset:";
+
 export function resolve(specifier, context, nextResolve) {
+  if (ASSET_SPECIFIER.test(specifier)) {
+    return {
+      shortCircuit: true,
+      url: `${ASSET_URL_PREFIX}${specifier}`,
+    };
+  }
   if (stubModules.has(specifier)) {
     return {
       shortCircuit: true,
@@ -98,6 +111,14 @@ export function resolve(specifier, context, nextResolve) {
 }
 
 export async function load(url, context, nextLoad) {
+  if (url.startsWith(ASSET_URL_PREFIX)) {
+    return {
+      format: "module",
+      shortCircuit: true,
+      source: 'export default "test-asset";\n',
+    };
+  }
+
   if (url.startsWith(STUB_URL_PREFIX)) {
     return {
       format: "module",

@@ -37,3 +37,18 @@ test("uses a deterministic lower-density matrix for the same payload", () => {
 
   assert.equal(first, second);
 });
+
+test("adds the row-based reveal motion when requested", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(StyledQrCode, {
+      animate: true,
+      value: TEST_PAIRING_URI,
+    }),
+  );
+
+  assert.match(html, /class="buzz-qr-cell-reveal"/);
+  assert.match(html, /data-qr-cell-row="0"/);
+  assert.match(html, /--buzz-qr-reveal-delay:0ms/);
+  assert.match(html, /data-qr-cell-row="56"/);
+  assert.match(html, /--buzz-qr-reveal-delay:189ms/);
+});

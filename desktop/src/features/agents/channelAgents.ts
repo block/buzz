@@ -233,7 +233,9 @@ export async function ensureChannelAgentPresetInChannel(
     name: expectedName,
     acpCommand: "buzz-acp",
     agentCommand: input.runtime.command,
-    agentArgs: input.runtime.defaultArgs,
+    // Do NOT seed agentArgs from runtime.defaultArgs (see instanceInputForDefinition.ts
+    // for the rationale — empty args let spawn resolve definition args live).
+    agentArgs: [],
     mcpCommand: input.runtime.mcpCommand ?? "",
     spawnAfterCreate: false,
   });
@@ -354,7 +356,9 @@ export async function provisionChannelManagedAgent(
     acpCommand: "buzz-acp",
     agentCommand: input.runtime.command,
     harnessOverride: input.harnessOverride ?? false,
-    agentArgs: input.runtime.defaultArgs,
+    // Do NOT seed agentArgs from runtime.defaultArgs (see instanceInputForDefinition.ts
+    // for the rationale — empty args let spawn resolve definition args live).
+    agentArgs: [],
     mcpCommand: input.runtime.mcpCommand ?? "",
     personaId: input.personaId ?? undefined,
     teamId: input.teamId ?? undefined,

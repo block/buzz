@@ -284,9 +284,34 @@ required. The scope (in parentheses) is optional but encouraged.
    - How to test it manually (if applicable)
    - Any follow-up work deferred to a future PR
 
-### Review Process
+6. **Shows the UI** — any PR that changes the desktop or mobile UI includes
+   before/after screenshots (or a short recording for interactions) in the
+   description. We can't run every branch locally — screenshots let us review
+   UI changes same-day instead of waiting for someone to build your branch.
 
-- We prioritize focused PRs that follow this guide and review as capacity allows.
+### PRs We're Unlikely to Merge
+
+Some kinds of PRs usually get closed — not because they're bad ideas, but
+because we can't safely review them without prior discussion:
+
+- **Large refactors or dependency swaps** without a prior issue agreeing on
+  the direction
+- **Cosmetic renames or style-only churn** that doesn't fix a bug or improve
+  clarity
+- **Entirely new features** with no prior discussion
+- **Drive-by changes bundled into an unrelated fix** — split them out
+
+If you're considering any of these, open an issue first and we'll tell you
+quickly whether it's a direction we'd merge. That saves your time as much as
+ours.
+
+### What to Expect After You Open a PR
+
+- Maintainers triage new PRs on a best-effort cadence. Focused PRs that
+  follow this guide move fastest.
+- Duplicates and PRs that skip this guide may be closed with a pointer here
+  rather than a full review. A close isn't a rejection of you or the idea —
+  address the gaps and reopen (or open a fresh PR) anytime.
 - Address review comments by pushing new commits (don't force-push during
   review; it makes it hard to see what changed).
 - Once approved, a maintainer will squash-merge your PR.

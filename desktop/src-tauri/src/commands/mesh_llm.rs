@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager, State};
 
 use crate::{app_state::AppState, mesh_llm, relay};
@@ -57,7 +58,84 @@ fn share_stop_should_teardown(mode: mesh_llm::MeshNodeMode) -> bool {
     matches!(mode, mesh_llm::MeshNodeMode::Serve)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MeshStartPlan {
+    Start,
+    RestartToReplaceClient,
+    RejectOccupied,
+}
+
+fn mesh_start_plan(
+    requested_mode: mesh_llm::MeshNodeMode,
+    existing_mode: Option<mesh_llm::MeshNodeMode>,
+) -> MeshStartPlan {
+    match (requested_mode, existing_mode) {
+        (_, None) => MeshStartPlan::Start,
+        (mesh_llm::MeshNodeMode::Serve, Some(mesh_llm::MeshNodeMode::Client)) => {
+            MeshStartPlan::RestartToReplaceClient
+        }
+        _ => MeshStartPlan::RejectOccupied,
+    }
+}
+
+fn sharing_config_from_request(
+    request: &mesh_llm::StartMeshNodeRequest,
+) -> CmdResult<MeshSharingConfig> {
+    let model_id = request
+        .model_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|model_id| !model_id.is_empty())
+        .ok_or_else(|| "modelId is required for serve mode".to_string())?;
+    Ok(MeshSharingConfig {
+        enabled: true,
+        model_id: model_id.to_string(),
+        max_vram_gb: request.max_vram_gb,
+    })
+}
+
+fn restarting_share_status(config: &MeshSharingConfig) -> mesh_llm::MeshNodeStatus {
+    mesh_llm::MeshNodeStatus {
+        state: mesh_llm::MeshNodeState::Starting,
+        mode: Some(mesh_llm::MeshNodeMode::Serve),
+        health: mesh_llm::MeshHealth {
+            status: mesh_llm::MeshHealthStatus::Degraded,
+            reason: Some("Buzz is restarting to switch this machine to sharing".to_string()),
+        },
+        api_base_url: None,
+        console_url: None,
+        model_id: Some(config.model_id.clone()),
+        model_name: Some(config.model_id.clone()),
+        invite_token: None,
+        endpoint_id: None,
+        device_id: None,
+        device_name: None,
+    }
+}
+
+fn restart_to_share(
+    app: &AppHandle,
+    config: &MeshSharingConfig,
+) -> CmdResult<mesh_llm::MeshNodeStatus> {
+    save_mesh_sharing_config(app, config)?;
+    let status = restarting_share_status(config);
+    app.request_restart();
+    Ok(status)
+}
+
 pub type CmdResult<T> = Result<T, String>;
+
+fn buzz_mesh_name_for_relay(relay_url: &str) -> String {
+    let normalized = url::Url::parse(relay_url.trim())
+        .map(|url| url.origin().ascii_serialization())
+        .unwrap_or_else(|_| relay_url.trim().trim_end_matches('/').to_ascii_lowercase());
+    let digest = hex::encode(Sha256::digest(normalized.as_bytes()));
+    format!("buzz-community-{}", &digest[..32])
+}
+
+fn buzz_mesh_name(state: &AppState) -> String {
+    buzz_mesh_name_for_relay(&relay::relay_ws_url_with_override(state))
+}
 
 fn advance_mesh_status_cursor(
     filter: &mut serde_json::Value,
@@ -137,6 +215,81 @@ pub(crate) async fn resolve_trusted_owner_ids_or_self_only(state: &AppState) -> 
     }
 }
 
+/// Choose validated live endpoints from other runtimes in this Buzz community.
+/// The stable relay-derived mesh name gives every runtime the same MeshLLM mesh
+/// identity; these endpoints supply transport bootstrap only.
+fn buzz_mesh_join_targets(
+    mut targets: Vec<mesh_llm::MeshServeTarget>,
+    self_owner_id: &str,
+) -> Vec<mesh_llm::MeshServeTarget> {
+    targets.retain(|target| {
+        target.reporter_pubkey.is_some()
+            && target
+                .owner_id
+                .as_deref()
+                .is_some_and(|owner| !owner.eq_ignore_ascii_case(self_owner_id.trim()))
+    });
+    targets.sort_by(|left, right| {
+        left.reporter_pubkey
+            .cmp(&right.reporter_pubkey)
+            .then_with(|| left.owner_id.cmp(&right.owner_id))
+            .then_with(|| left.endpoint_id.cmp(&right.endpoint_id))
+            .then_with(|| left.endpoint_addr.cmp(&right.endpoint_addr))
+            .then_with(|| left.model_id.cmp(&right.model_id))
+    });
+    targets.dedup_by(|left, right| left.endpoint_addr == right.endpoint_addr);
+    targets
+}
+
+/// Resolve the validated member endpoint this runtime should join to enter the
+/// existing Buzz community mesh. `Ok(None)` means this machine is the first
+/// live serving member (or is itself the shared bootstrap contact).
+pub(crate) async fn resolve_buzz_mesh_join_targets(
+    state: &AppState,
+) -> Result<Vec<mesh_llm::MeshServeTarget>, String> {
+    let events = query_mesh_discovery_events(state).await?;
+    let self_owner_id = mesh_llm::ensure_owner_identity()
+        .map_err(|error| format!("failed to load mesh owner identity: {error}"))?
+        .owner_id;
+    Ok(buzz_mesh_join_targets(
+        mesh_llm::availability_from_events(events).serve_targets,
+        &self_owner_id,
+    ))
+}
+
+/// Resolve the initial admission roster and bootstrap endpoint from one relay
+/// snapshot. A node start used to repeat the full membership + status query
+/// for each value, making Share Compute startup both slower and more exposed
+/// to inconsistent snapshots.
+async fn resolve_buzz_mesh_startup(state: &AppState) -> (Vec<String>, Option<String>) {
+    match query_mesh_discovery_events(state).await {
+        Ok(events) => {
+            let trusted_owner_ids = mesh_llm::owner_ids_from_events(&events);
+            let join_token = mesh_llm::ensure_owner_identity()
+                .ok()
+                .and_then(|identity| {
+                    buzz_mesh_join_targets(
+                        mesh_llm::availability_from_events(events).serve_targets,
+                        &identity.owner_id,
+                    )
+                    .into_iter()
+                    .next()
+                })
+                .map(|target| target.endpoint_addr);
+            (trusted_owner_ids, join_token)
+        }
+        Err(error) => {
+            // Initial startup fails closed to this runtime's own owner. Share
+            // Compute must still start for the first member and through a
+            // transient relay outage; the coordinator retries convergence.
+            eprintln!(
+                "buzz-mesh: startup discovery failed; allowing only this node and starting isolated for now: {error}"
+            );
+            (Vec::new(), None)
+        }
+    }
+}
+
 pub(crate) async fn restore_mesh_sharing(app: &AppHandle, state: &AppState) -> CmdResult<()> {
     let Some(config) = load_mesh_sharing_config(app)? else {
         return Ok(());
@@ -144,6 +297,10 @@ pub(crate) async fn restore_mesh_sharing(app: &AppHandle, state: &AppState) -> C
     if !config.enabled || config.model_id.trim().is_empty() {
         return Ok(());
     }
+    if state.mesh_llm_runtime.lock().await.is_some() {
+        return Ok(());
+    }
+    let (trusted_owner_ids, join_token) = resolve_buzz_mesh_startup(state).await;
     let mut runtime = state.mesh_llm_runtime.lock().await;
     if runtime.is_some() {
         return Ok(());
@@ -152,8 +309,9 @@ pub(crate) async fn restore_mesh_sharing(app: &AppHandle, state: &AppState) -> C
         mode: mesh_llm::MeshNodeMode::Serve,
         model_id: Some(config.model_id),
         max_vram_gb: config.max_vram_gb,
-        join_token: None,
-        trusted_owner_ids: Some(resolve_trusted_owner_ids_or_self_only(state).await),
+        join_token,
+        mesh_name: Some(buzz_mesh_name(state)),
+        trusted_owner_ids: Some(trusted_owner_ids),
     };
     let started = mesh_llm::DesktopMeshRuntime::start(request)
         .await
@@ -170,37 +328,91 @@ pub async fn mesh_start_node(
     state: State<'_, AppState>,
     mut request: mesh_llm::StartMeshNodeRequest,
 ) -> CmdResult<mesh_llm::MeshNodeStatus> {
-    // Frontend requests never carry a roster; resolve it here so every
-    // UI-started node enforces the member allowlist.
-    if request.trusted_owner_ids.is_none() {
-        request.trusted_owner_ids = Some(resolve_trusted_owner_ids_or_self_only(&state).await);
+    let sharing_config = if request.mode == mesh_llm::MeshNodeMode::Serve {
+        Some(sharing_config_from_request(&request)?)
+    } else {
+        None
+    };
+
+    // Never replace a client runtime in-process. Even a Ready SDK handle can
+    // finish `stop()` while its native listeners are still releasing :9337
+    // and :3131; a pending client has no shutdown handle at all. Persist the
+    // requested serving configuration and switch roles across a controlled
+    // process restart, the only boundary that proves both ports are clean.
+    {
+        let runtime = state.mesh_llm_runtime.lock().await;
+        if let Some(existing) = runtime.as_ref() {
+            let plan = mesh_start_plan(request.mode, Some(existing.mode()));
+            match plan {
+                MeshStartPlan::RestartToReplaceClient => {
+                    let config = sharing_config
+                        .as_ref()
+                        .ok_or_else(|| "serving configuration is unavailable".to_string())?;
+                    drop(runtime);
+                    return restart_to_share(&app, config);
+                }
+                MeshStartPlan::RejectOccupied => {
+                    return Err("mesh node is already running".to_string());
+                }
+                MeshStartPlan::Start => {}
+            }
+        }
     }
+
+    // Frontend requests never carry a roster. Resolve it and the bootstrap
+    // endpoint from one snapshot so UI startup does not repeat relay probes.
+    if request.trusted_owner_ids.is_none() || request.join_token.is_none() {
+        let (trusted_owner_ids, join_token) = resolve_buzz_mesh_startup(&state).await;
+        request.trusted_owner_ids.get_or_insert(trusted_owner_ids);
+        if request.join_token.is_none() {
+            request.join_token = join_token;
+        }
+    }
+    request.mesh_name = Some(buzz_mesh_name(&state));
     let mut runtime = state.mesh_llm_runtime.lock().await;
-    if runtime.is_some() {
+
+    let plan = match runtime.as_ref() {
+        Some(existing) => mesh_start_plan(request.mode, Some(existing.mode())),
+        None => mesh_start_plan(request.mode, None),
+    };
+    if plan == MeshStartPlan::RestartToReplaceClient {
+        let config = sharing_config
+            .as_ref()
+            .ok_or_else(|| "serving configuration is unavailable".to_string())?;
+        drop(runtime);
+        return restart_to_share(&app, config);
+    }
+    if plan == MeshStartPlan::RejectOccupied {
         return Err("mesh node is already running".to_string());
     }
 
-    let saved_request = request.clone();
     let started = mesh_llm::DesktopMeshRuntime::start(request)
         .await
         .map_err(|error| format!("{error:#}"))?;
-    let status = started
-        .status()
-        .await
-        .map_err(|error| format!("mesh node started but status probe failed: {error:#}"))?;
+    let status = match started.status().await {
+        Ok(status) => status,
+        Err(error) => {
+            let cleanup = started.stop().await;
+            if let Err(cleanup_error) = &cleanup {
+                eprintln!(
+                    "buzz-mesh: started node status failed and cleanup was incomplete: {cleanup_error:#}"
+                );
+            }
+            // The handle was never installed into AppState, so shutdown cannot
+            // see it again. Restart even when stop reported success: the
+            // process boundary guarantees native :9337/:3131 listeners cannot
+            // linger behind an untracked runtime.
+            drop(runtime);
+            app.request_restart();
+            return Err(format!(
+                "mesh node started but status probe failed: {error:#}; Buzz is restarting to guarantee cleanup"
+            ));
+        }
+    };
     *runtime = Some(started);
     drop(runtime);
-    if saved_request.mode == mesh_llm::MeshNodeMode::Serve {
-        if let Some(model_id) = saved_request.model_id.as_deref() {
-            save_mesh_sharing_config(
-                &app,
-                &MeshSharingConfig {
-                    enabled: true,
-                    model_id: model_id.to_string(),
-                    max_vram_gb: saved_request.max_vram_gb,
-                },
-            )?;
-        }
+    if let Some(config) = sharing_config.as_ref() {
+        save_mesh_sharing_config(&app, config)?;
     }
     mesh_llm::publish_current_status_once(&app, "start").await;
     Ok(status)
@@ -398,12 +610,21 @@ pub(crate) async fn ensure_client_node_for_model(
         mode: mesh_llm::MeshNodeMode::Client,
         model_id: None,
         max_vram_gb: None,
-        join_token: Some(join_token),
+        join_token: Some(join_token.clone()),
+        mesh_name: Some(buzz_mesh_name(state)),
         trusted_owner_ids: Some(resolve_trusted_owner_ids_or_self_only(state).await),
     };
     let mut runtime = state.mesh_llm_runtime.lock().await;
-    if runtime.is_some() {
-        return Err("mesh node changed while starting Buzz shared compute client".to_string());
+    if let Some(existing) = runtime.as_ref() {
+        // Another GUI agent may have won the startup race while this caller
+        // was resolving membership. The runtime is machine-scoped, not
+        // agent-scoped: join its selected endpoint into the existing node and
+        // let every caller reuse the same local ingress.
+        existing
+            .dial_endpoint_addr(join_token)
+            .await
+            .map_err(|error| format!("mesh dial failed: {error}"))?;
+        return existing.status().await.map_err(|error| error.to_string());
     }
     let started = mesh_llm::DesktopMeshRuntime::start(start)
         .await
@@ -644,266 +865,5 @@ pub async fn mesh_model_catalog() -> CmdResult<mesh_llm::MeshModelCatalog> {
 }
 
 #[cfg(all(test, feature = "mesh-llm"))]
-mod tests {
-    use super::*;
-    use crate::app_state::build_app_state;
-
-    fn target(model_id: &str, endpoint_addr: &str) -> mesh_llm::MeshServeTarget {
-        mesh_llm::MeshServeTarget {
-            model_id: model_id.to_string(),
-            model_name: None,
-            endpoint_addr: endpoint_addr.to_string(),
-            node_name: None,
-            capacity: None,
-            endpoint_id: None,
-            device_id: None,
-            device_name: None,
-        }
-    }
-
-    #[test]
-    fn readiness_failure_is_catalog_sync_when_model_never_visible() {
-        assert_eq!(
-            classify_mesh_readiness_failure(false),
-            MeshReadinessFailure::CatalogNeverSynced
-        );
-    }
-
-    #[test]
-    fn readiness_failure_is_routing_when_model_was_visible() {
-        assert_eq!(
-            classify_mesh_readiness_failure(true),
-            MeshReadinessFailure::RoutingNeverCompleted
-        );
-    }
-
-    #[test]
-    fn readiness_messages_are_distinct_and_actionable() {
-        let catalog = mesh_readiness_failure_message(
-            MeshReadinessFailure::CatalogNeverSynced,
-            "auto",
-            "HTTP 429",
-        );
-        let routing = mesh_readiness_failure_message(
-            MeshReadinessFailure::RoutingNeverCompleted,
-            "auto",
-            "HTTP 503",
-        );
-        // Distinct diagnoses, each names the model and carries the raw detail.
-        assert_ne!(catalog, routing);
-        assert!(catalog.contains("network path"));
-        assert!(catalog.contains("HTTP 429"));
-        assert!(routing.contains("did not complete"));
-        assert!(routing.contains("HTTP 503"));
-    }
-
-    #[test]
-    fn mesh_status_cursor_uses_relay_composite_tiebreak() {
-        let event = nostr::EventBuilder::new(nostr::Kind::TextNote, "status")
-            .custom_created_at(nostr::Timestamp::from(1_234))
-            .sign_with_keys(&nostr::Keys::generate())
-            .expect("sign test status");
-        let mut filter = mesh_llm::mesh_status_filter();
-
-        let cursor = advance_mesh_status_cursor(&mut filter, std::slice::from_ref(&event))
-            .expect("advance status cursor");
-
-        assert_eq!(cursor, (1_234, event.id.to_hex()));
-        assert_eq!(filter["until"], serde_json::json!(1_234));
-        assert_eq!(filter["before_id"], serde_json::json!(event.id.to_hex()));
-        assert_eq!(
-            filter["limit"],
-            serde_json::json!(mesh_llm::MESH_STATUS_PAGE_SIZE)
-        );
-    }
-
-    #[test]
-    fn pick_serve_target_returns_first_match_for_model() {
-        let targets = vec![
-            target("model-a", "addr-a"),
-            target("model-b", "addr-b1"),
-            target("model-b", "addr-b2"),
-        ];
-        // Matches by model id and returns the first such target.
-        assert_eq!(
-            pick_serve_target_for_model(targets, "model-b").map(|t| t.endpoint_addr),
-            Some("addr-b1".to_string())
-        );
-    }
-
-    #[test]
-    fn pick_serve_target_normalizes_main_revision() {
-        let targets = vec![target("org/model@main:q4", "addr")];
-        assert_eq!(
-            pick_serve_target_for_model(targets, "org/model:q4").map(|target| target.endpoint_addr),
-            Some("addr".to_string())
-        );
-    }
-
-    #[test]
-    fn pick_serve_target_auto_takes_any_live_target() {
-        let targets = vec![target("model-a", "addr-a"), target("model-b", "addr-b")];
-        // "auto" delegates model choice to the mesh router; any live target
-        // is a valid bootstrap peer (first one wins).
-        assert_eq!(
-            pick_serve_target_for_model(targets, crate::mesh_llm::AUTO_MODEL_ID)
-                .map(|t| t.endpoint_addr),
-            Some("addr-a".to_string())
-        );
-        // But auto with zero live targets still falls closed.
-        assert_eq!(
-            pick_serve_target_for_model(Vec::new(), crate::mesh_llm::AUTO_MODEL_ID),
-            None
-        );
-    }
-
-    #[test]
-    fn pick_serve_target_none_when_model_not_hosted() {
-        let targets = vec![target("model-a", "addr-a")];
-        // No live target serves this model -> caller falls closed.
-        assert_eq!(pick_serve_target_for_model(targets, "model-missing"), None);
-    }
-
-    #[test]
-    fn share_stop_tears_down_serve_but_not_client() {
-        // Stopping "Share compute" tears down a serve node (we were sharing)
-        // but must leave a client node alone (we are consuming a peer). This is
-        // the backend half of the toggle-on regression: a client node occupies
-        // the single slot and reports state:"running", and the stop path must
-        // not kill it.
-        assert!(
-            share_stop_should_teardown(mesh_llm::MeshNodeMode::Serve),
-            "serve node is our sharing runtime; stop must tear it down"
-        );
-        assert!(
-            !share_stop_should_teardown(mesh_llm::MeshNodeMode::Client),
-            "client node is a consume session; stop must NOT tear it down"
-        );
-    }
-
-    #[test]
-    fn client_status_serializes_with_running_state_and_client_mode() {
-        // Contract pin for the TS mock (e2eBridge.ts) and the frontend
-        // predicate: a consuming node serializes as
-        // {"state":"running","mode":"client"}. If serde renaming drifts, the
-        // hand-written mock shape and `deriveMeshShareToggle` would silently
-        // stop matching the real IPC payload.
-        let status = mesh_llm::MeshNodeStatus {
-            state: mesh_llm::MeshNodeState::Running,
-            mode: Some(mesh_llm::MeshNodeMode::Client),
-            // `MeshHealth::ok()` is module-private; build via the public fields.
-            health: mesh_llm::MeshHealth {
-                status: mesh_llm::MeshHealthStatus::Ok,
-                reason: None,
-            },
-            api_base_url: Some("http://127.0.0.1:9337/v1".to_string()),
-            console_url: None,
-            model_id: None,
-            model_name: None,
-            invite_token: None,
-            endpoint_id: None,
-            device_id: None,
-            device_name: None,
-        };
-        let value = serde_json::to_value(&status).expect("serialize mesh status");
-        assert_eq!(value["state"], serde_json::json!("running"));
-        assert_eq!(value["mode"], serde_json::json!("client"));
-    }
-
-    #[tokio::test]
-    async fn cold_client_preflight_requires_explicit_target() {
-        let state = build_app_state();
-        let error = ensure_client_node_for_model(&state, "demo/model", None)
-            .await
-            .expect_err("cold relay-mesh preflight must not auto-pick a target");
-        assert_eq!(error, RELAY_MESH_RUNTIME_NO_TARGET);
-    }
-
-    /// Acceptance-critical regression for dropping the serve-vs-client guard.
-    ///
-    /// Before this change, `ensure_client_node_for_model` hard-errored whenever
-    /// the running runtime was in `Serve` mode ("stop sharing before using
-    /// Buzz shared compute as a client"). That forbade exactly what a user should be
-    /// able to do: host model A while pointing an agent at a different model B
-    /// through the same `9337` ingress.
-    ///
-    /// This test starts a real serve runtime and asserts that a follow-up
-    /// preflight for a *different* model and no explicit target still reuses the
-    /// existing runtime. Cold starts without a target are rejected before mesh-llm
-    /// startup; running runtimes are already joined to whatever target the
-    /// frontend selected earlier.
-    ///
-    /// Hardware-gated (`#[ignore]`): loads a real model. Run with:
-    ///   cargo test -p buzz-desktop --features mesh-llm \
-    ///     ensure_serve_runtime_serves_other_model -- --ignored --nocapture
-    #[test]
-    #[ignore = "loads a real model; run manually with --ignored"]
-    fn ensure_serve_runtime_serves_other_model() {
-        std::thread::Builder::new()
-            .name("mesh-hardware-acceptance".to_string())
-            .stack_size(mesh_llm::MESH_WORKER_STACK_SIZE)
-            .spawn(|| {
-                let runtime = tokio::runtime::Builder::new_multi_thread()
-                    .worker_threads(2)
-                    .thread_stack_size(mesh_llm::MESH_WORKER_STACK_SIZE)
-                    .enable_all()
-                    .build()
-                    .expect("build mesh acceptance runtime");
-                runtime.block_on(async {
-                    const HOSTED_MODEL: &str = "jc-builds/SmolLM2-135M-Instruct-Q4_K_M-GGUF:Q4_K_M";
-                    const OTHER_MODEL: &str = "some/other-model-not-hosted-locally:Q4_K_M";
-
-                    let state = build_app_state();
-
-                    // Start a serve runtime hosting HOSTED_MODEL — this is the "Share
-                    // compute" path.
-                    let serve =
-                        mesh_llm::DesktopMeshRuntime::start(mesh_llm::StartMeshNodeRequest {
-                            mode: mesh_llm::MeshNodeMode::Serve,
-                            model_id: Some(HOSTED_MODEL.to_string()),
-                            max_vram_gb: None,
-                            join_token: None,
-                            trusted_owner_ids: None,
-                        })
-                        .await
-                        .expect("serve runtime should start");
-
-                    let serve_status = serve.status().await.expect("serve status");
-                    let serve_base = serve_status.api_base_url.clone();
-                    assert_eq!(serve_status.mode, Some(mesh_llm::MeshNodeMode::Serve));
-
-                    {
-                        let mut runtime = state.mesh_llm_runtime.lock().await;
-                        *runtime = Some(serve);
-                    }
-
-                    // Preflight for a DIFFERENT model with no explicit target. Old code:
-                    // Err(...sharing compute...). New code: reuse the running ingress.
-                    let status = ensure_client_node_for_model(&state, OTHER_MODEL, None)
-                        .await
-                        .expect("serve runtime must not reject a different-model preflight");
-
-                    // It returns the SAME running node — agents keep using A's 9337, and
-                    // the router decides routability for OTHER_MODEL per request.
-                    assert_eq!(
-                        status.mode,
-                        Some(mesh_llm::MeshNodeMode::Serve),
-                        "preflight should reuse the existing serve runtime, not spin up a client"
-                    );
-                    assert_eq!(
-                        status.api_base_url, serve_base,
-                        "agent must be pointed at the existing serve node's ingress"
-                    );
-
-                    // Clean up the runtime.
-                    let taken = state.mesh_llm_runtime.lock().await.take();
-                    if let Some(runtime) = taken {
-                        let _ = runtime.stop().await;
-                    }
-                });
-            })
-            .expect("spawn mesh acceptance thread")
-            .join()
-            .expect("mesh acceptance thread panicked");
-    }
-}
+#[path = "mesh_llm_tests.rs"]
+mod tests;

@@ -98,6 +98,7 @@ export default defineConfig({
         "**/inbox-reactions.spec.ts",
         "**/send-channel-binding.spec.ts",
         "**/project-commit-detail.spec.ts",
+        "**/project-inbox.spec.ts",
         "**/project-pr-review.spec.ts",
         "**/persona-model-combobox-screenshots.spec.ts",
         "**/drafts-screenshots.spec.ts",
@@ -120,6 +121,7 @@ export default defineConfig({
         "**/inbox-live-update.spec.ts",
         "**/mesh-compute.spec.ts",
         "**/observer-archive-policy.spec.ts",
+        "**/harness-management.spec.ts",
       ],
       use: {
         ...devices["Desktop Chrome"],
