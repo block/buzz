@@ -7985,6 +7985,52 @@ async function handleUpdateManagedAgent(args: {
   return { agent: cloneManagedAgent(agent), profile_sync_error: null };
 }
 
+/**
+ * Mock-mode `search_messages` predicate, mirroring the relay's filter contract.
+ *
+ * `since`/`until` are NIP-01 bounds and both inclusive — the relay keeps events
+ * where `since <= created_at <= until` (`crates/buzz-core/src/filter.rs`). The
+ * `before:` operator's exclusivity is encoded upstream in
+ * `parseSearchOperators`, which subtracts a second; the mock must not subtract
+ * it a second time.
+ *
+ * Exported so the boundary behavior is unit-testable without a browser.
+ */
+export function mockSearchHitMatches(
+  hit: Pick<
+    RawSearchHit,
+    "channel_id" | "pubkey" | "created_at" | "content" | "channel_name"
+  >,
+  filters: {
+    /** Lowercased FTS query; empty matches everything. */
+    query: string;
+    channelId?: string;
+    authorSet: Set<string> | null;
+    since?: number;
+    until?: number;
+  },
+): boolean {
+  if (filters.channelId && hit.channel_id !== filters.channelId) {
+    return false;
+  }
+  if (filters.authorSet && !filters.authorSet.has(hit.pubkey.toLowerCase())) {
+    return false;
+  }
+  if (filters.since != null && hit.created_at < filters.since) {
+    return false;
+  }
+  if (filters.until != null && hit.created_at > filters.until) {
+    return false;
+  }
+  if (!filters.query) {
+    return true;
+  }
+  return (
+    hit.content.toLowerCase().includes(filters.query) ||
+    (hit.channel_name?.toLowerCase().includes(filters.query) ?? false)
+  );
+}
+
 async function handleSearchMessages(
   args: {
     q: string;
@@ -8080,28 +8126,15 @@ async function handleSearchMessages(
       : null;
 
     const hits = mockHits
-      .filter((hit) => {
-        if (args.channelId && hit.channel_id !== args.channelId) {
-          return false;
-        }
-        if (authorSet && !authorSet.has(hit.pubkey.toLowerCase())) {
-          return false;
-        }
-        if (args.since != null && hit.created_at < args.since) {
-          return false;
-        }
-        if (args.until != null && hit.created_at >= args.until) {
-          return false;
-        }
-        if (!query) {
-          return true;
-        }
-
-        return (
-          hit.content.toLowerCase().includes(query) ||
-          (hit.channel_name?.toLowerCase().includes(query) ?? false)
-        );
-      })
+      .filter((hit) =>
+        mockSearchHitMatches(hit, {
+          query,
+          channelId: args.channelId,
+          authorSet,
+          since: args.since,
+          until: args.until,
+        }),
+      )
       .slice(0, limit);
 
     return {
