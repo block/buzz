@@ -81,10 +81,27 @@ class ComposeBar extends HookConsumerWidget {
 
     // Restore and persist unsent text as a local draft so the Activity
     // inbox Drafts filter reflects real composer state.
+    //
+    // The effect is additionally keyed on the active relay + pubkey identity:
+    // provider-level namespacing alone cannot protect a composer that stays
+    // mounted through an in-place community/account switch — the controller
+    // would retain the old identity's text and the next edit would persist it
+    // into the new identity's store. On identity change we replace the
+    // controller content with the new identity's own saved draft (or clear).
     final draftKey = composeDraftKey(channelId, threadHeadId: threadHeadId);
+    final draftIdentity =
+        '${ref.watch(relayConfigProvider).baseUrl}'
+        ':${ref.watch(myPubkeyProvider) ?? 'anon'}';
+    final lastDraftIdentity = useRef<String?>(null);
     useEffect(() {
+      final identityChanged =
+          lastDraftIdentity.value != null &&
+          lastDraftIdentity.value != draftIdentity;
+      lastDraftIdentity.value = draftIdentity;
       final saved = ref.read(composeDraftsProvider.notifier).textFor(draftKey);
-      if (saved != null && controller.text.isEmpty) {
+      if (identityChanged) {
+        controller.text = saved ?? '';
+      } else if (saved != null && controller.text.isEmpty) {
         controller.text = saved;
       }
       void persistDraft() {
@@ -100,7 +117,7 @@ class ComposeBar extends HookConsumerWidget {
 
       controller.addListener(persistDraft);
       return () => controller.removeListener(persistDraft);
-    }, [controller, draftKey]);
+    }, [controller, draftKey, draftIdentity]);
     final focusNode = useFocusNode();
     final isComposerExpanded = useState(false);
     final showAttachments = useState(false);
