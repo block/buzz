@@ -82,11 +82,11 @@ struct Cli {
     relay: String,
 
     /// Nostr private key (hex or nsec). This is the CLI's identity.
-    #[arg(long, env = "BUZZ_PRIVATE_KEY")]
+    #[arg(long, env = "BUZZ_PRIVATE_KEY", hide_env_values = true)]
     private_key: Option<String>,
 
     /// NIP-OA auth tag JSON (owner attestation). Injected into every signed event.
-    #[arg(long, env = "BUZZ_AUTH_TAG")]
+    #[arg(long, env = "BUZZ_AUTH_TAG", hide_env_values = true)]
     auth_tag: Option<String>,
 
     /// Output format: 'json' (default, full fields) or 'compact' (reduced fields).
