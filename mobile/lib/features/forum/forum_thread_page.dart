@@ -335,21 +335,22 @@ class _OriginalPost extends ConsumerWidget {
               ),
               const SizedBox(width: Grid.xxs),
               Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+                child: Row(
                   children: [
-                    GestureDetector(
-                      onTap: () => showUserProfileSheet(context, post.pubkey),
-                      child: Text(
-                        displayName,
-                        style: context.textTheme.labelMedium?.copyWith(
-                          fontWeight: FontWeight.w600,
+                    Flexible(
+                      child: GestureDetector(
+                        onTap: () => showUserProfileSheet(context, post.pubkey),
+                        child: Text(
+                          displayName,
+                          style: messageUsernameTextStyle,
+                          overflow: TextOverflow.ellipsis,
                         ),
                       ),
                     ),
+                    const SizedBox(width: Grid.xxs),
                     Text(
                       formatRelativeTime(post.createdAt),
-                      style: context.textTheme.labelSmall?.copyWith(
+                      style: messageTimestampTextStyle.copyWith(
                         color: context.colors.onSurfaceVariant,
                       ),
                     ),
@@ -363,6 +364,9 @@ class _OriginalPost extends ConsumerWidget {
             content: post.content,
             mentionNames: mentionNames,
             tags: post.tags,
+            baseStyle: messageBodyTextStyle.copyWith(
+              color: context.colors.onSurface,
+            ),
             onMentionTap: (pubkey) => showUserProfileSheet(context, pubkey),
           ),
         ],
@@ -419,17 +423,12 @@ class _ReplyRow extends ConsumerWidget {
                   children: [
                     GestureDetector(
                       onTap: () => showUserProfileSheet(context, reply.pubkey),
-                      child: Text(
-                        displayName,
-                        style: context.textTheme.labelMedium?.copyWith(
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
+                      child: Text(displayName, style: messageUsernameTextStyle),
                     ),
                     const SizedBox(width: Grid.xxs),
                     Text(
                       formatRelativeTime(reply.createdAt),
-                      style: context.textTheme.labelSmall?.copyWith(
+                      style: messageTimestampTextStyle.copyWith(
                         color: context.colors.onSurfaceVariant,
                       ),
                     ),
@@ -458,6 +457,9 @@ class _ReplyRow extends ConsumerWidget {
               content: reply.content,
               mentionNames: mentionNames,
               tags: reply.tags,
+              baseStyle: messageBodyTextStyle.copyWith(
+                color: context.colors.onSurface,
+              ),
               onMentionTap: (pubkey) => showUserProfileSheet(context, pubkey),
             ),
           ),

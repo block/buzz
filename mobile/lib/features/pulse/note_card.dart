@@ -92,9 +92,7 @@ class NoteCard extends HookConsumerWidget {
                             Flexible(
                               child: Text(
                                 displayName,
-                                style: context.textTheme.labelMedium?.copyWith(
-                                  fontWeight: FontWeight.w700,
-                                ),
+                                style: messageUsernameTextStyle,
                                 overflow: TextOverflow.ellipsis,
                               ),
                             ),
@@ -106,14 +104,15 @@ class NoteCard extends HookConsumerWidget {
                                 color: context.colors.primary,
                               ),
                             ],
+                            const SizedBox(width: Grid.xxs),
+                            Text(
+                              formatPulseRelativeTime(note.createdAt),
+                              style: messageTimestampTextStyle.copyWith(
+                                color: context.colors.onSurfaceVariant,
+                              ),
+                            ),
                           ],
                         ),
-                      ),
-                    ),
-                    Text(
-                      formatPulseRelativeTime(note.createdAt),
-                      style: context.textTheme.labelSmall?.copyWith(
-                        color: context.colors.onSurfaceVariant,
                       ),
                     ),
                     if (canFollow) ...[
@@ -142,7 +141,13 @@ class NoteCard extends HookConsumerWidget {
                   ),
                 ],
                 const SizedBox(height: Grid.half),
-                MessageContent(content: note.content, tags: note.tags),
+                MessageContent(
+                  content: note.content,
+                  tags: note.tags,
+                  baseStyle: messageBodyTextStyle.copyWith(
+                    color: context.colors.onSurface,
+                  ),
+                ),
                 const SizedBox(height: Grid.xxs),
                 Row(
                   children: [

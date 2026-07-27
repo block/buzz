@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:math' as math;
+import 'dart:ui' show SemanticsRole;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
@@ -11,6 +13,7 @@ import '../../shared/utils/string_utils.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
+import '../../shared/widgets/message_author_meta.dart';
 import '../channels/channel.dart';
 import '../channels/channel_detail_page.dart';
 import '../channels/channels_provider.dart';
@@ -26,6 +29,9 @@ import 'inbox_item.dart';
 import 'inbox_local_state_provider.dart';
 import 'inbox_read_state.dart';
 import 'reminders_provider.dart';
+
+part 'activity_page/inbox_row.dart';
+part 'activity_page/popover_menu.dart';
 
 /// Conversation-oriented Activity inbox.
 ///
@@ -276,6 +282,7 @@ class ActivityPage extends HookConsumerWidget {
     return FrostedScaffold(
       appBar: FrostedAppBar(
         gradient: context.appColors.topSectionGradient,
+        automaticallyImplyLeading: false,
         title: const Text('Activity'),
         titleStyle: headerTitleStyle,
         actions: [
@@ -338,64 +345,95 @@ class _FilterMenuButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return PopupMenuButton<InboxFilter>(
-      key: const ValueKey('activity-filter-menu'),
-      onSelected: onChanged,
-      itemBuilder: (context) => [
-        for (final entry in _filterLabels.entries)
-          PopupMenuItem(
-            value: entry.key,
-            child: Row(
-              children: [
-                SizedBox(
-                  width: Grid.sm,
-                  child: entry.key == filter
-                      ? Icon(
-                          LucideIcons.check,
-                          size: 16,
-                          color: context.colors.primary,
-                        )
-                      : null,
-                ),
-                Text(entry.value),
-                const Spacer(),
-                if (entry.key == InboxFilter.reminders && dueReminderCount > 0)
-                  _CountBadge(count: dueReminderCount)
-                else if (entry.key == InboxFilter.drafts && draftCount > 0)
-                  _CountBadge(count: draftCount),
-              ],
-            ),
-          ),
-      ],
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: Grid.xxs),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              _filterLabels[filter]!,
-              style: context.textTheme.labelLarge?.copyWith(
-                fontWeight: FontWeight.w600,
+    return Builder(
+      builder: (buttonContext) => InkWell(
+        key: const ValueKey('activity-filter-menu'),
+        borderRadius: BorderRadius.circular(Radii.md),
+        onTap: () async {
+          final selected = await _showActivityPopover<InboxFilter>(
+            context: buttonContext,
+            width: 240,
+            alignment: _ActivityPopoverAlignment.start,
+            offset: const Offset(0, Grid.half),
+            menuPadding: const EdgeInsets.symmetric(vertical: Grid.half),
+            color: context.colors.surface.withValues(alpha: 0.98),
+            elevation: 8,
+            shadowColor: context.colors.shadow.withValues(alpha: 0.18),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(Radii.card),
+              side: BorderSide(
+                color: context.colors.outlineVariant.withValues(alpha: 0.45),
               ),
             ),
-            const SizedBox(width: Grid.quarter),
-            Icon(
-              LucideIcons.chevronDown,
-              size: 16,
-              color: context.colors.onSurfaceVariant,
-            ),
-            if (dueReminderCount > 0 || draftCount > 0) ...[
-              const SizedBox(width: Grid.quarter),
-              Container(
-                width: 6,
-                height: 6,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: context.colors.primary,
+            surfaceKey: const ValueKey('activity-filter-popover'),
+            items: [
+              for (final entry in _filterLabels.entries)
+                PopupMenuItem(
+                  value: entry.key,
+                  height: Grid.lg,
+                  padding: const EdgeInsets.symmetric(horizontal: Grid.twelve),
+                  child: Row(
+                    children: [
+                      SizedBox(
+                        width: Grid.sm,
+                        child: entry.key == filter
+                            ? Icon(
+                                LucideIcons.check,
+                                size: 16,
+                                color: context.colors.primary,
+                              )
+                            : null,
+                      ),
+                      Text(
+                        entry.value,
+                        style: context.textTheme.labelLarge?.copyWith(
+                          color: context.colors.onSurface,
+                        ),
+                      ),
+                      const Spacer(),
+                      if (entry.key == InboxFilter.reminders &&
+                          dueReminderCount > 0)
+                        _CountBadge(count: dueReminderCount)
+                      else if (entry.key == InboxFilter.drafts &&
+                          draftCount > 0)
+                        _CountBadge(count: draftCount),
+                    ],
+                  ),
                 ),
-              ),
             ],
-          ],
+          );
+          if (buttonContext.mounted && selected != null) onChanged(selected);
+        },
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: Grid.xxs),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                _filterLabels[filter]!,
+                style: context.textTheme.labelLarge?.copyWith(
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(width: Grid.quarter),
+              Icon(
+                LucideIcons.chevronDown,
+                size: 16,
+                color: context.colors.onSurfaceVariant,
+              ),
+              if (dueReminderCount > 0 || draftCount > 0) ...[
+                const SizedBox(width: Grid.quarter),
+                Container(
+                  width: 6,
+                  height: 6,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: context.colors.primary,
+                  ),
+                ),
+              ],
+            ],
+          ),
         ),
       ),
     );
@@ -446,45 +484,64 @@ class _InboxOptionsButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return PopupMenuButton<String>(
-      key: const ValueKey('activity-options-menu'),
-      icon: const Icon(LucideIcons.ellipsis, size: 20),
-      onSelected: (value) {
-        if (value == 'unread-only') onUnreadOnlyChanged(!unreadOnly);
-        if (value == 'mark-all-read') onMarkAllRead();
-      },
-      itemBuilder: (context) => [
-        PopupMenuItem(
-          value: 'unread-only',
-          child: Row(
-            children: [
-              Expanded(child: Text(unreadOnly ? 'Show all' : 'Show unread')),
-              if (unreadOnly)
-                Icon(
-                  LucideIcons.check,
-                  size: 16,
-                  color: context.colors.primary,
+    return Builder(
+      builder: (buttonContext) => IconButton(
+        key: const ValueKey('activity-options-menu'),
+        tooltip: 'Activity options',
+        icon: const Icon(LucideIcons.ellipsis, size: 20),
+        onPressed: () async {
+          final selected = await _showActivityPopover<String>(
+            context: buttonContext,
+            width: 216,
+            alignment: _ActivityPopoverAlignment.end,
+            color: context.colors.surface,
+            elevation: 4,
+            shadowColor: context.colors.shadow.withValues(alpha: 0.18),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(Radii.md),
+              side: BorderSide(color: context.colors.outline),
+            ),
+            surfaceKey: const ValueKey('activity-options-popover'),
+            items: [
+              PopupMenuItem(
+                value: 'unread-only',
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(unreadOnly ? 'Show all' : 'Show unread'),
+                    ),
+                    if (unreadOnly)
+                      Icon(
+                        LucideIcons.check,
+                        size: 16,
+                        color: context.colors.primary,
+                      ),
+                  ],
                 ),
-            ],
-          ),
-        ),
-        PopupMenuItem(
-          value: 'mark-all-read',
-          enabled: unreadCount > 0,
-          child: Row(
-            children: [
-              const Expanded(child: Text('Mark all as read')),
-              if (unreadCount > 0)
-                Text(
-                  '$unreadCount',
-                  style: context.textTheme.labelSmall?.copyWith(
-                    color: context.colors.onSurfaceVariant,
-                  ),
+              ),
+              PopupMenuItem(
+                value: 'mark-all-read',
+                enabled: unreadCount > 0,
+                child: Row(
+                  children: [
+                    const Expanded(child: Text('Mark all as read')),
+                    if (unreadCount > 0)
+                      Text(
+                        '$unreadCount',
+                        style: context.textTheme.labelSmall?.copyWith(
+                          color: context.colors.onSurfaceVariant,
+                        ),
+                      ),
+                  ],
                 ),
+              ),
             ],
-          ),
-        ),
-      ],
+          );
+          if (!buttonContext.mounted || selected == null) return;
+          if (selected == 'unread-only') onUnreadOnlyChanged(!unreadOnly);
+          if (selected == 'mark-all-read') onMarkAllRead();
+        },
+      ),
     );
   }
 }
@@ -519,223 +576,6 @@ class _NewBoundaryDivider extends StatelessWidget {
             child: Divider(color: context.colors.error.withValues(alpha: 0.5)),
           ),
         ],
-      ),
-    );
-  }
-}
-
-/// One conversation row, matching desktop's inbox item hierarchy:
-/// avatar | sender + unread dot + time | contextual label | preview.
-class _InboxRow extends ConsumerWidget {
-  final InboxItem item;
-  final Channel? channel;
-  final String? currentPubkey;
-  final bool isDone;
-  final VoidCallback onTap;
-  final VoidCallback onMarkRead;
-  final VoidCallback onMarkUnread;
-
-  const _InboxRow({
-    required this.item,
-    required this.channel,
-    required this.currentPubkey,
-    required this.isDone,
-    required this.onTap,
-    required this.onMarkRead,
-    required this.onMarkUnread,
-  });
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final userCache = ref.watch(userCacheProvider);
-    final profile = userCache[item.item.pubkey.toLowerCase()];
-    final senderLabel = profile?.displayName ?? shortPubkey(item.item.pubkey);
-
-    final isDm = channel?.isDm ?? false;
-    final channelName = channel != null && !isDm
-        ? (channel!.name.isNotEmpty ? channel!.name : null)
-        : null;
-    final label = inboxTypeLabel(
-      item,
-      channelName: channelName,
-      isDm: isDm,
-      senderLabel: senderLabel,
-    );
-
-    final mutedColor = context.colors.onSurfaceVariant;
-    final labelColor = item.isActionRequired && !isDone
-        ? context.colors.tertiary
-        : mutedColor;
-
-    return InkWell(
-      key: ValueKey('inbox-row-${item.id}'),
-      onTap: onTap,
-      onLongPress: () => _showRowActions(context),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(
-          horizontal: Grid.gutter,
-          vertical: Grid.twelve,
-        ),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            _RowAvatar(pubkey: item.item.pubkey, profile: profile),
-            const SizedBox(width: Grid.twelve),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  // Sender + unread dot + timestamp.
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          senderLabel,
-                          // Compact label scale — matches the old
-                          // "@ Mention" headline treatment while staying
-                          // the row's primary label.
-                          style: context.textTheme.labelMedium?.copyWith(
-                            fontWeight: FontWeight.w600,
-                          ),
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                      const SizedBox(width: Grid.xxs),
-                      if (!isDone) ...[
-                        Container(
-                          key: ValueKey('inbox-unread-dot-${item.id}'),
-                          width: 6,
-                          height: 6,
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            color: context.colors.primary,
-                          ),
-                        ),
-                        const SizedBox(width: Grid.half),
-                      ],
-                      Text(
-                        _inboxTimestamp(item.latestActivityAt),
-                        style: context.textTheme.labelSmall?.copyWith(
-                          color: mutedColor,
-                          fontWeight: isDone
-                              ? FontWeight.w400
-                              : FontWeight.w500,
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: Grid.quarter),
-                  // Contextual label: "Mentioned in #channel" etc.
-                  Row(
-                    children: [
-                      Flexible(
-                        child: Text(
-                          label.text,
-                          style: context.textTheme.labelSmall?.copyWith(
-                            color: labelColor,
-                            fontWeight: FontWeight.w500,
-                          ),
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                      if (label.channelLabel != null) ...[
-                        const SizedBox(width: Grid.half),
-                        Flexible(
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: Grid.half + Grid.quarter,
-                              vertical: Grid.quarter / 2,
-                            ),
-                            decoration: BoxDecoration(
-                              color: context.colors.surfaceContainerHighest,
-                              borderRadius: BorderRadius.circular(Grid.half),
-                            ),
-                            child: Text(
-                              '#${label.channelLabel}',
-                              style: context.textTheme.labelSmall?.copyWith(
-                                color: mutedColor,
-                              ),
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ],
-                  ),
-                  const SizedBox(height: Grid.half),
-                  // Preview (bold while unread — desktop parity).
-                  MessageContent(
-                    content: item.item.displayContent,
-                    tags: item.item.tags,
-                    maxLines: 2,
-                    baseStyle: context.textTheme.bodySmall?.copyWith(
-                      color: isDone ? mutedColor : context.colors.onSurface,
-                      fontWeight: isDone ? FontWeight.w400 : FontWeight.w600,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  void _showRowActions(BuildContext context) {
-    showModalBottomSheet<void>(
-      context: context,
-      builder: (sheetContext) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              leading: Icon(
-                isDone ? LucideIcons.mail : LucideIcons.mailOpen,
-                size: 20,
-              ),
-              title: Text(isDone ? 'Mark unread' : 'Mark as read'),
-              onTap: () {
-                Navigator.of(sheetContext).pop();
-                isDone ? onMarkUnread() : onMarkRead();
-              },
-            ),
-            ListTile(
-              leading: const Icon(LucideIcons.externalLink, size: 20),
-              title: const Text('Open conversation'),
-              onTap: () {
-                Navigator.of(sheetContext).pop();
-                onTap();
-              },
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _RowAvatar extends StatelessWidget {
-  final String pubkey;
-  final UserProfile? profile;
-
-  const _RowAvatar({required this.pubkey, required this.profile});
-
-  @override
-  Widget build(BuildContext context) {
-    final initial =
-        profile?.initial ?? (pubkey.isNotEmpty ? pubkey[0].toUpperCase() : '?');
-    return AvatarImage(
-      imageUrl: profile?.avatarUrl,
-      radius: 18,
-      backgroundColor: context.colors.primaryContainer,
-      fallback: Text(
-        initial,
-        style: TextStyle(
-          fontSize: 14,
-          fontWeight: FontWeight.w600,
-          color: context.colors.onPrimaryContainer,
-        ),
       ),
     );
   }

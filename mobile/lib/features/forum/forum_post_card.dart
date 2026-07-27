@@ -71,22 +71,21 @@ class ForumPostCard extends ConsumerWidget {
                   child: _PostAvatar(profile: profile, pubkey: post.pubkey),
                 ),
                 const SizedBox(width: Grid.xxs),
-                Expanded(
+                Flexible(
                   child: GestureDetector(
                     behavior: HitTestBehavior.opaque,
                     onTap: () => showUserProfileSheet(context, post.pubkey),
                     child: Text(
                       displayName,
-                      style: context.textTheme.labelMedium?.copyWith(
-                        fontWeight: FontWeight.w600,
-                      ),
+                      style: messageUsernameTextStyle,
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
                 ),
+                const SizedBox(width: Grid.xxs),
                 Text(
                   formatRelativeTime(post.createdAt),
-                  style: context.textTheme.labelSmall?.copyWith(
+                  style: messageTimestampTextStyle.copyWith(
                     color: context.colors.onSurfaceVariant,
                   ),
                 ),
@@ -124,6 +123,9 @@ class ForumPostCard extends ConsumerWidget {
                     content: preview,
                     mentionNames: mentionNames,
                     tags: post.tags,
+                    baseStyle: messageBodyTextStyle.copyWith(
+                      color: context.colors.onSurface,
+                    ),
                   ),
                 ),
               ),

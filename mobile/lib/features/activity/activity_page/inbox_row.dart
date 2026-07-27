@@ -1,40 +1,5 @@
 part of '../activity_page.dart';
 
-/// "New" boundary between unread and previously read rows.
-class _NewBoundaryDivider extends StatelessWidget {
-  const _NewBoundaryDivider();
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(
-        horizontal: Grid.gutter,
-        vertical: Grid.half,
-      ),
-      child: Row(
-        children: [
-          Expanded(
-            child: Divider(color: context.colors.error.withValues(alpha: 0.5)),
-          ),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: Grid.xxs),
-            child: Text(
-              'New',
-              style: context.textTheme.labelSmall?.copyWith(
-                color: context.colors.error,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
-          Expanded(
-            child: Divider(color: context.colors.error.withValues(alpha: 0.5)),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
 /// One conversation row, matching desktop's inbox item hierarchy:
 /// avatar | sender + unread dot + time | contextual label | preview.
 class _InboxRow extends ConsumerWidget {
@@ -91,7 +56,7 @@ class _InboxRow extends ConsumerWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             _RowAvatar(pubkey: item.item.pubkey, profile: profile),
-            const SizedBox(width: Grid.twelve),
+            const SizedBox(width: messageAvatarContentGap),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -100,19 +65,25 @@ class _InboxRow extends ConsumerWidget {
                   Row(
                     children: [
                       Expanded(
-                        child: Text(
-                          senderLabel,
-                          // Compact label scale — matches the old
-                          // "@ Mention" headline treatment while staying
-                          // the row's primary label.
-                          style: context.textTheme.labelMedium?.copyWith(
-                            fontWeight: FontWeight.w600,
+                        child: MessageAuthorMeta(
+                          displayName: senderLabel,
+                          username: messageUsernameLabel(profile),
+                          timestamp: _inboxTimestamp(item.latestActivityAt),
+                          nameColor: context.colors.onSurface,
+                          metadataColor: mutedColor,
+                          nameStyle: activityUsernameTextStyle,
+                          metadataStyle: activityTimestampTextStyle,
+                          displayNameKey: ValueKey(
+                            'activity-author-${item.id}',
                           ),
-                          overflow: TextOverflow.ellipsis,
+                          usernameKey: ValueKey('activity-username-${item.id}'),
+                          timestampKey: ValueKey(
+                            'activity-timestamp-${item.id}',
+                          ),
                         ),
                       ),
-                      const SizedBox(width: Grid.xxs),
                       if (!isDone) ...[
+                        const SizedBox(width: Grid.xxs),
                         Container(
                           key: ValueKey('inbox-unread-dot-${item.id}'),
                           width: 6,
@@ -122,17 +93,7 @@ class _InboxRow extends ConsumerWidget {
                             color: context.colors.primary,
                           ),
                         ),
-                        const SizedBox(width: Grid.half),
                       ],
-                      Text(
-                        _inboxTimestamp(item.latestActivityAt),
-                        style: context.textTheme.labelSmall?.copyWith(
-                          color: mutedColor,
-                          fontWeight: isDone
-                              ? FontWeight.w400
-                              : FontWeight.w500,
-                        ),
-                      ),
                     ],
                   ),
                   const SizedBox(height: Grid.quarter),
@@ -142,9 +103,8 @@ class _InboxRow extends ConsumerWidget {
                       Flexible(
                         child: Text(
                           label.text,
-                          style: context.textTheme.labelSmall?.copyWith(
+                          style: activityContextTextStyle.copyWith(
                             color: labelColor,
-                            fontWeight: FontWeight.w500,
                           ),
                           overflow: TextOverflow.ellipsis,
                         ),
@@ -163,7 +123,7 @@ class _InboxRow extends ConsumerWidget {
                             ),
                             child: Text(
                               '#${label.channelLabel}',
-                              style: context.textTheme.labelSmall?.copyWith(
+                              style: activityContextTextStyle.copyWith(
                                 color: mutedColor,
                               ),
                               overflow: TextOverflow.ellipsis,
@@ -174,14 +134,13 @@ class _InboxRow extends ConsumerWidget {
                     ],
                   ),
                   const SizedBox(height: Grid.half),
-                  // Preview (bold while unread — desktop parity).
+                  // Message preview.
                   MessageContent(
                     content: item.item.displayContent,
                     tags: item.item.tags,
                     maxLines: 2,
-                    baseStyle: context.textTheme.bodySmall?.copyWith(
-                      color: isDone ? mutedColor : context.colors.onSurface,
-                      fontWeight: isDone ? FontWeight.w400 : FontWeight.w600,
+                    baseStyle: activityPreviewTextStyle.copyWith(
+                      color: context.colors.onSurface,
                     ),
                   ),
                 ],
@@ -238,7 +197,7 @@ class _RowAvatar extends StatelessWidget {
         profile?.initial ?? (pubkey.isNotEmpty ? pubkey[0].toUpperCase() : '?');
     return AvatarImage(
       imageUrl: profile?.avatarUrl,
-      radius: 18,
+      radius: activityAvatarSize / 2,
       backgroundColor: context.colors.primaryContainer,
       fallback: Text(
         initial,

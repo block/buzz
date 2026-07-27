@@ -664,7 +664,11 @@ void main() {
         _buildTestable(
           messages: messages,
           users: {
-            'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'alice': const UserProfile(
+              pubkey: 'alice',
+              displayName: 'Alice',
+              nip05Handle: 'alice@example.com',
+            ),
             'bob': const UserProfile(pubkey: 'bob', displayName: 'Bob'),
           },
         ),
@@ -674,29 +678,58 @@ void main() {
       expect(findRichText('Hello world!'), findsOneWidget);
       expect(findRichText('Hey Alice!'), findsOneWidget);
       expect(find.text('Alice'), findsOneWidget);
+      expect(find.text('alice@example.com'), findsOneWidget);
       expect(find.text('Bob'), findsOneWidget);
       final messageAvatars = find.byType(CircleAvatar);
       expect(messageAvatars, findsNWidgets(2));
       for (final avatar in messageAvatars.evaluate()) {
         expect(
           tester.getSize(find.byWidget(avatar.widget)),
-          const Size.square(36),
+          const Size.square(messageAvatarSize),
         );
       }
       final aliceName = find.text('Alice');
       final aliceText = tester.widget<Text>(aliceName);
-      final titleStyle = Theme.of(
-        tester.element(aliceName),
-      ).textTheme.titleSmall;
-      expect(aliceText.style?.fontSize, titleStyle?.fontSize);
+      expect(aliceText.style?.fontSize, messageUsernameTextStyle.fontSize);
+      expect(aliceText.style?.fontWeight, messageUsernameTextStyle.fontWeight);
+      expect(aliceText.style?.height, messageUsernameTextStyle.height);
+      final aliceUsername = tester.widget<Text>(
+        find.byKey(const ValueKey('message-username-msg1')),
+      );
+      final aliceTimestamp = tester.widget<Text>(
+        find.byKey(const ValueKey('message-timestamp-msg1')),
+      );
+      expect(aliceUsername.style?.fontSize, messageMetadataTextStyle.fontSize);
+      expect(aliceUsername.style?.fontWeight, FontWeight.w400);
+      expect(aliceUsername.style?.height, messageMetadataTextStyle.height);
+      expect(aliceTimestamp.style?.fontSize, messageMetadataTextStyle.fontSize);
+      expect(aliceTimestamp.style?.fontWeight, FontWeight.w400);
       final helloContent = findRichText('Hello world!');
       final helloText = tester.widget<RichText>(helloContent);
-      final bodyStyle = Theme.of(
-        tester.element(helloContent),
-      ).textTheme.bodyLarge;
       expect(
         effectiveFontSizeForText(helloText.text, 'Hello world!'),
-        bodyStyle?.fontSize,
+        messageBodyTextStyle.fontSize,
+      );
+      final messageList = tester.widget<ScrollablePositionedList>(
+        find.byKey(const ValueKey('channel-message-list')),
+      );
+      expect(messageList.padding!.bottom, 0);
+      final newestMessageGroup = tester.widget<Padding>(
+        find.byKey(const ValueKey('channel-message-group-msg2')),
+      );
+      expect(
+        newestMessageGroup.padding,
+        const EdgeInsets.only(bottom: Grid.xs),
+      );
+      expect(
+        find.byKey(const ValueKey('channel-jump-to-latest')),
+        findsNothing,
+      );
+      await tester.tap(find.text('Message #general'));
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('channel-jump-to-latest')),
+        findsNothing,
       );
     });
 
@@ -751,6 +784,17 @@ void main() {
           const Size.square(32),
         );
       }
+      final summaryPadding = tester.widget<Padding>(
+        find.byKey(const ValueKey('thread-summary-root')),
+      );
+      expect(
+        summaryPadding.padding,
+        const EdgeInsets.only(
+          left: messageAvatarSize + messageAvatarContentGap,
+          top: Grid.half,
+          bottom: Grid.xs,
+        ),
+      );
     });
 
     testWidgets('can jump back to latest when newer messages are offscreen', (
@@ -778,9 +822,21 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      final listView = tester.widget<ScrollablePositionedList>(
-        find.byKey(const ValueKey('channel-message-list')),
-      );
+      final messageList = find.byKey(const ValueKey('channel-message-list'));
+      final messageListElement = tester.element(messageList);
+      ScrollStartNotification(
+        metrics: FixedScrollMetrics(
+          minScrollExtent: 0,
+          maxScrollExtent: 100,
+          pixels: 0,
+          viewportDimension: 100,
+          axisDirection: AxisDirection.down,
+          devicePixelRatio: 1,
+        ),
+        context: messageListElement,
+        dragDetails: DragStartDetails(),
+      ).dispatch(messageListElement);
+      final listView = tester.widget<ScrollablePositionedList>(messageList);
       listView.itemScrollController!.jumpTo(index: 39);
       await tester.pumpAndSettle();
       expect(
@@ -909,22 +965,29 @@ void main() {
       expect(find.text('Alice'), findsOneWidget);
       final createdAction = findRichText('created this channel');
       expect(createdAction, findsOneWidget);
-      expect(tester.getSize(find.byType(CircleAvatar)), const Size.square(36));
+      expect(
+        tester.getSize(find.byType(CircleAvatar)),
+        const Size.square(messageAvatarSize),
+      );
       final nameRect = tester.getRect(find.text('Alice'));
       final nameText = tester.widget<Text>(find.text('Alice'));
-      final nameStyle = Theme.of(
-        tester.element(find.text('Alice')),
-      ).textTheme.titleSmall;
-      expect(nameText.style?.fontSize, nameStyle?.fontSize);
-      final timestampRect = tester.getRect(find.text(formatMessageTime(1000)));
-      expect(timestampRect.left - nameRect.right, Grid.xxs);
+      expect(nameText.style?.fontSize, systemMessageHeadingTextStyle.fontSize);
+      expect(
+        nameText.style?.fontWeight,
+        systemMessageHeadingTextStyle.fontWeight,
+      );
+      expect(
+        find.byKey(const ValueKey('system-message-username-alice')),
+        findsNothing,
+      );
+      final timestampRect = tester.getRect(
+        find.byKey(const ValueKey('system-message-timestamp-alice')),
+      );
+      expect(timestampRect.left, greaterThan(nameRect.right));
       final createdText = tester.widget<RichText>(createdAction);
-      final bodyStyle = Theme.of(
-        tester.element(createdAction),
-      ).textTheme.bodyLarge;
       expect(
         effectiveFontSizeForText(createdText.text, 'created this channel'),
-        bodyStyle?.fontSize,
+        systemMessageBodyTextStyle.fontSize,
       );
     });
 
@@ -948,7 +1011,10 @@ void main() {
 
       expect(find.text('Bob'), findsOneWidget);
       expect(findRichText('joined the channel'), findsOneWidget);
-      expect(tester.getSize(find.byType(CircleAvatar)), const Size.square(36));
+      expect(
+        tester.getSize(find.byType(CircleAvatar)),
+        const Size.square(messageAvatarSize),
+      );
     });
 
     testWidgets('renders member_joined (added by other) system event', (
@@ -976,17 +1042,23 @@ void main() {
       final addedAction = findRichText('was added by Alice');
       expect(addedAction, findsOneWidget);
       expect(find.text('Alice added Bob to the channel'), findsNothing);
-      expect(tester.getSize(find.byType(CircleAvatar)), const Size.square(36));
+      expect(
+        tester.getSize(find.byType(CircleAvatar)),
+        const Size.square(messageAvatarSize),
+      );
       final nameRect = tester.getRect(find.text('Bob'));
-      final timestampRect = tester.getRect(find.text(formatMessageTime(1000)));
-      expect(timestampRect.left - nameRect.right, Grid.xxs);
+      expect(
+        find.byKey(const ValueKey('system-message-username-bob')),
+        findsNothing,
+      );
+      final timestampRect = tester.getRect(
+        find.byKey(const ValueKey('system-message-timestamp-bob')),
+      );
+      expect(timestampRect.left, greaterThan(nameRect.right));
       final addedText = tester.widget<RichText>(addedAction);
-      final bodyStyle = Theme.of(
-        tester.element(addedAction),
-      ).textTheme.bodyLarge;
       expect(
         effectiveFontSizeForText(addedText.text, 'was added by Alice'),
-        bodyStyle?.fontSize,
+        systemMessageBodyTextStyle.fontSize,
       );
     });
 
@@ -1097,7 +1169,10 @@ void main() {
 
       final avatarRect = tester.getRect(find.byType(CircleAvatar));
       final reactionRect = tester.getRect(find.byType(ReactionRow));
-      expect(reactionRect.left, avatarRect.left + 36 + Grid.xxs);
+      expect(
+        reactionRect.left,
+        avatarRect.left + messageAvatarSize + messageAvatarContentGap,
+      );
     });
 
     testWidgets('renders member_left system event', (tester) async {
@@ -1835,6 +1910,14 @@ void main() {
       expect(find.byType(DayDivider), findsNWidgets(2));
       expect(find.text(formatDayHeading(rootCreatedAt)), findsOneWidget);
       expect(find.text(formatDayHeading(nextDayCreatedAt)), findsOneWidget);
+      final threadList = tester.widget<ScrollablePositionedList>(
+        find.byKey(const ValueKey('thread-message-list')),
+      );
+      expect(threadList.padding!.bottom, 0);
+      final newestThreadGroup = tester.widget<Padding>(
+        find.byKey(const ValueKey('thread-message-group-reply-next-day')),
+      );
+      expect(newestThreadGroup.padding, const EdgeInsets.only(bottom: Grid.xs));
     });
   });
 }

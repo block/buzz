@@ -201,16 +201,14 @@ class _ReplyContext extends ConsumerWidget {
                         Flexible(
                           child: Text(
                             displayName,
-                            style: context.textTheme.labelMedium?.copyWith(
-                              fontWeight: FontWeight.w700,
-                            ),
+                            style: messageUsernameTextStyle,
                             overflow: TextOverflow.ellipsis,
                           ),
                         ),
                         const SizedBox(width: Grid.half),
                         Text(
                           formatPulseRelativeTime(note.createdAt),
-                          style: context.textTheme.labelSmall?.copyWith(
+                          style: messageTimestampTextStyle.copyWith(
                             color: context.colors.onSurfaceVariant,
                           ),
                         ),
@@ -229,6 +227,9 @@ class _ReplyContext extends ConsumerWidget {
                           child: MessageContent(
                             content: note.content,
                             tags: note.tags,
+                            baseStyle: messageBodyTextStyle.copyWith(
+                              color: context.colors.onSurface,
+                            ),
                           ),
                         ),
                       ),
