@@ -85,7 +85,7 @@ On any other kind a notify tag MUST be rejected. Silently ignoring it is the wor
 
 **`channel`** — every current member of the channel. Persistent: it produces a stored feed row, so a member who was offline when it was sent still finds it on return, and it counts toward mention-tier unread state.
 
-**`here`** — members who are online at the moment of delivery. Live-only, by construction: **no notification is ever recorded** for it — no index row, no mentions-feed entry, no retroactive badge state. The event itself is an ordinary stored channel message like any other; it is the *mention* that has no persistent form. A reader who was offline, or who scrolls the message into view an hour later, gets nothing beyond a normal unread message. `@here` is a doorbell, not a letter.
+**`here`** — members who are online at the moment of delivery. Live-only, by construction: **no notification is ever recorded** for it — no index row, no mentions-feed entry, no retroactive badge state. The event itself is an ordinary stored channel message like any other; it is the *mention* that has no persistent form. A reader who was offline, or who scrolls the message into view an hour later, gets nothing beyond a normal unread message. A reader who *is* online when the message first reaches them escalates whether it arrived live or in a catch-up fetch — see "`@here` Liveness" below. `@here` is a doorbell, not a letter.
 
 ## Relay Processing
 
@@ -178,6 +178,8 @@ An event with `notify: here` escalates for a reader iff, **at observation time**
 - `|now − event.created_at| ≤ 120` seconds.
 
 The window absorbs clock skew and relay latency without letting `@here` become a persistent mention; 120 seconds is this implementation's value and other implementations MAY choose another, but it MUST be short enough that a message pulled from history never escalates. Because the test is evaluated at observation, the same event escalates for one reader and not another — that is the definition of "here", not an inconsistency.
+
+"Live-only" describes *when the test is evaluated*, not which socket delivered the event. The reader's client escalates iff it first observes the event while online and inside the window — and the delivery path is irrelevant: a launch or reconnect catch-up fetch that surfaces a 30-second-old `@here` escalates exactly as live delivery would, because the reader is in fact here. Nothing about that escalation persists: no index row, no stored tier, nothing that survives a restart. Re-observing the same event later, past the window, yields a plain unread message. This is what "no notification is ever recorded" means above.
 
 Since `@here` records no notification, the live delivery path owns its notification entirely; the feed path can never produce one. Conversely `@channel` notifications SHOULD be owned by whichever single path a client already uses for mention notifications, with the other path skipping notify-tagged events, so one message never notifies twice.
 
