@@ -944,13 +944,13 @@ async fn try_load_persisted_session(
             }
             Some(resp.session_id)
         }
-        Err(e) => {
+        Err(e) if load_failure_is_definitive(&e) => {
             tracing::warn!(
                 target: "pool::session",
                 session_id = %stored,
                 channel_id = %channel_id,
                 error = %e,
-                "session/load failed — clearing stale binding (if unchanged) and creating a new session"
+                "session/load rejected by agent — clearing stale binding (if unchanged) and creating a new session"
             );
             // Only drop the binding we failed to load. A concurrent process may
             // already have written a newer session for this channel.
@@ -962,7 +962,33 @@ async fn try_load_persisted_session(
             );
             None
         }
+        Err(e) => {
+            tracing::warn!(
+                target: "pool::session",
+                session_id = %stored,
+                channel_id = %channel_id,
+                error = %e,
+                "session/load outcome indeterminate — keeping binding and creating a new session; \
+                 the stored session may still be live on the provider"
+            );
+            None
+        }
     }
+}
+
+/// Whether a failed `session/load` proves the stored binding is dead.
+///
+/// Only a JSON-RPC error response is definitive: the provider answered and
+/// refused, so the session is genuinely gone and the binding is safe to drop.
+///
+/// Everything else is indeterminate. A timeout, transport failure or malformed
+/// response does NOT prove the provider failed to load — it may hold the session
+/// open. Dropping the binding on those and falling through to `session/new`
+/// would fork hidden provider state: two live sessions, one unreachable. Keeping
+/// the mapping is self-healing, because a provider that has genuinely lost the
+/// session answers `AgentError` on a later attempt and that clears it then.
+fn load_failure_is_definitive(error: &AcpError) -> bool {
+    matches!(error, AcpError::AgentError { .. })
 }
 
 /// Create a new ACP session via `session_new_full()`, populate model capabilities
@@ -4135,6 +4161,38 @@ async fn clear_reactions(rest: crate::relay::RestClient, event_ids: Vec<String>)
 
 #[cfg(test)]
 mod tests {
+
+    /// A `session/load` failure only clears the durable binding when the
+    /// provider actually answered and refused. Timeouts, transport failures and
+    /// malformed responses are indeterminate: the provider may hold the session
+    /// open, and clearing the binding there would fork hidden state into two
+    /// live sessions with one unreachable.
+    #[test]
+    fn only_an_agent_error_is_a_definitive_session_load_failure() {
+        use std::time::Duration;
+
+        assert!(super::load_failure_is_definitive(&AcpError::AgentError {
+            code: -32602,
+            message: "no such session".into(),
+        }));
+
+        for indeterminate in [
+            AcpError::Timeout(Duration::from_secs(1)),
+            AcpError::IdleTimeout(Duration::from_secs(1)),
+            AcpError::WriteTimeout(Duration::from_secs(1)),
+            AcpError::CancelDrainTimeout(Duration::from_secs(1)),
+            AcpError::HardTimeout {
+                silence: Duration::from_secs(1),
+            },
+            AcpError::AgentExited,
+            AcpError::Protocol("truncated frame".into()),
+        ] {
+            assert!(
+                !super::load_failure_is_definitive(&indeterminate),
+                "{indeterminate:?} must not clear the binding"
+            );
+        }
+    }
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
     use serde_json::json;
