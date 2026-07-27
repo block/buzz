@@ -36,8 +36,9 @@ const CUSTOM_ENTRY_ID = "\u0000custom";
 /**
  * "Add runtimes" — master-detail catalog dialog, modeled on the Agent
  * Catalog (PersonaCatalogDialog): searchable left chooser, right detail pane
- * with a primary Install / setup-guide CTA under the header, one neutral
- * vendor-sourced sentence, operational setup state, and technical details.
+ * with one neutral vendor-sourced sentence, operational setup state, and
+ * technical details, plus a primary Install / setup-guide CTA pinned in a
+ * bottom action bar (same position as the custom-harness Save button).
  * "+ Custom harness" opens the progressive-disclosure form in the same pane.
  */
 export function HarnessCatalogDialog({
@@ -170,12 +171,7 @@ export function HarnessCatalogDialog({
           {/* Right: detail pane */}
           <div className="relative z-10 ml-px flex min-h-0 flex-1 flex-col overflow-hidden rounded-tl-xl bg-background shadow-[-1px_0_0_0_hsl(var(--sidebar-border)/0.45)]">
             <div
-              className={cn(
-                "min-h-0 flex-1",
-                selectedId === CUSTOM_ENTRY_ID
-                  ? "flex flex-col overflow-hidden"
-                  : "overflow-y-auto px-5 py-5",
-              )}
+              className="flex min-h-0 flex-1 flex-col overflow-hidden"
               data-testid="harness-catalog-detail-pane"
             >
               {selectedId === CUSTOM_ENTRY_ID ? (
@@ -183,12 +179,16 @@ export function HarnessCatalogDialog({
               ) : selectedEntry ? (
                 <CatalogDetail entry={selectedEntry} key={selectedEntry.id} />
               ) : isLoading ? (
-                <CatalogDetailSkeleton />
+                <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
+                  <CatalogDetailSkeleton />
+                </div>
               ) : (
-                <div className="flex min-h-80 items-center justify-center rounded-lg border border-dashed border-border/70 px-6 text-center">
-                  <p className="max-w-sm text-sm text-muted-foreground">
-                    Select a runtime on the left, or add a custom one.
-                  </p>
+                <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
+                  <div className="flex min-h-80 items-center justify-center rounded-lg border border-dashed border-border/70 px-6 text-center">
+                    <p className="max-w-sm text-sm text-muted-foreground">
+                      Select a runtime on the left, or add a custom one.
+                    </p>
+                  </div>
                 </div>
               )}
             </div>
@@ -315,82 +315,99 @@ function CatalogDetail({ entry }: { entry: AcpRuntimeCatalogEntry }) {
     });
   }
 
+  // The outline docs button only shows when the entry needs no setup action
+  // (already ready) — pair it with a hint so the muted styling reads as
+  // "nothing to do here" rather than a broken primary button.
+  const isSecondaryCta = action.kind !== "install" && action.kind !== "docs";
+
+  const primaryCta =
+    action.kind === "install" ? (
+      <Button
+        data-testid={`harness-catalog-install-${entry.id}`}
+        disabled={install.isPending}
+        onClick={handleInstall}
+        type="button"
+      >
+        {install.isPending ? <Spinner className="mr-2 h-3.5 w-3.5" /> : null}
+        {action.label}
+      </Button>
+    ) : docsUrl ? (
+      <Button
+        data-testid={
+          action.kind === "docs"
+            ? `harness-catalog-setup-${entry.id}`
+            : `harness-catalog-docs-${entry.id}`
+        }
+        onClick={() => void openUrl(docsUrl)}
+        type="button"
+        variant={action.kind === "docs" ? "default" : "outline"}
+      >
+        <ExternalLink className="mr-1 h-3.5 w-3.5" />
+        {action.kind === "docs" ? action.label : installLinkLabel(entry)}
+      </Button>
+    ) : null;
+
   return (
-    <div className="flex min-h-full flex-col gap-6">
-      <div className="flex items-center gap-4">
-        <RuntimeIcon className="h-16 w-16" runtime={entry} />
-        <div className="min-w-0">
-          <h3 className="truncate text-xl font-semibold leading-snug">
-            {getRuntimeDisplayLabel(entry)}
-          </h3>
-          {isReady ? (
-            <span className="mt-1 inline-flex items-center rounded-md bg-emerald-500/15 px-2 py-0.5 text-xs font-medium text-emerald-600 dark:text-emerald-400">
-              Ready
-            </span>
-          ) : statusLabel ? (
-            <span
-              className="mt-1 inline-flex items-center rounded-md bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground"
-              data-testid={`harness-catalog-status-${entry.id}`}
-            >
-              {statusLabel}
-            </span>
-          ) : null}
-          <div className="mt-2">
-            {action.kind === "install" ? (
-              <Button
-                data-testid={`harness-catalog-install-${entry.id}`}
-                disabled={install.isPending}
-                onClick={handleInstall}
-                size="xs"
-                type="button"
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="min-h-0 flex-1 space-y-6 overflow-y-auto px-5 py-5">
+        <div className="flex items-center gap-4">
+          <RuntimeIcon className="h-16 w-16" runtime={entry} />
+          <div className="min-w-0">
+            <h3 className="truncate text-xl font-semibold leading-snug">
+              {getRuntimeDisplayLabel(entry)}
+            </h3>
+            {isReady ? (
+              <span className="mt-1 inline-flex items-center rounded-md bg-emerald-500/15 px-2 py-0.5 text-xs font-medium text-emerald-600 dark:text-emerald-400">
+                Ready
+              </span>
+            ) : statusLabel ? (
+              <span
+                className="mt-1 inline-flex items-center rounded-md bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground"
+                data-testid={`harness-catalog-status-${entry.id}`}
               >
-                {install.isPending ? (
-                  <Spinner className="mr-2 h-3.5 w-3.5" />
-                ) : null}
-                {action.label}
-              </Button>
-            ) : docsUrl ? (
-              <Button
-                data-testid={
-                  action.kind === "docs"
-                    ? `harness-catalog-setup-${entry.id}`
-                    : `harness-catalog-docs-${entry.id}`
-                }
-                onClick={() => void openUrl(docsUrl)}
-                size="xs"
-                type="button"
-                variant={action.kind === "docs" ? "default" : "outline"}
-              >
-                <ExternalLink className="mr-1 h-3.5 w-3.5" />
-                {action.kind === "docs"
-                  ? action.label
-                  : installLinkLabel(entry)}
-              </Button>
+                {statusLabel}
+              </span>
             ) : null}
           </div>
         </div>
+
+        {description ? (
+          <p className="text-sm leading-6 text-muted-foreground">
+            {description}
+          </p>
+        ) : null}
+
+        {entry.installHint ? (
+          <div className="space-y-1">
+            <p className="text-xs font-semibold text-muted-foreground">Setup</p>
+            <p className="whitespace-pre-line text-sm leading-6 text-foreground">
+              {entry.installHint}
+            </p>
+          </div>
+        ) : null}
+
+        {installError ? (
+          <p className="whitespace-pre-line rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-1.5 text-sm text-destructive">
+            {installError}
+          </p>
+        ) : null}
+
+        <TechnicalDetails entry={entry} />
       </div>
 
-      {description ? (
-        <p className="text-sm leading-6 text-muted-foreground">{description}</p>
-      ) : null}
-
-      {entry.installHint ? (
-        <div className="space-y-1">
-          <p className="text-xs font-semibold text-muted-foreground">Setup</p>
-          <p className="whitespace-pre-line text-sm leading-6 text-foreground">
-            {entry.installHint}
-          </p>
+      {primaryCta ? (
+        <div className="flex shrink-0 items-center justify-end gap-3 border-t border-border/60 bg-background px-5 py-3">
+          {isSecondaryCta ? (
+            <p
+              className="text-xs text-muted-foreground/80"
+              data-testid={`harness-catalog-ready-hint-${entry.id}`}
+            >
+              Already set up
+            </p>
+          ) : null}
+          {primaryCta}
         </div>
       ) : null}
-
-      {installError ? (
-        <p className="whitespace-pre-line rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-1.5 text-sm text-destructive">
-          {installError}
-        </p>
-      ) : null}
-
-      <TechnicalDetails entry={entry} />
     </div>
   );
 }
