@@ -370,7 +370,7 @@ class _FilterMenuButton extends StatelessWidget {
               for (final entry in _filterLabels.entries)
                 PopupMenuItem(
                   value: entry.key,
-                  height: Grid.lg,
+                  height: Grid.xl,
                   padding: const EdgeInsets.symmetric(horizontal: Grid.twelve),
                   child: Row(
                     children: [

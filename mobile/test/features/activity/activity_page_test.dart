@@ -241,7 +241,11 @@ void main() {
       find.byType(PopupMenuItem<InboxFilter>),
     );
     expect(items, hasLength(InboxFilter.values.length));
-    expect(items.every((item) => item.height == Grid.lg), isTrue);
+    expect(
+      items.every((item) => item.height >= Grid.xl),
+      isTrue,
+      reason: 'Activity filter choices must keep 48dp touch targets.',
+    );
 
     await tester.tap(find.descendant(of: surface, matching: find.text('All')));
     await tester.pumpAndSettle();
