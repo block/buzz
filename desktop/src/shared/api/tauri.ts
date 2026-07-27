@@ -366,11 +366,17 @@ export async function getPresence(pubkeys: string[]): Promise<PresenceLookup> {
   );
 }
 
+// Called unconditionally on every boot by useCommunityInit's "no active
+// community yet" branch, which already wraps both calls in its own
+// try/catch and falls back to needsSetup:true — so this guard is a
+// console-noise reduction, not a behavior fix.
 export function getDefaultRelayUrl(): Promise<string> {
+  if (!isTauri()) return Promise.reject(new Error("no Tauri runtime"));
   return invokeTauri<string>("get_default_relay_url");
 }
 
 export function autoConnectDefaultRelayEnabled(): Promise<boolean> {
+  if (!isTauri()) return Promise.resolve(false);
   return invokeTauri<boolean>("auto_connect_default_relay_enabled");
 }
 
@@ -1193,8 +1199,14 @@ export async function validateReposDir(dir: string): Promise<void> {
   await invokeTauri("validate_repos_dir", { dir });
 }
 
+// Sleep prevention is a native OS concept with no browser equivalent.
+// usePreventSleep.ts calls this fire-and-forget (`void setPreventSleepActive(...)`)
+// with no .catch of its own, so an unguarded call here was a genuine unhandled
+// promise rejection in a web (non-Tauri) runtime — not just console noise.
 export const setPreventSleepActive = (active: boolean) =>
-  invokeTauri("set_prevent_sleep_active", { active });
+  isTauri()
+    ? invokeTauri("set_prevent_sleep_active", { active })
+    : Promise.resolve();
 
 export const setAgentManagedProfiles = (enabled: boolean) =>
   invokeTauri("set_agent_managed_profiles", { enabled });
