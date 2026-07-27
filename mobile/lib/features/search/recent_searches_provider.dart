@@ -29,6 +29,12 @@ class RecentSearchesNotifier extends Notifier<List<String>> {
     );
   }
 
+  /// Records [query] as the most recent search after trimming whitespace.
+  ///
+  /// Empty queries are ignored. Existing matches are deduplicated
+  /// case-insensitively, the newest spelling is retained, the history is capped
+  /// at six entries, and the result is persisted for the current community and
+  /// account.
   void record(String query) {
     final trimmed = query.trim();
     if (trimmed.isEmpty) return;
@@ -41,6 +47,7 @@ class RecentSearchesNotifier extends Notifier<List<String>> {
     _persist(next);
   }
 
+  /// Clears the current community and account's history and persists it empty.
   void clear() => _persist(const []);
 
   void _persist(List<String> searches) {
