@@ -25,6 +25,7 @@ import 'package:buzz/features/profile/user_cache_provider.dart';
 import 'package:buzz/features/profile/user_profile.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
+import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 
 const _channelId = 'test-channel';
 
@@ -144,6 +145,7 @@ Widget _buildTestable({
   _FakeMessagesNotifier? messagesNotifier,
   String? canvasContent,
   List<NostrEvent>? threadReplies,
+  TextScaler textScaler = TextScaler.noScaling,
 }) {
   final resolvedChannel = channel ?? _testChannel;
   final fakeChannelsNotifier =
@@ -190,7 +192,12 @@ Widget _buildTestable({
     child: MaterialApp(
       theme: AppTheme.light(),
       navigatorObservers: navigatorObservers,
-      home: ChannelDetailPage(channel: resolvedChannel),
+      home: Builder(
+        builder: (context) => MediaQuery(
+          data: MediaQuery.of(context).copyWith(textScaler: textScaler),
+          child: ChannelDetailPage(channel: resolvedChannel),
+        ),
+      ),
     ),
   );
 }
@@ -1326,6 +1333,50 @@ void main() {
 
       expect(find.text('secret'), findsOneWidget);
       expect(find.byIcon(LucideIcons.lock), findsOneWidget);
+    });
+
+    testWidgets('grows for a scaled two-line DM title', (tester) async {
+      final dmChannel = Channel(
+        id: _channelId,
+        name: 'dm',
+        channelType: 'dm',
+        visibility: 'private',
+        description: '',
+        createdBy: 'alice',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        participants: const ['Alice'],
+        participantPubkeys: const ['alice'],
+        isMember: true,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [],
+          channel: dmChannel,
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+          textScaler: const TextScaler.linear(1.25),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final appBar = find.byType(FrostedAppBar);
+      final clip = find.descendant(of: appBar, matching: find.byType(ClipRect));
+      final title = find.descendant(of: appBar, matching: find.text('Alice'));
+      final presence = find.descendant(
+        of: appBar,
+        matching: find.text('Offline'),
+      );
+
+      expect(
+        tester.getSize(clip).height,
+        greaterThan(
+          tester.getSize(title).height + tester.getSize(presence).height,
+        ),
+      );
+      expect(tester.takeException(), isNull);
     });
   });
 

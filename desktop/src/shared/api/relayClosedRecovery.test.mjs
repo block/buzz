@@ -1,8 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { handleRelayClosed } from "./relayClosedRecovery.ts";
-import { requestHistoryGated } from "./relayGateBoundary.ts";
+import {
+  handleRelayClosed,
+  handleSubscriptionEose,
+} from "./relayClosedRecovery.ts";
+import {
+  requestFirstEventGated,
+  requestHistoryGated,
+} from "./relayGateBoundary.ts";
 
 // ── Fake-timer setup ──────────────────────────────────────────────────────────
 // The rate-limit gate and closed-retry logic use window.setTimeout/clearTimeout.
@@ -225,6 +231,33 @@ test("gate armed by rate-limited history CLOSED defers the next REQ until expiry
     "REQ must fire exactly once after gate clears",
   );
   assert.ok(sentAt[0] >= 5_001, "REQ must fire only after gate expiry");
+});
+
+test("first-event request resolves null when EOSE arrives without an event", async () => {
+  resetAll(0);
+  const subscriptions = new Map();
+  let requestedSubId = "";
+  const firstEventPromise = requestFirstEventGated(
+    subscriptions,
+    async (payload) => {
+      requestedSubId = payload[1];
+    },
+    async () => {},
+    { kinds: [13_534], limit: 1 },
+    25_000,
+  );
+
+  await Promise.resolve();
+  assert.match(requestedSubId, /^first-/);
+
+  handleSubscriptionEose({
+    subscriptions,
+    subId: requestedSubId,
+    closeSubscription: async () => {},
+  });
+
+  assert.equal(await firstEventPromise, null);
+  assert.equal(subscriptions.has(requestedSubId), false);
 });
 
 test("production CLOSED handler removes terminal live subscriptions", () => {

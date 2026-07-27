@@ -21,13 +21,14 @@ export type MeshShareToggleModel = {
   isSharing: boolean;
   /**
    * A client-mode runtime occupies the single slot (this machine is consuming
-   * a peer's compute). The Share switch must read off + disabled while true.
+   * a peer's compute). The Share switch reads off while true, but the member
+   * may replace this client with a serve runtime by turning sharing on.
    */
   isConsuming: boolean;
   /**
    * ANY runtime occupies the single slot (serve or client, healthy or failed).
-   * A fresh `mesh_start_node` fails with "already running" while true, so the
-   * switch must not offer a start — only a stop of an existing serve node.
+   * This remains useful for disabling edits around an existing serve runtime;
+   * the backend supports the intentional client-to-serve replacement.
    */
   slotOccupied: boolean;
 };

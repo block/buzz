@@ -315,20 +315,16 @@ fn persona_with_provider(
 // that the old create-time env baking silently blocked.
 
 use crate::managed_agents::env_vars::{live_persona_env, merged_user_env};
-use crate::managed_agents::persona_events::persona_snapshot;
 use std::collections::BTreeMap;
 
 /// Apply a persona snapshot onto a record, mirroring `create_managed_agent`:
-/// snapshotted prompt/model/provider/source_version are pinned, with the
-/// system_prompt unwrapped (the persona always carries one). `env_vars` is
-/// deliberately NOT touched — it stays agent overrides only.
+/// links the record to `persona.id`, then delegates the actual snapshot
+/// (prompt/model/provider/runtime/source_version) to the real production
+/// `apply_persona_snapshot` — so a change to that function's behavior is
+/// exercised by these tests instead of silently diverging from it.
 fn pin_persona(record: &mut ManagedAgentRecord, persona: &crate::managed_agents::AgentDefinition) {
-    let snapshot = persona_snapshot(persona);
     record.persona_id = Some(persona.id.clone());
-    record.system_prompt = snapshot.system_prompt;
-    record.model = snapshot.model;
-    record.provider = snapshot.provider;
-    record.persona_source_version = Some(snapshot.source_version);
+    crate::managed_agents::persona_events::apply_persona_snapshot(record, persona);
 }
 
 fn persona_v(
@@ -428,19 +424,31 @@ fn agent_env_overrides_win_over_persona_env_at_spawn() {
 }
 
 #[test]
-fn orphaned_agent_spawns_from_its_own_overrides() {
-    // Persona deleted: the live merge degrades to the record's own overrides.
+fn orphaned_agent_refused_at_spawn_boundary() {
+    // Persona deleted: `spawn_agent_child` must refuse before any process
+    // side effect, not silently degrade to the record's stale overrides.
+    // `require_resolved` on the shared resolver is the pure predicate
+    // `spawn_agent_child` checks first — this pins the contract without
+    // needing a real `AppHandle`.
     let persona = persona_v("p", "prompt", &[("ANTHROPIC_API_KEY", "persona-key")]);
     let mut record = fixture(RespondTo::Anyone, vec![], Some("tag".into()));
     record.env_vars = BTreeMap::from([("EXTRA".to_string(), "agent-value".to_string())]);
     pin_persona(&mut record, &persona);
 
-    let env = spawn_user_env(&record, &[]);
-    assert_eq!(env.get("EXTRA").map(String::as_str), Some("agent-value"));
+    // The persona is absent from the live catalog — same shape restore/start
+    // see when a persona was deleted on another device.
+    let no_personas: &[crate::managed_agents::AgentDefinition] = &[];
+    let error = crate::managed_agents::effective_config::resolve_effective_config(
+        &record,
+        no_personas,
+        &Default::default(),
+    )
+    .require_resolved()
+    .unwrap_err();
     assert_eq!(
-        env.get("ANTHROPIC_API_KEY"),
-        None,
-        "a deleted persona's env must not linger"
+        error,
+        crate::managed_agents::effective_config::ORPHANED_INSTANCE_ERROR.to_string(),
+        "an orphaned linked instance must be refused, not spawned from its own overrides"
     );
 }
 
@@ -700,14 +708,30 @@ fn grandchild_inherits_pgid_of_process_group_leader() {
     // spawns an intermediate child which in turn spawns a grandchild.
     // This mirrors the real tree: buzz-acp → goose → buzz-dev-mcp.
     //
-    // The intermediate `sh` uses exec to replace itself with another sh
-    // that backgrounds the grandchild, so the grandchild's ppid is the
-    // intermediate (not the harness).
+    // The intermediate `sh` backgrounds the grandchild and echoes its PID,
+    // so the grandchild's ppid is the intermediate (not the harness).
+    //
+    // The trailing `sleep 10` keeps the harness (the process group leader)
+    // alive through the assertions below: without it the harness exits as
+    // soon as the intermediate echoes, and under parallel test load it can
+    // be reaped before `getpgid(harness_pid)` runs (observed flake —
+    // getpgid returned -1). The group is killed in cleanup, so the sleep
+    // never runs to term.
+    //
+    // Absolute `/bin/sh` and `/bin/sleep` rather than bare names: parallel
+    // tests holding `lock_path_mutex` legitimately swap PATH to a tempdir,
+    // and this test doesn't need the lock — but a PATH lookup during the
+    // swap window fails with NotFound, and a child spawned during it
+    // inherits the poisoned PATH for its lifetime, so the script's inner
+    // lookups must be absolute too (observed flake).
     let mut harness = {
-        let mut cmd = Command::new("sh");
-        cmd.args(["-c", "sh -c 'sleep 10 & echo $!' & wait $!"])
-            .stdout(std::process::Stdio::piped())
-            .process_group(0);
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args([
+            "-c",
+            "/bin/sh -c '/bin/sleep 10 & echo $!' & wait $!; /bin/sleep 10",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .process_group(0);
         cmd.spawn().expect("spawn harness")
     };
 
@@ -791,9 +815,15 @@ fn own_group_grandchild_detected_by_ancestor_walk() {
     // The test process is the "harness". Spawn an intermediate with its own
     // process group (mirrors the node shim). It backgrounds a grandchild
     // (sleep 30) and prints the grandchild PID so we can inspect it.
+    //
+    // Absolute `/bin/sh` and `/bin/sleep` — no PATH lookups anywhere in this
+    // tree. Parallel tests holding `lock_path_mutex` legitimately swap PATH to
+    // a tempdir; the outer spawn during that window fails with NotFound, and a
+    // child spawned during it inherits the poisoned PATH for its lifetime, so
+    // inner lookups must be absolute too (observed flake).
     let mut intermediate = {
-        let mut cmd = Command::new("sh");
-        cmd.args(["-c", "sleep 30 & echo $!; wait"])
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", "/bin/sleep 30 & echo $!; wait"])
             .stdout(std::process::Stdio::piped())
             .process_group(0);
         cmd.spawn().expect("spawn intermediate")
@@ -1009,4 +1039,276 @@ fn invalid_pubkey_resolves_no_pair_key() {
     // Key-less records (keys minted on first start) cannot form a pair key;
     // the summary must fall back to the stopped/legacy-pid path, not panic.
     assert!(super::resolve_workspace_pair_key("not-a-key", "", "wss://one.example").is_none());
+}
+
+// ── Custom-harness orphan sweep coverage ─────────────────────────────────────
+//
+// The sweep/receipt ownership gate must include any process carrying the
+// `BUZZ_MANAGED_AGENT` env marker, regardless of whether the binary name
+// matches `KNOWN_AGENT_BINARIES`. Custom harnesses use arbitrary binary names
+// so name-match alone would silently leak their orphans on crash.
+//
+// Previously: macOS used a two-check OR+AND pattern (equivalent to just marker),
+//             Linux used an AND-gate (name + marker) — wrong for custom harnesses.
+// Fix: all platforms gate on `process_has_buzz_marker` alone; the receipt path
+//      is verified below via `valid_agent_runtime_receipt_with` (injectable),
+//      which no longer takes a name-check predicate at all — reinstating an
+//      AND-gate would be a signature change these tests would catch.
+
+// ── Collector-discriminating sweep tests (C-9 / Thufir F6) ──────────────────
+//
+// `kill_stale_tracked_processes_with` and `valid_agent_runtime_receipt_with`
+// accept injectable predicates so the sweep logic can be verified without
+// spawning real processes.  These tests drive the injection path directly,
+// discriminating on custom-harness vs known-binary vs marker presence.
+
+#[test]
+fn kill_stale_custom_harness_with_marker_is_terminated() {
+    // A record with a PID not in the live runtime map and with the Buzz marker
+    // should be terminated even though the binary name is not in KNOWN_AGENT_BINARIES.
+    let mut record = minimal_record("pubkey-custom");
+    record.runtime_pid = Some(9001);
+    let mut records = vec![record];
+    let runtimes = std::collections::HashMap::new();
+
+    let mut killed = vec![];
+    let changed = super::kill_stale_tracked_processes_with(
+        &mut records,
+        &runtimes,
+        |_pid| true, // simulate: marker present (custom harness we own)
+        |pid| {
+            killed.push(pid);
+            Ok(())
+        },
+    );
+
+    assert!(changed, "stale record with marker should mark changed");
+    assert_eq!(killed, vec![9001u32], "marked process must be killed");
+    assert!(
+        records[0].runtime_pid.is_none(),
+        "runtime_pid must be cleared"
+    );
+}
+
+#[test]
+fn kill_stale_process_without_marker_is_skipped() {
+    // A record PID without the marker (not our process — e.g. custom binary
+    // from another tool) should be skipped for termination but still cleared.
+    let mut record = minimal_record("pubkey-foreign");
+    record.runtime_pid = Some(9002);
+    let mut records = vec![record];
+    let runtimes = std::collections::HashMap::new();
+
+    let mut killed = vec![];
+    let changed = super::kill_stale_tracked_processes_with(
+        &mut records,
+        &runtimes,
+        |_pid| false, // simulate: no marker (not our process)
+        |pid| {
+            killed.push(pid);
+            Ok(())
+        },
+    );
+
+    assert!(
+        changed,
+        "stale record without marker should still mark changed"
+    );
+    assert!(
+        killed.is_empty(),
+        "process without marker must not be killed"
+    );
+    assert!(
+        records[0].runtime_pid.is_none(),
+        "runtime_pid must be cleared regardless"
+    );
+}
+
+#[test]
+fn kill_stale_live_pair_is_not_touched() {
+    // A record whose PID is in the live runtime map is NOT stale — skip it entirely.
+    use crate::managed_agents::ManagedAgentRuntimeKey;
+    let pubkey = "aa".repeat(32); // 64 hex chars — satisfies ManagedAgentRuntimeKey validation
+    let mut record = minimal_record(&pubkey);
+    record.runtime_pid = Some(9003);
+    let key = ManagedAgentRuntimeKey::new(pubkey, "wss://relay.example").unwrap();
+    let mut runtimes = std::collections::HashMap::new();
+    // Insert a placeholder runtime — value shape doesn't matter for the key lookup.
+    runtimes.insert(key, make_pair_runtime_placeholder());
+    let original_pid = record.runtime_pid;
+    let mut records = vec![record];
+
+    let mut killed = vec![];
+    let changed = super::kill_stale_tracked_processes_with(
+        &mut records,
+        &runtimes,
+        |_pid| true,
+        |pid| {
+            killed.push(pid);
+            Ok(())
+        },
+    );
+
+    assert!(!changed, "live pair must not be marked changed");
+    assert!(killed.is_empty(), "live pair process must not be killed");
+    assert_eq!(
+        records[0].runtime_pid, original_pid,
+        "live pair runtime_pid must not be cleared"
+    );
+}
+
+#[test]
+fn receipt_valid_with_marker_and_running() {
+    // Custom harness receipt: custom binary (not in KNOWN_AGENT_BINARIES), has_marker=true, is_running=true.
+    // Must be valid — marker is the authoritative gate.
+    use crate::managed_agents::ManagedAgentRuntimeKey;
+    let key = ManagedAgentRuntimeKey::new("bb".repeat(32), "wss://relay.example").unwrap();
+    let receipt = receipt_fixture(key.clone());
+    let path = std::path::PathBuf::from(format!("{}.json", key.runtime_id()));
+
+    let valid = super::valid_agent_runtime_receipt_with(
+        &path,
+        &receipt,
+        "test-instance",
+        |_pid| true,       // is_running
+        |_pid, _iid| true, // has_marker: true (custom binary — no name gate)
+    );
+    assert!(
+        valid,
+        "custom harness with marker and running pid must be valid"
+    );
+}
+
+#[test]
+fn receipt_invalid_known_binary_without_marker() {
+    // Known binary name but no marker — stray process, must not be valid.
+    use crate::managed_agents::ManagedAgentRuntimeKey;
+    let key = ManagedAgentRuntimeKey::new("cc".repeat(32), "wss://relay.example").unwrap();
+    let receipt = receipt_fixture(key.clone());
+    let path = std::path::PathBuf::from(format!("{}.json", key.runtime_id()));
+
+    let valid = super::valid_agent_runtime_receipt_with(
+        &path,
+        &receipt,
+        "test-instance",
+        |_pid| true,        // is_running
+        |_pid, _iid| false, // has_marker: false (not our process)
+    );
+    assert!(!valid, "known binary without marker must not be valid");
+}
+
+#[test]
+fn receipt_invalid_when_process_not_running() {
+    // Even with marker, a non-running process must not be valid.
+    use crate::managed_agents::ManagedAgentRuntimeKey;
+    let key = ManagedAgentRuntimeKey::new("dd".repeat(32), "wss://relay.example").unwrap();
+    let receipt = receipt_fixture(key.clone());
+    let path = std::path::PathBuf::from(format!("{}.json", key.runtime_id()));
+
+    let valid = super::valid_agent_runtime_receipt_with(
+        &path,
+        &receipt,
+        "test-instance",
+        |_pid| false,      // is_running: false
+        |_pid, _iid| true, // has_marker
+    );
+    assert!(
+        !valid,
+        "non-running process must not be valid regardless of marker"
+    );
+}
+
+// ── Test helpers ────────────────────────────────────────────────────────────
+
+fn minimal_record(pubkey: &str) -> crate::managed_agents::ManagedAgentRecord {
+    serde_json::from_str(&format!(
+        r#"{{
+            "pubkey": "{pubkey}",
+            "name": "test",
+            "private_key_nsec": "nsec1fake",
+            "relay_url": "",
+            "acp_command": "buzz-acp",
+            "agent_command": "buzz-agent",
+            "agent_args": [],
+            "mcp_command": "",
+            "turn_timeout_seconds": 320,
+            "system_prompt": null,
+            "model": null,
+            "provider": null,
+            "env_vars": {{}},
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "last_started_at": null,
+            "last_stopped_at": null,
+            "last_exit_code": null,
+            "last_error": null
+        }}"#
+    ))
+    .expect("minimal_record fixture")
+}
+
+fn make_pair_runtime_placeholder() -> crate::managed_agents::ManagedAgentPairRuntime {
+    use std::process::{Command, Stdio};
+    // Spawn a real child so ManagedAgentProcess's Child field is satisfied.
+    // `true` exits immediately with 0 — just a handle we need for type purposes.
+    //
+    // Absolute `/usr/bin/true` on unix (present on both macOS and Linux):
+    // parallel tests holding `lock_path_mutex` swap PATH to a tempdir, and a
+    // bare `true` lookup during that window fails with NotFound (observed
+    // flake). Windows keeps the PATH lookup — no test there swaps PATH.
+    #[cfg(unix)]
+    let program = "/usr/bin/true";
+    #[cfg(windows)]
+    let program = "true";
+    let child = Command::new(program)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn true for placeholder");
+    let process = crate::managed_agents::ManagedAgentProcess {
+        child,
+        log_path: std::path::PathBuf::new(),
+        spawn_config_hash: 0,
+        setup_mode: false,
+        adapter_availability: None,
+        start_nonce: "test-nonce".to_string(),
+        #[cfg(windows)]
+        job: None,
+    };
+    crate::managed_agents::ManagedAgentPairRuntime::starting(process)
+}
+
+// ── restart_eligible tests ──────────────────────────────────────────────
+
+#[test]
+fn restart_eligible_true_when_non_orphan_has_hash_drift() {
+    assert!(super::restart_eligible(false, true, false));
+}
+
+#[test]
+fn restart_eligible_true_when_non_orphan_has_availability_drift() {
+    assert!(super::restart_eligible(false, false, true));
+}
+
+#[test]
+fn restart_eligible_false_when_orphan_has_hash_drift() {
+    // An orphan can never be restarted successfully — spawn refuses it —
+    // so hash drift alone must not surface "Restart required".
+    assert!(!super::restart_eligible(true, true, false));
+}
+
+#[test]
+fn restart_eligible_false_when_orphan_has_availability_drift() {
+    assert!(!super::restart_eligible(true, false, true));
+}
+
+#[test]
+fn restart_eligible_false_when_orphan_has_no_drift() {
+    assert!(!super::restart_eligible(true, false, false));
+}
+
+#[test]
+fn restart_eligible_false_when_non_orphan_has_no_drift() {
+    assert!(!super::restart_eligible(false, false, false));
 }

@@ -3,6 +3,11 @@ import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
 import { decode } from "nostr-tools/nip19";
 import { finalizeEvent, getPublicKey } from "nostr-tools/pure";
 import { parse as yamlParse } from "yaml";
+import {
+  mergeMockCustomHarnesses,
+  handleSaveCustomHarness,
+  handleDeleteCustomHarness,
+} from "./e2eBridgeCustomHarnesses.ts";
 
 import { relayClient } from "@/shared/api/relayClient";
 import type { ConnectionState } from "@/shared/api/relayClientShared";
@@ -70,6 +75,8 @@ type MockManagedAgentSeed = {
   name: string;
   avatarUrl?: string | null;
   personaId?: string | null;
+  /** Harness/runtime id pin; `null` = inherit from persona (native default). */
+  runtime?: string | null;
   status?: RawManagedAgent["status"];
   channelNames?: string[];
   channelIds?: string[];
@@ -175,6 +182,8 @@ type E2eConfig = {
     acpAuthMethods?: Record<string, RawAcpAuthMethodsResult>;
     acpAuthMethodsErrors?: Record<string, string>;
     acpAuthMethodsError?: string;
+    /** When set, the `delete_custom_harness` mock command throws with this message. */
+    deleteCustomHarnessError?: string;
     connectAcpRuntimeResult?: RawConnectAcpRuntimeResult;
     connectAcpRuntimeDelayMs?: number;
     connectAcpRuntimeError?: string;
@@ -284,6 +293,8 @@ type E2eConfig = {
     oaOwnerIsMe?: boolean;
     /** Whether the mock relay advertises NIP-43 membership support. Defaults to false. */
     relayRequiresMembership?: boolean;
+    /** Delay EOSE for membership snapshots after delivering the event. */
+    relayMembershipEoseDelayMs?: number;
     relayRole?: "owner" | "admin" | "member" | null;
     // Descriptors returned by the mocked `pick_and_upload_media` /
     // `upload_media_bytes` commands. Lets a spec drive the attachment flow
@@ -296,6 +307,8 @@ type E2eConfig = {
     /** Delay (ms) applied to `get_relay_self` so E2E tests can prove the
      *  fail-closed race: DMs are withheld while classification is unresolved. */
     relaySelfDelayMs?: number;
+    /** Delay (ms) applied to `start_pairing` so pairing loading UI is observable. */
+    pairingStartDelayMs?: number;
     /**
      * Sequenced results for `confirm_team_snapshot_import`. String = throw
      * with that message; null = succeed. Call N uses results[N]; last entry
@@ -701,6 +714,8 @@ type RawManagedAgent = {
   pubkey: string;
   name: string;
   persona_id: string | null;
+  /** Record-level harness/runtime pin (`null` when inheriting from the persona). */
+  runtime: string | null;
   relay_url: string;
   acp_command: string;
   agent_command: string;
@@ -1452,6 +1467,7 @@ function cloneManagedAgent(agent: MockManagedAgent): RawManagedAgent {
     pubkey: agent.pubkey,
     name: agent.name,
     persona_id: agent.persona_id,
+    runtime: agent.runtime ?? null,
     relay_url: agent.relay_url,
     acp_command: agent.acp_command,
     agent_command: agent.agent_command,
@@ -1985,6 +2001,9 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     pubkey: seed.pubkey,
     name: seed.name,
     persona_id: seed.personaId ?? null,
+    // Native serde always emits this key (`null` when unpinned) — the bridge
+    // must mirror the wire shape, not omit the key.
+    runtime: seed.runtime ?? null,
     relay_url: DEFAULT_RELAY_WS_URL,
     acp_command: "buzz-acp",
     agent_command: "goose",
@@ -6804,7 +6823,24 @@ async function handleGetFeed(
   // For e2e, return a minimal feed structure with mentions.
   const limit = args.limit ?? 50;
   const mentionEvents = await relayQuery(config, [
-    { kinds: [9, 40002, 45001, 45003], "#p": [identity.pubkey], limit },
+    {
+      kinds: [
+        9,
+        40002,
+        1,
+        45001,
+        45003,
+        KIND_GIT_PULL_REQUEST,
+        KIND_GIT_PR_UPDATE,
+        KIND_GIT_ISSUE,
+        KIND_GIT_STATUS_OPEN,
+        KIND_GIT_STATUS_MERGED,
+        KIND_GIT_STATUS_CLOSED,
+        KIND_GIT_STATUS_DRAFT,
+      ],
+      "#p": [identity.pubkey],
+      limit,
+    },
   ]);
 
   // Look up channel names for feed items
@@ -6957,7 +6993,9 @@ async function handleDiscoverAcpRuntimes(
   }
   const configured = config?.mock?.acpRuntimesCatalog;
   if (configured) {
-    return configured.map(withMockRuntimeConfigMetadata);
+    return mergeMockCustomHarnesses(
+      configured.map(withMockRuntimeConfigMetadata),
+    );
   }
   const defaultCatalog: RawAcpRuntimeCatalogEntry[] = [
     {
@@ -6976,6 +7014,7 @@ async function handleDiscoverAcpRuntimes(
       underlying_cli_path: null,
       node_required: false,
       auth_status: { status: "not_applicable" },
+      source: "builtin",
       login_hint: undefined,
     },
     {
@@ -6995,6 +7034,7 @@ async function handleDiscoverAcpRuntimes(
       underlying_cli_path: "/usr/local/bin/claude",
       node_required: false,
       auth_status: { status: "unknown" },
+      source: "builtin",
       login_hint: undefined,
     },
     {
@@ -7014,6 +7054,7 @@ async function handleDiscoverAcpRuntimes(
       underlying_cli_path: null,
       node_required: false,
       auth_status: { status: "unknown" },
+      source: "builtin",
       login_hint: undefined,
     },
     {
@@ -7032,10 +7073,13 @@ async function handleDiscoverAcpRuntimes(
       underlying_cli_path: null,
       node_required: false,
       auth_status: { status: "not_applicable" },
+      source: "builtin",
       login_hint: undefined,
     },
   ];
-  return defaultCatalog.map(withMockRuntimeConfigMetadata);
+  return mergeMockCustomHarnesses(
+    defaultCatalog.map(withMockRuntimeConfigMetadata),
+  );
 }
 
 async function handleDiscoverAcpAuthMethods(
@@ -7638,6 +7682,8 @@ async function handleCreateManagedAgent(
     pubkey,
     name,
     persona_id: args.input.personaId ?? null,
+    // Create never pins a harness id — the record inherits from the persona.
+    runtime: null,
     relay_url: args.input.relayUrl ?? DEFAULT_RELAY_WS_URL,
     acp_command: args.input.acpCommand ?? "buzz-acp",
     agent_command: agentCommand,
@@ -8746,7 +8792,15 @@ function sendToMockSocket(args: {
         subId,
         createMockRelayMembershipEvent(),
       ]);
-      sendWsText(socket.handler, ["EOSE", subId]);
+      const eoseDelayMs = getConfig()?.mock?.relayMembershipEoseDelayMs ?? 0;
+      if (eoseDelayMs > 0) {
+        window.setTimeout(
+          () => sendWsText(socket.handler, ["EOSE", subId]),
+          eoseDelayMs,
+        );
+      } else {
+        sendWsText(socket.handler, ["EOSE", subId]);
+      }
       return;
     }
 
@@ -9623,6 +9677,13 @@ export function maybeInstallE2eTauriMocks() {
         return {
           additions: 27,
           deletions: 4,
+          commit_body: [
+            "See the [project guide](https://example.com/project-guide).",
+            "",
+            "![Architecture](/buzz.svg)",
+            "",
+            "![Demo](https://example.com/project-demo.mp4)",
+          ].join("\n"),
           files: [
             {
               path: "desktop/src/features/projects/ui/ProjectDetailScreen.tsx",
@@ -10004,6 +10065,15 @@ export function maybeInstallE2eTauriMocks() {
         return activeConfig?.mock?.relayRequiresMembership ?? false;
       case "discover_acp_providers":
         return handleDiscoverAcpRuntimes(activeConfig);
+      case "save_custom_harness":
+        return handleSaveCustomHarness(
+          payload as Parameters<typeof handleSaveCustomHarness>[0],
+        );
+      case "delete_custom_harness":
+        return handleDeleteCustomHarness(
+          payload as Parameters<typeof handleDeleteCustomHarness>[0],
+          activeConfig,
+        );
       case "discover_acp_auth_methods":
         return handleDiscoverAcpAuthMethods(
           payload as { runtimeId?: string },
@@ -10902,8 +10972,13 @@ export function maybeInstallE2eTauriMocks() {
       case "plugin:event|listen":
         // Tauri event system (pairing, huddle) — no-op in e2e, return unlisten fn ID
         return Math.floor(Math.random() * 1_000_000);
-      case "start_pairing":
+      case "start_pairing": {
+        const delayMs = activeConfig?.mock?.pairingStartDelayMs ?? 0;
+        if (delayMs > 0) {
+          await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+        }
         return "nostrpair://8f4b8db31967ce14fef970a1ff1e8eecf19a430aa1c83875e2f5be68dcac0f1a?relay=wss%3A%2F%2Frelay.example.com&secret=87d5a8cfd5807a0cb44f728b67d88d6dcb8daf99be137c158f21a50c1e913c0a&v=1";
+      }
       case "cancel_pairing":
       case "confirm_pairing_sas":
         return null;

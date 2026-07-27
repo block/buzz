@@ -18,8 +18,8 @@ import 'package:buzz/features/channels/compose_bar.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/mentions/mention_candidates.dart';
 import 'package:buzz/features/channels/mentions/mention_candidates_provider.dart';
-import 'package:buzz/features/custom_emoji/custom_emoji.dart';
-import 'package:buzz/features/custom_emoji/custom_emoji_provider.dart';
+import 'package:buzz/shared/custom_emoji/custom_emoji.dart';
+import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 

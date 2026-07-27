@@ -13,7 +13,9 @@ import '../channels/channels_page.dart';
 import '../search/search_page.dart';
 
 class HomePage extends HookConsumerWidget {
-  const HomePage({super.key});
+  const HomePage({required this.settingsPageBuilder, super.key});
+
+  final WidgetBuilder settingsPageBuilder;
 
   static const double _tabBarHeight = 56;
   static const double _tabBarRadius = _tabBarHeight / 2;
@@ -54,9 +56,16 @@ class HomePage extends HookConsumerWidget {
       _destinations.length,
     );
 
-    const pages = [ChannelsPage(), ActivityPage(), SearchPage()];
+    final pages = [
+      ChannelsPage(settingsPageBuilder: settingsPageBuilder),
+      const ActivityPage(),
+      const SearchPage(),
+    ];
 
     return Scaffold(
+      // Keep the floating navigation and Home quick actions anchored while the
+      // keyboard is visible on any tab.
+      resizeToAvoidBottomInset: false,
       extendBody: true,
       body: SizedBox.expand(
         child: Stack(

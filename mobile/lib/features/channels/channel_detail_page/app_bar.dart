@@ -1,5 +1,24 @@
 part of '../channel_detail_page.dart';
 
+double _scaledTextHeight(BuildContext context, TextStyle style) {
+  final scaledFontSize = MediaQuery.textScalerOf(
+    context,
+  ).scale(style.fontSize ?? 0);
+  return scaledFontSize * (style.height ?? 1);
+}
+
+double _dmAppBarTitleContentHeight(BuildContext context) {
+  final titleStyle = context.textTheme.titleSmall;
+  final presenceStyle = context.textTheme.bodySmall;
+  if (titleStyle == null || presenceStyle == null) {
+    return 30;
+  }
+  final textHeight =
+      _scaledTextHeight(context, titleStyle) +
+      _scaledTextHeight(context, presenceStyle);
+  return textHeight > 30 ? textHeight : 30;
+}
+
 class _TypingIndicator extends ConsumerWidget {
   final List<TypingEntry> entries;
 

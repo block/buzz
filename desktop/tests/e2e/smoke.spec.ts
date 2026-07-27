@@ -156,7 +156,7 @@ test("Buzz shared compute explains automatic model selection", async ({
   await expect(page.locator("#persona-model")).toContainText("Automatic");
   await expect(
     page.getByText(
-      "Buzz will choose an available shared model when the agent starts.",
+      "Auto uses Mesh collective intelligence when two or more models stay available, otherwise it chooses one available model.",
     ),
   ).toBeVisible();
   await expect(page.locator("#persona-custom-model")).toHaveCount(0);

@@ -18,6 +18,7 @@ import { PersonaDropdownField } from "./PersonaDropdownField";
 import type { EnvVarsValue } from "./EnvVarsEditor";
 import { PersonaAdvancedFields } from "./PersonaAdvancedFields";
 import { PersonaModelField } from "./PersonaModelField";
+import { runtimeAvailabilityWarning } from "./runtimeAvailabilityWarning";
 import { PersonaProviderApiKeyField } from "./PersonaProviderApiKeyField";
 import {
   canSubmitPersonaDialog,
@@ -620,19 +621,14 @@ export function AgentDefinitionDialog({
       );
   const previewLabel = displayName.trim() || "Agent name";
   const previewAvatarUrl = avatarUrl.trim() || null;
-  const runtimeWarning =
-    selectedRuntime && selectedRuntime.availability !== "available" ? (
-      <p className="text-xs text-warning">
-        {selectedRuntime.availability === "adapter_missing"
-          ? `${selectedRuntime.label} CLI is installed but the ACP adapter is missing.`
-          : selectedRuntime.availability === "adapter_outdated"
-            ? `${selectedRuntime.label} ACP adapter is outdated — reinstall to continue.`
-            : selectedRuntime.requiresExternalCli
-              ? `${selectedRuntime.label} CLI is missing. ${selectedRuntime.installHint}`
-              : `${selectedRuntime.label} is not installed.`}{" "}
-        Visit Settings &gt; Agents to set it up.
-      </p>
-    ) : null;
+  const runtimeWarningText = selectedRuntime
+    ? runtimeAvailabilityWarning(selectedRuntime)
+    : null;
+  const runtimeWarning = runtimeWarningText ? (
+    <p className="text-xs text-warning">
+      {runtimeWarningText} Visit Settings &gt; Agents to set it up.
+    </p>
+  ) : null;
   const advancedFieldsTransition = shouldReduceMotion
     ? { duration: 0 }
     : ADVANCED_FIELDS_MOTION_TRANSITION;
