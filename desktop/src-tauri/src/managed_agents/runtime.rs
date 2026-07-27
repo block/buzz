@@ -549,6 +549,19 @@ pub fn spawn_agent_child(
     // Enable MCP hook tools (_Stop, _PostCompact) for agents that need them.
     // Uses "*" because build_mcp_servers() hard-codes the server name to "buzz-mcp".
     let runtime_meta = known_acp_runtime(&effective_command);
+
+    // Pi loads MCP servers from a project-level .pi/mcp.json (via its MCP
+    // extension) — the ACP session/new mcpServers field is not yet wired
+    // through the adapter. Write the nest file so buzz-dev-mcp tools are
+    // available. Non-fatal: pi degrades to its native tools on failure.
+    if runtime_meta.is_some_and(|r| r.id == "pi") {
+        if let Some(workdir) = super::default_agent_workdir() {
+            if let Err(error) = super::config_bridge::ensure_pi_workdir_mcp_json(&workdir) {
+                eprintln!("buzz-desktop: failed to write pi mcp.json in nest: {error}");
+            }
+        }
+    }
+
     if runtime_meta.is_some_and(|r| r.mcp_hooks) {
         command.env("MCP_HOOK_SERVERS", "*");
     }

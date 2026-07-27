@@ -17,3 +17,10 @@ pub(crate) use types::*;
 pub(crate) fn read_goose_file_config() -> Option<RuntimeFileConfig> {
     goose::read_config_file()
 }
+
+/// Ensure the Buzz nest workdir has a `.pi/mcp.json` registering
+/// `buzz-dev-mcp` for pi's MCP extension. Called from the spawn path when
+/// launching a pi agent. See `pi::ensure_workdir_mcp_json`.
+pub(crate) fn ensure_pi_workdir_mcp_json(workdir: &std::path::Path) -> Result<(), String> {
+    pi::ensure_workdir_mcp_json(workdir)
+}
