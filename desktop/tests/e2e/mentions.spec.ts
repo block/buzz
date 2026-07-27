@@ -826,7 +826,7 @@ test("managed relay agents are visible in channel mentions regardless of relay p
   await expect(dropdown.getByText("agent")).toBeVisible();
 });
 
-test("relay-only agents stay hidden from channel mentions even when allowlisted", async ({
+test("allowlisted relay-only agents can be mentioned and receive a p tag", async ({
   page,
 }) => {
   await installMockBridge(page, {
@@ -836,17 +836,84 @@ test("relay-only agents stay hidden from channel mentions even when allowlisted"
         name: "quinn",
         respondTo: "allowlist",
         respondToAllowlist: [MOCK_VIEWER_PUBKEY],
+        channelNames: ["general"],
       },
     ],
   });
   await page.goto("/");
+
+  const channelId = await page
+    .getByTestId("channel-general")
+    .getAttribute("data-channel-id");
+  if (!channelId) {
+    throw new Error("General channel id missing.");
+  }
+  await page.evaluate(
+    async ({ agentPubkey, generalChannelId }) => {
+      const bridge = window as Window & {
+        __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
+          command: string,
+          payload?: Record<string, unknown>,
+        ) => Promise<unknown>;
+        __BUZZ_E2E_QUERY_CLIENT__?: {
+          invalidateQueries: () => Promise<void>;
+        };
+      };
+      const invoke = bridge.__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
+      if (!invoke) {
+        throw new Error("Mock bridge is not installed.");
+      }
+      await invoke("add_channel_members", {
+        channelId: generalChannelId,
+        pubkeys: [agentPubkey],
+        role: "bot",
+      });
+      await bridge.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries();
+    },
+    {
+      agentPubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+      generalChannelId: channelId,
+    },
+  );
+
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
+  const signedEventCount = await page.evaluate(
+    () => window.__BUZZ_E2E_SIGNED_EVENTS__?.length ?? 0,
+  );
   const input = page.getByTestId("message-input");
   await input.fill("@quinn");
 
-  await expect(autocomplete(page)).toHaveCount(0);
+  const dropdown = autocomplete(page);
+  await expect(dropdown.getByText("quinn")).toBeVisible();
+  await input.press("Enter");
+  await page.keyboard.type(" can you help?");
+  await page.getByTestId("send-message").click();
+
+  await expect
+    .poll(() =>
+      page.evaluate(
+        ({ agentPubkey, baselineCount }) => {
+          const event = window.__BUZZ_E2E_SIGNED_EVENTS__
+            ?.slice(baselineCount)
+            .find(
+              (candidate) =>
+                candidate.kind === 9 &&
+                candidate.tags.some(
+                  ([tagName, pubkey]) =>
+                    tagName === "p" && pubkey === agentPubkey,
+                ),
+            );
+          return event?.tags ?? [];
+        },
+        {
+          agentPubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+          baselineCount: signedEventCount,
+        },
+      ),
+    )
+    .toContainEqual(["p", ALLOWLIST_RELAY_AGENT_PUBKEY]);
 });
 
 test("mentioning an in-channel stopped managed agent starts it before sending", async ({

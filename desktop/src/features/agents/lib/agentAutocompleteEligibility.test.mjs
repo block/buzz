@@ -5,6 +5,7 @@ import {
   coalesceAgentAutocompleteCandidates,
   getMentionableAgentPubkeys,
   getSharedChannelIds,
+  isAgentMentionable,
   isAgentIdentityInManagedList,
   relayAgentIsSharedWithUser,
   shouldHideAgentFromMentions,
@@ -157,6 +158,39 @@ test("isAgentIdentityInManagedList: keeps people and only current managed agent 
     isAgentIdentityInManagedList(
       { isAgent: true, pubkey: PUB_B },
       managedAgentPubkeys,
+    ),
+    false,
+  );
+});
+
+test("isAgentMentionable: keeps people, managed agents, and invocable relay agents", () => {
+  const mentionableAgentPubkeys = new Set([PUB_A, PUB_B]);
+
+  assert.equal(
+    isAgentMentionable(
+      { isAgent: false, pubkey: PUB_C },
+      mentionableAgentPubkeys,
+    ),
+    true,
+  );
+  assert.equal(
+    isAgentMentionable(
+      { isAgent: true, pubkey: PUB_A.toUpperCase() },
+      mentionableAgentPubkeys,
+    ),
+    true,
+  );
+  assert.equal(
+    isAgentMentionable(
+      { isAgent: true, pubkey: PUB_B.toUpperCase() },
+      mentionableAgentPubkeys,
+    ),
+    true,
+  );
+  assert.equal(
+    isAgentMentionable(
+      { isAgent: true, pubkey: PUB_C },
+      mentionableAgentPubkeys,
     ),
     false,
   );
