@@ -10,8 +10,10 @@ import type { RelayEvent } from "@/shared/api/types";
  * How far an `@here` event may be from "now" and still escalate.
  *
  * `@here` is live-only (NIP-CM): a reader who was offline when it was sent, or
- * who scrolls it into view later, gets nothing. 120s absorbs clock skew and
- * relay latency without turning it into a persistent mention.
+ * who scrolls it into view later, gets nothing. "Live" means observation-time,
+ * not live-socket-only — a catch-up fetch within the window escalates exactly
+ * like a live delivery, and nothing persists either way. 120s absorbs clock
+ * skew and relay latency without turning it into a persistent mention.
  */
 export const HERE_FRESHNESS_WINDOW_SECONDS = 120;
 
