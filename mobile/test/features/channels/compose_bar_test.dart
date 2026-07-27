@@ -18,8 +18,11 @@ import 'package:buzz/features/channels/compose_bar.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/mentions/mention_candidates.dart';
 import 'package:buzz/features/channels/mentions/mention_candidates_provider.dart';
+import 'package:buzz/shared/custom_emoji/custom_emoji.dart';
+import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 final _pngBytes = Uint8List.fromList([
   0x89,
@@ -132,6 +135,10 @@ void _setMockMediaUploadPlatformHandler(
       .setMockMethodCallHandler(_mediaUploadPlatformChannel, handler);
 }
 
+/// Shared mock prefs for the compose bar's draft store. Initialized in
+/// [main].
+late SharedPreferences _testPrefs;
+
 Widget _buildComposeBar({
   required MediaUploadService uploadService,
   required ComposeBarOnSend onSend,
@@ -141,9 +148,12 @@ Widget _buildComposeBar({
   List<Channel> channels = const <Channel>[],
   String? currentPubkey,
   bool? supportsShowingSystemContextMenu,
+  List<CustomEmoji> customEmoji = const <CustomEmoji>[],
+  RelayConfigNotifier Function()? relayConfig,
 }) {
   return ProviderScope(
     overrides: [
+      customEmojiListProvider.overrideWithValue(customEmoji),
       mediaUploadServiceProvider.overrideWithValue(uploadService),
       currentPubkeyProvider.overrideWith((ref) => currentPubkey),
       channelMembersProvider(
@@ -154,7 +164,10 @@ Widget _buildComposeBar({
       relayClientProvider.overrideWithValue(
         RelayClient(baseUrl: 'http://localhost:3000'),
       ),
-      relayConfigProvider.overrideWith(() => _FakeRelayConfigNotifier()),
+      relayConfigProvider.overrideWith(
+        relayConfig ?? _FakeRelayConfigNotifier.new,
+      ),
+      savedPrefsProvider.overrideWithValue(_testPrefs),
       channelsProvider.overrideWith(() => _FakeChannelsNotifier(channels)),
     ],
     child: MaterialApp(
@@ -170,7 +183,10 @@ Widget _buildComposeBar({
             ),
       home: Scaffold(
         body: SafeArea(
-          child: ComposeBar(channelId: 'channel-1', onSend: onSend),
+          child: Align(
+            alignment: Alignment.bottomCenter,
+            child: ComposeBar(channelId: 'channel-1', onSend: onSend),
+          ),
         ),
       ),
     ),
@@ -183,6 +199,18 @@ class _FakeRelayConfigNotifier extends RelayConfigNotifier {
     baseUrl: 'http://localhost:3000',
     nsec: nostr.Keys.generate().nsec,
   );
+}
+
+/// Relay config that starts from a fixed identity and can be switched
+/// in place via [RelayConfigNotifier.update] — simulates a community or
+/// account switch while widgets stay mounted.
+class _SwitchableRelayConfigNotifier extends RelayConfigNotifier {
+  final RelayConfig initial;
+
+  _SwitchableRelayConfigNotifier(this.initial);
+
+  @override
+  RelayConfig build() => initial;
 }
 
 class _RecordingRelaySocket extends RelaySocket {
@@ -234,6 +262,11 @@ class _FakeChannelsNotifier extends ChannelsNotifier {
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  setUp(() async {
+    SharedPreferences.setMockInitialValues({});
+    _testPrefs = await SharedPreferences.getInstance();
+  });
+
   setUpAll(() {
     _setMockMediaUploadPlatformHandler((call) async {
       switch (call.method) {
@@ -255,6 +288,108 @@ void main() {
   });
 
   group('ComposeBar', () {
+    testWidgets('mounted composer does not carry draft text across an in-place '
+        'identity switch', (tester) async {
+      final keysA = nostr.Keys.generate();
+      final keysB = nostr.Keys.generate();
+      const relayUrl = 'http://localhost:3000';
+
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(keysA.nsec),
+          relayConfig: () => _SwitchableRelayConfigNotifier(
+            RelayConfig(baseUrl: relayUrl, nsec: keysA.nsec),
+          ),
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      String? storedText(nostr.Keys keys) {
+        final raw = _testPrefs.getString(
+          'compose_drafts_v1:$relayUrl:${keys.public}',
+        );
+        if (raw == null) return null;
+        final drafts = jsonDecode(raw) as List;
+        if (drafts.isEmpty) return null;
+        return (drafts.first as Map<String, dynamic>)['text'] as String?;
+      }
+
+      // Identity A types a draft; it persists into A's namespaced store.
+      await _expandComposer(tester);
+      await tester.enterText(find.byType(TextField), 'identity A secret draft');
+      await tester.pump();
+      expect(storedText(keysA), 'identity A secret draft');
+
+      // Switch identity in place while the composer stays mounted.
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(ComposeBar)),
+      );
+      container
+          .read(relayConfigProvider.notifier)
+          .update(baseUrl: relayUrl, nsec: keysB.nsec);
+      await tester.pumpAndSettle();
+
+      // The mounted composer must not carry identity A's text forward.
+      final textField = tester.widget<TextField>(find.byType(TextField));
+      expect(textField.controller!.text, isEmpty);
+      expect(storedText(keysB), isNull);
+
+      // Identity B's edits persist only into B's store; A's is untouched.
+      await tester.enterText(find.byType(TextField), 'identity B text');
+      await tester.pump();
+      expect(storedText(keysB), 'identity B text');
+      expect(storedText(keysA), 'identity A secret draft');
+
+      // Switching back restores identity A's own draft into the composer.
+      container
+          .read(relayConfigProvider.notifier)
+          .update(baseUrl: relayUrl, nsec: keysA.nsec);
+      await tester.pumpAndSettle();
+      expect(textField.controller!.text, 'identity A secret draft');
+      expect(storedText(keysB), 'identity B text');
+    });
+
+    testWidgets('inserts a community emoji at the cursor from the action row', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          customEmoji: const [
+            CustomEmoji(shortcode: 'meow', url: 'https://example.com/meow.png'),
+          ],
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      await _expandComposer(tester);
+      await tester.enterText(find.byType(TextField), 'hello world');
+      final textField = tester.widget<TextField>(find.byType(TextField));
+      textField.controller!.selection = const TextSelection.collapsed(
+        offset: 6,
+      );
+
+      await tester.tap(find.byIcon(LucideIcons.smilePlus));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(LucideIcons.sparkles));
+      await tester.pump();
+      await tester.tap(find.byTooltip(':meow:'));
+      await tester.pumpAndSettle();
+
+      expect(textField.controller!.text, 'hello :meow:world');
+      expect(textField.controller!.selection.baseOffset, 12);
+    });
+
     testWidgets('uploads an image and sends markdown plus imeta tags', (
       tester,
     ) async {
@@ -299,14 +434,14 @@ void main() {
         ),
       );
 
-      await tester.tap(find.byIcon(LucideIcons.paperclip));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Photo'));
+      await _openAttachmentMenu(tester);
+      await tester.tap(find.text('Photos'));
       await tester.pumpAndSettle();
 
       expect(find.byTooltip('Remove attachment'), findsOneWidget);
 
-      await tester.tap(find.byIcon(LucideIcons.sendHorizontal));
+      await _expandComposer(tester);
+      await tester.tap(find.byIcon(LucideIcons.arrowUp));
       await tester.pump();
       await tester.pumpAndSettle();
 
@@ -318,6 +453,150 @@ void main() {
         contains('url https://relay.example/media/test.png'),
       );
       expect(find.byTooltip('Remove attachment'), findsNothing);
+    });
+
+    testWidgets('keeps upload progress visible after the picker closes', (
+      tester,
+    ) async {
+      final pickedImage = Completer<XFile?>();
+      final uploadService = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: nostr.Keys.generate().nsec,
+        pickGalleryVideo: () async => null,
+        pickGalleryImage: () => pickedImage.future,
+      );
+
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: uploadService,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      await _openAttachmentMenu(tester);
+      await tester.tap(find.text('Photos'));
+      await tester.pump();
+
+      expect(
+        find.byKey(const ValueKey('compose-upload-progress')),
+        findsOneWidget,
+      );
+      expect(find.text('Uploading attachment…'), findsOneWidget);
+
+      pickedImage.complete(null);
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('compose-upload-progress')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('renders markdown formatting without visible delimiters', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      await _expandComposer(tester);
+      await tester.enterText(
+        find.byType(TextField),
+        '**bold** _italic_ ~~strike~~ `code`',
+      );
+
+      final textField = tester.widget<TextField>(find.byType(TextField));
+      final textSpan = textField.controller!.buildTextSpan(
+        context: tester.element(find.byType(TextField)),
+        style: tester.element(find.byType(TextField)).textTheme.bodyLarge,
+        withComposing: false,
+      );
+      final spans = _flattenStyledTextSpans(textSpan);
+
+      expect(textSpan.toPlainText(), '**bold** _italic_ ~~strike~~ `code`');
+      expect(
+        spans.singleWhere((span) => span.text == 'bold').style.fontWeight,
+        FontWeight.w700,
+      );
+      expect(
+        spans.singleWhere((span) => span.text == 'italic').style.fontStyle,
+        FontStyle.italic,
+      );
+      expect(
+        spans.singleWhere((span) => span.text == 'strike').style.decoration,
+        TextDecoration.lineThrough,
+      );
+      expect(
+        spans.singleWhere((span) => span.text == 'code').style.fontFamily,
+        'GeistMono',
+      );
+      expect(
+        spans
+            .where((span) => {'**', '_', '~~', '`'}.contains(span.text))
+            .every((span) => (span.style.fontSize ?? 1) < 1),
+        isTrue,
+      );
+
+      textField.controller!.value = textField.controller!.value.copyWith(
+        composing: const TextRange(start: 2, end: 6),
+      );
+      final composingSpan = textField.controller!.buildTextSpan(
+        context: tester.element(find.byType(TextField)),
+        style: tester.element(find.byType(TextField)).textTheme.bodyLarge,
+        withComposing: true,
+      );
+      final composingSpans = _flattenStyledTextSpans(composingSpan);
+      expect(
+        composingSpans
+            .where((span) => span.text == '**')
+            .every((span) => (span.style.fontSize ?? 1) < 1),
+        isTrue,
+      );
+      expect(
+        composingSpans
+            .singleWhere((span) => span.text == 'bold')
+            .style
+            .decoration,
+        TextDecoration.underline,
+      );
+    });
+
+    testWidgets('uses the primary color for formatting actions', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      await _expandComposer(tester);
+      await tester.tap(find.byIcon(LucideIcons.aLargeSmall));
+      await tester.pumpAndSettle();
+
+      final boldFinder = find.byIcon(LucideIcons.bold);
+      final boldIcon = tester.widget<Icon>(boldFinder);
+      final colors = tester.element(boldFinder).colors;
+      expect(boldIcon.color, colors.primary);
     });
 
     testWidgets('pasted image follows the attachment preview and send path', (
@@ -370,6 +649,7 @@ void main() {
         ),
       );
 
+      await _expandComposer(tester);
       final textField = tester.widget<TextField>(find.byType(TextField));
       final insertionConfiguration = textField.contentInsertionConfiguration;
       expect(insertionConfiguration, isNotNull);
@@ -400,7 +680,7 @@ void main() {
       );
       expect(find.byTooltip('Remove attachment'), findsOneWidget);
 
-      await tester.tap(find.byIcon(LucideIcons.sendHorizontal));
+      await tester.tap(find.byIcon(LucideIcons.arrowUp));
       await tester.pumpAndSettle();
 
       expect(sentContent, '\n![image](https://relay.example/media/pasted.png)');
@@ -450,6 +730,7 @@ void main() {
           ),
         );
 
+        await _expandComposer(tester);
         final textField = tester.widget<TextField>(find.byType(TextField));
         final editableTextState = tester.state<EditableTextState>(
           find.byType(EditableText),
@@ -513,6 +794,7 @@ void main() {
         );
         await tester.pump();
 
+        await _expandComposer(tester);
         final textField = tester.widget<TextField>(find.byType(TextField));
         final editableTextState = tester.state<EditableTextState>(
           find.byType(EditableText),
@@ -581,6 +863,7 @@ void main() {
           ),
         );
 
+        await _expandComposer(tester);
         final textField = tester.widget<TextField>(find.byType(TextField));
         final editableTextState = tester.state<EditableTextState>(
           find.byType(EditableText),
@@ -631,6 +914,7 @@ void main() {
         ),
       );
 
+      await _expandComposer(tester);
       final textField = tester.widget<TextField>(find.byType(TextField));
       textField.contentInsertionConfiguration!.onContentInserted(
         const KeyboardInsertedContent(
@@ -669,6 +953,7 @@ void main() {
           ),
         );
 
+        await _expandComposer(tester);
         final textField = tester.widget<TextField>(find.byType(TextField));
         final editableTextState = tester.state<EditableTextState>(
           find.byType(EditableText),
@@ -712,6 +997,7 @@ void main() {
         ),
       );
 
+      await _expandComposer(tester);
       final textField = tester.widget<TextField>(find.byType(TextField));
       final editableTextState = tester.state<EditableTextState>(
         find.byType(EditableText),
@@ -767,9 +1053,8 @@ void main() {
         ),
       );
 
-      await tester.tap(find.byIcon(LucideIcons.paperclip));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Photo'));
+      await _openAttachmentMenu(tester);
+      await tester.tap(find.text('Photos'));
       await tester.pumpAndSettle();
 
       final attachmentFinder = find.byKey(
@@ -824,9 +1109,8 @@ void main() {
         ),
       );
 
-      await tester.tap(find.byIcon(LucideIcons.paperclip));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Photo'));
+      await _openAttachmentMenu(tester);
+      await tester.tap(find.text('Photos'));
       await tester.pumpAndSettle();
 
       expect(find.textContaining('upload failed'), findsOneWidget);
@@ -866,9 +1150,8 @@ void main() {
           ),
         );
 
-        await tester.tap(find.byIcon(LucideIcons.paperclip));
-        await tester.pumpAndSettle();
-        await tester.tap(find.text('Photo'));
+        await _openAttachmentMenu(tester);
+        await tester.tap(find.text('Photos'));
         await tester.pumpAndSettle();
 
         expect(
@@ -916,9 +1199,8 @@ void main() {
         ),
       );
 
-      await tester.tap(find.byIcon(LucideIcons.paperclip));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Photo'));
+      await _openAttachmentMenu(tester);
+      await tester.tap(find.text('Photos'));
       await tester.pumpAndSettle();
 
       expect(
@@ -981,12 +1263,13 @@ void main() {
       );
       session.debugAttachSocketForTest(socket);
 
+      await _expandComposer(tester);
       await tester.enterText(find.byType(TextField), '@hel');
       await tester.pumpAndSettle();
       await tester.tap(find.text('Helper Bot'));
       await tester.pumpAndSettle();
       await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
-      await tester.tap(find.byIcon(LucideIcons.sendHorizontal));
+      await tester.tap(find.byIcon(LucideIcons.arrowUp));
       await tester.pumpAndSettle();
 
       expect(sentContent, 'hello @Helper Bot');
@@ -1082,12 +1365,13 @@ void main() {
       );
       session.debugAttachSocketForTest(socket);
 
+      await _expandComposer(tester);
       await tester.enterText(find.byType(TextField), '@hel');
       await tester.pumpAndSettle();
       await tester.tap(find.text('Helper Bot'));
       await tester.pumpAndSettle();
       await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
-      await tester.tap(find.byIcon(LucideIcons.sendHorizontal));
+      await tester.tap(find.byIcon(LucideIcons.arrowUp));
       await tester.pump();
 
       expect(didSend, isFalse);
@@ -1142,9 +1426,8 @@ void main() {
         ),
       );
 
-      await tester.tap(find.byIcon(LucideIcons.paperclip));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Photo'));
+      await _openAttachmentMenu(tester);
+      await tester.tap(find.text('Photos'));
       await tester.pumpAndSettle();
 
       expect(
@@ -1216,8 +1499,7 @@ void main() {
           ),
         );
 
-        await tester.tap(find.byIcon(LucideIcons.paperclip));
-        await tester.pumpAndSettle();
+        await _openAttachmentMenu(tester);
         await tester.tap(find.text('Video'));
         // Pump enough frames for the async file read + upload to complete.
         // Can't use pumpAndSettle here — the upload spinner's animation
@@ -1229,7 +1511,7 @@ void main() {
         // Video attachment should show a video icon (not a broken image).
         expect(find.byIcon(LucideIcons.video), findsOneWidget);
 
-        await tester.tap(find.byIcon(LucideIcons.sendHorizontal));
+        await tester.tap(find.byIcon(LucideIcons.arrowUp));
         await tester.pump();
         await tester.pumpAndSettle();
 
@@ -1454,14 +1736,46 @@ AgentDirectoryEntry _testAgent(String pubkey) {
   );
 }
 
+Future<void> _expandComposer(WidgetTester tester) async {
+  if (find.byType(TextField).evaluate().isNotEmpty) return;
+  await tester.tap(find.text('Message\u2026'));
+  await tester.pumpAndSettle();
+}
+
+Future<void> _openAttachmentMenu(WidgetTester tester) async {
+  await tester.tap(find.byTooltip('Add attachment').hitTestable());
+  await tester.pumpAndSettle();
+}
+
 Future<void> _selectAndSendAgentMention(WidgetTester tester) async {
+  await _expandComposer(tester);
   await tester.enterText(find.byType(TextField), '@hel');
   await tester.pumpAndSettle();
   await tester.tap(find.text('Helper Bot'));
   await tester.pumpAndSettle();
   await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
-  await tester.tap(find.byIcon(LucideIcons.sendHorizontal));
+  await tester.tap(find.byIcon(LucideIcons.arrowUp));
   await tester.pumpAndSettle();
+}
+
+List<({String text, TextStyle style})> _flattenStyledTextSpans(
+  InlineSpan root,
+) {
+  final result = <({String text, TextStyle style})>[];
+
+  void visit(InlineSpan span, TextStyle inheritedStyle) {
+    if (span is! TextSpan) return;
+    final effectiveStyle = inheritedStyle.merge(span.style);
+    if (span.text case final text?) {
+      result.add((text: text, style: effectiveStyle));
+    }
+    for (final child in span.children ?? const <InlineSpan>[]) {
+      visit(child, effectiveStyle);
+    }
+  }
+
+  visit(root, const TextStyle());
+  return result;
 }
 
 Channel _makeCurrentChannel({String channelType = 'stream'}) {

@@ -920,11 +920,13 @@ mod tests {
         let configured = "my-configured-model";
         let result = discovery_failure_fallback(Provider::DatabricksV2, configured);
 
-        // DatabricksV2 must return the full DATABRICKS_V2_KNOWN_MODELS list.
+        // DatabricksV2 must return the full DATABRICKS_V2_KNOWN_MODELS list,
+        // plus the configured model so the picker can still represent the model
+        // the agent is actually running.
         assert_eq!(
             result.len(),
-            DATABRICKS_V2_KNOWN_MODELS.len(),
-            "DatabricksV2 fallback must return all known models"
+            DATABRICKS_V2_KNOWN_MODELS.len() + 1,
+            "DatabricksV2 fallback must return all known models plus the configured model"
         );
         let result_ids: Vec<&str> = result.iter().map(|m| m.id.as_str()).collect();
         for known_id in DATABRICKS_V2_KNOWN_MODELS {
@@ -933,6 +935,10 @@ mod tests {
                 "DatabricksV2 fallback must include known model '{known_id}'"
             );
         }
+        assert!(
+            result_ids.contains(&configured),
+            "DatabricksV2 fallback must include the configured model"
+        );
     }
 
     #[test]

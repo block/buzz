@@ -5,6 +5,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart' as http_testing;
 import 'package:nostr/nostr.dart' as nostr;
+import 'package:pointycastle/digests/sha256.dart';
 
 import 'package:buzz/features/invites/invite_join_provider.dart';
 import 'package:buzz/shared/auth/auth.dart';
@@ -128,7 +129,26 @@ void main() {
         'https://relay.example.com/api/invites/claim',
       );
       expect(capturedRequest!.body, jsonEncode({'code': 'code'}));
-      expect(capturedRequest!.headers['Authorization'], startsWith('Nostr '));
+      final authHeader = capturedRequest!.headers['Authorization'];
+      expect(authHeader, startsWith('Nostr '));
+      expect(capturedRequest!.followRedirects, isFalse);
+      final encoded = authHeader!.substring('Nostr '.length);
+      final authEvent =
+          jsonDecode(
+                utf8.decode(base64Url.decode(base64Url.normalize(encoded))),
+              )
+              as Map<String, dynamic>;
+      final tags = (authEvent['tags'] as List<dynamic>)
+          .map((tag) => (tag as List<dynamic>).cast<String>())
+          .toList();
+      final payloadHash = SHA256Digest()
+          .process(capturedRequest!.bodyBytes)
+          .map((byte) => byte.toRadixString(16).padLeft(2, '0'))
+          .join();
+      expect(authEvent['kind'], 27235);
+      expect(tags, contains(equals(['u', capturedRequest!.url.toString()])));
+      expect(tags, contains(equals(['method', 'POST'])));
+      expect(tags, contains(equals(['payload', payloadHash])));
       expect(auth.authenticatedCommunities, hasLength(1));
       expect(
         auth.authenticatedCommunities.single.relayUrl,
@@ -138,6 +158,21 @@ void main() {
       expect(auth.authenticatedCommunities.single.nsec, keys.nsec);
     },
   );
+
+  test('prepare rejects an unsafe relay before showing confirmation', () async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+
+    await expectLater(
+      container
+          .read(inviteJoinProvider.notifier)
+          .prepare(
+            const InviteDeepLink(relayUrl: 'wss://127.0.0.1', code: 'code'),
+          ),
+      throwsFormatException,
+    );
+    expect(container.read(inviteJoinProvider).status, InviteJoinStatus.idle);
+  });
 
   test('join_policy_required requires a fresh link and cannot retry', () async {
     final keys = nostr.Keys.generate();

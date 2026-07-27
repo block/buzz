@@ -37,6 +37,8 @@ function requirementKey(
       return `cli_config_invalid:${req.probe_args.join(",")}:${index}`;
     case "git_bash":
       return `git_bash:${index}`;
+    case "missing_binary":
+      return `missing_binary:${req.command}:${index}`;
   }
 }
 
@@ -381,6 +383,20 @@ function RequirementRow({
           </span>
         </div>
       );
+    case "missing_binary": {
+      // Missing-binary rows are purely informational — the user must install the
+      // binary or update their PATH. No in-app action can fix this.
+      return (
+        <div className="flex items-center gap-2 text-xs leading-4 text-muted-foreground">
+          <span className="flex-1 [overflow-wrap:anywhere]">
+            <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs text-foreground">
+              {requirement.command}
+            </code>{" "}
+            not found in PATH — install it or check your PATH settings
+          </span>
+        </div>
+      );
+    }
     case "cli_config_invalid": {
       // Config-invalid rows are purely informational — the user must edit an
       // external file. No Agent runtimes CTA (Buzz can't repair ~/.codex/config.toml)

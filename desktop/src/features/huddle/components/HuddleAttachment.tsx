@@ -24,6 +24,7 @@ import {
 } from "@/shared/ui/attachment";
 import { useHuddle } from "../HuddleContext";
 import { isHuddleStartStale } from "../lib/huddleCardState";
+import { formatHuddleActionError } from "../lib/huddleError";
 
 type HuddleAttachmentProps = {
   channelId: string | null;
@@ -221,9 +222,7 @@ export function HuddleAttachment({
       await joinHuddle(channelId, ephemeralChannelId);
       void queryClient.invalidateQueries({ queryKey: ["channels"] });
     } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "Failed to join huddle";
-      toast.error(message);
+      toast.error(formatHuddleActionError(error, "join"));
     } finally {
       setIsJoining(false);
     }

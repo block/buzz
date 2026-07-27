@@ -108,6 +108,8 @@ re-install hooks after env changes. Before agents run Git or hooks, activate the
 repo's Hermit environment (`. ./bin/activate-hermit`); do not rewrite hook
 commands to compensate for an unconfigured shell `PATH`.
 
+**Commit with `git commit -s`.** The required **DCO Check** fails any PR with a commit missing a `Signed-off-by` trailer, and `just hooks` installs a `commit-msg` hook that adds it to commits you create locally (`git rebase` and `git cherry-pick` still need `--signoff`) — if you build commit commands programmatically, include `-s` every time. To repair a branch that already has unsigned commits: `git rebase --signoff main`, then force-push.
+
 Additional rules:
 - No `unsafe` code
 - Do not introduce new `unwrap()` or `expect()` in production paths — use `?` and proper error types
@@ -553,6 +555,15 @@ To run the app locally (starts Docker, relay, iOS simulator automatically):
 just mobile-dev
 ```
 
+When run from a git worktree, `just mobile-dev` (and `just
+mobile-build-android`) give the debug build a per-worktree app identifier
+(keyed to the worktree directory name) and a branch-labelled app name via
+`scripts/mobile-worktree-overrides.sh`, so builds from multiple worktrees
+install side by side. Release builds are unaffected. `just mobile-clean`
+removes stale worktree-suffixed installs from simulators/emulators. See
+[mobile/README.md](mobile/README.md) for direct Xcode / Android Studio
+usage.
+
 ### Testing Conventions
 
 - Prefer **widget tests** over unit tests for UI components — test the
@@ -569,5 +580,5 @@ just mobile-dev
 - [CONTRIBUTING.md](CONTRIBUTING.md) — setup, code style, PR process, how to add event kinds / CLI subcommands / HTTP endpoints
 - [TESTING.md](TESTING.md) — multi-agent E2E test guide
 - [ARCHITECTURE.md](ARCHITECTURE.md) — system design and component relationships
-- [RELEASING.md](RELEASING.md) — release process: `release-desktop`, `release-relay`, `release-mobile`, auto-tag, internal builds
+- [RELEASING.md](RELEASING.md) — release process: `release-desktop`, `release-relay`, `scripts/mobile-release.sh`, candidate tags, internal builds
 - [README.md](README.md) — project overview and quick start
