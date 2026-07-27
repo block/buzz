@@ -40,6 +40,11 @@ import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
 import { Markdown } from "@/shared/ui/markdown";
 import type { VideoReviewContext } from "@/shared/ui/VideoPlayer";
 import { MessageActionBar } from "./MessageActionBar";
+import { CrmActionCard } from "./CrmActionCard";
+import {
+  isCrmActionControlReaction,
+  parseCrmActionCard,
+} from "./crmActionCardParser";
 import { MessageAgentOwner } from "./MessageAgentOwner";
 import { MessageAuthorText, MessageHeaderRow } from "./MessageHeader";
 import { MessageTimestamp } from "./MessageTimestamp";
@@ -165,6 +170,7 @@ export const MessageRow = React.memo(
       pending: reactionPending,
       errorMessage: reactionErrorMessage,
       select: handleReactionSelect,
+      chooseExclusive: handleExclusiveReactionChoice,
     } = useReactionHandler(message, onToggleReaction);
     const { openReminder, activeReminderEventIds } = useRemindLater();
     const hasActiveReminder = activeReminderEventIds.has(message.id);
@@ -301,6 +307,20 @@ export const MessageRow = React.memo(
     }, [collapseDepthGuideActions]);
     const getTag = (name: string) =>
       message.tags?.find((tag) => tag[0] === name)?.[1];
+    const crmActionCard = React.useMemo(
+      () => parseCrmActionCard(message.body),
+      [message.body],
+    );
+    const visibleReactions = React.useMemo(
+      () =>
+        crmActionCard
+          ? reactions.filter(
+              (reaction) =>
+                !isCrmActionControlReaction(crmActionCard, reaction.emoji),
+            )
+          : reactions,
+      [crmActionCard, reactions],
+    );
 
     const renderBody = () => {
       switch (message.kind) {
@@ -365,7 +385,7 @@ export const MessageRow = React.memo(
                 message,
                 isKnownAgentPubkey,
               )}
-              content={message.body}
+              content={crmActionCard?.content ?? message.body}
               customEmoji={customEmoji}
               imetaByUrl={imetaByUrl}
               agentMentionPubkeysByName={agentMentionPubkeysByName}
@@ -378,6 +398,17 @@ export const MessageRow = React.memo(
           );
       }
     };
+
+    const crmActionCardNode = crmActionCard ? (
+      <CrmActionCard
+        action={crmActionCard}
+        canToggle={canToggleReactions}
+        onChooseLeadControl={handleExclusiveReactionChoice}
+        onSelect={handleReactionSelect}
+        pending={reactionPending}
+        reactions={reactions}
+      />
+    ) : null;
 
     const isThreadReplyLayout = layoutVariant === "thread-reply";
     const guideBleedRem = isThreadReplyLayout ? 0.25 : 0;
@@ -567,10 +598,11 @@ export const MessageRow = React.memo(
     const messageBodyNode = (
       <>
         {renderBody()}
+        {crmActionCardNode}
         {continuationMetadataNode}
         <MessageReactions
           messageId={message.id}
-          reactions={reactions}
+          reactions={visibleReactions}
           canToggle={canToggleReactions}
           pending={reactionPending}
           burstEmojiOnRender={badgeBurstEmoji}
