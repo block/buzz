@@ -145,24 +145,35 @@ pub async fn insert_mentions(
         return Ok(());
     }
 
-    // Single multi-row INSERT ... ON CONFLICT DO NOTHING — one round-trip regardless of mention count.
-    let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
-        "INSERT INTO event_mentions \
-         (community_id, pubkey_hex, event_id, event_created_at, channel_id, event_kind) ",
-    );
+    // Multi-row INSERT ... ON CONFLICT DO NOTHING, chunked to stay under
+    // Postgres's 65,535 bind-parameter statement cap (6 binds per row caps a
+    // single statement at ~10.9k rows). Relay-signed kind 39002 rosters carry
+    // one p-tag per channel member and can exceed that. All chunks run in one
+    // transaction: callers treat mention indexing as fire-and-forget (failures
+    // are logged, the event is already stored, and nothing retries), so a
+    // partially committed index would be permanent.
+    const MENTION_INSERT_CHUNK_ROWS: usize = 5_000;
+    let mut tx = pool.begin().await?;
+    for chunk in valid_pubkeys.chunks(MENTION_INSERT_CHUNK_ROWS) {
+        let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
+            "INSERT INTO event_mentions \
+             (community_id, pubkey_hex, event_id, event_created_at, channel_id, event_kind) ",
+        );
 
-    qb.push_values(&valid_pubkeys, |mut b, pubkey| {
-        b.push_bind(community_id.as_uuid())
-            .push_bind(pubkey.as_str())
-            .push_bind(event_id_bytes.as_slice())
-            .push_bind(created_at)
-            .push_bind(channel_id)
-            .push_bind(kind as i32);
-    });
+        qb.push_values(chunk, |mut b, pubkey| {
+            b.push_bind(community_id.as_uuid())
+                .push_bind(pubkey.as_str())
+                .push_bind(event_id_bytes.as_slice())
+                .push_bind(created_at)
+                .push_bind(channel_id)
+                .push_bind(kind as i32);
+        });
 
-    qb.push(" ON CONFLICT DO NOTHING");
+        qb.push(" ON CONFLICT DO NOTHING");
 
-    qb.build().execute(pool).await?;
+        qb.build().execute(&mut *tx).await?;
+    }
+    tx.commit().await?;
     Ok(())
 }
 
