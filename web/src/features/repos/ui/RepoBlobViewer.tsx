@@ -10,11 +10,10 @@
 import { ArrowLeft, Check, Copy, Download, FileText, Play } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Link, useParams } from "@tanstack/react-router";
-import Markdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import { toast } from "sonner";
 
 import { Button } from "@/shared/ui/button";
+import { Markdown } from "@/shared/ui/markdown";
 import type { BlobView } from "../git-client";
 import { useGitBlob, useGitHtmlDoc } from "../use-git-browse";
 import { useRepoContext } from "../use-repo-context";
@@ -182,7 +181,7 @@ function ViewerBody({
     case "markdown":
       return (
         <div className="prose prose-sm dark:prose-invert max-w-none rounded-lg border border-black/10 bg-white/50 p-4 dark:border-white/10 dark:bg-white/5">
-          <Markdown remarkPlugins={[remarkGfm]}>{view.content}</Markdown>
+          <Markdown>{view.content}</Markdown>
         </div>
       );
     case "html":

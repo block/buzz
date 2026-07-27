@@ -9,9 +9,8 @@ import {
 import { hasNip07Provider } from "@/shared/lib/nostr-signer";
 import { relayWsUrl } from "@/shared/lib/relay-url";
 import { Button } from "@/shared/ui/button";
+import { Markdown } from "@/shared/ui/markdown";
 import * as React from "react";
-import Markdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 
 import { InviteJoinPolicyNotice } from "./InviteJoinPolicyNotice";
 
@@ -372,9 +371,7 @@ export function InvitePage({ code }: { code: string }) {
               </button>
             </div>
             <div className="prose prose-sm max-w-none">
-              <Markdown remarkPlugins={[remarkGfm]}>
-                {document.markdown}
-              </Markdown>
+              <Markdown>{document.markdown}</Markdown>
             </div>
           </div>
         </div>

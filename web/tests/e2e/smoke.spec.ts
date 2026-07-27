@@ -120,6 +120,45 @@ test("invite requires age and legal consent before opening Buzz", async ({
   expect(consentBox?.width).toBe(acceptButtonBox?.width);
 });
 
+test("markdown opens off-site links in a new tab, in-app links in place", async ({
+  page,
+}) => {
+  await page.route("**/api/join-policy", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        policy: {
+          terms_markdown: [
+            "Read the [full policy](https://example.com/terms),",
+            "our [help centre](/help), and [section two](#two).",
+          ].join(" "),
+          age_attestation_required: false,
+          version: "policy-v1",
+        },
+      }),
+    });
+  });
+  await page.route("https://api.github.com/**", async (route) => {
+    await route.fulfill({ status: 500 });
+  });
+
+  await page.goto("/invite/demo-code");
+  await page.getByRole("button", { name: "Terms of Service" }).click();
+
+  const dialog = page.getByRole("dialog", { name: "Terms of Service" });
+  const offSite = dialog.getByRole("link", { name: "full policy" });
+  await expect(offSite).toHaveAttribute("target", "_blank");
+  await expect(offSite).toHaveAttribute("rel", /noreferrer/);
+
+  await expect(
+    dialog.getByRole("link", { name: "help centre" }),
+  ).not.toHaveAttribute("target", "_blank");
+  await expect(
+    dialog.getByRole("link", { name: "section two" }),
+  ).not.toHaveAttribute("target", "_blank");
+});
+
 test("invite can enroll a NIP-07 identity for browser access", async ({
   page,
 }) => {

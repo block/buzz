@@ -1,6 +1,5 @@
+import { Markdown } from "@/shared/ui/markdown";
 import { BookOpen } from "lucide-react";
-import Markdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import type { ReadmeResult } from "../git-client";
 
 export function RepoReadmeSection({
@@ -35,7 +34,7 @@ export function RepoReadmeSection({
         {readme.filename}
       </h2>
       <div className="prose prose-sm dark:prose-invert max-w-none rounded-lg border border-black/10 bg-white/50 p-4 dark:border-white/10 dark:bg-white/5">
-        <Markdown remarkPlugins={[remarkGfm]}>{readme.content}</Markdown>
+        <Markdown>{readme.content}</Markdown>
       </div>
     </div>
   );
