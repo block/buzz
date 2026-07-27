@@ -1,11 +1,14 @@
+use std::path::PathBuf;
+
 use serde::Serialize;
 use tauri::{AppHandle, Manager};
 
 use crate::{
     app_state::AppState,
     managed_agents::{
-        latest_managed_agent_log_path, load_managed_agents, read_log_tail, BackendKind,
-        ManagedAgentLogResponse,
+        build_managed_agent_summary, latest_managed_agent_log_path, load_global_agent_config,
+        load_managed_agents, load_personas, managed_agent_log_path, managed_agent_runtime_log_path,
+        read_log_tail, workspace_pair_key, BackendKind, ManagedAgentLogResponse,
     },
 };
 
@@ -24,6 +27,10 @@ struct ParsedAgentUsage {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+/// Bounded local usage and effective runtime metadata for one managed agent.
+///
+/// Prompt measurements are derived from harness logs and are estimates rather
+/// than provider billing data. No prompt or message content is serialized.
 pub struct AgentUsageSummary {
     pubkey: String,
     name: String,
@@ -77,6 +84,12 @@ fn parse_agent_usage(content: &str) -> ParsedAgentUsage {
     usage
 }
 
+fn select_usage_log_path(pair_path: Option<PathBuf>, legacy_path: PathBuf) -> PathBuf {
+    pair_path
+        .filter(|path| path.exists())
+        .unwrap_or(legacy_path)
+}
+
 #[tauri::command]
 pub async fn get_managed_agent_log(
     pubkey: String,
@@ -117,29 +130,48 @@ pub async fn get_managed_agent_log(
 #[tauri::command]
 pub async fn get_agent_usage_dashboard(app: AppHandle) -> Result<Vec<AgentUsageSummary>, String> {
     tokio::task::spawn_blocking(move || {
-        let records = {
+        let agent_contexts = {
             let state = app.state::<AppState>();
             let _store_guard = state
                 .managed_agents_store_lock
                 .lock()
                 .map_err(|error| error.to_string())?;
-            load_managed_agents(&app)?
+            let records = load_managed_agents(&app)?;
+            let personas = load_personas(&app).unwrap_or_default();
+            let global = load_global_agent_config(&app).unwrap_or_default();
+            let runtimes = state
+                .managed_agent_processes
+                .lock()
+                .map_err(|error| error.to_string())?;
+
+            records
+                .iter()
+                .filter(|record| {
+                    !record.pubkey.is_empty() && matches!(&record.backend, BackendKind::Local)
+                })
+                .map(|record| {
+                    let summary =
+                        build_managed_agent_summary(&app, record, &runtimes, &personas, &global)?;
+                    let legacy_log_path = managed_agent_log_path(&app, &record.pubkey)?;
+                    let pair_log_path = workspace_pair_key(&app, record)
+                        .and_then(|key| managed_agent_runtime_log_path(&app, &key).ok());
+                    let log_path = select_usage_log_path(pair_log_path, legacy_log_path);
+                    Ok((summary, log_path))
+                })
+                .collect::<Result<Vec<_>, String>>()?
         };
         let mut summaries = Vec::new();
 
-        for record in records.into_iter().filter(|record| {
-            !record.pubkey.is_empty() && matches!(&record.backend, BackendKind::Local)
-        }) {
-            let log_path = managed_agent_log_path(&app, &record.pubkey)?;
+        for (summary, log_path) in agent_contexts {
             let content = read_log_tail(&log_path, USAGE_LOG_SAMPLE_LINES)?;
             let usage = parse_agent_usage(&content);
 
             summaries.push(AgentUsageSummary {
-                pubkey: record.pubkey,
-                name: record.name,
-                model: record.model,
-                parallelism: record.parallelism,
-                is_running: record.runtime_pid.is_some(),
+                pubkey: summary.pubkey,
+                name: summary.name,
+                model: summary.model,
+                parallelism: summary.parallelism,
+                is_running: summary.status == "running",
                 prompt_count: usage.prompt_count,
                 prompt_bytes: usage.prompt_bytes,
                 estimated_prompt_tokens: usage.prompt_bytes.saturating_add(3) / 4,
@@ -194,5 +226,20 @@ ERROR dead-lettering batch immediately — provider usage limit reached
         assert_eq!(usage.prompt_count, 0);
         assert_eq!(usage.prompt_bytes, 0);
         assert_eq!(usage.session_start_count, 1);
+    }
+
+    #[test]
+    fn usage_log_prefers_existing_pair_scope_and_falls_back_to_legacy() {
+        let temp = tempfile::tempdir().unwrap();
+        let pair = temp.path().join("pair.log");
+        let legacy = temp.path().join("legacy.log");
+
+        assert_eq!(
+            select_usage_log_path(Some(pair.clone()), legacy.clone()),
+            legacy
+        );
+
+        std::fs::write(&pair, "pair usage").unwrap();
+        assert_eq!(select_usage_log_path(Some(pair.clone()), legacy), pair);
     }
 }
