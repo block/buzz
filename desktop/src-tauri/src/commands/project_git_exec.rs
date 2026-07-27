@@ -80,6 +80,7 @@ pub(crate) fn run_git(
     command.stdin(Stdio::null());
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
+    crate::util::configure_no_window(&mut command);
 
     let mut child = command
         .spawn()

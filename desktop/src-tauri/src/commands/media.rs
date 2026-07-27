@@ -264,6 +264,16 @@ pub(crate) fn sanitize_image_for_upload(body: Vec<u8>, mime: &str) -> Result<Vec
         return Ok(stripped.unwrap_or(body));
     }
 
+    // Agent/team snapshot PNGs carry their manifest in a tEXt chunk that the
+    // re-encode below would destroy. Pull it out first and re-inject it after
+    // sanitizing — all other metadata is still stripped, and the relay
+    // allowlists exactly this chunk.
+    let snapshot_chunk = if format == image::ImageFormat::Png {
+        super::media_snapshot_png::extract_snapshot_text_chunk(&body)
+    } else {
+        None
+    };
+
     use image::ImageDecoder;
     let reader = image::ImageReader::with_format(std::io::Cursor::new(&body), format);
     let mut decoder = reader
@@ -282,7 +292,11 @@ pub(crate) fn sanitize_image_for_upload(body: Vec<u8>, mime: &str) -> Result<Vec
     image
         .write_to(&mut output, format)
         .map_err(|_| "failed to encode image without metadata".to_string())?;
-    Ok(output.into_inner())
+    let sanitized = output.into_inner();
+    match snapshot_chunk {
+        Some(chunk) => super::media_snapshot_png::inject_snapshot_text_chunk(sanitized, &chunk),
+        None => Ok(sanitized),
+    }
 }
 
 pub(crate) fn detect_and_validate_mime(body: &[u8]) -> Result<String, String> {

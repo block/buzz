@@ -898,7 +898,7 @@ impl Db {
             .fetch_one(&mut *tx)
             .await?;
 
-            if owned_count >= relay_members::MAX_COMMUNITIES_PER_OWNER {
+            if owned_count >= relay_members::max_communities_per_owner() {
                 tx.rollback().await?;
                 return Ok(CreateCommunityWithOwnerResult::LimitReached);
             }
@@ -1841,6 +1841,24 @@ impl Db {
         limit: u32,
     ) -> Result<Vec<user::UserSearchProfile>> {
         user::search_users(&self.pool, community_id, query, limit).await
+    }
+
+    /// Return agent pubkeys whose verified owner matches `owner_pubkey`.
+    pub async fn list_agent_pubkeys_by_owner(
+        &self,
+        community_id: CommunityId,
+        owner_pubkey: &[u8],
+    ) -> Result<Vec<Vec<u8>>> {
+        user::list_agent_pubkeys_by_owner(&self.pool, community_id, owner_pubkey).await
+    }
+
+    /// Fetch verified ownership metadata for the requested agent pubkeys.
+    pub async fn get_agent_owners(
+        &self,
+        community_id: CommunityId,
+        agent_pubkeys: &[Vec<u8>],
+    ) -> Result<Vec<user::AgentOwner>> {
+        user::get_agent_owners(&self.pool, community_id, agent_pubkeys).await
     }
 
     /// Atomically set agent owner — only if no owner is currently assigned.

@@ -23,9 +23,7 @@ class _SendButton extends StatelessWidget {
           disabledBackgroundColor: context.colors.primary.withValues(
             alpha: 0.5,
           ),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(Radii.md),
-          ),
+          shape: const CircleBorder(),
         ),
         padding: EdgeInsets.zero,
         icon: isSending
@@ -38,7 +36,7 @@ class _SendButton extends StatelessWidget {
                 ),
               )
             : Icon(
-                LucideIcons.sendHorizontal,
+                LucideIcons.arrowUp,
                 size: 18,
                 color: context.colors.onPrimary,
               ),

@@ -299,9 +299,20 @@ async fn nip11_or_ws_handler(
 
     let max_frame_bytes = state.config.max_frame_bytes;
     match WebSocketUpgrade::from_request(req, &state).await {
-        Ok(ws) => limit_relay_websocket(ws, max_frame_bytes)
-            .on_upgrade(move |socket| handle_connection(socket, state, addr, tenant))
-            .into_response(),
+        Ok(ws) => {
+            // Shutting down: refuse new sockets instead of accepting a
+            // connection onto a dying pod. Readiness already returns 503, but
+            // that only stops K8s routing — direct and in-flight upgrades
+            // still reach here during the pre-drain grace window. Clients
+            // treat the refusal as a normal dial failure and retry, landing
+            // on a healthy pod.
+            if state.shutting_down.load(Ordering::Relaxed) {
+                return (StatusCode::SERVICE_UNAVAILABLE, "relay restarting").into_response();
+            }
+            limit_relay_websocket(ws, max_frame_bytes)
+                .on_upgrade(move |socket| handle_connection(socket, state, addr, tenant))
+                .into_response()
+        }
         Err(_) => {
             // Browser requesting HTML and Git web GUI is enabled → serve SPA.
             if state.config.serve_git_web_gui {

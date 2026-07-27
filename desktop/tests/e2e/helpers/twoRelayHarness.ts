@@ -17,7 +17,7 @@ type OwnedProcess = { name: string; child: ChildProcess; logPath: string };
 
 export class TwoRelayHarness {
   readonly root: string;
-  readonly relays: readonly [RelaySpec, RelaySpec];
+  readonly relays: readonly RelaySpec[];
   private readonly processes: OwnedProcess[] = [];
 
   get ownedPids(): number[] {
@@ -26,12 +26,12 @@ export class TwoRelayHarness {
     );
   }
 
-  private constructor(root: string, relays: readonly [RelaySpec, RelaySpec]) {
+  private constructor(root: string, relays: readonly RelaySpec[]) {
     this.root = root;
     this.relays = relays;
   }
 
-  static async create(relays: readonly [RelaySpec, RelaySpec]) {
+  static async create(relays: readonly RelaySpec[]) {
     return new TwoRelayHarness(
       await mkdtemp(join(tmpdir(), "buzz-ae-e2e-")),
       relays,
@@ -44,6 +44,45 @@ export class TwoRelayHarness {
     await Promise.all(
       this.relays.map((relay) => this.startRelay(binary, relay)),
     );
+  }
+
+  /**
+   * SIGTERM one relay by name and wait for it to exit on its own. Unlike
+   * `stop()`, this never escalates to SIGKILL: the relay's graceful drain
+   * (readiness 503 → 5s grace → 1012 close broadcast → listener drain) is
+   * exactly what restart tests exercise, so a forced kill would invalidate
+   * the run. Throws if the process does not exit within `timeoutMs`.
+   */
+  async terminateRelayGracefully(name: string, timeoutMs = 45_000) {
+    const owned = [...this.processes]
+      .reverse()
+      .find(
+        (candidate) =>
+          candidate.name === name &&
+          candidate.child.exitCode === null &&
+          candidate.child.signalCode === null,
+      );
+    if (!owned) throw new Error(`no live relay process named ${name}`);
+    const exited = new Promise<void>((resolveExit) =>
+      owned.child.once("exit", () => resolveExit()),
+    );
+    this.signal(owned.child, "SIGTERM");
+    if (
+      !(await Promise.race([exited.then(() => true), delay(timeoutMs, false)]))
+    ) {
+      throw new Error(
+        `${name} did not exit within ${timeoutMs}ms of SIGTERM — graceful drain is stuck`,
+      );
+    }
+  }
+
+  /** Start a fresh process for a relay spec on its original ports. */
+  async restartRelay(name: string, binary = process.env.BUZZ_E2E_RELAY_BIN) {
+    if (!binary)
+      throw new Error("BUZZ_E2E_RELAY_BIN is required for the live gate");
+    const relay = this.relays.find((candidate) => candidate.name === name);
+    if (!relay) throw new Error(`no relay spec named ${name}`);
+    await this.startRelay(binary, relay);
   }
 
   async startAcp(

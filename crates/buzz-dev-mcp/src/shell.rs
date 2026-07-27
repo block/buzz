@@ -177,6 +177,7 @@ pub async fn run(
     cmd.stderr(Stdio::piped());
     cmd.kill_on_drop(true);
     set_process_group(&mut cmd);
+    crate::configure_no_window_async(&mut cmd);
 
     let started = Instant::now();
     let mut child = match cmd.spawn() {
@@ -561,6 +562,36 @@ fn git_bash_from_standard_path_bases(
     .find(|bash| bash.is_file())
 }
 
+/// True if `path` is inside the Windows app-execution-alias directory
+/// (`%LOCALAPPDATA%\Microsoft\WindowsApps`). Paths in that directory are WSL
+/// stub launchers, not real executables — running them spawns `wsl.exe` /
+/// `wslhost.exe` / `conhost.exe` trees rather than the intended shell.
+///
+/// The check is purely path-structural (component-wise, case-insensitive) so it
+/// compiles and is testable on any host.  It matches the path component named
+/// `Microsoft` immediately followed by `WindowsApps`, so a sibling directory
+/// named `MicrosoftWindowsApps` does not match.
+#[cfg(any(windows, test))]
+fn is_windows_apps_alias(path: &Path) -> bool {
+    let mut components = path.components().peekable();
+    while components.peek().is_some() {
+        let mut it = components.clone();
+        if it.next().is_some_and(|c| {
+            c.as_os_str()
+                .to_string_lossy()
+                .eq_ignore_ascii_case("Microsoft")
+        }) && it.next().is_some_and(|c| {
+            c.as_os_str()
+                .to_string_lossy()
+                .eq_ignore_ascii_case("WindowsApps")
+        }) {
+            return true;
+        }
+        components.next();
+    }
+    false
+}
+
 /// True if `dir` is `root` or lives under it, comparing path components
 /// case-INsensitively. Windows paths are case-insensitive, but `Path::starts_with`
 /// compares components case-sensitively on every platform — so a PATH entry spelled
@@ -583,12 +614,28 @@ fn is_under_dir(dir: &Path, root: &Path) -> bool {
 }
 
 /// Scan the child's PATH for `bash.exe`, skipping the Windows system directory
-/// (`system_root`, normally `%SystemRoot%`) so we never resolve WSL's
-/// `System32\bash.exe`. PATH is parsed with `std::env::split_paths` (never a
-/// hand-split on ';') so it matches exactly what the spawned child would see.
+/// (`system_root`, normally `%SystemRoot%`) and the Windows app-execution-alias
+/// directory (`%LOCALAPPDATA%\Microsoft\WindowsApps`) so we never resolve WSL's
+/// `System32\bash.exe` or the `WindowsApps\bash.exe` stub launcher.
+///
+/// Skipping happens during iteration so scanning continues to the next PATH entry
+/// when an alias is encountered — alias-first/real-bash-second selects the real one.
+/// PATH is parsed with `std::env::split_paths` (never a hand-split on `;`) so it
+/// matches exactly what the spawned child would see.
 #[cfg(windows)]
 fn scan_path_for_bash(path_env: &str, system_root: Option<&Path>) -> Option<PathBuf> {
-    scan_path_for_command(Path::new("bash.exe"), path_env, system_root)
+    for dir in std::env::split_paths(path_env) {
+        if let Some(root) = system_root {
+            if is_under_dir(&dir, root) {
+                continue;
+            }
+        }
+        let candidate = dir.join("bash.exe");
+        if candidate.is_file() && !is_windows_apps_alias(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 /// Scan `path_env` for `name` (or `name.exe` on Windows if `name` has no
@@ -1030,6 +1077,63 @@ mod tests {
             "stdout: {stdout}"
         );
     }
+
+    // --- is_windows_apps_alias predicate tests (cross-host) ---
+
+    #[test]
+    fn test_windows_apps_alias_detected_typical_path() {
+        // Typical WSL alias: %LOCALAPPDATA%\Microsoft\WindowsApps\bash.exe
+        // Forward-slash form parses on both Windows and non-Windows hosts.
+        assert!(
+            is_windows_apps_alias(Path::new(
+                "C:/Users/alice/AppData/Local/Microsoft/WindowsApps/bash.exe"
+            )),
+            "standard WindowsApps path must be detected as an alias"
+        );
+    }
+
+    #[test]
+    fn test_windows_apps_alias_detected_case_insensitive() {
+        assert!(
+            is_windows_apps_alias(Path::new(
+                "C:/Users/alice/AppData/Local/MICROSOFT/WINDOWSAPPS/bash.exe"
+            )),
+            "WindowsApps detection must be case-insensitive"
+        );
+    }
+
+    #[test]
+    fn test_windows_apps_alias_rejected_real_git_bash() {
+        assert!(
+            !is_windows_apps_alias(Path::new("C:/Program Files/Git/bin/bash.exe")),
+            "real Git Bash must not be detected as a WindowsApps alias"
+        );
+    }
+
+    #[test]
+    fn test_windows_apps_alias_rejected_system32_bash() {
+        assert!(
+            !is_windows_apps_alias(Path::new("C:/Windows/System32/bash.exe")),
+            "System32 bash must not be detected as a WindowsApps alias"
+        );
+    }
+
+    #[test]
+    fn test_windows_apps_alias_rejected_partial_component_match() {
+        // A directory named "Microsoft" without a "WindowsApps" sibling must not match.
+        assert!(
+            !is_windows_apps_alias(Path::new("C:/Microsoft/SomeOtherDir/bash.exe")),
+            "path with Microsoft but not WindowsApps must not be detected"
+        );
+    }
+
+    #[test]
+    fn test_windows_apps_alias_rejected_unix_bash() {
+        assert!(
+            !is_windows_apps_alias(Path::new("/usr/bin/bash")),
+            "Unix bash must not be detected as a WindowsApps alias"
+        );
+    }
 }
 
 #[cfg(all(test, windows))]
@@ -1342,5 +1446,58 @@ mod windows_resolver_tests {
         let found = scan_path_for_bash(path_env.to_str().expect("utf8"), Some(sys_root.path()))
             .expect("bash on PATH must be found");
         assert_eq!(found, real_bash);
+    }
+
+    /// WSL alias rejection — when WindowsApps\bash.exe is first on PATH and a
+    /// legitimate Git Bash follows, the scanner must skip the alias and return
+    /// the real one (alias-first / real-bash-second ordering).
+    #[test]
+    fn windows_apps_alias_first_real_bash_second_returns_real() {
+        let base = tempdir().expect("base");
+
+        // Simulate %LOCALAPPDATA%\Microsoft\WindowsApps structure.
+        let microsoft = base.path().join("Microsoft");
+        let windows_apps = microsoft.join("WindowsApps");
+        std::fs::create_dir_all(&windows_apps).expect("mkdir WindowsApps");
+        let alias_bash = windows_apps.join("bash.exe");
+        touch(&alias_bash);
+
+        // Legitimate Git Bash in a separate directory.
+        let git_bin = base.path().join("git").join("bin");
+        std::fs::create_dir_all(&git_bin).expect("mkdir git/bin");
+        let real_bash = git_bin.join("bash.exe");
+        touch(&real_bash);
+
+        let path_env = env::join_paths([windows_apps.clone(), git_bin.clone()]).expect("join");
+        let sys_root = tempdir().expect("sysroot"); // empty
+
+        let found = scan_path_for_bash(path_env.to_str().expect("utf8"), Some(sys_root.path()))
+            .expect("real bash must be found after skipping alias");
+        assert_eq!(
+            found, real_bash,
+            "must skip WindowsApps alias and return real bash"
+        );
+    }
+
+    /// WSL alias rejection — when only WindowsApps\bash.exe is on PATH (no real
+    /// Git Bash installed), the scanner must return None rather than the alias.
+    #[test]
+    fn windows_apps_alias_only_returns_none() {
+        let base = tempdir().expect("base");
+
+        let microsoft = base.path().join("Microsoft");
+        let windows_apps = microsoft.join("WindowsApps");
+        std::fs::create_dir_all(&windows_apps).expect("mkdir WindowsApps");
+        let alias_bash = windows_apps.join("bash.exe");
+        touch(&alias_bash);
+
+        let path_env = env::join_paths([windows_apps.clone()]).expect("join");
+        let sys_root = tempdir().expect("sysroot"); // empty
+
+        let found = scan_path_for_bash(path_env.to_str().expect("utf8"), Some(sys_root.path()));
+        assert!(
+            found.is_none(),
+            "alias-only PATH must return None, not the WSL launcher"
+        );
     }
 }

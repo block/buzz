@@ -12,6 +12,8 @@ import { ProfilePopover } from "@/features/profile/ui/ProfilePopover";
 import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 import type { Community } from "@/features/communities/types";
 import { CommunitySwitcher } from "@/features/communities/ui/CommunitySwitcher";
+import { useMyRelayMembershipLookupQuery } from "@/features/community-members/hooks";
+import type { SettingsSection } from "@/features/settings/ui/SettingsPanels";
 import type { PresenceStatus, Profile, UserStatus } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 
@@ -19,7 +21,7 @@ type SidebarProfileCardProps = {
   activeCommunity: Community | null;
   isPresencePending?: boolean;
   onOpenAddCommunity: () => void;
-  onOpenSettings: (section?: "profile" | "appearance") => void;
+  onOpenSettings: (section?: SettingsSection) => void;
   onRemoveCommunity: (id: string) => void;
   onSendFeedback?: () => void;
   onSetPresenceStatus?: (status: PresenceStatus) => void;
@@ -56,6 +58,9 @@ export function SidebarProfileCard({
   communities,
 }: SidebarProfileCardProps) {
   const selfProfileCache = useSelfProfileCache();
+  const myMembershipQuery = useMyRelayMembershipLookupQuery();
+  const activeRole = myMembershipQuery.data?.membership?.role;
+  const canInvite = activeRole === "owner" || activeRole === "admin";
   const [profilePopoverOpen, setProfilePopoverOpen] = React.useState(false);
   const profileCardRef = React.useRef<HTMLDivElement | null>(null);
   const toggleProfilePopover = React.useCallback(
@@ -159,7 +164,15 @@ export function SidebarProfileCard({
             communitySwitcherSlot={
               <CommunitySwitcher
                 activeCommunity={activeCommunity}
-                onAddCommunity={onOpenAddCommunity}
+                canInvite={canInvite}
+                onAddCommunity={() => {
+                  setProfilePopoverOpen(false);
+                  onOpenAddCommunity();
+                }}
+                onInvite={() => {
+                  setProfilePopoverOpen(false);
+                  onOpenSettings("community-members");
+                }}
                 onRemoveCommunity={onRemoveCommunity}
                 onSwitchCommunity={onSwitchCommunity}
                 onUpdateCommunity={onUpdateCommunity}

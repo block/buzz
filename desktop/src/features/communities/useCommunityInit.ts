@@ -2,7 +2,11 @@ import { useEffect, useRef, useState } from "react";
 
 import { relayClient } from "@/shared/api/relayClient";
 import { resetRateLimitGate } from "@/shared/api/relayRateLimitGate";
-import { applyCommunity, getDefaultRelayUrl } from "@/shared/api/tauri";
+import {
+  applyCommunity,
+  autoConnectDefaultRelayEnabled,
+  getDefaultRelayUrl,
+} from "@/shared/api/tauri";
 import { getIdentity } from "@/shared/api/tauriIdentity";
 import { getOverrides } from "@/shared/features";
 import { resetMediaCaches } from "@/shared/lib/mediaUrl";
@@ -25,7 +29,10 @@ import { resetSidebarRelayConnectionCardState } from "@/features/sidebar/ui/useS
 import { clearMarkdownNodeCache } from "@/shared/ui/markdown/nodeCache";
 import { resetVideoPlayerState } from "@/shared/ui/videoPlayerState";
 
-import { initFirstCommunity } from "./communityStorage";
+import {
+  initFirstCommunity,
+  shouldAutoConnectDefaultRelay,
+} from "./communityStorage";
 import type { Community } from "./types";
 
 /**
@@ -107,13 +114,33 @@ export function useCommunityInit(
       if (!activeCommunity) {
         try {
           const defaultRelayUrl = await getDefaultRelayUrl();
+          const autoConnectDefaultRelay =
+            await autoConnectDefaultRelayEnabled();
 
-          if (isSharedIdentity) {
+          // Internal builds explicitly opt into treating their reviewed default
+          // relay as the first community. Public builds retain community
+          // selection even when BUZZ_RELAY_URL is overridden at runtime.
+          if (
+            isSharedIdentity ||
+            (autoConnectDefaultRelay &&
+              shouldAutoConnectDefaultRelay(defaultRelayUrl))
+          ) {
             const identity = await getIdentity();
             if (cancelled) return;
-            initFirstCommunity(defaultRelayUrl, identity.pubkey);
-            if (!cancelled) {
+            const community = initFirstCommunity(
+              defaultRelayUrl,
+              identity.pubkey,
+            );
+            if (community && !cancelled) {
               window.location.reload();
+              return;
+            }
+            if (!cancelled) {
+              setResult({
+                isReady: false,
+                needsSetup: true,
+                defaultRelayUrl,
+              });
             }
             return;
           }

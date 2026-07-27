@@ -6,4 +6,16 @@
 // `mobile/ios/Flutter/AppOverrides.xcconfig` containing
 // `BUNDLE_IDENTIFIER = your.app.id` (gitignored).
 BUNDLE_IDENTIFIER = com.buzz.buzzMobile
+APP_DISPLAY_NAME = Buzz
+
+// Worktree-aware debug identity (gitignored, written by
+// scripts/mobile-worktree-overrides.sh): a per-worktree bundle identifier
+// and a branch-labelled display name so debug builds from multiple worktrees
+// install side by side. Release and Profile builds never include it.
+#include? "WorktreeOverrides.xcconfig"
+
+// Developer app-specific overrides are included last: xcconfig
+// later-include-wins is per variable, so a personal BUNDLE_IDENTIFIER for
+// device signing beats the worktree default while unset variables still
+// fall through to the worktree values.
 #include? "AppOverrides.xcconfig"

@@ -211,8 +211,13 @@ function unescapeSvgText(text: string) {
     .replace(/&amp;/gu, "&");
 }
 
-export function emojiAvatarDataUrl(emoji: string, color: string) {
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512"><rect width="512" height="512" rx="256" fill="${color}"/><text x="50%" y="56%" dominant-baseline="middle" text-anchor="middle" font-size="${EMOJI_AVATAR_FONT_SIZE}">${escapeSvgText(emoji)}</text></svg>`;
+export function emojiAvatarDataUrl(
+  emoji: string,
+  color: string,
+  shape: "circle" | "rounded-square" = "circle",
+) {
+  const cornerRadius = shape === "rounded-square" ? 112 : 256;
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512"><rect width="512" height="512" rx="${cornerRadius}" fill="${color}"/><text x="50%" y="56%" dominant-baseline="middle" text-anchor="middle" font-size="${EMOJI_AVATAR_FONT_SIZE}">${escapeSvgText(emoji)}</text></svg>`;
   return `${EMOJI_AVATAR_DATA_URL_PREFIX}${encodeURIComponent(svg)}`;
 }
 

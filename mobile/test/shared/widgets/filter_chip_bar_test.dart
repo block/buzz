@@ -36,4 +36,44 @@ void main() {
     final resolved = chipTheme.color?.resolve({WidgetState.selected});
     expect(resolved, accent);
   });
+
+  testWidgets('expanded chips preserve large accessible text scaling', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.light(),
+        home: MediaQuery(
+          data: const MediaQueryData(textScaler: TextScaler.linear(2)),
+          child: Scaffold(
+            body: SizedBox(
+              width: 240,
+              child: FilterChipBar<int>(
+                expandItems: true,
+                selected: 0,
+                onSelected: (_) {},
+                items: const [
+                  FilterChipItem(id: 0, label: 'All'),
+                  FilterChipItem(id: 1, label: 'Messages'),
+                  FilterChipItem(id: 2, label: 'Channels'),
+                  FilterChipItem(id: 3, label: 'People'),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.descendant(
+        of: find.byType(FilterChipBar<int>),
+        matching: find.byType(FittedBox),
+      ),
+      findsNothing,
+    );
+    expect(tester.getSize(find.text('Messages')).height, greaterThan(32));
+    expect(tester.takeException(), isNull);
+  });
 }

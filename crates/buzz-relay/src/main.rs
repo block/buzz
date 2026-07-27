@@ -1127,6 +1127,7 @@ async fn serve(
 
     let (shutdown_tx, _) = tokio::sync::watch::channel(false);
     let shutdown_flag = Arc::clone(&state.shutting_down);
+    let drain_conn_manager = Arc::clone(&state.conn_manager);
     let tx = shutdown_tx.clone();
     tokio::spawn(async move {
         shutdown_signal().await;
@@ -1136,6 +1137,16 @@ async fn serve(
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         info!("Starting graceful drain (30s timeout)");
         let _ = tx.send(true);
+        // Tell every connected client to reconnect NOW. Without this, upgraded
+        // WebSocket connections outlive the listener drain: clients ride the
+        // dying pod until the forced exit below and only learn about the
+        // restart from a TCP reset. The 1012 close frame turns a 35s silent
+        // death into an immediate, well-attributed reconnect.
+        let closed = drain_conn_manager.drain_all();
+        info!(
+            connections = closed,
+            "Sent restart close frame to all live WebSocket connections"
+        );
         // Hard timeout: force exit if connections don't drain within 30s.
         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
         tracing::error!("Drain timeout exceeded — forcing exit");

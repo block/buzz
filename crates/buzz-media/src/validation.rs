@@ -571,6 +571,24 @@ fn validate_jpeg_metadata_free(bytes: &[u8]) -> Result<(), MediaError> {
     Err(MediaError::InvalidImage)
 }
 
+/// tEXt keywords that carry Buzz snapshot manifests (`.agent.png` /
+/// `.team.png`). These are deliberate product payloads — agent/team sharing
+/// embeds a manifest in a single tEXt chunk — so they are exempt from the
+/// metadata ban. Exactly one snapshot chunk is permitted per file; every
+/// other textual/metadata chunk remains forbidden.
+const PNG_SNAPSHOT_KEYWORDS: [&[u8]; 2] = [b"buzz_agent_snapshot", b"buzz_team_snapshot"];
+
+/// Returns true when a raw tEXt chunk payload is a Buzz snapshot manifest:
+/// the payload must start with an allowlisted keyword followed by the
+/// keyword/text NUL separator.
+fn is_snapshot_text_chunk(payload: &[u8]) -> bool {
+    PNG_SNAPSHOT_KEYWORDS.iter().any(|keyword| {
+        payload.len() > keyword.len()
+            && &payload[..keyword.len()] == *keyword
+            && payload[keyword.len()] == 0
+    })
+}
+
 fn validate_png_metadata_free(bytes: &[u8]) -> Result<(), MediaError> {
     const SIG: &[u8] = b"\x89PNG\r\n\x1a\n";
     if !bytes.starts_with(SIG) {
@@ -578,6 +596,7 @@ fn validate_png_metadata_free(bytes: &[u8]) -> Result<(), MediaError> {
     }
     let mut i = SIG.len();
     let mut saw_iend = false;
+    let mut saw_snapshot_chunk = false;
     while i < bytes.len() {
         if i + 12 > bytes.len() {
             return Err(MediaError::InvalidImage);
@@ -589,7 +608,19 @@ fn validate_png_metadata_free(bytes: &[u8]) -> Result<(), MediaError> {
             .and_then(|v| v.checked_add(len))
             .filter(|&v| v <= bytes.len())
             .ok_or(MediaError::InvalidImage)?;
-        if matches!(&kind, b"eXIf" | b"tEXt" | b"zTXt" | b"iTXt" | b"iCCP") {
+        if &kind == b"tEXt" {
+            // Buzz agent/team snapshot manifests ride in a single tEXt chunk
+            // with an allowlisted keyword. Anything else — other keywords, or
+            // a second snapshot chunk — is a forbidden metadata channel.
+            let payload = &bytes[i + 8..end - 4];
+            if saw_snapshot_chunk || !is_snapshot_text_chunk(payload) {
+                return Err(MediaError::MetadataForbidden);
+            }
+            saw_snapshot_chunk = true;
+            i = end;
+            continue;
+        }
+        if matches!(&kind, b"eXIf" | b"zTXt" | b"iTXt" | b"iCCP") {
             return Err(MediaError::MetadataForbidden);
         }
         // Unknown ancillary chunks are private metadata channels. Keep only
@@ -1270,6 +1301,67 @@ mod tests {
             validate_content(&trailing, &config),
             Err(MediaError::MetadataForbidden)
         ));
+    }
+
+    #[test]
+    fn test_png_snapshot_text_chunks_are_allowed() {
+        // Agent/team snapshot manifests ride in an allowlisted tEXt chunk;
+        // the relay must accept exactly one such chunk per file.
+        let config = test_config();
+        for keyword in [b"buzz_agent_snapshot".as_slice(), b"buzz_team_snapshot"] {
+            let mut payload = keyword.to_vec();
+            payload.push(0);
+            payload.extend_from_slice(b"eyJmb3JtYXQiOiJidXp6In0=");
+            let mut png = TINY_PNG[..TINY_PNG.len() - 12].to_vec();
+            png.extend_from_slice(&png_chunk(b"tEXt", &payload));
+            png.extend_from_slice(&TINY_PNG[TINY_PNG.len() - 12..]);
+            assert_eq!(
+                validate_content(&png, &config).unwrap_or_else(|error| panic!(
+                    "rejected snapshot tEXt keyword {}: {error}",
+                    String::from_utf8_lossy(keyword)
+                )),
+                "image/png"
+            );
+        }
+    }
+
+    #[test]
+    fn test_png_snapshot_text_chunk_rejected_when_duplicated_or_spoofed() {
+        let config = test_config();
+
+        // Two snapshot chunks: the second is a covert channel.
+        let mut payload = b"buzz_agent_snapshot".to_vec();
+        payload.push(0);
+        payload.extend_from_slice(b"data");
+        let mut png = TINY_PNG[..TINY_PNG.len() - 12].to_vec();
+        png.extend_from_slice(&png_chunk(b"tEXt", &payload));
+        png.extend_from_slice(&png_chunk(b"tEXt", &payload));
+        png.extend_from_slice(&TINY_PNG[TINY_PNG.len() - 12..]);
+        assert!(matches!(
+            validate_content(&png, &config),
+            Err(MediaError::MetadataForbidden)
+        ));
+
+        // Keyword prefix without the NUL separator, and near-miss keywords,
+        // stay forbidden.
+        for payload in [
+            b"buzz_agent_snapshotX\0data".as_slice(),
+            b"buzz_agent_snapshot_extra\0data",
+            b"buzz_agent_snapshot", // no separator at all
+            b"Comment\0GPS=37.7,-122.4",
+        ] {
+            let mut png = TINY_PNG[..TINY_PNG.len() - 12].to_vec();
+            png.extend_from_slice(&png_chunk(b"tEXt", payload));
+            png.extend_from_slice(&TINY_PNG[TINY_PNG.len() - 12..]);
+            assert!(
+                matches!(
+                    validate_content(&png, &config),
+                    Err(MediaError::MetadataForbidden)
+                ),
+                "accepted non-snapshot tEXt payload {:?}",
+                String::from_utf8_lossy(payload)
+            );
+        }
     }
 
     #[test]

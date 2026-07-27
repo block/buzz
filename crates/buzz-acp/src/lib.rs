@@ -220,13 +220,32 @@ async fn is_owner_or_sibling(
 /// Coarse security policy applied before subscription rules. Both `OwnerOnly`
 /// and `Allowlist` accept the owner and same-owner siblings; `Allowlist`
 /// additionally accepts the explicit external pubkey list.
+///
+/// # DM hardening (`is_dm`)
+///
+/// Clients auto-p-tag every DM participant, so in a DM *any* participant's
+/// message looks like a mention and would fire a turn. Combined with
+/// agent-initiated DMs (the agent can be asked to DM a third party), that
+/// turns `anyone`/`allowlist` modes into transitive access grants: whoever
+/// lands in a DM with the agent can prompt it. To close that hole, when
+/// `is_dm` is true only the owner and cryptographically verified same-owner
+/// siblings may fire a turn — the explicit allowlist and `anyone` mode do
+/// NOT apply inside DMs. `Nobody` still drops everything. Callers must
+/// resolve `is_dm` fail-closed: unknown channel type ⇒ treat as DM.
 async fn author_allowed(
     respond_to: &RespondTo,
     allowlist: &HashSet<String>,
     author: &str,
+    is_dm: bool,
     owner_cache: &OwnerCache,
     rest_client: &relay::RestClient,
 ) -> bool {
+    if is_dm {
+        return match respond_to {
+            RespondTo::Nobody => false,
+            _ => is_owner_or_sibling(author, owner_cache, rest_client).await,
+        };
+    }
     match respond_to {
         RespondTo::Anyone => true,
         RespondTo::Nobody => false,
@@ -234,6 +253,35 @@ async fn author_allowed(
         RespondTo::Allowlist => {
             allowlist.contains(author)
                 || is_owner_or_sibling(author, owner_cache, rest_client).await
+        }
+    }
+}
+
+/// Resolve whether `channel_id` is a DM, for the inbound author gate.
+///
+/// Resolution order:
+/// 1. Startup discovery metadata (`startup_info`) — covers channels known at
+///    process start.
+/// 2. Per-loop resolution cache (`cache`) — covers channels resolved since.
+/// 3. Lazy REST fetch of the channel's kind:39000 metadata — covers channels
+///    the agent was added to *after* startup (the exploit path: an
+///    agent-initiated DM is exactly such a channel).
+///
+/// Fail-closed: if the fetch fails or times out, the channel is treated as a
+/// DM for this event and the result is NOT cached, so a later event retries
+/// the fetch instead of pinning a mis-classification.
+pub(crate) async fn is_dm_channel(
+    channel_id: Uuid,
+    channel_info: &pool::ChannelInfoResolver,
+) -> bool {
+    match channel_info.resolve(channel_id).await {
+        Some(info) => info.channel_type == "dm",
+        None => {
+            tracing::warn!(
+                channel_id = %channel_id,
+                "channel type unresolved — treating as DM for author gate (fail closed)"
+            );
+            true
         }
     }
 }
@@ -1487,6 +1535,7 @@ async fn tokio_main() -> Result<()> {
         turn_liveness_interval: Duration::from_secs(config.turn_liveness_secs),
         dedup_mode: config.dedup_mode,
         system_prompt: config.system_prompt.clone(),
+        session_title: config.session_title.clone(),
         team_instructions: config.team_instructions.clone(),
         base_prompt: if config.no_base_prompt {
             None
@@ -1501,7 +1550,7 @@ async fn tokio_main() -> Result<()> {
             .to_string_lossy()
             .to_string(),
         rest_client: relay.rest_client(),
-        channel_info: channel_info_map,
+        channel_info: pool::ChannelInfoResolver::new(channel_info_map, relay.rest_client()),
         context_message_limit: config.context_message_limit,
         max_turns_per_session: config.max_turns_per_session,
         permission_mode: config.permission_mode,
@@ -2097,10 +2146,16 @@ async fn tokio_main() -> Result<()> {
                             // it never revokes same-owner team bots.
                             {
                                 let author = buzz_event.event.pubkey.to_hex();
+                                // DM hardening: resolve channel type (fail-closed
+                                // to DM) so allowlist/anyone modes cannot be
+                                // exercised by non-owner authors inside DMs.
+                                let is_dm =
+                                    is_dm_channel(buzz_event.channel_id, &ctx.channel_info).await;
                                 let allowed = author_allowed(
                                     &config.respond_to,
                                     &config.respond_to_allowlist,
                                     &author,
+                                    is_dm,
                                     &owner_cache,
                                     &ctx.rest_client,
                                 )
@@ -2110,6 +2165,7 @@ async fn tokio_main() -> Result<()> {
                                         channel_id = %buzz_event.channel_id,
                                         author = %buzz_event.event.pubkey.to_hex(),
                                         mode = %config.respond_to,
+                                        is_dm,
                                         "inbound author gate — dropping event"
                                     );
                                     continue;
@@ -2923,6 +2979,35 @@ fn dispatch_pending(
     dispatched_channels
 }
 
+/// Returns `true` when `error` is a non-retryable authentication failure.
+///
+/// Retrying auth errors is harmful: the token won't self-repair between
+/// attempts, so each retry wastes an attempt slot, delays the visible failure,
+/// and burns the user's context window. Dead-letter immediately and surface a
+/// re-authentication hint instead.
+///
+/// # Classification rationale
+///
+/// Auth failures arrive as [`acp::AcpError::AgentError`] with a message
+/// surfaced from the upstream CLI. Two narrow patterns reliably identify
+/// non-transient auth failures observed in the field:
+///
+/// - `"Re-authenticate"` — emitted by the Claude CLI when an OAuth token has
+///   expired ("OAuth access token has expired. Re-authenticate to continue.").
+///   Specific to the auth-expiry flow; does not appear in unrelated errors.
+/// - `"API Error: 401"` — present in Claude/Codex HTTP-401 responses; 401 is
+///   the standard auth-failure status and does not arise from network blips.
+///
+/// False positives (misclassifying a transient error as non-retryable) silently
+/// drop a user message, which is worse than a false negative (extra retries on
+/// an auth error). Both patterns are therefore chosen for high precision.
+fn is_auth_error(error: &acp::AcpError) -> bool {
+    let acp::AcpError::AgentError { message, .. } = error else {
+        return false;
+    };
+    message.contains("Re-authenticate") || message.contains("API Error: 401")
+}
+
 /// Spawn a task that posts a user-visible failure notice to the relay.
 ///
 /// Shared by the hard-cap immediate dead-letter path and the retries-exhausted
@@ -3043,6 +3128,21 @@ fn handle_prompt_result(
                 } else {
                     hard_timeout_fate_suffix = Some(" — requeued for retry (recently active)");
                 }
+            } else if matches!(&result.outcome, PromptOutcome::Error(e) if is_auth_error(e)) {
+                // Auth errors are non-retryable: the token won't self-repair
+                // between retries, so requeueing only wastes attempt slots and
+                // delays the visible failure. Dead-letter immediately and tell
+                // the user to re-authenticate the CLI.
+                tracing::warn!(
+                    channel_id = %batch.channel_id,
+                    events = batch.events.len(),
+                    "dead-lettering batch immediately — non-retryable auth error"
+                );
+                let content = "⚠️ I couldn't process the last request: authentication failed. \
+                    Please re-authenticate the CLI (e.g. run `claude /login` or `codex login`) \
+                    and then re-send."
+                    .to_string();
+                spawn_failure_notice(rest_client, &batch, content);
             } else if let Some(dead) = queue.requeue(batch) {
                 let reason = match &result.outcome {
                     PromptOutcome::Timeout(TimeoutKind::Idle) => "the turn timed out".to_string(),
@@ -3927,7 +4027,7 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
     // so shutdown() runs on all paths (success, error, timeout).
     let protocol_result = tokio::time::timeout(MODELS_TIMEOUT, async {
         let init = client.initialize().await?;
-        let session = client.session_new_full(&cwd, vec![], None).await?;
+        let session = client.session_new_full(&cwd, vec![], None, None).await?;
         Ok::<_, acp::AcpError>((init, session))
     })
     .await;
@@ -4076,6 +4176,18 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
                     env.push(EnvVar {
                         name: "BUZZ_AUTH_TAG".into(),
                         value: auth_tag,
+                    });
+                }
+            }
+            // Forward the agent's display name so dev-mcp can use it as the git
+            // author name instead of the raw npub. Read from the process env
+            // rather than Config: this is a pass-through of a contract owned
+            // upstream, and absent simply means dev-mcp falls back to the npub.
+            if let Ok(display_name) = std::env::var("BUZZ_ACP_DISPLAY_NAME") {
+                if !display_name.is_empty() {
+                    env.push(EnvVar {
+                        name: "BUZZ_ACP_DISPLAY_NAME".into(),
+                        value: display_name,
                     });
                 }
             }
@@ -4293,6 +4405,7 @@ mod author_gate_tests {
         let cache = OwnerCache::new(Some(OWNER.into()));
         cache.cache_sibling(SIBLING.into(), true);
         cache.cache_sibling(STRANGER.into(), false);
+        cache.cache_sibling(EXTERNAL.into(), false);
         cache
     }
 
@@ -4305,6 +4418,7 @@ mod author_gate_tests {
                 &RespondTo::Allowlist,
                 &allowlist,
                 SIBLING,
+                false,
                 &cache,
                 &dummy_rest_client()
             )
@@ -4322,6 +4436,7 @@ mod author_gate_tests {
                 &RespondTo::Allowlist,
                 &allowlist,
                 EXTERNAL,
+                false,
                 &cache,
                 &dummy_rest_client()
             )
@@ -4339,6 +4454,7 @@ mod author_gate_tests {
                 &RespondTo::Allowlist,
                 &allowlist,
                 STRANGER,
+                false,
                 &cache,
                 &dummy_rest_client()
             )
@@ -4356,6 +4472,7 @@ mod author_gate_tests {
                 &RespondTo::Allowlist,
                 &allowlist,
                 OWNER,
+                false,
                 &cache,
                 &dummy_rest_client()
             )
@@ -4376,6 +4493,7 @@ mod author_gate_tests {
                 &RespondTo::OwnerOnly,
                 &HashSet::new(),
                 STRANGER,
+                false,
                 &cache,
                 &dummy_rest_client()
             )
@@ -4393,6 +4511,7 @@ mod author_gate_tests {
                     &RespondTo::OwnerOnly,
                     &HashSet::new(),
                     who,
+                    false,
                     &cache,
                     &dummy_rest_client()
                 )
@@ -4400,6 +4519,235 @@ mod author_gate_tests {
                 "under default OwnerOnly, the {label} must be admitted so steering can fire"
             );
         }
+    }
+
+    // ── DM hardening ──────────────────────────────────────────────────────
+    //
+    // In a DM, clients auto-p-tag every participant, and an agent can be
+    // asked to open a DM with a third party. The gate must therefore ignore
+    // the allowlist and `anyone` mode inside DMs: only owner + verified
+    // siblings fire turns.
+
+    #[tokio::test]
+    async fn test_dm_rejects_allowlisted_external_pubkey() {
+        let cache = cache_with_sibling();
+        let allowlist = HashSet::from([EXTERNAL.to_string()]);
+        assert!(
+            !author_allowed(
+                &RespondTo::Allowlist,
+                &allowlist,
+                EXTERNAL,
+                true,
+                &cache,
+                &dummy_rest_client()
+            )
+            .await,
+            "an allowlisted external pubkey must NOT fire a turn inside a DM"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dm_rejects_stranger_under_anyone() {
+        let cache = cache_with_sibling();
+        assert!(
+            !author_allowed(
+                &RespondTo::Anyone,
+                &HashSet::new(),
+                STRANGER,
+                true,
+                &cache,
+                &dummy_rest_client()
+            )
+            .await,
+            "respond_to=anyone must still drop non-owner authors inside a DM"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dm_admits_owner_and_sibling_in_every_responding_mode() {
+        let cache = cache_with_sibling();
+        for mode in [
+            RespondTo::OwnerOnly,
+            RespondTo::Allowlist,
+            RespondTo::Anyone,
+        ] {
+            for (who, label) in [(OWNER, "owner"), (SIBLING, "sibling")] {
+                assert!(
+                    author_allowed(
+                        &mode,
+                        &HashSet::new(),
+                        who,
+                        true,
+                        &cache,
+                        &dummy_rest_client()
+                    )
+                    .await,
+                    "in a DM under {mode}, the {label} must still be admitted"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_dm_nobody_rejects_even_owner() {
+        let cache = cache_with_sibling();
+        assert!(
+            !author_allowed(
+                &RespondTo::Nobody,
+                &HashSet::new(),
+                OWNER,
+                true,
+                &cache,
+                &dummy_rest_client()
+            )
+            .await,
+            "respond_to=nobody must drop everything, DMs included"
+        );
+    }
+
+    // ── is_dm_channel resolution ──────────────────────────────────────────
+
+    fn resolver(startup: HashMap<Uuid, relay::ChannelInfo>) -> pool::ChannelInfoResolver {
+        pool::ChannelInfoResolver::new(startup, dummy_rest_client())
+    }
+
+    #[tokio::test]
+    async fn test_is_dm_channel_uses_definitive_startup_metadata() {
+        let dm_id = Uuid::new_v4();
+        let stream_id = Uuid::new_v4();
+        let startup = HashMap::from([
+            (
+                dm_id,
+                relay::ChannelInfo {
+                    name: "dm".into(),
+                    channel_type: "dm".into(),
+                },
+            ),
+            (
+                stream_id,
+                relay::ChannelInfo {
+                    name: "stream".into(),
+                    channel_type: "stream".into(),
+                },
+            ),
+        ]);
+        let resolver = resolver(startup);
+        assert!(is_dm_channel(dm_id, &resolver).await);
+        assert!(!is_dm_channel(stream_id, &resolver).await);
+    }
+
+    #[tokio::test]
+    async fn test_is_dm_channel_fails_closed_for_unknown_startup_metadata() {
+        let id = Uuid::new_v4();
+        let startup = HashMap::from([(
+            id,
+            relay::ChannelInfo {
+                name: "unknown".into(),
+                channel_type: "unknown".into(),
+            },
+        )]);
+        assert!(
+            is_dm_channel(id, &resolver(startup)).await,
+            "missing startup metadata must not be trusted as a stream"
+        );
+    }
+
+    async fn lazy_resolver_with_response(
+        response: serde_json::Value,
+    ) -> (
+        pool::ChannelInfoResolver,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test HTTP server");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let requests = std::sync::Arc::new(AtomicUsize::new(0));
+        let server_requests = requests.clone();
+        let body = response.to_string();
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut request = vec![0; 8192];
+                let _ = socket.read(&mut request).await;
+                server_requests.fetch_add(1, Ordering::SeqCst);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        let rest = relay::RestClient {
+            http: reqwest::Client::new(),
+            base_url,
+            keys: nostr::Keys::generate(),
+            auth_tag_json: None,
+        };
+        (
+            pool::ChannelInfoResolver::new(HashMap::new(), rest),
+            requests,
+            server,
+        )
+    }
+
+    #[tokio::test]
+    async fn test_is_dm_channel_lazy_resolves_declared_dm_and_caches_it() {
+        use std::sync::atomic::Ordering;
+
+        let id = Uuid::new_v4();
+        let response = serde_json::json!([{
+            "tags": [["d", id.to_string()], ["name", "DM"], ["t", "dm"]]
+        }]);
+        let (resolver, requests, server) = lazy_resolver_with_response(response).await;
+
+        assert!(is_dm_channel(id, &resolver).await);
+        assert!(is_dm_channel(id, &resolver).await);
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            1,
+            "second resolution uses cache"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn test_discovery_without_metadata_stays_fail_closed_at_author_gate() {
+        let id = Uuid::new_v4();
+        let discovered = relay::merge_discovered_channels(vec![id], &serde_json::json!([]));
+        let channel_info = resolver(discovered);
+        let owner_cache = cache_with_sibling();
+        let allowlist = HashSet::from([EXTERNAL.to_string()]);
+
+        let is_dm = is_dm_channel(id, &channel_info).await;
+        assert!(is_dm, "unknown startup metadata must fail closed as DM");
+        assert!(
+            !author_allowed(
+                &RespondTo::Allowlist,
+                &allowlist,
+                EXTERNAL,
+                is_dm,
+                &owner_cache,
+                &dummy_rest_client(),
+            )
+            .await,
+            "an external author must not pass when startup discovery omitted metadata"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_is_dm_channel_fails_closed_when_lazy_resolution_fails() {
+        assert!(
+            is_dm_channel(Uuid::new_v4(), &resolver(HashMap::new())).await,
+            "an unresolvable channel type must be treated as a DM"
+        );
     }
 }
 
@@ -4638,6 +4986,7 @@ mod build_mcp_servers_tests {
             typing_enabled: true,
             memory_enabled: false,
             model: None,
+            session_title: None,
             permission_mode: config::PermissionMode::BypassPermissions,
             respond_to: config::RespondTo::Anyone,
             respond_to_allowlist: std::collections::HashSet::new(),
@@ -4699,6 +5048,60 @@ mod build_mcp_servers_tests {
         let server = &servers[0];
         let has_auth_tag = server.env.iter().any(|e| e.name == "BUZZ_AUTH_TAG");
         assert!(!has_auth_tag, "empty BUZZ_AUTH_TAG should not be forwarded");
+    }
+
+    #[test]
+    fn test_display_name_set_is_forwarded_to_mcp_server() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("BUZZ_ACP_DISPLAY_NAME", "Duncan");
+        let config = test_config();
+        let servers = build_mcp_servers(&config);
+        std::env::remove_var("BUZZ_ACP_DISPLAY_NAME");
+
+        let entry = servers[0]
+            .env
+            .iter()
+            .find(|e| e.name == "BUZZ_ACP_DISPLAY_NAME");
+        assert_eq!(
+            entry.map(|e| e.value.as_str()),
+            Some("Duncan"),
+            "a set display name should reach the MCP server verbatim"
+        );
+    }
+
+    #[test]
+    fn test_display_name_unset_omits_the_key_entirely() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("BUZZ_ACP_DISPLAY_NAME");
+        let config = test_config();
+        let servers = build_mcp_servers(&config);
+
+        // Absent, not empty-valued: dev-mcp distinguishes the two and only
+        // falls back to the npub when the key is missing or blank.
+        assert!(
+            !servers[0]
+                .env
+                .iter()
+                .any(|e| e.name == "BUZZ_ACP_DISPLAY_NAME"),
+            "unset display name should not add the key"
+        );
+    }
+
+    #[test]
+    fn test_display_name_empty_omits_the_key_entirely() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("BUZZ_ACP_DISPLAY_NAME", "");
+        let config = test_config();
+        let servers = build_mcp_servers(&config);
+        std::env::remove_var("BUZZ_ACP_DISPLAY_NAME");
+
+        assert!(
+            !servers[0]
+                .env
+                .iter()
+                .any(|e| e.name == "BUZZ_ACP_DISPLAY_NAME"),
+            "empty display name should not be forwarded"
+        );
     }
 
     #[test]
@@ -4804,6 +5207,7 @@ mod error_outcome_emission_tests {
             typing_enabled: true,
             memory_enabled: false,
             model: None,
+            session_title: None,
             permission_mode: config::PermissionMode::BypassPermissions,
             respond_to: config::RespondTo::Anyone,
             respond_to_allowlist: HashSet::new(),
@@ -5756,6 +6160,232 @@ mod error_outcome_emission_tests {
     async fn application_error_emits_exactly_one_feed_event() {
         let app = AcpError::IdleTimeout(std::time::Duration::from_secs(1));
         assert_eq!(turn_errors_emitted_for(PromptOutcome::Error(app)).await, 1);
+    }
+
+    // ── is_auth_error classification ───────────────────────────────────────
+
+    #[test]
+    fn is_auth_error_matches_reauthenticate_message() {
+        let e = acp::AcpError::AgentError {
+            code: -32000,
+            message: "API Error: OAuth access token has expired. Re-authenticate to continue."
+                .to_string(),
+        };
+        assert!(
+            is_auth_error(&e),
+            "Re-authenticate variant must be classified as auth error"
+        );
+    }
+
+    #[test]
+    fn is_auth_error_matches_401_message() {
+        let e = acp::AcpError::AgentError {
+            code: -32000,
+            message: "Internal error: API Error: 401 OAuth access token has expired.".to_string(),
+        };
+        assert!(
+            is_auth_error(&e),
+            "API Error: 401 variant must be classified as auth error"
+        );
+    }
+
+    #[test]
+    fn is_auth_error_rejects_other_agent_error_message() {
+        let e = acp::AcpError::AgentError {
+            code: -32601,
+            message: "Usage credits required for 1M context — turn on usage credits".to_string(),
+        };
+        assert!(
+            !is_auth_error(&e),
+            "usage-credit error must NOT be classified as auth error"
+        );
+    }
+
+    #[test]
+    fn is_auth_error_rejects_transport_errors() {
+        let io = acp::AcpError::Io(std::io::Error::other("pipe broke"));
+        assert!(
+            !is_auth_error(&io),
+            "I/O error must not be classified as auth error"
+        );
+        let timeout = acp::AcpError::WriteTimeout(std::time::Duration::from_secs(5));
+        assert!(
+            !is_auth_error(&timeout),
+            "WriteTimeout must not be classified as auth error"
+        );
+    }
+
+    // ── auth error dead-letter behavior ────────────────────────────────────
+
+    /// An auth-class `PromptOutcome::Error` must dead-letter immediately
+    /// (the batch is never requeued) so the user sees a re-auth hint at once
+    /// rather than after 10 futile retries.
+    #[tokio::test]
+    async fn auth_error_dead_letters_immediately_without_requeueing() {
+        let keys = nostr::Keys::generate();
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "test")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let channel_id = uuid::Uuid::new_v4();
+        let batch = FlushBatch {
+            channel_id,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+
+        let auth_error = acp::AcpError::AgentError {
+            code: -32000,
+            message: "API Error: 401 OAuth access token has expired. Re-authenticate to continue."
+                .to_string(),
+        };
+
+        let agent = dummy_agent(0).await;
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: None,
+                turn_id: "test-turn-id".to_string(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+            },
+        );
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let removed_channels = std::collections::HashSet::new();
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let result = PromptResult {
+            agent,
+            source: PromptSource::Channel(channel_id),
+            turn_id: "test-turn-id".to_string(),
+            outcome: PromptOutcome::Error(auth_error),
+            batch: Some(batch),
+        };
+        handle_prompt_result(
+            &mut pool,
+            &mut queue,
+            &config,
+            result,
+            &mut heartbeat_in_flight,
+            &removed_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            None,
+            None,
+        );
+
+        // The batch must not be requeued: pending_channels returns 0.
+        assert_eq!(
+            queue.pending_channels(),
+            0,
+            "auth error must dead-letter immediately — batch must not be requeued"
+        );
+        assert_eq!(
+            queue.queued_event_count(&channel_id),
+            0,
+            "auth error must dead-letter immediately — no events should be pending"
+        );
+    }
+
+    /// A non-auth application error (e.g. usage credits) must still follow the
+    /// standard requeue path so today's behavior is unchanged.
+    #[tokio::test]
+    async fn non_auth_application_error_is_requeued() {
+        let keys = nostr::Keys::generate();
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "test")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let channel_id = uuid::Uuid::new_v4();
+        let batch = FlushBatch {
+            channel_id,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+
+        // Usage-credits error — AgentError but NOT an auth error.
+        let usage_error = acp::AcpError::AgentError {
+            code: -32000,
+            message: "Usage credits required for 1M context".to_string(),
+        };
+
+        let agent = dummy_agent(0).await;
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: None,
+                turn_id: "test-turn-id".to_string(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+            },
+        );
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let removed_channels = std::collections::HashSet::new();
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let result = PromptResult {
+            agent,
+            source: PromptSource::Channel(channel_id),
+            turn_id: "test-turn-id".to_string(),
+            outcome: PromptOutcome::Error(usage_error),
+            batch: Some(batch),
+        };
+        handle_prompt_result(
+            &mut pool,
+            &mut queue,
+            &config,
+            result,
+            &mut heartbeat_in_flight,
+            &removed_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            None,
+            None,
+        );
+
+        // Non-auth application error: batch IS requeued (first attempt, retry budget > 0).
+        assert_eq!(
+            queue.pending_channels(),
+            1,
+            "non-auth application error must requeue the batch for retry"
+        );
+        assert_eq!(
+            queue.queued_event_count(&channel_id),
+            1,
+            "non-auth application error must preserve the event for retry"
+        );
     }
 }
 
