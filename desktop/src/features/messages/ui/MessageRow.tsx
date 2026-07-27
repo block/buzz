@@ -41,7 +41,10 @@ import { Markdown } from "@/shared/ui/markdown";
 import type { VideoReviewContext } from "@/shared/ui/VideoPlayer";
 import { MessageActionBar } from "./MessageActionBar";
 import { CrmActionCard } from "./CrmActionCard";
-import { parseCrmActionCard } from "./crmActionCardParser";
+import {
+  isCrmActionControlReaction,
+  parseCrmActionCard,
+} from "./crmActionCardParser";
 import { MessageAgentOwner } from "./MessageAgentOwner";
 import { MessageAuthorText, MessageHeaderRow } from "./MessageHeader";
 import { MessageTimestamp } from "./MessageTimestamp";
@@ -306,6 +309,16 @@ export const MessageRow = React.memo(
     const crmActionCard = React.useMemo(
       () => parseCrmActionCard(message.body),
       [message.body],
+    );
+    const visibleReactions = React.useMemo(
+      () =>
+        crmActionCard
+          ? reactions.filter(
+              (reaction) =>
+                !isCrmActionControlReaction(crmActionCard, reaction.emoji),
+            )
+          : reactions,
+      [crmActionCard, reactions],
     );
 
     const renderBody = () => {
@@ -587,7 +600,7 @@ export const MessageRow = React.memo(
         {continuationMetadataNode}
         <MessageReactions
           messageId={message.id}
-          reactions={reactions}
+          reactions={visibleReactions}
           canToggle={canToggleReactions}
           pending={reactionPending}
           burstEmojiOnRender={badgeBurstEmoji}

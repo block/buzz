@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   extractCrmCalendarSlots,
   extractCrmRedditDraft,
+  isCrmActionControlReaction,
   parseCrmActionCard,
 } from "./crmActionCardParser.ts";
 
@@ -63,6 +64,16 @@ test("extracts only numbered calendar slots in their displayed order", () => {
     { label: "Mon 27 Jul, 10:00 CEST", reaction: "1️⃣" },
     { label: "Tue 28 Jul, 14:30 CEST", reaction: "2️⃣" },
   ]);
+});
+
+test("hides CRM control reactions without hiding ordinary message reactions", () => {
+  const calendar = parseCrmActionCard(
+    "Choose a meeting slot.\ncrm-action:v1:8ca5bd14-00d4-45cc-88ec-4bb1609e7d4a:calendar_book:2026-07-26T20:15:00+00:00",
+  );
+
+  assert.equal(isCrmActionControlReaction(calendar, "3️⃣"), true);
+  assert.equal(isCrmActionControlReaction(calendar, "❌"), true);
+  assert.equal(isCrmActionControlReaction(calendar, "❤️"), false);
 });
 
 test("keeps calendar slots for controls but removes their duplicate text from the message", () => {

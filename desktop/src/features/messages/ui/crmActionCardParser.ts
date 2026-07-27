@@ -12,6 +12,13 @@ export type CrmActionCard = {
 
 export type CrmCalendarSlot = { label: string; reaction: string };
 
+const CONTROL_REACTIONS: Record<CrmActionCard["actionType"], readonly string[]> = {
+  reddit_mark_posted: ["✅", "❌"],
+  lead_categorize: ["👍", "📅", "ℹ️", "👎", "🕒", "⛔", "🔀", "❌"],
+  outreach_approve: ["✅", "❌", "✏️"],
+  calendar_book: ["1️⃣", "2️⃣", "3️⃣", "❌"],
+};
+
 const MARKER =
   /(?:^|\n)crm-action:v1:([0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}):(reddit_mark_posted|lead_categorize|outreach_approve|calendar_book):(\S+)\s*$/i;
 const REDDIT_DRAFT =
@@ -70,6 +77,14 @@ export function parseCrmActionCard(body: string): CrmActionCard | null {
   }
 
   return action;
+}
+
+/** Action reactions are signed transport controls, not conversation feedback. */
+export function isCrmActionControlReaction(
+  action: CrmActionCard | null,
+  emoji: string,
+): boolean {
+  return Boolean(action && CONTROL_REACTIONS[action.actionType].includes(emoji));
 }
 
 /** Return only the explicitly delimited read-only Reddit draft, if present. */
