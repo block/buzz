@@ -517,13 +517,15 @@ pub async fn cmd_send_message(
     client: &BuzzClient,
     mut p: SendMessageParams,
 ) -> Result<(), CliError> {
+    // Reject a bad --notify value before consuming stdin, so a typo does not
+    // eat piped content the caller cannot replay.
+    let notify = parse_notify_mode(p.notify.as_deref())?;
     // Allow '-' to read content from stdin. This keeps callers from having to
     // jam shell-metacharacter-heavy text (backticks, $vars, etc.) through argv
     // quoting — the source of countless self-inflicted command-substitution
     // bugs for agent and human users alike.
     p.content = read_or_stdin(&p.content)?;
     validate_content_size(&p.content)?;
-    let notify = parse_notify_mode(p.notify.as_deref())?;
     if let Some(warning) = unflagged_notify_warning(&p.content, notify) {
         eprintln!("{warning}");
     }
