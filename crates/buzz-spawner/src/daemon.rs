@@ -22,6 +22,8 @@ use crate::{
 pub struct Daemon {
     config: Config,
     store: Store,
+    /// Per-owner provider credentials, delivered over the encrypted handshake.
+    credentials: crate::credentials::CredentialStore,
     relay: SpawnerRelay,
     containers: Arc<dyn ContainerOps>,
     /// Latest spec per `(owner, slug)`, the desired state built from the relay.
@@ -45,6 +47,7 @@ impl Daemon {
     /// Connect to the relay and open the state store.
     pub async fn start(config: Config, containers: Arc<dyn ContainerOps>) -> Result<Self> {
         let store = Store::open(&config.state_dir)?;
+        let credentials = crate::credentials::CredentialStore::open(&config.state_dir)?;
         let relay = SpawnerRelay::connect(&config.relay_url, &config.keys).await?;
 
         info!(
@@ -56,6 +59,7 @@ impl Daemon {
         Ok(Self {
             config,
             store,
+            credentials,
             relay,
             containers,
             desired: HashMap::new(),
@@ -143,6 +147,18 @@ impl Daemon {
                 self.reconcile().await
             }
             Inbound::Attestation { sender, frame } => {
+                if let buzz_sdk::spawner::AttestationFrame::CredentialUpdate { credential } =
+                    &frame
+                {
+                    return self.apply_credential_update(&sender, credential).await;
+                }
+                if matches!(
+                    &frame,
+                    buzz_sdk::spawner::AttestationFrame::CredentialAck { .. }
+                ) {
+                    // Our own outbound ack echoed off the ephemeral stream.
+                    return Ok(());
+                }
                 if let buzz_sdk::spawner::AttestationFrame::PromptUpdate {
                     agent_pubkey,
                     prompt,
@@ -293,12 +309,63 @@ impl Daemon {
         self.reconcile().await
     }
 
+    /// Store, replace, or clear the sender's provider credential, then restart
+    /// every agent that owner runs here so the change takes effect immediately.
+    ///
+    /// The sender IS the authorization: a kind:24201 frame is NIP-44 encrypted
+    /// to this spawner and the event signature proves who sent it, so the token
+    /// is filed under that verified pubkey and can only ever affect that
+    /// owner's own agents.
+    async fn apply_credential_update(
+        &mut self,
+        sender: &PublicKey,
+        credential: &str,
+    ) -> Result<()> {
+        let owner = sender.to_hex();
+        let outcome: Result<()> = match normalized_credential(credential) {
+            Some(token) => self.credentials.set(&owner, token),
+            None => self.credentials.remove(&owner).map(|_| ()),
+        };
+
+        let ack = buzz_sdk::spawner::AttestationFrame::CredentialAck {
+            accepted: outcome.is_ok(),
+            message: outcome.as_ref().err().map(|e| format!("{e:#}")),
+        };
+        if let Err(e) = self.relay.send_attestation(sender, &ack).await {
+            warn!(owner = %owner, "failed to send credential ack: {e:#}");
+        }
+        outcome?;
+
+        // Deliberately no token material in the log line.
+        info!(owner = %owner, "owner credential updated");
+
+        // Force-restart this owner's agents: clearing spec_hash makes the next
+        // reconcile pass see drift and replace each container (same mechanism
+        // as apply_prompt_update). With the credential removed, the same clear
+        // lets reconcile emit exactly one HoldForCredential per agent.
+        let slugs: Vec<String> = self
+            .store
+            .agents()
+            .filter(|r| r.owner_pubkey == owner)
+            .map(|r| r.slug.clone())
+            .collect();
+        for slug in slugs {
+            self.store.update(&owner, &slug, |r| {
+                r.spec_hash = None;
+            })?;
+        }
+        self.reconcile().await
+    }
+
     /// One reconciliation pass.
     pub async fn reconcile(&mut self) -> Result<()> {
         let spawner_pubkey = self.config.keys.public_key().to_hex();
         let containers = self.containers.list(&spawner_pubkey).await?;
         let desired: Vec<DesiredAgent> = self.desired.values().cloned().collect();
         let records: Vec<AgentRecord> = self.store.agents().cloned().collect();
+
+        let credentialed_owners: std::collections::HashSet<String> =
+            self.credentials.owners().cloned().collect();
 
         let actions = plan(ReconcileInput {
             desired: &desired,
@@ -308,6 +375,7 @@ impl Daemon {
             attestation_timeout_secs: self.config.attestation_timeout.as_secs() as i64,
             max_agents: self.config.max_agents,
             desired_hydrated: self.desired_hydrated,
+            credentialed_owners: &credentialed_owners,
         });
 
         for action in actions {
@@ -425,6 +493,26 @@ impl Daemon {
             Action::RemoveOrphan { container_id } => {
                 warn!(container = %container_id, "removing container with no spawner record");
                 self.containers.remove(&container_id, None).await
+            }
+            Action::HoldForCredential {
+                owner_pubkey,
+                slug,
+                container_id,
+            } => {
+                if let Some(id) = container_id {
+                    // Volume preserved, identity preserved: this is a hold.
+                    self.containers.remove(&id, None).await?;
+                }
+                self.store.update(&owner_pubkey, &slug, |r| {
+                    r.spec_hash = None;
+                })?;
+                let agent_pubkey = self
+                    .store
+                    .get(&owner_pubkey, &slug)
+                    .map(|r| r.agent_pubkey.clone());
+                info!(slug = %slug, "agent held: owner has no credential");
+                self.publish_needs_credential(&slug, &owner_pubkey, agent_pubkey.as_deref())
+                    .await
             }
         }
     }
@@ -568,6 +656,10 @@ impl Daemon {
             }
         };
         let (cpu_millis, memory_mib) = self.resources_for(&desired.spec);
+        let owner_credential = self
+            .credentials
+            .get(&desired.owner_pubkey)
+            .map(str::to_string);
 
         let spec = ContainerSpec {
             name: record.container_name(&self.config.keys.public_key().to_hex()),
@@ -585,7 +677,7 @@ impl Daemon {
                     command: self.config.agent_command.as_deref(),
                     args: self.config.agent_args.as_deref(),
                 },
-                None,
+                owner_credential.as_deref(),
             ),
             cpu_millis,
             memory_mib,
@@ -798,16 +890,43 @@ impl Daemon {
     ) -> Result<()> {
         let prompt_hash = prompt_hash_for(self.store.get(owner_pubkey, slug));
         let status = SpawnerAgentStatus {
+            needs_credential: false,
             phase,
             agent_pubkey: agent_pubkey.map(str::to_string),
             spec_hash: spec_hash.map(str::to_string),
             error,
             restart_count,
             prompt_hash,
-            needs_credential: false,
         };
         self.relay.publish_status(slug, owner_pubkey, &status).await
     }
+
+    /// Publish a `stopped` status flagged `needs_credential`, so clients can
+    /// say *why* the agent is not running instead of showing a plain Stopped.
+    async fn publish_needs_credential(
+        &mut self,
+        slug: &str,
+        owner_pubkey: &str,
+        agent_pubkey: Option<&str>,
+    ) -> Result<()> {
+        let status = SpawnerAgentStatus {
+            phase: SpawnPhase::Stopped,
+            agent_pubkey: agent_pubkey.map(str::to_string),
+            spec_hash: None,
+            error: None,
+            restart_count: 0,
+            prompt_hash: prompt_hash_for(self.store.get(owner_pubkey, slug)),
+            needs_credential: true,
+        };
+        self.relay.publish_status(slug, owner_pubkey, &status).await
+    }
+}
+
+/// Whether a credential update clears (empty/whitespace) or sets a token.
+/// Split out so the trim rule is testable without a daemon.
+fn normalized_credential(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 /// Hash of a record's cached prompt material, if any, for `prompt_hash` on the
@@ -935,6 +1054,16 @@ mod tests {
             last_failure_at: None,
             carried_team_instructions: None,
         }
+    }
+
+    #[test]
+    fn credential_normalization_trims_and_treats_blank_as_clear() {
+        assert_eq!(
+            normalized_credential("  sk-ant-oat01-x \n"),
+            Some("sk-ant-oat01-x".into())
+        );
+        assert_eq!(normalized_credential(""), None);
+        assert_eq!(normalized_credential("   "), None);
     }
 
     #[test]
