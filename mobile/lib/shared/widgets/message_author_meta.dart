@@ -52,35 +52,45 @@ class MessageAuthorMeta extends StatelessWidget {
       authorName = GestureDetector(onTap: onAuthorTap, child: authorName);
     }
 
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.center,
-      children: [
-        Flexible(child: authorName),
-        if (showUsername) ...[
-          const SizedBox(width: Grid.half),
-          Flexible(
-            child: Text(
-              normalizedUsername,
-              key: usernameKey,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: resolvedMetadataStyle,
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final metadataMaxWidth = constraints.hasBoundedWidth
+            ? constraints.maxWidth / (showUsername ? 3 : 2)
+            : double.infinity;
+
+        return Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            Expanded(child: authorName),
+            if (showUsername) ...[
+              const SizedBox(width: Grid.half),
+              ConstrainedBox(
+                constraints: BoxConstraints(maxWidth: metadataMaxWidth),
+                child: Text(
+                  normalizedUsername,
+                  key: usernameKey,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: resolvedMetadataStyle,
+                ),
+              ),
+            ],
+            const SizedBox(width: Grid.half),
+            Text('·', style: resolvedMetadataStyle),
+            const SizedBox(width: Grid.half),
+            ConstrainedBox(
+              constraints: BoxConstraints(maxWidth: metadataMaxWidth),
+              child: Text(
+                timestamp,
+                key: timestampKey,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: resolvedMetadataStyle,
+              ),
             ),
-          ),
-        ],
-        const SizedBox(width: Grid.half),
-        Text('·', style: resolvedMetadataStyle),
-        const SizedBox(width: Grid.half),
-        Flexible(
-          child: Text(
-            timestamp,
-            key: timestampKey,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: resolvedMetadataStyle,
-          ),
-        ),
-      ],
+          ],
+        );
+      },
     );
   }
 }
