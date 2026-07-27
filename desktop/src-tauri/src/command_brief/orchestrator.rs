@@ -139,7 +139,9 @@ pub(crate) trait BriefFinalizationGate: Send + Sync {
 mod providers;
 pub(crate) use providers::ReloadingSourceProvider;
 #[cfg(test)]
-pub(crate) use providers::{CollectedSourceProvider, SourceBackendLoader};
+pub(crate) use providers::{
+    provider_attempts, CollectedSourceProvider, ProviderAttempt, SourceBackendLoader,
+};
 use providers::{
     FallbackAdviserProvider, ImmediateFinalizationGate, ProductionSourceBackendLoader,
     TrustedLanSourceBackendLoader,
@@ -290,7 +292,11 @@ impl CommandBriefOrchestrator {
             let cloud = CloudAdviserClient::from_config(&config, timeout)
                 .map_err(|_| ProductionOrchestratorError)?;
             (
-                Arc::new(FallbackAdviserProvider { local, cloud }),
+                Arc::new(FallbackAdviserProvider {
+                    local,
+                    cloud,
+                    preference: config.routing_preference(),
+                }),
                 Arc::new(TrustedLanSourceBackendLoader {
                     config: config.clone(),
                 }),

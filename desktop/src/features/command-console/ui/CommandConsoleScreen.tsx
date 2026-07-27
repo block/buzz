@@ -2,12 +2,23 @@ import { AlertTriangle, ShieldCheck } from "lucide-react";
 
 import { useCommandConsoleStatus } from "../hooks/useCommandConsoleStatus";
 import { useDailyCommandBrief } from "../hooks/useDailyCommandBrief";
+import { useModelRoutingPreference } from "../hooks/useModelRoutingPreference";
 import { CommandSystemStatus } from "./CommandSystemStatus";
 import { DailyCommandBrief } from "./DailyCommandBrief";
+import { ModelRoutingControls } from "./ModelRoutingControls";
+
+const ACTIVE_BRIEF_STATES = new Set([
+  "queued",
+  "collecting_sources",
+  "running_specialists",
+  "consolidating",
+  "persisting",
+]);
 
 export function CommandConsoleScreen() {
   const systemStatus = useCommandConsoleStatus();
   const commandBrief = useDailyCommandBrief();
+  const modelRouting = useModelRoutingPreference();
 
   return (
     <div
@@ -23,9 +34,10 @@ export function CommandConsoleScreen() {
           <div className="min-w-0">
             <p className="text-sm font-bold tracking-widest">COMMAND ADVISER</p>
             <p className="text-sm text-primary-foreground/80">
-              LM Studio is preferred, with automatic LiteLLM and OpenAI
-              fallback. RAG, Memory, and Apple data are read from your
-              configured sources.
+              {modelRouting.preference === "cloud_first"
+                ? "Cloud models are preferred, with automatic local fallback."
+                : "The local model is preferred, with automatic cloud fallback."}{" "}
+              RAG, Memory, and Apple data are read from your configured sources.
             </p>
           </div>
         </section>
@@ -59,6 +71,21 @@ export function CommandConsoleScreen() {
             </p>
           </div>
         </section>
+
+        <ModelRoutingControls
+          disabled={
+            commandBrief.busy ||
+            modelRouting.loading ||
+            modelRouting.saving ||
+            (commandBrief.status !== null &&
+              ACTIVE_BRIEF_STATES.has(commandBrief.status.state))
+          }
+          error={modelRouting.error}
+          onChange={(preference) => {
+            void modelRouting.setPreference(preference);
+          }}
+          preference={modelRouting.preference}
+        />
 
         <CommandSystemStatus status={systemStatus} />
 

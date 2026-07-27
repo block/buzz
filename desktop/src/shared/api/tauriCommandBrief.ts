@@ -24,6 +24,19 @@ export type CommandBriefScheduleUpdate = {
   readonly concurrency: 1 | 2;
 };
 
+export type ModelRoutingPreference = "cloud_first" | "local_first";
+
+function parseModelRoutingPreference(value: unknown): ModelRoutingPreference {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ["preference"]) ||
+    (value.preference !== "cloud_first" && value.preference !== "local_first")
+  ) {
+    return invalidResponse();
+  }
+  return value.preference;
+}
+
 function invalidResponse(): never {
   throw new Error("Command Brief returned an invalid response.");
 }
@@ -112,4 +125,18 @@ export async function setCommandBriefSchedule(
     await invokeTauri<unknown>("set_command_brief_schedule", { update }),
   );
   return parsed ?? invalidResponse();
+}
+
+export async function getModelRoutingPreference(): Promise<ModelRoutingPreference> {
+  return parseModelRoutingPreference(
+    await invokeTauri<unknown>("get_model_routing_preference"),
+  );
+}
+
+export async function setModelRoutingPreference(
+  preference: ModelRoutingPreference,
+): Promise<ModelRoutingPreference> {
+  return parseModelRoutingPreference(
+    await invokeTauri<unknown>("set_model_routing_preference", { preference }),
+  );
 }

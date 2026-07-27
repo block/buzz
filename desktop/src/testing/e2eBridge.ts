@@ -140,6 +140,8 @@ type E2eConfig = {
     commandBriefLatest?: unknown;
     /** Daily Command Brief schedule returned by the bridge. */
     commandBriefSchedule?: unknown;
+    /** Adviser model routing preference returned by the bridge. */
+    modelRoutingPreference?: unknown;
     /** Optional start result for lifecycle-control E2E scenarios. */
     commandBriefStart?: unknown;
     /** Optional cancel result for lifecycle-control E2E scenarios. */
@@ -9379,6 +9381,18 @@ export function maybeInstallE2eTauriMocks() {
             concurrency: 1,
           }
         );
+      case "get_model_routing_preference":
+        return (
+          activeConfig?.mock?.modelRoutingPreference ?? {
+            preference: "cloud_first",
+          }
+        );
+      case "set_model_routing_preference":
+        return {
+          preference:
+            (payload as { preference?: string } | null)?.preference ??
+            "cloud_first",
+        };
       case "start_command_brief":
         return (
           activeConfig?.mock?.commandBriefStart ?? {

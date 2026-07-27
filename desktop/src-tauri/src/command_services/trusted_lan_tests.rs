@@ -1,5 +1,6 @@
 use super::trusted_lan::{
-    catalogue_fingerprint, load_optional, mcp_tool_result, TrustedLanConfig, TrustedLanEndpoint,
+    catalogue_fingerprint, load_optional, mcp_tool_result, save_routing_preference,
+    ModelRoutingPreference, TrustedLanConfig, TrustedLanEndpoint,
 };
 use serde_json::json;
 use std::os::unix::fs::PermissionsExt;
@@ -32,6 +33,78 @@ fn optional_loader_selects_only_a_valid_protected_trusted_lan_config() {
         .expect("protect trusted LAN config");
 
     assert!(load_optional(&path).expect("protected config").is_some());
+}
+
+#[test]
+fn routing_preference_defaults_local_and_accepts_cloud_first() {
+    let example =
+        String::from_utf8(include_bytes!("../../trusted-lan-sources.example.json").to_vec())
+            .expect("fixture utf8");
+    let legacy_fixture = example.replace("  \"model_routing_preference\": \"cloud_first\",\n", "");
+    let legacy =
+        TrustedLanConfig::parse(legacy_fixture.as_bytes()).expect("legacy trusted LAN config");
+    assert_eq!(
+        legacy.routing_preference(),
+        ModelRoutingPreference::LocalFirst
+    );
+
+    let cloud_first = example;
+    let parsed =
+        TrustedLanConfig::parse(cloud_first.as_bytes()).expect("cloud-first trusted LAN config");
+    assert_eq!(
+        parsed.routing_preference(),
+        ModelRoutingPreference::CloudFirst
+    );
+    assert_ne!(
+        legacy.configuration_identity(),
+        parsed.configuration_identity()
+    );
+}
+
+#[test]
+fn routing_preference_save_is_atomic_protected_and_preserves_routes() {
+    let directory = tempfile::tempdir_in(std::env::current_dir().expect("working directory"))
+        .expect("temporary protected config directory");
+    let path = directory.path().join("trusted-lan-sources.json");
+    std::fs::write(
+        &path,
+        include_bytes!("../../trusted-lan-sources.example.json"),
+    )
+    .expect("write trusted LAN config");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+        .expect("protect trusted LAN config");
+
+    let before = TrustedLanConfig::load(&path).expect("load before save");
+    save_routing_preference(&path, ModelRoutingPreference::CloudFirst)
+        .expect("save cloud-first preference");
+    let after = TrustedLanConfig::load(&path).expect("load after save");
+
+    assert_eq!(
+        after.routing_preference(),
+        ModelRoutingPreference::CloudFirst
+    );
+    assert_eq!(after.memory_url(), before.memory_url());
+    assert_eq!(after.rag_url(), before.rag_url());
+    assert_eq!(after.litellm().endpoint(), before.litellm().endpoint());
+    assert_eq!(after.litellm().model(), before.litellm().model());
+    assert_eq!(
+        after.litellm().keychain_key(),
+        before.litellm().keychain_key()
+    );
+    assert_eq!(after.openai().endpoint(), before.openai().endpoint());
+    assert_eq!(after.openai().model(), before.openai().model());
+    assert_eq!(
+        after.openai().keychain_key(),
+        before.openai().keychain_key()
+    );
+    assert_eq!(
+        std::fs::metadata(&path)
+            .expect("saved config metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
 }
 
 #[test]

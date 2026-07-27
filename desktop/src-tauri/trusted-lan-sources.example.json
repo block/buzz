@@ -4,10 +4,11 @@
   "memory_url": "http://192.168.1.26:8006/mcp",
   "rag_url": "http://192.168.1.107:8005/mcp/",
   "automatic_cloud_fallback_acknowledged": true,
+  "model_routing_preference": "cloud_first",
   "litellm": {
     "enabled": true,
-    "endpoint": "http://192.168.1.31:4000/v1/chat/completions",
-    "model": "openai/gpt-5.4",
+    "endpoint": "http://192.168.1.26:4000/v1/chat/completions",
+    "model": "chatgpt-5.4",
     "keychain_key": "command.cloud.litellm"
   },
   "openai": {

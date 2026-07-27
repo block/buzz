@@ -673,6 +673,8 @@ pub fn run() {
             get_latest_command_brief,
             get_command_brief_schedule,
             set_command_brief_schedule,
+            get_model_routing_preference,
+            set_model_routing_preference,
             get_identity,
             get_nsec,
             import_identity,

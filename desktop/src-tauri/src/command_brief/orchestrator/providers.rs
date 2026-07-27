@@ -1,5 +1,26 @@
 use super::*;
-use crate::command_services::trusted_lan::TrustedLanConfig;
+use crate::command_services::trusted_lan::{ModelRoutingPreference, TrustedLanConfig};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProviderAttempt {
+    Local,
+    Cloud(CloudProvider),
+}
+
+pub(crate) const fn provider_attempts(preference: ModelRoutingPreference) -> [ProviderAttempt; 3] {
+    match preference {
+        ModelRoutingPreference::CloudFirst => [
+            ProviderAttempt::Cloud(CloudProvider::LiteLlm),
+            ProviderAttempt::Cloud(CloudProvider::OpenAi),
+            ProviderAttempt::Local,
+        ],
+        ModelRoutingPreference::LocalFirst => [
+            ProviderAttempt::Local,
+            ProviderAttempt::Cloud(CloudProvider::LiteLlm),
+            ProviderAttempt::Cloud(CloudProvider::OpenAi),
+        ],
+    }
+}
 
 pub(super) struct ImmediateFinalizationGate;
 
@@ -62,6 +83,7 @@ impl BriefAdviserProvider for AdviserExecutor {
 pub(super) struct FallbackAdviserProvider {
     pub(super) local: AdviserExecutor,
     pub(super) cloud: CloudAdviserClient,
+    pub(super) preference: ModelRoutingPreference,
 }
 
 impl BriefAdviserProvider for FallbackAdviserProvider {
@@ -74,55 +96,44 @@ impl BriefAdviserProvider for FallbackAdviserProvider {
     ) -> BriefFuture<'a, Result<AdviserContribution, BriefAdviserError>> {
         Box::pin(async move {
             let identity = format!("{run_id}:{}", adviser_label(adviser));
-            let local = AdviserExecutor::run_specialist(
-                &self.local,
-                SpecialistAdviserRequest::new(&identity, adviser, sources.clone()),
-                cancellation.clone(),
-            )
-            .await;
-            match local {
-                Ok(result) => return Ok(result.contribution),
-                Err(error) if !cloud_fallback_eligible(error.code()) => {
-                    eprintln!(
-                        "buzz-desktop: {adviser:?} local adviser failed without fallback: {:?}",
-                        error.code()
-                    );
-                    return Err(BriefAdviserError::from(error));
-                }
-                Err(error) => {
-                    eprintln!(
-                        "buzz-desktop: {adviser:?} local adviser failed: {:?}; trying cloud fallback",
-                        error.code()
-                    );
-                }
-            }
-            for provider in [CloudProvider::LiteLlm, CloudProvider::OpenAi] {
-                if !self.cloud.available(provider) {
-                    eprintln!(
-                        "buzz-desktop: {adviser:?} cloud fallback {provider:?} is not configured"
-                    );
-                    continue;
-                }
-                let request = SpecialistAdviserRequest::new(&identity, adviser, sources.clone());
-                match self
-                    .cloud
-                    .run_specialist(provider, &request, cancellation.clone())
+            for attempt in provider_attempts(self.preference) {
+                let result = match attempt {
+                    ProviderAttempt::Local => AdviserExecutor::run_specialist(
+                        &self.local,
+                        SpecialistAdviserRequest::new(&identity, adviser, sources.clone()),
+                        cancellation.clone(),
+                    )
                     .await
-                {
+                    .map(|result| result.contribution),
+                    ProviderAttempt::Cloud(provider) => {
+                        if !self.cloud.available(provider) {
+                            eprintln!(
+                                "buzz-desktop: {adviser:?} adviser provider {provider:?} is not configured"
+                            );
+                            continue;
+                        }
+                        self.cloud
+                            .run_specialist(
+                                provider,
+                                &SpecialistAdviserRequest::new(&identity, adviser, sources.clone()),
+                                cancellation.clone(),
+                            )
+                            .await
+                    }
+                };
+                match result {
                     Ok(contribution) => return Ok(contribution),
                     Err(error) if !cloud_fallback_eligible(error.code()) => {
                         eprintln!(
-                            "buzz-desktop: {adviser:?} cloud fallback {provider:?} failed without retry: {:?}",
+                            "buzz-desktop: {adviser:?} adviser provider {attempt:?} failed without retry: {:?}",
                             error.code()
                         );
                         return Err(BriefAdviserError::from(error));
                     }
-                    Err(error) => {
-                        eprintln!(
-                            "buzz-desktop: {adviser:?} cloud fallback {provider:?} failed: {:?}",
-                            error.code()
-                        );
-                    }
+                    Err(error) => eprintln!(
+                        "buzz-desktop: {adviser:?} adviser provider {attempt:?} failed: {:?}",
+                        error.code()
+                    ),
                 }
             }
             eprintln!("buzz-desktop: {adviser:?} adviser providers exhausted");
@@ -139,65 +150,55 @@ impl BriefAdviserProvider for FallbackAdviserProvider {
     ) -> BriefFuture<'a, Result<Value, BriefAdviserError>> {
         Box::pin(async move {
             let identity = format!("{run_id}:chief_of_staff");
-            let local = AdviserExecutor::run_chief_of_staff(
-                &self.local,
-                ChiefOfStaffRequest::new(&identity, contributions.clone(), source_ledger.clone()),
-                cancellation.clone(),
-            )
-            .await;
-            match local {
-                Ok(result) => {
-                    return serde_json::to_value(result.contribution)
-                        .map_err(|_| BriefAdviserError::Failed);
-                }
-                Err(error) if !cloud_fallback_eligible(error.code()) => {
-                    eprintln!(
-                        "buzz-desktop: ChiefOfStaff local adviser failed without fallback: {:?}",
-                        error.code()
-                    );
-                    return Err(BriefAdviserError::from(error));
-                }
-                Err(error) => {
-                    eprintln!(
-                        "buzz-desktop: ChiefOfStaff local adviser failed: {:?}; trying cloud fallback",
-                        error.code()
-                    );
-                }
-            }
-            for provider in [CloudProvider::LiteLlm, CloudProvider::OpenAi] {
-                if !self.cloud.available(provider) {
-                    eprintln!(
-                        "buzz-desktop: ChiefOfStaff cloud fallback {provider:?} is not configured"
-                    );
-                    continue;
-                }
-                let request = ChiefOfStaffRequest::new(
-                    &identity,
-                    contributions.clone(),
-                    source_ledger.clone(),
-                );
-                match self
-                    .cloud
-                    .run_chief_of_staff(provider, &request, cancellation.clone())
+            for attempt in provider_attempts(self.preference) {
+                let result = match attempt {
+                    ProviderAttempt::Local => AdviserExecutor::run_chief_of_staff(
+                        &self.local,
+                        ChiefOfStaffRequest::new(
+                            &identity,
+                            contributions.clone(),
+                            source_ledger.clone(),
+                        ),
+                        cancellation.clone(),
+                    )
                     .await
-                {
+                    .map(|result| result.contribution),
+                    ProviderAttempt::Cloud(provider) => {
+                        if !self.cloud.available(provider) {
+                            eprintln!(
+                                "buzz-desktop: ChiefOfStaff adviser provider {provider:?} is not configured"
+                            );
+                            continue;
+                        }
+                        self.cloud
+                            .run_chief_of_staff(
+                                provider,
+                                &ChiefOfStaffRequest::new(
+                                    &identity,
+                                    contributions.clone(),
+                                    source_ledger.clone(),
+                                ),
+                                cancellation.clone(),
+                            )
+                            .await
+                    }
+                };
+                match result {
                     Ok(consolidation) => {
                         return serde_json::to_value(consolidation)
                             .map_err(|_| BriefAdviserError::Failed);
                     }
                     Err(error) if !cloud_fallback_eligible(error.code()) => {
                         eprintln!(
-                            "buzz-desktop: ChiefOfStaff cloud fallback {provider:?} failed without retry: {:?}",
+                            "buzz-desktop: ChiefOfStaff adviser provider {attempt:?} failed without retry: {:?}",
                             error.code()
                         );
                         return Err(BriefAdviserError::from(error));
                     }
-                    Err(error) => {
-                        eprintln!(
-                            "buzz-desktop: ChiefOfStaff cloud fallback {provider:?} failed: {:?}",
-                            error.code()
-                        );
-                    }
+                    Err(error) => eprintln!(
+                        "buzz-desktop: ChiefOfStaff adviser provider {attempt:?} failed: {:?}",
+                        error.code()
+                    ),
                 }
             }
             eprintln!("buzz-desktop: ChiefOfStaff adviser providers exhausted");

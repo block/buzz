@@ -11,8 +11,10 @@ test("CommandConsoleScreen renders the usable Command Adviser route", () => {
 
   assert.match(html, /data-testid="command-console-screen"/);
   assert.match(html, /data-testid="command-console-official-banner"/);
+  assert.match(html, /data-testid="model-routing-controls"/);
   assert.match(html, />COMMAND ADVISER</);
-  assert.match(html, /LM Studio is preferred/i);
+  assert.match(html, /Cloud models first/i);
+  assert.match(html, /Local model first/i);
   assert.doesNotMatch(html, /unsigned|fingerprint|replication/i);
 });
 

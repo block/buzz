@@ -13,6 +13,10 @@ use crate::command_brief::store::open_command_brief_store;
 use crate::command_brief::types::{
     BriefRunState, BriefRunStatus, BriefSchedule, PublishedCommandBrief,
 };
+use crate::command_services::trusted_lan::{
+    load_optional as load_optional_trusted_lan_config, save_routing_preference,
+    ModelRoutingPreference,
+};
 
 /// Bounded metadata-only status view for the most recently active brief.
 #[derive(Clone, Serialize)]
@@ -30,6 +34,12 @@ pub struct CommandBriefScheduleUpdate {
     pub enabled: bool,
     pub local_time: String,
     pub concurrency: u8,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelRoutingPreferenceView {
+    pub preference: ModelRoutingPreference,
 }
 
 fn require_active_owner(state: &AppState) -> Result<Keys, &'static str> {
@@ -72,6 +82,13 @@ fn valid_run_id(value: &str) -> bool {
 
 fn command_error() -> String {
     "command brief unavailable".to_string()
+}
+
+fn trusted_lan_config_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    app.path()
+        .app_config_dir()
+        .map(|directory| directory.join("trusted-lan-sources.json"))
+        .map_err(|_| command_error())
 }
 
 fn terminal(state: BriefRunState) -> bool {
@@ -182,6 +199,35 @@ pub async fn get_command_brief_status(
     status_view_for_owner(&state, &owner_pubkey)
         .await
         .map_err(str::to_string)
+}
+
+/// Read the protected provider order used by the next Daily Command Brief.
+#[tauri::command]
+pub fn get_model_routing_preference(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<ModelRoutingPreferenceView, String> {
+    let _owner = require_active_owner(&state).map_err(str::to_string)?;
+    let config = load_optional_trusted_lan_config(&trusted_lan_config_path(&app)?)
+        .map_err(|_| command_error())?;
+    Ok(ModelRoutingPreferenceView {
+        preference: config
+            .map(|config| config.routing_preference())
+            .unwrap_or_default(),
+    })
+}
+
+/// Persist one of the two fixed provider orders for subsequent brief runs.
+#[tauri::command]
+pub fn set_model_routing_preference(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    preference: ModelRoutingPreference,
+) -> Result<ModelRoutingPreferenceView, String> {
+    let _owner = require_active_owner(&state).map_err(str::to_string)?;
+    save_routing_preference(&trusted_lan_config_path(&app)?, preference)
+        .map_err(|_| command_error())?;
+    Ok(ModelRoutingPreferenceView { preference })
 }
 
 /// Start the fixed native OFFICIAL Daily Command Brief request.

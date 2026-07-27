@@ -1,7 +1,7 @@
 use crate::command_services::ssh::ProtectedFile;
 use reqwest::blocking::{Client, Response};
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::io::Read;
@@ -83,8 +83,26 @@ impl CloudProviderConfig {
 pub(crate) struct TrustedLanConfig {
     memory_url: TrustedLanEndpoint,
     rag_url: TrustedLanEndpoint,
+    routing_preference: ModelRoutingPreference,
     litellm: CloudProviderConfig,
     openai: CloudProviderConfig,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ModelRoutingPreference {
+    CloudFirst,
+    #[default]
+    LocalFirst,
+}
+
+impl ModelRoutingPreference {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::CloudFirst => "cloud_first",
+            Self::LocalFirst => "local_first",
+        }
+    }
 }
 
 impl TrustedLanConfig {
@@ -111,6 +129,7 @@ impl TrustedLanConfig {
         Ok(Self {
             memory_url,
             rag_url,
+            routing_preference: raw.model_routing_preference,
             litellm,
             openai,
         })
@@ -134,9 +153,47 @@ impl TrustedLanConfig {
         &self.openai
     }
 
+    pub(crate) const fn routing_preference(&self) -> ModelRoutingPreference {
+        self.routing_preference
+    }
+
+    pub(crate) fn configuration_identity(&self) -> String {
+        let basis = format!(
+            "{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
+            self.memory_url.as_str(),
+            self.rag_url.as_str(),
+            self.routing_preference.as_str(),
+            self.litellm.enabled(),
+            self.litellm.endpoint(),
+            self.litellm.model(),
+            self.openai.enabled(),
+            self.openai.endpoint(),
+            self.openai.model(),
+        );
+        hex::encode(Sha256::digest(basis.as_bytes()))
+    }
+
     pub(crate) fn source_client(&self) -> Result<TrustedLanSourceClient, TrustedLanError> {
         TrustedLanSourceClient::new(self.memory_url.clone(), self.rag_url.clone())
     }
+}
+
+pub(crate) fn save_routing_preference(
+    path: &Path,
+    preference: ModelRoutingPreference,
+) -> Result<(), TrustedLanError> {
+    let bytes = ProtectedFile::open(path, MAXIMUM_CONFIG_BYTES)
+        .and_then(|file| file.read_all())
+        .map_err(|_| TrustedLanError::UnprotectedConfig)?;
+    let mut raw: RawTrustedLanConfig =
+        serde_json::from_slice(&bytes).map_err(|_| TrustedLanError::InvalidConfig)?;
+    TrustedLanConfig::parse(&bytes)?;
+    raw.model_routing_preference = preference;
+    let mut payload =
+        serde_json::to_vec_pretty(&raw).map_err(|_| TrustedLanError::InvalidConfig)?;
+    payload.push(b'\n');
+    crate::managed_agents::storage::atomic_write_json_restricted(path, &payload)
+        .map_err(|_| TrustedLanError::UnprotectedConfig)
 }
 
 pub(crate) fn load_optional(path: &Path) -> Result<Option<TrustedLanConfig>, TrustedLanError> {
@@ -413,7 +470,7 @@ fn valid_keychain_key(value: &str) -> bool {
     value.starts_with("command.cloud.") && valid_identifier(value, 128)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct RawTrustedLanConfig {
     schema_version: u32,
@@ -421,11 +478,13 @@ struct RawTrustedLanConfig {
     memory_url: String,
     rag_url: String,
     automatic_cloud_fallback_acknowledged: bool,
+    #[serde(default)]
+    model_routing_preference: ModelRoutingPreference,
     litellm: RawCloudProviderConfig,
     openai: RawCloudProviderConfig,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct RawCloudProviderConfig {
     enabled: bool,

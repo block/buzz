@@ -778,7 +778,27 @@ async fn production_preflight(
     if !active_owner_matches(&state, expected_owner_pubkey) {
         return Err(IDENTITY_UNAVAILABLE);
     }
-    let apple_identity = format!("{apple_config_id}:{helper_id}");
+    let trusted_lan_path = app
+        .path()
+        .app_config_dir()
+        .map_err(|_| "runtime_config_unavailable")?
+        .join("trusted-lan-sources.json");
+    let trusted_lan_identity = tokio::task::spawn_blocking(move || {
+        crate::command_services::trusted_lan::load_optional(&trusted_lan_path)
+            .map_err(|_| "runtime_config_unavailable")
+            .map(|config| {
+                config.map_or_else(
+                    || "trusted-lan-disabled".to_string(),
+                    |config| config.configuration_identity(),
+                )
+            })
+    })
+    .await
+    .map_err(|_| "runtime_config_unavailable")??;
+    if !active_owner_matches(&state, expected_owner_pubkey) {
+        return Err(IDENTITY_UNAVAILABLE);
+    }
+    let apple_identity = format!("{apple_config_id}:{helper_id}:{trusted_lan_identity}");
     let config = RuntimeConfigIdentity::new(
         &owner_pubkey,
         model,

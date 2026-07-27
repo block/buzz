@@ -22,6 +22,7 @@ const schedule = {
   catchUpSameDay: true,
   concurrency: 1,
 };
+let routing = { preference: "cloud_first" };
 let statusView = {
   classification: "OFFICIAL",
   current: status,
@@ -38,6 +39,11 @@ globalThis.__TAURI_INTERNALS__ = {
     )
       return schedule;
     if (command === "cancel_command_brief") return status;
+    if (command === "get_model_routing_preference") return routing;
+    if (command === "set_model_routing_preference") {
+      routing = { preference: args.preference };
+      return routing;
+    }
     return null;
   },
   transformCallback: () => 1,
@@ -48,7 +54,9 @@ const {
   getCommandBriefSchedule,
   getCommandBriefStatus,
   getLatestCommandBrief,
+  getModelRoutingPreference,
   setCommandBriefSchedule,
+  setModelRoutingPreference,
   startCommandBrief,
 } = await import("./tauriCommandBrief.ts");
 
@@ -89,6 +97,23 @@ test("cancel sends only the bounded run identity and schedule update sends only 
       },
     },
   ]);
+});
+
+test("model routing exposes only the two fixed preference choices", async () => {
+  calls.length = 0;
+  routing = { preference: "cloud_first" };
+  assert.equal(await getModelRoutingPreference(), "cloud_first");
+  assert.equal(await setModelRoutingPreference("local_first"), "local_first");
+  assert.deepEqual(calls, [
+    { command: "get_model_routing_preference", args: {} },
+    {
+      command: "set_model_routing_preference",
+      args: { preference: "local_first" },
+    },
+  ]);
+
+  routing = { preference: "anything_else" };
+  await assert.rejects(getModelRoutingPreference(), /invalid response/);
 });
 
 test("status reconciliation rejects mixed runs and nonmonotonic lifecycle histories", async () => {

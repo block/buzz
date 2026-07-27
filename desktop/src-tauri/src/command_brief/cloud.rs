@@ -124,7 +124,7 @@ impl CloudAdviserClient {
         let body = match provider {
             CloudProvider::LiteLlm => json!({
                 "model": route.model,
-                "stream": false,
+                "stream": true,
                 "max_completion_tokens": 8192,
                 "response_format": {"type": "json_object"},
                 "messages": [
@@ -150,7 +150,7 @@ impl CloudAdviserClient {
             _ = cancellation.cancelled() => return Err(cancelled()),
             response = request.send() => response.map_err(map_transport_error)?,
         };
-        parse_provider_response(provider, response).await
+        parse_provider_response(provider, response, cancellation).await
     }
 
     fn route(&self, provider: CloudProvider) -> Option<&CloudRoute> {
@@ -184,6 +184,7 @@ fn load_route(
 async fn parse_provider_response(
     provider: CloudProvider,
     response: Response,
+    cancellation: CancellationToken,
 ) -> Result<String, AdviserExecutionError> {
     let status = response.status();
     if matches!(status.as_u16(), 401 | 403) {
@@ -203,7 +204,15 @@ async fn parse_provider_response(
     }
     let mut bytes = Vec::new();
     let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
+    loop {
+        let chunk = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return Err(cancelled()),
+            chunk = stream.next() => chunk,
+        };
+        let Some(chunk) = chunk else {
+            break;
+        };
         let chunk = chunk.map_err(map_transport_error)?;
         if bytes
             .len()
@@ -214,18 +223,10 @@ async fn parse_provider_response(
         }
         bytes.extend_from_slice(&chunk);
     }
-    let value: Value = serde_json::from_slice(&bytes).map_err(|_| invalid_output())?;
     match provider {
-        CloudProvider::LiteLlm => value
-            .get("choices")
-            .and_then(Value::as_array)
-            .and_then(|choices| choices.first())
-            .and_then(|choice| choice.get("message"))
-            .and_then(|message| message.get("content"))
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .ok_or_else(invalid_output),
+        CloudProvider::LiteLlm => parse_litellm_sse_body(&bytes),
         CloudProvider::OpenAi => {
+            let value: Value = serde_json::from_slice(&bytes).map_err(|_| invalid_output())?;
             if let Some(text) = value.get("output_text").and_then(Value::as_str) {
                 return Ok(text.to_string());
             }
@@ -249,6 +250,51 @@ async fn parse_provider_response(
                 .ok_or_else(invalid_output)
         }
     }
+}
+
+pub(crate) fn parse_litellm_sse_body(bytes: &[u8]) -> Result<String, AdviserExecutionError> {
+    if bytes.len() > MAXIMUM_CLOUD_RESPONSE_BYTES {
+        return Err(invalid_output());
+    }
+    let body = std::str::from_utf8(bytes).map_err(|_| invalid_output())?;
+    let mut output = String::new();
+    let mut done = false;
+    for line in body.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        let payload = line.strip_prefix("data: ").ok_or_else(invalid_output)?;
+        if done {
+            return Err(invalid_output());
+        }
+        if payload == "[DONE]" {
+            done = true;
+            continue;
+        }
+        let event: Value = serde_json::from_str(payload).map_err(|_| invalid_output())?;
+        let delta = event
+            .get("choices")
+            .and_then(Value::as_array)
+            .and_then(|choices| choices.first())
+            .and_then(|choice| choice.get("delta"))
+            .and_then(Value::as_object)
+            .ok_or_else(invalid_output)?;
+        if let Some(content) = delta.get("content") {
+            let content = content.as_str().ok_or_else(invalid_output)?;
+            if output
+                .len()
+                .checked_add(content.len())
+                .is_none_or(|length| length > MAXIMUM_CLOUD_RESPONSE_BYTES)
+            {
+                return Err(invalid_output());
+            }
+            output.push_str(content);
+        }
+    }
+    if !done || output.is_empty() {
+        return Err(invalid_output());
+    }
+    Ok(output)
 }
 
 fn map_transport_error(error: reqwest::Error) -> AdviserExecutionError {

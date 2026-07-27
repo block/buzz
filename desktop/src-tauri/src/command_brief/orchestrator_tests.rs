@@ -13,7 +13,10 @@ use crate::command_services::apple_inputs::{
     AppleBriefSelection, AppleInputRequest, AppleInputResponse,
 };
 use crate::command_services::rag::VerifiedRagSnapshot;
+use crate::command_services::trusted_lan::ModelRoutingPreference;
 
+use super::cloud::CloudProvider;
+use super::orchestrator::{provider_attempts, ProviderAttempt};
 use super::orchestrator::{
     BriefAdviserError, BriefAdviserProvider, BriefFinalizationGate, BriefFuture, BriefPersistence,
     BriefSourceProvider, CollectedSourceProvider, CommandBriefOrchestrator, CommandBriefRequest,
@@ -34,6 +37,26 @@ use super::types::{
 const SNAPSHOT_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const SNAPSHOT_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const OBSERVED: &str = "2026-07-25T06:00:00+10:00";
+
+#[test]
+fn routing_preference_defines_one_exact_provider_order() {
+    assert_eq!(
+        provider_attempts(ModelRoutingPreference::CloudFirst),
+        [
+            ProviderAttempt::Cloud(CloudProvider::LiteLlm),
+            ProviderAttempt::Cloud(CloudProvider::OpenAi),
+            ProviderAttempt::Local,
+        ]
+    );
+    assert_eq!(
+        provider_attempts(ModelRoutingPreference::LocalFirst),
+        [
+            ProviderAttempt::Local,
+            ProviderAttempt::Cloud(CloudProvider::LiteLlm),
+            ProviderAttempt::Cloud(CloudProvider::OpenAi),
+        ]
+    );
+}
 
 fn boxed<'a, T: Send + 'a>(
     future: impl Future<Output = T> + Send + 'a,
