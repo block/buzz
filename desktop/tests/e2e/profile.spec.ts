@@ -1129,10 +1129,10 @@ test("renders settings in the app shell with a back button", async ({
 }) => {
   await page.goto("/");
 
-  const inboxNavButton = page
+  const activityNavButton = page
     .getByTestId("app-sidebar")
-    .getByRole("button", { name: "Inbox" });
-  await expect(inboxNavButton).toBeVisible();
+    .getByRole("button", { name: "Activity" });
+  await expect(activityNavButton).toBeVisible();
 
   await openSettings(page);
   await expect(page.getByTestId("settings-sidebar")).toBeVisible();
@@ -1161,14 +1161,14 @@ test("renders settings in the app shell with a back button", async ({
       name: "Appearance",
     }),
   ).toBeVisible();
-  await expect(inboxNavButton).toHaveCount(0);
+  await expect(activityNavButton).toHaveCount(0);
 
   await page.getByTestId("settings-back-to-app").click();
   await expectHomeView(page);
-  await expect(inboxNavButton).toBeVisible();
+  await expect(activityNavButton).toBeVisible();
 });
 
-test("notification settings drive the Inbox badge and desktop alerts", async ({
+test("notification settings drive the Activity badge and desktop alerts", async ({
   page,
 }) => {
   async function getAppBadgeCount() {
@@ -1299,7 +1299,7 @@ test("notification settings drive the Inbox badge and desktop alerts", async ({
 
   await page
     .getByTestId("app-sidebar")
-    .getByRole("button", { name: "Inbox" })
+    .getByRole("button", { name: "Activity" })
     .click();
   await expectHomeView(page);
   await expect(page.getByTestId("sidebar-home-count")).toHaveCount(0);

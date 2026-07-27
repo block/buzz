@@ -3010,6 +3010,9 @@ test("Activity filter changes preserve valid detail and directly select a replac
     "Please review the home panel routing.",
   );
 
+  await expect(
+    page.getByRole("menuitemradio", { name: "Threads" }),
+  ).toHaveCount(0);
   await page.getByTestId("inbox-filter-trigger").click();
   await page.getByRole("menuitemradio", { name: "Needs action" }).click();
   await expect(
