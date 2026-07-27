@@ -75,7 +75,10 @@ import {
   getBakedModelInheritLabel,
   getBakedProviderInheritLabel,
 } from "./bakedEnvHelpers";
-import { getProviderApiKeyEnvVar } from "./agentConfigOptions";
+import {
+  getProviderApiKeyEnvVar,
+  providerApiKeyFieldLabel,
+} from "./agentConfigOptions";
 import { useAgentDialogDefaults } from "./useAgentDialogDefaults";
 import { AgentAiDefaultsNotice } from "./AgentAiDefaults";
 import { AgentDefaultsDialog } from "./AgentDefaultsDialog";
@@ -1036,11 +1039,7 @@ export function AgentInstanceEditDialog({
                 isInherited={apiKeyIsInherited}
                 inheritedLabel={apiKeyInheritedLabel}
                 isRequired={apiKeyIsRequired}
-                label={
-                  effectiveProvider === "anthropic"
-                    ? "Anthropic API Key"
-                    : "OpenAI API Key"
-                }
+                label={providerApiKeyFieldLabel(effectiveProvider)}
                 onValueChange={(next) => {
                   setEnvVars((prev) => ({
                     ...prev,

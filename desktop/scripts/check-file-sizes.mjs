@@ -177,7 +177,12 @@ const overrides = new Map([
   // Windows Doctor install fix: cli_install_commands_windows field added to test stubs.
   // team-instructions-first-class: ManagedAgentRecord fixture gains the new
   // team_id field (+1 line).
-  ["src-tauri/src/managed_agents/readiness.rs", 1863],
+  // +74 (1863 -> 1937): Together AI provider — the buzz_agent_requirements and
+  // goose_requirements credential arms (TOGETHER_API_KEY, not the OPENAI_COMPAT
+  // name it is mapped onto at spawn) plus three readiness tests pinning that
+  // distinction. Provider-specific credential requirements are the purpose of
+  // this file; the split remains queued with the rest of the list.
+  ["src-tauri/src/managed_agents/readiness.rs", 1937],
   // Windows PATH-correctness fix: 3 #[cfg(windows)] test functions covering
   // .cmd shim rejection, .bat shim rejection, and .exe acceptance for
   // configure_runtime_cli (fix #2397). Test-only growth; queued to split.
@@ -192,7 +197,11 @@ const overrides = new Map([
   // definition-authoritative resolver comments grew it to 982, and this PR's
   // typed harness-descriptor resolution in spawn_agent_child (+38) lands on
   // top. Queued to shrink with the next runtime split pass (#2974 follow-up).
-  ["src-tauri/src/managed_agents/runtime.rs", 1020],
+  // +23 (1020 -> 1043): Together AI provider — the spawn-time env derivation
+  // block beside the existing relay-mesh one. The preset logic itself lives in
+  // managed_agents/together.rs; only the call site (which must run after the
+  // user env is written, and scrubs both OpenAI keys first) belongs here.
+  ["src-tauri/src/managed_agents/runtime.rs", 1043],
   // applyWorkspace reposDir parameter plus the validateReposDir binding,
   // threaded through Tauri invokes for configurable repos_dir, plus the
   // harness-persona-sync `harnessOverride` create-input bit — load-bearing
@@ -556,7 +565,12 @@ const overrides = new Map([
   // test-bindable seam (struct + helper + docs) so the linked-agent
   // regression test kills the stale-record mutation at get_agent_models'
   // consumption point (review finding, Wren + Dawn).
-  ["src-tauri/src/commands/agent_models.rs", 1152],
+  // +50 (1152 -> 1202): Together AI provider — OpenAiModelListResponse became
+  // an untagged enum because Together answers /v1/models with a bare array,
+  // OpenAiModelListItem gained its `type` and `display_name` fields, and
+  // discovery routes Together to its own base URL and credential name. This is
+  // the model-discovery boundary; queued to split with the modules above.
+  ["src-tauri/src/commands/agent_models.rs", 1202],
   // global-agent-config: get_agent_config_surface / write_agent_config_field /
   // put_agent_session_config commands + GlobalAgentConfig serde types. New file
   // in this PR; queued to split with the command module refactor.

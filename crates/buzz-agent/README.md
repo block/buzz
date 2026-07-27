@@ -168,6 +168,7 @@ Everything is environment variables. No flags, no config files. (We are a subpro
 | llama.cpp | `openai` | `POST {base}/chat/completions` | any tool-calling GGUF |
 | Ollama | `openai` | `POST {base}/chat/completions` | llama3.1, qwen2.5-coder |
 | OpenRouter | `openai` | `POST {base}/chat/completions` | anything they route |
+| Together AI | `openai` | `POST {base}/chat/completions` | moonshotai/Kimi-K2.6, zai-org/GLM-5.2 |
 | Block Gateway | `openai` | `POST {base}/chat/completions` | gpt-5, claude |
 | Databricks | `databricks` | `POST {host}/serving-endpoints/{model}/invocations` | goose-claude-4-6-sonnet |
 | Databricks AI Gateway v2 | `databricks_v2` | `POST {host}/ai-gateway/{provider}/v1/...` | databricks-gpt-5-5, databricks-claude-opus-4-7 |
@@ -178,7 +179,17 @@ If `BUZZ_AGENT_PROVIDER=anthropic` is selected without `ANTHROPIC_API_KEY`, or `
 
 By default (`OPENAI_COMPAT_API=auto`) the agent picks **Responses** when `OPENAI_COMPAT_BASE_URL` points at an `*.openai.com` host and **Chat Completions** everywhere else. Pin the choice explicitly with `OPENAI_COMPAT_API=chat` or `OPENAI_COMPAT_API=responses` for providers that diverge from the default (e.g. a Responses-compatible self-hosted gateway).
 
-`Provider` is a Rust `enum` with one `match` in `Llm::complete`. There is no trait, no `Box<dyn>`, no async-trait. Adding a provider is a `match` arm and one `body`/`parse` pair in `llm.rs`.
+Some providers appear in Buzz's own provider picker under their own name while still running over this transport. **Together AI** and **Buzz shared compute** are both presets: the desktop stores `together` / `relay-mesh` as the provider and rewrites the env to `BUZZ_AGENT_PROVIDER=openai` plus the preset's base URL when it spawns the agent, so the agent itself never sees those ids. Together's key is `TOGETHER_API_KEY` in the picker and is mapped onto `OPENAI_COMPAT_API_KEY` at spawn. Running `buzz-agent` standalone against Together is the same thing done by hand:
+
+```sh
+BUZZ_AGENT_PROVIDER=openai \
+OPENAI_COMPAT_BASE_URL=https://api.together.ai/v1 \
+OPENAI_COMPAT_API_KEY="$TOGETHER_API_KEY" \
+OPENAI_COMPAT_MODEL=moonshotai/Kimi-K2.6 \
+buzz-agent
+```
+
+`Provider` is a Rust `enum` with one `match` in `Llm::complete`. There is no trait, no `Box<dyn>`, no async-trait. Adding a provider is a `match` arm and one `body`/`parse` pair in `llm.rs` — but a provider that already speaks an existing dialect needs no arm at all, only a preset like the two above.
 
 ## MCP Servers
 

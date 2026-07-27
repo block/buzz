@@ -34,6 +34,7 @@ pub(crate) mod storage;
 pub(crate) mod team_events;
 mod team_repair;
 mod teams;
+mod together;
 mod types;
 
 // Shared guard for tests that mutate or read process-global PATH.
@@ -75,6 +76,7 @@ pub use runtime_commands::*;
 pub use runtime_types::*;
 pub use storage::*;
 pub use teams::*;
+pub use together::*;
 pub use types::*;
 
 /// Returns the Buzz nest directory (`~/.buzz`) if it exists as a real
