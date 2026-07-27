@@ -59,6 +59,24 @@ type MockManagedAgentSeed = {
   autoRestartOnConfigChange?: boolean;
   respondTo?: "owner-only" | "allowlist" | "anyone";
   respondToAllowlist?: string[];
+  /**
+   * Spawner pubkey this agent's identity was relocated to. Non-null puts the
+   * agent in the server-hosted branch: the row shows the server badge and the
+   * Edit dialog renders the "Runs on … · Server" banner instead of the local
+   * harness picker.
+   */
+  relocatedToSpawner?: string | null;
+};
+
+/**
+ * A kind:10180 spawner announcement replayed to the directory subscription.
+ * `content` is the raw snake_case announcement body a real spawner publishes;
+ * omit `ai` to drive the "Model list unavailable from this server" fallback.
+ */
+type MockSpawnerAnnouncementSeed = {
+  pubkey: string;
+  content: Record<string, unknown>;
+  createdAt?: number;
 };
 
 type MockSearchProfileSeed = {
@@ -223,6 +241,8 @@ type MockBridgeOptions = {
       | "failed"
       | "stopped";
   }>;
+  /** kind:10180 announcements served to the spawner-directory subscription. */
+  spawnerAnnouncements?: MockSpawnerAnnouncementSeed[];
   personas?: MockPersonaSeed[];
   /** Community catalog replaceable-event heads returned by relay queries. */
   personaCatalogEvents?: RelayEvent[];
