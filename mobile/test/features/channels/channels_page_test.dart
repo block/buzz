@@ -1288,7 +1288,7 @@ class _FakeReadStateNotifier extends ReadStateNotifier {
       pubkey: state.pubkey,
       contexts: state.contexts,
       version: state.version + 1,
-      locallyForcedChannelIds: state.locallyForcedChannelIds,
+      forcedUnreadContexts: state.forcedUnreadContexts,
     );
   }
 
@@ -1299,7 +1299,11 @@ class _FakeReadStateNotifier extends ReadStateNotifier {
   }
 
   @override
-  void markContextRead(String contextId, int unixTimestamp) {
+  void markContextRead(
+    String contextId,
+    int unixTimestamp, {
+    bool clearForcedMessages = false,
+  }) {
     markedContexts[contextId] = unixTimestamp;
     state = state.copyWithContext(contextId, unixTimestamp);
   }
