@@ -123,6 +123,40 @@ type RawSpawnerPromptUpdate = {
   promptHash: string;
 };
 
+/** A decoded credential ack from a spawner. */
+export type SpawnerCredentialAck = {
+  accepted: boolean;
+  message?: string | null;
+};
+
+/**
+ * Build a signed credential update for a spawner. The token goes straight to
+ * Rust, which encrypts it into the returned event — it is never persisted on
+ * this device. An empty `credential` clears the spawner-side token.
+ */
+export async function buildSpawnerCredentialUpdate(input: {
+  spawnerPubkey: string;
+  credential: string;
+}): Promise<{ event: RelayEvent }> {
+  const raw = await invokeTauri<{ eventJson: string }>(
+    "send_spawner_credential_update",
+    { spawnerPubkey: input.spawnerPubkey, credential: input.credential },
+  );
+  return { event: JSON.parse(raw.eventJson) as RelayEvent };
+}
+
+/** Decode an inbound 24201 frame as a credential ack; null for other frames. */
+export async function decodeSpawnerCredentialAck(
+  spawnerPubkey: string,
+  encryptedContent: string,
+): Promise<SpawnerCredentialAck | null> {
+  const result = await invokeTauri<SpawnerCredentialAck | null>(
+    "decode_spawner_credential_ack",
+    { spawnerPubkey, encryptedContent },
+  );
+  return result ?? null;
+}
+
 /**
  * The signed answer, plus whether it handed over an existing agent's key.
  *
