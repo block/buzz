@@ -73,6 +73,25 @@ export function useServerAgents() {
   }, [spawners, statuses]);
 
   /**
+   * Refuse a slug already in use on this spawner.
+   *
+   * kind:30178 is addressed by `(author, kind, d_tag)`, so publishing a second
+   * spec under the same slug does not fail — it *replaces* the first. Whatever
+   * agent was running there is reconfigured out from under itself, and if the
+   * new spec names a different identity the spawner tears the old one down.
+   */
+  const assertSlugFree = React.useCallback(
+    (spawnerPubkey: string, slug: string) => {
+      if (statuses.has(spawnerStatusKey(spawnerPubkey, slug))) {
+        throw new Error(
+          `An agent named "${slug}" already runs on this spawner. Remove it first, or rename this one.`,
+        );
+      }
+    },
+    [statuses],
+  );
+
+  /**
    * Create a server agent from a persona.
    *
    * The spec carries `personaId` rather than the prompt itself, matching how
@@ -95,6 +114,7 @@ export function useServerAgents() {
           "Could not derive a name for this agent. Rename it using letters or digits.",
         );
       }
+      assertSlugFree(spawnerPubkey, slug);
       setIsPending(true);
       try {
         await publishSpawnerAgentSpec({
@@ -113,7 +133,7 @@ export function useServerAgents() {
         setIsPending(false);
       }
     },
-    [],
+    [assertSlugFree],
   );
 
   /**
@@ -129,6 +149,7 @@ export function useServerAgents() {
     async (agent: RelocatableAgent, spawnerPubkey: string) => {
       if (!spawnerPubkey) throw new Error("No spawner selected.");
       const { slug, spec } = buildRelocationPlan(agent);
+      assertSlugFree(spawnerPubkey, slug);
       setIsPending(true);
       try {
         await publishSpawnerAgentSpec({ slug, spawnerPubkey, spec });
@@ -137,7 +158,7 @@ export function useServerAgents() {
         setIsPending(false);
       }
     },
-    [],
+    [assertSlugFree],
   );
 
   /**
