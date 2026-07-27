@@ -384,7 +384,9 @@ class _RecentSearches extends StatelessWidget {
   Widget build(BuildContext context) {
     return ListView(
       key: const Key('recent-searches-list'),
-      padding: const EdgeInsets.only(bottom: Grid.xl),
+      padding: EdgeInsets.only(
+        bottom: Grid.xl + MediaQuery.viewInsetsOf(context).bottom,
+      ),
       children: [
         Padding(
           padding: const EdgeInsets.fromLTRB(

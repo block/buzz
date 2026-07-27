@@ -231,6 +231,47 @@ void main() {
     expect(find.text('Search messages, channels, and people'), findsOneWidget);
   });
 
+  testWidgets('keeps recent searches scrollable above the keyboard', (
+    tester,
+  ) async {
+    const keyboardInset = 300.0;
+
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          searchProvider.overrideWith(
+            () => _FakeSearchNotifier(const SearchState.initial()),
+          ),
+          recentSearchesProvider.overrideWith(
+            () => _FakeRecentSearchesNotifier(const [
+              'design systems',
+              'launch plan',
+            ]),
+          ),
+          profileProvider.overrideWith(() => _FakeProfileNotifier()),
+        ],
+        child: Builder(
+          builder: (context) => MediaQuery(
+            data: MediaQuery.of(context).copyWith(
+              viewInsets: const EdgeInsets.only(bottom: keyboardInset),
+            ),
+            child: const SearchPage(),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('search-field')));
+    await tester.pumpAndSettle();
+
+    final recentSearches = tester.widget<ListView>(
+      find.byKey(const Key('recent-searches-list')),
+    );
+    final padding = recentSearches.padding! as EdgeInsets;
+
+    expect(padding.bottom, Grid.xl + keyboardInset);
+  });
+
   testWidgets('keeps search results scrollable above the keyboard', (
     tester,
   ) async {
