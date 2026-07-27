@@ -900,6 +900,7 @@ jobs:
             -p buzz-relay \
             -p buzz-acp \
             -p buzz-agent \
+            -p buzz-a2a-acp \
             -p buzz-dev-mcp \
             -p git-credential-nostr \
             -p git-sign-nostr
@@ -938,7 +939,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p desktop/src-tauri/binaries
-          for bin in buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz; do
+          for bin in buzz-acp buzz-agent buzz-a2a-acp buzz-dev-mcp git-credential-nostr buzz; do
             touch "desktop/src-tauri/binaries/${bin}-${TARGET}.exe"
           done
       - name: Clippy (workspace)
@@ -1012,6 +1013,7 @@ jobs:
           mkdir -p desktop/src-tauri/binaries
           touch "desktop/src-tauri/binaries/buzz-acp-$TARGET"
           touch "desktop/src-tauri/binaries/buzz-agent-$TARGET"
+          touch "desktop/src-tauri/binaries/buzz-a2a-acp-$TARGET"
           touch "desktop/src-tauri/binaries/buzz-dev-mcp-$TARGET"
           touch "desktop/src-tauri/binaries/git-credential-nostr-$TARGET"
           touch "desktop/src-tauri/binaries/buzz-$TARGET"
