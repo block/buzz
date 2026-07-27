@@ -34,7 +34,7 @@ const HERMES_AVAILABLE = {
   binary_path: "/usr/local/bin/hermes-acp",
   default_args: [],
   mcp_command: null,
-  install_hint: "Install Hermes Agent from hermes-agent.nousresearch.com.",
+  install_hint: "Buzz talks to Hermes Agent through its hermes-acp command.",
   install_instructions_url: "https://hermes-agent.nousresearch.com",
   can_auto_install: false,
   requires_external_cli: true,
@@ -54,7 +54,8 @@ const OPENCLAW_NOT_INSTALLED = {
   binary_path: null,
   default_args: ["acp"],
   mcp_command: null,
-  install_hint: "Install OpenClaw: npm install -g openclaw@latest.",
+  install_hint:
+    "Buzz talks to OpenClaw through its ACP mode (openclaw acp), which relies on the OpenClaw Gateway daemon. Follow the setup guide to install both.",
   install_instructions_url: "https://docs.openclaw.ai/start/getting-started",
   can_auto_install: false,
   requires_external_cli: true,
@@ -76,7 +77,7 @@ const CURSOR_AVAILABLE = {
   binary_path: "/usr/local/bin/cursor-agent",
   default_args: [],
   mcp_command: null,
-  install_hint: "Install Cursor CLI from cursor.com.",
+  install_hint: "Buzz talks to Cursor through the cursor-agent CLI's ACP mode.",
   install_instructions_url: "https://cursor.com/cli",
   can_auto_install: false,
   requires_external_cli: true,
@@ -228,11 +229,8 @@ test.describe("your harnesses split", () => {
       "A personal AI assistant that runs on your own devices.",
     );
     // Operational setup hint from runtime state.
-    await expect(detail).toContainText("npm install -g openclaw@latest");
-    // Docs link + primary setup action (no auto-install → setup guide).
-    await expect(
-      page.getByTestId("harness-catalog-docs-openclaw"),
-    ).toBeVisible();
+    await expect(detail).toContainText("OpenClaw Gateway daemon");
+    // Primary setup action under the header (no auto-install → setup guide).
     await expect(
       page.getByTestId("harness-catalog-setup-openclaw"),
     ).toBeVisible();

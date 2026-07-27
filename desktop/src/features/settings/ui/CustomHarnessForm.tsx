@@ -1,5 +1,5 @@
 import * as React from "react";
-import { ChevronRight, Plus, X } from "lucide-react";
+import { Plus, X } from "lucide-react";
 
 import {
   useManagedAgentPrereqsQuery,

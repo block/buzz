@@ -336,7 +336,7 @@ function CatalogDetail({ entry }: { entry: AcpRuntimeCatalogEntry }) {
                 data-testid={`harness-catalog-install-${entry.id}`}
                 disabled={install.isPending}
                 onClick={handleInstall}
-                size="sm"
+                size="xs"
                 type="button"
               >
                 {install.isPending ? (
@@ -352,11 +352,11 @@ function CatalogDetail({ entry }: { entry: AcpRuntimeCatalogEntry }) {
                     : `harness-catalog-docs-${entry.id}`
                 }
                 onClick={() => void openUrl(docsUrl)}
-                size="sm"
+                size="xs"
                 type="button"
-                variant="outline"
+                variant={action.kind === "docs" ? "default" : "outline"}
               >
-                <ExternalLink className="mr-1 h-4 w-4" />
+                <ExternalLink className="mr-1 h-3.5 w-3.5" />
                 {action.kind === "docs"
                   ? action.label
                   : installLinkLabel(entry)}

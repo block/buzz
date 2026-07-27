@@ -83,8 +83,7 @@ const CODEX_NOT_INSTALLED = {
   binary_path: null,
   default_args: [],
   mcp_command: null,
-  install_hint:
-    "Buzz requires the Codex CLI; the desktop app alone is not enough.",
+  install_hint: "Buzz talks to Codex through the Codex CLI.",
   install_instructions_url: "https://developers.openai.com/codex/cli/",
   can_auto_install: true,
   underlying_cli_path: null,
@@ -215,7 +214,7 @@ test.describe("Doctor panel state screenshots", () => {
     );
     await expect(
       page.getByTestId("doctor-runtime-guidance-codex"),
-    ).toContainText("desktop app alone is not enough");
+    ).toContainText("Buzz talks to Codex through the Codex CLI.");
     await expect(
       page
         .getByTestId("doctor-runtime-guidance-codex")
