@@ -100,7 +100,8 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
 
-    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz";
+    // Local-dev-only credentials from .env.example, not a secret.
+    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum ConstraintKind {
@@ -560,7 +561,20 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 26);
+        // Contiguity instead of a hardcoded count: every new migration used to
+        // require bumping an exact `len()` here, and two branches racing for
+        // the same next number surfaced only as a checksum error at relay
+        // startup. This loop needs no edit when a migration is added and names
+        // the actual failure when two files claim the same version.
+        for (index, migration) in migrations.iter().enumerate() {
+            assert_eq!(
+                migration.version,
+                index as i64 + 1,
+                "migration versions must be contiguous from 1; a duplicate or \
+                 skipped number usually means two branches raced for the same \
+                 slot — rename the newer file to the next free number",
+            );
+        }
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -905,9 +919,13 @@ mod tests {
         );
 
         // NIP-CM: @channel mentions persist one row per event (never one per
-        // member) and @here never persists at all.
-        assert_eq!(migrations[25].version, 26);
-        let channel_notifications = migrations[25].sql.as_str();
+        // member) and @here never persists at all. Looked up by content, not
+        // index, so renumbering the migration file never touches this test.
+        let channel_notifications = migrations
+            .iter()
+            .map(|migration| migration.sql.as_str())
+            .find(|sql| sql.contains("CREATE TABLE channel_notifications"))
+            .expect("embedded migrator includes the channel_notifications migration");
         assert!(channel_notifications.contains("CREATE TABLE channel_notifications"));
         assert!(channel_notifications.contains("PRIMARY KEY (community_id, event_id)"));
         assert!(channel_notifications.contains("mode IN ('channel')"));
@@ -1154,7 +1172,10 @@ mod tests {
         run_migrations(&pool)
             .await
             .expect("retry succeeds after operator repair");
-        assert_eq!(applied_versions(&pool).await.last().copied(), Some(25));
+        // Tail version derived from the MIGRATOR, not hardcoded — a literal
+        // here has to be bumped by every new migration.
+        let expected_tail = MIGRATOR.iter().map(|migration| migration.version).max();
+        assert_eq!(applied_versions(&pool).await.last().copied(), expected_tail);
     }
 
     #[tokio::test]
