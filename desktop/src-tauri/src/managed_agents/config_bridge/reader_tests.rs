@@ -120,6 +120,32 @@ fn test_record() -> ManagedAgentRecord {
 }
 
 #[test]
+fn pi_reader_uses_agent_record_config_dir_override() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("settings.json"),
+        r#"{"steeringMode":"one-at-a-time"}"#,
+    )
+    .unwrap();
+    let mut record = test_record();
+    record.env_vars.insert(
+        "PI_CODING_AGENT_DIR".to_string(),
+        temp.path().to_string_lossy().into_owned(),
+    );
+    let runtime = crate::managed_agents::known_acp_runtime("pi-acp").expect("pi runtime");
+
+    let surface = read_config_surface(&record, Some(runtime), None, None);
+
+    assert!(surface.advanced.iter().any(|field| {
+        field.key == "steeringMode" && field.value.as_deref() == Some("one-at-a-time")
+    }));
+    assert_eq!(
+        surface.sources.config_file_path.as_deref(),
+        Some(temp.path().join("settings.json").to_string_lossy().as_ref())
+    );
+}
+
+#[test]
 fn pre_spawn_surface_reports_pending_acp_tiers() {
     let record = test_record();
     let runtime = test_runtime();

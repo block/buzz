@@ -7,10 +7,10 @@ use super::{
     effective_agent_command, find_nvm_default_bin, find_via_login_shell,
     is_login_shell_path_uninit, is_safe_nvm_tag, managed_agent_avatar_url, normalize_agent_args,
     parse_semver_tag, probe_codex_acp_major_version, record_agent_command,
-    refresh_login_shell_path, BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL,
-    GOOSE_AVATAR_URL,
+    refresh_login_shell_path, unprobed_auth_metadata, BUZZ_AGENT_AVATAR_URL,
+    CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL, GOOSE_AVATAR_URL,
 };
-use crate::managed_agents::AcpAvailabilityStatus;
+use crate::managed_agents::{AcpAvailabilityStatus, AuthStatus};
 
 #[test]
 fn resolves_known_avatar_for_bare_command() {
@@ -42,6 +42,21 @@ fn resolves_known_avatar_for_command_paths_and_aliases() {
 #[test]
 fn returns_none_for_unknown_commands() {
     assert!(managed_agent_avatar_url("custom-agent").is_none());
+}
+
+#[test]
+fn available_unprobed_runtime_surfaces_login_hint() {
+    assert_eq!(
+        unprobed_auth_metadata(
+            &AcpAvailabilityStatus::Available,
+            None,
+            Some("Run the runtime login flow."),
+        ),
+        (
+            AuthStatus::NotApplicable,
+            Some("Run the runtime login flow.".to_string()),
+        )
+    );
 }
 
 #[test]

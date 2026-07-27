@@ -103,6 +103,13 @@ with a TypeScript lookup table or an id comparison in a component.
    selecting Custom command keeps its required command field beside the harness
    picker rather than hiding it in Advanced.
 
+## Runtime notes
+
+- **pi (2026-07-28):** The config bridge reads pi as tier 2b from
+  `settings.json`, honoring an agent record's `PI_CODING_AGENT_DIR`. At spawn,
+  Buzz writes/merges only the real nest's `.pi/mcp.json` so pi's MCP extension
+  can load `buzz-dev-mcp`; it never writes the machine-global pi agent directory.
+
 ## The tests that enforce this
 
 - `lib/agentConfigCore.test.mjs` — field model per harness × scope, clearing

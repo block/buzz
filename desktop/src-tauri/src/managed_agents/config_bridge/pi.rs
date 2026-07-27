@@ -7,8 +7,8 @@ use std::path::PathBuf;
 /// Pi's settings.json holds harness behavior (steering, transport, trust) —
 /// not model/provider, which live in pi's credential store and models.json.
 /// Everything is surfaced read-only via `extra`; normalized fields stay None.
-pub(super) fn read_config_file() -> Option<RuntimeFileConfig> {
-    let path = pi_settings_path()?;
+pub(super) fn read_config_file(record_agent_dir: Option<&str>) -> Option<RuntimeFileConfig> {
+    let path = pi_settings_path(record_agent_dir)?;
     let raw = std::fs::read_to_string(path).ok()?;
     parse_pi_settings(&raw)
 }
@@ -22,8 +22,12 @@ fn parse_pi_settings(json_str: &str) -> Option<RuntimeFileConfig> {
     })
 }
 
-/// Pi's config directory: `$PI_CODING_AGENT_DIR` if set, else `~/.pi/agent`.
-pub(crate) fn pi_agent_dir() -> Option<PathBuf> {
+/// Pi's config directory: the agent record's `PI_CODING_AGENT_DIR`, then the
+/// desktop process environment, then `~/.pi/agent`.
+pub(crate) fn pi_agent_dir(record_agent_dir: Option<&str>) -> Option<PathBuf> {
+    if let Some(dir) = record_agent_dir.filter(|dir| !dir.is_empty()) {
+        return Some(PathBuf::from(dir));
+    }
     if let Ok(dir) = std::env::var("PI_CODING_AGENT_DIR") {
         if !dir.is_empty() {
             return Some(PathBuf::from(dir));
@@ -32,8 +36,9 @@ pub(crate) fn pi_agent_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|home| home.join(".pi").join("agent"))
 }
 
-fn pi_settings_path() -> Option<PathBuf> {
-    pi_agent_dir().map(|dir| dir.join("settings.json"))
+/// Resolve pi's `settings.json` path using the agent-specific directory override.
+pub(crate) fn pi_settings_path(record_agent_dir: Option<&str>) -> Option<PathBuf> {
+    pi_agent_dir(record_agent_dir).map(|dir| dir.join("settings.json"))
 }
 
 /// Ensure `<workdir>/.pi/mcp.json` registers `buzz-dev-mcp` for pi's MCP
@@ -161,14 +166,11 @@ mod tests {
     }
 
     #[test]
-    fn pi_agent_dir_honors_env_override() {
-        // PI_CODING_AGENT_DIR overrides ~/.pi/agent (pi's own convention).
-        // Serialize env mutation isn't needed: this test sets and removes
-        // within one test; the suite has no other reader of this var.
-        std::env::set_var("PI_CODING_AGENT_DIR", "/tmp/pi-test-agent-dir");
-        let dir = pi_agent_dir();
-        std::env::remove_var("PI_CODING_AGENT_DIR");
-        assert_eq!(dir, Some(PathBuf::from("/tmp/pi-test-agent-dir")));
+    fn pi_agent_dir_honors_record_env_override() {
+        assert_eq!(
+            pi_agent_dir(Some("/tmp/pi-test-agent-dir")),
+            Some(PathBuf::from("/tmp/pi-test-agent-dir"))
+        );
     }
 
     #[test]

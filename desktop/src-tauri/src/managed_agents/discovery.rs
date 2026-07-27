@@ -1352,6 +1352,18 @@ pub(crate) fn discover_acp_runtime_availability(runtime_id: &str) -> Option<AcpA
         .map(|partial| partial.entry.availability)
 }
 
+fn unprobed_auth_metadata(
+    availability: &AcpAvailabilityStatus,
+    auth_probe_args: Option<&[&str]>,
+    login_hint: Option<&str>,
+) -> (AuthStatus, Option<String>) {
+    if matches!(availability, AcpAvailabilityStatus::Available) && auth_probe_args.is_none() {
+        (AuthStatus::NotApplicable, login_hint.map(str::to_string))
+    } else {
+        (AuthStatus::Unknown, None)
+    }
+}
+
 pub fn discover_acp_runtimes() -> Vec<AcpRuntimeCatalogEntry> {
     // Phase 1: build all entries (fast — no probes yet).
     let mut partials: Vec<PartialEntry> = KNOWN_ACP_RUNTIMES
@@ -1394,17 +1406,17 @@ pub fn discover_acp_runtimes() -> Vec<AcpRuntimeCatalogEntry> {
         partial.entry.auth_status = status;
     }
 
-    // Fill NotApplicable / Unknown for non-probed entries.
+    // Fill NotApplicable / Unknown for non-probed entries. An available runtime
+    // without a probe can still have a manual login flow, so retain its hint.
     for partial in &mut partials {
         if partial.entry.auth_status == AuthStatus::Unknown {
-            partial.entry.auth_status = if partial.entry.availability
-                == AcpAvailabilityStatus::Available
-                && partial.runtime.auth_probe_args.is_none()
-            {
-                AuthStatus::NotApplicable
-            } else {
-                AuthStatus::Unknown
-            };
+            let (status, login_hint) = unprobed_auth_metadata(
+                &partial.entry.availability,
+                partial.runtime.auth_probe_args,
+                partial.runtime.login_hint,
+            );
+            partial.entry.auth_status = status;
+            partial.entry.login_hint = login_hint;
         }
     }
 

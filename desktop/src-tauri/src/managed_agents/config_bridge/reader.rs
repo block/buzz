@@ -22,7 +22,13 @@ pub(crate) fn read_config_surface(
             "goose" => super::goose::read_config_file().map(|c| (c, true)),
             "claude" => super::claude::read_config_file().map(|c| (c, true)),
             "codex" => super::codex::read_config_file().map(|c| (c, true)),
-            "pi" => super::pi::read_config_file().map(|c| (c, true)),
+            "pi" => super::pi::read_config_file(
+                record
+                    .env_vars
+                    .get("PI_CODING_AGENT_DIR")
+                    .map(String::as_str),
+            )
+            .map(|c| (c, true)),
             "buzz-agent" => super::buzz_agent::read_config_file().map(|c| (c, true)),
             _ => None,
         })
@@ -165,9 +171,18 @@ pub(crate) fn read_config_surface(
         });
     }
 
-    let config_file_path = runtime_meta
-        .and_then(|m| m.config_file_path)
-        .map(resolve_tilde);
+    let config_file_path = match runtime_meta.map(|runtime| runtime.id) {
+        Some("pi") => super::pi::pi_settings_path(
+            record
+                .env_vars
+                .get("PI_CODING_AGENT_DIR")
+                .map(String::as_str),
+        )
+        .map(|path| path.to_string_lossy().into_owned()),
+        _ => runtime_meta
+            .and_then(|runtime| runtime.config_file_path)
+            .map(resolve_tilde),
+    };
     let mcp_config_file_path = runtime_meta.and_then(mcp_config_file_path_for_runtime);
     let extensions = file_config.extensions.clone();
 
