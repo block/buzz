@@ -197,14 +197,14 @@ impl Store {
 }
 
 #[cfg(unix)]
-fn restrict_permissions(path: &Path) -> Result<()> {
+pub(crate) fn restrict_permissions(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
         .with_context(|| format!("failed to chmod {}", path.display()))
 }
 
 #[cfg(not(unix))]
-fn restrict_permissions(_path: &Path) -> Result<()> {
+pub(crate) fn restrict_permissions(_path: &Path) -> Result<()> {
     Ok(())
 }
 

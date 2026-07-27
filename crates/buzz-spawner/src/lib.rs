@@ -43,6 +43,7 @@
 pub mod attestation;
 pub mod config;
 pub mod container;
+pub mod credentials;
 pub mod daemon;
 pub mod env;
 pub mod reconcile;
