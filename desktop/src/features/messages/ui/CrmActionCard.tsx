@@ -3,6 +3,7 @@ import { Check, Copy, Pencil, X } from "lucide-react";
 
 import type { TimelineReaction } from "@/features/messages/types";
 import {
+  extractCrmCalendarSlots,
   extractCrmRedditDraft,
   type CrmActionCard as CrmAction,
 } from "@/features/messages/ui/crmActionCardParser";
@@ -21,16 +22,25 @@ const LEAD_CATEGORY_CHOICES = [
   { label: "Do Not Contact", reaction: "⛔" },
   { label: "Wrong Person", reaction: "🔀" },
 ] as const;
+const CALENDAR_SLOT_REACTIONS = new Set(["1️⃣", "2️⃣", "3️⃣"]);
 
 function isFinalDecisionReaction(
   actionType: CrmAction["actionType"],
   emoji: string,
 ): boolean {
-  if (emoji === APPROVE_EMOJI || emoji === CANCEL_EMOJI) return true;
-  if (actionType === "lead_categorize") {
-    return LEAD_CATEGORY_CHOICES.some((choice) => choice.reaction === emoji);
+  switch (actionType) {
+    case "reddit_mark_posted":
+      return emoji === APPROVE_EMOJI || emoji === CANCEL_EMOJI;
+    case "lead_categorize":
+      return (
+        emoji === CANCEL_EMOJI ||
+        LEAD_CATEGORY_CHOICES.some((choice) => choice.reaction === emoji)
+      );
+    case "outreach_approve":
+      return emoji === APPROVE_EMOJI || emoji === CANCEL_EMOJI;
+    case "calendar_book":
+      return emoji === CANCEL_EMOJI || CALENDAR_SLOT_REACTIONS.has(emoji);
   }
-  return false;
 }
 
 export function CrmActionCard({
@@ -61,6 +71,10 @@ export function CrmActionCard({
     action.actionType === "reddit_mark_posted"
       ? extractCrmRedditDraft(action.content)
       : null;
+  const calendarSlots =
+    action.actionType === "calendar_book"
+      ? extractCrmCalendarSlots(action.content)
+      : [];
 
   if (action.actionType === "lead_categorize") {
     return (
@@ -91,6 +105,51 @@ export function CrmActionCard({
           >
             <Check aria-hidden="true" />
             Record category
+          </Button>
+          <Button
+            disabled={disabled}
+            onClick={() => void onSelect(CANCEL_EMOJI)}
+            size="sm"
+            type="button"
+            variant="outline"
+          >
+            <X aria-hidden="true" />
+            Cancel
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  if (action.actionType === "calendar_book") {
+    return (
+      <div className="my-2 max-w-md rounded-lg border border-input/50 bg-muted/20 p-3">
+        <p className="text-sm font-medium">Book meeting</p>
+        <div className="mt-3 flex flex-wrap gap-2">
+          {calendarSlots.map((choice) => (
+            <Button
+              disabled={disabled}
+              key={choice.reaction}
+              onClick={() => setSelectedReaction(choice.reaction)}
+              size="sm"
+              type="button"
+              variant={
+                selectedReaction === choice.reaction ? "default" : "outline"
+              }
+            >
+              {choice.label}
+            </Button>
+          ))}
+        </div>
+        <div className="mt-3 flex gap-2">
+          <Button
+            disabled={disabled || !selectedReaction}
+            onClick={() => selectedReaction && void onSelect(selectedReaction)}
+            size="sm"
+            type="button"
+          >
+            <Check aria-hidden="true" />
+            Confirm booking
           </Button>
           <Button
             disabled={disabled}

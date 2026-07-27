@@ -1,21 +1,40 @@
 export type CrmActionCard = {
   actionId: string;
-  actionType: "reddit_mark_posted" | "lead_categorize" | "outreach_approve";
+  actionType:
+    | "reddit_mark_posted"
+    | "lead_categorize"
+    | "outreach_approve"
+    | "calendar_book";
   expiresAt: string;
   content: string;
 };
 
-const MARKER = /(?:^|\n)crm-action:v1:([0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}):(reddit_mark_posted|lead_categorize|outreach_approve):(\S+)\s*$/i;
-const REDDIT_DRAFT = /(?:^|\n)Draft to copy manually:\s*\n(`{3,})[^\n]*\n([\s\S]*?)\n\1(?=\n|$)/i;
-const ACTION_HEADER = /^\[CRM Buzz action [0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\]\s*\n?/i;
+const MARKER =
+  /(?:^|\n)crm-action:v1:([0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}):(reddit_mark_posted|lead_categorize|outreach_approve|calendar_book):(\S+)\s*$/i;
+const REDDIT_DRAFT =
+  /(?:^|\n)Draft to copy manually:\s*\n(`{3,})[^\n]*\n([\s\S]*?)\n\1(?=\n|$)/i;
+const CALENDAR_SLOT = /^\*\*Slot ([1-3]):\*\*\s*(.+)$/gim;
+const ACTION_HEADER =
+  /^\[CRM Buzz action [0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\]\s*\n?/i;
 const ACTION_FOOTERS: Record<CrmActionCard["actionType"], RegExp> = {
-  reddit_mark_posted: /\n*Mark Reddit draft as posted\.\nUse Approve only after the Reddit post is live\.\nExpires: [^\n]+\s*$/i,
-  lead_categorize: /\n*Choose a lead category using the action card\.\nThe selected category will be recorded and queued for SmartLead synchronization\.\nExpires: [^\n]+\s*$/i,
-  outreach_approve: /\n*Approve to send this frozen draft, or reject it\.\nExpires: [^\n]+\s*$/i,
+  reddit_mark_posted:
+    /\n*Mark Reddit draft as posted\.\nUse Approve only after the Reddit post is live\.\nExpires: [^\n]+\s*$/i,
+  lead_categorize:
+    /\n*Choose a lead category using the action card\.\nThe selected category will be recorded and queued for SmartLead synchronization\.\nExpires: [^\n]+\s*$/i,
+  outreach_approve:
+    /\n*Approve to send this frozen draft, or reject it\.\nExpires: [^\n]+\s*$/i,
+  calendar_book:
+    /\n*Choose a meeting slot using the action card\.\nExpires: [^\n]+\s*$/i,
 };
 
-function readableContent(body: string, actionType: CrmActionCard["actionType"]): string {
-  return body.replace(ACTION_HEADER, "").replace(ACTION_FOOTERS[actionType], "").trim();
+function readableContent(
+  body: string,
+  actionType: CrmActionCard["actionType"],
+): string {
+  return body
+    .replace(ACTION_HEADER, "")
+    .replace(ACTION_FOOTERS[actionType], "")
+    .trim();
 }
 
 /**
@@ -33,7 +52,10 @@ export function parseCrmActionCard(body: string): CrmActionCard | null {
     actionId: match[1],
     actionType: match[2] as CrmActionCard["actionType"],
     expiresAt,
-    content: readableContent(body.slice(0, match.index), match[2] as CrmActionCard["actionType"]),
+    content: readableContent(
+      body.slice(0, match.index),
+      match[2] as CrmActionCard["actionType"],
+    ),
   };
 }
 
@@ -42,4 +64,22 @@ export function extractCrmRedditDraft(content: string): string | null {
   const match = REDDIT_DRAFT.exec(content);
   const draft = match?.[2]?.trim();
   return draft || null;
+}
+
+/** Return the booked-slot choices that CRM explicitly rendered for this card. */
+export function extractCrmCalendarSlots(
+  content: string,
+): Array<{ label: string; reaction: string }> {
+  const slots: Array<{ label: string; reaction: string }> = [];
+  const seen = new Set<number>();
+
+  for (const match of content.matchAll(CALENDAR_SLOT)) {
+    const slotNumber = Number(match[1]);
+    const label = match[2]?.trim();
+    if (!label || seen.has(slotNumber)) continue;
+    seen.add(slotNumber);
+    slots.push({ label, reaction: `${slotNumber}\uFE0F\u20E3` });
+  }
+
+  return slots;
 }
