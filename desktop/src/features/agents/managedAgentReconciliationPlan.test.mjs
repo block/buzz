@@ -17,11 +17,11 @@ test("reconcileRetryDelayMs walks a capped backoff then gives up", () => {
   assert.equal(reconcileRetryDelayMs(0), null);
 });
 
-test("canonicalCommunityRelays dedupes by canonical form, keeps stored spelling", () => {
+test("canonicalCommunityRelays keeps host-derived community boundaries distinct", () => {
   const relays = canonicalCommunityRelays(
     [
       { relayUrl: "ws://localhost:3000" },
-      // Same relay, different spelling — folds onto the first entry.
+      // Same socket, different Host header — a different relay community.
       { relayUrl: "ws://127.0.0.1:3000" },
       { relayUrl: "wss://relay.example" },
       // Unparsable entries are dropped rather than reconciled.
@@ -32,7 +32,8 @@ test("canonicalCommunityRelays dedupes by canonical form, keeps stored spelling"
   assert.deepEqual(
     [...relays.entries()],
     [
-      ["ws://127.0.0.1:3000", "ws://localhost:3000"],
+      ["ws://localhost:3000", "ws://localhost:3000"],
+      ["ws://127.0.0.1:3000", "ws://127.0.0.1:3000"],
       ["wss://relay.example", "wss://relay.example"],
     ],
   );

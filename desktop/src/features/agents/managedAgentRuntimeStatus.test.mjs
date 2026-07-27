@@ -78,9 +78,9 @@ test("selects one relay without collapsing same-pubkey pairs", () => {
 });
 
 test("canonicalRelayUrl mirrors the backend pair-key normalization", () => {
-  // Loopback folding + default-port and trailing-slash stripping — the
-  // standard dev setup that previously broke pair matching.
-  assert.equal(canonicalRelayUrl("ws://localhost:3000"), "ws://127.0.0.1:3000");
+  // Host spelling remains part of the relay community boundary. Default ports
+  // and trailing slashes are still canonicalized.
+  assert.equal(canonicalRelayUrl("ws://localhost:3000"), "ws://localhost:3000");
   assert.equal(
     canonicalRelayUrl("WSS://Relay.Example:443/"),
     "wss://relay.example",
@@ -93,18 +93,18 @@ test("canonicalRelayUrl mirrors the backend pair-key normalization", () => {
     canonicalRelayUrl("wss://relay.example/path/"),
     "wss://relay.example/path",
   );
-  assert.equal(canonicalRelayUrl("ws://[::1]:3000"), "ws://127.0.0.1:3000");
+  assert.equal(canonicalRelayUrl("ws://[::1]:3000"), "ws://[::1]:3000");
   assert.equal(canonicalRelayUrl("https://relay.example"), null);
   assert.equal(canonicalRelayUrl("not a url"), null);
 });
 
-test("matches a stored community URL against canonical backend rows", () => {
+test("does not match a runtime from a different host-derived community", () => {
   const runtimes = [
     runtime({ relayUrl: "ws://127.0.0.1:3000", lifecycle: "ready" }),
   ];
   assert.equal(
-    findManagedAgentRuntime(runtimes, "aa", "ws://localhost:3000")?.lifecycle,
-    "ready",
+    findManagedAgentRuntime(runtimes, "aa", "ws://localhost:3000"),
+    undefined,
   );
   assert.equal(
     findManagedAgentRuntime(runtimes, "aa", "ws://localhost:3001"),
