@@ -5,7 +5,10 @@
 //! frames sent to it, and publishes status back. It holds no database
 //! connection and no privileged relay access.
 
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::{HashMap, VecDeque},
+    time::Duration,
+};
 
 use anyhow::{bail, Context, Result};
 use buzz_core::kind::{KIND_PERSONA, KIND_SPAWNER_AGENT_SPEC, KIND_SPAWNER_ATTESTATION};
@@ -32,6 +35,9 @@ const RECV_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How long to wait for a one-shot query to reach EOSE.
 const QUERY_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Cap on frames set aside while a one-shot query holds the socket.
+const MAX_DEFERRED_FRAMES: usize = 256;
 
 /// Something the daemon needs to act on.
 pub enum Inbound {
@@ -75,6 +81,9 @@ pub struct SpawnerRelay {
     conn: NostrWsConnection,
     keys: Keys,
     relay_url: String,
+    /// Frames received while a one-shot query held the socket, replayed by
+    /// [`Self::next`] before anything new is read.
+    deferred: VecDeque<RelayMessage>,
 }
 
 impl SpawnerRelay {
@@ -90,6 +99,7 @@ impl SpawnerRelay {
             conn,
             keys: keys.clone(),
             relay_url: relay_url.to_string(),
+            deferred: VecDeque::new(),
         };
         relay.subscribe_all().await?;
         Ok(relay)
@@ -97,6 +107,11 @@ impl SpawnerRelay {
 
     /// Reconnect after a transport failure, restoring both subscriptions.
     pub async fn reconnect(&mut self) -> Result<()> {
+        // Anything deferred belonged to the socket that just died. Specs are
+        // replayed by the new subscription, and an ephemeral frame held across
+        // a disconnect answers a handshake round the reconnect has already
+        // outlived, so acting on it would only apply stale state.
+        self.deferred.clear();
         self.conn = NostrWsConnection::connect_authenticated(&self.relay_url, &self.keys, None)
             .await
             .with_context(|| format!("failed to reconnect to {}", self.relay_url))?;
@@ -133,15 +148,25 @@ impl SpawnerRelay {
         Ok(())
     }
 
+    /// Set a frame aside for [`Self::next`], dropping the oldest under flood.
+    fn defer(&mut self, msg: RelayMessage) {
+        defer_frame(&mut self.deferred, msg);
+    }
+
     /// Wait for the next actionable relay frame.
     pub async fn next(&mut self) -> Result<Inbound> {
-        let msg = match self.conn.next_event(RECV_TIMEOUT).await {
-            Ok(msg) => msg,
-            // A timeout is the common case, not a failure: it just means no
-            // event arrived within the window, so the daemon can run its
-            // periodic reconcile and come back.
-            Err(buzz_ws_client::error::WsClientError::Timeout) => return Ok(Inbound::Idle),
-            Err(e) => return Err(e.into()),
+        // Frames set aside during a one-shot query come first, so an
+        // attestation response that raced a persona fetch is still acted on.
+        let msg = match self.deferred.pop_front() {
+            Some(msg) => msg,
+            None => match self.conn.next_event(RECV_TIMEOUT).await {
+                Ok(msg) => msg,
+                // A timeout is the common case, not a failure: it just means no
+                // event arrived within the window, so the daemon can run its
+                // periodic reconcile and come back.
+                Err(buzz_ws_client::error::WsClientError::Timeout) => return Ok(Inbound::Idle),
+                Err(e) => return Err(e.into()),
+            },
         };
 
         match msg {
@@ -306,10 +331,13 @@ impl SpawnerRelay {
 
     /// Fetch the personas authored by `owner`, keyed by `d` tag.
     ///
-    /// The spawner reads unshared personas through the NIP-OA delegation the
-    /// relay applies to attested readers, so an owner does not have to publish
-    /// their system prompts `["shared","true"]` to the whole community just to
-    /// run an agent.
+    /// Only reaches personas published `["shared","true"]`. Kind 30175 is
+    /// author-only otherwise, and the spawner authenticates as itself with no
+    /// NIP-OA tag (see [`Self::connect`]) — the owner delegation the relay
+    /// applies to attested readers covers the *agents* a spawner runs, never
+    /// the spawner. An unshared persona therefore has to arrive over the
+    /// encrypted attestation handshake instead; [`crate::daemon`] falls back to
+    /// that and says so when neither source has one.
     pub async fn fetch_personas(&mut self, owner: &PublicKey) -> Result<HashMap<String, Event>> {
         let sub_id = format!("personas-{}", &owner.to_hex()[..8]);
         self.conn
@@ -344,11 +372,17 @@ impl SpawnerRelay {
                 }) if subscription_id == sub_id => {
                     bail!("relay closed persona query: {message}");
                 }
-                // Frames for the standing subscriptions can interleave with
-                // this one-shot query. Dropping them is safe: specs are
-                // replaceable and re-delivered on reconnect, and the next
-                // reconcile pass re-reads state anyway.
-                Ok(_) => continue,
+                // Frames for the standing subscriptions interleave with this
+                // one-shot query. They cannot be dropped: kind:24201 is
+                // ephemeral, so an attestation response that arrives while a
+                // persona query is in flight is gone for good, and the agent it
+                // answers for sits in pending_attestation until the handshake
+                // times out and the owner is asked to approve all over again.
+                // Defer them to the next `next()` call instead.
+                Ok(other) => {
+                    self.defer(other);
+                    continue;
+                }
                 Err(buzz_ws_client::error::WsClientError::Timeout) => break,
                 Err(e) => return Err(e.into()),
             }
@@ -356,5 +390,67 @@ impl SpawnerRelay {
 
         let _ = self.conn.send_raw(&json!(["CLOSE", sub_id])).await;
         Ok(personas)
+    }
+}
+
+/// Push `msg` onto the deferral queue, evicting the oldest when full.
+///
+/// Bounded because anyone on the relay can address frames at this spawner; an
+/// unbounded queue would be a memory-growth lever for them. Eviction takes the
+/// oldest, so a flood cannot push out a frame that just arrived.
+fn defer_frame(deferred: &mut VecDeque<RelayMessage>, msg: RelayMessage) {
+    if deferred.len() >= MAX_DEFERRED_FRAMES {
+        deferred.pop_front();
+        warn!("deferred-frame queue is full; dropping the oldest frame");
+    }
+    deferred.push_back(msg);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn eose(id: &str) -> RelayMessage {
+        RelayMessage::Eose {
+            subscription_id: id.to_string(),
+        }
+    }
+
+    fn id_of(msg: &RelayMessage) -> String {
+        match msg {
+            RelayMessage::Eose { subscription_id } => subscription_id.clone(),
+            _ => unreachable!("test only defers Eose frames"),
+        }
+    }
+
+    #[test]
+    fn deferred_frames_replay_in_arrival_order() {
+        // An attestation response that raced a persona query must still be
+        // acted on, and in the order the relay sent it.
+        let mut deferred = VecDeque::new();
+        defer_frame(&mut deferred, eose("first"));
+        defer_frame(&mut deferred, eose("second"));
+
+        assert_eq!(id_of(&deferred.pop_front().unwrap()), "first");
+        assert_eq!(id_of(&deferred.pop_front().unwrap()), "second");
+        assert!(deferred.is_empty());
+    }
+
+    #[test]
+    fn deferral_is_bounded_and_evicts_the_oldest() {
+        // Anyone can address frames at this spawner, so the queue must not be
+        // an unbounded allocation lever — and the newest frame, which is the
+        // one most likely to still matter, must survive the flood.
+        let mut deferred = VecDeque::new();
+        for i in 0..MAX_DEFERRED_FRAMES + 10 {
+            defer_frame(&mut deferred, eose(&i.to_string()));
+        }
+
+        assert_eq!(deferred.len(), MAX_DEFERRED_FRAMES);
+        assert_eq!(id_of(deferred.front().unwrap()), "10");
+        assert_eq!(
+            id_of(deferred.back().unwrap()),
+            (MAX_DEFERRED_FRAMES + 9).to_string()
+        );
     }
 }
