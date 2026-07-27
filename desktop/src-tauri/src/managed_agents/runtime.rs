@@ -566,10 +566,12 @@ pub fn spawn_agent_child(
         nvm_bin,
     );
 
+    let workdir = super::default_agent_workdir().ok_or_else(|| {
+        "cannot spawn agent without a safe working directory; configure a valid home directory and restart Buzz"
+            .to_string()
+    })?;
     let mut command = std::process::Command::new(&resolved_acp_command);
-    if let Some(home) = super::default_agent_workdir() {
-        command.current_dir(home);
-    }
+    command.current_dir(workdir);
     command.stdin(std::process::Stdio::null());
     command.stdout(std::process::Stdio::from(stdout));
     command.stderr(std::process::Stdio::from(stderr));

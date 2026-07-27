@@ -77,7 +77,7 @@ pub use storage::*;
 pub use teams::*;
 pub use types::*;
 
-/// Returns the Buzz nest directory (`~/.buzz`) if it exists as a real
+/// Returns a safe Buzz nest directory (`~/.buzz`) if it exists as a real
 /// directory (not a symlink), falling back to the user's home directory.
 ///
 /// Used as the default working directory for spawned agent processes.
@@ -86,25 +86,67 @@ pub use types::*;
 ///
 /// Cached for the process lifetime via `OnceLock`.
 /// Returns `None` in sandboxed/containerized environments where `$HOME` is
-/// unset or points to a non-existent path; callers fall back to inheriting
-/// the parent's CWD.
+/// unset, points to a non-existent path, or resolves to a filesystem root.
+/// Agent spawn callers must reject that state rather than inheriting the
+/// desktop process's CWD, which can be `/` for macOS app launches.
 pub fn default_agent_workdir() -> Option<std::path::PathBuf> {
     use std::sync::OnceLock;
     static WORKDIR: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
     WORKDIR
-        .get_or_init(|| {
-            // Prefer ~/.buzz if it exists (created by ensure_nest()).
-            // Reject symlinks to prevent redirect attacks — is_dir()
-            // follows symlinks, so check symlink_metadata() first.
-            // Fall back to $HOME for resilience.
-            nest_dir()
-                .filter(|p| is_real_dir(p))
-                .or_else(|| dirs::home_dir().filter(|p| p.is_dir()))
-        })
+        .get_or_init(|| select_agent_workdir(nest_dir(), dirs::home_dir()))
         .clone()
+}
+
+fn select_agent_workdir(
+    nest: Option<std::path::PathBuf>,
+    home: Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    nest.filter(|path| is_safe_agent_workdir(path))
+        .or_else(|| home.filter(|path| is_safe_agent_workdir(path)))
+}
+
+/// A filesystem root is never a suitable coding-agent workspace: running an
+/// agent there makes common project discovery commands scan the whole machine.
+fn is_safe_agent_workdir(path: &std::path::Path) -> bool {
+    path.parent().is_some() && is_real_dir(path)
 }
 
 /// Returns `true` if `path` is a real directory (not a symlink).
 fn is_real_dir(path: &std::path::Path) -> bool {
     path.symlink_metadata().map(|m| m.is_dir()).unwrap_or(false)
+}
+
+#[cfg(test)]
+mod workdir_tests {
+    use super::select_agent_workdir;
+
+    #[test]
+    fn rejects_filesystem_root_as_agent_workdir() {
+        assert_eq!(
+            select_agent_workdir(Some("/".into()), Some("/".into())),
+            None
+        );
+    }
+
+    #[test]
+    fn prefers_a_real_nest_and_falls_back_to_home() {
+        let nest = tempfile::tempdir().expect("create nest");
+        let home = tempfile::tempdir().expect("create home");
+
+        assert_eq!(
+            select_agent_workdir(
+                Some(nest.path().to_path_buf()),
+                Some(home.path().to_path_buf())
+            ),
+            Some(nest.path().to_path_buf())
+        );
+
+        assert_eq!(
+            select_agent_workdir(
+                Some(nest.path().join("missing")),
+                Some(home.path().to_path_buf())
+            ),
+            Some(home.path().to_path_buf())
+        );
+    }
 }
