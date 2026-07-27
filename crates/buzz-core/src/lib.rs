@@ -22,6 +22,8 @@ pub mod filter;
 pub mod git_perms;
 /// Portable cryptographic identity and authorization port contracts.
 pub mod identity;
+/// I/O-free relay event classification and effective-state reduction.
+pub mod ingest;
 /// Buzz kind number registry — custom event type constants.
 pub mod kind;
 /// Network utilities — SSRF-safe IP classification.
@@ -32,8 +34,6 @@ pub mod observer;
 pub mod pairing;
 /// Presence status types shared across crates.
 pub mod presence;
-/// I/O-free relay event classification and effective-state reduction.
-pub mod ingest;
 /// Canonical relay runtime identities.
 pub mod relay;
 /// Durable relay-to-relay replication records and port contracts.

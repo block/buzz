@@ -30,7 +30,7 @@ use buzz_core::identity::{
     AuthenticatedPrincipal, AuthorizationDecision, IdentityAuthenticator, IdentityDenialCode,
     ReadOperation, ReplicationPeerAuthenticator,
 };
-use buzz_core::relay::{apply_effective_event, decide_event, is_ephemeral_kind, EventDecision};
+use buzz_core::ingest::{apply_effective_event, decide_event, is_ephemeral_kind, EventDecision};
 use buzz_core::replication::{
     ReplicationBatch, ReplicationCursor, ReplicationIngestOutcome, ReplicationReceipt,
     ReplicationRecord, ReplicationSinkPort, ReplicationSourceId, ReplicationSourcePort,
