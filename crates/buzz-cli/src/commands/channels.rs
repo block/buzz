@@ -19,7 +19,22 @@ fn extract_channel_metadata(e: &serde_json::Value) -> serde_json::Value {
         "name": extract_tag_value(e, "name"),
         "description": extract_tag_value(e, "about"),
         "created_at": e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0),
+        "archived": channel_is_archived(e),
     })
+}
+
+fn channel_is_archived(event: &serde_json::Value) -> bool {
+    event
+        .get("tags")
+        .and_then(|tags| tags.as_array())
+        .is_some_and(|tags| {
+            tags.iter().any(|tag| {
+                tag.as_array().is_some_and(|values| {
+                    values.first().and_then(|value| value.as_str()) == Some("archived")
+                        && values.get(1).and_then(|value| value.as_str()) == Some("true")
+                })
+            })
+        })
 }
 
 pub async fn cmd_list_channels(
@@ -172,7 +187,6 @@ impl ChannelSummary {
         let mut name: Option<String> = None;
         let mut channel_type: Option<String> = None;
         let mut visibility: Option<String> = None;
-        let mut archived = false;
         let mut about: Option<String> = None;
         let mut topic: Option<String> = None;
         let mut purpose: Option<String> = None;
@@ -194,7 +208,6 @@ impl ChannelSummary {
                 "about" => about = val.map(str::to_string),
                 "topic" => topic = val.map(str::to_string),
                 "purpose" => purpose = val.map(str::to_string),
-                "archived" => archived = val == Some("true"),
                 _ => {}
             }
         }
@@ -204,7 +217,7 @@ impl ChannelSummary {
             name: name?,
             channel_type,
             visibility,
-            archived,
+            archived: channel_is_archived(event),
             about,
             topic,
             purpose,
@@ -1177,9 +1190,9 @@ pub async fn dispatch_canvas(cmd: crate::CanvasCmd, client: &BuzzClient) -> Resu
 mod tests {
     use super::{
         apply_cardinality_rule, build_template_report, cmd_set_add_policy,
-        finalize_roster_resolution, name_matches, resolve_roster_with_archive_filter,
-        validate_ttl_seconds, ArchivedExclusion, ChannelSummary, ResolvedAgent, RosterResolution,
-        SkippedSlug,
+        extract_channel_metadata, finalize_roster_resolution, name_matches,
+        resolve_roster_with_archive_filter, validate_ttl_seconds, ArchivedExclusion,
+        ChannelSummary, ResolvedAgent, RosterResolution, SkippedSlug,
     };
     use crate::client::BuzzClient;
     use crate::CliError;
@@ -1220,6 +1233,18 @@ mod tests {
         ]));
         let s = ChannelSummary::from_event(&ev).expect("parse");
         assert!(s.archived);
+    }
+
+    #[test]
+    fn metadata_projection_preserves_archived_state() {
+        let ev = event(json!([
+            ["d", "11111111-1111-1111-1111-111111111111"],
+            ["name", "old-channel"],
+            ["archived", "true"],
+        ]));
+
+        let metadata = extract_channel_metadata(&ev);
+        assert_eq!(metadata["archived"], true);
     }
 
     #[test]

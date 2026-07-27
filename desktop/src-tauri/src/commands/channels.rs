@@ -478,11 +478,23 @@ fn is_duplicate_channel_rejection(error: &str) -> bool {
     error.contains("relay rejected event:") && error.contains("duplicate: channel already exists")
 }
 
-fn is_matching_starter_channel(channel: &ChannelInfo, spec: &StarterChannelSpec) -> bool {
+fn has_starter_channel_identity(channel: &ChannelInfo, spec: &StarterChannelSpec) -> bool {
     normalize_channel_name(&channel.name) == normalize_channel_name(spec.name)
         && channel.channel_type == "stream"
         && channel.visibility == "open"
-        && channel.archived_at.is_none()
+}
+
+fn is_matching_starter_channel(channel: &ChannelInfo, spec: &StarterChannelSpec) -> bool {
+    has_starter_channel_identity(channel, spec) && channel.archived_at.is_none()
+}
+
+fn has_active_non_starter_channel(channels: &[ChannelInfo]) -> bool {
+    channels.iter().any(|channel| {
+        channel.archived_at.is_none()
+            && !STARTER_CHANNELS
+                .iter()
+                .any(|spec| has_starter_channel_identity(channel, spec))
+    })
 }
 
 fn has_all_starter_channels(channels: &[ChannelInfo]) -> bool {
@@ -613,6 +625,13 @@ pub async fn ensure_starter_channels(
     state: State<'_, AppState>,
 ) -> Result<Vec<ChannelInfo>, String> {
     let mut existing_channels = get_channels(state.clone()).await?;
+
+    // A configured community owns its channel taxonomy. Do not recreate starter
+    // channels that its members deliberately archived after creating other routes.
+    if has_active_non_starter_channel(&existing_channels) {
+        return Ok(existing_channels);
+    }
+
     let relay_scope = relay_api_base_url_with_override(&state);
     let creator_keys = state.signing_keys()?;
     let creator_pubkey = creator_keys.public_key().to_hex();

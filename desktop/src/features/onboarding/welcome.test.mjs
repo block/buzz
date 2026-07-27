@@ -6,9 +6,9 @@ import {
   ensureStarterChannels,
   ensureWelcomeChannel,
   findPrivateWelcomeChannel,
-  hasEnsuredWelcomeChannel,
+  hasSettledChannelOnboarding,
   isWelcomeExperienceChannel,
-  markWelcomeChannelEnsured,
+  markChannelOnboardingSettled,
   rememberPendingWelcomeChannel,
   WELCOME_CHANNEL_DESCRIPTION,
   WELCOME_CHANNEL_NAME,
@@ -251,26 +251,26 @@ test("pending Welcome channel is consumed only after it appears in the channel l
   }
 });
 
-test("Welcome ensured marker is scoped to the current identity and community", () => {
+test("channel onboarding marker is scoped to the current identity and community", () => {
   const { restore } = installWindowSessionStorage();
   try {
-    markWelcomeChannelEnsured("pubkey-a", "wss://community-a.example");
+    markChannelOnboardingSettled("pubkey-a", "wss://community-a.example");
 
     assert.equal(
-      hasEnsuredWelcomeChannel("pubkey-a", "wss://community-a.example"),
+      hasSettledChannelOnboarding("pubkey-a", "wss://community-a.example"),
       true,
     );
     assert.equal(
-      hasEnsuredWelcomeChannel("pubkey-a", "wss://community-b.example"),
+      hasSettledChannelOnboarding("pubkey-a", "wss://community-b.example"),
       false,
     );
     assert.equal(
-      hasEnsuredWelcomeChannel("pubkey-b", "wss://community-a.example"),
+      hasSettledChannelOnboarding("pubkey-b", "wss://community-a.example"),
       false,
     );
-    assert.equal(hasEnsuredWelcomeChannel("pubkey-a", null), false);
+    assert.equal(hasSettledChannelOnboarding("pubkey-a", null), false);
     assert.equal(
-      hasEnsuredWelcomeChannel(null, "wss://community-a.example"),
+      hasSettledChannelOnboarding(null, "wss://community-a.example"),
       false,
     );
   } finally {
@@ -299,10 +299,65 @@ test("ensureStarterChannels reuses existing open starter channels", async () => 
     },
   });
 
+  assert.equal(result.kind, "starter");
   assert.equal(result.generalChannel, general);
   assert.equal(result.welcomeChannel, welcomeEveryone);
   assert.deepEqual(result.channels, [general, welcomeEveryone]);
   assert.equal(ensureCalls, 0);
+});
+
+test("ensureStarterChannels preserves a configured community taxonomy", async () => {
+  const crmLeads = makeChannel({
+    id: "crm-leads-channel",
+    name: "crm-leads",
+    visibility: "private",
+  });
+  let ensureCalls = 0;
+
+  const result = await ensureStarterChannels({
+    getChannels: async () => [crmLeads],
+    ensureStarterChannels: async () => {
+      ensureCalls += 1;
+      return [];
+    },
+  });
+
+  assert.equal(result.kind, "custom");
+  assert.deepEqual(result.channels, [crmLeads]);
+  assert.equal(ensureCalls, 0);
+});
+
+test("ensureStarterChannels does not treat archived custom channels as active taxonomy", async () => {
+  const archivedCrmLeads = makeChannel({
+    archivedAt: "2026-07-27T00:00:00.000Z",
+    id: "crm-leads-channel",
+    name: "crm-leads",
+    visibility: "private",
+  });
+  const general = makeChannel({
+    id: "general-channel",
+    name: "general",
+    visibility: "open",
+  });
+  const welcomeEveryone = makeChannel({
+    id: "welcome-everyone-channel",
+    name: "welcome-everyone",
+    visibility: "open",
+  });
+  let ensureCalls = 0;
+
+  const result = await ensureStarterChannels({
+    getChannels: async () => [archivedCrmLeads],
+    ensureStarterChannels: async () => {
+      ensureCalls += 1;
+      return [general, welcomeEveryone];
+    },
+  });
+
+  assert.equal(result.kind, "starter");
+  assert.equal(result.generalChannel, general);
+  assert.equal(result.welcomeChannel, welcomeEveryone);
+  assert.equal(ensureCalls, 1);
 });
 
 test("ensureStarterChannels resumes when one starter channel is missing", async () => {
@@ -326,6 +381,7 @@ test("ensureStarterChannels resumes when one starter channel is missing", async 
     },
   });
 
+  assert.equal(result.kind, "starter");
   assert.equal(result.generalChannel, general);
   assert.equal(result.welcomeChannel, welcomeEveryone);
   assert.deepEqual(result.channels, [general, welcomeEveryone]);

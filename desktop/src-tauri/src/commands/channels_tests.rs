@@ -301,3 +301,51 @@ fn starter_match_requires_open_unarchived_stream_by_normalized_name() {
     channel.archived_at = Some("2026-07-16T00:00:00Z".to_string());
     assert!(!is_matching_starter_channel(&channel, spec));
 }
+
+#[test]
+fn active_custom_channels_prevent_starter_channel_reseeding() {
+    let starter = ChannelInfo {
+        id: "starter-general".to_string(),
+        name: "general".to_string(),
+        channel_type: "stream".to_string(),
+        visibility: "open".to_string(),
+        description: String::new(),
+        topic: None,
+        purpose: None,
+        member_count: 0,
+        member_pubkeys: Vec::new(),
+        last_message_at: None,
+        archived_at: None,
+        participants: Vec::new(),
+        participant_pubkeys: Vec::new(),
+        is_member: true,
+        ttl_seconds: None,
+        ttl_deadline: None,
+    };
+    let mut custom = ChannelInfo {
+        id: "crm-general".to_string(),
+        name: "crm-general".to_string(),
+        channel_type: "stream".to_string(),
+        visibility: "private".to_string(),
+        description: String::new(),
+        topic: None,
+        purpose: None,
+        member_count: 1,
+        member_pubkeys: Vec::new(),
+        last_message_at: None,
+        archived_at: None,
+        participants: Vec::new(),
+        participant_pubkeys: Vec::new(),
+        is_member: true,
+        ttl_seconds: None,
+        ttl_deadline: None,
+    };
+
+    assert!(!has_active_non_starter_channel(&[starter]));
+    assert!(has_active_non_starter_channel(std::slice::from_ref(
+        &custom
+    )));
+
+    custom.archived_at = Some("2026-07-27T00:00:00Z".to_string());
+    assert!(!has_active_non_starter_channel(&[custom]));
+}

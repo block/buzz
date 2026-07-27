@@ -24,7 +24,11 @@ const PENDING_WELCOME_CHANNEL_STORAGE_KEY =
 const WELCOME_INITIAL_UNREAD_SUPPRESSION_STORAGE_KEY =
   "buzz:onboarding-welcome-initial-unread-suppression.v1";
 const PENDING_WELCOME_CHANNEL_MAX_AGE_MS = 5 * 60 * 1000;
-const WELCOME_CHANNEL_ENSURED_STORAGE_KEY = "buzz-welcome-channel-ensured.v2";
+// Keep the existing key so a normal community does not repeat setup after an
+// upgrade. It now records settled channel onboarding, which can be either the
+// starter experience or an existing community-owned taxonomy.
+const CHANNEL_ONBOARDING_SETTLED_STORAGE_KEY =
+  "buzz-welcome-channel-ensured.v2";
 
 type WelcomeChannelClient = {
   createChannel: (input: CreateChannelInput) => Promise<Channel>;
@@ -39,11 +43,15 @@ type StarterChannelsClient = {
   getChannels: () => Promise<Channel[]>;
 };
 
-export type StarterChannelsResult = {
+type StarterChannelPair = {
   channels: Channel[];
   generalChannel: Channel;
   welcomeChannel: Channel;
 };
+
+export type StarterChannelsResult =
+  | ({ kind: "starter" } & StarterChannelPair)
+  | { kind: "custom"; channels: Channel[] };
 
 type WelcomeChannelOptions = {
   allowedMemberPubkeys?: readonly string[];
@@ -67,11 +75,17 @@ function normalizeChannelName(name: string) {
   return name.trim().toLowerCase();
 }
 
-function isOpenStreamStarterChannel(channel: Channel, name: string) {
+function hasStarterChannelIdentity(channel: Channel, name: string) {
   return (
     normalizeChannelName(channel.name) === normalizeChannelName(name) &&
     channel.channelType === "stream" &&
-    channel.visibility === "open" &&
+    channel.visibility === "open"
+  );
+}
+
+function isOpenStreamStarterChannel(channel: Channel, name: string) {
+  return (
+    hasStarterChannelIdentity(channel, name) &&
     channel.archivedAt === null &&
     channel.isMember
   );
@@ -86,7 +100,7 @@ function findStarterChannel(channels: Channel[], name: string) {
 
 export function findStarterChannels(
   channels: Channel[],
-): Omit<StarterChannelsResult, "channels"> | null {
+): Omit<StarterChannelPair, "channels"> | null {
   const generalChannel = findStarterChannel(
     channels,
     STARTER_GENERAL_CHANNEL_NAME,
@@ -101,6 +115,16 @@ export function findStarterChannels(
   }
 
   return { generalChannel, welcomeChannel };
+}
+
+function hasActiveCustomChannel(channels: Channel[]) {
+  return channels.some(
+    (channel) =>
+      channel.archivedAt === null &&
+      ![STARTER_GENERAL_CHANNEL_NAME, STARTER_WELCOME_CHANNEL_NAME].some(
+        (starterName) => hasStarterChannelIdentity(channel, starterName),
+      ),
+  );
 }
 
 function hasOnlyCurrentOrAllowedMembers(
@@ -264,33 +288,47 @@ export async function ensureStarterChannels(
   const existingStarters = findStarterChannels(existingChannels);
   if (existingStarters) {
     return {
+      kind: "starter",
       channels: existingChannels,
       ...existingStarters,
     };
   }
 
-  const ensuredChannels = await client.ensureStarterChannels();
-  const ensuredStarters = findStarterChannels(ensuredChannels);
-  if (!ensuredStarters) {
-    throw new Error("Starter channels were not available after setup");
+  // A joined community can define its own operational taxonomy. Do not create
+  // generic onboarding channels on top of active routes such as crm-leads.
+  if (hasActiveCustomChannel(existingChannels)) {
+    return { kind: "custom", channels: existingChannels };
   }
 
-  return {
-    channels: ensuredChannels,
-    ...ensuredStarters,
-  };
+  const ensuredChannels = await client.ensureStarterChannels();
+  const ensuredStarters = findStarterChannels(ensuredChannels);
+  if (ensuredStarters) {
+    return {
+      kind: "starter",
+      channels: ensuredChannels,
+      ...ensuredStarters,
+    };
+  }
+
+  // The native command can discover a configured community after the first
+  // list call (for example while memberships are settling).
+  if (hasActiveCustomChannel(ensuredChannels)) {
+    return { kind: "custom", channels: ensuredChannels };
+  }
+
+  throw new Error("Starter channels were not available after setup");
 }
 
-export function welcomeChannelEnsuredStorageKey(
+export function channelOnboardingSettledStorageKey(
   pubkey: string,
   communityScope: string,
 ) {
-  return `${WELCOME_CHANNEL_ENSURED_STORAGE_KEY}:${encodeURIComponent(
+  return `${CHANNEL_ONBOARDING_SETTLED_STORAGE_KEY}:${encodeURIComponent(
     communityScope,
   )}:${pubkey}`;
 }
 
-export function hasEnsuredWelcomeChannel(
+export function hasSettledChannelOnboarding(
   pubkey: string | null | undefined,
   communityScope: string | null | undefined,
 ) {
@@ -301,7 +339,7 @@ export function hasEnsuredWelcomeChannel(
   try {
     return (
       window.localStorage.getItem(
-        welcomeChannelEnsuredStorageKey(pubkey, communityScope),
+        channelOnboardingSettledStorageKey(pubkey, communityScope),
       ) === "true"
     );
   } catch {
@@ -309,7 +347,7 @@ export function hasEnsuredWelcomeChannel(
   }
 }
 
-export function markWelcomeChannelEnsured(
+export function markChannelOnboardingSettled(
   pubkey: string | null | undefined,
   communityScope: string | null | undefined,
 ) {
@@ -319,7 +357,7 @@ export function markWelcomeChannelEnsured(
 
   try {
     window.localStorage.setItem(
-      welcomeChannelEnsuredStorageKey(pubkey, communityScope),
+      channelOnboardingSettledStorageKey(pubkey, communityScope),
       "true",
     );
   } catch {

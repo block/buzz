@@ -10,8 +10,8 @@ import { channelsQueryKey } from "@/features/channels/hooks";
 import {
   ensureStarterChannels,
   ensureWelcomeChannel,
-  hasEnsuredWelcomeChannel,
-  markWelcomeChannelEnsured,
+  hasSettledChannelOnboarding,
+  markChannelOnboardingSettled,
   notifyWelcomeChannelReady,
   rememberPendingWelcomeChannel,
 } from "@/features/onboarding/welcome";
@@ -57,7 +57,7 @@ function seedWelcomeExperience(
         queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey }),
         queryClient.invalidateQueries({ queryKey: relayAgentsQueryKey }),
       ]);
-      markWelcomeChannelEnsured(pubkey, communityScope);
+      markChannelOnboardingSettled(pubkey, communityScope);
     } catch (error) {
       console.warn("Failed to seed the private Welcome experience.", error);
     }
@@ -91,6 +91,21 @@ export async function initializeStarterChannels(
     } catch (error) {
       starterChannelsError = error;
       console.warn("Failed to initialize public starter channels.", error);
+    }
+
+    if (starterChannels?.kind === "custom") {
+      queryClient.setQueryData<Channel[]>(channelsQueryKey, (channels = []) => {
+        const ensuredIds = new Set(
+          starterChannels.channels.map((channel) => channel.id),
+        );
+        return [
+          ...starterChannels.channels,
+          ...channels.filter((channel) => !ensuredIds.has(channel.id)),
+        ];
+      });
+      markChannelOnboardingSettled(pubkey, communityScope);
+      await queryClient.invalidateQueries({ queryKey: channelsQueryKey });
+      return { ok: true };
     }
 
     const welcomeChannel = await ensureWelcomeChannel(
@@ -581,7 +596,7 @@ export function useAppOnboardingState(isSharedIdentity: boolean) {
       !currentPubkey ||
       !starterChannelsCommunityScope ||
       !readOnboardingCompletion(currentPubkey) ||
-      hasEnsuredWelcomeChannel(currentPubkey, starterChannelsCommunityScope)
+      hasSettledChannelOnboarding(currentPubkey, starterChannelsCommunityScope)
     ) {
       return;
     }
