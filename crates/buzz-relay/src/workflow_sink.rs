@@ -365,22 +365,18 @@ impl ActionSink for RelayActionSink {
 
     fn emit_approval_requested(
         &self,
-        community_id: CommunityId,
-        channel_id: &str,
-        token_hash_hex: &str,
-        approver_spec: &str,
-        message: &str,
-        workflow_id: &str,
-        run_id: &str,
-        author_pubkey: &str,
+        params: buzz_workflow::ApprovalRequestParams,
     ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>> {
-        let channel_id = channel_id.to_owned();
-        let token_hash_hex = token_hash_hex.to_owned();
-        let approver_spec = approver_spec.to_owned();
-        let message = message.to_owned();
-        let workflow_id = workflow_id.to_owned();
-        let run_id = run_id.to_owned();
-        let author_pubkey = author_pubkey.to_owned();
+        let buzz_workflow::ApprovalRequestParams {
+            community_id,
+            channel_id,
+            token_hash_hex,
+            approver_spec,
+            message,
+            workflow_id,
+            run_id,
+            author_pubkey,
+        } = params;
 
         Box::pin(async move {
             // 0. Upgrade weak reference — fails only during shutdown.
@@ -436,8 +432,9 @@ impl ActionSink for RelayActionSink {
             let author_pubkey_hex = author_pk.to_hex();
 
             // 5. Validate workflow_id and run_id are valid UUIDs.
-            let _workflow_uuid = Uuid::parse_str(&workflow_id)
-                .map_err(|e| ActionSinkError::InvalidInput(format!("invalid workflow UUID: {e}")))?;
+            let _workflow_uuid = Uuid::parse_str(&workflow_id).map_err(|e| {
+                ActionSinkError::InvalidInput(format!("invalid workflow UUID: {e}"))
+            })?;
             let _run_uuid = Uuid::parse_str(&run_id)
                 .map_err(|e| ActionSinkError::InvalidInput(format!("invalid run UUID: {e}")))?;
 
@@ -717,22 +714,30 @@ mod tests {
 
         // d tag carries the token hash.
         assert!(
-            tag_slices.iter().any(|t| t.len() == 2 && t[0] == "d" && t[1] == token_hash),
+            tag_slices
+                .iter()
+                .any(|t| t.len() == 2 && t[0] == "d" && t[1] == token_hash),
             "expected d tag with token hash; got {tag_slices:?}"
         );
         // h tag carries the channel UUID.
         assert!(
-            tag_slices.iter().any(|t| t.len() == 2 && t[0] == "h" && t[1] == channel_id),
+            tag_slices
+                .iter()
+                .any(|t| t.len() == 2 && t[0] == "h" && t[1] == channel_id),
             "expected h tag with channel id; got {tag_slices:?}"
         );
         // p tag carries the author pubkey.
         assert!(
-            tag_slices.iter().any(|t| t.len() == 2 && t[0] == "p" && t[1] == author_pk),
+            tag_slices
+                .iter()
+                .any(|t| t.len() == 2 && t[0] == "p" && t[1] == author_pk),
             "expected p tag with author pubkey; got {tag_slices:?}"
         );
         // buzz:workflow tag prevents recursive triggering.
         assert!(
-            tag_slices.iter().any(|t| t.len() == 2 && t[0] == "buzz:workflow" && t[1] == "true"),
+            tag_slices
+                .iter()
+                .any(|t| t.len() == 2 && t[0] == "buzz:workflow" && t[1] == "true"),
             "expected buzz:workflow tag; got {tag_slices:?}"
         );
     }

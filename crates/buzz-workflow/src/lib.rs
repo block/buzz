@@ -35,7 +35,7 @@ pub mod error;
 pub mod executor;
 pub mod schema;
 
-pub use action_sink::{ActionSink, ActionSinkError};
+pub use action_sink::{ActionSink, ActionSinkError, ApprovalRequestParams};
 pub use error::{PartialProgress, WorkflowError};
 pub use executor::ExecutionResult;
 pub use schema::{ActionDef, Step, TriggerDef, WorkflowDef};
@@ -49,8 +49,8 @@ use buzz_core::tenant::CommunityId;
 use buzz_db::workflow::RunStatus;
 use buzz_db::Db;
 use chrono::{DateTime, Utc};
-use sha2::Digest;
 use dashmap::DashMap;
+use sha2::Digest;
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 
@@ -376,25 +376,32 @@ impl WorkflowEngine {
         );
 
         // 8. Emit kind:46010 (best-effort — approval record is already durable).
-        let channel_id = workflow
-            .channel_id
-            .map(|id| id.to_string())
-            .unwrap_or_default();
+        let channel_id = match workflow.channel_id {
+            Some(id) => id.to_string(),
+            None => {
+                tracing::warn!(
+                    run_id = %run_id,
+                    workflow_id = %workflow_id,
+                    "Workflow has no channel_id — skipping kind:46010 notification"
+                );
+                return Ok(());
+            }
+        };
         let owner_pubkey_hex = hex::encode(&workflow.owner_pubkey);
         let token_hash_hex = hex::encode(sha2::Sha256::digest(approval_token.as_bytes()));
 
         if let Ok(sink) = self.action_sink() {
             if let Err(e) = sink
-                .emit_approval_requested(
+                .emit_approval_requested(ApprovalRequestParams {
                     community_id,
-                    &channel_id,
-                    &token_hash_hex,
-                    approver_spec,
-                    message,
-                    &workflow_id.to_string(),
-                    &run_id.to_string(),
-                    &owner_pubkey_hex,
-                )
+                    channel_id,
+                    token_hash_hex,
+                    approver_spec: approver_spec.to_owned(),
+                    message: message.to_owned(),
+                    workflow_id: workflow_id.to_string(),
+                    run_id: run_id.to_string(),
+                    author_pubkey: owner_pubkey_hex,
+                })
                 .await
             {
                 // Best-effort: the approval record is already persisted and the

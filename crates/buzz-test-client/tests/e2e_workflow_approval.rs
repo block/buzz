@@ -103,7 +103,7 @@ fn approval_workflow_yaml(name: &str) -> String {
          \x20 - id: approve\n\
          \x20   name: Request approval\n\
          \x20   action: request_approval\n\
-         \x20   from: '@anyone'\n\
+         \x20   from: 'any'\n\
          \x20   message: Please approve this workflow\n\
          \x20   timeout: 1h\n\
          \x20 - id: notify\n\
@@ -147,9 +147,9 @@ async fn define_workflow(keys: &Keys, channel_id: &str, yaml: &str, name: &str) 
     // The command executor returns `message: "response:{json}"` where json
     // carries `workflow_id`.
     let msg = body["message"].as_str().unwrap_or_default();
-    let json_part = msg.strip_prefix("response:").unwrap_or_else(|| {
-        panic!("workflow def OK message missing `response:` prefix: {msg:?}")
-    });
+    let json_part = msg
+        .strip_prefix("response:")
+        .unwrap_or_else(|| panic!("workflow def OK message missing `response:` prefix: {msg:?}"));
     let resp: serde_json::Value = serde_json::from_str(json_part)
         .unwrap_or_else(|e| panic!("parse workflow def response json: {e} ({json_part:?})"));
     resp["workflow_id"]
@@ -352,8 +352,8 @@ async fn approval_deny_cancels_workflow() {
     );
 
     // 4. Extract token hash from `d` tag.
-    let token_hash_hex = extract_d_tag_from_json(&approval_events[0])
-        .expect("kind:46010 event must have a `d` tag");
+    let token_hash_hex =
+        extract_d_tag_from_json(&approval_events[0]).expect("kind:46010 event must have a `d` tag");
 
     // 5. Submit a kind:46031 deny event.
     let deny_event = EventBuilder::new(Kind::Custom(KIND_APPROVAL_DENY), "Not approved")
@@ -424,8 +424,7 @@ async fn approval_emits_kind_46010() {
 
     // 3. Verify the event has a `d` tag with a 64-char hex token hash.
     let event = &approval_events[0];
-    let d_tag = extract_d_tag_from_json(event)
-        .expect("kind:46010 must have a `d` tag");
+    let d_tag = extract_d_tag_from_json(event).expect("kind:46010 must have a `d` tag");
     assert_eq!(
         d_tag.len(),
         64,
@@ -440,8 +439,7 @@ async fn approval_emits_kind_46010() {
     // 4. Verify the event kind is correct.
     let event_kind = event["kind"].as_u64().unwrap_or(0);
     assert_eq!(
-        event_kind,
-        KIND_WORKFLOW_APPROVAL_REQUESTED as u64,
+        event_kind, KIND_WORKFLOW_APPROVAL_REQUESTED as u64,
         "event kind must be 46010"
     );
 
@@ -508,7 +506,10 @@ async fn workflow_without_approval_completes_normally() {
     //    workflow has no approval step, so none should appear.
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_WORKFLOW_APPROVAL_REQUESTED))
-        .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel_id.as_str()]);
+        .custom_tags(
+            SingleLetterTag::lowercase(Alphabet::H),
+            [channel_id.as_str()],
+        );
     let approval_events = query_events(&keys, filter).await;
     assert!(
         approval_events.is_empty(),

@@ -2213,7 +2213,7 @@ mod tests {
                 run_id: run_a,
                 step_id: "gate",
                 step_index: 0,
-                approver_spec: "@anyone",
+                approver_spec: "any",
                 expires_at: expires,
             },
         )
@@ -2228,7 +2228,7 @@ mod tests {
                 run_id: run_b,
                 step_id: "gate",
                 step_index: 0,
-                approver_spec: "@anyone",
+                approver_spec: "any",
                 expires_at: expires,
             },
         )

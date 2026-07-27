@@ -37,6 +37,27 @@ impl From<ActionSinkError> for crate::WorkflowError {
     }
 }
 
+/// Parameters for [`ActionSink::emit_approval_requested`].
+#[derive(Debug, Clone)]
+pub struct ApprovalRequestParams {
+    /// The community that owns the workflow run.
+    pub community_id: CommunityId,
+    /// UUID string of the target channel.
+    pub channel_id: String,
+    /// Hex-encoded SHA-256 hash of the approval token (NIP-33 `d` tag).
+    pub token_hash_hex: String,
+    /// Who may approve (e.g. `"any"` or a 64-char hex pubkey).
+    pub approver_spec: String,
+    /// Human-readable approval prompt.
+    pub message: String,
+    /// Workflow UUID string (context).
+    pub workflow_id: String,
+    /// Run UUID string (context).
+    pub run_id: String,
+    /// Hex-encoded pubkey of the workflow owner.
+    pub author_pubkey: String,
+}
+
 /// Interface for workflow actions that produce side effects.
 ///
 /// Implemented by the relay to provide direct DB/event access to the executor.
@@ -75,26 +96,9 @@ pub trait ActionSink: Send + Sync {
     /// look it up and respond with a grant/deny event referencing the same
     /// `d` value.
     ///
-    /// - `community_id`: the community that owns the workflow run
-    /// - `channel_id`: UUID string of the target channel
-    /// - `token_hash_hex`: hex-encoded SHA-256 hash of the approval token
-    ///   (used as the NIP-33 `d` tag for parameterized replacement)
-    /// - `approver_spec`: who may approve (e.g. `"@manager"` or a hex pubkey)
-    /// - `message`: human-readable approval prompt
-    /// - `workflow_id`: workflow UUID string (context)
-    /// - `run_id`: run UUID string (context)
-    /// - `author_pubkey`: hex-encoded pubkey of the workflow owner
-    ///
     /// Returns the event ID hex string on success.
     fn emit_approval_requested(
         &self,
-        community_id: CommunityId,
-        channel_id: &str,
-        token_hash_hex: &str,
-        approver_spec: &str,
-        message: &str,
-        workflow_id: &str,
-        run_id: &str,
-        author_pubkey: &str,
+        params: ApprovalRequestParams,
     ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>>;
 }
