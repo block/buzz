@@ -791,6 +791,7 @@ impl Daemon {
             error,
             restart_count,
             prompt_hash,
+            needs_credential: false,
         };
         self.relay.publish_status(slug, owner_pubkey, &status).await
     }
