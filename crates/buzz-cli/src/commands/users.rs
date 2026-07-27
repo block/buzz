@@ -221,12 +221,20 @@ async fn search_by_name(
         crate::OutputFormat::Compact => {
             let compact: Vec<serde_json::Value> = profiles
                 .iter()
-                .map(|p| serde_json::json!({
-                    "pubkey": p.get("pubkey").cloned().unwrap_or_default(),
-                    "display_name": p.get("display_name").or_else(|| p.get("name")).cloned().unwrap_or_default(),
-                    "owner_pubkey": p.get("owner_pubkey").cloned().unwrap_or_default(),
-                    "owned_by_me": p.get("owned_by_me").cloned().unwrap_or_default(),
-                }))
+                .map(|p| {
+                    let mut value = serde_json::json!({
+                        "pubkey": p.get("pubkey").cloned().unwrap_or_default(),
+                        "display_name": p.get("display_name").or_else(|| p.get("name")).cloned().unwrap_or_default(),
+                    });
+                    if let Some(obj) = value.as_object_mut() {
+                        for field in ["owner_pubkey", "owned_by_me"] {
+                            if let Some(field_value) = p.get(field) {
+                                obj.insert(field.to_string(), field_value.clone());
+                            }
+                        }
+                    }
+                    value
+                })
                 .collect();
             serde_json::to_string(&compact).unwrap_or_default()
         }
