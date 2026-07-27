@@ -423,6 +423,58 @@ void main() {
   );
 
   test(
+    'websocket fallback refetches an open thread when a reply arrives live',
+    () async {
+      final relaySession = _RecordingRelaySessionNotifier(
+        queryResults: [
+          Exception('channel window unavailable'),
+          <NostrEvent>[],
+          [
+            _event(
+              id: 'reply',
+              createdAt: 20,
+              extraTags: const [
+                ['e', 'root', '', 'reply'],
+              ],
+            ),
+          ],
+        ],
+      );
+      final container = _buildContainer(relaySession);
+      addTearDown(container.dispose);
+
+      container.read(channelMessagesProvider(_channelId));
+      await relaySession.subscribed;
+      relaySession.completeHistory([_event(id: 'history', createdAt: 10)]);
+      await _pumpEventQueue();
+      // The channel window query failed, so this channel is on the legacy
+      // websocket history path for the rest of the session.
+      expect(relaySession.operations, ['subscribe', 'query', 'fetch']);
+
+      const args = ThreadRepliesArgs(channelId: _channelId, rootId: 'root');
+      expect(await container.read(threadRepliesProvider(args).future), isEmpty);
+
+      relaySession.emit(
+        _event(
+          id: 'reply',
+          createdAt: 20,
+          extraTags: const [
+            ['e', 'root', '', 'reply'],
+          ],
+        ),
+      );
+      await _pumpEventQueue();
+
+      expect(
+        (await container.read(
+          threadRepliesProvider(args).future,
+        )).map((event) => event.id),
+        ['reply'],
+      );
+    },
+  );
+
+  test(
     'successful never-echoed send releases ownership but keeps its row across reconnect',
     () async {
       final relaySession = _RecordingRelaySessionNotifier(

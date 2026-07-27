@@ -174,6 +174,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     if (authoritative && event.threadReference.parentId == null) {
       _confirmLocalMessages([event.id]);
     }
+    _invalidateThreadReplies(event);
     if (_usingChannelWindow) {
       _handleWindowLiveEvent(event);
     } else {
@@ -198,30 +199,42 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     state = AsyncData(flattened);
   }
 
+  /// Refetches the open thread view for a live reply.
+  ///
+  /// [threadRepliesProvider] is a one-shot future, so an open thread only
+  /// picks up a reply when it is invalidated. This runs for both history
+  /// paths: the websocket fallback merges replies into the flat timeline
+  /// alone, which left an open thread stale until an app restart rebuilt the
+  /// future.
+  void _invalidateThreadReplies(NostrEvent event) {
+    if (!EventKind.channelTimelineContentKinds.contains(event.kind)) return;
+    final thread = event.threadReference;
+    if (thread.parentId == null) return;
+
+    final rootId = thread.rootId;
+    if (rootId != null) {
+      ref.invalidate(
+        threadRepliesProvider(
+          ThreadRepliesArgs(channelId: channelId, rootId: rootId),
+        ),
+      );
+    }
+    final parentId = thread.parentId;
+    if (parentId != null && parentId != rootId) {
+      ref.invalidate(
+        threadRepliesProvider(
+          ThreadRepliesArgs(channelId: channelId, rootId: parentId),
+        ),
+      );
+    }
+  }
+
   bool _mergeWindowEventIntoStore(NostrEvent event) {
     final isTimelineRow = EventKind.channelTimelineContentKinds.contains(
       event.kind,
     );
     final thread = isTimelineRow ? event.threadReference : null;
-    if (thread?.parentId != null) {
-      final rootId = thread?.rootId;
-      if (rootId != null) {
-        ref.invalidate(
-          threadRepliesProvider(
-            ThreadRepliesArgs(channelId: channelId, rootId: rootId),
-          ),
-        );
-      }
-      final parentId = thread?.parentId;
-      if (parentId != null && parentId != rootId) {
-        ref.invalidate(
-          threadRepliesProvider(
-            ThreadRepliesArgs(channelId: channelId, rootId: parentId),
-          ),
-        );
-      }
-      if (!_isBroadcastReply(event)) return false;
-    }
+    if (thread?.parentId != null && !_isBroadcastReply(event)) return false;
     if (!isTimelineRow &&
         !EventKind.channelAuxEventKinds.contains(event.kind)) {
       return false;
