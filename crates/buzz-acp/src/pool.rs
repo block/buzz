@@ -1159,11 +1159,25 @@ fn framed_system_prompt(
 
 /// Render the `[Workspace]` grounding section, or `None` when `cwd` is unusable.
 ///
-/// Skips relative paths and the `/` fallback (`std::env::current_dir()` resolves
-/// to `/` on failure): a `/`-rooted workspace line would actively encourage the
-/// `$HOME`-wide scan this section exists to prevent.
+/// Two invariants gate emission: reject relative paths, and reject any
+/// filesystem root — `/`, `C:\`, `\\?\C:\`, `\\server\share` — since a
+/// root-rooted workspace line would actively encourage the `$HOME`-wide scan
+/// this section exists to prevent. `std::env::current_dir()` resolves to `/`
+/// on failure, so the root check also covers that fallback.
+///
+/// `Path::is_absolute()` is intentionally platform-dependent here (on
+/// Windows it requires a drive/UNC prefix, so a POSIX-style string like
+/// `/Users/me` is not absolute) rather than a bug to "fix" back to a string
+/// prefix test. `cwd` only ever originates from `std::env::current_dir()` in
+/// this same process (see `lib.rs`, where `PromptContext::cwd` is built) —
+/// there is no deserialization, CLI flag, or wire path that can hand this
+/// function a foreign-dialect path, so the compile-time platform always
+/// matches the path's dialect. The POSIX-path tests below are `#[cfg(unix)]`
+/// for the same reason: they assert on a dialect this predicate only accepts
+/// on Unix.
 fn workspace_section(cwd: &str) -> Option<String> {
-    if cwd != "/" && cwd.starts_with('/') {
+    let path = std::path::Path::new(cwd);
+    if path.is_absolute() && path.parent().is_some() {
         Some(format!(
             "[Workspace]\nYour absolute working directory is `{cwd}`. All workspace \
              files — `AGENTS.md`, `RESEARCH/`, `PLANS/`, `GUIDES/`, `WORK_LOGS/`, \
@@ -3806,6 +3820,7 @@ mod tests {
         assert!(framed_system_prompt("/", None, None).is_none());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_framed_system_prompt_absolute_cwd_prepends_workspace_before_base() {
         let framed = framed_system_prompt("/Users/me/.buzz", Some("base text"), None)
@@ -3841,6 +3856,29 @@ mod tests {
     fn test_workspace_section_relative_cwd_is_none() {
         assert!(workspace_section("relative/path").is_none());
         assert!(workspace_section("").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_workspace_section_posix_absolute_cwd_is_some() {
+        assert!(workspace_section("/Users/me/.buzz").is_some());
+    }
+
+    #[test]
+    fn test_workspace_section_root_cwd_is_none() {
+        assert!(workspace_section("/").is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_workspace_section_windows_drive_absolute_cwd_is_some() {
+        assert!(workspace_section(r"C:\Users\me\.buzz").is_some());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_workspace_section_windows_drive_root_is_none() {
+        assert!(workspace_section(r"C:\").is_none());
     }
 
     #[test]
