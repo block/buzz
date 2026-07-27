@@ -6,6 +6,8 @@
 //! portable authorization boundary without emulating production membership,
 //! media, search indexing, workflows, or multi-node fan-out.
 
+/// Journal-derived operator configuration from sync declaration heads.
+pub mod declarations;
 /// Laptop NIP-42/NIP-98 authentication and authorization adapter.
 pub mod identity;
 
@@ -529,14 +531,32 @@ impl LocalRelay {
         artifacts_dir: Option<PathBuf>,
     ) -> Result<Arc<Self>, StoreError> {
         let store = Arc::new(EventStore::open(mode).await?);
+        Ok(Self::open_full_with_store(
+            store,
+            replication_policy,
+            identity,
+            artifacts_dir,
+        ))
+    }
+
+    /// Builds a relay around an already-opened store.
+    ///
+    /// Lets callers evaluate journal state (for example, declaration-derived
+    /// trust) before constructing the adapters that depend on it.
+    pub fn open_full_with_store(
+        store: Arc<EventStore>,
+        replication_policy: Arc<dyn ReplicationPolicy>,
+        identity: Option<Arc<LocalIdentityAdapter>>,
+        artifacts_dir: Option<PathBuf>,
+    ) -> Arc<Self> {
         let (live_events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
-        Ok(Arc::new(Self {
+        Arc::new(Self {
             store,
             live_events,
             replication_policy,
             identity,
             artifacts_dir,
-        }))
+        })
     }
 
     /// Returns the relay's event store.

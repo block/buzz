@@ -93,6 +93,14 @@ pub const KIND_AGENT_PROFILE: u32 = 10100;
 /// `docs/nips/NIP-AE.md` and [`crate::engram`].
 pub const KIND_AGENT_ENGRAM: u32 = 30174;
 
+/// Sovereign sync declaration (parameterized replaceable).
+///
+/// PROVISIONAL number pending upstream registry assignment. One half of a
+/// sovereign sync agreement: an owner-signed statement of export, admit,
+/// read, or key-grant intent, addressed by `(pubkey, kind, "<role>/<stream>")`.
+/// See `specs/architecture/sovereign-sync-agreement-v0.1-draft.md`.
+pub const KIND_SYNC_DECLARATION: u32 = 30700;
+
 /// NIP-ER: Event Reminder (parameterized replaceable, author-only).
 ///
 /// Encrypted, author-only reminder addressed by `(pubkey, kind, d_tag)`. The
@@ -582,6 +590,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_FILE_METADATA,
     KIND_AGENT_PROFILE,
     KIND_AGENT_ENGRAM,
+    KIND_SYNC_DECLARATION,
     KIND_EVENT_REMINDER,
     KIND_PERSONA,
     KIND_TEAM,
@@ -784,6 +793,7 @@ const _: () = assert!(is_replaceable(KIND_AGENT_PROFILE)); // 10100 ∈ 10000–
 const _: () = assert!(is_parameterized_replaceable(KIND_PERSONA)); // 30175 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_TEAM)); // 30176 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_MANAGED_AGENT)); // 30177 ∈ 30000–39999
+const _: () = assert!(is_parameterized_replaceable(KIND_SYNC_DECLARATION)); // 30700 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_WORKFLOW_DEF)); // 30620 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_EVENT_REMINDER)); // 30300 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_DM_VISIBILITY)); // 30622 ∈ 30000–39999

@@ -185,6 +185,30 @@ at which point the journals are the source of truth and the files are a
 cache. The four-places-edited-by-hand drift observed in practice is the
 problem this ordering removes.
 
+## Runtime evaluation (v0.1 adapter policy)
+
+Adapters derive operating configuration from declaration heads at defined
+evaluation points — the laptop adapter at process start, the Cloudflare
+adapter at each replication request. Three rules:
+
+1. **Owner anchor.** Only declaration heads authored by the node's owner
+   pubkey govern that node's configuration. The owner pubkey is the one
+   remaining bootstrap datum (laptop `--owner` / `BUZZ_LOCAL_RELAY_OWNER`,
+   Cloudflare `BUZZ_OWNER_PUBKEY`); it is identity, not policy, and stable
+   across deploys. Foreign declarations remain relationship halves — they
+   confer nothing without a matching owner half (invariant 5).
+2. **Per-domain precedence, wholesale.** The domains are `admit/*` (sink
+   peer trust), `export/*` (stream exports), and `read/*` (reader grants).
+   If the journal holds *any* owner-signed head in a domain — whatever its
+   status — the journal governs that domain entirely and file/env config
+   for the domain is ignored; only `status: "active"` heads confer trust.
+   File/env is consulted solely when the journal holds no head in the
+   domain (bootstrap). Revocation is therefore irreversible by fallback: a
+   domain whose every head is revoked is an empty domain, not a reversion
+   to files.
+3. **Fail closed.** No owner anchor means no journal-derived configuration.
+   No heads and no bootstrap config means empty trust.
+
 ## Security invariants
 
 1. Declarations are intent, not credentials. Transport evidence and
