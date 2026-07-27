@@ -260,6 +260,40 @@ fn preset_entry_stays_available_when_adapter_present_but_cli_absent() {
 }
 
 #[test]
+fn common_binary_paths_include_kimi_code_install_dir() {
+    let home = dirs::home_dir().expect("test environment should have a home directory");
+    let kimi_bin_dir = home.join(".kimi-code").join("bin");
+
+    assert!(
+        super::common_binary_paths().contains(&kimi_bin_dir),
+        "Kimi Code's standalone install directory must be probed even when the desktop process has a stale PATH"
+    );
+}
+
+#[test]
+fn kimi_preset_uses_acp_subcommand_and_official_cli_docs() {
+    let kimi = super::PRESET_HARNESSES
+        .iter()
+        .find(|preset| preset.id == "kimi")
+        .expect("Kimi Code preset must be registered");
+
+    assert_eq!(kimi.command, "kimi");
+    assert_eq!(kimi.args, &["acp"]);
+    assert_eq!(
+        kimi.install_instructions_url,
+        "https://moonshotai.github.io/kimi-code/"
+    );
+
+    let entry = preset_catalog_entry(kimi, |command| {
+        (command == "kimi").then(|| PathBuf::from("/opt/kimi/bin/kimi"))
+    });
+    assert_eq!(entry.availability, AcpAvailabilityStatus::Available);
+    assert_eq!(entry.command.as_deref(), Some("kimi"));
+    assert_eq!(entry.default_args, vec!["acp"]);
+    assert_eq!(entry.source, crate::managed_agents::HarnessSource::Preset);
+}
+
+#[test]
 fn preset_entry_without_underlying_cli_stays_simple() {
     // Most presets: the command IS the vendor CLI. No external-CLI flag,
     // absent command means plain NotInstalled.

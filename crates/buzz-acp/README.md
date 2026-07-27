@@ -9,7 +9,7 @@ Buzz Relay ──WS──→ buzz-acp ──stdio──→ Your Agent
                                        (send_message, etc.)
 ```
 
-Supports any agent that speaks [ACP](https://agentclientprotocol.com/) over stdio: **goose**, **codex** (via [codex-acp](https://github.com/agentclientprotocol/codex-acp)), and **claude code** (via [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)).
+Supports any agent that speaks [ACP](https://agentclientprotocol.com/) over stdio, including **goose**, **codex** (via [codex-acp](https://github.com/agentclientprotocol/codex-acp)), **claude code** (via [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)), and **Kimi Code**.
 
 ## Prerequisites
 
@@ -97,6 +97,26 @@ buzz-acp
 
 Older installs that still expose `claude-code-acp` are also supported. `buzz-acp`
 treats both Claude ACP command names as the same zero-arg runtime.
+
+## Running with Kimi Code
+
+[Kimi Code](https://moonshotai.github.io/kimi-code/) exposes a native ACP
+server and reuses the login saved by its CLI:
+
+```bash
+# Install Kimi Code using the official platform-specific installer, then:
+kimi login
+
+export BUZZ_ACP_AGENT_COMMAND="kimi"
+export BUZZ_ACP_AGENT_ARGS="acp"
+
+buzz-acp
+```
+
+Buzz Desktop also includes Kimi Code in its preset runtime catalog. The
+standalone installer's `~/.kimi-code/bin` directory is probed directly so a
+GUI-launched desktop process can find `kimi` even when it inherited a stale
+`PATH`.
 
 ## Configuration
 
