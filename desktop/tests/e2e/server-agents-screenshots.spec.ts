@@ -52,29 +52,9 @@ test.describe("server agents section", () => {
     await expect(section).toContainText(
       "does not have to be the relay machine",
     );
-    await expect(
-      section.getByPlaceholder("Spawner public key (64 hex characters)"),
-    ).toBeVisible();
 
     await waitForAnimations(page);
     await section.screenshot({ path: `${SCREENSHOT_DIR}/01-setup-card.png` });
-  });
-
-  test("rejects a malformed spawner public key", async ({ page }) => {
-    await installMockBridge(page);
-    await gotoAgents(page);
-
-    const section = page.locator("section", { hasText: "Server agents" });
-    await section
-      .getByPlaceholder("Spawner public key (64 hex characters)")
-      .fill("not-a-pubkey");
-    await section.getByRole("button", { name: "Connect" }).click();
-
-    // Fails closed: the section must stay on the setup card rather than storing
-    // a value the relay could never route to.
-    await expect(
-      section.getByPlaceholder("Spawner public key (64 hex characters)"),
-    ).toBeVisible();
   });
 
   test("renders the configured state with a deploy menu", async ({ page }) => {
@@ -152,11 +132,9 @@ test.describe("server agents section", () => {
     const section = page.locator("section", { hasText: "Server agents" });
     await section.getByRole("button", { name: "Disconnect" }).click();
 
-    // Disconnecting is local only: the connect field stays, and the deploy
-    // action disappears because there is nowhere to deploy to.
-    await expect(
-      section.getByPlaceholder("Spawner public key (64 hex characters)"),
-    ).toBeVisible();
+    // Disconnecting is local only: the section falls back to its empty state,
+    // and the deploy action disappears because there is nowhere to deploy to.
+    await expect(section).toContainText("keep working when Buzz is closed");
     await expect(section).not.toContainText("Disconnect");
   });
 });

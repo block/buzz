@@ -17,7 +17,6 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
-import { Input } from "@/shared/ui/input";
 import { SectionHeader } from "@/shared/ui/PageHeader";
 import {
   sameLocation,
@@ -235,8 +234,6 @@ export function ServerAgentsSection({ personas }: ServerAgentsSectionProps) {
           </div>
         );
       })}
-
-      <SpawnerConnectCard />
     </section>
   );
 }
@@ -476,35 +473,6 @@ function DefaultLocationToggle({ spawner }: { spawner: string }) {
     >
       Make default
     </button>
-  );
-}
-
-/** Connect to a spawner by pubkey, for one that has not announced itself. */
-function SpawnerConnectCard() {
-  const [value, setValue] = React.useState("");
-
-  return (
-    <div className="flex gap-2">
-      <Input
-        onChange={(event) => setValue(event.target.value)}
-        placeholder="Spawner public key (64 hex characters)"
-        value={value}
-      />
-      <Button
-        disabled={value.trim().length === 0}
-        onClick={() => {
-          if (!addSpawner(value.trim())) {
-            toast.error("That is not a valid 64-character hex public key.");
-            return;
-          }
-          setValue("");
-        }}
-        type="button"
-        variant="outline"
-      >
-        Connect
-      </Button>
-    </div>
   );
 }
 
