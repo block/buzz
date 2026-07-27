@@ -25,7 +25,7 @@ import {
   useDefaultAgentLocation,
 } from "../agentLocation";
 import { useSpawnerDirectory } from "../spawnerDirectoryStore";
-import { addSpawner, removeSpawner } from "../spawnerPreference";
+import { addSpawner, removeSpawner, slugFromName } from "../spawnerPreference";
 import { useServerAgents, type ServerAgent } from "../useServerAgents";
 import { shortenPubkey } from "./SpawnerAttestationDialog";
 
@@ -105,9 +105,16 @@ export function ServerAgentsSection({ personas }: ServerAgentsSectionProps) {
   } = useServerAgents();
   const directory = useSpawnerDirectory();
 
-  const personaByName = React.useMemo(() => {
+  // Keyed by the slug an agent's spec is published under, because that is the
+  // only name a ServerAgent carries — keying by display name would miss every
+  // persona whose name is not already its own slug ("Fizz" vs "fizz"), and a
+  // miss republishes the spec without its personaId.
+  const personaBySlug = React.useMemo(() => {
     const map = new Map<string, AgentPersona>();
-    for (const persona of personas) map.set(persona.displayName, persona);
+    for (const persona of personas) {
+      const slug = slugFromName(persona.displayName);
+      if (slug) map.set(slug, persona);
+    }
     return map;
   }, [personas]);
 
@@ -208,7 +215,7 @@ export function ServerAgentsSection({ personas }: ServerAgentsSectionProps) {
                         await setEnabled(
                           agent,
                           enabled,
-                          personaByName.get(agent.slug),
+                          personaBySlug.get(agent.slug),
                         );
                       } catch (error) {
                         toast.error(
