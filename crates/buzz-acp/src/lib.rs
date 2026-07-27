@@ -2267,7 +2267,14 @@ async fn tokio_main() -> Result<()> {
                                 }
                             }
 
-                            let matched = filter::match_event(&buzz_event.event, buzz_event.channel_id, &rules, &pubkey_hex).await;
+                            let matched = filter::match_event(
+                                &buzz_event.event,
+                                buzz_event.channel_id,
+                                &rules,
+                                &pubkey_hex,
+                                &inbound_author,
+                            )
+                            .await;
                             let prompt_tag = match matched {
                                 Some(m) => m.prompt_tag,
                                 None => {
@@ -2835,6 +2842,27 @@ fn is_workflow_event(event: &nostr::Event) -> bool {
         .any(|tag| tag.as_slice().first().map(String::as_str) == Some("buzz:workflow"))
 }
 
+fn workflow_owner(event: &nostr::Event) -> Option<PublicKey> {
+    let owner_tag = event
+        .tags
+        .iter()
+        .find(|tag| tag.as_slice().first().map(String::as_str) == Some("p"))?;
+    PublicKey::from_hex(owner_tag.as_slice().get(1)?).ok()
+}
+
+/// Return the author of an event that has already passed inbound admission.
+///
+/// Workflow events are immutable and reach the queue only after
+/// [`effective_inbound_author`] verifies their signature and relay signer, so
+/// downstream filtering and prompt rendering can reuse the owner tag.
+pub(crate) fn admitted_event_author(event: &nostr::Event) -> PublicKey {
+    if is_workflow_event(event) {
+        workflow_owner(event).unwrap_or(event.pubkey)
+    } else {
+        event.pubkey
+    }
+}
+
 /// Return the author used by the inbound gate.
 ///
 /// The relay action sink signs workflow output with its advertised workflow
@@ -2853,12 +2881,7 @@ fn effective_inbound_author(
         return None;
     }
 
-    let owner_tag = event
-        .tags
-        .iter()
-        .find(|tag| tag.as_slice().first().map(String::as_str) == Some("p"))?;
-    let owner = owner_tag.as_slice().get(1)?;
-    PublicKey::from_hex(owner).ok().map(|owner| owner.to_hex())
+    workflow_owner(event).map(|owner| owner.to_hex())
 }
 
 fn is_owner_control_command(
@@ -4556,7 +4579,7 @@ mod author_gate_tests {
 
     #[tokio::test]
     async fn test_verified_workflow_attribution_preserves_dm_author_gate() {
-        use nostr::{EventBuilder, Keys, Kind, Tag};
+        use nostr::{EventBuilder, Keys, Kind, Tag, ToBech32};
 
         let relay = Keys::generate();
         let workflow_owner = Keys::generate();
@@ -4584,6 +4607,18 @@ mod author_gate_tests {
             attributed_author,
             workflow_owner.public_key().to_hex(),
             "verified workflow output must be attributed to its owner"
+        );
+        let prompt_event = queue::BatchEvent {
+            event: event.clone(),
+            prompt_tag: "scheduled".into(),
+            received_at: std::time::Instant::now(),
+        };
+        let prompt = queue::format_event_block(Uuid::new_v4(), None, &prompt_event, None);
+        let owner_hex = workflow_owner.public_key().to_hex();
+        let owner_npub = workflow_owner.public_key().to_bech32().expect("owner npub");
+        assert!(
+            prompt.contains(&format!("From: {owner_npub} (hex: {owner_hex})")),
+            "prompt must render the verified workflow owner, not the relay signer"
         );
         assert_eq!(
             effective_inbound_author(&event, None),

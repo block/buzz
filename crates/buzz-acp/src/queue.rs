@@ -1079,8 +1079,9 @@ pub(crate) fn format_event_block(
     be: &BatchEvent,
     profile_lookup: Option<&PromptProfileLookup>,
 ) -> String {
-    let hex = be.event.pubkey.to_hex();
-    let npub = be.event.pubkey.to_bech32().unwrap_or_else(|_| hex.clone());
+    let author = crate::admitted_event_author(&be.event);
+    let hex = author.to_hex();
+    let npub = author.to_bech32().unwrap_or_else(|_| hex.clone());
 
     let time = chrono::DateTime::from_timestamp(be.event.created_at.as_secs() as i64, 0)
         .map(|dt| dt.to_rfc3339())
@@ -1464,7 +1465,7 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
     //   - top-level     → anchor to the triggering event (it becomes the root)
     // Agent↔agent turns get no forced anchor — deep nesting is intentional
     // there. DMs are always 1:1 with a human, so they always anchor.
-    let sender_pubkey = last_event.event.pubkey.to_hex();
+    let sender_pubkey = crate::admitted_event_author(&last_event.event).to_hex();
     let reply_anchor = if is_dm {
         thread_tags
             .root_event_id
@@ -3968,6 +3969,52 @@ mod tests {
         assert!(
             prompt.contains("new top-level message"),
             "top-level human message should use the new-thread instruction"
+        );
+    }
+
+    #[test]
+    fn test_workflow_reply_anchor_uses_attributed_owner() {
+        let ch = Uuid::new_v4();
+        let relay = Keys::generate();
+        let owner = Keys::generate();
+        let watcher = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(9), "@watcher scheduled scan")
+            .tags([
+                nostr::Tag::public_key(owner.public_key()),
+                nostr::Tag::parse(["buzz:workflow", "true"]).unwrap(),
+                nostr::Tag::public_key(watcher.public_key()),
+            ])
+            .sign_with_keys(&relay)
+            .unwrap();
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "scheduled".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let profiles = HashMap::from([
+            (owner.public_key().to_hex(), profile(true)),
+            (watcher.public_key().to_hex(), profile(true)),
+        ]);
+
+        // Model an already-admitted workflow event. The relay signer has no
+        // profile and would be treated as human; the attributed owner and every
+        // mentioned identity are agents, so no human-facing anchor is needed.
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                profile_lookup: Some(&profiles),
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+        assert!(
+            !prompt.contains("--reply-to"),
+            "reply anchoring must classify the attributed workflow owner, not the relay signer"
         );
     }
 
