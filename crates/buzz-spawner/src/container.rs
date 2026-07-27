@@ -278,17 +278,51 @@ impl DockerOps {
             ..Default::default()
         };
 
-        let created = self
+        let created = match self
             .docker
             .create_container(
                 Some(CreateContainerOptions {
                     name: Some(spec.name.clone()),
                     ..Default::default()
                 }),
-                body,
+                body.clone(),
             )
             .await
-            .with_context(|| format!("failed to create container {}", spec.name))?;
+        {
+            Ok(created) => created,
+            // The name can be squatted by a container a previous spawner
+            // identity created (names are owner+slug scoped, but list() only
+            // sees the current identity's label) — self-heal by removing it,
+            // but only after verifying the labels say it is an agent container.
+            Err(e) if is_name_conflict(&e) => {
+                self.remove_name_squatter(&spec.name)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "container name {} is taken and could not be reclaimed",
+                            spec.name
+                        )
+                    })?;
+                self.docker
+                    .create_container(
+                        Some(CreateContainerOptions {
+                            name: Some(spec.name.clone()),
+                            ..Default::default()
+                        }),
+                        body,
+                    )
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "failed to create container {} after reclaiming its name",
+                            spec.name
+                        )
+                    })?
+            }
+            Err(e) => {
+                return Err(e).with_context(|| format!("failed to create container {}", spec.name));
+            }
+        };
 
         self.docker
             .start_container(&created.id, None::<StartContainerOptions>)
@@ -338,6 +372,39 @@ impl DockerOps {
         Ok(())
     }
 
+    /// Remove an agent container squatting on `name`.
+    ///
+    /// Only containers carrying the `com.buzz.agent` label are removed — that
+    /// label marks them as spawner-managed regardless of which spawner
+    /// identity created them, so orphans left by a retired identity are fair
+    /// game while an operator's unrelated container of the same name is not.
+    /// The workspace volume is a named mount and survives the removal.
+    async fn remove_name_squatter(&self, name: &str) -> Result<()> {
+        use bollard::query_parameters::InspectContainerOptions;
+
+        let squatter = self
+            .docker
+            .inspect_container(name, None::<InspectContainerOptions>)
+            .await
+            .with_context(|| format!("failed to inspect conflicting container {name}"))?;
+        let labels = squatter.config.as_ref().and_then(|c| c.labels.as_ref());
+        if !labels.is_some_and(|labels| labels.contains_key(AGENT_LABEL)) {
+            anyhow::bail!(
+                "conflicting container {name} does not carry the {AGENT_LABEL} label; \
+                 refusing to remove a container the spawner does not manage"
+            );
+        }
+        let spawner = labels
+            .and_then(|labels| labels.get(SPAWNER_LABEL).cloned())
+            .unwrap_or_default();
+        tracing::info!(
+            container = %name,
+            previous_spawner = %spawner,
+            "removing orphaned agent container squatting on required name"
+        );
+        self.remove_inner(name, None).await
+    }
+
     async fn logs_inner(&self, container_id: &str, lines: usize) -> Result<String> {
         use bollard::query_parameters::LogsOptionsBuilder;
         use futures_util::StreamExt;
@@ -360,6 +427,17 @@ impl DockerOps {
         }
         Ok(out)
     }
+}
+
+/// True when Docker rejected a create because the container name is taken.
+fn is_name_conflict(e: &bollard::errors::Error) -> bool {
+    matches!(
+        e,
+        bollard::errors::Error::DockerResponseServerError {
+            status_code: 409,
+            ..
+        }
+    )
 }
 
 fn is_not_found(e: &bollard::errors::Error) -> bool {
@@ -394,5 +472,19 @@ mod tests {
         assert_eq!(labels.get(SLUG_LABEL), Some(&"fizz".to_string()));
         // Without this, two spawners on one host reap each other's containers.
         assert_eq!(labels.get(SPAWNER_LABEL), Some(&"s".repeat(64)));
+    }
+
+    #[test]
+    fn name_conflict_matches_409_only() {
+        let conflict = bollard::errors::Error::DockerResponseServerError {
+            status_code: 409,
+            message: "Conflict. The container name is already in use".into(),
+        };
+        assert!(is_name_conflict(&conflict));
+        let not_found = bollard::errors::Error::DockerResponseServerError {
+            status_code: 404,
+            message: "no such container".into(),
+        };
+        assert!(!is_name_conflict(&not_found));
     }
 }
