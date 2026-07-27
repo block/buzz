@@ -50,6 +50,10 @@ fn redact_object(map: &Map<String, Value>) -> Map<String, Value> {
 
     let mut out = Map::with_capacity(map.len());
     for (key, val) in map {
+        if key == "mcpServers" {
+            out.insert(key.clone(), redact_mcp_servers(val));
+            continue;
+        }
         if env_pair_secret && key == "value" {
             out.insert(key.clone(), Value::String(REDACTED.to_string()));
             continue;
@@ -61,6 +65,64 @@ fn redact_object(map: &Map<String, Value>) -> Map<String, Value> {
         out.insert(key.clone(), redact_secret_shaped_json(val));
     }
     out
+}
+
+/// MCP server environment values are configuration, not display data. Redact
+/// them all, irrespective of the variable name (for example, `DATABASE_URL`).
+fn redact_mcp_servers(value: &Value) -> Value {
+    match value {
+        Value::Array(servers) => Value::Array(
+            servers
+                .iter()
+                .map(|server| match server {
+                    Value::Object(map) => {
+                        let mut out = Map::with_capacity(map.len());
+                        for (key, val) in map {
+                            if key == "env" {
+                                out.insert(key.clone(), redact_mcp_env(val));
+                            } else {
+                                out.insert(key.clone(), redact_secret_shaped_json(val));
+                            }
+                        }
+                        Value::Object(out)
+                    }
+                    other => redact_secret_shaped_json(other),
+                })
+                .collect(),
+        ),
+        other => redact_secret_shaped_json(other),
+    }
+}
+
+fn redact_mcp_env(value: &Value) -> Value {
+    match value {
+        Value::Object(entries) => Value::Object(
+            entries
+                .keys()
+                .map(|key| (key.clone(), Value::String(REDACTED.to_string())))
+                .collect(),
+        ),
+        Value::Array(entries) => Value::Array(
+            entries
+                .iter()
+                .map(|entry| match entry {
+                    Value::Object(pair) => {
+                        let mut out = Map::with_capacity(pair.len());
+                        for (key, val) in pair {
+                            if key == "name" {
+                                out.insert(key.clone(), val.clone());
+                            } else {
+                                out.insert(key.clone(), Value::String(REDACTED.to_string()));
+                            }
+                        }
+                        Value::Object(out)
+                    }
+                    _ => Value::String(REDACTED.to_string()),
+                })
+                .collect(),
+        ),
+        _ => Value::String(REDACTED.to_string()),
+    }
 }
 
 fn is_scalar_secret_value(val: &Value) -> bool {
@@ -149,7 +211,28 @@ mod tests {
         let env = &out["params"]["mcpServers"][0]["env"];
         assert_eq!(env[0]["name"], "OPENAI_API_KEY");
         assert_eq!(env[0]["value"], REDACTED);
-        assert_eq!(env[1]["value"], "/tmp");
+        assert_eq!(env[1]["name"], "HOME");
+        assert_eq!(env[1]["value"], REDACTED);
+    }
+
+    #[test]
+    fn redacts_all_mcp_server_env_map_values() {
+        let input = json!({
+            "params": {
+                "mcpServers": [{
+                    "env": {
+                        "DATABASE_URL": "postgres://user:password@host/database",
+                        "REGION": "us-east-1"
+                    }
+                }]
+            },
+            "env": {"REGION": "us-east-1"}
+        });
+        let out = redact_secret_shaped_json(&input);
+        let env = &out["params"]["mcpServers"][0]["env"];
+        assert_eq!(env["DATABASE_URL"], REDACTED);
+        assert_eq!(env["REGION"], REDACTED);
+        assert_eq!(out["env"]["REGION"], "us-east-1");
     }
 
     #[test]
