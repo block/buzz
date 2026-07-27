@@ -63,8 +63,10 @@ const UPLOAD_PACK_MAX_DECODED_BYTES: u64 = 64 * 1024 * 1024;
 /// Validates the `Authorization: Nostr <base64>` header before the request body
 /// is read. Same pattern as `AuthenticatedUpload` in media.rs.
 ///
-/// Authorization model: any authenticated pubkey can clone; push authorization
-/// is handled by the pre-receive hook (calls back to the internal policy endpoint
+/// Authorization model: reads (ref advertisement, upload-pack) require the
+/// caller's *current* active membership in the repo's bound channel — see
+/// [`authorize_git_read`] (SEC-005). Push authorization is additionally
+/// handled by the pre-receive hook (calls back to the internal policy endpoint
 /// which checks channel role + protection rules from kind:30617).
 pub struct GitAuth {
     /// The authenticated user's public key, extracted from the NIP-98 event.
@@ -432,15 +434,21 @@ async fn authorize_git_read(
 }
 
 /// Extract the `buzz-channel` UUID from a kind:30617 announcement.
-/// `None` when the tag is absent or its value is not a valid UUID.
+///
+/// First-tag semantics, matching the push policy endpoint: only the *first*
+/// `buzz-channel` tag is considered, and it must carry a valid UUID. A
+/// malformed first binding denies even if a later duplicate tag is valid —
+/// an ambiguous announcement must fail closed, not silently resolve to
+/// whichever duplicate happens to parse.
 fn repo_bound_channel_id(event: &nostr::Event) -> Option<uuid::Uuid> {
-    event.tags.iter().find_map(|t| {
-        let s = t.as_slice();
-        if s.first().map(String::as_str) != Some("buzz-channel") {
-            return None;
-        }
-        s.get(1).and_then(|v| uuid::Uuid::parse_str(v).ok())
-    })
+    let first = event
+        .tags
+        .iter()
+        .find(|t| t.as_slice().first().map(String::as_str) == Some("buzz-channel"))?;
+    first
+        .as_slice()
+        .get(1)
+        .and_then(|v| uuid::Uuid::parse_str(v).ok())
 }
 
 /// Pure decision for [`authorize_git_read`]: a read requires a current
@@ -2483,6 +2491,37 @@ mod sec005_read_gate_tests {
             ],
         );
         assert_eq!(repo_bound_channel_id(&empty), None);
+    }
+
+    #[test]
+    fn repo_bound_channel_id_fails_closed_on_ambiguous_duplicate_bindings() {
+        // First-tag semantics: a malformed first binding must deny even when
+        // a later duplicate tag is valid. An ambiguous announcement must not
+        // silently resolve to whichever duplicate happens to parse.
+        let keys = Keys::generate();
+        let ch = uuid::Uuid::new_v4();
+        let malformed_first = announcement(
+            &keys,
+            vec![
+                Tag::parse(["d", "r"]).unwrap(),
+                Tag::parse(["buzz-channel", "not-a-uuid"]).unwrap(),
+                Tag::parse(["buzz-channel", &ch.to_string()]).unwrap(),
+            ],
+        );
+        assert_eq!(repo_bound_channel_id(&malformed_first), None);
+
+        // And the mirror image: a valid first binding wins, matching the
+        // push policy endpoint's first-tag resolution.
+        let other = uuid::Uuid::new_v4();
+        let valid_first = announcement(
+            &keys,
+            vec![
+                Tag::parse(["d", "r"]).unwrap(),
+                Tag::parse(["buzz-channel", &ch.to_string()]).unwrap(),
+                Tag::parse(["buzz-channel", &other.to_string()]).unwrap(),
+            ],
+        );
+        assert_eq!(repo_bound_channel_id(&valid_first), Some(ch));
     }
 
     // ── authorize_git_read matrix (requires Postgres) ────────────────────
