@@ -12,6 +12,10 @@
 //! ```text
 //! RELAY_URL=ws://localhost:3000 cargo test -p buzz-test-client --test e2e_channel_mentions -- --ignored
 //! ```
+//!
+//! These were compile-verified (`--no-run`) when written; the local dev stack
+//! had no Redis container, so the relay could not be started and execution is
+//! deferred to the integration-gate run.
 
 use nostr::{EventBuilder, Keys, Kind, Tag};
 use serde_json::Value;
