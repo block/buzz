@@ -17,17 +17,15 @@
 //! `FOR UPDATE` serializes concurrent claims for one invite across relay
 //! processes — exactly one claimant can win the final slot.
 
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use base64::Engine;
+use buzz_core::invite::{
+    encode_v2_code, hash_v2_code, MAX_INVITE_TTL_SECS, MAX_INVITE_USES, MIN_INVITE_TTL_SECS,
+    V2_SECRET_LEN,
+};
 use chrono::{DateTime, Utc};
-use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row as _};
 
 use crate::error::Result;
 use crate::CommunityId;
-
-/// Maximum supported `max_uses` value. Matches the migration CHECK constraint.
-pub const MAX_INVITE_USES: i32 = 10_000;
 
 /// Outcome of a v2 invite claim. Expected invalid/expired/exhausted states are
 /// typed variants so the relay layer can map them to distinct HTTP responses
@@ -75,13 +73,9 @@ pub struct MintedInvite {
 }
 
 fn validate_mint_inputs(ttl_secs: u64, max_uses: Option<i32>) -> Result<()> {
-    if !(buzz_core::invite::MIN_INVITE_TTL_SECS..=buzz_core::invite::MAX_INVITE_TTL_SECS)
-        .contains(&ttl_secs)
-    {
+    if !(MIN_INVITE_TTL_SECS..=MAX_INVITE_TTL_SECS).contains(&ttl_secs) {
         return Err(crate::error::DbError::InvalidData(format!(
-            "ttl_secs must be between {} and {}",
-            buzz_core::invite::MIN_INVITE_TTL_SECS,
-            buzz_core::invite::MAX_INVITE_TTL_SECS
+            "ttl_secs must be between {MIN_INVITE_TTL_SECS} and {MAX_INVITE_TTL_SECS}"
         )));
     }
 
@@ -94,14 +88,6 @@ fn validate_mint_inputs(ttl_secs: u64, max_uses: Option<i32>) -> Result<()> {
     }
 
     Ok(())
-}
-
-/// Hash a v2 code string to its SHA-256 digest (32 bytes).
-///
-/// The code is the full `v2.<base64url>` string. We hash the entire string so
-/// the relay never needs to parse or decode the secret on the claim path.
-pub fn hash_invite_code(code: &str) -> [u8; 32] {
-    Sha256::digest(code.as_bytes()).into()
 }
 
 /// Mint a v2 invite: generate a 32-byte random secret, hash it, persist the
@@ -119,9 +105,9 @@ pub async fn mint_relay_invite(
     validate_mint_inputs(ttl_secs, max_uses)?;
 
     // Generate 32 random bytes and encode as base64url — this is the secret.
-    let secret: [u8; 32] = rand::random();
-    let code = format!("v2.{}", URL_SAFE_NO_PAD.encode(secret));
-    let token_hash = hash_invite_code(&code);
+    let secret: [u8; V2_SECRET_LEN] = rand::random();
+    let code = encode_v2_code(&secret);
+    let token_hash = hash_v2_code(&code);
     let now = Utc::now();
     let expires_at = now + chrono::Duration::seconds(ttl_secs as i64);
 
@@ -422,8 +408,8 @@ mod tests {
     #[test]
     fn mint_validation_rejects_invalid_bounds_before_database_access() {
         for (ttl, max_uses) in [
-            (buzz_core::invite::MIN_INVITE_TTL_SECS - 1, None),
-            (buzz_core::invite::MAX_INVITE_TTL_SECS + 1, None),
+            (MIN_INVITE_TTL_SECS - 1, None),
+            (MAX_INVITE_TTL_SECS + 1, None),
             (3600, Some(0)),
             (3600, Some(-1)),
             (3600, Some(MAX_INVITE_USES + 1)),
@@ -443,7 +429,7 @@ mod tests {
         let invite = mint_relay_invite(&pool, community, "owner", 3600, Some(1))
             .await
             .expect("mint bounded invite");
-        let hash = hash_invite_code(&invite.code);
+        let hash = hash_v2_code(&invite.code);
 
         assert_eq!(
             claim_relay_invite(&pool, community, &hash, &first, None)
@@ -489,7 +475,7 @@ mod tests {
         let invite = mint_relay_invite(&pool, community, "owner", 3600, Some(1))
             .await
             .expect("mint bounded invite");
-        let hash = hash_invite_code(&invite.code);
+        let hash = hash_v2_code(&invite.code);
 
         let (first_outcome, second_outcome) = tokio::join!(
             claim_relay_invite(&pool, community, &hash, &first, None),
@@ -533,7 +519,7 @@ mod tests {
         let invite = mint_relay_invite(&pool, community_a, "owner", 3600, Some(2))
             .await
             .expect("mint invite");
-        let hash = hash_invite_code(&invite.code);
+        let hash = hash_v2_code(&invite.code);
 
         assert_eq!(
             claim_relay_invite(&pool, community_b, &hash, &test_pubkey(), None)
@@ -570,7 +556,7 @@ mod tests {
         let invite = mint_relay_invite(&pool, community, "owner", 3600, None)
             .await
             .expect("mint unlimited invite");
-        let hash = hash_invite_code(&invite.code);
+        let hash = hash_v2_code(&invite.code);
 
         for (expected_count, pubkey) in [(1, test_pubkey()), (2, test_pubkey())] {
             assert_eq!(
@@ -596,7 +582,7 @@ mod tests {
         let invite = mint_relay_invite(&pool, community, "owner", 3600, Some(1))
             .await
             .expect("mint bounded invite");
-        let hash = hash_invite_code(&invite.code);
+        let hash = hash_v2_code(&invite.code);
 
         let error = claim_relay_invite(&pool, community, &hash, &pubkey, Some("too-short"))
             .await

@@ -925,6 +925,7 @@ dependencies = [
 name = "buzz-core"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "chrono",
  "hex",
  "hmac 0.13.0",
@@ -945,7 +946,6 @@ dependencies = [
 name = "buzz-db"
 version = "0.1.0"
 dependencies = [
- "base64",
  "buzz-core",
  "chrono",
  "hex",

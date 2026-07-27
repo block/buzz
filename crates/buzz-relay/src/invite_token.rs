@@ -54,27 +54,6 @@ pub use buzz_core::invite::DEFAULT_INVITE_TTL_SECS;
 /// Maximum invite lifetime a mint request may ask for: 30 days.
 pub use buzz_core::invite::MAX_INVITE_TTL_SECS;
 
-/// Prefix that distinguishes v2 opaque database-backed invite codes from v1
-/// HMAC-signed tokens. Routing on claim checks this prefix exactly — a `v2.`
-/// code is never fallen back to the v1 verifier.
-pub const V2_PREFIX: &str = "v2.";
-
-/// Validate the canonical v2 opaque-code shape without consulting storage.
-///
-/// A valid code is exactly `v2.` followed by the unpadded base64url encoding
-/// of a 32-byte secret. Callers must not send malformed `v2.` input through
-/// the v1 verifier.
-pub fn validate_v2_code(code: &str) -> Result<(), InviteError> {
-    let encoded = code.strip_prefix(V2_PREFIX).ok_or(InviteError::Malformed)?;
-    let secret = URL_SAFE_NO_PAD
-        .decode(encoded)
-        .map_err(|_| InviteError::Malformed)?;
-    if secret.len() != 32 || URL_SAFE_NO_PAD.encode(&secret) != encoded {
-        return Err(InviteError::Malformed);
-    }
-    Ok(())
-}
-
 /// Maximum accepted code length (defense against absurd inputs before any
 /// parsing work happens). A real code is ~200 bytes.
 const MAX_CODE_LEN: usize = 1024;
@@ -317,25 +296,6 @@ mod tests {
         assert_eq!(verify_invite(&key, c, "a.b"), Err(InviteError::Malformed));
         let huge = "x".repeat(MAX_CODE_LEN + 1);
         assert_eq!(verify_invite(&key, c, &huge), Err(InviteError::Malformed));
-    }
-
-    #[test]
-    fn v2_shape_validation_requires_canonical_32_byte_secret() {
-        let valid = format!("{V2_PREFIX}{}", URL_SAFE_NO_PAD.encode([7_u8; 32]));
-        assert_eq!(validate_v2_code(&valid), Ok(()));
-
-        for malformed in [
-            "v2.",
-            "v2.not-base64!",
-            &format!("{V2_PREFIX}{}", URL_SAFE_NO_PAD.encode([7_u8; 31])),
-            &format!("{valid}="),
-        ] {
-            assert_eq!(
-                validate_v2_code(malformed),
-                Err(InviteError::Malformed),
-                "accepted malformed v2 code: {malformed}"
-            );
-        }
     }
 
     #[test]

@@ -25,7 +25,12 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::handlers::side_effects::{publish_nip43_member_added, publish_nip43_membership_list};
-use crate::invite_token::{self, DEFAULT_INVITE_TTL_SECS, MAX_INVITE_TTL_SECS};
+use buzz_core::invite::{
+    hash_v2_code, validate_v2_code, DEFAULT_INVITE_TTL_SECS, MAX_INVITE_TTL_SECS, MAX_INVITE_USES,
+    MIN_INVITE_TTL_SECS, V2_PREFIX,
+};
+
+use crate::invite_token;
 use crate::state::AppState;
 
 use super::{api_error, bridge, internal_error};
@@ -44,13 +49,13 @@ pub(crate) const CLAIM_RATE_CACHE_CAPACITY: u64 = 10_000;
 #[derive(Debug, Default, Deserialize)]
 pub struct MintInviteRequest {
     /// Requested lifetime in seconds. Must be between
-    /// [`buzz_core::invite::MIN_INVITE_TTL_SECS`] and
+    /// [`MIN_INVITE_TTL_SECS`] and
     /// [`invite_token::MAX_INVITE_TTL_SECS`]; defaults to 72 h.
     #[serde(default)]
     pub ttl_secs: Option<u64>,
     /// Maximum number of uses before the invite is exhausted. `None` (omitted
     /// or `null`) means unlimited — preserves current behavior. When present,
-    /// must be an integer from 1 through [`buzz_db::relay_invite::MAX_INVITE_USES`].
+    /// must be an integer from 1 through [`MAX_INVITE_USES`].
     #[serde(default)]
     pub max_uses: Option<i32>,
 }
@@ -59,24 +64,21 @@ fn validate_mint_request(
     request: &MintInviteRequest,
 ) -> Result<(u64, Option<i32>), (StatusCode, Json<Value>)> {
     let ttl = request.ttl_secs.unwrap_or(DEFAULT_INVITE_TTL_SECS);
-    if !(buzz_core::invite::MIN_INVITE_TTL_SECS..=MAX_INVITE_TTL_SECS).contains(&ttl) {
+    if !(MIN_INVITE_TTL_SECS..=MAX_INVITE_TTL_SECS).contains(&ttl) {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
             &format!(
                 "ttl_secs must be between {} and {MAX_INVITE_TTL_SECS}",
-                buzz_core::invite::MIN_INVITE_TTL_SECS
+                MIN_INVITE_TTL_SECS
             ),
         ));
     }
 
     if let Some(max_uses) = request.max_uses {
-        if !(1..=buzz_db::relay_invite::MAX_INVITE_USES).contains(&max_uses) {
+        if !(1..=MAX_INVITE_USES).contains(&max_uses) {
             return Err(api_error(
                 StatusCode::BAD_REQUEST,
-                &format!(
-                    "max_uses must be between 1 and {}",
-                    buzz_db::relay_invite::MAX_INVITE_USES
-                ),
+                &format!("max_uses must be between 1 and {MAX_INVITE_USES}"),
             ));
         }
     }
@@ -363,8 +365,8 @@ pub async fn claim_invite(
     //
     // Route by exact prefix: v2. codes use the durable invite table. No
     // fallback to v1 HMAC verification for malformed v2 input.
-    if request.code.starts_with(invite_token::V2_PREFIX) {
-        invite_token::validate_v2_code(&request.code)
+    if request.code.starts_with(V2_PREFIX) {
+        validate_v2_code(&request.code)
             .map_err(|_| api_error(StatusCode::FORBIDDEN, "invite_invalid"))?;
 
         // Join-policy receipt verification, same mechanism as v1: the receipt
@@ -378,7 +380,7 @@ pub async fn claim_invite(
                 .map_err(|_| api_error(StatusCode::FORBIDDEN, "join_policy_required"))?;
         }
 
-        let token_hash = buzz_db::relay_invite::hash_invite_code(&request.code);
+        let token_hash = hash_v2_code(&request.code);
         let outcome = state
             .db
             .claim_relay_invite(
@@ -526,7 +528,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use super::{claim_key_rate_limited, CLAIM_RATE_LIMIT};
+    use super::{claim_key_rate_limited, CLAIM_RATE_LIMIT, MAX_INVITE_USES, MIN_INVITE_TTL_SECS};
     use axum::{
         body::{to_bytes, Body},
         http::{header, Request, StatusCode},
@@ -752,7 +754,7 @@ mod tests {
             serde_json::json!({}),
             serde_json::json!({ "max_uses": null }),
             serde_json::json!({ "max_uses": 1 }),
-            serde_json::json!({ "max_uses": buzz_db::relay_invite::MAX_INVITE_USES }),
+            serde_json::json!({ "max_uses": MAX_INVITE_USES }),
         ] {
             serde_json::from_value::<super::MintInviteRequest>(valid).expect("valid request");
         }
@@ -782,20 +784,17 @@ mod tests {
             ),
             (
                 super::MintInviteRequest {
-                    ttl_secs: Some(buzz_core::invite::MIN_INVITE_TTL_SECS),
+                    ttl_secs: Some(MIN_INVITE_TTL_SECS),
                     max_uses: Some(1),
                 },
-                (buzz_core::invite::MIN_INVITE_TTL_SECS, Some(1)),
+                (MIN_INVITE_TTL_SECS, Some(1)),
             ),
             (
                 super::MintInviteRequest {
                     ttl_secs: Some(MAX_INVITE_TTL_SECS),
-                    max_uses: Some(buzz_db::relay_invite::MAX_INVITE_USES),
+                    max_uses: Some(MAX_INVITE_USES),
                 },
-                (
-                    MAX_INVITE_TTL_SECS,
-                    Some(buzz_db::relay_invite::MAX_INVITE_USES),
-                ),
+                (MAX_INVITE_TTL_SECS, Some(MAX_INVITE_USES)),
             ),
         ] {
             assert_eq!(
@@ -815,10 +814,10 @@ mod tests {
             },
             super::MintInviteRequest {
                 ttl_secs: None,
-                max_uses: Some(buzz_db::relay_invite::MAX_INVITE_USES + 1),
+                max_uses: Some(MAX_INVITE_USES + 1),
             },
             super::MintInviteRequest {
-                ttl_secs: Some(buzz_core::invite::MIN_INVITE_TTL_SECS - 1),
+                ttl_secs: Some(MIN_INVITE_TTL_SECS - 1),
                 max_uses: None,
             },
             super::MintInviteRequest {
@@ -858,8 +857,8 @@ mod tests {
         for body in [
             serde_json::json!({ "max_uses": 0 }),
             serde_json::json!({ "max_uses": -1 }),
-            serde_json::json!({ "max_uses": buzz_db::relay_invite::MAX_INVITE_USES + 1 }),
-            serde_json::json!({ "ttl_secs": buzz_core::invite::MIN_INVITE_TTL_SECS - 1 }),
+            serde_json::json!({ "max_uses": MAX_INVITE_USES + 1 }),
+            serde_json::json!({ "ttl_secs": MIN_INVITE_TTL_SECS - 1 }),
             serde_json::json!({ "ttl_secs": MAX_INVITE_TTL_SECS + 1 }),
         ] {
             let response = post_json(
@@ -877,8 +876,8 @@ mod tests {
             serde_json::json!({}),
             serde_json::json!({ "max_uses": null }),
             serde_json::json!({ "max_uses": 1 }),
-            serde_json::json!({ "max_uses": buzz_db::relay_invite::MAX_INVITE_USES }),
-            serde_json::json!({ "ttl_secs": buzz_core::invite::MIN_INVITE_TTL_SECS }),
+            serde_json::json!({ "max_uses": MAX_INVITE_USES }),
+            serde_json::json!({ "ttl_secs": MIN_INVITE_TTL_SECS }),
             serde_json::json!({ "ttl_secs": MAX_INVITE_TTL_SECS }),
         ] {
             let response = post_json(
