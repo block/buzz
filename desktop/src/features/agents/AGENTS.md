@@ -102,6 +102,14 @@ with a TypeScript lookup table or an id comparison in a component.
    Edit. In Edit,
    selecting Custom command keeps its required command field beside the harness
    picker rather than hiding it in Advanced.
+10. **Provider-specific credential fields are a structured view over env vars.**
+    The `openai-compat` provider surfaces `OPENAI_COMPAT_BASE_URL` as a
+    dedicated input (`PersonaProviderBaseUrlField`) that writes the same env
+    var the backend already consumes. Like the API key pseudo-field, it is
+    hidden from the generic Advanced env editor and preserved across provider
+    switches so users do not lose typed values when flipping back. Provider
+    checks in these pseudo-fields (e.g. `effectiveProvider === "openai-compat"`)
+    are limited to credential presentation, not capability gating.
 
 ## The tests that enforce this
 
