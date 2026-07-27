@@ -647,6 +647,10 @@ mobile-clean:
 # Apply database migrations
 migrate: _ensure-migrations
 
+# Assert schema/schema.sql matches the schema built by migrations/ (#1322)
+check-schema-drift:
+    ./scripts/check-schema-drift.sh
+
 # ─── Utilities ────────────────────────────────────────────────────────────────
 
 # Remove build artifacts
