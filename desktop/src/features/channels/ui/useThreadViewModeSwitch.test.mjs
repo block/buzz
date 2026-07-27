@@ -44,6 +44,23 @@ test("resolves both sources when a layout anchor matches the external target", (
   );
 });
 
+test("does not resolve a layout target that was never captured", () => {
+  assert.deepEqual(
+    getResolvedThreadTargets({
+      externalTargetId: "reply-b",
+      layoutTargetId: null,
+    }),
+    { resolveExternal: true, resolveLayout: false },
+  );
+  assert.deepEqual(
+    getResolvedThreadTargets({
+      externalTargetId: null,
+      layoutTargetId: null,
+    }),
+    { resolveExternal: true, resolveLayout: false },
+  );
+});
+
 test("returns null without a mounted thread body or visible message", () => {
   assert.equal(findTopVisibleThreadMessageId(null), null);
   assert.equal(

@@ -72,14 +72,21 @@ export function useThreadViewModeSwitch({
     [onModeChange],
   );
 
-  const resolveScrollTarget = React.useCallback(() => {
-    const resolution = getResolvedThreadTargets({
-      externalTargetId: externalScrollTargetId,
-      layoutTargetId: layoutScrollTargetId,
-    });
-    if (resolution.resolveLayout) setLayoutScrollTargetId(null);
-    if (resolution.resolveExternal) onExternalTargetResolved();
-  }, [externalScrollTargetId, layoutScrollTargetId, onExternalTargetResolved]);
+  const resolveScrollTarget = React.useCallback(
+    (settledMessageId?: string) => {
+      const resolution = getResolvedThreadTargets({
+        externalTargetId: externalScrollTargetId,
+        layoutTargetId: layoutScrollTargetId,
+      });
+      if (resolution.resolveExternal) onExternalTargetResolved();
+      if (settledMessageId) {
+        setLayoutScrollTargetId((current) =>
+          current === settledMessageId ? null : current,
+        );
+      }
+    },
+    [externalScrollTargetId, layoutScrollTargetId, onExternalTargetResolved],
+  );
 
   return {
     changeThreadViewMode,

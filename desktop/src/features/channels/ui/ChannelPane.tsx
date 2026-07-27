@@ -514,8 +514,6 @@ export const ChannelPane = React.memo(function ChannelPane({
   const isOverlay = useIsThreadPanelOverlay();
   const useSplitAuxiliaryPane = !isSinglePanelView && !isOverlay;
   const threadViewMode = useThreadViewMode();
-  // Focus mode only replaces the wide split thread pane; narrow threads and
-  // other auxiliary panels keep their existing presentation.
   const useFocusThreadDrawer =
     threadViewMode === "focus" &&
     useSplitAuxiliaryPane &&
@@ -881,7 +879,8 @@ export const ChannelPane = React.memo(function ChannelPane({
                 onExpandReplies={onExpandThreadReplies}
                 onSelectReplyTarget={onSelectThreadReplyTarget}
                 onSend={onSendThreadReply}
-                onScrollTargetResolved={resolveScrollTarget}
+                onScrollTargetResolved={() => resolveScrollTarget()}
+                onScrollTargetSettled={resolveScrollTarget}
                 onToggleReaction={onToggleReaction}
                 onUnfollowThread={onUnfollowThread}
                 profiles={profiles}

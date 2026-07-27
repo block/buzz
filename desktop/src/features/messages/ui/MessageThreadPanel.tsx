@@ -79,6 +79,7 @@ type MessageThreadPanelProps = ThreadPanelLayoutProps & {
   onMarkRead?: (message: TimelineMessage) => void;
   onExpandReplies: (message: TimelineMessage) => void;
   onScrollTargetResolved: () => void;
+  onScrollTargetSettled?: (messageId: string) => void;
   scrollTargetHighlights?: boolean;
   onSelectReplyTarget: (message: TimelineMessage) => void;
   onSend: (
@@ -207,6 +208,7 @@ export function MessageThreadPanel({
   onMarkRead,
   onExpandReplies,
   onScrollTargetResolved,
+  onScrollTargetSettled,
   onSelectReplyTarget,
   onSend,
   onToggleReaction,
@@ -488,6 +490,8 @@ export function MessageThreadPanel({
       messages: threadMessages,
       highlightTargetMessage: scrollTargetHighlights,
       onTargetReached: onScrollTargetResolved,
+      onTargetSettled: onScrollTargetSettled,
+      pinTargetCentered: !scrollTargetHighlights,
       scrollContainerRef: threadBodyRef,
       targetMessageId: scrollTargetId,
     });
