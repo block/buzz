@@ -198,6 +198,35 @@ void main() {
 
     expect(relay.subscribeCalls, 1, reason: 'no re-subscribe after dispose');
   });
+
+  test('backoff resets after full recovery so later failures start from the '
+      'base delay', () async {
+    await setUpEnv();
+    // Climb the failure counter: 5 rate-limited attempts before success.
+    // With a 5ms base, attempt 5 would wait 5<<5 = 160ms if the counter
+    // were never reset.
+    final relay = _RateLimitedRelaySession(failuresBeforeSuccess: 5);
+    final manager = buildManager(relaySession: relay);
+    await manager.initialize();
+    await _waitUntil(() => relay.subscribeCalls > 5);
+
+    // Fully recovered. A later transient failure (late CLOSED) must retry
+    // from the base delay, not the climbed ceiling.
+    final subscribeCallsAfterRecovery = relay.subscribeCalls;
+    relay.closeLiveSubscription('rate-limited: quota exceeded');
+    final stopwatch = Stopwatch()..start();
+    await _waitUntil(() => relay.subscribeCalls > subscribeCallsAfterRecovery);
+    stopwatch.stop();
+
+    expect(
+      stopwatch.elapsedMilliseconds,
+      lessThan(100),
+      reason:
+          'retry after recovery must wait ~base delay (5ms), '
+          'not the pre-recovery backoff (160ms)',
+    );
+    manager.dispose(flushPending: false);
+  });
 }
 
 Future<void> _waitUntil(

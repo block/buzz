@@ -93,6 +93,11 @@ class ChannelSectionsManager {
   /// with `rate-limited: quota exceeded`) — retry with backoff instead of
   /// silently giving up, which left desktop-created groups invisible until
   /// an unrelated refetch.
+  ///
+  /// Retries are intentionally unbounded for the manager's lifetime: this
+  /// sync must eventually land for groups to appear at all, and at the 30s
+  /// delay ceiling a persistent retry is cheap. Do not "fix" this into a
+  /// bounded loop — giving up permanently is the exact bug this replaces.
   Future<void> _syncWithRelay() async {
     if (!_startupFetchSucceeded) {
       _startupFetchSucceeded = await _fetchAndMerge();
@@ -102,6 +107,11 @@ class ChannelSectionsManager {
 
     if (!_startupFetchSucceeded || !subscribed) {
       _scheduleStartupRetry();
+    } else {
+      // Fully recovered — later transient failures (e.g. a late relay
+      // CLOSED) start backing off from the base delay again instead of the
+      // ceiling the cold start climbed to.
+      _startupRetryAttempt = 0;
     }
   }
 
@@ -109,7 +119,7 @@ class ChannelSectionsManager {
     if (_disposed) return;
     _startupRetryTimer?.cancel();
     // The inner shift cap is overflow protection, not the delay policy: the
-    // attempt counter grows for the process lifetime, and an unchecked `<<`
+    // consecutive-failure counter is unbounded, and an unchecked `<<`
     // past 62 wraps negative, which would make the Timer fire immediately in
     // a hot loop. At the default 2s base the outer 30s clamp is what callers
     // actually observe (2s, 4s, …, 30s); the shift cap only bites for the
