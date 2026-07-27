@@ -118,6 +118,8 @@ export function ChannelScreen({
     channelManagementOpen,
     clearAutoSend,
     clearMessageRouteTarget,
+    harnessOpen,
+    openHarnessForAgent,
     openAgentSessionChannelId,
     openAgentSessionPubkey,
     openThreadHeadId,
@@ -125,6 +127,7 @@ export function ChannelScreen({
     profilePanelTab,
     profilePanelView,
     setChannelManagementOpen,
+    setHarnessOpen,
     setOpenAgentSessionChannelId,
     setOpenAgentSessionPubkey,
     setOpenThreadHeadId,
@@ -929,6 +932,9 @@ export function ChannelScreen({
                   onThreadPanelResizeStart={handleThreadPanelResizeStart}
                   onTargetReached={handleTargetReached}
                   onToggleReaction={effectiveToggleReaction}
+                  harnessOpen={harnessOpen}
+                  onHarnessOpenChange={setHarnessOpen}
+                  onOpenHarnessForAgent={openHarnessForAgent}
                   openAgentSessionChannelId={openAgentSessionChannelId}
                   openAgentSessionPubkey={openAgentSessionPubkey}
                   openThreadHeadId={effectiveOpenThreadHeadId}

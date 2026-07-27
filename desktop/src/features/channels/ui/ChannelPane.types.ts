@@ -139,6 +139,14 @@ export type ChannelPaneProps = {
   shouldShowThreadSkeleton: boolean;
   openAgentSessionChannelId: string | null;
   openAgentSessionPubkey: string | null;
+  /** True when the open agent session is promoted to the full-screen harness. */
+  harnessOpen?: boolean;
+  onHarnessOpenChange?: (open: boolean) => void;
+  /** Selects an agent and enters harness mode in a single history patch. */
+  onOpenHarnessForAgent?: (
+    agentPubkey: string,
+    channelId?: string | null,
+  ) => void;
   onProfilePanelViewChange: (
     view: ProfilePanelView,
     options?: { replace?: boolean },

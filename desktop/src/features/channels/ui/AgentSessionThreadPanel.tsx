@@ -77,6 +77,11 @@ type AgentSessionThreadPanelProps = {
    */
   onBack?: () => void;
   onClose: () => void;
+  /**
+   * Promotes this session to the full-screen harness view. Omitted when the
+   * host cannot render it (no channel scope), which hides the affordance.
+   */
+  onEnterHarness?: () => void;
   widthPx: number;
   transparentChrome?: boolean;
 };
@@ -91,6 +96,7 @@ export function AgentSessionThreadPanel({
   profiles,
   onBack,
   onClose,
+  onEnterHarness,
   widthPx,
   transparentChrome = false,
 }: AgentSessionThreadPanelProps) {
@@ -260,6 +266,19 @@ export function AgentSessionThreadPanel({
 
   const agentHeaderActions = (
     <AuxiliaryPanelHeaderActions>
+      {onEnterHarness ? (
+        <Button
+          aria-label="Open harness mode"
+          data-testid="agent-session-enter-harness"
+          onClick={onEnterHarness}
+          size="icon"
+          title="Harness mode — full-screen session"
+          type="button"
+          variant="ghost"
+        >
+          <TerminalSquare />
+        </Button>
+      ) : null}
       {isLive ? (
         <DropdownMenu modal={false}>
           <DropdownMenuTrigger asChild>

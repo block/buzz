@@ -66,6 +66,8 @@ import { KIND_SYSTEM_MESSAGE } from "@/shared/constants/kinds";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
 import { channelChrome } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
+
+import { useChannelHarness } from "@/features/channels/ui/useChannelHarness";
 export const ChannelPane = React.memo(function ChannelPane({
   activeChannel,
   agentPubkeys,
@@ -143,6 +145,9 @@ export const ChannelPane = React.memo(function ChannelPane({
   shouldShowThreadSkeleton,
   openAgentSessionChannelId,
   openAgentSessionPubkey,
+  harnessOpen = false,
+  onHarnessOpenChange,
+  onOpenHarnessForAgent,
   onProfilePanelViewChange,
   onProfilePanelTabChange,
   profilePanelPubkey,
@@ -540,6 +545,25 @@ export const ChannelPane = React.memo(function ChannelPane({
       }),
     [agentSessionAgents, openAgentSessionPubkey, profilePanelPubkey, profiles],
   );
+
+  const harness = useChannelHarness({
+    activeChannel,
+    activeChannelId,
+    agentSessionAgents,
+    composerDisabled: isComposerDisabled,
+    currentPubkey,
+    harnessOpen,
+    isSending,
+    onHarnessOpenChange,
+    onOpenHarnessForAgent,
+    onSend: openThreadHeadId ? onSendThreadReply : onSendMessage,
+    profiles,
+    selectedAgent,
+    threadHeadMessage: threadHeadMessage ?? null,
+    threadMessages,
+    typingPubkeys: openThreadHeadId ? threadTypingPubkeys : typingPubkeys,
+  });
+
   const hasSplitAuxiliaryPane =
     useSplitAuxiliaryPane &&
     (channelManagementOpen ||
@@ -860,6 +884,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                 disabled={isComposerDisabled}
                 editTarget={threadEditTarget}
                 firstUnreadReplyId={threadFirstUnreadReplyId}
+                headerActions={harness.threadAction}
                 huddleMemberPubkeys={huddleMemberPubkeys}
                 huddleMemberPubkeysPending={huddleMemberPubkeysPending}
                 isFollowingThread={isFollowingThread}
@@ -962,6 +987,11 @@ export const ChannelPane = React.memo(function ChannelPane({
                 profiles={profiles}
                 onBack={onBackFromAgentSession}
                 onClose={onCloseAgentSession}
+                onEnterHarness={
+                  onHarnessOpenChange && activeChannel
+                    ? harness.enterHarness
+                    : undefined
+                }
                 widthPx={threadPanelWidthPx}
               />
             );
@@ -994,6 +1024,7 @@ export const ChannelPane = React.memo(function ChannelPane({
           })()
         ) : null}
       </AnimatePresence>
+      {harness.overlay}
     </div>
   );
 });

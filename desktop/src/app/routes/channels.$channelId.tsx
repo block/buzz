@@ -17,6 +17,8 @@ type ChannelRouteSearch = {
    * composer can verify it has the right draft before firing.
    */
   autoSend?: string;
+  /** Sentinel `"1"` promoting the agent session panel to full-screen harness mode. */
+  harness?: string;
   messageId?: string;
   profile?: string;
   profileTab?: ProfilePanelTab;
@@ -35,6 +37,7 @@ function validateChannelSearch(
   return {
     agentSession: nonEmptyString(search.agentSession),
     autoSend: nonEmptyString(search.autoSend),
+    harness: nonEmptyString(search.harness),
     messageId: nonEmptyString(search.messageId),
     profile: nonEmptyString(search.profile),
     profileTab: parseProfilePanelTab(search.profileTab) ?? undefined,

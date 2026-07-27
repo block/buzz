@@ -13,6 +13,67 @@ export function scopeByChannel<T extends { channelId?: string | null }>(
 }
 
 /**
+ * Id prefixes used by caller-injected transcript rows.
+ *
+ * Injected rows are thread-scoped by construction — the caller only builds them
+ * from one thread's messages — and they carry no `turnId`, so any turn-based
+ * scoping must exempt them explicitly or they vanish. Keeping the prefixes here
+ * stops the injector and the filter from drifting apart.
+ */
+export const INJECTED_TRANSCRIPT_PREFIXES = ["reply:", "prompt:"] as const;
+
+export function isInjectedTranscriptId(id: string): boolean {
+  return INJECTED_TRANSCRIPT_PREFIXES.some((prefix) => id.startsWith(prefix));
+}
+
+/**
+ * Merge two timestamp-ordered transcript windows into one ascending stream.
+ *
+ * Used to fold the agent's *published* replies into the observer transcript.
+ * The observer stream only sees the agent's reasoning and tool calls, because a
+ * reply is sent by shelling out to the `buzz` CLI — so the answer itself lands
+ * in the channel as a kind-9 event the ACP frames never contain. Interleaving
+ * them by time reconstructs the full prompt → work → answer shape.
+ *
+ * Items with equal timestamps keep base-before-extra order so a reply always
+ * renders after the tool call that produced it. Unparseable timestamps sort
+ * last rather than throwing.
+ */
+export function mergeTranscriptItems<
+  T extends { id: string; timestamp: string; messageId?: string | null },
+>(base: readonly T[], extra: readonly T[]): T[] {
+  if (extra.length === 0) return base as T[];
+  const seenIds = new Set(base.map((item) => item.id));
+  // Also dedupe on source event id: an injected row and the ACP stream's own
+  // row for the same message have different ids but are the same message, and
+  // showing both would double every prompt.
+  const seenMessageIds = new Set(
+    base
+      .map((item) => item.messageId)
+      .filter((id): id is string => typeof id === "string" && id.length > 0),
+  );
+  const combined = [
+    ...base,
+    ...extra.filter(
+      (item) =>
+        !seenIds.has(item.id) &&
+        !(item.messageId && seenMessageIds.has(item.messageId)),
+    ),
+  ];
+  const at = (value: string) => {
+    const parsed = Date.parse(value);
+    return Number.isNaN(parsed) ? Number.POSITIVE_INFINITY : parsed;
+  };
+  return combined
+    .map((item, index) => ({ item, index }))
+    .sort(
+      (a, b) =>
+        at(a.item.timestamp) - at(b.item.timestamp) || a.index - b.index,
+    )
+    .map(({ item }) => item);
+}
+
+/**
  * Merge live and archived raw `ObserverEvent[]` arrays into a single
  * deduplicated, chronologically-sorted array.
  *

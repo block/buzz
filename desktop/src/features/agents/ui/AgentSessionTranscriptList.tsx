@@ -116,6 +116,7 @@ export function AgentSessionTranscriptList({
   agentName,
   agentPubkey,
   autoTail = false,
+  liveStatusSlot,
   channelId = null,
   emptyDescription,
   emptyState = "idle",
@@ -126,6 +127,12 @@ export function AgentSessionTranscriptList({
   variant = "default",
 }: AgentTranscriptIdentityProps & {
   autoTail?: boolean;
+  /**
+   * Rendered inline beside the turn-liveness indicator. Harness mode puts its
+   * live status there (buzzword, elapsed, tokens) so the two read as one line
+   * instead of stacking a second strip above the composer.
+   */
+  liveStatusSlot?: React.ReactNode;
   channelId?: string | null;
   emptyDescription: string;
   emptyState?: AgentSessionTranscriptEmptyState;
@@ -278,7 +285,12 @@ export function AgentSessionTranscriptList({
               </motion.div>
             );
           })}
-          {isTurnLive && !isCompactPreview ? <TurnLivenessIndicator /> : null}
+          {isTurnLive && !isCompactPreview ? (
+            <div className="flex items-center gap-2">
+              <TurnLivenessIndicator />
+              {liveStatusSlot}
+            </div>
+          ) : null}
         </AgentSessionTranscriptVariantProvider>
       </div>
     </motion.div>
@@ -518,6 +530,7 @@ function SameKindSummaryItem({
     <>
       <ActivityRow
         className="flex flex-col gap-0.5"
+        defaultOpen
         openToneScope="summary"
         testId="transcript-same-kind-summary"
         title={formatTranscriptTimestampTitle(summary.timestamp)}

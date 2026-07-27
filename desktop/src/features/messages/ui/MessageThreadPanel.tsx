@@ -27,6 +27,7 @@ import { AuxiliaryPanel } from "@/shared/layout/AuxiliaryPanel";
 import { AuxiliaryPanelBody } from "@/shared/layout/AuxiliaryPanel";
 import {
   AuxiliaryPanelHeader,
+  AuxiliaryPanelHeaderActions,
   AuxiliaryPanelHeaderGroup,
   AuxiliaryPanelTitle,
 } from "@/shared/layout/AuxiliaryPanel";
@@ -107,6 +108,8 @@ type MessageThreadPanelProps = ThreadPanelLayoutProps & {
   threadTypingPubkeys: string[];
   threadHeadVideoReviewContext?: VideoReviewContext;
   toolbarExtraActions?: React.ReactNode;
+  /** Trailing controls rendered in the thread panel header. */
+  headerActions?: React.ReactNode;
   widthPx: number;
   isFollowingThread?: boolean;
   isMessageUnreadById?: (messageId: string) => boolean;
@@ -189,6 +192,7 @@ export function MessageThreadPanel({
   huddleMemberPubkeysPending = false,
   layout = "standalone",
   editTarget,
+  headerActions,
   headerLeading,
   isSending,
   isFocusMode,
@@ -895,6 +899,11 @@ export function MessageThreadPanel({
       >
         <AuxiliaryPanelTitle>Thread</AuxiliaryPanelTitle>
       </AuxiliaryPanelHeaderGroup>
+      {headerActions ? (
+        <AuxiliaryPanelHeaderActions>
+          {headerActions}
+        </AuxiliaryPanelHeaderActions>
+      ) : null}
     </>
   );
 
