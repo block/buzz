@@ -20,14 +20,14 @@ export function ModelRoutingControls({
       className="text-white"
       data-testid="model-routing-controls"
     >
-      <div className="flex flex-wrap items-start justify-between gap-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h2 className="text-base font-semibold" id="model-routing-heading">
             Adviser model routing
           </h2>
           <p className="mt-1 max-w-2xl text-sm text-slate-300">
-            Choose the first provider for new briefs. If it is unavailable, the
-            other route is tried automatically.
+            Choose the first provider for the next brief; fallback remains
+            automatic.
           </p>
         </div>
         <fieldset className="flex flex-wrap gap-2">
@@ -36,6 +36,7 @@ export function ModelRoutingControls({
             aria-pressed={preference === "cloud_first"}
             disabled={disabled}
             onClick={() => onChange("cloud_first")}
+            size="sm"
             type="button"
             variant={preference === "cloud_first" ? "default" : "outline"}
           >
@@ -46,6 +47,7 @@ export function ModelRoutingControls({
             aria-pressed={preference === "local_first"}
             disabled={disabled}
             onClick={() => onChange("local_first")}
+            size="sm"
             type="button"
             variant={preference === "local_first" ? "default" : "outline"}
           >
@@ -54,10 +56,6 @@ export function ModelRoutingControls({
           </Button>
         </fieldset>
       </div>
-      <p className="mt-3 text-sm text-slate-400">
-        The selection applies to the next run; an active brief keeps the route
-        it started with.
-      </p>
       {error ? (
         <p className="mt-2 text-sm text-destructive" role="alert">
           {error}

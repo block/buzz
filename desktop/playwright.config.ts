@@ -117,6 +117,7 @@ export default defineConfig({
         "**/mesh-compute.spec.ts",
         "**/command-console.spec.ts",
         "**/daily-command-brief.spec.ts",
+        "**/command-adviser-naval-ui.spec.ts",
         "**/observer-archive-policy.spec.ts",
       ],
       use: {

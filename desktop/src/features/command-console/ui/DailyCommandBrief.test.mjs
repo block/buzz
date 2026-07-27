@@ -268,6 +268,7 @@ test("renders a decision-first brief with supporting evidence collapsed after co
   const today = html.indexOf(">Today at a glance<");
   const operations = html.indexOf(">Operational priorities and risks<");
   assert.ok(decisions >= 0 && decisions < today && today < operations);
+  assert.doesNotMatch(html, />Generation status</);
 
   const disclosure = html.indexOf('data-testid="brief-evidence-disclosure"');
   assert.ok(disclosure > operations);

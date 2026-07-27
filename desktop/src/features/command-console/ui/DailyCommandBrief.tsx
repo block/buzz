@@ -234,6 +234,11 @@ export function DailyCommandBrief({
   onCancel,
   onScheduleChange,
 }: DailyCommandBriefProps) {
+  const visibleStatus =
+    latest && (status?.state === "completed" || status?.state === "degraded")
+      ? null
+      : status;
+
   return (
     <section
       aria-labelledby="daily-command-brief-heading"
@@ -280,7 +285,7 @@ export function DailyCommandBrief({
         </Alert>
       ) : null}
 
-      <BriefStatus status={status} busy={busy} onCancel={onCancel} />
+      <BriefStatus status={visibleStatus} busy={busy} onCancel={onCancel} />
 
       {!latest ? (
         <Card>
