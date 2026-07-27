@@ -38,6 +38,7 @@ import {
 import { Button } from "@/shared/ui/button";
 import { Separator } from "@/shared/ui/separator";
 import type { VideoReviewContext } from "@/shared/ui/VideoPlayer";
+import type { RestorableScrollAnchor } from "@/features/messages/lib/restorableScrollAnchor";
 import { MessageComposer } from "./MessageComposer";
 import { ThreadMessageSkeleton } from "./MessageThreadPanelSkeleton";
 import { MessageRow, type ThreadDepthGuideAction } from "./MessageRow";
@@ -64,6 +65,8 @@ type MessageThreadPanelProps = ThreadPanelLayoutProps & {
     imetaMedia?: ImetaMedia[];
   } | null;
   isSending: boolean;
+  initialScrollAnchor?: RestorableScrollAnchor | null;
+  onInitialScrollAnchorRestored?: () => void;
   onCancelEdit?: () => void;
   onCancelReply: () => void;
   onClose: () => void;
@@ -195,6 +198,7 @@ export function MessageThreadPanel({
   isSinglePanelView = false,
   isFollowingThread,
   isMessageUnreadById,
+  initialScrollAnchor = null,
   onCancelEdit,
   onCancelReply,
   onClose,
@@ -205,6 +209,7 @@ export function MessageThreadPanel({
   onFollowThread,
   onMarkUnread,
   onMarkRead,
+  onInitialScrollAnchorRestored,
   onExpandReplies,
   onScrollTargetResolved,
   onSelectReplyTarget,
@@ -484,8 +489,10 @@ export function MessageThreadPanel({
     useAnchoredScroll({
       channelId: threadHeadId,
       contentRef: threadContentRef,
+      initialScrollAnchor,
       isLoading: threadRepliesPending || repliesRenderState === "pending",
       messages: threadMessages,
+      onInitialScrollAnchorRestored,
       highlightTargetMessage: scrollTargetHighlights,
       onTargetReached: onScrollTargetResolved,
       scrollContainerRef: threadBodyRef,

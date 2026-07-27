@@ -50,10 +50,6 @@ import {
 } from "@/features/messages/lib/channelWindowStore";
 import { getThreadReference } from "@/features/messages/lib/threading";
 import { imetaMediaFromTags } from "@/features/messages/lib/imetaMediaMarkdown";
-import {
-  resolveTimelineLoadingLatch,
-  selectTimelineLoadingState,
-} from "@/features/messages/lib/timelineLoadingState";
 import { useFetchOlderMessages } from "@/features/messages/useFetchOlderMessages";
 import { useIndependentThreadPanel } from "@/features/messages/useIndependentThreadPanel";
 import { useThreadReplies } from "@/features/messages/useThreadReplies";
@@ -79,6 +75,7 @@ import { useMessageProfiles } from "./useMessageProfiles";
 import { useChannelPanelHistoryState } from "./useChannelPanelHistoryState";
 import { useChannelProfilePanel } from "./useChannelProfilePanel";
 import { useChannelRouteTarget } from "./useChannelRouteTarget";
+import { useChannelTimelineLoading } from "./useChannelTimelineLoading";
 import { useChannelUnreadState } from "./useChannelUnreadState";
 import type { ChannelScreenProps } from "./ChannelScreen.types";
 const HEADER_ACTIONS_COMPACT_BREAKPOINT_PX = 760,
@@ -599,38 +596,30 @@ export function ChannelScreen({
     setThreadReplyTargetId,
     setThreadScrollTargetId,
   });
-  const { handleOpenProfilePanel, handleCloseProfilePanel, handleOpenDm } =
-    useChannelProfilePanel({
-      closeAgentSession: handleCloseAgentSession,
-      setChannelManagementOpen,
-      setExpandedThreadReplyIds,
-      setOpenThreadHeadId,
-      setProfilePanelPubkey,
-      setThreadReplyTargetId,
-      setThreadScrollTargetId,
-    });
-  const settledChannelIdRef = React.useRef<string | null>(null);
-  const hasSettledThisChannel =
-    activeChannelId !== null && settledChannelIdRef.current === activeChannelId;
-  const timelineLoadingNow =
-    activeChannel !== null &&
-    activeChannel.channelType !== "forum" &&
-    selectTimelineLoadingState(
-      {
-        isPending: messagesQuery.isPending,
-        isFetching: messagesQuery.isFetching,
-        isPlaceholderData: messagesQuery.isPlaceholderData,
-        dataLength: messagesQuery.data?.length ?? null,
-      },
-      hasSettledThisChannel,
-    );
-  const { settledChannelId, isLoading: isTimelineLoading } =
-    resolveTimelineLoadingLatch(
-      settledChannelIdRef.current,
-      activeChannelId,
-      timelineLoadingNow,
-    );
-  settledChannelIdRef.current = settledChannelId;
+  const {
+    handleBackFromProfilePanel,
+    handleOpenProfilePanel,
+    handleCloseProfilePanel,
+    handleOpenDm,
+    handleThreadInitialScrollAnchorRestored,
+    hasProfilePanelReturnTarget,
+    threadInitialScrollAnchor,
+  } = useChannelProfilePanel({
+    activeChannelId,
+    closeAgentSession: handleCloseAgentSession,
+    openThreadHeadId: effectiveOpenThreadHeadId,
+    profilePanelPubkey,
+    setChannelManagementOpen,
+    setExpandedThreadReplyIds,
+    setOpenThreadHeadId,
+    setProfilePanelPubkey,
+    setThreadReplyTargetId,
+    setThreadScrollTargetId,
+  });
+  const isTimelineLoading = useChannelTimelineLoading(
+    activeChannel,
+    messagesQuery,
+  );
   const { welcomeKickoffStage, welcomeKickoffSettingUp } =
     useWelcomeKickoffStagePresence(
       activeChannel,
@@ -640,11 +629,12 @@ export function ChannelScreen({
   const resetComposerTargets = React.useCallback(
     (_channelId: string | null) => {
       setExpandedThreadReplyIds(new Set());
+      handleThreadInitialScrollAnchorRestored();
       setThreadScrollTargetId(null);
       setThreadReplyTargetId(null);
       setEditTargetId(null);
     },
-    [],
+    [handleThreadInitialScrollAnchorRestored],
   );
   const handleThreadScrollTargetResolved = React.useCallback(() => {
     setThreadScrollTargetId(null);
@@ -918,6 +908,11 @@ export function ChannelScreen({
                   onOpenProfilePanel={handleOpenProfilePanel}
                   onResetThreadPanelWidth={handleThreadPanelWidthReset}
                   onCloseProfilePanel={handleCloseProfilePanel}
+                  onBackFromProfilePanel={
+                    hasProfilePanelReturnTarget
+                      ? handleBackFromProfilePanel
+                      : undefined
+                  }
                   onOpenThread={handleOpenThreadAndCloseAgentSession}
                   onSelectThreadReplyTarget={handleSelectThreadReplyTarget}
                   onSendMessage={handleSendMessage}
@@ -945,9 +940,13 @@ export function ChannelScreen({
                   unreadCount={unreadCount}
                   targetMessageId={mainTimelineTargetMessageId}
                   threadHeadMessage={displayedThreadHeadMessage}
+                  threadInitialScrollAnchor={threadInitialScrollAnchor}
                   threadMessages={displayedThreadMessages}
                   threadMessagesPending={threadRepliesQuery.isPending}
                   threadPanelWidthPx={threadPanelWidthPx}
+                  onThreadInitialScrollAnchorRestored={
+                    handleThreadInitialScrollAnchorRestored
+                  }
                   threadTypingPubkeys={threadTypingPubkeys}
                   threadReplyTargetMessage={displayedThreadReplyTargetMessage}
                   threadScrollTargetId={threadScrollTargetId}

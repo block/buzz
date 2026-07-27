@@ -8,6 +8,12 @@ import {
   shouldSettleForSplitPanel,
   shouldSettleVirtualizedBottom,
 } from "./useAnchoredScroll.ts";
+import {
+  captureRestorableScrollAnchor,
+  restoreRestorableScrollAnchor,
+} from "../lib/restorableScrollAnchor.ts";
+
+globalThis.CSS ??= { escape: (value) => value };
 
 function fakeContainer({ clientHeight, scrollHeight, scrollTop }) {
   const writes = [];
@@ -166,4 +172,76 @@ test("pinned center real user scroll releases the anchor", () => {
     }),
     false,
   );
+});
+
+test("captures the first visible message and its exact viewport offset", () => {
+  const rows = [
+    {
+      dataset: { messageId: "above" },
+      getBoundingClientRect: () => ({ bottom: 90, top: 40 }),
+    },
+    {
+      dataset: { messageId: "reading" },
+      getBoundingClientRect: () => ({ bottom: 150, top: 85 }),
+    },
+  ];
+  const container = {
+    clientHeight: 300,
+    getBoundingClientRect: () => ({ top: 100 }),
+    querySelectorAll: () => rows,
+    scrollHeight: 1_000,
+    scrollTop: 420,
+  };
+
+  assert.deepEqual(captureRestorableScrollAnchor(container), {
+    fallbackScrollTop: 420,
+    kind: "message",
+    messageId: "reading",
+    topOffset: -15,
+  });
+});
+
+test("restores the captured message to the same viewport offset", () => {
+  const row = {
+    getBoundingClientRect: () => ({ top: 220 }),
+  };
+  const container = {
+    clientHeight: 300,
+    getBoundingClientRect: () => ({ top: 100 }),
+    querySelector: () => row,
+    querySelectorAll: () => [row],
+    scrollHeight: 1_000,
+    scrollTop: 300,
+    scrollTo({ top }) {
+      this.scrollTop = top;
+    },
+  };
+
+  assert.deepEqual(
+    restoreRestorableScrollAnchor(container, {
+      fallbackScrollTop: 420,
+      kind: "message",
+      messageId: "reading",
+      topOffset: -15,
+    }),
+    { kind: "message", messageId: "reading", topOffset: -15 },
+  );
+  assert.equal(container.scrollTop, 435);
+});
+
+test("captures and restores a reader pinned to the physical bottom", () => {
+  const container = fakeContainer({
+    clientHeight: 300,
+    scrollHeight: 1_000,
+    scrollTop: 700,
+  });
+  container.getBoundingClientRect = () => ({ top: 0 });
+  container.querySelectorAll = () => [];
+
+  const anchor = captureRestorableScrollAnchor(container);
+  assert.deepEqual(anchor, { kind: "at-bottom" });
+  assert.deepEqual(restoreRestorableScrollAnchor(container, anchor), {
+    kind: "at-bottom",
+  });
+  assert.equal(container.scrollTop, 1_000);
 });
