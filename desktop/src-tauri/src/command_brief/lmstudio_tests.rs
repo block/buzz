@@ -394,6 +394,8 @@ async fn valid_terminal_message_uses_fixed_prompt_separate_evidence_and_catalog_
 
     let (request, headers) = request_rx.await.expect("captured request");
     assert_eq!(request["model"], "local-model");
+    assert_eq!(request["context_length"], 32_768);
+    assert_eq!(request["max_output_tokens"], 8_192);
     assert_eq!(
         request["system_prompt"],
         super::personas::definition_for(AdviserId::Operations).system_prompt()

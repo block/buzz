@@ -311,7 +311,7 @@ test("fails closed when native knowledge status is unavailable", () => {
   assert.deepEqual(viewModel.degradedSections, ["knowledge-status"]);
 });
 
-test("reports LM Studio from its own native readiness probe, never mesh", () => {
+test("reports a ready LM Studio route as connected, never mesh", () => {
   const viewModel = createCommandConsoleStatusViewModel({
     lmStudio: {
       error: null,
@@ -338,16 +338,64 @@ test("reports LM Studio from its own native readiness probe, never mesh", () => 
     (service) => service.id === "lm-studio",
   );
   assert.deepEqual(lmStudio, {
-    detail:
-      "Loaded model is ready; authentication is not enabled. LM Studio API authentication is not enabled. LM Studio listener exposure is unverified.",
+    detail: "Loaded model is ready; authentication is not enabled.",
     id: "lm-studio",
     label: "LM Studio",
-    state: "degraded",
-    statusLabel: "Degraded",
+    state: "connected",
+    statusLabel: "Connected",
   });
 });
 
-test("keeps authenticated ready LM Studio degraded while listener exposure is unknown", () => {
+test("treats reachable trusted LAN knowledge as connected without requiring mesh compute", () => {
+  const status = knowledgeStatus({
+    version: 2,
+    sourceMode: "trusted_lan",
+    modelRoute: "local_litellm_openai",
+    evidenceAssurance: "trusted_lan_observed",
+    memory: {
+      ...knowledgeStatus().memory,
+      nodeId: null,
+      homeNodeId: null,
+      revisionCount: 0,
+      conflictCount: 0,
+      replicationCursor: null,
+      homeReplicationCursor: null,
+      lastSuccessfulSync: null,
+      freshness: "observed",
+      validation: "trusted_lan_observed",
+      toolAllowlist: ["search_events"],
+    },
+    rag: {
+      ...knowledgeStatus().rag,
+      signatureFingerprint: null,
+      freshness: "observed",
+      validation: "trusted_lan_observed",
+      toolAllowlist: ["list_collections", "search_knowledge_base"],
+    },
+    degradedSections: [],
+  });
+  const viewModel = createCommandConsoleStatusViewModel({
+    knowledge: { error: null, status },
+    lmStudio: { error: null, status: null },
+    relayConnection: "connected",
+  });
+
+  assert.equal(
+    viewModel.liveServices.some(({ id }) => id === "local-compute"),
+    false,
+  );
+  assert.equal(
+    viewModel.liveServices.find(({ id }) => id === "memory")?.state,
+    "connected",
+  );
+  assert.equal(
+    viewModel.liveServices.find(({ id }) => id === "rag")?.state,
+    "connected",
+  );
+  assert.deepEqual(viewModel.degradedSections, []);
+});
+
+test("does not turn an accepted listener warning into a model outage", () => {
   const viewModel = createCommandConsoleStatusViewModel({
     lmStudio: {
       error: null,
@@ -367,7 +415,7 @@ test("keeps authenticated ready LM Studio degraded while listener exposure is un
   const lmStudio = viewModel.liveServices.find(
     (service) => service.id === "lm-studio",
   );
-  assert.equal(lmStudio?.state, "degraded");
-  assert.equal(lmStudio?.statusLabel, "Degraded");
-  assert.match(lmStudio?.detail ?? "", /listener exposure is unverified/i);
+  assert.equal(lmStudio?.state, "connected");
+  assert.equal(lmStudio?.statusLabel, "Connected");
+  assert.doesNotMatch(lmStudio?.detail ?? "", /listener exposure/i);
 });

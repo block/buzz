@@ -13,6 +13,7 @@ use super::{
     start_model_readiness_observer_with_poll, timer_claim_fast_path,
     trusted_model_readiness_observation, CommandBriefReadinessTransitions, CommandBriefRuntimeSet,
     InstalledCommandBriefRuntime, ReadinessSignalSource, RuntimeConfigIdentity, RuntimeReadiness,
+    MODEL_TIMEOUT,
 };
 use crate::command_brief::audit::{PersistedTerminal, TerminalAuditInput};
 use crate::command_brief::orchestrator::{
@@ -34,6 +35,11 @@ use crate::commands::{LmStudioReadiness, LmStudioReadinessState};
 struct UnusedProvider;
 
 struct DropSignal(Arc<AtomicUsize>);
+
+#[test]
+fn command_brief_model_timeout_matches_native_client_maximum() {
+    assert_eq!(MODEL_TIMEOUT, Duration::from_secs(300));
+}
 
 impl Drop for DropSignal {
     fn drop(&mut self) {

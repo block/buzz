@@ -196,7 +196,10 @@ pub async fn start_command_brief(
         .to_hex();
     let status = crate::startup::start_manual_command_brief(app.clone(), &owner_pubkey)
         .await
-        .map_err(|_| command_error())?;
+        .map_err(|error| {
+            eprintln!("buzz-desktop: command brief start failed: {error}");
+            command_error()
+        })?;
     if !active_owner_matches(&state, &owner_pubkey) {
         let runtimes = state.command_brief_runtimes.read().await;
         runtimes.cancel(&owner_pubkey, status.run_id());

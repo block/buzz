@@ -31,6 +31,7 @@ use super::types::{
     MAX_ARRAY_ITEMS, MAX_TEXT_BYTES, SPECIALIST_ADVISERS,
 };
 use crate::command_services::apple_inputs::AppleBriefSelection;
+use crate::command_services::rag::RagSnapshotAssurance;
 use crate::command_services::trusted_lan::load_optional as load_optional_trusted_lan_config;
 
 mod lifecycle;
@@ -41,6 +42,8 @@ const MAX_CO_REQUEST_BYTES: usize = 1024;
 const MAX_SCHEDULE_ID_BYTES: usize = 256;
 const MAX_STATUS_HISTORY: usize = 32;
 const MAX_TRACKED_RUNS: usize = 64;
+const TRUSTED_RECHECK_LIMITATION: &str = "Trusted-LAN source recheck was unavailable after evidence collection; the brief retains the cited evidence already collected.";
+const CHIEF_FALLBACK_LIMITATION: &str = "Chief of Staff model consolidation was unavailable; the brief was consolidated deterministically from validated specialist advice.";
 
 /// A boxed, cancellation-aware future used by the orchestration seams.
 pub(crate) type BriefFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -518,6 +521,8 @@ impl CommandBriefOrchestrator {
                 }
             }
 
+            let mut runtime_limitations = Vec::new();
+            let mut trusted_recheck_degraded = false;
             match self
                 .inner
                 .sources
@@ -525,6 +530,14 @@ impl CommandBriefOrchestrator {
                 .await
             {
                 Ok(()) => {}
+                Err(error)
+                    if error != SourceCollectionError::Cancelled
+                        && context.rag_snapshot_assurance()
+                            == RagSnapshotAssurance::TrustedLanObserved =>
+                {
+                    trusted_recheck_degraded = true;
+                    runtime_limitations.push(TRUSTED_RECHECK_LIMITATION.to_string());
+                }
                 Err(SourceCollectionError::SnapshotChanged) if !restarted => {
                     restarted = true;
                     continue;
@@ -569,6 +582,9 @@ impl CommandBriefOrchestrator {
 
             let mut degraded = context.degraded_sections().to_vec();
             degraded.extend(failed_advisers.iter().copied().map(section_for_adviser));
+            if trusted_recheck_degraded {
+                degraded.push(BriefSection::ConflictsAndGaps);
+            }
             degraded.sort();
             degraded.dedup();
             self.transition(
@@ -615,8 +631,19 @@ impl CommandBriefOrchestrator {
                     },
                 )
                 .await;
-            let chief_value = match chief {
-                Ok(value) => value,
+            let chief = match chief {
+                Ok(value) => match validate_chief_output(
+                    value,
+                    &contributions,
+                    context.limitations(),
+                    &ledger_ids,
+                ) {
+                    Ok(chief) => chief,
+                    Err(()) => {
+                        install_chief_fallback(&mut degraded, &mut runtime_limitations);
+                        deterministic_chief(&contributions)
+                    }
+                },
                 Err(SchedulerError::Cancelled)
                 | Err(SchedulerError::Task(BriefAdviserError::Cancelled)) => {
                     self.persist_closed_and_install(
@@ -631,36 +658,8 @@ impl CommandBriefOrchestrator {
                     return;
                 }
                 Err(_) => {
-                    self.persist_closed_and_install(
-                        &run_id,
-                        &request.schedule_id,
-                        context.snapshot_id(),
-                        CommandBriefFailureCode::ChiefOfStaffFailed,
-                        &degraded,
-                        cancellation.clone(),
-                    )
-                    .await;
-                    return;
-                }
-            };
-            let chief = match validate_chief_output(
-                chief_value,
-                &contributions,
-                context.limitations(),
-                &ledger_ids,
-            ) {
-                Ok(chief) => chief,
-                Err(()) => {
-                    self.persist_closed_and_install(
-                        &run_id,
-                        &request.schedule_id,
-                        context.snapshot_id(),
-                        CommandBriefFailureCode::ChiefOfStaffOutputRejected,
-                        &degraded,
-                        cancellation.clone(),
-                    )
-                    .await;
-                    return;
+                    install_chief_fallback(&mut degraded, &mut runtime_limitations);
+                    deterministic_chief(&contributions)
                 }
             };
 
@@ -671,6 +670,21 @@ impl CommandBriefOrchestrator {
                 .await
             {
                 Ok(()) => {}
+                Err(error)
+                    if error != SourceCollectionError::Cancelled
+                        && context.rag_snapshot_assurance()
+                            == RagSnapshotAssurance::TrustedLanObserved =>
+                {
+                    degraded.push(BriefSection::ConflictsAndGaps);
+                    degraded.sort();
+                    degraded.dedup();
+                    if !runtime_limitations
+                        .iter()
+                        .any(|item| item == TRUSTED_RECHECK_LIMITATION)
+                    {
+                        runtime_limitations.push(TRUSTED_RECHECK_LIMITATION.to_string());
+                    }
+                }
                 Err(SourceCollectionError::SnapshotChanged) if !restarted => {
                     restarted = true;
                     continue;
@@ -719,8 +733,11 @@ impl CommandBriefOrchestrator {
                 &context,
                 contributions,
                 chief,
-                &degraded,
-                &failed_advisers,
+                AssemblyLimitations {
+                    degraded: &degraded,
+                    failed_advisers: &failed_advisers,
+                    runtime: &runtime_limitations,
+                },
             ) {
                 Ok(brief) => brief,
                 Err(()) => {
@@ -820,6 +837,18 @@ impl CommandBriefOrchestrator {
                 record.result = result;
             }
         }
+    }
+}
+
+fn install_chief_fallback(degraded: &mut Vec<BriefSection>, limitations: &mut Vec<String>) {
+    degraded.extend([BriefSection::Today, BriefSection::ConflictsAndGaps]);
+    degraded.sort();
+    degraded.dedup();
+    if !limitations
+        .iter()
+        .any(|item| item == CHIEF_FALLBACK_LIMITATION)
+    {
+        limitations.push(CHIEF_FALLBACK_LIMITATION.to_string());
     }
 }
 

@@ -14,6 +14,23 @@ pub(super) struct ValidatedChief {
     findings: Vec<CitedFinding>,
 }
 
+pub(super) struct AssemblyLimitations<'a> {
+    pub(super) degraded: &'a [BriefSection],
+    pub(super) failed_advisers: &'a [AdviserId],
+    pub(super) runtime: &'a [String],
+}
+
+pub(super) fn deterministic_chief(contributions: &[AdviserContribution]) -> ValidatedChief {
+    let mut seen = BTreeSet::new();
+    let findings = contributions
+        .iter()
+        .flat_map(|contribution| contribution.findings().iter().cloned())
+        .filter(|finding| seen.insert((finding.text().to_string(), finding.source_ids().to_vec())))
+        .take(MAX_ARRAY_ITEMS)
+        .collect();
+    ValidatedChief { findings }
+}
+
 pub(super) fn validate_chief_output(
     value: Value,
     contributions: &[AdviserContribution],
@@ -74,8 +91,7 @@ pub(super) fn assemble_brief(
     context: &FrozenSourceContext,
     contributions: Vec<AdviserContribution>,
     chief: ValidatedChief,
-    degraded: &[BriefSection],
-    failed_advisers: &[AdviserId],
+    limitations: AssemblyLimitations<'_>,
 ) -> Result<CommandBrief, ()> {
     let mut sections = BTreeMap::<BriefSection, Vec<CitedFinding>>::from([
         (BriefSection::Today, chief.findings),
@@ -95,8 +111,17 @@ pub(super) fn assemble_brief(
         .iter()
         .flat_map(|contribution| contribution.dissent().iter().cloned())
         .collect::<Vec<_>>();
-    let missing_information =
-        bounded_missing_information(failed_advisers, &contributions, context.limitations());
+    let missing_information = bounded_missing_information(
+        limitations.failed_advisers,
+        &contributions,
+        context
+            .limitations()
+            .iter()
+            .chain(limitations.runtime)
+            .cloned()
+            .collect::<Vec<_>>()
+            .as_slice(),
+    );
     let value = json!({
         "version": 1,
         "classification": "OFFICIAL",
@@ -105,7 +130,7 @@ pub(super) fn assemble_brief(
         "scheduleId": request.schedule_id,
         "snapshotId": context.snapshot_id(),
         "sections": sections,
-        "degradedSections": degraded,
+        "degradedSections": limitations.degraded,
         "missingInformation": missing_information,
         "dissent": dissent,
         "sourceLedger": context.ledger(),

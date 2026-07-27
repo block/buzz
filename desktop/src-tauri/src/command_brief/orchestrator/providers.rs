@@ -83,12 +83,24 @@ impl BriefAdviserProvider for FallbackAdviserProvider {
             match local {
                 Ok(result) => return Ok(result.contribution),
                 Err(error) if !cloud_fallback_eligible(error.code()) => {
+                    eprintln!(
+                        "buzz-desktop: {adviser:?} local adviser failed without fallback: {:?}",
+                        error.code()
+                    );
                     return Err(BriefAdviserError::from(error));
                 }
-                Err(_) => {}
+                Err(error) => {
+                    eprintln!(
+                        "buzz-desktop: {adviser:?} local adviser failed: {:?}; trying cloud fallback",
+                        error.code()
+                    );
+                }
             }
             for provider in [CloudProvider::LiteLlm, CloudProvider::OpenAi] {
                 if !self.cloud.available(provider) {
+                    eprintln!(
+                        "buzz-desktop: {adviser:?} cloud fallback {provider:?} is not configured"
+                    );
                     continue;
                 }
                 let request = SpecialistAdviserRequest::new(&identity, adviser, sources.clone());
@@ -99,11 +111,21 @@ impl BriefAdviserProvider for FallbackAdviserProvider {
                 {
                     Ok(contribution) => return Ok(contribution),
                     Err(error) if !cloud_fallback_eligible(error.code()) => {
+                        eprintln!(
+                            "buzz-desktop: {adviser:?} cloud fallback {provider:?} failed without retry: {:?}",
+                            error.code()
+                        );
                         return Err(BriefAdviserError::from(error));
                     }
-                    Err(_) => {}
+                    Err(error) => {
+                        eprintln!(
+                            "buzz-desktop: {adviser:?} cloud fallback {provider:?} failed: {:?}",
+                            error.code()
+                        );
+                    }
                 }
             }
+            eprintln!("buzz-desktop: {adviser:?} adviser providers exhausted");
             Err(BriefAdviserError::Failed)
         })
     }
@@ -129,12 +151,24 @@ impl BriefAdviserProvider for FallbackAdviserProvider {
                         .map_err(|_| BriefAdviserError::Failed);
                 }
                 Err(error) if !cloud_fallback_eligible(error.code()) => {
+                    eprintln!(
+                        "buzz-desktop: ChiefOfStaff local adviser failed without fallback: {:?}",
+                        error.code()
+                    );
                     return Err(BriefAdviserError::from(error));
                 }
-                Err(_) => {}
+                Err(error) => {
+                    eprintln!(
+                        "buzz-desktop: ChiefOfStaff local adviser failed: {:?}; trying cloud fallback",
+                        error.code()
+                    );
+                }
             }
             for provider in [CloudProvider::LiteLlm, CloudProvider::OpenAi] {
                 if !self.cloud.available(provider) {
+                    eprintln!(
+                        "buzz-desktop: ChiefOfStaff cloud fallback {provider:?} is not configured"
+                    );
                     continue;
                 }
                 let request = ChiefOfStaffRequest::new(
@@ -152,11 +186,21 @@ impl BriefAdviserProvider for FallbackAdviserProvider {
                             .map_err(|_| BriefAdviserError::Failed);
                     }
                     Err(error) if !cloud_fallback_eligible(error.code()) => {
+                        eprintln!(
+                            "buzz-desktop: ChiefOfStaff cloud fallback {provider:?} failed without retry: {:?}",
+                            error.code()
+                        );
                         return Err(BriefAdviserError::from(error));
                     }
-                    Err(_) => {}
+                    Err(error) => {
+                        eprintln!(
+                            "buzz-desktop: ChiefOfStaff cloud fallback {provider:?} failed: {:?}",
+                            error.code()
+                        );
+                    }
                 }
             }
+            eprintln!("buzz-desktop: ChiefOfStaff adviser providers exhausted");
             Err(BriefAdviserError::Failed)
         })
     }
@@ -369,6 +413,15 @@ impl BriefSourceProvider for ReloadingSourceProvider {
         context: &'a FrozenSourceContext,
         cancellation: CancellationToken,
     ) -> BriefFuture<'a, Result<(), SourceCollectionError>> {
+        if context.rag_snapshot_assurance() == RagSnapshotAssurance::TrustedLanObserved {
+            return Box::pin(async move {
+                if cancellation.is_cancelled() {
+                    Err(SourceCollectionError::Cancelled)
+                } else {
+                    Ok(())
+                }
+            });
+        }
         let loader = Arc::clone(&self.loader);
         let snapshot = context.snapshot_binding().clone();
         Box::pin(async move {

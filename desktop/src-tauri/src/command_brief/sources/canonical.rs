@@ -1,5 +1,8 @@
 use super::*;
 
+const MAX_CANONICAL_LEDGER_ITEMS: usize = 48;
+const MAX_CANONICAL_SOURCE_QUOTE_BYTES: usize = 1_024;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct CandidateSource {
     pub(super) source_id: String,
@@ -384,7 +387,9 @@ pub(super) fn canonical_ledger(
     let mut limitations = BTreeSet::new();
     let mut rejected_by_kind = [0_usize; 6];
     for mut candidate in candidates {
-        let Some((quote, truncated)) = canonical_quote(&candidate.quote, MAX_TEXT_BYTES) else {
+        let Some((quote, truncated)) =
+            canonical_quote(&candidate.quote, MAX_CANONICAL_SOURCE_QUOTE_BYTES)
+        else {
             rejected_by_kind[source_priority(candidate.source_kind) as usize] += 1;
             continue;
         };
@@ -412,16 +417,16 @@ pub(super) fn canonical_ledger(
     }
     let mut candidates = by_source.into_values().collect::<Vec<_>>();
     candidates.sort_by(|left, right| {
-        source_priority(left.source_kind)
-            .cmp(&source_priority(right.source_kind))
+        retention_priority(left.source_kind)
+            .cmp(&retention_priority(right.source_kind))
             .then_with(|| left.source_id.cmp(&right.source_id))
     });
     let mut omitted_by_kind = [0_usize; 6];
-    if candidates.len() > MAX_SOURCE_LEDGER_ITEMS {
-        for candidate in &candidates[MAX_SOURCE_LEDGER_ITEMS..] {
+    if candidates.len() > MAX_CANONICAL_LEDGER_ITEMS {
+        for candidate in &candidates[MAX_CANONICAL_LEDGER_ITEMS..] {
             omitted_by_kind[source_priority(candidate.source_kind) as usize] += 1;
         }
-        candidates.truncate(MAX_SOURCE_LEDGER_ITEMS);
+        candidates.truncate(MAX_CANONICAL_LEDGER_ITEMS);
     }
     let mut ledger = Vec::with_capacity(candidates.len());
     for candidate in candidates {
@@ -461,6 +466,17 @@ pub(super) fn canonical_ledger(
         omitted_by_kind,
         rejected_by_kind,
     })
+}
+
+const fn retention_priority(kind: SourceKind) -> u8 {
+    match kind {
+        SourceKind::Calendar => 0,
+        SourceKind::Reminders => 1,
+        SourceKind::Notes => 2,
+        SourceKind::File => 3,
+        SourceKind::Memory => 4,
+        SourceKind::Rag => 5,
+    }
 }
 
 pub(super) struct CanonicalLedgerOutput {

@@ -7,11 +7,39 @@ struct NoteRecord: Equatable {
 final class NotesReader {
     private static let maximumTitleCharacters = 512
     private static let maximumBodyCharacters = 32_768
-    private let allowedFolders: Set<String>
     private let fixtureRecords: [NoteRecord]?
-    init(allowedFolders: Set<String> = ["Notes"]) { self.allowedFolders = allowedFolders; fixtureRecords = nil }
-    private init(records: [NoteRecord]) { allowedFolders = Set(records.map(\.folderIdentifier)).union(["Notes", "work"]); fixtureRecords = records }
+    init(allowedFolders: Set<String> = []) {
+        _ = allowedFolders
+        fixtureRecords = nil
+    }
+    private init(records: [NoteRecord]) { fixtureRecords = records }
     static func fixture(records: [NoteRecord]) -> NotesReader { .init(records: records) }
+
+    func permissionStatus() -> PermissionState {
+        (try? listFolders()) == nil ? .unavailable : .authorized
+    }
+
+    func listFolders() throws -> [String] {
+        if let fixtureRecords {
+            return Array(Set(fixtureRecords.map(\.folderIdentifier))).sorted()
+        }
+        var error: NSDictionary?
+        let source = #"tell application "Notes" to get name of every folder"#
+        guard let descriptor = NSAppleScript(source: source)?.executeAndReturnError(&error),
+              error == nil else {
+            throw AppleInputFailure.invalidRequest("Notes folder discovery failed")
+        }
+        var folders = [String]()
+        if descriptor.numberOfItems > 0 {
+            for index in 1...descriptor.numberOfItems {
+                guard let value = descriptor.atIndex(index)?.stringValue,
+                      !value.isEmpty,
+                      value.utf8.count <= ProtocolLimits.maximumStringBytes else { continue }
+                folders.append(value)
+            }
+        }
+        return Array(Set(folders)).sorted()
+    }
 
     func read(folderIdentifiers: [String], maximum: Int) throws -> Page<NoteRecord> {
         try validate(folderIdentifiers)
@@ -77,8 +105,7 @@ final class NotesReader {
     }
     private func validate(_ folders: [String]) throws {
         guard !folders.isEmpty, folders.count <= ProtocolLimits.maximumArrayCount,
-              folders.allSatisfy({ !$0.isEmpty && $0.utf8.count <= ProtocolLimits.maximumStringBytes }),
-              Set(folders).isSubset(of: allowedFolders) else {
+              folders.allSatisfy({ !$0.isEmpty && $0.utf8.count <= ProtocolLimits.maximumStringBytes }) else {
             throw AppleInputFailure.forbidden("requested Notes folder is not allowlisted")
         }
     }

@@ -73,6 +73,30 @@ fn evidence_budget_uses_source_priority_then_ledger_id_and_reports_every_omissio
 }
 
 #[test]
+fn daily_routine_prioritizes_apple_inputs_inside_the_model_budget() {
+    let rendered = build_evidence_prompt(
+        definition_for(AdviserId::DailyRoutine),
+        &[
+            source("rag", SourceKind::Rag, "RAG evidence"),
+            source("memory", SourceKind::Memory, "Memory evidence"),
+            source("calendar", SourceKind::Calendar, "Calendar evidence"),
+            source("reminder", SourceKind::Reminders, "Reminder evidence"),
+            source("note", SourceKind::Notes, "Notes evidence"),
+            source("file", SourceKind::File, "File evidence"),
+        ],
+    );
+
+    assert_eq!(
+        rendered
+            .envelopes
+            .iter()
+            .map(|envelope| envelope.ledger_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["calendar", "reminder", "note", "file", "memory", "rag"]
+    );
+}
+
+#[test]
 fn total_prompt_budget_omits_deterministically_and_records_the_missing_source() {
     let sources = (0..64)
         .map(|index| {

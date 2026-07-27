@@ -1,10 +1,21 @@
 import XCTest
 
 final class NotesFixtureTests: XCTestCase {
-    func testNotesFixtureOnlyReadsConfiguredFolders() throws {
+    func testFixtureListsUniqueFoldersForSafeSelection() throws {
+        let reader = NotesReader.fixture(records: [
+            .init(identifier: "1", folderIdentifier: "Command", title: "One", body: "Body"),
+            .init(identifier: "2", folderIdentifier: "Command", title: "Two", body: "Body"),
+            .init(identifier: "3", folderIdentifier: "Planning", title: "Three", body: "Body"),
+        ])
+
+        XCTAssertEqual(try reader.listFolders(), ["Command", "Planning"])
+        XCTAssertEqual(reader.permissionStatus(), .authorized)
+    }
+
+    func testNotesFixtureOnlyReturnsRequestedFolders() throws {
         let reader = NotesReader.fixture(records: [.init(identifier: "1", folderIdentifier: "work", title: "Plan", body: "bounded")])
         XCTAssertEqual(try reader.read(folderIdentifiers: ["work"], maximum: 1).records.map(\.title), ["Plan"])
-        XCTAssertThrowsError(try reader.read(folderIdentifiers: ["other"], maximum: 1))
+        XCTAssertTrue(try reader.read(folderIdentifiers: ["other"], maximum: 1).records.isEmpty)
     }
 
     func testAppleScriptIsFixedToNotesApplication() throws {

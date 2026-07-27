@@ -208,8 +208,8 @@ export function DailyCommandBrief({
             Daily Command Brief
           </h2>
           <p className="text-sm text-muted-foreground">
-            Local-model advice grounded in the frozen OFFICIAL knowledge
-            snapshot.
+            Evidence-cited advice from your configured RAG, Memory, and Apple
+            sources.
           </p>
         </div>
         <Button

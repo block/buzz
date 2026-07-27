@@ -7,7 +7,6 @@ import {
   type KnowledgeValidation,
 } from "@/features/command-console/domain/knowledgeStatus";
 import type { ConnectionState } from "@/shared/api/relayClientShared";
-import { useMeshNodeStatus } from "@/features/mesh-compute/hooks/useMeshNodeStatus";
 import { getCommandKnowledgeStatus } from "@/shared/api/tauriCommandServices";
 import type { MeshNodeStatus } from "@/shared/api/tauriMesh";
 import {
@@ -63,7 +62,7 @@ type LocalComputeFreshnessOptions = {
 
 type CommandConsoleStatusSources = {
   readonly relayConnection: ConnectionState;
-  readonly localCompute: LocalComputeProbe;
+  readonly localCompute?: LocalComputeProbe;
   readonly lmStudio?: {
     readonly status: LmStudioReadiness | null;
     readonly error: string | null;
@@ -150,17 +149,6 @@ function lmStudioStatus(probe: {
     };
   }
   const status = probe.status;
-  const securityWarnings = [...status.securityWarnings];
-  if (
-    status.bindExposure === "unknown" &&
-    !securityWarnings.includes("LM Studio listener exposure is unverified.")
-  ) {
-    securityWarnings.push("LM Studio listener exposure is unverified.");
-  }
-  const detail =
-    securityWarnings.length === 0
-      ? status.detail
-      : `${status.detail} ${securityWarnings.join(" ")}`;
   if (status.status === "app_missing") {
     return {
       ...base,
@@ -177,17 +165,17 @@ function lmStudioStatus(probe: {
       statusLabel: "Unavailable",
     };
   }
-  if (status.status === "ready" && securityWarnings.length === 0) {
+  if (status.status === "ready") {
     return {
       ...base,
-      detail,
+      detail: status.detail,
       state: "connected",
       statusLabel: "Connected",
     };
   }
   return {
     ...base,
-    detail,
+    detail: status.detail,
     state: "degraded",
     statusLabel: "Degraded",
   };
@@ -347,19 +335,14 @@ function memoryStatus(status: CommandKnowledgeStatus): CommandServiceStatus {
   if (status.sourceMode === "trusted_lan") {
     return {
       ...base,
-      detail:
-        "Approved trusted-LAN Memory is reachable for direct read-only evidence.",
-      state: "degraded",
-      statusLabel: "Degraded",
+      detail: "Trusted LAN Memory is reachable for direct evidence retrieval.",
+      state: "connected",
+      statusLabel: "Connected",
       facts: [
-        { label: "Assurance", value: "Trusted LAN observed" },
         {
           label: "Permissions",
           value: memory.toolAllowlist.join(", "),
         },
-      ],
-      diagnostics: [
-        "Evidence is observed directly and is not a replicated signed Memory revision.",
       ],
     };
   }
@@ -435,23 +418,14 @@ function ragStatus(status: CommandKnowledgeStatus): CommandServiceStatus {
   ) {
     return {
       ...base,
-      detail:
-        "Approved trusted-LAN RAG is reachable for direct read-only retrieval.",
-      state: "degraded",
-      statusLabel: "Degraded",
+      detail: "Trusted LAN RAG is reachable for direct retrieval.",
+      state: "connected",
+      statusLabel: "Connected",
       facts: [
-        {
-          label: "Catalogue fingerprint",
-          value: rag.activeSnapshotId ?? "Unknown",
-        },
-        { label: "Assurance", value: "Trusted LAN observed" },
         {
           label: "Permissions",
           value: rag.toolAllowlist.join(", "),
         },
-      ],
-      diagnostics: [
-        "The catalogue fingerprint is audit metadata only; evidence is unsigned.",
       ],
     };
   }
@@ -587,7 +561,7 @@ export function createCommandConsoleStatusViewModel({
           : knowledge.status.degradedSections,
     liveServices: [
       relayStatus(relayConnection),
-      localComputeStatus(localCompute),
+      ...(localCompute ? [localComputeStatus(localCompute)] : []),
       ...(lmStudio ? [lmStudioStatus(lmStudio)] : []),
       ...knowledgeServices,
     ],
@@ -704,19 +678,16 @@ export function useFreshCommandConsoleLocalCompute(
 
 export function useCommandConsoleStatus(): CommandConsoleStatusViewModel {
   const relayConnection = useRelayConnection({ degradedAfterMs: 0 });
-  const localComputeProbe = useMeshNodeStatus();
-  const localCompute = useFreshCommandConsoleLocalCompute(localComputeProbe);
   const lmStudio = useLmStudioReadiness();
   const knowledge = useCommandKnowledgeStatus();
 
   return React.useMemo(
     () =>
       createCommandConsoleStatusViewModel({
-        localCompute,
         lmStudio,
         knowledge,
         relayConnection,
       }),
-    [knowledge, lmStudio, localCompute, relayConnection],
+    [knowledge, lmStudio, relayConnection],
   );
 }

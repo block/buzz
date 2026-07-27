@@ -119,7 +119,10 @@ function render(overrides = {}) {
 }
 
 test("renders no-brief and queued/running/failed lifecycle states with truthful controls", () => {
-  assert.match(render(), /No Daily Command Brief has been generated/);
+  const initial = render();
+  assert.match(initial, /No Daily Command Brief has been generated/);
+  assert.match(initial, /configured RAG, Memory, and Apple sources/i);
+  assert.doesNotMatch(initial, /frozen OFFICIAL knowledge snapshot/i);
 
   const running = render({
     status: {

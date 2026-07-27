@@ -4,7 +4,6 @@ use std::time::Duration;
 
 use buzz_agent_pkg::lmstudio::{
     LmStudioChatRequest, LmStudioChatResponse, LmStudioOutput, LmStudioReasoning,
-    MAX_CONTEXT_TOKENS, MAX_OUTPUT_TOKENS,
 };
 use buzz_agent_pkg::types::{AgentError, ExecutedToolProvider};
 use buzz_agent_pkg::LmStudioNativeClient;
@@ -28,6 +27,8 @@ use crate::command_services::policy::{
 const MAX_REQUEST_IDENTITY_BYTES: usize = 1_024;
 const MAX_MODEL_ID_BYTES: usize = 512;
 const MAX_CHIEF_INPUT_BYTES: usize = 256 * 1024;
+const COMMAND_BRIEF_OUTPUT_TOKENS: u32 = 8_192;
+const COMMAND_BRIEF_CONTEXT_TOKENS: u64 = 32_768;
 
 /// One specialist invocation assembled only from a closed adviser ID and
 /// already-validated run sources.
@@ -394,8 +395,8 @@ impl AdviserExecutor {
             evidence.system_prompt,
             self.specialist_integrations.clone(),
             LmStudioReasoning::Off,
-            MAX_OUTPUT_TOKENS,
-            MAX_CONTEXT_TOKENS,
+            COMMAND_BRIEF_OUTPUT_TOKENS,
+            COMMAND_BRIEF_CONTEXT_TOKENS,
         )
         .map_err(map_native_error)?;
         let execution = execute_native(
@@ -444,8 +445,8 @@ impl AdviserExecutor {
             persona.system_prompt(),
             Vec::new(),
             LmStudioReasoning::Off,
-            MAX_OUTPUT_TOKENS,
-            MAX_CONTEXT_TOKENS,
+            COMMAND_BRIEF_OUTPUT_TOKENS,
+            COMMAND_BRIEF_CONTEXT_TOKENS,
         )
         .map_err(map_native_error)?;
         let execution = execute_native(

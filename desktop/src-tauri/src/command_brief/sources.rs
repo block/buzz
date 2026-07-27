@@ -17,10 +17,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::personas::specialist_definitions;
 use super::provenance::ValidatedSource;
-use super::types::{
-    AdviserId, BriefSection, SourceKind, SourceLedgerEntry, MAX_ARRAY_ITEMS,
-    MAX_SOURCE_LEDGER_ITEMS, MAX_TEXT_BYTES,
-};
+use super::types::{AdviserId, BriefSection, SourceKind, SourceLedgerEntry, MAX_ARRAY_ITEMS};
 use crate::command_services::apple_inputs::{
     read_apple_inputs_blocking, AppleBriefSelection, AppleInputPermission, AppleInputRequest,
     AppleInputResponse,
@@ -43,6 +40,7 @@ const RAG_TOOL: &str = "search_knowledge_base";
 const MEMORY_TOOL: &str = "command_memory_context";
 const COLLECTION_SCOPE: &str = "verified_catalogue";
 const OBSERVED_COLLECTION_SCOPE: &str = "observed_catalogue";
+const RETRIEVAL_RESULT_LIMIT: u32 = 3;
 
 const RAG_MEMORY_SECTIONS: [BriefSection; 5] = [
     BriefSection::Operations,
@@ -324,7 +322,7 @@ impl SourceBackend for ProductionSourceBackend {
                 json!({
                     "query": intent.query(),
                     "collections": snapshot.logical_collections(),
-                    "top_k": 8,
+                    "top_k": RETRIEVAL_RESULT_LIMIT,
                 }),
                 cancellation,
             )
@@ -353,7 +351,7 @@ impl SourceBackend for ProductionSourceBackend {
             .call(
                 memory,
                 MEMORY_TOOL,
-                json!({"query": intent.query(), "limit": 10}),
+                json!({"query": intent.query(), "limit": RETRIEVAL_RESULT_LIMIT}),
                 cancellation,
             )
             .map_err(|_| SourceReadError::new("memory_read_unavailable"))?;
@@ -467,7 +465,10 @@ impl SourceBackend for TrustedLanSourceBackend {
         let result = self
             .client
             .search_rag(intent.query(), snapshot.logical_collections())
-            .map_err(|_| SourceReadError::new("rag_read_unavailable"))?;
+            .map_err(|error| {
+                eprintln!("buzz-desktop: trusted LAN RAG read failed: {error:?}");
+                SourceReadError::new("rag_read_unavailable")
+            })?;
         if cancellation.is_cancelled() {
             Err(SourceReadError::new("cancelled"))
         } else {
@@ -485,8 +486,11 @@ impl SourceBackend for TrustedLanSourceBackend {
         }
         let result = self
             .client
-            .search_memory(intent.query(), 10)
-            .map_err(|_| SourceReadError::new("memory_read_unavailable"))?;
+            .search_memory(intent.query(), RETRIEVAL_RESULT_LIMIT)
+            .map_err(|error| {
+                eprintln!("buzz-desktop: trusted LAN Memory read failed: {error:?}");
+                SourceReadError::new("memory_read_unavailable")
+            })?;
         if cancellation.is_cancelled() {
             Err(SourceReadError::new("cancelled"))
         } else {
@@ -598,6 +602,10 @@ impl FrozenSourceContext {
         self.snapshot.logical_collections()
     }
 
+    pub(crate) const fn rag_snapshot_assurance(&self) -> RagSnapshotAssurance {
+        self.snapshot.assurance()
+    }
+
     #[allow(
         dead_code,
         reason = "Task 8 constructs the Task 5 production source adapter"
@@ -619,6 +627,33 @@ impl FrozenSourceContext {
         Self {
             run_id: run_id.to_string(),
             snapshot: VerifiedRagSnapshot::for_test(snapshot_id, observed_at, observed_at),
+            observed_at: observed_at.to_string(),
+            ledger,
+            validated_sources,
+            degraded_sections,
+            limitations,
+            retrieval_intents: Vec::new(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_orchestrator_trusted_test(
+        run_id: &str,
+        snapshot_id: &str,
+        observed_at: &str,
+        ledger: Vec<SourceLedgerEntry>,
+        degraded_sections: Vec<BriefSection>,
+        limitations: Vec<String>,
+    ) -> Self {
+        let validated_sources = ledger.iter().cloned().map(ValidatedSource::from).collect();
+        Self {
+            run_id: run_id.to_string(),
+            snapshot: VerifiedRagSnapshot::from_trusted_lan_observation(
+                snapshot_id,
+                observed_at,
+                vec!["navy-publications".to_string()],
+            )
+            .expect("valid trusted test snapshot"),
             observed_at: observed_at.to_string(),
             ledger,
             validated_sources,
@@ -952,31 +987,9 @@ fn fixed_retrieval_intents(
         .collect()
 }
 
-fn degrade_all(
-    degraded: &mut BTreeSet<BriefSection>,
-    limitations: &mut BTreeSet<String>,
-    limitation: &str,
-) {
-    degraded.extend(RAG_MEMORY_SECTIONS);
-    limitations.insert(limitation.to_string());
-}
-
-fn bounded_limitations(limitations: BTreeSet<String>) -> Vec<String> {
-    if limitations.len() <= MAX_ARRAY_ITEMS {
-        return limitations.into_iter().collect();
-    }
-    let omitted = limitations.len() - (MAX_ARRAY_ITEMS - 1);
-    let mut bounded = limitations
-        .into_iter()
-        .take(MAX_ARRAY_ITEMS - 1)
-        .collect::<Vec<_>>();
-    bounded.push(format!(
-        "{omitted} additional source limitations omitted after the canonical limit."
-    ));
-    bounded
-}
-
 mod canonical;
 use canonical::*;
+mod limitations;
+use limitations::*;
 mod trusted_lan_evidence;
 use trusted_lan_evidence::*;

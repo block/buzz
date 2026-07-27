@@ -83,49 +83,89 @@ async fn trusted_lan_knowledge_status(
         let config =
             crate::command_services::trusted_lan::TrustedLanConfig::load(&path).map_err(|_| ())?;
         let client = config.source_client().map_err(|_| ())?;
-        let catalogue = client.catalogue().map_err(|_| ())?;
-        let fingerprint = crate::command_services::trusted_lan::catalogue_fingerprint(&catalogue)
-            .map_err(|_| ())?;
-        client
+        let rag = client.catalogue().and_then(|catalogue| {
+            crate::command_services::trusted_lan::catalogue_fingerprint(&catalogue)
+        });
+        let memory_ready = client
             .search_memory("Buzz command knowledge readiness probe", 1)
-            .map_err(|_| ())?;
-        Ok::<_, ()>(fingerprint)
+            .is_ok();
+        Ok::<_, ()>((rag.ok(), memory_ready))
     })
     .await;
     match result {
-        Ok(Ok(fingerprint)) => Some((
-            MemoryKnowledgeStatus {
-                status: "ready".to_string(),
-                server_identity: Some("memory".to_string()),
-                node_id: None,
-                home_node_id: None,
-                revision_count: 0,
-                conflict_count: 0,
-                replication_cursor: None,
-                home_replication_cursor: None,
-                last_successful_sync: None,
-                freshness: "observed",
-                validation: "trusted_lan_observed",
-                tool_allowlist: vec!["search_events".to_string()],
-                error: None,
-            },
-            RagKnowledgeStatus {
-                status: "ready".to_string(),
-                server_identity: Some("rag".to_string()),
-                active_snapshot_id: Some(fingerprint),
-                signature_fingerprint: None,
-                snapshot_time: Some(probe_time.clone()),
-                last_successful_activation: Some(probe_time),
-                freshness: "observed".to_string(),
-                validation: "trusted_lan_observed".to_string(),
-                tool_allowlist: vec![
-                    "list_collections".to_string(),
-                    "search_knowledge_base".to_string(),
-                ],
-                error: None,
-            },
-            vec!["trusted-lan-unsigned".to_string()],
-        )),
+        Ok(Ok((rag_fingerprint, memory_ready))) => {
+            let memory = if memory_ready {
+                MemoryKnowledgeStatus {
+                    status: "ready".to_string(),
+                    server_identity: Some("memory".to_string()),
+                    node_id: None,
+                    home_node_id: None,
+                    revision_count: 0,
+                    conflict_count: 0,
+                    replication_cursor: None,
+                    home_replication_cursor: None,
+                    last_successful_sync: None,
+                    freshness: "observed",
+                    validation: "trusted_lan_observed",
+                    tool_allowlist: vec!["search_events".to_string()],
+                    error: None,
+                }
+            } else {
+                MemoryKnowledgeStatus {
+                    status: "unavailable".to_string(),
+                    server_identity: None,
+                    node_id: None,
+                    home_node_id: None,
+                    revision_count: 0,
+                    conflict_count: 0,
+                    replication_cursor: None,
+                    home_replication_cursor: None,
+                    last_successful_sync: None,
+                    freshness: "unknown",
+                    validation: "failed",
+                    tool_allowlist: Vec::new(),
+                    error: Some("trusted_lan_memory_unavailable".to_string()),
+                }
+            };
+            let rag = if let Some(fingerprint) = rag_fingerprint {
+                RagKnowledgeStatus {
+                    status: "ready".to_string(),
+                    server_identity: Some("rag".to_string()),
+                    active_snapshot_id: Some(fingerprint),
+                    signature_fingerprint: None,
+                    snapshot_time: Some(probe_time.clone()),
+                    last_successful_activation: Some(probe_time),
+                    freshness: "observed".to_string(),
+                    validation: "trusted_lan_observed".to_string(),
+                    tool_allowlist: vec![
+                        "list_collections".to_string(),
+                        "search_knowledge_base".to_string(),
+                    ],
+                    error: None,
+                }
+            } else {
+                RagKnowledgeStatus {
+                    status: "unavailable".to_string(),
+                    server_identity: None,
+                    active_snapshot_id: None,
+                    signature_fingerprint: None,
+                    snapshot_time: None,
+                    last_successful_activation: None,
+                    freshness: "unknown".to_string(),
+                    validation: "failed".to_string(),
+                    tool_allowlist: Vec::new(),
+                    error: Some("trusted_lan_rag_unavailable".to_string()),
+                }
+            };
+            let mut degraded = Vec::new();
+            if !memory_ready {
+                degraded.push("memory-readiness".to_string());
+            }
+            if rag.status != "ready" {
+                degraded.push("rag-readiness".to_string());
+            }
+            Some((memory, rag, degraded))
+        }
         _ => Some((
             MemoryKnowledgeStatus {
                 status: "unavailable".to_string(),
@@ -154,11 +194,7 @@ async fn trusted_lan_knowledge_status(
                 tool_allowlist: Vec::new(),
                 error: Some("trusted_lan_unavailable".to_string()),
             },
-            vec![
-                "memory-readiness".to_string(),
-                "rag-readiness".to_string(),
-                "trusted-lan-unsigned".to_string(),
-            ],
+            vec!["memory-readiness".to_string(), "rag-readiness".to_string()],
         )),
     }
 }

@@ -3,7 +3,7 @@ use std::cmp::Ordering;
 use serde::Serialize;
 
 use super::personas::PersonaDefinition;
-use super::types::{SourceKind, SourceLedgerEntry};
+use super::types::{AdviserId, SourceKind, SourceLedgerEntry};
 
 /// Maximum UTF-8 bytes retained from one source quote in a model-visible envelope.
 pub const MAX_EVIDENCE_ENVELOPE_QUOTE_BYTES: usize = 4 * 1024;
@@ -126,7 +126,7 @@ pub fn build_evidence_prompt(
     sources: &[ValidatedSource],
 ) -> EvidencePrompt {
     let mut ordered = sources.to_vec();
-    ordered.sort_by(source_order);
+    ordered.sort_by(|left, right| source_order(persona.adviser, left, right));
 
     let mut envelopes = Vec::new();
     let mut limitations = Vec::new();
@@ -194,11 +194,26 @@ fn serialize_envelopes(envelopes: &[EvidenceEnvelope]) -> String {
     serde_json::to_string(envelopes).unwrap_or_else(|_| "[]".to_string())
 }
 
-fn source_order(left: &ValidatedSource, right: &ValidatedSource) -> Ordering {
-    source_priority(left.source_kind)
-        .cmp(&source_priority(right.source_kind))
+fn source_order(adviser: AdviserId, left: &ValidatedSource, right: &ValidatedSource) -> Ordering {
+    model_source_priority(adviser, left.source_kind)
+        .cmp(&model_source_priority(adviser, right.source_kind))
         .then_with(|| left.ledger_id.cmp(&right.ledger_id))
         .then_with(|| left.source_id.cmp(&right.source_id))
+}
+
+const fn model_source_priority(adviser: AdviserId, kind: SourceKind) -> u8 {
+    if matches!(adviser, AdviserId::DailyRoutine) {
+        match kind {
+            SourceKind::Calendar => 0,
+            SourceKind::Reminders => 1,
+            SourceKind::Notes => 2,
+            SourceKind::File => 3,
+            SourceKind::Memory => 4,
+            SourceKind::Rag => 5,
+        }
+    } else {
+        source_priority(kind)
+    }
 }
 
 const fn source_priority(kind: SourceKind) -> u8 {

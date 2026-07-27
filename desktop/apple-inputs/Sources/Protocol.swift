@@ -11,6 +11,8 @@ enum ProtocolLimits {
 
 enum AppleInputOperation: String, Codable {
     case permissionStatus = "permission_status", requestPermission = "request_permission"
+    case listCalendars = "list_calendars", listReminderLists = "list_reminder_lists"
+    case listNoteFolders = "list_note_folders"
     case readCalendar = "read_calendar", readReminders = "read_reminders"
     case readNotes = "read_notes", readFiles = "read_files"
 }
@@ -32,7 +34,8 @@ struct ReminderPayload { let listIdentifiers: [String]; let start: Date; let end
 struct NotesPayload { let folderIdentifiers: [String]; let maximum: Int }
 struct FilesPayload { let paths: [String] }
 enum AppleInputPayload {
-    case permission(PermissionPayload), readCalendar(CalendarPayload), readReminders(ReminderPayload), readNotes(NotesPayload), readFiles(FilesPayload)
+    case permission(PermissionPayload), listCalendars, listReminderLists, listNoteFolders
+    case readCalendar(CalendarPayload), readReminders(ReminderPayload), readNotes(NotesPayload), readFiles(FilesPayload)
 }
 struct AppleInputRequest {
     let operation: AppleInputOperation
@@ -58,6 +61,15 @@ struct AppleInputRequest {
                 throw AppleInputFailure.invalidRequest("permission can only be requested for calendar or reminders")
             }
             return .init(operation: operation, payload: .permission(.init(source: source)))
+        case .listCalendars:
+            try exact(arguments, keys: [])
+            return .init(operation: operation, payload: .listCalendars)
+        case .listReminderLists:
+            try exact(arguments, keys: [])
+            return .init(operation: operation, payload: .listReminderLists)
+        case .listNoteFolders:
+            try exact(arguments, keys: [])
+            return .init(operation: operation, payload: .listNoteFolders)
         case .readCalendar:
             try exact(arguments, keys: ["calendar_ids", "start", "end", "maximum"])
             let ids = try stringArray(arguments["calendar_ids"], name: "calendar_ids")

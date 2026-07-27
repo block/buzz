@@ -39,10 +39,32 @@ func response(for request: AppleInputRequest) async -> AppleInputResponse {
             switch payload.source {
             case .calendar, .reminders: state = eventKit.permissionStatus(source: payload.source)
             case .files: state = .authorized
-            case .notes: state = .unavailable
+            case .notes: state = notes.permissionStatus()
             }
             return .init(source: payload.source.rawValue, permission: state, records: [],
                          error: state == .unavailable ? "permission status is unavailable without prompting" : nil)
+        case .listCalendars:
+            let permission = eventKit.permissionStatus(source: .calendar)
+            return .init(
+                source: "calendar",
+                permission: permission,
+                records: eventKit.listCalendars().map { $0.output() }
+            )
+        case .listReminderLists:
+            let permission = eventKit.permissionStatus(source: .reminders)
+            return .init(
+                source: "reminders",
+                permission: permission,
+                records: eventKit.listReminderLists().map { $0.output() }
+            )
+        case .listNoteFolders:
+            return .init(
+                source: "notes",
+                permission: .authorized,
+                records: try notes.listFolders().map {
+                    AppleInputRecord(fields: ["identifier": $0, "title": $0])
+                }
+            )
         case .readCalendar(let payload):
             let page = try eventKit.readCalendar(calendarIdentifiers: payload.calendarIdentifiers, start: payload.start, end: payload.end, maximum: payload.maximum)
             return .init(source: "calendar", permission: eventKit.permissionStatus(source: .calendar),

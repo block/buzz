@@ -776,7 +776,7 @@ test("trusted LAN knowledge status preserves observed assurance without fake sig
       truncated: false,
       error: null,
     })),
-    degradedSections: ["trusted-lan-unsigned"],
+    degradedSections: [],
   });
 
   assert.equal(status?.sourceMode, "trusted_lan");

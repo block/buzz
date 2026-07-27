@@ -32,7 +32,10 @@ use crate::command_services::apple_inputs::{bundled_helper_identity, AppleBriefS
 use crate::commands::LmStudioReadiness;
 use tokio_util::sync::CancellationToken;
 
-const MODEL_TIMEOUT: Duration = Duration::from_secs(120);
+// Evidence-backed Qwen advisers can exceed two minutes on Apple Silicon even
+// with native reasoning disabled. Five minutes is the native client's bounded
+// maximum and leaves enough time for one structured contribution to complete.
+const MODEL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const MODEL_READINESS_POLL_INTERVAL: Duration = Duration::from_secs(15);
 const READINESS_DISPATCH_BACKOFF: Duration = Duration::from_millis(250);
 const COMMAND_BRIEF_POLICY_REVISION: &str = "command-brief-policy-v1";
@@ -896,13 +899,19 @@ pub(crate) async fn start_manual_command_brief(
         .ok_or_else(|| "command brief model unavailable".to_string())?;
     let preflight = production_preflight(&app, &schedule, &model, expected_owner_pubkey)
         .await
-        .map_err(|_| "command brief runtime unavailable".to_string())?;
+        .map_err(|code| {
+            eprintln!("buzz-desktop: command brief preflight failed: {code}");
+            "command brief runtime unavailable".to_string()
+        })?;
     if preflight.owner_keys.public_key().to_hex() != expected_owner_pubkey {
         return Err("command brief identity unavailable".to_string());
     }
     let runtime = ensure_production_runtime(&app, &preflight, store_path, expected_owner_pubkey)
         .await
-        .map_err(|_| "command brief runtime unavailable".to_string())?;
+        .map_err(|code| {
+            eprintln!("buzz-desktop: command brief runtime install failed: {code}");
+            "command brief runtime unavailable".to_string()
+        })?;
     let active_owner = app
         .state::<AppState>()
         .signing_keys()

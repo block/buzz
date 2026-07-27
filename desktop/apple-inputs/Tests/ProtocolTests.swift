@@ -20,6 +20,22 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(payload.maximum, 25)
     }
 
+    func testDecodesReadOnlyEventKitSourceDiscovery() throws {
+        let calendars = try AppleInputRequest.decode(
+            line: #"{"operation":"list_calendars","arguments":{}}"#
+        )
+        let reminders = try AppleInputRequest.decode(
+            line: #"{"operation":"list_reminder_lists","arguments":{}}"#
+        )
+        let notes = try AppleInputRequest.decode(
+            line: #"{"operation":"list_note_folders","arguments":{}}"#
+        )
+
+        XCTAssertEqual(calendars.operation, .listCalendars)
+        XCTAssertEqual(reminders.operation, .listReminderLists)
+        XCTAssertEqual(notes.operation, .listNoteFolders)
+    }
+
     func testReminderPayloadRequiresBoundedRFC3339Window() throws {
         let request = try AppleInputRequest.decode(line: #"{"operation":"read_reminders","arguments":{"list_ids":["work"],"start":"2026-07-01T00:00:00Z","end":"2026-07-02T00:00:00Z","maximum":2}}"#)
         guard case .readReminders(let payload) = request.payload else { return XCTFail("wrong payload") }

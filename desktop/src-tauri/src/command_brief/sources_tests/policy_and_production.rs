@@ -264,7 +264,7 @@ fn oversized_source_text_is_utf8_safely_truncated_and_reported() {
         .iter()
         .find(|source| source.source_id() == "rag:large")
         .expect("large source retained");
-    assert!(source.quote().len() <= MAX_TEXT_BYTES);
+    assert!(source.quote().len() <= 1_024);
     assert!(source.quote().is_char_boundary(source.quote().len()));
     assert!(context
         .limitations()
@@ -318,14 +318,28 @@ fn ledger_truncation_tracks_omitted_kinds_and_degrades_affected_sections() {
         .freeze()
         .expect("bounded ledger");
 
-    assert_eq!(context.ledger().len(), 256);
+    assert_eq!(context.ledger().len(), 48);
+    for kind in [
+        SourceKind::Calendar,
+        SourceKind::Reminders,
+        SourceKind::Notes,
+        SourceKind::File,
+    ] {
+        assert!(
+            context
+                .ledger()
+                .iter()
+                .any(|source| source.source_kind() == kind),
+            "{kind:?} must survive bounded ledger retention"
+        );
+    }
     assert!(context
         .degraded_sections()
-        .contains(&BriefSection::DailyRoutine));
+        .contains(&BriefSection::Navigation));
     assert!(context
         .limitations()
         .iter()
-        .any(|item| item.contains("calendar") && item.contains("omitted")));
+        .any(|item| item.contains("RAG") && item.contains("omitted")));
 }
 
 #[test]
@@ -621,10 +635,10 @@ fn production_backend_uses_fixed_tool_arguments_and_rejects_snapshot_mismatch() 
         calls[0]["arguments"]["collections"],
         json!(["navy-publications"])
     );
-    assert_eq!(calls[0]["arguments"]["top_k"], 8);
+    assert_eq!(calls[0]["arguments"]["top_k"], 3);
     assert_eq!(calls[1]["tool"], "command_memory_context");
     assert_eq!(calls[1]["arguments"]["query"], intent.query());
-    assert_eq!(calls[1]["arguments"]["limit"], 10);
+    assert_eq!(calls[1]["arguments"]["limit"], 3);
     assert_eq!(calls[2]["tool"], "get_snapshot_status");
     assert_eq!(calls[2]["arguments"], json!({}));
 }

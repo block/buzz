@@ -2,6 +2,12 @@ import EventKit
 import Foundation
 
 struct Page<Value> { let records: [Value]; let truncated: Bool }
+struct EventKitSourceRecord: Equatable {
+    let identifier, title: String
+    func output() -> AppleInputRecord {
+        .init(fields: ["identifier": identifier, "title": title])
+    }
+}
 struct CalendarRecord: Equatable {
     let identifier, calendarIdentifier, title, recurrenceIdentifier: String
     let start, end: Date
@@ -58,6 +64,34 @@ final class EventKitReader: @unchecked Sendable {
     }
     func permissionStatus() -> (calendar: PermissionState, reminders: PermissionState) {
         (permissionStatus(source: .calendar), permissionStatus(source: .reminders))
+    }
+    func listCalendars() -> [EventKitSourceRecord] {
+        if store == nil {
+            return uniqueSources(calendarFixture.map {
+                EventKitSourceRecord(identifier: $0.calendarIdentifier, title: $0.calendarIdentifier)
+            })
+        }
+        guard permissionStatus(source: .calendar) == .authorized, let store else { return [] }
+        return uniqueSources(store.calendars(for: .event).map {
+            EventKitSourceRecord(
+                identifier: $0.calendarIdentifier,
+                title: String($0.title.prefix(512))
+            )
+        })
+    }
+    func listReminderLists() -> [EventKitSourceRecord] {
+        if store == nil {
+            return uniqueSources(reminderFixture.map {
+                EventKitSourceRecord(identifier: $0.listIdentifier, title: $0.listIdentifier)
+            })
+        }
+        guard permissionStatus(source: .reminders) == .authorized, let store else { return [] }
+        return uniqueSources(store.calendars(for: .reminder).map {
+            EventKitSourceRecord(
+                identifier: $0.calendarIdentifier,
+                title: String($0.title.prefix(512))
+            )
+        })
     }
     func requestPermission(source: PermissionSource) async -> PermissionState {
         guard let store else { return permissionStatus(source: source) }
@@ -128,5 +162,17 @@ final class EventKitReader: @unchecked Sendable {
         }
         lock.lock(); defer { lock.unlock() }
         return fetched
+    }
+
+    private func uniqueSources(_ values: [EventKitSourceRecord]) -> [EventKitSourceRecord] {
+        var seen = Set<String>()
+        return values
+            .filter { seen.insert($0.identifier).inserted }
+            .sorted {
+                let comparison = $0.title.localizedCaseInsensitiveCompare($1.title)
+                return comparison == .orderedSame
+                    ? $0.identifier < $1.identifier
+                    : comparison == .orderedAscending
+            }
     }
 }

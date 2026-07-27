@@ -81,6 +81,17 @@ fn source_context(
     )
 }
 
+fn trusted_source_context(run_id: &str) -> FrozenSourceContext {
+    FrozenSourceContext::for_orchestrator_trusted_test(
+        run_id,
+        SNAPSHOT_A,
+        OBSERVED,
+        ledger(SNAPSHOT_A, run_id),
+        Vec::new(),
+        Vec::new(),
+    )
+}
+
 fn section_for(adviser: AdviserId) -> BriefSection {
     match adviser {
         AdviserId::Operations => BriefSection::Operations,
@@ -229,6 +240,7 @@ pub(super) struct FakeAdviserProvider {
     chief_override: Mutex<Option<Value>>,
     chief_limitations: Mutex<Option<Vec<String>>>,
     specialist_limitations: Mutex<BTreeMap<AdviserId, Vec<String>>>,
+    chief_failures: AtomicUsize,
     tokens: Mutex<Vec<CancellationToken>>,
 }
 
@@ -245,6 +257,10 @@ impl FakeAdviserProvider {
             .lock()
             .expect("specialist limitations lock")
             .insert(adviser, limitations);
+    }
+
+    fn fail_chief_once(&self) {
+        self.chief_failures.store(1, Ordering::SeqCst);
     }
 }
 
@@ -331,6 +347,15 @@ impl BriefAdviserProvider for FakeAdviserProvider {
             if cancellation.is_cancelled() {
                 return Err(BriefAdviserError::Cancelled);
             }
+            if self
+                .chief_failures
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err(BriefAdviserError::Failed);
+            }
             let mut output = self
                 .chief_override
                 .lock()
@@ -346,6 +371,39 @@ impl BriefAdviserProvider for FakeAdviserProvider {
                 output["limitations"] = json!(limitations);
             }
             Ok(output)
+        })
+    }
+}
+
+struct TrustedRecheckFailureProvider;
+
+impl BriefSourceProvider for TrustedRecheckFailureProvider {
+    fn freeze<'a>(
+        &'a self,
+        run_id: &'a str,
+        _co_request: &'a str,
+        _observed_at: &'a str,
+        cancellation: CancellationToken,
+    ) -> BriefFuture<'a, Result<FrozenSourceContext, SourceCollectionError>> {
+        boxed(async move {
+            if cancellation.is_cancelled() {
+                return Err(SourceCollectionError::Cancelled);
+            }
+            Ok(trusted_source_context(run_id))
+        })
+    }
+
+    fn recheck<'a>(
+        &'a self,
+        _context: &'a FrozenSourceContext,
+        cancellation: CancellationToken,
+    ) -> BriefFuture<'a, Result<(), SourceCollectionError>> {
+        boxed(async move {
+            if cancellation.is_cancelled() {
+                Err(SourceCollectionError::Cancelled)
+            } else {
+                Err(SourceCollectionError::RagUnavailable)
+            }
         })
     }
 }
@@ -523,7 +581,69 @@ async fn failed_adviser_becomes_visible_limitation_only_degradation_without_retr
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn unsupported_chief_addition_persists_one_redacted_failed_terminal() {
+async fn failed_chief_model_preserves_specialists_in_a_degraded_brief() {
+    let sources = Arc::new(FakeSourceProvider::with_snapshots([SNAPSHOT_A]));
+    let advisers = Arc::new(FakeAdviserProvider::default());
+    advisers.fail_chief_once();
+    let persistence = Arc::new(FakePersistence::default());
+    let orchestrator = orchestrator(1, sources, advisers, persistence.clone());
+
+    let run_id = orchestrator.start(request()).expect("run starts");
+    assert_eq!(
+        wait_terminal(&orchestrator, &run_id).await,
+        BriefRunState::Degraded
+    );
+    let brief =
+        serde_json::to_value(orchestrator.result(&run_id).expect("brief").brief()).expect("json");
+    assert_eq!(
+        brief["contributions"]
+            .as_array()
+            .expect("contributions")
+            .len(),
+        5
+    );
+    assert!(!brief["sections"]["today"]
+        .as_array()
+        .expect("today")
+        .is_empty());
+    assert!(brief["missingInformation"]
+        .as_array()
+        .expect("limitations")
+        .contains(&json!(
+            "Chief of Staff model consolidation was unavailable; the brief was consolidated deterministically from validated specialist advice."
+        )));
+    persistence.assert_one_terminal(CommandBriefLifecycleState::Degraded, None);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn trusted_lan_recheck_failure_keeps_already_collected_evidence() {
+    let persistence = Arc::new(FakePersistence::default());
+    let orchestrator = orchestrator(
+        1,
+        Arc::new(TrustedRecheckFailureProvider),
+        Arc::new(FakeAdviserProvider::default()),
+        persistence.clone(),
+    );
+
+    let run_id = orchestrator.start(request()).expect("run starts");
+    assert_eq!(
+        wait_terminal(&orchestrator, &run_id).await,
+        BriefRunState::Degraded
+    );
+    let brief =
+        serde_json::to_value(orchestrator.result(&run_id).expect("brief").brief()).expect("json");
+    assert_eq!(brief["sourceLedger"].as_array().expect("ledger").len(), 1);
+    assert!(brief["missingInformation"]
+        .as_array()
+        .expect("limitations")
+        .contains(&json!(
+            "Trusted-LAN source recheck was unavailable after evidence collection; the brief retains the cited evidence already collected."
+        )));
+    persistence.assert_one_terminal(CommandBriefLifecycleState::Degraded, None);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn unsupported_chief_addition_is_discarded_and_uses_safe_fallback() {
     let sources = Arc::new(FakeSourceProvider::with_snapshots([SNAPSHOT_A]));
     let advisers = Arc::new(FakeAdviserProvider::default());
     *advisers.chief_override.lock().expect("chief override lock") = Some(json!({
@@ -543,21 +663,26 @@ async fn unsupported_chief_addition_persists_one_redacted_failed_terminal() {
     let run_id = orchestrator.start(request()).expect("run starts");
     assert_eq!(
         wait_terminal(&orchestrator, &run_id).await,
-        BriefRunState::Failed
+        BriefRunState::Degraded
     );
-    assert!(orchestrator.result(&run_id).is_none());
-    assert!(persistence.values.lock().expect("persistence").is_empty());
-    persistence.assert_one_terminal(
-        CommandBriefLifecycleState::Failed,
-        Some(CommandBriefFailureCode::ChiefOfStaffOutputRejected),
+    let brief =
+        serde_json::to_value(orchestrator.result(&run_id).expect("brief").brief()).expect("json");
+    assert!(!brief.to_string().contains("Unsupported new claim"));
+    assert_eq!(
+        brief["contributions"]
+            .as_array()
+            .expect("contributions")
+            .len(),
+        5
     );
+    persistence.assert_one_terminal(CommandBriefLifecycleState::Degraded, None);
     let status = serde_json::to_value(orchestrator.status(&run_id).expect("status")).expect("json");
-    assert_eq!(status["error"], "chief_of_staff_output_rejected");
+    assert_eq!(status["state"], "degraded");
     assert!(!status.to_string().contains("Unsupported new claim"));
 }
 
 #[tokio::test]
-async fn unsupported_chief_limitation_fails_before_persistence() {
+async fn unsupported_chief_limitation_is_discarded_and_uses_safe_fallback() {
     let sources = Arc::new(FakeSourceProvider::with_snapshots([SNAPSHOT_A]));
     let advisers = Arc::new(FakeAdviserProvider::default());
     *advisers
@@ -570,12 +695,14 @@ async fn unsupported_chief_limitation_fails_before_persistence() {
     let run_id = orchestrator.start(request()).expect("run starts");
     assert_eq!(
         wait_terminal(&orchestrator, &run_id).await,
-        BriefRunState::Failed
+        BriefRunState::Degraded
     );
-    assert!(orchestrator.result(&run_id).is_none());
-    assert!(persistence.values.lock().expect("persistence").is_empty());
+    let brief =
+        serde_json::to_value(orchestrator.result(&run_id).expect("brief").brief()).expect("json");
+    assert!(!brief.to_string().contains("Invented source gap"));
+    persistence.assert_one_terminal(CommandBriefLifecycleState::Degraded, None);
     let status = serde_json::to_value(orchestrator.status(&run_id).expect("status")).expect("json");
-    assert_eq!(status["error"], "chief_of_staff_output_rejected");
+    assert_eq!(status["state"], "degraded");
     assert!(!status.to_string().contains("Invented source gap"));
 }
 

@@ -6,12 +6,14 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { CommandConsoleScreen } from "./CommandConsoleScreen.tsx";
 
-test("CommandConsoleScreen renders an unmistakable OFFICIAL classification", () => {
+test("CommandConsoleScreen renders the usable Command Adviser route", () => {
   const html = renderToStaticMarkup(React.createElement(CommandConsoleScreen));
 
   assert.match(html, /data-testid="command-console-screen"/);
   assert.match(html, /data-testid="command-console-official-banner"/);
-  assert.match(html, />OFFICIAL</);
+  assert.match(html, />COMMAND ADVISER</);
+  assert.match(html, /LM Studio is preferred/i);
+  assert.doesNotMatch(html, /unsigned|fingerprint|replication/i);
 });
 
 test("CommandConsoleScreen installs the real advisory Daily Command Brief without placeholder claims", () => {

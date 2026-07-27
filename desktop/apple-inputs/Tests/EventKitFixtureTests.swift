@@ -35,4 +35,25 @@ final class EventKitFixtureTests: XCTestCase {
         let page = try reader.readCalendar(calendarIdentifiers: ["work"], start: Date(), end: Date().addingTimeInterval(86_400), maximum: 1)
         XCTAssertEqual(page.records.map(\.identifier), ["included"])
     }
+
+    func testSourceDiscoveryReturnsStableUniqueIdentifiersAndTitles() {
+        let reader = EventKitReader.fixture(
+            calendarRecords: [
+                .init(identifier: "event-1", calendarIdentifier: "work", title: "Ops", recurrenceIdentifier: "", start: .distantPast, end: .distantFuture, isRecurring: false, isDeleted: false, isStale: false),
+                .init(identifier: "event-2", calendarIdentifier: "work", title: "Duplicate source", recurrenceIdentifier: "", start: .distantPast, end: .distantFuture, isRecurring: false, isDeleted: false, isStale: false),
+            ],
+            reminderRecords: [
+                .init(identifier: "reminder-1", listIdentifier: "command", title: "Return", recurrenceIdentifier: "", dueDate: Date(), completionDate: nil, isCompleted: false, isDeleted: false, isStale: false),
+            ]
+        )
+
+        XCTAssertEqual(
+            reader.listCalendars(),
+            [EventKitSourceRecord(identifier: "work", title: "work")]
+        )
+        XCTAssertEqual(
+            reader.listReminderLists(),
+            [EventKitSourceRecord(identifier: "command", title: "command")]
+        )
+    }
 }

@@ -13,6 +13,8 @@ use url::{Host, Url};
 const MAXIMUM_CONFIG_BYTES: u64 = 64 * 1024;
 const MAXIMUM_MCP_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const TRUSTED_MODE: &str = "OFFICIAL_TRUSTED_LAN";
+const TRUSTED_LAN_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const TRUSTED_LAN_RETRIEVAL_LIMIT: u32 = 3;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TrustedLanEndpoint(String);
@@ -169,7 +171,7 @@ impl TrustedLanSourceClient {
         let http = Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_secs(10))
+            .timeout(TRUSTED_LAN_REQUEST_TIMEOUT)
             .build()
             .map_err(|_| TrustedLanError::ServiceUnavailable)?;
         Ok(Self {
@@ -191,7 +193,11 @@ impl TrustedLanSourceClient {
         self.call(
             &self.rag_url,
             "search_knowledge_base",
-            json!({"query": query, "collections": collections, "top_k": 8}),
+            json!({
+                "query": query,
+                "collections": collections,
+                "top_k": TRUSTED_LAN_RETRIEVAL_LIMIT
+            }),
         )
     }
 

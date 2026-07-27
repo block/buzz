@@ -328,7 +328,6 @@ function expectedDegradedSections(
   memory: MemoryKnowledgeStatus,
   rag: RagKnowledgeStatus,
   appleInputs: readonly AppleKnowledgeStatus[],
-  trustedLan = false,
 ): readonly string[] {
   const sections: string[] = [];
   if (memory.status !== "ready") sections.push("memory-readiness");
@@ -339,7 +338,6 @@ function expectedDegradedSections(
       sections.push(`apple-${source.source}`);
     }
   }
-  if (trustedLan) sections.push("trusted-lan-unsigned");
   return sections.sort();
 }
 
@@ -426,9 +424,7 @@ export function parseCommandKnowledgeStatus(
     degradedSections.length > 16 ||
     new Set(degradedSections).size !== degradedSections.length ||
     JSON.stringify(degradedSections) !==
-      JSON.stringify(
-        expectedDegradedSections(memory, rag, appleInputs, trustedLan),
-      )
+      JSON.stringify(expectedDegradedSections(memory, rag, appleInputs))
   )
     return null;
   const parsed = {

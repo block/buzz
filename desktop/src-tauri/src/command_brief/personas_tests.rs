@@ -83,7 +83,7 @@ fn fixed_prompts_are_structured_advisory_and_cannot_be_renderer_overridden() {
     let prompt = navigation.system_prompt();
     for required in [
         "Return exactly one JSON object",
-        "source ledger IDs",
+        "\"sourceIds\"",
         "limitations",
         "dissent",
         "pending",
@@ -103,6 +103,51 @@ fn fixed_prompts_are_structured_advisory_and_cannot_be_renderer_overridden() {
     );
 
     assert_no_renderer_control_surface(navigation);
+}
+
+#[test]
+fn every_model_prompt_spells_out_the_exact_rust_output_contract() {
+    for adviser in [
+        AdviserId::Operations,
+        AdviserId::Navigation,
+        AdviserId::DailyRoutine,
+        AdviserId::Reporting,
+        AdviserId::Plans,
+    ] {
+        let prompt = definition_for(adviser).system_prompt();
+        for field in [
+            "\"classification\":\"OFFICIAL\"",
+            "\"adviser\"",
+            "\"section\"",
+            "\"findings\"",
+            "\"sourceIds\"",
+            "\"confidence\"",
+            "\"limitations\"",
+            "\"dissent\"",
+            "\"proposedActions\"",
+            "\"approvalState\":\"pending\"",
+        ] {
+            assert!(
+                prompt.contains(field),
+                "{adviser:?} prompt omitted required contract field {field}"
+            );
+        }
+    }
+
+    let chief = definition_for(AdviserId::ChiefOfStaff).system_prompt();
+    for field in [
+        "\"classification\":\"OFFICIAL\"",
+        "\"adviser\":\"chief_of_staff\"",
+        "\"findings\"",
+        "\"sourceIds\"",
+        "\"limitations\"",
+        "\"dissent\"",
+    ] {
+        assert!(
+            chief.contains(field),
+            "Chief prompt omitted required contract field {field}"
+        );
+    }
 }
 
 fn assert_no_renderer_control_surface(definition: &PersonaDefinition) {
