@@ -64,6 +64,7 @@ export default defineConfig({
         "**/mentions.spec.ts",
         "**/team-mentions.spec.ts",
         "**/channel-mentions.spec.ts",
+        "**/channel-mentions-screenshots.spec.ts",
         "**/persistent-agent-audience.spec.ts",
         "**/relay-reconnect.spec.ts",
         "**/relay-reconnect-affordance.spec.ts",
