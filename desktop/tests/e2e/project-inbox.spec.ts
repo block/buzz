@@ -46,7 +46,7 @@ test("Buzz Git pull request renders and stays actionable in Inbox", async ({
         id,
         kind: 1618,
         pubkey: author,
-        content: "Inbox rendering verification",
+        content: "# Inbox rendering verification",
         created_at: Math.floor(Date.now() / 1000) + 1,
         channel_id: null,
         channel_name: "",
@@ -69,6 +69,35 @@ test("Buzz Git pull request renders and stays actionable in Inbox", async ({
 
   const inboxRow = page.getByTestId(`home-inbox-item-${pullRequestId}`);
   await expect(inboxRow).toBeVisible({ timeout: 10_000 });
+  const previewTypography = await inboxRow
+    .locator(".inbox-preview-markdown")
+    .evaluate((preview) => {
+      const firstBlock = preview.firstElementChild;
+      if (!firstBlock) {
+        throw new Error("Expected the Inbox preview to render a first block.");
+      }
+      const previewStyle = getComputedStyle(preview);
+      const firstBlockStyle = getComputedStyle(firstBlock);
+      return {
+        firstBlockTag: firstBlock.tagName,
+        fontSizeMatches: firstBlockStyle.fontSize === previewStyle.fontSize,
+        fontWeightMatches:
+          firstBlockStyle.fontWeight === previewStyle.fontWeight,
+        letterSpacingMatches:
+          firstBlockStyle.letterSpacing === previewStyle.letterSpacing,
+        lineHeightMatches:
+          firstBlockStyle.lineHeight === previewStyle.lineHeight,
+        lineClamp: firstBlockStyle.webkitLineClamp,
+      };
+    });
+  expect(previewTypography).toEqual({
+    firstBlockTag: "H1",
+    fontSizeMatches: true,
+    fontWeightMatches: true,
+    letterSpacingMatches: true,
+    lineHeightMatches: true,
+    lineClamp: "2",
+  });
   await inboxRow.locator(":scope > div").first().click();
 
   const detail = page.getByTestId("home-project-inbox-detail");
