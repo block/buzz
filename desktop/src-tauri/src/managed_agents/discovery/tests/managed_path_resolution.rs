@@ -1,5 +1,31 @@
 use crate::managed_agents::discovery::{clear_resolve_cache, resolve_command};
 
+/// The legacy Goose Windows installer wrote `%USERPROFILE%\goose\goose.exe`,
+/// a directory on no standard PATH. `resolve_command_uncached` finds binaries
+/// outside PATH only by scanning `common_binary_paths()`, so that directory
+/// must appear there or those installs stay undiscovered (#2239 residual).
+///
+/// Asserts the probe list rather than a planted binary: `common_binary_paths`
+/// is a process-lifetime `OnceLock`, so a test cannot re-seed `USERPROFILE`
+/// deterministically, and planting an executable under the real user profile
+/// is not an acceptable test side effect.
+#[cfg(windows)]
+#[test]
+fn common_binary_paths_probes_legacy_goose_install_dir() {
+    use std::path::PathBuf;
+
+    let profile = std::env::var_os("USERPROFILE").expect("USERPROFILE is always set on Windows");
+    let legacy_dir = PathBuf::from(profile).join("goose");
+
+    let probed = super::super::common_binary_paths();
+
+    assert!(
+        probed.contains(&legacy_dir),
+        "legacy Goose install dir {} must be probed, got: {probed:?}",
+        legacy_dir.display()
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn resolve_command_prefers_buzz_managed_npm_shim_over_path() {

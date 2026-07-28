@@ -344,7 +344,9 @@ const overrides = new Map([
   // absent, so AdapterMissing replaces the misleading NotInstalled. Includes
   // the deliberate-divergence doc comments; net after the inline preset
   // entries.push block collapsed into the helper.
-  ["src-tauri/src/managed_agents/discovery.rs", 1835],
+  // +6: legacy Goose Windows install dir (%USERPROFILE%\goose) probed in
+  // common_binary_paths so pre-#2680 standalone installs are discoverable.
+  ["src-tauri/src/managed_agents/discovery.rs", 1841],
   // BYOH — save_custom_harness_to_dir (backup-swap atomic write) + save_and_warm /
   // delete_and_warm (persist-mutex serialization for concurrent-safe registry
   // refresh, B-6). Also: id/collision/load/registry tests (from the file base) +
