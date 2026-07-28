@@ -59,13 +59,12 @@ test("machine onboarding: landing, backup, setup docked CTAs", async ({
   await waitForAnimations(page);
   await page.screenshot({ path: `${SHOT_DIR}/02-backup.png` });
 
-  // Encrypted-by-default backup: the raw key sits behind an explicit click.
-  await page.getByTestId("backup-show-raw-key").click();
-  await expect(page.getByTestId("nsec-value")).toBeVisible();
+  // The key stays masked behind an explicit reveal toggle.
+  await expect(page.getByTestId("backup-key-value")).toBeVisible();
 
   // Reveal the key: box must not reflow (same-length monospace mask).
-  await page.getByTestId("nsec-reveal-toggle").click();
-  await expect(page.getByTestId("nsec-value")).toHaveClass(/select-text/);
+  await page.getByTestId("backup-key-reveal-toggle").click();
+  await expect(page.getByTestId("backup-key-value")).toHaveClass(/select-text/);
   await waitForAnimations(page);
   await page.screenshot({ path: `${SHOT_DIR}/02b-backup-revealed.png` });
 

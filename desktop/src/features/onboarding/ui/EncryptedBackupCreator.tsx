@@ -23,14 +23,15 @@ import { NsecMaskedDisplay } from "./NsecMaskedDisplay";
 type EncryptedBackupCreatorProps = {
   /** "spotlight" is the onboarding treatment; "boxed" fits settings cards. */
   variant?: "spotlight" | "boxed";
-  /** Fired only after the portable Keycase has been saved successfully. */
+  /** Fired only after the encrypted key file has been saved successfully. */
   onSaved?: (path: string) => void;
 };
 
 /**
- * Password-first Keycase creation flow shared by onboarding and Settings.
- * The raw private key never enters this component. Rust creates the NIP-49
- * payload locally, then the native save dialog produces the user-owned file.
+ * Password-first encrypted key download flow shared by onboarding and
+ * Settings. The raw private key never enters this component. Rust creates the
+ * NIP-49 payload locally, then the native save dialog produces the user-owned
+ * file.
  */
 export function EncryptedBackupCreator({
   variant = "spotlight",
@@ -57,7 +58,7 @@ export function EncryptedBackupCreator({
           message:
             err instanceof Error
               ? err.message
-              : "Failed to generate a Keycase password.",
+              : "Failed to generate a password.",
         });
     }
   }, []);
@@ -89,7 +90,7 @@ export function EncryptedBackupCreator({
       } catch (err) {
         if (mountedRef.current)
           setSaveError(
-            err instanceof Error ? err.message : "Failed to save Keycase.",
+            err instanceof Error ? err.message : "Failed to save your key.",
           );
       } finally {
         if (mountedRef.current) setIsSaving(false);
@@ -99,7 +100,7 @@ export function EncryptedBackupCreator({
         dispatch({
           type: "create-failed",
           message:
-            err instanceof Error ? err.message : "Failed to create Keycase.",
+            err instanceof Error ? err.message : "Failed to encrypt your key.",
         });
     }
   }, [onSaved, state]);
@@ -117,7 +118,7 @@ export function EncryptedBackupCreator({
     } catch (err) {
       if (mountedRef.current)
         setSaveError(
-          err instanceof Error ? err.message : "Failed to save Keycase.",
+          err instanceof Error ? err.message : "Failed to save your key.",
         );
     } finally {
       if (mountedRef.current) setIsSaving(false);
@@ -149,14 +150,14 @@ export function EncryptedBackupCreator({
             variant="outline"
           >
             {isSaving ? <Spinner className="h-3.5 w-3.5 border-2" /> : null}
-            Save Keycase…
+            Save a copy…
           </Button>
           {savedPath ? (
             <p
               className="text-xs text-muted-foreground"
               data-testid="encrypted-backup-saved-path"
             >
-              Keycase saved to {savedPath}
+              Saved to {savedPath}
             </p>
           ) : null}
         </div>
@@ -164,7 +165,7 @@ export function EncryptedBackupCreator({
           <p className="text-center text-sm text-destructive">{saveError}</p>
         ) : null}
         <p className="text-center text-xs leading-5 text-muted-foreground">
-          Keep this Keycase private. You need both the file and its password to
+          Keep this file private. You need both the file and its password to
           restore your identity. Buzz cannot reset the password.
         </p>
       </div>
@@ -193,9 +194,7 @@ export function EncryptedBackupCreator({
               data-testid="backup-passphrase-generate-error"
             >
               <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-              <span>
-                Could not generate a Keycase password: {state.generateError}
-              </span>
+              <span>Could not generate a password: {state.generateError}</span>
             </div>
           ) : (
             <div className="flex items-center justify-center gap-2 py-4 text-sm text-foreground/70">
@@ -227,15 +226,15 @@ export function EncryptedBackupCreator({
             </Button>
           </div>
           <p className="text-center text-xs leading-5 text-muted-foreground">
-            Save this generated passphrase as your Keycase password. Store it
-            separately from the private Keycase file.
+            Save this generated passphrase as your encryption password. Store it
+            separately from the downloaded key file.
           </p>
         </div>
       ) : (
         <div className="space-y-3">
           <div className="space-y-2">
             <Input
-              aria-label="Keycase password"
+              aria-label="Encryption password"
               autoComplete="new-password"
               className="h-10 bg-background"
               data-testid="backup-passphrase-custom"
@@ -250,7 +249,7 @@ export function EncryptedBackupCreator({
               value={state.customPassphrase}
             />
             <Input
-              aria-label="Confirm Keycase password"
+              aria-label="Confirm encryption password"
               autoComplete="new-password"
               className="h-10 bg-background"
               data-testid="backup-passphrase-confirm"
@@ -286,7 +285,8 @@ export function EncryptedBackupCreator({
             </Button>
           </div>
           <p className="text-center text-xs leading-5 text-muted-foreground">
-            Your password protects the Keycase. Buzz cannot reset it if lost.
+            Your password protects your downloaded key. Buzz cannot reset it if
+            lost.
           </p>
         </div>
       )}
@@ -311,10 +311,10 @@ export function EncryptedBackupCreator({
           {state.isCreating ? (
             <>
               <Spinner className="h-4 w-4 border-2" />
-              Creating Keycase… this takes a couple of seconds
+              Encrypting… this takes a couple of seconds
             </>
           ) : (
-            "Create Keycase"
+            "Encrypt and download"
           )}
         </Button>
       </div>

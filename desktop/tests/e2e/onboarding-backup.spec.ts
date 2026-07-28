@@ -11,6 +11,14 @@ async function enterMachineBackup(page: import("@playwright/test").Page) {
   await page.getByRole("button", { name: "Create a new identity key" }).click();
 }
 
+async function invokedCommands(page: import("@playwright/test").Page) {
+  return page.evaluate(
+    () =>
+      (window as Window & { __BUZZ_E2E_COMMANDS__?: string[] })
+        .__BUZZ_E2E_COMMANDS__ ?? [],
+  );
+}
+
 const SHOTS = "test-results/screenshots-onboarding";
 
 test("backup step appears on fresh-key path after profile submit", async ({
@@ -36,24 +44,70 @@ test("backup step appears on fresh-key path after profile submit", async ({
 });
 
 // ---------------------------------------------------------------------------
-// Keycase path: password → create locally → native save → saved confirmation.
-// The raw key must never be fetched on this path.
+// Chooser: masked key with reveal toggle and inline copy. The raw key is
+// fetched only on explicit reveal/copy, and Next is never blocked.
 // ---------------------------------------------------------------------------
 
-test("Keycase happy path: generated password, create, native save, Next", async ({
+test("chooser shows masked key; reveal and copy fetch it explicitly", async ({
+  page,
+}) => {
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+  await enterMachineBackup(page);
+
+  await expect(page.getByTestId("backup-intro-logo")).toHaveCount(0);
+
+  // Masked by default: decorative mask only, no key material in the DOM.
+  const key = page.getByTestId("backup-key-value");
+  await expect(key).toBeVisible();
+  await expect(key).toHaveClass(/blur/);
+  await expect(key).not.toContainText("nsec1");
+  expect(await invokedCommands(page)).not.toContain("get_nsec");
+
+  // Reveal fetches the key; box must not reflow (same-length monospace mask).
+  await page.getByTestId("backup-key-reveal-toggle").click();
+  await expect(key).toContainText("nsec1mock");
+  await expect(key).toHaveClass(/select-text/);
+
+  await waitForAnimations(page);
+  await page.screenshot({ path: `${SHOTS}/02-backup-chooser-revealed.png` });
+
+  // Hide again.
+  await page.getByTestId("backup-key-reveal-toggle").click();
+  await expect(key).not.toContainText("nsec1");
+
+  // Inline copy goes straight to the clipboard.
+  await page.getByTestId("backup-copy-key").click();
+  await expect
+    .poll(async () => invokedCommands(page))
+    .toContain("copy_text_to_clipboard");
+  expect(await invokedCommands(page)).toContain("get_nsec");
+
+  // Backup is recommended, never required.
+  await expect(page.getByTestId("onboarding-next")).toBeEnabled();
+  await page.getByTestId("onboarding-next").click();
+  await expect(page.getByTestId("onboarding-page-2")).toBeVisible();
+});
+
+// ---------------------------------------------------------------------------
+// Encrypted download path: password → encrypt locally → native save → saved
+// confirmation. The raw key must never be fetched on this path.
+// ---------------------------------------------------------------------------
+
+test("download happy path: generated password, encrypt, native save, Next", async ({
   page,
 }) => {
   await enterMachineBackup(page);
+
+  // The download flow sits behind the footer CTA.
+  await expect(page.getByTestId("backup-intro-logo")).toHaveCount(0);
+  await page.getByTestId("backup-option-download").click();
 
   // Default mode: generated password shown, but backup remains optional.
   await expect(page.getByTestId("backup-passphrase-generated")).toBeVisible();
   await expect(page.getByTestId("onboarding-next")).toBeEnabled();
 
-  // Let the perceived-loading intro (animated logo → content fade-in) finish
-  // so the screenshot captures fully opaque content.
-  await expect(page.getByTestId("backup-intro-logo")).toHaveCount(0);
   await waitForAnimations(page);
-  await page.screenshot({ path: `${SHOTS}/02-backup-step-passphrase.png` });
+  await page.screenshot({ path: `${SHOTS}/03-backup-download-passphrase.png` });
 
   await page.getByTestId("encrypted-backup-create").click();
 
@@ -65,18 +119,14 @@ test("Keycase happy path: generated password, create, native save, Next", async 
   await expect(blob).toContainText("ncryptsec1");
 
   await waitForAnimations(page);
-  await page.screenshot({ path: `${SHOTS}/03-backup-step-encrypted.png` });
+  await page.screenshot({ path: `${SHOTS}/04-backup-download-encrypted.png` });
 
   await expect(page.getByTestId("encrypted-backup-saved-path")).toContainText(
     "identity.ncryptsec",
   );
 
-  // The default path must never have fetched the raw key.
-  const commands = await page.evaluate(
-    () =>
-      (window as Window & { __BUZZ_E2E_COMMANDS__?: string[] })
-        .__BUZZ_E2E_COMMANDS__ ?? [],
-  );
+  // The download path must never have fetched the raw key.
+  const commands = await invokedCommands(page);
   expect(commands).not.toContain("get_nsec");
   expect(commands).toContain("create_ncryptsec_backup");
 
@@ -85,10 +135,26 @@ test("Keycase happy path: generated password, create, native save, Next", async 
   await expect(page.getByTestId("onboarding-page-2")).toBeVisible();
 });
 
+test("download view returns to the chooser via All backup options", async ({
+  page,
+}) => {
+  await enterMachineBackup(page);
+
+  await page.getByTestId("backup-option-download").click();
+  await expect(page.getByTestId("backup-passphrase-generated")).toBeVisible();
+  // The footer download CTA hides while the flow is open.
+  await expect(page.getByTestId("backup-option-download")).toHaveCount(0);
+
+  await page.getByTestId("backup-back-to-options").click();
+  await expect(page.getByTestId("backup-key-value")).toBeVisible();
+  await expect(page.getByTestId("backup-option-download")).toBeVisible();
+});
+
 test("custom passphrase requires 12 characters and confirmation", async ({
   page,
 }) => {
   await enterMachineBackup(page);
+  await page.getByTestId("backup-option-download").click();
 
   await page.getByTestId("backup-passphrase-choose-own").click();
   const create = page.getByTestId("encrypted-backup-create");
@@ -106,41 +172,6 @@ test("custom passphrase requires 12 characters and confirmation", async ({
     .getByTestId("backup-passphrase-confirm")
     .fill("a much longer passphrase");
   await expect(create).toBeEnabled();
-});
-
-// ---------------------------------------------------------------------------
-// Raw-key path: preserved behind one explicit advanced action.
-// ---------------------------------------------------------------------------
-
-test("raw key path is one explicit click away and shows the masked nsec", async ({
-  page,
-}) => {
-  await enterMachineBackup(page);
-
-  await page.getByTestId("backup-show-raw-key").click();
-
-  const nsecDisplay = page.getByTestId("nsec-value");
-  await expect(nsecDisplay).toBeVisible();
-
-  // Should start masked (blurred) — reveal button exists and eye icon visible.
-  const revealBtn = page.getByTestId("nsec-reveal-toggle");
-  await expect(revealBtn).toBeVisible();
-  await expect(nsecDisplay).toHaveCSS("filter", /blur/);
-
-  // Reveal and verify the mock nsec appears.
-  await revealBtn.click();
-  await expect(nsecDisplay).not.toHaveCSS("filter", /blur/);
-  await expect(nsecDisplay).toContainText("nsec1mock");
-
-  // Intro crossfade must be finished before capturing.
-  await expect(page.getByTestId("backup-intro-logo")).toHaveCount(0);
-  await waitForAnimations(page);
-  await page.screenshot({ path: `${SHOTS}/04-backup-step-raw-revealed.png` });
-
-  // Next remains enabled on the advanced raw-key path.
-  await expect(page.getByTestId("onboarding-next")).toBeEnabled();
-  await page.getByTestId("onboarding-next").click();
-  await expect(page.getByTestId("onboarding-page-2")).toBeVisible();
 });
 
 test("backup step back button returns to machine identity choice", async ({
@@ -162,10 +193,10 @@ test("backup step back button returns to machine identity choice", async ({
 });
 
 // ---------------------------------------------------------------------------
-// B4: Error path coverage (raw path)
+// B4: Error path coverage (reveal/copy)
 // ---------------------------------------------------------------------------
 
-test("raw path shows error banner and retry button when get_nsec fails", async ({
+test("reveal shows inline error when get_nsec fails and Next still advances", async ({
   page,
 }) => {
   await installMockBridge(
@@ -177,22 +208,16 @@ test("raw path shows error banner and retry button when get_nsec fails", async (
   await page.getByRole("button", { name: "Create a new identity key" }).click();
 
   await expect(page.getByTestId("onboarding-page-backup")).toBeVisible();
-  await page.getByTestId("backup-show-raw-key").click();
+  await page.getByTestId("backup-key-reveal-toggle").click();
 
-  await expect(page.getByTestId("backup-load-error")).toBeVisible();
-  await expect(page.getByTestId("backup-retry")).toBeVisible();
-  // Keychain failure does not trap the user; both Next and explicit skip work.
+  await expect(page.getByTestId("backup-copy-error")).toBeVisible();
+  // Keychain failure does not trap the user.
   await expect(page.getByTestId("onboarding-next")).toBeEnabled();
-  await expect(page.getByTestId("backup-skip")).toBeVisible();
-
-  // Skip for now still advances to machine setup.
-  await page.getByTestId("backup-skip").click();
+  await page.getByTestId("onboarding-next").click();
   await expect(page.getByTestId("onboarding-page-2")).toBeVisible();
 });
 
-test("raw path retry succeeds and shows key after initial failure", async ({
-  page,
-}) => {
+test("reveal retry succeeds after initial failure", async ({ page }) => {
   // First call fails, second succeeds (sequenced via nsecErrors).
   await installMockBridge(
     page,
@@ -201,12 +226,12 @@ test("raw path retry succeeds and shows key after initial failure", async ({
   );
   await page.goto("/");
   await page.getByRole("button", { name: "Create a new identity key" }).click();
-  await page.getByTestId("backup-show-raw-key").click();
 
-  await expect(page.getByTestId("backup-load-error")).toBeVisible();
+  await page.getByTestId("backup-key-reveal-toggle").click();
+  await expect(page.getByTestId("backup-copy-error")).toBeVisible();
 
-  // Retry — second call succeeds.
-  await page.getByTestId("backup-retry").click();
-  await expect(page.getByTestId("nsec-value")).toBeVisible();
-  await expect(page.getByTestId("backup-load-error")).not.toBeVisible();
+  // Retry — second call succeeds and clears the error.
+  await page.getByTestId("backup-key-reveal-toggle").click();
+  await expect(page.getByTestId("backup-key-value")).toContainText("nsec1mock");
+  await expect(page.getByTestId("backup-copy-error")).not.toBeVisible();
 });

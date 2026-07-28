@@ -1,12 +1,14 @@
-import { AlertTriangle, Info, RefreshCw } from "lucide-react";
+import { ArrowLeft, Check, Copy, Eye, EyeOff, Info } from "lucide-react";
 import * as React from "react";
 
 import { getNsec } from "@/shared/api/tauriIdentity";
 import { cn } from "@/shared/lib/cn";
+import { writeTextToClipboard } from "@/shared/lib/clipboard";
 import { Button } from "@/shared/ui/button";
 import { FuzzyLogo } from "@/shared/ui/buzz-logo/FuzzyLogo";
 import { Card } from "@/shared/ui/card";
 import { Spinner } from "@/shared/ui/spinner";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { ONBOARDING_PRIMARY_CTA_CLASS } from "./OnboardingChrome";
 import { OnboardingFooter } from "./OnboardingFooter";
 import {
@@ -14,9 +16,7 @@ import {
   OnboardingSlideTransition,
 } from "./OnboardingSlideTransition";
 import { EncryptedBackupCreator } from "./EncryptedBackupCreator";
-import { NsecMaskedDisplay } from "./NsecMaskedDisplay";
-
-export type BackupStepMode = "encrypted" | "raw";
+import { ONBOARDING_KEY_TEXT_CLASS } from "./NsecMaskedDisplay";
 
 /**
  * How long the "Creating your identity key" loader holds the stage before the
@@ -25,8 +25,43 @@ export type BackupStepMode = "encrypted" | "raw";
  */
 const INTRO_HOLD_MS = 1400;
 
+/**
+ * The creation moment should only be sold once per app session. Module-level
+ * so remounts (e.g. navigating Back and returning to this step) skip the fake
+ * hold and show the finished state instantly.
+ */
+let introPlayed = false;
+
 const REVEAL_ANIMATION_CLASS =
   "animate-in fade-in duration-700 motion-reduce:animate-none";
+
+/** Quicker fade for switching between the chooser and a backup method. */
+const VIEW_ANIMATION_CLASS =
+  "animate-in fade-in duration-300 motion-reduce:animate-none";
+
+/**
+ * The chooser offers both backup methods: copying happens in place, while the
+ * encrypted download flow expands into its own view.
+ */
+type BackupView = "choose" | "download";
+
+function BackToOptions({ onClick }: { onClick: () => void }) {
+  return (
+    <div className="mt-4 flex justify-center">
+      <Button
+        className="h-8 gap-1 text-sm text-muted-foreground hover:text-accent-foreground"
+        data-testid="backup-back-to-options"
+        onClick={onClick}
+        size="sm"
+        type="button"
+        variant="ghost"
+      >
+        <ArrowLeft className="h-3.5 w-3.5" aria-hidden="true" />
+        All backup options
+      </Button>
+    </div>
+  );
+}
 
 /** Saving a Keycase is recommended, never required to continue onboarding. */
 export function backupNextDisabled(): boolean {
@@ -40,38 +75,31 @@ type BackupStepProps = {
 };
 
 /**
- * Onboarding backup step — recommends a portable Keycase without blocking
- * setup. The raw key is fetched only after the user chooses the advanced path.
+ * Onboarding backup step — offers two ways to back up the new key without
+ * blocking setup: a portable password-protected Keycase (recommended) or a
+ * direct clipboard copy destined for a password manager. The raw key is
+ * fetched only when the user explicitly clicks Copy, goes straight to the
+ * clipboard, and is never rendered or held in state.
  */
 export function BackupStep({ direction, onBack, onNext }: BackupStepProps) {
-  const [mode, setMode] = React.useState<BackupStepMode>("encrypted");
+  const [created, setCreated] = React.useState(introPlayed);
+  const [view, setView] = React.useState<BackupView>("choose");
+  const [copyState, setCopyState] = React.useState<
+    "idle" | "copying" | "copied"
+  >("idle");
+  const [copyError, setCopyError] = React.useState<string | null>(null);
   const [nsec, setNsec] = React.useState<string | null>(null);
-  const [isLoading, setIsLoading] = React.useState(false);
-  const [loadError, setLoadError] = React.useState<string | null>(null);
-  const [created, setCreated] = React.useState(false);
+  const [isRevealed, setIsRevealed] = React.useState(false);
   const cancelledRef = React.useRef(false);
+  const copiedTimerRef = React.useRef<number | null>(null);
 
   React.useEffect(() => {
-    const timer = window.setTimeout(() => setCreated(true), INTRO_HOLD_MS);
+    if (introPlayed) return;
+    const timer = window.setTimeout(() => {
+      introPlayed = true;
+      setCreated(true);
+    }, INTRO_HOLD_MS);
     return () => window.clearTimeout(timer);
-  }, []);
-
-  const loadNsec = React.useCallback(async () => {
-    setIsLoading(true);
-    setLoadError(null);
-    try {
-      const value = await getNsec();
-      if (!cancelledRef.current) setNsec(value);
-    } catch (err) {
-      if (!cancelledRef.current)
-        setLoadError(
-          err instanceof Error
-            ? err.message
-            : "Failed to retrieve private key.",
-        );
-    } finally {
-      if (!cancelledRef.current) setIsLoading(false);
-    }
   }, []);
 
   React.useEffect(() => {
@@ -81,13 +109,61 @@ export function BackupStep({ direction, onBack, onNext }: BackupStepProps) {
       // nsec from memory on unmount (backup step is only on the fresh-key path).
       cancelledRef.current = true;
       setNsec(null);
+      if (copiedTimerRef.current !== null)
+        window.clearTimeout(copiedTimerRef.current);
     };
   }, []);
 
-  const showRawKey = React.useCallback(() => {
-    setMode("raw");
-    void loadNsec();
-  }, [loadNsec]);
+  const copyKeyToClipboard = React.useCallback(async () => {
+    setCopyState("copying");
+    setCopyError(null);
+    try {
+      const value = nsec ?? (await getNsec());
+      await writeTextToClipboard(value);
+      if (cancelledRef.current) return;
+      setCopyState("copied");
+      if (copiedTimerRef.current !== null)
+        window.clearTimeout(copiedTimerRef.current);
+      copiedTimerRef.current = window.setTimeout(() => {
+        if (!cancelledRef.current) setCopyState("idle");
+      }, 2000);
+    } catch (err) {
+      if (cancelledRef.current) return;
+      setCopyState("idle");
+      setCopyError(
+        err instanceof Error ? err.message : "Failed to retrieve private key.",
+      );
+    }
+  }, [nsec]);
+
+  const toggleReveal = React.useCallback(async () => {
+    if (isRevealed) {
+      setIsRevealed(false);
+      return;
+    }
+    setCopyError(null);
+    try {
+      // The raw key enters the DOM only after this explicit reveal action.
+      const value = nsec ?? (await getNsec());
+      if (cancelledRef.current) return;
+      setNsec(value);
+      setIsRevealed(true);
+    } catch (err) {
+      if (cancelledRef.current) return;
+      setCopyError(
+        err instanceof Error ? err.message : "Failed to retrieve private key.",
+      );
+    }
+  }, [isRevealed, nsec]);
+
+  // Fixed-length decorative mask (nsec keys are 63 chars) so no key material
+  // is fetched just to render the blurred row. Bullets are joined with a
+  // zero-width space: WebKit won't line-break a run of U+2022 without an
+  // explicit break opportunity, so the masked row would overflow otherwise.
+  const maskedKey = React.useMemo(
+    () => Array.from({ length: nsec?.length ?? 63 }, () => "•").join("\u200b"),
+    [nsec],
+  );
 
   return (
     <OnboardingSlideTransition
@@ -141,85 +217,110 @@ export function BackupStep({ direction, onBack, onNext }: BackupStepProps) {
             REVEAL_ANIMATION_CLASS,
           )}
         >
-          {mode === "encrypted" ? (
-            <Card className="w-full px-8 py-6" variant="textured">
-              <div className="mx-auto w-full max-w-[832px]">
-                <div className="mb-5 space-y-2 text-center">
-                  <h2 className="text-lg font-medium">Save a Keycase</h2>
-                  <p className="text-xs leading-5 text-muted-foreground">
-                    A Keycase is still private. Never publish or share it. You
-                    need both the file and password to restore your identity.
-                  </p>
+          {view === "choose" ? (
+            <div className="w-full">
+              <Card className="px-8 py-6" variant="textured">
+                <div className="mx-auto flex w-full min-w-0 max-w-[832px] items-center gap-4">
+                  <div className="min-w-0 flex-1">
+                    <p
+                      className={cn(
+                        ONBOARDING_KEY_TEXT_CLASS,
+                        isRevealed && nsec
+                          ? "select-text"
+                          : "select-none blur-[4px]",
+                      )}
+                      data-testid="backup-key-value"
+                    >
+                      {isRevealed && nsec ? nsec : maskedKey}
+                    </p>
+                  </div>
+                  <div className="flex shrink-0 gap-1.5">
+                    <Button
+                      aria-label={
+                        isRevealed ? "Hide private key" : "Reveal private key"
+                      }
+                      className="h-10 w-10 text-muted-foreground hover:text-foreground"
+                      data-testid="backup-key-reveal-toggle"
+                      onClick={() => void toggleReveal()}
+                      size="icon"
+                      type="button"
+                      variant="ghost"
+                    >
+                      {isRevealed ? (
+                        <EyeOff className="h-6 w-6" aria-hidden="true" />
+                      ) : (
+                        <Eye className="h-6 w-6" aria-hidden="true" />
+                      )}
+                    </Button>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          aria-label="Copy private key"
+                          className="h-10 w-10 text-muted-foreground hover:text-foreground"
+                          data-testid="backup-copy-key"
+                          disabled={copyState === "copying"}
+                          onClick={() => void copyKeyToClipboard()}
+                          size="icon"
+                          type="button"
+                          variant="ghost"
+                        >
+                          {copyState === "copying" ? (
+                            <Spinner className="h-5 w-5 border-2" />
+                          ) : copyState === "copied" ? (
+                            <Check
+                              className="h-6 w-6 text-primary"
+                              aria-hidden="true"
+                            />
+                          ) : (
+                            <Copy className="h-6 w-6" aria-hidden="true" />
+                          )}
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent className="max-w-[240px] text-center">
+                        Copy your key and save it somewhere safe — a password
+                        manager is a great place for it.
+                      </TooltipContent>
+                    </Tooltip>
+                  </div>
                 </div>
-                <EncryptedBackupCreator variant="spotlight" />
-              </div>
-            </Card>
-          ) : isLoading ? (
-            <div className="flex items-center justify-center gap-2 py-6 text-sm text-foreground/70">
-              <Spinner className="h-4 w-4 border-2" />
-              Loading your private key…
-            </div>
-          ) : loadError ? (
-            <div className="mx-auto max-w-[500px] space-y-3 text-left">
-              <div
-                className="flex items-start gap-3 rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive"
-                data-testid="backup-load-error"
-              >
-                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                {copyError ? (
+                  <p
+                    className="mt-3 text-center text-sm text-destructive"
+                    data-testid="backup-copy-error"
+                  >
+                    Could not retrieve your private key: {copyError}. You can
+                    continue and find it later in Settings &gt; Profile &gt;
+                    Identity.
+                  </p>
+                ) : null}
+              </Card>
+
+              <p className="mx-auto mt-6 flex max-w-[440px] items-start justify-center gap-1.5 text-center text-xs leading-5 text-[var(--buzz-onboarding-backup-ink)]">
+                <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
                 <span>
-                  Could not retrieve your private key: {loadError}. You can
-                  continue and find it later in Settings &gt; Profile &gt;
-                  Identity.
+                  Never share your private key. Anyone with this key can
+                  impersonate you and access everything in your account.
                 </span>
-              </div>
-              <Button
-                className="h-8 gap-1.5 text-sm"
-                data-testid="backup-retry"
-                onClick={() => void loadNsec()}
-                size="sm"
-                type="button"
-                variant="outline"
-              >
-                <RefreshCw className="h-3.5 w-3.5" />
-                Try again
-              </Button>
+              </p>
             </div>
-          ) : nsec ? (
-            <Card className="w-full px-8 py-6" variant="textured">
-              <div className="mx-auto w-full max-w-[832px]">
-                <NsecMaskedDisplay nsec={nsec} variant="bare" />
-              </div>
-            </Card>
           ) : (
-            <p className="text-center text-sm text-foreground/70">
-              No key available to back up.
-            </p>
-          )}
-
-          {mode === "encrypted" ? (
-            <div className="mt-4 flex justify-center">
-              <Button
-                className="h-8 text-sm text-muted-foreground hover:text-accent-foreground"
-                data-testid="backup-show-raw-key"
-                onClick={showRawKey}
-                size="sm"
-                type="button"
-                variant="ghost"
-              >
-                Advanced: show my private key instead
-              </Button>
+            <div className={VIEW_ANIMATION_CLASS}>
+              <Card className="w-full px-8 py-6" variant="textured">
+                <div className="mx-auto w-full max-w-[832px]">
+                  <div className="mb-5 space-y-2 text-center">
+                    <h2 className="text-lg font-medium">Download your key</h2>
+                    <p className="text-xs leading-5 text-muted-foreground">
+                      Your key is encrypted with your password before it
+                      downloads. Keep the file private — you need both it and
+                      the password to restore your identity.
+                    </p>
+                  </div>
+                  <EncryptedBackupCreator variant="spotlight" />
+                </div>
+              </Card>
+              <BackToOptions onClick={() => setView("choose")} />
             </div>
-          ) : null}
-
-          {mode === "raw" && nsec ? (
-            <p className="mx-auto mt-6 flex max-w-[440px] items-start justify-center gap-1.5 text-center text-xs leading-5 text-[var(--buzz-onboarding-backup-ink)]">
-              <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-              <span>
-                Never share your private key. Anyone with this key can
-                impersonate you and access everything in your account.
-              </span>
-            </p>
-          ) : null}
+          )}
         </div>
       )}
 
@@ -235,15 +336,15 @@ export function BackupStep({ direction, onBack, onNext }: BackupStepProps) {
             Next
           </Button>
 
-          {mode === "raw" && loadError ? (
+          {view === "choose" ? (
             <Button
-              className="h-9 rounded-full px-5 text-muted-foreground hover:text-accent-foreground"
-              data-testid="backup-skip"
-              onClick={onNext}
+              className="h-9 rounded-full bg-foreground/10 px-6 hover:bg-foreground/15"
+              data-testid="backup-option-download"
+              onClick={() => setView("download")}
               type="button"
               variant="ghost"
             >
-              Skip for now
+              Download my key
             </Button>
           ) : null}
 
