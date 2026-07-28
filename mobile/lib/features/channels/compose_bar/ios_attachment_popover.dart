@@ -25,10 +25,13 @@ class _IOSAttachmentPopoverCallbacks {
 }
 
 class _IOSAttachmentPopoverCoordinator {
+  static final Object _cancelledSupportCheck = Object();
+
   final MethodChannel _channel;
 
   Object? _activeOwner;
   _IOSAttachmentPopoverCallbacks? _callbacks;
+  Completer<void>? _pendingSupportCancellation;
   bool _didPresent = false;
   bool _handlerInstalled = false;
 
@@ -45,11 +48,14 @@ class _IOSAttachmentPopoverCoordinator {
   }) async {
     if (defaultTargetPlatform != TargetPlatform.iOS) return false;
     if (_activeOwner case final activeOwner?) {
+      if (identical(activeOwner, owner)) return true;
       if (!_didPresent) _clearOwner(activeOwner);
       return _didPresent;
     }
 
+    final supportCancellation = Completer<void>();
     _activeOwner = owner;
+    _pendingSupportCancellation = supportCancellation;
     _callbacks = _IOSAttachmentPopoverCallbacks(
       onCapture: onCapture,
       onChoosePhotos: onChoosePhotos,
@@ -60,9 +66,16 @@ class _IOSAttachmentPopoverCoordinator {
     _ensureHandler();
 
     try {
-      final supported =
-          await _channel.invokeMethod<bool>('isSupported') ?? false;
+      final supportResult = await Future.any<Object?>([
+        _channel.invokeMethod<bool>('isSupported'),
+        supportCancellation.future.then<Object?>((_) => _cancelledSupportCheck),
+      ]);
+      if (identical(supportResult, _cancelledSupportCheck)) return true;
+      if (identical(_pendingSupportCancellation, supportCancellation)) {
+        _pendingSupportCancellation = null;
+      }
       if (!identical(_activeOwner, owner)) return false;
+      final supported = supportResult == true;
       if (!supported || !sourceContext.mounted) {
         _clearOwner(owner);
         return false;
@@ -153,6 +166,11 @@ class _IOSAttachmentPopoverCoordinator {
 
   void _clearOwner(Object owner) {
     if (!identical(_activeOwner, owner)) return;
+    final supportCancellation = _pendingSupportCancellation;
+    _pendingSupportCancellation = null;
+    if (supportCancellation != null && !supportCancellation.isCompleted) {
+      supportCancellation.complete();
+    }
     _activeOwner = null;
     _callbacks = null;
     _didPresent = false;

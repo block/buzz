@@ -658,11 +658,31 @@ void main() {
 
           expect(supportCalls, 1);
           expect(presentCalls, 0);
-          expect(find.byTooltip('Close attachments'), findsWidgets);
+          expect(
+            find.descendant(
+              of: find.byKey(const ValueKey('first-composer')),
+              matching: find.byTooltip('Close attachments'),
+            ),
+            findsNothing,
+          );
+          expect(
+            find.descendant(
+              of: find.byKey(const ValueKey('second-composer')),
+              matching: find.byTooltip('Close attachments'),
+            ),
+            findsWidgets,
+          );
 
           supportResult.complete(true);
           await tester.pumpAndSettle();
           expect(presentCalls, 0);
+          expect(
+            find.descendant(
+              of: find.byKey(const ValueKey('first-composer')),
+              matching: find.byTooltip('Close attachments'),
+            ),
+            findsNothing,
+          );
         } finally {
           if (!supportResult.isCompleted) supportResult.complete(false);
           await _sendNativeAttachmentPopoverCall(tester, 'dismissed');
@@ -672,6 +692,65 @@ void main() {
         }
       },
     );
+
+    testWidgets('a repeated owner tap keeps its pending native presentation', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      final supportResult = Completer<bool>();
+      var supportCalls = 0;
+      var presentCalls = 0;
+      _setMockNativeAttachmentPopoverHandler((call) async {
+        switch (call.method) {
+          case 'isSupported':
+            supportCalls += 1;
+            return supportResult.future;
+          case 'present':
+            presentCalls += 1;
+            return true;
+          case 'dismiss':
+            return null;
+        }
+        return null;
+      });
+      final uploadService = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: nostr.Keys.generate().nsec,
+        pickGalleryImage: () async => null,
+        pickGalleryImages: () async => const [],
+        pickGalleryVideo: () async => null,
+      );
+
+      try {
+        await tester.pumpWidget(
+          _buildNativePopoverOwnershipHarness(
+            uploadService: uploadService,
+            includeFirstComposer: false,
+          ),
+        );
+
+        await tester.tap(find.byTooltip('Add attachment').hitTestable());
+        await tester.pump();
+        await tester.tap(find.byTooltip('Add attachment').hitTestable());
+        await tester.pumpAndSettle();
+
+        expect(supportCalls, 1);
+        expect(presentCalls, 0);
+
+        supportResult.complete(true);
+        await tester.pumpAndSettle();
+
+        expect(presentCalls, 1);
+        expect(find.byTooltip('Close attachments'), findsNothing);
+      } finally {
+        if (!supportResult.isCompleted) supportResult.complete(false);
+        await _sendNativeAttachmentPopoverCall(tester, 'dismissed');
+        await tester.pumpWidget(const SizedBox.shrink());
+        _setMockNativeAttachmentPopoverHandler(null);
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
 
     testWidgets('disposing the native popover owner releases ownership', (
       tester,
