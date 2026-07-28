@@ -352,7 +352,10 @@ const overrides = new Map([
   // +19: codex-acp minimum-version gate — MIN_CODEX_ACP_VERSION plus the strict
   // three-component parse in probe_codex_acp_version, so an outdated 1.x adapter
   // is offered a reinstall instead of classifying as Available on major alone.
-  ["src-tauri/src/managed_agents/discovery.rs", 1860],
+  // +4 (1860 -> 1864): Hermes preset resolves via `hermes acp` with a comment
+  // explaining why the venv-only `hermes-acp` console script fails on a default
+  // install. Queued to split with the rest of this list.
+  ["src-tauri/src/managed_agents/discovery.rs", 1864],
   // BYOH — save_custom_harness_to_dir (backup-swap atomic write) + save_and_warm /
   // delete_and_warm (persist-mutex serialization for concurrent-safe registry
   // refresh, B-6). Also: id/collision/load/registry tests (from the file base) +
