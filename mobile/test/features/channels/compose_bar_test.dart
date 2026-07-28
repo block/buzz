@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -18,10 +19,12 @@ import 'package:buzz/features/channels/compose_bar.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/mentions/mention_candidates.dart';
 import 'package:buzz/features/channels/mentions/mention_candidates_provider.dart';
+import 'package:buzz/features/channels/photo_library.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 final _pngBytes = Uint8List.fromList([
   0x89,
@@ -126,6 +129,9 @@ List<int> _testPngChunk(String type, List<int> payload) {
 }
 
 const _mediaUploadPlatformChannel = MethodChannel('buzz/media_upload');
+const _nativeAttachmentPopoverChannel = MethodChannel(
+  'buzz/native_attachment_popover',
+);
 
 void _setMockMediaUploadPlatformHandler(
   Future<Object?> Function(MethodCall call)? handler,
@@ -133,6 +139,31 @@ void _setMockMediaUploadPlatformHandler(
   TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
       .setMockMethodCallHandler(_mediaUploadPlatformChannel, handler);
 }
+
+void _setMockNativeAttachmentPopoverHandler(
+  Future<Object?> Function(MethodCall call)? handler,
+) {
+  TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+      .setMockMethodCallHandler(_nativeAttachmentPopoverChannel, handler);
+}
+
+Future<void> _sendNativeAttachmentPopoverCall(
+  WidgetTester tester,
+  String method, [
+  Object? arguments,
+]) async {
+  await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+    _nativeAttachmentPopoverChannel.name,
+    _nativeAttachmentPopoverChannel.codec.encodeMethodCall(
+      MethodCall(method, arguments),
+    ),
+    null,
+  );
+}
+
+/// Shared mock prefs for the compose bar's draft store. Initialized in
+/// [main].
+late SharedPreferences _testPrefs;
 
 Widget _buildComposeBar({
   required MediaUploadService uploadService,
@@ -143,12 +174,16 @@ Widget _buildComposeBar({
   List<Channel> channels = const <Channel>[],
   String? currentPubkey,
   bool? supportsShowingSystemContextMenu,
+  TextScaler? textScaler,
   List<CustomEmoji> customEmoji = const <CustomEmoji>[],
+  RelayConfigNotifier Function()? relayConfig,
+  PhotoLibrary photoLibrary = const _EmptyPhotoLibrary(),
 }) {
   return ProviderScope(
     overrides: [
       customEmojiListProvider.overrideWithValue(customEmoji),
       mediaUploadServiceProvider.overrideWithValue(uploadService),
+      photoLibraryProvider.overrideWithValue(photoLibrary),
       currentPubkeyProvider.overrideWith((ref) => currentPubkey),
       channelMembersProvider(
         'channel-1',
@@ -158,17 +193,22 @@ Widget _buildComposeBar({
       relayClientProvider.overrideWithValue(
         RelayClient(baseUrl: 'http://localhost:3000'),
       ),
-      relayConfigProvider.overrideWith(() => _FakeRelayConfigNotifier()),
+      relayConfigProvider.overrideWith(
+        relayConfig ?? _FakeRelayConfigNotifier.new,
+      ),
+      savedPrefsProvider.overrideWithValue(_testPrefs),
       channelsProvider.overrideWith(() => _FakeChannelsNotifier(channels)),
     ],
     child: MaterialApp(
       theme: AppTheme.light(),
-      builder: supportsShowingSystemContextMenu == null
+      builder: supportsShowingSystemContextMenu == null && textScaler == null
           ? null
           : (context, child) => MediaQuery(
               data: MediaQuery.of(context).copyWith(
                 supportsShowingSystemContextMenu:
-                    supportsShowingSystemContextMenu,
+                    supportsShowingSystemContextMenu ??
+                    MediaQuery.of(context).supportsShowingSystemContextMenu,
+                textScaler: textScaler ?? MediaQuery.textScalerOf(context),
               ),
               child: child!,
             ),
@@ -184,12 +224,98 @@ Widget _buildComposeBar({
   );
 }
 
+Widget _buildNativePopoverOwnershipHarness({
+  required MediaUploadService uploadService,
+  required bool includeFirstComposer,
+}) {
+  return ProviderScope(
+    overrides: [
+      customEmojiListProvider.overrideWithValue(const []),
+      mediaUploadServiceProvider.overrideWithValue(uploadService),
+      photoLibraryProvider.overrideWithValue(const _EmptyPhotoLibrary()),
+      currentPubkeyProvider.overrideWith((ref) => null),
+      channelMembersProvider(
+        'channel-1',
+      ).overrideWith((ref) => Future.value(const <ChannelMember>[])),
+      agentDirectoryProvider.overrideWith(
+        (ref) async => const <AgentDirectoryEntry>[],
+      ),
+      agentOwnersProvider.overrideWith((ref) async => const <String, String>{}),
+      relayClientProvider.overrideWithValue(
+        RelayClient(baseUrl: 'http://localhost:3000'),
+      ),
+      relayConfigProvider.overrideWith(_FakeRelayConfigNotifier.new),
+      savedPrefsProvider.overrideWithValue(_testPrefs),
+      channelsProvider.overrideWith(() => _FakeChannelsNotifier(const [])),
+    ],
+    child: MaterialApp(
+      theme: AppTheme.light(),
+      home: Scaffold(
+        body: Column(
+          mainAxisAlignment: MainAxisAlignment.end,
+          children: [
+            if (includeFirstComposer)
+              ComposeBar(
+                key: const ValueKey('first-composer'),
+                channelId: 'channel-1',
+                onSend: (_, _, {mediaTags = const []}) async {},
+              ),
+            ComposeBar(
+              key: const ValueKey('second-composer'),
+              channelId: 'channel-1',
+              onSend: (_, _, {mediaTags = const []}) async {},
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
 class _FakeRelayConfigNotifier extends RelayConfigNotifier {
   @override
   RelayConfig build() => RelayConfig(
     baseUrl: 'http://localhost:3000',
     nsec: nostr.Keys.generate().nsec,
   );
+}
+
+class _EmptyPhotoLibrary implements PhotoLibrary {
+  const _EmptyPhotoLibrary();
+
+  @override
+  Future<List<RecentPhoto>> loadRecentPhotos() async => const [];
+
+  @override
+  Future<List<XFile>> resolveSelectedPhotos(List<RecentPhoto> photos) async =>
+      const [];
+}
+
+class _FakePhotoLibrary implements PhotoLibrary {
+  final List<RecentPhoto> photos;
+
+  const _FakePhotoLibrary(this.photos);
+
+  @override
+  Future<List<RecentPhoto>> loadRecentPhotos() async => photos;
+
+  @override
+  Future<List<XFile>> resolveSelectedPhotos(List<RecentPhoto> photos) async => [
+    for (final photo in photos)
+      XFile.fromData(_pngBytes, name: '${photo.id}.png'),
+  ];
+}
+
+/// Relay config that starts from a fixed identity and can be switched
+/// in place via [RelayConfigNotifier.update] — simulates a community or
+/// account switch while widgets stay mounted.
+class _SwitchableRelayConfigNotifier extends RelayConfigNotifier {
+  final RelayConfig initial;
+
+  _SwitchableRelayConfigNotifier(this.initial);
+
+  @override
+  RelayConfig build() => initial;
 }
 
 class _RecordingRelaySocket extends RelaySocket {
@@ -241,6 +367,11 @@ class _FakeChannelsNotifier extends ChannelsNotifier {
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  setUp(() async {
+    SharedPreferences.setMockInitialValues({});
+    _testPrefs = await SharedPreferences.getInstance();
+  });
+
   setUpAll(() {
     _setMockMediaUploadPlatformHandler((call) async {
       switch (call.method) {
@@ -262,6 +393,72 @@ void main() {
   });
 
   group('ComposeBar', () {
+    testWidgets('mounted composer does not carry draft text across an in-place '
+        'identity switch', (tester) async {
+      final keysA = nostr.Keys.generate();
+      final keysB = nostr.Keys.generate();
+      const relayUrl = 'http://localhost:3000';
+
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(keysA.nsec),
+          relayConfig: () => _SwitchableRelayConfigNotifier(
+            RelayConfig(baseUrl: relayUrl, nsec: keysA.nsec),
+          ),
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      String? storedText(nostr.Keys keys) {
+        final raw = _testPrefs.getString(
+          'compose_drafts_v1:$relayUrl:${keys.public}',
+        );
+        if (raw == null) return null;
+        final drafts = jsonDecode(raw) as List;
+        if (drafts.isEmpty) return null;
+        return (drafts.first as Map<String, dynamic>)['text'] as String?;
+      }
+
+      // Identity A types a draft; it persists into A's namespaced store.
+      await _expandComposer(tester);
+      await tester.enterText(find.byType(TextField), 'identity A secret draft');
+      await tester.pump();
+      expect(storedText(keysA), 'identity A secret draft');
+
+      // Switch identity in place while the composer stays mounted.
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(ComposeBar)),
+      );
+      container
+          .read(relayConfigProvider.notifier)
+          .update(baseUrl: relayUrl, nsec: keysB.nsec);
+      await tester.pumpAndSettle();
+
+      // The mounted composer must not carry identity A's text forward.
+      final textField = tester.widget<TextField>(find.byType(TextField));
+      expect(textField.controller!.text, isEmpty);
+      expect(storedText(keysB), isNull);
+
+      // Identity B's edits persist only into B's store; A's is untouched.
+      await tester.enterText(find.byType(TextField), 'identity B text');
+      await tester.pump();
+      expect(storedText(keysB), 'identity B text');
+      expect(storedText(keysA), 'identity A secret draft');
+
+      // Switching back restores identity A's own draft into the composer.
+      container
+          .read(relayConfigProvider.notifier)
+          .update(baseUrl: relayUrl, nsec: keysA.nsec);
+      await tester.pumpAndSettle();
+      expect(textField.controller!.text, 'identity A secret draft');
+      expect(storedText(keysB), 'identity B text');
+    });
+
     testWidgets('inserts a community emoji at the cursor from the action row', (
       tester,
     ) async {
@@ -296,6 +493,380 @@ void main() {
 
       expect(textField.controller!.text, 'hello :meow:world');
       expect(textField.controller!.selection.baseOffset, 12);
+    });
+
+    testWidgets('native All Photos picker failures show an error', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      _setMockNativeAttachmentPopoverHandler((call) async {
+        return switch (call.method) {
+          'isSupported' || 'present' => true,
+          'dismiss' => null,
+          _ => null,
+        };
+      });
+      final uploadService = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: nostr.Keys.generate().nsec,
+        pickGalleryImage: () async => null,
+        pickGalleryImages: () async =>
+            throw PlatformException(code: 'photo_picker_failed'),
+        pickGalleryVideo: () async => null,
+      );
+
+      try {
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: uploadService,
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+
+        await tester.tap(find.byTooltip('Add attachment').hitTestable());
+        await tester.pumpAndSettle();
+        await _sendNativeAttachmentPopoverCall(tester, 'pickAllPhotos');
+        await _sendNativeAttachmentPopoverCall(tester, 'dismissed');
+        await tester.pumpAndSettle();
+
+        expect(find.text('Unable to open your photo library.'), findsOneWidget);
+      } finally {
+        await _sendNativeAttachmentPopoverCall(tester, 'dismissed');
+        await tester.pumpWidget(const SizedBox.shrink());
+        _setMockNativeAttachmentPopoverHandler(null);
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
+    testWidgets('disposing a non-owner keeps native popover callbacks active', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      var presentCalls = 0;
+      var dismissCalls = 0;
+      var pickAllPhotosCalls = 0;
+      _setMockNativeAttachmentPopoverHandler((call) async {
+        switch (call.method) {
+          case 'isSupported':
+            return true;
+          case 'present':
+            presentCalls += 1;
+            return true;
+          case 'dismiss':
+            dismissCalls += 1;
+            return null;
+        }
+        return null;
+      });
+      final uploadService = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: nostr.Keys.generate().nsec,
+        pickGalleryImage: () async => null,
+        pickGalleryImages: () async {
+          pickAllPhotosCalls += 1;
+          return const [];
+        },
+        pickGalleryVideo: () async => null,
+      );
+
+      try {
+        await tester.pumpWidget(
+          _buildNativePopoverOwnershipHarness(
+            uploadService: uploadService,
+            includeFirstComposer: true,
+          ),
+        );
+
+        await tester.tap(find.byTooltip('Add attachment').hitTestable().at(1));
+        await tester.pumpAndSettle();
+        expect(presentCalls, 1);
+
+        await tester.pumpWidget(
+          _buildNativePopoverOwnershipHarness(
+            uploadService: uploadService,
+            includeFirstComposer: false,
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(dismissCalls, 0);
+
+        await _sendNativeAttachmentPopoverCall(tester, 'pickAllPhotos');
+        await tester.pumpAndSettle();
+        expect(pickAllPhotosCalls, 1);
+
+        await _sendNativeAttachmentPopoverCall(tester, 'dismissed');
+      } finally {
+        await _sendNativeAttachmentPopoverCall(tester, 'dismissed');
+        await tester.pumpWidget(const SizedBox.shrink());
+        _setMockNativeAttachmentPopoverHandler(null);
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
+    testWidgets(
+      'a pending native popover does not claim another composer tap',
+      (tester) async {
+        final previousPlatform = debugDefaultTargetPlatformOverride;
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        final supportResult = Completer<bool>();
+        var supportCalls = 0;
+        var presentCalls = 0;
+        _setMockNativeAttachmentPopoverHandler((call) async {
+          switch (call.method) {
+            case 'isSupported':
+              supportCalls += 1;
+              return supportResult.future;
+            case 'present':
+              presentCalls += 1;
+              return true;
+            case 'dismiss':
+              return null;
+          }
+          return null;
+        });
+        final uploadService = MediaUploadService(
+          baseUrl: 'https://relay.example',
+          nsec: nostr.Keys.generate().nsec,
+          pickGalleryImage: () async => null,
+          pickGalleryImages: () async => const [],
+          pickGalleryVideo: () async => null,
+        );
+
+        try {
+          await tester.pumpWidget(
+            _buildNativePopoverOwnershipHarness(
+              uploadService: uploadService,
+              includeFirstComposer: true,
+            ),
+          );
+
+          await tester.tap(
+            find.byTooltip('Add attachment').hitTestable().at(0),
+          );
+          await tester.pump();
+          await tester.tap(
+            find.byTooltip('Add attachment').hitTestable().at(1),
+          );
+          await tester.pumpAndSettle();
+
+          expect(supportCalls, 1);
+          expect(presentCalls, 0);
+          expect(
+            find.descendant(
+              of: find.byKey(const ValueKey('first-composer')),
+              matching: find.byTooltip('Close attachments'),
+            ),
+            findsNothing,
+          );
+          expect(
+            find.descendant(
+              of: find.byKey(const ValueKey('second-composer')),
+              matching: find.byTooltip('Close attachments'),
+            ),
+            findsWidgets,
+          );
+
+          supportResult.complete(true);
+          await tester.pumpAndSettle();
+          expect(presentCalls, 0);
+          expect(
+            find.descendant(
+              of: find.byKey(const ValueKey('first-composer')),
+              matching: find.byTooltip('Close attachments'),
+            ),
+            findsNothing,
+          );
+        } finally {
+          if (!supportResult.isCompleted) supportResult.complete(false);
+          await _sendNativeAttachmentPopoverCall(tester, 'dismissed');
+          await tester.pumpWidget(const SizedBox.shrink());
+          _setMockNativeAttachmentPopoverHandler(null);
+          debugDefaultTargetPlatformOverride = previousPlatform;
+        }
+      },
+    );
+
+    testWidgets('a repeated owner tap keeps its pending native presentation', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      final supportResult = Completer<bool>();
+      var supportCalls = 0;
+      var presentCalls = 0;
+      _setMockNativeAttachmentPopoverHandler((call) async {
+        switch (call.method) {
+          case 'isSupported':
+            supportCalls += 1;
+            return supportResult.future;
+          case 'present':
+            presentCalls += 1;
+            return true;
+          case 'dismiss':
+            return null;
+        }
+        return null;
+      });
+      final uploadService = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: nostr.Keys.generate().nsec,
+        pickGalleryImage: () async => null,
+        pickGalleryImages: () async => const [],
+        pickGalleryVideo: () async => null,
+      );
+
+      try {
+        await tester.pumpWidget(
+          _buildNativePopoverOwnershipHarness(
+            uploadService: uploadService,
+            includeFirstComposer: false,
+          ),
+        );
+
+        await tester.tap(find.byTooltip('Add attachment').hitTestable());
+        await tester.pump();
+        await tester.tap(find.byTooltip('Add attachment').hitTestable());
+        await tester.pumpAndSettle();
+
+        expect(supportCalls, 1);
+        expect(presentCalls, 0);
+
+        supportResult.complete(true);
+        await tester.pumpAndSettle();
+
+        expect(presentCalls, 1);
+        expect(find.byTooltip('Close attachments'), findsNothing);
+      } finally {
+        if (!supportResult.isCompleted) supportResult.complete(false);
+        await _sendNativeAttachmentPopoverCall(tester, 'dismissed');
+        await tester.pumpWidget(const SizedBox.shrink());
+        _setMockNativeAttachmentPopoverHandler(null);
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
+    testWidgets('disposing the native popover owner releases ownership', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      var presentCalls = 0;
+      var dismissCalls = 0;
+      _setMockNativeAttachmentPopoverHandler((call) async {
+        switch (call.method) {
+          case 'isSupported':
+            return true;
+          case 'present':
+            presentCalls += 1;
+            return true;
+          case 'dismiss':
+            dismissCalls += 1;
+            return null;
+        }
+        return null;
+      });
+      final uploadService = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: nostr.Keys.generate().nsec,
+        pickGalleryImage: () async => null,
+        pickGalleryImages: () async => const [],
+        pickGalleryVideo: () async => null,
+      );
+
+      try {
+        await tester.pumpWidget(
+          _buildNativePopoverOwnershipHarness(
+            uploadService: uploadService,
+            includeFirstComposer: true,
+          ),
+        );
+
+        await tester.tap(find.byTooltip('Add attachment').hitTestable().at(0));
+        await tester.pumpAndSettle();
+        expect(presentCalls, 1);
+
+        await tester.pumpWidget(
+          _buildNativePopoverOwnershipHarness(
+            uploadService: uploadService,
+            includeFirstComposer: false,
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(dismissCalls, 1);
+
+        await tester.tap(find.byTooltip('Add attachment').hitTestable());
+        await tester.pumpAndSettle();
+        expect(presentCalls, 2);
+      } finally {
+        await _sendNativeAttachmentPopoverCall(tester, 'dismissed');
+        await tester.pumpWidget(const SizedBox.shrink());
+        _setMockNativeAttachmentPopoverHandler(null);
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
+    testWidgets('missing native dismiss bridge still releases ownership', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      var presentCalls = 0;
+      _setMockNativeAttachmentPopoverHandler((call) async {
+        switch (call.method) {
+          case 'isSupported':
+            return true;
+          case 'present':
+            presentCalls += 1;
+            return true;
+          case 'dismiss':
+            throw MissingPluginException('dismiss is unavailable');
+        }
+        return null;
+      });
+      final uploadService = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: nostr.Keys.generate().nsec,
+        pickGalleryImage: () async => null,
+        pickGalleryImages: () async => const [],
+        pickGalleryVideo: () async => null,
+      );
+
+      try {
+        await tester.pumpWidget(
+          _buildNativePopoverOwnershipHarness(
+            uploadService: uploadService,
+            includeFirstComposer: true,
+          ),
+        );
+
+        await tester.tap(find.byTooltip('Add attachment').hitTestable().at(0));
+        await tester.pumpAndSettle();
+        expect(presentCalls, 1);
+
+        await tester.pumpWidget(
+          _buildNativePopoverOwnershipHarness(
+            uploadService: uploadService,
+            includeFirstComposer: false,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.byTooltip('Add attachment').hitTestable());
+        await tester.pumpAndSettle();
+        expect(presentCalls, 2);
+      } finally {
+        await _sendNativeAttachmentPopoverCall(tester, 'dismissed');
+        await tester.pumpWidget(const SizedBox.shrink());
+        _setMockNativeAttachmentPopoverHandler(null);
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
     });
 
     testWidgets('uploads an image and sends markdown plus imeta tags', (
@@ -342,8 +913,7 @@ void main() {
         ),
       );
 
-      await _openAttachmentMenu(tester);
-      await tester.tap(find.text('Photos'));
+      await _openSystemPhotoPicker(tester);
       await tester.pumpAndSettle();
 
       expect(find.byTooltip('Remove attachment'), findsOneWidget);
@@ -363,15 +933,115 @@ void main() {
       expect(find.byTooltip('Remove attachment'), findsNothing);
     });
 
-    testWidgets('keeps upload progress visible after the picker closes', (
+    testWidgets('uploads multiple system-selected photos in picker order', (
       tester,
     ) async {
-      final pickedImage = Completer<XFile?>();
       final uploadService = MediaUploadService(
         baseUrl: 'https://relay.example',
         nsec: nostr.Keys.generate().nsec,
+        httpClient: http_testing.MockClient((request) async {
+          final mimeType = request.headers.entries
+              .firstWhere((entry) => entry.key.toLowerCase() == 'content-type')
+              .value;
+          final isGif = mimeType == 'image/gif';
+          return http.Response(
+            jsonEncode({
+              'url': isGif
+                  ? 'https://relay.example/media/two.gif'
+                  : 'https://relay.example/media/one.png',
+              'sha256': isGif
+                  ? '2222222222222222222222222222222222222222222222222222222222222222'
+                  : '1111111111111111111111111111111111111111111111111111111111111111',
+              'size': request.bodyBytes.length,
+              'type': mimeType,
+              'uploaded': 1,
+            }),
+            200,
+          );
+        }),
+        pickGalleryImage: () async => null,
+        pickGalleryImages: () async => [
+          XFile.fromData(_pngBytes, name: 'one.png'),
+          XFile.fromData(_gifBytes, name: 'two.gif'),
+        ],
         pickGalleryVideo: () async => null,
-        pickGalleryImage: () => pickedImage.future,
+      );
+
+      String? sentContent;
+      List<List<String>> sentMediaTags = const [];
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: uploadService,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {
+                sentContent = content;
+                sentMediaTags = mediaTags;
+              },
+        ),
+      );
+
+      await _openSystemPhotoPicker(tester);
+      await tester.pumpAndSettle();
+
+      expect(find.byTooltip('Remove attachment'), findsNWidgets(2));
+
+      await _expandComposer(tester);
+      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      await tester.pumpAndSettle();
+
+      expect(
+        sentContent,
+        '\n![image](https://relay.example/media/one.png)'
+        '\n![image](https://relay.example/media/two.gif)',
+      );
+      expect(sentMediaTags, hasLength(2));
+      expect(sentMediaTags.map((tag) => tag[1]), [
+        'url https://relay.example/media/one.png',
+        'url https://relay.example/media/two.gif',
+      ]);
+    });
+
+    testWidgets('bounds concurrent system-selected photo uploads', (
+      tester,
+    ) async {
+      final releaseFirstBatch = Completer<void>();
+      var requestsStarted = 0;
+      var activeRequests = 0;
+      var peakActiveRequests = 0;
+      final uploadService = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: nostr.Keys.generate().nsec,
+        httpClient: http_testing.MockClient((request) async {
+          requestsStarted += 1;
+          final requestNumber = requestsStarted;
+          activeRequests += 1;
+          peakActiveRequests = math.max(peakActiveRequests, activeRequests);
+          if (requestNumber <= 3) {
+            await releaseFirstBatch.future;
+          }
+          activeRequests -= 1;
+          return http.Response(
+            jsonEncode({
+              'url': 'https://relay.example/media/photo-$requestNumber.png',
+              'sha256':
+                  '1111111111111111111111111111111111111111111111111111111111111111',
+              'size': request.bodyBytes.length,
+              'type': 'image/png',
+              'uploaded': 1,
+            }),
+            200,
+          );
+        }),
+        pickGalleryImage: () async => null,
+        pickGalleryImages: () async => [
+          for (var index = 0; index < 5; index += 1)
+            XFile.fromData(_pngBytes, name: 'photo-$index.png'),
+        ],
+        pickGalleryVideo: () async => null,
       );
 
       await tester.pumpWidget(
@@ -386,17 +1056,191 @@ void main() {
         ),
       );
 
+      await _openSystemPhotoPicker(tester);
+      for (var frame = 0; frame < 20 && requestsStarted < 3; frame += 1) {
+        await tester.pump(const Duration(milliseconds: 20));
+      }
+
+      expect(requestsStarted, 3);
+      expect(peakActiveRequests, 3);
+
+      releaseFirstBatch.complete();
+      await tester.pumpAndSettle();
+
+      expect(requestsStarted, 5);
+      expect(peakActiveRequests, 3);
+      expect(find.byTooltip('Remove attachment'), findsNWidgets(5));
+    });
+
+    testWidgets('numbers recent photo selection and returns to the menu', (
+      tester,
+    ) async {
+      final photoLibrary = _FakePhotoLibrary([
+        RecentPhoto(id: 'one', thumbnailBytes: _gifBytes),
+        RecentPhoto(id: 'two', thumbnailBytes: _gifBytes),
+        RecentPhoto(id: 'three', thumbnailBytes: _gifBytes),
+      ]);
+
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          photoLibrary: photoLibrary,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
       await _openAttachmentMenu(tester);
       await tester.tap(find.text('Photos'));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('photo-gallery-picker')),
+        findsOneWidget,
+      );
+      expect(find.byTooltip('Back to attachment options'), findsWidgets);
+      expect(find.text('All photos'), findsOneWidget);
+
+      await tester.tap(find.byKey(const ValueKey('recent-photo-two')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('recent-photo-one')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Add 2 photos'), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('photo-selection-index-two')),
+          matching: find.text('1'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('photo-selection-index-one')),
+          matching: find.text('2'),
+        ),
+        findsOneWidget,
+      );
+
+      await tester.tap(find.byKey(const ValueKey('recent-photo-two')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Add 1 photo'), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('photo-selection-index-one')),
+          matching: find.text('1'),
+        ),
+        findsOneWidget,
+      );
+
+      await tester.tap(find.byKey(const ValueKey('photo-gallery-back')));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('photo-gallery-picker')), findsNothing);
+      expect(
+        find.byKey(const ValueKey('attachment-trigger-menu')).hitTestable(),
+        findsOneWidget,
+      );
+      expect(find.text('Camera'), findsOneWidget);
+      expect(find.text('Photos'), findsOneWidget);
+    });
+
+    testWidgets('photo picker errors keep the action visible at large text', (
+      tester,
+    ) async {
+      final uploadService = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: nostr.Keys.generate().nsec,
+        pickGalleryImage: () async => null,
+        pickGalleryImages: () async =>
+            throw PlatformException(code: 'photo_picker_failed'),
+        pickGalleryVideo: () async => null,
+      );
+
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: uploadService,
+          textScaler: const TextScaler.linear(1.2),
+          photoLibrary: _FakePhotoLibrary([
+            RecentPhoto(id: 'one', thumbnailBytes: _gifBytes),
+            RecentPhoto(id: 'two', thumbnailBytes: _gifBytes),
+            RecentPhoto(id: 'three', thumbnailBytes: _gifBytes),
+            RecentPhoto(id: 'four', thumbnailBytes: _gifBytes),
+          ]),
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      await _openSystemPhotoPicker(tester);
+      await tester.pumpAndSettle();
+
+      expect(tester.takeException(), isNull);
+      expect(find.byKey(const ValueKey('photo-gallery-error')), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('photo-gallery-action')).hitTestable(),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('keeps upload progress visible after the picker closes', (
+      tester,
+    ) async {
+      final uploadResponse = Completer<http.Response>();
+      final uploadService = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: nostr.Keys.generate().nsec,
+        httpClient: http_testing.MockClient((request) => uploadResponse.future),
+        pickGalleryVideo: () async => null,
+        pickGalleryImage: () async => null,
+        pickGalleryImages: () async => [
+          XFile.fromData(_pngBytes, name: 'tiny.png'),
+        ],
+      );
+
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: uploadService,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      await _openSystemPhotoPicker(tester);
       await tester.pump();
 
       expect(
         find.byKey(const ValueKey('compose-upload-progress')),
         findsOneWidget,
       );
-      expect(find.text('Uploading attachment…'), findsOneWidget);
+      expect(find.bySemanticsLabel('Uploading attachment…'), findsOneWidget);
 
-      pickedImage.complete(null);
+      uploadResponse.complete(
+        http.Response(
+          jsonEncode({
+            'url': 'https://relay.example/media/test.png',
+            'sha256':
+                '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+            'size': 16,
+            'type': 'image/png',
+            'uploaded': 1,
+          }),
+          200,
+        ),
+      );
       await tester.pumpAndSettle();
 
       expect(
@@ -961,8 +1805,7 @@ void main() {
         ),
       );
 
-      await _openAttachmentMenu(tester);
-      await tester.tap(find.text('Photos'));
+      await _openSystemPhotoPicker(tester);
       await tester.pumpAndSettle();
 
       final attachmentFinder = find.byKey(
@@ -1017,8 +1860,7 @@ void main() {
         ),
       );
 
-      await _openAttachmentMenu(tester);
-      await tester.tap(find.text('Photos'));
+      await _openSystemPhotoPicker(tester);
       await tester.pumpAndSettle();
 
       expect(find.textContaining('upload failed'), findsOneWidget);
@@ -1058,8 +1900,7 @@ void main() {
           ),
         );
 
-        await _openAttachmentMenu(tester);
-        await tester.tap(find.text('Photos'));
+        await _openSystemPhotoPicker(tester);
         await tester.pumpAndSettle();
 
         expect(
@@ -1107,8 +1948,7 @@ void main() {
         ),
       );
 
-      await _openAttachmentMenu(tester);
-      await tester.tap(find.text('Photos'));
+      await _openSystemPhotoPicker(tester);
       await tester.pumpAndSettle();
 
       expect(
@@ -1334,8 +2174,7 @@ void main() {
         ),
       );
 
-      await _openAttachmentMenu(tester);
-      await tester.tap(find.text('Photos'));
+      await _openSystemPhotoPicker(tester);
       await tester.pumpAndSettle();
 
       expect(
@@ -1653,6 +2492,13 @@ Future<void> _expandComposer(WidgetTester tester) async {
 Future<void> _openAttachmentMenu(WidgetTester tester) async {
   await tester.tap(find.byTooltip('Add attachment').hitTestable());
   await tester.pumpAndSettle();
+}
+
+Future<void> _openSystemPhotoPicker(WidgetTester tester) async {
+  await _openAttachmentMenu(tester);
+  await tester.tap(find.text('Photos'));
+  await tester.pumpAndSettle();
+  await tester.tap(find.text('All photos'));
 }
 
 Future<void> _selectAndSendAgentMention(WidgetTester tester) async {

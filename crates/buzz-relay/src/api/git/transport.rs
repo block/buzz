@@ -63,8 +63,10 @@ const UPLOAD_PACK_MAX_DECODED_BYTES: u64 = 64 * 1024 * 1024;
 /// Validates the `Authorization: Nostr <base64>` header before the request body
 /// is read. Same pattern as `AuthenticatedUpload` in media.rs.
 ///
-/// Authorization model: any authenticated pubkey can clone; push authorization
-/// is handled by the pre-receive hook (calls back to the internal policy endpoint
+/// Authorization model: reads (ref advertisement, upload-pack) require the
+/// caller's *current* active membership in the repo's bound channel — see
+/// [`authorize_git_read`] (SEC-005). Push authorization is additionally
+/// handled by the pre-receive hook (calls back to the internal policy endpoint
 /// which checks channel role + protection rules from kind:30617).
 pub struct GitAuth {
     /// The authenticated user's public key, extracted from the NIP-98 event.
@@ -354,6 +356,114 @@ fn hydrate_error_to_response(owner: &str, repo: &str, err: HydrateError) -> Resp
         .into_response()
 }
 
+/// SEC-005: authorize a repository *read* (ref advertisement, upload-pack).
+///
+/// The authorization invariant is the authenticated git caller's **current
+/// active membership in the repo's bound channel**. NIP-98 alone only proves
+/// key possession — without this gate any authenticated pubkey (including a
+/// member removed from the channel) can clone channel-bound repositories.
+///
+/// Resolution follows the current authoritative announcement, the same
+/// mapping the push policy endpoint uses:
+/// 1. current live kind:30617 by `(community, owner pubkey from the URL,
+///    d = canonical repo name)` — soft-deleted/replaced announcements do not
+///    resolve;
+/// 2. its `buzz-channel` tag → channel UUID;
+/// 3. [`buzz_db::Db::get_member_role`] for the caller — a read is allowed
+///    only on `Ok(Some(role))` with a role the relay recognizes.
+///
+/// Fail-closed: missing/deleted announcement, invalid owner, missing or
+/// malformed `buzz-channel` binding, non-member, unknown role, and every DB
+/// error all deny. There is deliberately **no repo-owner bypass**: an owner
+/// removed from the bound channel loses read access, which is the exact
+/// exploit shape this gate closes. Every denial is the same generic 404 as a
+/// nonexistent repo so membership cannot be probed through the git endpoints.
+async fn authorize_git_read(
+    db: &buzz_db::Db,
+    community: buzz_core::CommunityId,
+    caller: &nostr::PublicKey,
+    owner_hex: &str,
+    repo_name: &str,
+) -> Result<(), Response> {
+    fn denied() -> Response {
+        (StatusCode::NOT_FOUND, "repository not found").into_response()
+    }
+
+    let Ok(owner_bytes) = hex::decode(owner_hex) else {
+        return Err(denied());
+    };
+    if owner_bytes.len() != 32 {
+        return Err(denied());
+    }
+
+    let query = buzz_db::EventQuery {
+        kinds: Some(vec![30617]),
+        pubkey: Some(owner_bytes),
+        d_tag: Some(repo_name.to_string()),
+        global_only: true,
+        limit: Some(1),
+        ..buzz_db::EventQuery::for_community(community)
+    };
+    let repo_event = match db.query_events(&query).await {
+        Ok(mut events) => match events.pop() {
+            Some(event) => event,
+            None => return Err(denied()),
+        },
+        Err(e) => {
+            error!(repo = %repo_name, error = %e, "git read gate: 30617 lookup failed (deny)");
+            return Err(denied());
+        }
+    };
+
+    let Some(channel_id) = repo_bound_channel_id(&repo_event.event) else {
+        warn!(repo = %repo_name, "git read gate: missing/malformed buzz-channel binding (deny)");
+        return Err(denied());
+    };
+
+    match db
+        .get_member_role(community, channel_id, &caller.to_bytes())
+        .await
+    {
+        Ok(role) if read_role_allows(role.as_deref()) => Ok(()),
+        Ok(_) => Err(denied()),
+        Err(e) => {
+            error!(repo = %repo_name, error = %e, "git read gate: role lookup failed (deny)");
+            Err(denied())
+        }
+    }
+}
+
+/// Extract the `buzz-channel` UUID from a kind:30617 announcement.
+///
+/// First-tag semantics, matching the push policy endpoint: only the *first*
+/// `buzz-channel` tag is considered, and it must carry a valid UUID. A
+/// malformed first binding denies even if a later duplicate tag is valid —
+/// an ambiguous announcement must fail closed, not silently resolve to
+/// whichever duplicate happens to parse.
+fn repo_bound_channel_id(event: &nostr::Event) -> Option<uuid::Uuid> {
+    let first = event
+        .tags
+        .iter()
+        .find(|t| t.as_slice().first().map(String::as_str) == Some("buzz-channel"))?;
+    first
+        .as_slice()
+        .get(1)
+        .and_then(|v| uuid::Uuid::parse_str(v).ok())
+}
+
+/// Pure decision for [`authorize_git_read`]: a read requires a current
+/// active membership row whose role the relay recognizes.
+///
+/// `None` = not an active member (removed, left, never joined) ⇒ deny.
+/// An unrecognized role string ⇒ deny (fail-closed, same as the push
+/// policy endpoint).
+fn read_role_allows(role: Option<&str>) -> bool {
+    match role {
+        Some(r) => r.parse::<buzz_core::channel::MemberRole>().is_ok(),
+        None => false,
+    }
+}
+
 #[derive(Deserialize)]
 /// Query parameters for the `info/refs` endpoint.
 pub struct InfoRefsQuery {
@@ -547,7 +657,19 @@ pub async fn info_refs(
         "git-upload-pack" | "git-receive-pack" => &query.service,
         _ => return Err((StatusCode::BAD_REQUEST, "invalid service").into_response()),
     };
-    let _repo_name = validate_repo_id(&params.owner, &params.repo)?;
+    let repo_name = validate_repo_id(&params.owner, &params.repo)?;
+
+    // SEC-005: channel-membership gate before any manifest load, hydration,
+    // or subprocess work. Both services — the receive-pack advertisement
+    // leaks the ref list just like the upload-pack one.
+    authorize_git_read(
+        &state.db,
+        auth.tenant.community(),
+        &auth.pubkey,
+        &params.owner,
+        repo_name,
+    )
+    .await?;
 
     // Track C fast path: only for clone advertisement. The receive-pack
     // advertisement carries a different capability set (report-status,
@@ -790,7 +912,21 @@ pub async fn upload_pack(
     AxumPath(params): AxumPath<GitRepoParams>,
     body: Body,
 ) -> Result<Response, Response> {
-    let _ = validate_repo_id(&params.owner, &params.repo)?;
+    let repo_name = validate_repo_id(&params.owner, &params.repo)?;
+
+    // SEC-005: the reused NIP-98 token means the GET advertisement's
+    // authorization cannot stand in for POST-time membership — gate this
+    // door independently, before body decode work is driven or hydration
+    // starts.
+    authorize_git_read(
+        &state.db,
+        auth.tenant.community(),
+        &auth.pubkey,
+        &params.owner,
+        repo_name,
+    )
+    .await?;
+
     let body = decode_git_request_body(&headers, body, UPLOAD_PACK_MAX_DECODED_BYTES);
     let permit = acquire_git_permit(&state, "upload_pack")?;
 
@@ -2284,5 +2420,337 @@ mod track_c_tests {
         let body = build_upload_pack_advertisement(&m);
         let caps = String::from_utf8_lossy(&body);
         assert!(caps.contains("object-format=sha256"));
+    }
+}
+
+#[cfg(test)]
+mod sec005_read_gate_tests {
+    use super::*;
+    use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    // ── Pure decision helpers ────────────────────────────────────────────
+
+    #[test]
+    fn read_role_allows_every_recognized_role() {
+        for role in ["owner", "admin", "member", "guest", "bot"] {
+            assert!(read_role_allows(Some(role)), "role {role:?} must allow");
+        }
+    }
+
+    #[test]
+    fn read_role_denies_non_members_and_unknown_roles() {
+        assert!(!read_role_allows(None), "no membership row must deny");
+        assert!(
+            !read_role_allows(Some("superuser")),
+            "unrecognized role must deny (fail-closed)"
+        );
+        assert!(!read_role_allows(Some("")), "empty role must deny");
+    }
+
+    fn announcement(keys: &Keys, tags: Vec<Tag>) -> nostr::Event {
+        EventBuilder::new(Kind::Custom(30617), "")
+            .tags(tags)
+            .sign_with_keys(keys)
+            .expect("sign 30617")
+    }
+
+    #[test]
+    fn repo_bound_channel_id_extracts_valid_uuid() {
+        let keys = Keys::generate();
+        let ch = uuid::Uuid::new_v4();
+        let event = announcement(
+            &keys,
+            vec![
+                Tag::parse(["d", "r"]).unwrap(),
+                Tag::parse(["buzz-channel", &ch.to_string()]).unwrap(),
+            ],
+        );
+        assert_eq!(repo_bound_channel_id(&event), Some(ch));
+    }
+
+    #[test]
+    fn repo_bound_channel_id_rejects_absent_and_malformed_bindings() {
+        let keys = Keys::generate();
+        let absent = announcement(&keys, vec![Tag::parse(["d", "r"]).unwrap()]);
+        assert_eq!(repo_bound_channel_id(&absent), None);
+
+        let malformed = announcement(
+            &keys,
+            vec![
+                Tag::parse(["d", "r"]).unwrap(),
+                Tag::parse(["buzz-channel", "not-a-uuid"]).unwrap(),
+            ],
+        );
+        assert_eq!(repo_bound_channel_id(&malformed), None);
+
+        let empty = announcement(
+            &keys,
+            vec![
+                Tag::parse(["d", "r"]).unwrap(),
+                Tag::parse(["buzz-channel"]).unwrap(),
+            ],
+        );
+        assert_eq!(repo_bound_channel_id(&empty), None);
+    }
+
+    #[test]
+    fn repo_bound_channel_id_fails_closed_on_ambiguous_duplicate_bindings() {
+        // First-tag semantics: a malformed first binding must deny even when
+        // a later duplicate tag is valid. An ambiguous announcement must not
+        // silently resolve to whichever duplicate happens to parse.
+        let keys = Keys::generate();
+        let ch = uuid::Uuid::new_v4();
+        let malformed_first = announcement(
+            &keys,
+            vec![
+                Tag::parse(["d", "r"]).unwrap(),
+                Tag::parse(["buzz-channel", "not-a-uuid"]).unwrap(),
+                Tag::parse(["buzz-channel", &ch.to_string()]).unwrap(),
+            ],
+        );
+        assert_eq!(repo_bound_channel_id(&malformed_first), None);
+
+        // And the mirror image: a valid first binding wins, matching the
+        // push policy endpoint's first-tag resolution.
+        let other = uuid::Uuid::new_v4();
+        let valid_first = announcement(
+            &keys,
+            vec![
+                Tag::parse(["d", "r"]).unwrap(),
+                Tag::parse(["buzz-channel", &ch.to_string()]).unwrap(),
+                Tag::parse(["buzz-channel", &other.to_string()]).unwrap(),
+            ],
+        );
+        assert_eq!(repo_bound_channel_id(&valid_first), Some(ch));
+    }
+
+    // ── authorize_git_read matrix (requires Postgres) ────────────────────
+
+    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
+
+    async fn setup_db() -> buzz_db::Db {
+        let url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| TEST_DB_URL.to_string());
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect test DB");
+        buzz_db::Db::from_pool(pool)
+    }
+
+    /// How the fixture's kind:30617 binds (or fails to bind) a channel.
+    enum Binding {
+        /// `buzz-channel` tag carrying the fixture channel's UUID.
+        Channel,
+        /// No `buzz-channel` tag at all.
+        Missing,
+        /// `buzz-channel` tag whose value is not a UUID.
+        Malformed,
+    }
+
+    struct RepoFixture {
+        db: buzz_db::Db,
+        community: buzz_core::CommunityId,
+        channel: uuid::Uuid,
+        owner_keys: Keys,
+        owner_hex: String,
+        member_keys: Keys,
+        repo: String,
+    }
+
+    /// Community + channel + one plain member + a kind:30617 announcement.
+    /// The repo owner is a *different* key that is not a channel member —
+    /// deliberately, to pin "no repo-owner bypass".
+    async fn setup_repo(binding: Binding) -> RepoFixture {
+        let db = setup_db().await;
+        let host = format!("sec005-{}.example", uuid::Uuid::new_v4().simple());
+        let community = db
+            .ensure_configured_community(&host)
+            .await
+            .expect("community")
+            .id;
+
+        let owner_keys = Keys::generate();
+        let member_keys = Keys::generate();
+        let creator = Keys::generate(); // channel creator, distinct from repo owner
+        let creator_pk = creator.public_key().to_bytes().to_vec();
+        let member_pk = member_keys.public_key().to_bytes().to_vec();
+        db.ensure_user(community, &creator_pk).await.expect("user");
+        db.ensure_user(community, &member_pk).await.expect("user");
+
+        let channel = uuid::Uuid::new_v4();
+        db.create_channel_with_id(
+            community,
+            channel,
+            &format!("ch-{}", channel.simple()),
+            buzz_db::channel::ChannelType::Stream,
+            buzz_db::channel::ChannelVisibility::Open,
+            None,
+            &creator_pk,
+            None,
+        )
+        .await
+        .expect("channel");
+        db.add_member(
+            community,
+            channel,
+            &member_pk,
+            buzz_core::channel::MemberRole::Member,
+            Some(&creator_pk),
+        )
+        .await
+        .expect("member");
+
+        let repo = format!("repo-{}", uuid::Uuid::new_v4().simple());
+        let mut tags = vec![Tag::parse(["d", &repo]).unwrap()];
+        match binding {
+            Binding::Channel => {
+                tags.push(Tag::parse(["buzz-channel", &channel.to_string()]).unwrap());
+            }
+            Binding::Missing => {}
+            Binding::Malformed => {
+                tags.push(Tag::parse(["buzz-channel", "not-a-uuid"]).unwrap());
+            }
+        }
+        let event = announcement(&owner_keys, tags);
+        db.insert_event(community, &event, None)
+            .await
+            .expect("30617");
+
+        let owner_hex = owner_keys.public_key().to_hex();
+        RepoFixture {
+            db,
+            community,
+            channel,
+            owner_keys,
+            owner_hex,
+            member_keys,
+            repo,
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn read_gate_allows_current_member_denies_removed_and_owner_bypass() {
+        let f = setup_repo(Binding::Channel).await;
+
+        // Current member: allowed.
+        let member = f.member_keys.public_key();
+        assert!(
+            authorize_git_read(&f.db, f.community, &member, &f.owner_hex, &f.repo)
+                .await
+                .is_ok(),
+            "current member must be allowed to read"
+        );
+
+        // Never-a-member caller: denied.
+        let stranger = Keys::generate().public_key();
+        assert!(
+            authorize_git_read(&f.db, f.community, &stranger, &f.owner_hex, &f.repo)
+                .await
+                .is_err(),
+            "non-member must be denied"
+        );
+
+        // Member removed → denied. THE finding-005 exploit shape.
+        let member_pk = member.to_bytes().to_vec();
+        f.db.remove_member(f.community, f.channel, &member_pk, &member_pk)
+            .await
+            .expect("self-remove");
+        assert!(
+            authorize_git_read(&f.db, f.community, &member, &f.owner_hex, &f.repo)
+                .await
+                .is_err(),
+            "removed member must be denied"
+        );
+
+        // No repo-owner bypass: the announcement author is not a channel
+        // member and must be denied too.
+        let owner = f.owner_keys.public_key();
+        assert!(
+            authorize_git_read(&f.db, f.community, &owner, &f.owner_hex, &f.repo)
+                .await
+                .is_err(),
+            "repo owner outside the channel must be denied (no owner bypass)"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn read_gate_denies_missing_or_malformed_binding_and_absent_repo() {
+        // Missing buzz-channel tag → deny even for a channel member.
+        let f = setup_repo(Binding::Missing).await;
+        let member = f.member_keys.public_key();
+        assert!(
+            authorize_git_read(&f.db, f.community, &member, &f.owner_hex, &f.repo)
+                .await
+                .is_err(),
+            "announcement without buzz-channel binding must deny"
+        );
+
+        // Malformed buzz-channel tag → deny.
+        let g = setup_repo(Binding::Malformed).await;
+        let member_g = g.member_keys.public_key();
+        assert!(
+            authorize_git_read(&g.db, g.community, &member_g, &g.owner_hex, &g.repo)
+                .await
+                .is_err(),
+            "announcement with malformed buzz-channel binding must deny"
+        );
+
+        // Nonexistent announcement → deny.
+        assert!(
+            authorize_git_read(&f.db, f.community, &member, &f.owner_hex, "no-such-repo")
+                .await
+                .is_err(),
+            "nonexistent repo must deny"
+        );
+
+        // Owner-mismatch: URL owner differs from announcement author → deny.
+        let impostor_hex = Keys::generate().public_key().to_hex();
+        assert!(
+            authorize_git_read(&f.db, f.community, &member, &impostor_hex, &f.repo)
+                .await
+                .is_err(),
+            "URL owner that never announced this repo must deny"
+        );
+
+        // Invalid owner hex in URL → deny (never panics).
+        assert!(
+            authorize_git_read(&f.db, f.community, &member, "zz-not-hex", &f.repo)
+                .await
+                .is_err(),
+            "malformed owner hex must deny"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn read_gate_follows_current_announcement_not_stale_registry() {
+        // Max's registry/pointer concern: a soft-deleted 30617 can leave the
+        // `git_repo_names` reservation and the manifest pointer alive. Reads
+        // must follow the current authoritative announcement — once it's
+        // deleted, the gate denies even a current channel member.
+        let f = setup_repo(Binding::Channel).await;
+
+        let member = f.member_keys.public_key();
+        assert!(
+            authorize_git_read(&f.db, f.community, &member, &f.owner_hex, &f.repo)
+                .await
+                .is_ok(),
+            "precondition: member allowed while announcement is live"
+        );
+
+        let owner_pk = f.owner_keys.public_key().to_bytes().to_vec();
+        let deleted =
+            f.db.soft_delete_by_coordinate(f.community, 30617, &owner_pk, &f.repo)
+                .await
+                .expect("soft delete 30617");
+        assert!(deleted, "precondition: a live announcement row was deleted");
+
+        assert!(
+            authorize_git_read(&f.db, f.community, &member, &f.owner_hex, &f.repo)
+                .await
+                .is_err(),
+            "deleted announcement must deny reads even for channel members"
+        );
     }
 }

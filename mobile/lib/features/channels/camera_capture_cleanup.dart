@@ -6,15 +6,25 @@ Future<void> processCapturedImage(
   XFile image,
   Future<void> Function(XFile image) onCapture,
 ) async {
+  await processTemporaryImages([image], (images) => onCapture(images.single));
+}
+
+/// Processes native-owned [images], then removes their temporary files.
+Future<void> processTemporaryImages(
+  List<XFile> images,
+  Future<void> Function(List<XFile> images) process,
+) async {
   try {
-    await onCapture(image);
+    await process(images);
   } finally {
-    final path = image.path;
-    if (path.isNotEmpty) {
-      try {
-        await File(path).delete();
-      } on FileSystemException {
-        // The camera plugin may already have removed its temporary file.
+    for (final image in images) {
+      final path = image.path;
+      if (path.isNotEmpty) {
+        try {
+          await File(path).delete();
+        } on FileSystemException {
+          // The native picker may already have removed its temporary file.
+        }
       }
     }
   }

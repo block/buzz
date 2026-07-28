@@ -57,6 +57,8 @@ buzz users get                          # your own profile
 buzz users get --pubkey <hex>           # single user
 buzz users get --pubkey <hex> --pubkey <hex>  # batch (max 200)
 buzz users set-presence --status online
+buzz users set-status --text "heads down on the CLI" --emoji "🚀"
+buzz users set-status --clear                 # remove your status
 
 # DMs
 buzz dms open --pubkey <hex>
@@ -133,6 +135,7 @@ stored rules in `validation_error` so an owner can remove and repair them.
 | | `set-profile` | Update your profile |
 | | `presence` | Get presence status |
 | | `set-presence` | Set presence status |
+| | `set-status` | Set or clear your NIP-38 profile status |
 | `workflows` | `list` | List workflows |
 | | `get` | Get workflow definition |
 | | `create` | Create a workflow |

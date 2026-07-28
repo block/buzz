@@ -1,10 +1,12 @@
 import 'dart:async';
 import 'dart:collection';
+import 'dart:math' as math;
 
 import 'package:camera/camera.dart' as camera;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/physics.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
@@ -15,10 +17,12 @@ import 'package:nostr/nostr.dart' as nostr;
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
+import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../profile/user_cache_provider.dart';
 import '../profile/user_profile.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
+import '../activity/compose_drafts_provider.dart';
 import 'camera_capture_cleanup.dart';
 import 'channel.dart';
 import 'channel_management_provider.dart';
@@ -27,21 +31,21 @@ import 'emoji_picker.dart';
 import 'mentions/mention_candidates.dart';
 import 'mentions/mention_candidates_provider.dart';
 import 'mentions/mention_ranking.dart';
+import 'photo_library.dart';
 
 part 'compose_bar/helpers.dart';
 part 'compose_bar/markdown_editing_controller.dart';
 part 'compose_bar/suggestions.dart';
 part 'compose_bar/formatting_toolbar.dart';
 part 'compose_bar/attachments.dart';
+part 'compose_bar/photo_gallery_picker.dart';
+part 'compose_bar/ios_photo_picker.dart';
+part 'compose_bar/ios_attachment_popover.dart';
 part 'compose_bar/camera_preview.dart';
 part 'compose_bar/send_button.dart';
+part 'compose_bar/layout.dart';
 
-const _pastedImageMimeTypes = <String>[
-  'image/jpeg',
-  'image/jpg',
-  'image/png',
-  'image/webp',
-];
+const _maxConcurrentImageUploads = 3;
 
 /// Rich compose bar with @mention autocomplete and a markdown formatting
 /// toolbar. Used in both channel and thread views — the caller provides an
@@ -77,10 +81,57 @@ class ComposeBar extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final controller = useMemoized(_MarkdownEditingController.new);
     useEffect(() => controller.dispose, [controller]);
+
+    // Restore and persist unsent text as a local draft so the Activity
+    // inbox Drafts filter reflects real composer state.
+    //
+    // The effect is additionally keyed on the active relay + pubkey identity:
+    // provider-level namespacing alone cannot protect a composer that stays
+    // mounted through an in-place community/account switch — the controller
+    // would retain the old identity's text and the next edit would persist it
+    // into the new identity's store. On identity change we replace the
+    // controller content with the new identity's own saved draft (or clear).
+    final draftKey = composeDraftKey(channelId, threadHeadId: threadHeadId);
+    final draftIdentity =
+        '${ref.watch(relayConfigProvider).baseUrl}'
+        ':${ref.watch(myPubkeyProvider) ?? 'anon'}';
+    final lastDraftIdentity = useRef<String?>(null);
+    useEffect(() {
+      final identityChanged =
+          lastDraftIdentity.value != null &&
+          lastDraftIdentity.value != draftIdentity;
+      lastDraftIdentity.value = draftIdentity;
+      final saved = ref.read(composeDraftsProvider.notifier).textFor(draftKey);
+      if (identityChanged) {
+        controller.text = saved ?? '';
+      } else if (saved != null && controller.text.isEmpty) {
+        controller.text = saved;
+      }
+      void persistDraft() {
+        ref
+            .read(composeDraftsProvider.notifier)
+            .save(
+              key: draftKey,
+              channelId: channelId,
+              threadHeadId: threadHeadId,
+              text: controller.text,
+            );
+      }
+
+      controller.addListener(persistDraft);
+      return () => controller.removeListener(persistDraft);
+    }, [controller, draftKey, draftIdentity]);
     final focusNode = useFocusNode();
     final isComposerExpanded = useState(false);
-    final showAttachments = useState(false);
-    final showCamera = useState(false);
+    final attachmentSurface = useState(_AttachmentSurface.closed);
+    final iosAttachmentPopover = useMemoized(
+      _IOSAttachmentPopoverController.new,
+    );
+    useEffect(
+      () =>
+          () => unawaited(iosAttachmentPopover.dispose()),
+      [iosAttachmentPopover],
+    );
     final isSending = useState(false);
     final showFormatting = useState(false);
     final attachments = useState<List<BlobDescriptor>>([]);
@@ -348,8 +399,7 @@ class ComposeBar extends HookConsumerWidget {
       mentionMap.value.clear();
       mentionQuery.value = null;
       channelQuery.value = null;
-      showAttachments.value = false;
-      showCamera.value = false;
+      attachmentSurface.value = _AttachmentSurface.closed;
       showFormatting.value = false;
       uploadError.value = null;
       focusNode.requestFocus();
@@ -492,6 +542,80 @@ class ComposeBar extends HookConsumerWidget {
       }
     }
 
+    Future<void> pickThenUpload({
+      required Future<XFile?> Function() pick,
+      required Future<BlobDescriptor> Function(XFile file) upload,
+    }) async {
+      uploadError.value = null;
+      try {
+        final picked = await pick();
+        if (picked == null || !context.mounted) return;
+        await pickAndUpload(() => upload(picked));
+      } catch (error) {
+        if (context.mounted) {
+          uploadError.value = _formatUploadError(error);
+        }
+      }
+    }
+
+    Future<void> uploadImages(List<XFile> images) async {
+      if (images.isEmpty) return;
+      uploadError.value = null;
+      uploadingCount.value += images.length;
+      try {
+        Future<({BlobDescriptor? uploaded, Object? error})> uploadImage(
+          XFile image,
+        ) async {
+          try {
+            final uploaded = await ref
+                .read(mediaUploadServiceProvider)
+                .uploadImage(image);
+            return (uploaded: uploaded, error: null);
+          } catch (error) {
+            return (uploaded: null, error: error);
+          }
+        }
+
+        final results = <({BlobDescriptor? uploaded, Object? error})>[];
+        for (
+          var start = 0;
+          start < images.length;
+          start += _maxConcurrentImageUploads
+        ) {
+          final end = math.min(
+            start + _maxConcurrentImageUploads,
+            images.length,
+          );
+          results.addAll(
+            await Future.wait([
+              for (final image in images.sublist(start, end))
+                uploadImage(image),
+            ]),
+          );
+        }
+        if (!context.mounted) return;
+
+        final uploaded = [for (final result in results) ?result.uploaded];
+        if (uploaded.isNotEmpty) {
+          attachments.value = [...attachments.value, ...uploaded];
+        }
+        final firstError = results
+            .map((result) => result.error)
+            .whereType<Object>()
+            .firstOrNull;
+        if (firstError != null) {
+          uploadError.value = _formatUploadError(firstError);
+        }
+      } finally {
+        if (context.mounted) {
+          uploadingCount.value = math.max(
+            0,
+            uploadingCount.value - images.length,
+          );
+        }
+      }
+    }
+
     Widget buildContextMenu(
       BuildContext context,
       EditableTextState editableTextState,
@@ -580,31 +704,88 @@ class ComposeBar extends HookConsumerWidget {
 
     // ----- Widget tree ----------------------------------------------------
 
-    void chooseAttachment(Future<BlobDescriptor?> Function() pick) {
-      showAttachments.value = false;
-      showCamera.value = false;
-      pickAndUpload(pick);
+    void chooseAttachment(
+      Future<void> Function() choose, {
+      String? errorMessage,
+    }) {
+      attachmentSurface.value = _AttachmentSurface.closed;
+      unawaited(() async {
+        try {
+          await choose();
+        } catch (error) {
+          if (context.mounted) {
+            uploadError.value = errorMessage ?? _formatUploadError(error);
+          }
+        }
+      }());
     }
 
     void toggleAttachments() {
-      if (showCamera.value) {
-        showCamera.value = false;
-        showAttachments.value = false;
+      attachmentSurface.value = switch (attachmentSurface.value) {
+        _AttachmentSurface.closed => _AttachmentSurface.menu,
+        _AttachmentSurface.menu => _AttachmentSurface.closed,
+        _AttachmentSurface.camera ||
+        _AttachmentSurface.photos => _AttachmentSurface.menu,
+      };
+    }
+
+    void handleAttachmentTap(BuildContext triggerContext) {
+      if (defaultTargetPlatform != TargetPlatform.iOS ||
+          attachmentSurface.value != _AttachmentSurface.closed) {
+        toggleAttachments();
         return;
       }
-      showCamera.value = false;
-      showAttachments.value = !showAttachments.value;
+
+      focusNode.unfocus();
+      unawaited(
+        iosAttachmentPopover
+            .present(
+              sourceContext: triggerContext,
+              onCapture: (image) => pickAndUpload(
+                () => ref.read(mediaUploadServiceProvider).uploadImage(image),
+              ),
+              onChoosePhotos: uploadImages,
+              onAllPhotos: () => chooseAttachment(() async {
+                final photos = await ref
+                    .read(mediaUploadServiceProvider)
+                    .pickGalleryImages();
+                await uploadImages(photos);
+              }, errorMessage: 'Unable to open your photo library.'),
+              onVideo: () => chooseAttachment(() {
+                final service = ref.read(mediaUploadServiceProvider);
+                return pickThenUpload(
+                  pick: service.pickGalleryVideo,
+                  upload: service.uploadVideo,
+                );
+              }),
+              onFiles: () => chooseAttachment(() {
+                final service = ref.read(mediaUploadServiceProvider);
+                return pickThenUpload(
+                  pick: service.pickAttachmentFile,
+                  upload: service.uploadFile,
+                );
+              }),
+            )
+            .then((didPresent) {
+              if (!didPresent && context.mounted) toggleAttachments();
+            }),
+      );
     }
 
     void openCamera() {
       focusNode.unfocus();
-      showAttachments.value = false;
-      showCamera.value = true;
+      attachmentSurface.value = _AttachmentSurface.camera;
     }
 
     final motionDuration = reducedMotion
         ? Duration.zero
-        : const Duration(milliseconds: 180);
+        : Duration(
+            milliseconds:
+                attachmentSurface.value == _AttachmentSurface.camera ||
+                    attachmentSurface.value == _AttachmentSurface.photos
+                ? 320
+                : 250,
+          );
     final suggestionOverlayController = useMemoized(
       OverlayPortalController.new,
     );
@@ -618,8 +799,7 @@ class ComposeBar extends HookConsumerWidget {
 
     void expandComposer() {
       if (isComposerExpanded.value) return;
-      showAttachments.value = false;
-      showCamera.value = false;
+      attachmentSurface.value = _AttachmentSurface.closed;
       isComposerExpanded.value = true;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (context.mounted) focusNode.requestFocus();
@@ -646,40 +826,48 @@ class ComposeBar extends HookConsumerWidget {
             ),
           )
         : const SizedBox.shrink(key: ValueKey('no-suggestions'));
-    final overlayPanel = showCamera.value
-        ? KeyedSubtree(
-            key: const ValueKey('camera-preview'),
-            child: _InlineCameraPreview(
-              onClose: () => showCamera.value = false,
-              onCapture: (image) async {
-                showCamera.value = false;
-                await pickAndUpload(
-                  () => ref.read(mediaUploadServiceProvider).uploadImage(image),
-                );
-              },
-            ),
-          )
-        : showAttachments.value
-        ? KeyedSubtree(
-            key: const ValueKey('attachment-menu'),
-            child: Align(
-              alignment: Alignment.bottomLeft,
-              heightFactor: 1,
-              child: _AttachmentMenu(
-                onCamera: openCamera,
-                onPhotos: () => chooseAttachment(
-                  ref.read(mediaUploadServiceProvider).pickAndUploadImage,
-                ),
-                onVideo: () => chooseAttachment(
-                  ref.read(mediaUploadServiceProvider).pickAndUploadVideo,
-                ),
-                onFiles: () => chooseAttachment(
-                  ref.read(mediaUploadServiceProvider).pickAndUploadFile,
-                ),
-              ),
-            ),
-          )
-        : suggestionPanel;
+    Widget buildOverlayPanel(_AttachmentSurface surface) {
+      return _AttachmentSurfacePanel(
+        key: ValueKey(
+          surface == _AttachmentSurface.closed
+              ? 'composer-suggestions'
+              : 'attachment-surface',
+        ),
+        surface: surface,
+        suggestionPanel: suggestionPanel,
+        onBack: () => attachmentSurface.value = _AttachmentSurface.menu,
+        onCamera: openCamera,
+        onPhotos: () {
+          focusNode.unfocus();
+          attachmentSurface.value = _AttachmentSurface.photos;
+        },
+        onVideo: () => chooseAttachment(() {
+          final service = ref.read(mediaUploadServiceProvider);
+          return pickThenUpload(
+            pick: service.pickGalleryVideo,
+            upload: service.uploadVideo,
+          );
+        }),
+        onFiles: () => chooseAttachment(() {
+          final service = ref.read(mediaUploadServiceProvider);
+          return pickThenUpload(
+            pick: service.pickAttachmentFile,
+            upload: service.uploadFile,
+          );
+        }),
+        onCapture: (image) async {
+          attachmentSurface.value = _AttachmentSurface.closed;
+          await pickAndUpload(
+            () => ref.read(mediaUploadServiceProvider).uploadImage(image),
+          );
+        },
+        onPickAllPhotos: ref.read(mediaUploadServiceProvider).pickGalleryImages,
+        onChoosePhotos: (photos) async {
+          attachmentSurface.value = _AttachmentSurface.closed;
+          await uploadImages(photos);
+        },
+      );
+    }
 
     // Suggestions and attachments live in the overlay so showing them cannot
     // reflow the composer. Both stay anchored just above the capsule.
@@ -696,233 +884,91 @@ class ComposeBar extends HookConsumerWidget {
             layoutInfo.childPaintTransform,
             Offset.zero,
           );
-          return Positioned(
-            left: composerOrigin.dx,
-            bottom: layoutInfo.overlaySize.height - composerOrigin.dy,
-            width: layoutInfo.childSize.width,
-            child: ClipRect(
-              child: Padding(
-                padding: const EdgeInsets.only(bottom: Grid.xxs),
-                child: _SuggestionPanelMotion(
-                  duration: motionDuration,
-                  child: overlayPanel,
+          return ValueListenableBuilder<_AttachmentSurface>(
+            valueListenable: attachmentSurface,
+            builder: (context, surface, _) {
+              final surfaceDuration = reducedMotion
+                  ? Duration.zero
+                  : Duration(
+                      milliseconds:
+                          surface == _AttachmentSurface.camera ||
+                              surface == _AttachmentSurface.photos
+                          ? 320
+                          : 250,
+                    );
+              final expandedSurfaceCoversComposer =
+                  surface == _AttachmentSurface.camera ||
+                  surface == _AttachmentSurface.photos;
+              final overlayAnchorY =
+                  composerOrigin.dy +
+                  (expandedSurfaceCoversComposer
+                      ? layoutInfo.childSize.height + Grid.twelve
+                      : 0);
+              return AnimatedPositioned(
+                duration: surfaceDuration,
+                curve:
+                    surface == _AttachmentSurface.camera ||
+                        surface == _AttachmentSurface.photos
+                    ? const Cubic(0.34, 1.25, 0.64, 1)
+                    : const Cubic(0.22, 1, 0.36, 1),
+                left: composerOrigin.dx,
+                bottom: layoutInfo.overlaySize.height - overlayAnchorY,
+                width: layoutInfo.childSize.width,
+                child: ClipRect(
+                  child: Padding(
+                    padding: const EdgeInsets.only(bottom: Grid.xxs),
+                    child: surface == _AttachmentSurface.closed
+                        ? _SuggestionPanelMotion(
+                            duration: surfaceDuration,
+                            alignment: Alignment.bottomLeft,
+                            child: buildOverlayPanel(surface),
+                          )
+                        : buildOverlayPanel(surface),
+                  ),
                 ),
-              ),
-            ),
+              );
+            },
           );
         },
-        child: Container(
-          decoration: BoxDecoration(
-            color: context.colors.surfaceContainerHighest,
-            borderRadius: BorderRadius.circular(Radii.dialog),
-            border: Border.all(
-              color: Colors.black.withValues(alpha: 0.04),
-              width: 1,
-            ),
-          ),
-          padding: const EdgeInsets.all(Grid.xxs),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              if (hasAttachments || hasPendingUploads) ...[
-                _AttachmentStrip(
-                  attachments: attachments.value,
-                  uploadingCount: uploadingCount.value,
-                  onRemove: removeAttachment,
-                ),
-                const SizedBox(height: Grid.xxs),
-              ],
-
-              if (uploadError.value case final error?) ...[
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: Text(
-                    error,
-                    style: context.textTheme.bodySmall?.copyWith(
-                      color: context.colors.error,
-                    ),
-                  ),
-                ),
-                const SizedBox(height: Grid.xxs),
-              ],
-
-              // Keep the default state out of the focus system entirely so
-              // restored native focus cannot expand a newly opened channel.
-              if (isComposerExpanded.value)
-                TextField(
-                  controller: controller,
-                  focusNode: focusNode,
-                  textInputAction: TextInputAction.send,
-                  contextMenuBuilder: buildContextMenu,
-                  contentInsertionConfiguration: ContentInsertionConfiguration(
-                    allowedMimeTypes: _pastedImageMimeTypes,
-                    onContentInserted: uploadPastedImage,
-                  ),
-                  onSubmitted: (_) => send(),
-                  minLines: 1,
-                  maxLines: 5,
-                  style: context.textTheme.bodyLarge,
-                  decoration: InputDecoration(
-                    hintText: resolvedHint,
-                    hintStyle: context.textTheme.bodyLarge?.copyWith(
-                      color: context.colors.onSurfaceVariant,
-                    ),
-                    border: InputBorder.none,
-                    enabledBorder: InputBorder.none,
-                    focusedBorder: InputBorder.none,
-                    contentPadding: const EdgeInsets.symmetric(
-                      horizontal: Grid.half,
-                      vertical: Grid.half,
-                    ),
-                    isDense: true,
-                  ),
-                )
-              else
-                Row(
-                  children: [
-                    _AttachmentTrigger(
-                      open: showAttachments.value || showCamera.value,
-                      onTap: toggleAttachments,
-                    ),
-                    const SizedBox(width: Grid.xxs),
-                    Expanded(
-                      child: Semantics(
-                        button: true,
-                        label: resolvedHint,
-                        child: GestureDetector(
-                          behavior: HitTestBehavior.opaque,
-                          onTap: expandComposer,
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(
-                              vertical: Grid.half,
-                            ),
-                            child: Align(
-                              alignment: Alignment.centerLeft,
-                              child: Text(
-                                resolvedHint,
-                                style: context.textTheme.bodyLarge?.copyWith(
-                                  color: context.colors.onSurfaceVariant,
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-
-              ClipRect(
-                child: Align(
-                  alignment: Alignment.topCenter,
-                  heightFactor: composerExpansionValue,
-                  child: IgnorePointer(
-                    ignoring: composerExpansionValue < 0.98,
-                    child: Opacity(
-                      opacity: composerExpansionProgress,
-                      child: Transform.translate(
-                        offset: Offset(
-                          0,
-                          Grid.xxs * (1 - composerExpansionProgress),
-                        ),
-                        child: Column(
-                          children: [
-                            const SizedBox(height: Grid.xxs),
-                            Row(
-                              children: [
-                                _AttachmentTrigger(
-                                  open:
-                                      showAttachments.value ||
-                                      showCamera.value ||
-                                      showFormatting.value,
-                                  onTap: () {
-                                    if (showFormatting.value) {
-                                      showFormatting.value = false;
-                                    } else {
-                                      toggleAttachments();
-                                    }
-                                  },
-                                ),
-                                const SizedBox(width: Grid.half),
-                                Expanded(
-                                  child: AnimatedSwitcher(
-                                    duration: motionDuration,
-                                    switchInCurve: Curves.easeOutCubic,
-                                    switchOutCurve: Curves.easeInCubic,
-                                    layoutBuilder:
-                                        (currentChild, previousChildren) =>
-                                            Stack(
-                                              alignment: Alignment.centerLeft,
-                                              children: [
-                                                ...previousChildren,
-                                                ?currentChild,
-                                              ],
-                                            ),
-                                    child: showFormatting.value
-                                        ? _FormattingToolbar(
-                                            onFormat: applyFormat,
-                                          )
-                                        : Row(
-                                            key: const ValueKey(
-                                              'standard-actions',
-                                            ),
-                                            children: [
-                                              _ComposeAction(
-                                                icon: LucideIcons.atSign,
-                                                onTap: () {
-                                                  showAttachments.value = false;
-                                                  showCamera.value = false;
-                                                  triggerMention();
-                                                },
-                                              ),
-                                              _ComposeAction(
-                                                icon: LucideIcons.hash,
-                                                onTap: () {
-                                                  showAttachments.value = false;
-                                                  showCamera.value = false;
-                                                  triggerChannel();
-                                                },
-                                              ),
-                                              _ComposeAction(
-                                                icon: LucideIcons.smilePlus,
-                                                onTap: () {
-                                                  showAttachments.value = false;
-                                                  showCamera.value = false;
-                                                  showEmojiPicker(
-                                                    context: context,
-                                                    onSelect: insertEmoji,
-                                                  );
-                                                },
-                                              ),
-                                              _ComposeAction(
-                                                icon: LucideIcons.aLargeSmall,
-                                                onTap: () {
-                                                  showAttachments.value = false;
-                                                  showCamera.value = false;
-                                                  showFormatting.value = true;
-                                                },
-                                              ),
-                                              const Spacer(),
-                                              _SendButton(
-                                                isDisabled: hasPendingUploads,
-                                                isSending: isSending.value,
-                                                onTap: send,
-                                              ),
-                                            ],
-                                          ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          ),
+        child: _ComposeBarLayout(
+          attachments: attachments.value,
+          uploadingCount: uploadingCount.value,
+          onRemoveAttachment: removeAttachment,
+          uploadError: uploadError.value,
+          isExpanded: isComposerExpanded.value,
+          controller: controller,
+          focusNode: focusNode,
+          contextMenuBuilder: buildContextMenu,
+          onContentInserted: uploadPastedImage,
+          onSend: () => unawaited(send()),
+          resolvedHint: resolvedHint,
+          attachmentSurface: attachmentSurface.value,
+          onAttachmentTap: handleAttachmentTap,
+          onExpand: expandComposer,
+          expansionValue: composerExpansionValue,
+          expansionProgress: composerExpansionProgress,
+          formattingOpen: showFormatting.value,
+          onCloseFormatting: () => showFormatting.value = false,
+          motionDuration: motionDuration,
+          onFormat: applyFormat,
+          onMention: () {
+            attachmentSurface.value = _AttachmentSurface.closed;
+            triggerMention();
+          },
+          onChannel: () {
+            attachmentSurface.value = _AttachmentSurface.closed;
+            triggerChannel();
+          },
+          onEmoji: () {
+            attachmentSurface.value = _AttachmentSurface.closed;
+            showEmojiPicker(context: context, onSelect: insertEmoji);
+          },
+          onOpenFormatting: () {
+            attachmentSurface.value = _AttachmentSurface.closed;
+            showFormatting.value = true;
+          },
+          hasPendingUploads: hasPendingUploads,
+          isSending: isSending.value,
         ),
       ),
     );

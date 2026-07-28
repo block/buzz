@@ -6,8 +6,8 @@ use crate::{
     managed_agents::{
         build_managed_agent_summary, current_instance_id, discover_provider_candidates,
         ensure_persona_is_active, find_managed_agent_mut, load_managed_agents, load_personas,
-        load_teams, managed_agent_avatar_url, managed_agents_base_dir, normalize_agent_args,
-        provider_deploy, resolve_provider_binary, save_managed_agents, start_managed_agent_process,
+        load_teams, managed_agent_avatar_url, normalize_agent_args, provider_deploy,
+        resolve_provider_binary, save_managed_agents, start_managed_agent_process,
         stop_managed_agent_process, stop_managed_agent_workspace_pair,
         sync_managed_agent_processes, try_regenerate_nest, validate_provider_config, BackendKind,
         CreateManagedAgentRequest, CreateManagedAgentResponse, ManagedAgentRecord,
@@ -18,8 +18,7 @@ use crate::{
     util::now_iso,
 };
 
-/// Read the workspace owner's pubkey hex from app state without holding the
-/// lock for longer than necessary. Used to populate `BUZZ_ACP_AGENT_OWNER`
+/// Read the workspace owner pubkey without holding the lock. Used to populate `BUZZ_ACP_AGENT_OWNER`
 /// as a fallback for legacy agent records that have no NIP-OA `auth_tag`.
 pub(super) fn workspace_owner_hex(state: &AppState) -> Result<String, String> {
     let keys = state.keys.lock().map_err(|e| e.to_string())?;
@@ -45,52 +44,15 @@ pub(super) fn retain_managed_agent_pending(
     state: &AppState,
     record: &ManagedAgentRecord,
 ) {
-    use crate::managed_agents::{
-        agent_events::{agent_event_content, build_agent_event},
-        persona_events::monotonic_created_at,
-        retention::{get_retained_event, open_retention_db, retain_event, RetainedEvent},
-    };
-    use buzz_core_pkg::kind::KIND_MANAGED_AGENT;
-    use nostr::JsonUtil;
+    use crate::managed_agents::{reconcile::retain_agent_record, retention::open_retention_db};
 
     let result = (|| -> Result<(), String> {
-        let conn = open_retention_db(&managed_agents_base_dir(app)?.join("retention.db"))?;
-        // The published content is the opt-IN projection JSON, independent of
-        // signing and created_at. Compute it once to drive the no-republish
-        // guard without signing twice.
-        let content = serde_json::to_string(&agent_event_content(record))
-            .map_err(|e| format!("failed to serialize managed-agent content: {e}"))?;
-        let (owner_pubkey, event) = {
-            let keys = state.signing_keys()?;
-            let owner_pubkey = keys.public_key().to_hex();
-            let existing =
-                get_retained_event(&conn, KIND_MANAGED_AGENT, &owner_pubkey, &record.pubkey)?;
-            // Skip re-publishing when the projection is unchanged: a start/stop
-            // or any edit that touched only excluded runtime/local fields
-            // produces an identical projection, so it is a no-op — operational
-            // churn never re-enqueues a publish.
-            if existing.as_ref().is_some_and(|row| row.content == content) {
-                return Ok(());
-            }
-            // Monotonic created_at: bump past the retained head (NIP-AP step 3).
-            let event = build_agent_event(record)?
-                .custom_created_at(monotonic_created_at(existing.map(|row| row.created_at)))
-                .sign_with_keys(&keys)
-                .map_err(|e| format!("failed to sign managed-agent event: {e}"))?;
-            (owner_pubkey, event)
-        };
-        retain_event(
-            &conn,
-            &RetainedEvent {
-                kind: KIND_MANAGED_AGENT,
-                pubkey: owner_pubkey,
-                d_tag: record.pubkey.clone(),
-                content: event.content.to_string(),
-                created_at: event.created_at.as_secs() as i64,
-                raw_event: event.as_json(),
-                pending_sync: true,
-            },
-        )
+        let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
+        let conn = open_retention_db(&scope.db_path)?;
+        // Shared engine with the boot-time reconcile: projection content diff
+        // (no republish for runtime-only churn) + monotonic created_at bump
+        // past the retained head (NIP-AP step 3).
+        retain_agent_record(&conn, &scope.owner_keys, record).map(|_| ())
     })();
     if let Err(e) = result {
         eprintln!("buzz-desktop: agent-retain: {e}");
@@ -126,15 +88,12 @@ pub(super) fn tombstone_managed_agent_pending(
     const KIND_DELETE: u32 = 5;
 
     let result = (|| -> Result<(), String> {
-        let (owner_pubkey, event) = {
-            let keys = state.signing_keys()?;
-            let owner_pubkey = keys.public_key().to_hex();
-            let event = build_agent_delete(agent_pubkey, &owner_pubkey)?
-                .sign_with_keys(&keys)
-                .map_err(|e| format!("failed to sign managed-agent tombstone: {e}"))?;
-            (owner_pubkey, event)
-        };
-        let conn = open_retention_db(&managed_agents_base_dir(app)?.join("retention.db"))?;
+        let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
+        let owner_pubkey = scope.owner_keys.public_key().to_hex();
+        let event = build_agent_delete(agent_pubkey, &owner_pubkey)?
+            .sign_with_keys(&scope.owner_keys)
+            .map_err(|e| format!("failed to sign managed-agent tombstone: {e}"))?;
+        let conn = open_retention_db(&scope.db_path)?;
         delete_retained_event(&conn, KIND_MANAGED_AGENT, &owner_pubkey, agent_pubkey)?;
         retain_event(
             &conn,
@@ -220,13 +179,10 @@ pub(super) fn archive_managed_agent_pending(app: &AppHandle, state: &AppState, a
     use nostr::JsonUtil;
 
     let result = (|| -> Result<(), String> {
-        let (owner_pubkey, event) = {
-            let keys = state.signing_keys()?;
-            let owner_pubkey = keys.public_key().to_hex();
-            let event = build_agent_archive_request(&keys, agent_pubkey)?;
-            (owner_pubkey, event)
-        };
-        let conn = open_retention_db(&managed_agents_base_dir(app)?.join("retention.db"))?;
+        let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
+        let owner_pubkey = scope.owner_keys.public_key().to_hex();
+        let event = build_agent_archive_request(&scope.owner_keys, agent_pubkey)?;
+        let conn = open_retention_db(&scope.db_path)?;
         retain_event(
             &conn,
             &RetainedEvent {
@@ -941,8 +897,10 @@ pub async fn create_managed_agent(
             name_pool: Vec::new(),
             is_builtin: false,
             is_active: true,
+            shared: false,
             source_team: None,
             source_team_persona_slug: None,
+            catalog_source: None,
             definition_respond_to: None,
             definition_respond_to_allowlist: Vec::new(),
             definition_parallelism: None,

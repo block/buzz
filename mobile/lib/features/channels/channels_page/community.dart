@@ -66,7 +66,12 @@ class _CommunitySwitcherSheet extends HookConsumerWidget {
             child: communitiesAsync.when(
               loading: () => const SizedBox(
                 height: 120,
-                child: Center(child: CircularProgressIndicator()),
+                child: Center(
+                  child: BuzzLoadingIndicator(
+                    size: 40,
+                    semanticLabel: 'Loading communities',
+                  ),
+                ),
               ),
               error: (e, _) => Padding(
                 padding: const EdgeInsets.all(Grid.xs),
@@ -475,7 +480,7 @@ class _CommunityIndicator extends ConsumerWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           _CommunityAvatar(name: name, relayUrl: activeCommunity?.relayUrl),
-          const SizedBox(width: Grid.xxs),
+          const SizedBox(width: _kTopSectionLabelGap),
           if (name != null)
             Flexible(
               child: Text(
@@ -511,7 +516,7 @@ class _CommunityAvatar extends ConsumerWidget {
     super.key,
     required this.name,
     this.relayUrl,
-    this.size = 32,
+    this.size = _kTopSectionAvatarSize,
   });
 
   @override

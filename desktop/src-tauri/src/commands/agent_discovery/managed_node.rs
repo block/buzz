@@ -5,7 +5,7 @@ use std::{io::Read, io::Write};
 
 use crate::managed_agents::{is_npm_global_install, InstallStepResult};
 
-const MANAGED_NODE_VERSION: &str = "v24.11.0";
+const MANAGED_NODE_VERSION: &str = "v24.18.0";
 const MANAGED_NODE_MAX_BYTES: u64 = 90 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy)]
@@ -18,43 +18,43 @@ struct ManagedNodeArtifact {
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const MANAGED_NODE_ARTIFACT: Option<ManagedNodeArtifact> = Some(ManagedNodeArtifact {
     platform: "darwin-arm64",
-    filename: "node-v24.11.0-darwin-arm64.tar.gz",
-    sha256: "0be2ab2816a4fa02d1acff014a434f29f56d8d956f5af6a98b70ced6c5f4d201",
+    filename: "node-v24.18.0-darwin-arm64.tar.gz",
+    sha256: "e1a97e14c99c803e96c7339403282ea05a499c32f8d83defe9ef5ec66f979ed1",
 });
 
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 const MANAGED_NODE_ARTIFACT: Option<ManagedNodeArtifact> = Some(ManagedNodeArtifact {
     platform: "darwin-x64",
-    filename: "node-v24.11.0-darwin-x64.tar.gz",
-    sha256: "3884671e87f46f773832d98a0a6cabcc5ec4f637084f0f3515b69e66ea27f2f1",
+    filename: "node-v24.18.0-darwin-x64.tar.gz",
+    sha256: "dfd0dbd3e721503434df7b7205e719f61b3a3a31b2bcf9729b8b91fea240f080",
 });
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const MANAGED_NODE_ARTIFACT: Option<ManagedNodeArtifact> = Some(ManagedNodeArtifact {
     platform: "linux-x64",
-    filename: "node-v24.11.0-linux-x64.tar.gz",
-    sha256: "b3c071cdf47aab867c3b2aa287257df12ec5d7c962bf922b32fd33226c4295fd",
+    filename: "node-v24.18.0-linux-x64.tar.gz",
+    sha256: "783130984963db7ba9cbd01089eaf2c2efb055c7c1693c943174b967b3050cb8",
 });
 
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 const MANAGED_NODE_ARTIFACT: Option<ManagedNodeArtifact> = Some(ManagedNodeArtifact {
     platform: "linux-arm64",
-    filename: "node-v24.11.0-linux-arm64.tar.gz",
-    sha256: "4786d00c4d259d3ff0b2328307f764ef3ced65f2d6e9502d433e68d66238509d",
+    filename: "node-v24.18.0-linux-arm64.tar.gz",
+    sha256: "6b4484c2190274175df9aa8f28e2d758a819cb1c1fe6ab481e2f95b463ab8508",
 });
 
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
 const MANAGED_NODE_ARTIFACT: Option<ManagedNodeArtifact> = Some(ManagedNodeArtifact {
     platform: "win-x64",
-    filename: "node-v24.11.0-win-x64.zip",
-    sha256: "1054540bce22b54ec7e50ebc078ec5d090700a77657607a58f6a64df21f49fdd",
+    filename: "node-v24.18.0-win-x64.zip",
+    sha256: "0ae68406b42d7725661da979b1403ec9926da205c6770827f33aac9d8f26e821",
 });
 
 #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
 const MANAGED_NODE_ARTIFACT: Option<ManagedNodeArtifact> = Some(ManagedNodeArtifact {
     platform: "win-arm64",
-    filename: "node-v24.11.0-win-arm64.zip",
-    sha256: "12d3b1aa9696b7411e115a4fa2aef57f95560b5ee16bb62cd69843e535ec72be",
+    filename: "node-v24.18.0-win-arm64.zip",
+    sha256: "f274669adb93b1fd0fbf8f21fd078609e9dcc84333d4f2718d2dde3f9a161a01",
 });
 
 #[cfg(not(any(
@@ -615,9 +615,9 @@ mod tests {
     #[test]
     fn test_validate_zip_accepts_normal_entries() {
         let tmp = make_zip_with_entries(&[
-            "node-v24.11.0-win-x64/node.exe",
-            "node-v24.11.0-win-x64/npm.cmd",
-            "node-v24.11.0-win-x64/npm",
+            "node-v24.18.0-win-x64/node.exe",
+            "node-v24.18.0-win-x64/npm.cmd",
+            "node-v24.18.0-win-x64/npm",
         ]);
         let file = std::fs::File::open(tmp.path()).unwrap();
         let archive = zip::ZipArchive::new(file).unwrap();
@@ -677,7 +677,7 @@ mod tests {
     #[test]
     fn test_validate_zip_rejects_backslash_traversal() {
         // Path traversal using Windows separator — must reject on every host.
-        let tmp = make_zip_with_entries(&["node-v24.11.0-win-x64\\..\\..\\evil"]);
+        let tmp = make_zip_with_entries(&["node-v24.18.0-win-x64\\..\\..\\evil"]);
         let file = std::fs::File::open(tmp.path()).unwrap();
         let archive = zip::ZipArchive::new(file).unwrap();
         let err = validate_managed_node_zip_entries(&archive).unwrap_err();

@@ -91,7 +91,7 @@ export function AppSidebarPrimaryMenu({
 }: AppSidebarPrimaryMenuProps) {
   return (
     <SidebarHeader
-      className="cursor-default select-none px-2 pb-0 pt-0"
+      className="relative z-40 cursor-default select-none px-2 pb-0 pt-0"
       data-tauri-drag-region
       data-testid="sidebar-primary-menu"
     >

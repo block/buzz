@@ -40,6 +40,7 @@ import {
   KIND_HUDDLE_STARTED,
   KIND_MEMBER_ADDED_NOTIFICATION,
   KIND_MEMBER_REMOVED_NOTIFICATION,
+  KIND_PERSONA,
   KIND_REPO_ANNOUNCEMENT,
   KIND_REPO_STATE,
   KIND_STREAM_MESSAGE_EDIT,
@@ -112,13 +113,17 @@ type MockPersonaSeed = {
   displayName: string;
   avatarUrl?: string | null;
   systemPrompt: string;
+  updatedAt?: string;
   isActive?: boolean;
+  shared?: boolean;
   sourceTeam?: string | null;
   envVars?: Record<string, string>;
   runtime?: string | null;
   model?: string | null;
   provider?: string | null;
   namePool?: string[];
+  respondTo?: "owner-only" | "allowlist" | "anyone";
+  respondToAllowlist?: string[];
 };
 
 type MockTeamSeed = {
@@ -148,6 +153,13 @@ type E2eConfig = {
       email?: string;
       name?: string;
       expiresAt: string;
+    } | null;
+    /** Optional policy returned by the native join-policy discovery command. */
+    joinPolicy?: {
+      terms_markdown?: string;
+      privacy_markdown?: string;
+      age_attestation_required: boolean;
+      version: string;
     } | null;
     /** Delay Builderlab login completion so cancellation/retry UI can be tested. */
     builderlabLoginDelayMs?: number;
@@ -187,6 +199,8 @@ type E2eConfig = {
     connectAcpRuntimeResult?: RawConnectAcpRuntimeResult;
     connectAcpRuntimeDelayMs?: number;
     connectAcpRuntimeError?: string;
+    /** Catalog returned after a successful mocked connect (sign-in). */
+    acpRuntimesCatalogAfterConnect?: RawAcpRuntimeCatalogEntry[];
     activePersonaIds?: string[];
     installAcpRuntimeDelayMs?: number;
     installAcpRuntimeResult?: RawInstallRuntimeResult;
@@ -215,6 +229,10 @@ type E2eConfig = {
      *  (`list/start/stop/restart_managed_agent_runtime`). */
     managedAgentRuntimes?: MockManagedAgentRuntimeSeed[];
     personas?: MockPersonaSeed[];
+    /** Community catalog replaceable-event heads returned by relay queries. */
+    personaCatalogEvents?: RelayEvent[];
+    /** Outcomes for successive explicit persona share publications. */
+    personaSharePublicationStatuses?: Array<"published" | "queued">;
     teams?: MockTeamSeed[];
     relayAgents?: MockRelayAgentSeed[];
     agentListDelayMs?: number;
@@ -800,7 +818,9 @@ type RawPersona = {
   name_pool?: string[];
   is_builtin: boolean;
   is_active: boolean;
+  shared: boolean;
   source_team?: string | null;
+  catalog_source?: { owner_pubkey: string; persona_id: string } | null;
   env_vars?: Record<string, string>;
   respond_to?: string | null;
   respond_to_allowlist?: string[];
@@ -1013,7 +1033,9 @@ declare global {
     }) => RelayEvent[];
     __BUZZ_E2E_EMIT_MOCK_TYPING__?: (input: {
       channelName: string;
+      createdAt?: number;
       pubkey?: string;
+      threadHeadId?: string;
     }) => RelayEvent;
     __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
       command: string,
@@ -2160,6 +2182,7 @@ function resetMockPersonas(config?: E2eConfig) {
     name_pool: [],
     is_builtin: true,
     is_active: activePersonaIds.has(persona.id),
+    shared: false,
     source_team: null,
     created_at: now,
     updated_at: now,
@@ -2175,12 +2198,18 @@ function resetMockPersonas(config?: E2eConfig) {
       model: persona.model ?? null,
       provider: persona.provider ?? null,
       name_pool: persona.namePool ?? [],
+      respond_to: persona.respondTo ?? null,
+      respond_to_allowlist:
+        persona.respondTo === "allowlist"
+          ? [...(persona.respondToAllowlist ?? [])]
+          : [],
       is_builtin: false,
       is_active: persona.isActive ?? true,
+      shared: persona.shared ?? false,
       source_team: persona.sourceTeam ?? null,
       env_vars: { ...(persona.envVars ?? {}) },
       created_at: now,
-      updated_at: now,
+      updated_at: persona.updatedAt ?? now,
     });
   }
 }
@@ -2775,6 +2804,7 @@ const mockChannels: MockChannel[] = [
 const mockMessages = new Map<string, RelayEvent[]>();
 const mockUserStatuses: RelayEvent[] = [];
 const mockReminderEvents: RelayEvent[] = [];
+const mockPersonaEvents: RelayEvent[] = [];
 let mockRelayMembers: RawRelayMember[] = [];
 const mockSockets = new Map<number, MockSocket>();
 let mockWebsocketSendMutexWedged = false;
@@ -2803,6 +2833,16 @@ function resetMockSaveSubscriptions(config: E2eConfig | undefined) {
   mockSaveSubscriptions = (config?.mock?.saveSubscriptions ?? []).map((s) => ({
     ...s,
   }));
+}
+
+function resetMockPersonaCatalogEvents(config: E2eConfig | undefined) {
+  mockPersonaEvents.length = 0;
+  for (const event of config?.mock?.personaCatalogEvents ?? []) {
+    mockPersonaEvents.push({
+      ...event,
+      tags: event.tags.map((tag) => [...tag]),
+    });
+  }
 }
 
 // Mesh-compute mock state — TEST-ONLY.
@@ -3835,6 +3875,13 @@ function emitMockLiveEvent(channelId: string, event: RelayEvent) {
 }
 
 function emitMockGlobalEvent(event: RelayEvent) {
+  if (
+    event.kind === KIND_PERSONA &&
+    event.pubkey.toLowerCase() !== MOCK_IDENTITY_PUBKEY.toLowerCase() &&
+    !personaHasExactSharedTag(event)
+  ) {
+    return;
+  }
   for (const socket of mockSockets.values()) {
     for (const [subId, subscription] of socket.subscriptions) {
       if (subscription.kinds && !subscription.kinds.includes(event.kind)) {
@@ -4021,13 +4068,21 @@ function emitMockChannelMessage(
   return event;
 }
 
-function emitMockTypingIndicator(channelId: string, pubkey: string) {
+function emitMockTypingIndicator(
+  channelId: string,
+  pubkey: string,
+  threadHeadId?: string,
+  createdAt?: number,
+) {
   const event: RelayEvent = {
     id: crypto.randomUUID().replace(/-/g, ""),
     pubkey,
-    created_at: Math.floor(Date.now() / 1000),
+    created_at: createdAt ?? Math.floor(Date.now() / 1000),
     kind: 20002,
-    tags: [["h", channelId]],
+    tags: [
+      ["h", channelId],
+      ...(threadHeadId ? [["e", threadHeadId, "", "reply"]] : []),
+    ],
     content: "",
     sig: "mocksig".repeat(20).slice(0, 128),
   };
@@ -6823,7 +6878,24 @@ async function handleGetFeed(
   // For e2e, return a minimal feed structure with mentions.
   const limit = args.limit ?? 50;
   const mentionEvents = await relayQuery(config, [
-    { kinds: [9, 40002, 45001, 45003], "#p": [identity.pubkey], limit },
+    {
+      kinds: [
+        9,
+        40002,
+        1,
+        45001,
+        45003,
+        KIND_GIT_PULL_REQUEST,
+        KIND_GIT_PR_UPDATE,
+        KIND_GIT_ISSUE,
+        KIND_GIT_STATUS_OPEN,
+        KIND_GIT_STATUS_MERGED,
+        KIND_GIT_STATUS_CLOSED,
+        KIND_GIT_STATUS_DRAFT,
+      ],
+      "#p": [identity.pubkey],
+      limit,
+    },
   ]);
 
   // Look up channel names for feed items
@@ -6943,6 +7015,7 @@ function withMockRuntimeConfigMetadata(
 
 let runtimeCatalogDiscoveryCount = 0;
 let mockInstallCompleted = false;
+let mockConnectCompleted = false;
 
 async function handleDiscoverAcpRuntimes(
   config: E2eConfig | undefined,
@@ -6967,6 +7040,10 @@ async function handleDiscoverAcpRuntimes(
   const afterInstall = config?.mock?.acpRuntimesCatalogAfterInstall;
   if (mockInstallCompleted && afterInstall) {
     return afterInstall.map(withMockRuntimeConfigMetadata);
+  }
+  const afterConnect = config?.mock?.acpRuntimesCatalogAfterConnect;
+  if (mockConnectCompleted && afterConnect) {
+    return afterConnect.map(withMockRuntimeConfigMetadata);
   }
   const sequence = config?.mock?.acpRuntimesCatalogSequence;
   if (sequence && sequence.length > 0) {
@@ -7097,6 +7174,7 @@ async function handleConnectAcpRuntime(
   if (delayMs > 0) {
     await new Promise((resolve) => window.setTimeout(resolve, delayMs));
   }
+  mockConnectCompleted = true;
   return config?.mock?.connectAcpRuntimeResult ?? { launched: true };
 }
 
@@ -7115,6 +7193,9 @@ let mockGlobalAgentConfig: {
 
 // Per-page get_nsec call counter for sequenced error testing.
 let nsecCallCount = 0;
+
+// Per-page explicit catalog publication outcomes.
+let personaSharePublicationCallCount = 0;
 
 // Per-page confirm_team_snapshot_import call counter for sequenced error testing.
 let teamSnapshotConfirmCallCount = 0;
@@ -7309,6 +7390,7 @@ async function handleCreatePersona(args: {
     provider?: string;
     envVars?: Record<string, string>;
     behavior?: PersonaBehaviorInput;
+    catalogSource?: { ownerPubkey: string; personaId: string };
   };
 }): Promise<RawPersona> {
   const now = new Date().toISOString();
@@ -7322,49 +7404,78 @@ async function handleCreatePersona(args: {
     provider: args.input.provider?.trim() || null,
     is_builtin: false,
     is_active: true,
+    shared: false,
     source_team: null,
+    // Mirrors `CatalogSource::normalized`: the coordinate a catalog copy keeps
+    // so the catalog can tell an already-added foreign entry from a new one.
+    catalog_source: args.input.catalogSource
+      ? {
+          owner_pubkey: args.input.catalogSource.ownerPubkey
+            .trim()
+            .toLowerCase(),
+          persona_id: args.input.catalogSource.personaId.trim(),
+        }
+      : null,
     env_vars: { ...(args.input.envVars ?? {}) },
     created_at: now,
     updated_at: now,
   };
   applyMockPersonaBehavior(persona, args.input.behavior);
   mockPersonas.push(persona);
+  upsertMockPersonaEvent(persona);
   return { ...persona };
 }
 
+type MockUpdatePersonaInput = {
+  id: string;
+  displayName: string;
+  avatarUrl?: string;
+  systemPrompt: string;
+  runtime?: string;
+  model?: string;
+  provider?: string;
+  envVars?: Record<string, string>;
+  behavior?: PersonaBehaviorInput;
+};
+
 async function handleUpdatePersona(args: {
-  input: {
-    id: string;
-    displayName: string;
-    avatarUrl?: string;
-    systemPrompt: string;
-    runtime?: string;
-    model?: string;
-    provider?: string;
-    envVars?: Record<string, string>;
-    behavior?: PersonaBehaviorInput;
-  };
+  input: MockUpdatePersonaInput;
 }): Promise<RawPersona> {
-  const persona = mockPersonas.find(
-    (candidate) => candidate.id === args.input.id,
-  );
+  return { ...applyMockPersonaUpdate(args.input) };
+}
+
+/**
+ * Save an edit to the mock persona store, exactly like `update_persona_with`,
+ * and return the live record so a caller can publish it.
+ *
+ * Deliberately does NOT publish a catalog event: the real `update_persona`
+ * only enqueues a pending head for the out-of-band flush loop, so nothing has
+ * reached the relay by the time the command returns. Publishing here would
+ * make a UI that never calls `update_persona_and_publish` look like it kept
+ * the "Save and publish" promise.
+ */
+function applyMockPersonaUpdate(input: MockUpdatePersonaInput): RawPersona {
+  const persona = mockPersonas.find((candidate) => candidate.id === input.id);
   if (!persona) {
-    throw new Error(`agent ${args.input.id} not found`);
+    throw new Error(`agent ${input.id} not found`);
   }
-  persona.display_name = args.input.displayName.trim();
-  persona.avatar_url = args.input.avatarUrl?.trim() || null;
-  persona.system_prompt = args.input.systemPrompt.trim();
-  persona.runtime = args.input.runtime?.trim() || null;
-  persona.model = args.input.model?.trim() || null;
-  persona.provider = args.input.provider?.trim() || null;
-  if (args.input.envVars !== undefined) {
+  persona.display_name = input.displayName.trim();
+  persona.avatar_url = input.avatarUrl?.trim() || null;
+  persona.system_prompt = input.systemPrompt.trim();
+  persona.runtime = input.runtime?.trim() || null;
+  persona.model = input.model?.trim() || null;
+  persona.provider = input.provider?.trim() || null;
+  if (input.envVars !== undefined) {
     // Absent = preserve; present = replace entirely (matches Rust handler).
-    persona.env_vars = { ...args.input.envVars };
+    persona.env_vars = { ...input.envVars };
   }
-  applyMockPersonaBehavior(persona, args.input.behavior);
+  applyMockPersonaBehavior(persona, input.behavior);
   persona.updated_at = new Date().toISOString();
 
-  return { ...persona };
+  for (const callback of tauriEventListeners.get("agents-data-changed") ?? []) {
+    callback();
+  }
+  return persona;
 }
 
 async function handleDeletePersona(args: { id: string }): Promise<void> {
@@ -7426,15 +7537,115 @@ async function handleSetPersonaActive(args: {
   return { ...persona };
 }
 
+function personaHasExactSharedTag(event: RelayEvent): boolean {
+  const tags = event.tags.filter((tag) => tag[0] === "shared");
+  return tags.length === 1 && tags[0]?.length === 2 && tags[0]?.[1] === "true";
+}
+
+function upsertMockPersonaRelayEvent(event: RelayEvent): void {
+  const sourceId = event.tags.find((tag) => tag[0] === "d")?.[1];
+  if (!sourceId) return;
+  const existingIndex = mockPersonaEvents.findIndex(
+    (candidate) =>
+      candidate.pubkey.toLowerCase() === event.pubkey.toLowerCase() &&
+      candidate.tags.some((tag) => tag[0] === "d" && tag[1] === sourceId),
+  );
+  if (existingIndex >= 0) {
+    mockPersonaEvents.splice(existingIndex, 1);
+  }
+  mockPersonaEvents.push(event);
+}
+
+function upsertMockPersonaEvent(persona: RawPersona): void {
+  const event: RelayEvent = {
+    id: mockEventId(),
+    pubkey: MOCK_IDENTITY_PUBKEY,
+    created_at: Math.floor(Date.now() / 1_000),
+    kind: KIND_PERSONA,
+    tags: [["d", persona.id], ...(persona.shared ? [["shared", "true"]] : [])],
+    content: JSON.stringify({
+      display_name: persona.display_name,
+      system_prompt: persona.system_prompt,
+      avatar_url: persona.avatar_url,
+      runtime: persona.runtime ?? null,
+      model: persona.model ?? null,
+      provider: persona.provider ?? null,
+      name_pool: persona.name_pool ?? [],
+      respond_to: persona.respond_to ?? null,
+      respond_to_allowlist: persona.respond_to_allowlist ?? [],
+      parallelism: persona.parallelism ?? null,
+    }),
+    sig: "0".repeat(128),
+  };
+  upsertMockPersonaRelayEvent(event);
+  emitMockGlobalEvent(event);
+}
+
+type MockPersonaPublicationResult = {
+  persona: RawPersona;
+  publicationStatus: "published" | "queued";
+  relayMessage?: string;
+};
+
+/**
+ * Publish a persona's catalog head and report the relay outcome, like
+ * `publish_prepared_persona`. A `queued` outcome must NOT make the event
+ * visible to catalog readers — that is the whole distinction the UI reports.
+ */
+function publishMockPersonaHead(
+  persona: RawPersona,
+  config: E2eConfig | undefined,
+): MockPersonaPublicationResult {
+  const publicationStatus =
+    config?.mock?.personaSharePublicationStatuses?.[
+      personaSharePublicationCallCount++
+    ] ?? "published";
+  if (publicationStatus === "published") {
+    upsertMockPersonaEvent(persona);
+  }
+  return {
+    persona: { ...persona },
+    publicationStatus,
+    ...(publicationStatus === "queued"
+      ? { relayMessage: "relay unreachable: could not connect to relay" }
+      : {}),
+  };
+}
+
+async function handleSetPersonaShared(
+  args: {
+    id: string;
+    shared: boolean;
+  },
+  config?: E2eConfig,
+): Promise<MockPersonaPublicationResult> {
+  const persona = mockPersonas.find((candidate) => candidate.id === args.id);
+  if (!persona) {
+    throw new Error(`agent ${args.id} not found`);
+  }
+  if (persona.is_builtin) {
+    throw new Error("Built-in agents cannot be shared to the catalog.");
+  }
+  persona.shared = args.shared;
+  persona.updated_at = new Date().toISOString();
+  return publishMockPersonaHead(persona, config);
+}
+
+/** Mirrors `update_persona_and_publish`: save the edit, then await the relay. */
+async function handleUpdatePersonaAndPublish(
+  args: { input: MockUpdatePersonaInput },
+  config?: E2eConfig,
+): Promise<MockPersonaPublicationResult> {
+  return publishMockPersonaHead(applyMockPersonaUpdate(args.input), config);
+}
+
 function ensureMockPersonaIsActive(personaId: string) {
   const persona = mockPersonas.find((candidate) => candidate.id === personaId);
   if (!persona) {
     throw new Error(`agent ${personaId} not found`);
   }
   if (!persona.is_active) {
-    throw new Error(
-      `${persona.display_name} is not in My Agents. Choose it from Agent Catalog first.`,
-    );
+    throw new Error(`${persona.display_name} is not in My Agents.`);
   }
 }
 
@@ -7968,10 +8179,60 @@ async function handleUpdateManagedAgent(args: {
   return { agent: cloneManagedAgent(agent), profile_sync_error: null };
 }
 
+/**
+ * Mock-mode `search_messages` predicate, mirroring the relay's filter contract.
+ *
+ * `since`/`until` are NIP-01 bounds and both inclusive — the relay keeps events
+ * where `since <= created_at <= until` (`crates/buzz-core/src/filter.rs`). The
+ * `before:` operator's exclusivity is encoded upstream in
+ * `parseSearchOperators`, which subtracts a second; the mock must not subtract
+ * it a second time.
+ *
+ * Exported so the boundary behavior is unit-testable without a browser.
+ */
+export function mockSearchHitMatches(
+  hit: Pick<
+    RawSearchHit,
+    "channel_id" | "pubkey" | "created_at" | "content" | "channel_name"
+  >,
+  filters: {
+    /** Lowercased FTS query; empty matches everything. */
+    query: string;
+    channelId?: string;
+    authorSet: Set<string> | null;
+    since?: number;
+    until?: number;
+  },
+): boolean {
+  if (filters.channelId && hit.channel_id !== filters.channelId) {
+    return false;
+  }
+  if (filters.authorSet && !filters.authorSet.has(hit.pubkey.toLowerCase())) {
+    return false;
+  }
+  if (filters.since != null && hit.created_at < filters.since) {
+    return false;
+  }
+  if (filters.until != null && hit.created_at > filters.until) {
+    return false;
+  }
+  if (!filters.query) {
+    return true;
+  }
+  return (
+    hit.content.toLowerCase().includes(filters.query) ||
+    (hit.channel_name?.toLowerCase().includes(filters.query) ?? false)
+  );
+}
+
 async function handleSearchMessages(
   args: {
     q: string;
     limit?: number;
+    channelId?: string;
+    authors?: string[];
+    since?: number;
+    until?: number;
   },
   config: E2eConfig | undefined,
 ): Promise<RawSearchResponse> {
@@ -8054,17 +8315,20 @@ async function handleSearchMessages(
       }
     }
 
-    const hits = mockHits
-      .filter((hit) => {
-        if (!query) {
-          return true;
-        }
+    const authorSet = args.authors?.length
+      ? new Set(args.authors.map((author) => author.toLowerCase()))
+      : null;
 
-        return (
-          hit.content.toLowerCase().includes(query) ||
-          (hit.channel_name?.toLowerCase().includes(query) ?? false)
-        );
-      })
+    const hits = mockHits
+      .filter((hit) =>
+        mockSearchHitMatches(hit, {
+          query,
+          channelId: args.channelId,
+          authorSet,
+          since: args.since,
+          until: args.until,
+        }),
+      )
       .slice(0, limit);
 
     return {
@@ -8073,11 +8337,26 @@ async function handleSearchMessages(
     };
   }
 
-  // NIP-50 search via POST /query
+  // NIP-50 search via POST /query — forward operator pushdown fields.
   const limit = args.limit ?? 20;
-  const events = await relayQuery(config, [
-    { kinds: [9, 40002], search: args.q, limit },
-  ]);
+  const filter: Record<string, unknown> = {
+    kinds: [9, 40002, 45001, 45003],
+    search: args.q,
+    limit,
+  };
+  if (args.channelId) {
+    filter["#h"] = [args.channelId];
+  }
+  if (args.authors?.length) {
+    filter.authors = args.authors;
+  }
+  if (args.since != null) {
+    filter.since = args.since;
+  }
+  if (args.until != null) {
+    filter.until = args.until;
+  }
+  const events = await relayQuery(config, [filter]);
   const hits = events.map((ev) => ({
     event_id: ev.id ?? "",
     pubkey: ev.pubkey ?? "",
@@ -8123,6 +8402,35 @@ async function resolveMockUploadDescriptors(
       filename: "quarterly-report.pdf",
     },
   ];
+}
+
+async function resolveMockUploadDescriptorForBytes(
+  args: { data: number[]; filename?: string | null },
+  config: E2eConfig | undefined,
+): Promise<RawBlobDescriptor> {
+  const configured = config?.mock?.uploadDescriptors;
+  if (configured !== undefined) {
+    const descriptors = await resolveMockUploadDescriptors(config);
+    const descriptor = descriptors[0];
+    if (!descriptor) throw new Error("mock upload returned no descriptor");
+    return descriptor;
+  }
+
+  const bytes = Uint8Array.from(args.data);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  const sha256 = Array.from(new Uint8Array(digest), (value) =>
+    value.toString(16).padStart(2, "0"),
+  ).join("");
+  const filename = args.filename ?? "upload.bin";
+  const isAgentJson = filename.toLowerCase().endsWith(".agent.json");
+  return {
+    url: `https://mock.relay/media/${sha256}${isAgentJson ? ".json" : ".bin"}`,
+    sha256,
+    size: bytes.length,
+    type: isAgentJson ? "application/json" : "application/octet-stream",
+    uploaded: Math.floor(Date.now() / 1000),
+    filename,
+  };
 }
 
 async function handleSendChannelMessage(
@@ -8820,6 +9128,25 @@ function sendToMockSocket(args: {
       return;
     }
 
+    if (filter.kinds?.includes(KIND_PERSONA)) {
+      const authors = filter.authors?.map((author) => author.toLowerCase());
+      const sourceIds = filter["#d"];
+      for (const event of mockPersonaEvents) {
+        if (authors && !authors.includes(event.pubkey.toLowerCase())) continue;
+        if (
+          event.pubkey.toLowerCase() !== MOCK_IDENTITY_PUBKEY.toLowerCase() &&
+          !personaHasExactSharedTag(event)
+        ) {
+          continue;
+        }
+        const sourceId = event.tags.find((tag) => tag[0] === "d")?.[1];
+        if (sourceIds && (!sourceId || !sourceIds.includes(sourceId))) continue;
+        sendWsText(socket.handler, ["EVENT", subId, event]);
+      }
+      sendWsText(socket.handler, ["EOSE", subId]);
+      return;
+    }
+
     // Project queries: NIP-34 kinds, or kind:1 comments scoped by repo `a`
     // tag (PR/issue discussions, approvals, review requests).
     if (
@@ -8917,6 +9244,36 @@ function sendToMockSocket(args: {
         if (idx >= 0) mockReminderEvents.splice(idx, 1);
       }
       mockReminderEvents.push(event);
+      sendWsText(socket.handler, ["OK", event.id, true, ""]);
+      return;
+    }
+
+    if (event.kind === KIND_PERSONA) {
+      const sourceId = event.tags.find((tag) => tag[0] === "d")?.[1];
+      if (!sourceId) {
+        sendWsText(socket.handler, [
+          "OK",
+          event.id,
+          false,
+          "invalid: persona event missing d tag.",
+        ]);
+        return;
+      }
+      const sharedTags = event.tags.filter((tag) => tag[0] === "shared");
+      if (
+        sharedTags.length > 1 ||
+        (sharedTags.length === 1 && !personaHasExactSharedTag(event))
+      ) {
+        sendWsText(socket.handler, [
+          "OK",
+          event.id,
+          false,
+          'invalid: shared tag must be exactly ["shared","true"].',
+        ]);
+        return;
+      }
+      upsertMockPersonaRelayEvent(event);
+      emitMockGlobalEvent(event);
       sendWsText(socket.handler, ["OK", event.id, true, ""]);
       return;
     }
@@ -9039,6 +9396,7 @@ export function maybeInstallE2eTauriMocks() {
   resetMockWorkflows();
   resetMockMesh();
   resetMockUserStatuses();
+  resetMockPersonaCatalogEvents(config);
   resetMockSaveSubscriptions(config);
   resetMockPendingCommunityDeepLinks(config);
   mockWebsocketSendMutexWedged = false;
@@ -9079,7 +9437,12 @@ export function maybeInstallE2eTauriMocks() {
     );
   };
   window.__BUZZ_E2E_PREPEND_MOCK_HISTORY__ = prependMockHistory;
-  window.__BUZZ_E2E_EMIT_MOCK_TYPING__ = ({ channelName, pubkey }) => {
+  window.__BUZZ_E2E_EMIT_MOCK_TYPING__ = ({
+    channelName,
+    createdAt,
+    pubkey,
+    threadHeadId,
+  }) => {
     const channel = mockChannels.find(
       (candidate) => candidate.name === channelName,
     );
@@ -9087,7 +9450,12 @@ export function maybeInstallE2eTauriMocks() {
       throw new Error(`Mock channel ${channelName} not found.`);
     }
 
-    return emitMockTypingIndicator(channel.id, pubkey ?? CHARLIE_PUBKEY);
+    return emitMockTypingIndicator(
+      channel.id,
+      pubkey ?? CHARLIE_PUBKEY,
+      threadHeadId,
+      createdAt,
+    );
   };
   window.__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__ = ({ channelName, kind }) => {
     const channel = mockChannels.find(
@@ -9486,6 +9854,8 @@ export function maybeInstallE2eTauriMocks() {
         // seeded empty/default path as valid so Add Community can continue to
         // relay-policy discovery.
         return;
+      case "fetch_join_policy":
+        return activeConfig?.mock?.joinPolicy ?? null;
       case "apply_workspace": {
         const applyDelayMs = activeConfig?.mock?.applyCommunityDelayMs ?? 0;
         if (applyDelayMs > 0) {
@@ -9660,6 +10030,13 @@ export function maybeInstallE2eTauriMocks() {
         return {
           additions: 27,
           deletions: 4,
+          commit_body: [
+            "See the [project guide](https://example.com/project-guide).",
+            "",
+            "![Architecture](/buzz.svg)",
+            "",
+            "![Demo](https://example.com/project-demo.mp4)",
+          ].join("\n"),
           files: [
             {
               path: "desktop/src/features/projects/ui/ProjectDetailScreen.tsx",
@@ -10093,6 +10470,11 @@ export function maybeInstallE2eTauriMocks() {
         return handleUpdatePersona(
           payload as Parameters<typeof handleUpdatePersona>[0],
         );
+      case "update_persona_and_publish":
+        return handleUpdatePersonaAndPublish(
+          payload as Parameters<typeof handleUpdatePersonaAndPublish>[0],
+          activeConfig,
+        );
       case "delete_persona":
         return handleDeletePersona(
           payload as Parameters<typeof handleDeletePersona>[0],
@@ -10116,11 +10498,16 @@ export function maybeInstallE2eTauriMocks() {
             };
             const now = new Date().toISOString();
             const existing = mockPersonas.find((p) => p.id === dTag);
+            const shared = nostrEvent.tags.some(
+              (tag) =>
+                tag.length === 2 && tag[0] === "shared" && tag[1] === "true",
+            );
             if (existing) {
               existing.display_name =
                 content.display_name ?? existing.display_name;
               existing.system_prompt =
                 content.system_prompt ?? existing.system_prompt;
+              existing.shared = shared;
               existing.updated_at = now;
             } else {
               mockPersonas.push({
@@ -10130,6 +10517,7 @@ export function maybeInstallE2eTauriMocks() {
                 system_prompt: content.system_prompt ?? "",
                 is_builtin: false,
                 is_active: true,
+                shared,
                 env_vars: {},
                 created_at: now,
                 updated_at: now,
@@ -10155,6 +10543,11 @@ export function maybeInstallE2eTauriMocks() {
       case "set_persona_active":
         return handleSetPersonaActive(
           payload as Parameters<typeof handleSetPersonaActive>[0],
+        );
+      case "set_persona_shared":
+        return handleSetPersonaShared(
+          payload as Parameters<typeof handleSetPersonaShared>[0],
+          activeConfig,
         );
       case "list_teams":
         return handleListTeams();
@@ -10202,8 +10595,8 @@ export function maybeInstallE2eTauriMocks() {
         // Specs assert invocation via __BUZZ_E2E_COMMANDS__.
         return true;
       case "encode_agent_snapshot_for_send": {
-        // Return a minimal PNG-shaped payload so the send flow can proceed
-        // through upload_media_bytes without a real Rust encode step.
+        // Return the requested wire format so both message sharing (PNG) and
+        // community catalog publication (JSON) exercise their real branches.
         // Optional encodeDelayMs lets specs observe the "preparing" phase before
         // the upload begins.
         const encodeDelayMs = activeConfig?.mock?.encodeDelayMs ?? 0;
@@ -10211,6 +10604,46 @@ export function maybeInstallE2eTauriMocks() {
           await new Promise((resolve) =>
             window.setTimeout(resolve, encodeDelayMs),
           );
+        }
+        const input = payload as {
+          id: string;
+          memoryLevel: "none" | "core" | "everything";
+          format: "json" | "png";
+        };
+        if (input.format === "json") {
+          const persona = mockPersonas.find(
+            (candidate) => candidate.id === input.id,
+          );
+          const snapshot = {
+            format: "buzz-agent-snapshot",
+            version: 1,
+            definition: {
+              name: persona?.display_name ?? "E2E Agent",
+              sourceIsBuiltIn: persona?.is_builtin ?? false,
+              systemPrompt: persona?.system_prompt ?? "",
+              runtime: persona?.runtime ?? null,
+              model: persona?.model ?? null,
+              provider: persona?.provider ?? null,
+              respondTo: persona?.respond_to ?? null,
+              respondToAllowlist: persona?.respond_to_allowlist ?? [],
+              namePool: persona?.name_pool ?? [],
+            },
+            profile: {
+              displayName: persona?.display_name ?? "E2E Agent",
+              avatarUrl: persona?.avatar_url ?? null,
+            },
+            memory: {
+              level: input.memoryLevel,
+              entries: [],
+            },
+          };
+          const fileBytes = Array.from(
+            new TextEncoder().encode(JSON.stringify(snapshot)),
+          );
+          return {
+            fileBytes,
+            fileName: "e2e-agent.agent.json",
+          };
         }
         return {
           fileBytes: [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a],
@@ -10221,6 +10654,9 @@ export function maybeInstallE2eTauriMocks() {
         // Return a minimal preview — no writes performed.
         return {
           displayName: "Imported Agent",
+          isBuiltIn: true,
+          model: "claude-opus-4-5",
+          runtime: "goose",
           systemPrompt: null,
           avatarUrl: null,
           memoryLevel: "none",
@@ -10732,7 +11168,10 @@ export function maybeInstallE2eTauriMocks() {
       case "pick_and_upload_image":
         return (await resolveMockUploadDescriptors(activeConfig))[0] ?? null;
       case "upload_media_bytes":
-        return (await resolveMockUploadDescriptors(activeConfig))[0];
+        return resolveMockUploadDescriptorForBytes(
+          payload as { data: number[]; filename?: string | null },
+          activeConfig,
+        );
       case "fetch_media_bytes": {
         // The real command fetches relay media through Rust reqwest and
         // replies with raw bytes (`tauri::ipc::Response` → ArrayBuffer). In

@@ -35,6 +35,14 @@ void main() {
     );
     final resolved = chipTheme.color?.resolve({WidgetState.selected});
     expect(resolved, accent);
+    final selectedLabel = tester.widget<Text>(find.text('Everyone'));
+    final unselectedLabel = tester.widget<Text>(find.text('Following'));
+    expect(selectedLabel.style?.fontSize, filterChipTextStyle.fontSize);
+    expect(selectedLabel.style?.height, filterChipTextStyle.height);
+    expect(selectedLabel.style?.fontWeight, FontWeight.w500);
+    expect(unselectedLabel.style?.fontSize, filterChipTextStyle.fontSize);
+    expect(unselectedLabel.style?.height, filterChipTextStyle.height);
+    expect(unselectedLabel.style?.fontWeight, FontWeight.w400);
   });
 
   testWidgets('expanded chips preserve large accessible text scaling', (

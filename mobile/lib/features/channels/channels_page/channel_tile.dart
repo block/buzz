@@ -66,7 +66,7 @@ class _ChannelTile extends ConsumerWidget {
                     ),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: context.textTheme.bodyLarge?.copyWith(
+                    style: contentListTitleTextStyle.copyWith(
                       color: context.colors.onSurface,
                       fontWeight: isUnread ? FontWeight.w700 : FontWeight.w400,
                     ),
@@ -200,14 +200,21 @@ class _ChannelTile extends ConsumerWidget {
                         onMarkRead?.call();
                         ref
                             .read(readStateProvider.notifier)
-                            .markContextRead(channel.id, ts);
+                            .markContextRead(
+                              channel.id,
+                              ts,
+                              clearForcedMessages: true,
+                            );
                         ref
                             .read(channelsProvider.notifier)
                             .clearObservedUnreadCoveredByRead(channel.id, ts);
                       } else {
                         ref
                             .read(readStateProvider.notifier)
-                            .markContextUnread(channel.id);
+                            .markContextUnread(
+                              channel.id,
+                              channelId: channel.id,
+                            );
                       }
                     }
                   },

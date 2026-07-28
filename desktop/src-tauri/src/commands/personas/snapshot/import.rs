@@ -13,7 +13,7 @@ use tauri::{AppHandle, Emitter, State};
 use crate::{
     app_state::AppState,
     managed_agents::{
-        agent_snapshot::{decode_snapshot_json, decode_snapshot_png, MemoryLevel},
+        agent_snapshot::{decode_snapshot_json, decode_snapshot_png, AgentSnapshot, MemoryLevel},
         load_managed_agents, load_personas, save_managed_agents, save_personas, AgentDefinition,
         ManagedAgentRecord, RespondTo,
     },
@@ -50,6 +50,13 @@ pub(super) fn reject_legacy_persona_filename(file_name: &str) -> Result<(), Stri
 pub struct AgentSnapshotImportPreview {
     /// Agent display name from the snapshot.
     pub display_name: String,
+    /// Whether the exported source definition was built in. This is display
+    /// metadata only; confirmed imports are always independent custom agents.
+    pub is_builtin: bool,
+    /// Preferred model from the exported definition.
+    pub model: Option<String>,
+    /// Preferred runtime from the exported definition.
+    pub runtime: Option<String>,
     /// System prompt, if any.
     pub system_prompt: Option<String>,
     /// Effective avatar: data URL if present, otherwise the source URL fallback.
@@ -262,30 +269,39 @@ pub async fn preview_agent_snapshot_import(
         reject_legacy_persona_filename(&file_name)?;
         let snapshot = decode_snapshot_from_bytes(&file_bytes)?;
 
-        let memory_level = match snapshot.memory.level {
-            MemoryLevel::None => "none",
-            MemoryLevel::Core => "core",
-            MemoryLevel::Everything => "everything",
-        }
-        .to_string();
-
-        Ok(AgentSnapshotImportPreview {
-            display_name: snapshot.profile.display_name.clone(),
-            system_prompt: snapshot.definition.system_prompt.clone(),
-            // Effective avatar: data URL wins; URL fallback if no data URL.
-            avatar_url: snapshot
-                .profile
-                .avatar_data_url
-                .clone()
-                .or_else(|| snapshot.profile.avatar_url.clone()),
-            memory_level,
-            memory_entry_count: snapshot.memory.entries.len(),
-            source_allowlist_count: snapshot.definition.respond_to_allowlist.len(),
-            has_source_allowlist: !snapshot.definition.respond_to_allowlist.is_empty(),
-        })
+        Ok(build_agent_snapshot_import_preview(&snapshot))
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
+}
+
+pub(crate) fn build_agent_snapshot_import_preview(
+    snapshot: &AgentSnapshot,
+) -> AgentSnapshotImportPreview {
+    let memory_level = match snapshot.memory.level {
+        MemoryLevel::None => "none",
+        MemoryLevel::Core => "core",
+        MemoryLevel::Everything => "everything",
+    }
+    .to_string();
+
+    AgentSnapshotImportPreview {
+        display_name: snapshot.profile.display_name.clone(),
+        is_builtin: snapshot.definition.source_is_builtin,
+        model: snapshot.definition.model.clone(),
+        runtime: snapshot.definition.runtime.clone(),
+        system_prompt: snapshot.definition.system_prompt.clone(),
+        // Effective avatar: data URL wins; URL fallback if no data URL.
+        avatar_url: snapshot
+            .profile
+            .avatar_data_url
+            .clone()
+            .or_else(|| snapshot.profile.avatar_url.clone()),
+        memory_level,
+        memory_entry_count: snapshot.memory.entries.len(),
+        source_allowlist_count: snapshot.definition.respond_to_allowlist.len(),
+        has_source_allowlist: !snapshot.definition.respond_to_allowlist.is_empty(),
+    }
 }
 
 // ── `confirm_agent_snapshot_import` ──────────────────────────────────────────
@@ -408,8 +424,10 @@ pub async fn confirm_agent_snapshot_import(
             name_pool: snapshot.definition.name_pool.clone(),
             is_builtin: false,
             is_active: true,
+            shared: false,
             source_team: None,
             source_team_persona_slug: None,
+            catalog_source: None,
             env_vars: std::collections::BTreeMap::new(),
             respond_to: respond_to_wire.clone(),
             respond_to_allowlist: minted.respond_to_allowlist.clone(),
@@ -476,8 +494,10 @@ pub async fn confirm_agent_snapshot_import(
             respond_to_allowlist: minted.respond_to_allowlist.clone(),
             is_builtin: false,
             is_active: true,
+            shared: false,
             source_team: None,
             source_team_persona_slug: None,
+            catalog_source: None,
             definition_respond_to: respond_to_wire.clone(),
             definition_respond_to_allowlist: minted.respond_to_allowlist.clone(),
             definition_parallelism: minted_parallelism,
@@ -585,7 +605,6 @@ pub async fn confirm_agent_snapshot_import(
 fn retain_agent_pending(app: &AppHandle, state: &AppState, record: &ManagedAgentRecord) {
     use crate::managed_agents::{
         agent_events::{agent_event_content, build_agent_event},
-        managed_agents_base_dir,
         persona_events::monotonic_created_at,
         retention::{get_retained_event, open_retention_db, retain_event, RetainedEvent},
     };
@@ -593,11 +612,12 @@ fn retain_agent_pending(app: &AppHandle, state: &AppState, record: &ManagedAgent
     use nostr::JsonUtil;
 
     let result = (|| -> Result<(), String> {
-        let conn = open_retention_db(&managed_agents_base_dir(app)?.join("retention.db"))?;
+        let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
+        let conn = open_retention_db(&scope.db_path)?;
         let content = serde_json::to_string(&agent_event_content(record))
             .map_err(|e| format!("failed to serialize agent content: {e}"))?;
         let (owner_pubkey, event) = {
-            let keys = state.signing_keys()?;
+            let keys = &scope.owner_keys;
             let owner_pubkey = keys.public_key().to_hex();
             let existing =
                 get_retained_event(&conn, KIND_MANAGED_AGENT, &owner_pubkey, &record.pubkey)?;
@@ -606,7 +626,7 @@ fn retain_agent_pending(app: &AppHandle, state: &AppState, record: &ManagedAgent
             }
             let event = build_agent_event(record)?
                 .custom_created_at(monotonic_created_at(existing.map(|row| row.created_at)))
-                .sign_with_keys(&keys)
+                .sign_with_keys(keys)
                 .map_err(|e| format!("failed to sign agent event: {e}"))?;
             (owner_pubkey, event)
         };

@@ -1872,6 +1872,26 @@ pub async fn workflow_webhook(
     }
     let trigger_ctx_json = serde_json::to_value(&trigger_ctx).ok();
 
+    // SEC-006: the webhook secret authenticates the *caller*, but the run
+    // executes with the workflow **owner's** standing authority — so the
+    // secret alone is insufficient. Immediately before run creation, reject
+    // disabled/inactive workflows and recheck the owner's current channel
+    // membership (and role, for exfiltration-capable definitions). Fail
+    // closed with the same generic 404 as the lookups above so a
+    // revoked-owner workflow is indistinguishable from a nonexistent one.
+    if !workflow.enabled || workflow.status != buzz_db::workflow::WorkflowStatus::Active {
+        return Err(not_found("workflow not found"));
+    }
+    let Some(wf_channel_id) = workflow.channel_id else {
+        // No channel scope means no channel authority to verify — fail closed.
+        return Err(not_found("workflow not found"));
+    };
+    state
+        .workflow_engine
+        .check_owner_authority(community_id, wf_channel_id, &workflow.owner_pubkey, &def)
+        .await
+        .map_err(|_| not_found("workflow not found"))?;
+
     let run_id = state
         .db
         .create_workflow_run(community_id, id, None, trigger_ctx_json.as_ref())

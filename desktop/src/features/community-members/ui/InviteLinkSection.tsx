@@ -14,8 +14,10 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
+import { Input } from "@/shared/ui/input";
 import { Separator } from "@/shared/ui/separator";
 import { Spinner } from "@/shared/ui/spinner";
+import { Switch } from "@/shared/ui/switch";
 
 const TTL_OPTIONS: { label: string; value: number }[] = [
   { label: "1 day", value: 24 * 60 * 60 },
@@ -31,8 +33,9 @@ type CopyStatus = "idle" | "copying" | "copied";
 /**
  * Share-with-link footer for the community invite dialog.
  *
- * Each copy action mints a fresh stateless invite code and places its
- * shareable landing-page URL on the clipboard.
+ * Each copy action mints a fresh database-backed invite code and places its
+ * shareable landing-page URL on the clipboard. Invites may be unlimited or
+ * capped to a caller-selected number of successful joins.
  */
 export function InviteLinkSection({
   onTtlSecsChange,
@@ -42,6 +45,14 @@ export function InviteLinkSection({
   ttlSecs: number;
 }) {
   const [copyStatus, setCopyStatus] = React.useState<CopyStatus>("idle");
+  const [maxUsesEnabled, setMaxUsesEnabled] = React.useState(true);
+  const [maxUsesInput, setMaxUsesInput] = React.useState("3");
+  const parsedMaxUses = Number(maxUsesInput);
+  const maxUsesValid =
+    !maxUsesEnabled ||
+    (Number.isInteger(parsedMaxUses) &&
+      parsedMaxUses >= 1 &&
+      parsedMaxUses <= 10000);
   const ttlLabel =
     TTL_OPTIONS.find((option) => option.value === ttlSecs)?.label ?? "3 days";
   const copyLabel =
@@ -58,10 +69,13 @@ export function InviteLinkSection({
   }, [copyStatus]);
 
   async function handleCopy() {
-    if (copyStatus === "copying") return;
+    if (copyStatus === "copying" || !maxUsesValid) return;
     setCopyStatus("copying");
     try {
-      const invite = await mintInvite(ttlSecs);
+      const invite = await mintInvite({
+        ttlSecs,
+        maxUses: maxUsesEnabled ? parsedMaxUses : null,
+      });
       await writeTextToClipboard(invite.url);
       setCopyStatus("copied");
       toast.success("Invite link copied");
@@ -118,13 +132,45 @@ export function InviteLinkSection({
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
+      <div className="mt-3 flex items-center gap-2 text-xs">
+        <Switch
+          checked={maxUsesEnabled}
+          data-testid="invite-link-max-uses-switch"
+          id="invite-max-uses"
+          onCheckedChange={setMaxUsesEnabled}
+        />
+        <label className="text-muted-foreground" htmlFor="invite-max-uses">
+          Limit uses
+        </label>
+        {maxUsesEnabled ? (
+          <Input
+            className="h-7 w-20"
+            data-testid="invite-link-max-uses-input"
+            inputMode="numeric"
+            max={10000}
+            min={1}
+            onChange={(event) => setMaxUsesInput(event.target.value)}
+            placeholder="3"
+            type="number"
+            value={maxUsesInput}
+          />
+        ) : null}
+        {maxUsesEnabled && !maxUsesValid ? (
+          <span
+            className="text-destructive"
+            data-testid="invite-link-max-uses-error"
+          >
+            Enter a whole number from 1 to 10,000
+          </span>
+        ) : null}
+      </div>
       <Separator className="my-4 bg-input/40" />
       <div className="flex justify-end">
         <Button
           className="shrink-0 border-border shadow-none"
           data-copy-status={copyStatus}
           data-testid="copy-invite-link"
-          disabled={copyStatus === "copying"}
+          disabled={copyStatus === "copying" || !maxUsesValid}
           onClick={() => void handleCopy()}
           size="sm"
           type="button"

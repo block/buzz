@@ -1,16 +1,21 @@
 /**
- * E2E spec for the Bring-Your-Own-Harness management UI.
+ * E2E spec for the consolidated Harnesses settings surface + Add-harnesses
+ * catalog dialog.
  *
  * Covers:
- *  - Preset gallery renders with Detected badge for an available preset
- *  - Preset gallery renders without badge / with install link for a missing preset
- *  - Add custom harness (form → save → row appears in list)
+ *  - Ready preset gets a row in "Your harnesses"; needs-setup preset does NOT
+ *  - Needs-setup preset appears in the Add-harnesses catalog with status,
+ *    curated description, docs link, and setup action
+ *  - Catalog search filters the list
+ *  - Toggling install does not reorder rows (stable order)
+ *  - Add custom harness via catalog (name+command → save → row appears)
+ *  - Advanced disclosure hides ID/args/env/docs/hint until opened
  *  - Edit preserves env vars (round-trip through definitionEnv boundary)
  *  - Same-ID edit replaces entry (no duplicate row)
  *  - Rename removes old row and shows new row
- *  - Delete success removes row
- *  - Delete failure shows error inline (error-injection knob)
- *  - PATH badge: custom harness row shows Detected when availability === "available"
+ *  - Delete success removes row; delete failure shows inline error
+ *  - PATH badge: custom harness row shows Detected when available
+ *  - Preset rows render bundled logos, never initials
  *  - Onboarding navigate: setup-page "More harnesses" click → Settings → Agents (F8)
  */
 import { expect, test } from "@playwright/test";
@@ -19,7 +24,7 @@ import { installMockBridge } from "../helpers/bridge";
 
 // ── Shared catalog fixtures ───────────────────────────────────────────────────
 
-/** Hermes preset with availability "available" — renders the Detected badge. */
+/** Hermes preset with availability "available" — earns a Your-harnesses row. */
 const HERMES_AVAILABLE = {
   id: "hermes",
   label: "Hermes",
@@ -29,7 +34,7 @@ const HERMES_AVAILABLE = {
   binary_path: "/usr/local/bin/hermes-acp",
   default_args: [],
   mcp_command: null,
-  install_hint: "Install Hermes Agent from hermes-agent.nousresearch.com.",
+  install_hint: "Buzz talks to Hermes Agent through its hermes-acp command.",
   install_instructions_url: "https://hermes-agent.nousresearch.com",
   can_auto_install: false,
   requires_external_cli: true,
@@ -39,7 +44,7 @@ const HERMES_AVAILABLE = {
   source: "preset",
 } as const;
 
-/** OpenClaw preset with availability "not_installed" — renders install link. */
+/** OpenClaw preset "not_installed" + no auto-install — catalog-only. */
 const OPENCLAW_NOT_INSTALLED = {
   id: "openclaw",
   label: "OpenClaw",
@@ -49,7 +54,8 @@ const OPENCLAW_NOT_INSTALLED = {
   binary_path: null,
   default_args: ["acp"],
   mcp_command: null,
-  install_hint: "Install OpenClaw: npm install -g openclaw@latest.",
+  install_hint:
+    "Buzz talks to OpenClaw through its ACP mode (openclaw acp), which relies on the OpenClaw Gateway daemon. Follow the setup guide to install both.",
   install_instructions_url: "https://docs.openclaw.ai/start/getting-started",
   can_auto_install: false,
   requires_external_cli: true,
@@ -60,8 +66,8 @@ const OPENCLAW_NOT_INSTALLED = {
 } as const;
 
 /** Cursor preset — deliberately has NO bundled logo (brand assets not
- * licensed for redistribution; see FALLBACK_ONLY_PRESETS). Must render the
- * terminal glyph, never initials. */
+ * licensed for redistribution). Must render the terminal glyph, never
+ * initials. */
 const CURSOR_AVAILABLE = {
   id: "cursor",
   label: "Cursor",
@@ -71,7 +77,7 @@ const CURSOR_AVAILABLE = {
   binary_path: "/usr/local/bin/cursor-agent",
   default_args: [],
   mcp_command: null,
-  install_hint: "Install Cursor CLI from cursor.com.",
+  install_hint: "Buzz talks to Cursor through the cursor-agent CLI's ACP mode.",
   install_instructions_url: "https://cursor.com/cli",
   can_auto_install: false,
   requires_external_cli: true,
@@ -81,7 +87,7 @@ const CURSOR_AVAILABLE = {
   source: "preset",
 } as const;
 
-/** Custom harness entry already persisted — shown in the custom list. */
+/** Custom harness entry already persisted — always gets a row. */
 function makeCustomEntry(
   overrides: {
     id?: string;
@@ -128,28 +134,32 @@ async function openHarnessSettings(page: import("@playwright/test").Page) {
   await page.getByTestId("profile-popover-settings").click();
   await expect(page.getByTestId("settings-view")).toBeVisible();
   await page.getByTestId("settings-nav-agents").click();
-  await expect(page.getByTestId("settings-harness-management")).toBeVisible({
+  await expect(page.getByTestId("settings-harnesses")).toBeVisible({
     timeout: 10_000,
   });
 }
 
-/**
- * Fill and submit the custom harness add/edit form.
- * Caller must have the form visible before calling.
- */
+/** Open the Add-harnesses catalog dialog from the settings surface. */
+async function openCatalog(page: import("@playwright/test").Page) {
+  await page.getByTestId("harness-add-button").click();
+  await expect(page.getByTestId("harness-catalog-dialog")).toBeVisible();
+}
+
+/** Fill the custom harness form (all fields render inline). */
 async function fillHarnessForm(
   page: import("@playwright/test").Page,
   values: {
     label: string;
-    id: string;
+    id?: string;
     command: string;
     env?: Array<{ key: string; value: string }>;
   },
 ) {
   await page.fill("#ch-label", values.label);
-  // ID may auto-derive; overwrite it.
-  await page.fill("#ch-id", values.id);
   await page.fill("#ch-command", values.command);
+  if (values.id !== undefined) {
+    await page.fill("#ch-id", values.id);
+  }
   for (const pair of values.env ?? []) {
     await page.getByRole("button", { name: "Add env var" }).click();
     // Fill last appended row.
@@ -160,25 +170,10 @@ async function fillHarnessForm(
   }
 }
 
-// ── Preset gallery ────────────────────────────────────────────────────────────
+// ── Your harnesses vs catalog split ──────────────────────────────────────────
 
-test.describe("preset gallery", () => {
-  test("detected preset shows Detected badge", async ({ page }) => {
-    await installMockBridge(page, {
-      acpRuntimesCatalog: [HERMES_AVAILABLE, OPENCLAW_NOT_INSTALLED],
-    });
-    await openHarnessSettings(page);
-
-    const hermesCard = page.getByTestId("harness-preset-hermes");
-    await expect(hermesCard).toBeVisible();
-    await expect(hermesCard.getByText("Detected")).toBeVisible();
-    // Not-installed preset must NOT show Detected badge.
-    const openclawCard = page.getByTestId("harness-preset-openclaw");
-    await expect(openclawCard).toBeVisible();
-    await expect(openclawCard.getByText("Detected")).not.toBeVisible();
-  });
-
-  test("not-installed preset shows Install link, not Detected badge", async ({
+test.describe("your harnesses split", () => {
+  test("ready preset gets a row; needs-setup preset is catalog-only", async ({
     page,
   }) => {
     await installMockBridge(page, {
@@ -186,41 +181,195 @@ test.describe("preset gallery", () => {
     });
     await openHarnessSettings(page);
 
-    const openclawCard = page.getByTestId("harness-preset-openclaw");
-    await expect(openclawCard).toBeVisible();
-    await expect(openclawCard.getByText("Install")).toBeVisible();
-    await expect(openclawCard.getByText("Detected")).not.toBeVisible();
+    // Ready preset row with a Ready status chip.
+    const hermesRow = page.getByTestId("doctor-runtime-hermes");
+    await expect(hermesRow).toBeVisible();
+    await expect(page.getByTestId("doctor-runtime-ready-hermes")).toHaveText(
+      "Ready",
+    );
+
+    // Needs-setup preset must NOT render a row (and thus no Install button).
+    await expect(page.getByTestId("doctor-runtime-openclaw")).toHaveCount(0);
+    await expect(
+      page.getByTestId("doctor-runtime-install-openclaw"),
+    ).toHaveCount(0);
+  });
+
+  test("needs-setup preset appears in catalog with status, description, docs and setup action", async ({
+    page,
+  }) => {
+    await installMockBridge(page, {
+      acpRuntimesCatalog: [HERMES_AVAILABLE, OPENCLAW_NOT_INSTALLED],
+    });
+    await openHarnessSettings(page);
+    await openCatalog(page);
+
+    // Needs-setup entries sort first, so OpenClaw is auto-selected.
+    await expect(
+      page.getByTestId("harness-catalog-list-item-openclaw"),
+    ).toBeVisible();
+    const detail = page.getByTestId("harness-catalog-detail-pane");
+    await expect(detail).toContainText("OpenClaw");
+    // Status chip.
+    await expect(
+      page.getByTestId("harness-catalog-status-openclaw"),
+    ).toHaveText("CLI needed");
+    // Curated one-liner (first-party-sourced category sentence).
+    await expect(detail).toContainText(
+      "A personal AI assistant that runs on your own devices.",
+    );
+    // Operational setup hint from runtime state.
+    await expect(detail).toContainText("OpenClaw Gateway daemon");
+    // Primary setup action under the header (no auto-install → setup guide).
+    await expect(
+      page.getByTestId("harness-catalog-setup-openclaw"),
+    ).toBeVisible();
+
+    // Technical details are visible by default.
+    const technical = page.getByTestId("harness-catalog-technical-openclaw");
+    await expect(technical).toBeVisible();
+    await expect(technical).toContainText("openclaw");
+    await expect(technical).toContainText("acp");
+  });
+
+  test("ready preset shows in catalog as Ready with no install action", async ({
+    page,
+  }) => {
+    await installMockBridge(page, {
+      acpRuntimesCatalog: [HERMES_AVAILABLE, OPENCLAW_NOT_INSTALLED],
+    });
+    await openHarnessSettings(page);
+    await openCatalog(page);
+
+    // Ready entries live in the "Installed" accordion, collapsed by default.
+    await expect(
+      page.getByTestId("harness-catalog-list-item-hermes"),
+    ).toHaveCount(0);
+    await expect(
+      page.getByTestId("harness-catalog-section-installed-count"),
+    ).toHaveText("1");
+    await page.getByTestId("harness-catalog-section-installed").click();
+
+    await page.getByTestId("harness-catalog-list-item-hermes").click();
+    const detail = page.getByTestId("harness-catalog-detail-pane");
+    await expect(detail).toContainText("Ready");
+    await expect(
+      page.getByTestId("harness-catalog-install-hermes"),
+    ).toHaveCount(0);
+    await expect(page.getByTestId("harness-catalog-setup-hermes")).toHaveCount(
+      0,
+    );
+  });
+
+  test("catalog Update for an outdated adapter requires confirmation before installing", async ({
+    page,
+  }) => {
+    // Wes's review blocker: Add runtimes → Setup → Update must honor the
+    // same machine-wide replacement confirmation the runtime row shows —
+    // never mutate straight from the catalog CTA.
+    await installMockBridge(page, {
+      acpRuntimesCatalog: [
+        HERMES_AVAILABLE,
+        {
+          ...OPENCLAW_NOT_INSTALLED,
+          availability: "adapter_outdated",
+          binary_path: "/usr/local/bin/openclaw",
+          can_auto_install: true,
+        },
+      ],
+    });
+    await openHarnessSettings(page);
+    await openCatalog(page);
+
+    const installCalls = () =>
+      page.evaluate(
+        () =>
+          (
+            (window as Window & { __BUZZ_E2E_COMMANDS__?: string[] })
+              .__BUZZ_E2E_COMMANDS__ ?? []
+          ).filter((command) => command === "install_acp_runtime").length,
+      );
+
+    await page.getByTestId("harness-catalog-list-item-openclaw").click();
+    await expect(
+      page.getByTestId("harness-catalog-status-openclaw"),
+    ).toHaveText("Update needed");
+    const updateButton = page.getByTestId("harness-catalog-install-openclaw");
+    await expect(updateButton).toHaveText("Update");
+
+    // Cancel path: clicking Update opens the warning, no mutation fires.
+    await updateButton.click();
+    const dialog = page.getByRole("alertdialog");
+    await expect(dialog).toContainText("Update OpenClaw adapter?");
+    await expect(dialog).toContainText(
+      "This replaces the machine-wide openclaw adapter.",
+    );
+    // Generic runtimes must never get Codex's package copy.
+    await expect(dialog).not.toContainText("codex-acp");
+    expect(await installCalls()).toBe(0);
+    await dialog.getByRole("button", { name: "Cancel" }).click();
+    await expect(dialog).toHaveCount(0);
+    expect(await installCalls()).toBe(0);
+
+    // Confirm path: exactly one install fires after confirmation.
+    await updateButton.click();
+    await page.getByTestId("harness-catalog-confirm-update-openclaw").click();
+    await expect(page.getByRole("alertdialog")).toHaveCount(0);
+    await expect.poll(installCalls).toBe(1);
+    // No duplicate mutation after the flow settles.
+    expect(await installCalls()).toBe(1);
+  });
+
+  test("catalog search filters the list", async ({ page }) => {
+    await installMockBridge(page, {
+      acpRuntimesCatalog: [
+        HERMES_AVAILABLE,
+        OPENCLAW_NOT_INSTALLED,
+        CURSOR_AVAILABLE,
+      ],
+    });
+    await openHarnessSettings(page);
+    await openCatalog(page);
+
+    await page.getByTestId("harness-catalog-search").fill("claw");
+    await expect(
+      page.getByTestId("harness-catalog-list-item-openclaw"),
+    ).toBeVisible();
+    await expect(
+      page.getByTestId("harness-catalog-list-item-hermes"),
+    ).toHaveCount(0);
+    await expect(
+      page.getByTestId("harness-catalog-list-item-cursor"),
+    ).toHaveCount(0);
+    // The custom-harness entry stays available regardless of the filter.
+    await expect(
+      page.getByTestId("harness-catalog-list-item-custom"),
+    ).toBeVisible();
   });
 });
 
-// ── Preset logos in the Agent runtimes list ──────────────────────────────────
+// ── Preset logos in Your harnesses rows ──────────────────────────────────────
 
-test("Agent runtimes rows render bundled preset logos, not initials", async ({
+test("harness rows render bundled preset logos, not initials", async ({
   page,
 }) => {
   await installMockBridge(page, {
-    acpRuntimesCatalog: [
-      HERMES_AVAILABLE,
-      OPENCLAW_NOT_INSTALLED,
-      CURSOR_AVAILABLE,
-    ],
+    acpRuntimesCatalog: [HERMES_AVAILABLE, CURSOR_AVAILABLE],
   });
   await openHarnessSettings(page);
 
-  // Preset rows in "Agent runtimes" must show the same bundled logo the
-  // preset gallery uses (PRESET_LOGOS via RuntimeIcon), even though presets
-  // emit an empty avatar_url (the no-remote-icon security line).
-  for (const [id, file] of [
-    ["hermes", "/harness-logos/hermes.png"],
-    ["openclaw", "/harness-logos/openclaw.svg"],
-  ] as const) {
-    const logo = page.getByTestId(`doctor-runtime-logo-${id}`);
-    await expect(logo).toBeVisible();
-    await expect(logo.locator("img")).toHaveAttribute("src", file);
-  }
+  // Preset rows must show the same bundled logo the catalog uses
+  // (PRESET_LOGOS via RuntimeIcon), even though presets emit an empty
+  // avatar_url (the no-remote-icon security line).
+  const hermesLogo = page.getByTestId("doctor-runtime-logo-hermes");
+  await expect(hermesLogo).toBeVisible();
+  await expect(hermesLogo.locator("img")).toHaveAttribute(
+    "src",
+    "/harness-logos/hermes.png",
+  );
 
-  // Cursor has no bundled logo (licensing) — it must fall through to
-  // RuntimeIcon's terminal glyph like the preset gallery, not initials.
+  // Cursor renders its inline SVG mark (RUNTIME_MARKS, CC0 simple-icons
+  // path) — an svg, never an img or initials.
   const cursorLogo = page.getByTestId("doctor-runtime-logo-cursor");
   await expect(cursorLogo).toBeVisible();
   await expect(cursorLogo.locator("svg")).toBeVisible();
@@ -228,40 +377,48 @@ test("Agent runtimes rows render bundled preset logos, not initials", async ({
   await expect(cursorLogo).not.toContainText("C");
 });
 
-// ── Custom harness add ────────────────────────────────────────────────────────
+// ── Custom harness add (via catalog) ─────────────────────────────────────────
 
 test.describe("add custom harness", () => {
-  test("form saves and row appears in list", async ({ page }) => {
+  test("catalog custom form saves and row appears in Your harnesses", async ({
+    page,
+  }) => {
     await installMockBridge(page, {
       acpRuntimesCatalog: [HERMES_AVAILABLE, OPENCLAW_NOT_INSTALLED],
     });
     await openHarnessSettings(page);
 
     // No custom rows yet.
-    // The list container may exist but have no row children.
     await expect(
-      page.getByTestId("custom-harness-row-my-custom-agent"),
+      page.getByTestId("doctor-runtime-my-custom-agent"),
     ).not.toBeVisible();
 
-    // Open the add form.
-    await page.getByTestId("harness-add-custom-button").click();
+    await openCatalog(page);
+    await page.getByTestId("harness-catalog-list-item-custom").click();
     await expect(page.getByTestId("custom-harness-form")).toBeVisible();
+
+    // All fields render inline.
+    await expect(page.locator("#ch-label")).toBeVisible();
+    await expect(page.locator("#ch-command")).toBeVisible();
+    await expect(page.locator("#ch-id")).toBeVisible();
 
     await fillHarnessForm(page, {
       label: "My Custom Agent",
-      id: "my-custom-agent",
       command: "my-custom-acp",
     });
 
-    // Submit.
+    // ID auto-derives from the label.
+    await expect(page.locator("#ch-id")).toHaveValue("my-custom-agent");
+
     await page
       .getByTestId("custom-harness-form")
       .getByRole("button", { name: "Save", exact: true })
       .click();
 
-    // Row must appear in the list after save.
+    // Dialog closes; row appears in Your harnesses.
+    await expect(page.getByTestId("harness-catalog-dialog")).not.toBeVisible();
     await expect(
-      page.getByTestId("custom-harness-row-my-custom-agent"),
+      page.getByTestId("doctor-runtime-my-custom-agent"),
     ).toBeVisible({ timeout: 5_000 });
   });
 
@@ -277,14 +434,15 @@ test.describe("add custom harness", () => {
     });
     await openHarnessSettings(page);
 
-    // Open edit form for the existing custom entry.
+    // Open edit form for the existing custom entry via the ••• menu.
     await expect(
-      page.getByTestId("custom-harness-row-my-custom-agent"),
+      page.getByTestId("doctor-runtime-my-custom-agent"),
     ).toBeVisible();
+    await page.getByTestId("doctor-runtime-menu-my-custom-agent").click();
     await page.getByTestId("custom-harness-edit-my-custom-agent").click();
     await expect(page.getByTestId("custom-harness-form")).toBeVisible();
 
-    // Env KEY and value must be pre-populated.
+    // Existing env vars must be pre-populated.
     await expect(page.locator('input[placeholder="KEY"]').first()).toHaveValue(
       "MY_API_KEY",
     );
@@ -304,6 +462,7 @@ test.describe("add custom harness", () => {
     await openHarnessSettings(page);
 
     // Edit, keep same ID, change label.
+    await page.getByTestId("doctor-runtime-menu-my-custom-agent").click();
     await page.getByTestId("custom-harness-edit-my-custom-agent").click();
     await expect(page.getByTestId("custom-harness-form")).toBeVisible();
     await page.fill("#ch-label", "V2 Label");
@@ -313,9 +472,7 @@ test.describe("add custom harness", () => {
       .click();
 
     // Exactly one row with the same ID; label updated.
-    const rows = page.locator(
-      '[data-testid^="custom-harness-row-my-custom-agent"]',
-    );
+    const rows = page.locator('[data-testid="doctor-runtime-my-custom-agent"]');
     await expect(rows).toHaveCount(1);
     await expect(rows.first()).toContainText("V2 Label");
   });
@@ -330,10 +487,14 @@ test.describe("add custom harness", () => {
     });
     await openHarnessSettings(page);
 
+    await page.getByTestId("doctor-runtime-menu-old-harness").click();
     await page.getByTestId("custom-harness-edit-old-harness").click();
     await expect(page.getByTestId("custom-harness-form")).toBeVisible();
-    await page.fill("#ch-label", "New Harness");
-    await page.fill("#ch-id", "new-harness");
+    await fillHarnessForm(page, {
+      label: "New Harness",
+      id: "new-harness",
+      command: "my-custom-acp",
+    });
     await page
       .getByTestId("custom-harness-form")
       .getByRole("button", { name: "Save", exact: true })
@@ -341,11 +502,11 @@ test.describe("add custom harness", () => {
 
     // Old row gone; new row present.
     await expect(
-      page.getByTestId("custom-harness-row-old-harness"),
+      page.getByTestId("doctor-runtime-old-harness"),
     ).not.toBeVisible({ timeout: 5_000 });
-    await expect(
-      page.getByTestId("custom-harness-row-new-harness"),
-    ).toBeVisible({ timeout: 5_000 });
+    await expect(page.getByTestId("doctor-runtime-new-harness")).toBeVisible({
+      timeout: 5_000,
+    });
   });
 });
 
@@ -362,9 +523,13 @@ test.describe("delete custom harness", () => {
     });
     await openHarnessSettings(page);
 
-    // Enter confirm-delete mode.
+    // Enter confirm-delete mode via the ••• menu.
+    await page.getByTestId("doctor-runtime-menu-my-custom-agent").click();
     await page.getByTestId("custom-harness-delete-my-custom-agent").click();
-    // The confirm button must appear.
+    // Blast-radius warning + confirm button must appear.
+    await expect(
+      page.getByTestId("custom-harness-delete-warning-my-custom-agent"),
+    ).toBeVisible();
     await expect(
       page.getByTestId("custom-harness-delete-confirm-my-custom-agent"),
     ).toBeVisible();
@@ -374,7 +539,7 @@ test.describe("delete custom harness", () => {
 
     // Row disappears after successful delete.
     await expect(
-      page.getByTestId("custom-harness-row-my-custom-agent"),
+      page.getByTestId("doctor-runtime-my-custom-agent"),
     ).not.toBeVisible({ timeout: 5_000 });
   });
 
@@ -391,6 +556,7 @@ test.describe("delete custom harness", () => {
     });
     await openHarnessSettings(page);
 
+    await page.getByTestId("doctor-runtime-menu-my-custom-agent").click();
     await page.getByTestId("custom-harness-delete-my-custom-agent").click();
     await page
       .getByTestId("custom-harness-delete-confirm-my-custom-agent")
@@ -401,16 +567,14 @@ test.describe("delete custom harness", () => {
       page.getByText("permission denied: could not remove file"),
     ).toBeVisible({ timeout: 5_000 });
     await expect(
-      page.getByTestId("custom-harness-row-my-custom-agent"),
+      page.getByTestId("doctor-runtime-my-custom-agent"),
     ).toBeVisible();
   });
 });
 
-// ── PATH badge on custom harness row ─────────────────────────────────────────
+// ── Custom harness row readiness ─────────────────────────────────────────────
 
-test("custom harness row shows Detected badge when command is on PATH", async ({
-  page,
-}) => {
+test("available custom harness row shows a Ready chip", async ({ page }) => {
   await installMockBridge(page, {
     acpRuntimesCatalog: [
       HERMES_AVAILABLE,
@@ -420,9 +584,38 @@ test("custom harness row shows Detected badge when command is on PATH", async ({
   });
   await openHarnessSettings(page);
 
-  const row = page.getByTestId("custom-harness-row-my-custom-agent");
+  const row = page.getByTestId("doctor-runtime-my-custom-agent");
   await expect(row).toBeVisible();
-  await expect(row.getByText("Detected")).toBeVisible();
+  await expect(
+    page.getByTestId("doctor-runtime-ready-my-custom-agent"),
+  ).toHaveText("Ready");
+});
+
+test("not-ready custom harness row shows status, no install action", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    acpRuntimesCatalog: [
+      HERMES_AVAILABLE,
+      OPENCLAW_NOT_INSTALLED,
+      makeCustomEntry(),
+    ],
+  });
+  await openHarnessSettings(page);
+
+  const row = page.getByTestId("doctor-runtime-my-custom-agent");
+  await expect(row).toBeVisible();
+  await expect(
+    page.getByTestId("doctor-runtime-status-my-custom-agent"),
+  ).toHaveText("CLI needed");
+  // A row that setup can't fix with one click renders no Install button (and
+  // is not ready).
+  await expect(
+    page.getByTestId("doctor-runtime-install-my-custom-agent"),
+  ).toHaveCount(0);
+  await expect(
+    page.getByTestId("doctor-runtime-ready-my-custom-agent"),
+  ).toHaveCount(0);
 });
 
 // ── F8: onboarding navigate-after-complete ────────────────────────────────────
@@ -491,8 +684,8 @@ test("onboarding setup More-harnesses click navigates to Settings → Agents", a
   await page.getByTestId("onboarding-setup-more-harnesses").click();
 
   // After onboarding completes + router mounts, the app must land on
-  // Settings → Agents (harness management section visible).
-  await expect(page.getByTestId("settings-harness-management")).toBeVisible({
+  // Settings → Agents (consolidated harnesses section visible).
+  await expect(page.getByTestId("settings-harnesses")).toBeVisible({
     timeout: 15_000,
   });
 });
