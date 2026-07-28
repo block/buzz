@@ -46,7 +46,7 @@ pub async fn build_core_section(
         Ok(None) => Some(format!("[{SECTION_LABEL}]\n{ONBOARDING_NUDGE}")),
         Err(reason) => {
             tracing::warn!(
-                target: "engram::core",
+                target: "buzz_acp::engram::core",
                 "core fetch failed: {reason} — emitting no section to avoid \
                  confusing a relay outage with an absent core"
             );
