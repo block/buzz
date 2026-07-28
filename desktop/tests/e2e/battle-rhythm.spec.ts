@@ -112,6 +112,45 @@ test("Battle Rhythm opens read-only plan milestones without duplicating them", a
   ).toHaveCount(0);
 });
 
+test("Planning Review proposes but does not auto-create a missing prerequisite", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await page.getByTestId("open-battle-rhythm-view").click();
+  const screen = page.getByTestId("battle-rhythm-screen");
+  await screen.getByRole("button", { name: "New Event" }).click();
+  let editor = page.getByRole("dialog", { name: "New manual event" });
+  await editor.getByLabel("Event").fill("Sail Manila");
+  await editor.getByLabel("Start", { exact: true }).fill("2026-08-03T08:00");
+  await editor.getByLabel("End", { exact: true }).fill("2026-08-03T10:00");
+  await editor.getByRole("button", { name: "Save event" }).click();
+
+  await screen.getByRole("button", { name: "Planning Review" }).click();
+  const review = page.getByRole("dialog", { name: "Planning Review" });
+  await expect(
+    review.getByText("Securing-for-sea activity may be missing"),
+  ).toBeVisible();
+  await expect(review.getByText("Rules only")).toBeVisible();
+  await review.getByRole("button", { name: "Review proposed event" }).click();
+
+  editor = page.getByRole("dialog", { name: "New manual event" });
+  await expect(editor.getByLabel("Event")).toHaveValue(
+    "Securing for sea rounds",
+  );
+  await expect(editor.getByLabel("Start", { exact: true })).toHaveValue(
+    "2026-07-31T00:00",
+  );
+  await editor.getByRole("button", { name: "Save event" }).click();
+
+  await screen.getByRole("button", { name: "Planning Review" }).click();
+  await expect(
+    page
+      .getByRole("dialog", { name: "Planning Review" })
+      .getByText("No planning gaps found"),
+  ).toBeVisible();
+});
+
 test("Battle Rhythm reviews and applies a Shortcast document import", async ({
   page,
 }) => {

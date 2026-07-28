@@ -13,6 +13,11 @@ import {
   type ApplePublicationStatus,
 } from "../data/applePublication";
 import { dayInTimeZone, getYearRange } from "../domain/dateRange";
+import {
+  evaluatePlanningChecks,
+  type PlanningFinding,
+  type ProposedCalendarEvent,
+} from "../domain/deterministicChecks";
 import { expandRecurringEvents } from "../domain/occurrences";
 import type { BattleRhythmEvent } from "../domain/contracts";
 import { useBattleRhythmMutations, useBattleRhythmQuery } from "../hooks";
@@ -20,6 +25,7 @@ import { DayShortcast } from "./DayShortcast";
 import { EventEditorDialog } from "./EventEditorDialog";
 import { ImportReviewDialog } from "./ImportReviewDialog";
 import { MonthCalendar } from "./MonthCalendar";
+import { PlanningReviewPanel } from "./PlanningReviewPanel";
 import { SourceHistoryDialog } from "./SourceHistoryDialog";
 import { WeekCalendar } from "./WeekCalendar";
 import { YearTimeline } from "./YearTimeline";
@@ -41,8 +47,12 @@ export function BattleRhythmScreen() {
   const [editingEvent, setEditingEvent] = React.useState<
     BattleRhythmEvent | undefined
   >();
+  const [editorPrefill, setEditorPrefill] = React.useState<
+    ProposedCalendarEvent | undefined
+  >();
   const [historyOpen, setHistoryOpen] = React.useState(false);
   const [importOpen, setImportOpen] = React.useState(false);
+  const [reviewOpen, setReviewOpen] = React.useState(false);
   const [appleStatus, setAppleStatus] =
     React.useState<ApplePublicationStatus>();
   const [appleBusy, setAppleBusy] = React.useState(false);
@@ -57,6 +67,15 @@ export function BattleRhythmScreen() {
   const events = React.useMemo(
     () => expandRecurringEvents(rhythm.data?.events ?? [], range),
     [range, rhythm.data?.events],
+  );
+  const planningFindings = React.useMemo(
+    () =>
+      evaluatePlanningChecks({
+        events: rhythm.data?.events ?? [],
+        sources: rhythm.data?.sources ?? [],
+        timeZone: TIME_ZONE,
+      }),
+    [rhythm.data?.events, rhythm.data?.sources],
   );
   const planMilestones = React.useMemo(
     () =>
@@ -183,6 +202,14 @@ export function BattleRhythmScreen() {
         )
       : undefined;
     setEditingEvent(original);
+    setEditorPrefill(undefined);
+    setEditorOpen(true);
+  }
+  function reviewProposedEvent(finding: PlanningFinding) {
+    if (!finding.proposedEvent) return;
+    setReviewOpen(false);
+    setEditingEvent(undefined);
+    setEditorPrefill(finding.proposedEvent);
     setEditorOpen(true);
   }
   function openPlanMilestone(milestone: PlanTaskCalendarProjection) {
@@ -281,8 +308,7 @@ export function BattleRhythmScreen() {
           </button>
           <button
             className="rounded border px-3 py-2 text-sm"
-            disabled
-            title="Planning Review is not configured"
+            onClick={() => setReviewOpen(true)}
             type="button"
           >
             Planning Review
@@ -327,13 +353,23 @@ export function BattleRhythmScreen() {
         event={editingEvent}
         onOpenChange={(open) => {
           setEditorOpen(open);
-          if (!open) setEditingEvent(undefined);
+          if (!open) {
+            setEditingEvent(undefined);
+            setEditorPrefill(undefined);
+          }
         }}
         onSave={async (event) => {
           await mutations.manual.mutateAsync(event);
         }}
         open={editorOpen}
+        prefill={editorPrefill}
         timeZone={TIME_ZONE}
+      />
+      <PlanningReviewPanel
+        findings={planningFindings}
+        onOpenChange={setReviewOpen}
+        onReviewEvent={reviewProposedEvent}
+        open={reviewOpen}
       />
       <SourceHistoryDialog
         onRollback={async (input) => {

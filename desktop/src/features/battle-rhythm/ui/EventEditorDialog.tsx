@@ -7,12 +7,14 @@ import {
 } from "@/shared/ui/dialog";
 import type { BattleRhythmEvent } from "../domain/contracts";
 import { localDateTimeToRfc3339 } from "../domain/dateRange";
+import type { ProposedCalendarEvent } from "../domain/deterministicChecks";
 
 type Props = {
   event?: BattleRhythmEvent;
   onOpenChange: (open: boolean) => void;
   onSave: (event: BattleRhythmEvent) => Promise<void> | void;
   open: boolean;
+  prefill?: ProposedCalendarEvent;
   timeZone: string;
 };
 export function EventEditorDialog({
@@ -20,20 +22,22 @@ export function EventEditorDialog({
   onOpenChange,
   onSave,
   open,
+  prefill,
   timeZone,
 }: Props) {
-  const [title, setTitle] = React.useState(event?.title ?? "");
+  const draft = event ?? prefill;
+  const [title, setTitle] = React.useState(draft?.title ?? "");
   const [start, setStart] = React.useState(
-    event?.start.slice(0, 16) ?? new Date().toISOString().slice(0, 16),
+    draft?.start.slice(0, 16) ?? new Date().toISOString().slice(0, 16),
   );
   const [end, setEnd] = React.useState(
-    event?.end.slice(0, 16) ??
+    draft?.end.slice(0, 16) ??
       new Date(Date.now() + 3_600_000).toISOString().slice(0, 16),
   );
-  const [allDay, setAllDay] = React.useState(event?.allDay ?? false);
-  const [owner, setOwner] = React.useState(event?.responsibleOwner ?? "");
+  const [allDay, setAllDay] = React.useState(draft?.allDay ?? false);
+  const [owner, setOwner] = React.useState(draft?.responsibleOwner ?? "");
   const [location, setLocation] = React.useState(event?.location ?? "");
-  const [remarks, setRemarks] = React.useState(event?.remarks ?? "");
+  const [remarks, setRemarks] = React.useState(draft?.remarks ?? "");
   const [frequency, setFrequency] = React.useState(
     event?.recurrence?.frequency ?? "none",
   );
@@ -48,23 +52,24 @@ export function EventEditorDialog({
   );
   React.useEffect(() => {
     if (!open) return;
-    setTitle(event?.title ?? "");
+    const nextDraft = event ?? prefill;
+    setTitle(nextDraft?.title ?? "");
     setStart(
-      event?.start.slice(0, 16) ?? new Date().toISOString().slice(0, 16),
+      nextDraft?.start.slice(0, 16) ?? new Date().toISOString().slice(0, 16),
     );
     setEnd(
-      event?.end.slice(0, 16) ??
+      nextDraft?.end.slice(0, 16) ??
         new Date(Date.now() + 3_600_000).toISOString().slice(0, 16),
     );
-    setAllDay(event?.allDay ?? false);
-    setOwner(event?.responsibleOwner ?? "");
+    setAllDay(nextDraft?.allDay ?? false);
+    setOwner(nextDraft?.responsibleOwner ?? "");
     setLocation(event?.location ?? "");
-    setRemarks(event?.remarks ?? "");
+    setRemarks(nextDraft?.remarks ?? "");
     setFrequency(event?.recurrence?.frequency ?? "none");
     setInterval(String(event?.recurrence?.interval ?? 1));
     setUntil(event?.recurrence?.until?.slice(0, 16) ?? "");
     setExclusions(event?.excludedOccurrenceStarts.join(", ") ?? "");
-  }, [event, open]);
+  }, [event, open, prefill]);
   const submit = async (form: React.FormEvent) => {
     form.preventDefault();
     if (!title.trim()) return;
@@ -83,7 +88,7 @@ export function EventEditorDialog({
       ownership: { kind: "manual" },
       title: title.trim(),
       description: null,
-      type: "activity",
+      type: event?.type ?? prefill?.type ?? "activity",
       start: localDateTimeToRfc3339(start, timeZone),
       end: localDateTimeToRfc3339(end, timeZone),
       allDay,
