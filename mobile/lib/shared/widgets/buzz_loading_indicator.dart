@@ -2,11 +2,12 @@ import 'dart:math' show pi;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../theme/theme.dart';
 
 /// The shared mobile loading indicator, matching the desktop arc spinner.
-class BuzzLoadingIndicator extends HookWidget {
+class BuzzLoadingIndicator extends HookConsumerWidget {
   /// The spinner diameter.
   final double size;
 
@@ -25,7 +26,7 @@ class BuzzLoadingIndicator extends HookWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
     final animation = useAnimationController(
       duration: const Duration(milliseconds: 500),
