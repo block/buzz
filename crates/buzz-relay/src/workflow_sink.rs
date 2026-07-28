@@ -167,6 +167,35 @@ impl RelayActionSink {
             state: Arc::downgrade(state),
         }
     }
+
+    /// Upgrade the weak ref and resolve the run's owning community → tenant.
+    ///
+    /// Every ActionSink method must do this before producing any side effect:
+    /// the workflow run carries `community_id`, and the relay-signed event
+    /// belongs to *that* community, never the deployment default. Centralizing
+    /// the two-step (upgrade + tenant resolution) keeps the five action
+    /// implementations DRY and the fail-closed behavior consistent.
+    async fn resolve_state_and_tenant(
+        &self,
+        community_id: CommunityId,
+    ) -> Result<(Arc<AppState>, buzz_core::tenant::TenantContext), ActionSinkError> {
+        let state = self
+            .state
+            .upgrade()
+            .ok_or_else(|| ActionSinkError::Database("relay is shutting down".into()))?;
+        let host = state
+            .db
+            .lookup_community_host(community_id)
+            .await
+            .map_err(|e| ActionSinkError::Database(e.to_string()))?
+            .ok_or_else(|| {
+                ActionSinkError::Database(format!(
+                    "workflow run community {community_id} is not mapped to a host"
+                ))
+            })?;
+        let tenant = buzz_core::tenant::TenantContext::resolved(community_id, host);
+        Ok((state, tenant))
+    }
 }
 
 impl ActionSink for RelayActionSink {
@@ -183,31 +212,7 @@ impl ActionSink for RelayActionSink {
         let author_pubkey = author_pubkey.to_owned();
 
         Box::pin(async move {
-            // 0. Upgrade weak reference — fails only during shutdown.
-            let state = self
-                .state
-                .upgrade()
-                .ok_or_else(|| ActionSinkError::Database("relay is shutting down".into()))?;
-
-            // The run carries its owning community (`community_id`); the
-            // relay-signed kind:9 message belongs to *that* community, never the
-            // deployment default. Re-deriving the tenant from `config.relay_url`
-            // would post a community-B workflow's output into the deployment/
-            // default community under N>1. Read the community's host back to
-            // form a complete TenantContext (host is for labelling only — the
-            // community is already fixed and is never re-derived from it). Fail
-            // closed if the community no longer maps to a host.
-            let host = state
-                .db
-                .lookup_community_host(community_id)
-                .await
-                .map_err(|e| ActionSinkError::Database(e.to_string()))?
-                .ok_or_else(|| {
-                    ActionSinkError::Database(format!(
-                        "workflow run community {community_id} is not mapped to a host"
-                    ))
-                })?;
-            let tenant = buzz_core::tenant::TenantContext::resolved(community_id, host);
+            let (state, tenant) = self.resolve_state_and_tenant(community_id).await?;
 
             // 1. Validate content is not empty/whitespace-only
             if text.trim().is_empty() {
@@ -381,24 +386,7 @@ impl ActionSink for RelayActionSink {
         let author_pubkey = author_pubkey.to_owned();
 
         Box::pin(async move {
-            let state = self
-                .state
-                .upgrade()
-                .ok_or_else(|| ActionSinkError::Database("relay is shutting down".into()))?;
-
-            // Resolve the run's owning community → tenant (same rationale as
-            // send_message: a community-B workflow must mutate B's channel).
-            let host = state
-                .db
-                .lookup_community_host(community_id)
-                .await
-                .map_err(|e| ActionSinkError::Database(e.to_string()))?
-                .ok_or_else(|| {
-                    ActionSinkError::Database(format!(
-                        "workflow run community {community_id} is not mapped to a host"
-                    ))
-                })?;
-            let tenant = buzz_core::tenant::TenantContext::resolved(community_id, host);
+            let (state, tenant) = self.resolve_state_and_tenant(community_id).await?;
 
             if topic.trim().is_empty() {
                 return Err(ActionSinkError::EmptyContent);
@@ -476,22 +464,7 @@ impl ActionSink for RelayActionSink {
         let author_pubkey = author_pubkey.to_owned();
 
         Box::pin(async move {
-            let state = self
-                .state
-                .upgrade()
-                .ok_or_else(|| ActionSinkError::Database("relay is shutting down".into()))?;
-
-            let host = state
-                .db
-                .lookup_community_host(community_id)
-                .await
-                .map_err(|e| ActionSinkError::Database(e.to_string()))?
-                .ok_or_else(|| {
-                    ActionSinkError::Database(format!(
-                        "workflow run community {community_id} is not mapped to a host"
-                    ))
-                })?;
-            let tenant = buzz_core::tenant::TenantContext::resolved(community_id, host);
+            let (state, tenant) = self.resolve_state_and_tenant(community_id).await?;
 
             if emoji.trim().is_empty() {
                 return Err(ActionSinkError::EmptyContent);
@@ -502,30 +475,21 @@ impl ActionSink for RelayActionSink {
                 ActionSinkError::InvalidInput(format!("invalid target event id: {e}"))
             })?;
 
-            // Build a NIP-25 reaction (kind:7) via the SDK builder, then add
-            // attribution `p` and `buzz:workflow` (depth) tags. The SDK builder
-            // emits content=emoji + an `e` tag pointing at the target.
+            // Build a NIP-25 reaction (kind:7) inline. The SDK's build_reaction
+            // emits content=emoji + an `e` tag, but we also need attribution `p`
+            // and `buzz:workflow` (depth) tags. Rather than probe-sign to extract
+            // the builder's tags (double-signing), construct all tags directly —
+            // matching the set_channel_topic pattern for consistency.
             let workflow_tag_depth = workflow_depth.to_string();
-            let base = buzz_sdk::builders::build_reaction(target_id, &emoji)
-                .map_err(|e| ActionSinkError::EventBuild(e.to_string()))?;
-            // Sign once to capture the builder's tags, then rebuild with the
-            // full set. EventBuilder has no mutable tag access, so this is the
-            // simplest way to extend its tags while preserving content/kind.
-            let probe = base
-                .clone()
-                .sign_with_keys(&state.relay_keypair)
-                .map_err(|e| ActionSinkError::EventBuild(format!("probe sign: {e}")))?;
-            let mut all_tags: Vec<Tag> = probe.tags.into_iter().collect();
-            all_tags.push(
-                Tag::parse(["p", &author_pubkey])
-                    .map_err(|e| ActionSinkError::EventBuild(format!("p tag: {e}")))?,
-            );
-            all_tags.push(
-                Tag::parse(["buzz:workflow", "true", &workflow_tag_depth])
-                    .map_err(|e| ActionSinkError::EventBuild(format!("workflow tag: {e}")))?,
-            );
+            let target_id_hex = target_id.to_hex();
+            let e_tag = Tag::parse(["e", &target_id_hex])
+                .map_err(|e| ActionSinkError::EventBuild(format!("e tag: {e}")))?;
+            let p_tag = Tag::parse(["p", &author_pubkey])
+                .map_err(|e| ActionSinkError::EventBuild(format!("p tag: {e}")))?;
+            let wf_tag = Tag::parse(["buzz:workflow", "true", &workflow_tag_depth])
+                .map_err(|e| ActionSinkError::EventBuild(format!("workflow tag: {e}")))?;
             let event = EventBuilder::new(Kind::Custom(7), &emoji)
-                .tags(all_tags)
+                .tags([e_tag, p_tag, wf_tag])
                 .sign_with_keys(&state.relay_keypair)
                 .map_err(|e| ActionSinkError::EventBuild(format!("sign: {e}")))?;
 
@@ -577,22 +541,7 @@ impl ActionSink for RelayActionSink {
         let author_pubkey = author_pubkey.to_owned();
 
         Box::pin(async move {
-            let state = self
-                .state
-                .upgrade()
-                .ok_or_else(|| ActionSinkError::Database("relay is shutting down".into()))?;
-
-            let host = state
-                .db
-                .lookup_community_host(community_id)
-                .await
-                .map_err(|e| ActionSinkError::Database(e.to_string()))?
-                .ok_or_else(|| {
-                    ActionSinkError::Database(format!(
-                        "workflow run community {community_id} is not mapped to a host"
-                    ))
-                })?;
-            let tenant = buzz_core::tenant::TenantContext::resolved(community_id, host);
+            let (state, tenant) = self.resolve_state_and_tenant(community_id).await?;
 
             if text.trim().is_empty() {
                 return Err(ActionSinkError::EmptyContent);
@@ -701,22 +650,7 @@ impl ActionSink for RelayActionSink {
         let author_pubkey = author_pubkey.to_owned();
 
         Box::pin(async move {
-            let state = self
-                .state
-                .upgrade()
-                .ok_or_else(|| ActionSinkError::Database("relay is shutting down".into()))?;
-
-            let host = state
-                .db
-                .lookup_community_host(community_id)
-                .await
-                .map_err(|e| ActionSinkError::Database(e.to_string()))?
-                .ok_or_else(|| {
-                    ActionSinkError::Database(format!(
-                        "workflow run community {community_id} is not mapped to a host"
-                    ))
-                })?;
-            let tenant = buzz_core::tenant::TenantContext::resolved(community_id, host);
+            let (state, tenant) = self.resolve_state_and_tenant(community_id).await?;
 
             // Build a kind:46010 (KIND_WORKFLOW_APPROVAL_REQUESTED) event.
             // The `d` tag carries the token hash so the grant/deny handler
