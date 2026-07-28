@@ -56,6 +56,8 @@ pub enum BindIdentityResult {
     Matched,
     /// Another active binding already owns the uid or pubkey.
     Conflict(IdentityBindingConflict),
+    /// The requested uid/pubkey pair was previously revoked.
+    Revoked,
 }
 
 fn validate_inputs(uid: &str, pubkey: &[u8], source: &str) -> Result<()> {
@@ -134,6 +136,31 @@ async fn active_by_pubkey_tx(
     row.map(row_to_binding).transpose()
 }
 
+async fn revoked_pair_exists_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    uid: &str,
+    pubkey: &[u8],
+) -> Result<bool> {
+    let row = sqlx::query(
+        r#"
+        SELECT 1
+        FROM identity_bindings
+        WHERE community_id = $1
+          AND uid = $2
+          AND pubkey = $3
+          AND revoked_at IS NOT NULL
+        LIMIT 1
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(uid)
+    .bind(pubkey)
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(row.is_some())
+}
+
 fn conflict_from(binding: IdentityBinding) -> IdentityBindingConflict {
     IdentityBindingConflict {
         uid: binding.uid,
@@ -168,6 +195,7 @@ async fn lock_identity_keys_tx(
 /// - same uid + same pubkey updates display/last_seen and succeeds;
 /// - same uid + different pubkey conflicts;
 /// - same pubkey + different uid conflicts;
+/// - a previously revoked uid/pubkey pair remains revoked;
 /// - no active row creates a new binding.
 pub async fn bind_or_validate_identity(
     pool: &PgPool,
@@ -222,6 +250,11 @@ pub async fn bind_or_validate_identity(
             tx.rollback().await?;
             return Ok(BindIdentityResult::Conflict(conflict_from(binding)));
         }
+    }
+
+    if revoked_pair_exists_tx(&mut tx, community_id, uid, pubkey).await? {
+        tx.rollback().await?;
+        return Ok(BindIdentityResult::Revoked);
     }
 
     sqlx::query(
@@ -453,5 +486,57 @@ mod tests {
             .expect("lookup binding")
             .expect("binding exists");
         assert_eq!(binding.source, SOURCE_JWT_NPUB);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn bind_identity_does_not_recreate_revoked_pair() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let pubkey = random_pubkey();
+
+        bind_or_validate_identity(
+            &pool,
+            community,
+            "user-1",
+            &pubkey,
+            Some("user@example.com"),
+            SOURCE_JWT_NPUB,
+        )
+        .await
+        .expect("create binding");
+
+        sqlx::query(
+            r#"
+            UPDATE identity_bindings
+            SET revoked_at = NOW(), revoked_reason = 'test revocation'
+            WHERE community_id = $1 AND uid = $2 AND pubkey = $3
+            "#,
+        )
+        .bind(community.as_uuid())
+        .bind("user-1")
+        .bind(&pubkey)
+        .execute(&pool)
+        .await
+        .expect("revoke binding");
+
+        let result = bind_or_validate_identity(
+            &pool,
+            community,
+            "user-1",
+            &pubkey,
+            Some("user@example.com"),
+            SOURCE_JWT_NPUB,
+        )
+        .await
+        .expect("revoked pair is a binding result");
+
+        assert_eq!(result, BindIdentityResult::Revoked);
+        assert!(
+            get_active_identity_binding_by_pubkey(&pool, community, &pubkey)
+                .await
+                .expect("lookup binding")
+                .is_none()
+        );
     }
 }

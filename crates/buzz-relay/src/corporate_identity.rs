@@ -205,6 +205,9 @@ pub enum CorporateIdentityError {
     /// The requested uid/pubkey binding conflicts with an active binding.
     #[error("corporate identity binding conflict")]
     BindingConflict,
+    /// The requested uid/pubkey binding was previously revoked.
+    #[error("corporate identity binding revoked")]
+    BindingRevoked,
     /// NIP-OA delegation was present but did not satisfy corporate identity.
     #[error("corporate identity delegation denied")]
     DelegationDenied,
@@ -223,6 +226,7 @@ impl CorporateIdentityError {
             Self::InvalidClaim { .. }
             | Self::NpubMismatch
             | Self::BindingConflict
+            | Self::BindingRevoked
             | Self::DelegationDenied => StatusCode::FORBIDDEN,
             Self::Db(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -238,6 +242,7 @@ impl CorporateIdentityError {
             Self::InvalidClaim { .. } => "corporate identity claim invalid",
             Self::NpubMismatch => "corporate identity pubkey mismatch",
             Self::BindingConflict => "corporate identity binding conflict",
+            Self::BindingRevoked => "corporate identity binding revoked",
             Self::DelegationDenied => "corporate identity delegation denied",
             Self::Db(_) => "corporate identity unavailable",
         }
@@ -362,6 +367,25 @@ async fn enforce_corporate_identity_inner(
                     "corporate identity binding conflict"
                 );
                 return Err(CorporateIdentityError::BindingConflict);
+            }
+            BindIdentityResult::Revoked => {
+                metrics::counter!("buzz_corporate_identity_bindings_total", "result" => "revoked")
+                    .increment(1);
+                record_identity_binding_audit(
+                    state,
+                    community_id,
+                    buzz_audit::AuditAction::CorporateIdentityBindingRevokedAttempt,
+                    signer,
+                    &claims.uid,
+                    serde_json::json!({ "source": source }),
+                )
+                .await;
+                warn!(
+                    uid = %claims.uid,
+                    signer = %signer.to_hex(),
+                    "corporate identity binding was previously revoked"
+                );
+                return Err(CorporateIdentityError::BindingRevoked);
             }
             binding => binding,
         };
@@ -665,6 +689,7 @@ fn record_identity_binding_metric(binding: &BindIdentityResult) {
         BindIdentityResult::Created => "created",
         BindIdentityResult::Matched => "matched",
         BindIdentityResult::Conflict(_) => "conflict",
+        BindIdentityResult::Revoked => "revoked",
     };
     metrics::counter!("buzz_corporate_identity_bindings_total", "result" => result).increment(1);
 }
@@ -678,6 +703,7 @@ fn record_corporate_identity_denial(error: &CorporateIdentityError) {
         CorporateIdentityError::InvalidClaim { .. } => "invalid_claim",
         CorporateIdentityError::NpubMismatch => "npub_mismatch",
         CorporateIdentityError::BindingConflict => "binding_conflict",
+        CorporateIdentityError::BindingRevoked => "binding_revoked",
         CorporateIdentityError::DelegationDenied => "delegation_denied",
         CorporateIdentityError::Db(_) => "db",
     };

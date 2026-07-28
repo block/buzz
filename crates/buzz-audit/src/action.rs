@@ -32,6 +32,8 @@ pub enum AuditAction {
     CorporateIdentityBindingCreated,
     /// A corporate identity binding attempt conflicted with an active binding.
     CorporateIdentityBindingConflict,
+    /// A corporate identity binding attempt matched a revoked binding.
+    CorporateIdentityBindingRevokedAttempt,
 }
 
 impl AuditAction {
@@ -51,6 +53,9 @@ impl AuditAction {
             Self::MediaUploaded => "media_uploaded",
             Self::CorporateIdentityBindingCreated => "corporate_identity_binding_created",
             Self::CorporateIdentityBindingConflict => "corporate_identity_binding_conflict",
+            Self::CorporateIdentityBindingRevokedAttempt => {
+                "corporate_identity_binding_revoked_attempt"
+            }
         }
     }
 
@@ -68,6 +73,7 @@ impl AuditAction {
         Self::MediaUploaded,
         Self::CorporateIdentityBindingCreated,
         Self::CorporateIdentityBindingConflict,
+        Self::CorporateIdentityBindingRevokedAttempt,
     ];
 }
 
