@@ -670,6 +670,91 @@ impl ActionSink for RelayActionSink {
             Ok(event_id_hex)
         })
     }
+
+    fn request_approval(
+        &self,
+        community_id: CommunityId,
+        token_hash: &str,
+        message: &str,
+        approver_spec: &str,
+        author_pubkey: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>> {
+        let token_hash = token_hash.to_owned();
+        let message = message.to_owned();
+        let approver_spec = approver_spec.to_owned();
+        let author_pubkey = author_pubkey.to_owned();
+
+        Box::pin(async move {
+            let state = self
+                .state
+                .upgrade()
+                .ok_or_else(|| ActionSinkError::Database("relay is shutting down".into()))?;
+
+            let host = state
+                .db
+                .lookup_community_host(community_id)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?
+                .ok_or_else(|| {
+                    ActionSinkError::Database(format!(
+                        "workflow run community {community_id} is not mapped to a host"
+                    ))
+                })?;
+            let tenant = buzz_core::tenant::TenantContext::resolved(community_id, host);
+
+            // Build a kind:46010 (KIND_WORKFLOW_APPROVAL_REQUESTED) event.
+            // The `d` tag carries the token hash so the grant/deny handler
+            // (kind:46030/46031) can locate the pending approval row. Content
+            // is the human-readable approval prompt; `approver_spec` is a tag
+            // for routing/labeling.
+            let d_tag = Tag::parse(["d", &token_hash])
+                .map_err(|e| ActionSinkError::EventBuild(format!("d tag: {e}")))?;
+            let p_tag = Tag::parse(["p", &author_pubkey])
+                .map_err(|e| ActionSinkError::EventBuild(format!("p tag: {e}")))?;
+            let approver_tag = Tag::parse(["approver", &approver_spec])
+                .map_err(|e| ActionSinkError::EventBuild(format!("approver tag: {e}")))?;
+            let event = EventBuilder::new(
+                Kind::Custom(buzz_core::kind::KIND_WORKFLOW_APPROVAL_REQUESTED as u16),
+                &message,
+            )
+            .tags([d_tag, p_tag, approver_tag])
+            .sign_with_keys(&state.relay_keypair)
+            .map_err(|e| ActionSinkError::EventBuild(format!("sign: {e}")))?;
+
+            let kind_u32 = buzz_core::kind::KIND_WORKFLOW_APPROVAL_REQUESTED;
+            // Approval-request events are global-scoped (no channel_id) — they
+            // are workflow-execution kinds, excluded from workflow triggering
+            // (is_workflow_execution_kind) so they can't recurse.
+            let (stored_event, was_inserted) = state
+                .db
+                .insert_event(tenant.community(), &event, None)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+            if !was_inserted {
+                return Err(ActionSinkError::Database(
+                    "approval-request event was not inserted".into(),
+                ));
+            }
+
+            dispatch_persistent_event(
+                &tenant,
+                &state,
+                &stored_event,
+                kind_u32,
+                &author_pubkey,
+                None,
+            )
+            .await;
+
+            let event_id_hex = stored_event.event.id.to_hex();
+            info!(
+                community_id = %community_id,
+                token_hash = %token_hash,
+                "Workflow request_approval → event {event_id_hex}"
+            );
+            Ok(event_id_hex)
+        })
+    }
 }
 
 #[cfg(test)]

@@ -139,4 +139,28 @@ pub trait ActionSink: Send + Sync {
         author_pubkey: &str,
         workflow_depth: usize,
     ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>>;
+
+    /// Emit a workflow approval-request event (kind:46010).
+    ///
+    /// The executor writes the `workflow_approvals` DB row (via
+    /// `create_approval`) *before* calling this method, then asks the sink to
+    /// publish the request event so approvers are notified. The event carries
+    /// the token hash as a `d` tag so the relay's grant/deny handler
+    /// (kind:46030/46031) can locate the pending approval.
+    ///
+    /// - `community_id`: the owning community of the workflow run.
+    /// - `token_hash`: SHA-256 hex of the raw approval token (matches the DB row).
+    /// - `message`: human-readable approval prompt shown to the approver.
+    /// - `approver_spec`: who may approve (e.g. `"@release-manager"`).
+    /// - `author_pubkey`: hex pubkey of the workflow owner.
+    ///
+    /// Returns the request event ID hex string on success.
+    fn request_approval(
+        &self,
+        community_id: CommunityId,
+        token_hash: &str,
+        message: &str,
+        approver_spec: &str,
+        author_pubkey: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>>;
 }

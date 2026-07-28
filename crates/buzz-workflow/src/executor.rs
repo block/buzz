@@ -525,6 +525,7 @@ fn resolve_send_message_channel(
 /// persist state and stop the execution loop.
 pub async fn dispatch_action(
     step_id: &str,
+    step_index: usize,
     action: &ActionDef,
     engine: &WorkflowEngine,
     community_id: CommunityId,
@@ -787,10 +788,75 @@ pub async fn dispatch_action(
                 "RequestApproval from={from} timeout={timeout_str}: {message}"
             );
 
+            // Compute expiry from the timeout string (default 24h).
+            let timeout_secs = parse_duration_secs(timeout_str)?;
+            let expires_at = chrono::Utc::now()
+                + chrono::Duration::seconds(i64::try_from(timeout_secs).unwrap_or(i64::MAX / 2));
+
+            // Load workflow metadata for the approval row's workflow_id and
+            // the request event's attribution, scoped to the run's community.
+            let wf_run = engine
+                .db
+                .get_workflow_run(community_id, run_id)
+                .await
+                .map_err(|e| {
+                    WorkflowError::WebhookError(format!(
+                        "RequestApproval: failed to load workflow run {run_id}: {e}"
+                    ))
+                })?;
+            let workflow = engine
+                .db
+                .get_workflow(community_id, wf_run.workflow_id)
+                .await
+                .map_err(|e| {
+                    WorkflowError::WebhookError(format!(
+                        "RequestApproval: failed to load workflow {}: {e}",
+                        wf_run.workflow_id
+                    ))
+                })?;
+            let owner_pubkey_hex = hex::encode(&workflow.owner_pubkey);
+
             let token = generate_approval_token(run_id, step_id);
 
-            // TODO (WF-08): create approval record in DB, emit kind:46010.
-            // For now, return Suspended with the token so the caller can persist state.
+            // Persist the approval request BEFORE emitting the event, so the
+            // grant/deny handler (kind:46030/46031) can find a matching row.
+            // create_approval hashes the raw token internally.
+            engine
+                .db
+                .create_approval(buzz_db::workflow::CreateApprovalParams {
+                    community_id,
+                    token: &token,
+                    workflow_id: wf_run.workflow_id,
+                    run_id,
+                    step_id,
+                    step_index: i32::try_from(step_index).unwrap_or(0),
+                    approver_spec: from,
+                    expires_at,
+                })
+                .await
+                .map_err(|e| WorkflowError::WebhookError(format!("create_approval: {e}")))?;
+
+            // Compute the token hash for the event's `d` tag — matches what
+            // the grant/deny handler looks up (hash_approval_token = SHA-256).
+            let token_hash_hex = {
+                use sha2::Digest;
+                let mut hasher = sha2::Sha256::new();
+                hasher.update(token.as_bytes());
+                hex::encode(hasher.finalize())
+            };
+
+            // Emit the kind:46010 request event so approvers are notified.
+            engine
+                .action_sink()?
+                .request_approval(
+                    community_id,
+                    &token_hash_hex,
+                    message,
+                    from,
+                    &owner_pubkey_hex,
+                )
+                .await
+                .map_err(WorkflowError::from)?;
 
             Ok(StepResult::Suspended {
                 approval_token: token,
@@ -1202,6 +1268,7 @@ async fn execute_steps(
             std::time::Duration::from_secs(timeout_secs),
             dispatch_action(
                 &step.id,
+                i,
                 &resolved_action,
                 engine,
                 community_id,
