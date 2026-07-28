@@ -144,8 +144,10 @@ jobs:
           set -euo pipefail
           REV=$(python3 -c 'import tomllib; d=tomllib.load(open("Cargo.lock", "rb")); p=next(p for p in d["package"] if p["name"] == "mesh-llm-sdk"); print(p["source"].rsplit("#", 1)[1])')
           [[ -n "$REV" ]] || { echo "::error::could not resolve mesh-llm rev from Cargo.lock"; exit 1; }
+          URL=$(python3 -c 'import tomllib; d=tomllib.load(open("Cargo.lock", "rb")); p=next(p for p in d["package"] if p["name"] == "mesh-llm-sdk"); print(p["source"].split("+", 1)[1].split("?", 1)[0].split("#", 1)[0])')
           echo "rev=$REV" >> "$GITHUB_OUTPUT"
           echo "short=${REV:0:7}" >> "$GITHUB_OUTPUT"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
       - name: Restore mesh llama build cache
         id: llama_cache
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
@@ -156,14 +158,22 @@ jobs:
         if: steps.llama_cache.outputs.cache-hit != 'true'
         env:
           MESH_REV_SHORT: ${{ steps.mesh_rev.outputs.short }}
+          MESH_REV: ${{ steps.mesh_rev.outputs.rev }}
+          MESH_URL: ${{ steps.mesh_rev.outputs.url }}
         run: |
           set -euo pipefail
           cargo fetch --manifest-path desktop/src-tauri/Cargo.toml
           SHORT="$MESH_REV_SHORT"
           MESH_ROOT=$(find "${CARGO_HOME:-$HOME/.cargo}/git/checkouts" -path "*/$SHORT" -type d -name "$SHORT" | head -1)
           if [[ -z "$MESH_ROOT" ]]; then
-            echo "::error::mesh-llm checkout for $SHORT not found after cargo fetch"
-            exit 1
+            # cargo fetch fills git/db but creates checkouts lazily at build
+            # time, so a cold runner (fresh fork, evicted rust-cache) has no
+            # checkout dir — clone the locked rev directly instead of failing.
+            echo "no cargo checkout for $SHORT; cloning $MESH_URL at $MESH_REV"
+            MESH_ROOT="$RUNNER_TEMP/mesh-llm-$SHORT"
+            git init -q "$MESH_ROOT"
+            git -C "$MESH_ROOT" fetch -q --depth 1 "$MESH_URL" "$MESH_REV"
+            git -C "$MESH_ROOT" checkout -q FETCH_HEAD
           fi
           export LLAMA_STAGE_BACKEND=metal
           export LLAMA_STAGE_BUILD_DIR="$GITHUB_WORKSPACE/.cache/mesh-llama/build-stage-abi-metal"
