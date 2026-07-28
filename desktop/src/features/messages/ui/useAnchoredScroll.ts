@@ -73,6 +73,9 @@ type UseAnchoredScrollResult = {
   highlightedMessageId: string | null;
   /** Imperative: scroll to bottom. */
   scrollToBottom: (behavior?: ScrollBehavior) => void;
+  /** Re-pins after a layout owner changes trailing geometry. Returns true when
+   *  the hook handled the settlement, including a preserved pinned target. */
+  settleAtBottomAfterLayout: () => boolean;
   /** Arm a one-shot scroll-to-bottom that fires on the next appended message
    *  (used by the composer's send flow). */
   scrollToBottomOnNextUpdate: () => void;
@@ -382,6 +385,35 @@ export function useAnchoredScroll({
   const scrollToBottomOnNextUpdate = React.useCallback(() => {
     forceBottomOnNextAppendRef.current = true;
   }, []);
+
+  const settleAtBottomAfterLayout = React.useCallback(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return false;
+    if (anchorRef.current.kind === "pinned-center") {
+      repinPinnedCenter();
+      const atBottom = isAtBottomNow(container);
+      setIsAtBottom((previous) =>
+        previous === atBottom ? previous : atBottom,
+      );
+      if (atBottom) setNewMessageCount(0);
+      schedulePinnedTargetSettle(anchorRef.current.messageId);
+      return true;
+    }
+    if (!isAtBottomNow(container)) return false;
+
+    anchorRef.current = { kind: "at-bottom" };
+    setIsAtBottom(true);
+    setNewMessageCount(0);
+    if (!virtualizerOwnsPrependAnchoring) {
+      container.scrollTo({ top: container.scrollHeight, behavior: "auto" });
+    }
+    return true;
+  }, [
+    repinPinnedCenter,
+    schedulePinnedTargetSettle,
+    scrollContainerRef,
+    virtualizerOwnsPrependAnchoring,
+  ]);
 
   const highlightMessage = React.useCallback((messageId: string) => {
     if (highlightTimeoutRef.current !== null) {
@@ -743,10 +775,8 @@ export function useAnchoredScroll({
     const observer = new ResizeObserver(() => {
       const container = scrollContainerRef.current;
       if (!container) return;
-      if (anchorRef.current.kind === "pinned-center") {
-        repinPinnedCenter();
-        schedulePinnedTargetSettle(anchorRef.current.messageId);
-      } else if (
+      if (settleAtBottomAfterLayout()) return;
+      if (
         anchorRef.current.kind === "at-bottom" &&
         !virtualizerOwnsPrependAnchoring
       ) {
@@ -754,6 +784,8 @@ export function useAnchoredScroll({
       }
     });
     observer.observe(content);
+    const container = scrollContainerRef.current;
+    if (container && container !== content) observer.observe(container);
     return () => {
       observer.disconnect();
       if (targetSettleRafRef.current !== null) {
@@ -764,9 +796,8 @@ export function useAnchoredScroll({
   }, [
     channelId,
     contentRef,
-    repinPinnedCenter,
-    schedulePinnedTargetSettle,
     scrollContainerRef,
+    settleAtBottomAfterLayout,
     virtualizerOwnsPrependAnchoring,
   ]);
 
@@ -919,6 +950,7 @@ export function useAnchoredScroll({
     newMessageCount,
     highlightedMessageId,
     scrollToBottom: scrollToBottomImperative,
+    settleAtBottomAfterLayout,
     scrollToBottomOnNextUpdate,
     scrollToMessage: scrollToMessageImperative,
     onVirtualizerAtBottomStateChange,
