@@ -1595,10 +1595,14 @@ const PRESET_HARNESSES: &[PresetHarness] = &[
     PresetHarness {
         id: "hermes",
         label: "Hermes Agent",
-        command: "hermes-acp",
-        args: &[],
+        // `hermes` is the launcher the Hermes installer writes to ~/.local/bin,
+        // which is on the login-shell PATH. The `hermes-acp` console script
+        // exists only inside Hermes' own venv, which is not, so resolving by
+        // that name fails on a default install.
+        command: "hermes",
+        args: &["acp"],
         install_instructions_url: "https://hermes-agent.nousresearch.com",
-        install_hint: "Buzz talks to Hermes Agent through its hermes-acp command.",
+        install_hint: "Buzz talks to Hermes Agent through its ACP mode (hermes acp).",
         underlying_cli: None,
     },
     PresetHarness {
