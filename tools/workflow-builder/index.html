@@ -1,0 +1,601 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Buzz Workflow Builder</title>
+<style>
+:root{--bg:#0d1117;--bg2:#161b22;--bg3:#1c2128;--border:#30363d;--text:#e6edf3;--text2:#8b949e;--accent:#58a6ff;--accent2:#3fb950;--purple:#bc8cff;--red:#f85149;--amber:#d29922;--radius:8px}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text);display:flex;height:100vh;overflow:hidden}
+
+/* Layout */
+.sidebar{width:340px;background:var(--bg2);border-right:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden}
+.main{flex:1;display:flex;flex-direction:column;overflow:hidden}
+
+/* Header */
+.header{padding:16px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;flex-shrink:0}
+.header h1{font-size:18px;font-weight:700;display:flex;align-items:center;gap:8px}
+.header-actions{display:flex;gap:8px}
+.btn{padding:6px 14px;border-radius:6px;font-size:13px;font-weight:600;cursor:pointer;border:1px solid var(--border);background:var(--bg3);color:var(--text);transition:all .15s}
+.btn:hover{border-color:var(--text2)}
+.btn-primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn-primary:hover{background:#79c0ff}
+.btn-sm{padding:4px 10px;font-size:12px}
+
+/* Sidebar — config */
+.config-area{flex:1;overflow-y:auto;padding:16px}
+.config-section{margin-bottom:20px}
+.config-section h3{font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:var(--text2);margin-bottom:8px}
+.field{margin-bottom:10px}
+.field label{display:block;font-size:12px;color:var(--text2);margin-bottom:4px}
+.field input,.field select,.field textarea{width:100%;padding:8px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;font-family:inherit}
+.field input:focus,.field select:focus,.field textarea:focus{outline:none;border-color:var(--accent)}
+.field textarea{resize:vertical;min-height:60px;font-family:'SF Mono',Consolas,monospace}
+.hint{font-size:11px;color:var(--text2);margin-top:3px;line-height:1.4}
+
+/* Trigger type pills */
+.trigger-pills{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
+.trigger-pill{padding:6px 12px;border-radius:99px;font-size:12px;font-weight:600;cursor:pointer;border:1px solid var(--border);background:var(--bg);color:var(--text2);transition:all .15s}
+.trigger-pill.active{background:var(--accent);border-color:var(--accent);color:#fff}
+.trigger-pill:hover:not(.active){border-color:var(--text2)}
+
+/* Steps area */
+.steps-header{display:flex;align-items:center;justify-content:space-between;padding:12px 20px;border-bottom:1px solid var(--border);flex-shrink:0}
+.steps-header h2{font-size:14px;font-weight:600}
+.steps-container{flex:1;overflow-y:auto;padding:16px 20px}
+
+/* Step card */
+.step-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:12px;overflow:hidden;transition:border-color .15s}
+.step-card:hover{border-color:var(--text2)}
+.step-card.dragging{opacity:.5;border-color:var(--accent)}
+.step-card.error{border-color:var(--red)}
+.step-header{display:flex;align-items:center;gap:8px;padding:10px 12px;background:var(--bg3);cursor:grab}
+.step-header .drag-handle{color:var(--text2);cursor:grab;font-size:16px}
+.step-num{width:24px;height:24px;border-radius:6px;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex-shrink:0}
+.step-id{flex:1;font-size:13px;font-weight:600}
+.step-action-badge{padding:3px 8px;border-radius:4px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.5px}
+.step-body{padding:12px}
+.step-actions-bar{display:flex;gap:6px;margin-top:10px}
+.step-actions-bar .btn-sm{padding:3px 8px;font-size:11px}
+
+/* Action type colors */
+.act-send_message{background:rgba(88,166,255,.15);color:#58a6ff}
+.act-send_dm{background:rgba(188,140,255,.15);color:#bc8cff}
+.act-set_channel_topic{background:rgba(63,185,80,.15);color:#3fb950}
+.act-add_reaction{background:rgba(248,81,73,.15);color:#f85149}
+.act-call_webhook{background:rgba(210,153,34,.15);color:#d29922}
+.act-request_approval{background:rgba(188,140,255,.15);color:#bc8cff}
+.act-delay{background:rgba(139,148,158,.15);color:#8b949e}
+.act-query_count{background:rgba(63,185,80,.15);color:#3fb950}
+.act-query_messages{background:rgba(88,166,255,.15);color:#58a6ff}
+
+/* YAML panel */
+.yaml-panel{width:420px;background:var(--bg2);border-left:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden}
+.yaml-panel-header{padding:12px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;flex-shrink:0}
+.yaml-panel-header h3{font-size:13px;font-weight:600}
+.yaml-output{flex:1;overflow:auto;padding:16px;font-family:'SF Mono',Consolas,'Courier New',monospace;font-size:12px;line-height:1.6;white-space:pre-wrap;color:var(--text)}
+
+/* Validation */
+.validation{padding:12px 16px;border-top:1px solid var(--border);flex-shrink:0;max-height:200px;overflow-y:auto}
+.validation h4{font-size:12px;font-weight:600;margin-bottom:8px;display:flex;align-items:center;gap:6px}
+.validation .ok{color:var(--accent2)}
+.validation .err{color:var(--red)}
+.validation .warn{color:var(--amber)}
+.validation ul{list-style:none;padding-left:0}
+.validation li{font-size:12px;padding:4px 0;display:flex;align-items:flex-start;gap:6px}
+.validation li .icon{flex-shrink:0;font-weight:700}
+
+/* Add step menu */
+.add-step-menu{padding:12px 20px;border-top:1px solid var(--border);flex-shrink:0;display:flex;flex-wrap:wrap;gap:6px}
+.add-step-btn{padding:6px 12px;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;border:1px solid var(--border);background:var(--bg2);color:var(--text);transition:all .15s}
+.add-step-btn:hover{border-color:var(--accent);color:var(--accent)}
+
+/* Empty state */
+.empty-state{text-align:center;padding:60px 20px;color:var(--text2)}
+.empty-state .emoji{font-size:48px;margin-bottom:12px}
+.empty-state h3{font-size:16px;font-weight:600;color:var(--text);margin-bottom:6px}
+.empty-state p{font-size:13px;line-height:1.5}
+
+/* Responsive */
+@media(max-width:1200px){.yaml-panel{width:340px}}
+@media(max-width:900px){body{flex-direction:column}.sidebar{width:100%;height:auto;max-height:300px}.yaml-panel{width:100%;height:300px}}
+</style>
+</head>
+<body>
+
+<!-- Sidebar: Workflow Config -->
+<div class="sidebar">
+<div class="header">
+<h1>⚙️ Workflow Builder</h1>
+<div class="header-actions">
+<button class="btn btn-sm" onclick="loadExample()">Example</button>
+<button class="btn btn-sm" onclick="resetAll()">Reset</button>
+</div>
+</div>
+<div class="config-area">
+<!-- Name -->
+<div class="config-section">
+<h3>Workflow Name</h3>
+<div class="field">
+<input type="text" id="wf-name" placeholder="e.g. Incident Alert" oninput="updateYaml()">
+</div>
+</div>
+
+<!-- Trigger -->
+<div class="config-section">
+<h3>Trigger</h3>
+<div class="trigger-pills" id="trigger-pills">
+<div class="trigger-pill active" data-trigger="message_posted" onclick="selectTrigger(this)">📨 Message Posted</div>
+<div class="trigger-pill" data-trigger="reaction_added" onclick="selectTrigger(this)">👍 Reaction Added</div>
+<div class="trigger-pill" data-trigger="diff_posted" onclick="selectTrigger(this)">📝 Diff Posted</div>
+<div class="trigger-pill" data-trigger="schedule" onclick="selectTrigger(this)">⏰ Schedule</div>
+<div class="trigger-pill" data-trigger="webhook" onclick="selectTrigger(this)">🌐 Webhook</div>
+</div>
+<div id="trigger-config"></div>
+</div>
+</div>
+</div>
+
+<!-- Main: Steps -->
+<div class="main">
+<div class="steps-header">
+<h2>📋 Steps <span id="step-count" style="color:var(--text2);font-weight:400"></span></h2>
+</div>
+<div class="steps-container" id="steps-container">
+<div class="empty-state" id="empty-state">
+<div class="emoji">📋</div>
+<h3>No steps yet</h3>
+<p>Click an action below to add your first step.<br>Steps execute sequentially — top to bottom.</p>
+</div>
+</div>
+
+<!-- Add step bar -->
+<div class="add-step-menu">
+<span style="font-size:12px;color:var(--text2);align-self:center;margin-right:4px">Add:</span>
+<button class="add-step-btn" onclick="addStep('send_message')">📨 send_message</button>
+<button class="add-step-btn" onclick="addStep('send_dm')">💬 send_dm</button>
+<button class="add-step-btn" onclick="addStep('set_channel_topic')">📌 set_channel_topic</button>
+<button class="add-step-btn" onclick="addStep('add_reaction')">👍 add_reaction</button>
+<button class="add-step-btn" onclick="addStep('call_webhook')">🌐 call_webhook</button>
+<button class="add-step-btn" onclick="addStep('request_approval')">✅ request_approval</button>
+<button class="add-step-btn" onclick="addStep('delay')">⏱️ delay</button>
+<button class="add-step-btn" onclick="addStep('query_count')">🔢 query_count</button>
+<button class="add-step-btn" onclick="addStep('query_messages')">📊 query_messages</button>
+</div>
+</div>
+
+<!-- YAML Panel -->
+<div class="yaml-panel">
+<div class="yaml-panel-header">
+<h3>📄 YAML Output</h3>
+<div style="display:flex;gap:6px">
+<button class="btn btn-sm" onclick="copyYaml()">Copy</button>
+<button class="btn btn-sm" onclick="downloadYaml()">Download</button>
+</div>
+</div>
+<div class="yaml-output" id="yaml-output"></div>
+<div class="validation" id="validation">
+<h4 class="ok">✅ Valid</h4>
+</div>
+</div>
+
+<script>
+// ── State ──────────────────────────────────────────────────────────
+const state = {
+  name: '',
+  trigger: 'message_posted',
+  triggerConfig: {},
+  steps: [],
+};
+
+// Action field definitions
+const ACTION_FIELDS = {
+  send_message: {
+    label: 'Send Message', emoji: '📨',
+    fields: [
+      {key:'text',label:'Message Text',type:'textarea',required:true,placeholder:'Hello! {{trigger.text}}'},
+      {key:'channel',label:'Channel Override (optional)',type:'text',required:false,placeholder:'UUID or leave empty for trigger channel'},
+    ],
+  },
+  send_dm: {
+    label: 'Send DM', emoji: '💬',
+    fields: [
+      {key:'to',label:'Recipient',type:'text',required:true,placeholder:'{{trigger.author}} or hex pubkey'},
+      {key:'text',label:'Message Text',type:'textarea',required:true,placeholder:'Hi!'},
+    ],
+  },
+  set_channel_topic: {
+    label: 'Set Channel Topic', emoji: '📌',
+    fields: [
+      {key:'topic',label:'New Topic',type:'text',required:true,placeholder:'Status: All Systems Go'},
+    ],
+  },
+  add_reaction: {
+    label: 'Add Reaction', emoji: '👍',
+    fields: [
+      {key:'emoji',label:'Emoji',type:'text',required:true,placeholder:'white_check_mark'},
+    ],
+  },
+  call_webhook: {
+    label: 'Call Webhook', emoji: '🌐',
+    fields: [
+      {key:'url',label:'URL (HTTPS)',type:'text',required:true,placeholder:'https://hooks.example.com/notify'},
+      {key:'method',label:'Method',type:'text',required:false,placeholder:'POST'},
+      {key:'body',label:'Body (optional)',type:'textarea',required:false,placeholder:'{"text":"{{trigger.text}}"}'},
+    ],
+  },
+  request_approval: {
+    label: 'Request Approval', emoji: '✅',
+    fields: [
+      {key:'from',label:'Approver',type:'text',required:true,placeholder:'@release-manager'},
+      {key:'message',label:'Approval Prompt',type:'text',required:true,placeholder:'Approve deploy?'},
+      {key:'timeout',label:'Timeout (optional)',type:'text',required:false,placeholder:'24h'},
+    ],
+  },
+  delay: {
+    label: 'Delay', emoji: '⏱️',
+    fields: [
+      {key:'duration',label:'Duration',type:'text',required:true,placeholder:'5m'},
+    ],
+  },
+  query_count: {
+    label: 'Query Count', emoji: '🔢',
+    fields: [
+      {key:'channel',label:'Channel (optional)',type:'text',required:false,placeholder:'UUID or trigger channel'},
+      {key:'kinds',label:'Event Kinds (comma-separated)',type:'text',required:true,placeholder:'9'},
+      {key:'since',label:'Since Duration (optional)',type:'text',required:false,placeholder:'1h'},
+    ],
+  },
+  query_messages: {
+    label: 'Query Messages', emoji: '📊',
+    fields: [
+      {key:'channel',label:'Channel (optional)',type:'text',required:false,placeholder:'UUID or trigger channel'},
+      {key:'limit',label:'Limit (default 10)',type:'text',required:false,placeholder:'5'},
+    ],
+  },
+};
+
+const TRIGGER_FIELDS = {
+  message_posted: [
+    {key:'filter',label:'Filter Expression (optional)',type:'text',placeholder:'str_contains(trigger_text, "P1")'},
+  ],
+  reaction_added: [
+    {key:'emoji',label:'Emoji (optional — empty = any)',type:'text',placeholder:'👍'},
+  ],
+  diff_posted: [
+    {key:'filter',label:'Filter Expression (optional)',type:'text',placeholder:'str_contains(trigger_text, "BREAKING")'},
+  ],
+  schedule: [
+    {key:'cron',label:'Cron Expression (UTC)',type:'text',placeholder:'0 9 * * 1-5'},
+    {key:'interval',label:'OR Interval (e.g. 1h, 30m)',type:'text',placeholder:'1h'},
+  ],
+  webhook: [],
+};
+
+let nextStepNum = 1;
+
+// ── Trigger ────────────────────────────────────────────────────────
+function selectTrigger(el) {
+  document.querySelectorAll('.trigger-pill').forEach(p => p.classList.remove('active'));
+  el.classList.add('active');
+  state.trigger = el.dataset.trigger;
+  state.triggerConfig = {};
+  renderTriggerConfig();
+  updateYaml();
+}
+
+function renderTriggerConfig() {
+  const container = document.getElementById('trigger-config');
+  const fields = TRIGGER_FIELDS[state.trigger] || [];
+  if (fields.length === 0) {
+    container.innerHTML = '<div class="hint">No additional configuration needed.</div>';
+    return;
+  }
+  container.innerHTML = fields.map(f => `
+    <div class="field">
+      <label>${f.label}</label>
+      <input type="text" data-tkey="${f.key}" placeholder="${f.placeholder||''}"
+        value="${state.triggerConfig[f.key]||''}"
+        oninput="state.triggerConfig[this.dataset.tkey]=this.value; updateYaml()">
+    </div>`).join('');
+}
+
+// ── Steps ──────────────────────────────────────────────────────────
+function addStep(action) {
+  const def = ACTION_FIELDS[action];
+  const step = {
+    id: `step_${nextStepNum++}`,
+    name: '',
+    action: action,
+    if_expr: '',
+    timeout_secs: '',
+    fields: {},
+  };
+  def.fields.forEach(f => { step.fields[f.key] = ''; });
+  state.steps.push(step);
+  renderSteps();
+  updateYaml();
+}
+
+function removeStep(idx) {
+  state.steps.splice(idx, 1);
+  renderSteps();
+  updateYaml();
+}
+
+function moveStep(idx, dir) {
+  const ni = idx + dir;
+  if (ni < 0 || ni >= state.steps.length) return;
+  [state.steps[idx], state.steps[ni]] = [state.steps[ni], state.steps[idx]];
+  renderSteps();
+  updateYaml();
+}
+
+function updateStepField(stepIdx, fieldKey, value) {
+  state.steps[stepIdx].fields[fieldKey] = value;
+  updateYaml();
+}
+
+function updateStepMeta(stepIdx, key, value) {
+  state.steps[stepIdx][key] = value;
+  updateYaml();
+}
+
+function renderSteps() {
+  const container = document.getElementById('steps-container');
+  const empty = document.getElementById('empty-state');
+
+  if (state.steps.length === 0) {
+    empty.style.display = 'block';
+    // Remove all step cards
+    container.querySelectorAll('.step-card').forEach(c => c.remove());
+    document.getElementById('step-count').textContent = '';
+    return;
+  }
+  empty.style.display = 'none';
+  document.getElementById('step-count').textContent = `(${state.steps.length})`;
+
+  container.innerHTML = state.steps.map((step, i) => {
+    const def = ACTION_FIELDS[step.action];
+    const fieldsHtml = def.fields.map(f => {
+      const val = step.fields[f.key] || '';
+      const inputTag = f.type === 'textarea'
+        ? `<textarea data-sidx="${i}" data-fkey="${f.key}" placeholder="${f.placeholder||''}"
+            oninput="updateStepField(${i},'${f.key}',this.value)">${val}</textarea>`
+        : `<input type="text" data-sidx="${i}" data-fkey="${f.key}" value="${val}" placeholder="${f.placeholder||''}"
+            oninput="updateStepField(${i},'${f.key}',this.value)">`;
+      return `<div class="field"><label>${f.label}${f.required?' <span style="color:var(--red)">*</span>':''}</label>${inputTag}</div>`;
+    }).join('');
+
+    return `
+    <div class="step-card" data-idx="${i}">
+      <div class="step-header">
+        <span class="step-num">${i+1}</span>
+        <span class="step-id" data-sidx="${i}" contenteditable="true" oninput="updateStepMeta(${i},'id',this.textContent)">${step.id}</span>
+        <span class="step-action-badge act-${step.action}">${def.emoji} ${step.action}</span>
+      </div>
+      <div class="step-body">
+        ${fieldsHtml}
+        <div class="field">
+          <label>Condition — if: (optional)</label>
+          <input type="text" value="${step.if_expr||''}" placeholder="steps_prev_output_count > 10"
+            oninput="updateStepMeta(${i},'if_expr',this.value)">
+          <div class="hint">evalexpr — step is skipped (not failed) if false</div>
+        </div>
+        <div class="step-actions-bar">
+          <button class="btn btn-sm" onclick="moveStep(${i},-1)" ${i===0?'disabled':''}>↑</button>
+          <button class="btn btn-sm" onclick="moveStep(${i},1)" ${i===state.steps.length-1?'disabled':''}>↓</button>
+          <button class="btn btn-sm" style="margin-left:auto;color:var(--red)" onclick="removeStep(${i})">Delete</button>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+// ── YAML Generation ────────────────────────────────────────────────
+function generateYaml() {
+  const lines = [];
+  lines.push(`name: '${state.name || 'Untitled Workflow'}'`);
+
+  // Trigger
+  lines.push('trigger:');
+  lines.push(`  on: ${state.trigger}`);
+  const tFields = TRIGGER_FIELDS[state.trigger] || [];
+  tFields.forEach(f => {
+    const val = state.triggerConfig[f.key];
+    if (val && val.trim()) {
+      if (f.key === 'filter') {
+        lines.push(`  filter: '${val}'`);
+      } else {
+        lines.push(`  ${f.key}: ${val}`);
+      }
+    }
+  });
+
+  // Steps
+  lines.push('steps:');
+  state.steps.forEach(step => {
+    const def = ACTION_FIELDS[step.action];
+    lines.push(`  - id: ${step.id}`);
+    lines.push(`    action: ${step.action}`);
+    def.fields.forEach(f => {
+      const val = step.fields[f.key];
+      if (val !== undefined && val !== '') {
+        // Quote text fields that may contain special chars
+        if (f.type === 'textarea' || val.includes('{{') || val.includes(' ') || val.includes(':')) {
+          lines.push(`    ${f.key}: '${val}'`);
+        } else {
+          lines.push(`    ${f.key}: ${val}`);
+        }
+      }
+    });
+    if (step.if_expr && step.if_expr.trim()) {
+      lines.push(`    if: '${step.if_expr}'`);
+    }
+  });
+
+  return lines.join('\n');
+}
+
+// ── Validation ─────────────────────────────────────────────────────
+function validate() {
+  const errors = [];
+  const warnings = [];
+
+  if (!state.name || !state.name.trim()) {
+    errors.push('Workflow name is required');
+  }
+
+  if (state.steps.length === 0) {
+    warnings.push('No steps — add at least one action');
+  }
+
+  const seenIds = new Set();
+  const idRegex = /^[a-zA-Z0-9_]+$/;
+
+  state.steps.forEach((step, i) => {
+    if (!step.id || !step.id.trim()) {
+      errors.push(`Step ${i+1}: id is required`);
+    } else if (!idRegex.test(step.id)) {
+      errors.push(`Step "${step.id}": id must be alphanumeric + underscores only`);
+    } else if (seenIds.has(step.id)) {
+      errors.push(`Step "${step.id}": duplicate step id`);
+    }
+    seenIds.add(step.id);
+
+    // Required fields
+    const def = ACTION_FIELDS[step.action];
+    def.fields.forEach(f => {
+      if (f.required) {
+        const val = step.fields[f.key];
+        if (!val || !val.trim()) {
+          errors.push(`Step "${step.id}": ${f.label} is required`);
+        }
+      }
+    });
+  });
+
+  // Schedule validation
+  if (state.trigger === 'schedule') {
+    const cron = state.triggerConfig.cron;
+    const interval = state.triggerConfig.interval;
+    if (!cron && !interval) {
+      errors.push('Schedule trigger requires either cron or interval');
+    }
+    if (cron && interval) {
+      errors.push('Schedule: specify either cron OR interval, not both');
+    }
+  }
+
+  return {errors, warnings};
+}
+
+function updateYaml() {
+  document.getElementById('yaml-output').textContent = generateYaml();
+  renderValidation();
+}
+
+function renderValidation() {
+  const {errors, warnings} = validate();
+  const container = document.getElementById('validation');
+
+  if (errors.length === 0 && warnings.length === 0) {
+    container.innerHTML = '<h4 class="ok">✅ Valid — ready to deploy</h4>';
+    return;
+  }
+
+  let html = '';
+  if (errors.length > 0) {
+    html += '<h4 class="err">❌ Errors</h4><ul>';
+    errors.forEach(e => { html += `<li class="err"><span class="icon">✗</span> ${e}</li>`; });
+    html += '</ul>';
+  }
+  if (warnings.length > 0) {
+    html += '<h4 class="warn">⚠️ Warnings</h4><ul>';
+    warnings.forEach(w => { html += `<li class="warn"><span class="icon">!</span> ${w}</li>`; });
+    html += '</ul>';
+  }
+  container.innerHTML = html;
+}
+
+// ── Actions ────────────────────────────────────────────────────────
+function copyYaml() {
+  const yaml = generateYaml();
+  navigator.clipboard.writeText(yaml).then(() => {
+    const btn = event.target;
+    const orig = btn.textContent;
+    btn.textContent = '✓ Copied!';
+    setTimeout(() => { btn.textContent = orig; }, 1500);
+  });
+}
+
+function downloadYaml() {
+  const yaml = generateYaml();
+  const blob = new Blob([yaml], {type: 'text/yaml'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = (state.name || 'workflow').toLowerCase().replace(/\s+/g,'-') + '.yaml';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function loadExample() {
+  state.name = 'High Traffic Alert';
+  state.trigger = 'message_posted';
+  state.triggerConfig = {filter: 'str_contains(trigger_text, "urgent")'};
+  state.steps = [
+    {id:'count', action:'query_count', if_expr:'', fields:{channel:'', kinds:'9', since:'1h'}},
+    {id:'check', action:'', if_expr:'steps_count_output_count > 50', fields:{}},
+    {id:'alert', action:'send_message', if_expr:'', fields:{text:'🚨 High traffic: {{steps_count_output_count}} messages in the last hour!', channel:''}},
+    {id:'notify', action:'send_dm', if_expr:'', fields:{to:'{{trigger.author}}', text:'Urgent traffic spike detected in your channel.'}},
+  ];
+  // Fix: step 'check' was placeholder — replace with a real no-op (use send_message with condition)
+  state.steps = [
+    {id:'count', action:'query_count', if_expr:'', name:'', fields:{channel:'', kinds:'9', since:'1h'}},
+    {id:'alert', action:'send_message', if_expr:'steps_count_output_count > 50', name:'', fields:{text:'🚨 High traffic: {{steps_count_output_count}} messages in the last hour!', channel:''}},
+    {id:'react', action:'add_reaction', if_expr:'', name:'', fields:{emoji:'rotating_light'}},
+  ];
+  nextStepNum = 4;
+  // Sync trigger pill
+  document.querySelectorAll('.trigger-pill').forEach(p => {
+    p.classList.toggle('active', p.dataset.trigger === state.trigger);
+  });
+  document.getElementById('wf-name').value = state.name;
+  renderTriggerConfig();
+  // Populate trigger fields
+  Object.entries(state.triggerConfig).forEach(([k,v]) => {
+    const el = document.querySelector(`[data-tkey="${k}"]`);
+    if (el) el.value = v;
+  });
+  renderSteps();
+  updateYaml();
+}
+
+function resetAll() {
+  state.name = '';
+  state.trigger = 'message_posted';
+  state.triggerConfig = {};
+  state.steps = [];
+  nextStepNum = 1;
+  document.getElementById('wf-name').value = '';
+  document.querySelectorAll('.trigger-pill').forEach(p => {
+    p.classList.toggle('active', p.dataset.trigger === 'message_posted');
+  });
+  renderTriggerConfig();
+  renderSteps();
+  updateYaml();
+}
+
+// Wire name input
+document.getElementById('wf-name').addEventListener('input', e => {
+  state.name = e.target.value;
+  updateYaml();
+});
+
+// Init
+renderTriggerConfig();
+updateYaml();
+</script>
+</body>
+</html>
