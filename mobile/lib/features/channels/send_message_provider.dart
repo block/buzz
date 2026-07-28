@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/relay/relay.dart';
@@ -12,7 +14,7 @@ import 'channels_provider.dart';
 /// over the relay's NIP-42-authenticated WebSocket session.
 class SendMessage {
   final SignedEventRelay _signedEventRelay;
-  final Channel? Function(String channelId) _readChannel;
+  final FutureOr<Channel?> Function(String channelId) _readChannel;
   final Future<List<ChannelMember>> Function(String channelId) _fetchMembers;
   final Map<String, UserProfile> Function() _readUserCache;
   final void Function(String channelId, NostrEvent event) _addLocalMessage;
@@ -21,7 +23,7 @@ class SendMessage {
 
   SendMessage({
     required SignedEventRelay signedEventRelay,
-    required Channel? Function(String channelId) readChannel,
+    required FutureOr<Channel?> Function(String channelId) readChannel,
     required Future<List<ChannelMember>> Function(String channelId)
     fetchMembers,
     required Map<String, UserProfile> Function() readUserCache,
@@ -60,21 +62,27 @@ class SendMessage {
 
     // In a DM, fan out p-tags to every other participant so mention-gated
     // agent subscriptions see plain messages (matching the desktop's
-    // messageMentionPubkeys). Synchronous cached lookup — if the channel
-    // isn't cached yet, the send proceeds with explicit mentions only.
-    final channel = _readChannel(channelId);
-    final fanoutPubkeys = (channel?.isDm ?? false)
-        ? channel!.participantPubkeys
+    // messageMentionPubkeys). Wait for the authoritative channel list when
+    // the synchronous cache has not loaded this channel yet.
+    final channel = await _readChannel(channelId);
+    if (channel == null) {
+      throw StateError('Channel not found: $channelId');
+    }
+    final fanoutPubkeys = channel.isDm
+        ? channel.participantPubkeys
         : const <String>[];
 
     // Normalize mentions: lowercase, deduplicate, exclude self (matching
     // the desktop's normalizeMentionPubkeys).
     final selfLower = authorPubkey?.toLowerCase();
     final seenMentions = <String>{?selfLower};
-    final normalizedMentions = <String>[
-      for (final pk in [...resolvedMentions, ...fanoutPubkeys])
-        if (seenMentions.add(pk.toLowerCase())) pk,
-    ];
+    final normalizedMentions = <String>[];
+    for (final pk in [...resolvedMentions, ...fanoutPubkeys]) {
+      final lower = pk.toLowerCase();
+      if (lower.isNotEmpty && seenMentions.add(lower)) {
+        normalizedMentions.add(lower);
+      }
+    }
 
     final tags = <List<String>>[
       ['h', channelId],
@@ -181,11 +189,21 @@ final sendMessageProvider = Provider<SendMessage>((ref) {
       session: ref.read(relaySessionProvider.notifier),
       nsec: config.nsec,
     ),
-    readChannel: (channelId) => ref
-        .read(channelsProvider)
-        .value
-        ?.where((channel) => channel.id == channelId)
-        .firstOrNull,
+    readChannel: (channelId) {
+      final cachedChannel = ref
+          .read(channelsProvider)
+          .value
+          ?.where((channel) => channel.id == channelId)
+          .firstOrNull;
+      if (cachedChannel != null) return cachedChannel;
+      return ref
+          .read(channelsProvider.future)
+          .then(
+            (channels) => channels
+                .where((channel) => channel.id == channelId)
+                .firstOrNull,
+          );
+    },
     fetchMembers: (channelId) =>
         ref.read(channelMembersProvider(channelId).future),
     readUserCache: () => ref.read(userCacheProvider),

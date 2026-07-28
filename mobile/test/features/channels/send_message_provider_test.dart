@@ -19,7 +19,7 @@ void main() {
           session: session,
           nsec: nostr.Keys.generate().nsec,
         ),
-        readChannel: (_) => null,
+        readChannel: (_) => _channel(channelType: 'stream'),
         fetchMembers: (_) async => const [],
         readUserCache: () => const {},
         addLocalMessage: (_, event) => localMessages.add(event),
@@ -53,7 +53,7 @@ void main() {
         session: session,
         nsec: nostr.Keys.generate().nsec,
       ),
-      readChannel: (_) => null,
+      readChannel: (_) => _channel(channelType: 'stream'),
       fetchMembers: (_) async => const [],
       readUserCache: () => const {},
       addLocalMessage: (_, event) => localMessages.add(event),
@@ -119,7 +119,7 @@ void main() {
   });
 
   test(
-    'explicit mention overlapping a fan-out participant dedupes to one p tag',
+    'DM recipient tags are lowercase, non-empty, and deduplicated',
     () async {
       final session = _PendingPublishRelaySession();
       final keys = nostr.Keys.generate();
@@ -128,25 +128,21 @@ void main() {
         nsec: keys.nsec,
         readChannel: (channelId) => _channel(
           channelType: 'dm',
-          participantPubkeys: [keys.public, _humanPubkey, _agentPubkey],
+          participantPubkeys: [keys.public, _humanPubkey, _agentPubkey, ''],
         ),
       );
 
-      // The explicit mention arrives uppercase while the roster holds the
-      // lowercase form — dedupe is keyed on the lowercased pubkey.
       final explicitAgent = _agentPubkey.toUpperCase();
       final result = send(
         channelId: _channelId,
         content: 'hey @agent',
-        mentionPubkeys: [explicitAgent],
+        mentionPubkeys: [explicitAgent, ''],
       );
       await session.published;
       session.accept();
       await result;
 
-      // The case-mismatched overlap collapses to a single p tag (first-seen
-      // casing wins), and the rest of the roster still fans out.
-      expect(_pTagPubkeys(session.event), [explicitAgent, _humanPubkey]);
+      expect(_pTagPubkeys(session.event), [_agentPubkey, _humanPubkey]);
     },
   );
 
@@ -187,7 +183,37 @@ void main() {
     },
   );
 
-  test('sends without fan-out when the channel is not cached yet', () async {
+  test('waits for channel loading before publishing a plain DM', () async {
+    final session = _PendingPublishRelaySession();
+    final channel = Completer<Channel?>();
+    final send = _sendMessage(
+      session: session,
+      nsec: nostr.Keys.generate().nsec,
+      readChannel: (_) => channel.future,
+    );
+
+    final result = send(
+      channelId: _channelId,
+      content: 'hello',
+      mentionPubkeys: const [],
+    );
+    await Future<void>.delayed(Duration.zero);
+
+    expect(session.hasPublished, isFalse);
+
+    channel.complete(
+      _channel(
+        channelType: 'dm',
+        participantPubkeys: const [_humanPubkey, _agentPubkey],
+      ),
+    );
+    await session.published;
+    session.accept();
+    await result;
+
+    expect(_pTagPubkeys(session.event), [_humanPubkey, _agentPubkey]);
+  });
+  test('rejects a send when the channel cannot be resolved', () async {
     final session = _PendingPublishRelaySession();
     final send = _sendMessage(
       session: session,
@@ -200,11 +226,21 @@ void main() {
       content: 'hello',
       mentionPubkeys: const [],
     );
-    await session.published;
-    session.accept();
-    await result;
+    final failure = expectLater(
+      result,
+      throwsA(
+        isA<StateError>().having(
+          (error) => error.message,
+          'message',
+          contains(_channelId),
+        ),
+      ),
+    );
+    await Future<void>.delayed(Duration.zero);
+    if (session.hasPublished) session.reject();
 
-    expect(_pTagPubkeys(session.event), isEmpty);
+    await failure;
+    expect(session.hasPublished, isFalse);
   });
 }
 
@@ -225,7 +261,7 @@ const _parentEventId =
 SendMessage _sendMessage({
   required _PendingPublishRelaySession session,
   required String nsec,
-  required Channel? Function(String channelId) readChannel,
+  required FutureOr<Channel?> Function(String channelId) readChannel,
 }) => SendMessage(
   signedEventRelay: SignedEventRelay(session: session, nsec: nsec),
   readChannel: readChannel,
@@ -260,6 +296,7 @@ class _PendingPublishRelaySession extends RelaySessionNotifier {
   final Completer<NostrEvent> _result = Completer<NostrEvent>();
   final Completer<void> _published = Completer<void>();
   late NostrEvent event;
+  bool get hasPublished => _published.isCompleted;
 
   Future<void> get published => _published.future;
 
