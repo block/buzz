@@ -751,7 +751,7 @@ mod tests {
         assert!(result.is_empty());
     }
 
-    // --- (c) attest: build_attest_output ---
+    // --- (e) attest: build_attest_output ---
 
     fn test_client(keys: Keys) -> BuzzClient {
         BuzzClient::new("http://localhost".into(), keys, None, None).expect("client")
@@ -773,6 +773,27 @@ mod tests {
         let recovered_owner = buzz_sdk::nip_oa::verify_auth_tag(auth_tag_json, &agent.public_key())
             .expect("tag verifies against the agent pubkey");
         assert_eq!(recovered_owner, owner.public_key());
+    }
+
+    #[test]
+    fn attest_binds_conditions_into_the_signed_tag() {
+        let owner = Keys::generate();
+        let agent = Keys::generate();
+        let client = test_client(owner.clone());
+
+        let output =
+            build_attest_output(&client, &agent.public_key().to_hex(), "kind=9").expect("attest");
+        assert_eq!(output["conditions"], json!("kind=9"));
+
+        let auth_tag_json = output["auth_tag"].as_str().expect("auth_tag is a string");
+        buzz_sdk::nip_oa::verify_auth_tag(auth_tag_json, &agent.public_key())
+            .expect("tag verifies with matching conditions");
+
+        // Tampering with the conditions embedded in the tag must invalidate
+        // the signature — conditions are part of the signed preimage, not
+        // just a cosmetic label alongside it.
+        let tampered = auth_tag_json.replacen("kind=9", "kind=1", 1);
+        assert!(buzz_sdk::nip_oa::verify_auth_tag(&tampered, &agent.public_key()).is_err());
     }
 
     #[test]
