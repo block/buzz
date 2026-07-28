@@ -25,7 +25,8 @@ fn active_installs() -> &'static std::sync::Mutex<std::collections::HashSet<Stri
 /// `None` if none was found).
 ///
 /// Returns `None` when no install is needed (adapter is present and current).
-/// Returns `Some(cmds)` when the adapter is missing or (for codex) outdated.
+/// Returns `Some(cmds)` when the adapter is missing or (for codex) below its
+/// minimum supported version.
 ///
 /// For the codex **outdated** case the returned sequence is a two-step
 /// reinstall: first uninstall the old `@zed-industries/codex-acp` package
@@ -1152,7 +1153,8 @@ mod tests {
     /// plan_adapter_install is the pure install-plan seam used by
     /// install_acp_runtime_blocking. These tests verify:
     ///   - A 0.x binary (AdapterOutdated) → uninstall-then-install sequence returned
-    ///   - A 1.x binary (Available) → None (no reinstall)
+    ///   - A current 1.x binary (Available) → None (no reinstall)
+    ///   - A 1.x binary below the floor → install plan returned
     ///   - Missing binary (None path) → catalog install commands returned
     #[cfg(unix)]
     #[test]
@@ -1192,10 +1194,10 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("codex-acp");
-        // Simulate 1.x adapter: outputs version and exits 0
+        // Simulate the minimum supported adapter version.
         std::fs::write(
             &bin,
-            "#!/bin/sh\necho '@agentclientprotocol/codex-acp 1.1.2'\nexit 0\n",
+            "#!/bin/sh\necho '@agentclientprotocol/codex-acp 1.1.7'\nexit 0\n",
         )
         .expect("write script");
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
@@ -1206,7 +1208,32 @@ mod tests {
 
         assert!(
             plan.is_none(),
-            "1.x codex adapter must not trigger install plan (no reinstall needed)"
+            "current codex adapter must not trigger install plan (no reinstall needed)"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_plan_adapter_install_updates_older_1x_codex_binary() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("codex-acp");
+        // A 1.x adapter below MIN_CODEX_ACP_VERSION must still be reinstalled.
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\necho '@agentclientprotocol/codex-acp 1.1.5'\nexit 0\n",
+        )
+        .expect("write script");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod script");
+
+        let install_cmds = &["npm install -g @agentclientprotocol/codex-acp"];
+        let plan = plan_adapter_install("codex", Some(&bin), install_cmds, Some("/usr/bin:/bin"));
+
+        assert!(
+            plan.is_some(),
+            "older 1.x codex adapter must trigger update plan"
         );
     }
 

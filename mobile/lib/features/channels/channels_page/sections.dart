@@ -154,7 +154,7 @@ class _CustomSectionHeader extends ConsumerWidget {
             const SizedBox(width: _kChannelLabelGap),
             Text(
               section.name,
-              style: context.textTheme.bodyLarge?.copyWith(
+              style: contentListTitleTextStyle.copyWith(
                 color: sectionColor,
                 fontWeight: FontWeight.w600,
               ),
@@ -318,7 +318,7 @@ class _ChannelSection extends StatelessWidget {
                   ),
                   child: Text(
                     emptyLabel,
-                    style: context.textTheme.bodySmall?.copyWith(
+                    style: contentListBodyTextStyle.copyWith(
                       color: context.colors.onSurfaceVariant,
                     ),
                   ),
@@ -430,7 +430,7 @@ class _SectionHeader extends StatelessWidget {
             const SizedBox(width: _kChannelLabelGap),
             Text(
               label,
-              style: context.textTheme.bodyLarge?.copyWith(
+              style: contentListTitleTextStyle.copyWith(
                 color: sectionColor,
                 fontWeight: FontWeight.w600,
               ),

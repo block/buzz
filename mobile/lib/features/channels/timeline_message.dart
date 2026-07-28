@@ -171,6 +171,11 @@ class TimelineMessage {
     this.parentId,
     this.rootId,
   });
+
+  /// Attachment messages stay visually distinct from surrounding messages,
+  /// even when several are sent by the same author in quick succession.
+  bool get hasAttachments =>
+      tags.any((tag) => tag.isNotEmpty && tag.first == 'imeta');
 }
 
 @immutable
