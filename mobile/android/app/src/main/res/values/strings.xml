@@ -1,0 +1,9 @@
+<resources>
+    <string name="agent_activity_channel_name">Agent activity</string>
+    <string name="agent_activity_channel_description">Live progress for running Buzz agents</string>
+    <string name="agent_activity_public_body">Open Buzz to view progress</string>
+    <plurals name="agent_activity_public_title">
+        <item quantity="one">Agent is working</item>
+        <item quantity="other">%d agents are working</item>
+    </plurals>
+</resources>

@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -7,6 +8,7 @@ import 'package:package_info_plus/package_info_plus.dart';
 
 import '../../shared/auth/auth.dart';
 import '../../shared/clipboard_utils.dart';
+import '../../shared/notifications/agent_live_update_preferences.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/app_list.dart';
@@ -18,6 +20,7 @@ import 'theme_picker_page.dart';
 
 part 'settings_page/appearance_section.dart';
 part 'settings_page/connection_section.dart';
+part 'settings_page/notifications_section.dart';
 
 class SettingsPage extends HookConsumerWidget {
   const SettingsPage({super.key, required this.profileHeader});
@@ -42,6 +45,10 @@ class SettingsPage extends HookConsumerWidget {
               children: [
                 profileHeader,
                 const _AppearanceSection(),
+                if (!kIsWeb &&
+                    (defaultTargetPlatform == TargetPlatform.android ||
+                        defaultTargetPlatform == TargetPlatform.iOS))
+                  const _NotificationsSection(),
                 const _ConnectionSection(),
                 const _RemoveCommunitySection(),
               ],

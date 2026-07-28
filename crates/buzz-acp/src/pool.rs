@@ -1352,6 +1352,7 @@ pub async fn run_prompt_task(
                 PromptSource::Heartbeat => "heartbeat",
             },
             "triggeringEventIds": triggering_event_ids,
+            "livenessIntervalSecs": ctx.turn_liveness_interval.as_secs(),
         }),
     );
 
@@ -3253,7 +3254,9 @@ async fn run_turn_liveness(
             "turn_liveness",
             agent_index,
             &context,
-            serde_json::json!({}),
+            serde_json::json!({
+                "livenessIntervalSecs": interval.as_secs(),
+            }),
         );
         drop(guard);
     }
@@ -4834,7 +4837,7 @@ mod tests {
             .all(|event| event.started_at.as_deref() == Some(&started_at)));
         assert!(pings
             .iter()
-            .all(|event| event.payload == serde_json::json!({})));
+            .all(|event| event.payload == serde_json::json!({ "livenessIntervalSecs": 10 })));
         assert_eq!(
             serde_json::to_value(&pings[0]).unwrap()["startedAt"],
             started_at,

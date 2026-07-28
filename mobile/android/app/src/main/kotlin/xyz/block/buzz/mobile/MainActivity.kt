@@ -78,9 +78,35 @@ internal object AndroidImageProcessor {
 
 class MainActivity : FlutterActivity() {
     private var mediaUploadChannel: MethodChannel? = null
+    private var agentLiveUpdatesChannel: MethodChannel? = null
+    private var agentLiveUpdateManager: AgentLiveUpdateManager? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+
+        agentLiveUpdateManager = AgentLiveUpdateManager(this)
+        agentLiveUpdatesChannel = MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            AGENT_LIVE_UPDATES_CHANNEL,
+        ).also { channel ->
+            channel.setMethodCallHandler { call, result ->
+                when (call.method) {
+                    SHOW_AGENT_LIVE_UPDATE_METHOD -> {
+                        val payload = AgentLiveUpdatePayload.from(call.arguments)
+                        if (payload == null) {
+                            invalidArguments(result, "Expected agent activity details.")
+                            return@setMethodCallHandler
+                        }
+                        result.success(agentLiveUpdateManager?.show(payload) == true)
+                    }
+                    DISMISS_AGENT_LIVE_UPDATE_METHOD -> {
+                        agentLiveUpdateManager?.dismiss()
+                        result.success(null)
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+        }
 
         mediaUploadChannel = MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
@@ -104,6 +130,23 @@ class MainActivity : FlutterActivity() {
                 }
             }
         }
+    }
+
+    override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
+        agentLiveUpdatesChannel?.setMethodCallHandler(null)
+        agentLiveUpdatesChannel = null
+        mediaUploadChannel?.setMethodCallHandler(null)
+        mediaUploadChannel = null
+        super.cleanUpFlutterEngine(flutterEngine)
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        agentLiveUpdateManager?.onRequestPermissionsResult(requestCode, grantResults)
     }
 
     private fun handleSanitizeImageForUpload(
@@ -283,6 +326,9 @@ class MainActivity : FlutterActivity() {
     }
 
     companion object {
+        private const val AGENT_LIVE_UPDATES_CHANNEL = "buzz/agent_live_updates"
+        private const val SHOW_AGENT_LIVE_UPDATE_METHOD = "show"
+        private const val DISMISS_AGENT_LIVE_UPDATE_METHOD = "dismiss"
         private const val MEDIA_UPLOAD_CHANNEL = "buzz/media_upload"
         private const val SANITIZE_IMAGE_FOR_UPLOAD_METHOD = "sanitizeImageForUpload"
         private const val TRANSCODE_IMAGE_TO_JPEG_METHOD = "transcodeImageToJpeg"

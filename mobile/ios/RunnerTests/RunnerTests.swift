@@ -6,6 +6,48 @@ import XCTest
 
 class RunnerTests: XCTestCase {
 
+  func testAgentLiveActivityPayloadParsesFlutterArguments() throws {
+    let payload = try XCTUnwrap(
+      AgentLiveActivityPayload.from(
+        arguments: [
+          "title": "Codex and Maya are working",
+          "body": "Across #agents and #design",
+          "activeCount": 2,
+          "startedAtMillis": 1_785_152_800_000,
+          "lastActivityAtMillis": 1_785_152_810_000,
+          "expiresAtMillis": 1_785_181_610_000,
+          "channelId": "channel-2",
+          "messageId": "message-2",
+        ]
+      )
+    )
+
+    XCTAssertEqual(payload.activeCount, 2)
+    XCTAssertEqual(
+      payload.deepLink,
+      "buzz://message?channel=channel-2&id=message-2"
+    )
+    XCTAssertEqual(payload.contentState.publicTitle, "2 agents are working")
+    XCTAssertEqual(payload.contentState.publicBody, "Open Buzz to view progress")
+    XCTAssertEqual(
+      payload.staleDate,
+      Date(timeIntervalSince1970: 1_785_181_610)
+    )
+  }
+
+  func testAgentLiveActivityPayloadRejectsMissingTimingData() {
+    XCTAssertNil(
+      AgentLiveActivityPayload.from(
+        arguments: [
+          "title": "Codex is working",
+          "body": "In #agents",
+          "activeCount": 1,
+          "channelId": "channel-1",
+        ]
+      )
+    )
+  }
+
   func testDynamicIslandQrScannerRecognizesTallSafeAreas() {
     for safeAreaTopInset in [51, 59, 62] {
       XCTAssertTrue(

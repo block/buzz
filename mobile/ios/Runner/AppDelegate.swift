@@ -7,6 +7,7 @@ import UserNotifications
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
   private var mediaUploadChannel: FlutterMethodChannel?
   private var qrScannerChannel: FlutterMethodChannel?
+  private var agentLiveUpdateChannel: FlutterMethodChannel?
   private var inlinePhotoPickerSupportChannel: FlutterMethodChannel?
   private var nativeAttachmentPopoverCoordinator: NativeAttachmentPopoverCoordinator?
 
@@ -14,9 +15,52 @@ import UserNotifications
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
-    UNUserNotificationCenter.current().requestAuthorization(options: [.badge]) { _, _ in }
-    return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+    #if targetEnvironment(simulator)
+      if !ProcessInfo.processInfo.arguments.contains("--agent-live-activity-demo") {
+        UNUserNotificationCenter.current().requestAuthorization(options: [.badge]) { _, _ in }
+      }
+    #else
+      UNUserNotificationCenter.current().requestAuthorization(options: [.badge]) { _, _ in }
+    #endif
+    let didFinish = super.application(
+      application,
+      didFinishLaunchingWithOptions: launchOptions
+    )
+    #if targetEnvironment(simulator)
+      startAgentLiveActivityDemoIfRequested()
+    #endif
+    return didFinish
   }
+
+  #if targetEnvironment(simulator)
+    private func startAgentLiveActivityDemoIfRequested() {
+      guard
+        ProcessInfo.processInfo.arguments.contains("--agent-live-activity-demo"),
+        #available(iOS 16.1, *)
+      else {
+        return
+      }
+
+      DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+        let now = Int64(Date().timeIntervalSince1970 * 1_000)
+        let payload = AgentLiveActivityPayload(
+          title: "Codex and Claude are working",
+          body: "In #agents · Adding iOS Live Activities",
+          activeCount: 2,
+          startedAtMillis: now - 32_000,
+          lastActivityAtMillis: now,
+          expiresAtMillis: now + 8 * 60 * 60_000,
+          channelId: "agents-demo",
+          messageId: "agent-live-activity-demo"
+        )
+        Task {
+          await AgentLiveActivityManager.dismiss()
+          try? await Task.sleep(nanoseconds: 250_000_000)
+          _ = try? await AgentLiveActivityManager.show(payload)
+        }
+      }
+    }
+  #endif
 
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
@@ -34,6 +78,13 @@ import UserNotifications
     )
     qrScannerChannel?.setMethodCallHandler { call, result in
       Self.handleQrScannerMethodCall(call, result: result)
+    }
+    agentLiveUpdateChannel = FlutterMethodChannel(
+      name: "buzz/agent_live_updates",
+      binaryMessenger: messenger
+    )
+    agentLiveUpdateChannel?.setMethodCallHandler { call, result in
+      Self.handleAgentLiveUpdateMethodCall(call, result: result)
     }
     inlinePhotoPickerSupportChannel = FlutterMethodChannel(
       name: "buzz/inline_photo_picker",
@@ -70,6 +121,57 @@ import UserNotifications
       messenger: messenger,
       parentViewController: nativeAttachmentRegistrar?.viewController
     )
+  }
+
+  private static func handleAgentLiveUpdateMethodCall(
+    _ call: FlutterMethodCall,
+    result: @escaping FlutterResult
+  ) {
+    guard #available(iOS 16.1, *) else {
+      result(false)
+      return
+    }
+
+    switch call.method {
+    case "show":
+      guard let payload = AgentLiveActivityPayload.from(arguments: call.arguments) else {
+        result(
+          FlutterError(
+            code: "invalid_arguments",
+            message: "Expected valid agent activity details.",
+            details: nil
+          )
+        )
+        return
+      }
+      Task {
+        do {
+          let didShow = try await AgentLiveActivityManager.show(payload)
+          await MainActor.run {
+            result(didShow)
+          }
+        } catch {
+          await MainActor.run {
+            result(
+              FlutterError(
+                code: "agent_live_activity_failed",
+                message: "Unable to show agent activity.",
+                details: error.localizedDescription
+              )
+            )
+          }
+        }
+      }
+    case "dismiss":
+      Task {
+        await AgentLiveActivityManager.dismiss()
+        await MainActor.run {
+          result(nil)
+        }
+      }
+    default:
+      result(FlutterMethodNotImplemented)
+    }
   }
 
   private static func handleQrScannerMethodCall(

@@ -1,0 +1,5 @@
+#include "Generated.xcconfig"
+BUNDLE_IDENTIFIER = com.buzz.buzzMobile
+#include? "WorktreeOverrides.xcconfig"
+#include? "AppOverrides.xcconfig"
+AGENT_ACTIVITY_WIDGET_BUNDLE_IDENTIFIER = $(BUNDLE_IDENTIFIER).AgentActivityWidget
