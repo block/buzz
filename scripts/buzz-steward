@@ -39,16 +39,19 @@ STEWARD_PUB="$("$CLIENT" pubkey "$STEWARD_KEY")"
 OWNER_PUB="$("$CLIENT" pubkey "$OWNER_KEY")"
 mkdir -p "$STATE_DIR"
 
-relay_for_read() {
-  if curl -sf --max-time 2 "$LOCAL_URL/health" >/dev/null; then
-    echo "$LOCAL_URL"
-  else
-    echo "$CLOUD_URL"
-  fi
+# Observe every mandated node's own journal, not just the nearest one:
+# counterparty halves reach the rendezvous first (or only), and a steward
+# that reads one journal reports offers as open after they were answered.
+# Merged head-reduction keeps the newest event per (author, d) cell.
+query_heads() { # $1 = relay URL; empty output on failure
+  "$CLIENT" query "$STEWARD_KEY" "$1" '[{"kinds":[30700]}]' 2>/dev/null \
+    | sed 's/^200 //' || true
 }
-
-RELAY="$(relay_for_read)"
-HEADS="$("$CLIENT" query "$STEWARD_KEY" "$RELAY" '[{"kinds":[30700]}]' | sed 's/^200 //')"
+HEADS="$({ query_heads "$LOCAL_URL"; echo; query_heads "$CLOUD_URL"; } \
+  | jq -cs 'map(select(type == "array")) | add
+            | unique_by(.id)
+            | group_by(.pubkey + ([.tags[] | select(.[0]=="d") | .[1]][0] // .id))
+            | map(max_by(.created_at))')"
 
 # ── Mandate: which nodes am I steward of, with which powers? ───────────────
 # The mandate's declared powers are the contract: "observe" is required to
