@@ -22,6 +22,7 @@ import {
   type BattleRhythmRevision,
   type BattleRhythmSource,
 } from "../domain/contracts";
+import { reconstructSourceRevision } from "../domain/revisionState";
 
 export type BattleRhythmRange = Readonly<{ start: string; end: string }>;
 type Publisher = Pick<typeof relayClient, "publishEvent" | "fetchEvents">;
@@ -65,6 +66,7 @@ export async function fetchBattleRhythm(
   Readonly<{
     sources: readonly BattleRhythmSource[];
     events: readonly BattleRhythmEvent[];
+    revisions: readonly BattleRhythmRevision[];
   }>
 > {
   const [sourceEvents, calendarEvents, revisionEvents] = await Promise.all([
@@ -126,26 +128,47 @@ export async function fetchBattleRhythm(
       /* invalid chunks are ineligible */
     }
   }
+  const revisions = Array.from(revisionsByKey.entries())
+    .filter(([key]) => eligibleRevisionKeys.has(key))
+    .map(([, revision]) => revision)
+    .sort(
+      (left, right) =>
+        Date.parse(left.importedAt) - Date.parse(right.importedAt),
+    );
+  const activeStates = new Map<
+    string,
+    ReadonlyMap<string, BattleRhythmEvent>
+  >();
   const sources = newest(sourceEvents)
     .map(parseRelaySourceEvent)
     .filter((x): x is BattleRhythmSource => x !== null)
     .filter((source) =>
       eligibleRevisionKeys.has(`${source.id}:${source.revisionId}`),
-    );
-  const removedEventIds = new Set(
-    sources.flatMap((source) => {
-      const revision = revisionsByKey.get(`${source.id}:${source.revisionId}`);
-      return (
-        revision?.changes
-          .filter((change) => change.kind === "removed")
-          .map((change) => change.before.id) ?? []
-      );
-    }),
-  );
+    )
+    .filter((source) => {
+      try {
+        activeStates.set(
+          source.id,
+          reconstructSourceRevision(revisions, source.id, source.revisionId),
+        );
+        return true;
+      } catch {
+        return false;
+      }
+    });
   const events = newest(calendarEvents)
     .map(parseRelayCalendarEvent)
     .filter((x): x is BattleRhythmEvent => x !== null)
-    .filter((event) => !removedEventIds.has(event.id))
+    .filter((event) => {
+      if (event.ownership.kind === "manual") return true;
+      const expected = activeStates
+        .get(event.ownership.sourceId)
+        ?.get(event.id);
+      return (
+        expected !== undefined &&
+        JSON.stringify(expected) === JSON.stringify(event)
+      );
+    })
     .filter(
       (event) =>
         Date.parse(event.start) < Date.parse(range.end) &&
@@ -154,6 +177,7 @@ export async function fetchBattleRhythm(
   return Object.freeze({
     sources: Object.freeze(sources),
     events: Object.freeze(events),
+    revisions: Object.freeze(revisions),
   });
 }
 export async function publishManualEvent(
@@ -184,24 +208,32 @@ export async function applyImportRevision(
         "Import may only replace events owned by its source revision",
       );
   const existing = await publisher.fetchEvents({
-    kinds: [KIND_BATTLE_RHYTHM_EVENT],
+    kinds: [KIND_BATTLE_RHYTHM_EVENT, KIND_BATTLE_RHYTHM_SOURCE],
     authors: [input.ownerPubkey],
     limit: 2000,
   });
+  const existingHeads = newest(existing);
   const existingById = new Map(
-    newest(existing)
+    existingHeads
+      .filter((head) => head.kind === KIND_BATTLE_RHYTHM_EVENT)
       .map((head) => ({
         id: head.tags.find((tag) => tag[0] === "d")?.[1],
+        createdAt: head.created_at,
         parsed: parseRelayCalendarEvent(head),
       }))
       .filter(
-        (head): head is { id: string; parsed: BattleRhythmEvent | null } =>
-          Boolean(head.id),
+        (
+          head,
+        ): head is {
+          id: string;
+          createdAt: number;
+          parsed: BattleRhythmEvent | null;
+        } => Boolean(head.id),
       )
-      .map((head) => [head.id, head.parsed]),
+      .map((head) => [head.id, head]),
   );
   for (const event of events) {
-    const prior = existingById.get(event.id);
+    const prior = existingById.get(event.id)?.parsed;
     if (
       existingById.has(event.id) &&
       (!prior ||
@@ -214,7 +246,11 @@ export async function applyImportRevision(
   }
   const heads = await Promise.all(
     events.map((event) =>
-      buildCalendarEvent(event, input.priorEventCreatedAt?.[event.id]),
+      buildCalendarEvent(
+        event,
+        input.priorEventCreatedAt?.[event.id] ??
+          existingById.get(event.id)?.createdAt,
+      ),
     ),
   );
   const chunks = await buildRevisionEvents(revision); // Build and validate every immutable chunk before any relay mutation.
@@ -222,6 +258,14 @@ export async function applyImportRevision(
   for (const chunk of chunks) await publish(publisher, chunk);
   await publish(
     publisher,
-    await buildSourceEvent(source, input.priorSourceCreatedAt),
+    await buildSourceEvent(
+      source,
+      input.priorSourceCreatedAt ??
+        existingHeads.find(
+          (head) =>
+            head.kind === KIND_BATTLE_RHYTHM_SOURCE &&
+            head.tags.some((tag) => tag[0] === "d" && tag[1] === source.id),
+        )?.created_at,
+    ),
   );
 }

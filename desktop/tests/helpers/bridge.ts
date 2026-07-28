@@ -127,6 +127,8 @@ export type MockAgentMemoryListing = {
 };
 
 type MockBridgeOptions = {
+  /** Successive extracted planning documents returned to Battle Rhythm imports. */
+  battleRhythmDocuments?: unknown[];
   /** World Monitor status returned by the mock Tauri bridge. */
   worldMonitorConnection?: unknown;
   /** Native Daily Command Brief status view returned by the mock Tauri bridge. */

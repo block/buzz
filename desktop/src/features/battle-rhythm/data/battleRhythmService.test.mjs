@@ -85,6 +85,42 @@ test("import publishes heads then chunks then active source pointer", async () =
   );
   assert.deepEqual(kinds, [30631, 46310, 30630]);
 });
+test("import advances replaceable heads beyond relay timestamps", async () => {
+  const codec = await import("../domain/eventCodec.ts");
+  const priorSource = {
+    ...(await codec.buildSourceEvent(source)),
+    created_at: 50,
+  };
+  const priorEvent = {
+    ...(await codec.buildCalendarEvent(event)),
+    created_at: 75,
+  };
+  const published = [];
+  await applyImportRevision(
+    {
+      ownerPubkey: "owner",
+      source,
+      revision: {
+        schemaVersion: 1,
+        id: "r1",
+        sourceId: "fas",
+        priorRevisionId: null,
+        importedAt: source.importedAt,
+        changes: [{ kind: "changed", before: event, after: event }],
+      },
+      events: [event],
+    },
+    {
+      fetchEvents: async () => [priorSource, priorEvent],
+      publishEvent: async (relay) => {
+        published.push(relay);
+        return relay;
+      },
+    },
+  );
+  assert.ok(published.find((relay) => relay.kind === 30631).created_at > 75);
+  assert.ok(published.find((relay) => relay.kind === 30630).created_at > 50);
+});
 test("import rejects an event owned by another source before any publish", async () => {
   let calls = 0;
   await assert.rejects(() =>
@@ -321,6 +357,14 @@ test("fetch hides events removed by the active source revision", async () => {
     revisionId: "r2",
     priorRevisionId: "r1",
   };
+  const firstRevision = {
+    schemaVersion: 1,
+    id: "r1",
+    sourceId: "fas",
+    priorRevisionId: null,
+    importedAt: source.importedAt,
+    changes: [{ kind: "added", after: event }],
+  };
   const revision = {
     schemaVersion: 1,
     id: "r2",
@@ -332,7 +376,10 @@ test("fetch hides events removed by the active source revision", async () => {
   const responses = [
     [await codec.buildSourceEvent(revisedSource)],
     [await codec.buildCalendarEvent(event)],
-    await codec.buildRevisionEvents(revision),
+    [
+      ...(await codec.buildRevisionEvents(firstRevision)),
+      ...(await codec.buildRevisionEvents(revision)),
+    ],
   ];
 
   const result = await fetchBattleRhythm(
@@ -346,4 +393,5 @@ test("fetch hides events removed by the active source revision", async () => {
 
   assert.equal(result.sources.length, 1);
   assert.deepEqual(result.events, []);
+  assert.equal(result.revisions.length, 2);
 });

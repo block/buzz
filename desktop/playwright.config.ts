@@ -117,6 +117,7 @@ export default defineConfig({
         "**/mesh-compute.spec.ts",
         "**/command-console.spec.ts",
         "**/battle-rhythm.spec.ts",
+        "**/battle-rhythm-screenshots.spec.ts",
         "**/command-team-conversations.spec.ts",
         "**/daily-command-brief.spec.ts",
         "**/world-monitor-connection.spec.ts",

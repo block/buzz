@@ -300,8 +300,13 @@ export function BattleRhythmScreen() {
         timeZone={TIME_ZONE}
       />
       <SourceHistoryDialog
+        onRollback={async (input) => {
+          await mutations.importRevision.mutateAsync(input);
+        }}
         onOpenChange={setHistoryOpen}
         open={historyOpen}
+        ownerPubkey={identity.data?.pubkey ?? ""}
+        revisions={rhythm.data?.revisions ?? []}
         sources={rhythm.data?.sources ?? []}
       />
       <ImportReviewDialog

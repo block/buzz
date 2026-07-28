@@ -137,6 +137,8 @@ type MockSearchProfileSeed = {
 type E2eConfig = {
   mode?: "mock" | "relay";
   mock?: {
+    /** Successive extracted planning documents returned to Battle Rhythm imports. */
+    battleRhythmDocuments?: unknown[];
     /** World Monitor status returned by the mock Tauri bridge. */
     worldMonitorConnection?: unknown;
     /** Native Daily Command Brief status view returned by the mock Tauri bridge. */
@@ -9287,6 +9289,7 @@ export function maybeInstallE2eTauriMocks() {
     deviceId: state === "running" ? "mock-endpoint-id" : null,
     deviceName: state === "running" ? "Mock desktop" : null,
   });
+  let battleRhythmDocumentIndex = 0;
   const handleMockCommand = async (command: string, payload: unknown) => {
     const activeConfig = getConfig();
     const identity = getActiveIdentity(activeConfig);
@@ -9487,6 +9490,15 @@ export function maybeInstallE2eTauriMocks() {
       case "recover_command_brief_publications":
         return 0;
       case "pick_battle_rhythm_document":
+        if (activeConfig?.mock?.battleRhythmDocuments?.length) {
+          const documents = activeConfig.mock.battleRhythmDocuments;
+          const document =
+            documents[
+              Math.min(battleRhythmDocumentIndex, documents.length - 1)
+            ];
+          battleRhythmDocumentIndex += 1;
+          return document;
+        }
         return {
           filename: "Shortcast.docx",
           extension: "docx",
