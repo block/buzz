@@ -3723,7 +3723,23 @@ struct PoolStartup {
     has_generated_codex_config: bool,
     model: Option<String>,
     observer: Option<observer::ObserverHandle>,
+    /// Max slots initializing at once. A parameter rather than a constant so a
+    /// future scale-from-1 pool can reuse this as its grow-batch size without
+    /// changing the signature. Clamped to >= 1; `agents` means "all at once".
+    init_concurrency: usize,
 }
+
+/// Slots initialized at once by default.
+///
+/// Deliberately below a typical pool size. Measured on locally installed
+/// adapters at 10 slots, a bound of 4 keeps most of the win (~330ms vs ~160ms
+/// unbounded, against ~1070ms serial), while capping how many adapters perform
+/// their startup handshake simultaneously. That cap matters for gateway-backed
+/// adapters, whose shared-gateway behaviour under a 10-way burst is the one
+/// thing the measurements above do NOT cover — neither probed adapter is
+/// gateway-backed. Promote this toward pool size once that is measured; the
+/// field exists so doing so needs no signature change.
+const DEFAULT_INIT_CONCURRENCY: usize = 4;
 
 impl PoolStartup {
     fn from_config(config: &Config, observer: Option<observer::ObserverHandle>) -> Self {
@@ -3735,102 +3751,197 @@ impl PoolStartup {
             has_generated_codex_config: config.has_generated_codex_config,
             model: config.model.clone(),
             observer,
+            init_concurrency: DEFAULT_INIT_CONCURRENCY,
         }
     }
 }
 
+/// Acquire one init permit, or give up if shutdown is signalled while queued.
+///
+/// This exists because the wait for a permit is an unbounded await: with
+/// `init_concurrency < agents`, cancelling the in-flight batch releases its
+/// permits, and a queued task that only awaited `acquire()` would take one and
+/// spawn a fresh adapter child during teardown before reaching any shutdown
+/// check. Each such child is a real process — and for gateway-backed adapters, a
+/// real gateway handshake — created after the pool was already cancelled.
+///
+/// `biased` gives shutdown priority when both are ready, so an
+/// already-signalled watch always wins over a freely available permit. That
+/// makes this select the linearization point: if the permit wins, the init
+/// legitimately began before shutdown. No post-acquire re-check is added,
+/// because it could not close the race it appears to address — shutdown can
+/// fire immediately after any such check — and nothing could pin it.
+async fn acquire_init_permit<'a>(
+    limiter: &'a tokio::sync::Semaphore,
+    shutdown: Option<&mut watch::Receiver<()>>,
+) -> Option<tokio::sync::SemaphorePermit<'a>> {
+    match shutdown {
+        Some(shutdown) => tokio::select! {
+            biased;
+            _ = shutdown.changed() => None,
+            // Semaphore is never closed; a closed one means "cannot start".
+            permit = limiter.acquire() => permit.ok(),
+        },
+        None => limiter.acquire().await.ok(),
+    }
+}
+
+/// Initialize all pool slots, up to `startup.init_concurrency` at a time.
+///
+/// Concurrency matters because slow-starting adapters (OpenClaw pays 4-10s per
+/// worker on a gateway handshake) turn a serial loop into `N x spawn` of dead
+/// wall-clock before the pool can serve anything.
+///
+/// Three invariants this function must uphold, each of which a naive concurrent
+/// rewrite silently breaks (all three stay green against the pre-existing
+/// suite, which never builds a pool through this function — see the tests added
+/// alongside this comment):
+///
+/// 1. **Slots are positional.** `agent.index` must equal the agent's index in
+///    `AgentPool::agents` (see `AgentPool::from_slots`), because `return_agent`
+///    writes `agents[agent.index]` and `crash_history[idx]` charges the circuit
+///    breaker by the same number. A `JoinSet` yields in *completion* order, so
+///    results are assigned to a pre-sized `Vec` by index, never pushed.
+/// 2. **Each in-flight init observes shutdown itself** and reaps the child it
+///    owns, rather than being aborted from outside.
+/// 3. **A partial pool is valid.** Only an entirely dead pool is an error.
 async fn initialize_agent_pool(
     startup: &PoolStartup,
-    mut shutdown: Option<watch::Receiver<()>>,
+    shutdown: Option<watch::Receiver<()>>,
 ) -> Result<AgentPool> {
-    // One agent failing to start must not kill the whole pool.
-    // Attempt each spawn under a 60-second timeout; a partial pool is valid.
-    let mut agent_slots: Vec<Option<OwnedAgent>> = Vec::with_capacity(startup.agents as usize);
-    for i in 0..startup.agents as usize {
-        let spawn_result = AcpClient::spawn(
-            &startup.command,
-            &startup.args,
-            &startup.extra_env,
-            startup.has_generated_codex_config,
-        )
-        .await;
-        match spawn_result {
-            Ok(mut acp) => {
-                acp.set_observer(startup.observer.clone(), i);
-                let initialize = tokio::time::timeout(Duration::from_secs(60), acp.initialize());
-                let initialize_result = match shutdown.as_mut() {
-                    Some(shutdown) => tokio::select! {
-                        biased;
-                        _ = shutdown.changed() => {
-                            acp.shutdown().await;
-                            shutdown_agent_slots(&mut agent_slots).await;
-                            return Err(anyhow::anyhow!("pool initialization cancelled by shutdown"));
-                        }
-                        result = initialize => result,
-                    },
-                    None => initialize.await,
-                };
-                match initialize_result {
-                    Ok(Ok(init_result)) => {
-                        tracing::info!(agent = i, "agent initialized: {init_result}");
-                        let protocol_version =
-                            init_result["protocolVersion"].as_u64().unwrap_or(1) as u32;
-                        tracing::info!(
-                            agent = i,
-                            name = init_result
-                                .get("agentInfo")
-                                .or_else(|| init_result.get("serverInfo"))
-                                .and_then(|info| info.get("name"))
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("unknown"),
-                            "agent initialized — non-cancelling steer enabled (try-and-tolerate)"
-                        );
-                        acp.observe(
-                            "agent_initialized",
-                            serde_json::json!({
-                                "agentIndex": i,
-                                "initializeResult": init_result,
-                            }),
-                        );
-                        let agent_name = normalized_agent_name(&init_result);
-                        agent_slots.push(Some(OwnedAgent {
-                            index: i,
+    let total = startup.agents as usize;
+    // Zero would deadlock every acquire; one is the serial-equivalent floor.
+    let permits = startup.init_concurrency.clamp(1, total.max(1));
+    let limiter = Arc::new(tokio::sync::Semaphore::new(permits));
+
+    let mut tasks: tokio::task::JoinSet<(usize, Option<OwnedAgent>)> = tokio::task::JoinSet::new();
+    for index in 0..total {
+        let command = startup.command.clone();
+        let args = startup.args.clone();
+        let extra_env = startup.extra_env.clone();
+        let has_generated_codex_config = startup.has_generated_codex_config;
+        let observer = startup.observer.clone();
+        let desired_model = startup.model.clone();
+        let limiter = Arc::clone(&limiter);
+        let mut shutdown = shutdown.clone();
+
+        tasks.spawn(async move {
+            // Dropping the permit on task exit is what bounds concurrency.
+            // Queued tasks must abandon the queue on shutdown rather than
+            // inheriting a released permit and spawning during teardown.
+            let _permit = match acquire_init_permit(&limiter, shutdown.as_mut()).await {
+                Some(permit) => permit,
+                None => return (index, None),
+            };
+
+            // Spawn is deliberately awaited before the timeout wraps init so we
+            // always own the child and can reap it explicitly.
+            let spawned =
+                AcpClient::spawn(&command, &args, &extra_env, has_generated_codex_config).await;
+            let mut acp = match spawned {
+                Ok(acp) => acp,
+                Err(error) => {
+                    tracing::error!(agent = index, "agent failed to spawn: {error}");
+                    return (index, None);
+                }
+            };
+            acp.set_observer(observer, index);
+
+            let initialize = tokio::time::timeout(Duration::from_secs(60), acp.initialize());
+            let initialized = match shutdown.as_mut() {
+                // biased: shutdown wins a tie so cancellation is prompt.
+                Some(shutdown) => tokio::select! {
+                    biased;
+                    _ = shutdown.changed() => {
+                        acp.shutdown().await;
+                        return (index, None);
+                    }
+                    result = initialize => result,
+                },
+                None => initialize.await,
+            };
+
+            match initialized {
+                Ok(Ok(init_result)) => {
+                    tracing::info!(agent = index, "agent initialized: {init_result}");
+                    let protocol_version =
+                        init_result["protocolVersion"].as_u64().unwrap_or(1) as u32;
+                    tracing::info!(
+                        agent = index,
+                        name = init_result
+                            .get("agentInfo")
+                            .or_else(|| init_result.get("serverInfo"))
+                            .and_then(|info| info.get("name"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown"),
+                        "agent initialized — non-cancelling steer enabled (try-and-tolerate)"
+                    );
+                    acp.observe(
+                        "agent_initialized",
+                        serde_json::json!({
+                            "agentIndex": index,
+                            "initializeResult": init_result,
+                        }),
+                    );
+                    let agent_name = normalized_agent_name(&init_result);
+                    (
+                        index,
+                        Some(OwnedAgent {
+                            index,
                             acp,
                             state: SessionState::default(),
                             model_capabilities: None,
-                            desired_model: startup.model.clone(),
+                            desired_model,
                             model_overridden: false,
                             agent_name,
                             goose_system_prompt_supported: None,
                             protocol_version,
-                        }));
-                    }
-                    Ok(Err(e)) => {
-                        tracing::error!(agent = i, "agent initialize failed: {e}");
-                        acp.shutdown().await;
-                        agent_slots.push(None);
-                    }
-                    Err(_) => {
-                        tracing::error!(agent = i, "agent timed out during init (60s)");
-                        acp.shutdown().await;
-                        agent_slots.push(None);
-                    }
+                        }),
+                    )
+                }
+                Ok(Err(error)) => {
+                    tracing::error!(agent = index, "agent initialize failed: {error}");
+                    acp.shutdown().await;
+                    (index, None)
+                }
+                Err(_) => {
+                    tracing::error!(agent = index, "agent timed out during init (60s)");
+                    acp.shutdown().await;
+                    (index, None)
                 }
             }
-            Err(e) => {
-                tracing::error!(agent = i, "agent failed to spawn: {e}");
-                agent_slots.push(None);
-            }
+        });
+    }
+
+    // Assign by index — never push. Upholds invariant 1 above.
+    let mut agent_slots: Vec<Option<OwnedAgent>> = (0..total).map(|_| None).collect();
+    while let Some(joined) = tasks.join_next().await {
+        match joined {
+            Ok((index, agent)) => agent_slots[index] = agent,
+            // A panicking init task loses its slot; the pool stays consistent
+            // and maintenance refill can reclaim it later.
+            Err(error) => tracing::error!("agent init task panicked: {error}"),
         }
     }
+
     let live_count = agent_slots.iter().filter(|slot| slot.is_some()).count();
+
+    // Shutdown observed mid-init: reap anything that did come up and fail the
+    // call, matching the serial loop's contract. Without this, a pool built
+    // during shutdown would be returned as `Ok` and leak until the caller's
+    // drain path happened to reap it.
+    if shutdown.is_some_and(|shutdown| shutdown.has_changed().unwrap_or(false)) {
+        shutdown_agent_slots(&mut agent_slots).await;
+        return Err(anyhow::anyhow!("pool initialization cancelled by shutdown"));
+    }
+
     if live_count == 0 {
         return Err(anyhow::anyhow!(
             "all {} agents failed to start — cannot continue",
             startup.agents
         ));
     }
-    if live_count < startup.agents as usize {
+    if live_count < total {
         tracing::warn!(
             "started {}/{} agents — continuing with reduced pool",
             live_count,
@@ -5235,6 +5346,319 @@ mod error_outcome_emission_tests {
                 "serverInfo": { "name": "buzz-agent" }
             })),
             "buzz-agent"
+        );
+    }
+
+    // ── initialize_agent_pool: concurrent init ────────────────────────────
+    //
+    // These exist because a concurrent rewrite of `initialize_agent_pool` that
+    // is wrong in three separate ways (completion-order slots, no per-task
+    // shutdown observation, dropped partial-pool handling) passes the entire
+    // rest of this suite. Nothing else here builds a pool through that
+    // function, so these are its only coverage.
+
+    /// A mock ACP agent as a shell script: sleep, then answer `initialize`.
+    /// `bash` keeps this dependency-free, matching `acp.rs`'s `spawn_script`.
+    /// `exit_before_reply` models an adapter that dies during the handshake.
+    fn mock_agent_script(sleep_secs: f32, exit_before_reply: bool) -> String {
+        let reply = if exit_before_reply {
+            "exit 1".to_string()
+        } else {
+            // id must echo the request's id; initialize is the first request, so 0.
+            r#"printf '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":2,"agentInfo":{"name":"mock"},"agentCapabilities":{}}}\n'"#
+                .to_string()
+        };
+        // Read the initialize request, pause, reply, then idle so the child
+        // stays alive as a pool member until the test reaps it.
+        format!("read -r _line; sleep {sleep_secs}; {reply}; sleep 30")
+    }
+
+    fn mock_startup(agents: u32, script: String, init_concurrency: usize) -> PoolStartup {
+        PoolStartup {
+            agents,
+            command: "bash".into(),
+            args: vec!["-c".into(), script],
+            extra_env: vec![],
+            has_generated_codex_config: false,
+            model: None,
+            observer: None,
+            init_concurrency,
+        }
+    }
+
+    /// INVARIANT 1. `AgentPool::from_slots` requires `agent.index` to equal the
+    /// agent's position in `agents`, because `return_agent` writes
+    /// `agents[agent.index]` and `crash_history[idx]` charges the breaker by the
+    /// same number. A `JoinSet` completes out of order, so this pins that
+    /// results are placed by index rather than pushed.
+    ///
+    /// Staggered sleeps guarantee completion order is the REVERSE of index
+    /// order: without index-assignment this fails deterministically, not flakily.
+    #[tokio::test]
+    async fn concurrent_pool_init_places_agents_in_their_own_slots() {
+        let agents = 4;
+        // Slot i sleeps (agents - i) * 0.3s → slot 3 finishes first, slot 0 last.
+        let script = format!(
+            "read -r _line; \
+             idx=$(cat {}); echo $((idx+1)) > {}; \
+             sleep $(echo \"scale=2; ({} - $idx) * 0.3\" | bc); \
+             printf '{{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{{\"protocolVersion\":2,\"agentInfo\":{{\"name\":\"mock\"}},\"agentCapabilities\":{{}}}}}}\\n'; \
+             sleep 30",
+            "$COUNTER", "$COUNTER", agents
+        );
+        // The counter file hands each process its arrival ordinal.
+        let counter = std::env::temp_dir().join(format!("dawn_pool_idx_{}", std::process::id()));
+        std::fs::write(&counter, "0").expect("seed counter");
+        let mut startup = mock_startup(agents, script, agents as usize);
+        startup
+            .extra_env
+            .push(("COUNTER".into(), counter.display().to_string()));
+
+        let mut pool = initialize_agent_pool(&startup, None)
+            .await
+            .expect("all four mocks initialize");
+
+        let slots = pool.agents_mut();
+        assert_eq!(
+            slots.len(),
+            agents as usize,
+            "one slot per configured agent"
+        );
+        for (position, slot) in slots.iter().enumerate() {
+            let agent = slot
+                .as_ref()
+                .unwrap_or_else(|| panic!("slot {position} should hold a live agent"));
+            assert_eq!(
+                agent.index, position,
+                "slot invariant violated: position {position} holds agent labelled {} — \
+                 return_agent would write it back to the wrong slot",
+                agent.index
+            );
+        }
+        shutdown_agent_pool(&mut pool).await;
+        let _ = std::fs::remove_file(&counter);
+    }
+
+    /// INVARIANT 3. A partially-dead pool is valid: `Ok` with the survivors in
+    /// their own slots, not `Err`, and not a densely-packed `Vec` that would
+    /// break the index invariant. Every 2nd mock exits during the handshake.
+    #[tokio::test]
+    async fn concurrent_pool_init_survives_partial_failure_positionally() {
+        let agents = 4;
+        // Even arrivals die mid-handshake, odd arrivals initialize.
+        let script = format!(
+            "read -r _line; \
+             idx=$(cat {}); echo $((idx+1)) > {}; \
+             if [ $((idx % 2)) -eq 0 ]; then exit 1; fi; \
+             printf '{{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{{\"protocolVersion\":2,\"agentInfo\":{{\"name\":\"mock\"}},\"agentCapabilities\":{{}}}}}}\\n'; \
+             sleep 30",
+            "$COUNTER", "$COUNTER"
+        );
+        let counter = std::env::temp_dir().join(format!("dawn_pool_part_{}", std::process::id()));
+        std::fs::write(&counter, "0").expect("seed counter");
+        // Serialize arrivals so the even/odd split is deterministic.
+        let mut startup = mock_startup(agents, script, 1);
+        startup
+            .extra_env
+            .push(("COUNTER".into(), counter.display().to_string()));
+
+        let mut pool = initialize_agent_pool(&startup, None)
+            .await
+            .expect("a partial pool must be Ok, not Err");
+
+        let slots = pool.agents_mut();
+        assert_eq!(
+            slots.len(),
+            agents as usize,
+            "dead slots stay present as None — packing them would shift indices"
+        );
+        let live = slots.iter().filter(|slot| slot.is_some()).count();
+        assert_eq!(live, 2, "half the mocks initialize");
+        for (position, slot) in slots.iter().enumerate() {
+            if let Some(agent) = slot {
+                assert_eq!(
+                    agent.index, position,
+                    "survivor at position {position} labelled {}",
+                    agent.index
+                );
+            }
+        }
+        shutdown_agent_pool(&mut pool).await;
+        let _ = std::fs::remove_file(&counter);
+    }
+
+    /// An entirely dead pool is the one case that IS an error — otherwise the
+    /// harness would come up believing it can serve turns.
+    #[tokio::test]
+    async fn concurrent_pool_init_errors_when_every_agent_fails() {
+        let startup = mock_startup(3, mock_agent_script(0.0, true), 3);
+        let result = initialize_agent_pool(&startup, None).await;
+        let error = result.err().expect("a fully dead pool must be Err");
+        assert!(
+            error.to_string().contains("all 3 agents failed to start"),
+            "error should name the failure: {error}"
+        );
+    }
+
+    /// The reason this change exists: slow adapters must initialize in parallel.
+    /// Four agents each sleeping 1s must finish well under the 4s a serial loop
+    /// would take. The 2.5s bound is loose enough for a loaded CI box while
+    /// still failing a serial regression.
+    #[tokio::test]
+    async fn concurrent_pool_init_overlaps_slow_agents() {
+        let startup = mock_startup(4, mock_agent_script(1.0, false), 4);
+        let started = std::time::Instant::now();
+        let mut pool = initialize_agent_pool(&startup, None)
+            .await
+            .expect("four slow mocks initialize");
+        let elapsed = started.elapsed();
+        assert_eq!(pool.live_count(), 4, "all four come up");
+        assert!(
+            elapsed < Duration::from_millis(2500),
+            "4x1s inits took {elapsed:?} — expected overlap, got serial-like timing"
+        );
+        shutdown_agent_pool(&mut pool).await;
+    }
+
+    /// `init_concurrency` must actually bound in-flight inits, since a future
+    /// scale-from-1 pool reuses it as its grow-batch size. With a bound of 1,
+    /// four 0.4s agents cannot finish in under 1.6s.
+    #[tokio::test]
+    async fn init_concurrency_bounds_in_flight_spawns() {
+        let startup = mock_startup(4, mock_agent_script(0.4, false), 1);
+        let started = std::time::Instant::now();
+        let mut pool = initialize_agent_pool(&startup, None)
+            .await
+            .expect("four mocks initialize serially");
+        let elapsed = started.elapsed();
+        assert_eq!(pool.live_count(), 4, "all four come up");
+        assert!(
+            elapsed >= Duration::from_millis(1600),
+            "bound of 1 should serialize 4x0.4s inits, took {elapsed:?}"
+        );
+        shutdown_agent_pool(&mut pool).await;
+    }
+
+    /// Shutdown must win over a queued permit wait. With every permit held, the
+    /// only ready branch is the watch, so this is deterministic — no scheduler
+    /// coin-flip. Regression for: a queued task inheriting a permit released by
+    /// the cancelled batch and spawning an adapter child during teardown.
+    #[tokio::test]
+    async fn acquire_init_permit_abandons_queue_on_shutdown() {
+        let limiter = tokio::sync::Semaphore::new(1);
+        let held = limiter.acquire().await.expect("take the only permit");
+        let (shutdown_tx, mut shutdown_rx) = watch::channel(());
+
+        let mut queued = Box::pin(acquire_init_permit(&limiter, Some(&mut shutdown_rx)));
+        // Nothing to grant while the permit is held, so the wait must be pending.
+        assert!(
+            (&mut queued).now_or_never().is_none(),
+            "should still be queued while the only permit is held"
+        );
+
+        shutdown_tx.send(()).expect("signal shutdown");
+        // Bounded: without shutdown-aware acquisition this waits forever on a
+        // permit that is never released, and an unbounded await here would hang
+        // CI for its whole timeout instead of failing.
+        let outcome = tokio::time::timeout(Duration::from_secs(2), queued)
+            .await
+            .expect("a queued waiter must abandon the queue on shutdown, not block on a permit");
+        assert!(
+            outcome.is_none(),
+            "shutdown while queued must yield no permit"
+        );
+        drop(held);
+    }
+
+    /// Shutdown already signalled: the permit is freely available, so BOTH
+    /// branches are ready and only `biased` ordering decides. Looped so that
+    /// removing `biased` cannot pass on a lucky draw.
+    #[tokio::test]
+    async fn acquire_init_permit_prefers_shutdown_over_available_permit() {
+        for attempt in 0..64 {
+            let limiter = tokio::sync::Semaphore::new(4);
+            let (shutdown_tx, mut shutdown_rx) = watch::channel(());
+            shutdown_tx.send(()).expect("signal shutdown");
+
+            assert!(
+                acquire_init_permit(&limiter, Some(&mut shutdown_rx))
+                    .await
+                    .is_none(),
+                "attempt {attempt}: an already-signalled shutdown must win over an \
+                 available permit, or a cancelled pool still spawns adapters"
+            );
+            assert_eq!(
+                limiter.available_permits(),
+                4,
+                "attempt {attempt}: no permit should have been consumed"
+            );
+        }
+    }
+
+    /// Without a shutdown channel the helper is a plain bounded acquire, and the
+    /// permit must actually be taken (and returned on drop) so it still bounds.
+    #[tokio::test]
+    async fn acquire_init_permit_without_shutdown_takes_a_permit() {
+        let limiter = tokio::sync::Semaphore::new(1);
+        let permit = acquire_init_permit(&limiter, None)
+            .await
+            .expect("a free permit with no shutdown channel");
+        assert_eq!(limiter.available_permits(), 0, "permit must be held");
+        drop(permit);
+        assert_eq!(limiter.available_permits(), 1, "permit returns on drop");
+    }
+
+    /// The default bound is a deliberate, evidence-conservative choice: it caps
+    /// how many adapters handshake at once because gateway-backed adapters were
+    /// never probed under a full-pool burst. Pin it so it cannot drift back to
+    /// "all at once" without someone changing this test and reading why.
+    #[test]
+    fn from_config_defaults_to_a_bounded_init_concurrency() {
+        let mut config = test_config();
+        config.agents = 10;
+        let startup = PoolStartup::from_config(&config, None);
+        assert_eq!(startup.init_concurrency, DEFAULT_INIT_CONCURRENCY);
+        assert!(
+            startup.init_concurrency < config.agents as usize,
+            "default must bound below pool size until the gateway-backed probe exists"
+        );
+    }
+
+    /// INVARIANT 2. Shutdown mid-init must fail the call rather than returning a
+    /// pool built during teardown, and must leave nothing for the caller to reap.
+    #[tokio::test]
+    async fn concurrent_pool_init_cancels_on_shutdown() {
+        let startup = mock_startup(4, mock_agent_script(5.0, false), 4);
+        let (shutdown_tx, shutdown_rx) = watch::channel(());
+        let init = tokio::spawn(async move {
+            let startup = startup;
+            initialize_agent_pool(&startup, Some(shutdown_rx)).await
+        });
+        // Let all four spawn and begin their 5s handshake, then cancel.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let cancelled_at = std::time::Instant::now();
+        shutdown_tx.send(()).expect("signal shutdown");
+
+        let result = tokio::time::timeout(Duration::from_secs(10), init)
+            .await
+            .expect("init must not hang after shutdown")
+            .expect("init task should not panic");
+        let elapsed = cancelled_at.elapsed();
+        let error = result
+            .err()
+            .expect("shutdown mid-init must be Err, not a pool built during teardown");
+        assert!(
+            error.to_string().contains("cancelled by shutdown"),
+            "error should name cancellation: {error}"
+        );
+        // Each in-flight init must abandon its own 5s handshake when the watch
+        // fires. Returning the right error only after every handshake completed
+        // would satisfy the assertion above while leaving shutdown blocked for
+        // the full init duration — so bound the reaction time explicitly.
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "shutdown took {elapsed:?} to be observed — in-flight inits ran to \
+             completion instead of cancelling"
         );
     }
 
