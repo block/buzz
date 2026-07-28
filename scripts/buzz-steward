@@ -158,5 +158,19 @@ TMP="$(mktemp)"; printf '%s' "$EVENT" > "$TMP"
 rm -f "$TMP"
 echo "$DIGEST" > "$STATE_DIR/last-report.sha"
 echo "steward: report posted (steward-signed, $(wc -c < "$FINDINGS" | tr -d ' ') bytes of findings)"
+
+# Host-surface voice: raise a native notification when (and only when) a new
+# report posts. Env-gated so the same script runs headless elsewhere. The
+# notification body is built from counts only — no report text crosses into
+# the osascript string.
+if [ "${BUZZ_STEWARD_NOTIFY:-}" = "1" ] && command -v osascript >/dev/null; then
+  offers="$(grep -c '^- OFFER OPEN' "$FINDINGS" || true)"
+  drift="$(grep -c '^- DRIFT' "$FINDINGS" || true)"
+  unscoped="$(grep -c '^- UNSCOPED' "$FINDINGS" || true)"
+  down="$(grep -c 'UNREACHABLE' "$FINDINGS" || true)"
+  summary="offers open: $offers, drift: $drift, unscoped: $unscoped"
+  [ "$down" -gt 0 ] && summary="⚠ $down node(s) UNREACHABLE — $summary"
+  osascript -e "display notification \"$summary\" with title \"Buzz Steward\" subtitle \"new report in the journal\"" || true
+fi
 cat "$FINDINGS"
 rm -f "$FINDINGS"
