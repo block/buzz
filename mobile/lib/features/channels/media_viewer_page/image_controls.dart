@@ -178,6 +178,7 @@ class _MediaViewerFilmstripImage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final borderWidth = 1 + (1.5 * proximity);
     return Semantics(
       button: true,
       selected: selected,
@@ -189,27 +190,32 @@ class _MediaViewerFilmstripImage extends StatelessWidget {
         onTap: () => onSelect(index),
         child: Container(
           height: 52,
-          clipBehavior: Clip.antiAlias,
+          padding: EdgeInsets.all(borderWidth),
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(Radii.sm),
             border: Border.all(
               color: Colors.white.withValues(alpha: 0.28 + (0.72 * proximity)),
-              width: 1 + (1.5 * proximity),
+              width: borderWidth,
             ),
           ),
-          child: Opacity(
-            opacity: 0.62 + (0.38 * proximity),
-            child: MediaImage(
-              url: image.url,
-              decodeWidth: 72,
-              fit: BoxFit.cover,
-              semanticLabel: image.semanticLabel,
-              errorBuilder: (_, _, _) => const ColoredBox(
-                color: Color.fromRGBO(255, 255, 255, 0.12),
-                child: Icon(
-                  LucideIcons.imageOff,
-                  color: Colors.white70,
-                  size: 18,
+          child: ClipRRect(
+            key: ValueKey('message-media-image-viewer-thumbnail-clip:$index'),
+            borderRadius: BorderRadius.circular(Radii.sm - borderWidth),
+            clipBehavior: Clip.antiAlias,
+            child: Opacity(
+              opacity: 0.62 + (0.38 * proximity),
+              child: MediaImage(
+                url: image.url,
+                decodeWidth: 72,
+                fit: BoxFit.cover,
+                semanticLabel: image.semanticLabel,
+                errorBuilder: (_, _, _) => const ColoredBox(
+                  color: Color.fromRGBO(255, 255, 255, 0.12),
+                  child: Icon(
+                    LucideIcons.imageOff,
+                    color: Colors.white70,
+                    size: 18,
+                  ),
                 ),
               ),
             ),

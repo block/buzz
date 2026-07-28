@@ -497,6 +497,17 @@ Photos
             find.byKey(const ValueKey('message-media-image-viewer-image:1')),
           );
           expect(displayedImage.decodeWidth, isNotNull);
+          final selectedThumbnailClip = tester.widget<ClipRRect>(
+            find.byKey(
+              const ValueKey('message-media-image-viewer-thumbnail-clip:1'),
+            ),
+          );
+          final selectedThumbnailRadius =
+              selectedThumbnailClip.borderRadius as BorderRadius;
+          expect(
+            selectedThumbnailRadius.topLeft.x,
+            closeTo(Radii.sm - 2.5, 0.01),
+          );
 
           await tester.fling(
             find.byKey(const ValueKey('message-media-image-viewer-pages')),
