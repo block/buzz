@@ -423,6 +423,31 @@ impl AcpClient {
             // Callers MUST still call shutdown().await for guaranteed cleanup.
             .kill_on_drop(true);
 
+        // Scrub harness secrets from the child environment before any persona
+        // env vars are injected. Without this, the agent subprocess (and every
+        // MCP server / tool process it in turn spawns) inherits the harness's
+        // BUZZ_PRIVATE_KEY / BUZZ_API_TOKEN, enabling a compromised agent to
+        // sign Nostr events as the agent identity independently of the harness.
+        // The intentional key handoff to MCP servers happens via the
+        // session/new JSON-RPC params (build_mcp_servers), NOT via env vars.
+        //
+        // Only remove keys that actually exist in the parent environment. This
+        // avoids triggering a Windows-specific Command behavior where calling
+        // env_remove on a non-existent key still flips the Command into
+        // "explicit-env" mode, breaking child processes that depend on the
+        // full inherited environment.
+        for secret_key in &[
+            "BUZZ_PRIVATE_KEY",
+            "BUZZ_API_TOKEN",
+            "BUZZ_ACP_PRIVATE_KEY",
+            "BUZZ_ACP_API_TOKEN",
+            "NOSTR_PRIVATE_KEY",
+        ] {
+            if std::env::var_os(secret_key).is_some() {
+                cmd.env_remove(secret_key);
+            }
+        }
+
         // Per-persona env vars (e.g., GOOSE_PROVIDER, BUZZ_AGENT_PROVIDER).
         // For most keys, operator precedence wins: skip injection if already set
         // in the parent environment.
