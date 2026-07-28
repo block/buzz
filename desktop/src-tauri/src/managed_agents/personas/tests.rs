@@ -6,7 +6,7 @@ use super::{
 use crate::managed_agents::discovery::{default_agent_command, effective_agent_command};
 use crate::managed_agents::AgentDefinition;
 
-const COMMAND_TEAM_PERSONAS: [(&str, &str, &str); 6] = [
+const COMMAND_TEAM_PERSONAS: [(&str, &str, &str); 8] = [
     (
         "builtin:command-chief-of-staff",
         "Chief of Staff",
@@ -16,6 +16,16 @@ const COMMAND_TEAM_PERSONAS: [(&str, &str, &str); 6] = [
         "builtin:command-operations",
         "Operations Adviser",
         "readiness, dependencies, risks",
+    ),
+    (
+        "builtin:command-intelligence",
+        "Maritime N2 Adviser",
+        "reported information",
+    ),
+    (
+        "builtin:command-logistics",
+        "Logistics Adviser",
+        "replenishment",
     ),
     (
         "builtin:command-navigation",
@@ -84,6 +94,8 @@ fn merge_personas_adds_missing_built_ins() {
             "Bumble",
             "Chief of Staff",
             "Operations Adviser",
+            "Maritime N2 Adviser",
+            "Logistics Adviser",
             "Navigation Adviser",
             "Daily Routine Adviser",
             "Reporting Adviser",
@@ -103,6 +115,8 @@ fn merge_personas_adds_missing_built_ins() {
             "builtin:bumble",
             "builtin:command-chief-of-staff",
             "builtin:command-operations",
+            "builtin:command-intelligence",
+            "builtin:command-logistics",
             "builtin:command-navigation",
             "builtin:command-daily-routine",
             "builtin:command-reporting",
@@ -154,6 +168,64 @@ fn command_team_builtins_are_active_symbolic_and_route_independent() {
         assert!(record
             .system_prompt
             .contains("<persona-id>\\n<channel-id>\\n<triggering-event-id>"));
+        assert!(record.system_prompt.contains(
+            "Seek applicable doctrine with search_command_doctrine before substantive advice."
+        ));
+        assert!(record.system_prompt.contains(
+            "If no applicable doctrine is retrieved, continue with a reasoned assessment."
+        ));
+    }
+}
+
+#[test]
+fn n2_and_planning_prompts_pin_osint_provenance_and_virtual_jpg_behaviour() {
+    let records = built_in_persona_records("2026-07-28T00:00:00Z");
+    let n2 = records
+        .iter()
+        .find(|record| record.id == "builtin:command-intelligence")
+        .expect("N2 adviser should exist");
+    for required in [
+        "world_monitor_",
+        "reported information",
+        "observed indicators",
+        "assumptions",
+        "assessment",
+        "ISO 3166-1 alpha-2",
+    ] {
+        assert!(n2.system_prompt.contains(required), "missing {required:?}");
+    }
+
+    for persona_id in [
+        "builtin:command-chief-of-staff",
+        "builtin:command-operations",
+    ] {
+        let prompt = &records
+            .iter()
+            .find(|record| record.id == persona_id)
+            .expect("planning persona should exist")
+            .system_prompt;
+        for required in [
+            "mission-specific Buzz channel",
+            "virtual Joint Planning Group",
+            "@mention",
+        ] {
+            assert!(
+                prompt.contains(required),
+                "{persona_id} missing {required:?}"
+            );
+        }
+    }
+
+    let (twice, changed) = merge_personas(records.clone(), "2026-07-28T00:00:01Z");
+    assert!(!changed);
+    for persona_id in ["builtin:command-intelligence", "builtin:command-logistics"] {
+        assert_eq!(
+            twice
+                .iter()
+                .filter(|record| record.id == persona_id)
+                .count(),
+            1
+        );
     }
 }
 

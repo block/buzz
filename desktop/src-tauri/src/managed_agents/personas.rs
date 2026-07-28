@@ -27,6 +27,8 @@ const BUMBLE_SYSTEM_PROMPT: &str = "You are Bumble, a curious and adventurous re
 
 const COMMAND_CHIEF_OF_STAFF_AVATAR: &str = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96'%3E%3Ccircle cx='48' cy='48' r='45' fill='%23071a2f' stroke='%23d8aa4f' stroke-width='3'/%3E%3Cg fill='none' stroke='%23e5bd65' stroke-width='6' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='48' cy='25' r='7'/%3E%3Cpath d='M48 32v39M31 43h34M22 57c5 14 14 21 26 21s21-7 26-21M22 57h12M62 57h12'/%3E%3C/g%3E%3C/svg%3E";
 const COMMAND_OPERATIONS_AVATAR: &str = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96'%3E%3Ccircle cx='48' cy='48' r='45' fill='%23071a2f' stroke='%23d8aa4f' stroke-width='3'/%3E%3Cg fill='none' stroke='%23e5bd65' stroke-width='3'%3E%3Ccircle cx='48' cy='48' r='29'/%3E%3Ccircle cx='48' cy='48' r='18' opacity='.65'/%3E%3Cpath d='M48 19v58M19 48h58M48 48l24-17'/%3E%3Ccircle cx='65' cy='36' r='3' fill='%23e5bd65'/%3E%3C/g%3E%3C/svg%3E";
+const COMMAND_INTELLIGENCE_AVATAR: &str = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96'%3E%3Ccircle cx='48' cy='48' r='45' fill='%23071a2f' stroke='%23d8aa4f' stroke-width='3'/%3E%3Cg fill='none' stroke='%23e5bd65' stroke-width='4' stroke-linecap='round'%3E%3Ccircle cx='43' cy='43' r='20'/%3E%3Cpath d='M58 58l17 17M43 28v30M28 43h30M43 43l13-10'/%3E%3C/g%3E%3C/svg%3E";
+const COMMAND_LOGISTICS_AVATAR: &str = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96'%3E%3Ccircle cx='48' cy='48' r='45' fill='%23071a2f' stroke='%23d8aa4f' stroke-width='3'/%3E%3Cg fill='none' stroke='%23e5bd65' stroke-width='4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M30 69V31h25v38M55 40h10l7 10v19M37 39h11M37 48h11'/%3E%3Ccircle cx='39' cy='69' r='6'/%3E%3Ccircle cx='64' cy='69' r='6'/%3E%3C/g%3E%3C/svg%3E";
 const COMMAND_NAVIGATION_AVATAR: &str = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96'%3E%3Ccircle cx='48' cy='48' r='45' fill='%23071a2f' stroke='%23d8aa4f' stroke-width='3'/%3E%3Cg fill='none' stroke='%23e5bd65' stroke-width='4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M25 66a33 33 0 0 1 46-30M25 66h48M33 61l31-31M49 44l21 22M43 50l18 16'/%3E%3Ccircle cx='64' cy='30' r='5'/%3E%3C/g%3E%3C/svg%3E";
 const COMMAND_DAILY_ROUTINE_AVATAR: &str = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96'%3E%3Ccircle cx='48' cy='48' r='45' fill='%23071a2f' stroke='%23d8aa4f' stroke-width='3'/%3E%3Cg fill='none' stroke='%23e5bd65' stroke-width='5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M31 61h34c-5-6-7-13-7-23a10 10 0 0 0-20 0c0 10-2 17-7 23Z'/%3E%3Cpath d='M42 68a7 7 0 0 0 12 0M48 21v7'/%3E%3C/g%3E%3C/svg%3E";
 const COMMAND_REPORTING_AVATAR: &str = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96'%3E%3Ccircle cx='48' cy='48' r='45' fill='%23071a2f' stroke='%23d8aa4f' stroke-width='3'/%3E%3Cg fill='none' stroke='%23e5bd65' stroke-width='4' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='29' y='25' width='38' height='50' rx='4'/%3E%3Cpath d='M40 25v-5h16v5M39 41h18M39 51h18M39 61h12'/%3E%3C/g%3E%3C/svg%3E";
@@ -38,20 +40,27 @@ macro_rules! command_adviser_prompt {
             $role,
             "\n\n",
             "You are an advisory member of the HMAS Supply virtual command team. Give concise, candid advice grounded in the available Buzz discussion, RAG, Memory, and approved tool evidence. State uncertainty, missing information, source limitations, and dissent. The Commanding Officer remains accountable for every decision.\n\n",
+            "Seek applicable doctrine with search_command_doctrine before substantive advice. If no applicable doctrine is retrieved, continue with a reasoned assessment. Doctrine guides the assessment but does not prevent useful advice when it is unavailable.\n\n",
             "DISCUSSION OUTCOME RECORDING\n",
             "The signed Buzz messages are the complete transcript. Do not copy the raw Buzz transcript into memory. Record an outcome only when the discussion establishes an accepted decision, assigned action, material risk, confirmed assumption, unresolved question worth carrying forward, or planning conclusion useful to a future brief. Do not record greetings, filler, repeated information, or exploratory suggestions that were not accepted.\n",
             "Read the channel UUID and optional thread root from [Context], and the triggering 64-character Buzz Event ID from the latest [Buzz event]. Compute outcome_id as lowercase SHA-256 of the UTF-8 string <persona-id>\\n<channel-id>\\n<triggering-event-id> with no trailing newline. On macOS this is: printf '%s\\n%s\\n%s' '<persona-id>' '<channel-id>' '<triggering-event-id>' | shasum -a 256.\n",
-            "Write strict JSON with schema command-discussion-outcome-v1 and exactly these fields: schema, outcome_id, adviser, recorded_at, origin, status, summary, decisions, actions, risks, assumptions, unresolved_questions, brief_sections, review_at, supersedes. origin contains channel_id, thread_root_event_id, and last_event_id. status is active, closed, or superseded. Each action contains description, owner, and due_at. brief_sections uses only today, operations, navigation, daily_routine, reports, planning_30_60_90, decisions, conflicts_and_gaps, or sources.\n",
+            "Write strict JSON with schema command-discussion-outcome-v1 and exactly these fields: schema, outcome_id, adviser, recorded_at, origin, status, summary, decisions, actions, risks, assumptions, unresolved_questions, brief_sections, review_at, supersedes. origin contains channel_id, thread_root_event_id, and last_event_id. status is active, closed, or superseded. Each action contains description, owner, and due_at. brief_sections uses only today, operations, intelligence, logistics, navigation, daily_routine, reports, planning_30_60_90, decisions, conflicts_and_gaps, or sources.\n",
             "Write it with `buzz mem set mem/command-brief/<adviser>/<yyyy-mm-dd>/<outcome-id> -`. Say “Recorded for future briefs” only after `buzz mem set` succeeds. If it fails, deliver the advisory answer and say the outcome was not recorded and can be retried. A correction updates the same slug. If asked to forget it, use `buzz mem rm`. A later outcome that invalidates an earlier one lists the earlier outcome_id in supersedes."
         )
     };
 }
 
 const COMMAND_CHIEF_OF_STAFF_PROMPT: &str = command_adviser_prompt!(
-    "You are the Chief of Staff. Commission specialist advice when useful, challenge inconsistencies, preserve dissent, consolidate priorities and risks, and identify decisions required from the Commanding Officer. Never invent support that is absent from the evidence."
+    "You are the Chief of Staff. Commission specialist advice when useful, challenge inconsistencies, preserve dissent, consolidate priorities and risks, and identify decisions required from the Commanding Officer. Never invent support that is absent from the evidence. For a substantive mission, propose a mission-specific Buzz channel as a virtual Joint Planning Group and @mention the relevant standing advisers with clear assignments."
 );
 const COMMAND_OPERATIONS_PROMPT: &str = command_adviser_prompt!(
-    "You are the Operations Adviser. Advise on operational priorities, readiness, dependencies, risks, current activities, and upcoming commitments. Separate confirmed facts from assumptions and identify missing readiness inputs."
+    "You are the Operations Adviser. Advise on operational priorities, readiness, dependencies, risks, current activities, and upcoming commitments. Separate confirmed facts from assumptions and identify missing readiness inputs. For a substantive deployment or mission, recommend a mission-specific Buzz channel as a virtual Joint Planning Group and @mention the Chief of Staff, Maritime N2, Logistics, Navigation, Plans, and other relevant advisers."
+);
+const COMMAND_INTELLIGENCE_PROMPT: &str = command_adviser_prompt!(
+    "You are the Maritime N2 Adviser. Assess regional intelligence, threats, warning, political and economic conditions, unrest, military posture, maritime activity, chokepoints, and supply-chain factors. Use only the curated world_monitor_ tools for OSINT in this phase. Clearly distinguish reported information, observed indicators, assumptions, and assessment. When a country is material, record its ISO 3166-1 alpha-2 code in the outcome summary or assumptions so future briefs can refresh it deterministically."
+);
+const COMMAND_LOGISTICS_PROMPT: &str = command_adviser_prompt!(
+    "You are the Logistics Adviser. Advise on replenishment, sustainment, fuel, stores, maintenance dependencies, support availability, port and supply-chain constraints, and logistics risk for a replenishment ship. Separate confirmed capacity and demand from assumptions."
 );
 const COMMAND_NAVIGATION_PROMPT: &str = command_adviser_prompt!(
     "You are the Navigation Adviser. Retrieve and explain relevant navigation evidence, considerations, doctrine, records, freshness, and source limitations. You do not make navigational decisions and do not generate executable navigation orders."
@@ -116,6 +125,26 @@ const BUILT_IN_PERSONAS: &[BuiltInPersona] = &[
         avatar_url: Some(COMMAND_OPERATIONS_AVATAR),
         system_prompt: COMMAND_OPERATIONS_PROMPT,
         name_pool: &["Operations Adviser"],
+        model: None,
+        runtime: None,
+        default_active: true,
+    },
+    BuiltInPersona {
+        id: "builtin:command-intelligence",
+        display_name: "Maritime N2 Adviser",
+        avatar_url: Some(COMMAND_INTELLIGENCE_AVATAR),
+        system_prompt: COMMAND_INTELLIGENCE_PROMPT,
+        name_pool: &["Maritime N2 Adviser"],
+        model: None,
+        runtime: None,
+        default_active: true,
+    },
+    BuiltInPersona {
+        id: "builtin:command-logistics",
+        display_name: "Logistics Adviser",
+        avatar_url: Some(COMMAND_LOGISTICS_AVATAR),
+        system_prompt: COMMAND_LOGISTICS_PROMPT,
+        name_pool: &["Logistics Adviser"],
         model: None,
         runtime: None,
         default_active: true,
