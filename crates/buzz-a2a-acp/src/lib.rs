@@ -12,7 +12,7 @@ use serde::Deserialize;
 use serde_json::{json, value::RawValue, Value};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
@@ -25,6 +25,9 @@ use uuid::Uuid;
 const MAX_RECORD_BYTES: usize = 2 * 1024 * 1024;
 const MAX_ARTIFACT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_ACP_LINE_BYTES: usize = 1024 * 1024;
+const MAX_EXTENSIONS_JSON_BYTES: usize = 64 * 1024;
+const MAX_EXTENSIONS: usize = 32;
+const MAX_EXTENSION_URI_BYTES: usize = 2 * 1024;
 const DEFAULT_TASK_POLL_SECS: u64 = 7_200;
 const TASK_POLL_BACKOFF_SECS: [u64; 4] = [1, 5, 15, 30];
 
@@ -39,6 +42,8 @@ pub struct AdapterConfig {
     pub bearer_token_endpoint: Option<String>,
     /// Optional caller-supplied A2A conversation context identifier.
     pub context_id: Option<String>,
+    /// Extension metadata keyed by an exact URI advertised in the Agent Card.
+    pub extensions: BTreeMap<String, Value>,
     /// Maximum time to wait for an asynchronous A2A task.
     pub task_poll_secs: u64,
 }
@@ -60,6 +65,10 @@ struct Cli {
     /// Optional stable A2A conversation context identifier.
     #[arg(long, env = "BUZZ_A2A_CONTEXT_ID")]
     context_id: Option<String>,
+
+    /// JSON object keyed by A2A extension URI.
+    #[arg(long, env = "BUZZ_A2A_EXTENSIONS_JSON")]
+    extensions_json: Option<String>,
 
     /// Maximum time to wait for an asynchronous A2A task.
     #[arg(
@@ -99,6 +108,12 @@ pub enum AdapterError {
     InvalidArtifact(String),
     #[error("A2A endpoint is not advertised by the Agent Card")]
     MissingEndpoint,
+    #[error("invalid A2A extension configuration: {0}")]
+    InvalidExtensionConfig(String),
+    #[error("A2A extension is not advertised by the Agent Card: {0}")]
+    UnsupportedExtension(String),
+    #[error("Agent Card requires an A2A extension that is not configured: {0}")]
+    RequiredExtension(String),
     #[error("unsafe endpoint URL: {0}")]
     UnsafeEndpoint(String),
     #[error("bearer token is not authorized for A2A endpoint {0}")]
@@ -227,6 +242,27 @@ pub struct AgentCard {
     /// Current A2A interface declarations.
     #[serde(default, rename = "supportedInterfaces")]
     pub supported_interfaces: Vec<SupportedInterface>,
+    /// Optional protocol extensions advertised by the agent.
+    #[serde(default)]
+    pub capabilities: AgentCapabilities,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+/// A2A capabilities used by the adapter.
+pub struct AgentCapabilities {
+    /// Extension declarations from the Agent Card.
+    #[serde(default)]
+    pub extensions: Vec<AgentExtension>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+/// One A2A protocol extension advertised by an Agent Card.
+pub struct AgentExtension {
+    /// Exact URI used for negotiation and message metadata.
+    pub uri: String,
+    /// Whether a client must activate the extension to invoke the agent.
+    #[serde(default)]
+    pub required: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -771,12 +807,80 @@ fn protocol_request(
     client: &Client,
     mode: &ProtocolMode,
     endpoint: &str,
+    extensions: &BTreeMap<String, Value>,
 ) -> reqwest::RequestBuilder {
     let request = client.post(endpoint);
-    match mode.a2a_version() {
+    let request = match mode.a2a_version() {
         Some(version) => request.header("A2A-Version", version),
         None => request,
+    };
+    if extensions.is_empty() {
+        request
+    } else {
+        request.header(
+            "A2A-Extensions",
+            extensions.keys().cloned().collect::<Vec<_>>().join(", "),
+        )
     }
+}
+
+fn parse_extensions_json(raw: Option<&str>) -> Result<BTreeMap<String, Value>, AdapterError> {
+    let Some(raw) = raw.filter(|value| !value.trim().is_empty()) else {
+        return Ok(BTreeMap::new());
+    };
+    if raw.len() > MAX_EXTENSIONS_JSON_BYTES {
+        return Err(AdapterError::InvalidExtensionConfig(format!(
+            "configuration exceeds {MAX_EXTENSIONS_JSON_BYTES} bytes"
+        )));
+    }
+    let extensions: BTreeMap<String, Value> = serde_json::from_str(raw)
+        .map_err(|error| AdapterError::InvalidExtensionConfig(error.to_string()))?;
+    if extensions.len() > MAX_EXTENSIONS {
+        return Err(AdapterError::InvalidExtensionConfig(format!(
+            "configuration exceeds {MAX_EXTENSIONS} extensions"
+        )));
+    }
+    for uri in extensions.keys() {
+        validate_extension_uri(uri)?;
+    }
+    Ok(extensions)
+}
+
+fn validate_extension_uri(uri: &str) -> Result<(), AdapterError> {
+    if uri.is_empty() || uri.len() > MAX_EXTENSION_URI_BYTES {
+        return Err(AdapterError::InvalidExtensionConfig(
+            "extension URI is empty or too long".into(),
+        ));
+    }
+    Url::parse(uri)
+        .map(|_| ())
+        .map_err(|_| AdapterError::InvalidExtensionConfig(format!("invalid extension URI: {uri}")))
+}
+
+fn negotiate_extensions(
+    card: &AgentCard,
+    configured: &BTreeMap<String, Value>,
+    mode: &ProtocolMode,
+) -> Result<BTreeMap<String, Value>, AdapterError> {
+    if !configured.is_empty() && matches!(mode, ProtocolMode::VendorServiceEndpoint { .. }) {
+        return Err(AdapterError::InvalidExtensionConfig(
+            "A2A extensions require a standard A2A interface".into(),
+        ));
+    }
+    let mut advertised = HashSet::new();
+    for extension in &card.capabilities.extensions {
+        validate_extension_uri(&extension.uri)?;
+        advertised.insert(extension.uri.as_str());
+        if extension.required && !configured.contains_key(&extension.uri) {
+            return Err(AdapterError::RequiredExtension(extension.uri.clone()));
+        }
+    }
+    for uri in configured.keys() {
+        if !advertised.contains(uri.as_str()) {
+            return Err(AdapterError::UnsupportedExtension(uri.clone()));
+        }
+    }
+    Ok(configured.clone())
 }
 
 #[derive(Debug, Deserialize)]
@@ -858,6 +962,7 @@ async fn invoke(
     resolved: &ResolvedAgent,
     token: Option<&str>,
     token_endpoint: Option<&str>,
+    extensions: &BTreeMap<String, Value>,
     task_poll_secs: u64,
     session_id: &str,
     text: &str,
@@ -874,9 +979,15 @@ async fn invoke(
         id,
         session_id,
         text,
+        extensions,
     );
-    let mut request =
-        protocol_request(&client, &resolved.mode, resolved.mode.endpoint()).json(&payload);
+    let mut request = protocol_request(
+        &client,
+        &resolved.mode,
+        resolved.mode.endpoint(),
+        extensions,
+    )
+    .json(&payload);
     if let Some(token) = token {
         request = request.bearer_auth(token);
     }
@@ -918,6 +1029,7 @@ async fn invoke(
                 task_id,
                 task_poll_secs,
                 &client,
+                extensions,
             )
             .await;
         }
@@ -937,6 +1049,7 @@ async fn poll_task(
     task_id: &str,
     task_poll_secs: u64,
     client: &Client,
+    extensions: &BTreeMap<String, Value>,
 ) -> Result<String, AdapterError> {
     let started = std::time::Instant::now();
     let timeout = std::time::Duration::from_secs(task_poll_secs);
@@ -965,7 +1078,8 @@ async fn poll_task(
         });
         validate_endpoint_binding(token, token_endpoint, resolved.mode.endpoint())?;
         let mut request =
-            protocol_request(client, &resolved.mode, resolved.mode.endpoint()).json(&payload);
+            protocol_request(client, &resolved.mode, resolved.mode.endpoint(), extensions)
+                .json(&payload);
         if let Some(token) = token {
             request = request.bearer_auth(token);
         }
@@ -1058,8 +1172,9 @@ fn request_payload(
     id: u64,
     session_id: &str,
     text: &str,
+    extensions: &BTreeMap<String, Value>,
 ) -> Value {
-    let params = match mode {
+    let mut params = match mode {
         ProtocolMode::JsonRpc {
             protocol_version, ..
         } if protocol_version
@@ -1079,6 +1194,23 @@ fn request_payload(
             "contextId": session_id,
         }),
     };
+    if !extensions.is_empty() && matches!(mode, ProtocolMode::JsonRpc { .. }) {
+        if let Some(message) = params.get_mut("message").and_then(Value::as_object_mut) {
+            message.insert(
+                "extensions".into(),
+                Value::Array(extensions.keys().cloned().map(Value::String).collect()),
+            );
+            message.insert(
+                "metadata".into(),
+                Value::Object(
+                    extensions
+                        .iter()
+                        .map(|(uri, metadata)| (uri.clone(), metadata.clone()))
+                        .collect(),
+                ),
+            );
+        }
+    }
     json!({ "jsonrpc": "2.0", "id": id, "method": mode.method(false), "params": params })
 }
 
@@ -1230,6 +1362,7 @@ pub async fn run(config: AdapterConfig) -> Result<(), AdapterError> {
         record.verification.label()
     );
     let (resolved, source) = resolve_card(record.record, record.base.as_ref()).await?;
+    let extensions = negotiate_extensions(&resolved.card, &config.extensions, &resolved.mode)?;
     if source == CardSource::DeprecatedCardData {
         eprintln!(
             "buzz-a2a-acp: using deprecated OASF integration/a2a data.card_data compatibility path"
@@ -1328,12 +1461,14 @@ pub async fn run(config: AdapterConfig) -> Result<(), AdapterError> {
                         let prompt_token = config.bearer_token.clone();
                         let prompt_token_endpoint = config.bearer_token_endpoint.clone();
                         let prompt_task_poll_secs = config.task_poll_secs;
+                        let prompt_extensions = extensions.clone();
                         let prompt_session_id = session_id.clone();
                         let task = tokio::spawn(async move {
                             invoke(
                                 &prompt_resolved,
                                 prompt_token.as_deref(),
                                 prompt_token_endpoint.as_deref(),
+                                &prompt_extensions,
                                 prompt_task_poll_secs,
                                 &prompt_session_id,
                                 &text,
@@ -1481,6 +1616,8 @@ pub fn run_cli() -> Result<(), String> {
     let bearer_token = std::env::var("BUZZ_A2A_BEARER_TOKEN")
         .ok()
         .filter(|value| !value.trim().is_empty());
+    let extensions = parse_extensions_json(args.extensions_json.as_deref())
+        .map_err(|error| error.to_string())?;
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -1490,6 +1627,7 @@ pub fn run_cli() -> Result<(), String> {
             bearer_token,
             bearer_token_endpoint: args.bearer_token_endpoint,
             context_id: args.context_id,
+            extensions,
             task_poll_secs: args.task_poll_secs,
         }))
         .map_err(|error| error.to_string())
@@ -1587,6 +1725,7 @@ mod tests {
             1,
             "session",
             "hello",
+            &BTreeMap::new(),
         );
         assert_eq!(current["method"], "SendMessage");
         assert_eq!(current["params"]["message"]["role"], "ROLE_USER");
@@ -1600,6 +1739,7 @@ mod tests {
             2,
             "session",
             "hello",
+            &BTreeMap::new(),
         );
         assert_eq!(vendor["method"], "agent/sendMessage");
         assert_eq!(vendor["params"]["agentId"], "remote");
@@ -1630,7 +1770,7 @@ mod tests {
                 None,
             ),
         ] {
-            let request = protocol_request(&client, &mode, mode.endpoint())
+            let request = protocol_request(&client, &mode, mode.endpoint(), &BTreeMap::new())
                 .build()
                 .expect("request builds");
             assert_eq!(
@@ -1654,11 +1794,111 @@ mod tests {
             3,
             "buzz-session",
             "hello",
+            &BTreeMap::new(),
         );
         assert_eq!(request["method"], "message/send");
         assert!(request["params"]["contextId"].is_null());
         assert_eq!(request["params"]["message"]["contextId"], "buzz-session");
         assert_eq!(request["params"]["message"]["parts"][0]["kind"], "text");
+    }
+
+    #[test]
+    fn negotiates_and_projects_advertised_extensions() {
+        let extension_uri = "https://example.com/a2a/extensions/work-context/v1";
+        let card: AgentCard = serde_json::from_value(json!({
+            "capabilities": {
+                "extensions": [{ "uri": extension_uri }]
+            },
+            "supportedInterfaces": [{
+                "url": "https://agent.example/rpc",
+                "protocolBinding": "JSONRPC",
+                "protocolVersion": "1.0"
+            }]
+        }))
+        .expect("card");
+        let mode = select_protocol_mode(&card).expect("mode");
+        let configured = BTreeMap::from([(
+            extension_uri.to_string(),
+            json!({ "organizationRef": "https://example.com/organizations/acme" }),
+        )]);
+        let active =
+            negotiate_extensions(&card, &configured, &mode).expect("extension is advertised");
+        let request = request_payload(&mode, None, 4, "session", "hello", &active);
+        assert_eq!(
+            request["params"]["message"]["extensions"],
+            json!([extension_uri])
+        );
+        assert_eq!(
+            request["params"]["message"]["metadata"][extension_uri]["organizationRef"],
+            "https://example.com/organizations/acme"
+        );
+
+        let http_request = protocol_request(&Client::new(), &mode, mode.endpoint(), &active)
+            .build()
+            .expect("request builds");
+        assert_eq!(
+            http_request
+                .headers()
+                .get("A2A-Extensions")
+                .and_then(|value| value.to_str().ok()),
+            Some(extension_uri)
+        );
+    }
+
+    #[test]
+    fn rejects_unadvertised_and_missing_required_extensions() {
+        let required_uri = "https://example.com/a2a/extensions/required/v1";
+        let card: AgentCard = serde_json::from_value(json!({
+            "capabilities": {
+                "extensions": [{ "uri": required_uri, "required": true }]
+            },
+            "supportedInterfaces": [{
+                "url": "https://agent.example/rpc",
+                "protocolBinding": "JSONRPC",
+                "protocolVersion": "1.0"
+            }]
+        }))
+        .expect("card");
+        let mode = select_protocol_mode(&card).expect("mode");
+        assert!(matches!(
+            negotiate_extensions(&card, &BTreeMap::new(), &mode),
+            Err(AdapterError::RequiredExtension(uri)) if uri == required_uri
+        ));
+
+        let configured = BTreeMap::from([(
+            "https://example.com/a2a/extensions/other/v1".to_string(),
+            json!({}),
+        )]);
+        assert!(matches!(
+            negotiate_extensions(&card, &configured, &mode),
+            Err(AdapterError::RequiredExtension(uri)) if uri == required_uri
+        ));
+
+        let optional_card: AgentCard = serde_json::from_value(json!({
+            "capabilities": { "extensions": [] },
+            "supportedInterfaces": [{
+                "url": "https://agent.example/rpc",
+                "protocolBinding": "JSONRPC",
+                "protocolVersion": "1.0"
+            }]
+        }))
+        .expect("card");
+        let optional_mode = select_protocol_mode(&optional_card).expect("mode");
+        assert!(matches!(
+            negotiate_extensions(&optional_card, &configured, &optional_mode),
+            Err(AdapterError::UnsupportedExtension(uri))
+                if uri == "https://example.com/a2a/extensions/other/v1"
+        ));
+    }
+
+    #[test]
+    fn parses_bounded_extension_configuration() {
+        let parsed =
+            parse_extensions_json(Some(r#"{"urn:example:extension":{"scope":"project-1"}}"#))
+                .expect("valid extension map");
+        assert_eq!(parsed["urn:example:extension"]["scope"], "project-1");
+        assert!(parse_extensions_json(Some("[]")).is_err());
+        assert!(parse_extensions_json(Some(r#"{"not a uri":{}}"#)).is_err());
     }
 
     #[test]
