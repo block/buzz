@@ -1468,6 +1468,8 @@ mod tests {
             prompt_tag: None,
             compiled_filter: None,
             consecutive_timeouts: Arc::new(AtomicU32::new(0)),
+            target_repo: None,
+            target_env: None,
         }
     }
 

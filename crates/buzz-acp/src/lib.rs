@@ -5,6 +5,7 @@ mod config;
 mod engram_fetch;
 mod filter;
 mod observer;
+mod options;
 mod pool;
 mod pool_lifecycle;
 mod queue;
@@ -1453,6 +1454,8 @@ async fn tokio_main() -> Result<()> {
                 compiled_filter: None,
                 consecutive_timeouts: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
                 prompt_tag: Some("@mention".into()),
+                target_repo: None,
+                target_env: None,
             }]
         }
         SubscribeMode::All => {
@@ -1465,6 +1468,8 @@ async fn tokio_main() -> Result<()> {
                 compiled_filter: None,
                 consecutive_timeouts: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
                 prompt_tag: Some("all".into()),
+                target_repo: None,
+                target_env: None,
             }]
         }
         SubscribeMode::Config => {
@@ -2173,8 +2178,8 @@ async fn tokio_main() -> Result<()> {
                             }
 
                             let matched = filter::match_event(&buzz_event.event, buzz_event.channel_id, &rules, &pubkey_hex).await;
-                            let prompt_tag = match matched {
-                                Some(m) => m.prompt_tag,
+                            let (prompt_tag, target_repo, target_env) = match matched {
+                                Some(m) => (m.prompt_tag, m.target_repo, m.target_env),
                                 None => {
                                     tracing::debug!(channel_id = %buzz_event.channel_id, kind = buzz_event.event.kind.as_u16(), "event matched no rule — dropping");
                                     continue;
@@ -2201,6 +2206,8 @@ async fn tokio_main() -> Result<()> {
                                 event: buzz_event.event,
                                 received_at: std::time::Instant::now(),
                                 prompt_tag,
+                                target_repo,
+                                target_env,
                             });
                             // 👀 — immediate "seen" reaction, only if the event
                             // was actually queued (not dropped by DedupMode::Drop).
@@ -2828,6 +2835,8 @@ fn try_native_steer(
         event,
         prompt_tag: prompt_tag.clone(),
         received_at: std::time::Instant::now(),
+        target_repo: None,
+        target_env: None,
     };
     let event_block = queue::format_event_block(channel_id, None, &be, None);
     let body = format!("{header}\n\n[Buzz event: {prompt_tag}]\n{event_block}\n\n{closing}");
@@ -5517,6 +5526,8 @@ mod error_outcome_emission_tests {
                     event,
                     prompt_tag: "test".into(),
                     received_at: std::time::Instant::now(),
+                    target_repo: None,
+                    target_env: None,
                 }],
                 cancelled_events: vec![],
                 cancel_reason: None,
@@ -5623,6 +5634,8 @@ mod error_outcome_emission_tests {
                     event,
                     prompt_tag: "test".into(),
                     received_at: std::time::Instant::now(),
+                    target_repo: None,
+                    target_env: None,
                 }],
                 cancelled_events: vec![],
                 cancel_reason: None,
@@ -5741,6 +5754,8 @@ mod error_outcome_emission_tests {
                     .unwrap(),
                 prompt_tag: "test".into(),
                 received_at: std::time::Instant::now(),
+                target_repo: None,
+                target_env: None,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -5834,6 +5849,8 @@ mod error_outcome_emission_tests {
                     .unwrap(),
                 prompt_tag: "test".into(),
                 received_at: std::time::Instant::now(),
+                target_repo: None,
+                target_env: None,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -5912,6 +5929,8 @@ mod error_outcome_emission_tests {
                 event: original_event.clone(),
                 prompt_tag: "test".into(),
                 received_at: std::time::Instant::now(),
+                target_repo: None,
+                target_env: None,
             }],
             cancelled_events: vec![],
             cancel_reason: Some(CancelReason::Steer),
@@ -5941,6 +5960,8 @@ mod error_outcome_emission_tests {
             event: new_event.clone(),
             received_at: std::time::Instant::now(),
             prompt_tag: "test".into(),
+            target_repo: None,
+            target_env: None,
         });
         let config = test_config();
         let mut heartbeat_in_flight = false;
@@ -6233,6 +6254,8 @@ mod error_outcome_emission_tests {
                 event,
                 prompt_tag: "test".into(),
                 received_at: std::time::Instant::now(),
+                target_repo: None,
+                target_env: None,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -6318,6 +6341,8 @@ mod error_outcome_emission_tests {
                 event,
                 prompt_tag: "test".into(),
                 received_at: std::time::Instant::now(),
+                target_repo: None,
+                target_env: None,
             }],
             cancelled_events: vec![],
             cancel_reason: None,

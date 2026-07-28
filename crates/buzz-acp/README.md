@@ -248,6 +248,38 @@ Forum event kinds:
 
 > **Note:** Without `--no-mention-filter` (or `require_mention = false`), the default `subscribe=mentions` mode filters events that don't @mention the agent — forum posts will be invisible.
 
+## Chat targeting (Slack-parity)
+
+Mentions may include inline options that the harness injects as a `[Run Options]` prompt section:
+
+| Option | Example | Effect |
+|--------|---------|--------|
+| `repo=` | `repo=web` | Prefer nest checkout `REPOS/web` |
+| `env=` / `environment=` | `env=Platform` | Named multi-repo environment |
+| `branch=` | `branch=dev` | Prefer base branch |
+| `model=` | `model=gpt-5` | Prefer model when the runtime supports it |
+| `autopr=` | `autopr=false` | Prefer / disallow auto `buzz pr open` |
+| `channel=` | `channel=#eng` | Post updates to another channel (membership required) |
+
+Quoted values with spaces are supported (`env="Platform Staging"`). Light natural language also works: `use the Platform environment`, `use the "Platform Staging" environment`, and `in web` (single-token repo name only).
+
+### Nest environments file
+
+Optional `{cwd}/.buzz/environments.toml`:
+
+```toml
+[[environment]]
+name = "Platform"
+repos = ["web", "api"]
+default_branch = "main"  # optional
+```
+
+Repo names are directories under nest `REPOS/`. When `env=` matches, preferred paths are `{cwd}/REPOS/{name}` for each listed repo that exists.
+
+### Rule defaults
+
+Subscription rules (`--subscribe config`) may set optional `target_repo` / `target_env`. Explicit inline options in the mention text always win over rule defaults.
+
 ## How It Works
 
 1. **Startup** — Spawns N agent subprocesses (default 1), sends ACP `initialize` to each, connects to the relay with NIP-42 auth.

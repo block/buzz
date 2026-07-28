@@ -1839,6 +1839,9 @@ pub async fn run_prompt_task(
                 system_prompt: ctx.system_prompt.as_deref(),
                 team_instructions: ctx.team_instructions.as_deref(),
                 agent_canvas: agent_canvas.as_deref(),
+                nest_cwd: Some(&ctx.cwd),
+                rule_target_repo: b.events.last().and_then(|e| e.target_repo.as_deref()),
+                rule_target_env: b.events.last().and_then(|e| e.target_env.as_deref()),
             },
         )
     } else {
@@ -2031,6 +2034,7 @@ pub async fn run_prompt_task(
                             Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
                         )
                         .await;
+                        spawn_outcome_reaction(&ctx.rest_client, &reaction_ids, REACTION_DONE);
                         send_prompt_result(
                             &result_tx,
                             &turn_id,
@@ -2049,6 +2053,10 @@ pub async fn run_prompt_task(
     match prompt_result {
         Ok(stop_reason) => {
             log_stop_reason(&source, &stop_reason);
+
+            if matches!(stop_reason, StopReason::EndTurn) {
+                spawn_outcome_reaction(&ctx.rest_client, &reaction_ids, REACTION_DONE);
+            }
 
             let should_rotate = matches!(
                 stop_reason,
@@ -2105,6 +2113,7 @@ pub async fn run_prompt_task(
         }
         Err(AcpError::AgentExited) => {
             tracing::error!(target: "pool::prompt", "agent {} exited during prompt", agent.index);
+            spawn_outcome_reaction(&ctx.rest_client, &reaction_ids, REACTION_FAILED);
             agent.state.invalidate_all();
             let usage = agent.acp.take_turn_usage();
             publish_agent_turn_metric(
@@ -2131,6 +2140,7 @@ pub async fn run_prompt_task(
                 "idle timeout ({}s) — cancelling session {session_id}",
                 ctx.idle_timeout.as_secs()
             );
+            spawn_outcome_reaction(&ctx.rest_client, &reaction_ids, REACTION_FAILED);
             match agent
                 .acp
                 .cancel_with_cleanup(&session_id, ctx.idle_timeout)
@@ -2219,6 +2229,7 @@ pub async fn run_prompt_task(
                 "hard timeout ({}s cap, silence {silence:?}, recently_active={recently_active}) — agent process is unrecoverable, invalidating all sessions",
                 ctx.max_turn_duration.as_secs()
             );
+            spawn_outcome_reaction(&ctx.rest_client, &reaction_ids, REACTION_FAILED);
             agent.state.invalidate_all();
             let usage = agent.acp.take_turn_usage();
             publish_agent_turn_metric(
@@ -2241,6 +2252,7 @@ pub async fn run_prompt_task(
         }
         Err(e) => {
             tracing::error!(target: "pool::prompt", "session_prompt error: {e}");
+            spawn_outcome_reaction(&ctx.rest_client, &reaction_ids, REACTION_FAILED);
             // AgentError means the agent caught a problem before mutating
             // session state (e.g. bad LLM response). The session is healthy —
             // don't invalidate it. Other errors may have corrupted state.
@@ -3491,6 +3503,8 @@ async fn publish_agent_turn_metric(
 
 const REACTION_SEEN: &str = "👀";
 const REACTION_WORKING: &str = "💬";
+const REACTION_DONE: &str = "✅";
+const REACTION_FAILED: &str = "❌";
 
 /// Best-effort timeout for a single reaction REST call.
 const REACTION_TIMEOUT: Duration = Duration::from_millis(500);
@@ -3687,6 +3701,27 @@ async fn react_working(rest: &crate::relay::RestClient, event_ids: &[String]) {
         )
         .await;
     }
+}
+
+/// Fire-and-forget outcome reaction (✅ / ❌) before `ReactionGuard` clears 👀/💬.
+fn spawn_outcome_reaction(
+    rest: &crate::relay::RestClient,
+    event_ids: &[String],
+    emoji: &'static str,
+) {
+    if event_ids.is_empty() {
+        return;
+    }
+    let rest = rest.clone();
+    let ids = event_ids.to_vec();
+    tokio::spawn(async move {
+        for chunk in ids.chunks(REACTION_CONCURRENCY) {
+            futures_util::future::join_all(
+                chunk.iter().map(|eid| reaction_add(&rest, eid, emoji)),
+            )
+            .await;
+        }
+    });
 }
 
 /// Fire-and-forget: remove both 👀 and 💬 from all events. Spawned on turn complete.
@@ -4185,6 +4220,8 @@ mod tests {
                 event,
                 prompt_tag: "@mention".into(),
                 received_at: std::time::Instant::now(),
+                target_repo: None,
+                target_env: None,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -4511,6 +4548,8 @@ mod tests {
                 event,
                 prompt_tag: "test".into(),
                 received_at: std::time::Instant::now(),
+                target_repo: None,
+                target_env: None,
             }],
             cancelled_events: vec![],
             cancel_reason: None,

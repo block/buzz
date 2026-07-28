@@ -73,6 +73,23 @@ fn normalizes_claude_and_codex_args_to_empty() {
 }
 
 #[test]
+fn cursor_agent_defaults_to_acp_subcommand() {
+    assert_eq!(
+        normalize_agent_args("cursor-agent", Vec::new()),
+        vec!["acp".to_string()]
+    );
+    assert_eq!(
+        normalize_agent_args("cursor", Vec::new()),
+        vec!["acp".to_string()]
+    );
+    // Explicit args still win over the default.
+    assert_eq!(
+        normalize_agent_args("cursor-agent", vec!["acp".into(), "--verbose".into()]),
+        vec!["acp".to_string(), "--verbose".to_string()]
+    );
+}
+
+#[test]
 fn resolves_buzz_agent_avatar() {
     assert_eq!(
         managed_agent_avatar_url("buzz-agent"),
