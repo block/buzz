@@ -318,6 +318,22 @@ pub const KIND_WORKFLOW_DEF: u32 = 30620;
 /// `hidden_at` per viewer; this is the only Nostr-visible projection of it.
 pub const KIND_DM_VISIBILITY: u32 = 30622;
 
+/// Battle Rhythm calendar source (parameterized replaceable, d=source id).
+///
+/// Owner-authored global state describing an imported or maintained calendar
+/// source. Stored under the standard NIP-33 `(pubkey, kind, d_tag)` key.
+pub const KIND_BATTLE_RHYTHM_SOURCE: u32 = 30630;
+/// Battle Rhythm calendar event (parameterized replaceable, d=event id).
+///
+/// Owner-authored global calendar state, keyed by the standard NIP-33
+/// `(pubkey, kind, d_tag)` address.
+pub const KIND_BATTLE_RHYTHM_EVENT: u32 = 30631;
+/// Battle Rhythm calendar revision audit record (regular stored event).
+///
+/// Owner-authored global history for calendar changes; unlike source and event
+/// snapshots, revisions are append-only rather than parameterized replaceable.
+pub const KIND_BATTLE_RHYTHM_REVISION: u32 = 46310;
+
 /// Lower bound of the NIP-33 parameterized replaceable range (30000–39999).
 pub const PARAM_REPLACEABLE_KIND_MIN: u32 = 30000;
 /// Upper bound of the NIP-33 parameterized replaceable range (30000–39999).
@@ -520,6 +536,9 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_AGENT_PROFILE,
     KIND_AGENT_ENGRAM,
     KIND_EVENT_REMINDER,
+    KIND_BATTLE_RHYTHM_SOURCE,
+    KIND_BATTLE_RHYTHM_EVENT,
+    KIND_BATTLE_RHYTHM_REVISION,
     KIND_PERSONA,
     KIND_TEAM,
     KIND_MANAGED_AGENT,
@@ -725,6 +744,8 @@ const _: () = assert!(is_parameterized_replaceable(KIND_MANAGED_AGENT)); // 3017
 const _: () = assert!(is_parameterized_replaceable(KIND_WORKFLOW_DEF)); // 30620 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_EVENT_REMINDER)); // 30300 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_DM_VISIBILITY)); // 30622 ∈ 30000–39999
+const _: () = assert!(is_parameterized_replaceable(KIND_BATTLE_RHYTHM_SOURCE)); // 30630 ∈ 30000–39999
+const _: () = assert!(is_parameterized_replaceable(KIND_BATTLE_RHYTHM_EVENT)); // 30631 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_THREAD_SUMMARY)); // 39005 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_WINDOW_BOUNDS)); // 39006 ∈ 30000–39999
 
@@ -753,6 +774,11 @@ const _: () = assert!(!is_ephemeral(KIND_COMMAND_BRIEF));
 const _: () = assert!(!is_replaceable(KIND_COMMAND_BRIEF));
 const _: () = assert!(!is_parameterized_replaceable(KIND_COMMAND_BRIEF));
 const _: () = assert!(KIND_COMMAND_BRIEF <= u16::MAX as u32);
+// Compile-time: KIND_BATTLE_RHYTHM_REVISION is a regular stored kind.
+const _: () = assert!(!is_ephemeral(KIND_BATTLE_RHYTHM_REVISION));
+const _: () = assert!(!is_replaceable(KIND_BATTLE_RHYTHM_REVISION));
+const _: () = assert!(!is_parameterized_replaceable(KIND_BATTLE_RHYTHM_REVISION));
+const _: () = assert!(KIND_BATTLE_RHYTHM_REVISION <= u16::MAX as u32);
 // Moderation kinds fit u16 and are neither replaceable nor ephemeral:
 // 1984 is a regular event (persisted to the queue, never fanned out);
 // 9040–9044 are direct commands (executed, never stored).
@@ -789,6 +815,14 @@ mod tests {
         assert!(is_parameterized_replaceable(39000)); // NIP-29 group metadata
         assert!(is_parameterized_replaceable(39999));
         assert!(!is_parameterized_replaceable(40000));
+    }
+
+    #[test]
+    fn battle_rhythm_kind_shapes_are_stable() {
+        assert!(is_parameterized_replaceable(KIND_BATTLE_RHYTHM_SOURCE));
+        assert!(is_parameterized_replaceable(KIND_BATTLE_RHYTHM_EVENT));
+        assert!(!is_parameterized_replaceable(KIND_BATTLE_RHYTHM_REVISION));
+        assert!(!is_ephemeral(KIND_BATTLE_RHYTHM_REVISION));
     }
 
     #[test]

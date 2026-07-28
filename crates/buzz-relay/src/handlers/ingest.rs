@@ -13,7 +13,8 @@ use buzz_auth::Scope;
 use buzz_core::kind::{
     event_kind_u32, is_identity_archive_request_kind, is_parameterized_replaceable,
     is_relay_admin_kind, KIND_AGENT_ENGRAM, KIND_AGENT_PROFILE, KIND_AGENT_TURN_METRIC,
-    KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_AUTH, KIND_BOOKMARK_LIST, KIND_BOOKMARK_SET,
+    KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_AUTH, KIND_BATTLE_RHYTHM_EVENT,
+    KIND_BATTLE_RHYTHM_REVISION, KIND_BATTLE_RHYTHM_SOURCE, KIND_BOOKMARK_LIST, KIND_BOOKMARK_SET,
     KIND_CANVAS, KIND_COMMAND_BRIEF, KIND_CONTACT_LIST, KIND_DELETION, KIND_DM_ADD_MEMBER,
     KIND_DM_HIDE, KIND_DM_OPEN, KIND_EMOJI_LIST, KIND_EMOJI_SET, KIND_EVENT_REMINDER,
     KIND_FOLLOW_SET, KIND_FORUM_COMMENT, KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_GIFT_WRAP,
@@ -200,7 +201,8 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         KIND_PROFILE => Ok(Scope::UsersWrite),
         KIND_TEXT_NOTE | KIND_LONG_FORM => Ok(Scope::MessagesWrite),
         KIND_CONTACT_LIST | KIND_READ_STATE | KIND_USER_STATUS | KIND_AGENT_ENGRAM
-        | KIND_EVENT_REMINDER | KIND_PERSONA | KIND_TEAM | KIND_MANAGED_AGENT
+        | KIND_EVENT_REMINDER | KIND_BATTLE_RHYTHM_SOURCE | KIND_BATTLE_RHYTHM_EVENT
+        | KIND_BATTLE_RHYTHM_REVISION | KIND_PERSONA | KIND_TEAM | KIND_MANAGED_AGENT
         | super::push_lease::KIND_PUSH_LEASE => {
             Ok(Scope::UsersWrite)
         }
@@ -402,6 +404,11 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             | KIND_AGENT_ENGRAM
             // NIP-ER event reminders are addressed by (pubkey, kind, d_tag); never channel-scoped.
             | KIND_EVENT_REMINDER
+            // Battle Rhythm calendar sources, event snapshots, and revisions are
+            // owner-authored global workspace state, never channel-scoped.
+            | KIND_BATTLE_RHYTHM_SOURCE
+            | KIND_BATTLE_RHYTHM_EVENT
+            | KIND_BATTLE_RHYTHM_REVISION
             // Agent profile (10100): user-owned replaceable, keyed by pubkey.
             | KIND_AGENT_PROFILE
             // NIP-AP: persona definitions (30175): owner-authored, keyed by (pubkey, kind, d_tag).
@@ -2935,6 +2942,22 @@ mod tests {
             required_scope_for_kind(KIND_COMMAND_BRIEF, &dummy).unwrap(),
             Scope::MessagesWrite
         );
+    }
+
+    #[test]
+    fn battle_rhythm_events_are_owner_global_user_writes() {
+        for kind in [
+            KIND_BATTLE_RHYTHM_SOURCE,
+            KIND_BATTLE_RHYTHM_EVENT,
+            KIND_BATTLE_RHYTHM_REVISION,
+        ] {
+            assert_eq!(
+                required_scope_for_kind(kind, &make_dummy_event()).unwrap(),
+                Scope::UsersWrite,
+            );
+            assert!(is_global_only_kind(kind));
+            assert!(!requires_h_channel_scope(kind));
+        }
     }
 
     #[test]

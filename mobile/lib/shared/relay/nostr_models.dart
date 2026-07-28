@@ -20,6 +20,9 @@ abstract final class EventKind {
   static const readState = 30078;
   static const userStatus = 30315;
   static const dmVisibility = 30622;
+  static const battleRhythmSource = 30630;
+  static const battleRhythmEvent = 30631;
+  static const battleRhythmRevision = 46310;
   static const streamMessageV2 = 40002;
   static const channelThreadSummary = 39005;
   static const channelWindowBounds = 39006;
