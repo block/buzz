@@ -1,6 +1,7 @@
 import * as React from "react";
 import {
   AlertCircle,
+  BookUser,
   Check,
   ChevronRight,
   Download,
@@ -11,6 +12,7 @@ import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { toast } from "sonner";
 
 import { useEncodeAgentSnapshotForSendMutation } from "@/features/agents/hooks";
+import type { CatalogPersonaShareLevel } from "@/features/agents/lib/personaCatalogRelay";
 import {
   useOpenDmMutation,
   useUpsertCachedChannel,
@@ -20,7 +22,6 @@ import { uploadMediaBytes, type BlobDescriptor } from "@/shared/api/tauri";
 import { copyTextToSystemClipboard } from "@/shared/api/tauriMedia";
 import type { SnapshotMemoryLevel } from "@/shared/api/tauriPersonas";
 import type { AgentPersona, UserSearchResult } from "@/shared/api/types";
-import { cn } from "@/shared/lib/cn";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -39,7 +40,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/shared/ui/dialog";
-import { Separator } from "@/shared/ui/separator";
 import { Spinner } from "@/shared/ui/spinner";
 
 import {
@@ -51,8 +51,10 @@ import { resolveSnapshotAvatarPng } from "./snapshotAvatarPng";
 import { useSnapshotSendController } from "./useSnapshotSendController";
 
 type PersonaShareDialogProps = {
+  catalogShareLevel: CatalogPersonaShareLevel;
   isPending: boolean;
   linkedAgentPubkey: string | null;
+  onCatalogShareLevelChange: (shareLevel: CatalogPersonaShareLevel) => void;
   onExport: () => void;
   onOpenChange: (open: boolean) => void;
   open: boolean;
@@ -60,6 +62,7 @@ type PersonaShareDialogProps = {
 };
 
 type SnapshotShareDialogProps = {
+  afterLink?: React.ReactNode;
   displayName: string;
   encodeSnapshot: (
     memoryLevel: SnapshotMemoryLevel,
@@ -108,6 +111,20 @@ type PendingMemoryShare = {
   memoryLevel: Exclude<SnapshotMemoryLevel, "none">;
   recipientNames?: string[];
 };
+
+function buildSnapshotShareLevels(itemLabel: "Agent" | "Team") {
+  return [
+    { value: "none" as const, label: `${itemLabel} only` },
+    {
+      value: "core" as const,
+      label: `${itemLabel} + core memory`,
+    },
+    {
+      value: "everything" as const,
+      label: `${itemLabel} + all memories`,
+    },
+  ];
+}
 
 function formatRecipientAudience(names: readonly string[]): string {
   if (names.length === 0) return "The people you selected";
@@ -179,39 +196,32 @@ function MemoryShareConfirmation({
 
 function ShareLevelControl({
   ariaLabel,
-  className,
   disabled,
   hasMemoryOptions,
-  onOpenChange,
-  staticClassName,
-  staticLabel,
   testId,
   value,
   options,
   onChange,
 }: {
   ariaLabel: string;
-  className?: string;
   disabled: boolean;
   hasMemoryOptions: boolean;
-  onOpenChange?: (open: boolean) => void;
-  staticClassName?: string;
-  staticLabel: string;
   testId: string;
   value: SnapshotMemoryLevel;
   options: { value: SnapshotMemoryLevel; label: string }[];
   onChange: (level: SnapshotMemoryLevel) => void;
 }) {
   if (!hasMemoryOptions) {
+    // Nothing to choose from, so there is no dropdown to open. State the
+    // outcome rather than naming the sole option: the memory-level labels
+    // ("Agent only", "+ core memory", …) are comparative and only make sense
+    // when the alternatives are actually offered.
     return (
       <span
-        className={cn(
-          "inline-flex h-8 w-auto shrink-0 items-center justify-end px-2 text-sm text-muted-foreground",
-          staticClassName,
-        )}
+        className="inline-flex h-8 w-auto shrink-0 items-center justify-end px-2 text-sm text-muted-foreground"
         data-testid={testId}
       >
-        {staticLabel}
+        No memories included
       </span>
     );
   }
@@ -219,9 +229,7 @@ function ShareLevelControl({
   return (
     <SnapshotOptionMenu
       ariaLabel={ariaLabel}
-      className={className}
       disabled={disabled}
-      onOpenChange={onOpenChange}
       onValueChange={(nextValue) => onChange(nextValue as SnapshotMemoryLevel)}
       options={options}
       testId={testId}
@@ -231,6 +239,7 @@ function ShareLevelControl({
 }
 
 export function SnapshotShareDialog({
+  afterLink,
   displayName,
   encodeSnapshot,
   hasMemoryOptions,
@@ -252,9 +261,7 @@ export function SnapshotShareDialog({
   const [copyStatus, setCopyStatus] = React.useState<CopyStatus>("idle");
   const [pendingMemoryShare, setPendingMemoryShare] =
     React.useState<PendingMemoryShare | null>(null);
-  const [linkShareLevel, setLinkShareLevel] =
-    React.useState<SnapshotMemoryLevel>("none");
-  const [recipientShareLevel, setRecipientShareLevel] =
+  const [shareLevel, setShareLevel] =
     React.useState<SnapshotMemoryLevel>("none");
   const encodedSnapshotCacheRef = React.useRef(
     new Map<SnapshotMemoryLevel, Promise<EncodedSnapshot>>(),
@@ -273,9 +280,7 @@ export function SnapshotShareDialog({
   const isActionPending = isPending || isCopying || isSending;
   const isInterfacePending = isPending || isSending;
   const hasSelectedRecipients = selectedRecipients.length > 0;
-  const showMemoryWarning =
-    linkShareLevel !== "none" ||
-    (hasSelectedRecipients && recipientShareLevel !== "none");
+  const showMemoryWarning = shareLevel !== "none";
   const recipientActionTransition = shouldReduceMotion
     ? { duration: 0 }
     : RECIPIENT_ACTION_TRANSITION;
@@ -298,17 +303,7 @@ export function SnapshotShareDialog({
   const itemLabel = snapshotKind === "team" ? "team" : "agent";
   const itemLabelTitle = snapshotKind === "team" ? "Team" : "Agent";
   const shareLevels = React.useMemo(
-    () => [
-      { value: "none" as const, label: `${itemLabelTitle} only` },
-      {
-        value: "core" as const,
-        label: `${itemLabelTitle} + core memory`,
-      },
-      {
-        value: "everything" as const,
-        label: `${itemLabelTitle} + all memories`,
-      },
-    ],
+    () => buildSnapshotShareLevels(itemLabelTitle),
     [itemLabelTitle],
   );
   const getEncodedSnapshot = React.useCallback(
@@ -337,8 +332,7 @@ export function SnapshotShareDialog({
       setSelectedRecipients([]);
       setCopyStatus("idle");
       setPendingMemoryShare(null);
-      setLinkShareLevel("none");
-      setRecipientShareLevel("none");
+      setShareLevel("none");
       onReset?.();
       snapshotSendController.reset();
     }
@@ -495,21 +489,6 @@ export function SnapshotShareDialog({
                     excludedPubkeys={excludedRecipientPubkeys}
                     onSelectionChange={setSelectedRecipients}
                     open={open}
-                    renderEndControl={(handleAccessOpenChange) => (
-                      <ShareLevelControl
-                        ariaLabel="What to include"
-                        className="-mr-2 h-7"
-                        disabled={isInterfacePending}
-                        hasMemoryOptions={hasMemoryOptions}
-                        onChange={setRecipientShareLevel}
-                        onOpenChange={handleAccessOpenChange}
-                        options={shareLevels}
-                        staticLabel={`${itemLabelTitle} only`}
-                        staticClassName="-mr-2 h-7 w-auto"
-                        testId={`${testIdPrefix}-recipient-access`}
-                        value={recipientShareLevel}
-                      />
-                    )}
                     selectedUsers={selectedRecipients}
                     testIdPrefix={testIdPrefix}
                   />
@@ -532,9 +511,7 @@ export function SnapshotShareDialog({
                           isActionPending ||
                           !snapshotSendController.isDmSafetyReady
                         }
-                        onClick={() =>
-                          requestMemoryShare("send", recipientShareLevel)
-                        }
+                        onClick={() => requestMemoryShare("send", shareLevel)}
                         type="button"
                       >
                         {isSending ? "Sending…" : "Send"}
@@ -550,6 +527,116 @@ export function SnapshotShareDialog({
                 They’ll receive a copy they can add and use. Changes you make
                 later won’t sync.
               </p>
+            </div>
+
+            <div
+              className="flex items-center gap-3 pt-2"
+              data-testid={`${testIdPrefix}-link-row`}
+            >
+              <span
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground"
+                data-testid={`${testIdPrefix}-link-icon`}
+              >
+                <Link2 className="h-4 w-4" />
+              </span>
+              <div
+                className="min-w-0 flex-1"
+                data-testid={`${testIdPrefix}-link-copy`}
+              >
+                <h3 className="text-sm font-medium">Share with a link</h3>
+                <p className="text-xs text-secondary-foreground/75">
+                  Anyone with the link can add and use a copy.
+                </p>
+              </div>
+              <Button
+                asChild
+                className="shrink-0 border-border shadow-none disabled:opacity-100"
+                data-copy-status={copyStatus}
+                data-testid={`${testIdPrefix}-copy-link`}
+                disabled={isActionPending}
+                onClick={() => requestMemoryShare("copy", shareLevel)}
+                size="sm"
+                type="button"
+                variant="outline"
+              >
+                <motion.button
+                  layout={!shouldReduceMotion}
+                  layoutDependency={copyStatus}
+                  style={{ transformOrigin: "100% 50%" }}
+                  transition={copyButtonLayoutTransition}
+                >
+                  <span aria-live="polite" className="sr-only">
+                    {copyStatusLabel}
+                  </span>
+                  <span
+                    aria-hidden="true"
+                    className="relative grid place-items-center"
+                    data-testid={`${testIdPrefix}-copy-link-stage`}
+                  >
+                    <AnimatePresence initial={false} mode="popLayout">
+                      <motion.span
+                        animate={{
+                          filter: "blur(0px)",
+                          opacity: 1,
+                          transform: "scale(1)",
+                        }}
+                        className="col-start-1 row-start-1 flex items-center justify-center gap-1.5 [transform-origin:50%_50%] will-change-[transform,opacity,filter]"
+                        data-testid={`${testIdPrefix}-copy-link-state`}
+                        exit={
+                          shouldReduceMotion
+                            ? { opacity: 0 }
+                            : {
+                                filter: "blur(2px)",
+                                opacity: 0,
+                                transform: "scale(0.97)",
+                              }
+                        }
+                        initial={
+                          shouldReduceMotion
+                            ? false
+                            : {
+                                filter: "blur(2px)",
+                                opacity: 0,
+                                transform: "scale(0.97)",
+                              }
+                        }
+                        key={copyStatus}
+                        transition={copyFeedbackTransition}
+                      >
+                        {copyStatus === "copying" ? (
+                          <Spinner
+                            aria-hidden="true"
+                            className="h-4 w-4 border-2"
+                          />
+                        ) : copyStatus === "copied" ? (
+                          <Check aria-hidden="true" className="h-4 w-4" />
+                        ) : (
+                          <Link2 aria-hidden="true" className="h-4 w-4" />
+                        )}
+                        <span>{copyStatusLabel}</span>
+                      </motion.span>
+                    </AnimatePresence>
+                  </span>
+                </motion.button>
+              </Button>
+            </div>
+
+            <div
+              className="flex items-center gap-3"
+              data-testid={`${testIdPrefix}-share-level-row`}
+            >
+              <h3 className="min-w-0 flex-1 text-sm font-medium">
+                What’s included
+              </h3>
+              <ShareLevelControl
+                ariaLabel="What to include"
+                disabled={isInterfacePending}
+                hasMemoryOptions={hasMemoryOptions}
+                onChange={setShareLevel}
+                options={shareLevels}
+                testId={`${testIdPrefix}-share-level`}
+                value={shareLevel}
+              />
             </div>
 
             <AnimatePresence initial={false}>
@@ -577,118 +664,7 @@ export function SnapshotShareDialog({
               ) : null}
             </AnimatePresence>
 
-            <section
-              className="pt-6"
-              data-testid={`${testIdPrefix}-copy-link-footer`}
-            >
-              <div
-                className="flex items-center gap-3"
-                data-testid={`${testIdPrefix}-link-row`}
-              >
-                <span
-                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground"
-                  data-testid={`${testIdPrefix}-link-icon`}
-                >
-                  <Link2 className="h-4 w-4" />
-                </span>
-                <div
-                  className="min-w-0 flex-1"
-                  data-testid={`${testIdPrefix}-link-copy`}
-                >
-                  <h3 className="text-sm font-medium">Share with a link</h3>
-                  <p className="text-xs text-secondary-foreground/75">
-                    Anyone with the link can add and use a copy.
-                  </p>
-                </div>
-                <ShareLevelControl
-                  ariaLabel="What to include in the link"
-                  disabled={isInterfacePending}
-                  hasMemoryOptions={hasMemoryOptions}
-                  onChange={setLinkShareLevel}
-                  options={shareLevels}
-                  staticLabel={`${itemLabelTitle} only`}
-                  testId={`${testIdPrefix}-link-access`}
-                  value={linkShareLevel}
-                />
-              </div>
-              <Separator
-                className="my-4 bg-input/40"
-                data-testid={`${testIdPrefix}-link-divider`}
-              />
-              <div className="flex justify-end">
-                <Button
-                  asChild
-                  className="shrink-0 border-border shadow-none disabled:opacity-100"
-                  data-copy-status={copyStatus}
-                  data-testid={`${testIdPrefix}-copy-link`}
-                  disabled={isActionPending}
-                  onClick={() => requestMemoryShare("copy", linkShareLevel)}
-                  size="sm"
-                  type="button"
-                  variant="outline"
-                >
-                  <motion.button
-                    layout={!shouldReduceMotion}
-                    layoutDependency={copyStatus}
-                    style={{ transformOrigin: "100% 50%" }}
-                    transition={copyButtonLayoutTransition}
-                  >
-                    <span aria-live="polite" className="sr-only">
-                      {copyStatusLabel}
-                    </span>
-                    <span
-                      aria-hidden="true"
-                      className="relative grid place-items-center"
-                      data-testid={`${testIdPrefix}-copy-link-stage`}
-                    >
-                      <AnimatePresence initial={false} mode="popLayout">
-                        <motion.span
-                          animate={{
-                            filter: "blur(0px)",
-                            opacity: 1,
-                            transform: "scale(1)",
-                          }}
-                          className="col-start-1 row-start-1 flex items-center justify-center gap-1.5 [transform-origin:50%_50%] will-change-[transform,opacity,filter]"
-                          data-testid={`${testIdPrefix}-copy-link-state`}
-                          exit={
-                            shouldReduceMotion
-                              ? { opacity: 0 }
-                              : {
-                                  filter: "blur(2px)",
-                                  opacity: 0,
-                                  transform: "scale(0.97)",
-                                }
-                          }
-                          initial={
-                            shouldReduceMotion
-                              ? false
-                              : {
-                                  filter: "blur(2px)",
-                                  opacity: 0,
-                                  transform: "scale(0.97)",
-                                }
-                          }
-                          key={copyStatus}
-                          transition={copyFeedbackTransition}
-                        >
-                          {copyStatus === "copying" ? (
-                            <Spinner
-                              aria-hidden="true"
-                              className="h-4 w-4 border-2"
-                            />
-                          ) : copyStatus === "copied" ? (
-                            <Check aria-hidden="true" className="h-4 w-4" />
-                          ) : (
-                            <Link2 aria-hidden="true" className="h-4 w-4" />
-                          )}
-                          <span>{copyStatusLabel}</span>
-                        </motion.span>
-                      </AnimatePresence>
-                    </span>
-                  </motion.button>
-                </Button>
-              </div>
-            </section>
+            {afterLink}
           </div>
         </div>
         <button
@@ -715,14 +691,23 @@ export function SnapshotShareDialog({
 }
 
 export function PersonaShareDialog({
+  catalogShareLevel,
   isPending,
   linkedAgentPubkey,
+  onCatalogShareLevelChange,
   onExport,
   onOpenChange,
   open,
   persona,
 }: PersonaShareDialogProps) {
   const encodeSnapshotMutation = useEncodeAgentSnapshotForSendMutation();
+  const catalogShareLevels = React.useMemo(
+    () => [
+      { value: "not-shared", label: "Not shared" },
+      { value: "none", label: "Shared" },
+    ],
+    [],
+  );
   const encodeSnapshot = React.useCallback(
     async (memoryLevel: SnapshotMemoryLevel) =>
       encodeSnapshotMutation.mutateAsync({
@@ -742,6 +727,40 @@ export function PersonaShareDialog({
 
   return (
     <SnapshotShareDialog
+      afterLink={
+        persona.isBuiltIn ? null : (
+          <section
+            className="flex min-h-16 w-full items-center gap-3"
+            data-testid="persona-share-catalog"
+          >
+            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
+              <BookUser className="h-4 w-4" />
+            </span>
+            <div className="min-w-0 flex-1">
+              <h3 className="text-sm font-medium">Share to catalog</h3>
+              <p className="text-xs text-secondary-foreground/75">
+                Anyone in this community can find and use a copy. Your agent
+                instruction is shared as plaintext. Memories and secrets aren’t
+                included.
+              </p>
+            </div>
+            <div className="flex shrink-0 items-center">
+              <SnapshotOptionMenu
+                ariaLabel="What to share in the catalog"
+                disabled={isPending}
+                onValueChange={(nextValue) =>
+                  onCatalogShareLevelChange(
+                    nextValue as CatalogPersonaShareLevel,
+                  )
+                }
+                options={catalogShareLevels}
+                testId="persona-share-catalog-access"
+                value={catalogShareLevel}
+              />
+            </div>
+          </section>
+        )
+      }
       displayName={persona.displayName}
       encodeSnapshot={encodeSnapshot}
       hasMemoryOptions={linkedAgentPubkey !== null}

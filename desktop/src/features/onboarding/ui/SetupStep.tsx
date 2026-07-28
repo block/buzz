@@ -388,7 +388,7 @@ function runtimeDetailText(runtime: AcpRuntimeCatalogEntry): string {
     runtime.availability === "cli_missing" ||
     runtime.availability === "not_installed"
   ) {
-    return "CLI not detected; the desktop app alone isn’t enough.";
+    return "CLI not detected.";
   }
   return "";
 }
@@ -615,7 +615,7 @@ function RuntimeProvidersSection({
 
       <div className="flex w-full flex-1 flex-col items-center justify-center gap-8 py-10">
         {orderedItems.length > 0 ? (
-          <div className="grid min-w-0 w-full max-w-[592px] grid-cols-1 gap-4 md:grid-cols-2">
+          <div className="grid min-w-0 w-full max-w-[1200px] grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
             {orderedItems.map((runtime) => (
               <RuntimeCard
                 installResults={installResults}
@@ -714,6 +714,23 @@ function SetupStepContent({
         >
           Back
         </Button>
+
+        <p className="text-xs text-foreground/50">
+          More harnesses (Cursor, Grok, Amp&hellip;){" "}
+          {actions.navigateToAgentSettings ? (
+            <button
+              className="text-foreground/70 underline underline-offset-2 hover:text-foreground"
+              data-testid="onboarding-setup-more-harnesses"
+              onClick={actions.navigateToAgentSettings}
+              type="button"
+            >
+              Settings → Agents
+            </button>
+          ) : (
+            <span className="text-foreground/70">Settings → Agents</span>
+          )}{" "}
+          after setup.
+        </p>
       </OnboardingFooter>
     </OnboardingSlideTransition>
   );

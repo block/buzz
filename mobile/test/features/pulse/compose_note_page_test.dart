@@ -24,19 +24,31 @@ void main() {
     tags: const [],
   );
 
-  Widget buildTestable(Widget home) {
+  Widget buildTestable(
+    Widget home, {
+    TextScaler textScaler = TextScaler.noScaling,
+    String displayName = 'Alice',
+  }) {
     return ProviderScope(
       overrides: [
         userCacheProvider.overrideWith(
           () => _FakeUserCacheNotifier({
-            'alice_pk': const UserProfile(
+            'alice_pk': UserProfile(
               pubkey: 'alice_pk',
-              displayName: 'Alice',
+              displayName: displayName,
             ),
           }),
         ),
       ],
-      child: MaterialApp(theme: AppTheme.light(), home: home),
+      child: MaterialApp(
+        theme: AppTheme.light(),
+        home: Builder(
+          builder: (context) => MediaQuery(
+            data: MediaQuery.of(context).copyWith(textScaler: textScaler),
+            child: home,
+          ),
+        ),
+      ),
     );
   }
 
@@ -50,6 +62,53 @@ void main() {
     expect(find.text('Alice'), findsOneWidget); // author name in the row
     expect(find.textContaining('original note being replied to'), findsWidgets);
     expect(find.text('Reply'), findsOneWidget); // action button label
+  });
+
+  testWidgets('reply preview constrains its timestamp at large text sizes', (
+    tester,
+  ) async {
+    final oldReplyNote = UserNote(
+      id: 'old-note',
+      pubkey: 'alice_pk',
+      createdAt: DateTime.utc(2025, 9, 30, 12).millisecondsSinceEpoch ~/ 1000,
+      content: 'An older note',
+      tags: const [],
+    );
+
+    await tester.pumpWidget(
+      buildTestable(
+        ComposeNotePage(replyTo: oldReplyNote),
+        textScaler: const TextScaler.linear(2),
+      ),
+    );
+    await tester.pump();
+
+    final timestamp = tester.widget<Text>(find.text('Sep 30'));
+    expect(timestamp.maxLines, 1);
+    expect(timestamp.overflow, TextOverflow.ellipsis);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('gives the reply author unused timestamp width', (tester) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(320, 600);
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+    const displayName = 'A moderately long Pulse reply author';
+
+    await tester.pumpWidget(
+      buildTestable(
+        ComposeNotePage(replyTo: replyNote),
+        displayName: displayName,
+      ),
+    );
+    await tester.pump();
+
+    expect(tester.getSize(find.text(displayName)).width, greaterThan(150));
+    expect(find.text('2m'), findsOneWidget);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('new-note mode shows no reply preview', (tester) async {

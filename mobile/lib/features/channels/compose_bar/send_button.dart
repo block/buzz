@@ -27,13 +27,10 @@ class _SendButton extends StatelessWidget {
         ),
         padding: EdgeInsets.zero,
         icon: isSending
-            ? SizedBox(
-                width: 16,
-                height: 16,
-                child: CircularProgressIndicator(
-                  strokeWidth: 2,
-                  color: context.colors.onPrimary,
-                ),
+            ? BuzzLoadingIndicator(
+                size: 18,
+                color: context.colors.onPrimary,
+                semanticLabel: 'Sending message',
               )
             : Icon(
                 LucideIcons.arrowUp,

@@ -121,8 +121,10 @@ fn built_in_persona_records(now: &str) -> Vec<AgentDefinition> {
             name_pool: persona.name_pool.iter().map(|s| s.to_string()).collect(),
             is_builtin: true,
             is_active: persona.default_active,
+            shared: false,
             source_team: None,
             source_team_persona_slug: None,
+            catalog_source: None,
             env_vars: std::collections::BTreeMap::new(),
             respond_to: None,
             respond_to_allowlist: Vec::new(),
@@ -254,10 +256,7 @@ pub fn ensure_persona_is_active(
         .ok_or_else(|| format!("agent {persona_id} not found"))?;
 
     if !persona.is_active {
-        return Err(format!(
-            "{} is not in My Agents. Choose it from Agent Catalog first.",
-            persona.display_name
-        ));
+        return Err(format!("{} is not in My Agents.", persona.display_name));
     }
 
     Ok(())

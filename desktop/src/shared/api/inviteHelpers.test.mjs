@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   inviteErrorMessage,
+  isInviteExhaustedError,
   isInviteExpiredError,
   relayHttpFromWs,
 } from "./inviteHelpers.ts";
@@ -33,4 +34,10 @@ test("invite expiry sentinel is recognized without hiding other errors", () => {
     inviteErrorMessage("network unavailable"),
     "network unavailable",
   );
+});
+
+test("invite exhaustion sentinel is recognized distinctly from expiry", () => {
+  assert.equal(isInviteExhaustedError(new Error("invite_exhausted")), true);
+  assert.equal(isInviteExhaustedError(new Error("invite_expired")), false);
+  assert.equal(isInviteExhaustedError(new Error("invite_invalid")), false);
 });

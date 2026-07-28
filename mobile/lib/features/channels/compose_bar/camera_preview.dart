@@ -115,50 +115,44 @@ class _InlineCameraPreview extends HookConsumerWidget {
     }
 
     final activeController = controller.value;
-    return Container(
-      width: double.infinity,
-      clipBehavior: Clip.antiAlias,
-      decoration: BoxDecoration(
-        color: Colors.black,
-        borderRadius: BorderRadius.circular(Radii.dialog),
-      ),
-      foregroundDecoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(Radii.dialog),
-        border: Border.all(
-          color: Colors.black.withValues(alpha: 0.04),
-          width: 1,
-        ),
-      ),
-      child: AspectRatio(
-        aspectRatio: 4 / 3,
-        child: Stack(
-          fit: StackFit.expand,
-          children: [
-            if (activeController case final initialized?)
-              _CameraFeed(controller: initialized)
-            else
-              _CameraPlaceholder(
-                isInitializing: isInitializing.value,
-                message: error.value,
-              ),
-            if (activeController != null)
-              Align(
-                alignment: Alignment.bottomCenter,
-                child: Padding(
-                  padding: const EdgeInsets.all(Grid.twelve),
-                  child: _CameraCaptureButton(
-                    isPressed: isCapturing.value,
-                    onTap: capture,
-                  ),
+    final usesAndroidCameraLayout =
+        defaultTargetPlatform == TargetPlatform.android;
+    return ColoredBox(
+      color: Colors.black,
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          if (activeController case final initialized?)
+            _CameraFeed(controller: initialized)
+          else
+            _CameraPlaceholder(
+              isInitializing: isInitializing.value,
+              message: error.value,
+            ),
+          if (activeController != null)
+            Align(
+              alignment: Alignment.bottomCenter,
+              child: Padding(
+                padding: const EdgeInsets.all(Grid.twelve),
+                child: _CameraCaptureButton(
+                  isPressed: isCapturing.value,
+                  onTap: capture,
                 ),
               ),
-            Positioned(
-              top: Grid.xxs,
-              right: Grid.xxs,
-              child: _CameraCloseButton(onTap: onClose),
             ),
-          ],
-        ),
+          Positioned(
+            top: usesAndroidCameraLayout ? null : Grid.xxs,
+            left: usesAndroidCameraLayout ? Grid.twelve : null,
+            right: usesAndroidCameraLayout ? null : Grid.xxs,
+            bottom: usesAndroidCameraLayout
+                ? Grid.twelve + ((_cameraCaptureSize - _cameraBackSize) / 2)
+                : null,
+            child: _CameraCloseButton(
+              onTap: onClose,
+              emphasized: usesAndroidCameraLayout,
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -204,9 +198,10 @@ class _CameraPlaceholder extends StatelessWidget {
         child: Padding(
           padding: const EdgeInsets.all(Grid.sm),
           child: isInitializing
-              ? const CircularProgressIndicator(
+              ? const BuzzLoadingIndicator(
+                  size: 44,
                   color: Colors.white,
-                  strokeWidth: 2,
+                  semanticLabel: 'Starting camera',
                 )
               : Column(
                   mainAxisSize: MainAxisSize.min,
@@ -254,8 +249,8 @@ class _CameraCaptureButton extends StatelessWidget {
           duration: duration,
           curve: Curves.easeOutCubic,
           child: Container(
-            width: 64,
-            height: 64,
+            width: _cameraCaptureSize,
+            height: _cameraCaptureSize,
             decoration: BoxDecoration(
               color: Colors.white.withValues(alpha: 0.24),
               shape: BoxShape.circle,
@@ -277,26 +272,32 @@ class _CameraCaptureButton extends StatelessWidget {
 
 class _CameraCloseButton extends StatelessWidget {
   final VoidCallback onTap;
+  final bool emphasized;
 
-  const _CameraCloseButton({required this.onTap});
+  const _CameraCloseButton({required this.onTap, required this.emphasized});
 
   @override
   Widget build(BuildContext context) {
     return SizedBox.square(
-      dimension: 36,
+      dimension: emphasized ? _cameraBackSize : 36,
       child: IconButton(
         onPressed: onTap,
-        tooltip: 'Close camera',
+        tooltip: 'Back to attachment options',
         padding: EdgeInsets.zero,
         style: IconButton.styleFrom(
-          backgroundColor: Colors.black.withValues(alpha: 0.56),
+          backgroundColor: Colors.black.withValues(
+            alpha: emphasized ? 0.68 : 0.56,
+          ),
           foregroundColor: Colors.white,
         ),
-        icon: const Icon(LucideIcons.x, size: 18),
+        icon: Icon(LucideIcons.arrowLeft, size: emphasized ? 24 : 18),
       ),
     );
   }
 }
+
+const _cameraCaptureSize = 64.0;
+const _cameraBackSize = 44.0;
 
 String _cameraErrorMessage(Object error) {
   if (error is camera.CameraException) {

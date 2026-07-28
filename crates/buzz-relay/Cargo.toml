@@ -92,3 +92,4 @@ reqwest = { workspace = true }
 tokio-tungstenite = { workspace = true }
 futures = "0.3"
 flate2 = "1.1.9"
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
