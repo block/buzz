@@ -480,6 +480,8 @@ impl ChannelInfoResolver {
 }
 
 pub struct PromptContext {
+    /// Streaming policy for replies. Disabled by default.
+    pub stream_flush: crate::stream_flush::StreamFlushConfig,
     pub mcp_servers: Vec<McpServer>,
     pub initial_message: Option<String>,
     pub idle_timeout: Duration,
@@ -1879,6 +1881,41 @@ pub async fn run_prompt_task(
         None => prompt_sections.iter().map(String::as_str).collect(),
     };
 
+    // Streamed replies: attach a chunk sink for the duration of the prompt so
+    // the channel sees the answer being written instead of arriving whole.
+    //
+    // `stream_tx` is scope-local ON PURPOSE. Dropping it is the end-of-turn
+    // signal, so every exit below — success, cancel, idle timeout, agent exit,
+    // early return — flushes the tail without needing to remember to. Only
+    // channel turns stream; a heartbeat has no channel to write into.
+    let stream_handle = match (ctx.stream_flush.enabled, &source) {
+        (true, PromptSource::Channel(channel_id)) => {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+            let publisher = RelayStreamPublisher {
+                rest: ctx.rest_client.clone(),
+                channel_id: *channel_id,
+                thread_tags: batch
+                    .as_ref()
+                    .and_then(|b| b.events.last())
+                    .map(|be| crate::queue::parse_thread_tags(&be.event))
+                    .unwrap_or_default(),
+            };
+            let cfg = ctx.stream_flush;
+            agent.acp.set_stream_sink(Some(tx.clone()));
+            let join = tokio::spawn(async move {
+                crate::stream_flush::run_stream(rx, publisher, cfg, || {
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0)
+                })
+                .await
+            });
+            Some((tx, join))
+        }
+        _ => None,
+    };
+
     // When control_rx is Some (channel tasks), wrap the prompt in select! so
     // the main loop can cancel, interrupt, or rotate it. Heartbeats
     // (control_rx=None) take the simple await path — they are not controllable.
@@ -2045,6 +2082,19 @@ pub async fn run_prompt_task(
             }
         }
     };
+
+    // Turn is over: detach the sink and drop the sender so the streamer sees the
+    // channel close, performs its final flush, and exits. Awaiting the join
+    // means the complete reply is on the relay before the outcome is reported —
+    // otherwise a caller could observe "turn complete" against a message still
+    // missing its last edit.
+    if let Some((tx, join)) = stream_handle {
+        agent.acp.set_stream_sink(None);
+        drop(tx);
+        if let Err(e) = join.await {
+            tracing::debug!("stream task join failed: {e}");
+        }
+    }
 
     match prompt_result {
         Ok(stop_reason) => {
@@ -3706,6 +3756,69 @@ async fn clear_reactions(rest: crate::relay::RestClient, event_ids: Vec<String>)
     }
 }
 
+/// Publishes a streamed reply into a channel: one kind:9 post, then kind:40003
+/// edits against it.
+///
+/// Edits are deliberately unthreaded — they carry only the `e` tag identifying
+/// the message being replaced, so a stream never fans out into the thread.
+struct RelayStreamPublisher {
+    rest: crate::relay::RestClient,
+    channel_id: Uuid,
+    thread_tags: ThreadTags,
+}
+
+impl crate::stream_flush::StreamPublisher for RelayStreamPublisher {
+    async fn post(&mut self, body: String) -> Option<String> {
+        let thread_ref = self.thread_tags.root_event_id.as_deref().and_then(|root| {
+            let root_id = nostr::EventId::from_hex(root).ok()?;
+            let parent_id = self
+                .thread_tags
+                .parent_event_id
+                .as_deref()
+                .and_then(|p| nostr::EventId::from_hex(p).ok())
+                .unwrap_or(root_id);
+            Some(buzz_sdk::ThreadRef {
+                root_event_id: root_id,
+                parent_event_id: parent_id,
+            })
+        });
+        let builder =
+            buzz_sdk::build_message(self.channel_id, &body, thread_ref.as_ref(), &[], false, &[])
+                .ok()?;
+        let event = builder.sign_with_keys(&self.rest.keys).ok()?;
+        match tokio::time::timeout(Duration::from_secs(5), self.rest.submit_event(&event)).await {
+            Ok(Ok(_)) => Some(event.id.to_hex()),
+            Ok(Err(e)) => {
+                tracing::debug!(channel = %self.channel_id, "stream post failed: {e}");
+                None
+            }
+            Err(_) => {
+                tracing::debug!(channel = %self.channel_id, "stream post timed out");
+                None
+            }
+        }
+    }
+
+    async fn edit(&mut self, event_id: &str, body: String) {
+        let Ok(target) = nostr::EventId::from_hex(event_id) else {
+            return;
+        };
+        let Ok(builder) = buzz_sdk::build_edit(self.channel_id, target, &body) else {
+            return;
+        };
+        let Ok(event) = builder.sign_with_keys(&self.rest.keys) else {
+            return;
+        };
+        // Best effort: a dropped edit only costs freshness — the next edit, or
+        // the end-of-turn flush, carries the full text anyway.
+        match tokio::time::timeout(Duration::from_secs(5), self.rest.submit_event(&event)).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => tracing::debug!(channel = %self.channel_id, "stream edit failed: {e}"),
+            Err(_) => tracing::debug!(channel = %self.channel_id, "stream edit timed out"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5335,6 +5448,7 @@ mod tests {
     ) -> PromptContext {
         use crate::relay::RestClient;
         PromptContext {
+            stream_flush: crate::stream_flush::StreamFlushConfig::default(),
             mcp_servers: vec![],
             initial_message: None,
             idle_timeout: Duration::from_secs(60),

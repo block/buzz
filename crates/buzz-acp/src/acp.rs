@@ -172,6 +172,10 @@ pub struct AcpClient {
     observer_agent_index: Option<usize>,
     /// Best-effort context attached to raw ACP wire events.
     observer_context: ObserverContext,
+    /// Per-turn sink for `agent_message_chunk` text. Set by the turn driver when
+    /// streaming is enabled; `None` means chunks are logged and dropped, which
+    /// is the behaviour every deployment had before streaming existed.
+    stream_sink: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     /// Most recently observed `_meta.goose.activeRunId` from a
     /// `session/update` notification of kind `session_info_update`.
     ///
@@ -493,6 +497,7 @@ impl AcpClient {
             observer: None,
             observer_agent_index: None,
             observer_context: ObserverContext::default(),
+            stream_sink: None,
             active_run_id: None,
             steer_rx: None,
             goose_usage: UsageTracker::default(),
@@ -500,6 +505,15 @@ impl AcpClient {
     }
 
     /// Attach a local observer feed to this ACP client.
+    /// Attach (or clear) the per-turn streaming sink. Cleared between turns so a
+    /// stale sender can never receive a later turn's text.
+    pub(crate) fn set_stream_sink(
+        &mut self,
+        sink: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    ) {
+        self.stream_sink = sink;
+    }
+
     pub fn set_observer(&mut self, observer: Option<ObserverHandle>, agent_index: usize) {
         self.observer = observer;
         self.observer_agent_index = Some(agent_index);
@@ -1543,6 +1557,12 @@ impl AcpClient {
             "agent_message_chunk" => {
                 if let Some(text) = update["content"]["text"].as_str() {
                     tracing::info!(target: "acp::stream", "{text}");
+                    // Forward to the turn's streamer when one is attached. A
+                    // closed receiver is not an error worth failing a turn over
+                    // — the answer still lands via the normal path.
+                    if let Some(sink) = &self.stream_sink {
+                        let _ = sink.send(text.to_string());
+                    }
                 }
                 false
             }
