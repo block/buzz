@@ -154,10 +154,9 @@ struct OwnerCache {
     pubkey: Option<String>,
     /// author_hex → is_sibling (true = same owner, false = not)
     siblings: std::sync::Mutex<HashMap<String, bool>>,
-    /// author_hex → is_agent (NIP-OA auth tag present on kind:0).
-    /// Used by the followed-thread author policy (#2270 loop guard), not by
-    /// the security gate — same heuristic weight as prompt reply anchoring.
-    agent_flags: std::sync::Mutex<HashMap<String, bool>>,
+    /// Authors whose kind:0 contains a cryptographically valid NIP-OA
+    /// attestation. Negative/unknown results are never cached.
+    verified_agents: std::sync::Mutex<HashSet<String>>,
 }
 
 impl OwnerCache {
@@ -165,25 +164,23 @@ impl OwnerCache {
         Self {
             pubkey: initial,
             siblings: std::sync::Mutex::new(HashMap::new()),
-            agent_flags: std::sync::Mutex::new(HashMap::new()),
+            verified_agents: std::sync::Mutex::new(HashSet::new()),
         }
     }
 
-    /// Check the agent-flag cache. `None` = never looked up.
-    fn known_agent_flag(&self, author: &str) -> Option<bool> {
-        self.agent_flags
+    fn is_verified_agent(&self, author: &str) -> bool {
+        self.verified_agents
             .lock()
-            .ok()
-            .and_then(|map| map.get(author).copied())
+            .is_ok_and(|authors| authors.contains(author))
     }
 
-    /// Cache an agent-flag lookup result (capped like the sibling cache).
-    fn cache_agent_flag(&self, author: String, is_agent: bool) {
-        if let Ok(mut map) = self.agent_flags.lock() {
-            if map.len() >= 256 {
-                map.clear();
+    /// Cache a positively verified agent identity (capped like sibling state).
+    fn cache_verified_agent(&self, author: String) {
+        if let Ok(mut authors) = self.verified_agents.lock() {
+            if authors.len() >= 256 {
+                authors.clear();
             }
-            map.insert(author, is_agent);
+            authors.insert(author);
         }
     }
 
@@ -239,48 +236,122 @@ async fn is_owner_or_sibling(
     is_sibling
 }
 
-/// Is this author an agent (NIP-OA `auth` tag on their kind:0 profile)?
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FollowAuthorClass {
+    Human,
+    Agent,
+    Unknown,
+}
+
+/// Classify an author for the followed-thread anti-loop boundary.
 ///
-/// Used by the followed-thread author policy: an *unmentioned* event admitted
-/// only because its thread is followed must not fire a turn when its author
-/// is another agent, or two agents sharing a thread auto-continue each other
-/// indefinitely (the loop #2270 requires stay impossible). Presence/shape
-/// heuristic per [`pool::profile_event_is_agent`] — same weight as prompt
-/// reply anchoring; the security gate remains [`author_allowed`]. Unknown or
-/// unfetchable identities classify as human (fail open for visibility,
-/// matching `turn_is_human_facing`); explicit mentions are never affected.
-async fn author_is_agent(
+/// This path deliberately fails closed: only the configured human owner or a
+/// non-bot channel member is positively admitted as human. A valid NIP-OA
+/// attestation or the channel's `bot` role proves agenthood. Missing profiles,
+/// membership state, malformed events, and relay failures remain `Unknown` and
+/// therefore require an explicit mention under the default `humans` policy.
+async fn classify_follow_author(
     author: &str,
+    channel_id: Uuid,
     owner_cache: &OwnerCache,
     rest_client: &relay::RestClient,
-) -> bool {
-    if let Some(cached) = owner_cache.known_agent_flag(author) {
-        return cached;
+) -> FollowAuthorClass {
+    if owner_cache.get() == Some(author) {
+        return FollowAuthorClass::Human;
+    }
+    if owner_cache.is_verified_agent(author) {
+        return FollowAuthorClass::Agent;
     }
 
     let author_pk = match nostr::PublicKey::from_hex(author) {
         Ok(pk) => pk,
-        Err(_) => return false,
+        Err(_) => return FollowAuthorClass::Unknown,
     };
-    let filter = nostr::Filter::new()
+    let profile_filter = nostr::Filter::new()
         .kind(nostr::Kind::Metadata)
         .author(author_pk)
         .limit(1);
-
-    let is_agent =
-        match tokio::time::timeout(Duration::from_millis(2000), rest_client.query(&[filter])).await
+    if let Ok(Ok(resp)) = tokio::time::timeout(
+        Duration::from_millis(2000),
+        rest_client.query(&[profile_filter]),
+    )
+    .await
+    {
+        if resp
+            .as_array()
+            .and_then(|events| events.first())
+            .is_some_and(|event| profile_has_valid_agent_attestation(event, &author_pk))
         {
-            Ok(Ok(resp)) => resp
-                .as_array()
-                .and_then(|events| events.first())
-                .is_some_and(pool::profile_event_is_agent),
-            // Timeout/error — treat as human (fail open) but do NOT cache, so a
-            // transient relay hiccup can't pin an agent as human for the session.
-            _ => return false,
-        };
+            owner_cache.cache_verified_agent(author.to_string());
+            return FollowAuthorClass::Agent;
+        }
+    }
 
-    owner_cache.cache_agent_flag(author.to_string(), is_agent);
-    is_agent
+    use nostr::{Alphabet, SingleLetterTag};
+    let membership_filter = nostr::Filter::new()
+        .kind(nostr::Kind::Custom(
+            buzz_core::kind::KIND_NIP29_GROUP_MEMBERS as u16,
+        ))
+        .custom_tags(
+            SingleLetterTag::lowercase(Alphabet::D),
+            [channel_id.to_string()],
+        )
+        .limit(1);
+    let membership = match tokio::time::timeout(
+        Duration::from_millis(2000),
+        rest_client.query(&[membership_filter]),
+    )
+    .await
+    {
+        Ok(Ok(resp)) => resp,
+        _ => return FollowAuthorClass::Unknown,
+    };
+
+    membership
+        .as_array()
+        .and_then(|events| events.first())
+        .and_then(|event| member_role(event, author))
+        .map_or(FollowAuthorClass::Unknown, |role| {
+            if role == "bot" {
+                FollowAuthorClass::Agent
+            } else {
+                FollowAuthorClass::Human
+            }
+        })
+}
+
+fn profile_has_valid_agent_attestation(
+    event: &serde_json::Value,
+    agent_pubkey: &nostr::PublicKey,
+) -> bool {
+    event
+        .get("tags")
+        .and_then(|tags| tags.as_array())
+        .is_some_and(|tags| {
+            tags.iter().any(|tag| {
+                serde_json::to_string(tag).is_ok_and(|tag_json| {
+                    buzz_sdk::nip_oa::verify_auth_tag(&tag_json, agent_pubkey).is_ok()
+                })
+            })
+        })
+}
+
+fn member_role<'a>(event: &'a serde_json::Value, author: &str) -> Option<&'a str> {
+    event
+        .get("tags")?
+        .as_array()?
+        .iter()
+        .filter_map(|tag| tag.as_array())
+        .find(|parts| {
+            parts.first().and_then(|v| v.as_str()) == Some("p")
+                && parts
+                    .get(1)
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|pubkey| pubkey.eq_ignore_ascii_case(author))
+        })
+        .and_then(|parts| parts.get(3))
+        .and_then(|role| role.as_str())
+        .filter(|role| matches!(*role, "owner" | "admin" | "member" | "guest" | "bot"))
 }
 
 /// Whether a followed-thread admission should be suppressed for this author.
@@ -292,9 +363,11 @@ async fn author_is_agent(
 fn suppress_follow_admission(
     admitted_via_follow: bool,
     policy: config::FollowThreadAuthors,
-    author_is_agent: bool,
+    author_class: FollowAuthorClass,
 ) -> bool {
-    admitted_via_follow && matches!(policy, config::FollowThreadAuthors::Humans) && author_is_agent
+    admitted_via_follow
+        && matches!(policy, config::FollowThreadAuthors::Humans)
+        && author_class != FollowAuthorClass::Human
 }
 
 /// Inbound author gate decision: does this author's event fire a turn?
@@ -2316,22 +2389,28 @@ async fn tokio_main() -> Result<()> {
                             // lookup runs only on follow-admitted events.
                             if admitted_via_follow {
                                 let author = buzz_event.event.pubkey.to_hex();
-                                let is_agent_author = match config.follow_thread_authors {
+                                let author_class = match config.follow_thread_authors {
                                     config::FollowThreadAuthors::Humans => {
-                                        author_is_agent(&author, &owner_cache, &ctx.rest_client)
-                                            .await
+                                        classify_follow_author(
+                                            &author,
+                                            buzz_event.channel_id,
+                                            &owner_cache,
+                                            &ctx.rest_client,
+                                        )
+                                        .await
                                     }
-                                    config::FollowThreadAuthors::All => false,
+                                    config::FollowThreadAuthors::All => FollowAuthorClass::Human,
                                 };
                                 if suppress_follow_admission(
                                     admitted_via_follow,
                                     config.follow_thread_authors,
-                                    is_agent_author,
+                                    author_class,
                                 ) {
                                     tracing::debug!(
                                         channel_id = %buzz_event.channel_id,
                                         author = %author,
-                                        "followed-thread admission suppressed for agent author"
+                                        ?author_class,
+                                        "followed-thread admission suppressed for non-human author"
                                     );
                                     continue;
                                 }
@@ -4573,7 +4652,7 @@ mod follow_author_policy_tests {
         assert!(!suppress_follow_admission(
             true,
             FollowThreadAuthors::Humans,
-            false
+            FollowAuthorClass::Human
         ));
     }
 
@@ -4585,7 +4664,16 @@ mod follow_author_policy_tests {
         assert!(suppress_follow_admission(
             true,
             FollowThreadAuthors::Humans,
-            true
+            FollowAuthorClass::Agent
+        ));
+    }
+
+    #[test]
+    fn unknown_unmentioned_reply_in_followed_root_is_dropped() {
+        assert!(suppress_follow_admission(
+            true,
+            FollowThreadAuthors::Humans,
+            FollowAuthorClass::Unknown
         ));
     }
 
@@ -4596,12 +4684,12 @@ mod follow_author_policy_tests {
         assert!(!suppress_follow_admission(
             false,
             FollowThreadAuthors::Humans,
-            true
+            FollowAuthorClass::Agent
         ));
         assert!(!suppress_follow_admission(
             false,
             FollowThreadAuthors::All,
-            true
+            FollowAuthorClass::Agent
         ));
     }
 
@@ -4610,7 +4698,7 @@ mod follow_author_policy_tests {
         assert!(!suppress_follow_admission(
             true,
             FollowThreadAuthors::All,
-            true
+            FollowAuthorClass::Agent
         ));
     }
 
@@ -4622,9 +4710,52 @@ mod follow_author_policy_tests {
         // A ever replied anyway, B's harness would face the identical
         // decision — also suppressed. Under the default policy the cycle
         // cannot begin from either side.
-        let a_fires = !suppress_follow_admission(true, FollowThreadAuthors::Humans, true);
-        let b_fires = !suppress_follow_admission(true, FollowThreadAuthors::Humans, true);
+        let a_fires =
+            !suppress_follow_admission(true, FollowThreadAuthors::Humans, FollowAuthorClass::Agent);
+        let b_fires =
+            !suppress_follow_admission(true, FollowThreadAuthors::Humans, FollowAuthorClass::Agent);
         assert!(!a_fires && !b_fires);
+    }
+
+    #[test]
+    fn profile_agent_classification_requires_a_valid_attestation() {
+        let owner = nostr::Keys::generate();
+        let agent = nostr::Keys::generate();
+        let auth = buzz_sdk::nip_oa::compute_auth_tag(&owner, &agent.public_key(), "")
+            .expect("compute auth tag");
+        let auth: serde_json::Value = serde_json::from_str(&auth).expect("parse auth tag");
+
+        let valid_profile = serde_json::json!({"tags": [auth]});
+        assert!(profile_has_valid_agent_attestation(
+            &valid_profile,
+            &agent.public_key()
+        ));
+
+        let malformed_profile = serde_json::json!({
+            "tags": [["auth", owner.public_key().to_hex(), "", "not-a-signature"]]
+        });
+        assert!(!profile_has_valid_agent_attestation(
+            &malformed_profile,
+            &agent.public_key()
+        ));
+    }
+
+    #[test]
+    fn membership_role_requires_a_known_role_for_the_exact_author() {
+        let author = "aa";
+        let event = serde_json::json!({
+            "tags": [
+                ["d", "channel"],
+                ["p", "bb", "", "bot"],
+                ["p", author, "", "member"]
+            ]
+        });
+        assert_eq!(member_role(&event, author), Some("member"));
+        assert_eq!(member_role(&event, "bb"), Some("bot"));
+        assert_eq!(member_role(&event, "cc"), None);
+
+        let unknown_role = serde_json::json!({"tags": [["p", author, "", "robot"]]});
+        assert_eq!(member_role(&unknown_role, author), None);
     }
 }
 

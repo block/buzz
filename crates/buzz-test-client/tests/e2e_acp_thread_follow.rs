@@ -1,14 +1,15 @@
 //! End-to-end test for buzz-acp thread-following (#2270) against a live relay.
 //!
 //! Drives the real `buzz-acp` binary with a stub ACP agent (`stub-acp-agent`,
-//! built from this crate) and asserts turn dispatch across the four cases from
-//! the #2375 review:
+//! built from this crate) and asserts the user-visible scenarios from the
+//! #2375 review:
 //!
-//! 1. explicit @mention → one turn (thread becomes followed);
-//! 2. untagged human reply in the followed thread → one more turn;
-//! 3. untagged agent-authored reply in the followed thread → no turn
+//! 1. explicit @mention → exactly one turn (thread becomes followed);
+//! 2. agent publishes a reply in that thread;
+//! 3. untagged human reply to the agent → exactly one more turn;
+//! 4. untagged agent-authored reply in the followed thread → no turn
 //!    (followed-thread author policy, default `humans`);
-//! 4. untagged top-level message → no turn (mention gate intact).
+//! 5. untagged top-level message → no turn.
 //!
 //! Turn observation: the stub appends a line to `STUB_TURN_LOG` per
 //! `session/prompt`. Participation is recorded by the harness at dispatch, so
@@ -109,6 +110,7 @@ async fn send_channel_message(
     content: &str,
     mention: Option<&Keys>,
     thread_root: Option<&str>,
+    parent_event: Option<&str>,
 ) -> String {
     let mut tags = vec![Tag::parse(["h", &channel.to_string()]).unwrap()];
     if let Some(m) = mention {
@@ -116,6 +118,9 @@ async fn send_channel_message(
     }
     if let Some(root) = thread_root {
         tags.push(Tag::parse(["e", root, "", "root"]).unwrap());
+    }
+    if let Some(parent) = parent_event {
+        tags.push(Tag::parse(["e", parent, "", "reply"]).unwrap());
     }
     let event = EventBuilder::new(Kind::Custom(9), content)
         .tags(tags)
@@ -132,18 +137,30 @@ fn turn_count(log: &std::path::Path) -> usize {
         .unwrap_or(0)
 }
 
-/// Deadline-poll until `turn_count` reaches `expected` (same shape as the
-/// scheduler-push waits in e2e_event_reminder.rs).
-async fn await_turns(log: &std::path::Path, expected: usize, deadline: Duration) {
+/// Wait for exactly `delta` new turns, then keep the count stable long enough
+/// to catch duplicate dispatches from the same event.
+async fn await_exact_turn_delta(
+    log: &std::path::Path,
+    before: usize,
+    delta: usize,
+    deadline: Duration,
+) {
+    let expected = before + delta;
     let start = Instant::now();
     while start.elapsed() < deadline {
-        if turn_count(log) >= expected {
+        let current = turn_count(log);
+        assert!(
+            current <= expected,
+            "event dispatched too many turns: saw {current}, expected exactly {expected}"
+        );
+        if current == expected {
+            assert_no_new_turns(log, expected, Duration::from_secs(2)).await;
             return;
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
     panic!(
-        "expected {expected} dispatched turn(s) within {deadline:?}, saw {}",
+        "expected exactly {expected} dispatched turn(s) within {deadline:?}, saw {}",
         turn_count(log)
     );
 }
@@ -153,9 +170,9 @@ async fn assert_no_new_turns(log: &std::path::Path, expected: usize, window: Dur
     let start = Instant::now();
     while start.elapsed() < window {
         let n = turn_count(log);
-        assert!(
-            n <= expected,
-            "unexpected turn dispatched: saw {n}, expected {expected}"
+        assert_eq!(
+            n, expected,
+            "unexpected turn count: saw {n}, expected {expected}"
         );
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
@@ -181,16 +198,16 @@ async fn thread_follow_admits_humans_and_suppresses_agents() {
     add_member(&human, channel, &agent).await;
     add_member(&human, channel, &other_agent).await;
 
-    // Publish a kind:0 for the second agent carrying the NIP-OA `auth` tag
-    // shape (4 elements) — the marker `profile_event_is_agent` classifies on.
+    // Publish a kind:0 with a cryptographically valid NIP-OA attestation for
+    // the second agent. The default humans-only policy must suppress it.
+    let auth_tag_json = buzz_sdk::nip_oa::compute_auth_tag(&human, &other_agent.public_key(), "")
+        .expect("compute agent auth tag");
+    let auth_tag_parts: Vec<String> =
+        serde_json::from_str(&auth_tag_json).expect("parse agent auth tag");
     let profile = EventBuilder::new(Kind::Metadata, r#"{"name":"other-agent"}"#)
-        .tags(vec![Tag::parse([
-            "auth",
-            &human.public_key().to_hex(),
-            "",
-            "e2e-attestation-placeholder",
+        .tags(vec![
+            Tag::parse(auth_tag_parts).expect("build agent auth tag")
         ])
-        .unwrap()])
         .sign_with_keys(&other_agent)
         .unwrap();
     post_event(&profile).await;
@@ -210,6 +227,7 @@ async fn thread_follow_admits_humans_and_suppresses_agents() {
             env!("CARGO_BIN_EXE_stub-acp-agent"),
         )
         .env("BUZZ_ACP_RESPOND_TO", "anyone")
+        .env("BUZZ_ACP_AGENT_OWNER", human.public_key().to_hex())
         .env("BUZZ_ACP_HEARTBEAT_INTERVAL", "0")
         .env("BUZZ_ACP_AGENTS", "1")
         .env("STUB_TURN_LOG", &turn_log)
@@ -235,22 +253,40 @@ async fn thread_follow_admits_humans_and_suppresses_agents() {
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
 
-    // 1. Explicit mention → one turn; the thread root (= mention id) becomes followed.
-    let mention_id = send_channel_message(&human, channel, "@agent ping", Some(&agent), None).await;
-    await_turns(&turn_log, 1, Duration::from_secs(30)).await;
+    // 1. Explicit mention → exactly one turn; the mention id becomes the root.
+    let before = turn_count(&turn_log);
+    let mention_id =
+        send_channel_message(&human, channel, "@agent ping", Some(&agent), None, None).await;
+    await_exact_turn_delta(&turn_log, before, 1, Duration::from_secs(30)).await;
 
-    // 2. Untagged human reply in the followed thread → a second turn.
+    // 2. Publish the agent's visible reply, then verify ignore-self prevents a
+    // second turn. The next human message replies to this event, not merely to
+    // an abstract dispatch record.
+    let agent_reply_id = send_channel_message(
+        &agent,
+        channel,
+        "agent reply",
+        None,
+        Some(&mention_id),
+        Some(&mention_id),
+    )
+    .await;
+    assert_no_new_turns(&turn_log, before + 1, Duration::from_secs(2)).await;
+
+    // 3. Untagged human reply to the agent → exactly one additional turn.
+    let before_follow_up = turn_count(&turn_log);
     send_channel_message(
         &human,
         channel,
         "untagged follow-up",
         None,
         Some(&mention_id),
+        Some(&agent_reply_id),
     )
     .await;
-    await_turns(&turn_log, 2, Duration::from_secs(30)).await;
+    await_exact_turn_delta(&turn_log, before_follow_up, 1, Duration::from_secs(30)).await;
 
-    // 3. Untagged agent-authored reply in the followed thread → suppressed.
+    // 4. Untagged agent-authored reply in the followed thread → suppressed.
     //    respond-to=anyone admits the author, so the followed-thread author
     //    policy is the only gate exercised here.
     send_channel_message(
@@ -259,16 +295,17 @@ async fn thread_follow_admits_humans_and_suppresses_agents() {
         "untagged agent interjection",
         None,
         Some(&mention_id),
+        Some(&agent_reply_id),
     )
     .await;
     assert_no_new_turns(&turn_log, 2, Duration::from_secs(10)).await;
     let log = std::fs::read_to_string(&harness_log).unwrap_or_default();
     assert!(
-        log.contains("followed-thread admission suppressed for agent author"),
+        log.contains("followed-thread admission suppressed for non-human author"),
         "expected suppression log line; harness log:\n{log}"
     );
 
-    // 4. Untagged top-level message → no turn (mention gate intact).
-    send_channel_message(&human, channel, "no mention here", None, None).await;
+    // 5. Untagged top-level message → no turn (mention gate intact).
+    send_channel_message(&human, channel, "no mention here", None, None, None).await;
     assert_no_new_turns(&turn_log, 2, Duration::from_secs(10)).await;
 }

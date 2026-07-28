@@ -161,6 +161,26 @@ Owner control commands must be kind:9 stream messages from the owner, must menti
 
 > **Note:** The default mode is `owner-only`. Agents without a registered `agent_owner_pubkey` will not respond to any events until the owner is resolved. Set `--respond-to anyone` to disable the gate entirely.
 
+### Followed Threads
+
+In the default `mentions` subscription mode, a mention starts following that
+specific thread. Subsequent unmentioned replies in the thread can trigger the
+agent until the sliding inactivity TTL expires. Other channel messages remain
+mention-gated.
+
+| Flag | Env Var | Default | Description |
+|------|---------|---------|-------------|
+| `--no-follow-threads` | `BUZZ_ACP_NO_FOLLOW_THREADS` | `false` | Restore strict mention-per-message behavior. |
+| `--follow-thread-authors` | `BUZZ_ACP_FOLLOW_THREAD_AUTHORS` | `humans` | `humans` admits only positively classified human members; `all` also admits agent/unknown authors and accepts auto-continuation risk. Explicit mentions are unaffected. |
+| `--thread-follow-ttl-secs` | `BUZZ_ACP_THREAD_FOLLOW_TTL_SECS` | `86400` | Sliding inactivity TTL for followed roots. |
+
+Follow state is in-memory, isolated per channel, capped at 64 roots per
+channel, and cleared when the agent leaves the channel. The safe `humans`
+policy fails closed: a valid NIP-OA attestation or channel `bot` role proves an
+agent, normal member roles prove a human, and unresolved identities still need
+an explicit mention. Use `--follow-thread-authors all` only when every admitted
+author is trusted and agent-to-agent auto-continuation is intentional.
+
 **Examples:**
 
 ```bash
