@@ -92,6 +92,76 @@ test("personaManagedAgentUpdate syncs edited persona identity to linked agent", 
   });
 });
 
+test("personaManagedAgentUpdate syncs edited behavior to the linked instance", () => {
+  const allowlisted = persona({
+    respondTo: "allowlist",
+    respondToAllowlist: ["a".repeat(64)],
+    parallelism: 4,
+  });
+  const anyone = persona({
+    respondTo: "anyone",
+    respondToAllowlist: [],
+    parallelism: 8,
+  });
+
+  assert.deepEqual(
+    personaManagedAgentUpdate(
+      agent({
+        name: anyone.displayName,
+        systemPrompt: anyone.systemPrompt,
+        model: anyone.model,
+        envVars: anyone.envVars,
+        respondTo: "allowlist",
+        respondToAllowlist: ["a".repeat(64)],
+        parallelism: 4,
+      }),
+      anyone,
+      { previousPersona: allowlisted },
+    ),
+    {
+      pubkey: "deadbeef".repeat(8),
+      respondTo: "anyone",
+      respondToAllowlist: [],
+      parallelism: 8,
+    },
+  );
+});
+
+test("personaManagedAgentUpdate does not overwrite behavior on unrelated edits", () => {
+  assert.deepEqual(
+    personaManagedAgentUpdate(
+      agent({
+        respondTo: "allowlist",
+        respondToAllowlist: ["b".repeat(64)],
+        parallelism: 2,
+      }),
+      persona({
+        respondTo: "owner-only",
+        respondToAllowlist: [],
+        parallelism: 4,
+      }),
+      {
+        previousPersona: persona({
+          displayName: "Fizz",
+          systemPrompt: "Old prompt",
+          model: "old-model",
+          envVars: { OLD_KEY: "1" },
+          respondTo: "owner-only",
+          respondToAllowlist: [],
+          parallelism: 4,
+        }),
+      },
+    ),
+    {
+      pubkey: "deadbeef".repeat(8),
+      name: "Fizz Prime",
+      systemPrompt: "New prompt",
+      model: "new-model",
+      envVars: { NEW_KEY: "2" },
+    },
+  );
+});
+
 test("personaManagedAgentUpdate skips unrelated or unchanged agents", () => {
   assert.equal(
     personaManagedAgentUpdate(agent({ personaId: "persona-2" }), persona()),

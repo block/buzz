@@ -15,6 +15,7 @@ import {
   useCreatePersonaMutation,
   useManagedAgentsQuery,
   usePersonasQuery,
+  useUpdateManagedAgentMutation,
   useUpdatePersonaMutation,
 } from "./hooks";
 import {
@@ -24,6 +25,10 @@ import {
 } from "./lib/instanceInputForDefinition";
 import { useCreatedAgentChannelAttachment } from "./useCreatedAgentChannelAttachment";
 import { classifyAgentManagementOrigin } from "./agentManagementBuffer";
+import {
+  linkedInstanceForPersonaRequest,
+  personaBehaviorManagedAgentPatch,
+} from "./lib/personaBehaviorManagedAgentPatch";
 import { useChannelsQuery } from "@/features/channels/hooks";
 import { resolveManagedAgentAvatarUrl } from "./ui/managedAgentAvatar";
 import type { AgentCreateIntent } from "./ui/agentCreateIntent";
@@ -65,6 +70,7 @@ export function useAgentManagement() {
   const runtimesQuery = useAcpRuntimesQuery({ enabled: true });
   const createPersonaMutation = useCreatePersonaMutation();
   const updatePersonaMutation = useUpdatePersonaMutation();
+  const updateManagedAgentMutation = useUpdateManagedAgentMutation();
   const createAgentMutation = useCreateManagedAgentMutation();
   const [request, setRequest] = React.useState<AgentManagementRequest | null>(
     null,
@@ -155,6 +161,7 @@ export function useAgentManagement() {
   const isPending =
     createPersonaMutation.isPending ||
     updatePersonaMutation.isPending ||
+    updateManagedAgentMutation.isPending ||
     createAgentMutation.isPending;
 
   function assertAgentCanActFromOrigin(channelId: string) {
@@ -244,7 +251,25 @@ export function useAgentManagement() {
     setError(null);
     try {
       assertAgentCanActFromOrigin(request.request.channelId);
-      await updatePersonaMutation.mutateAsync(input);
+      const updatedPersona = await updatePersonaMutation.mutateAsync(input);
+      const behaviorPatch = personaBehaviorManagedAgentPatch(
+        currentPersona,
+        updatedPersona,
+      );
+      if (behaviorPatch) {
+        const linkedInstance = linkedInstanceForPersonaRequest(
+          managedAgentsQuery.data ?? [],
+          updatedPersona.id,
+          request.request.agentName,
+          sourceAgentPubkey.current,
+        );
+        if (linkedInstance) {
+          await updateManagedAgentMutation.mutateAsync({
+            pubkey: linkedInstance.pubkey,
+            ...behaviorPatch,
+          });
+        }
+      }
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: personasQueryKey }),
         queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey }),

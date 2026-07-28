@@ -1,3 +1,4 @@
+import { personaBehaviorManagedAgentPatch } from "@/features/agents/lib/personaBehaviorManagedAgentPatch";
 import * as React from "react";
 import type {
   AcpRuntimeCatalogEntry,
@@ -289,6 +290,19 @@ export function personaManagedAgentUpdate(
 
   if (!stringRecordEqual(persona.envVars, agent.envVars)) {
     input.envVars = persona.envVars;
+    hasChanges = true;
+  }
+
+  const behaviorPatch = personaBehaviorManagedAgentPatch(
+    options.previousPersona,
+    persona,
+  );
+  if (behaviorPatch) {
+    // Profile Edit is the only ordinary UI path to the definition editor for a
+    // persona-linked instance. Mirror an explicitly edited behavior group onto
+    // that selected instance; otherwise Save would update only the definition
+    // and leave its running inbound gate/parallelism unchanged.
+    Object.assign(input, behaviorPatch);
     hasChanges = true;
   }
 
