@@ -160,49 +160,21 @@ pub async fn cmd_set_profile(
         ));
     }
 
-    // Read-merge-write: fetch current profile, merge in the new fields, then sign.
+    // Read-merge-write: kind:0 is replaceable, so the event published here is
+    // the entire profile. Fetch the current content and let the SDK merge the
+    // caller's fields over it — fields without a CLI flag (`name`) and fields
+    // Buzz does not model (`bot`, `website`, `banner`, `lud16`, …) all carry
+    // forward instead of being silently deleted.
     let current = fetch_current_profile(client).await?;
-
-    // Merge: caller-supplied fields win; fall back to current profile values.
-    let merged_name = display_name
-        .map(|s| s.to_string())
-        .or_else(|| {
-            current
-                .get("display_name")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        })
-        .or_else(|| {
-            current
-                .get("name")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        });
-    let merged_picture = avatar_url.map(|s| s.to_string()).or_else(|| {
-        current
-            .get("picture")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-    });
-    let merged_about = about.map(|s| s.to_string()).or_else(|| {
-        current
-            .get("about")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-    });
-    let merged_nip05 = nip05_handle.map(|s| s.to_string()).or_else(|| {
-        current
-            .get("nip05")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-    });
+    let current_json = serde_json::Value::Object(current).to_string();
 
     let builder = buzz_sdk::build_profile(
-        merged_name.as_deref(),
-        None, // `name` field (username) — not exposed by CLI
-        merged_picture.as_deref(),
-        merged_about.as_deref(),
-        merged_nip05.as_deref(),
+        Some(&current_json),
+        display_name,
+        None, // `name` (username) has no CLI flag; the merge carries it forward
+        avatar_url,
+        about,
+        nip05_handle,
     )
     .map_err(|e| CliError::Other(format!("build_profile failed: {e}")))?;
 

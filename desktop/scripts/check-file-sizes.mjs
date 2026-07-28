@@ -420,16 +420,6 @@ const overrides = new Map([
   // migration/materialize.rs; ratchet held at 1110.
   ["src-tauri/src/migration_tests.rs", 1110],
   ["src-tauri/src/nostr_convert.rs", 1126],
-  // degraded-network resilience: relay.rs grew past 1000 with the addition of
-  // relay_error_message hint-capping (oversized-hint test via loopback TCP) and
-  // the relay_admission freshness-verification test. The loopback mock was
-  // hardened (std::net + request-read-before-write) adding ~10 lines.
-  // Queued to split test helpers to relay/tests.rs.
-  // +30 (1047 -> 1077): agents-everywhere pair re-key — query_relay_at_with_keys
-  // (NIP-98 signed /query with explicit agent keys + optional x-auth-tag) for
-  // bounded-auth agent relay-membership discovery. Load-bearing; queued to
-  // split alongside the test-helper split.
-  ["src-tauri/src/relay.rs", 1077],
   // degraded-network resilience: visibleChannelId field + getter/setter, NOTICE
   // handler for relay back-pressure, and rate-limit gate imports add ~74 lines
   // of load-bearing degraded-network recovery code. Queued to split.

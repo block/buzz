@@ -56,28 +56,19 @@ pub async fn update_profile(
     )
     .await?;
 
-    // Pull the current content as a JSON object so we can merge with
-    // the caller's overrides.
-    let current: Value = prior_events
-        .first()
-        .and_then(|ev| serde_json::from_str::<Value>(&ev.content).ok())
-        .unwrap_or(Value::Null);
+    // Merge the caller's overrides onto the current published content so
+    // fields this command does not model (`bot`, `website`, `banner`,
+    // `lud16`, …) survive the rebuild.
+    let current_content = prior_events.first().map(|ev| ev.content.as_str());
 
-    let dn = display_name
-        .as_deref()
-        .or_else(|| current.get("display_name").and_then(Value::as_str));
-    let name = current.get("name").and_then(Value::as_str);
-    let picture = avatar_url
-        .as_deref()
-        .or_else(|| current.get("picture").and_then(Value::as_str));
-    let ab = about
-        .as_deref()
-        .or_else(|| current.get("about").and_then(Value::as_str));
-    let nip05 = nip05_handle
-        .as_deref()
-        .or_else(|| current.get("nip05").and_then(Value::as_str));
-
-    let builder = events::build_profile(dn, name, picture, ab, nip05)?;
+    let builder = events::build_profile(
+        current_content,
+        display_name.as_deref(),
+        None, // `name` — not exposed here; the merge carries it forward
+        avatar_url.as_deref(),
+        about.as_deref(),
+        nip05_handle.as_deref(),
+    )?;
     submit_event(builder, &state).await?;
 
     // Re-fetch to return canonical profile.
@@ -136,7 +127,7 @@ pub async fn update_profile_at_relay(
         return Err("profile avatar changed before deferred save".to_string());
     }
 
-    let builder = build_deferred_profile_event(&current, &avatar_url, prior_event)?;
+    let builder = build_deferred_profile_event(&avatar_url, prior_event)?;
     submit_event_at_with_keys(builder, &state, &api_base_url, &signer).await?;
 
     let events = query_relay_at_with_keys(&state, &api_base_url, &[filter], &signer, None).await?;
@@ -148,17 +139,20 @@ pub async fn update_profile_at_relay(
 }
 
 fn build_deferred_profile_event(
-    current: &Value,
     avatar_url: &str,
     prior_event: Option<&nostr::Event>,
 ) -> Result<nostr::EventBuilder, String> {
-    let display_name = current.get("display_name").and_then(Value::as_str);
-    let name = current.get("name").and_then(Value::as_str);
-    let about = current.get("about").and_then(Value::as_str);
-    let nip05 = current.get("nip05").and_then(Value::as_str);
+    // Read-merge-write, same as the other kind:0 call sites: hand the currently
+    // published content to the merge rather than re-listing the fields this path
+    // happens to model. Previously this rebuilt the event from four hand-copied
+    // keys, so any other field in the author's kind:0 (`bot`, `website`,
+    // `banner`, `lud16`, …) was dropped on every deferred-avatar save — the same
+    // data loss this change fixes elsewhere. `None` for the non-avatar fields
+    // carries their published values forward untouched.
+    let current_content = prior_event.map(|event| event.content.as_str());
 
     Ok(
-        events::build_profile(display_name, name, Some(avatar_url), about, nip05)?
+        events::build_profile(current_content, None, None, Some(avatar_url), None, None)?
             .custom_created_at(monotonic_created_at(
                 prior_event.map(|event| event.created_at.as_secs() as i64),
             )),
@@ -451,21 +445,70 @@ mod tests {
         .sign_with_keys(&keys)
         .expect("sign prior profile");
 
-        let builder = build_deferred_profile_event(
-            &serde_json::json!({"display_name": "Larry"}),
-            "https://example.com/avatar.png",
-            Some(&prior_event),
-        )
-        .expect("build deferred profile");
+        let builder =
+            build_deferred_profile_event("https://example.com/avatar.png", Some(&prior_event))
+                .expect("build deferred profile");
         let event = builder
             .sign_with_keys(&keys)
             .expect("sign deferred profile");
 
         assert_eq!(event.created_at.as_secs(), prior_created_at + 1);
-        assert_eq!(
-            serde_json::from_str::<Value>(&event.content).unwrap()["picture"],
-            "https://example.com/avatar.png"
-        );
+        let content = serde_json::from_str::<Value>(&event.content).unwrap();
+        assert_eq!(content["picture"], "https://example.com/avatar.png");
+        // The merge carries the published name forward rather than the caller
+        // re-supplying it.
+        assert_eq!(content["display_name"], "Larry");
+    }
+
+    #[test]
+    fn deferred_profile_save_preserves_unmodeled_profile_fields() {
+        // The deferred-avatar path used to rebuild kind:0 from four hand-copied
+        // keys, so anything else in the author's profile was dropped every time
+        // an avatar save was deferred. It now routes the published content
+        // through the same merge as the other call sites; this pins that so the
+        // hand-copying cannot come back.
+        let keys = nostr::Keys::generate();
+        let prior_event = nostr::EventBuilder::new(
+            nostr::Kind::Metadata,
+            serde_json::json!({
+                "display_name": "Larry",
+                "name": "larry",
+                "about": "builder",
+                "nip05": "larry@example.com",
+                "picture": "https://example.com/old.png",
+                // fields no profile command models
+                "bot": true,
+                "website": "https://larry.example",
+                "banner": "https://example.com/banner.png",
+                "lud16": "larry@getalby.example",
+            })
+            .to_string(),
+        )
+        .sign_with_keys(&keys)
+        .expect("sign prior profile");
+
+        let event = build_deferred_profile_event("https://example.com/new.png", Some(&prior_event))
+            .expect("build deferred profile")
+            .sign_with_keys(&keys)
+            .expect("sign deferred profile");
+
+        let content = serde_json::from_str::<Value>(&event.content).unwrap();
+        assert_eq!(content["picture"], "https://example.com/new.png");
+        for (key, expected) in [
+            ("display_name", serde_json::json!("Larry")),
+            ("name", serde_json::json!("larry")),
+            ("about", serde_json::json!("builder")),
+            ("nip05", serde_json::json!("larry@example.com")),
+            ("bot", serde_json::json!(true)),
+            ("website", serde_json::json!("https://larry.example")),
+            (
+                "banner",
+                serde_json::json!("https://example.com/banner.png"),
+            ),
+            ("lud16", serde_json::json!("larry@getalby.example")),
+        ] {
+            assert_eq!(content[key], expected, "{key} was dropped on deferred save");
+        }
     }
 
     #[test]
