@@ -72,8 +72,33 @@
           "type": "array",
           "items": { "type": "string" }
         },
-        "ephemeralTtlOverride": { "type": "integer", "minimum": 0 }
+        "ephemeralTtlOverride": { "type": "integer", "minimum": 0 },
+        "command": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Optional relay container entrypoint override. Empty preserves the image default."
+        },
+        "args": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Optional relay container arguments override. Empty preserves the image default."
+        },
+        "extraVolumeMounts": {
+          "type": "array",
+          "items": { "type": "object" },
+          "description": "Raw Kubernetes volumeMount fragments appended to the relay container."
+        }
       }
+    },
+    "extraInitContainers": {
+      "type": "array",
+      "items": { "type": "object" },
+      "description": "Raw Kubernetes init-container fragments appended to the relay Pod."
+    },
+    "extraVolumes": {
+      "type": "array",
+      "items": { "type": "object" },
+      "description": "Raw Kubernetes volume fragments appended to the relay Pod."
     },
     "service": {
       "type": "object",
