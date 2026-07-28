@@ -10,10 +10,10 @@ import {
 
 import {
   DEFAULT_LANG,
-  LANG_STORAGE_KEY,
   type Lang,
   type MsgKey,
-  isLang,
+  loadStoredLang,
+  persistLang,
   translate,
 } from "./messages";
 
@@ -25,24 +25,14 @@ type I18nContextValue = {
 
 const I18nContext = createContext<I18nContextValue | undefined>(undefined);
 
-function readStoredLang(): Lang {
-  try {
-    const stored = window.localStorage.getItem(LANG_STORAGE_KEY);
-    if (isLang(stored)) {
-      return stored;
-    }
-  } catch {
-    // ignore quota / private mode
-  }
-  return DEFAULT_LANG;
-}
-
 function applyDocumentLang(lang: Lang) {
   document.documentElement.lang = lang === "zh" ? "zh-CN" : "en";
 }
 
 export function I18nProvider({ children }: { children: ReactNode }) {
-  const [lang, setLangState] = useState<Lang>(() => readStoredLang());
+  const [lang, setLangState] = useState<Lang>(() =>
+    loadStoredLang(window.localStorage),
+  );
 
   useEffect(() => {
     applyDocumentLang(lang);
@@ -50,11 +40,7 @@ export function I18nProvider({ children }: { children: ReactNode }) {
 
   const setLang = useCallback((next: Lang) => {
     setLangState(next);
-    try {
-      window.localStorage.setItem(LANG_STORAGE_KEY, next);
-    } catch {
-      // ignore
-    }
+    persistLang(window.localStorage, next);
     applyDocumentLang(next);
   }, []);
 

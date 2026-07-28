@@ -184,7 +184,8 @@ function getSearchHitChannelName(
 function getSearchHitContextLabel(
   hit: SearchHit,
   channelLookup: ReadonlyMap<string, Channel>,
-  channelLabels?: Record<string, string>,
+  channelLabels: Record<string, string> | undefined,
+  t: (key: MsgKey) => string,
 ): SearchHitContextLabel {
   const channel = hit.channelId ? channelLookup.get(hit.channelId) : null;
   const channelName = getSearchHitChannelName(
@@ -196,7 +197,7 @@ function getSearchHitContextLabel(
   if (channel?.channelType === "dm") {
     return {
       channelLabel: null,
-      text: "Direct message", // translated at call site when needed
+      text: t("search.directMessage"),
     };
   }
 
@@ -205,14 +206,14 @@ function getSearchHitContextLabel(
   return {
     channelLabel: channelName,
     text: channelName
-      ? `${isThread ? "Thread" : "Message"} in`
+      ? isThread
+        ? t("search.threadIn")
+        : t("search.messageIn")
       : isThread
-        ? "Thread"
-        : "Message",
+        ? t("search.thread")
+        : t("search.message"),
   };
 }
-
-// Keep English context chips for message hits in v1 — full coverage is phase 2.
 
 function getResultSectionKey(result: SearchResult): SearchResultSectionKey {
   if (result.kind === "channel") {
@@ -649,7 +650,12 @@ export function TopbarSearch({
         : null;
     const messageContextLabel =
       result.kind === "message"
-        ? getSearchHitContextLabel(result.hit, channelLookup, channelLabels)
+        ? getSearchHitContextLabel(
+            result.hit,
+            channelLookup,
+            channelLabels,
+            t,
+          )
         : null;
     const title =
       result.kind === "channel"
@@ -781,11 +787,11 @@ export function TopbarSearch({
   const searchResultContent = isShowingSuggestions ? (
     suggestionResults.length === 0 ? (
       <div className="px-4 py-5 text-sm text-muted-foreground">
-        <p>No recent activity yet.</p>
+        <p>{t("search.noRecentActivity")}</p>
       </div>
     ) : (
       <div
-        aria-label="Recent activity"
+        aria-label={t("search.recentActivity")}
         className="max-h-96 overflow-y-auto p-1.5"
         role="listbox"
       >
@@ -797,7 +803,7 @@ export function TopbarSearch({
               {suggestedResults.length > 0 ? (
                 <div>
                   <div className={SEARCH_SECTION_TITLE_CLASS}>
-                    Recent activity
+                    {t("search.recentActivity")}
                   </div>
                   {suggestedResults.map((result) =>
                     renderSearchResultRow(result, resultIndex++),
@@ -806,7 +812,9 @@ export function TopbarSearch({
               ) : null}
               {suggestionActionResults.length > 0 ? (
                 <div>
-                  <div className={SEARCH_SECTION_TITLE_CLASS}>Actions</div>
+                  <div className={SEARCH_SECTION_TITLE_CLASS}>
+                    {t("search.actions")}
+                  </div>
                   {suggestionActionResults.map((result) =>
                     renderSearchResultRow(result, resultIndex++),
                   )}
@@ -825,7 +833,7 @@ export function TopbarSearch({
     </p>
   ) : searchableResults.length === 0 ? (
     <p className="px-4 py-5 text-sm text-muted-foreground">
-      No matches for <span className="font-semibold">{trimmedQuery}</span>.
+      {t("search.noMatchesFor", { query: trimmedQuery })}
     </p>
   ) : (
     <div className="max-h-96 overflow-y-auto p-1.5" role="listbox">

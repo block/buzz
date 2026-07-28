@@ -46,12 +46,25 @@ const en = {
   "search.directMessage": "Direct message",
   "search.noResults": "No results",
   "search.noMatches": "No matches for",
+  "search.noMatchesFor": "No matches for {query}.",
+  "search.noRecentActivity": "No recent activity yet.",
+  "search.recentActivity": "Recent activity",
+  "search.thread": "Thread",
+  "search.message": "Message",
+  "search.threadIn": "Thread in",
+  "search.messageIn": "Message in",
 
   // Settings nav groups
   "settings.group.personal": "Personal",
   "settings.group.communities": "Communities",
   "settings.group.app": "App",
   "settings.back": "Back",
+  "settings.backToApp": "Back to app",
+  "settings.checkingInvitePermissions": "Checking invite permissions…",
+  "settings.inviteCheckFailed": "Invite settings could not be checked.",
+  "settings.tryAgain": "Try again",
+  "settings.inviteUnavailable":
+    "Invite settings are unavailable. Relay recovery may still be in progress.",
   "settings.title": "Settings",
 
   // Settings sections
@@ -137,11 +150,23 @@ const zh: Record<MsgKey, string> = {
   "search.directMessage": "私信",
   "search.noResults": "无结果",
   "search.noMatches": "无匹配：",
+  "search.noMatchesFor": "无匹配：{query}。",
+  "search.noRecentActivity": "暂无最近活动。",
+  "search.recentActivity": "最近活动",
+  "search.thread": "帖子",
+  "search.message": "消息",
+  "search.threadIn": "帖子位于",
+  "search.messageIn": "消息位于",
 
   "settings.group.personal": "个人",
   "settings.group.communities": "社区",
   "settings.group.app": "应用",
   "settings.back": "返回",
+  "settings.backToApp": "返回应用",
+  "settings.checkingInvitePermissions": "正在检查邀请权限…",
+  "settings.inviteCheckFailed": "无法检查邀请设置。",
+  "settings.tryAgain": "重试",
+  "settings.inviteUnavailable": "邀请设置暂不可用。中继恢复可能仍在进行。",
   "settings.title": "设置",
 
   "settings.section.appearance": "外观",
@@ -204,4 +229,35 @@ export function translate(
     }
   }
   return text;
+}
+
+/** Read lang from a storage-like object (localStorage or test double). */
+export function loadStoredLang(
+  storage: Pick<Storage, "getItem"> | null | undefined,
+): Lang {
+  try {
+    const stored = storage?.getItem(LANG_STORAGE_KEY);
+    if (isLang(stored)) {
+      return stored;
+    }
+  } catch {
+    // ignore
+  }
+  return DEFAULT_LANG;
+}
+
+/** Persist lang; returns false if storage write failed. */
+export function persistLang(
+  storage: Pick<Storage, "setItem"> | null | undefined,
+  lang: Lang,
+): boolean {
+  if (!isLang(lang)) {
+    return false;
+  }
+  try {
+    storage?.setItem(LANG_STORAGE_KEY, lang);
+    return true;
+  } catch {
+    return false;
+  }
 }

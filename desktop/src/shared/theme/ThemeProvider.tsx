@@ -12,6 +12,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invokeTauri } from "@/shared/api/tauri";
 import { isMacPlatform } from "@/shared/lib/platform";
 import { createThemeVars, hexToHsl } from "./adaptive-theme";
+import { RAFT_ACCENT_HEX, getRaftShellVars } from "./raft-shell";
 import {
   SYNTAX_THEMES,
   type SyntaxThemeName,
@@ -22,7 +23,8 @@ import {
 } from "./theme-loader";
 
 export const THEME_STORAGE_KEY = "buzz-theme";
-const CACHE_KEY = "buzz-theme-cache";
+/** Bumped when Buzz shell palette changes so FOUC cache cannot pin stale GitHub-derived chrome. */
+const CACHE_KEY = "buzz-theme-cache.v2-raft";
 export const ACCENT_STORAGE_KEY = "buzz-accent-color";
 export const NEUTRAL_ACCENT = "neutral";
 const FOLLOW_SYSTEM_KEY = "buzz-follow-system";
@@ -212,9 +214,9 @@ function applyAccentColor(value: string) {
 }
 
 /**
- * The Buzz themes ship with a fixed neutral accent (the GitHub black/white
- * foreground) rather than a user-selectable accent color. When a Buzz theme is
- * active we force `NEUTRAL_ACCENT` regardless of the stored preference, and the
+ * The Buzz themes ship with a fixed Raft amber accent rather than a
+ * user-selectable accent color. When a Buzz theme is active we force
+ * {@link RAFT_ACCENT_HEX} regardless of the stored preference, and the
  * appearance panel hides the accent picker. The user's chosen accent is left
  * untouched in storage so it returns when they switch back to another theme.
  */
@@ -223,14 +225,14 @@ export function isBuzzTheme(themeName: string): boolean {
 }
 
 /**
- * Resolve the accent to actually apply for a theme: Buzz themes are pinned to
- * the neutral accent; every other theme uses the stored/selected accent.
+ * Resolve the accent to actually apply for a theme: Buzz (Raft) themes pin
+ * amber primary; every other theme uses the stored/selected accent.
  */
 function resolveEffectiveAccent(
   themeName: string,
   accentColor: string,
 ): string {
-  return isBuzzTheme(themeName) ? NEUTRAL_ACCENT : accentColor;
+  return isBuzzTheme(themeName) ? RAFT_ACCENT_HEX : accentColor;
 }
 
 /**
@@ -434,11 +436,19 @@ async function applyTheme(
   if (requestToken !== themeApplyRequest) return null;
 
   const info = extractThemeInfo(name, themeData);
-  const { isDark, vars } = createThemeVars(info.bg, info.fg, info.comment, {
+  let { isDark, vars } = createThemeVars(info.bg, info.fg, info.comment, {
     added: info.added,
     deleted: info.deleted,
     modified: info.modified,
   });
+
+  // Buzz themes keep Shiki syntax colors from github-light/dark, but the app
+  // chrome must use Raft shell tokens (cream/charcoal/amber). Overlay after
+  // createThemeVars so inline styles do not pin the old GitHub-derived chrome.
+  if (isBuzzTheme(name)) {
+    isDark = name === "buzz-dark";
+    vars = { ...vars, ...getRaftShellVars(isDark) };
+  }
 
   const root = document.documentElement;
   for (const [key, value] of Object.entries(vars)) {
@@ -459,7 +469,7 @@ async function applyTheme(
   // browser paints the new theme + accent together. Doing this in a later
   // microtask (e.g. the caller's `.then`) let the previous accent flash on the
   // new theme for a frame — the flicker seen when switching to Buzz. Buzz
-  // themes resolve to the neutral accent regardless of the stored value.
+  // (Raft) themes resolve to amber primary regardless of the stored value.
   applyAccentColor(
     resolveEffectiveAccent(
       name,

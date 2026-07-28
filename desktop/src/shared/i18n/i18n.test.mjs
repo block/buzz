@@ -3,8 +3,11 @@ import { describe, it } from "node:test";
 
 import {
   DEFAULT_LANG,
+  LANG_STORAGE_KEY,
   isLang,
+  loadStoredLang,
   messages,
+  persistLang,
   translate,
 } from "./messages.ts";
 
@@ -31,12 +34,46 @@ describe("desktop i18n", () => {
     assert.equal(translate("nav.inbox", "zh"), "收件箱");
     assert.equal(translate("nav.channels", "zh"), "频道");
     assert.equal(translate("appearance.language.title", "zh"), "语言");
+    assert.equal(translate("settings.backToApp", "zh"), "返回应用");
+    assert.equal(translate("search.noRecentActivity", "en"), "No recent activity yet.");
+    assert.equal(
+      translate("search.noMatchesFor", "zh", { query: "foo" }),
+      "无匹配：foo。",
+    );
   });
 
   it("falls back to English for missing zh (defensive)", () => {
-    // All keys exist; unknown key returns the key itself via ?? chain
-    // when accessed incorrectly — translate uses typed keys only.
     assert.equal(translate("common.save", "en"), "Save");
     assert.equal(translate("common.save", "zh"), "保存");
+  });
+
+  it("loadStoredLang defaults when empty and reads valid values", () => {
+    const store = new Map();
+    const storage = {
+      getItem: (k) => (store.has(k) ? store.get(k) : null),
+      setItem: (k, v) => {
+        store.set(k, v);
+      },
+    };
+    assert.equal(loadStoredLang(storage), DEFAULT_LANG);
+    storage.setItem(LANG_STORAGE_KEY, "en");
+    assert.equal(loadStoredLang(storage), "en");
+    storage.setItem(LANG_STORAGE_KEY, "bogus");
+    assert.equal(loadStoredLang(storage), DEFAULT_LANG);
+  });
+
+  it("persistLang writes storage so a later load keeps the choice", () => {
+    const store = new Map();
+    const storage = {
+      getItem: (k) => (store.has(k) ? store.get(k) : null),
+      setItem: (k, v) => {
+        store.set(k, v);
+      },
+    };
+    assert.equal(persistLang(storage, "en"), true);
+    assert.equal(store.get(LANG_STORAGE_KEY), "en");
+    assert.equal(loadStoredLang(storage), "en");
+    assert.equal(persistLang(storage, "zh"), true);
+    assert.equal(loadStoredLang(storage), "zh");
   });
 });

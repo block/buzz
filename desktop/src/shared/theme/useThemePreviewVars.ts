@@ -14,6 +14,7 @@ import {
 } from "./ThemePreviewFrame";
 import { NEUTRAL_ACCENT } from "./ThemeProvider";
 import { hexToHsl } from "./adaptive-theme";
+import { getRaftShellVars } from "./raft-shell";
 
 export type ThemePreviewVarsByTheme = Partial<
   Record<SyntaxThemeName, ThemePreviewVars>
@@ -25,11 +26,14 @@ let themePreviewVarsPromise: Promise<ThemePreviewVarsByTheme> | null = null;
 async function loadThemePreviewVars(name: SyntaxThemeName) {
   const themeData = await loadThemeData(name);
   const info = extractThemeInfo(name, themeData);
-  const { vars } = createThemeVars(info.bg, info.fg, info.comment, {
+  let { vars } = createThemeVars(info.bg, info.fg, info.comment, {
     added: info.added,
     deleted: info.deleted,
     modified: info.modified,
   });
+  if (name === "buzz" || name === "buzz-dark") {
+    vars = { ...vars, ...getRaftShellVars(name === "buzz-dark") };
+  }
   return [name, vars] as const;
 }
 
@@ -86,6 +90,9 @@ export function useThemePreviewVars() {
 }
 
 export function getThemeFallbackPreviewVars(name: SyntaxThemeName) {
+  if (name === "buzz" || name === "buzz-dark") {
+    return getRaftShellVars(name === "buzz-dark");
+  }
   return isLightTheme(name) ? LIGHT_PREVIEW_VARS : DARK_PREVIEW_VARS;
 }
 
