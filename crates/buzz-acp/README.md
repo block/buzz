@@ -154,10 +154,13 @@ The gate applies to **all** inbound events — @mentions, DMs, thread replies, a
 | `!shutdown` | Gracefully exits the harness. |
 | `!cancel` | Cancels the current in-flight turn for that channel, if any. |
 | `!rotate` | Rotates the ACP session for that channel. If a turn is in-flight, it is cancelled and the channel session is invalidated when the task returns; otherwise the cached idle session is invalidated immediately. The next queued/received event starts a fresh session. |
+| `!model [id]` | Switches the model backing that channel and replies in-channel. If a turn is in-flight, it is cancelled and re-run on the new model; otherwise the model applies on the next turn. With no `id`, lists the available models. |
 
 Use `!cancel` to stop only the current turn; it is a no-op when the channel is idle. Use `!rotate` when you want the next turn in the channel to start from a fresh ACP session, even if the channel is currently idle.
 
-Owner control commands must be kind:9 stream messages from the owner, must mention this agent with a `p` tag, and are consumed by the harness instead of being forwarded to the agent.
+`!model` matches model IDs exactly — adapters ship near-identical pairs (`opus[1m]` vs `claude-opus-5`, `gpt-5.3-codex` vs `gpt-5.3-codex/low`) where a prefix match would silently pick a different context lane and price point. An unknown ID is rejected with the list and leaves the current model untouched.
+
+Owner control commands must be kind:9 stream messages from the owner, must mention this agent with a `p` tag, and are consumed by the harness instead of being forwarded to the agent. The command may be typed on its own (`!rotate`) or after a leading mention (`@Agent !rotate`).
 
 > **Note:** The default mode is `owner-only`. Agents without a registered `agent_owner_pubkey` will not respond to any events until the owner is resolved. Set `--respond-to anyone` to disable the gate entirely.
 

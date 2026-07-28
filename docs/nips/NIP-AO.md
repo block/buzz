@@ -122,8 +122,20 @@ The `content` field decrypts to:
 }
 ```
 
-The only defined control type is `cancel_turn`. Implementations MUST ignore
-events with unrecognized `type` values.
+Two control types are defined. `cancel_turn` cancels the channel's in-flight
+turn. `switch_model` carries an additional `modelId` and switches the model
+backing the channel — cancelling and re-running the in-flight turn on the new
+model, or applying to the next turn when the channel is idle:
+
+```json
+{
+  "type":      "switch_model",
+  "channelId": "<channel_uuid>",
+  "modelId":   "<model_id>"
+}
+```
+
+Implementations MUST ignore events with unrecognized `type` values.
 
 ## Ephemerality Contract
 

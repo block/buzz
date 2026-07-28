@@ -1869,6 +1869,30 @@ pub fn extract_model_config_options(result: &serde_json::Value) -> Vec<serde_jso
         .unwrap_or_default()
 }
 
+/// Identifier of a `configOptions` entry.
+///
+/// Adapters disagree on the key: the ACP spec says `configId` on the request
+/// (`SetSessionConfigOptionRequest.configId`), while responses carry `id`
+/// (`SessionConfigOption.id`). Accept both; the set request always uses
+/// `configId` on the wire.
+pub fn config_option_id(config_opt: &serde_json::Value) -> Option<&str> {
+    config_opt
+        .get("configId")
+        .or_else(|| config_opt.get("id"))
+        .and_then(|v| v.as_str())
+}
+
+/// Human-readable label of a `configOptions` entry or one of its options.
+///
+/// The schema field is `name`; `displayName` is a pre-standardization spelling
+/// still emitted by some adapters.
+pub fn config_option_label(value: &serde_json::Value) -> Option<&str> {
+    value
+        .get("name")
+        .or_else(|| value.get("displayName"))
+        .and_then(|v| v.as_str())
+}
+
 /// Extract `SessionModelState` (unstable path) from a `session/new` result.
 ///
 /// Returns the `models` object if present: `{ currentModelId, availableModels: [...] }`.
@@ -1889,14 +1913,7 @@ pub fn resolve_model_switch_method(
     // 1. Search stable configOptions for a "model"-category entry whose
     //    options contain a value matching desired_model.
     for config_opt in extract_model_config_options(session_new_result) {
-        // Adapters disagree on the key: the ACP spec says `configId`, but
-        // claude-agent-acp emits `id`. Accept both; the set request always
-        // uses `configId` on the wire.
-        let config_id = match config_opt
-            .get("configId")
-            .or_else(|| config_opt.get("id"))
-            .and_then(|v| v.as_str())
-        {
+        let config_id = match config_option_id(&config_opt) {
             Some(id) => id,
             None => continue,
         };
@@ -2569,6 +2586,43 @@ mod tests {
                 option_value: "model-b".to_string(),
             })
         );
+    }
+
+    #[test]
+    fn resolve_finds_config_options_only_model() {
+        // codex-acp shape: the halves disagree — configOptions offers clean ids
+        // while availableModels offers reasoning-suffixed ones. Only the stable
+        // half can serve `gpt-5.4`.
+        let result = serde_json::json!({
+            "configOptions": [{
+                "id": "model",
+                "category": "model",
+                "currentValue": "gpt-5.4",
+                "options": [{ "value": "gpt-5.4", "name": "GPT-5.4" }]
+            }],
+            "models": {
+                "currentModelId": "gpt-5.3-codex/medium",
+                "availableModels": [{ "modelId": "gpt-5.3-codex/medium" }]
+            }
+        });
+        assert_eq!(
+            super::resolve_model_switch_method(&result, "gpt-5.4"),
+            Some(super::ModelSwitchMethod::ConfigOption {
+                config_id: "model".to_string(),
+                option_value: "gpt-5.4".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn config_option_label_prefers_schema_name() {
+        let schema = serde_json::json!({ "name": "Haiku", "displayName": "stale" });
+        assert_eq!(super::config_option_label(&schema), Some("Haiku"));
+
+        let legacy = serde_json::json!({ "displayName": "Haiku" });
+        assert_eq!(super::config_option_label(&legacy), Some("Haiku"));
+
+        assert_eq!(super::config_option_label(&serde_json::json!({})), None);
     }
 
     // ── model_in_catalog tests ────────────────────────────────────────────
