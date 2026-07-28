@@ -909,6 +909,54 @@ void main() {
       expect(findRichText('Newest live update'), findsOneWidget);
     });
 
+    testWidgets('preserves an initial message deep-link position', (
+      tester,
+    ) async {
+      final initialMessages = [
+        for (var i = 0; i < 40; i++)
+          _textMsg(
+            id: 'msg$i',
+            pubkey: 'alice',
+            content: 'Message $i',
+            createdAt: 1000 + i,
+          ),
+      ];
+      final messagesNotifier = _FakeMessagesNotifier(initialMessages);
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          messagesNotifier: messagesNotifier,
+          initialMessageId: 'msg5',
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(findRichText('Message 5'), findsOneWidget);
+      expect(findRichText('Message 39'), findsNothing);
+      expect(
+        find.byKey(const ValueKey('channel-jump-to-latest')),
+        findsOneWidget,
+      );
+
+      messagesNotifier.setMessages([
+        ...initialMessages,
+        _textMsg(
+          id: 'newest',
+          pubkey: 'alice',
+          content: 'Newest live update',
+          createdAt: 2000,
+        ),
+      ]);
+      await tester.pumpAndSettle();
+
+      expect(findRichText('Message 5'), findsOneWidget);
+      expect(findRichText('Newest live update'), findsNothing);
+    });
+
     testWidgets('groups consecutive messages from same author', (tester) async {
       final messages = [
         _textMsg(

@@ -157,8 +157,10 @@ class _MessageList extends HookConsumerWidget {
       }
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!context.mounted || !itemScrollController.isAttached) return;
-        itemScrollController.jumpTo(index: targetIndex, alignment: 0.35);
         didJumpToInitialMessage.value = true;
+        followsLatest.value = false;
+        isAtLatest.value = false;
+        itemScrollController.jumpTo(index: targetIndex, alignment: 0.35);
       });
       return null;
     }, [initialMessageId, initialThreadRootId, entries.length]);
