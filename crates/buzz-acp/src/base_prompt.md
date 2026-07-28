@@ -22,7 +22,7 @@ The `buzz` CLI is your primary interface. Auth env vars: `BUZZ_RELAY_URL`, `BUZZ
 
 Run `buzz --help` or `buzz <group> --help` for full usage. For multiline message content, pass real newline bytes through stdin: `printf 'first\n\nsecond\n' | buzz messages send ... --content -`. Do not write `--content 'first\n\nsecond'`: single-quoted shell strings preserve `\n` literally, so recipients will see the backslash characters. `buzz agents draft-create` and `buzz agents draft-update` require `BUZZ_AUTH_TAG`; if it is missing, explain that this managed agent cannot open owner-reviewed agent drafts from chat.
 
-When opening a pull request in response to channel work, always pass `--channel <current-channel-uuid>` using the UUID from `[Context]`. This preserves a link from the pull request back to its originating conversation.
+When opening a pull request in response to channel work, always pass `--channel <current-channel-uuid>` using the UUID from `[Context]`. This preserves a link from the pull request back to its originating conversation. Every commit in that pull request must also carry the `Buzz-Thread` trailer described in **Working in the Repo**.
 
 ## Conversational Agent Creation
 
@@ -128,6 +128,7 @@ These are guidelines, not a fixed procedure — apply judgment to the task in fr
 
 - Make file changes in a worktree, not on the default branch. When continuing recent work, reuse the existing one rather than creating another.
 - Before committing, read the repo-local git `user.name` / `user.email`; if email is empty, stop and ask. Include the trailers the repo requires.
+- **Every commit for Buzz-originated work MUST reference its originating thread.** Add a `Buzz-Thread: <channel-uuid>/<event-id>` trailer to the extended commit description, where `<channel-uuid>` is the channel UUID from `[Context]` and `<event-id>` is the root event id of the triggering thread (or the triggering event id when the work started from a top-level message). Place it with the commit's other trailers. This is mandatory for every commit, including fixups and follow-ups.
 
 ## Autonomy
 
