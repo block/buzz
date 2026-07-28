@@ -32,6 +32,14 @@ pub enum EventOwnershipV1 {
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BattleRhythmRecurrenceV1 {
+    pub frequency: String,
+    pub interval: u16,
+    pub until: Option<String>,
+    pub series_id: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BattleRhythmEventV1 {
     pub schema_version: u8,
     pub id: String,
@@ -53,6 +61,8 @@ pub struct BattleRhythmEventV1 {
     pub linked_task_id: Option<String>,
     pub linked_mission_requirement_id: Option<String>,
     pub parent_activity_id: Option<String>,
+    pub recurrence: Option<BattleRhythmRecurrenceV1>,
+    pub excluded_occurrence_starts: Vec<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

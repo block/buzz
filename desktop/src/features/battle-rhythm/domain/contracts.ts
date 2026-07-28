@@ -1,5 +1,11 @@
 export type BattleRhythmSourceType = "fas" | "longcast" | "shortcast" | "other";
 export type BattleRhythmStatus = "draft" | "approved" | "cancelled";
+export type BattleRhythmRecurrence = Readonly<{
+  frequency: "daily" | "weekly" | "monthly";
+  interval: number;
+  until: string | null;
+  seriesId: string;
+}>;
 export type EventOwnership =
   | { readonly kind: "manual" }
   | {
@@ -43,6 +49,8 @@ export type BattleRhythmEvent = Readonly<{
   linkedTaskId: string | null;
   linkedMissionRequirementId: string | null;
   parentActivityId: string | null;
+  recurrence: BattleRhythmRecurrence | null;
+  excludedOccurrenceStarts: readonly string[];
 }>;
 export type BattleRhythmChange = Readonly<
   | { kind: "added"; after: BattleRhythmEvent }
@@ -93,6 +101,8 @@ const eventKeys = [
   "linkedTaskId",
   "linkedMissionRequirementId",
   "parentActivityId",
+  "recurrence",
+  "excludedOccurrenceStarts",
 ];
 function fail(message: string): never {
   throw new Error(`Invalid Battle Rhythm contract: ${message}`);
@@ -206,6 +216,82 @@ function ownership(value: unknown): EventOwnership {
     });
   fail("invalid ownership");
 }
+function recurrence(
+  value: unknown,
+  start: string,
+): BattleRhythmRecurrence | null {
+  if (value === null) return null;
+  const o = record(value, ["frequency", "interval", "until", "seriesId"]);
+  if (
+    typeof o.frequency !== "string" ||
+    !["daily", "weekly", "monthly"].includes(o.frequency) ||
+    !Number.isInteger(o.interval) ||
+    typeof o.interval !== "number" ||
+    o.interval < 1 ||
+    o.interval > 366
+  )
+    fail("invalid recurrence rule");
+  const until =
+    o.until === null ? null : timestamp(o.until, "recurrence.until");
+  if (until !== null && Date.parse(until) < Date.parse(start))
+    fail("recurrence until precedes start");
+  return freeze({
+    frequency: o.frequency as BattleRhythmRecurrence["frequency"],
+    interval: o.interval,
+    until,
+    seriesId: string(o.seriesId, "seriesId", 256),
+  });
+}
+function localParts(value: string) {
+  const match = ISO.exec(value);
+  if (!match) fail("recurrence timestamp must be ISO-8601");
+  return {
+    year: Number(match[1]),
+    month: Number(match[2]),
+    day: Number(match[3]),
+    time: `${match[4]}:${match[5]}:${match[6]}`,
+  };
+}
+function isOccurrence(
+  start: string,
+  occurrence: string,
+  rule: BattleRhythmRecurrence,
+): boolean {
+  const first = localParts(start),
+    next = localParts(occurrence);
+  if (first.time !== next.time) return false;
+  const firstDay = Date.UTC(first.year, first.month - 1, first.day);
+  const nextDay = Date.UTC(next.year, next.month - 1, next.day);
+  if (nextDay < firstDay) return false;
+  if (rule.frequency === "daily")
+    return ((nextDay - firstDay) / 86_400_000) % rule.interval === 0;
+  if (rule.frequency === "weekly")
+    return ((nextDay - firstDay) / 86_400_000) % (7 * rule.interval) === 0;
+  const months = (next.year - first.year) * 12 + next.month - first.month;
+  return next.day === first.day && months >= 0 && months % rule.interval === 0;
+}
+function excludedOccurrences(
+  value: unknown,
+  start: string,
+  rule: BattleRhythmRecurrence | null,
+): readonly string[] {
+  if (!Array.isArray(value) || value.length > 512)
+    fail("excluded occurrences invalid");
+  if (value.length && !rule) fail("exclusions require recurrence");
+  const parsed = value.map((item) => timestamp(item, "excluded occurrence"));
+  if (parsed.some((item, index) => index > 0 && parsed[index - 1] >= item))
+    fail("excluded occurrences must be sorted and unique");
+  if (
+    rule &&
+    parsed.some(
+      (item) =>
+        (rule.until !== null && Date.parse(item) > Date.parse(rule.until)) ||
+        !isOccurrence(start, item, rule),
+    )
+  )
+    fail("excluded occurrence outside series");
+  return freeze(parsed);
+}
 export function parseBattleRhythmEvent(value: unknown): BattleRhythmEvent {
   const o = record(value, eventKeys);
   const start = timestamp(o.start, "start"),
@@ -214,6 +300,7 @@ export function parseBattleRhythmEvent(value: unknown): BattleRhythmEvent {
   if (typeof o.allDay !== "boolean") fail("allDay must be boolean");
   if (!Array.isArray(o.participants) || o.participants.length > 256)
     fail("participants invalid");
+  const parsedRecurrence = recurrence(o.recurrence, start);
   return freeze({
     schemaVersion: one(o.schemaVersion),
     id: string(o.id, "id", 256),
@@ -239,6 +326,12 @@ export function parseBattleRhythmEvent(value: unknown): BattleRhythmEvent {
       "linkedMissionRequirementId",
     ),
     parentActivityId: nullableString(o.parentActivityId, "parentActivityId"),
+    recurrence: parsedRecurrence,
+    excludedOccurrenceStarts: excludedOccurrences(
+      o.excludedOccurrenceStarts,
+      start,
+      parsedRecurrence,
+    ),
   });
 }
 function change(value: unknown): BattleRhythmChange {

@@ -69,6 +69,17 @@ export async function buildCalendarEvent(
       ["source", event.ownership.sourceId],
       ["revision", event.ownership.revisionId],
     );
+  if (event.recurrence) {
+    tags.push(
+      ["series", event.recurrence.seriesId],
+      [
+        "recurrence",
+        event.recurrence.frequency,
+        String(event.recurrence.interval),
+      ],
+    );
+    if (event.recurrence.until) tags.push(["until", event.recurrence.until]);
+  }
   return eventSigner({
     kind: KIND_BATTLE_RHYTHM_EVENT,
     content: content(event),
@@ -172,6 +183,15 @@ export function parseRelayCalendarEvent(
     return parsed.id === tag(event, "d") &&
       parsed.start === tag(event, "start") &&
       parsed.end === tag(event, "end") &&
+      (parsed.recurrence === null
+        ? !tag(event, "series") &&
+          !tag(event, "recurrence") &&
+          !tag(event, "until")
+        : parsed.recurrence.seriesId === tag(event, "series") &&
+          parsed.recurrence.frequency === tag(event, "recurrence") &&
+          String(parsed.recurrence.interval) ===
+            event.tags.find((item) => item[0] === "recurrence")?.[2] &&
+          parsed.recurrence.until === (tag(event, "until") ?? null)) &&
       (parsed.ownership.kind === "manual" ||
         (parsed.ownership.sourceId === tag(event, "source") &&
           parsed.ownership.revisionId === tag(event, "revision")))

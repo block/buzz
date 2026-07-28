@@ -46,6 +46,8 @@ const event = {
   linkedTaskId: null,
   linkedMissionRequirementId: null,
   parentActivityId: null,
+  recurrence: null,
+  excludedOccurrenceStarts: [],
 };
 setBattleRhythmEventSignerForTests(async (input) => ({
   id: "test",

@@ -35,6 +35,13 @@ const event = {
   linkedTaskId: null,
   linkedMissionRequirementId: null,
   parentActivityId: null,
+  recurrence: {
+    frequency: "weekly",
+    interval: 1,
+    until: "2026-08-31T08:00:00+10:00",
+    seriesId: "sail-routine",
+  },
+  excludedOccurrenceStarts: ["2026-08-17T08:00:00+10:00"],
 };
 setBattleRhythmEventSignerForTests(async (input) => ({
   id: "test",
@@ -54,9 +61,20 @@ test("calendar event uses stable d and parsed temporal/source tags", async () =>
     ["end", event.end],
     ["source", "fas"],
     ["revision", "r1"],
+    ["series", "sail-routine"],
+    ["recurrence", "weekly", "1"],
+    ["until", "2026-08-31T08:00:00+10:00"],
   ]);
   assert.ok(relay.created_at > 10);
   assert.equal(parseRelayCalendarEvent(relay)?.id, event.id);
+  assert.deepEqual(
+    parseRelayCalendarEvent(relay)?.recurrence,
+    event.recurrence,
+  );
+  assert.deepEqual(
+    parseRelayCalendarEvent(relay)?.excludedOccurrenceStarts,
+    event.excludedOccurrenceStarts,
+  );
 });
 test("source uses stable d and coverage tags", async () => {
   const source = {

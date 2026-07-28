@@ -33,6 +33,13 @@
     "linkedPlanId": null,
     "linkedTaskId": null,
     "linkedMissionRequirementId": null,
-    "parentActivityId": null
+    "parentActivityId": null,
+    "recurrence": {
+      "frequency": "weekly",
+      "interval": 1,
+      "until": "2026-08-31T08:00:00+10:00",
+      "seriesId": "sail-routine"
+    },
+    "excludedOccurrenceStarts": ["2026-08-17T08:00:00+10:00"]
   }
 }

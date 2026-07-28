@@ -43,6 +43,13 @@ const event = {
   linkedTaskId: null,
   linkedMissionRequirementId: null,
   parentActivityId: null,
+  recurrence: {
+    frequency: "weekly",
+    interval: 1,
+    until: "2026-08-31T08:00:00+10:00",
+    seriesId: "sail-routine",
+  },
+  excludedOccurrenceStarts: ["2026-08-17T08:00:00+10:00"],
 };
 const fixture = JSON.parse(
   readFileSync(
@@ -82,6 +89,38 @@ test("parsers reject unknown fields, non-ISO dates, unordered coverage, and inva
   assert.throws(() => parseBattleRhythmEvent({ ...event, allDay: "false" }));
   assert.throws(() =>
     parseBattleRhythmSource({ ...source, coverageStart: source.coverageEnd }),
+  );
+});
+
+test("recurrence is strict, bounded, and only excludes occurrences in its series", () => {
+  for (const frequency of ["daily", "weekly", "monthly"]) {
+    const parsed = parseBattleRhythmEvent({
+      ...event,
+      recurrence: { ...event.recurrence, frequency },
+      excludedOccurrenceStarts: [],
+    });
+    assert.equal(parsed.recurrence.frequency, frequency);
+  }
+  assert.throws(() =>
+    parseBattleRhythmEvent({
+      ...event,
+      recurrence: { ...event.recurrence, interval: 0 },
+    }),
+  );
+  assert.throws(() =>
+    parseBattleRhythmEvent({
+      ...event,
+      excludedOccurrenceStarts: [
+        event.excludedOccurrenceStarts[0],
+        event.excludedOccurrenceStarts[0],
+      ],
+    }),
+  );
+  assert.throws(() =>
+    parseBattleRhythmEvent({
+      ...event,
+      excludedOccurrenceStarts: ["2026-08-18T08:00:00+10:00"],
+    }),
   );
 });
 
