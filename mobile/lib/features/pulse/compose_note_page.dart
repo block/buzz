@@ -198,15 +198,17 @@ class _ReplyContext extends ConsumerWidget {
                   children: [
                     Row(
                       children: [
-                        Flexible(
+                        Expanded(
                           child: Text(
                             displayName,
+                            maxLines: 1,
                             style: messageUsernameTextStyle,
                             overflow: TextOverflow.ellipsis,
                           ),
                         ),
                         const SizedBox(width: Grid.half),
-                        Flexible(
+                        ConstrainedBox(
+                          constraints: const BoxConstraints(maxWidth: Grid.xxl),
                           child: Text(
                             formatPulseRelativeTime(note.createdAt),
                             maxLines: 1,

@@ -89,23 +89,34 @@ class NoteCard extends HookConsumerWidget {
                         onTap: () => showUserProfileSheet(context, note.pubkey),
                         child: Row(
                           children: [
-                            Flexible(
-                              child: Text(
-                                displayName,
-                                style: messageUsernameTextStyle,
-                                overflow: TextOverflow.ellipsis,
+                            Expanded(
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Flexible(
+                                    child: Text(
+                                      displayName,
+                                      maxLines: 1,
+                                      style: messageUsernameTextStyle,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ),
+                                  if (isAgent) ...[
+                                    const SizedBox(width: Grid.half),
+                                    Icon(
+                                      LucideIcons.bot,
+                                      size: 13,
+                                      color: context.colors.primary,
+                                    ),
+                                  ],
+                                ],
                               ),
                             ),
-                            if (isAgent) ...[
-                              const SizedBox(width: Grid.half),
-                              Icon(
-                                LucideIcons.bot,
-                                size: 13,
-                                color: context.colors.primary,
-                              ),
-                            ],
                             const SizedBox(width: Grid.xxs),
-                            Flexible(
+                            ConstrainedBox(
+                              constraints: const BoxConstraints(
+                                maxWidth: Grid.xl,
+                              ),
                               child: Text(
                                 formatPulseRelativeTime(note.createdAt),
                                 maxLines: 1,

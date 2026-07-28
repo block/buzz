@@ -77,4 +77,54 @@ void main() {
     expect(timestamp.overflow, TextOverflow.ellipsis);
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('gives the author unused timestamp width', (tester) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(320, 600);
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+    const displayName = 'A moderately long Pulse author';
+    final note = UserNote(
+      id: 'note-2',
+      pubkey: 'alice',
+      createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000 - 120,
+      content: 'A note',
+      tags: const [],
+    );
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          userCacheProvider.overrideWith(
+            () => _FakeUserCacheNotifier({
+              'alice': const UserProfile(
+                pubkey: 'alice',
+                displayName: displayName,
+              ),
+            }),
+          ),
+        ],
+        child: MaterialApp(
+          theme: AppTheme.light(),
+          home: Scaffold(
+            body: NoteCard(
+              note: note,
+              reaction: const PulseReactionState(
+                count: 0,
+                reactedByCurrentUser: false,
+              ),
+              canFollow: true,
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(tester.getSize(find.text(displayName)).width, greaterThan(145));
+    expect(find.text('2m'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
 }

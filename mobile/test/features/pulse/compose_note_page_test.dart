@@ -27,14 +27,15 @@ void main() {
   Widget buildTestable(
     Widget home, {
     TextScaler textScaler = TextScaler.noScaling,
+    String displayName = 'Alice',
   }) {
     return ProviderScope(
       overrides: [
         userCacheProvider.overrideWith(
           () => _FakeUserCacheNotifier({
-            'alice_pk': const UserProfile(
+            'alice_pk': UserProfile(
               pubkey: 'alice_pk',
-              displayName: 'Alice',
+              displayName: displayName,
             ),
           }),
         ),
@@ -85,6 +86,28 @@ void main() {
     final timestamp = tester.widget<Text>(find.text('Sep 30'));
     expect(timestamp.maxLines, 1);
     expect(timestamp.overflow, TextOverflow.ellipsis);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('gives the reply author unused timestamp width', (tester) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(320, 600);
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+    const displayName = 'A moderately long Pulse reply author';
+
+    await tester.pumpWidget(
+      buildTestable(
+        ComposeNotePage(replyTo: replyNote),
+        displayName: displayName,
+      ),
+    );
+    await tester.pump();
+
+    expect(tester.getSize(find.text(displayName)).width, greaterThan(150));
+    expect(find.text('2m'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
