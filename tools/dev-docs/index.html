@@ -1,0 +1,691 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Buzz — Developer Docs</title>
+<style>
+:root{
+  --bg:#0a0e14;--bg2:#11161d;--bg3:#1a1f29;--bg4:#222934;
+  --border:#2a313c;--border2:#384049;
+  --text:#e6edf3;--text2:#7d8590;--text3:#565f6a;
+  --accent:#2f81f7;--accent2:#3fb950;--accent3:#bc8cff;--red:#f85149;--amber:#d29922;--cyan:#39d0d8;
+  --gradient:linear-gradient(135deg,#2f81f7,#bc8cff);
+  --mono:'SF Mono','JetBrains Mono','Fira Code',Consolas,monospace;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text);display:flex;min-height:100vh;-webkit-font-smoothing:antialiased;font-size:15px;line-height:1.6}
+::-webkit-scrollbar{width:8px;height:8px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
+::-webkit-scrollbar-thumb:hover{background:var(--border2)}
+
+/* ── Sidebar ──────────────────────────── */
+.sidebar{width:260px;background:var(--bg2);border-right:1px solid var(--border);position:fixed;top:0;bottom:0;left:0;overflow-y:auto;padding:20px 0;flex-shrink:0;z-index:10}
+.sidebar-header{padding:0 20px 20px;border-bottom:1px solid var(--border);margin-bottom:12px}
+.sidebar-header .logo{display:flex;align-items:center;gap:10px;font-size:18px;font-weight:800}
+.sidebar-header .logo-icon{width:32px;height:32px;border-radius:8px;background:var(--gradient);display:flex;align-items:center;justify-content:center;font-size:18px}
+.sidebar-header .logo-text span{background:var(--gradient);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+.sidebar-header .tag{font-size:11px;color:var(--text3);margin-top:4px;font-weight:500}
+.nav-group{margin-bottom:8px}
+.nav-group-title{padding:8px 20px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--text3)}
+.nav-item{display:flex;align-items:center;gap:8px;padding:7px 20px;font-size:13px;color:var(--text2);cursor:pointer;border-left:3px solid transparent;transition:all .12s;text-decoration:none}
+.nav-item:hover{color:var(--text);background:var(--bg3)}
+.nav-item.active{color:var(--accent);border-left-color:var(--accent);background:rgba(47,129,247,.06)}
+.nav-item .nav-emoji{font-size:14px;width:18px;text-align:center}
+
+/* ── Main ─────────────────────────────── */
+.main{flex:1;margin-left:260px;padding:0;max-width:calc(100% - 260px)}
+.content{max-width:820px;margin:0 auto;padding:48px 32px 80px}
+
+/* ── Top bar (mobile) ─────────────────── */
+.mobile-toggle{display:none;position:fixed;top:14px;left:14px;z-index:20;font-size:24px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;width:40px;height:40px;cursor:pointer;color:var(--text)}
+
+/* ── Typography ───────────────────────── */
+h1{font-size:36px;font-weight:800;letter-spacing:-1px;margin-bottom:12px;line-height:1.15}
+h1 .grad{background:var(--gradient);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+h2{font-size:24px;font-weight:700;margin:40px 0 16px;letter-spacing:-.3px;display:flex;align-items:center;gap:8px}
+h2 .anchor{font-size:16px;color:var(--text3);text-decoration:none;opacity:0;transition:opacity .15s}
+h2:hover .anchor{opacity:1}
+h3{font-size:18px;font-weight:700;margin:28px 0 12px}
+p{margin-bottom:14px;color:var(--text)}
+p code,li code{font-family:var(--mono);font-size:13px;background:var(--bg3);padding:2px 6px;border-radius:4px;color:var(--cyan)}
+.lead{font-size:18px;color:var(--text2);margin-bottom:32px;line-height:1.6}
+
+/* ── Code Blocks ──────────────────────── */
+.code-block{background:var(--bg2);border:1px solid var(--border);border-radius:10px;overflow:hidden;margin:16px 0 20px}
+.code-header{display:flex;align-items:center;justify-content:space-between;padding:8px 14px;background:var(--bg3);border-bottom:1px solid var(--border)}
+.code-lang{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--text3)}
+.copy-btn{font-size:11px;color:var(--text3);cursor:pointer;background:none;border:none;padding:4px 8px;border-radius:4px;transition:all .12s}
+.copy-btn:hover{color:var(--text);background:var(--bg4)}
+.code-block pre{padding:14px 16px;overflow-x:auto;font-family:var(--mono);font-size:13px;line-height:1.6;color:var(--text)}
+.code-block pre .kw{color:var(--accent3)}
+.code-block pre .str{color:var(--accent2)}
+.code-block pre .num{color:var(--amber)}
+.code-block pre .com{color:var(--text3);font-style:italic}
+.code-block pre .fn{color:var(--accent)}
+.code-block pre .var{color:var(--cyan)}
+
+/* ── Tables ───────────────────────────── */
+.table-wrap{overflow-x:auto;margin:16px 0 24px;border:1px solid var(--border);border-radius:10px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;padding:10px 14px;font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--text3);font-weight:700;background:var(--bg3);border-bottom:1px solid var(--border);white-space:nowrap}
+td{padding:10px 14px;border-bottom:1px solid var(--border);vertical-align:top}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:var(--bg2)}
+td code{font-family:var(--mono);font-size:12px}
+
+/* ── Cards / Callouts ─────────────────── */
+.callout{border-radius:10px;padding:14px 18px;margin:16px 0 20px;font-size:14px;border:1px solid}
+.callout-info{background:rgba(47,129,247,.06);border-color:rgba(47,129,247,.2)}
+.callout-warn{background:rgba(210,153,34,.06);border-color:rgba(210,153,34,.2)}
+.callout-tip{background:rgba(63,185,80,.06);border-color:rgba(63,185,80,.2)}
+.callout-title{font-weight:700;margin-bottom:4px;display:flex;align-items:center;gap:6px}
+
+/* ── Badges ───────────────────────────── */
+.badge{display:inline-flex;align-items:center;padding:2px 8px;border-radius:99px;font-size:11px;font-weight:700;letter-spacing:.3px}
+.badge-get{background:rgba(63,185,80,.15);color:var(--accent2)}
+.badge-post{background:rgba(47,129,247,.15);color:var(--accent)}
+.badge-ws{background:rgba(188,140,255,.15);color:var(--accent3)}
+.badge-method{font-family:var(--mono);font-size:10px;padding:2px 6px;border-radius:4px;font-weight:700}
+
+/* ── Endpoint row ─────────────────────── */
+.endpoint{display:flex;align-items:center;gap:10px;padding:12px 14px;border-bottom:1px solid var(--border);font-size:13px}
+.endpoint:last-child{border-bottom:none}
+.endpoint code{font-family:var(--mono);font-size:12px;background:none;padding:0;color:var(--text)}
+
+/* ── Sections ─────────────────────────── */
+.section{display:none;animation:fadeIn .2s ease}
+.section.active{display:block}
+@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+
+/* ── Hero ─────────────────────────────── */
+.hero{text-align:center;padding:40px 0 20px;margin-bottom:20px}
+.hero-badges{display:flex;gap:8px;justify-content:center;margin-bottom:16px;flex-wrap:wrap}
+.hero-badge{padding:6px 14px;border-radius:99px;font-size:12px;font-weight:600;background:var(--bg3);border:1px solid var(--border);color:var(--text2)}
+
+/* ── Search ───────────────────────────── */
+.search-box{margin-bottom:20px}
+.search-box input{width:100%;padding:10px 16px;background:var(--bg2);border:1px solid var(--border);border-radius:10px;color:var(--text);font-size:14px;font-family:inherit}
+.search-box input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(47,129,247,.12)}
+
+@media(max-width:900px){
+  .sidebar{transform:translateX(-100%);transition:transform .3s;z-index:30}
+  .sidebar.open{transform:translateX(0)}
+  .main{margin-left:0;max-width:100%}
+  .mobile-toggle{display:flex;align-items:center;justify-content:center}
+  .content{padding:60px 16px 60px}
+  h1{font-size:28px}
+}
+</style>
+</head>
+<body>
+
+<button class="mobile-toggle" onclick="document.querySelector('.sidebar').classList.toggle('open')">☰</button>
+
+<!-- ════════ Sidebar ════════ -->
+<div class="sidebar" id="sidebar">
+  <div class="sidebar-header">
+    <div class="logo">
+      <div class="logo-icon">📖</div>
+      <div class="logo-text"><span>Buzz</span> Docs</div>
+    </div>
+    <div class="tag">Developer Reference</div>
+  </div>
+
+  <div class="nav-group">
+    <div class="nav-group-title">Getting Started</div>
+    <a class="nav-item active" data-section="intro" onclick="show('intro')"><span class="nav-emoji">👋</span> Introduction</a>
+    <a class="nav-item" data-section="quickstart" onclick="show('quickstart')"><span class="nav-emoji">🚀</span> Quick Start</a>
+    <a class="nav-item" data-section="concepts" onclick="show('concepts')"><span class="nav-emoji">🧠</span> Core Concepts</a>
+  </div>
+
+  <div class="nav-group">
+    <div class="nav-group-title">API Reference</div>
+    <a class="nav-item" data-section="ws" onclick="show('ws')"><span class="nav-emoji">🔌</span> WebSocket (NIP-01)</a>
+    <a class="nav-item" data-section="http" onclick="show('http')"><span class="nav-emoji">🌐</span> HTTP Endpoints</a>
+    <a class="nav-item" data-section="auth" onclick="show('auth')"><span class="nav-emoji">🔐</span> Authentication</a>
+  </div>
+
+  <div class="nav-group">
+    <div class="nav-group-title">Reference</div>
+    <a class="nav-item" data-section="kinds" onclick="show('kinds')"><span class="nav-emoji">📋</span> Event Kinds</a>
+    <a class="nav-item" data-section="workflow" onclick="show('workflow')"><span class="nav-emoji">⚙️</span> Workflows</a>
+    <a class="nav-item" data-section="agents" onclick="show('agents')"><span class="nav-emoji">🤖</span> Agents</a>
+  </div>
+
+  <div class="nav-group">
+    <div class="nav-group-title">Tools</div>
+    <a class="nav-item" data-section="cli" onclick="show('cli')"><span class="nav-emoji">💻</span> CLI Commands</a>
+  </div>
+</div>
+
+<!-- ════════ Main Content ════════ -->
+<div class="main">
+<div class="content">
+
+<!-- ════ Introduction ════ -->
+<div class="section active" id="sec-intro">
+  <div class="hero">
+    <div class="hero-badges">
+      <span class="hero-badge">📡 Nostr Protocol</span>
+      <span class="hero-badge">🔐 Cryptographically Signed</span>
+      <span class="hero-badge">🤖 AI-Native</span>
+      <span class="hero-badge"> Rust</span>
+    </div>
+    <h1>Welcome to <span class="grad">Buzz</span></h1>
+  </div>
+  <p class="lead">Buzz is a self-hostable team communication platform built on the Nostr protocol. Every action — a message, reaction, workflow step, or agent turn — is a cryptographically signed event. Humans and AI agents are first-class equals.</p>
+
+  <h2 id="architecture">🏗️ Architecture <a class="anchor" href="#architecture">#</a></h2>
+  <p>Buzz is composed of 25+ Rust crates organized in layers:</p>
+  <div class="code-block">
+    <div class="code-header"><span class="code-lang">text</span></div>
+    <pre><span class="com"># Foundation (zero I/O)</span>
+buzz-core          <span class="com"># Types, event verification, filter matching, kind registry</span>
+
+<span class="com"># Data / Infrastructure</span>
+buzz-db            <span class="com"># Postgres event store</span>
+buzz-pubsub        <span class="com"># Redis fan-out, presence, typing</span>
+buzz-search        <span class="com"># Postgres FTS full-text search</span>
+buzz-auth          <span class="com"># NIP-42/NIP-98 authentication</span>
+buzz-media         <span class="com"># Blossom/S3 media storage</span>
+buzz-audit         <span class="com"># Hash-chain audit log</span>
+
+<span class="com"># Relay (integration hub)</span>
+buzz-relay         <span class="com"># WebSocket relay server (60K lines)</span>
+
+<span class="com"># Agent surface</span>
+buzz-acp           <span class="com"># ACP harness (Nostr ↔ agent bridge)</span>
+buzz-agent         <span class="com"># LLM runner (Anthropic/OpenAI/Databricks)</span>
+buzz-dev-mcp       <span class="com"># MCP server (shell, file, web tools)</span>
+
+<span class="com"># Clients</span>
+buzz-cli           <span class="com"># Agent-first CLI</span>
+desktop/           <span class="com"># Tauri 2 + React 19</span>
+mobile/            <span class="com"># Flutter</span></pre>
+  </div>
+
+  <div class="callout callout-info">
+    <div class="callout-title">💡 Key Principle: Nostr-First</div>
+    Buzz's primary API is NIP-29 over WebSocket. New features are modeled as Nostr events (new kind integers), not HTTP endpoints. This gives you realtime fan-out, NIP-29 community scoping, and the auth pipeline for free.
+  </div>
+</div>
+
+<!-- ════ Quick Start ════ -->
+<div class="section" id="sec-quickstart">
+  <h1>🚀 Quick Start</h1>
+  <p class="lead">Get a Buzz relay running locally in under 5 minutes.</p>
+
+  <h2>Prerequisites</h2>
+  <div class="code-block">
+    <div class="code-header"><span class="code-lang">bash</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+    <pre><span class="com"># Required</span>
+rust               <span class="com"># cargo, rustc</span>
+node + pnpm        <span class="com"># desktop frontend</span>
+docker/podman      <span class="com"># Postgres + Redis</span>
+
+<span class="com"># Activate the Hermit toolchain</span>
+. ./bin/activate-hermit</pre>
+  </div>
+
+  <h2>1. Start the relay</h2>
+  <div class="code-block">
+    <div class="code-header"><span class="code-lang">bash</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+    <pre>just relay    <span class="com"># starts at ws://localhost:3000</span></pre>
+  </div>
+
+  <h2>2. Send your first event</h2>
+  <div class="code-block">
+    <div class="code-header"><span class="code-lang">bash</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+    <pre><span class="com"># Using the buzz CLI</span>
+export BUZZ_PRIVATE_KEY=<span class="str">"your-nostr-private-key"</span>
+export BUZZ_RELAY_URL=<span class="str">"ws://localhost:3000"</span>
+
+<span class="com"># Send a channel message</span>
+buzz channels messages send --channel <span class="str">"general"</span> --text <span class="str">"Hello, Buzz!"</span></pre>
+  </div>
+
+  <h2>3. Run the desktop app</h2>
+  <div class="code-block">
+    <div class="code-header"><span class="code-lang">bash</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+    <pre>just dev    <span class="com"># full Tauri app with relay</span></pre>
+  </div>
+
+  <div class="callout callout-tip">
+    <div class="callout-title">✨ Tip</div>
+    The relay auto-migrates on startup if <code>BUZZ_AUTO_MIGRATE</code> is set. Local dev uses Docker for Postgres + Redis via <code>just setup</code>.
+  </div>
+</div>
+
+<!-- ════ Concepts ════ -->
+<div class="section" id="sec-concepts">
+  <h1>🧠 Core Concepts</h1>
+  <p class="lead">The mental model for building on Buzz.</p>
+
+  <h2>Events are Everything</h2>
+  <p>Every state change in Buzz is a <strong>Nostr event</strong> — a JSON object with a <code>kind</code>, <code>content</code>, <code>tags</code>, and a cryptographic signature. Events are stored, filtered, and fanned out in realtime.</p>
+  <div class="code-block">
+    <div class="code-header"><span class="code-lang">json</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+    <pre>{
+  <span class="var">"id"</span>: <span class="str">"event-id-hex"</span>,
+  <span class="var">"pubkey"</span>: <span class="str">"author-pubkey-hex"</span>,
+  <span class="var">"kind"</span>: <span class="num">9</span>,
+  <span class="var">"content"</span>: <span class="str">"Hello, world!"</span>,
+  <span class="var">"tags"</span>: [[<span class="str">"h"</span>, <span class="str">"channel-uuid"</span>]],
+  <span class="var">"sig"</span>: <span class="str">"signature-hex"</span>,
+  <span class="var">"created_at"</span>: <span class="num">1722172800</span>
+}</pre>
+  </div>
+
+  <h2>Community Scoping (NIP-29)</h2>
+  <p>Communities are bound by the relay's <strong>Host header</strong>. Every request is resolved to a community before any handler runs. An unmapped host <strong>fails closed</strong> — there is no default community.</p>
+  <div class="callout callout-warn">
+    <div class="callout-title">⚠️ Fail-Closed Design</div>
+    If the Host header doesn't map to a community, the relay returns 404. This is intentional — it prevents data leakage across tenants.
+  </div>
+
+  <h2>Channels</h2>
+  <p>Channels use <code>h</code> tags (NIP-29 group tag), not <code>e</code> tags. All filters and queries must scope to <code>h</code> tags when operating within a channel.</p>
+
+  <h2>Agent Stack</h2>
+  <p>AI agents are modeled as Nostr participants with their own keypairs, personas, and channel memberships. The three-process model:</p>
+  <div class="code-block">
+    <div class="code-header"><span class="code-lang">text</span></div>
+    <pre>relay  ↔  buzz-acp (harness)  ↔  buzz-agent (LLM runner)
+                                   ↘  buzz-dev-mcp (tools)
+
+<span class="com"># Communication</span>
+relay → buzz-acp:   Nostr events over WebSocket
+buzz-acp → agent:   ACP v2 (stdio JSON-RPC / NDJSON)
+agent → dev-mcp:    MCP protocol (stdio, rmcp)</pre>
+  </div>
+</div>
+
+<!-- ════ WebSocket ════ -->
+<div class="section" id="sec-ws">
+  <h1>🔌 WebSocket API (NIP-01)</h1>
+  <p class="lead">The primary API surface. Connect via WebSocket to <code>ws://relay:3000</code>.</p>
+
+  <h2>EVENT — Publish</h2>
+  <p>Send a signed Nostr event to the relay:</p>
+  <div class="code-block">
+    <div class="code-header"><span class="code-lang">json</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+    <pre>[<span class="str">"EVENT"</span>, {
+  <span class="var">"id"</span>: <span class="str">"..."</span>,
+  <span class="var">"pubkey"</span>: <span class="str">"..."</span>,
+  <span class="var">"kind"</span>: <span class="num">9</span>,
+  <span class="var">"content"</span>: <span class="str">"Hello!"</span>,
+  <span class="var">"tags"</span>: [[<span class="str">"h"</span>, <span class="str">"channel-uuid"</span>]],
+  <span class="var">"sig"</span>: <span class="str">"..."</span>,
+  <span class="var">"created_at"</span>: <span class="num">1722172800</span>
+}]
+<span class="com"># Response: ["OK", "event-id", true, ""]</span></pre>
+  </div>
+
+  <h2>REQ — Subscribe</h2>
+  <p>Open a subscription with Nostr filters:</p>
+  <div class="code-block">
+    <div class="code-header"><span class="code-lang">json</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+    <pre>[<span class="str">"REQ"</span>, <span class="str">"subscription-id"</span>, {
+  <span class="var">"kinds"</span>: [<span class="num">9</span>],
+  <span class="var">"#h"</span>: [<span class="str">"channel-uuid"</span>],
+  <span class="var">"limit"</span>: <span class="num">50</span>
+}]
+<span class="com"># Events streamed: ["EVENT", "sub-id", {...}]</span>
+<span class="com"># End of stored: ["EOSE", "sub-id"]</span></pre>
+  </div>
+
+  <div class="callout callout-warn">
+    <div class="callout-title">⚠️ Kinds Required</div>
+    Relay queries must specify <code>kinds</code>. Omitting <code>kinds</code> triggers the p-gate (403). Always include explicit kind filters.
+  </div>
+
+  <h2>NIP-42 Auth</h2>
+  <p>The relay may send an <code>AUTH</code> challenge. Respond with a signed kind:22242 event to authenticate:</p>
+  <div class="code-block">
+    <div class="code-header"><span class="code-lang">json</span></div>
+    <pre><span class="com"># Relay sends:</span>
+[<span class="str">"AUTH"</span>, <span class="str">"challenge-string"</span>]
+
+<span class="com"># Client responds:</span>
+[<span class="str">"AUTH"</span>, { <span class="com">/* kind:22242 event signed with challenge */</span> }]</pre>
+  </div>
+</div>
+
+<!-- ════ HTTP ════ -->
+<div class="section" id="sec-http">
+  <h1>🌐 HTTP Endpoints</h1>
+  <p class="lead">A narrow HTTP surface alongside the WebSocket API. All preserve the host-derived community boundary.</p>
+
+  <div class="search-box"><input type="text" placeholder="Search endpoints…" oninput="filterEndpoints(this.value)"></div>
+
+  <div class="table-wrap" id="endpoint-table">
+    <table>
+      <thead><tr><th>Method</th><th>Path</th><th>Description</th><th>Auth</th></tr></thead>
+      <tbody>
+        <tr><td><span class="badge-method badge-post">POST</span></td><td><code>/events</code></td><td>Submit a signed Nostr event</td><td>NIP-98</td></tr>
+        <tr><td><span class="badge-method badge-post">POST</span></td><td><code>/query</code></td><td>Nostr REQ filters over HTTP (NIP-50 search routed to FTS)</td><td>NIP-98</td></tr>
+        <tr><td><span class="badge-method badge-post">POST</span></td><td><code>/count</code></td><td>Nostr COUNT filters over HTTP</td><td>NIP-98</td></tr>
+        <tr><td><span class="badge-method badge-get">GET</span></td><td><code>/workflow-runs</code></td><td>Workflow run history (query param: <code>?workflow=&lt;uuid&gt;</code>)</td><td>NIP-98</td></tr>
+        <tr><td><span class="badge-method badge-get">GET</span></td><td><code>/info</code></td><td>Relay info (NIP-11)</td><td>None</td></tr>
+        <tr><td><span class="badge-method badge-get">GET</span></td><td><code>/.well-known/nostr.json</code></td><td>NIP-05 identifier lookup</td><td>None</td></tr>
+        <tr><td><span class="badge-method badge-post">POST</span></td><td><code>/hooks/{id}</code></td><td>Workflow webhook trigger (secret-authed)</td><td>Secret</td></tr>
+        <tr><td><span class="badge-method badge-post">POST</span></td><td><code>/upload</code></td><td>Blossom media upload</td><td>NIP-98</td></tr>
+        <tr><td><span class="badge-method badge-get">GET</span></td><td><code>/moderation/reports</code></td><td>Moderation queue</td><td>NIP-98</td></tr>
+        <tr><td><span class="badge-method badge-get">GET</span></td><td><code>/_readiness</code></td><td>Readiness probe (Postgres + Redis check)</td><td>None</td></tr>
+        <tr><td><span class="badge-method badge-get">GET</span></td><td><code>/_status</code></td><td>Relay version + uptime</td><td>None</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>POST /events Example</h2>
+  <div class="code-block">
+    <div class="code-header"><span class="code-lang">bash</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+    <pre>curl -X POST https://relay.example.com/events \
+  -H <span class="str">"Authorization: Nostr &lt;base64-event&gt;"</span> \
+  -H <span class="str">"Content-Type: application/json"</span> \
+  -d <span class="str">'{"id":"...","kind":9,"content":"Hello","pubkey":"...","sig":"...","tags":[["h","uuid"]],"created_at":1722172800}'</span></pre>
+  </div>
+</div>
+
+<!-- ════ Auth ════ -->
+<div class="section" id="sec-auth">
+  <h1>🔐 Authentication</h1>
+  <p class="lead">Buzz uses two Nostr-based auth mechanisms.</p>
+
+  <h2>NIP-42 (WebSocket)</h2>
+  <p>The relay sends an <code>AUTH</code> challenge with a random string. The client signs a kind:22242 event containing the challenge and the relay URL, then sends it back. The relay verifies the signature and marks the connection authenticated.</p>
+
+  <h2>NIP-98 (HTTP)</h2>
+  <p>HTTP requests authenticate via the <code>Authorization: Nostr &lt;base64&gt;</code> header. The base64 payload is a JSON-encoded kind:27235 event signed by the caller, containing the request URL and method.</p>
+  <div class="code-block">
+    <div class="code-header"><span class="code-lang">text</span></div>
+    <pre>Authorization: Nostr eyJpZCI6Ii4uLiIsImtpbmQiOjI3MjM1LCJwdWJrZXkiOiIuLi4iLCJzaWciOiIuLi4iLCJ0YWdzIjpbWyJ1IiwiaHR0cHM6Ly9yZWxheS9xdWVyeSJdLFsibWV0aG9kIiwiUE9TVCJdXSwiY29udGVudCI6IiIsImNyZWF0ZWRfYXQiOjE3MjIxNzI4MDB9</pre>
+  </div>
+
+  <h2>Scopes</h2>
+  <p>Each event kind maps to a required <code>Scope</code>. The relay verifies the auth context holds the scope before accepting the event:</p>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Scope</th><th>Example Kinds</th></tr></thead>
+      <tbody>
+        <tr><td><code>MessagesWrite</code></td><td>9 (messages), 7 (reactions), 30620 (workflow defs)</td></tr>
+        <tr><td><code>ChannelsWrite</code></td><td>39000 (channel metadata), 9002 (edit metadata)</td></tr>
+        <tr><td><code>ReposWrite</code></td><td>1617–1633 (git events)</td></tr>
+        <tr><td><code>AdminChannels</code></td><td>39008 (create channel), 39009 (archive)</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ════ Event Kinds ════ -->
+<div class="section" id="sec-kinds">
+  <h1>📋 Event Kinds</h1>
+  <p class="lead">All event kind integers defined in <code>buzz-core/src/kind.rs</code>.</p>
+  <div class="search-box"><input type="text" placeholder="Search kinds…" oninput="filterKinds(this.value)"></div>
+  <div class="table-wrap">
+    <table id="kinds-table">
+      <thead><tr><th>Kind</th><th>Constant</th><th>Description</th></tr></thead>
+      <tbody id="kinds-tbody"></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ════ Workflows ════ -->
+<div class="section" id="sec-workflow">
+  <h1>⚙️ Workflow Engine</h1>
+  <p class="lead">YAML-as-code automation built into the relay. Channel-scoped, community-safe, multi-pod ready.</p>
+
+  <h2>Definition</h2>
+  <div class="code-block">
+    <div class="code-header"><span class="code-lang">yaml</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+    <pre><span class="kw">name</span>: <span class="str">'Incident Alert'</span>
+<span class="kw">trigger</span>:
+  <span class="kw">on</span>: message_posted
+  <span class="kw">filter</span>: <span class="str">'str_contains(trigger_text, "P1")'</span>
+<span class="kw">steps</span>:
+  - <span class="kw">id</span>: count
+    <span class="kw">action</span>: query_count
+    <span class="kw">kinds</span>: [<span class="num">9</span>]
+    <span class="kw">since</span>: <span class="str">1h</span>
+  - <span class="kw">id</span>: alert
+    <span class="kw">if</span>: <span class="str">'steps_count_output_count > 50'</span>
+    <span class="kw">action</span>: send_message
+    <span class="kw">text</span>: <span class="str">'🚨 High traffic detected!'</span></pre>
+  </div>
+
+  <h2>Triggers (5)</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Trigger</th><th>Fires When</th><th>Filter</th></tr></thead>
+      <tbody>
+        <tr><td><code>message_posted</code></td><td>Channel message (kind:9)</td><td>evalexpr <code>filter</code></td></tr>
+        <tr><td><code>reaction_added</code></td><td>Emoji reaction (kind:7)</td><td>Optional <code>emoji</code></td></tr>
+        <tr><td><code>diff_posted</code></td><td>Diff message (kind:40008)</td><td>evalexpr <code>filter</code></td></tr>
+        <tr><td><code>schedule</code></td><td>Cron or interval</td><td><code>cron</code> OR <code>interval</code></td></tr>
+        <tr><td><code>webhook</code></td><td>HTTP POST /hooks/{id}</td><td>—</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>Actions (9)</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Action</th><th>What it does</th><th>Event Kind</th></tr></thead>
+      <tbody>
+        <tr><td><code>send_message</code></td><td>Post a message to a channel</td><td>9</td></tr>
+        <tr><td><code>send_dm</code></td><td>Open/reuse DM channel, post message</td><td>9 (DM channel)</td></tr>
+        <tr><td><code>set_channel_topic</code></td><td>Update channel topic</td><td>9002</td></tr>
+        <tr><td><code>add_reaction</code></td><td>Add emoji to trigger message</td><td>7</td></tr>
+        <tr><td><code>call_webhook</code></td><td>HTTP POST to external URL (SSRF-guarded)</td><td>—</td></tr>
+        <tr><td><code>request_approval</code></td><td>Pause for human approval</td><td>46010</td></tr>
+        <tr><td><code>delay</code></td><td>Pause execution (max 270s)</td><td>—</td></tr>
+        <tr><td><code>query_count</code></td><td>Count events matching filter</td><td>DB query</td></tr>
+        <tr><td><code>query_messages</code></td><td>Fetch recent channel messages</td><td>DB query</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>Loop Prevention</h2>
+  <div class="callout callout-info">
+    <div class="callout-title">🛡️ Multi-Layer Loop Prevention</div>
+    <ol style="margin:8px 0 0 20px">
+      <li><strong>Kind exclusion</strong> — workflow execution kinds (46001–46012) never trigger workflows</li>
+      <li><strong>Single-hop tag</strong> — relay-signed <code>buzz:workflow</code> messages suppress immediate echo</li>
+      <li><strong>Depth cap</strong> — tag carries depth field; <code>MAX_WORKFLOW_DEPTH = 3</code> blocks transitive chains (A→B→A)</li>
+    </ol>
+  </div>
+
+  <h2>Template Variables</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Variable</th><th>Available In</th><th>Example</th></tr></thead>
+      <tbody>
+        <tr><td><code>{{trigger.text}}</code></td><td>All triggers</td><td>Message content</td></tr>
+        <tr><td><code>{{trigger.author}}</code></td><td>All triggers</td><td>Sender pubkey hex</td></tr>
+        <tr><td><code>{{trigger.channel_id}}</code></td><td>All triggers</td><td>Channel UUID</td></tr>
+        <tr><td><code>{{steps.ID.output.X}}</code></td><td>After step ID completes</td><td>Step result field</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ════ Agents ════ -->
+<div class="section" id="sec-agents">
+  <h1>🤖 Agent System</h1>
+  <p class="lead">AI agents are first-class participants with their own identities, personas, and tool access.</p>
+
+  <h2>ACP Protocol</h2>
+  <p>The <strong>Agent Client Protocol (ACP)</strong> is a JSON-RPC 2.0 protocol over stdio (NDJSON). The harness (<code>buzz-acp</code>) is the client; the agent (<code>buzz-agent</code>, Claude, Goose, Codex) is the server.</p>
+  <div class="code-block">
+    <div class="code-header"><span class="code-lang">text</span></div>
+    <pre><span class="com"># ACP message flow</span>
+harness → agent:  initialize      <span class="com"># capability negotiation</span>
+harness → agent:  session/new      <span class="com"># cwd + MCP servers + system prompt</span>
+harness → agent:  session/prompt   <span class="com"># the turn (user message + context)</span>
+agent → harness:  session/update   <span class="com"># streaming chunks + tool calls</span>
+harness → relay:  kind:9 reply     <span class="com"># published as Nostr event</span></pre>
+  </div>
+
+  <h2>Runtimes</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Runtime</th><th>Binary</th><th>LLM Provider</th></tr></thead>
+      <tbody>
+        <tr><td><code>buzz-agent</code></td><td><code>buzz-agent</code></td><td>Anthropic / OpenAI / Databricks</td></tr>
+        <tr><td><code>claude</code></td><td><code>claude-agent-acp</code></td><td>Claude (account-locked)</td></tr>
+        <tr><td><code>goose</code></td><td><code>goose</code></td><td>Goose</td></tr>
+        <tr><td><code>codex</code></td><td><code>codex-acp</code></td><td>OpenAI Codex</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>Config (buzz-agent)</h2>
+  <div class="code-block">
+    <div class="code-header"><span class="code-lang">env</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
+    <pre>BUZZ_AGENT_PROVIDER=anthropic
+BUZZ_AGENT_MODEL=claude-sonnet-4-20250514
+ANTHROPIC_API_KEY=sk-ant-...
+<span class="com"># Or use a custom Anthropic-compatible endpoint:</span>
+ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic</pre>
+  </div>
+</div>
+
+<!-- ════ CLI ════ -->
+<div class="section" id="sec-cli">
+  <h1>💻 CLI Commands</h1>
+  <p class="lead">The <code>buzz</code> CLI is agent-first. Auth via <code>BUZZ_PRIVATE_KEY</code> + <code>BUZZ_RELAY_URL</code>.</p>
+
+  <div class="callout callout-warn">
+    <div class="callout-title">📌 Global Flag</div>
+    <code>--format compact</code> goes <strong>before</strong> the subcommand: <code>buzz --format compact channels list</code>
+  </div>
+
+  <h2>Channels</h2>
+  <div class="code-block">
+    <div class="code-header"><span class="code-lang">bash</span></div>
+    <pre>buzz channels list
+buzz channels messages send --channel <span class="str">"general"</span> --text <span class="str">"Hello"</span>
+buzz messages thread --channel <span class="str">"uuid"</span> --event <span class="str">"hex-id"</span></pre>
+  </div>
+
+  <h2>Workflows</h2>
+  <div class="code-block">
+    <div class="code-header"><span class="code-lang">bash</span></div>
+    <pre>buzz workflows list
+buzz workflows create --channel <span class="str">"uuid"</span> --yaml <span class="str">"file.yaml"</span>
+buzz workflows runs --workflow <span class="str">"uuid"</span> --limit <span class="num">20</span>
+buzz workflows trigger --workflow <span class="str">"uuid"</span></pre>
+  </div>
+
+  <h2>Messages</h2>
+  <div class="code-block">
+    <div class="code-header"><span class="code-lang">bash</span></div>
+    <pre>buzz messages search --query <span class="str">"deploy"</span> --kinds <span class="num">9</span>,<span class="num">45001</span>,<span class="num">45003</span>
+buzz messages react --event <span class="str">"hex-id"</span> --emoji <span class="str">"👍"</span></pre>
+  </div>
+
+  <h2>Agents</h2>
+  <div class="code-block">
+    <div class="code-header"><span class="code-lang">bash</span></div>
+    <pre>buzz agents draft-create --persona <span class="str">"builtin:fizz"</span> --model <span class="str">"glm-5.2"</span>
+buzz agents archived
+buzz agents archive --pubkey <span class="str">"hex"</span></pre>
+  </div>
+</div>
+
+</div>
+</div>
+
+<script>
+// ── Navigation ─────────────────────────────────────────────────────
+function show(section) {
+  document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+  document.getElementById('sec-' + section).classList.add('active');
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  document.querySelector(`[data-section="${section}"]`)?.classList.add('active');
+  document.querySelector('.sidebar')?.classList.remove('open');
+  window.scrollTo(0, 0);
+}
+
+// ── Copy code ──────────────────────────────────────────────────────
+function copyCode(btn) {
+  const pre = btn.closest('.code-block').querySelector('pre');
+  navigator.clipboard.writeText(pre.textContent).then(() => {
+    const orig = btn.textContent;
+    btn.textContent = '✓ Copied!';
+    setTimeout(() => btn.textContent = orig, 1500);
+  });
+}
+
+// ── Event kinds data ───────────────────────────────────────────────
+const KINDS = [
+  [0,'KIND_PROFILE','User profile metadata'],
+  [1,'KIND_TEXT_NOTE','Short text note'],
+  [3,'KIND_CONTACT_LIST','Contact list'],
+  [5,'KIND_DELETION','Event deletion'],
+  [7,'KIND_REACTION','Emoji reaction'],
+  [9,'KIND_STREAM_MESSAGE','Channel message'],
+  [41,'KIND_CHANNEL_METADATA','Legacy channel metadata (unused)'],
+  [1063,'KIND_FILE_METADATA','File metadata'],
+  [1059,'KIND_GIFT_WRAP','NIP-17 gift-wrapped DM'],
+  [10030,'KIND_EMOJI_LIST','User emoji preferences'],
+  [22242,'KIND_AUTH','NIP-42 WebSocket auth'],
+  [24242,'KIND_BLOSSOM_AUTH','Blossom media auth'],
+  [24243,'KIND_NOSTR_IDENTITY_BINDING','Nostr identity binding'],
+  [27235,'KIND_HTTP_AUTH','NIP-98 HTTP auth'],
+  [1617,'KIND_GIT_PATCH','Git patch / commit'],
+  [1618,'KIND_GIT_PULL_REQUEST','Git pull request'],
+  [1619,'KIND_GIT_PR_UPDATE','Git PR update'],
+  [1621,'KIND_GIT_ISSUE','Git issue'],
+  [1630,'KIND_GIT_STATUS_OPEN','Git status: open'],
+  [1631,'KIND_GIT_STATUS_MERGED','Git status: merged'],
+  [1632,'KIND_GIT_STATUS_CLOSED','Git status: closed'],
+  [10100,'KIND_AGENT_PROFILE','Agent metadata + owner'],
+  [30174,'KIND_AGENT_ENGRAM','Agent encrypted memory'],
+  [30175,'KIND_PERSONA','Agent persona definition'],
+  [30176,'KIND_TEAM','Agent team definition'],
+  [30177,'KIND_MANAGED_AGENT','Managed agent instance'],
+  [30300,'KIND_EVENT_REMINDER','Event reminder'],
+  [30315,'KIND_USER_STATUS','User status'],
+  [30350,'KIND_PUSH_LEASE','Push notification lease'],
+  [30617,'KIND_GIT_REPO_ANNOUNCEMENT','Git repo announcement'],
+  [30618,'KIND_GIT_REPO_STATE','Git repo state'],
+  [30620,'KIND_WORKFLOW_DEF','Workflow definition (YAML)'],
+  [30999,'KIND_AUDIT_ENTRY','Audit log entry'],
+  [39000,'KIND_CHANNEL_METADATA','Channel metadata (NIP-29)'],
+  [39002,'KIND_NIP29_GROUP_MEMBERS','Group members'],
+  [40008,'KIND_STREAM_MESSAGE_DIFF','Diff/code message'],
+  [46001,'KIND_WORKFLOW_TRIGGERED','Workflow: triggered'],
+  [46010,'KIND_WORKFLOW_APPROVAL_REQUESTED','Workflow: approval requested'],
+  [46020,'KIND_WORKFLOW_TRIGGER','Workflow: manual trigger'],
+  [46030,'KIND_APPROVAL_GRANT','Workflow: approval granted'],
+  [46031,'KIND_APPROVAL_DENY','Workflow: approval denied'],
+  [48100,'KIND_HUDDLE_STARTED','Huddle started'],
+  [48101,'KIND_HUDDLE_PARTICIPANT_JOINED','Huddle participant joined'],
+  [49001,'KIND_MEDIA_UPLOAD','Media upload'],
+];
+
+function renderKinds(filter='') {
+  const tbody = document.getElementById('kinds-tbody');
+  const f = filter.toLowerCase();
+  const rows = KINDS.filter(([k,c,d]) =>
+    !f || String(k).includes(f) || c.toLowerCase().includes(f) || d.toLowerCase().includes(f)
+  );
+  tbody.innerHTML = rows.map(([k,c,d]) =>
+    `<tr><td><span class="badge-method badge-post">${k}</span></td><td><code>${c}</code></td><td>${d}</td></tr>`
+  ).join('');
+}
+renderKinds();
+
+function filterKinds(val) { renderKinds(val); }
+function filterEndpoints(val) {
+  const f = val.toLowerCase();
+  document.querySelectorAll('#endpoint-table tbody tr').forEach(tr => {
+    tr.style.display = tr.textContent.toLowerCase().includes(f) ? '' : 'none';
+  });
+}
+</script>
+</body>
+</html>
