@@ -660,8 +660,9 @@ void main() {
           expect(presentCalls, 0);
           expect(find.byTooltip('Close attachments'), findsWidgets);
 
-          supportResult.complete(false);
+          supportResult.complete(true);
           await tester.pumpAndSettle();
+          expect(presentCalls, 0);
         } finally {
           if (!supportResult.isCompleted) supportResult.complete(false);
           await _sendNativeAttachmentPopoverCall(tester, 'dismissed');

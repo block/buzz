@@ -44,7 +44,10 @@ class _IOSAttachmentPopoverCoordinator {
     required VoidCallback onFiles,
   }) async {
     if (defaultTargetPlatform != TargetPlatform.iOS) return false;
-    if (_activeOwner != null) return _didPresent;
+    if (_activeOwner case final activeOwner?) {
+      if (!_didPresent) _clearOwner(activeOwner);
+      return _didPresent;
+    }
 
     _activeOwner = owner;
     _callbacks = _IOSAttachmentPopoverCallbacks(
