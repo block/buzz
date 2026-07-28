@@ -425,6 +425,7 @@ export function AgentConfigPanel({
 
       <McpServersSection
         extensions={extensions}
+        pubkey={pubkey}
         runtimeId={runtimeId}
         variant={advancedMode === "flat" ? "profile" : "compact"}
       />

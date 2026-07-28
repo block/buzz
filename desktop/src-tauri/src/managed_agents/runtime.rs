@@ -7,9 +7,10 @@ use super::agent_env::build_buzz_agent_provider_defaults;
 use crate::{
     managed_agents::{
         append_log_marker, known_acp_runtime, login_shell_path, managed_agent_log_path,
-        missing_command_message, normalize_agent_args, open_log_file, resolve_command,
-        spawn_key_refusal, KnownAcpRuntime, ManagedAgentPairRuntime, ManagedAgentRecord,
-        ManagedAgentRuntimeKey, ManagedAgentSummary,
+        missing_command_message, normalize_agent_args, open_log_file,
+        remote_mcp::configure_remote_mcp_startup, resolve_command, spawn_key_refusal,
+        KnownAcpRuntime, ManagedAgentPairRuntime, ManagedAgentRecord, ManagedAgentRuntimeKey,
+        ManagedAgentSummary,
     },
     util::now_iso,
 };
@@ -545,15 +546,11 @@ pub fn spawn_agent_child(
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| effective_command.clone());
 
-    // The caller supplies the explicit canonical pair relay. This is the only
-    // relay this child may connect to, regardless of the record/workspace default.
+    // The canonical pair relay is the only relay this child may connect to.
     let effective_relay_url = runtime_key.relay_url.clone();
 
-    // Augment PATH for DMG launches so child processes can find:
-    //   - bundled CLI via ~/.local/bin symlink
-    //   - nvm-managed node/npm (nvm initializes only in interactive shells)
-    //   - bundled sidecars (buzz, buzz-acp, etc.) via exe parent (Contents/MacOS/)
-    //   - runtimes (node, python, etc.) via login shell PATH
+    // Augment DMG PATH with the bundled CLI/sidecars, nvm binaries, and
+    // runtimes inherited from the login shell.
     let nvm_bin = dirs::home_dir()
         .as_deref()
         .and_then(super::find_nvm_default_bin);
@@ -567,10 +564,10 @@ pub fn spawn_agent_child(
     );
 
     let mut command = std::process::Command::new(&resolved_acp_command);
+    let remote_mcp_startup = configure_remote_mcp_startup(&mut command, app, &record.pubkey)?;
     if let Some(home) = super::default_agent_workdir() {
         command.current_dir(home);
     }
-    command.stdin(std::process::Stdio::null());
     command.stdout(std::process::Stdio::from(stdout));
     command.stderr(std::process::Stdio::from(stderr));
     if let Some(ref path) = augmented_path {
@@ -904,18 +901,19 @@ pub fn spawn_agent_child(
         command.creation_flags(CREATE_NO_WINDOW);
     }
 
-    let child = command.spawn().map_err(|error| {
+    let mut child = command.spawn().map_err(|error| {
         format!(
             "failed to spawn `{}` for agent {}: {error}",
             resolved_acp_command.display(),
             record.name
         )
     })?;
-
-    // Stamp the effective spawn config so the summary builder can flag
-    // needs_restart when disk state drifts from what this process runs.
-    // `effective_relay_url` is already resolved, and resolution is idempotent,
-    // so it serves as the workspace-relay input here.
+    if let Err(error) = remote_mcp_startup.write_to(&mut child) {
+        let _ = terminate_process(child.id());
+        let _ = child.wait();
+        return Err(error);
+    }
+    // Stamp the effective spawn config so summaries can flag drift.
     let spawn_config_hash = super::spawn_hash::spawn_config_hash(
         record,
         &personas,

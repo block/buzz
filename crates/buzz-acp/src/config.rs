@@ -12,8 +12,22 @@ use nostr::Keys;
 use thiserror::Error;
 use url::Url;
 use uuid::Uuid;
+use zeroize::Zeroize;
 
+use crate::acp::McpServerHttp;
 use crate::filter::SubscriptionRule;
+
+const MAX_REMOTE_MCP_STDIN_BYTES: usize = 64 * 1024;
+
+fn parse_remote_mcp_servers(input: &str) -> Result<Vec<McpServerHttp>, ConfigError> {
+    if input.len() > MAX_REMOTE_MCP_STDIN_BYTES {
+        return Err(ConfigError::ConfigFile(
+            "remote MCP stdin payload exceeds 64 KiB".into(),
+        ));
+    }
+    serde_json::from_str(input)
+        .map_err(|error| ConfigError::ConfigFile(format!("remote MCP stdin JSON: {error}")))
+}
 
 /// Default idle timeout (seconds) when neither `--idle-timeout` nor the
 /// deprecated `--turn-timeout` is set.
@@ -261,6 +275,13 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_MCP_COMMAND", default_value = "")]
     pub mcp_command: String,
 
+    /// Read a JSON array of remote HTTP MCP servers from stdin at startup.
+    ///
+    /// Desktop uses this one-shot private pipe so bearer headers never enter
+    /// process arguments or environment variables.
+    #[arg(long, env = "BUZZ_ACP_REMOTE_MCP_STDIN", default_value_t = false)]
+    pub remote_mcp_stdin: bool,
+
     /// Idle timeout: max seconds of silence before killing a turn.
     /// Resets on any agent stdout activity.
     #[arg(long, env = "BUZZ_ACP_IDLE_TIMEOUT")]
@@ -495,6 +516,7 @@ pub struct Config {
     pub agent_command: String,
     pub agent_args: Vec<String>,
     pub mcp_command: String,
+    pub remote_mcp_servers: Vec<McpServerHttp>,
     pub idle_timeout_secs: u64,
     pub max_turn_duration_secs: u64,
     pub agents: u32,
@@ -1029,12 +1051,27 @@ impl Config {
 
         validate_multiple_event_handling(args.multiple_event_handling, args.dedup)?;
 
+        let remote_mcp_servers = if args.remote_mcp_stdin {
+            let mut input = String::new();
+            let mut reader = std::io::Read::take(
+                std::io::stdin().lock(),
+                (MAX_REMOTE_MCP_STDIN_BYTES + 1) as u64,
+            );
+            std::io::Read::read_to_string(&mut reader, &mut input)?;
+            let parsed = parse_remote_mcp_servers(&input);
+            input.zeroize();
+            parsed?
+        } else {
+            Vec::new()
+        };
+
         let config = Config {
             keys,
             relay_url: args.relay_url,
             agent_command,
             agent_args,
             mcp_command: args.mcp_command,
+            remote_mcp_servers,
             idle_timeout_secs,
             max_turn_duration_secs,
             agents: args.agents,
@@ -1413,6 +1450,7 @@ mod tests {
             agent_command: "goose".into(),
             agent_args: vec!["acp".into()],
             mcp_command: "".into(),
+            remote_mcp_servers: vec![],
             idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
@@ -1449,6 +1487,27 @@ mod tests {
             no_base_prompt: false,
             base_prompt_content: None,
         }
+    }
+
+    #[test]
+    fn remote_mcp_stdin_parser_accepts_http_server_shape() {
+        let servers = parse_remote_mcp_servers(
+            r#"[{"type":"http","name":"patina","url":"https://patina.so/mcp/acme","headers":[{"name":"Authorization","value":"Bearer pk_secret"}]}]"#,
+        )
+        .expect("valid ACP HTTP MCP payload should parse");
+
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].name, "patina");
+        assert_eq!(servers[0].headers[0].name, "Authorization");
+    }
+
+    #[test]
+    fn remote_mcp_stdin_parser_rejects_invalid_and_oversized_payloads() {
+        assert!(parse_remote_mcp_servers("not-json").is_err());
+        let oversized = " ".repeat(MAX_REMOTE_MCP_STDIN_BYTES + 1);
+        let error = parse_remote_mcp_servers(&oversized)
+            .expect_err("oversized remote MCP payload must fail closed");
+        assert!(error.to_string().contains("64 KiB"));
     }
 
     fn make_rule(

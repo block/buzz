@@ -95,6 +95,20 @@ type MockManagedAgentRuntimeSeed = {
   lifecycle?: MockManagedAgentRuntimeRow["lifecycle"];
 };
 
+type MockRemoteMcpConnection = {
+  agentPubkey: string;
+  id: string;
+  provider: string;
+  name: string;
+  url: string;
+  workspaceSlug: string;
+  workspaceName: string | null;
+  principalName: string | null;
+  enabled: boolean;
+  status: "connected" | "disabled";
+  lastVerifiedAt: string;
+};
+
 type MockRelayAgentSeed = {
   pubkey: string;
   name: string;
@@ -2085,6 +2099,7 @@ function resetMockRelayAgents(config?: E2eConfig) {
 
 function resetMockManagedAgents(config?: E2eConfig) {
   mockManagedAgents = [];
+  mockRemoteMcpConnections = [];
   mockManagedAgentRuntimes = (config?.mock?.managedAgentRuntimes ?? []).map(
     (seed) => ({
       pubkey: seed.pubkey,
@@ -2793,6 +2808,7 @@ let mockClosedChannelLiveSubscription = false;
 const realSockets = new Map<number, WebSocket>();
 let mockManagedAgents: MockManagedAgent[] = [];
 let mockManagedAgentRuntimes: MockManagedAgentRuntimeRow[] = [];
+let mockRemoteMcpConnections: MockRemoteMcpConnection[] = [];
 
 // Mutable `save_subscriptions` table mirror — TEST-ONLY.
 //
@@ -10459,6 +10475,85 @@ export function maybeInstallE2eTauriMocks() {
       }
       case "list_managed_agents":
         return handleListManagedAgents(activeConfig);
+      case "list_remote_mcp_connections": {
+        const { pubkey } = payload as { pubkey: string };
+        return mockRemoteMcpConnections
+          .filter((connection) => connection.agentPubkey === pubkey)
+          .map(({ agentPubkey: _agentPubkey, ...connection }) => ({
+            ...connection,
+          }));
+      }
+      case "connect_patina": {
+        const { apiKey, pubkey, workspaceSlug } = payload as {
+          apiKey: string;
+          pubkey: string;
+          workspaceSlug: string;
+        };
+        if (!apiKey.startsWith("pk_")) {
+          throw new Error("Patina agent keys must start with pk_");
+        }
+        const normalizedSlug = workspaceSlug.trim().toLowerCase();
+        const connection: MockRemoteMcpConnection = {
+          agentPubkey: pubkey,
+          enabled: true,
+          id: "patina",
+          lastVerifiedAt: new Date().toISOString(),
+          name: "Patina",
+          principalName: "Buzz Viewer",
+          provider: "patina",
+          status: "connected",
+          url: `https://patina.so/mcp/${normalizedSlug}`,
+          workspaceName: "Patina Demo",
+          workspaceSlug: normalizedSlug,
+        };
+        mockRemoteMcpConnections = [
+          ...mockRemoteMcpConnections.filter(
+            (item) => item.agentPubkey !== pubkey || item.id !== connection.id,
+          ),
+          connection,
+        ];
+        const { agentPubkey: _agentPubkey, ...summary } = connection;
+        return summary;
+      }
+      case "test_patina_connection": {
+        const { pubkey } = payload as { pubkey: string };
+        const connection = mockRemoteMcpConnections.find(
+          (item) => item.agentPubkey === pubkey && item.id === "patina",
+        );
+        if (!connection) {
+          throw new Error("Patina is not connected for this agent");
+        }
+        connection.lastVerifiedAt = new Date().toISOString();
+        const { agentPubkey: _agentPubkey, ...summary } = connection;
+        return { ...summary };
+      }
+      case "set_remote_mcp_enabled": {
+        const { connectionId, enabled, pubkey } = payload as {
+          connectionId: string;
+          enabled: boolean;
+          pubkey: string;
+        };
+        const connection = mockRemoteMcpConnections.find(
+          (item) => item.agentPubkey === pubkey && item.id === connectionId,
+        );
+        if (!connection) {
+          throw new Error("Remote MCP connection was not found");
+        }
+        connection.enabled = enabled;
+        connection.status = enabled ? "connected" : "disabled";
+        const { agentPubkey: _agentPubkey, ...summary } = connection;
+        return { ...summary };
+      }
+      case "disconnect_remote_mcp": {
+        const { connectionId, pubkey } = payload as {
+          connectionId: string;
+          pubkey: string;
+        };
+        mockRemoteMcpConnections = mockRemoteMcpConnections.filter(
+          (item) => item.agentPubkey !== pubkey || item.id !== connectionId,
+        );
+        return undefined;
+      }
       case "get_agent_memory":
         return handleGetAgentMemory(
           (payload as Parameters<typeof handleGetAgentMemory>[0]) ?? {},

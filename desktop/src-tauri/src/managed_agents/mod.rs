@@ -23,6 +23,7 @@ mod process_lifecycle;
 pub(crate) mod readiness;
 pub(crate) mod reconcile;
 mod relay_mesh;
+mod remote_mcp;
 mod repos;
 mod restore;
 pub mod retention;
@@ -65,6 +66,11 @@ pub(crate) use readiness::{
     AgentReadiness, Requirement,
 };
 pub use relay_mesh::*;
+pub(crate) use remote_mcp::delete_remote_mcp_connections_for_agent;
+pub use remote_mcp::{
+    connect_patina, disconnect_remote_mcp, list_remote_mcp_connections, set_remote_mcp_enabled,
+    test_patina_connection,
+};
 pub use repos::{
     effective_repos_dir, ensure_repos_symlink, resolve_repos_at_boot, validate_repos_dir,
     write_persisted_repos_dir,

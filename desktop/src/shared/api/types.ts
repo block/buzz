@@ -689,6 +689,19 @@ export type ConfigSourceReport = {
 
 export type ExtensionEntry = { name: string; kind: string; enabled: boolean };
 
+export type RemoteMcpConnection = {
+  id: string;
+  provider: string;
+  name: string;
+  url: string;
+  workspaceSlug: string;
+  workspaceName: string | null;
+  principalName: string | null;
+  enabled: boolean;
+  status: "connected" | "disabled";
+  lastVerifiedAt: string;
+};
+
 export type NormalizedConfig = {
   model: NormalizedField | null;
   provider: NormalizedField | null;

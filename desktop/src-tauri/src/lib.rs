@@ -47,9 +47,10 @@ use huddle::{
     set_voice_input_mode, speak_agent_message, start_huddle, start_stt_pipeline,
 };
 use managed_agents::{
-    backfill_persona_snapshots, ensure_nest, list_managed_agent_runtimes,
-    put_managed_agent_runtime_lifecycle, reconcile_managed_agent_runtimes,
-    restart_managed_agent_runtime, start_managed_agent_runtime, stop_managed_agent_runtime,
+    backfill_persona_snapshots, connect_patina, disconnect_remote_mcp, ensure_nest,
+    list_managed_agent_runtimes, list_remote_mcp_connections, put_managed_agent_runtime_lifecycle,
+    reconcile_managed_agent_runtimes, restart_managed_agent_runtime, set_remote_mcp_enabled,
+    start_managed_agent_runtime, stop_managed_agent_runtime, test_patina_connection,
     try_regenerate_nest,
 };
 #[cfg(not(feature = "mesh-llm"))]
@@ -792,6 +793,11 @@ pub fn run() {
             list_relay_agents,
             list_managed_agents,
             list_managed_agent_runtimes,
+            list_remote_mcp_connections,
+            connect_patina,
+            test_patina_connection,
+            set_remote_mcp_enabled,
+            disconnect_remote_mcp,
             start_managed_agent_runtime,
             stop_managed_agent_runtime,
             restart_managed_agent_runtime,

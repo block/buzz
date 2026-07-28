@@ -168,6 +168,36 @@ pub struct OwnedAgent {
     pub goose_system_prompt_supported: Option<bool>,
     /// Protocol version reported by the agent in its initialize response.
     pub protocol_version: u32,
+    /// Whether the adapter advertises client-provided Streamable HTTP MCP
+    /// servers in its initialize capabilities.
+    pub http_mcp_supported: bool,
+}
+
+pub(crate) fn supports_http_mcp(initialize_result: &serde_json::Value) -> bool {
+    initialize_result
+        .get("agentCapabilities")
+        .and_then(|capabilities| capabilities.get("mcpCapabilities"))
+        .and_then(|capabilities| capabilities.get("http"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn validate_mcp_transport_capabilities(
+    http_mcp_supported: bool,
+    runtime_name: &str,
+    servers: &[McpServer],
+) -> Result<(), AcpError> {
+    if http_mcp_supported {
+        return Ok(());
+    }
+    if let Some(server) = servers.iter().find(|server| server.is_http()) {
+        return Err(AcpError::Protocol(format!(
+            "MCP server '{}' requires HTTP MCP support, but runtime '{}' did not advertise agentCapabilities.mcpCapabilities.http",
+            server.name(),
+            runtime_name
+        )));
+    }
+    Ok(())
 }
 
 fn has_system_prompt_support(
@@ -854,6 +884,12 @@ async fn create_session_and_apply_model(
     agent_canvas: Option<&str>,
     channel_name: Option<&str>,
 ) -> Result<String, AcpError> {
+    validate_mcp_transport_capabilities(
+        agent.http_mcp_supported,
+        &agent.agent_name,
+        &ctx.mcp_servers,
+    )?;
+
     // Build base_prompt + system_prompt + agent core + canvas metadata into a
     // single prompt. Standard protocol-v2 agents receive it in `session/new`;
     // Goose receives it through the custom request below. Legacy agents receive
@@ -863,9 +899,12 @@ async fn create_session_and_apply_model(
     let is_goose = agent.agent_name == "goose";
     let combined_system_prompt = with_canvas(
         with_core(
-            with_team(
-                framed_system_prompt(&ctx.cwd, ctx.base_prompt, ctx.system_prompt.as_deref()),
-                ctx.team_instructions.as_deref(),
+            with_remote_mcp_guidance(
+                with_team(
+                    framed_system_prompt(&ctx.cwd, ctx.base_prompt, ctx.system_prompt.as_deref()),
+                    ctx.team_instructions.as_deref(),
+                ),
+                &ctx.mcp_servers,
             ),
             agent_core,
         ),
@@ -1241,6 +1280,26 @@ fn with_team(prompt: Option<String>, instructions: Option<&str>) -> Option<Strin
         (None, Some(instructions)) => Some(format!("[Team Instructions]\n{instructions}")),
         (Some(prompt), None) => Some(prompt),
         (None, None) => None,
+    }
+}
+
+/// Add provider-specific operating guidance only when that remote MCP server is
+/// present. This keeps the agent's normal prompt unchanged for every other
+/// runtime and connection.
+fn with_remote_mcp_guidance(prompt: Option<String>, mcp_servers: &[McpServer]) -> Option<String> {
+    if !mcp_servers
+        .iter()
+        .any(|server| server.is_http() && server.name().eq_ignore_ascii_case("patina"))
+    {
+        return prompt;
+    }
+
+    let guidance = "[Patina]\nUse Patina as the approved company context source: orient once, \
+        bundle context before substantial work, cite the Patina artifact paths you relied on, \
+        and state plainly when Patina has no relevant context.";
+    match prompt {
+        Some(prompt) => Some(format!("{prompt}\n\n{guidance}")),
+        None => Some(guidance.to_string()),
     }
 }
 
@@ -3709,8 +3768,48 @@ async fn clear_reactions(rest: crate::relay::RestClient, event_ids: Vec<String>)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::acp::{HttpTransport, McpServerHttp};
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
     use serde_json::json;
+
+    #[test]
+    fn initialize_capability_allows_http_mcp() {
+        let init = json!({
+            "agentCapabilities": {
+                "mcpCapabilities": {
+                    "http": true
+                }
+            }
+        });
+        let servers = vec![McpServer::Http(McpServerHttp {
+            transport: HttpTransport::Http,
+            name: "patina".into(),
+            url: "https://patina.so/mcp/acme".into(),
+            headers: vec![],
+        })];
+
+        assert!(
+            validate_mcp_transport_capabilities(supports_http_mcp(&init), "codex", &servers)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn initialize_without_http_capability_rejects_remote_server() {
+        let init = json!({ "agentCapabilities": { "mcpCapabilities": {} } });
+        let servers = vec![McpServer::Http(McpServerHttp {
+            transport: HttpTransport::Http,
+            name: "patina".into(),
+            url: "https://patina.so/mcp/acme".into(),
+            headers: vec![],
+        })];
+
+        let error =
+            validate_mcp_transport_capabilities(supports_http_mcp(&init), "buzz-agent", &servers)
+                .expect_err("HTTP-incapable runtimes must fail before session/new");
+        assert!(error.to_string().contains("patina"));
+        assert!(error.to_string().contains("HTTP MCP"));
+    }
 
     // These pin the initial_message dispatch path (run_prompt_task, ~line 855):
     // a legacy agent WITH a base_prompt must get [Base] prepended to the user
@@ -5060,6 +5159,7 @@ mod tests {
             agent_name: "unknown".into(),
             goose_system_prompt_supported: None,
             protocol_version: 2,
+            http_mcp_supported: false,
         };
 
         // Simulate dispatch: install a steer receiver (normally done by
@@ -5118,6 +5218,7 @@ mod tests {
             agent_name: "unknown".into(),
             goose_system_prompt_supported: None,
             protocol_version: 2,
+            http_mcp_supported: false,
         };
 
         // Simulate a completed turn: `steer_rx` was consumed by the read loop
@@ -5414,6 +5515,39 @@ mod tests {
     fn test_with_canvas_returns_none_when_both_absent() {
         let result = with_canvas(None, None);
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn patina_remote_mcp_adds_default_usage_guidance() {
+        let servers = vec![McpServer::Http(crate::acp::McpServerHttp {
+            transport: crate::acp::HttpTransport::Http,
+            name: "patina".into(),
+            url: "https://patina.so/mcp/acme".into(),
+            headers: vec![],
+        })];
+
+        let result = with_remote_mcp_guidance(Some("base content".into()), &servers)
+            .expect("Patina guidance should produce a prompt");
+
+        assert!(result.starts_with("base content\n\n[Patina]\n"));
+        assert!(result.contains("bundle context before substantial work"));
+        assert!(result.contains("cite the Patina artifact paths"));
+        assert!(result.contains("when Patina has no relevant context"));
+    }
+
+    #[test]
+    fn non_patina_mcp_leaves_prompt_unchanged() {
+        let servers = vec![McpServer::Stdio(crate::acp::McpServerStdio {
+            name: "buzz-mcp".into(),
+            command: "buzz-dev-mcp".into(),
+            args: vec![],
+            env: vec![],
+        })];
+
+        assert_eq!(
+            with_remote_mcp_guidance(Some("base content".into()), &servers),
+            Some("base content".into())
+        );
     }
 
     // ── canvas_sections cache invalidation ───────────────────────────────────

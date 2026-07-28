@@ -36,6 +36,7 @@ import type {
   InstallRuntimeResult,
   GitBashPrerequisite,
   RuntimeConfigSurface,
+  RemoteMcpConnection,
 } from "@/shared/api/types";
 
 export * from "@/shared/api/tauriChannels";
@@ -864,6 +865,52 @@ export async function listManagedAgents(): Promise<ManagedAgent[]> {
   return (await invokeTauri<RawManagedAgent[]>("list_managed_agents")).map(
     fromRawManagedAgent,
   );
+}
+
+export async function listRemoteMcpConnections(
+  pubkey: string,
+): Promise<RemoteMcpConnection[]> {
+  return invokeTauri<RemoteMcpConnection[]>("list_remote_mcp_connections", {
+    pubkey,
+  });
+}
+
+export async function connectPatina(input: {
+  pubkey: string;
+  workspaceSlug: string;
+  apiKey: string;
+}): Promise<RemoteMcpConnection> {
+  return invokeTauri<RemoteMcpConnection>("connect_patina", input);
+}
+
+export async function testPatinaConnection(
+  pubkey: string,
+): Promise<RemoteMcpConnection> {
+  return invokeTauri<RemoteMcpConnection>("test_patina_connection", {
+    pubkey,
+  });
+}
+
+export async function setRemoteMcpEnabled(
+  pubkey: string,
+  connectionId: string,
+  enabled: boolean,
+): Promise<RemoteMcpConnection> {
+  return invokeTauri<RemoteMcpConnection>("set_remote_mcp_enabled", {
+    pubkey,
+    connectionId,
+    enabled,
+  });
+}
+
+export async function disconnectRemoteMcp(
+  pubkey: string,
+  connectionId: string,
+): Promise<void> {
+  return invokeTauri("disconnect_remote_mcp", {
+    pubkey,
+    connectionId,
+  });
 }
 export async function createManagedAgent(input: CreateManagedAgentInput) {
   const response = await invokeTauri<RawCreateManagedAgentResponse>(

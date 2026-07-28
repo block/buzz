@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
-use acp::{AcpClient, EnvVar, McpServer};
+use acp::{AcpClient, EnvVar, McpServer, McpServerStdio};
 use anyhow::Result;
 use buzz_core::kind::{
     KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_STREAM_MESSAGE,
@@ -1140,10 +1140,9 @@ fn any_respawn_in_flight(crash_history: &[SlotCircuit]) -> bool {
 /// Result of a background respawn task.
 struct RespawnResult {
     index: usize,
-    /// Tuple: (initialized client, protocol version, supports_goose_steer).
-    /// The third element is always `true` — the supervisor uses
-    /// try-and-tolerate for the steer extension.
-    result: Result<(AcpClient, u32, String)>,
+    /// Tuple: (initialized client, protocol version, agent name,
+    /// supports HTTP MCP).
+    result: Result<(AcpClient, u32, String, bool)>,
 }
 
 /// Outcome of a non-cancelling steer attempt, forwarded from a per-attempt
@@ -1187,7 +1186,7 @@ impl RespawnGuard {
     /// Send the result and disarm the guard. Uses `try_send` (sync) so there
     /// is no await boundary between marking `sent` and actually enqueueing —
     /// cancellation cannot slip between the two.
-    fn send(mut self, result: Result<(AcpClient, u32, String)>) {
+    fn send(mut self, result: Result<(AcpClient, u32, String, bool)>) {
         // Invariant: try_send succeeds because the channel capacity equals the
         // slot count, and respawn_in_flight guarantees at most one outstanding
         // result per slot. If this ever fails, the channel sizing or the
@@ -1786,7 +1785,7 @@ async fn tokio_main() -> Result<()> {
         while let Ok(rr) = respawn_rx.try_recv() {
             crash_history[rr.index].respawn_in_flight = false;
             match rr.result {
-                Ok((acp, protocol_version, agent_name)) => {
+                Ok((acp, protocol_version, agent_name, http_mcp_supported)) => {
                     let agent = OwnedAgent {
                         index: rr.index,
                         acp,
@@ -1797,6 +1796,7 @@ async fn tokio_main() -> Result<()> {
                         agent_name,
                         goose_system_prompt_supported: None,
                         protocol_version,
+                        http_mcp_supported,
                     };
                     pool.return_agent(agent);
                     tracing::info!(agent = rr.index, "respawn complete");
@@ -2666,7 +2666,7 @@ async fn tokio_main() -> Result<()> {
     // Drain any respawn results that completed before the abort. Explicitly
     // shut down returned agents instead of relying on AcpClient::Drop.
     while let Ok(rr) = respawn_rx.try_recv() {
-        if let Ok((mut acp, _, _)) = rr.result {
+        if let Ok((mut acp, _, _, _)) = rr.result {
             acp.shutdown().await;
             tracing::debug!(agent = rr.index, "reaped respawned agent on shutdown");
         }
@@ -3793,6 +3793,7 @@ async fn initialize_agent_pool(
                             }),
                         );
                         let agent_name = normalized_agent_name(&init_result);
+                        let http_mcp_supported = pool::supports_http_mcp(&init_result);
                         agent_slots.push(Some(OwnedAgent {
                             index: i,
                             acp,
@@ -3803,6 +3804,7 @@ async fn initialize_agent_pool(
                             agent_name,
                             goose_system_prompt_supported: None,
                             protocol_version,
+                            http_mcp_supported,
                         }));
                     }
                     Ok(Err(e)) => {
@@ -3853,7 +3855,7 @@ async fn spawn_and_init(
     has_generated_codex_config: bool,
     agent_index: usize,
     observer: Option<observer::ObserverHandle>,
-) -> Result<(AcpClient, u32, String)> {
+) -> Result<(AcpClient, u32, String, bool)> {
     let mut acp = AcpClient::spawn(command, args, extra_env, has_generated_codex_config)
         .await
         .map_err(|e| anyhow::anyhow!("failed to spawn agent: {e}"))?;
@@ -3871,7 +3873,8 @@ async fn spawn_and_init(
                 }),
             );
             let agent_name = normalized_agent_name(&init_result);
-            Ok((acp, protocol_version, agent_name))
+            let http_mcp_supported = pool::supports_http_mcp(&init_result);
+            Ok((acp, protocol_version, agent_name, http_mcp_supported))
         }
         Err(e) => {
             // Explicitly shut down the spawned child to prevent zombie/leak.
@@ -4140,60 +4143,68 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
 }
 
 fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
-    if config.mcp_command.is_empty() {
-        return vec![];
+    let mut servers = Vec::new();
+    if !config.mcp_command.is_empty() {
+        servers.push(McpServer::Stdio(McpServerStdio {
+            name: std::path::Path::new(&config.mcp_command)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("mcp")
+                .to_string(),
+            command: config.mcp_command.clone(),
+            args: vec![],
+            env: {
+                let mut env = vec![
+                    EnvVar {
+                        name: "BUZZ_RELAY_URL".into(),
+                        value: config.relay_url.clone(),
+                    },
+                    EnvVar {
+                        name: "BUZZ_PRIVATE_KEY".into(),
+                        // bech32 encoding of a valid secret key is infallible.
+                        // Panic here is correct: injecting a bogus secret would cause
+                        // delayed, hard-to-diagnose agent failures downstream.
+                        value: config
+                            .keys
+                            .secret_key()
+                            .to_bech32()
+                            .expect("secret key bech32 encoding should never fail"),
+                    },
+                ];
+                // Forward BUZZ_AUTH_TAG (NIP-OA owner attestation credential)
+                // so the MCP server can attach it to every signed event.
+                if let Ok(auth_tag) = std::env::var("BUZZ_AUTH_TAG") {
+                    if !auth_tag.is_empty() {
+                        env.push(EnvVar {
+                            name: "BUZZ_AUTH_TAG".into(),
+                            value: auth_tag,
+                        });
+                    }
+                }
+                // Forward the agent's display name so dev-mcp can use it as the git
+                // author name instead of the raw npub. Read from the process env
+                // rather than Config: this is a pass-through of a contract owned
+                // upstream, and absent simply means dev-mcp falls back to the npub.
+                if let Ok(display_name) = std::env::var("BUZZ_ACP_DISPLAY_NAME") {
+                    if !display_name.is_empty() {
+                        env.push(EnvVar {
+                            name: "BUZZ_ACP_DISPLAY_NAME".into(),
+                            value: display_name,
+                        });
+                    }
+                }
+                env
+            },
+        }));
     }
-    vec![McpServer {
-        name: std::path::Path::new(&config.mcp_command)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("mcp")
-            .to_string(),
-        command: config.mcp_command.clone(),
-        args: vec![],
-        env: {
-            let mut env = vec![
-                EnvVar {
-                    name: "BUZZ_RELAY_URL".into(),
-                    value: config.relay_url.clone(),
-                },
-                EnvVar {
-                    name: "BUZZ_PRIVATE_KEY".into(),
-                    // bech32 encoding of a valid secret key is infallible.
-                    // Panic here is correct: injecting a bogus secret would cause
-                    // delayed, hard-to-diagnose agent failures downstream.
-                    value: config
-                        .keys
-                        .secret_key()
-                        .to_bech32()
-                        .expect("secret key bech32 encoding should never fail"),
-                },
-            ];
-            // Forward BUZZ_AUTH_TAG (NIP-OA owner attestation credential)
-            // so the MCP server can attach it to every signed event.
-            if let Ok(auth_tag) = std::env::var("BUZZ_AUTH_TAG") {
-                if !auth_tag.is_empty() {
-                    env.push(EnvVar {
-                        name: "BUZZ_AUTH_TAG".into(),
-                        value: auth_tag,
-                    });
-                }
-            }
-            // Forward the agent's display name so dev-mcp can use it as the git
-            // author name instead of the raw npub. Read from the process env
-            // rather than Config: this is a pass-through of a contract owned
-            // upstream, and absent simply means dev-mcp falls back to the npub.
-            if let Ok(display_name) = std::env::var("BUZZ_ACP_DISPLAY_NAME") {
-                if !display_name.is_empty() {
-                    env.push(EnvVar {
-                        name: "BUZZ_ACP_DISPLAY_NAME".into(),
-                        value: display_name,
-                    });
-                }
-            }
-            env
-        },
-    }]
+    servers.extend(
+        config
+            .remote_mcp_servers
+            .iter()
+            .cloned()
+            .map(McpServer::Http),
+    );
+    servers
 }
 
 #[cfg(test)]
@@ -4963,6 +4974,7 @@ mod build_mcp_servers_tests {
             agent_command: "goose".into(),
             agent_args: vec!["acp".into()],
             mcp_command: "test-mcp-server".into(),
+            remote_mcp_servers: vec![],
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
@@ -5006,7 +5018,7 @@ mod build_mcp_servers_tests {
         let config = test_config();
         let servers = build_mcp_servers(&config);
         assert_eq!(servers.len(), 1);
-        let server = &servers[0];
+        let server = servers[0].as_stdio().expect("catalog MCP is stdio");
         assert_eq!(server.name, "test-mcp-server");
 
         let names: Vec<&str> = server.env.iter().map(|e| e.name.as_str()).collect();
@@ -5028,7 +5040,7 @@ mod build_mcp_servers_tests {
         let servers = build_mcp_servers(&config);
         std::env::remove_var("BUZZ_AUTH_TAG");
 
-        let server = &servers[0];
+        let server = servers[0].as_stdio().expect("catalog MCP is stdio");
         let auth_tag_env = server.env.iter().find(|e| e.name == "BUZZ_AUTH_TAG");
         assert!(
             auth_tag_env.is_some(),
@@ -5045,7 +5057,7 @@ mod build_mcp_servers_tests {
         let servers = build_mcp_servers(&config);
         std::env::remove_var("BUZZ_AUTH_TAG");
 
-        let server = &servers[0];
+        let server = servers[0].as_stdio().expect("catalog MCP is stdio");
         let has_auth_tag = server.env.iter().any(|e| e.name == "BUZZ_AUTH_TAG");
         assert!(!has_auth_tag, "empty BUZZ_AUTH_TAG should not be forwarded");
     }
@@ -5059,6 +5071,8 @@ mod build_mcp_servers_tests {
         std::env::remove_var("BUZZ_ACP_DISPLAY_NAME");
 
         let entry = servers[0]
+            .as_stdio()
+            .expect("catalog MCP is stdio")
             .env
             .iter()
             .find(|e| e.name == "BUZZ_ACP_DISPLAY_NAME");
@@ -5080,6 +5094,8 @@ mod build_mcp_servers_tests {
         // falls back to the npub when the key is missing or blank.
         assert!(
             !servers[0]
+                .as_stdio()
+                .expect("catalog MCP is stdio")
                 .env
                 .iter()
                 .any(|e| e.name == "BUZZ_ACP_DISPLAY_NAME"),
@@ -5097,6 +5113,8 @@ mod build_mcp_servers_tests {
 
         assert!(
             !servers[0]
+                .as_stdio()
+                .expect("catalog MCP is stdio")
                 .env
                 .iter()
                 .any(|e| e.name == "BUZZ_ACP_DISPLAY_NAME"),
@@ -5116,12 +5134,29 @@ mod build_mcp_servers_tests {
     }
 
     #[test]
+    fn remote_mcp_server_is_appended_after_catalog_stdio_server() {
+        let mut config = test_config();
+        config.remote_mcp_servers.push(acp::McpServerHttp {
+            transport: acp::HttpTransport::Http,
+            name: "patina".into(),
+            url: "https://patina.so/mcp/acme".into(),
+            headers: vec![],
+        });
+
+        let servers = build_mcp_servers(&config);
+        assert_eq!(servers.len(), 2);
+        assert_eq!(servers[0].name(), "test-mcp-server");
+        assert_eq!(servers[1].name(), "patina");
+        assert!(servers[1].is_http());
+    }
+
+    #[test]
     fn absolute_path_mcp_command_uses_file_stem_as_name() {
         let mut config = test_config();
         config.mcp_command = "/opt/bin/my-mcp-server".into();
         let servers = build_mcp_servers(&config);
         assert_eq!(servers.len(), 1);
-        assert_eq!(servers[0].name, "my-mcp-server");
+        assert_eq!(servers[0].name(), "my-mcp-server");
     }
 
     #[test]
@@ -5143,7 +5178,8 @@ mod build_mcp_servers_tests {
         let servers = build_mcp_servers(&config);
         assert_eq!(servers.len(), 1);
         assert_eq!(
-            servers[0].name, "mcp",
+            servers[0].name(),
+            "mcp",
             "Path::new(\".\").file_stem() is None — should fall back to \"mcp\""
         );
     }
@@ -5184,6 +5220,7 @@ mod error_outcome_emission_tests {
             agent_command: "true".into(),
             agent_args: vec![],
             mcp_command: "test-mcp-server".into(),
+            remote_mcp_servers: vec![],
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
@@ -5256,6 +5293,7 @@ mod error_outcome_emission_tests {
             // Error branches under test never read this; 1 is the legacy
             // non-systemPrompt path, the simplest valid value.
             protocol_version: 1,
+            http_mcp_supported: false,
         }
     }
 

@@ -1338,6 +1338,13 @@ pub async fn delete_managed_agent(
             save_managed_agents(&app, &records)?;
             // Remove the agent's nsec from the keyring after the record is gone.
             crate::managed_agents::delete_agent_key(&pubkey);
+            if let Err(error) =
+                crate::managed_agents::delete_remote_mcp_connections_for_agent(&app, &pubkey)
+            {
+                eprintln!(
+                    "buzz-desktop: failed to remove remote MCP connections for agent {pubkey}: {error}"
+                );
+            }
             // Tombstone-after-validation: only reached past the deployed-remote
             // guard above and a confirmed removal — never orphan a live remote
             // deployment's relay record. Inside the lock, before the block closes

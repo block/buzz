@@ -22,14 +22,85 @@ const MAX_LINE_SIZE: usize = 10_000_000; // 10 MB
 
 /// An MCP server configuration passed to `session/new`.
 ///
-/// Corresponds to the `McpServerStdio` variant in the ACP schema.
-/// All four fields are **required** by the schema (`args` and `env` may be empty arrays).
+/// ACP models stdio servers as an untagged object and HTTP servers as an
+/// object tagged with `type: "http"`, so the outer enum is untagged.
 #[derive(Debug, Clone, serde::Serialize)]
-pub struct McpServer {
+#[serde(untagged)]
+pub enum McpServer {
+    /// A child-process MCP server.
+    Stdio(McpServerStdio),
+    /// A remote Streamable HTTP MCP server.
+    Http(McpServerHttp),
+}
+
+impl McpServer {
+    /// Return the display name shared by both transport variants.
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Stdio(server) => &server.name,
+            Self::Http(server) => &server.name,
+        }
+    }
+
+    /// Whether this server requires ACP HTTP MCP support.
+    pub fn is_http(&self) -> bool {
+        matches!(self, Self::Http(_))
+    }
+
+    /// Return the stdio payload when this is a child-process server.
+    #[cfg(test)]
+    pub fn as_stdio(&self) -> Option<&McpServerStdio> {
+        match self {
+            Self::Stdio(server) => Some(server),
+            Self::Http(_) => None,
+        }
+    }
+}
+
+/// ACP stdio MCP server.
+///
+/// All four fields are required by the schema (`args` and `env` may be empty
+/// arrays).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct McpServerStdio {
     pub name: String,
     pub command: String,
     pub args: Vec<String>,
     pub env: Vec<EnvVar>,
+}
+
+/// ACP Streamable HTTP MCP server.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct McpServerHttp {
+    #[serde(rename = "type")]
+    pub transport: HttpTransport,
+    pub name: String,
+    pub url: String,
+    pub headers: Vec<HttpHeader>,
+}
+
+/// The only remote transport ACP currently defines.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HttpTransport {
+    Http,
+}
+
+/// A single HTTP header for a remote MCP server.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct HttpHeader {
+    pub name: String,
+    pub value: String,
+}
+
+impl std::fmt::Debug for HttpHeader {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("HttpHeader")
+            .field("name", &self.name)
+            .field("value", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// A single environment variable for an MCP server.
@@ -119,6 +190,42 @@ fn agent_error_from_json(error: &serde_json::Value) -> AcpError {
         None => error.to_string(),
     };
     AcpError::AgentError { code, message }
+}
+
+/// Return a copy safe for logs and observer events.
+///
+/// `session/new` is the only ACP request that carries MCP credentials. Both
+/// stdio `env` values and HTTP `headers` values are replaced while names and
+/// the surrounding wire shape remain available for diagnosis.
+fn redact_acp_wire_message(message: &serde_json::Value) -> serde_json::Value {
+    let mut redacted = message.clone();
+    if redacted.get("method").and_then(serde_json::Value::as_str) != Some("session/new") {
+        return redacted;
+    }
+
+    let Some(servers) = redacted
+        .pointer_mut("/params/mcpServers")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return redacted;
+    };
+
+    for server in servers {
+        for key in ["env", "headers"] {
+            let Some(entries) = server
+                .get_mut(key)
+                .and_then(serde_json::Value::as_array_mut)
+            else {
+                continue;
+            };
+            for entry in entries {
+                if let Some(value) = entry.get_mut("value") {
+                    *value = serde_json::Value::String("[REDACTED]".to_string());
+                }
+            }
+        }
+    }
+    redacted
 }
 
 fn build_initialize_params() -> serde_json::Value {
@@ -958,17 +1065,21 @@ impl AcpClient {
     /// (e.g., it's stuck or dead), the write would otherwise block forever.
     async fn write_ndjson(&mut self, value: &serde_json::Value) -> Result<(), AcpError> {
         const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-        let line = serde_json::to_string(value)?;
-        tokio::time::timeout(WRITE_TIMEOUT, async {
+        use zeroize::Zeroize;
+
+        let mut line = serde_json::to_string(value)?;
+        let write_result = tokio::time::timeout(WRITE_TIMEOUT, async {
             self.stdin.write_all(line.as_bytes()).await?;
             self.stdin.write_all(b"\n").await?;
             self.stdin.flush().await?;
             Ok::<(), std::io::Error>(())
         })
-        .await
-        .map_err(|_| AcpError::WriteTimeout(WRITE_TIMEOUT))?
-        .map_err(AcpError::Io)?;
-        self.observe("acp_write", value.clone());
+        .await;
+        line.zeroize();
+        write_result
+            .map_err(|_| AcpError::WriteTimeout(WRITE_TIMEOUT))?
+            .map_err(AcpError::Io)?;
+        self.observe("acp_write", redact_acp_wire_message(value));
         Ok(())
     }
 
@@ -999,7 +1110,8 @@ impl AcpClient {
             "params": params,
         });
 
-        tracing::debug!(target: "acp::wire", "→ {}", &serde_json::to_string(&msg).unwrap_or_default());
+        let logged = redact_acp_wire_message(&msg);
+        tracing::debug!(target: "acp::wire", "→ {}", &serde_json::to_string(&logged).unwrap_or_default());
 
         // Wrap write + read in a single timeout so a hung agent can't block forever.
         // We cannot use an async block that borrows `self` mutably across two awaits
@@ -2196,7 +2308,7 @@ mod tests {
     #[test]
     fn session_new_mcp_server_has_required_fields() {
         // Schema requires name, command, args, env — all present, args/env may be empty.
-        let server = McpServer {
+        let server = McpServer::Stdio(McpServerStdio {
             name: "test-mcp".into(),
             command: "/usr/local/bin/test-mcp-server".into(),
             args: vec![],
@@ -2210,7 +2322,7 @@ mod tests {
                     value: "nsec1abc".into(),
                 },
             ],
-        };
+        });
         let serialized = serde_json::to_value(&server).unwrap();
         assert_eq!(serialized["name"].as_str(), Some("test-mcp"));
         assert_eq!(
@@ -2224,6 +2336,69 @@ mod tests {
         assert_eq!(
             serialized["env"][0]["name"].as_str(),
             Some("BUZZ_RELAY_URL")
+        );
+    }
+
+    #[test]
+    fn session_new_http_mcp_server_matches_acp_wire_shape() {
+        let server = McpServer::Http(McpServerHttp {
+            transport: HttpTransport::Http,
+            name: "patina".into(),
+            url: "https://patina.so/mcp/acme".into(),
+            headers: vec![HttpHeader {
+                name: "Authorization".into(),
+                value: "Bearer pk_secret".into(),
+            }],
+        });
+
+        let serialized = serde_json::to_value(&server).unwrap();
+        assert_eq!(serialized["type"], "http");
+        assert_eq!(serialized["name"], "patina");
+        assert_eq!(serialized["url"], "https://patina.so/mcp/acme");
+        assert_eq!(serialized["headers"][0]["name"], "Authorization");
+        assert_eq!(serialized["headers"][0]["value"], "Bearer pk_secret");
+    }
+
+    #[test]
+    fn session_new_wire_observation_redacts_mcp_secrets() {
+        let message = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "session/new",
+            "params": {
+                "cwd": "/tmp",
+                "mcpServers": [
+                    {
+                        "name": "buzz-mcp",
+                        "command": "buzz",
+                        "args": [],
+                        "env": [
+                            {"name": "BUZZ_PRIVATE_KEY", "value": "nsec_secret"}
+                        ]
+                    },
+                    {
+                        "type": "http",
+                        "name": "patina",
+                        "url": "https://patina.so/mcp/acme",
+                        "headers": [
+                            {"name": "Authorization", "value": "Bearer pk_secret"}
+                        ]
+                    }
+                ]
+            }
+        });
+
+        let redacted = redact_acp_wire_message(&message);
+        let rendered = redacted.to_string();
+        assert!(!rendered.contains("nsec_secret"));
+        assert!(!rendered.contains("pk_secret"));
+        assert_eq!(
+            redacted["params"]["mcpServers"][0]["env"][0]["value"],
+            "[REDACTED]"
+        );
+        assert_eq!(
+            redacted["params"]["mcpServers"][1]["headers"][0]["value"],
+            "[REDACTED]"
         );
     }
 

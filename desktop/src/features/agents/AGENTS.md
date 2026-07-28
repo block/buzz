@@ -106,6 +106,14 @@ with a TypeScript lookup table or an id comparison in a component.
    Edit. In Edit,
    selecting Custom command keeps its required command field beside the harness
    picker rather than hiding it in Advanced.
+10. **Remote MCP credentials remain Rust-owned and runtime capability is
+    negotiated.** The frontend may render credential-free connection metadata,
+    but must never hydrate a saved bearer token. Desktop persists only a keyring
+    reference, resolves the credential at spawn, and sends the one-shot HTTP MCP
+    payload to `buzz-acp` through its private stdin pipe. Compatibility comes
+    from the ACP runtime's `initialize.agentCapabilities.mcpCapabilities.http`
+    response; do not hard-code a frontend runtime allowlist. A missing credential
+    or absent HTTP capability fails closed before `session/new`.
 
 ## The tests that enforce this
 
@@ -124,6 +132,8 @@ with a TypeScript lookup table or an id comparison in a component.
   acceptance coverage for readiness, failure states, defaults, navigation,
   successful-empty vs failed optional-model discovery, and persistence races.
 - Rust: `runtime_metadata_env_vars` tests pin spawn-time key application.
+- `desktop/tests/e2e/patina-mcp.spec.ts` — remote-MCP connect lifecycle and the
+  invariant that reconnect opens with an empty credential input.
 
 ## Keep this file true
 
