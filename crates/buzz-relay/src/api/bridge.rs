@@ -2129,6 +2129,93 @@ pub async fn moderation_restricted(
     Ok(Json(Value::Array(rows.iter().map(ban_json).collect())))
 }
 
+/// Query parameters for `GET /workflow-runs`.
+#[derive(Debug, serde::Deserialize)]
+pub struct WorkflowRunsQuery {
+    /// Workflow UUID to filter runs by (required).
+    workflow: String,
+    /// Maximum number of runs to return (newest first). Capped at 100.
+    limit: Option<i64>,
+}
+
+const WORKFLOW_RUNS_LIMIT: i64 = 100;
+
+/// `GET /workflow-runs` — workflow run history (NIP-98 auth).
+///
+/// Returns the `workflow_runs` DB rows for the caller's community, filtered by
+/// workflow UUID. Unlike the Nostr event approach (kinds 46001–46012, which the
+/// relay does not emit), this reads the authoritative run state directly from
+/// the database. Community-scoped via host binding.
+pub async fn workflow_runs(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+    Query(q): Query<WorkflowRunsQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let raw_host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let tenant = crate::tenant::bind_community(&state.db, raw_host)
+        .await
+        .map_err(|_| {
+            api_error(
+                StatusCode::NOT_FOUND,
+                "relay: no community is configured for this host",
+            )
+        })?;
+
+    // NIP-98 auth — the URL must include the query string for GET requests
+    // so the signature covers the full request (path + query params).
+    let path_with_query = match raw_query.as_deref() {
+        Some(rq) => format!("/workflow-runs?{rq}"),
+        None => "/workflow-runs".to_owned(),
+    };
+    let url = nip98_expected_url(&state.config.relay_url, &tenant, &path_with_query);
+    let (pubkey, _event_id_bytes) =
+        verify_bridge_auth(&headers, "GET", &url, None, state.config.require_auth_token)?;
+
+    let limit = q
+        .limit
+        .filter(|n| *n > 0)
+        .map(|n| n.min(WORKFLOW_RUNS_LIMIT))
+        .unwrap_or(WORKFLOW_RUNS_LIMIT);
+
+    let workflow_uuid = uuid::Uuid::parse_str(&q.workflow)
+        .map_err(|_| api_error(StatusCode::BAD_REQUEST, "invalid workflow UUID"))?;
+
+    let rows = state
+        .db
+        .list_workflow_runs(tenant.community(), workflow_uuid, limit)
+        .await
+        .map_err(|e| internal_error(&format!("list workflow runs: {e}")))?;
+
+    tracing::info!(
+        pubkey = %pubkey.to_hex(),
+        route = "/workflow-runs",
+        status = 200u16,
+        result_count = rows.len(),
+        "HTTP bridge request"
+    );
+
+    Ok(Json(Value::Array(
+        rows.iter().map(workflow_run_json).collect(),
+    )))
+}
+
+/// Serialize a [`WorkflowRunRecord`] to JSON for the REST response.
+fn workflow_run_json(r: &buzz_db::workflow::WorkflowRunRecord) -> Value {
+    serde_json::json!({
+        "id": r.id,
+        "workflow_id": r.workflow_id,
+        "status": r.status.to_string(),
+        "current_step": r.current_step,
+        "started_at": r.started_at.map(|dt| dt.to_rfc3339()),
+        "completed_at": r.completed_at.map(|dt| dt.to_rfc3339()),
+        "error_message": r.error_message,
+    })
+}
+
 fn report_json(r: &buzz_db::moderation::ReportRecord) -> Value {
     let (target_kind, target) = match &r.target {
         buzz_db::moderation::ReportTarget::Event(id) => ("event", hex::encode(id)),

@@ -118,6 +118,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         )
         // Webhook trigger (secret-authenticated, no NIP-98)
         .route("/hooks/{id}", post(api::bridge::workflow_webhook))
+        // Workflow run history (NIP-98 auth, reads workflow_runs DB table)
+        .route("/workflow-runs", get(api::bridge::workflow_runs))
         // Mesh demo echo probe — testbed-only; 404 unless BUZZ_MESH=on and
         // BUZZ_MESH_DEMO_ECHO=on (see api::mesh_demo).
         .route("/_mesh/demo/echo", post(api::mesh_demo::demo_echo))
