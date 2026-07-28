@@ -1846,6 +1846,25 @@ mod tests {
     }
 
     #[test]
+    fn omits_extension_headers_and_metadata_when_unconfigured() {
+        let mode = ProtocolMode::JsonRpc {
+            endpoint: "https://agent.example/rpc".into(),
+            protocol_version: Some("1.0".into()),
+        };
+        let extensions = BTreeMap::new();
+        let payload = request_payload(&mode, None, 5, "session", "hello", &extensions);
+        let message = &payload["params"]["message"];
+
+        assert!(message.get("extensions").is_none());
+        assert!(message.get("metadata").is_none());
+
+        let request = protocol_request(&Client::new(), &mode, mode.endpoint(), &extensions)
+            .build()
+            .expect("request builds");
+        assert!(request.headers().get("A2A-Extensions").is_none());
+    }
+
+    #[test]
     fn rejects_unadvertised_and_missing_required_extensions() {
         let required_uri = "https://example.com/a2a/extensions/required/v1";
         let card: AgentCard = serde_json::from_value(json!({
