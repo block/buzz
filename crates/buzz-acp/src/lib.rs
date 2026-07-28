@@ -2838,6 +2838,19 @@ fn event_mentions_agent(event: &nostr::Event, agent_pubkey_hex: &str) -> bool {
 /// starts with a `!token`, or with an `@mention` followed by one. Ownership is
 /// NOT checked here — callers re-check the author so a non-owner's `!cancel`
 /// still reaches the agent as a prompt.
+///
+/// The bang must sit at **command position**: either first, or immediately
+/// after the run of leading `@mention` tokens that addresses the agent. Prose
+/// never arms it. Anything looser makes an ordinary question — `@Agent what
+/// happens if I run !shutdown` — indistinguishable from the command itself.
+///
+/// A mention is one whitespace-delimited `@token`, so a display name holding
+/// spaces (`@Will Pfleger !rotate`) does not reach command position and is
+/// delivered to the agent as an ordinary message instead. Without the name
+/// list — which the main loop does not have — where such a mention ends is
+/// genuinely ambiguous, and that ambiguity is the whole vulnerability: any
+/// rule permissive enough to end the mention at `Pfleger` also ends it at the
+/// last word of a sentence. Not firing is the safe side of that trade.
 fn owner_control_command<'a>(
     event: &'a nostr::Event,
     kind_u32: u32,
@@ -2846,19 +2859,20 @@ fn owner_control_command<'a>(
     if kind_u32 != KIND_STREAM_MESSAGE || !event_mentions_agent(event, agent_pubkey_hex) {
         return None;
     }
-    let content = event.content.trim();
+    let mut content = event.content.trim();
     // Mentioning is how a client addresses an agent, so `@Name !rotate` is the
-    // natural gesture, and a display name may hold spaces (`@Codex (Sol)`).
-    // Skip past the mention to the first `!`-initiated token rather than
-    // matching the name: the `p` tag already proved the mention is ours.
-    let content = if content.starts_with('@') {
-        content
-            .char_indices()
-            .find(|&(i, c)| c == '!' && content[..i].ends_with(char::is_whitespace))
-            .map_or("", |(i, _)| &content[i..])
-    } else {
-        content
-    };
+    // natural gesture, and a channel may address several agents at once
+    // (`@Sol @Eva !rotate`). Skip the leading mention tokens without matching a
+    // name — the `p` tag already proved the mention is ours. Every skipped
+    // token must itself start with `@`, which is what keeps the scan from
+    // running into prose.
+    while let Some(after_at) = content.strip_prefix('@') {
+        let token_len = after_at.find(char::is_whitespace).unwrap_or(after_at.len());
+        if token_len == 0 {
+            return None; // bare `@` — not a mention
+        }
+        content = after_at[token_len..].trim_start();
+    }
     if !content.starts_with('!') {
         return None;
     }
@@ -4402,20 +4416,27 @@ mod owner_control_command_tests {
             // `("!shutdown", "please")` matches no arm and falls through.
             ("!shutdown please", Some(("!shutdown", "please"))),
             ("!bogus", Some(("!bogus", ""))),
-            // Clients address an agent by mention, and a display name may hold
-            // spaces, so a leading mention is skipped without matching a name.
+            // Clients address an agent by mention, so leading `@token`s are
+            // skipped without matching a name — including several at once.
             ("@Claude !rotate", Some(("!rotate", ""))),
             ("@Claude !rotate now", Some(("!rotate", "now"))),
-            ("@Will Pfleger !rotate", Some(("!rotate", ""))),
-            ("@Codex (Sol) !cancel", Some(("!cancel", ""))),
+            ("@Sol @Eva !cancel", Some(("!cancel", ""))),
             ("@Claude", None),
-            // A leading `@` arms the scan for the rest of the content, so a
-            // bang anywhere after one is a command.
-            ("@Claude please run !rotate", Some(("!rotate", ""))),
-            // Without that leading `@`, a bang never fires.
+            // The bang must be at command position. Prose after the mention
+            // never arms it, or asking the agent *about* a command runs it.
+            ("@Claude please run !rotate", None),
+            ("@Claude what happens if I use !shutdown", None),
+            // A display name holding spaces does not reach command position:
+            // the parser has no name list, and any rule loose enough to end
+            // the mention at `Pfleger` also ends it mid-sentence.
+            ("@Will Pfleger !rotate", None),
+            ("@Codex (Sol) !cancel", None),
+            // A bang that is not first and not behind a leading mention is
+            // just text.
             ("hello @Claude !rotate", None),
             ("hello !rotate", None),
             ("", None),
+            ("@", None),
         ] {
             let event = make_event(KIND_STREAM_MESSAGE, content, Some(&agent));
             assert_eq!(

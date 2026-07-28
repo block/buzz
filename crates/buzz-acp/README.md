@@ -160,7 +160,9 @@ Use `!cancel` to stop only the current turn; it is a no-op when the channel is i
 
 `!model` matches model IDs exactly — adapters ship near-identical pairs (`opus[1m]` vs `claude-opus-5`, `gpt-5.3-codex` vs `gpt-5.3-codex/low`) where a prefix match would silently pick a different context lane and price point. An unknown ID is rejected with the list and leaves the current model untouched.
 
-Owner control commands must be kind:9 stream messages from the owner, must mention this agent with a `p` tag, and are consumed by the harness instead of being forwarded to the agent. The command may be typed on its own (`!rotate`) or after a leading mention (`@Agent !rotate`).
+Owner control commands must be kind:9 stream messages from the owner, must mention this agent with a `p` tag, and are consumed by the harness instead of being forwarded to the agent. The command may be typed on its own (`!rotate`) or immediately after the leading `@mention` tokens (`@Agent !rotate`, `@Sol @Eva !rotate`).
+
+The bang must be at that command position. A bang appearing later in the message is ordinary text, so asking an agent *about* a command — `@Agent what happens if I use !shutdown` — is delivered as a normal message rather than executed. Since the harness has no display-name list, a mention holding spaces (`@Will Pfleger !rotate`) does not reach command position either; address such an agent with a single-token handle to use control commands.
 
 > **Note:** The default mode is `owner-only`. Agents without a registered `agent_owner_pubkey` will not respond to any events until the owner is resolved. Set `--respond-to anyone` to disable the gate entirely.
 
