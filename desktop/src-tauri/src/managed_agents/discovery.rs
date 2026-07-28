@@ -226,7 +226,7 @@ fn executable_basename(command: &str) -> String {
     }
 }
 
-fn normalize_command_identity(command: &str) -> String {
+pub(crate) fn normalize_command_identity(command: &str) -> String {
     let normalized = command.trim().replace('\\', "/");
     let basename = normalized.rsplit('/').next().unwrap_or(normalized.as_str());
     let lower = basename

@@ -5,6 +5,7 @@
 #   sprig            implementation binary
 #   buzz-acp       link to sprig (ACP harness)
 #   buzz-agent     link to sprig (ACP-compliant agent)
+#   buzz-a2a-acp   link to sprig (OASF/A2A remote-agent ACP adapter)
 #   buzz-dev-mcp   link to sprig (developer MCP server; also dispatches
 #                    rg/tree/buzz/git-credential-nostr/git-sign-nostr)
 #
@@ -34,6 +35,7 @@
 #   sprig
 #   buzz-acp
 #   buzz-agent
+#   buzz-a2a-acp
 #   buzz-dev-mcp
 #   README.md
 #   sprig.json        { version, git_sha, target, binaries: [{name, sha256, size}] }
@@ -59,7 +61,7 @@ else
 fi
 
 BUNDLE_BIN="sprig"
-COMMANDS=(buzz-acp buzz-agent buzz-dev-mcp)
+COMMANDS=(buzz-acp buzz-agent buzz-a2a-acp buzz-dev-mcp)
 
 echo "==> Building Sprig v${VERSION} for ${TARGET}"
 echo "    git_sha=${GIT_SHA}"
@@ -143,6 +145,8 @@ Commands:
 - `buzz-acp` — ACP harness that bridges Buzz channel events to an
   ACP-compliant agent over stdio.
 - `buzz-agent` — ACP-compliant agent (spawns MCP servers, calls LLMs).
+- `buzz-a2a-acp` — OASF/A2A remote-agent ACP adapter. It reads an operator-
+  supplied Agent Record and forwards prompts through the advertised A2A endpoint.
 - `buzz-dev-mcp` — Developer MCP server (shell, str_replace, todo) and
   multicall entrypoint for `rg`, `tree`, `buzz`, `git-credential-nostr`,
   `git-sign-nostr`.

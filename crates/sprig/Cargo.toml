@@ -15,5 +15,6 @@ path = "src/main.rs"
 
 [dependencies]
 buzz-acp = { path = "../buzz-acp" }
+buzz-a2a-acp = { path = "../buzz-a2a-acp" }
 buzz-agent = { path = "../buzz-agent" }
 buzz-dev-mcp = { path = "../buzz-dev-mcp" }
