@@ -1,0 +1,37 @@
+capability:
+  id: sovereign-sync-agreements
+  type: capability
+  description: |
+    Establish attributable event-stream relationships between independently
+    owned nodes, replicate NIP-29 shared contexts through a custodian, retrieve
+    artifacts through accepted event references, and surface drift without
+    conflating ownership, transport, or event authorship.
+  scope:
+    personas:
+      - ../personas/sovereign-node-operator.md
+    journeys:
+      - ../journeys/offer-and-accept-sovereign-event-stream.md
+      - ../journeys/replicate-shared-context-through-rendezvous.md
+      - ../journeys/fetch-referenced-stream-artifacts.md
+      - ../journeys/detect-and-reconcile-stream-drift.md
+    stories:
+      - ../stories/sovereign-sync/offer-sovereign-event-stream.md
+      - ../stories/sovereign-sync/accept-sovereign-event-stream.md
+      - ../stories/sovereign-sync/authorize-sovereign-stream-transport.md
+      - ../stories/sovereign-sync/replicate-shared-context-events.md
+      - ../stories/sovereign-sync/retrieve-referenced-stream-artifacts.md
+      - ../stories/sovereign-sync/observe-and-report-stream-drift.md
+      - ../stories/sovereign-sync/reconcile-stream-agreement-drift.md
+    models:
+      - ../models/sovereign-sync/sovereign-stream-agreement.model.yaml
+      - ../models/sovereign-sync/sovereign-stream-agreement.lifecycle.yaml
+    features:
+      - ../features/sovereign-sync/stream-agreement.feature
+      - ../features/sovereign-sync/shared-context-replication.feature
+      - ../features/sovereign-sync/referenced-artifact-custody.feature
+      - ../features/sovereign-sync/steward-drift.feature
+    contracts:
+      - ../contracts/openapi/sovereign-sync.yaml
+    fixtures:
+      - ../fixtures/sovereign-sync/agreement-v0.1.json
+      - ../fixtures/sovereign-sync/artifact-reference-v0.1.json

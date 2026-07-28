@@ -1,0 +1,28 @@
+{
+  "_meta": {
+    "id": "sovereign-artifact-reference-v0.1",
+    "type": "fixture",
+    "story": "specs/stories/sovereign-sync/retrieve-referenced-stream-artifacts.md",
+    "feature": "specs/features/sovereign-sync/referenced-artifact-custody.feature",
+    "scenario": "Fetch and verify an artifact referenced by a readable stream"
+  },
+  "stream_id": "shared/clinical-review-v1",
+  "reader_transport": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "event": {
+    "id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "tags": [
+      ["h", "clinical-review"],
+      ["x", "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"]
+    ]
+  },
+  "artifact": {
+    "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "content_type": "application/octet-stream"
+  },
+  "expected": {
+    "authorized_when_stream_readable": true,
+    "authorized_without_reference": false,
+    "hash_verification_required": true,
+    "store_is_idempotent": true
+  }
+}

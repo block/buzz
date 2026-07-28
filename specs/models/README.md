@@ -32,3 +32,15 @@
 | Cloudflare relay adapter | A portable relay implementation using Worker ingress and one SQLite-backed Durable Object per stable node. |
 | Conformance tier | One evidence environment: deterministic kernel, local Workers runtime, or deployed preview. |
 | Object eviction | Removal of a Durable Object's in-memory instance while its durable storage remains available for reconstruction. |
+| Sovereign owner | The application identity authorized to sign policy declarations for one or more nodes. |
+| Node principal | A stable identity naming an operated node independently of its rotating transport keys. |
+| Transport verification key | A key used to authenticate replication reads or deliveries; it does not own policy or event content. |
+| Event stream | One immutable selection of signed events identified by a stream ID. |
+| Stream export | A source-owner declaration offering an event stream to named counterparty owners. |
+| Stream admit | A destination-owner declaration accepting a pinned export and naming transport keys allowed at its sink. |
+| Stream read grant | A source- or custodian-owner declaration allowing named transport keys to drain an export. |
+| Stream agreement | A current matched export/admit pair expressing mutual owner intent independently of transport readiness. |
+| Shared context | A human-visible NIP-29 space identified by an `h` tag; it may be carried by one or more event streams. |
+| Artifact reference | An `x` tag from an accepted event to immutable bytes named by SHA-256. |
+| Rendezvous custodian | A node that holds and relays selected events or referenced artifacts without becoming their author or policy owner. |
+| Steward mandate | An owner-signed grant allowing an agent to observe and optionally report without changing configuration. |

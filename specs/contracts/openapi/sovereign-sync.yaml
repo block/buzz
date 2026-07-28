@@ -1,0 +1,304 @@
+openapi: 3.1.0
+info:
+  title: Buzz Sovereign Sync HTTP Contract
+  version: 0.1.0
+  description: |
+    Existing portable relay HTTP operations used to publish and query
+    declaration events, move selected signed-event history, and fetch
+    content-addressed artifacts. Agreements introduce no declaration-specific
+    endpoint: declarations and steward reports are ordinary signed events.
+servers:
+  - url: http://127.0.0.1:7777
+    description: Authenticated local sovereign relay
+  - url: https://{relayHost}
+    description: Rendezvous custodian
+    variables:
+      relayHost:
+        default: relay.example
+security:
+  - nip98: []
+paths:
+  /events:
+    post:
+      operationId: submitSovereignEvent
+      summary: Submit a signed declaration, context event, or steward report
+      x-story: specs/stories/sovereign-sync/offer-sovereign-event-stream.md
+      x-feature: specs/features/sovereign-sync/stream-agreement.feature
+      x-journey: specs/journeys/offer-and-accept-sovereign-event-stream.md
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NostrEvent"
+      responses:
+        "200":
+          description: Signed event ingest outcome.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WriteResult"
+        "400":
+          description: Malformed or invalid signed event.
+        "401":
+          description: Authentication evidence is absent or invalid.
+        "403":
+          description: The authenticated principal may not append this event.
+  /query:
+    post:
+      operationId: querySovereignEvents
+      summary: Query effective declaration heads or shared-context events
+      x-story: specs/stories/sovereign-sync/observe-and-report-stream-drift.md
+      x-feature: specs/features/sovereign-sync/steward-drift.feature
+      x-journey: specs/journeys/detect-and-reconcile-stream-drift.md
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              minItems: 1
+              items:
+                $ref: "#/components/schemas/NostrFilter"
+      responses:
+        "200":
+          description: Effective signed events visible to the caller.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/NostrEvent"
+        "401":
+          description: Authentication evidence is absent or invalid.
+        "403":
+          description: The requested scope is not readable by this principal.
+  /replication:
+    post:
+      operationId: ingestSovereignReplication
+      summary: Ingest exact signed events transported for one configured source
+      x-story: specs/stories/sovereign-sync/replicate-shared-context-events.md
+      x-feature: specs/features/sovereign-sync/shared-context-replication.feature
+      x-journey: specs/journeys/replicate-shared-context-through-rendezvous.md
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                $ref: "#/components/schemas/ReplicationRecord"
+      responses:
+        "200":
+          description: Per-record destination receipts.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ReplicationReceipt"
+        "401":
+          description: Transport authentication failed.
+        "403":
+          description: The presenting transport principal is not admitted for the source.
+  /replication/read:
+    post:
+      operationId: readSovereignReplication
+      summary: Read an authorized ordered page from an exported event stream
+      x-story: specs/stories/sovereign-sync/authorize-sovereign-stream-transport.md
+      x-feature: specs/features/sovereign-sync/shared-context-replication.feature
+      x-journey: specs/journeys/replicate-shared-context-through-rendezvous.md
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReplicationReadRequest"
+      responses:
+        "200":
+          description: Ordered replication page and opaque next cursor.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReplicationBatch"
+        "401":
+          description: Transport authentication failed.
+        "403":
+          description: The presenting transport principal lacks a current read grant.
+  /artifacts/{sha256}:
+    parameters:
+      - name: sha256
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/Sha256"
+    head:
+      operationId: checkReferencedArtifact
+      summary: Check availability of an artifact reachable through a readable stream
+      x-story: specs/stories/sovereign-sync/retrieve-referenced-stream-artifacts.md
+      x-feature: specs/features/sovereign-sync/referenced-artifact-custody.feature
+      x-journey: specs/journeys/fetch-referenced-stream-artifacts.md
+      responses:
+        "200":
+          description: Artifact exists and is authorized through a readable event reference.
+        "401":
+          description: Authentication evidence is absent or invalid.
+        "403":
+          description: No readable stream grants a reference path to this digest.
+        "404":
+          description: Authorized reference exists, but bytes are unavailable.
+    get:
+      operationId: fetchReferencedArtifact
+      summary: Fetch hash-addressed bytes through a readable event reference
+      x-story: specs/stories/sovereign-sync/retrieve-referenced-stream-artifacts.md
+      x-feature: specs/features/sovereign-sync/referenced-artifact-custody.feature
+      x-journey: specs/journeys/fetch-referenced-stream-artifacts.md
+      responses:
+        "200":
+          description: Exact artifact bytes.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "401":
+          description: Authentication evidence is absent or invalid.
+        "403":
+          description: No readable stream grants a reference path to this digest.
+        "404":
+          description: Authorized reference exists, but bytes are unavailable.
+components:
+  securitySchemes:
+    nip98:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: Payload-bound NIP-98 proof for this HTTP method and URL.
+  schemas:
+    HexPubkey:
+      type: string
+      pattern: "^[0-9a-f]{64}$"
+    Sha256:
+      type: string
+      pattern: "^[0-9a-f]{64}$"
+    EventId:
+      $ref: "#/components/schemas/Sha256"
+    NostrEvent:
+      type: object
+      required: [id, pubkey, created_at, kind, tags, content, sig]
+      properties:
+        id:
+          $ref: "#/components/schemas/EventId"
+        pubkey:
+          $ref: "#/components/schemas/HexPubkey"
+        created_at:
+          type: integer
+          minimum: 0
+        kind:
+          type: integer
+          minimum: 0
+          maximum: 65535
+        tags:
+          type: array
+          items:
+            type: array
+            minItems: 1
+            items:
+              type: string
+        content:
+          type: string
+        sig:
+          type: string
+          pattern: "^[0-9a-f]{128}$"
+    NostrFilter:
+      type: object
+      additionalProperties: true
+    WriteResult:
+      type: object
+      required: [event_id, accepted, message]
+      properties:
+        event_id:
+          $ref: "#/components/schemas/EventId"
+        accepted:
+          type: boolean
+        message:
+          type: string
+    ReplicationRecord:
+      type: object
+      required: [source, cursor, event]
+      properties:
+        source:
+          type: string
+          minLength: 1
+        cursor:
+          type: string
+          minLength: 1
+        event:
+          $ref: "#/components/schemas/NostrEvent"
+    ReplicationReceipt:
+      type: object
+      required: [source, cursor, event_id, outcome]
+      properties:
+        source:
+          type: string
+          minLength: 1
+        cursor:
+          type: string
+          minLength: 1
+        event_id:
+          $ref: "#/components/schemas/EventId"
+        outcome:
+          $ref: "#/components/schemas/ReplicationIngestOutcome"
+    ReplicationIngestOutcome:
+      oneOf:
+        - type: object
+          required: [status]
+          properties:
+            status:
+              const: stored
+        - type: object
+          required: [status]
+          properties:
+            status:
+              const: duplicate
+        - type: object
+          required: [status]
+          properties:
+            status:
+              const: superseded
+        - type: object
+          required: [status, reason]
+          properties:
+            status:
+              const: rejected
+            reason:
+              type: string
+              minLength: 1
+      discriminator:
+        propertyName: status
+    ReplicationReadRequest:
+      type: object
+      required: [source]
+      properties:
+        source:
+          type: string
+          minLength: 1
+        cursor:
+          type: [string, "null"]
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 500
+          default: 500
+    ReplicationBatch:
+      type: object
+      required: [records, next_cursor, caught_up]
+      properties:
+        records:
+          type: array
+          items:
+            $ref: "#/components/schemas/ReplicationRecord"
+        next_cursor:
+          type: string
+        caught_up:
+          type: boolean

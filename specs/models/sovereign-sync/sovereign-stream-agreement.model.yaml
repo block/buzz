@@ -1,0 +1,235 @@
+id: sovereign-stream-agreement
+type: model
+entity: SovereignStreamAgreement
+aggregate: SovereignStreamAgreement
+description: |
+  Represents the current, derived relationship between independently owned
+  nodes over one immutable signed-event stream selection. Agreement state is
+  derived from owner-signed declaration heads; transport readiness is derived
+  separately from read/admit grants and authenticated transport evidence.
+
+sources:
+  stories:
+    - specs/stories/sovereign-sync/offer-sovereign-event-stream.md
+    - specs/stories/sovereign-sync/accept-sovereign-event-stream.md
+    - specs/stories/sovereign-sync/authorize-sovereign-stream-transport.md
+    - specs/stories/sovereign-sync/replicate-shared-context-events.md
+    - specs/stories/sovereign-sync/retrieve-referenced-stream-artifacts.md
+    - specs/stories/sovereign-sync/observe-and-report-stream-drift.md
+    - specs/stories/sovereign-sync/reconcile-stream-agreement-drift.md
+  journeys:
+    - specs/journeys/offer-and-accept-sovereign-event-stream.md
+    - specs/journeys/replicate-shared-context-through-rendezvous.md
+    - specs/journeys/fetch-referenced-stream-artifacts.md
+    - specs/journeys/detect-and-reconcile-stream-drift.md
+  architecture:
+    - specs/architecture/sovereign-sync-agreement-v0.1-draft.md
+
+identity:
+  fields: [source_owner, destination_owner, stream_id]
+  description: |
+    A stream agreement is pairwise between owner identities. Node labels and
+    transport verification keys may rotate without changing this identity.
+
+attributes:
+  stream_id:
+    type: string
+    required: true
+    immutable: true
+    description: Stable identifier for exactly one event selection.
+  selection:
+    type: EventStreamSelection
+    required: true
+    immutable: true
+  source_owner:
+    type: OwnerIdentity
+    required: true
+    immutable: true
+  destination_owner:
+    type: OwnerIdentity
+    required: true
+    immutable: true
+  agreement_state:
+    type: enum
+    required: true
+    derived: true
+    values: [absent, offered, matched, drifted, inactive, superseded]
+    see: sovereign-stream-agreement.lifecycle.yaml
+  transport_state:
+    type: enum
+    required: true
+    derived: true
+    values: [unconfigured, partially_authorized, ready, unhealthy]
+  current_export_event_id:
+    type: EventId
+    required: false
+    derived: true
+  current_admit_event_id:
+    type: EventId
+    required: false
+    derived: true
+
+entities:
+  - name: SyncDeclaration
+    identity: [author_owner, role, stream_or_scope]
+    replacement_semantics: parameterized_replaceable_head
+    attributes:
+      - event_id
+      - author_owner
+      - role
+      - node_scope
+      - status
+      - counterparty_owner_keys
+      - transport_verification_keys
+      - pinned_event_id
+      - content
+    roles: [export, admit, read, key-grant, steward]
+  - name: SharedContext
+    identity: h_tag
+    description: |
+      A NIP-29 human-visible relationship space. Its identifier is independent
+      of any replication stream ID.
+  - name: ArtifactReference
+    identity: [referencing_event_id, sha256]
+    immutable: true
+    description: |
+      An x-tag edge from an accepted signed event to immutable blob bytes.
+
+value_objects:
+  - name: OwnerIdentity
+    representation: nostr_public_key
+    purpose: Signs declarations and owns policy decisions.
+  - name: NodePrincipal
+    representation: stable_principal_uri
+    purpose: Names an operated node independently of rotating transport keys.
+  - name: TransportVerificationKey
+    representation: nostr_public_key
+    purpose: Proves a replication caller may move records for a named source or reader grant.
+  - name: EventAuthor
+    representation: nostr_public_key
+    purpose: Signs an event envelope and is never replaced by a relay, owner, or transport identity.
+  - name: EventStreamSelection
+    variants:
+      - filter: nip01_filter_set
+      - mirror: true
+      - upstream_source: replication_source_id
+    equality: Canonical semantic equality of the selected variant.
+  - name: EventId
+    representation: lowercase_hex_sha256
+  - name: ArtifactDigest
+    representation: lowercase_hex_sha256
+
+relationships:
+  export_head:
+    type: has-one-current
+    entity: SyncDeclaration
+    required_for_states: [offered, matched, drifted]
+  admit_head:
+    type: has-one-current-per-destination
+    entity: SyncDeclaration
+    required_for_states: [matched, drifted]
+  read_grants:
+    type: has-many-current
+    entity: SyncDeclaration
+    required_by_topology: pull_or_custodian_mediated
+  shared_contexts:
+    type: selects-many
+    entity: SharedContext
+    through: EventStreamSelection
+  artifact_references:
+    type: exposes-many-conditionally
+    entity: ArtifactReference
+    through: accepted_events_in_stream
+
+commands:
+  - name: PublishExport
+    actor: source_owner
+    input: [stream_id, selection, destination_owner_keys, node_scope]
+    output: export_declaration_head
+  - name: PublishAdmit
+    actor: destination_owner
+    input: [stream_id, export_event_id, accepted_transport_keys, node_scope]
+    output: admit_declaration_head
+  - name: PublishReadGrant
+    actor: source_or_custodian_owner
+    input: [stream_id, export_event_id, reader_transport_keys, node_scope]
+    output: read_declaration_head
+  - name: EvaluateAgreement
+    input: [current_export_head, current_admit_head]
+    output: agreement_state
+  - name: EvaluateTransportReadiness
+    input: [topology, current_admit_head, current_read_heads, authenticated_transport_principal]
+    output: transport_state
+  - name: ReplicateEvents
+    input: [stream_id, cursor, authenticated_transport_principal]
+    output: [replication_records, next_cursor, checkpoint_safe_receipts]
+  - name: FetchReferencedArtifact
+    input: [artifact_digest, authenticated_transport_principal, readable_streams]
+    output: [artifact_bytes_or_denial]
+  - name: ReportDrift
+    actor: mandated_steward
+    input: [current_heads, runtime_health, steward_mandate]
+    output: signed_shared_context_report_or_local_observation
+
+rules:
+  - id: export-counterparty-is-owner
+    description: Export p-tags name owner identities permitted to author the destination admit half.
+    enforced: domain
+  - id: admit-and-read-keys-are-transport
+    description: Admit and read p-tags name verification keys permitted to present transport evidence.
+    enforced: domain
+  - id: declaration-author-is-policy-owner
+    description: Only the configured owner identity may author declarations governing its node scope.
+    enforced: authorization
+  - id: selection-defines-stream-identity
+    description: Changing selection semantics requires a new stream ID.
+    enforced: domain
+  - id: admit-pins-reviewed-export
+    description: A matched admit carries an e-tag equal to the current export event ID.
+    enforced: domain
+  - id: agreement-and-transport-are-orthogonal
+    description: A matched agreement does not prove transport readiness, and successful transport does not create agreement.
+    enforced: domain
+  - id: shared-context-is-not-stream
+    description: A NIP-29 h-tag identifies a human-visible context; a stream ID identifies its delivery selection.
+    enforced: validation
+  - id: artifact-access-follows-reference
+    description: Blob bytes are visible only through an accepted event reference in a stream readable by the requester.
+    enforced: authorization
+  - id: steward-powers-are-exact
+    description: Observe permits inspection, report permits publication, and neither permits configuration changes.
+    enforced: authorization
+
+invariants:
+  - id: identity-layers-remain-distinct
+    description: Owner identity, node principal, transport key, event author, and custodian are never inferred from one another.
+  - id: signed-event-envelope-preserved
+    description: Replication never rewrites event ID, author, kind, tags, content, or signature.
+  - id: unmatched-heads-confer-no-agreement
+    description: Missing, revoked, unoffered, unpinned, or stale declaration pairs are not matched.
+  - id: destination-controls-admission
+    description: A source offer cannot create or broaden destination admission.
+  - id: source-controls-export-and-reading
+    description: A destination admit cannot create an export or read grant.
+  - id: revocation-does-not-fall-back
+    description: A journal-governed domain with only revoked heads is empty and never revives bootstrap trust.
+  - id: artifacts-are-content-addressed
+    description: Artifact bytes are accepted only when their SHA-256 equals the requested digest.
+  - id: history-is-durable-current-state-is-derived
+    description: Prior declarations remain durable while authority derives only from current effective heads.
+
+boundaries:
+  inside:
+    - owner-authored declaration vocabulary
+    - pairwise agreement derivation
+    - topology-aware transport readiness
+    - shared-context stream selection
+    - reference-gated artifact access
+    - bounded steward observation and reporting
+  outside:
+    - legal identity proofing
+    - private key custody and recovery
+    - automatic counterparty discovery
+    - scheduling and retry policy
+    - user-interface presentation
+    - artifact encryption key exchange

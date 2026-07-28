@@ -1,11 +1,23 @@
 # Sovereign Sync Agreement v0.1 (draft)
 
-Status: draft for discussion; not yet implemented, not yet upstreamed. Kind
-numbers are provisional pending assignment in the shared registry
-(`buzz-core/src/kind.rs`). This draft is descriptive: every clause family
-below already runs as operator configuration in the portable relay adapters;
-the draft's contribution is turning that configuration into signed,
-journal-resident, mutually attributable intent.
+Status: draft for discussion; partially implemented in the portable relay
+adapters and not yet upstreamed. Kind numbers are provisional pending assignment
+in the shared registry (`buzz-core/src/kind.rs`). The IDD source for operator
+experience and testable behavior is
+`specs/capabilities/sovereign-sync-agreements.capability.yaml`; this document
+defines the supporting mechanism and vocabulary.
+
+## Scope
+
+A sync agreement governs a **selection of signed events**. It does not package
+artifact bytes and it is not itself a shared context:
+
+- an **event stream** is one immutable filter, mirror, or upstream-source
+  selection identified by a stream ID;
+- a **shared context** is a human-visible NIP-29 space identified by an `h` tag
+  and may be carried by an event stream;
+- an **artifact** is immutable content named by a SHA-256 `x` tag on an accepted
+  event and transferred separately under access inherited from that reference.
 
 ## Decision
 
@@ -19,6 +31,23 @@ attributable, and observable.
 This replaces nothing at the transport boundary. Peer evidence (NIP-98/NIP-42)
 still authenticates every session; destination policy still admits every
 record; declarations are names and intent, never credentials.
+
+## Identity roles
+
+The vocabulary intentionally keeps five roles distinct:
+
+1. **Owner identity** signs declarations and controls one node's policy.
+2. **Node principal** is a stable operator label whose transport keys may rotate.
+3. **Transport verification key** proves a caller may move records for a named
+   source or read grant.
+4. **Event author** signs the exact Nostr event being transported.
+5. **Custodian** stores or relays authorized events and blobs without becoming
+   their owner or author.
+
+An `export` offer names counterparty **owner identities** permitted to answer
+the offer. `admit` and `read` grants name **transport verification keys**. A
+node that separates application ownership from transport therefore uses
+different public keys in these positions.
 
 ## Why a matched pair, not a countersigned document
 
@@ -73,7 +102,7 @@ the selective-streams work).
   "kind": 3070x,
   "tags": [
     ["d", "export/rendezvous/ted-sovereign"],
-    ["p", "<reader-or-destination-pubkey>"]      // zero or more offered parties
+    ["p", "<destination-owner-pubkey>"]          // zero or more owners allowed to answer
   ],
   "content": {
     "status": "active",
@@ -110,7 +139,7 @@ principal, under which verification keys, pinned to which export.
 
 Authorizes a principal to drain an exported stream (the rendezvous role).
 Same shape as `admit` seen from the other side: `d = "read/<stream-id>"`,
-`p` = reader pubkey(s), `e` pin to the export declaration.
+`p` = reader transport verification key(s), `e` pin to the export declaration.
 
 ### `key-grant` — compartment capability record
 
@@ -192,6 +221,11 @@ relationship's own record (declaration halves, session records, shared
 tooling, steward reports). The context does not describe the binding; it
 *is* the binding.
 
+The shared context ID and stream ID are separate. The `h` tag names the space a
+person opens; the stream ID names one delivery selection that may carry that
+space. Multiple streams may custody the same context under different topologies
+without changing the context's identity.
+
 Shared contexts are scoped with NIP-29 `h` tags — deliberately upstream's
 group vocabulary, so:
 
@@ -224,12 +258,18 @@ confers nothing on the counterparty and claims nothing about consent
 An agreement over stream `S` between source `A` and destination `B` exists
 iff all of the following hold at the current heads:
 
-1. `A` has an active `export/S` declaration whose `p` tags include `B` (or,
-   for rendezvous reads, an active `read/S` naming `B`).
-2. `B` has an active `admit/S` declaration whose `p` tags name the transport
+1. Source owner `A` has an active `export/S` declaration whose `p` tags include
+   destination owner `B`.
+2. Destination owner `B` has an active `admit/S` declaration whose `p` tags name the transport
    principal actually presenting evidence, and whose `e` tag equals the
    event ID of `A`'s current `export/S` head.
 3. The declarations agree on the stream ID byte-for-byte.
+
+This match expresses mutual owner intent only. Pull or rendezvous-mediated
+delivery additionally requires an active `read/S` grant naming the presenting
+transport key. Destination ingest additionally evaluates the `admit/S`
+transport keys. Agreement state and transport readiness MUST be reported
+separately: neither implies the other.
 
 Rule (2)'s pin is the drift detector: if `A` replaces its export declaration
 (new selection ⇒ new stream ID; new readers or metadata ⇒ same `d`, new

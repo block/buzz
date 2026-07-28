@@ -1,0 +1,101 @@
+id: sovereign-stream-agreement-lifecycle
+type: model
+entity: SovereignStreamAgreement
+description: |
+  Derived agreement states for one source owner, destination owner, and
+  immutable stream selection. States describe mutual intent only; transport
+  readiness is evaluated independently.
+
+sources:
+  stories:
+    - specs/stories/sovereign-sync/offer-sovereign-event-stream.md
+    - specs/stories/sovereign-sync/accept-sovereign-event-stream.md
+    - specs/stories/sovereign-sync/reconcile-stream-agreement-drift.md
+  journeys:
+    - specs/journeys/offer-and-accept-sovereign-event-stream.md
+    - specs/journeys/detect-and-reconcile-stream-drift.md
+
+initial_state: absent
+
+states:
+  absent:
+    description: No active export head exists for the pair and stream.
+    terminal: false
+  offered:
+    description: An active export offers to the destination owner, but no matching current admit exists.
+    terminal: false
+  matched:
+    description: |
+      Active export and admit heads use the same stream ID, the export offers
+      to the admit author, and the admit pins the current export event.
+    terminal: false
+  drifted:
+    description: |
+      A formerly compatible pair no longer matches because the export head,
+      pin, status, stream ID, or offered destination changed.
+    terminal: false
+  inactive:
+    description: A required current head is revoked or withdrawn.
+    terminal: false
+  superseded:
+    description: The parties moved to a new stream ID because selection semantics changed.
+    terminal: true
+
+transitions:
+  publish_offer:
+    from: absent
+    to: offered
+    trigger: source_owner
+    guards:
+      - explicit-selection
+      - destination-owner-named
+  accept_offer:
+    from: offered
+    to: matched
+    trigger: destination_owner
+    guards:
+      - admit-author-is-offered
+      - identical-stream-id
+      - admit-pins-current-export
+  replace_nonsemantic_export_metadata:
+    from: matched
+    to: drifted
+    trigger: source_owner
+    description: Replacing the export head changes its event ID and invalidates the old admit pin.
+  repin_current_export:
+    from: drifted
+    to: matched
+    trigger: destination_owner
+    guards:
+      - destination-reviewed-current-export
+      - admit-pins-current-export
+  revoke_export:
+    from: [offered, matched, drifted]
+    to: inactive
+    trigger: source_owner
+  revoke_admit:
+    from: [matched, drifted]
+    to: inactive
+    trigger: destination_owner
+  reactivate_compatible_heads:
+    from: inactive
+    to: matched
+    trigger: owners
+    guards:
+      - current-heads-match
+  replace_selection:
+    from: [offered, matched, drifted, inactive]
+    to: superseded
+    trigger: source_owner
+    effects:
+      - create a distinct agreement lifecycle under a new stream ID
+
+invalid:
+  - transition: transport_success_to_matched
+    reason: Transport evidence and receipts do not create owner consent.
+  - transition: steward_reconcile
+    reason: Observe and report powers do not permit declaration mutation.
+  - transition: reuse_stream_id_for_changed_selection
+    reason: Selection is part of stream identity.
+  - transition: bootstrap_fallback_after_revocation
+    reason: Revoked journal-governed domains remain empty rather than reviving bootstrap trust.

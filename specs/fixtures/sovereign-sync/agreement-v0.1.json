@@ -1,0 +1,59 @@
+{
+  "_meta": {
+    "id": "sovereign-stream-agreement-v0.1",
+    "type": "fixture",
+    "story": "specs/stories/sovereign-sync/accept-sovereign-event-stream.md",
+    "feature": "specs/features/sovereign-sync/stream-agreement.feature",
+    "scenario": "Accept the exact export head with separate transport keys"
+  },
+  "identities": {
+    "source_owner": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "destination_owner": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "destination_transport": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  },
+  "stream_id": "shared/clinical-review-v1",
+  "shared_context_id": "clinical-review",
+  "export": {
+    "kind": 30700,
+    "pubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "event_id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "tags": [
+      ["d", "export/shared/clinical-review-v1"],
+      ["n", "source-node"],
+      ["p", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]
+    ],
+    "content": {
+      "status": "active",
+      "selection": {
+        "filter": [
+          {
+            "kinds": [1, 39000],
+            "#h": ["clinical-review"]
+          }
+        ]
+      },
+      "artifacts": "referenced"
+    }
+  },
+  "admit": {
+    "kind": 30700,
+    "pubkey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "tags": [
+      ["d", "admit/shared/clinical-review-v1"],
+      ["n", "destination-node"],
+      ["p", "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],
+      ["e", "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"]
+    ],
+    "content": {
+      "status": "active",
+      "principal": "did:buzz:destination-node",
+      "retention": {
+        "keep": "journal"
+      }
+    }
+  },
+  "expected": {
+    "agreement_state": "matched",
+    "transport_state_without_read_grant": "partially_authorized"
+  }
+}
