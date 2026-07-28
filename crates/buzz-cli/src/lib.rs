@@ -342,6 +342,25 @@ Examples:\n  \
 buzz agents archived"
     )]
     Archived,
+    /// Mint a NIP-OA owner attestation for an externally-generated agent key
+    #[command(
+        after_help = "Signs an [\"auth\", owner_pubkey, conditions, sig] tag with the caller's \
+own identity (BUZZ_PRIVATE_KEY), proving ownership of `agent-pubkey` without needing that \
+key's private material. Use this to attest a key you generated yourself for a \
+non-Desktop-managed deployment (e.g. a headless agent host) — set the printed tag verbatim \
+as that deployment's BUZZ_AUTH_TAG.\n\n\
+Examples:\n  \
+buzz agents attest --agent-pubkey <PUBKEY>\n  \
+buzz agents attest --agent-pubkey <PUBKEY> --conditions \"kind=9\""
+    )]
+    Attest {
+        /// Agent identity pubkey to attest ownership of (hex)
+        #[arg(long)]
+        agent_pubkey: String,
+        /// Optional NIP-OA conditions clause (e.g. "kind=9&created_at<1700000000")
+        #[arg(long, default_value = "")]
+        conditions: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1873,6 +1892,7 @@ mod tests {
             vec![
                 "archive",
                 "archived",
+                "attest",
                 "draft-create",
                 "draft-update",
                 "unarchive"
@@ -1995,7 +2015,7 @@ mod tests {
     #[test]
     fn subcommand_counts_are_stable() {
         let expected: Vec<(&str, usize)> = vec![
-            ("agents", 5),
+            ("agents", 6),
             ("canvas", 2),
             ("channels", 16),
             ("dms", 4),

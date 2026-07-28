@@ -148,7 +148,42 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
         }
 
         AgentsCmd::Archived => cmd_archived(client).await,
+
+        AgentsCmd::Attest {
+            agent_pubkey,
+            conditions,
+        } => cmd_attest(client, &agent_pubkey, &conditions),
     }
+}
+
+/// Mint a NIP-OA `["auth", owner_pubkey, conditions, sig]` tag proving the
+/// caller (`client.keys()`) owns `agent_pubkey`. Pure local signing — no
+/// relay round-trip, since the resulting tag is verified by whoever reads it.
+fn cmd_attest(client: &BuzzClient, agent_pubkey: &str, conditions: &str) -> Result<(), CliError> {
+    let output = build_attest_output(client, agent_pubkey, conditions)?;
+    println!("{output}");
+    Ok(())
+}
+
+fn build_attest_output(
+    client: &BuzzClient,
+    agent_pubkey: &str,
+    conditions: &str,
+) -> Result<serde_json::Value, CliError> {
+    validate_hex64(agent_pubkey)?;
+    let agent = PublicKey::from_hex(agent_pubkey)
+        .map_err(|e| CliError::Usage(format!("invalid agent pubkey: {e}")))?;
+    let auth_tag = buzz_sdk::nip_oa::compute_auth_tag(client.keys(), &agent, conditions)
+        .map_err(|e| CliError::Usage(format!("failed to compute auth tag: {e}")))?;
+    Ok(json!({
+        "ok": true,
+        "action": "attest",
+        "owner_pubkey": client.keys().public_key().to_hex(),
+        "agent_pubkey": agent_pubkey,
+        "conditions": conditions,
+        "auth_tag": auth_tag,
+        "message": "Set this as BUZZ_AUTH_TAG on the agent's deployment verbatim.",
+    }))
 }
 
 /// Require `BUZZ_AUTH_TAG` and parse the owner pubkey from it. Used only by
@@ -714,5 +749,56 @@ mod tests {
             .expect("sign");
         let result = verify_archived_event(&event, &self_hex).expect("should pass");
         assert!(result.is_empty());
+    }
+
+    // --- (c) attest: build_attest_output ---
+
+    fn test_client(keys: Keys) -> BuzzClient {
+        BuzzClient::new("http://localhost".into(), keys, None, None).expect("client")
+    }
+
+    #[test]
+    fn attest_produces_verifiable_tag() {
+        let owner = Keys::generate();
+        let agent = Keys::generate();
+        let agent_hex = agent.public_key().to_hex();
+        let client = test_client(owner.clone());
+
+        let output = build_attest_output(&client, &agent_hex, "").expect("attest");
+        assert_eq!(output["ok"], json!(true));
+        assert_eq!(output["owner_pubkey"], json!(owner.public_key().to_hex()));
+        assert_eq!(output["agent_pubkey"], json!(agent_hex));
+
+        let auth_tag_json = output["auth_tag"].as_str().expect("auth_tag is a string");
+        let recovered_owner = buzz_sdk::nip_oa::verify_auth_tag(auth_tag_json, &agent.public_key())
+            .expect("tag verifies against the agent pubkey");
+        assert_eq!(recovered_owner, owner.public_key());
+    }
+
+    #[test]
+    fn attest_rejects_self_attestation() {
+        let owner = Keys::generate();
+        let owner_hex = owner.public_key().to_hex();
+        let client = test_client(owner);
+
+        let err = build_attest_output(&client, &owner_hex, "").unwrap_err();
+        assert!(matches!(err, CliError::Usage(_)));
+    }
+
+    #[test]
+    fn attest_rejects_invalid_pubkey() {
+        let client = test_client(Keys::generate());
+        let err = build_attest_output(&client, "not-hex", "").unwrap_err();
+        assert!(matches!(err, CliError::Usage(_)));
+    }
+
+    #[test]
+    fn attest_rejects_malformed_conditions() {
+        let owner = Keys::generate();
+        let agent = Keys::generate();
+        let client = test_client(owner);
+        let err = build_attest_output(&client, &agent.public_key().to_hex(), "has whitespace")
+            .unwrap_err();
+        assert!(matches!(err, CliError::Usage(_)));
     }
 }
