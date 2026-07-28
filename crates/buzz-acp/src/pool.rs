@@ -2094,6 +2094,20 @@ pub async fn run_prompt_task(
             )
             .await;
 
+            let raw_turn_text = agent.acp.take_accumulated_text();
+            let turn_text = clean_agent_text_response(&raw_turn_text);
+            if !turn_text.is_empty() {
+                if let (PromptSource::Channel(channel_id), Some(ref b)) = (&source, &batch) {
+                    let thread_tags = b
+                        .events
+                        .last()
+                        .map(|be| crate::queue::parse_thread_tags(&be.event))
+                        .unwrap_or_default();
+                    post_failure_notice(&ctx.rest_client, *channel_id, &thread_tags, &turn_text)
+                        .await;
+                }
+            }
+
             send_prompt_result(
                 &result_tx,
                 &turn_id,
@@ -3545,6 +3559,28 @@ pub(crate) async fn reaction_add(rest: &crate::relay::RestClient, event_id: &str
         Ok(Err(e)) => tracing::debug!(event_id, emoji, "reaction add failed: {e}"),
         Err(_) => tracing::debug!(event_id, emoji, "reaction add timed out"),
     }
+}
+
+pub(crate) fn clean_agent_text_response(text: &str) -> String {
+    let mut cleaned = text.to_string();
+    if let Some(pos) = cleaned.rfind("```json") {
+        let block = &cleaned[pos..];
+        if block.contains("reply_to") || block.contains("channel") || block.contains("command") {
+            cleaned.truncate(pos);
+        }
+    }
+    if let Some(pos) = cleaned.rfind("call:buzz-dev-mcp") {
+        cleaned.truncate(pos);
+    }
+    if let Some(pos) = cleaned.rfind("Call reply_to") {
+        cleaned.truncate(pos);
+    }
+    cleaned = cleaned
+        .replace("<|tool_call>", "")
+        .replace("<|tool_calls>", "")
+        .replace("<|im_end|>", "")
+        .replace("<|endoftext|>", "");
+    cleaned.trim().to_string()
 }
 
 /// Best-effort: post a visible failure notice (kind:9) to a channel after a

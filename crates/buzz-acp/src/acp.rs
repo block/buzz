@@ -187,6 +187,8 @@ pub struct AcpClient {
     /// Other agents may leave this unset — readers must treat `None` as
     /// "no active run to steer into" and fall back to cancel+merge.
     active_run_id: Option<String>,
+    /// Accumulated agent_message_chunk text for the current turn.
+    accumulated_text: String,
     /// Per-turn channel for receiving goose-native non-cancelling steer
     /// requests from the main loop. Installed by
     /// [`install_steer_rx`](Self::install_steer_rx) at dispatch and
@@ -494,9 +496,15 @@ impl AcpClient {
             observer_agent_index: None,
             observer_context: ObserverContext::default(),
             active_run_id: None,
+            accumulated_text: String::new(),
             steer_rx: None,
             goose_usage: UsageTracker::default(),
         })
+    }
+
+    /// Take accumulated agent_message_chunk text for the current turn.
+    pub fn take_accumulated_text(&mut self) -> String {
+        std::mem::take(&mut self.accumulated_text)
     }
 
     /// Attach a local observer feed to this ACP client.
@@ -691,6 +699,7 @@ impl AcpClient {
         let params = build_prompt_params(session_id, prompt_blocks);
         let hard_deadline = tokio::time::Instant::now() + max_duration;
         self.current_hard_deadline = Some(hard_deadline);
+        self.accumulated_text.clear();
 
         // Mark the usage tracker as in-flight for this turn BEFORE sending the
         // prompt so that any setup notifications recorded earlier are not
@@ -1543,6 +1552,7 @@ impl AcpClient {
             "agent_message_chunk" => {
                 if let Some(text) = update["content"]["text"].as_str() {
                     tracing::info!(target: "acp::stream", "{text}");
+                    self.accumulated_text.push_str(text);
                 }
                 false
             }

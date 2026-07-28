@@ -1077,6 +1077,9 @@ fn parse_responses(v: Value) -> Result<LlmResponse, AgentError> {
         Some("completed") => ProviderStop::EndTurn,
         _ => ProviderStop::Other,
     };
+    if text.is_empty() && !reasoning.is_empty() && tool_calls.is_empty() {
+        text = reasoning.clone();
+    }
     let input_tokens = sum_usage(&v, &["input_tokens"]);
     let output_tokens = sum_usage(&v, &["output_tokens"]);
     Ok(LlmResponse {
@@ -1204,7 +1207,7 @@ fn parse_openai(v: Value) -> Result<LlmResponse, AgentError> {
     let msg = choice
         .get("message")
         .ok_or_else(|| AgentError::Llm("missing message".into()))?;
-    let text = str_field(msg, "content");
+    let mut text = str_field(msg, "content");
     // DeepSeek and vLLM-style OpenAI-compat hosts expose reasoning tokens on the
     // message object. Prefer `reasoning_content` (DeepSeek's field name); fall
     // back to `reasoning` (some other providers). Both are absent for standard
@@ -1232,6 +1235,9 @@ fn parse_openai(v: Value) -> Result<LlmResponse, AgentError> {
                 args,
             )?);
         }
+    }
+    if text.is_empty() && !reasoning.is_empty() && tool_calls.is_empty() {
+        text = reasoning.clone();
     }
     let input_tokens = openai_chat_input_tokens(&v);
     let output_tokens = sum_usage(&v, &["completion_tokens"]);
