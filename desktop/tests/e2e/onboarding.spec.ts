@@ -1822,6 +1822,12 @@ test("delayed profile seed does not undo an explicit avatar clear", async ({
 
   const existingAvatarUrl =
     "https://mock.relay/media/existing-community-avatar.png";
+  await page.route(`${existingAvatarUrl}*`, async (route) => {
+    await route.fulfill({
+      body: Buffer.from(ONE_PIXEL_PNG_BASE64, "base64"),
+      contentType: "image/png",
+    });
+  });
   await seedCurrentAvatar(page, existingAvatarUrl);
   await expect(page.getByTestId("community-avatar-circle-image")).toBeVisible();
 
@@ -1831,7 +1837,9 @@ test("delayed profile seed does not undo an explicit avatar clear", async ({
   await page.getByTestId("community-team-intro-back").click();
 
   await page.getByTestId("community-avatar-open").click();
-  await page.getByTestId("community-avatar-url").fill("");
+  const avatarUrlInput = page.getByTestId("community-avatar-url");
+  await avatarUrlInput.fill("https://example.com/replacement-avatar.png");
+  await avatarUrlInput.fill("");
   await page.getByTestId("community-avatar-done").click();
   await expect(page.getByTestId("community-avatar-empty")).toBeVisible();
 
