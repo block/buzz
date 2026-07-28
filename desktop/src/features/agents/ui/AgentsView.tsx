@@ -20,6 +20,7 @@ import { SecretRevealDialog } from "./SecretRevealDialog";
 import { TeamDeleteDialog } from "./TeamDeleteDialog";
 import { TeamDialog } from "./TeamDialog";
 import { TeamsSection } from "./TeamsSection";
+import { ConnectedRelayAgentsSection } from "./ConnectedRelayAgentsSection";
 import { UnifiedAgentsSection } from "./UnifiedAgentsSection";
 import { useManagedAgentActions } from "./useManagedAgentActions";
 import { usePersonaActions } from "./usePersonaActions";
@@ -31,6 +32,12 @@ import { useGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
 import { Button } from "@/shared/ui/button";
 import { PageHeader } from "@/shared/ui/PageHeader";
 import { getInheritedAgentDefaults } from "./bakedEnvHelpers";
+
+const WELCOME_TEAM_PERSONA_IDS = new Set([
+  "builtin:fizz",
+  "builtin:honey",
+  "builtin:bumble",
+]);
 
 export function AgentsView() {
   const { openPersonaProfilePanel, openProfilePanel } = useProfilePanel();
@@ -74,6 +81,18 @@ export function AgentsView() {
   // most providers persist the model as a provider env var (e.g. DATABRICKS_MODEL)
   // or inherit a baked build default, leaving `globalConfig.model` null.
   const configuredGlobalModel = inheritedDefaults.model.value;
+  const hasConnectedRelayAgents = agents.connectedRelayAgents.length > 0;
+  const visibleManagedAgents = hasConnectedRelayAgents
+    ? agents.managedAgents.filter(
+        (agent) =>
+          !agent.personaId || !WELCOME_TEAM_PERSONA_IDS.has(agent.personaId),
+      )
+    : agents.managedAgents;
+  const visiblePersonas = hasConnectedRelayAgents
+    ? personas.libraryPersonas.filter(
+        (persona) => !WELCOME_TEAM_PERSONA_IDS.has(persona.id),
+      )
+    : personas.libraryPersonas;
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: mount-only; personas.handleImportSnapshotFile and teamActions.handleImportTeamSnapshotFile are stable
   React.useEffect(() => {
@@ -140,11 +159,23 @@ export function AgentsView() {
             title="Agents"
           />
           <div className="flex flex-col gap-8">
+            <ConnectedRelayAgentsSection
+              agents={agents.connectedRelayAgents}
+              error={
+                agents.relayAgentsQuery.error instanceof Error
+                  ? agents.relayAgentsQuery.error
+                  : null
+              }
+              isLoading={agents.relayAgentsQuery.isLoading}
+              onOpenAgentProfile={(pubkey) => {
+                openProfilePanel?.(pubkey);
+              }}
+            />
             <UnifiedAgentsSection
               defaultModel={inheritedDefaults.model.value}
               actionErrorMessage={agents.actionErrorMessage}
               actionNoticeMessage={agents.actionNoticeMessage}
-              agents={agents.managedAgents}
+              agents={visibleManagedAgents}
               agentsError={
                 agents.managedAgentsQuery.error instanceof Error
                   ? agents.managedAgentsQuery.error
@@ -168,7 +199,7 @@ export function AgentsView() {
               }}
               // Persona props
               canChooseCatalog={personas.catalogPersonas.length > 0}
-              personas={personas.libraryPersonas}
+              personas={visiblePersonas}
               personasError={
                 personas.personasQuery.error instanceof Error
                   ? personas.personasQuery.error

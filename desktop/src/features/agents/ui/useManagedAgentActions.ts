@@ -13,6 +13,7 @@ import {
   useDeleteManagedAgentMutation,
 } from "@/features/agents/hooks";
 import { useGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
+import { connectedRelayAgents } from "@/features/agents/lib/connectedRelayAgents";
 import { useChannelsQuery } from "@/features/channels/hooks";
 import { usePresenceQuery } from "@/features/presence/hooks";
 import type {
@@ -91,8 +92,13 @@ export function useManagedAgentActions() {
   // AppShell); this hook only reads derived state.
 
   const managedPubkeys = React.useMemo(
-    () => new Set(managedAgents.map((agent) => agent.pubkey)),
+    () => new Set(managedAgents.map((agent) => normalizePubkey(agent.pubkey))),
     [managedAgents],
+  );
+
+  const connectedAgents = React.useMemo(
+    () => connectedRelayAgents(relayAgentsQuery.data ?? [], managedPubkeys),
+    [managedPubkeys, relayAgentsQuery.data],
   );
 
   const managedPubkeyList = React.useMemo(
@@ -403,6 +409,7 @@ export function useManagedAgentActions() {
     managedAgentLogQuery,
     managedPresenceQuery,
     managedAgents,
+    connectedRelayAgents: connectedAgents,
     managedPubkeys,
     channelIdToName,
     channelsByPubkey,
