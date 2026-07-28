@@ -88,7 +88,9 @@ pub struct AgentDefinition {
     pub respond_to_allowlist: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parallelism: Option<u32>,
+    #[serde(default)]
     pub created_at: String,
+    #[serde(default)]
     pub updated_at: String,
 }
 
@@ -243,7 +245,9 @@ pub struct ManagedAgentRecord {
     /// `#[serde(default)]` so pre-existing records deserialize as `None`.
     #[serde(default)]
     pub avatar_url: Option<String>,
+    #[serde(default = "default_acp_command")]
     pub acp_command: String,
+    #[serde(default)]
     pub agent_command: String,
     /// Explicit per-instance harness pin. `None` (the default) means inherit
     /// the harness from the linked persona's `runtime`, so persona harness
@@ -254,16 +258,19 @@ pub struct ManagedAgentRecord {
     /// derivations and is not authoritative for spawn.
     #[serde(default)]
     pub agent_command_override: Option<String>,
+    #[serde(default)]
     pub agent_args: Vec<String>,
     /// Create-time snapshot of the catalog MCP command. Never read at spawn —
     /// the effective MCP command is always re-derived from the runtime catalog
     /// (`known_acp_runtime`) — and no longer written by updates. Kept for
     /// serde compatibility with existing stores.
+    #[serde(default)]
     pub mcp_command: String,
     /// Deprecated: `BUZZ_ACP_TURN_TIMEOUT` is ignored by the harness and the
     /// desktop no longer emits or edits it. Kept for serde compatibility with
     /// existing stores; use `idle_timeout_seconds` or
     /// `max_turn_duration_seconds` for turn-length control.
+    #[serde(default)]
     pub turn_timeout_seconds: u64,
     /// Idle timeout in seconds (`BUZZ_ACP_IDLE_TIMEOUT`): how long the agent
     /// may stay silent on its ACP channel mid-turn before the harness times
@@ -333,14 +340,20 @@ pub struct ManagedAgentRecord {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        alias = "persona_name_in_pack"
+        alias = "persona_name_in_team"
     )]
     pub persona_name_in_team: Option<String>,
+    #[serde(default)]
     pub created_at: String,
+    #[serde(default)]
     pub updated_at: String,
+    #[serde(default)]
     pub last_started_at: Option<String>,
+    #[serde(default)]
     pub last_stopped_at: Option<String>,
+    #[serde(default)]
     pub last_exit_code: Option<i32>,
+    #[serde(default)]
     pub last_error: Option<String>,
     #[serde(default)]
     pub last_error_code: Option<i64>,
@@ -807,6 +820,10 @@ pub const DEFAULT_ACP_COMMAND: &str = "buzz-acp";
 /// ~5 min (320s) — matches the CLI harness default (BUZZ_ACP_IDLE_TIMEOUT).
 pub const DEFAULT_AGENT_TURN_TIMEOUT_SECONDS: u64 = 320;
 pub const DEFAULT_AGENT_PARALLELISM: u32 = 10;
+
+fn default_acp_command() -> String {
+    DEFAULT_ACP_COMMAND.to_string()
+}
 
 fn default_agent_parallelism() -> u32 {
     DEFAULT_AGENT_PARALLELISM
