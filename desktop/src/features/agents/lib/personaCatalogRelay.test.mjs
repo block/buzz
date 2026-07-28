@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test, { mock } from "node:test";
 
 import { relayClient } from "@/shared/api/relayClient";
+import { emojiAvatarDataUrl } from "@/features/profile/ui/ProfileAvatarEditor.utils.ts";
 import {
   catalogPersonasFromPublications,
   catalogPublicationsFromEvents,
@@ -170,6 +171,57 @@ test("catalog avatars keep bounded http URLs and drop unsafe schemes", () => {
     BOB,
   );
   assert.equal(unsafe[0].avatarUrl, null);
+});
+
+/** The avatar a catalog entry projects for `avatarUrl`, or null if dropped. */
+function catalogAvatarUrl(avatarUrl) {
+  const personas = catalogPersonasFromPublications(
+    catalogPublicationsFromEvents([
+      personaEvent({ createdAt: 1, id: "avatar-vector", avatarUrl }),
+    ]),
+    [],
+    BOB,
+  );
+  return personas[0].avatarUrl;
+}
+
+// An emoji avatar is self-contained, so it is the one `data:` avatar that can
+// render on another member's machine. Dropping it left shared agents looking
+// avatar-less in the catalog.
+test("test_percent_encoded_emoji_svg_avatar_survives_the_catalog", () => {
+  const emojiAvatar = emojiAvatarDataUrl("🐝", "#FFCC00");
+
+  assert.equal(catalogAvatarUrl(emojiAvatar), emojiAvatar);
+});
+
+test("test_base64_svg_avatar_is_rejected", () => {
+  assert.equal(
+    catalogAvatarUrl(`data:image/svg+xml;base64,${btoa("<svg/>")}`),
+    null,
+  );
+});
+
+test("test_non_svg_data_avatar_is_rejected", () => {
+  assert.equal(catalogAvatarUrl("data:image/png,%89PNG"), null);
+});
+
+test("test_oversized_inline_svg_avatar_is_rejected", () => {
+  const withinCap = `data:image/svg+xml,${"a".repeat(8_192 - "data:image/svg+xml,".length)}`;
+  assert.equal(withinCap.length, 8_192);
+  assert.equal(catalogAvatarUrl(withinCap), withinCap);
+  assert.equal(catalogAvatarUrl(`${withinCap}a`), null);
+});
+
+// Catalog avatars render through `<img src>` (ProfileAvatar → AvatarImage),
+// where an SVG document is never scripted, so a script-bearing avatar is
+// accepted and inert rather than filtered — the projection must not silently
+// start sanitizing markup it does not render.
+test("test_script_bearing_inline_svg_avatar_is_accepted_and_rendered_inert", () => {
+  const scripted = `data:image/svg+xml,${encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>',
+  )}`;
+
+  assert.equal(catalogAvatarUrl(scripted), scripted);
 });
 
 test("foreign allowlist behavior imports as owner-only", () => {

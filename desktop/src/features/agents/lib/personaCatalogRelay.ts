@@ -77,6 +77,30 @@ function isSafeHttpUrl(value: unknown): value is string {
   }
 }
 
+/**
+ * Emoji avatars are the one `data:` avatar a catalog entry keeps.
+ *
+ * They persist as inline, percent-encoded SVG (`emojiAvatarDataUrl` in
+ * `ProfileAvatarEditor.utils.ts`), so they are self-contained and render on
+ * any member's machine — unlike a bundled runtime-default avatar, whose local
+ * asset path means nothing to another install. The accepted shape is exactly
+ * that prefix: the trailing comma is what rejects `;base64` payloads, and
+ * every other `data:` MIME stays rejected. Catalog avatars render through
+ * `<img src>` (`ProfileAvatar` → `AvatarImage`), where SVG script never
+ * executes, so bounding the length is the remaining concern — 8 KiB is an
+ * order of magnitude above the ~700 characters an emoji avatar encodes to.
+ */
+const INLINE_SVG_AVATAR_PREFIX = "data:image/svg+xml,";
+const MAX_INLINE_SVG_AVATAR_LENGTH = 8_192;
+
+function isInlineSvgAvatar(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.startsWith(INLINE_SVG_AVATAR_PREFIX) &&
+    value.length <= MAX_INLINE_SVG_AVATAR_LENGTH
+  );
+}
+
 function optionalString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value : null;
 }
@@ -97,11 +121,9 @@ function parsePersonaContent(event: RelayEvent): CatalogAgentProjection | null {
   }
 
   const avatarUrl =
-    parsed.avatar_url === null || parsed.avatar_url === undefined
-      ? null
-      : isSafeHttpUrl(parsed.avatar_url)
-        ? parsed.avatar_url
-        : null;
+    isSafeHttpUrl(parsed.avatar_url) || isInlineSvgAvatar(parsed.avatar_url)
+      ? parsed.avatar_url
+      : null;
   const namePool = Array.isArray(parsed.name_pool)
     ? parsed.name_pool.filter(
         (candidate): candidate is string => typeof candidate === "string",
