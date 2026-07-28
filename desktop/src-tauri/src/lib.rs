@@ -927,6 +927,7 @@ pub fn run() {
             command_services::apple_inputs::read_apple_inputs,
             pick_battle_rhythm_document,
             interpret_battle_rhythm_document,
+            calculate_plan_schedule,
             command_services::memory::get_memory_service_readiness,
             command_services::memory::sync_memory_service,
             command_services::policy::status::get_command_knowledge_status,

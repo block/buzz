@@ -328,6 +328,12 @@ pub const KIND_BATTLE_RHYTHM_SOURCE: u32 = 30630;
 /// Owner-authored global calendar state, keyed by the standard NIP-33
 /// `(pubkey, kind, d_tag)` address.
 pub const KIND_BATTLE_RHYTHM_EVENT: u32 = 30631;
+/// Command Adviser planning project (parameterized replaceable, d=project id).
+pub const KIND_PLANNING_PROJECT: u32 = 30632;
+/// Command Adviser planning task (parameterized replaceable, d=task id).
+pub const KIND_PLANNING_TASK: u32 = 30633;
+/// Command Adviser mission constraint (parameterized replaceable, d=constraint id).
+pub const KIND_MISSION_CONSTRAINT: u32 = 30634;
 /// Battle Rhythm calendar revision audit record (regular stored event).
 ///
 /// Owner-authored global history for calendar changes; unlike source and event
@@ -538,6 +544,9 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_EVENT_REMINDER,
     KIND_BATTLE_RHYTHM_SOURCE,
     KIND_BATTLE_RHYTHM_EVENT,
+    KIND_PLANNING_PROJECT,
+    KIND_PLANNING_TASK,
+    KIND_MISSION_CONSTRAINT,
     KIND_BATTLE_RHYTHM_REVISION,
     KIND_PERSONA,
     KIND_TEAM,
@@ -746,6 +755,9 @@ const _: () = assert!(is_parameterized_replaceable(KIND_EVENT_REMINDER)); // 303
 const _: () = assert!(is_parameterized_replaceable(KIND_DM_VISIBILITY)); // 30622 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_BATTLE_RHYTHM_SOURCE)); // 30630 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_BATTLE_RHYTHM_EVENT)); // 30631 ∈ 30000–39999
+const _: () = assert!(is_parameterized_replaceable(KIND_PLANNING_PROJECT));
+const _: () = assert!(is_parameterized_replaceable(KIND_PLANNING_TASK));
+const _: () = assert!(is_parameterized_replaceable(KIND_MISSION_CONSTRAINT));
 const _: () = assert!(is_parameterized_replaceable(KIND_THREAD_SUMMARY)); // 39005 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_WINDOW_BOUNDS)); // 39006 ∈ 30000–39999
 

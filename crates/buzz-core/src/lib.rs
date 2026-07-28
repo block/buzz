@@ -35,6 +35,8 @@ pub mod network;
 pub mod observer;
 /// NIP-AB device pairing — crypto primitives, message types, and errors.
 pub mod pairing;
+/// Command Adviser planning contracts and deterministic schedule engine.
+pub mod planning;
 /// Presence status types shared across crates.
 pub mod presence;
 /// Canonical relay runtime identities.
