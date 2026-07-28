@@ -1,6 +1,7 @@
 import {
   Activity,
   Bot,
+  CalendarDays,
   FolderGit2,
   Inbox,
   ShieldCheck,
@@ -27,7 +28,8 @@ type SidebarSelectedView =
   | "console"
   | "workflows"
   | "pulse"
-  | "projects";
+  | "projects"
+  | "battleRhythm";
 
 type AppSidebarPinnedHeaderProps = {
   channelLabels: Record<string, string>;
@@ -46,6 +48,7 @@ type AppSidebarPinnedHeaderProps = {
 type AppSidebarPrimaryMenuProps = {
   homeBadgeCount: number;
   onSelectAgents: () => void;
+  onSelectBattleRhythm: () => void;
   onSelectCommandConsole: () => void;
   onSelectHome: () => void;
   onSelectProjects: () => void;
@@ -92,6 +95,7 @@ export function AppSidebarPinnedHeader({
 export function AppSidebarPrimaryMenu({
   homeBadgeCount,
   onSelectAgents,
+  onSelectBattleRhythm,
   onSelectCommandConsole,
   onSelectHome,
   onSelectProjects,
@@ -124,6 +128,18 @@ export function AppSidebarPrimaryMenu({
               {Math.min(homeBadgeCount, 99)}
             </SidebarMenuBadge>
           ) : null}
+        </SidebarMenuItem>
+        <SidebarMenuItem>
+          <SidebarMenuButton
+            data-testid="open-battle-rhythm-view"
+            isActive={selectedView === "battleRhythm"}
+            onClick={onSelectBattleRhythm}
+            tooltip="Battle Rhythm"
+            type="button"
+          >
+            <CalendarDays className="h-4 w-4" />
+            <SidebarMenuLabel>Battle Rhythm</SidebarMenuLabel>
+          </SidebarMenuButton>
         </SidebarMenuItem>
         <FeatureGate feature="pulse">
           <SidebarMenuItem>

@@ -10,7 +10,8 @@ export type AppView =
   | "console"
   | "workflows"
   | "pulse"
-  | "projects";
+  | "projects"
+  | "battleRhythm";
 
 const WINDOW_DRAG_HANDLE_HEIGHT = 44;
 const TAURI_DRAG_REGION_ATTR = "data-tauri-drag-region";
@@ -138,6 +139,9 @@ export function deriveShellRoute(pathname: string): {
       selectedChannelId: null,
       selectedView: "console",
     };
+  }
+  if (pathname === "/battle-rhythm") {
+    return { selectedChannelId: null, selectedView: "battleRhythm" };
   }
 
   if (pathname === "/workflows" || pathname.startsWith("/workflows/")) {

@@ -104,7 +104,8 @@ type AppSidebarProps = {
     | "console"
     | "workflows"
     | "pulse"
-    | "projects";
+    | "projects"
+    | "battleRhythm";
   unreadChannelCounts: ReadonlyMap<string, number>;
   unreadChannelIds: ReadonlySet<string>;
   communities: Community[];
@@ -142,6 +143,7 @@ type AppSidebarProps = {
   onRemoveCommunity: (id: string) => void;
   onCreateAgent: () => void;
   onSelectAgents: () => void;
+  onSelectBattleRhythm: () => void;
   onSelectCommandConsole: () => void;
   onSelectProjects: () => void;
   onSelectPulse: () => void;
@@ -210,6 +212,7 @@ export function AppSidebar({
   onRemoveCommunity,
   onCreateAgent,
   onSelectAgents,
+  onSelectBattleRhythm,
   onSelectCommandConsole,
   onSelectProjects,
   onSelectPulse,
@@ -597,6 +600,7 @@ export function AppSidebar({
               <AppSidebarPrimaryMenu
                 homeBadgeCount={homeBadgeCount}
                 onSelectAgents={onSelectAgents}
+                onSelectBattleRhythm={onSelectBattleRhythm}
                 onSelectCommandConsole={onSelectCommandConsole}
                 onSelectHome={onSelectHome}
                 onSelectProjects={onSelectProjects}

@@ -11,6 +11,7 @@ import { Route as remindersRouteImport } from "./routes/reminders";
 import { Route as pulseRouteImport } from "./routes/pulse";
 import { Route as projectsRouteImport } from "./routes/projects";
 import { Route as consoleRouteImport } from "./routes/console";
+import { Route as battleRhythmRouteImport } from "./routes/battle-rhythm";
 import { Route as agentsRouteImport } from "./routes/agents";
 import { Route as indexRouteImport } from "./routes/index";
 import { Route as workflowsDotworkflowIdRouteImport } from "./routes/workflows.$workflowId";
@@ -47,6 +48,11 @@ const projectsRoute = projectsRouteImport.update({
 const consoleRoute = consoleRouteImport.update({
   id: "/console",
   path: "/console",
+  getParentRoute: () => rootRouteImport,
+} as any);
+const battleRhythmRoute = battleRhythmRouteImport.update({
+  id: "/battle-rhythm",
+  path: "/battle-rhythm",
   getParentRoute: () => rootRouteImport,
 } as any);
 const agentsRoute = agentsRouteImport.update({
@@ -89,6 +95,7 @@ const channelsDotchannelIdDotpostsDotpostIdRoute =
 export interface FileRoutesByFullPath {
   "/": typeof indexRoute;
   "/agents": typeof agentsRoute;
+  "/battle-rhythm": typeof battleRhythmRoute;
   "/console": typeof consoleRoute;
   "/projects": typeof projectsRoute;
   "/pulse": typeof pulseRoute;
@@ -104,6 +111,7 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   "/": typeof indexRoute;
   "/agents": typeof agentsRoute;
+  "/battle-rhythm": typeof battleRhythmRoute;
   "/console": typeof consoleRoute;
   "/projects": typeof projectsRoute;
   "/pulse": typeof pulseRoute;
@@ -120,6 +128,7 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport;
   "/": typeof indexRoute;
   "/agents": typeof agentsRoute;
+  "/battle-rhythm": typeof battleRhythmRoute;
   "/console": typeof consoleRoute;
   "/projects": typeof projectsRoute;
   "/pulse": typeof pulseRoute;
@@ -137,6 +146,7 @@ export interface FileRouteTypes {
   fullPaths:
     | "/"
     | "/agents"
+    | "/battle-rhythm"
     | "/console"
     | "/projects"
     | "/pulse"
@@ -152,6 +162,7 @@ export interface FileRouteTypes {
   to:
     | "/"
     | "/agents"
+    | "/battle-rhythm"
     | "/console"
     | "/projects"
     | "/pulse"
@@ -167,6 +178,7 @@ export interface FileRouteTypes {
     | "__root__"
     | "/"
     | "/agents"
+    | "/battle-rhythm"
     | "/console"
     | "/projects"
     | "/pulse"
@@ -183,6 +195,7 @@ export interface FileRouteTypes {
 export interface RootRouteChildren {
   indexRoute: typeof indexRoute;
   agentsRoute: typeof agentsRoute;
+  battleRhythmRoute: typeof battleRhythmRoute;
   consoleRoute: typeof consoleRoute;
   projectsRoute: typeof projectsRoute;
   pulseRoute: typeof pulseRoute;
@@ -240,6 +253,13 @@ declare module "@tanstack/react-router" {
       preLoaderRoute: typeof consoleRouteImport;
       parentRoute: typeof rootRouteImport;
     };
+    "/battle-rhythm": {
+      id: "/battle-rhythm";
+      path: "/battle-rhythm";
+      fullPath: "/battle-rhythm";
+      preLoaderRoute: typeof battleRhythmRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
     "/agents": {
       id: "/agents";
       path: "/agents";
@@ -295,6 +315,7 @@ declare module "@tanstack/react-router" {
 const rootRouteChildren: RootRouteChildren = {
   indexRoute: indexRoute,
   agentsRoute: agentsRoute,
+  battleRhythmRoute: battleRhythmRoute,
   consoleRoute: consoleRoute,
   projectsRoute: projectsRoute,
   pulseRoute: pulseRoute,

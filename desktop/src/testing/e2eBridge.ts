@@ -20,6 +20,9 @@ import {
 } from "@/shared/api/customEmoji";
 import {
   KIND_AGENT_OBSERVER_FRAME,
+  KIND_BATTLE_RHYTHM_EVENT,
+  KIND_BATTLE_RHYTHM_REVISION,
+  KIND_BATTLE_RHYTHM_SOURCE,
   KIND_CHANNEL_THREAD_SUMMARY,
   KIND_CHANNEL_WINDOW_BOUNDS,
   KIND_DM_VISIBILITY,
@@ -2801,6 +2804,7 @@ const mockChannels: MockChannel[] = [
 const mockMessages = new Map<string, RelayEvent[]>();
 const mockUserStatuses: RelayEvent[] = [];
 const mockReminderEvents: RelayEvent[] = [];
+const mockBattleRhythmEvents: RelayEvent[] = [];
 let mockRelayMembers: RawRelayMember[] = [];
 const mockSockets = new Map<number, MockSocket>();
 let mockWebsocketSendMutexWedged = false;
@@ -8769,6 +8773,25 @@ function sendToMockSocket(args: {
       return;
     }
 
+    if (
+      filter.kinds?.some((kind) =>
+        [
+          KIND_BATTLE_RHYTHM_SOURCE,
+          KIND_BATTLE_RHYTHM_EVENT,
+          KIND_BATTLE_RHYTHM_REVISION,
+        ].includes(kind),
+      )
+    ) {
+      const authors = filter.authors?.map((author) => author.toLowerCase());
+      for (const event of mockBattleRhythmEvents) {
+        if (filter.kinds && !filter.kinds.includes(event.kind)) continue;
+        if (authors && !authors.includes(event.pubkey.toLowerCase())) continue;
+        sendWsText(socket.handler, ["EVENT", subId, event]);
+      }
+      sendWsText(socket.handler, ["EOSE", subId]);
+      return;
+    }
+
     // Project queries: NIP-34 kinds, or kind:1 comments scoped by repo `a`
     // tag (PR/issue discussions, approvals, review requests).
     if (
@@ -8861,6 +8884,28 @@ function sendToMockSocket(args: {
         if (idx >= 0) mockReminderEvents.splice(idx, 1);
       }
       mockReminderEvents.push(event);
+      sendWsText(socket.handler, ["OK", event.id, true, ""]);
+      return;
+    }
+
+    if (
+      [
+        KIND_BATTLE_RHYTHM_SOURCE,
+        KIND_BATTLE_RHYTHM_EVENT,
+        KIND_BATTLE_RHYTHM_REVISION,
+      ].includes(event.kind)
+    ) {
+      const dTag = event.tags.find((tag) => tag[0] === "d")?.[1];
+      if (dTag) {
+        const index = mockBattleRhythmEvents.findIndex(
+          (item) =>
+            item.kind === event.kind &&
+            item.pubkey.toLowerCase() === event.pubkey.toLowerCase() &&
+            item.tags.some((tag) => tag[0] === "d" && tag[1] === dTag),
+        );
+        if (index >= 0) mockBattleRhythmEvents.splice(index, 1);
+      }
+      mockBattleRhythmEvents.push(event);
       sendWsText(socket.handler, ["OK", event.id, true, ""]);
       return;
     }

@@ -292,10 +292,10 @@ function excludedOccurrences(
   if (value.length && !rule) fail("exclusions require recurrence");
   const parsed = value.map((item) => timestamp(item, "excluded occurrence"));
   if (
-    parsed.some(
-      (item, index) =>
-        index > 0 && Date.parse(parsed[index - 1]!) >= Date.parse(item),
-    )
+    parsed.some((item, index) => {
+      const previous = parsed[index - 1];
+      return previous !== undefined && Date.parse(previous) >= Date.parse(item);
+    })
   )
     fail("excluded occurrences must be sorted and unique");
   if (

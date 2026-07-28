@@ -329,6 +329,23 @@ git add crates/buzz-core/src/battle_rhythm.rs crates/buzz-core/src/lib.rs crates
 git commit -m "feat: persist battle rhythm calendar data"
 ```
 
+### Task 2a: Extend persisted events with recurrence and exclusions
+
+**Files:**
+- Modify: `desktop/src/features/battle-rhythm/domain/contracts.ts`
+- Modify: `desktop/src/features/battle-rhythm/domain/eventCodec.ts`
+- Modify: `desktop/src/features/battle-rhythm/data/battleRhythmService.ts`
+- Modify: their focused tests and `crates/buzz-core/src/battle_rhythm.rs`
+
+**Required behaviour:**
+- Persist a strict optional recurrence object on calendar event heads: daily, weekly, or monthly frequency; positive interval; optional inclusive-until timestamp; and a stable series ID.
+- Persist a bounded, sorted, unique set of excluded occurrence start timestamps. An exclusion never mutates the source event or creates a UI-only exception.
+- Manual creation/editing and fetch round-trip recurrence exactly through signed content and tags. Imported source-owned events retain the same model for later Shortcast/FAS use.
+- Reject invalid rules, exclusions outside the series, and unknown fields. Keep all Task 2 ownership/revision-integrity guarantees.
+- Add TypeScript/Rust fixture and focused tests for daily/weekly/monthly rules, one exclusion, exact round trip, and invalid cases.
+
+**Reason:** Task 3 requires reload-safe recurring routines with excluded occurrences. The original Task 2 contract lacked a persisted form, so this explicit bridge prevents an unsafe UI-only recurrence implementation.
+
 ### Task 3: Add the sidebar destination and usable calendar views
 
 **Files:**

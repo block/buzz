@@ -13,6 +13,13 @@ test("deriveShellRoute_selectsCommandConsoleForConsolePath", () => {
   });
 });
 
+test("battle rhythm route selects its own sidebar destination", () => {
+  assert.deepEqual(deriveShellRoute("/battle-rhythm"), {
+    selectedChannelId: null,
+    selectedView: "battleRhythm",
+  });
+});
+
 test("shouldBounceForChannelNotification_allowsTopLevelChannelMessages", () => {
   assert.equal(shouldBounceForChannelNotification([["h", "channel"]]), true);
 });
