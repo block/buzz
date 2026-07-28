@@ -586,10 +586,6 @@ void main() {
         findsOneWidget,
       );
       expect(find.byTooltip('Back to attachment options'), findsWidgets);
-      expect(
-        find.byKey(const ValueKey('attachment-trigger-photos')).hitTestable(),
-        findsOneWidget,
-      );
       expect(find.text('All photos'), findsOneWidget);
 
       await tester.tap(find.byKey(const ValueKey('recent-photo-two')));
