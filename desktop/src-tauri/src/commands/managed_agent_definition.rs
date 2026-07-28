@@ -32,6 +32,9 @@ pub(super) fn apply_model_provider_prompt_update(
             record.model = model_update;
         }
         if let Some(provider_update) = provider {
+            crate::managed_agents::validate_provider_value(
+                provider_update.as_deref().unwrap_or_default(),
+            )?;
             record.provider = provider_update;
         }
         if let Some(prompt_update) = system_prompt {

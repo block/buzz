@@ -26,7 +26,7 @@ pub(crate) use metadata::{
     apply_agent_display_env, resolve_session_title, runtime_metadata_env_vars,
     DISPLAY_NAME_ENV_VAR, SESSION_TITLE_ENV_VAR,
 };
-
+pub(crate) mod provider_env;
 mod stop;
 pub(crate) use stop::managed_agent_runtime_keys;
 pub use stop::{stop_managed_agent_process, stop_managed_agent_workspace_pair};
