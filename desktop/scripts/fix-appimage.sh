@@ -42,6 +42,16 @@
 #     wrong -- spawning nothing, dying on unresolved bundled libs, or spawning
 #     the system helpers -- and the window never appears.
 #
+#  4. Broken .DirIcon (#3419): tauri-bundler creates .DirIcon at the AppDir
+#     root as a symlink to the build machine's absolute AppDir path (e.g.
+#     /__w/buzz/buzz/desktop/src-tauri/target/release/bundle/appimage/Buzz.AppDir/Buzz.png),
+#     unlike the other bundled icon symlinks (usr/share/icons/.../buzz-desktop.png,
+#     usr/share/applications/Buzz.desktop) which are correctly relative. That
+#     path never exists on an end user's machine, so desktop integration tools
+#     that resolve .DirIcon to show/install the app icon fail with "Symlink
+#     target not found". Fix: repoint .DirIcon at its target's basename as a
+#     relative symlink within the AppDir.
+#
 # Fix: (a) remove the offending libs so the app uses the system copies (newer and
 # ABI-compatible on any distro shipping glib >= 2.72 / Ubuntu 22.04+), and
 # (b) install a launcher shim in front of the app binary that strips the
@@ -79,6 +89,25 @@ trap 'rm -rf "$WORKDIR"' EXIT
 
 echo "==> Extracting $APPIMAGE_NAME"
 (cd "$WORKDIR" && APPIMAGE_EXTRACT_AND_RUN=1 "$APPIMAGE_ABS" --appimage-extract)
+
+echo "==> Fixing .DirIcon absolute symlink"
+# tauri-bundler points .DirIcon at the build machine's absolute AppDir path
+# (see root cause 4 above). Guard against a bundler layout change the same way
+# as the checks below: fail loudly rather than silently shipping a broken link.
+DIRICON="$WORKDIR/squashfs-root/.DirIcon"
+if [[ ! -L "$DIRICON" ]]; then
+  echo "Error: .DirIcon not found or not a symlink — bundler layout changed; update fix-appimage.sh" >&2
+  exit 1
+fi
+DIRICON_TARGET="$(readlink "$DIRICON")"
+if [[ "$DIRICON_TARGET" == /* ]]; then
+  ICON_NAME="$(basename "$DIRICON_TARGET")"
+  if [[ ! -f "$WORKDIR/squashfs-root/$ICON_NAME" ]]; then
+    echo "Error: .DirIcon target $ICON_NAME not found at AppDir root — bundler layout changed; update fix-appimage.sh" >&2
+    exit 1
+  fi
+  ln -sf "$ICON_NAME" "$DIRICON"
+fi
 
 LIBDIR="$WORKDIR/squashfs-root/usr/lib"
 
