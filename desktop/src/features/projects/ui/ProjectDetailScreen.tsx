@@ -483,6 +483,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     );
     const issuePubkeys = (issuesQuery.data ?? []).flatMap((issue) => [
       issue.author,
+      ...(issue.assignee ? [issue.assignee] : []),
       ...issue.recipients,
       ...issue.comments.map((comment) => comment.author),
     ]);

@@ -68,6 +68,9 @@ export const KIND_GIT_STATUS_OPEN = 1630;
 export const KIND_GIT_STATUS_MERGED = 1631;
 export const KIND_GIT_STATUS_CLOSED = 1632;
 export const KIND_GIT_STATUS_DRAFT = 1633;
+// Buzz extension (not NIP-34): replaceable current issue-routing state keyed
+// by issue ID. It e-tags the issue and p-tags the current assignee.
+export const KIND_GIT_ISSUE_ASSIGNEE = 32001;
 // NIP-DV: relay-signed per-viewer DM visibility snapshot (d=viewer pubkey,
 // h-tags = currently-hidden DM channel ids).
 export const KIND_DM_VISIBILITY = 30622;

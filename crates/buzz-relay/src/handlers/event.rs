@@ -38,7 +38,7 @@ pub(crate) fn bounded_kind_label(kind: u32) -> String {
         8000..=8003 | 9000..=9022 | 9030..=9036 => kind.to_string(),
         13534..=13535 => kind.to_string(),
         20000..=29999 => kind.to_string(),
-        30023 | 30315 | 39000..=39003 => kind.to_string(),
+        30023 | 30315 | 32001 | 39000..=39003 => kind.to_string(),
         40002..=40100 => kind.to_string(),
         41001 | 41010..=41012 => kind.to_string(),
         43001..=43006 => kind.to_string(),
@@ -1172,6 +1172,11 @@ mod tests {
     use tokio::sync::{mpsc, Mutex, RwLock};
     use tokio_util::sync::CancellationToken;
     use uuid::Uuid;
+
+    #[test]
+    fn issue_assignment_has_a_bounded_metrics_label() {
+        assert_eq!(super::bounded_kind_label(32001), "32001");
+    }
 
     #[test]
     fn fanout_event_frame_matches_legacy_format_byte_for_byte() {

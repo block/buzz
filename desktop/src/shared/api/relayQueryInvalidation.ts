@@ -39,6 +39,7 @@ const RELAY_PROJECT_QUERY_PARTS = new Set<string>([
   "activity-summaries",
   "issues",
   "pull-requests",
+  "work-items",
 ]);
 
 const LOCAL_PROJECT_QUERY_PARTS = new Set<string>([

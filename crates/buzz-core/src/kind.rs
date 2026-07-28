@@ -631,6 +631,20 @@ pub const KIND_GIT_STATUS_DRAFT: u32 = 1633;
 /// announcement, never a project. See `docs/nips/NIP-MP.md`.
 pub const KIND_PROJECT: u32 = 30621;
 
+/// Buzz extension (not part of NIP-34): repository-owner-authored issue
+/// routing state. Parameterized-replaceable by issue ID (`d` tag), so bounded
+/// repo-wide reads retain one current state per issue instead of losing older
+/// assignments under high reassignment volume. The event also `e`-tags the
+/// issue root, `a`-tags its kind:30617 repository, and either carries one
+/// marked assignee `p` tag or `["assignee", "none"]`. Assignment is not
+/// acceptance or execution; those remain kind:43001–43006 job events.
+pub const KIND_GIT_ISSUE_ASSIGNEE: u32 = 32001;
+
+const _: () = assert!(KIND_GIT_ISSUE_ASSIGNEE <= u16::MAX as u32);
+const _: () = assert!(!is_ephemeral(KIND_GIT_ISSUE_ASSIGNEE));
+const _: () = assert!(!is_replaceable(KIND_GIT_ISSUE_ASSIGNEE));
+const _: () = assert!(is_parameterized_replaceable(KIND_GIT_ISSUE_ASSIGNEE));
+
 /// All registered kind constants — used for duplicate detection and iteration.
 pub const ALL_KINDS: &[u32] = &[
     KIND_PROFILE,
@@ -763,6 +777,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_GIT_STATUS_CLOSED,
     KIND_GIT_STATUS_DRAFT,
     KIND_PROJECT,
+    KIND_GIT_ISSUE_ASSIGNEE,
 ];
 
 /// Returns `true` if `kind` is in the ephemeral range (20000–29999).
@@ -921,6 +936,14 @@ mod tests {
         assert!(is_parameterized_replaceable(39000)); // NIP-29 group metadata
         assert!(is_parameterized_replaceable(39999));
         assert!(!is_parameterized_replaceable(40000));
+    }
+
+    #[test]
+    fn issue_assignment_is_parameterized_current_state() {
+        assert_eq!(KIND_GIT_ISSUE_ASSIGNEE, 32001);
+        assert!(is_parameterized_replaceable(KIND_GIT_ISSUE_ASSIGNEE));
+        assert!(!is_replaceable(KIND_GIT_ISSUE_ASSIGNEE));
+        assert!(!is_ephemeral(KIND_GIT_ISSUE_ASSIGNEE));
     }
 
     #[test]

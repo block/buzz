@@ -2,6 +2,7 @@ import { relayClient } from "@/shared/api/relayClient";
 import type { RelayEvent } from "@/shared/api/types";
 import {
   KIND_GIT_ISSUE,
+  KIND_GIT_ISSUE_ASSIGNEE,
   KIND_GIT_PR_UPDATE,
   KIND_GIT_PULL_REQUEST,
   KIND_GIT_STATUS_CLOSED,
@@ -34,6 +35,7 @@ type ProjectRepository<TProject extends ProjectReference> =
 /** Optional event groups that can fail without discarding root work items. */
 export type ProjectWorkItemSection =
   | "comments"
+  | "assignees"
   | "pull-request-updates"
   | "statuses";
 
@@ -85,34 +87,46 @@ export async function fetchProjectsWorkItems<TProject extends ProjectReference>(
       ),
     ),
   ];
-  const [rootResult, updateResult, commentResult, statusResult] =
-    await Promise.allSettled([
-      fetchEvents({
-        kinds: [KIND_GIT_ISSUE, KIND_GIT_PULL_REQUEST],
-        "#a": repoAddresses,
-        limit: 2_000,
-      }),
-      fetchEvents({
-        kinds: [KIND_GIT_PR_UPDATE],
-        "#a": repoAddresses,
-        limit: 2_000,
-      }),
-      fetchEvents({
-        kinds: [KIND_TEXT_NOTE],
-        "#a": repoAddresses,
-        limit: 2_000,
-      }),
-      fetchEvents({
-        kinds: [
-          KIND_GIT_STATUS_OPEN,
-          KIND_GIT_STATUS_MERGED,
-          KIND_GIT_STATUS_CLOSED,
-          KIND_GIT_STATUS_DRAFT,
-        ],
-        "#a": repoAddresses,
-        limit: 2_000,
-      }),
-    ]);
+  const [
+    rootResult,
+    updateResult,
+    commentResult,
+    statusResult,
+    assigneeResult,
+  ] = await Promise.allSettled([
+    fetchEvents({
+      kinds: [KIND_GIT_ISSUE, KIND_GIT_PULL_REQUEST],
+      "#a": repoAddresses,
+      limit: 2_000,
+    }),
+    fetchEvents({
+      kinds: [KIND_GIT_PR_UPDATE],
+      "#a": repoAddresses,
+      limit: 2_000,
+    }),
+    fetchEvents({
+      kinds: [KIND_TEXT_NOTE],
+      "#a": repoAddresses,
+      limit: 2_000,
+    }),
+    fetchEvents({
+      kinds: [
+        KIND_GIT_STATUS_OPEN,
+        KIND_GIT_STATUS_MERGED,
+        KIND_GIT_STATUS_CLOSED,
+        KIND_GIT_STATUS_DRAFT,
+      ],
+      "#a": repoAddresses,
+      limit: 2_000,
+    }),
+    fetchEvents({
+      kinds: [KIND_GIT_ISSUE_ASSIGNEE],
+      "#a": repoAddresses,
+      // kind:32001 replaces by issue ID. Keep this at the root-query bound so
+      // every issue in the aggregate result can retain its current assignee.
+      limit: 2_000,
+    }),
+  ]);
 
   if (rootResult.status === "rejected") {
     throw rootResult.reason instanceof Error
@@ -126,10 +140,13 @@ export async function fetchProjectsWorkItems<TProject extends ProjectReference>(
     commentResult.status === "fulfilled" ? commentResult.value : [];
   const statusEvents =
     statusResult.status === "fulfilled" ? statusResult.value : [];
+  const assigneeEvents =
+    assigneeResult.status === "fulfilled" ? assigneeResult.value : [];
   const rootsByRepo = groupByRepoAddress(rootResult.value);
   const updatesByRepo = groupByRepoAddress(updateEvents);
   const commentsByRepo = groupByRepoAddress(commentEvents);
   const statusesByRepo = groupByRepoAddress(statusEvents);
+  const assigneesByRepo = groupByRepoAddress(assigneeEvents);
 
   const pullRequests = projects
     .flatMap((project) =>
@@ -174,6 +191,7 @@ export async function fetchProjectsWorkItems<TProject extends ProjectReference>(
           ),
           statusesByRepo.get(repository.repoAddress) ?? [],
           commentsByRepo.get(repository.repoAddress) ?? [],
+          assigneesByRepo.get(repository.repoAddress) ?? [],
         ).map((issue) => ({ issue, project, repository })),
       ),
     )
@@ -204,11 +222,15 @@ export async function fetchProjectsWorkItems<TProject extends ProjectReference>(
   if (updateResult.status === "rejected") {
     pullRequestFailedSections.unshift("pull-request-updates");
   }
+  const issueFailedSections = [...sharedFailedSections];
+  if (assigneeResult.status === "rejected") {
+    issueFailedSections.push("assignees");
+  }
 
   return {
     issues: {
       items: issues,
-      failedSections: sharedFailedSections,
+      failedSections: issueFailedSections,
     },
     pullRequests: {
       items: pullRequests,

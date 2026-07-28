@@ -30,6 +30,9 @@ export type ProjectIssue = {
   recipients: string[];
   status: ProjectIssueStatus;
   statusEventId: string | null;
+  assignee: string | null;
+  assigneeEventId: string | null;
+  assignedBy: string | null;
   updatedAt: number;
   comments: ProjectIssueComment[];
 };
@@ -50,11 +53,13 @@ export function eventToProjectIssue(
   issue: RelayEvent,
   statusEvents?: RelayEvent[],
   commentEvents?: RelayEvent[],
+  assigneeEvents?: RelayEvent[],
 ): ProjectIssue;
 export function projectIssueEventsToIssues(
   issueEvents: RelayEvent[],
   statusEvents?: RelayEvent[],
   commentEvents?: RelayEvent[],
+  assigneeEvents?: RelayEvent[],
 ): ProjectIssue[];
 export function nextProjectIssueCommentCreatedAt(
   issue: ProjectIssue,

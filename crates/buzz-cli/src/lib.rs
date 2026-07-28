@@ -1644,6 +1644,43 @@ pub enum IssuesCmd {
         #[arg(long)]
         limit: Option<u32>,
     },
+    /// Assign or unassign an issue (Buzz kind:32001)
+    Assign {
+        /// Issue event id
+        #[arg(long)]
+        issue: String,
+        /// Repo owner pubkey (64-char hex)
+        #[arg(long)]
+        repo_owner: String,
+        /// Repo identifier (d-tag)
+        #[arg(long)]
+        repo_id: String,
+        /// Human or agent pubkey to assign
+        #[arg(
+            long,
+            required_unless_present = "unassign",
+            conflicts_with = "unassign"
+        )]
+        assignee: Option<String>,
+        /// Remove the current assignee
+        #[arg(long, conflicts_with = "assignee")]
+        unassign: bool,
+    },
+    /// List current issue assignments, optionally filtered by assignee
+    Assignments {
+        /// Repo owner pubkey (64-char hex)
+        #[arg(long)]
+        repo_owner: String,
+        /// Repo identifier (d-tag)
+        #[arg(long)]
+        repo_id: String,
+        /// Human or agent pubkey
+        #[arg(long)]
+        assignee: Option<String>,
+        /// Maximum number of results
+        #[arg(long)]
+        limit: Option<u32>,
+    },
     /// Set status on an issue (open/resolved/closed/draft — NIP-34 kind:1630-1633)
     Status {
         /// Issue event id
@@ -2265,7 +2302,7 @@ mod tests {
         );
         assert_eq!(
             names(&cmd, "issues"),
-            vec!["create", "get", "list", "status"]
+            vec!["assign", "assignments", "create", "get", "list", "status"]
         );
         assert_eq!(names(&cmd, "media"), vec!["get"]);
         assert_eq!(names(&cmd, "upload"), vec!["file"]);
@@ -2286,6 +2323,54 @@ mod tests {
     }
 
     #[test]
+    fn issue_assign_requires_exactly_one_assignment_action() {
+        let issue = "e".repeat(64);
+        let owner = "a".repeat(64);
+        let assignee = "b".repeat(64);
+        let base = vec![
+            "buzz".to_string(),
+            "issues".to_string(),
+            "assign".to_string(),
+            "--issue".to_string(),
+            issue,
+            "--repo-owner".to_string(),
+            owner,
+            "--repo-id".to_string(),
+            "demo".to_string(),
+        ];
+
+        assert!(Cli::try_parse_from(base.clone()).is_err());
+
+        let mut assigned_args = base.clone();
+        assigned_args.extend(["--assignee".to_string(), assignee.clone()]);
+        let assigned = Cli::try_parse_from(assigned_args).unwrap();
+        assert!(matches!(
+            assigned.command,
+            Cmd::Issues(IssuesCmd::Assign {
+                assignee: Some(value),
+                unassign: false,
+                ..
+            }) if value == assignee
+        ));
+
+        let mut unassigned_args = base.clone();
+        unassigned_args.push("--unassign".to_string());
+        let unassigned = Cli::try_parse_from(unassigned_args).unwrap();
+        assert!(matches!(
+            unassigned.command,
+            Cmd::Issues(IssuesCmd::Assign {
+                assignee: None,
+                unassign: true,
+                ..
+            })
+        ));
+
+        let mut conflicting_args = base;
+        conflicting_args.extend(["--assignee".to_string(), assignee, "--unassign".to_string()]);
+        assert!(Cli::try_parse_from(conflicting_args).is_err());
+    }
+
+    #[test]
     fn subcommand_counts_are_stable() {
         let expected: Vec<(&str, usize)> = vec![
             ("agents", 5),
@@ -2294,7 +2379,7 @@ mod tests {
             ("dms", 4),
             ("emoji", 5),
             ("feed", 1),
-            ("issues", 4),
+            ("issues", 6),
             ("media", 1),
             ("messages", 8),
             ("pack", 2),

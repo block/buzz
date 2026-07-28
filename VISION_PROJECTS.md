@@ -184,9 +184,64 @@ Every step traced. Every trace a signed event. Change the project CI once and ev
 
 ### Issues → Forum + NIP-34
 
-Bug reports are NIP-34 kind:1621 events, rendered through Buzz's forum surface. Threaded comments use NIP-22 kind:1111. Labels, assignees, milestones are nostr tags. Design discussions and RFCs use the forum's long-form async surface.
+Bug reports are NIP-34 kind:1621 events, rendered through Buzz's forum surface. Threaded comments use NIP-22 kind:1111. Labels remain on the issue root; assignment is mutable routing metadata recorded by Buzz kind:32001. Design discussions and RFCs use the forum's long-form async surface.
 
 NIP-34 clients can discover and interact with issues. Buzz's forum gives them a home with threading, search, and agent triage.
+
+#### Issue assignment (Buzz kind:32001)
+
+NIP-34 does not define mutable issue assignment, and issue roots are immutable.
+Buzz therefore records each routing decision as a signed follow-on event:
+
+```json
+{
+  "kind": 32001,
+  "content": "",
+  "tags": [
+    ["d", "<issue-event-id>"],
+    ["e", "<issue-event-id>", "", "root"],
+    ["p", "<human-or-agent-pubkey>", "", "assignee"],
+    ["a", "30617:<repo-owner-pubkey>:<repo-id>"]
+  ]
+}
+```
+
+The envelope is canonical: empty content; exactly one `d`, one root-marked
+`e`, and one two-field repository `a`; no `h`; and exactly one marked assignee
+`p` or the unassignment marker. Malformed or ambiguous events are ignored by
+readers and rejected by Buzz relays.
+
+Unassignment replaces the marked `p` tag with `["assignee", "none"]`. The
+repository owner signs assignment state; issue authorship alone does not grant
+routing authority. Kind:32001 is parameterized-replaceable by the issue ID in
+`d`, so bounded repo queries retain one current state per issue even after heavy
+reassignment. Readers resolve duplicate relay copies by `created_at`, then the
+lowest event ID when timestamps tie.
+
+Writers must query their current `(kind, pubkey, d)` head before updating and
+sign with `created_at = max(now, prior_created_at + 1)`. Deterministic event-ID
+tie-breaking gives convergence, but without this monotonic guard a second
+assignment made in the same wall-clock second can lose to the first. A
+concurrent dominated write must be surfaced as a conflict rather than success.
+
+Clients must preserve author-self `p` tags when the repository owner assigns
+the issue to themselves; rust-nostr builders require `allow_self_tagging` for
+that case.
+
+Assignment means “this identity is the current routing target.” It does not
+mean the target accepted the work, began it, or completed it. Those transitions
+belong to the separate kind:43001–43006 job protocol, so reassignment never
+silently cancels an in-flight job. Owner-only authorship is part of this
+version's contract. Admitting maintainer signers later requires an explicit
+delegation and cross-author conflict-resolution protocol because NIP-33
+replacement coordinates include the author pubkey.
+
+The replaceable assignment event is a current-state projection, not a task
+history. Durable acceptance, progress, completion, cancellation, and evidence
+belong in job events; relay audit records cover assignment-ingest decisions.
+Relays validate the referenced issue before accepting the assignment, so
+replication clients must publish the issue root first and retry an assignment
+that arrived out of order.
 
 ### Docs → Canvases
 
@@ -226,7 +281,7 @@ Standard kinds as substrate. Custom kinds only where genuinely novel.
 
 | Layer | Standard NIP Kinds | Buzz Custom | Rationale |
 |-------|-------------------|---------------|-----------|
-| **Git state** | 30617, 30618, 1617, 1618, 1621, 1630-1633 (NIP-34) | — | Interop with ngit, gitworkshop.dev |
+| **Git state** | 30617, 30618, 1617, 1618, 1621, 1630-1633 (NIP-34) | 32001 | NIP-34 interoperability plus signed, replaceable issue routing |
 | **Comments** | 1111 (NIP-22) | — | Threaded replies everywhere |
 | **Channels** | 9000-9022, 39000-39003 (NIP-29) | — | Project workspaces |
 | **HTTP auth** | 27235 (NIP-98) | — | Git push authentication |

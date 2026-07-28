@@ -248,6 +248,7 @@ export function ProjectsView() {
           ) ?? []),
           ...(projectsWorkItemsQuery.data?.issues.items.flatMap(({ issue }) => [
             issue.author,
+            ...(issue.assignee ? [issue.assignee] : []),
             ...issue.recipients,
             ...issue.comments.map((comment) => comment.author),
           ]) ?? []),

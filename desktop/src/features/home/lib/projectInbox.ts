@@ -8,6 +8,7 @@ import type { ProjectsWorkItemsResult } from "@/features/projects/projectWorkIte
 import type { FeedItem } from "@/shared/api/types";
 import {
   KIND_GIT_ISSUE,
+  KIND_GIT_ISSUE_ASSIGNEE,
   KIND_GIT_PR_UPDATE,
   KIND_GIT_PULL_REQUEST,
   KIND_GIT_STATUS_CLOSED,
@@ -21,6 +22,7 @@ const PROJECT_ROOT_KINDS = new Set([KIND_GIT_PULL_REQUEST, KIND_GIT_ISSUE]);
 const PROJECT_ACTIVITY_KINDS = new Set([
   KIND_TEXT_NOTE,
   KIND_GIT_PR_UPDATE,
+  KIND_GIT_ISSUE_ASSIGNEE,
   KIND_GIT_STATUS_OPEN,
   KIND_GIT_STATUS_MERGED,
   KIND_GIT_STATUS_CLOSED,

@@ -44,6 +44,191 @@ function statusEvent({ kind, pubkey, createdAt }) {
   };
 }
 
+function assigneeEvent({
+  pubkey,
+  assignee,
+  createdAt,
+  id = `${createdAt.toString(16).padStart(64, "0")}`,
+  tags,
+}) {
+  return {
+    id,
+    kind: 32001,
+    pubkey,
+    created_at: createdAt,
+    content: "",
+    tags: tags ?? [
+      ["d", "e".repeat(64)],
+      ["e", "e".repeat(64), "", "root"],
+      ...(assignee === null
+        ? [["assignee", "none"]]
+        : [["p", assignee, "", "assignee"]]),
+      ["a", REPO_ADDRESS],
+    ],
+  };
+}
+
+test("ignores assignment events from a different pubkey", () => {
+  const attackerAssignment = assigneeEvent({
+    pubkey: ATTACKER,
+    assignee: ATTACKER,
+    createdAt: 300,
+  });
+
+  const issue = eventToProjectIssue(issueEvent(), [], [], [attackerAssignment]);
+
+  assert.equal(issue.assignee, null);
+  assert.equal(issue.assigneeEventId, null);
+});
+
+test("only the repo owner can set shared issue routing", () => {
+  const authorAssignsSelf = assigneeEvent({
+    pubkey: AUTHOR,
+    assignee: AUTHOR,
+    createdAt: 400,
+  });
+  const ownerReassigns = assigneeEvent({
+    pubkey: OWNER,
+    assignee: OWNER,
+    createdAt: 300,
+  });
+
+  const issue = eventToProjectIssue(
+    issueEvent(),
+    [],
+    [],
+    [authorAssignsSelf, ownerReassigns],
+  );
+
+  assert.equal(issue.assignee, OWNER);
+  assert.equal(issue.assigneeEventId, ownerReassigns.id);
+  assert.equal(issue.assignedBy, OWNER);
+});
+
+test("ignores ambiguous assignment envelopes", () => {
+  const assignment = assigneeEvent({
+    pubkey: OWNER,
+    assignee: AUTHOR,
+    createdAt: 200,
+  });
+  const ambiguous = assigneeEvent({
+    pubkey: OWNER,
+    assignee: OWNER,
+    createdAt: 300,
+    tags: [
+      ["d", "e".repeat(64)],
+      ["e", "e".repeat(64), "", "root"],
+      ["p", OWNER, "", "assignee"],
+      ["p", ATTACKER],
+      ["a", REPO_ADDRESS],
+    ],
+  });
+  const duplicateRoot = assigneeEvent({
+    pubkey: OWNER,
+    assignee: OWNER,
+    createdAt: 400,
+    tags: [
+      ["d", "e".repeat(64)],
+      ["e", "e".repeat(64), "", "root"],
+      ["e", "e".repeat(64), "", "root"],
+      ["p", OWNER, "", "assignee"],
+      ["a", REPO_ADDRESS],
+    ],
+  });
+  const strayChannel = assigneeEvent({
+    pubkey: OWNER,
+    assignee: OWNER,
+    createdAt: 500,
+    tags: [
+      ["d", "e".repeat(64)],
+      ["e", "e".repeat(64), "", "root"],
+      ["p", OWNER, "", "assignee"],
+      ["a", REPO_ADDRESS],
+      ["h", "00000000-0000-0000-0000-000000000000"],
+    ],
+  });
+  const wrongReplacementKey = assigneeEvent({
+    pubkey: OWNER,
+    assignee: OWNER,
+    createdAt: 600,
+    tags: [
+      ["d", "f".repeat(64)],
+      ["e", "e".repeat(64), "", "root"],
+      ["p", OWNER, "", "assignee"],
+      ["a", REPO_ADDRESS],
+    ],
+  });
+
+  const issue = eventToProjectIssue(
+    issueEvent(),
+    [],
+    [],
+    [assignment, ambiguous, duplicateRoot, strayChannel, wrongReplacementKey],
+  );
+  assert.equal(issue.assignee, AUTHOR);
+  assert.equal(issue.assigneeEventId, assignment.id);
+});
+
+test("explicit unassignment wins without treating malformed events as unassignment", () => {
+  const assignment = assigneeEvent({
+    pubkey: OWNER,
+    assignee: AUTHOR,
+    createdAt: 200,
+  });
+  const malformed = assigneeEvent({
+    pubkey: OWNER,
+    assignee: "not-a-pubkey",
+    createdAt: 300,
+  });
+  const stillAssigned = eventToProjectIssue(
+    issueEvent(),
+    [],
+    [],
+    [assignment, malformed],
+  );
+  assert.equal(stillAssigned.assignee, AUTHOR);
+  assert.equal(stillAssigned.assigneeEventId, assignment.id);
+
+  const unassignment = assigneeEvent({
+    pubkey: OWNER,
+    assignee: null,
+    createdAt: 400,
+  });
+  const unassigned = eventToProjectIssue(
+    issueEvent(),
+    [],
+    [],
+    [assignment, malformed, unassignment],
+  );
+  assert.equal(unassigned.assignee, null);
+  assert.equal(unassigned.assigneeEventId, unassignment.id);
+  assert.equal(unassigned.assignedBy, OWNER);
+});
+
+test("same-second assignments use the lowest event id as a deterministic tie-break", () => {
+  const lowerId = assigneeEvent({
+    pubkey: OWNER,
+    assignee: AUTHOR,
+    createdAt: 300,
+    id: "1".repeat(64),
+  });
+  const higherId = assigneeEvent({
+    pubkey: OWNER,
+    assignee: OWNER,
+    createdAt: 300,
+    id: "f".repeat(64),
+  });
+
+  for (const events of [
+    [lowerId, higherId],
+    [higherId, lowerId],
+  ]) {
+    const issue = eventToProjectIssue(issueEvent(), [], [], events);
+    assert.equal(issue.assignee, AUTHOR);
+    assert.equal(issue.assigneeEventId, lowerId.id);
+  }
+});
+
 test("ignores status events from a different pubkey", () => {
   const attackerClosed = statusEvent({
     kind: 1632,

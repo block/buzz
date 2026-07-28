@@ -137,3 +137,70 @@ test("fetchProjectsWorkItems returns a single row for a PR present in both proje
   // Sanity: the stub was actually called (proves we ran the production path).
   assert.ok(callCount >= 1, "fetchEvents must have been called");
 });
+
+const AUTHOR = "b".repeat(64);
+const ASSIGNEE = "c".repeat(64);
+const ASSIGNED_ISSUE_ID = "e".repeat(64);
+
+const assignedIssue = {
+  ...makeIssue(ASSIGNED_ISSUE_ID),
+  pubkey: AUTHOR,
+  content: "Investigate the failure",
+};
+
+const assignmentEvent = {
+  id: "f".repeat(64),
+  kind: 32001,
+  pubkey: REPO_OWNER,
+  created_at: 200,
+  content: "",
+  tags: [
+    ["d", ASSIGNED_ISSUE_ID],
+    ["e", ASSIGNED_ISSUE_ID, "", "root"],
+    ["p", ASSIGNEE, "", "assignee"],
+    ["a", REPO_ADDRESS],
+  ],
+};
+
+test("aggregate work-item queries fetch and project issue assignments", async () => {
+  const filters = [];
+  const fetchEvents = async (filter) => {
+    filters.push(filter);
+    if (filter.kinds.includes(1621)) return [assignedIssue];
+    if (filter.kinds.includes(32001)) return [assignmentEvent];
+    return [];
+  };
+
+  const result = await fetchProjectsWorkItems([projectA], fetchEvents);
+
+  assert.equal(result.issues.items.length, 1);
+  assert.equal(result.issues.items[0].issue.assignee, ASSIGNEE);
+  assert.equal(result.issues.items[0].issue.assignedBy, REPO_OWNER);
+  assert.deepEqual(result.issues.failedSections, []);
+  assert.ok(
+    filters.some(
+      (filter) =>
+        filter.kinds.length === 1 &&
+        filter.kinds[0] === 32001 &&
+        filter["#a"]?.[0] === REPO_ADDRESS,
+    ),
+    "aggregate query must request repo-scoped assignment events",
+  );
+});
+
+test("assignment query failure preserves issues and reports partial data", async () => {
+  const fetchEvents = async (filter) => {
+    if (filter.kinds.includes(1621)) return [assignedIssue];
+    if (filter.kinds.includes(32001)) {
+      throw new Error("assignment query unavailable");
+    }
+    return [];
+  };
+
+  const result = await fetchProjectsWorkItems([projectA], fetchEvents);
+
+  assert.equal(result.issues.items.length, 1);
+  assert.equal(result.issues.items[0].issue.assignee, null);
+  assert.deepEqual(result.issues.failedSections, ["assignees"]);
+  assert.deepEqual(result.pullRequests.failedSections, []);
+});

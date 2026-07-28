@@ -49,7 +49,6 @@ pub async fn get_feed(
     state: State<'_, AppState>,
 ) -> Result<FeedResponse, String> {
     let cap = limit.unwrap_or(50).min(100);
-
     // Parse types filter — if absent, run all sub-queries.
     // Comma-separated: e.g. "mentions,needs_action".
     let want_mentions = types
@@ -77,6 +76,7 @@ pub async fn get_feed(
             buzz_core_pkg::kind::KIND_GIT_PULL_REQUEST,
             buzz_core_pkg::kind::KIND_GIT_PR_UPDATE,
             buzz_core_pkg::kind::KIND_GIT_ISSUE,
+            buzz_core_pkg::kind::KIND_GIT_ISSUE_ASSIGNEE,
             buzz_core_pkg::kind::KIND_GIT_STATUS_OPEN,
             buzz_core_pkg::kind::KIND_GIT_STATUS_MERGED,
             buzz_core_pkg::kind::KIND_GIT_STATUS_CLOSED,
