@@ -19,11 +19,20 @@ test("backup step appears on fresh-key path after profile submit", async ({
   await enterMachineBackup(page);
 
   await expect(page.getByTestId("onboarding-page-backup")).toBeVisible();
+
+  // Perceived-loading intro: the animated logo and "Creating" title show
+  // first, then the finished state replaces them after the hold.
+  await expect(
+    page.getByRole("heading", { name: "Creating your identity key" }),
+  ).toBeVisible();
+  await expect(page.getByTestId("backup-intro-logo")).toBeVisible();
+
   await expect(
     page.getByRole("heading", {
-      name: "Account created!",
+      name: "Your unique identity key has been created",
     }),
   ).toBeVisible();
+  await expect(page.getByTestId("backup-intro-logo")).toHaveCount(0);
 });
 
 // ---------------------------------------------------------------------------
@@ -40,6 +49,9 @@ test("Keycase happy path: generated password, create, native save, Next", async 
   await expect(page.getByTestId("backup-passphrase-generated")).toBeVisible();
   await expect(page.getByTestId("onboarding-next")).toBeEnabled();
 
+  // Let the perceived-loading intro (animated logo → content fade-in) finish
+  // so the screenshot captures fully opaque content.
+  await expect(page.getByTestId("backup-intro-logo")).toHaveCount(0);
   await waitForAnimations(page);
   await page.screenshot({ path: `${SHOTS}/02-backup-step-passphrase.png` });
 
@@ -120,6 +132,8 @@ test("raw key path is one explicit click away and shows the masked nsec", async 
   await expect(nsecDisplay).not.toHaveCSS("filter", /blur/);
   await expect(nsecDisplay).toContainText("nsec1mock");
 
+  // Intro crossfade must be finished before capturing.
+  await expect(page.getByTestId("backup-intro-logo")).toHaveCount(0);
   await waitForAnimations(page);
   await page.screenshot({ path: `${SHOTS}/04-backup-step-raw-revealed.png` });
 
