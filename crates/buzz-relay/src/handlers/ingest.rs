@@ -183,6 +183,19 @@ pub enum IngestError {
     Internal(String),
 }
 
+fn map_relay_admin_error(error: super::relay_admin::RelayAdminError) -> IngestError {
+    use super::relay_admin::RelayAdminError;
+    match error {
+        // Same wire prefix and HTTP status (403) as every other durable
+        // restriction refusal — see the write-path gate below and `auth.rs`.
+        RelayAdminError::Banned => {
+            IngestError::AuthFailed("blocked: you are banned from this community".to_string())
+        }
+        RelayAdminError::Rejected(reason) => IngestError::Rejected(format!("invalid: {reason}")),
+        RelayAdminError::Internal(reason) => IngestError::Internal(format!("error: {reason}")),
+    }
+}
+
 fn map_push_accept_error(error: super::push_lease::AcceptError) -> IngestError {
     match error {
         super::push_lease::AcceptError::Validation(reason) => {
@@ -1021,16 +1034,42 @@ fn validate_engram_envelope(event: &Event) -> Result<(), String> {
 /// Enforces:
 /// * exactly one `d` tag with a non-empty value matching the slug grammar
 ///   `^[a-z0-9][a-z0-9_-]{0,63}$`.
+/// * at most one `shared` tag; if present, its value must be exactly `"true"`.
 ///
-/// Without this, an empty d-tag collapses every persona into the
+/// Without the `d`-tag check, an empty d-tag collapses every persona into the
 /// `(pubkey, 30175, "")` slot — last-write-wins data loss.
+///
+/// The `shared` tag rule ensures no ambiguous heads: either an event has no
+/// `shared` tag (author-only) or exactly `["shared", "true"]` (community-
+/// readable). Any other value (`"false"`, `"1"`, extra tags) is rejected at
+/// ingest so read-path helpers can treat stored events as unambiguously one or
+/// the other.
 fn validate_persona_envelope(event: &Event) -> Result<(), String> {
     let mut d_tags: Vec<&str> = Vec::new();
+    let mut shared_count = 0usize;
     for tag in event.tags.iter() {
         let parts = tag.as_slice();
         if parts.len() >= 2 && parts[0].as_str() == "d" {
             d_tags.push(&parts[1]);
         }
+        if !parts.is_empty() && parts[0].as_str() == "shared" {
+            // Exact shape required: ["shared", "true"] — exactly two elements,
+            // second element exactly "true". Extra elements are rejected so that
+            // a three-element tag like ["shared","true","extra"] cannot be stored
+            // and later misread as shared by the SQL-level visibility clause.
+            if parts.len() != 2 || parts[1].as_str() != "true" {
+                return Err(format!(
+                    "persona event `shared` tag must be exactly [\"shared\",\"true\"] (got {:?})",
+                    parts.iter().map(|s| s.as_str()).collect::<Vec<_>>()
+                ));
+            }
+            shared_count += 1;
+        }
+    }
+    if shared_count > 1 {
+        return Err(format!(
+            "persona event must have at most one `shared` tag (got {shared_count})"
+        ));
     }
     if d_tags.len() != 1 {
         return Err(format!(
@@ -1598,7 +1637,10 @@ async fn ingest_event_inner(
     // is the durable backstop the fan-out's best-effort delivery relies on.
     // Moderation commands enforce bans inside their handler and remain exempt
     // here only so timeouts do not disarm the tool used to lift them. Relay-admin
-    // commands retain their separate authorization policy.
+    // commands (9030–9033) are exempt for the same reason — a timed-out admin
+    // must still be able to administer the roster — and likewise enforce the
+    // durable ban inside `relay_admin::handle_relay_admin_event`. Any kind added
+    // to this exemption owes the same handler-local ban check.
     //
     // Scope: this gate checks the *authoring* pubkey only, with no NIP-OA
     // owner→agent cascade. That cascade lives at the auth seam for bans, where
@@ -1805,10 +1847,13 @@ async fn ingest_event_inner(
     }
 
     // Handled directly — these mutate relay_members and do NOT get stored.
+    // The handler enforces the durable community ban itself: the write-path
+    // gate above exempts relay-admin kinds so timed-out admins keep their
+    // administrative capability, which leaves bans to the handler.
     if is_relay_admin_kind(event.kind.as_u16() as u32) {
         crate::handlers::relay_admin::handle_relay_admin_event(tenant, state, &event)
             .await
-            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+            .map_err(map_relay_admin_error)?;
         return Ok(IngestResult {
             event_id: event_id_hex,
             accepted: true,
@@ -2515,6 +2560,62 @@ mod tests {
         KIND_STREAM_MESSAGE_DIFF, KIND_TEAM, KIND_USER_STATUS,
     };
     use nostr::{EventBuilder, Kind};
+
+    /// A banned relay admin must be refused with the same wire prefix and
+    /// transport status as every other durable-restriction refusal:
+    /// `blocked:` and (via `bridge.rs`'s `AuthFailed` arm) HTTP 403 — never
+    /// `invalid:`/400, which reads as "your request was malformed" and lets a
+    /// client retry-loop against an authorization decision.
+    #[test]
+    fn relay_admin_ban_maps_to_blocked_auth_failure() {
+        let mapped = map_relay_admin_error(super::super::relay_admin::RelayAdminError::Banned);
+        match mapped {
+            IngestError::AuthFailed(msg) => {
+                assert_eq!(msg, "blocked: you are banned from this community");
+            }
+            other => panic!("banned admin must map to AuthFailed (HTTP 403), got {other:?}"),
+        }
+    }
+
+    /// Validation/authorization failures keep the pre-existing `invalid:`
+    /// prefix and 400 status — this is the arm the whole 9030-series relied on
+    /// before the ban category existed, so it must not regress.
+    #[test]
+    fn relay_admin_rejection_keeps_invalid_prefix() {
+        let mapped = map_relay_admin_error(super::super::relay_admin::RelayAdminError::Rejected(
+            "actor not authorized: must be admin or owner".to_string(),
+        ));
+        match mapped {
+            IngestError::Rejected(msg) => {
+                assert_eq!(
+                    msg, "invalid: actor not authorized: must be admin or owner",
+                    "existing relay-admin rejections must keep their exact wire text"
+                );
+            }
+            other => panic!("validation failure must map to Rejected, got {other:?}"),
+        }
+    }
+
+    /// A restriction-lookup outage is a server fault, not a client one. It
+    /// must fail closed as `error:`/500 so a Postgres blip can neither admit a
+    /// banned admin nor be reported to an innocent one as a bad request.
+    #[test]
+    fn relay_admin_internal_maps_to_error_not_client_fault() {
+        let mapped = map_relay_admin_error(super::super::relay_admin::RelayAdminError::Internal(
+            "internal error checking restriction state: pool timed out".to_string(),
+        ));
+        match mapped {
+            IngestError::Internal(msg) => {
+                assert!(
+                    msg.starts_with("error: "),
+                    "internal failures need the `error:` NIP-01 prefix, got {msg:?}"
+                );
+            }
+            other => {
+                panic!("restriction DB failure must map to Internal (HTTP 500), got {other:?}")
+            }
+        }
+    }
 
     #[derive(Debug, Default)]
     struct VecTracer {
@@ -3532,6 +3633,89 @@ mod tests {
         let ev = make_persona(&[&["d", "has.dot"]]);
         let err = validate_persona_envelope(&ev).unwrap_err();
         assert!(err.contains("`d` tag"), "got: {err}");
+    }
+
+    // ─── persona shared-tag envelope tests ───────────────────────────────────
+
+    #[test]
+    fn persona_envelope_accepts_shared_true() {
+        // A persona event with exactly one ["shared","true"] tag must be accepted.
+        let ev = make_persona(&[&["d", "my-persona"], &["shared", "true"]]);
+        assert!(validate_persona_envelope(&ev).is_ok());
+    }
+
+    #[test]
+    fn persona_envelope_accepts_no_shared_tag() {
+        // The shared tag is optional; omitting it is the author-only default.
+        let ev = make_persona(&[&["d", "my-persona"]]);
+        assert!(validate_persona_envelope(&ev).is_ok());
+    }
+
+    #[test]
+    fn persona_envelope_rejects_shared_false() {
+        let ev = make_persona(&[&["d", "my-persona"], &["shared", "false"]]);
+        let err = validate_persona_envelope(&ev).unwrap_err();
+        assert!(
+            err.contains("\"true\""),
+            "expected 'true' in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn persona_envelope_rejects_shared_wrong_value() {
+        let ev = make_persona(&[&["d", "my-persona"], &["shared", "yes"]]);
+        let err = validate_persona_envelope(&ev).unwrap_err();
+        assert!(
+            err.contains("\"true\""),
+            "expected 'true' in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn persona_envelope_rejects_shared_missing_value() {
+        // A "shared" tag with no value argument must be rejected.
+        let ev = make_event_with_tags(
+            KIND_PERSONA,
+            r#"{"display_name":"x"}"#,
+            &[&["d", "slug"], &["shared"]],
+        );
+        let err = validate_persona_envelope(&ev).unwrap_err();
+        assert!(
+            err.contains("\"true\""),
+            "expected 'true' in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn persona_envelope_rejects_duplicate_shared_tags() {
+        // More than one shared tag, even if both are "true", must be rejected.
+        let ev = make_persona(&[
+            &["d", "my-persona"],
+            &["shared", "true"],
+            &["shared", "true"],
+        ]);
+        let err = validate_persona_envelope(&ev).unwrap_err();
+        assert!(
+            err.contains("at most one"),
+            "expected 'at most one' in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn persona_envelope_rejects_shared_three_elements() {
+        // ["shared","true","extra"] must be rejected — only exactly two elements
+        // are valid so the SQL containment check tags @> '[["shared","true"]]'
+        // cannot match a three-element stored tag.
+        let ev = make_event_with_tags(
+            KIND_PERSONA,
+            r#"{"display_name":"x"}"#,
+            &[&["d", "slug"], &["shared", "true", "extra"]],
+        );
+        let err = validate_persona_envelope(&ev).unwrap_err();
+        assert!(
+            err.contains("[\"shared\",\"true\"]"),
+            "expected exact-shape error, got: {err}"
+        );
     }
 
     // ─── agent_turn_metric envelope tests ────────────────────────────────────

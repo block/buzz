@@ -4,24 +4,24 @@ Welcome, and thank you for your interest in contributing! Buzz is an
 open-source project and we're glad you're here. This guide will help you
 get from zero to a merged pull request.
 
-If you have questions that aren't answered here, open a GitHub Discussion or
-reach out in the community channels.
+If you have questions that aren't answered here, [open an issue](https://github.com/block/buzz/issues/new).
 
 ---
 
 ## Table of Contents
 
 1. [Code of Conduct](#code-of-conduct)
-2. [Setting Up the Development Environment](#setting-up-the-development-environment)
-3. [Running Tests](#running-tests)
-4. [Code Style](#code-style)
-5. [Making a Pull Request](#making-a-pull-request)
-6. [Architecture Overview](#architecture-overview)
-7. [Ecosystem](#ecosystem)
-8. [How to Add a New Event Kind](#how-to-add-a-new-event-kind)
-9. [How to Add a New MCP Tool](#how-to-add-a-new-mcp-tool)
-10. [How to Add a New API Endpoint](#how-to-add-a-new-api-endpoint)
-11. [License and CLA](#license-and-cla)
+2. [Before You Open a PR](#before-you-open-a-pr)
+3. [Setting Up the Development Environment](#setting-up-the-development-environment)
+4. [Running Tests](#running-tests)
+5. [Code Style](#code-style)
+6. [Making a Pull Request](#making-a-pull-request)
+7. [Architecture Overview](#architecture-overview)
+8. [Ecosystem](#ecosystem)
+9. [How to Add a New Event Kind](#how-to-add-a-new-event-kind)
+10. [How to Add a New MCP Tool](#how-to-add-a-new-mcp-tool)
+11. [How to Add a New API Endpoint](#how-to-add-a-new-api-endpoint)
+12. [License and CLA](#license-and-cla)
 
 ---
 
@@ -30,6 +30,22 @@ reach out in the community channels.
 This project follows the [Contributor Covenant v2.1](CODE_OF_CONDUCT.md).
 By participating you agree to uphold these standards. Please report
 unacceptable behavior to **conduct@buzz-relay.org**.
+
+---
+
+## Before You Open a PR
+
+Before starting, search [open PRs](https://github.com/block/buzz/pulls) and [open issues](https://github.com/block/buzz/issues) for duplicates — someone may already be working on the same thing. When you open your PR, link the closest existing one in the description (or say "none found").
+
+For anything beyond a small fix, opening an issue first is strongly recommended. Describe the problem and proposed solution so a maintainer can acknowledge the approach before you build — it avoids two people building the same thing in parallel.
+
+Buzz is an agent platform, so AI-assisted PRs are welcome. No need to disclose the tools you used, but you own and must have reviewed the final code. Submissions that are clearly unreviewed may be closed with a pointer here.
+
+We squash-merge, so your PR title becomes the commit subject in `main`. Use [Conventional Commits](https://www.conventionalcommits.org/) format: `feat(mcp): add get_feed_actions tool`. The type prefix (`feat`, `fix`, `docs`, `refactor`, `test`, `chore`) is required. See the [Commit Messages](#commit-messages) section for the full reference.
+
+Every commit needs a Developer Certificate of Origin sign-off, so commit with `git commit -s` — it appends the `Signed-off-by` trailer that certifies you wrote the change and can contribute it. The required **DCO Check** blocks merge without it on every commit, and it's the most common reason new PRs stall. If you already pushed unsigned commits, run `git rebase --signoff main` and force-push. Running `just hooks` installs a `commit-msg` hook that adds the trailer to commits created by `git commit` and `git merge`; other flows need their own flag — `git rebase --signoff`, `git cherry-pick -s`.
+
+We review as capacity allows — focused PRs that follow this guide move fastest.
 
 ---
 
@@ -171,7 +187,7 @@ just ci
 ```
 
 This is the same check that runs in CI. PRs that fail `just ci` will not be
-merged.
+merged. If `just ci` fails on formatting, `just fix-all` fixes it in one shot (`rustfmt` + Tauri fmt + desktop, web, and mobile formatters).
 
 ---
 
@@ -248,13 +264,6 @@ required. The scope (in parentheses) is optional but encouraged.
 
 ## Making a Pull Request
 
-### Before You Start
-
-- Check open issues and PRs to avoid duplicate work.
-- For significant changes, open an issue first to discuss the approach.
-- For small fixes (typos, doc improvements, obvious bugs), go ahead and open
-  a PR directly.
-
 ### What a Good PR Looks Like
 
 1. **Focused** — one logical change per PR. If you're fixing a bug and
@@ -275,19 +284,34 @@ required. The scope (in parentheses) is optional but encouraged.
    - How to test it manually (if applicable)
    - Any follow-up work deferred to a future PR
 
-### PR Checklist
+6. **Shows the UI** — any PR that changes the desktop or mobile UI includes
+   before/after screenshots (or a short recording for interactions) in the
+   description. We can't run every branch locally — screenshots let us review
+   UI changes same-day instead of waiting for someone to build your branch.
 
-```
-- [ ] `just ci` passes (fmt + clippy + unit tests + mobile)
-- [ ] Integration tests pass (`just test`)
-- [ ] New public APIs / tools / endpoints are documented
-- [ ] No new `unwrap()` in production code paths
-- [ ] No new `unsafe` blocks
-```
+### PRs We're Unlikely to Merge
 
-### Review Process
+Some kinds of PRs usually get closed — not because they're bad ideas, but
+because we can't safely review them without prior discussion:
 
-- A maintainer will review your PR within a few business days.
+- **Large refactors or dependency swaps** without a prior issue agreeing on
+  the direction
+- **Cosmetic renames or style-only churn** that doesn't fix a bug or improve
+  clarity
+- **Entirely new features** with no prior discussion
+- **Drive-by changes bundled into an unrelated fix** — split them out
+
+If you're considering any of these, open an issue first and we'll tell you
+quickly whether it's a direction we'd merge. That saves your time as much as
+ours.
+
+### What to Expect After You Open a PR
+
+- Maintainers triage new PRs on a best-effort cadence. Focused PRs that
+  follow this guide move fastest.
+- Duplicates and PRs that skip this guide may be closed with a pointer here
+  rather than a full review. A close isn't a rejection of you or the idea —
+  address the gaps and reopen (or open a fresh PR) anytime.
 - Address review comments by pushing new commits (don't force-push during
   review; it makes it hard to see what changed).
 - Once approved, a maintainer will squash-merge your PR.

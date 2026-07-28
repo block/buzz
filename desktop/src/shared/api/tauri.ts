@@ -118,6 +118,8 @@ export type RawManagedAgent = {
   pubkey: string;
   name: string;
   persona_id: string | null;
+  // Optional: pre-feature fixtures may omit it. The record's harness/runtime id.
+  runtime?: string | null;
   team_id?: string | null;
   relay_url: string;
   acp_command: string;
@@ -132,6 +134,7 @@ export type RawManagedAgent = {
   system_prompt: string | null;
   avatar_url?: string | null;
   model: string | null;
+  model_source?: ManagedAgent["modelSource"];
   provider: string | null;
   persona_out_of_date: boolean;
   persona_orphaned: boolean;
@@ -184,11 +187,19 @@ export type RawAcpRuntimeCatalogEntry = {
   install_hint: string;
   install_instructions_url: string;
   can_auto_install: boolean;
+  /** Optional only for older E2E fixtures; the Rust catalog always supplies it. */
+  requires_external_cli?: boolean;
   underlying_cli_path: string | null;
   node_required: boolean;
   /** Tagged union with snake_case status values — same shape as `AuthStatus`. */
   auth_status: AuthStatus;
   login_hint?: string;
+  source: "builtin" | "preset" | "custom";
+  /**
+   * Definition-level env vars for `source: custom` entries.
+   * Omitted/absent for builtin and preset — skipped in Rust serialization when empty.
+   */
+  definition_env?: Record<string, string>;
 };
 
 export type RawInstallStepResult = {
@@ -458,6 +469,9 @@ export async function searchMessages(
     q: input.q,
     limit: input.limit,
     channelId: input.channelId,
+    authors: input.authors,
+    since: input.since,
+    until: input.until,
   });
 
   return {
@@ -685,6 +699,7 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     pubkey: agent.pubkey,
     name: agent.name,
     personaId: agent.persona_id,
+    runtime: agent.runtime ?? null,
     teamId: agent.team_id ?? null,
     relayUrl: agent.relay_url,
     acpCommand: agent.acp_command,
@@ -699,6 +714,8 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     systemPrompt: agent.system_prompt,
     avatarUrl: agent.avatar_url ?? null,
     model: agent.model,
+    modelSource: agent.model_source ?? null,
+    // Fallbacks for pre-feature mocks/fixtures. Real records always carry them.
     provider: agent.provider ?? null,
     personaOutOfDate: agent.persona_out_of_date ?? false,
     personaOrphaned: agent.persona_orphaned ?? false,
@@ -725,7 +742,7 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
   };
 }
 
-function fromRawAcpRuntimeCatalogEntry(
+export function fromRawAcpRuntimeCatalogEntry(
   entry: RawAcpRuntimeCatalogEntry,
 ): AcpRuntimeCatalogEntry {
   return {
@@ -743,10 +760,15 @@ function fromRawAcpRuntimeCatalogEntry(
     installHint: entry.install_hint,
     installInstructionsUrl: entry.install_instructions_url,
     canAutoInstall: entry.can_auto_install,
+    requiresExternalCli: entry.requires_external_cli ?? false,
     underlyingCliPath: entry.underlying_cli_path,
     nodeRequired: entry.node_required,
     authStatus: entry.auth_status,
     loginHint: entry.login_hint ?? null,
+    source: entry.source,
+    // Map definition_env (snake_case from Rust) to definitionEnv (camelCase).
+    // Absent when empty (Rust serialization skips empty BTreeMap) — default to {}.
+    definitionEnv: entry.definition_env ?? {},
   };
 }
 
@@ -926,6 +948,45 @@ export async function discoverAcpRuntimes(): Promise<AcpRuntimeCatalogEntry[]> {
   return (
     await invokeTauri<RawAcpRuntimeCatalogEntry[]>("discover_acp_providers")
   ).map(fromRawAcpRuntimeCatalogEntry);
+}
+
+/** Input shape for creating or updating a custom harness. */
+export type HarnessDefinitionInput = {
+  id: string;
+  label: string;
+  command: string;
+  args?: string[];
+  env?: Record<string, string>;
+  installInstructionsUrl?: string;
+  installHint?: string;
+};
+
+/** Save (create or overwrite) a custom harness definition. Returns the catalog entry. */
+export async function saveCustomHarness(
+  definition: HarnessDefinitionInput,
+  originalId?: string,
+): Promise<AcpRuntimeCatalogEntry> {
+  const raw = await invokeTauri<RawAcpRuntimeCatalogEntry>(
+    "save_custom_harness",
+    {
+      definition: {
+        id: definition.id,
+        label: definition.label,
+        command: definition.command,
+        args: definition.args ?? [],
+        env: definition.env ?? {},
+        installInstructionsUrl: definition.installInstructionsUrl ?? "",
+        installHint: definition.installHint ?? "",
+      },
+      originalId: originalId ?? null,
+    },
+  );
+  return fromRawAcpRuntimeCatalogEntry(raw);
+}
+
+/** Delete a custom harness definition by id. No-op if already gone. */
+export async function deleteCustomHarness(id: string): Promise<void> {
+  await invokeTauri<void>("delete_custom_harness", { id });
 }
 
 export async function installAcpRuntime(

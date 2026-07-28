@@ -168,7 +168,7 @@ test("thread inbox row read state includes per-message marker", () => {
   );
 });
 
-test("thread inbox row read state uses newest thread or message marker", () => {
+test("thread inbox row read state follows the per-message marker", () => {
   const replyItem = feedItem({
     id: "reply-event",
     createdAt: 200,
@@ -185,6 +185,30 @@ test("thread inbox row read state uses newest thread or message marker", () => {
       getThreadReadAt: () => 250,
       getMessageReadAt: () => 200,
     }),
-    250,
+    200,
   );
+});
+
+test("parent-only replies use their parent as the thread read context", () => {
+  const replyItem = feedItem({
+    id: "reply-event",
+    createdAt: 200,
+    tags: [
+      ["h", CHANNEL_ID],
+      ["e", "parent-event", "", "reply"],
+    ],
+  });
+  let resolvedRootId = null;
+
+  assert.equal(
+    resolveInboxItemReadAt(inboxItem([replyItem]), {
+      getChannelReadAt: () => 100,
+      getThreadReadAt: (rootId) => {
+        resolvedRootId = rootId;
+        return 150;
+      },
+    }),
+    150,
+  );
+  assert.equal(resolvedRootId, "parent-event");
 });

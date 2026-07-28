@@ -44,6 +44,7 @@ function isEmptySharedComputeError(message: string): boolean {
 export function formatModelDiscoveryErrorStatus(
   error: unknown,
   provider: string,
+  agentLabel?: string,
 ): PersonaModelDiscoveryStatus | null {
   const message = errorMessage(error);
 
@@ -83,6 +84,19 @@ export function formatModelDiscoveryErrorStatus(
     return {
       message:
         "Buzz couldn't check shared compute through the relay. Check your relay connection and try again.",
+      tone: "warning",
+    };
+  }
+
+  // Spec-reserved auth error text (agent-client-protocol ErrorCode::AuthRequired),
+  // surfaced verbatim through buzz-acp's stderr — generic across conformant
+  // harnesses (e.g. cursor-agent when not signed in). Match the message text,
+  // NOT code -32000: that code is also the catch-all fallback for unclassified
+  // errors, so matching it would swallow unrelated failures into "sign in".
+  if (message.toLowerCase().includes("authentication required")) {
+    const label = agentLabel?.trim();
+    return {
+      message: `${label || "This agent"} requires sign-in before models can load. Sign in with the ${label || "agent's"} CLI in a terminal, then try again.`,
       tone: "warning",
     };
   }

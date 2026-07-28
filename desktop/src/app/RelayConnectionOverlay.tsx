@@ -60,7 +60,7 @@ export function RelayConnectionOverlay({
           animate={{ opacity: 1, y: 0 }}
           className={cn(
             "pointer-events-none fixed z-50 w-[284px]",
-            hasCommunityRail ? "left-[60px]" : "left-3",
+            hasCommunityRail ? "left-[68px]" : "left-3",
             isHuddleDrawerOpen
               ? "bottom-[calc(var(--buzz-huddle-drawer-height,0px)+12px)]"
               : "bottom-3",
@@ -86,7 +86,7 @@ export function RelayConnectionOverlay({
           animate={{ opacity: 1, y: 0 }}
           className={cn(
             "pointer-events-none fixed z-50 w-[284px]",
-            hasCommunityRail ? "left-[60px]" : "left-3",
+            hasCommunityRail ? "left-[68px]" : "left-3",
             isHuddleDrawerOpen
               ? "bottom-[calc(var(--buzz-huddle-drawer-height,0px)+12px)]"
               : "bottom-3",

@@ -20,6 +20,7 @@ type UserAvatarProps = {
   size?: UserAvatarSize;
   accent?: boolean;
   className?: string;
+  fallbackDelayMs?: number;
   testId?: string;
 };
 
@@ -29,6 +30,7 @@ export function UserAvatar({
   size = "md",
   accent = false,
   className,
+  fallbackDelayMs = 200,
   testId,
 }: UserAvatarProps) {
   const initials = getInitials(displayName);
@@ -67,7 +69,7 @@ export function UserAvatar({
             : "bg-secondary text-secondary-foreground",
         )}
         data-testid={testId ? `${testId}-fallback` : undefined}
-        delayMs={200}
+        delayMs={fallbackDelayMs}
       >
         {initials}
       </AvatarFallback>

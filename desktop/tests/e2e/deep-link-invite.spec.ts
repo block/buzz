@@ -179,26 +179,22 @@ test("add-community deep link opens one editable prefill and acknowledges the qu
   await page.goto("/");
 
   await expect(
-    page.getByRole("heading", { name: "Add Community" }),
+    page.getByRole("heading", { name: "Join an existing community" }),
   ).toBeVisible();
-  const relayInput = page.locator("#ws-relay-url");
-  const nameInput = page.locator("#ws-name");
-  await expect(relayInput).toHaveValue(PENDING_ADD_COMMUNITY_LINK.relayUrl);
-  await expect(nameInput).toHaveValue(PENDING_ADD_COMMUNITY_LINK.name);
+  const communityInput = page.getByLabel("Community URL or invite link");
+  await expect(communityInput).toHaveValue(PENDING_ADD_COMMUNITY_LINK.relayUrl);
+  await expect(page.getByLabel("Name")).toHaveCount(0);
 
-  await nameInput.fill("Edited Team");
-  await expect(nameInput).toHaveValue("Edited Team");
-
-  await page.getByRole("button", { name: "Cancel" }).click();
+  await page.getByRole("button", { name: "Close" }).click();
   await expect(
-    page.getByRole("heading", { name: "Add Community" }),
+    page.getByRole("heading", { name: "Join an existing community" }),
   ).toHaveCount(0);
 
   await page.getByTestId("sidebar-profile-avatar-button").click();
   await page.getByTestId("community-switcher").click();
-  await page.getByRole("menuitem", { name: "Add Community" }).click();
-  await expect(relayInput).toHaveValue("");
-  await expect(nameInput).toHaveValue("");
+  await page.getByRole("menuitem", { name: "Add a community" }).click();
+  await page.getByTestId("add-community-join").click();
+  await expect(communityInput).toHaveValue("");
 
   const acknowledgements = await page.evaluate(() =>
     (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).filter(
@@ -228,10 +224,8 @@ test("queued add-community links open and acknowledge one at a time", async ({
   );
   await page.goto("/");
 
-  const relayInput = page.locator("#ws-relay-url");
-  const nameInput = page.locator("#ws-name");
-  await expect(relayInput).toHaveValue(PENDING_ADD_COMMUNITY_LINK.relayUrl);
-  await expect(nameInput).toHaveValue(PENDING_ADD_COMMUNITY_LINK.name);
+  const communityInput = page.getByLabel("Community URL or invite link");
+  await expect(communityInput).toHaveValue(PENDING_ADD_COMMUNITY_LINK.relayUrl);
 
   await expect
     .poll(() =>
@@ -246,12 +240,11 @@ test("queued add-community links open and acknowledge one at a time", async ({
     )
     .toEqual([{ id: PENDING_ADD_COMMUNITY_LINK.id }]);
 
-  await page.getByRole("button", { name: "Cancel" }).click();
+  await page.getByRole("button", { name: "Close" }).click();
 
-  await expect(relayInput).toHaveValue(
+  await expect(communityInput).toHaveValue(
     SECOND_PENDING_ADD_COMMUNITY_LINK.relayUrl,
   );
-  await expect(nameInput).toHaveValue(SECOND_PENDING_ADD_COMMUNITY_LINK.name);
   await expect
     .poll(() =>
       page.evaluate(() =>

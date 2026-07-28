@@ -507,13 +507,26 @@ else
     fail "Bot2 push failed (bot should be promoted to member)"
 fi
 
-# ── Test: Non-member push denied ──────────────────────────────────────────────
+# ── Test: Non-member read denied (SEC-005) + non-member push denied ──────────
 
-log "Guest: attempting push (should be denied)..."
+log "Guest: attempting clone (should be denied — SEC-005 read gate)..."
 GUEST_DIR="$WORK_DIR/guest"
 
-git_clone "$GUEST_PRIVKEY" "${RELAY_HTTP}/git/${OWNER_PUBKEY}/${REPO_NAME}" "$GUEST_DIR" \
-    || fail "Guest clone failed (read access should work)"
+if git_clone "$GUEST_PRIVKEY" "${RELAY_HTTP}/git/${OWNER_PUBKEY}/${REPO_NAME}" "$GUEST_DIR"; then
+    fail "Guest clone succeeded (non-member reads should be denied — SEC-005)"
+fi
+success "Guest clone denied (not a channel member) — SEC-005 read gate"
+
+# Members can still read: bot1/bot2 cloned successfully above, and the
+# owner-verification clone below re-confirms member read access post-gate.
+
+log "Guest: attempting push (should be denied)..."
+# The guest cannot clone anymore, so stage the push from a copy of bot1's
+# member clone, credentialed as the guest. (SEC-005 denies the push at the
+# receive-pack advertisement, before any ref negotiation, so the copy being
+# behind the remote does not matter.)
+rm -rf "$GUEST_DIR"
+cp -R "$BOT1_DIR" "$GUEST_DIR"
 
 echo "<!-- unauthorized -->" >> "$GUEST_DIR/index.html"
 git -C "$GUEST_DIR" add -A
@@ -523,8 +536,11 @@ git -C "$GUEST_DIR" -c user.name="Guest" -c user.email="guest@evil.test" \
 PUSH_OUTPUT=$(git_push "$GUEST_PRIVKEY" "$GUEST_DIR" 2>&1) && \
     fail "Guest push succeeded (should have been denied!)"
 
-# Verify the denial is permission-related, not a network error
-if echo "$PUSH_OUTPUT" | grep -qi "denied\|forbidden\|not authorized\|403\|permission"; then
+# Verify the denial is permission-related, not a network error. With the
+# SEC-005 read gate the denial surfaces at the receive-pack advertisement
+# as a generic "repository not found" (membership must not be probeable);
+# hook-level denials phrase it as denied/forbidden.
+if echo "$PUSH_OUTPUT" | grep -qi "denied\|forbidden\|not authorized\|403\|permission\|not found\|404"; then
     success "Guest push denied (not a channel member) — reason confirmed in output"
 else
     warn "Guest push failed but denial reason not found in output: $PUSH_OUTPUT"
@@ -884,12 +900,15 @@ fi
 # ATTACK: A malicious repo could set core.hooksPath in its .git/config to point
 # to /dev/null or a no-op script. This only affects client-side hooks — the
 # server's pre-receive hook is invoked by git-receive-pack on the SERVER, not
-# the client. This test confirms the server hook still fires.
+# the client. This test confirms server-side authorization still fires.
+# (Clone as bot1 — the SEC-005 read gate denies guest clones — then push as
+# the guest: the unauthorized push must be denied regardless of client config,
+# whether at the read gate or the server hook.)
 
 log "Hook integrity: client core.hooksPath cannot bypass server hook..."
 HOOKSPATH_DIR="$WORK_DIR/hookspath-test"
 
-NOSTR_PRIVATE_KEY="$GUEST_PRIVKEY" GIT_TERMINAL_PROMPT=0 \
+NOSTR_PRIVATE_KEY="$BOT1_PRIVKEY" GIT_TERMINAL_PROMPT=0 \
     git clone \
     -c credential.helper="" \
     -c credential.useHttpPath=true \

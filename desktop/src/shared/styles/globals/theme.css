@@ -245,6 +245,28 @@
   --buzz-active-foreground: 0 0% 100%;
 }
 
+/*
+ * Use the Buzz primary color for the floating selection-formatting tray.
+ * Other themes retain the standard popover treatment.
+ */
+:root[data-buzz-sidebar] [data-buzz-selection-formatting-tray] {
+  border-color: hsl(var(--primary-foreground) / 0.18);
+  background-color: hsl(var(--primary));
+  color: hsl(var(--primary-foreground));
+}
+
+:root[data-buzz-sidebar] [data-buzz-selection-formatting-tray] button {
+  color: hsl(var(--primary-foreground));
+}
+
+:root[data-buzz-sidebar] [data-buzz-selection-formatting-tray] button:hover,
+:root[data-buzz-sidebar]
+  [data-buzz-selection-formatting-tray]
+  button[aria-pressed="true"] {
+  background-color: hsl(var(--primary-foreground) / 0.16);
+  color: hsl(var(--primary-foreground));
+}
+
 /* Keep the subtle content-card lift in Buzz Light only. */
 :root[data-buzz-sidebar]:not(.dark) [data-buzz-content-surface] {
   box-shadow:

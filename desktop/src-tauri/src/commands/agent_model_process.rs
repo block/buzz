@@ -27,7 +27,13 @@ pub(super) async fn run_agent_models_command(
         if let Some(home) = default_agent_workdir() {
             cmd.current_dir(home);
         }
-        if let Some(ref path) = crate::managed_agents::login_shell_path() {
+        // Inject the same augmented PATH used for launched agents and CLI
+        // probes: managed Node/npm dirs, exe-parent sidecars, login-shell
+        // PATH, and (Windows) the inherited process PATH. login_shell_path()
+        // alone is always None on Windows, which left this child with no
+        // managed Node dirs — the ACP adapter's `.cmd` shims then failed with
+        // `'node' is not recognized` and the model dropdown stayed empty.
+        if let Some(ref path) = crate::managed_agents::readiness::cli_probe::augmented_path() {
             cmd.env("PATH", path);
         }
         cmd.arg("models")

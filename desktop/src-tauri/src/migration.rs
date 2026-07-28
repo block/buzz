@@ -176,6 +176,11 @@ fn run_boot_migrations_inner(app: &tauri::AppHandle, reset_completed: bool) {
     // Post-fold readers of the runtime map (`load_persona_runtimes`) fall
     // back to the unified store's definitions.
     fold_personas_into_agent_store(app);
+    // Clean the legacy baked team-instructions suffix out of stored prompts
+    // AFTER the fold (so definitions lifted out of personas.json are cleaned in
+    // the same boot) and BEFORE backfill_standalone_agents (so a manufactured
+    // definition never snapshots a suffix this strips).
+    strip_baked_team_instructions(app);
     // Canonicalize structured provider/model fields and strip stale derived
     // env keys BEFORE matching standalone agents to folded definitions. If
     // this ran after backfill, pre-cleanup data could prevent a valid match
@@ -1366,7 +1371,6 @@ pub fn migrate_persona_provider_to_runtime(app: &tauri::AppHandle) {
     }
     rename_provider_to_runtime_in_personas(&path);
 }
-
 mod materialize;
 pub use materialize::materialize_agent_runtimes;
 mod fold;
@@ -1376,6 +1380,8 @@ mod backfill;
 pub use backfill::backfill_standalone_agents;
 mod detach;
 pub use detach::detach_directory_backed_teams;
+mod team_suffix;
+pub use team_suffix::strip_baked_team_instructions;
 
 #[cfg(test)]
 #[path = "migration_test_support.rs"]
