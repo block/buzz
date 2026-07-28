@@ -26,6 +26,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   BUZZ_TEST_POSTGRES_PASSWORD: buzz_dev
+  REDIS_PASSWORD: buzz_valkey_dev
 
 permissions: {}
 
@@ -48,7 +49,8 @@ jobs:
       # cache ci.yml populates on every push to main. Scheduled runs execute on
       # main, so most weekly runs hit a matching key and skip the relay compile +
       # archive entirely. Same key + same build recipe as ci.yml keep the cached
-      # archive byte-compatible.
+      # archive byte-compatible. The key includes both workflow files so changes
+      # to either recipe invalidate correctly.
       - name: Restore relay artifacts cache
         id: relay-artifacts-cache
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
@@ -57,14 +59,14 @@ jobs:
             target/ci/buzz-relay
             target/ci/git-credential-nostr
             target/ci/backend-integration-tests.tar.zst
-          key: relay-artifacts-${{ runner.os }}-${{ hashFiles('crates/**', 'migrations/**', 'Dockerfile', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml', '.github/workflows/ci.yml') }}
+          key: relay-artifacts-${{ runner.os }}-${{ hashFiles('crates/**', 'migrations/**', 'Dockerfile', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml', '.github/workflows/ci.yml', '.github/workflows/valkey-integration.yml') }}
       - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
         if: steps.relay-artifacts-cache.outputs.cache-hit != 'true'
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         if: steps.relay-artifacts-cache.outputs.cache-hit != 'true'
         with:
           workspaces: "."
-          save-if: ${{ github.event_name == 'schedule' }}
+          save-if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
       - name: Install cargo-nextest
         if: steps.relay-artifacts-cache.outputs.cache-hit != 'true'
         uses: taiki-e/install-action@0fd46367812ee04360509b4169d9f659d6892bb2 # v2.79.15
@@ -86,14 +88,14 @@ jobs:
             --test e2e_event_reminder \
             --archive-file target/ci/backend-integration-tests.tar.zst
       - name: Save relay artifacts cache
-        if: steps.relay-artifacts-cache.outputs.cache-hit != 'true' && github.event_name == 'schedule'
+        if: steps.relay-artifacts-cache.outputs.cache-hit != 'true' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
             target/ci/buzz-relay
             target/ci/git-credential-nostr
             target/ci/backend-integration-tests.tar.zst
-          key: relay-artifacts-${{ runner.os }}-${{ hashFiles('crates/**', 'migrations/**', 'Dockerfile', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml', '.github/workflows/ci.yml') }}
+          key: relay-artifacts-${{ runner.os }}-${{ hashFiles('crates/**', 'migrations/**', 'Dockerfile', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml', '.github/workflows/ci.yml', '.github/workflows/valkey-integration.yml') }}
 
       # Valkey stands in for Redis: the compose `valkey` profile publishes it on
       # host port 6380. Everything else (postgres, minio) is identical to ci.yml.
@@ -112,23 +114,10 @@ jobs:
           done
       - name: Wait for integration services
         run: |
-          wait_healthy() {
-            local service="$1"
-            local container="$2"
-            for attempt in $(seq 1 60); do
-              status=$(docker inspect --format='{{.State.Health.Status}}' "${container}" 2>/dev/null || echo "not_found")
-              if [ "${status}" = "healthy" ]; then
-                echo "${service} is healthy"
-                return 0
-              fi
-              sleep 2
-            done
-            docker logs "${container}" || true
-            return 1
-          }
-          wait_healthy "Postgres" "buzz-postgres"
-          wait_healthy "Valkey" "buzz-valkey"
-          wait_healthy "MinIO" "buzz-minio"
+          ./scripts/wait-healthy.sh "Postgres" "buzz-postgres" &
+          ./scripts/wait-healthy.sh "Valkey" "buzz-valkey" &
+          ./scripts/wait-healthy.sh "MinIO" "buzz-minio" &
+          wait
       - name: Apply schema and seed deployment community
         # Mirrors ci.yml backend-integration: the reminder scheduler binds the
         # deployment community once at boot and exits on an unmapped host, so the
@@ -159,7 +148,7 @@ jobs:
           chmod +x ./target/ci/buzz-relay
           nohup env \
             DATABASE_URL="postgres://buzz:${BUZZ_TEST_POSTGRES_PASSWORD}@localhost:5432/buzz" \
-            REDIS_URL=redis://localhost:6380 \
+            REDIS_URL="redis://:${REDIS_PASSWORD}@localhost:6380" \
             RELAY_URL=ws://localhost:3000 \
             BUZZ_BIND_ADDR=0.0.0.0:3000 \
             BUZZ_REQUIRE_AUTH_TOKEN=false \
