@@ -19,6 +19,19 @@ async fn main() -> Result<()> {
         )
         .init();
 
+    // Install ring as the process-level rustls CryptoProvider, matching
+    // buzz-cli, buzz-acp, buzz-admin, and buzz-dev-mcp.
+    //
+    // Both ring and aws-lc-rs end up enabled through the workspace's unified
+    // feature set, and with two providers compiled in rustls refuses to guess.
+    // Without this the very first `wss://` connection panics inside rustls
+    // rather than returning an error — so a spawner pointed at a TLS relay
+    // crash-loops at startup and never reaches its own error handling. A `ws://`
+    // relay is unaffected, which is why local development did not catch it.
+    //
+    // `let _ =` is deliberate: a redundant install returns Err and is harmless.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let config = Config::from_env()?;
     let containers: Arc<dyn ContainerOps> = Arc::new(DockerOps::connect()?);
 
