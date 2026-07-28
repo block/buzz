@@ -174,6 +174,7 @@ Widget _buildComposeBar({
   List<Channel> channels = const <Channel>[],
   String? currentPubkey,
   bool? supportsShowingSystemContextMenu,
+  TextScaler? textScaler,
   List<CustomEmoji> customEmoji = const <CustomEmoji>[],
   RelayConfigNotifier Function()? relayConfig,
   PhotoLibrary photoLibrary = const _EmptyPhotoLibrary(),
@@ -200,12 +201,14 @@ Widget _buildComposeBar({
     ],
     child: MaterialApp(
       theme: AppTheme.light(),
-      builder: supportsShowingSystemContextMenu == null
+      builder: supportsShowingSystemContextMenu == null && textScaler == null
           ? null
           : (context, child) => MediaQuery(
               data: MediaQuery.of(context).copyWith(
                 supportsShowingSystemContextMenu:
-                    supportsShowingSystemContextMenu,
+                    supportsShowingSystemContextMenu ??
+                    MediaQuery.of(context).supportsShowingSystemContextMenu,
+                textScaler: textScaler ?? MediaQuery.textScalerOf(context),
               ),
               child: child!,
             ),
@@ -886,6 +889,48 @@ void main() {
       );
       expect(find.text('Camera'), findsOneWidget);
       expect(find.text('Photos'), findsOneWidget);
+    });
+
+    testWidgets('photo picker errors keep the action visible at large text', (
+      tester,
+    ) async {
+      final uploadService = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: nostr.Keys.generate().nsec,
+        pickGalleryImage: () async => null,
+        pickGalleryImages: () async =>
+            throw PlatformException(code: 'photo_picker_failed'),
+        pickGalleryVideo: () async => null,
+      );
+
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: uploadService,
+          textScaler: const TextScaler.linear(1.2),
+          photoLibrary: _FakePhotoLibrary([
+            RecentPhoto(id: 'one', thumbnailBytes: _gifBytes),
+            RecentPhoto(id: 'two', thumbnailBytes: _gifBytes),
+            RecentPhoto(id: 'three', thumbnailBytes: _gifBytes),
+            RecentPhoto(id: 'four', thumbnailBytes: _gifBytes),
+          ]),
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      await _openSystemPhotoPicker(tester);
+      await tester.pumpAndSettle();
+
+      expect(tester.takeException(), isNull);
+      expect(find.byKey(const ValueKey('photo-gallery-error')), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('photo-gallery-action')).hitTestable(),
+        findsOneWidget,
+      );
     });
 
     testWidgets('keeps upload progress visible after the picker closes', (

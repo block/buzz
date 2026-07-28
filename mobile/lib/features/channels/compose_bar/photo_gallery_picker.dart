@@ -178,17 +178,29 @@ class _RecentPhotoGalleryPicker extends HookConsumerWidget {
             ),
           ),
           const SizedBox(height: Grid.half),
-          SizedBox(height: 248, child: buildGalleryBody()),
-          if (actionError.value case final error?) ...[
-            const SizedBox(height: Grid.half),
-            Text(
-              error,
-              style: context.textTheme.bodySmall?.copyWith(
-                color: context.colors.error,
-              ),
-              textAlign: TextAlign.center,
+          Expanded(
+            child: Column(
+              children: [
+                Expanded(child: buildGalleryBody()),
+                if (actionError.value case final error?) ...[
+                  const SizedBox(height: Grid.half),
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxHeight: 72),
+                    child: SingleChildScrollView(
+                      child: Text(
+                        error,
+                        key: const ValueKey('photo-gallery-error'),
+                        style: context.textTheme.bodySmall?.copyWith(
+                          color: context.colors.error,
+                        ),
+                        textAlign: TextAlign.center,
+                      ),
+                    ),
+                  ),
+                ],
+              ],
             ),
-          ],
+          ),
           const SizedBox(height: Grid.xxs),
           SizedBox(
             width: double.infinity,
