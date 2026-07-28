@@ -85,6 +85,12 @@ pub(crate) struct FilesArguments {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PdfArguments {
+    path: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(
     tag = "operation",
     content = "arguments",
@@ -98,6 +104,7 @@ pub(crate) enum AppleInputRequest {
     ReadReminders(ReminderArguments),
     ReadNotes(NotesArguments),
     ReadFiles(FilesArguments),
+    ExtractPdf(PdfArguments),
 }
 
 #[cfg_attr(
@@ -116,12 +123,14 @@ impl AppleInputRequest {
             Self::ReadReminders(_) => AppleInputSource::Reminders,
             Self::ReadNotes(_) => AppleInputSource::Notes,
             Self::ReadFiles(_) => AppleInputSource::Files,
+            Self::ExtractPdf(_) => AppleInputSource::Files,
         }
     }
 
     fn timeout(&self) -> Duration {
         match self {
             Self::RequestPermission(_) => PERMISSION_TIMEOUT,
+            Self::ExtractPdf(_) => Duration::from_secs(60),
             _ => DEFAULT_TIMEOUT,
         }
     }
@@ -577,7 +586,7 @@ fn validate_response(
         serde_json::from_slice(line).map_err(|_| SupervisionError::Protocol)?;
     if response.source != expected_source
         || chrono::DateTime::parse_from_rfc3339(&response.observed_at).is_err()
-        || response.records.len() > 100
+        || response.records.len() > 2_000
         || response
             .error
             .as_ref()
@@ -765,6 +774,58 @@ pub(crate) fn read_apple_inputs_blocking(request: AppleInputRequest) -> AppleInp
         Ok(response) => response,
         Err(error) => fail_soft(source, &error),
     }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct PlanningPdfPage {
+    pub(crate) page: usize,
+    pub(crate) text: String,
+    pub(crate) confidence: Option<f64>,
+}
+
+pub(crate) fn extract_planning_pdf(path: &Path) -> Result<Vec<PlanningPdfPage>, String> {
+    let response = read_apple_inputs_blocking(AppleInputRequest::ExtractPdf(PdfArguments {
+        path: path
+            .to_str()
+            .ok_or_else(|| "selected PDF path is not valid UTF-8".to_string())?
+            .to_string(),
+    }));
+    if let Some(error) = response.error() {
+        return Err(error.to_string());
+    }
+    response
+        .records()
+        .iter()
+        .map(|record| {
+            let page = record
+                .fields()
+                .get("page")
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|page| *page > 0)
+                .ok_or_else(|| "PDF helper returned an invalid page number".to_string())?;
+            let text = record
+                .fields()
+                .get("text")
+                .cloned()
+                .ok_or_else(|| "PDF helper omitted page text".to_string())?;
+            let confidence = record
+                .fields()
+                .get("confidence")
+                .map(|value| {
+                    value
+                        .parse::<f64>()
+                        .ok()
+                        .filter(|value| (0.0..=1.0).contains(value))
+                        .ok_or_else(|| "PDF helper returned invalid OCR confidence".to_string())
+                })
+                .transpose()?;
+            Ok(PlanningPdfPage {
+                page,
+                text,
+                confidence,
+            })
+        })
+        .collect()
 }
 
 #[cfg(all(test, unix))]

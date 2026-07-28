@@ -4,8 +4,8 @@
 	classes = {};
 	objectVersion = 77;
 	objects = {
-		A10000000000000000000001 /* Sources */ = {isa = PBXGroup; children = (A10000000000000000000011 /* main.swift */, A10000000000000000000012 /* Protocol.swift */, A10000000000000000000013 /* EventKitReader.swift */, A10000000000000000000014 /* NotesReader.swift */, A10000000000000000000015 /* FileReader.swift */); path = Sources; sourceTree = "<group>"; };
-		A10000000000000000000002 /* Tests */ = {isa = PBXGroup; children = (A10000000000000000000021 /* ProtocolTests.swift */, A10000000000000000000022 /* EventKitFixtureTests.swift */, A10000000000000000000023 /* NotesFixtureTests.swift */, A10000000000000000000024 /* FileReaderTests.swift */); path = Tests; sourceTree = "<group>"; };
+		A10000000000000000000001 /* Sources */ = {isa = PBXGroup; children = (A10000000000000000000011 /* main.swift */, A10000000000000000000012 /* Protocol.swift */, A10000000000000000000013 /* EventKitReader.swift */, A10000000000000000000014 /* NotesReader.swift */, A10000000000000000000015 /* FileReader.swift */, A10000000000000000000016 /* PDFExtractor.swift */); path = Sources; sourceTree = "<group>"; };
+		A10000000000000000000002 /* Tests */ = {isa = PBXGroup; children = (A10000000000000000000021 /* ProtocolTests.swift */, A10000000000000000000022 /* EventKitFixtureTests.swift */, A10000000000000000000023 /* NotesFixtureTests.swift */, A10000000000000000000024 /* FileReaderTests.swift */, A10000000000000000000025 /* PDFExtractorTests.swift */); path = Tests; sourceTree = "<group>"; };
 		A10000000000000000000003 /* Products */ = {isa = PBXGroup; children = (A10000000000000000000031 /* BuzzAppleInputs */, A10000000000000000000032 /* BuzzAppleInputsTests.xctest */); name = Products; sourceTree = "<group>"; };
 		A10000000000000000000004 /* Root */ = {isa = PBXGroup; children = (A10000000000000000000001 /* Sources */, A10000000000000000000002 /* Tests */, A10000000000000000000003 /* Products */); sourceTree = "<group>"; };
 		A10000000000000000000011 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
@@ -13,19 +13,22 @@
 		A10000000000000000000013 /* EventKitReader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventKitReader.swift; sourceTree = "<group>"; };
 		A10000000000000000000014 /* NotesReader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotesReader.swift; sourceTree = "<group>"; };
 		A10000000000000000000015 /* FileReader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileReader.swift; sourceTree = "<group>"; };
+		A10000000000000000000016 /* PDFExtractor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PDFExtractor.swift; sourceTree = "<group>"; };
 		A10000000000000000000021 /* ProtocolTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProtocolTests.swift; sourceTree = "<group>"; };
 		A10000000000000000000022 /* EventKitFixtureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventKitFixtureTests.swift; sourceTree = "<group>"; };
 		A10000000000000000000023 /* NotesFixtureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotesFixtureTests.swift; sourceTree = "<group>"; };
 		A10000000000000000000024 /* FileReaderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileReaderTests.swift; sourceTree = "<group>"; };
+		A10000000000000000000025 /* PDFExtractorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PDFExtractorTests.swift; sourceTree = "<group>"; };
 		A10000000000000000000031 /* BuzzAppleInputs */ = {isa = PBXFileReference; explicitFileType = compiled.mach-o.executable; path = BuzzAppleInputs; sourceTree = BUILT_PRODUCTS_DIR; };
 		A10000000000000000000032 /* BuzzAppleInputsTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; path = BuzzAppleInputsTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		A10000000000000000000041 /* Sources Build */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000051 /* main.swift */, A10000000000000000000052 /* Protocol.swift */, A10000000000000000000053 /* EventKitReader.swift */, A10000000000000000000054 /* NotesReader.swift */, A10000000000000000000055 /* FileReader.swift */); runOnlyForDeploymentPostprocessing = 0; };
-		A10000000000000000000042 /* Test Sources Build */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000061 /* ProtocolTests.swift */, A10000000000000000000062 /* EventKitFixtureTests.swift */, A10000000000000000000063 /* NotesFixtureTests.swift */, A10000000000000000000064 /* FileReaderTests.swift */, A10000000000000000000065 /* Protocol.swift */, A10000000000000000000066 /* EventKitReader.swift */, A10000000000000000000067 /* NotesReader.swift */, A10000000000000000000068 /* FileReader.swift */); runOnlyForDeploymentPostprocessing = 0; };
+		A10000000000000000000041 /* Sources Build */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000051 /* main.swift */, A10000000000000000000052 /* Protocol.swift */, A10000000000000000000053 /* EventKitReader.swift */, A10000000000000000000054 /* NotesReader.swift */, A10000000000000000000055 /* FileReader.swift */, A10000000000000000000056 /* PDFExtractor.swift */); runOnlyForDeploymentPostprocessing = 0; };
+		A10000000000000000000042 /* Test Sources Build */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000061 /* ProtocolTests.swift */, A10000000000000000000062 /* EventKitFixtureTests.swift */, A10000000000000000000063 /* NotesFixtureTests.swift */, A10000000000000000000064 /* FileReaderTests.swift */, A10000000000000000000065 /* Protocol.swift */, A10000000000000000000066 /* EventKitReader.swift */, A10000000000000000000067 /* NotesReader.swift */, A10000000000000000000068 /* FileReader.swift */, A10000000000000000000069 /* PDFExtractor.swift */, A1000000000000000000006A /* PDFExtractorTests.swift */); runOnlyForDeploymentPostprocessing = 0; };
 		A10000000000000000000051 /* main.swift */ = {isa = PBXBuildFile; fileRef = A10000000000000000000011 /* main.swift */; };
 		A10000000000000000000052 /* Protocol.swift */ = {isa = PBXBuildFile; fileRef = A10000000000000000000012 /* Protocol.swift */; };
 		A10000000000000000000053 /* EventKitReader.swift */ = {isa = PBXBuildFile; fileRef = A10000000000000000000013 /* EventKitReader.swift */; };
 		A10000000000000000000054 /* NotesReader.swift */ = {isa = PBXBuildFile; fileRef = A10000000000000000000014 /* NotesReader.swift */; };
 		A10000000000000000000055 /* FileReader.swift */ = {isa = PBXBuildFile; fileRef = A10000000000000000000015 /* FileReader.swift */; };
+		A10000000000000000000056 /* PDFExtractor.swift */ = {isa = PBXBuildFile; fileRef = A10000000000000000000016 /* PDFExtractor.swift */; };
 		A10000000000000000000061 /* ProtocolTests.swift */ = {isa = PBXBuildFile; fileRef = A10000000000000000000021 /* ProtocolTests.swift */; };
 		A10000000000000000000062 /* EventKitFixtureTests.swift */ = {isa = PBXBuildFile; fileRef = A10000000000000000000022 /* EventKitFixtureTests.swift */; };
 		A10000000000000000000063 /* NotesFixtureTests.swift */ = {isa = PBXBuildFile; fileRef = A10000000000000000000023 /* NotesFixtureTests.swift */; };
@@ -34,6 +37,8 @@
 		A10000000000000000000066 /* EventKitReader.swift */ = {isa = PBXBuildFile; fileRef = A10000000000000000000013 /* EventKitReader.swift */; };
 		A10000000000000000000067 /* NotesReader.swift */ = {isa = PBXBuildFile; fileRef = A10000000000000000000014 /* NotesReader.swift */; };
 		A10000000000000000000068 /* FileReader.swift */ = {isa = PBXBuildFile; fileRef = A10000000000000000000015 /* FileReader.swift */; };
+		A10000000000000000000069 /* PDFExtractor.swift */ = {isa = PBXBuildFile; fileRef = A10000000000000000000016 /* PDFExtractor.swift */; };
+		A1000000000000000000006A /* PDFExtractorTests.swift */ = {isa = PBXBuildFile; fileRef = A10000000000000000000025 /* PDFExtractorTests.swift */; };
 		A10000000000000000000071 /* XCTest */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = XCTest.framework; path = System/Library/Frameworks/XCTest.framework; sourceTree = SDKROOT; };
 		A10000000000000000000072 /* XCTest Build */ = {isa = PBXBuildFile; fileRef = A10000000000000000000071 /* XCTest */; };
 		A10000000000000000000073 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };

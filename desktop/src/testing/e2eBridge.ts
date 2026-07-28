@@ -9486,6 +9486,33 @@ export function maybeInstallE2eTauriMocks() {
       }
       case "recover_command_brief_publications":
         return 0;
+      case "pick_battle_rhythm_document":
+        return {
+          filename: "Shortcast.docx",
+          extension: "docx",
+          sha256:
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          sizeBytes: 2048,
+          blocks: [
+            {
+              kind: "table_row",
+              location: "table 1 row 1",
+              cells: ["Date", "Time", "Event"],
+            },
+            {
+              kind: "table_row",
+              location: "table 1 row 2",
+              cells: ["29 Jul 2026", "0800", "Navigation brief"],
+            },
+          ],
+          pages: [],
+          sheets: [],
+          truncated: false,
+        };
+      case "interpret_battle_rhythm_document":
+        // Exercise the fully local deterministic fallback in browser E2E. The
+        // native Rust tests cover provider-neutral model routing separately.
+        return null;
       case "get_command_brief_status":
         return (
           activeConfig?.mock?.commandBriefStatus ?? {

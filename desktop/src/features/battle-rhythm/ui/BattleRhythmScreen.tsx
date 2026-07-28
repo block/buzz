@@ -7,6 +7,7 @@ import type { BattleRhythmEvent } from "../domain/contracts";
 import { useBattleRhythmMutations, useBattleRhythmQuery } from "../hooks";
 import { DayShortcast } from "./DayShortcast";
 import { EventEditorDialog } from "./EventEditorDialog";
+import { ImportReviewDialog } from "./ImportReviewDialog";
 import { MonthCalendar } from "./MonthCalendar";
 import { SourceHistoryDialog } from "./SourceHistoryDialog";
 import { WeekCalendar } from "./WeekCalendar";
@@ -30,6 +31,7 @@ export function BattleRhythmScreen() {
     BattleRhythmEvent | undefined
   >();
   const [historyOpen, setHistoryOpen] = React.useState(false);
+  const [importOpen, setImportOpen] = React.useState(false);
   const range = React.useMemo(() => getYearRange(day, TIME_ZONE, 24), [day]);
   const rhythm = useBattleRhythmQuery(identity.data?.pubkey, range);
   const mutations = useBattleRhythmMutations(
@@ -169,8 +171,7 @@ export function BattleRhythmScreen() {
           </button>
           <button
             className="rounded border px-3 py-2 text-sm"
-            disabled
-            title="Document import is planned for a later phase"
+            onClick={() => setImportOpen(true)}
             type="button"
           >
             Import Document
@@ -229,6 +230,17 @@ export function BattleRhythmScreen() {
       <SourceHistoryDialog
         onOpenChange={setHistoryOpen}
         open={historyOpen}
+        sources={rhythm.data?.sources ?? []}
+      />
+      <ImportReviewDialog
+        coverage={range}
+        events={rhythm.data?.events ?? []}
+        onApply={async (input) => {
+          await mutations.importRevision.mutateAsync(input);
+        }}
+        onOpenChange={setImportOpen}
+        open={importOpen}
+        ownerPubkey={identity.data?.pubkey ?? ""}
         sources={rhythm.data?.sources ?? []}
       />
     </main>

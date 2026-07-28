@@ -110,6 +110,20 @@ impl CloudAdviserClient {
         parse_cloud_chief_output(request, &terminal)
     }
 
+    pub(crate) async fn complete_json(
+        &self,
+        provider: CloudProvider,
+        system: &str,
+        input: &Value,
+        cancellation: CancellationToken,
+    ) -> Result<Value, AdviserExecutionError> {
+        let input = serde_json::to_string(input).map_err(|_| invalid_output())?;
+        let output = self
+            .complete(provider, system, &input, cancellation)
+            .await?;
+        serde_json::from_str(&output).map_err(|_| invalid_output())
+    }
+
     async fn complete(
         &self,
         provider: CloudProvider,

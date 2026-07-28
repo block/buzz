@@ -130,6 +130,8 @@ rubato = "3.0"
 audioadapter-buffers = "3.0"
 tempfile = "3"
 strip-ansi-escapes = "0.2"
+quick-xml = "0.41.0"
+calamine = "0.36.1"
 
 [dev-dependencies]
 # `test-util` enables tokio's paused-clock (`start_paused`) so the relay

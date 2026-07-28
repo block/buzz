@@ -82,6 +82,15 @@ func response(for request: AppleInputRequest) async -> AppleInputResponse {
             let files = FileReader(allowlistedRoots: fileAllowlist)
             let page = try files.read(paths: payload.paths)
             return .init(source: "files", permission: .authorized, records: page.records.map { $0.output() }, truncated: page.truncated)
+        case .extractPDF(let payload):
+            let records = try PDFExtractor().extract(path: payload.path).map { page in
+                var fields = ["page": String(page.page), "text": page.text]
+                if let confidence = page.confidence {
+                    fields["confidence"] = String(confidence)
+                }
+                return AppleInputRecord(fields: fields)
+            }
+            return .init(source: "files", permission: .authorized, records: records)
         }
     } catch {
         return .init(source: request.operation.rawValue, permission: .unavailable, records: [], error: error.localizedDescription)

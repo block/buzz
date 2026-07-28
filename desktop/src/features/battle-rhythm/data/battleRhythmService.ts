@@ -88,6 +88,7 @@ export async function fetchBattleRhythm(
     .map(parseRelayRevisionChunk)
     .filter((chunk): chunk is NonNullable<typeof chunk> => chunk !== null);
   const eligibleRevisionKeys = new Set<string>();
+  const revisionsByKey = new Map<string, BattleRhythmRevision>();
   const chunkGroups = new Map<string, typeof chunks>();
   for (const chunk of chunks) {
     const group = chunkGroups.get(chunk.revisionId) ?? [];
@@ -120,6 +121,7 @@ export async function fetchBattleRhythm(
       });
       if ((await revisionManifestHash(revision)) === first.manifestHash)
         eligibleRevisionKeys.add(`${first.sourceId}:${revisionId}`);
+      revisionsByKey.set(`${first.sourceId}:${revisionId}`, revision);
     } catch {
       /* invalid chunks are ineligible */
     }
@@ -130,9 +132,20 @@ export async function fetchBattleRhythm(
     .filter((source) =>
       eligibleRevisionKeys.has(`${source.id}:${source.revisionId}`),
     );
+  const removedEventIds = new Set(
+    sources.flatMap((source) => {
+      const revision = revisionsByKey.get(`${source.id}:${source.revisionId}`);
+      return (
+        revision?.changes
+          .filter((change) => change.kind === "removed")
+          .map((change) => change.before.id) ?? []
+      );
+    }),
+  );
   const events = newest(calendarEvents)
     .map(parseRelayCalendarEvent)
     .filter((x): x is BattleRhythmEvent => x !== null)
+    .filter((event) => !removedEventIds.has(event.id))
     .filter(
       (event) =>
         Date.parse(event.start) < Date.parse(range.end) &&

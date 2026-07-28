@@ -15,6 +15,7 @@ enum AppleInputOperation: String, Codable {
     case listNoteFolders = "list_note_folders"
     case readCalendar = "read_calendar", readReminders = "read_reminders"
     case readNotes = "read_notes", readFiles = "read_files"
+    case extractPDF = "extract_pdf"
 }
 enum PermissionSource: String { case calendar, reminders, notes, files }
 enum PermissionState: String, Codable { case notDetermined = "not_determined", denied, authorized, restricted, unavailable }
@@ -33,9 +34,11 @@ struct CalendarPayload { let calendarIdentifiers: [String]; let start: Date; let
 struct ReminderPayload { let listIdentifiers: [String]; let start: Date; let end: Date; let maximum: Int }
 struct NotesPayload { let folderIdentifiers: [String]; let maximum: Int }
 struct FilesPayload { let paths: [String] }
+struct PDFPayload { let path: String }
 enum AppleInputPayload {
     case permission(PermissionPayload), listCalendars, listReminderLists, listNoteFolders
     case readCalendar(CalendarPayload), readReminders(ReminderPayload), readNotes(NotesPayload), readFiles(FilesPayload)
+    case extractPDF(PDFPayload)
 }
 struct AppleInputRequest {
     let operation: AppleInputOperation
@@ -91,6 +94,13 @@ struct AppleInputRequest {
         case .readFiles:
             try exact(arguments, keys: ["paths"])
             return .init(operation: operation, payload: .readFiles(.init(paths: try stringArray(arguments["paths"], name: "paths"))))
+        case .extractPDF:
+            try exact(arguments, keys: ["path"])
+            guard let path = arguments["path"] as? String, !path.isEmpty,
+                  path.utf8.count <= 4096, path.hasPrefix("/") else {
+                throw AppleInputFailure.invalidRequest("path must be a bounded absolute path")
+            }
+            return .init(operation: operation, payload: .extractPDF(.init(path: path)))
         }
     }
 

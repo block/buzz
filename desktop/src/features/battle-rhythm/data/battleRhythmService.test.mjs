@@ -313,3 +313,37 @@ test("chunk publication failure leaves the active source pointer unwritten", asy
   );
   assert.deepEqual(kinds, [30631, 46310]);
 });
+
+test("fetch hides events removed by the active source revision", async () => {
+  const codec = await import("../domain/eventCodec.ts");
+  const revisedSource = {
+    ...source,
+    revisionId: "r2",
+    priorRevisionId: "r1",
+  };
+  const revision = {
+    schemaVersion: 1,
+    id: "r2",
+    sourceId: "fas",
+    priorRevisionId: "r1",
+    importedAt: source.importedAt,
+    changes: [{ kind: "removed", before: event }],
+  };
+  const responses = [
+    [await codec.buildSourceEvent(revisedSource)],
+    [await codec.buildCalendarEvent(event)],
+    await codec.buildRevisionEvents(revision),
+  ];
+
+  const result = await fetchBattleRhythm(
+    "owner",
+    {
+      start: "2026-08-01T00:00:00+10:00",
+      end: "2026-09-01T00:00:00+10:00",
+    },
+    { fetchEvents: async () => responses.shift() ?? [] },
+  );
+
+  assert.equal(result.sources.length, 1);
+  assert.deepEqual(result.events, []);
+});

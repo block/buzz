@@ -45,3 +45,34 @@ test("Battle Rhythm persists a manual weekly routine and honours an exclusion", 
   await expect(screen.getByText("CUB – Updated")).toBeVisible();
   await expect(screen.getByText("Manual", { exact: true })).toBeVisible();
 });
+
+test("Battle Rhythm reviews and applies a Shortcast document import", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await page.getByTestId("open-battle-rhythm-view").click();
+
+  const screen = page.getByTestId("battle-rhythm-screen");
+  await screen.getByRole("button", { name: "Import Document" }).click();
+  const dialog = page.getByRole("dialog", {
+    name: "Import planning document",
+  });
+  await dialog
+    .getByRole("button", { name: "Choose Word, Excel, or PDF" })
+    .click();
+
+  await expect(dialog.getByText("Shortcast.docx")).toBeVisible();
+  await expect(dialog.getByText("Navigation brief")).toBeVisible();
+  await expect(dialog.getByText(/1 added/)).toBeVisible();
+  await dialog.getByRole("button", { name: "Apply approved changes" }).click();
+
+  await expect(dialog).toHaveCount(0);
+  await expect(screen.getByText("Navigation brief")).toBeVisible();
+  await screen.getByRole("button", { name: "History" }).click();
+  await expect(
+    page
+      .getByRole("dialog", { name: "Source revisions" })
+      .getByText("Shortcast", { exact: true }),
+  ).toBeVisible();
+});
