@@ -118,6 +118,75 @@ void main() {
     expect(_pTagPubkeys(session.event), [_mentionPubkey]);
   });
 
+  test(
+    'explicit mention overlapping a fan-out participant dedupes to one p tag',
+    () async {
+      final session = _PendingPublishRelaySession();
+      final keys = nostr.Keys.generate();
+      final send = _sendMessage(
+        session: session,
+        nsec: keys.nsec,
+        readChannel: (channelId) => _channel(
+          channelType: 'dm',
+          participantPubkeys: [keys.public, _humanPubkey, _agentPubkey],
+        ),
+      );
+
+      // The explicit mention arrives uppercase while the roster holds the
+      // lowercase form — dedupe is keyed on the lowercased pubkey.
+      final explicitAgent = _agentPubkey.toUpperCase();
+      final result = send(
+        channelId: _channelId,
+        content: 'hey @agent',
+        mentionPubkeys: [explicitAgent],
+      );
+      await session.published;
+      session.accept();
+      await result;
+
+      // The case-mismatched overlap collapses to a single p tag (first-seen
+      // casing wins), and the rest of the roster still fans out.
+      expect(_pTagPubkeys(session.event), [explicitAgent, _humanPubkey]);
+    },
+  );
+
+  test(
+    'DM thread reply carries fan-out p tags alongside reply e-tags',
+    () async {
+      final session = _PendingPublishRelaySession();
+      final keys = nostr.Keys.generate();
+      final send = _sendMessage(
+        session: session,
+        nsec: keys.nsec,
+        readChannel: (channelId) => _channel(
+          channelType: 'dm',
+          participantPubkeys: [keys.public, _humanPubkey, _agentPubkey],
+        ),
+      );
+
+      // Nested thread reply, as the thread page sends it: parent + root.
+      final result = send(
+        channelId: _channelId,
+        content: 'replying in-thread',
+        parentEventId: _parentEventId,
+        rootEventId: _rootEventId,
+        mentionPubkeys: const [],
+      );
+      await session.published;
+      session.accept();
+      await result;
+
+      expect(
+        session.event.tags,
+        containsAll([
+          ['e', _rootEventId, '', 'root'],
+          ['e', _parentEventId, '', 'reply'],
+        ]),
+      );
+      expect(_pTagPubkeys(session.event), [_humanPubkey, _agentPubkey]);
+    },
+  );
+
   test('sends without fan-out when the channel is not cached yet', () async {
     final session = _PendingPublishRelaySession();
     final send = _sendMessage(
@@ -147,6 +216,11 @@ const _agentPubkey =
     'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
 const _mentionPubkey =
     'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc';
+
+const _rootEventId =
+    'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd';
+const _parentEventId =
+    'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';
 
 SendMessage _sendMessage({
   required _PendingPublishRelaySession session,
