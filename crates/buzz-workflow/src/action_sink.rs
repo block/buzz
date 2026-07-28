@@ -94,4 +94,26 @@ pub trait ActionSink: Send + Sync {
         author_pubkey: &str,
         workflow_depth: usize,
     ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>>;
+
+    /// Add an emoji reaction to a message on behalf of a workflow owner.
+    ///
+    /// Emits a NIP-25 reaction event (kind:7) targeting `target_event_id`.
+    /// The relay keypair signs the event; attribution flows through the
+    /// standard reaction storage path.
+    ///
+    /// - `community_id`: the owning community of the workflow run.
+    /// - `target_event_id`: hex event ID of the message to react to.
+    /// - `emoji`: emoji character or shortcode (e.g. `"👍"`, `"thumbsup"`).
+    /// - `author_pubkey`: hex pubkey of the workflow owner (attribution `p` tag).
+    /// - `workflow_depth`: trigger-chain depth for loop prevention.
+    ///
+    /// Returns the reaction event ID hex string on success.
+    fn add_reaction(
+        &self,
+        community_id: CommunityId,
+        target_event_id: &str,
+        emoji: &str,
+        author_pubkey: &str,
+        workflow_depth: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>>;
 }

@@ -462,6 +462,107 @@ impl ActionSink for RelayActionSink {
             Ok(event_id_hex)
         })
     }
+
+    fn add_reaction(
+        &self,
+        community_id: CommunityId,
+        target_event_id: &str,
+        emoji: &str,
+        author_pubkey: &str,
+        workflow_depth: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>> {
+        let target_event_id = target_event_id.to_owned();
+        let emoji = emoji.to_owned();
+        let author_pubkey = author_pubkey.to_owned();
+
+        Box::pin(async move {
+            let state = self
+                .state
+                .upgrade()
+                .ok_or_else(|| ActionSinkError::Database("relay is shutting down".into()))?;
+
+            let host = state
+                .db
+                .lookup_community_host(community_id)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?
+                .ok_or_else(|| {
+                    ActionSinkError::Database(format!(
+                        "workflow run community {community_id} is not mapped to a host"
+                    ))
+                })?;
+            let tenant = buzz_core::tenant::TenantContext::resolved(community_id, host);
+
+            if emoji.trim().is_empty() {
+                return Err(ActionSinkError::EmptyContent);
+            }
+
+            // Parse the target event ID (hex) → EventId for the SDK builder.
+            let target_id = nostr::EventId::from_hex(&target_event_id).map_err(|e| {
+                ActionSinkError::InvalidInput(format!("invalid target event id: {e}"))
+            })?;
+
+            // Build a NIP-25 reaction (kind:7) via the SDK builder, then add
+            // attribution `p` and `buzz:workflow` (depth) tags. The SDK builder
+            // emits content=emoji + an `e` tag pointing at the target.
+            let workflow_tag_depth = workflow_depth.to_string();
+            let base = buzz_sdk::builders::build_reaction(target_id, &emoji)
+                .map_err(|e| ActionSinkError::EventBuild(e.to_string()))?;
+            // Sign once to capture the builder's tags, then rebuild with the
+            // full set. EventBuilder has no mutable tag access, so this is the
+            // simplest way to extend its tags while preserving content/kind.
+            let probe = base
+                .clone()
+                .sign_with_keys(&state.relay_keypair)
+                .map_err(|e| ActionSinkError::EventBuild(format!("probe sign: {e}")))?;
+            let mut all_tags: Vec<Tag> = probe.tags.into_iter().collect();
+            all_tags.push(
+                Tag::parse(["p", &author_pubkey])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("p tag: {e}")))?,
+            );
+            all_tags.push(
+                Tag::parse(["buzz:workflow", "true", &workflow_tag_depth])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("workflow tag: {e}")))?,
+            );
+            let event = EventBuilder::new(Kind::Custom(7), &emoji)
+                .tags(all_tags)
+                .sign_with_keys(&state.relay_keypair)
+                .map_err(|e| ActionSinkError::EventBuild(format!("sign: {e}")))?;
+
+            let kind_u32: u32 = 7;
+            // Reactions are global-scoped (no channel_id) — they reference the
+            // target message via the `e` tag, and the relay resolves channel
+            // membership from the target during ingest.
+            let (stored_event, was_inserted) = state
+                .db
+                .insert_event(tenant.community(), &event, None)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+            if !was_inserted {
+                return Err(ActionSinkError::Database(
+                    "reaction event was not inserted".into(),
+                ));
+            }
+
+            dispatch_persistent_event(
+                &tenant,
+                &state,
+                &stored_event,
+                kind_u32,
+                &author_pubkey,
+                None,
+            )
+            .await;
+
+            let event_id_hex = stored_event.event.id.to_hex();
+            info!(
+                community_id = %community_id,
+                target = %target_event_id,
+                "Workflow add_reaction → event {event_id_hex}"
+            );
+            Ok(event_id_hex)
+        })
+    }
 }
 
 #[cfg(test)]
