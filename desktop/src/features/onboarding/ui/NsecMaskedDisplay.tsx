@@ -94,7 +94,9 @@ export function NsecMaskedDisplay({
         <div className="min-w-0 flex-1">
           <p
             className={`${
-              isBare ? ONBOARDING_KEY_TEXT_CLASS : "text-xs leading-5"
+              isBare
+                ? ONBOARDING_KEY_TEXT_CLASS
+                : "break-all [overflow-wrap:anywhere] font-mono text-xs leading-5"
             } ${
               isRevealed
                 ? `select-text ${isBare ? "" : "text-foreground"}`
