@@ -28,6 +28,24 @@ pub enum VoiceInputMode {
     VoiceActivity,
 }
 
+/// Language passed to the local multilingual Whisper recognizer.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptionLanguage {
+    German,
+    #[default]
+    English,
+}
+
+impl TranscriptionLanguage {
+    pub(crate) const fn whisper_code(self) -> &'static str {
+        match self {
+            Self::German => "de",
+            Self::English => "en",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum HuddlePhase {
@@ -80,6 +98,8 @@ pub struct HuddleState {
     pub tts_enabled: bool,
     /// Whether STT transcript posting is enabled for this huddle.
     pub transcription_enabled: bool,
+    /// Language used by the local multilingual Whisper recognizer.
+    pub transcription_language: TranscriptionLanguage,
     /// Shared flag: true while TTS is playing audio.
     /// Shared with the STT pipeline for barge-in / echo gating.
     #[serde(skip)]
@@ -157,6 +177,7 @@ impl Clone for HuddleState {
             is_creator: self.is_creator,
             tts_enabled: self.tts_enabled,
             transcription_enabled: self.transcription_enabled,
+            transcription_language: self.transcription_language,
             tts_active: Arc::clone(&self.tts_active),
             tts_cancel: Arc::clone(&self.tts_cancel),
             tts_starting: Arc::clone(&self.tts_starting),
@@ -184,6 +205,7 @@ impl Default for HuddleState {
             is_creator: false,
             tts_enabled: true,
             transcription_enabled: false,
+            transcription_language: TranscriptionLanguage::default(),
             tts_active: Arc::new(AtomicBool::new(false)),
             tts_cancel: Arc::new(AtomicBool::new(false)),
             tts_starting: Arc::new(AtomicBool::new(false)),
@@ -197,13 +219,16 @@ impl Default for HuddleState {
 }
 
 impl HuddleState {
-    /// Reset to default state while preserving the session generation counter.
+    /// Reset to default state while preserving user voice preferences and the
+    /// session generation counter.
     /// Used by start_huddle rollback, join_huddle rollback, and teardown_huddle
     /// to invalidate in-flight transcription tasks without losing the generation.
     pub(crate) fn reset_preserving_generation(&mut self) {
         let gen = Arc::clone(&self.session_generation);
+        let transcription_language = self.transcription_language;
         *self = Self::default();
         self.session_generation = gen;
+        self.transcription_language = transcription_language;
     }
 }
 

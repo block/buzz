@@ -1024,7 +1024,6 @@ dependencies = [
  "buzz-persona",
  "buzz-sdk",
  "bytes",
- "bzip2 0.6.1",
  "chrono",
  "ctrlc",
  "dirs",

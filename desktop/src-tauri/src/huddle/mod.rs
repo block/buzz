@@ -33,6 +33,7 @@ pub mod pocket;
 pub mod preprocessing;
 pub mod reconnect;
 pub mod relay_api;
+pub mod settings;
 pub mod state;
 pub mod stt;
 pub mod transcription;
@@ -61,7 +62,8 @@ pub(super) fn drain_until_shutdown<T>(
 
 // ── Re-exports ────────────────────────────────────────────────────────────────
 
-pub use state::{HuddleJoinInfo, HuddlePhase, HuddleState, VoiceInputMode};
+pub use settings::{get_transcription_language, set_transcription_language};
+pub use state::{HuddleJoinInfo, HuddlePhase, HuddleState, TranscriptionLanguage, VoiceInputMode};
 pub use transcription::{set_huddle_transcription_enabled, start_stt_pipeline};
 
 // ── Imports ───────────────────────────────────────────────────────────────────
@@ -792,7 +794,7 @@ pub async fn check_pipeline_hotstart(state: State<'_, AppState>) -> Result<(), S
     Ok(())
 }
 
-/// Trigger a background download of voice models (Parakeet STT + Pocket TTS).
+/// Trigger a background download of voice models (multilingual Whisper STT + Pocket TTS).
 ///
 /// Returns immediately — downloads run in tokio background tasks.
 /// Poll `get_model_status` to track progress.

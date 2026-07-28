@@ -1,7 +1,7 @@
-//! Model download manager for STT (Parakeet TDT-CTC 110M) and TTS (Pocket TTS) models.
+//! Model download manager for STT (Whisper Tiny multilingual) and TTS (Pocket TTS) models.
 //!
 //! Mental model:
-//!   app launch → start_stt_download (background) → ~/.buzz/models/parakeet-tdt-ctc-110m-en/
+//!   app launch → start_stt_download (background) → ~/.buzz/models/whisper-tiny-multilingual/
 //!   app launch → start_tts_download (background) → ~/.buzz/models/pocket-tts/
 //!   STT pipeline → is_stt_ready() → stt_model_dir() → run inference
 //!   TTS pipeline → is_tts_ready() → tts_model_dir() → run synthesis
@@ -10,12 +10,10 @@
 //! is written alongside model files — if the on-disk version doesn't match the
 //! compiled-in version, the model is re-downloaded.
 //!
-//! Upgrade note: an older Moonshine STT model directory at
-//! `~/.buzz/models/moonshine-tiny/` is removed best-effort once the new STT
-//! model finishes installing successfully. Cleanup is gated on the new model
-//! being Ready, so a failed download never removes the previous on-disk model
-//! during migration. If removal fails (permissions, etc.) the leftover is
-//! harmless and can be removed by hand.
+//! Upgrade note: older Moonshine and English-only Parakeet STT directories are
+//! removed best-effort once the multilingual model finishes installing. Cleanup
+//! is gated on the new model being Ready, so a failed download never removes
+//! the previous on-disk model during migration.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -33,10 +31,24 @@ use sha2::{Digest, Sha256};
 // To recompute hashes: download each file, run `shasum -a 256 <file>`, and
 // update the corresponding constant.
 
-/// SHA-256 hash of the STT archive
-/// (sherpa-onnx-nemo-parakeet_tdt_ctc_110m-en-36000-int8.tar.bz2).
-/// Computed from a known-good download. Update when upgrading model versions.
-const STT_ARCHIVE_SHA256: &str = "17f945007b52ccd8b7200ffc7c5652e9e8e961dfdf479cefcabd06cf5703630b";
+/// HuggingFace base URL for sherpa-onnx's multilingual Whisper Tiny export.
+///
+/// Pinned to commit 65176e2deb88badc814a94058666cadccc29b61c
+/// (2024-07-13) for reproducible downloads.
+const STT_HF_BASE: &str = "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-tiny/resolve/\
+     65176e2deb88badc814a94058666cadccc29b61c";
+
+/// SHA-256 hashes for the int8 Whisper sessions and tokenizer.
+pub(super) const STT_ENCODER_FILENAME: &str = "tiny-encoder.int8.onnx";
+pub(super) const STT_DECODER_FILENAME: &str = "tiny-decoder.int8.onnx";
+pub(super) const STT_TOKENS_FILENAME: &str = "tiny-tokens.txt";
+
+#[rustfmt::skip]
+const STT_FILE_HASHES: &[(&str, &str)] = &[
+    (STT_ENCODER_FILENAME, "d24fb083ae3b1041fc24e97971d60e280c9342201fbb67b0ab428a8b4a51a434"),
+    (STT_DECODER_FILENAME, "d2fece8dd42771f1df975c6c0445770d0c292bf7547c2cae04a6c0cc57540925"),
+    (STT_TOKENS_FILENAME,  "b34b360dbb493e781e479794586d661700670d65564001f23024971d1f2fa126"),
+];
 
 /// HuggingFace base URL for the sherpa-onnx Pocket TTS fp32 repackage.
 ///
@@ -86,11 +98,10 @@ const TTS_FILE_HASHES: &[(&str, &str)] = &[
 // considered stale and re-downloaded. Increment when upgrading model files.
 
 /// Model manifest version for the STT model. Increment when upgrading model files.
-/// Bumped from "1" → "2" alongside the migration from Moonshine Tiny to
-/// Parakeet TDT-CTC 110M — the model directory name also changed, so this
-/// is technically belt-and-suspenders, but it keeps the manifest semantics
-/// honest (each version tag identifies one specific set of model bytes).
-const STT_MODEL_VERSION: &str = "2";
+/// Bumped from "2" → "3" for the English-only Parakeet → multilingual Whisper
+/// migration. The directory name also changes, keeping each version bound to
+/// one exact set of model bytes.
+const STT_MODEL_VERSION: &str = "3";
 
 /// Model manifest version for Pocket TTS. Increment when upgrading model files.
 /// Bumped "1" → "2" when the bundled reference voice changed from KevinAHM's
@@ -107,57 +118,41 @@ const MANIFEST_FILENAME: &str = ".buzz-model-manifest";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-/// Maximum expected STT archive size (200 MB — actual is ~100 MB).
-const MAX_STT_DOWNLOAD_BYTES: u64 = 200 * 1024 * 1024;
+/// Maximum expected size per Whisper file (110 MB; decoder is ~90 MB).
+const MAX_STT_FILE_BYTES: u64 = 110 * 1024 * 1024;
 
 /// Maximum expected Pocket TTS file size (400 MB per file — largest is
 /// `lm_main.onnx` at ~303 MB fp32).
 const MAX_TTS_FILE_BYTES: u64 = 400 * 1024 * 1024;
 
-/// NVIDIA Parakeet TDT-CTC 110M (English, int8) — packaged for sherpa-onnx by
-/// k2-fsa. Single ONNX file (CTC head) + tokens.txt. Avg WER ~7.5% across
-/// the OpenASR-style benchmarks; ~half the WER of Moonshine Tiny at ~2× the
-/// disk footprint. CTC blank-token decoding eliminates the silence/cut-audio
-/// hallucination class that hurts encoder-decoder models on noisy huddle audio.
-/// License: CC-BY-4.0 (attribution required — see About dialog).
-const STT_DOWNLOAD_URL: &str =
-    "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/\
-     sherpa-onnx-nemo-parakeet_tdt_ctc_110m-en-36000-int8.tar.bz2";
-
-/// Subdirectory name produced by `tar xjf` on the archive.
-const STT_ARCHIVE_SUBDIR: &str = "sherpa-onnx-nemo-parakeet_tdt_ctc_110m-en-36000-int8";
-
 /// Final directory name under `~/.buzz/models/`.
-const STT_MODEL_DIR_NAME: &str = "parakeet-tdt-ctc-110m-en";
+const STT_MODEL_DIR_NAME: &str = "whisper-tiny-multilingual";
 
 /// All files that must be present for the model to be considered ready.
 ///
-/// Includes the attribution sidecar written by Buzz during install. The
-/// upstream archive does not ship a license file, so readiness should require
-/// the local CC-BY-4.0 attribution to travel with the cached model bytes.
-const STT_EXPECTED_FILES: &[&str] = &["model.int8.onnx", "tokens.txt", STT_LICENSE_FILE_NAME];
+/// Includes the attribution sidecar written by Buzz during install.
+const STT_EXPECTED_FILES: &[&str] = &[
+    STT_ENCODER_FILENAME,
+    STT_DECODER_FILENAME,
+    STT_TOKENS_FILENAME,
+    STT_LICENSE_FILE_NAME,
+];
 
-/// CC-BY-4.0 §3(a)(1) attribution block written next to the STT model files
-/// after install. Travels with the bytes — if a user copies the model
-/// directory, the attribution comes with it. Mirrored in About/Credits.
-///
-/// Covers all five §3(a)(1) bullets: creator, copyright notice, license
-/// notice, warranty disclaimer reference, and URI to the source material.
+/// Attribution and license sidecar written next to the STT model files.
 const STT_LICENSE_FILE_NAME: &str = "MODEL_LICENSE.txt";
 const STT_LICENSE_TEXT: &str = "\
-NVIDIA Parakeet TDT-CTC 110M (English)
-© NVIDIA Corporation.
+OpenAI Whisper Tiny (multilingual)
+Copyright (c) 2022 OpenAI.
 
-Licensed under the Creative Commons Attribution 4.0 International License
-(CC-BY-4.0). License text: https://creativecommons.org/licenses/by/4.0/
+Licensed under the MIT License:
+https://github.com/openai/whisper/blob/main/LICENSE
 
-Original model: https://huggingface.co/nvidia/parakeet-tdt_ctc-110m
-Converted to ONNX with int8 quantization by the sherpa-onnx project
-(https://github.com/k2-fsa/sherpa-onnx); Buzz ships this conversion
-unmodified.
+Original model: https://huggingface.co/openai/whisper-tiny
+ONNX conversion and int8 quantization:
+https://huggingface.co/csukuangfj/sherpa-onnx-whisper-tiny
 
-Provided \"AS IS\", without warranty of any kind, express or implied. See the
-license text for full warranty disclaimer.
+The software is provided \"AS IS\", without warranty of any kind, express or
+implied. See the MIT License for the complete terms.
 ";
 
 // ── Pocket TTS model ──────────────────────────────────────────────────────────
@@ -229,70 +224,12 @@ pub enum ModelStatus {
 
 /// Combined status for all voice models (returned to the frontend).
 ///
-/// `stt` is the speech-to-text model status (currently Parakeet TDT-CTC 110M;
-/// historically Moonshine Tiny). The field name describes the role, not the
-/// specific model, so future model swaps don't ripple into the API surface.
+/// `stt` is the speech-to-text model status. The field name describes the
+/// role, not the specific model, so model swaps don't ripple into the API.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VoiceModelStatus {
     pub stt: ModelStatus,
     pub tts: ModelStatus,
-}
-
-// ── Safe archive extraction ───────────────────────────────────────────────────
-
-/// Extract a .tar.bz2 archive safely using Rust-native crates.
-///
-/// The `tar` crate rejects path traversal (absolute paths, `..` components)
-/// by default in `unpack()`. We add an explicit pre-check as defense-in-depth.
-fn extract_archive(archive_path: &Path, dest_dir: &Path) -> Result<(), String> {
-    use bzip2::read::BzDecoder;
-    use std::fs::File;
-    use tar::Archive;
-
-    let file = File::open(archive_path).map_err(|e| format!("open archive: {e}"))?;
-    let decoder = BzDecoder::new(file);
-    let mut archive = Archive::new(decoder);
-
-    // Pre-validate: check all entries for path safety before extracting anything.
-    // This is defense-in-depth — the tar crate also rejects traversal in unpack().
-    {
-        let file2 =
-            File::open(archive_path).map_err(|e| format!("open archive for validation: {e}"))?;
-        let decoder2 = BzDecoder::new(file2);
-        let mut check_archive = Archive::new(decoder2);
-        for entry in check_archive
-            .entries()
-            .map_err(|e| format!("read archive entries: {e}"))?
-        {
-            let entry = entry.map_err(|e| format!("archive entry: {e}"))?;
-            let path = entry.path().map_err(|e| format!("entry path: {e}"))?;
-            let path_str = path.to_string_lossy();
-
-            // Reject absolute paths.
-            if path.is_absolute() {
-                return Err(format!("archive contains absolute path: {path_str}"));
-            }
-            // Reject path traversal.
-            for component in path.components() {
-                if matches!(component, std::path::Component::ParentDir) {
-                    return Err(format!("archive contains path traversal: {path_str}"));
-                }
-            }
-            // Reject symlinks.
-            if entry.header().entry_type().is_symlink()
-                || entry.header().entry_type().is_hard_link()
-            {
-                return Err(format!("archive contains symlink/hardlink: {path_str}"));
-            }
-        }
-    }
-
-    // Safe to extract — all entries validated.
-    archive
-        .unpack(dest_dir)
-        .map_err(|e| format!("extract archive: {e}"))?;
-
-    Ok(())
 }
 
 // ── Hash verification ─────────────────────────────────────────────────────────
@@ -610,15 +547,9 @@ impl ModelManager {
 
     /// Start a background STT model download. No-op if already ready or downloading.
     ///
-    /// Also schedules a best-effort cleanup of the legacy Moonshine model
-    /// directory — but **only when the new STT model is already on disk and
-    /// Ready**. This covers the "fast-path" upgrade scenario (new model
-    /// installed by a previous build, `download_stt_model` short-circuits, the
-    /// post-install cleanup never runs). For users mid-migration (old model
-    /// present, new model still downloading) we keep the old files until the
-    /// Parakeet install finishes, avoiding unnecessary data loss if the
-    /// ~100 MB download fails. The post-install path inside
-    /// `download_stt_model` handles cleanup once the new install reaches Ready.
+    /// Also schedules best-effort cleanup of legacy STT model directories, but
+    /// only when multilingual Whisper is Ready. This covers the fast-path where
+    /// a previous build already installed the new model.
     pub fn start_stt_download(&self, http_client: reqwest::Client) {
         let manager = self.clone();
         self.stt.start_download(
@@ -630,10 +561,10 @@ impl ModelManager {
         if self.stt.is_ready(&self.models_dir) {
             // Detached cleanup task — must not block startup. Gated above on
             // the new model being Ready, so a mid-migration user keeps their
-            // existing moonshine-tiny files until Parakeet install completes.
+            // previous model files until the Whisper install completes.
             let models_dir = self.models_dir.clone();
             tauri::async_runtime::spawn(async move {
-                cleanup_legacy_moonshine_dir(&models_dir).await;
+                cleanup_legacy_stt_dirs(&models_dir).await;
             });
         }
     }
@@ -651,98 +582,84 @@ impl ModelManager {
 
     // ── Private download implementations ─────────────────────────────────────
 
-    /// Download, extract, and verify the STT model archive.
+    /// Download and verify the multilingual Whisper STT files.
     async fn download_stt_model(&self, http_client: reqwest::Client) -> Result<(), String> {
         tokio::fs::create_dir_all(&self.models_dir)
             .await
             .map_err(|e| format!("create models dir: {e}"))?;
 
-        // Temp filenames derive from the final directory name to avoid colliding
-        // with leftovers from any previous STT model (e.g. moonshine-tiny.*).
-        let archive_path = self
-            .models_dir
-            .join(format!("{STT_MODEL_DIR_NAME}.tar.bz2"));
         let temp_dir = self.models_dir.join(format!("{STT_MODEL_DIR_NAME}.tmp"));
+        fresh_temp_dir(&temp_dir).await?;
 
-        eprintln!("buzz-desktop: downloading STT model from {STT_DOWNLOAD_URL}");
-        let response = fetch_url(&http_client, STT_DOWNLOAD_URL, "stt archive").await?;
+        let total_files = STT_FILE_HASHES.len() as u32;
+        for (i, (filename, expected)) in STT_FILE_HASHES.iter().enumerate() {
+            let url = format!("{STT_HF_BASE}/{filename}");
+            eprintln!("buzz-desktop: downloading Whisper STT {filename} from {url}");
+            let response = fetch_url(&http_client, &url, filename)
+                .await
+                .inspect_err(|_| {
+                    let _ = std::fs::remove_dir_all(&temp_dir);
+                })?;
 
-        let slot = self.stt.clone();
-        let bytes = download_file(
-            response,
-            &archive_path,
-            MAX_STT_DOWNLOAD_BYTES,
-            "stt archive",
-            |downloaded, content_length| {
-                if let Some(pct) =
-                    content_length.and_then(|total| (downloaded * 89).checked_div(total))
-                {
-                    slot.set_status(ModelStatus::Downloading {
-                        progress_percent: pct.min(89) as u8,
-                    });
-                }
-            },
-        )
-        .await?;
-        eprintln!("buzz-desktop: downloaded {bytes} bytes, wrote to disk");
+            let dest = temp_dir.join(filename);
+            let slot = self.stt.clone();
+            let file_index = i as u32;
+            let bytes = download_file(
+                response,
+                &dest,
+                MAX_STT_FILE_BYTES,
+                filename,
+                |downloaded, content_length| {
+                    if let Some(total) = content_length {
+                        if total > 0 {
+                            let file_frac = downloaded as f64 / total as f64;
+                            let base = (file_index as f64 / total_files as f64) * 89.0;
+                            let span = 89.0 / total_files as f64;
+                            let pct = (base + span * file_frac).min(89.0) as u8;
+                            slot.set_status(ModelStatus::Downloading {
+                                progress_percent: pct,
+                            });
+                        }
+                    }
+                },
+            )
+            .await
+            .inspect_err(|_| {
+                let _ = std::fs::remove_dir_all(&temp_dir);
+            })?;
+            eprintln!("buzz-desktop: downloaded {bytes} bytes ({filename}), wrote to disk");
 
-        // Verify archive integrity before extraction.
-        let hash = sha256_file(&archive_path).await?;
-        if hash != STT_ARCHIVE_SHA256 {
-            let _ = tokio::fs::remove_file(&archive_path).await;
-            return Err(format!(
-                "STT archive integrity check failed: expected {STT_ARCHIVE_SHA256}, got {hash}"
-            ));
+            let actual = sha256_file(&dest).await?;
+            if actual != *expected {
+                let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+                return Err(format!(
+                    "Whisper STT {filename} integrity check failed: expected {expected}, got {actual}"
+                ));
+            }
+
+            let pct = (((i as u32 + 1) * 89) / total_files).min(89) as u8;
+            self.stt.set_status(ModelStatus::Downloading {
+                progress_percent: pct,
+            });
         }
 
+        tokio::fs::write(temp_dir.join(STT_LICENSE_FILE_NAME), STT_LICENSE_TEXT)
+            .await
+            .map_err(|e| format!("write STT model license sidecar: {e}"))?;
         self.stt.set_status(ModelStatus::Downloading {
             progress_percent: 90,
         });
-        fresh_temp_dir(&temp_dir).await?;
 
-        eprintln!("buzz-desktop: extracting STT archive…");
-        let (ap, td) = (archive_path.clone(), temp_dir.clone());
-        tokio::task::spawn_blocking(move || extract_archive(&ap, &td))
-            .await
-            .map_err(|e| format!("tar task panicked: {e}"))??;
-
-        let extracted_subdir = temp_dir.join(STT_ARCHIVE_SUBDIR);
-        if !extracted_subdir.is_dir() {
-            let _ = tokio::fs::remove_dir_all(&temp_dir).await;
-            return Err(format!(
-                "expected subdir '{STT_ARCHIVE_SUBDIR}' not found after extraction"
-            ));
-        }
-
-        // Write the CC-BY-4.0 attribution sidecar before the atomic install,
-        // so it lands in the final model dir as part of the same rename. The
-        // upstream tarball ships no LICENSE/NOTICE, so we provide it ourselves
-        // per §3(a)(1) (license must travel with Shared material).
-        let license_path = extracted_subdir.join(STT_LICENSE_FILE_NAME);
-        if let Err(e) = tokio::fs::write(&license_path, STT_LICENSE_TEXT).await {
-            let _ = tokio::fs::remove_dir_all(&temp_dir).await;
-            let _ = tokio::fs::remove_file(&archive_path).await;
-            return Err(format!("write model license sidecar: {e}"));
-        }
-
-        // verify_and_install takes the subdir (actual model files); temp_cleanup removes outer dir.
         if let Err(e) = self
             .stt
-            .verify_and_install(&self.models_dir, &extracted_subdir, Some(&temp_dir))
+            .verify_and_install(&self.models_dir, &temp_dir, None)
             .await
         {
             let _ = tokio::fs::remove_dir_all(&temp_dir).await;
-            let _ = tokio::fs::remove_file(&archive_path).await;
             return Err(e);
         }
-        let _ = tokio::fs::remove_file(&archive_path).await;
 
-        // Best-effort cleanup of the previous default STT model dir (Moonshine
-        // Tiny, ~70 MB). Runs only after the new install reaches Ready, so a
-        // failed download never removes the previous on-disk model during
-        // migration. The same cleanup also runs from `start_stt_download` to
-        // cover users who already have the new model installed.
-        cleanup_legacy_moonshine_dir(&self.models_dir).await;
+        cleanup_legacy_stt_dirs(&self.models_dir).await;
 
         eprintln!(
             "buzz-desktop: STT model ready at {}",
@@ -890,31 +807,29 @@ pub fn is_stt_ready() -> bool {
         .unwrap_or(false)
 }
 
-/// Best-effort cleanup of the legacy Moonshine STT model directory.
-///
-/// Removes `~/.buzz/models/moonshine-tiny/` if present (~70 MB on disk).
-/// Idempotent — no-op if the directory is absent. Errors are logged and
-/// swallowed; the leftover is harmless and the user can remove it manually.
+/// Best-effort cleanup of legacy STT model directories.
 ///
 /// This is intentionally a free function rather than a method: it has no
 /// dependency on `ModelManager` state, runs from both pre- and post-install
 /// code paths, and the call site is meant to be easy to delete in a future
 /// release once we're confident no users are still on the old model dir.
-async fn cleanup_legacy_moonshine_dir(models_dir: &Path) {
-    let legacy = models_dir.join("moonshine-tiny");
-    if !legacy.exists() {
-        return;
-    }
-    match tokio::fs::remove_dir_all(&legacy).await {
-        Ok(()) => eprintln!(
-            "buzz-desktop: removed legacy STT model dir {}",
-            legacy.display()
-        ),
-        Err(e) => eprintln!(
-            "buzz-desktop: could not remove legacy STT model dir {}: {e} \
-             (harmless — remove manually to reclaim disk space)",
-            legacy.display()
-        ),
+async fn cleanup_legacy_stt_dirs(models_dir: &Path) {
+    for dir_name in ["moonshine-tiny", "parakeet-tdt-ctc-110m-en"] {
+        let legacy = models_dir.join(dir_name);
+        if !legacy.exists() {
+            continue;
+        }
+        match tokio::fs::remove_dir_all(&legacy).await {
+            Ok(()) => eprintln!(
+                "buzz-desktop: removed legacy STT model dir {}",
+                legacy.display()
+            ),
+            Err(e) => eprintln!(
+                "buzz-desktop: could not remove legacy STT model dir {}: {e} \
+                 (harmless — remove manually to reclaim disk space)",
+                legacy.display()
+            ),
+        }
     }
 }
 
@@ -933,6 +848,24 @@ pub fn is_tts_ready() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stt_readiness_requires_all_whisper_files_and_license() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let slot = ModelSlot::new(STT_MODEL_DIR_NAME, STT_EXPECTED_FILES, STT_MODEL_VERSION);
+        let model_dir = temp.path().join(STT_MODEL_DIR_NAME);
+        std::fs::create_dir_all(&model_dir).expect("create model dir");
+
+        for file in STT_EXPECTED_FILES {
+            std::fs::write(model_dir.join(file), b"test").expect("write expected file");
+        }
+        std::fs::write(model_dir.join(MANIFEST_FILENAME), STT_MODEL_VERSION).expect("manifest");
+
+        assert!(slot.is_ready(temp.path()));
+
+        std::fs::remove_file(model_dir.join(STT_DECODER_FILENAME)).expect("remove decoder");
+        assert!(!slot.is_ready(temp.path()));
+    }
 
     #[test]
     fn tts_readiness_requires_license_sidecar() {

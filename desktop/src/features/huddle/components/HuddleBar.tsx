@@ -3,6 +3,8 @@ import { listen } from "@tauri-apps/api/event";
 import {
   Bot,
   Captions,
+  Check,
+  Languages,
   MessageSquareText,
   PhoneOff,
   SmilePlus,
@@ -48,6 +50,7 @@ type HuddleState = {
   agent_pubkeys: string[];
   tts_enabled: boolean;
   transcription_enabled: boolean;
+  transcription_language: "german" | "english";
   is_creator: boolean;
   voice_input_mode: "push_to_talk" | "voice_activity";
 };
@@ -529,6 +532,21 @@ export function HuddleBar({
     }
   }
 
+  async function handleTranscriptionLanguage(
+    language: HuddleState["transcription_language"],
+  ) {
+    setTranscriptError(null);
+    try {
+      await invoke("set_transcription_language", { language });
+      const s = await invoke<HuddleState>("get_huddle_state");
+      setState(s);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      setTranscriptError(`Language change failed: ${message}`);
+      console.error("Failed to change transcription language:", e);
+    }
+  }
+
   function handleOpenThread() {
     if (!parentChannelId || !huddleThreadEventId) return;
     onOpenThread?.(parentChannelId, huddleThreadEventId);
@@ -774,6 +792,60 @@ export function HuddleBar({
             </TooltipContent>
           </Tooltip>
 
+          <Popover>
+            <PopoverTrigger asChild>
+              <Button
+                aria-label={`Transcript language: ${
+                  barState.transcription_language === "german"
+                    ? "German"
+                    : "English"
+                }`}
+                className="buzz-huddle-control-button h-12 min-w-12 shrink-0 gap-1 rounded-md px-2"
+                type="button"
+                variant="ghost"
+              >
+                <Languages className="h-4 w-4" />
+                <span className="text-2xs font-semibold uppercase">
+                  {barState.transcription_language === "german" ? "DE" : "EN"}
+                </span>
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent
+              align="center"
+              className="buzz-huddle-drawer buzz-huddle-popover w-48 text-foreground"
+              side="top"
+            >
+              <span className="mb-1 block px-2 text-xs font-medium">
+                Transcript language
+              </span>
+              {(
+                [
+                  ["german", "Deutsch"],
+                  ["english", "English"],
+                ] as const
+              ).map(([language, label]) => {
+                const selected = barState.transcription_language === language;
+                return (
+                  <button
+                    aria-pressed={selected}
+                    className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs transition-colors hover:bg-accent"
+                    key={language}
+                    onClick={() => void handleTranscriptionLanguage(language)}
+                    type="button"
+                  >
+                    <Check
+                      className={cn(
+                        "h-3 w-3 shrink-0",
+                        !selected && "invisible",
+                      )}
+                    />
+                    <span className="font-medium">{label}</span>
+                  </button>
+                );
+              })}
+            </PopoverContent>
+          </Popover>
+
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
@@ -822,6 +894,9 @@ export function HuddleBar({
           ? "In huddle, microphone connected"
           : "In huddle, no microphone"}
         {`, voice input: ${isPttMode ? "push to talk, press Ctrl+Space to transmit" : "voice activity detection"}`}
+        {`, transcript language: ${
+          barState.transcription_language === "german" ? "German" : "English"
+        }`}
         {modelStatus &&
           transcriptionEnabled &&
           modelStatus.stt !== "ready" &&

@@ -42,8 +42,9 @@ use huddle::audio_output::{
 use huddle::reconnect::reconnect_huddle_audio;
 use huddle::{
     add_agent_to_huddle, check_pipeline_hotstart, confirm_huddle_active, download_voice_models,
-    end_huddle, get_huddle_agent_pubkeys, get_huddle_state, get_model_status, get_voice_input_mode,
-    join_huddle, leave_huddle, push_audio_pcm, set_huddle_transcription_enabled, set_tts_enabled,
+    end_huddle, get_huddle_agent_pubkeys, get_huddle_state, get_model_status,
+    get_transcription_language, get_voice_input_mode, join_huddle, leave_huddle, push_audio_pcm,
+    set_huddle_transcription_enabled, set_transcription_language, set_tts_enabled,
     set_voice_input_mode, speak_agent_message, start_huddle, start_stt_pipeline,
 };
 use managed_agents::{
@@ -885,6 +886,8 @@ pub fn run() {
             get_huddle_agent_pubkeys,
             set_voice_input_mode,
             get_voice_input_mode,
+            set_transcription_language,
+            get_transcription_language,
             list_audio_output_devices,
             set_audio_output_device,
             get_audio_output_device,
