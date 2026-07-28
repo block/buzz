@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -22,6 +21,9 @@ use crate::command_services::policy::{
 };
 
 const SNAPSHOT: &str = "f8bb8f8d2f046a82137f1ebc01f41fb370f3a330992bce8a7a4b6160c3ef3f07";
+
+mod fixtures;
+use fixtures::{parse_specialist, specialist_contributions};
 
 struct FakeResponse {
     status: u16,
@@ -287,58 +289,6 @@ fn cloud_fallback_stops_for_cancellation_and_policy_integrity_failures() {
     ] {
         assert!(!cloud_fallback_eligible(terminal), "{terminal:?}");
     }
-}
-
-fn parse_specialist(value: Value, adviser: AdviserId) -> AdviserContribution {
-    AdviserContribution::parse_for_adviser(
-        value,
-        adviser,
-        &BTreeSet::from(["ledger-1".to_string()]),
-    )
-    .expect("specialist contribution")
-}
-
-fn specialist_contributions() -> Vec<AdviserContribution> {
-    [
-        (
-            AdviserId::Operations,
-            "operations",
-            "operations",
-            "Machinery is within limits.",
-        ),
-        (
-            AdviserId::Navigation,
-            "navigation",
-            "navigation",
-            "Navigation considerations are bounded.",
-        ),
-        (
-            AdviserId::DailyRoutine,
-            "daily_routine",
-            "daily_routine",
-            "Daily routine is supported.",
-        ),
-        (
-            AdviserId::Reporting,
-            "reporting",
-            "reports",
-            "Reporting is current.",
-        ),
-        (
-            AdviserId::Plans,
-            "plans",
-            "planning_30_60_90",
-            "Plans are source-backed.",
-        ),
-    ]
-    .into_iter()
-    .map(|(adviser, wire_adviser, section, text)| {
-        parse_specialist(
-            contribution_value(wire_adviser, section, text, &["ledger-1"]),
-            adviser,
-        )
-    })
-    .collect()
 }
 
 async fn executor_for(

@@ -13,6 +13,8 @@ const finding = {
 };
 const advisers = [
   ["operations", "operations"],
+  ["intelligence", "intelligence"],
+  ["logistics", "logistics"],
   ["navigation", "navigation"],
   ["daily_routine", "daily_routine"],
   ["reporting", "reports"],
@@ -39,6 +41,8 @@ const advisers = [
 const sectionKeys = [
   "today",
   "operations",
+  "intelligence",
+  "logistics",
   "navigation",
   "daily_routine",
   "reports",
@@ -77,6 +81,23 @@ const published = {
         quotedLocation: { quote: "hidden evidence", location: "page 7" },
         retrievedAt: "2026-07-25T05:55:00Z",
         observedAt: "2026-07-25T05:56:00Z",
+      },
+      {
+        classification: "OFFICIAL",
+        ledgerId: "ledger-world-monitor",
+        sourceId: "world-monitor-source",
+        sourceKind: "world_monitor",
+        collection: "World Monitor",
+        documentId: "World Monitor regional update",
+        chunkId: "world-monitor-chunk",
+        timestamp: "2026-07-25T05:40:00Z",
+        snapshotId: "snapshot-verified",
+        quotedLocation: {
+          quote: "hidden curated intelligence",
+          location: "curated regional update",
+        },
+        retrievedAt: "2026-07-25T05:57:00Z",
+        observedAt: "2026-07-25T05:58:00Z",
       },
     ],
     sourceFreshness: {
@@ -172,7 +193,7 @@ test("renders no-brief and queued/running/failed lifecycle states with truthful 
   assert.match(initial, /No Daily Command Brief has been generated/);
   assert.match(
     initial,
-    /latest available RAG, Memory, Calendar, Reminders, Notes/i,
+    /latest available RAG, Memory, World Monitor, Calendar, Reminders, Notes/i,
   );
   assert.doesNotMatch(initial, /frozen OFFICIAL knowledge snapshot/i);
 
@@ -264,10 +285,20 @@ test("renders a decision-first brief with supporting evidence collapsed after co
     },
   });
 
-  const decisions = html.indexOf(">Decisions and approvals required<");
-  const today = html.indexOf(">Today at a glance<");
-  const operations = html.indexOf(">Operational priorities and risks<");
-  assert.ok(decisions >= 0 && decisions < today && today < operations);
+  const decisions = html.indexOf('data-testid="brief-section-decisions"');
+  const today = html.indexOf('data-testid="brief-section-today"');
+  const operations = html.indexOf('data-testid="brief-section-operations"');
+  const intelligence = html.indexOf('data-testid="brief-section-intelligence"');
+  const logistics = html.indexOf('data-testid="brief-section-logistics"');
+  const navigation = html.indexOf('data-testid="brief-section-navigation"');
+  assert.ok(
+    decisions >= 0 &&
+      decisions < today &&
+      today < operations &&
+      operations < intelligence &&
+      intelligence < logistics &&
+      logistics < navigation,
+  );
   assert.doesNotMatch(html, />Generation status</);
 
   const disclosure = html.indexOf('data-testid="brief-evidence-disclosure"');
@@ -284,6 +315,8 @@ test("renders a decision-first brief with supporting evidence collapsed after co
 
   for (const adviser of [
     "Operations",
+    "Maritime N2",
+    "Logistics",
     "Navigation",
     "Daily Routine",
     "Reporting",
@@ -303,6 +336,12 @@ test("renders a decision-first brief with supporting evidence collapsed after co
   assert.match(html, />Watch items</);
   assert.match(html, />Conflicts and gaps</);
   assert.doesNotMatch(html, /hidden evidence/);
+  const worldMonitor = html.indexOf("World Monitor regional update");
+  assert.ok(worldMonitor > disclosure);
+  assert.doesNotMatch(
+    html.slice(0, disclosure),
+    /World Monitor regional update/,
+  );
   assert.doesNotMatch(html, /approve|execute action/i);
 });
 

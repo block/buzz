@@ -190,6 +190,14 @@ function MainBriefSections({
           section="operations"
         />
         <BriefSectionCard
+          findings={brief.sections.intelligence}
+          section="intelligence"
+        />
+        <BriefSectionCard
+          findings={brief.sections.logistics}
+          section="logistics"
+        />
+        <BriefSectionCard
           findings={brief.sections.navigation}
           section="navigation"
         />
@@ -295,7 +303,8 @@ export function DailyCommandBrief({
             </p>
             <p className="mt-1 text-sm text-muted-foreground">
               Generate a brief to assemble the latest available RAG, Memory,
-              Calendar, Reminders, Notes and selected-file inputs.
+              World Monitor, Calendar, Reminders, Notes and selected-file
+              inputs.
             </p>
           </CardContent>
         </Card>

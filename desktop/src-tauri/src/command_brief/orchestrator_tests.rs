@@ -484,7 +484,7 @@ pub(super) async fn wait_terminal(
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn exact_five_specialists_share_snapshot_then_tool_free_chief_builds_nine_sections() {
+async fn exact_seven_specialists_share_snapshot_then_tool_free_chief_builds_eleven_sections() {
     let sources = Arc::new(FakeSourceProvider::with_snapshots([SNAPSHOT_A]));
     let advisers = Arc::new(FakeAdviserProvider::default());
     let persistence = Arc::new(FakePersistence::default());
@@ -497,13 +497,13 @@ async fn exact_five_specialists_share_snapshot_then_tool_free_chief_builds_nine_
     );
 
     let calls = advisers.calls.lock().expect("calls lock").clone();
-    assert_eq!(calls.len(), 6);
+    assert_eq!(calls.len(), 8);
     assert_eq!(calls.last().map(String::as_str), Some("chief"));
     for adviser in SPECIALIST_ADVISERS {
         assert!(calls.contains(&format!("specialist:{adviser:?}")));
     }
     let snapshots = advisers.snapshots.lock().expect("snapshots lock").clone();
-    assert_eq!(snapshots.len(), 5);
+    assert_eq!(snapshots.len(), 7);
     assert!(snapshots.iter().all(|(_, snapshot)| snapshot == SNAPSHOT_A));
 
     let brief = orchestrator.result(&run_id).expect("completed brief");
@@ -511,7 +511,7 @@ async fn exact_five_specialists_share_snapshot_then_tool_free_chief_builds_nine_
     assert_eq!(value["classification"], "OFFICIAL");
     assert_eq!(value["runId"], run_id);
     assert_eq!(value["snapshotId"], SNAPSHOT_A);
-    assert_eq!(value["sections"].as_object().map(|map| map.len()), Some(9));
+    assert_eq!(value["sections"].as_object().map(|map| map.len()), Some(11));
     assert_eq!(
         value["contributions"]
             .as_array()
@@ -521,6 +521,8 @@ async fn exact_five_specialists_share_snapshot_then_tool_free_chief_builds_nine_
             .collect::<Vec<_>>(),
         vec![
             json!("operations"),
+            json!("intelligence"),
+            json!("logistics"),
             json!("navigation"),
             json!("daily_routine"),
             json!("reporting"),
@@ -625,7 +627,7 @@ async fn failed_chief_model_preserves_specialists_in_a_degraded_brief() {
             .as_array()
             .expect("contributions")
             .len(),
-        5
+        7
     );
     assert!(!brief["sections"]["today"]
         .as_array()
@@ -698,7 +700,7 @@ async fn unsupported_chief_addition_is_discarded_and_uses_safe_fallback() {
             .as_array()
             .expect("contributions")
             .len(),
-        5
+        7
     );
     persistence.assert_one_terminal(CommandBriefLifecycleState::Degraded, None);
     let status = serde_json::to_value(orchestrator.status(&run_id).expect("status")).expect("json");
@@ -877,11 +879,11 @@ async fn one_snapshot_change_restarts_whole_run_second_change_fails() {
         BriefRunState::Completed
     );
     let snapshots = advisers.snapshots.lock().expect("snapshots").clone();
-    assert_eq!(snapshots.len(), 10);
-    assert!(snapshots[..5]
+    assert_eq!(snapshots.len(), 14);
+    assert!(snapshots[..7]
         .iter()
         .all(|(_, snapshot)| snapshot == SNAPSHOT_A));
-    assert!(snapshots[5..]
+    assert!(snapshots[7..]
         .iter()
         .all(|(_, snapshot)| snapshot == SNAPSHOT_B));
 
@@ -904,7 +906,7 @@ async fn one_snapshot_change_restarts_whole_run_second_change_fails() {
     );
     assert_eq!(
         failing_advisers.snapshots.lock().expect("snapshots").len(),
-        10
+        14
     );
     let status = serde_json::to_value(failing.status(&failing_run).expect("status")).expect("json");
     assert_eq!(status["error"], "snapshot_changed");

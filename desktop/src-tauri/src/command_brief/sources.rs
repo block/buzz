@@ -45,34 +45,6 @@ const RAG_MEMORY_SECTIONS: [BriefSection; 5] = [
     BriefSection::Planning306090,
 ];
 
-/// Stable, redacted failures which the orchestrator may expose as run status.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum SourceCollectionError {
-    Cancelled,
-    InvalidRequest,
-    InvalidTime,
-    RagUnavailable,
-    RagStale,
-    RagInvalid,
-    SnapshotChanged,
-    ConflictingSourceIdentity,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct SourceReadError {
-    code: &'static str,
-}
-
-impl SourceReadError {
-    pub(crate) const fn new(code: &'static str) -> Self {
-        Self { code }
-    }
-
-    fn code(self) -> &'static str {
-        self.code
-    }
-}
-
 /// Backend seam implemented by the admitted local RAG, Memory, and signed Apple services.
 pub(crate) trait SourceBackend: Send + Sync {
     fn verify_active_rag_snapshot(&self) -> Result<VerifiedRagSnapshot, SourceCollectionError>;
@@ -168,34 +140,6 @@ where
 
     fn post_recheck_limitations(&self) -> Vec<String> {
         (**self).post_recheck_limitations()
-    }
-}
-
-pub(crate) trait SourceToolCaller: Send + Sync {
-    fn call(
-        &self,
-        service: &AuthenticatedSourceService,
-        tool_name: &str,
-        arguments: Value,
-        cancellation: &CancellationToken,
-    ) -> Result<Value, AdmissionError>;
-}
-
-#[allow(
-    dead_code,
-    reason = "Task 8 installs the production orchestrator into AppState"
-)]
-struct AuthenticatedMcpSourceCaller;
-
-impl SourceToolCaller for AuthenticatedMcpSourceCaller {
-    fn call(
-        &self,
-        service: &AuthenticatedSourceService,
-        tool_name: &str,
-        arguments: Value,
-        cancellation: &CancellationToken,
-    ) -> Result<Value, AdmissionError> {
-        service.call(tool_name, arguments, cancellation)
     }
 }
 
@@ -1020,42 +964,6 @@ impl<B: SourceBackend> SourceCollector<B> {
     }
 }
 
-fn extract_rag_records(
-    snapshot: &VerifiedRagSnapshot,
-    query: &str,
-    value: &Value,
-    observed_at: &str,
-    collections: &[String],
-) -> Result<Vec<CandidateSource>, SourceReadError> {
-    match snapshot.assurance() {
-        RagSnapshotAssurance::SignedSnapshot => {
-            extract_verified_rag_evidence(snapshot, query, value)
-                .map(|records| {
-                    records
-                        .into_iter()
-                        .map(|record| CandidateSource {
-                            source_id: record.source_id,
-                            source_kind: SourceKind::Rag,
-                            collection: record.collection,
-                            document_id: record.document_id,
-                            chunk_id: record.chunk_id,
-                            timestamp: record.retrieved_at.clone(),
-                            location: record.location,
-                            retrieved_at: record.retrieved_at,
-                            observed_at: observed_at.to_string(),
-                            quote: record.quote,
-                        })
-                        .collect()
-                })
-                .map_err(|_| SourceReadError::new("rag_evidence_invalid"))
-        }
-        RagSnapshotAssurance::TrustedLanObserved => {
-            extract_trusted_lan_rag_evidence(value, query, observed_at, collections)
-                .map_err(|_| SourceReadError::new("rag_evidence_invalid"))
-        }
-    }
-}
-
 fn ensure_collection_active(cancellation: &CancellationToken) -> Result<(), SourceCollectionError> {
     if cancellation.is_cancelled() {
         Err(SourceCollectionError::Cancelled)
@@ -1064,14 +972,21 @@ fn ensure_collection_active(cancellation: &CancellationToken) -> Result<(), Sour
     }
 }
 
+mod backend_tools;
+use backend_tools::AuthenticatedMcpSourceCaller;
+pub(crate) use backend_tools::SourceToolCaller;
 mod canonical;
 use canonical::*;
 mod command_team_discussions;
 pub(crate) use command_team_discussions::{
     load_command_team_discussions, CommandTeamDiscussionBatch,
 };
+mod errors;
+pub(crate) use errors::{SourceCollectionError, SourceReadError};
 mod limitations;
 use limitations::*;
+mod rag_collection;
+use rag_collection::extract_rag_records;
 mod retrieval_intents;
 use retrieval_intents::fixed_retrieval_intents;
 pub(crate) use retrieval_intents::FixedRetrievalIntent;
