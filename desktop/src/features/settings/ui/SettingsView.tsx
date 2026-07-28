@@ -7,6 +7,8 @@ import {
   canManageCommunityMembers,
   shouldWarnMissingMembershipSnapshot,
 } from "@/shared/api/relayMembers";
+import { SidebarProviderUsageIndicator } from "@/features/provider-usage/ui/SidebarProviderUsageIndicator";
+import { FeatureGate } from "@/shared/features";
 import { getFeature } from "@/shared/features/manifest";
 import {
   resolveEnabled,
@@ -294,6 +296,9 @@ export function SettingsView({
         </SidebarContent>
 
         <SidebarFooter>
+          <FeatureGate feature="providerUsage">
+            <SidebarProviderUsageIndicator />
+          </FeatureGate>
           {appVersion ? (
             <p
               className="px-2 pb-1 text-xs text-sidebar-foreground/45"

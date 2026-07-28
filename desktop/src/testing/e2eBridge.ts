@@ -9529,6 +9529,61 @@ export function maybeInstallE2eTauriMocks() {
 
         return { ...DEFAULT_MOCK_IDENTITY, lost: isLost, locked: isLocked };
       }
+      case "list_provider_usage_capabilities":
+        return [
+          {
+            id: "codex",
+            name: "Codex",
+            availability: "available",
+            detail: "Uses your existing local Codex sign-in",
+          },
+          {
+            id: "claude",
+            name: "Claude",
+            availability: "unsupported",
+            detail: "No supported standalone personal allowance reader yet",
+          },
+          {
+            id: "grok",
+            name: "Grok",
+            availability: "unsupported",
+            detail: "Consumer allowance is available in Grok Settings",
+          },
+        ];
+      case "get_provider_usage":
+        return {
+          provider: "codex",
+          vendor: "openai",
+          product: "codex",
+          source: "personalAllowance",
+          planType: "pro",
+          windows: [
+            {
+              id: "codex:primary",
+              label: "5-hour",
+              usedPercent: 38,
+              remainingPercent: 62,
+              resetsAt: 1_785_258_777,
+              durationMinutes: 300,
+            },
+            {
+              id: "codex:secondary",
+              label: "Weekly",
+              usedPercent: 52,
+              remainingPercent: 48,
+              resetsAt: 1_785_658_777,
+              durationMinutes: 10_080,
+            },
+          ],
+          totals: {
+            creditBalance: "0",
+            resetCreditsAvailable: 3,
+            lifetimeTokens: 13_597_623_776,
+            latestDailyTokens: 61_038_450,
+            latestDailyDate: "2026-07-24",
+          },
+          fetchedAt: 1_753_390_800,
+        };
       case "sign_nostr_identity_binding": {
         const request = payload as {
           challengeId: string;

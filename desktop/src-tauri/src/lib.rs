@@ -677,6 +677,8 @@ pub fn run() {
             transfer_builderlab_community,
             title_bar_double_click,
             get_identity,
+            list_provider_usage_capabilities,
+            get_provider_usage,
             get_nsec,
             import_identity,
             persist_current_identity,

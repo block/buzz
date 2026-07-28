@@ -12,6 +12,8 @@ import { Button } from "@/shared/ui/button";
 import { cn } from "@/shared/lib/cn";
 import { topChromeBackdrop } from "@/shared/layout/chromeLayout";
 import { useOptionalSidebar } from "@/shared/ui/sidebar";
+import { FeatureGate } from "@/shared/features";
+import { SidebarProviderUsageIndicator } from "@/features/provider-usage/ui/SidebarProviderUsageIndicator";
 
 type AppTopChromeProps = {
   canGoBack: boolean;
@@ -131,6 +133,9 @@ export function AppTopChrome({
           <ChevronRight />
         </Button>
       </div>
+      <FeatureGate feature="providerUsage">
+        <SidebarProviderUsageIndicator placement="chrome" />
+      </FeatureGate>
     </div>
   );
 }
