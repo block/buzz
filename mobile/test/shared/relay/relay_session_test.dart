@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -321,6 +322,260 @@ void main() {
     );
   });
 
+  // ── Gap 3: reconnect backoff jitter ──────────────────────────────────────
+
+  test('jitters the scheduled reconnect delay around the ladder position', () {
+    final session = RelaySessionNotifier(random: Random(1234));
+    final container = ProviderContainer(
+      overrides: [relaySessionProvider.overrideWith(() => session)],
+    );
+    addTearDown(container.dispose);
+    container.read(relaySessionProvider);
+
+    session.debugHandleConnected();
+    session.debugHandleDisconnected();
+
+    final delay = session.debugLastReconnectDelay;
+    expect(delay, isNotNull);
+    // The ladder itself stays un-jittered at base...
+    expect(session.debugReconnectDelayMs, 1000);
+    // ...but the scheduled wait is randomised within +/-20% of it. A flat
+    // doubling schedule would land on exactly 1000ms.
+    expect(delay!.inMilliseconds, isNot(1000));
+    expect(delay.inMilliseconds, inInclusiveRange(800, 1200));
+  });
+
+  test('keeps every jittered delay within +/-20% and does not repeat', () {
+    final session = RelaySessionNotifier(random: Random(7));
+    final samples = <int>{};
+
+    for (var i = 0; i < 200; i++) {
+      final delay = session.debugJitteredDelay(8000).inMilliseconds;
+      expect(delay, inInclusiveRange(6400, 9600));
+      samples.add(delay);
+    }
+
+    // A flat (un-jittered) schedule would collapse to the single value 8000.
+    expect(samples.length, greaterThan(1));
+    expect(samples, isNot(contains(8000)));
+  });
+
+  // ── Gap 4: backoff resets on stability, not on connect ───────────────────
+
+  test('does not reset the backoff ladder on a short-lived connection', () {
+    final session = _backoffSession();
+
+    // Three connect/drop cycles that never reach the stability threshold. The
+    // ladder must keep doubling instead of snapping back to base each time.
+    session.debugHandleConnected();
+    expect(session.debugStableConnectionArmed, isTrue);
+    session.debugHandleDisconnected();
+    // Dropping before the threshold disarms the pending reset.
+    expect(session.debugStableConnectionArmed, isFalse);
+    expect(session.debugReconnectDelayMs, 1000);
+
+    session.debugFireReconnectTimer();
+    expect(session.debugReconnectDelayMs, 2000);
+
+    session.debugHandleConnected();
+    session.debugHandleDisconnected();
+    session.debugFireReconnectTimer();
+    expect(session.debugReconnectDelayMs, 4000);
+
+    session.debugHandleConnected();
+    session.debugHandleDisconnected();
+    session.debugFireReconnectTimer();
+    expect(session.debugReconnectDelayMs, 8000);
+  });
+
+  test('resets the backoff ladder once a connection proves stable', () {
+    final session = _backoffSession();
+
+    session.debugHandleConnected();
+    session.debugHandleDisconnected();
+    session.debugFireReconnectTimer();
+    session.debugHandleConnected();
+    session.debugHandleDisconnected();
+    session.debugFireReconnectTimer();
+    expect(session.debugReconnectDelayMs, 4000);
+
+    // This connection survives the stability window, earning the ladder back.
+    session.debugHandleConnected();
+    session.debugCompleteStableConnection();
+
+    expect(session.debugReconnectDelayMs, 1000);
+    expect(session.debugStableConnectionArmed, isFalse);
+  });
+
+  test('resets the backoff ladder immediately on app resume', () {
+    final session = _backoffSession();
+
+    session.debugHandleConnected();
+    session.debugHandleDisconnected();
+    session.debugFireReconnectTimer();
+    expect(session.debugReconnectDelayMs, 2000);
+
+    // Backgrounding is our own teardown, not relay trouble: a foregrounding
+    // user must not wait out a ladder the relay never asked for.
+    session.debugPauseNow();
+    session.onAppResumed();
+
+    expect(session.debugReconnectDelayMs, 1000);
+  });
+
+  // ── Gap 5: NOTICE frames feed backpressure ───────────────────────────────
+
+  test('rate-limit gate rejects publish without sending the event', () async {
+    final fixture = _recordingSession();
+    fixture.session.debugHandleMessage([
+      'NOTICE',
+      'rate-limited: quota exceeded; retry in 12s',
+    ]);
+
+    await expectLater(
+      fixture.session.publish(
+        _event(),
+        timeout: const Duration(milliseconds: 1),
+      ),
+      throwsA(
+        isA<RelayRateLimitedException>().having(
+          (error) => error.retryAfter,
+          'retryAfter',
+          greaterThan(Duration.zero),
+        ),
+      ),
+    );
+    expect(fixture.socket.sent, isEmpty);
+  });
+
+  test('rate-limit gate drops ephemeral raw sends', () {
+    final fixture = _recordingSession();
+    fixture.session.sendRaw(['EVENT', _event().toJson()]);
+    expect(fixture.socket.sent, hasLength(1));
+    fixture.socket.sent.clear();
+
+    fixture.session.debugHandleMessage([
+      'NOTICE',
+      'rate-limited: quota exceeded; retry in 12s',
+    ]);
+
+    fixture.session.sendRaw(['EVENT', _event().toJson()]);
+
+    expect(fixture.socket.sent, isEmpty);
+  });
+
+  test('rate-limit NOTICE arms a gate separate from reconnect backoff', () {
+    final session = RelaySessionNotifier(random: Random(1));
+
+    session.debugHandleMessage([
+      'NOTICE',
+      'rate-limited: quota exceeded; retry in 12s',
+    ]);
+
+    expect(session.debugRateLimitRemaining, isNotNull);
+    expect(session.debugReconnectDelayMs, 1000);
+  });
+
+  test('floors a rate-limit NOTICE without a usable hint', () {
+    final withoutHint = RelaySessionNotifier(random: Random(1));
+    withoutHint.debugHandleMessage([
+      'NOTICE',
+      'rate-limited: too many concurrent requests',
+    ]);
+    expect(
+      withoutHint.debugRateLimitRemaining!.inMilliseconds,
+      inInclusiveRange(3900, 6000),
+    );
+
+    final zeroHint = RelaySessionNotifier(random: Random(1));
+    zeroHint.debugHandleMessage([
+      'NOTICE',
+      'rate-limited: quota exceeded; retry in 0s',
+    ]);
+    expect(
+      zeroHint.debugRateLimitRemaining!.inMilliseconds,
+      inInclusiveRange(3900, 6000),
+    );
+  });
+
+  test('does not clamp a long rate-limit hint to reconnect maximum', () {
+    final session = RelaySessionNotifier(random: Random(1));
+
+    session.debugHandleMessage([
+      'NOTICE',
+      'rate-limited: quota exceeded; retry in 60s',
+    ]);
+
+    // A 30s clamp with +/-20% jitter can be at most 36s. The unclamped 60s
+    // hint is at least 48s, leaving a wide margin for test execution time.
+    expect(session.debugRateLimitRemaining!.inMilliseconds, greaterThan(40000));
+  });
+
+  test('never shortens an existing rate-limit deadline', () {
+    final session = RelaySessionNotifier(random: Random(1));
+
+    session.debugHandleMessage([
+      'NOTICE',
+      'rate-limited: quota exceeded; retry in 30s',
+    ]);
+    final longDeadline = session.debugRateLimitDeadlineMs;
+
+    session.debugHandleMessage([
+      'NOTICE',
+      'rate-limited: quota exceeded; retry in 1s',
+    ]);
+
+    expect(session.debugRateLimitDeadlineMs, longDeadline);
+  });
+
+  test('stable connection reset preserves the rate-limit deadline', () {
+    final session = RelaySessionNotifier(random: Random(1));
+    session.debugHandleMessage([
+      'NOTICE',
+      'rate-limited: quota exceeded; retry in 60s',
+    ]);
+    final deadline = session.debugRateLimitDeadlineMs;
+
+    session.debugCompleteStableConnection();
+
+    expect(session.debugReconnectDelayMs, 1000);
+    expect(session.debugRateLimitDeadlineMs, deadline);
+  });
+
+  test('lazily clears the rate-limit deadline once it expires', () {
+    var nowMs = 100;
+    final session = RelaySessionNotifier(
+      random: Random(1),
+      rateLimitNowMs: () => nowMs,
+    );
+    session.debugHandleMessage([
+      'NOTICE',
+      'rate-limited: quota exceeded; retry in 5s',
+    ]);
+    final deadline = session.debugRateLimitDeadlineMs!;
+
+    expect(session.debugRateLimitRemaining, isNotNull);
+
+    nowMs = deadline;
+
+    expect(session.debugRateLimitRemaining, isNull);
+    expect(session.debugRateLimitDeadlineMs, isNull);
+  });
+
+  test('leaves rate gate and backoff untouched for other NOTICE frames', () {
+    final session = RelaySessionNotifier(random: Random(1));
+
+    session.debugHandleMessage(['NOTICE', 'server restarting shortly']);
+    expect(session.debugReconnectDelayMs, 1000);
+    expect(session.debugRateLimitRemaining, isNull);
+
+    // Malformed NOTICE frames must not throw.
+    session.debugHandleMessage(['NOTICE']);
+    session.debugHandleMessage(['NOTICE', 42]);
+    expect(session.debugReconnectDelayMs, 1000);
+    expect(session.debugRateLimitRemaining, isNull);
+  });
+
   test(
     'live onClosed callback runs when relay closes an open subscription',
     () async {
@@ -393,7 +648,82 @@ class _ControlledRelaySocket extends RelaySocket {
   void disconnectWith(Object? error) => _disconnected(error);
 }
 
+class _RecordingRelaySocket extends RelaySocket {
+  final List<List<dynamic>> sent = [];
+
+  _RecordingRelaySocket()
+    : super(
+        wsUrl: 'wss://relay.example',
+        nsec: null,
+        onMessage: (_) {},
+        onConnected: () {},
+        onDisconnected: (_) {},
+      );
+
+  @override
+  void send(List<dynamic> payload) => sent.add(payload);
+
+  @override
+  void dispose() {}
+}
+
+class _RecordingSessionFixture {
+  final RelaySessionNotifier session;
+  final _RecordingRelaySocket socket;
+
+  _RecordingSessionFixture(this.session, this.socket);
+}
+
+_RecordingSessionFixture _recordingSession() {
+  final session = RelaySessionNotifier(random: Random(1));
+  final container = ProviderContainer(
+    overrides: [relaySessionProvider.overrideWith(() => session)],
+  );
+  addTearDown(container.dispose);
+  container.read(relaySessionProvider);
+  final socket = _RecordingRelaySocket();
+  session.debugAttachSocketForTest(socket);
+  return _RecordingSessionFixture(session, socket);
+}
+
 const _channelId = '11111111-1111-4111-8111-111111111111';
+
+/// A session whose reconnects attach a no-op socket, so the backoff ladder can
+/// be driven through real connect/drop cycles without touching the network.
+RelaySessionNotifier _backoffSession({int seed = 1}) {
+  final keychain = nostr.Keys.generate();
+  final session = RelaySessionNotifier(
+    random: Random(seed),
+    socketFactory:
+        ({
+          required wsUrl,
+          required nsec,
+          required onMessage,
+          required onConnected,
+          required onDisconnected,
+        }) => _ControlledRelaySocket(
+          wsUrl: wsUrl,
+          nsec: nsec,
+          onMessage: onMessage,
+          onConnected: onConnected,
+          onDisconnected: onDisconnected,
+        ),
+  );
+  final container = ProviderContainer(
+    overrides: [
+      relaySessionProvider.overrideWith(() => session),
+      relayConfigProvider.overrideWith(
+        () => _FakeRelayConfigNotifier(
+          baseUrl: 'https://relay.example',
+          nsec: keychain.nsec,
+        ),
+      ),
+    ],
+  );
+  addTearDown(container.dispose);
+  container.read(relaySessionProvider);
+  return session;
+}
 
 class _FakeRelayConfigNotifier extends RelayConfigNotifier {
   final String _baseUrl;

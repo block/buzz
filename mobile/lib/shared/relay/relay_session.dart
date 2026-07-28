@@ -26,6 +26,17 @@ class SessionState {
   const SessionState({required this.status, this.reconnectAttempt = 0});
 }
 
+/// A publish was refused because the relay's rate-limit window is still active.
+class RelayRateLimitedException implements Exception {
+  const RelayRateLimitedException(this.retryAfter);
+
+  final Duration retryAfter;
+
+  @override
+  String toString() =>
+      'Relay is rate-limited; retry after ${retryAfter.inMilliseconds}ms';
+}
+
 class _HistorySubscription {
   final List<NostrEvent> events = [];
   final Completer<List<NostrEvent>> completer;
@@ -78,17 +89,40 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   RelaySessionNotifier({
     http.Client? httpClient,
     RelaySocketFactory socketFactory = RelaySocket.new,
+    Random? random,
+    int Function()? rateLimitNowMs,
   }) : _httpClient = httpClient,
-       _socketFactory = socketFactory;
+       _socketFactory = socketFactory,
+       _random = random ?? Random(),
+       _rateLimitClock = Stopwatch()..start(),
+       _rateLimitNowMsOverride = rateLimitNowMs;
 
   final http.Client? _httpClient;
   final RelaySocketFactory _socketFactory;
+  final Random _random;
+  final Stopwatch _rateLimitClock;
+  final int Function()? _rateLimitNowMsOverride;
 
   static const _baseReconnectDelayMs = 1000;
   static const _maxReconnectDelayMs = 30000;
   static const _eventBatchMs = 16;
   static const _reconnectReplaySkewSeconds = 5;
   static const _maxRecentDeliveryKeys = 5000;
+
+  /// Fraction of the backoff delay randomised in each direction, so a fleet of
+  /// clients does not reconnect in lockstep after a relay blip. Mirrors
+  /// buzz-acp's `jittered_duration` (crates/buzz-acp/src/relay.rs).
+  static const _reconnectJitterRatio = 0.2;
+
+  /// How long a connection must stay up before the backoff ladder is
+  /// considered earned back and resets to base. Mirrors buzz-acp's
+  /// `STABLE_CONNECTION_SECS` (crates/buzz-acp/src/relay.rs).
+  static const _stableConnectionMs = 60000;
+
+  /// Backoff floor applied when the relay rate-limits us without a usable
+  /// `retry in Ns` hint (absent, or below 2s). Mirrors the floor in buzz-acp's
+  /// `set_rate_limit_gate`.
+  static const _minRateLimitBackoffMs = 5000;
 
   RelaySocket? _socket;
   final Map<String, _HistorySubscription> _historySubscriptions = {};
@@ -99,7 +133,10 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   Timer? _reconnectTimer;
   Timer? _flushTimer;
   Timer? _backgroundGraceTimer;
+  Timer? _stableConnectionTimer;
   int _reconnectDelayMs = _baseReconnectDelayMs;
+  Duration? _lastReconnectDelay;
+  int? _rateLimitDeadlineMs;
   int _subIdCounter = 0;
   bool _disposed = false;
   bool _paused = false;
@@ -250,6 +287,11 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
   }) {
+    final retryAfter = _checkRateLimitGate();
+    if (retryAfter != null) {
+      return Future<NostrEvent>.error(RelayRateLimitedException(retryAfter));
+    }
+
     final completer = Completer<NostrEvent>();
 
     final timer = Timer(timeout, () {
@@ -275,6 +317,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   /// Send a raw message over the WebSocket without waiting for acknowledgement.
   /// Used for ephemeral events like typing indicators.
   void sendRaw(List<dynamic> payload) {
+    if (_checkRateLimitGate() != null) return;
     _socket?.send(payload);
   }
 
@@ -298,6 +341,46 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   void debugHandleSocketMessageForTest(List<dynamic> data) =>
       _handleMessage(data);
 
+  /// Current position on the reconnect backoff ladder, before jitter.
+  @visibleForTesting
+  int get debugReconnectDelayMs => _reconnectDelayMs;
+
+  /// The jittered delay most recently handed to the reconnect timer.
+  @visibleForTesting
+  Duration? get debugLastReconnectDelay => _lastReconnectDelay;
+
+  /// Whether a connection is currently accruing stability toward a backoff
+  /// ladder reset.
+  @visibleForTesting
+  bool get debugStableConnectionArmed => _stableConnectionTimer != null;
+
+  /// Remaining send-side rate-limit delay, or null when the gate is inactive.
+  @visibleForTesting
+  Duration? get debugRateLimitRemaining => _checkRateLimitGate();
+
+  /// Monotonic deadline used to verify overlapping notices preserve the max.
+  @visibleForTesting
+  int? get debugRateLimitDeadlineMs {
+    if (_checkRateLimitGate() == null) return null;
+    return _rateLimitDeadlineMs;
+  }
+
+  @visibleForTesting
+  Duration debugJitteredDelay(int baseMs) => _jitteredDelay(baseMs);
+
+  /// Run the pending reconnect attempt now instead of waiting out its delay.
+  @visibleForTesting
+  void debugFireReconnectTimer() {
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    _runScheduledReconnect();
+  }
+
+  /// Run the stability reset the connection would reach after
+  /// [_stableConnectionMs], without waiting for wall-clock time.
+  @visibleForTesting
+  void debugCompleteStableConnection() => _onConnectionStable();
+
   @visibleForTesting
   void debugAttachSocketForTest(RelaySocket socket) {
     _socket?.dispose();
@@ -308,6 +391,9 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   /// Force a reconnect (e.g., returning from background).
   Future<void> reconnect() async {
     await _socket?.disconnect();
+    // Caller-driven reconnect: reset the ladder immediately. Unlike the
+    // automatic reconnect path this is gated by an explicit request, so it
+    // cannot spin into a hammering loop on its own.
     _reconnectDelayMs = _baseReconnectDelayMs;
     final config = ref.read(relayConfigProvider);
     await _connect(config);
@@ -322,6 +408,8 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   void _pauseNow() {
     _paused = true;
     _reconnectTimer?.cancel();
+    _stableConnectionTimer?.cancel();
+    _stableConnectionTimer = null;
     _cancelAllHistory(Exception('App moved to background'));
     _rejectAllPending(Exception('App moved to background'));
     _socket?.disconnect();
@@ -339,7 +427,10 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     if (state.status == SessionStatus.connected) return;
 
     // Cancel any in-flight reconnect backoff timer so we reconnect immediately
-    // instead of waiting for the (possibly large) exponential delay.
+    // instead of waiting for the (possibly large) exponential delay. The
+    // preceding disconnect was our own backgrounding, not relay trouble, and
+    // the user is looking at the app right now — reset the ladder immediately
+    // rather than making them wait out a delay the relay never asked for.
     _reconnectTimer?.cancel();
     _reconnectDelayMs = _baseReconnectDelayMs;
     final config = ref.read(relayConfigProvider);
@@ -375,13 +466,37 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   void _handleConnected(int generation) {
     if (_disposed || generation != _connectionGeneration) return;
     _hasConnectedOnce = true;
-    _reconnectDelayMs = _baseReconnectDelayMs;
+    // Deliberately does NOT reset the backoff ladder. A socket that dies
+    // seconds after connecting would reset it on every cycle, so the doubling
+    // never accumulates and a flapping link hammers the relay indefinitely.
+    // The ladder is only earned back once the connection proves itself stable.
+    _armStableConnectionReset();
     state = const SessionState(status: SessionStatus.connected);
     _replayLiveSubscriptions();
   }
 
+  /// Start counting down to a backoff ladder reset. Cancelled the moment the
+  /// connection drops, so only a connection that survives
+  /// [_stableConnectionMs] resets the ladder.
+  void _armStableConnectionReset() {
+    _stableConnectionTimer?.cancel();
+    _stableConnectionTimer = Timer(
+      const Duration(milliseconds: _stableConnectionMs),
+      _onConnectionStable,
+    );
+  }
+
+  void _onConnectionStable() {
+    _stableConnectionTimer?.cancel();
+    _stableConnectionTimer = null;
+    _reconnectDelayMs = _baseReconnectDelayMs;
+  }
+
   void _handleDisconnected(int generation, Object? error) {
     if (_disposed || generation != _connectionGeneration) return;
+    // The connection did not survive long enough to earn the ladder back.
+    _stableConnectionTimer?.cancel();
+    _stableConnectionTimer = null;
     _cancelAllHistory(error);
     _rejectAllPending(error);
     _eventBuffer.clear();
@@ -404,11 +519,26 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     );
 
     _reconnectTimer?.cancel();
-    _reconnectTimer = Timer(Duration(milliseconds: _reconnectDelayMs), () {
-      _reconnectDelayMs = min(_reconnectDelayMs * 2, _maxReconnectDelayMs);
-      final config = ref.read(relayConfigProvider);
-      _connect(config);
-    });
+    final delay = _jitteredDelay(_reconnectDelayMs);
+    _lastReconnectDelay = delay;
+    _reconnectTimer = Timer(delay, _runScheduledReconnect);
+  }
+
+  void _runScheduledReconnect() {
+    _reconnectDelayMs = min(_reconnectDelayMs * 2, _maxReconnectDelayMs);
+    final config = ref.read(relayConfigProvider);
+    _connect(config);
+  }
+
+  /// Randomise [baseMs] by ±[_reconnectJitterRatio] so a fleet of clients does
+  /// not reconnect in lockstep after a relay blip. The ladder position itself
+  /// stays un-jittered; jitter is applied per scheduled wait.
+  Duration _jitteredDelay(int baseMs) {
+    final factor =
+        1 -
+        _reconnectJitterRatio +
+        _random.nextDouble() * 2 * _reconnectJitterRatio;
+    return Duration(milliseconds: (baseMs * factor).round());
   }
 
   /// Replay all live subscriptions after a reconnect, with a time skew to
@@ -439,7 +569,54 @@ class RelaySessionNotifier extends Notifier<SessionState> {
         _handleClosed(data);
       case 'OK':
         _handleOk(data);
+      case 'NOTICE':
+        _handleNotice(data);
     }
+  }
+
+  /// Handle a relay NOTICE. The relay announces rate limiting this way
+  /// (`rate-limited: ...; retry in 30s`), so discarding NOTICE means never
+  /// hearing the slow-down we are provoking. A rate-limit notice arms a
+  /// send-side gate independent of the reconnect backoff ladder.
+  void _handleNotice(List<dynamic> data) {
+    if (data.length < 2 || data[1] is! String) return;
+    final message = data[1] as String;
+    debugPrint('relay NOTICE: $message');
+    if (!message.startsWith('rate-limited:')) return;
+
+    // A missing hint, or one under 2s, floors to _minRateLimitBackoffMs: a
+    // burst of low-quality hints must not drop the gate so short that the next
+    // send immediately re-triggers the limit.
+    final hintMs = _parseRetryHintMs(message) ?? 0;
+    final requested = hintMs < 2000 ? _minRateLimitBackoffMs : hintMs;
+    final deadline = _rateLimitNowMs + _jitteredDelay(requested).inMilliseconds;
+    // Take the maximum so overlapping notices cannot shorten a later deadline
+    // that is already in place. Relay hints are deliberately not clamped by
+    // the reconnect ladder's 30-second maximum.
+    _rateLimitDeadlineMs = max(_rateLimitDeadlineMs ?? 0, deadline);
+  }
+
+  /// Return the remaining gate duration, lazily clearing an expired deadline.
+  Duration? _checkRateLimitGate() {
+    final deadline = _rateLimitDeadlineMs;
+    if (deadline == null) return null;
+    final remainingMs = deadline - _rateLimitNowMs;
+    if (remainingMs > 0) return Duration(milliseconds: remainingMs);
+    _rateLimitDeadlineMs = null;
+    return null;
+  }
+
+  int get _rateLimitNowMs =>
+      _rateLimitNowMsOverride?.call() ?? _rateLimitClock.elapsedMilliseconds;
+
+  /// Parse the relay's `retry in {N}s` hint into milliseconds. Returns null
+  /// when the hint is absent or malformed. Mirrors buzz-acp's
+  /// `parse_rate_limit_retry_secs`.
+  int? _parseRetryHintMs(String message) {
+    final match = RegExp(r'retry in (\d+)').firstMatch(message);
+    if (match == null) return null;
+    final seconds = int.tryParse(match.group(1)!);
+    return seconds == null ? null : seconds * 1000;
   }
 
   void _handleEvent(List<dynamic> data) {
@@ -639,9 +816,11 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     _reconnectTimer?.cancel();
     _flushTimer?.cancel();
     _backgroundGraceTimer?.cancel();
+    _stableConnectionTimer?.cancel();
     _cancelAllHistory(null);
     _rejectAllPending(null);
     _recentDeliveryKeys.clear();
+    _rateLimitDeadlineMs = null;
     _socket?.dispose();
     _socket = null;
     _httpClient?.close();
