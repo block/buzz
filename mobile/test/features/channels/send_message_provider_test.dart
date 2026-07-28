@@ -213,34 +213,41 @@ void main() {
 
     expect(_pTagPubkeys(session.event), [_humanPubkey, _agentPubkey]);
   });
-  test('rejects a send when the channel cannot be resolved', () async {
+  test('sends explicit mentions when the channel is missing', () async {
     final session = _PendingPublishRelaySession();
     final send = _sendMessage(
       session: session,
       nsec: nostr.Keys.generate().nsec,
       readChannel: (_) => null,
     );
+    unawaited(session.published.then((_) => session.accept()));
 
-    final result = send(
+    await send(
       channelId: _channelId,
-      content: 'hello',
-      mentionPubkeys: const [],
+      content: 'hey @someone',
+      mentionPubkeys: const [_mentionPubkey],
     );
-    final failure = expectLater(
-      result,
-      throwsA(
-        isA<StateError>().having(
-          (error) => error.message,
-          'message',
-          contains(_channelId),
-        ),
-      ),
-    );
-    await Future<void>.delayed(Duration.zero);
-    if (session.hasPublished) session.reject();
 
-    await failure;
-    expect(session.hasPublished, isFalse);
+    expect(_pTagPubkeys(session.event), [_mentionPubkey]);
+  });
+
+  test('sends explicit mentions when the channel lookup fails', () async {
+    final session = _PendingPublishRelaySession();
+    final send = _sendMessage(
+      session: session,
+      nsec: nostr.Keys.generate().nsec,
+      readChannel: (_) =>
+          Future<Channel?>.error(Exception('channel list unavailable')),
+    );
+    unawaited(session.published.then((_) => session.accept()));
+
+    await send(
+      channelId: _channelId,
+      content: 'hey @someone',
+      mentionPubkeys: const [_mentionPubkey],
+    );
+
+    expect(_pTagPubkeys(session.event), [_mentionPubkey]);
   });
 }
 

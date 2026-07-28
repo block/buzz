@@ -61,15 +61,16 @@ class SendMessage {
     final authorPubkey = _signedEventRelay.pubkey;
 
     // In a DM, fan out p-tags to every other participant so mention-gated
-    // agent subscriptions see plain messages (matching the desktop's
-    // messageMentionPubkeys). Wait for the authoritative channel list when
-    // the synchronous cache has not loaded this channel yet.
-    final channel = await _readChannel(channelId);
-    if (channel == null) {
-      throw StateError('Channel not found: $channelId');
+    // agent subscriptions see plain messages. Wait for initial channel
+    // loading, but preserve explicit-mention sends if the list is unavailable.
+    Channel? channel;
+    try {
+      channel = await _readChannel(channelId);
+    } catch (_) {
+      channel = null;
     }
-    final fanoutPubkeys = channel.isDm
-        ? channel.participantPubkeys
+    final fanoutPubkeys = (channel?.isDm ?? false)
+        ? channel!.participantPubkeys
         : const <String>[];
 
     // Normalize mentions: lowercase, deduplicate, exclude self (matching
