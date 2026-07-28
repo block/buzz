@@ -610,6 +610,265 @@ void main() {
       }
     });
 
+    testWidgets(
+      'a pending native popover does not claim another composer tap',
+      (tester) async {
+        final previousPlatform = debugDefaultTargetPlatformOverride;
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        final supportResult = Completer<bool>();
+        var supportCalls = 0;
+        var presentCalls = 0;
+        _setMockNativeAttachmentPopoverHandler((call) async {
+          switch (call.method) {
+            case 'isSupported':
+              supportCalls += 1;
+              return supportResult.future;
+            case 'present':
+              presentCalls += 1;
+              return true;
+            case 'dismiss':
+              return null;
+          }
+          return null;
+        });
+        final uploadService = MediaUploadService(
+          baseUrl: 'https://relay.example',
+          nsec: nostr.Keys.generate().nsec,
+          pickGalleryImage: () async => null,
+          pickGalleryImages: () async => const [],
+          pickGalleryVideo: () async => null,
+        );
+
+        try {
+          await tester.pumpWidget(
+            _buildNativePopoverOwnershipHarness(
+              uploadService: uploadService,
+              includeFirstComposer: true,
+            ),
+          );
+
+          await tester.tap(
+            find.byTooltip('Add attachment').hitTestable().at(0),
+          );
+          await tester.pump();
+          await tester.tap(
+            find.byTooltip('Add attachment').hitTestable().at(1),
+          );
+          await tester.pumpAndSettle();
+
+          expect(supportCalls, 1);
+          expect(presentCalls, 0);
+          expect(
+            find.descendant(
+              of: find.byKey(const ValueKey('first-composer')),
+              matching: find.byTooltip('Close attachments'),
+            ),
+            findsNothing,
+          );
+          expect(
+            find.descendant(
+              of: find.byKey(const ValueKey('second-composer')),
+              matching: find.byTooltip('Close attachments'),
+            ),
+            findsWidgets,
+          );
+
+          supportResult.complete(true);
+          await tester.pumpAndSettle();
+          expect(presentCalls, 0);
+          expect(
+            find.descendant(
+              of: find.byKey(const ValueKey('first-composer')),
+              matching: find.byTooltip('Close attachments'),
+            ),
+            findsNothing,
+          );
+        } finally {
+          if (!supportResult.isCompleted) supportResult.complete(false);
+          await _sendNativeAttachmentPopoverCall(tester, 'dismissed');
+          await tester.pumpWidget(const SizedBox.shrink());
+          _setMockNativeAttachmentPopoverHandler(null);
+          debugDefaultTargetPlatformOverride = previousPlatform;
+        }
+      },
+    );
+
+    testWidgets('a repeated owner tap keeps its pending native presentation', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      final supportResult = Completer<bool>();
+      var supportCalls = 0;
+      var presentCalls = 0;
+      _setMockNativeAttachmentPopoverHandler((call) async {
+        switch (call.method) {
+          case 'isSupported':
+            supportCalls += 1;
+            return supportResult.future;
+          case 'present':
+            presentCalls += 1;
+            return true;
+          case 'dismiss':
+            return null;
+        }
+        return null;
+      });
+      final uploadService = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: nostr.Keys.generate().nsec,
+        pickGalleryImage: () async => null,
+        pickGalleryImages: () async => const [],
+        pickGalleryVideo: () async => null,
+      );
+
+      try {
+        await tester.pumpWidget(
+          _buildNativePopoverOwnershipHarness(
+            uploadService: uploadService,
+            includeFirstComposer: false,
+          ),
+        );
+
+        await tester.tap(find.byTooltip('Add attachment').hitTestable());
+        await tester.pump();
+        await tester.tap(find.byTooltip('Add attachment').hitTestable());
+        await tester.pumpAndSettle();
+
+        expect(supportCalls, 1);
+        expect(presentCalls, 0);
+
+        supportResult.complete(true);
+        await tester.pumpAndSettle();
+
+        expect(presentCalls, 1);
+        expect(find.byTooltip('Close attachments'), findsNothing);
+      } finally {
+        if (!supportResult.isCompleted) supportResult.complete(false);
+        await _sendNativeAttachmentPopoverCall(tester, 'dismissed');
+        await tester.pumpWidget(const SizedBox.shrink());
+        _setMockNativeAttachmentPopoverHandler(null);
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
+    testWidgets('disposing the native popover owner releases ownership', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      var presentCalls = 0;
+      var dismissCalls = 0;
+      _setMockNativeAttachmentPopoverHandler((call) async {
+        switch (call.method) {
+          case 'isSupported':
+            return true;
+          case 'present':
+            presentCalls += 1;
+            return true;
+          case 'dismiss':
+            dismissCalls += 1;
+            return null;
+        }
+        return null;
+      });
+      final uploadService = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: nostr.Keys.generate().nsec,
+        pickGalleryImage: () async => null,
+        pickGalleryImages: () async => const [],
+        pickGalleryVideo: () async => null,
+      );
+
+      try {
+        await tester.pumpWidget(
+          _buildNativePopoverOwnershipHarness(
+            uploadService: uploadService,
+            includeFirstComposer: true,
+          ),
+        );
+
+        await tester.tap(find.byTooltip('Add attachment').hitTestable().at(0));
+        await tester.pumpAndSettle();
+        expect(presentCalls, 1);
+
+        await tester.pumpWidget(
+          _buildNativePopoverOwnershipHarness(
+            uploadService: uploadService,
+            includeFirstComposer: false,
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(dismissCalls, 1);
+
+        await tester.tap(find.byTooltip('Add attachment').hitTestable());
+        await tester.pumpAndSettle();
+        expect(presentCalls, 2);
+      } finally {
+        await _sendNativeAttachmentPopoverCall(tester, 'dismissed');
+        await tester.pumpWidget(const SizedBox.shrink());
+        _setMockNativeAttachmentPopoverHandler(null);
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
+    testWidgets('missing native dismiss bridge still releases ownership', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      var presentCalls = 0;
+      _setMockNativeAttachmentPopoverHandler((call) async {
+        switch (call.method) {
+          case 'isSupported':
+            return true;
+          case 'present':
+            presentCalls += 1;
+            return true;
+          case 'dismiss':
+            throw MissingPluginException('dismiss is unavailable');
+        }
+        return null;
+      });
+      final uploadService = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: nostr.Keys.generate().nsec,
+        pickGalleryImage: () async => null,
+        pickGalleryImages: () async => const [],
+        pickGalleryVideo: () async => null,
+      );
+
+      try {
+        await tester.pumpWidget(
+          _buildNativePopoverOwnershipHarness(
+            uploadService: uploadService,
+            includeFirstComposer: true,
+          ),
+        );
+
+        await tester.tap(find.byTooltip('Add attachment').hitTestable().at(0));
+        await tester.pumpAndSettle();
+        expect(presentCalls, 1);
+
+        await tester.pumpWidget(
+          _buildNativePopoverOwnershipHarness(
+            uploadService: uploadService,
+            includeFirstComposer: false,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.byTooltip('Add attachment').hitTestable());
+        await tester.pumpAndSettle();
+        expect(presentCalls, 2);
+      } finally {
+        await _sendNativeAttachmentPopoverCall(tester, 'dismissed');
+        await tester.pumpWidget(const SizedBox.shrink());
+        _setMockNativeAttachmentPopoverHandler(null);
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
     testWidgets('uploads an image and sends markdown plus imeta tags', (
       tester,
     ) async {

@@ -12,7 +12,7 @@ This chart has two operating profiles selected by values:
 ## Quickstart (eval only)
 
 ```sh
-helm install buzz oci://ghcr.io/block/buzz/charts/buzz --version 0.1.0 \
+helm install buzz oci://ghcr.io/block/buzz/charts/buzz --version 0.1.7 \
   --create-namespace --namespace buzz \
   --set quickstart=true \
   --set postgresql.enabled=true \

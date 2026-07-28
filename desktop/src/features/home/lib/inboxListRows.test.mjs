@@ -17,16 +17,6 @@ function inboxItem(
   };
 }
 
-function draftItem(key, updatedAt, rootStatus = "available") {
-  return {
-    entry: {
-      key,
-      draft: { createdAt: updatedAt, updatedAt },
-    },
-    rootStatus,
-  };
-}
-
 function reminder(
   id,
   createdAt,
@@ -46,20 +36,18 @@ function reminder(
 
 test("Inbox All combines rows in latest-first order", () => {
   const rows = buildInboxListRows({
-    drafts: [draftItem("draft", "2026-07-21T12:00:00.000Z")],
     items: [inboxItem("message", 1_753_099_300)],
     reminders: [reminder("reminder", 1_753_099_100)],
   });
 
   assert.deepEqual(
     rows.map((row) => row.kind),
-    ["draft", "inbox", "reminder"],
+    ["inbox", "reminder"],
   );
 });
 
-test("Inbox All excludes completed reminders and deleted-root drafts", () => {
+test("Inbox All excludes completed reminders", () => {
   const rows = buildInboxListRows({
-    drafts: [draftItem("deleted", "2026-07-21T12:00:00.000Z", "deleted")],
     items: [],
     reminders: [reminder("done", 1_753_099_100, "done")],
   });
@@ -69,12 +57,10 @@ test("Inbox All excludes completed reminders and deleted-root drafts", () => {
 
 test("Inbox conversation keys stay stable when the representative changes", () => {
   const first = buildInboxListRows({
-    drafts: [],
     items: [inboxItem("reply-1", 1, "thread-root")],
     reminders: [],
   });
   const second = buildInboxListRows({
-    drafts: [],
     items: [inboxItem("reply-2", 2, "thread-root")],
     reminders: [],
   });
@@ -87,7 +73,6 @@ test("due reminder enriches its existing conversation instead of duplicating it"
   const item = inboxItem("message", 100);
   item.groupItems = [{ id: "reminded-reply" }];
   const rows = buildInboxListRows({
-    drafts: [],
     items: [item],
     reminders: [
       reminder("reminder", 50, "pending", {
@@ -105,7 +90,6 @@ test("due reminder enriches its existing conversation instead of duplicating it"
 
 test("due reminder without a represented conversation sorts at trigger time", () => {
   const rows = buildInboxListRows({
-    drafts: [],
     items: [inboxItem("newer-than-creation", 150)],
     reminders: [
       reminder("reminder", 50, "pending", {
