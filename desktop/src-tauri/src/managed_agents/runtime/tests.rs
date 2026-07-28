@@ -565,10 +565,13 @@ fn runtime_metadata_env_vars_injects_model_even_with_acp_model_switching() {
 // ── name_matches_known_binary / name_matches_interpreter tests ───────────
 
 #[test]
-fn name_matches_known_binary_rejects_node() {
+fn name_matches_known_binary_recognizes_antigravity_without_matching_node() {
     // `node` must NOT be in KNOWN_AGENT_BINARIES — adding it there would
     // sweep all node processes on the machine regardless of ownership.
     assert!(!super::name_matches_known_binary("node"));
+    assert!(super::name_matches_known_binary("agy"));
+    assert!(super::name_matches_known_binary("agy-acp"));
+    assert!(super::name_matches_known_binary("agy_acp"));
 }
 
 #[test]

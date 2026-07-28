@@ -11,6 +11,7 @@ use crate::managed_agents::{
 };
 
 mod runtime_metadata;
+mod antigravity;
 
 pub(crate) use runtime_metadata::KnownAcpRuntime;
 
@@ -43,7 +44,6 @@ fn common_binary_paths() -> &'static [PathBuf] {
                 home.join(".asdf/shims"),
             ]);
         }
-        // Windows well-known dirs for npm global shims and standalone installer targets.
         #[cfg(windows)]
         {
             if let Some(appdata) = std::env::var_os("APPDATA") {
@@ -169,6 +169,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         // Verified: `codex login status` exits 0 when logged in, non-zero otherwise.
         auth_probe_args: Some(&["codex", "login", "status"]),
     },
+    antigravity::RUNTIME,
     KnownAcpRuntime {
         id: "buzz-agent",
         label: "Buzz Agent",
@@ -463,8 +464,8 @@ pub fn try_record_agent_command(
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_command_identity(command).as_str() {
         "goose" => Some(vec!["acp".to_string()]),
-        "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
-        | "claudecode" | "buzz-agent" => Some(Vec::new()),
+        "agy-acp" | "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp"
+        | "claude-code" | "claudecode" | "buzz-agent" => Some(Vec::new()),
         _ => None,
     }
 }
@@ -1337,8 +1338,7 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime) -> PartialEntr
         .map(|cmd| normalize_agent_args(cmd, Vec::new()))
         .unwrap_or_default();
 
-    let can_auto_install = !runtime.cli_install_commands_for_os().is_empty()
-        || !runtime.adapter_install_commands.is_empty();
+    let can_auto_install = runtime.can_auto_install(&availability);
 
     let cli_hint = runtime.cli_install_hint;
     let adapter_hint = runtime.adapter_install_hint;

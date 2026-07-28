@@ -18,7 +18,8 @@ export type ProviderRuntimeCapability = "capable" | "locked" | "unknown";
  * provider. To avoid that, we resolve capability STATICALLY for known ids:
  *
  * - buzz-agent / goose → "capable" (`isProviderCapable`, id-based).
- * - claude / codex → "locked" (CLI-login runtimes; no LLM provider selection).
+ * - claude / codex / antigravity → "locked" (vendor CLI runtimes; no LLM
+ *   provider selection).
  * - anything else (custom, empty, genuinely unknown) → "unknown".
  *
  * `isProviderCapable` is the caller-supplied {@link
@@ -33,7 +34,7 @@ export function resolveRuntimeProviderCapability(
     return "capable";
   }
   const id = runtimeId.trim();
-  if (id === "claude" || id === "codex") {
+  if (id === "claude" || id === "codex" || id === "antigravity") {
     return "locked";
   }
   return "unknown";
@@ -96,8 +97,9 @@ export function resolveAgentCommandUpdate(input: {
  * A key counts as missing when its env value is absent or an empty string
  * (matching {@link EnvVarsEditor}'s own `isMissing` rendering). The
  * `requiredEnvKeys` list is already filtered to keys the dialog can fix —
- * CLI-login runtimes (claude/codex) and keys satisfied by the runtime file
- * config contribute no entries, so this never blocks on out-of-band auth.
+ * Vendor CLI runtimes (claude/codex/antigravity) and keys satisfied by the
+ * runtime file config contribute no entries, so this never blocks on
+ * out-of-band auth.
  */
 export function hasMissingRequiredEnvKey(
   requiredEnvKeys: readonly string[],

@@ -151,8 +151,8 @@ function isKnownLlmProvider(
  * Required credential env keys for the given runtime + provider combination.
  * Derived from PROVIDER_CREDENTIAL_CONFIG — single source of truth.
  *
- * buzz-agent and goose use provider-specific credentials; claude and codex
- * handle auth via CLI login (surfaced separately via the CliLogin surface).
+ * buzz-agent and goose use provider-specific credentials; claude, codex, and
+ * antigravity own authentication in their vendor CLIs.
  */
 export function requiredCredentialEnvKeys(
   runtimeId: string,
