@@ -1617,6 +1617,16 @@ const PRESET_HARNESSES: &[PresetHarness] = &[
             Gateway's own environment separately.",
         underlying_cli: None,
     },
+    PresetHarness {
+        id: "kiro",
+        label: "Kiro",
+        command: "kiro-cli",
+        args: &["acp"],
+        install_instructions_url: "https://kiro.dev/docs/getting-started/",
+        install_hint: "Buzz talks to Kiro through the Kiro CLI's ACP mode (kiro-cli acp). \
+            Install the Kiro CLI and run `kiro-cli auth login` to authenticate.",
+        underlying_cli: None,
+    },
 ];
 
 /// Return the static preset harness definitions as `HarnessDefinition` values.
