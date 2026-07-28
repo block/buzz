@@ -119,20 +119,17 @@ const SHORT_PROMPT_MAX_FRAMES: i32 = 100;
 
 /// Word-count threshold (inclusive) below which we cap `max_frames` tighter
 /// than the upstream default. Above this threshold we leave sherpa-onnx's
-/// generation limits in place — overriding them caused the "first 'yep' is
-/// just static" regression seen on 2026-05-18, where dropping
-/// `frames_after_eos` below the upstream default of 3 clipped the leading
-/// audio of multi-clause sentences.
+/// generation limits in place because dropping `frames_after_eos` below the
+/// upstream default of 3 can clip the leading audio of multi-clause sentences.
 const SHORT_PROMPT_WORD_THRESHOLD: usize = 4;
 
 /// Number of leading spaces used by the optional spaces-prefix experiment.
 /// The upstream Python uses exactly 8 for short prompts.
 ///
 /// Leading-space padding is upstream's mitigation for the FlowLM cold-start
-/// smear (kyutai-labs/pocket-tts #91, #70). A previous revision instead
-/// synthesized sacrificial text and trimmed it with an amplitude threshold;
-/// that threshold sat in soft-onset territory and could eat real word starts.
-/// Whitespace needs no fragile audio trimming.
+/// smear (kyutai-labs/pocket-tts #91, #70). It avoids amplitude-threshold
+/// trimming, whose threshold can sit in soft-onset territory and eat real word
+/// starts.
 #[cfg_attr(not(test), allow(dead_code))]
 const PROMPT_PAD_SPACES: usize = 8;
 
