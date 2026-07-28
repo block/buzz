@@ -12,6 +12,7 @@ import type { MissionConstraint, PlanningTask } from "../domain/contracts";
 import { ConstraintEditorDialog } from "./ConstraintEditorDialog";
 import { GanttChart } from "./GanttChart";
 import { MissionConstraintsPanel } from "./MissionConstraintsPanel";
+import { PlanImportReviewDialog } from "./PlanImportReviewDialog";
 import { TaskEditorDialog } from "./TaskEditorDialog";
 import { TaskTable } from "./TaskTable";
 
@@ -63,6 +64,7 @@ export function PlanDetailScreen({
   const [taskOpen, setTaskOpen] = React.useState(false);
   const [editingTask, setEditingTask] = React.useState<PlanningTask>();
   const [constraintOpen, setConstraintOpen] = React.useState(false);
+  const [importOpen, setImportOpen] = React.useState(false);
   const [editingConstraint, setEditingConstraint] =
     React.useState<MissionConstraint>();
   const [validationError, setValidationError] = React.useState<string>();
@@ -95,6 +97,34 @@ export function PlanDetailScreen({
       throw cause;
     }
     await mutations.task.mutateAsync(task);
+  }
+  async function importTasks(imported: readonly PlanningTask[]) {
+    if (!project) return;
+    const importedIds = new Set(imported.map((task) => task.id));
+    const prospective = [
+      ...tasks.filter((task) => !importedIds.has(task.id)),
+      ...imported,
+    ];
+    setValidationError(undefined);
+    try {
+      await calculatePlanSchedule({
+        project,
+        tasks: prospective,
+        workingCalendar: {
+          workingWeekdays: [1, 2, 3, 4, 5],
+          excludedDates: [],
+        },
+        today: today(),
+      });
+      for (const task of imported) await mutations.task.mutateAsync(task);
+    } catch (cause) {
+      setValidationError(
+        cause instanceof Error
+          ? cause.message
+          : "Imported task network is invalid.",
+      );
+      throw cause;
+    }
   }
   if (plans.isLoading) {
     return <p className="p-6 text-sm text-muted-foreground">Loading plan…</p>;
@@ -142,6 +172,7 @@ export function PlanDetailScreen({
             <div className="flex gap-2">
               <button
                 className="rounded border px-3 py-2 text-sm"
+                onClick={() => setImportOpen(true)}
                 type="button"
               >
                 <FileUp className="mr-1 inline h-4 w-4" />
@@ -255,6 +286,13 @@ export function PlanDetailScreen({
         open={constraintOpen}
         projectId={project.id}
         tasks={tasks}
+      />
+      <PlanImportReviewDialog
+        existingTasks={tasks}
+        onApply={importTasks}
+        onOpenChange={setImportOpen}
+        open={importOpen}
+        project={project}
       />
     </main>
   );

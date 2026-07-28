@@ -45,6 +45,33 @@ test("picker returns a strict extracted planning document", async () => {
   assert.equal(result?.blocks[0].location, "Shortcast!B2");
 });
 
+test("picker preserves blank cells inside extracted planning rows", async () => {
+  response = {
+    filename: "Planning.docx",
+    extension: "docx",
+    sha256: "d".repeat(64),
+    sizeBytes: 2048,
+    blocks: [
+      {
+        kind: "table_row",
+        location: "table 1 row 2",
+        cells: ["1", "Define support concept", ""],
+      },
+    ],
+    pages: [],
+    sheets: [],
+    truncated: false,
+  };
+
+  const result = await pickBattleRhythmDocument();
+
+  assert.deepEqual(result?.blocks[0].cells, [
+    "1",
+    "Define support concept",
+    "",
+  ]);
+});
+
 test("picker preserves cancellation and rejects unknown native fields", async () => {
   response = null;
   assert.equal(await pickBattleRhythmDocument(), null);

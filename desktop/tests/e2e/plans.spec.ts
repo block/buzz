@@ -1,6 +1,75 @@
 import { expect, test, type Page } from "@playwright/test";
 import { installMockBridge } from "../helpers/bridge";
 
+function deploymentPlanDocument() {
+  const rows = [
+    [
+      "WBS",
+      "Task",
+      "Owner",
+      "Start",
+      "Due",
+      "Duration",
+      "Progress",
+      "Dependencies",
+    ],
+    [
+      "1",
+      "Define support concept",
+      "Operations Officer",
+      "2026-08-03",
+      "2026-08-04",
+      "2",
+      "0%",
+      "",
+    ],
+    [
+      "2",
+      "Confirm logistics support",
+      "Logistics Officer",
+      "2026-08-05",
+      "2026-08-07",
+      "3",
+      "0%",
+      "1",
+    ],
+    [
+      "3",
+      "Confirm port services",
+      "Logistics Officer",
+      "2026-08-05",
+      "2026-08-05",
+      "1",
+      "0%",
+      "1",
+    ],
+    [
+      "4",
+      "Command readiness review",
+      "Commanding Officer",
+      "2026-08-10",
+      "2026-08-10",
+      "1",
+      "0%",
+      "2,3",
+    ],
+  ];
+  return {
+    filename: "NT Planning.xlsx",
+    extension: "xlsx",
+    sha256: "d".repeat(64),
+    sizeBytes: 4096,
+    blocks: rows.map((cells, index) => ({
+      kind: "table_row",
+      location: `Planning table row ${index + 1}`,
+      cells,
+    })),
+    pages: [],
+    sheets: [],
+    truncated: false,
+  };
+}
+
 async function addTask(
   page: Page,
   input: {
@@ -134,4 +203,46 @@ test("Plans persists a deployment network, critical path, and mission constraint
     .selectOption("resolved");
   await disposition.getByRole("button", { name: "Save constraint" }).click();
   await expect(panel.getByText("resolved", { exact: true })).toBeVisible();
+});
+
+test("Plans reviews and imports a deployment WBS from a planning document", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    battleRhythmDocuments: [deploymentPlanDocument()],
+  });
+  await page.goto("/");
+  await page.getByTestId("open-plans-view").click();
+  await page.getByRole("button", { name: "New Plan" }).click();
+  const create = page.getByRole("dialog", { name: "New operational plan" });
+  await create.getByLabel("Plan title").fill("Imported deployment plan");
+  await create
+    .getByLabel("Purpose")
+    .fill("Prepare the logistics mission through a reviewed WBS.");
+  await create.getByLabel("Mission-ready date").fill("2026-08-10");
+  await create.getByRole("button", { name: "Create plan" }).click();
+
+  const detail = page.getByTestId("plan-detail-screen");
+  await detail.getByRole("button", { name: "Import Plan" }).click();
+  const review = page.getByRole("dialog", {
+    name: "Review deployment plan import",
+  });
+  await review
+    .getByRole("button", { name: "Choose Word, Excel, or PDF" })
+    .click();
+  await expect(review.getByText("NT Planning.xlsx")).toBeVisible();
+  await expect(review.getByText("4 tasks proposed")).toBeVisible();
+  await expect(review.getByText("Confirm logistics support")).toBeVisible();
+  await review.getByRole("button", { name: "Import reviewed tasks" }).click();
+
+  await expect(review).toHaveCount(0);
+  await expect(
+    detail.getByRole("cell", { name: "Define support concept" }),
+  ).toBeVisible();
+  await expect(
+    detail.getByRole("cell", { name: "Command readiness review" }),
+  ).toBeVisible();
+  const gantt = detail.getByTestId("gantt-chart");
+  await expect(gantt.getByText("6 working days")).toBeVisible();
+  await expect(gantt.getByText("2 working days float")).toBeVisible();
 });

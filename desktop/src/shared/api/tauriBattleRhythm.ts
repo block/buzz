@@ -63,6 +63,12 @@ function text(value: unknown, maximum = 1024 * 1024): string {
   return value;
 }
 
+function boundedText(value: unknown, maximum: number): string {
+  if (typeof value !== "string" || value.length > maximum)
+    throw new Error("Battle Rhythm returned an invalid extracted document.");
+  return value;
+}
+
 function integer(value: unknown, maximum: number): number {
   if (
     !Number.isSafeInteger(value) ||
@@ -86,7 +92,9 @@ function parseBlock(value: unknown): ExtractedPlanningBlock {
     return Object.freeze({
       kind: block.kind,
       location: text(block.location),
-      cells: Object.freeze(block.cells.map((cell) => text(cell, 65_536))),
+      cells: Object.freeze(
+        block.cells.map((cell) => boundedText(cell, 65_536)),
+      ),
     });
   }
   if (block.kind === "spreadsheet_cell" || block.kind === "spreadsheet_merge") {
