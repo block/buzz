@@ -168,7 +168,8 @@ export function VoiceSettingsCard() {
           </DropdownMenu>
         </SettingsOptionRow>
 
-        {settings.backend === "siri" && (
+        {(settings.backend === "siri" ||
+          (!loading && voices.length > 0 && !settings.siri_voice)) && (
           <SettingsOptionRow className="items-start border-b border-border/60">
             <div className="min-w-0 flex-1">
               <p className="text-sm font-medium">Siri voice</p>

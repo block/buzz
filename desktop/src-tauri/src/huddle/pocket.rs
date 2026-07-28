@@ -581,7 +581,7 @@ mod tests {
 
     #[test]
     fn prepare_prompt_threshold_is_inclusive_at_four_words() {
-        // Both prompts are padded. Only the 4-word prompt gets a tight
+        // Both prompts receive the production prefix. Only the 4-word prompt gets a tight
         // max_frames cap; the 5-word prompt keeps upstream generation limits.
         let four = prepare_pocket_prompt("one two three four").expect("non-empty");
         assert_eq!(
