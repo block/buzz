@@ -100,7 +100,7 @@ pub fn decrypt_ncryptsec(input: &str, password: &str) -> Result<Keys, String> {
     let encrypted = parse_ncryptsec(input)?;
     let secret_key = encrypted
         .decrypt(password)
-        .map_err(|_| "wrong passphrase or corrupted backup".to_string())?;
+        .map_err(|_| "wrong Keycase password or damaged Keycase".to_string())?;
     Ok(Keys::new(secret_key))
 }
 
@@ -119,8 +119,7 @@ pub fn recover_keys_from_input(input: &str, password: Option<&str>) -> Result<Ke
         .get(..NCRYPTSEC_HRP.len())
         .is_some_and(|head| head.eq_ignore_ascii_case(NCRYPTSEC_HRP));
     if hrp_match {
-        let password =
-            password.ok_or_else(|| "encrypted backup requires a passphrase".to_string())?;
+        let password = password.ok_or_else(|| "Keycase requires a password".to_string())?;
         decrypt_ncryptsec(trimmed, password)
     } else {
         Keys::parse(trimmed).map_err(|e| format!("Invalid private key: {e}"))

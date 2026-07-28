@@ -178,7 +178,7 @@ function NsecRevealRow() {
 }
 
 /**
- * Collapsible row for creating an encrypted NIP-49 backup on demand. The raw
+ * Collapsible row for saving a portable Keycase on demand. The raw
  * private key never reaches this flow — the passphrase goes to Rust, which
  * returns the persisted `ncryptsec1…` blob.
  */
@@ -189,9 +189,10 @@ function EncryptedBackupRow() {
     <div className="px-4 py-3" data-testid="profile-encrypted-backup-row">
       <div className="flex items-center justify-between gap-4">
         <div className="min-w-0 space-y-1">
-          <p className="text-sm font-medium">Password Backup</p>
+          <p className="text-sm font-medium">Keycase</p>
           <p className="text-sm text-muted-foreground">
-            Protect your key with a password and save a recoverable backup.
+            Save a portable, password-protected copy of your identity. Keep it
+            private.
           </p>
         </div>
         <button
@@ -201,12 +202,16 @@ function EncryptedBackupRow() {
           onClick={() => setIsOpen((open) => !open)}
           type="button"
         >
-          {isOpen ? "Close" : "Create"}
+          {isOpen ? "Close" : "Save a new Keycase"}
         </button>
       </div>
       {isOpen ? (
         <div className="mt-3">
           <EncryptedBackupCreator variant="boxed" />
+          <p className="mt-3 text-xs leading-5 text-muted-foreground">
+            Buzz cannot reset the password. Saving a new Keycase does not
+            invalidate copies you saved before.
+          </p>
         </div>
       ) : null}
     </div>

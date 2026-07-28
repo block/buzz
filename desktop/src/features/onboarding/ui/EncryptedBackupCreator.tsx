@@ -23,22 +23,18 @@ import { NsecMaskedDisplay } from "./NsecMaskedDisplay";
 type EncryptedBackupCreatorProps = {
   /** "spotlight" is the onboarding treatment; "boxed" fits settings cards. */
   variant?: "spotlight" | "boxed";
-  /** Fired once the backup blob exists (hosts gate Next / show toasts). */
-  onCreated?: (ncryptsec: string) => void;
+  /** Fired only after the portable Keycase has been saved successfully. */
+  onSaved?: (path: string) => void;
 };
 
 /**
- * Passphrase-first NIP-49 backup creation flow, shared by the onboarding
- * BackupStep and the settings Password Backup row.
- *
- * The raw private key never enters this component: it collects a passphrase,
- * asks Rust to create + persist the encrypted backup, and displays the
- * returned `ncryptsec1…` blob. A generated 6-word passphrase is the default;
- * "choose my own" requires ≥12 characters plus confirmation.
+ * Password-first Keycase creation flow shared by onboarding and Settings.
+ * The raw private key never enters this component. Rust creates the NIP-49
+ * payload locally, then the native save dialog produces the user-owned file.
  */
 export function EncryptedBackupCreator({
   variant = "spotlight",
-  onCreated,
+  onSaved,
 }: EncryptedBackupCreatorProps) {
   const [state, dispatch] = React.useReducer(
     encryptedBackupReducer,
@@ -61,7 +57,7 @@ export function EncryptedBackupCreator({
           message:
             err instanceof Error
               ? err.message
-              : "Failed to generate a passphrase.",
+              : "Failed to generate a Keycase password.",
         });
     }
   }, []);
@@ -82,16 +78,31 @@ export function EncryptedBackupCreator({
       const ncryptsec = await createNcryptsecBackup(passphrase);
       if (!mountedRef.current) return;
       dispatch({ type: "create-succeeded", ncryptsec });
-      onCreated?.(ncryptsec);
+      setIsSaving(true);
+      setSaveError(null);
+      try {
+        const path = await saveNcryptsecCopy(ncryptsec);
+        if (mountedRef.current && path) {
+          setSavedPath(path);
+          onSaved?.(path);
+        }
+      } catch (err) {
+        if (mountedRef.current)
+          setSaveError(
+            err instanceof Error ? err.message : "Failed to save Keycase.",
+          );
+      } finally {
+        if (mountedRef.current) setIsSaving(false);
+      }
     } catch (err) {
       if (mountedRef.current)
         dispatch({
           type: "create-failed",
           message:
-            err instanceof Error ? err.message : "Failed to create backup.",
+            err instanceof Error ? err.message : "Failed to create Keycase.",
         });
     }
-  }, [onCreated, state]);
+  }, [onSaved, state]);
 
   const handleSaveCopy = React.useCallback(async () => {
     if (!state.ncryptsec || isSaving) return;
@@ -99,16 +110,19 @@ export function EncryptedBackupCreator({
     setSaveError(null);
     try {
       const path = await saveNcryptsecCopy(state.ncryptsec);
-      if (mountedRef.current && path) setSavedPath(path);
+      if (mountedRef.current && path) {
+        setSavedPath(path);
+        onSaved?.(path);
+      }
     } catch (err) {
       if (mountedRef.current)
         setSaveError(
-          err instanceof Error ? err.message : "Failed to save a copy.",
+          err instanceof Error ? err.message : "Failed to save Keycase.",
         );
     } finally {
       if (mountedRef.current) setIsSaving(false);
     }
-  }, [isSaving, state.ncryptsec]);
+  }, [isSaving, onSaved, state.ncryptsec]);
 
   const isSpotlight = variant === "spotlight";
   const customIssue = customPassphraseIssue(
@@ -135,14 +149,14 @@ export function EncryptedBackupCreator({
             variant="outline"
           >
             {isSaving ? <Spinner className="h-3.5 w-3.5 border-2" /> : null}
-            Save a copy…
+            Save Keycase…
           </Button>
           {savedPath ? (
             <p
               className="text-xs text-muted-foreground"
               data-testid="encrypted-backup-saved-path"
             >
-              Saved to {savedPath}
+              Keycase saved to {savedPath}
             </p>
           ) : null}
         </div>
@@ -150,8 +164,8 @@ export function EncryptedBackupCreator({
           <p className="text-center text-sm text-destructive">{saveError}</p>
         ) : null}
         <p className="text-center text-xs leading-5 text-muted-foreground">
-          This backup can only be unlocked with your passphrase. Without the
-          passphrase it cannot be recovered — not even by Buzz.
+          Keep this Keycase private. You need both the file and its password to
+          restore your identity. Buzz cannot reset the password.
         </p>
       </div>
     );
@@ -180,13 +194,13 @@ export function EncryptedBackupCreator({
             >
               <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
               <span>
-                Could not generate a passphrase: {state.generateError}
+                Could not generate a Keycase password: {state.generateError}
               </span>
             </div>
           ) : (
             <div className="flex items-center justify-center gap-2 py-4 text-sm text-foreground/70">
               <Spinner className="h-4 w-4 border-2" />
-              Generating a passphrase…
+              Generating a password…
             </div>
           )}
           <div className="flex items-center justify-center gap-3">
@@ -199,7 +213,7 @@ export function EncryptedBackupCreator({
               variant="outline"
             >
               <RefreshCw className="h-3.5 w-3.5" />
-              New passphrase
+              New generated password
             </Button>
             <Button
               className="h-8 text-sm text-muted-foreground hover:text-accent-foreground"
@@ -213,15 +227,15 @@ export function EncryptedBackupCreator({
             </Button>
           </div>
           <p className="text-center text-xs leading-5 text-muted-foreground">
-            Write this passphrase down. It protects your backup and cannot be
-            recovered if lost.
+            Save this generated passphrase as your Keycase password. Store it
+            separately from the private Keycase file.
           </p>
         </div>
       ) : (
         <div className="space-y-3">
           <div className="space-y-2">
             <Input
-              aria-label="Backup passphrase"
+              aria-label="Keycase password"
               autoComplete="new-password"
               className="h-10 bg-background"
               data-testid="backup-passphrase-custom"
@@ -231,12 +245,12 @@ export function EncryptedBackupCreator({
                   value: event.target.value,
                 })
               }
-              placeholder={`Passphrase (min ${MIN_CUSTOM_PASSPHRASE_LEN} characters)`}
+              placeholder={`Password (min ${MIN_CUSTOM_PASSPHRASE_LEN} characters)`}
               type="password"
               value={state.customPassphrase}
             />
             <Input
-              aria-label="Confirm backup passphrase"
+              aria-label="Confirm Keycase password"
               autoComplete="new-password"
               className="h-10 bg-background"
               data-testid="backup-passphrase-confirm"
@@ -246,7 +260,7 @@ export function EncryptedBackupCreator({
                   value: event.target.value,
                 })
               }
-              placeholder="Confirm passphrase"
+              placeholder="Confirm password"
               type="password"
               value={state.customConfirm}
             />
@@ -268,11 +282,11 @@ export function EncryptedBackupCreator({
               type="button"
               variant="ghost"
             >
-              Use a generated passphrase
+              Use a generated password
             </Button>
           </div>
           <p className="text-center text-xs leading-5 text-muted-foreground">
-            Your passphrase protects the backup and cannot be recovered if lost.
+            Your password protects the Keycase. Buzz cannot reset it if lost.
           </p>
         </div>
       )}
@@ -297,10 +311,10 @@ export function EncryptedBackupCreator({
           {state.isCreating ? (
             <>
               <Spinner className="h-4 w-4 border-2" />
-              Encrypting… this takes a couple of seconds
+              Creating Keycase… this takes a couple of seconds
             </>
           ) : (
-            "Create encrypted backup"
+            "Create Keycase"
           )}
         </Button>
       </div>

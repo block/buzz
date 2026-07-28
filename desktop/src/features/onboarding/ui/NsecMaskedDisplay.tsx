@@ -9,8 +9,8 @@ type NsecMaskedDisplayProps = {
   variant?: "boxed" | "bare";
   /**
    * What kind of secret is displayed. Drives labels, aria and testids:
-   * a raw private key ("nsec", default) can impersonate its holder; an
-   * encrypted backup ("ncryptsec") is only as sensitive as its passphrase.
+   * a raw private key ("nsec", default) can impersonate its holder; a
+   * Keycase ("ncryptsec") is only as sensitive as its passphrase.
    */
   kind?: "nsec" | "ncryptsec";
   /**
@@ -26,7 +26,7 @@ const KIND_LABELS = {
     testIdPrefix: "nsec",
   },
   ncryptsec: {
-    noun: "encrypted backup",
+    noun: "Keycase",
     testIdPrefix: "ncryptsec",
   },
 } as const;

@@ -645,7 +645,7 @@ test("first-launch encrypted backup import asks for a passphrase and continues",
   await page.getByTestId("nostr-import-passphrase").fill("wrong passphrase");
   await page.getByTestId("nostr-import-submit").click();
   await expect(page.getByTestId("nostr-import-feedback")).toContainText(
-    /wrong passphrase/i,
+    /wrong Keycase password/i,
   );
 
   await page

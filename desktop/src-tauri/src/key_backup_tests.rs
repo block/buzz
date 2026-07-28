@@ -41,7 +41,7 @@ fn wrong_password_is_a_friendly_error() {
     let keys = Keys::generate();
     let blob = create_backup_blob(&keys, "right password", FAST_LOG_N).unwrap();
     let err = decrypt_ncryptsec(&blob, "wrong password").unwrap_err();
-    assert_eq!(err, "wrong passphrase or corrupted backup");
+    assert_eq!(err, "wrong Keycase password or damaged Keycase");
 }
 
 #[test]
@@ -90,13 +90,13 @@ fn recover_keys_ncryptsec_happy_path() {
 #[test]
 fn recover_keys_ncryptsec_requires_password() {
     let err = recover_keys_from_input(SPEC_NCRYPTSEC, None).unwrap_err();
-    assert_eq!(err, "encrypted backup requires a passphrase");
+    assert_eq!(err, "Keycase requires a password");
 }
 
 #[test]
 fn recover_keys_ncryptsec_wrong_password() {
     let err = recover_keys_from_input(SPEC_NCRYPTSEC, Some("wrong")).unwrap_err();
-    assert_eq!(err, "wrong passphrase or corrupted backup");
+    assert_eq!(err, "wrong Keycase password or damaged Keycase");
 }
 
 /// Bech32 permits an all-uppercase encoding: `NCRYPTSEC1…` must classify as
@@ -108,7 +108,7 @@ fn recover_keys_uppercase_ncryptsec_classifies_as_encrypted() {
     let upper = SPEC_NCRYPTSEC.to_ascii_uppercase();
     // Routing proof: encrypted path demands a passphrase.
     let err = recover_keys_from_input(&upper, None).unwrap_err();
-    assert_eq!(err, "encrypted backup requires a passphrase");
+    assert_eq!(err, "Keycase requires a password");
     // With the passphrase, the bech32 decoder accepts the uppercase form.
     let keys = recover_keys_from_input(&upper, Some("nostr")).unwrap();
     assert_eq!(keys.secret_key().to_secret_hex(), SPEC_SECRET_HEX);

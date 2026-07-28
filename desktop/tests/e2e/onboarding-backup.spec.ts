@@ -21,31 +21,31 @@ test("backup step appears on fresh-key path after profile submit", async ({
   await expect(page.getByTestId("onboarding-page-backup")).toBeVisible();
   await expect(
     page.getByRole("heading", {
-      name: "Your unique identity key has been created",
+      name: "Account created!",
     }),
   ).toBeVisible();
 });
 
 // ---------------------------------------------------------------------------
-// Encrypted-by-default path (plan D3): passphrase → create → ncryptsec shown.
+// Keycase path: password → create locally → native save → saved confirmation.
 // The raw key must never be fetched on this path.
 // ---------------------------------------------------------------------------
 
-test("encrypted backup happy path: generated passphrase, create, save copy, Next", async ({
+test("Keycase happy path: generated password, create, native save, Next", async ({
   page,
 }) => {
   await enterMachineBackup(page);
 
-  // Default mode: generated passphrase shown, Next locked until backup exists.
+  // Default mode: generated password shown, but backup remains optional.
   await expect(page.getByTestId("backup-passphrase-generated")).toBeVisible();
-  await expect(page.getByTestId("onboarding-next")).toBeDisabled();
+  await expect(page.getByTestId("onboarding-next")).toBeEnabled();
 
   await waitForAnimations(page);
   await page.screenshot({ path: `${SHOTS}/02-backup-step-passphrase.png` });
 
   await page.getByTestId("encrypted-backup-create").click();
 
-  // The persisted blob is displayed masked; copy + save-a-copy available.
+  // The locally created blob stays masked; the portable save action is explicit.
   const blob = page.getByTestId("ncryptsec-value");
   await expect(blob).toBeVisible();
   await expect(blob).toHaveCSS("filter", /blur/);
@@ -55,7 +55,6 @@ test("encrypted backup happy path: generated passphrase, create, save copy, Next
   await waitForAnimations(page);
   await page.screenshot({ path: `${SHOTS}/03-backup-step-encrypted.png` });
 
-  await page.getByTestId("encrypted-backup-save-copy").click();
   await expect(page.getByTestId("encrypted-backup-saved-path")).toContainText(
     "identity.ncryptsec",
   );
@@ -98,7 +97,7 @@ test("custom passphrase requires 12 characters and confirmation", async ({
 });
 
 // ---------------------------------------------------------------------------
-// Raw-key path: preserved behind an explicit "Show raw key instead" click.
+// Raw-key path: preserved behind one explicit advanced action.
 // ---------------------------------------------------------------------------
 
 test("raw key path is one explicit click away and shows the masked nsec", async ({
@@ -124,7 +123,7 @@ test("raw key path is one explicit click away and shows the masked nsec", async 
   await waitForAnimations(page);
   await page.screenshot({ path: `${SHOTS}/04-backup-step-raw-revealed.png` });
 
-  // Raw mode keeps the previous gating: key shown → Next enabled.
+  // Next remains enabled on the advanced raw-key path.
   await expect(page.getByTestId("onboarding-next")).toBeEnabled();
   await page.getByTestId("onboarding-next").click();
   await expect(page.getByTestId("onboarding-page-2")).toBeVisible();
@@ -168,8 +167,8 @@ test("raw path shows error banner and retry button when get_nsec fails", async (
 
   await expect(page.getByTestId("backup-load-error")).toBeVisible();
   await expect(page.getByTestId("backup-retry")).toBeVisible();
-  // Next is blocked on error; Skip for now ghost is shown instead.
-  await expect(page.getByTestId("onboarding-next")).toBeDisabled();
+  // Keychain failure does not trap the user; both Next and explicit skip work.
+  await expect(page.getByTestId("onboarding-next")).toBeEnabled();
   await expect(page.getByTestId("backup-skip")).toBeVisible();
 
   // Skip for now still advances to machine setup.

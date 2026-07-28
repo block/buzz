@@ -16,29 +16,9 @@ import { NsecMaskedDisplay } from "./NsecMaskedDisplay";
 
 export type BackupStepMode = "encrypted" | "raw";
 
-/**
- * Pure helper so the disabled logic can be unit-tested without a DOM.
- *
- * Encrypted mode (default): Next unlocks once the backup blob exists — the
- * user must either create a backup or explicitly switch to the raw key.
- * Raw mode: disabled while loading or after a failed load (only the explicit
- * "Skip for now" ghost advances past an error), matching the previous flow.
- */
-export function backupNextDisabled({
-  mode,
-  hasBackup,
-  isLoading,
-  loadError,
-}: {
-  mode: BackupStepMode;
-  hasBackup: boolean;
-  isLoading: boolean;
-  loadError: string | null;
-}): boolean {
-  if (mode === "encrypted") {
-    return !hasBackup;
-  }
-  return isLoading || loadError !== null;
+/** Saving a Keycase is recommended, never required to continue onboarding. */
+export function backupNextDisabled(): boolean {
+  return false;
 }
 
 type BackupStepProps = {
@@ -48,14 +28,11 @@ type BackupStepProps = {
 };
 
 /**
- * Onboarding backup step — encrypted by default. The user protects their
- * freshly created key with a passphrase and gets a NIP-49 `ncryptsec1…`
- * backup; the raw key is only fetched (and shown) after an explicit
- * "Show raw key instead" click. The default path never invokes `get_nsec`.
+ * Onboarding backup step — recommends a portable Keycase without blocking
+ * setup. The raw key is fetched only after the user chooses the advanced path.
  */
 export function BackupStep({ direction, onBack, onNext }: BackupStepProps) {
   const [mode, setMode] = React.useState<BackupStepMode>("encrypted");
-  const [hasBackup, setHasBackup] = React.useState(false);
   const [nsec, setNsec] = React.useState<string | null>(null);
   const [isLoading, setIsLoading] = React.useState(false);
   const [loadError, setLoadError] = React.useState<string | null>(null);
@@ -103,11 +80,11 @@ export function BackupStep({ direction, onBack, onNext }: BackupStepProps) {
     >
       <div className="flex w-full max-w-[500px] shrink-0 flex-col text-center">
         <h1 className="text-title font-normal text-foreground">
-          Your unique identity key has been created
+          Account created!
         </h1>
         <p className="mt-5 text-sm leading-6 text-foreground/80">
           {mode === "encrypted"
-            ? "Protect it with a passphrase and keep an encrypted backup in case you ever need to restore your account."
+            ? "Buzz keeps your identity in the system keychain. Save a portable, password-protected Keycase in case you need to restore it elsewhere."
             : "This key is stored in your system keychain, but save it some place safe in case you ever need to restore your account."}
         </p>
       </div>
@@ -116,10 +93,14 @@ export function BackupStep({ direction, onBack, onNext }: BackupStepProps) {
         {mode === "encrypted" ? (
           <Card className="w-full px-8 py-6" variant="textured">
             <div className="mx-auto w-full max-w-[832px]">
-              <EncryptedBackupCreator
-                onCreated={() => setHasBackup(true)}
-                variant="spotlight"
-              />
+              <div className="mb-5 space-y-2 text-center">
+                <h2 className="text-lg font-medium">Save a Keycase</h2>
+                <p className="text-xs leading-5 text-muted-foreground">
+                  A Keycase is still private. Never publish or share it. You
+                  need both the file and password to restore your identity.
+                </p>
+              </div>
+              <EncryptedBackupCreator variant="spotlight" />
             </div>
           </Card>
         ) : isLoading ? (
@@ -164,7 +145,7 @@ export function BackupStep({ direction, onBack, onNext }: BackupStepProps) {
           </p>
         )}
 
-        {mode === "encrypted" && !hasBackup ? (
+        {mode === "encrypted" ? (
           <div className="mt-4 flex justify-center">
             <Button
               className="h-8 text-sm text-muted-foreground hover:text-accent-foreground"
@@ -174,7 +155,7 @@ export function BackupStep({ direction, onBack, onNext }: BackupStepProps) {
               type="button"
               variant="ghost"
             >
-              Show raw key instead
+              Advanced: show my private key instead
             </Button>
           </div>
         ) : null}
@@ -194,12 +175,7 @@ export function BackupStep({ direction, onBack, onNext }: BackupStepProps) {
         <Button
           className={ONBOARDING_PRIMARY_CTA_CLASS}
           data-testid="onboarding-next"
-          disabled={backupNextDisabled({
-            mode,
-            hasBackup,
-            isLoading,
-            loadError,
-          })}
+          disabled={backupNextDisabled()}
           onClick={onNext}
           type="button"
         >

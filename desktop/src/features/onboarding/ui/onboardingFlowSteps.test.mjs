@@ -53,74 +53,11 @@ test("currentStep_falls_back_to_1_for_pages_outside_the_step_list", () => {
 });
 
 // ---------------------------------------------------------------------------
-// BackupStep gating: backupNextDisabled() pure helper
+// BackupStep gating: saving a Keycase is recommended, not required
 // ---------------------------------------------------------------------------
 
-test("backup_next_disabled_in_encrypted_mode_until_backup_exists", () => {
-  // Encrypted (default) mode: the user must create a backup — or explicitly
-  // switch to the raw key — before Next unlocks. Loading/error state belongs
-  // to the raw path and must not leak into the encrypted gate.
-  assert.equal(
-    backupNextDisabled({
-      mode: "encrypted",
-      hasBackup: false,
-      isLoading: false,
-      loadError: null,
-    }),
-    true,
-  );
-});
-
-test("backup_next_enabled_in_encrypted_mode_once_backup_created", () => {
-  assert.equal(
-    backupNextDisabled({
-      mode: "encrypted",
-      hasBackup: true,
-      isLoading: false,
-      loadError: null,
-    }),
-    false,
-  );
-});
-
-test("backup_next_disabled_while_loading_raw_key", () => {
-  // During a slow keychain read, Next must be blocked — user cannot race past
-  // the key display before it is shown.
-  assert.equal(
-    backupNextDisabled({
-      mode: "raw",
-      hasBackup: false,
-      isLoading: true,
-      loadError: null,
-    }),
-    true,
-  );
-});
-
-test("backup_next_disabled_on_raw_load_error", () => {
-  // Error state: only the explicit "Skip for now" ghost advances; Next blocked.
-  assert.equal(
-    backupNextDisabled({
-      mode: "raw",
-      hasBackup: false,
-      isLoading: false,
-      loadError: "IPC error",
-    }),
-    true,
-  );
-});
-
-test("backup_next_enabled_after_clean_raw_load", () => {
-  // Key shown (or backend cleanly returned none) — user may proceed.
-  assert.equal(
-    backupNextDisabled({
-      mode: "raw",
-      hasBackup: false,
-      isLoading: false,
-      loadError: null,
-    }),
-    false,
-  );
+test("backup_next_is_always_enabled", () => {
+  assert.equal(backupNextDisabled(), false);
 });
 
 // ---------------------------------------------------------------------------
