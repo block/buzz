@@ -69,7 +69,7 @@ import {
   withAccentPreviewVars,
 } from "@/shared/theme/useThemePreviewVars";
 import { ChannelTemplatesSettingsCard } from "./ChannelTemplatesSettingsCard";
-import { DoctorSettingsPanel } from "./DoctorSettingsPanel";
+import { HarnessesSettingsPanel } from "./HarnessesSettingsPanel";
 import { ExperimentalFeaturesCard } from "./ExperimentalFeaturesCard";
 import { KeyboardShortcutsCard } from "./KeyboardShortcutsCard";
 import { MeshComputeSettingsCard } from "@/features/mesh-compute/ui/MeshComputeSettingsCard";
@@ -814,7 +814,7 @@ export function renderSettingsSection(
       return (
         <div className="space-y-12">
           <PreventSleepSettingsCard />
-          <DoctorSettingsPanel />
+          <HarnessesSettingsPanel />
           <ActiveAgentCommunitiesSettingsCard />
           <AgentDefaultsSettingsCard />
         </div>

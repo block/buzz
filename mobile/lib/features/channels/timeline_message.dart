@@ -3,7 +3,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 
 import '../../shared/relay/relay.dart';
-import '../custom_emoji/custom_emoji.dart';
+import '../../shared/custom_emoji/custom_emoji.dart';
 import 'channel_window.dart';
 
 enum SystemEventType {

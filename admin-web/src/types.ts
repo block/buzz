@@ -12,6 +12,17 @@ export interface Report {
   createdAt: string;
 }
 
+export interface ReportedMessage {
+  authorPubkey: string;
+  content: string;
+  createdAt: string;
+  deletedAt: string | null;
+}
+
+export interface ReportDetail extends Report {
+  message: ReportedMessage | null;
+}
+
 export interface FeedbackSummary {
   id: string;
   communityId: string;

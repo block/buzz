@@ -134,6 +134,13 @@ type MockBridgeOptions = {
   relaySelf?: string | null;
   /** Builderlab account returned by hosted-community onboarding. Null/omitted = signed out. */
   builderlabAuth?: { email?: string; name?: string; expiresAt: string } | null;
+  /** Optional policy returned by the native join-policy discovery command. */
+  joinPolicy?: {
+    terms_markdown?: string;
+    privacy_markdown?: string;
+    age_attestation_required: boolean;
+    version: string;
+  } | null;
   /** Bound Builderlab Nostr identity. Null/omitted = not linked yet. */
   builderlabIdentity?: { npub?: string; pubkey_hex?: string } | null;
   /** Communities owned by the mocked Builderlab account. */
@@ -154,6 +161,8 @@ type MockBridgeOptions = {
   acpRuntimesDelayMs?: number;
   acpAuthMethods?: Record<string, { methods: Record<string, unknown>[] }>;
   acpAuthMethodsError?: string;
+  /** When set, the `delete_custom_harness` mock command throws with this message. */
+  deleteCustomHarnessError?: string;
   connectAcpRuntimeResult?: { launched: boolean };
   connectAcpRuntimeDelayMs?: number;
   connectAcpRuntimeError?: string;
@@ -301,6 +310,8 @@ type MockBridgeOptions = {
   oaOwnerIsMe?: boolean;
   /** Whether the mock relay advertises NIP-43 membership support. Defaults to false. */
   relayRequiresMembership?: boolean;
+  /** Delay EOSE for membership snapshots after delivering the event. */
+  relayMembershipEoseDelayMs?: number;
   /**
    * Active identity's role in the seeded `mockRelayMembers`. `null` removes
    * the active identity from the membership list entirely (admin-path branch
@@ -320,6 +331,8 @@ type MockBridgeOptions = {
   /** Delay (ms) applied to `get_relay_self` so E2E tests can prove the
    *  fail-closed race: DMs are withheld while classification is unresolved. */
   relaySelfDelayMs?: number;
+  /** Delay (ms) applied to `start_pairing` so pairing loading UI is observable. */
+  pairingStartDelayMs?: number;
   /**
    * Sequenced results for `confirm_team_snapshot_import`. String = throw
    * with that message; null = succeed. Call N uses results[N]; last entry

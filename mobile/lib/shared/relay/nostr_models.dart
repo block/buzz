@@ -18,6 +18,7 @@ abstract final class EventKind {
   static const agentObserverFrame = 24200;
   static const huddleReaction = 24810;
   static const readState = 30078;
+  static const eventReminder = 30300;
   static const userStatus = 30315;
   static const dmVisibility = 30622;
   static const streamMessageV2 = 40002;

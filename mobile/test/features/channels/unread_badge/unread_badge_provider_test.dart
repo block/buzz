@@ -55,7 +55,7 @@ void main() {
   ProviderContainer buildContainer({
     required List<Channel> channels,
     Map<String, int> readContexts = const {},
-    Set<String> locallyForcedChannelIds = const {},
+    Map<String, String> forcedUnreadContexts = const {},
     bool readStateReady = true,
     Map<String, int> highPriorityMap = const {},
     Map<String, List<ObservedUnreadEvent>>? observedEventsByChannel,
@@ -77,7 +77,7 @@ void main() {
               pubkey: 'me',
               contexts: readContexts,
               version: 1,
-              locallyForcedChannelIds: locallyForcedChannelIds,
+              forcedUnreadContexts: forcedUnreadContexts,
             ),
           ),
         ),
@@ -259,7 +259,7 @@ void main() {
       final container = buildContainer(
         channels: [makeChannel(id: 'ch-a', lastMessageAtSeconds: t20)],
         readContexts: {'ch-a': t30},
-        locallyForcedChannelIds: {'ch-a'},
+        forcedUnreadContexts: {'ch-a': 'ch-a'},
       );
       addTearDown(container.dispose);
 

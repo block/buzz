@@ -37,8 +37,6 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { cn } from "@/shared/lib/cn";
 import { getInitials } from "@/shared/lib/initials";
-import { isMacPlatform } from "@/shared/lib/platform";
-import { useIsFullscreen } from "@/shared/lib/useIsFullscreen";
 import { writeTextToClipboard } from "@/shared/lib/clipboard";
 
 type CommunityRailProps = {
@@ -315,7 +313,6 @@ export function CommunityRail({
     activeCommunityId,
   );
   const iconsByCommunity = useCommunityIcons(communities);
-  const isFullscreen = useIsFullscreen();
   const { markAllChannelsRead, onOpenSettings } = useAppShell();
   const myMembershipQuery = useMyRelayMembershipLookupQuery();
   const activeRole = myMembershipQuery.data?.membership?.role;
@@ -370,19 +367,10 @@ export function CommunityRail({
     });
   };
 
-  // macOS traffic lights overlay the top-left, so start buttons below them (they hide in fullscreen).
-  const topPaddingClass =
-    isMacPlatform() && !isFullscreen
-      ? "pt-(--buzz-top-chrome-height,40px)"
-      : "pt-3";
-
   return (
     <nav
       aria-label="Communities"
-      className={cn(
-        "flex w-12 shrink-0 flex-col items-center gap-2 overflow-y-auto bg-sidebar pb-3",
-        topPaddingClass,
-      )}
+      className="relative z-20 mb-2 mt-[calc(var(--buzz-top-chrome-height,40px)+1px)] flex w-14 shrink-0 flex-col items-center gap-2 overflow-y-auto bg-sidebar px-2.5 pb-3 pt-1.5"
       data-testid="community-rail"
     >
       <DndContext

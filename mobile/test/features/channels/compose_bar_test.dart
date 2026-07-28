@@ -18,10 +18,11 @@ import 'package:buzz/features/channels/compose_bar.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/mentions/mention_candidates.dart';
 import 'package:buzz/features/channels/mentions/mention_candidates_provider.dart';
-import 'package:buzz/features/custom_emoji/custom_emoji.dart';
-import 'package:buzz/features/custom_emoji/custom_emoji_provider.dart';
+import 'package:buzz/shared/custom_emoji/custom_emoji.dart';
+import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 final _pngBytes = Uint8List.fromList([
   0x89,
@@ -134,6 +135,10 @@ void _setMockMediaUploadPlatformHandler(
       .setMockMethodCallHandler(_mediaUploadPlatformChannel, handler);
 }
 
+/// Shared mock prefs for the compose bar's draft store. Initialized in
+/// [main].
+late SharedPreferences _testPrefs;
+
 Widget _buildComposeBar({
   required MediaUploadService uploadService,
   required ComposeBarOnSend onSend,
@@ -144,6 +149,7 @@ Widget _buildComposeBar({
   String? currentPubkey,
   bool? supportsShowingSystemContextMenu,
   List<CustomEmoji> customEmoji = const <CustomEmoji>[],
+  RelayConfigNotifier Function()? relayConfig,
 }) {
   return ProviderScope(
     overrides: [
@@ -158,7 +164,10 @@ Widget _buildComposeBar({
       relayClientProvider.overrideWithValue(
         RelayClient(baseUrl: 'http://localhost:3000'),
       ),
-      relayConfigProvider.overrideWith(() => _FakeRelayConfigNotifier()),
+      relayConfigProvider.overrideWith(
+        relayConfig ?? _FakeRelayConfigNotifier.new,
+      ),
+      savedPrefsProvider.overrideWithValue(_testPrefs),
       channelsProvider.overrideWith(() => _FakeChannelsNotifier(channels)),
     ],
     child: MaterialApp(
@@ -190,6 +199,18 @@ class _FakeRelayConfigNotifier extends RelayConfigNotifier {
     baseUrl: 'http://localhost:3000',
     nsec: nostr.Keys.generate().nsec,
   );
+}
+
+/// Relay config that starts from a fixed identity and can be switched
+/// in place via [RelayConfigNotifier.update] — simulates a community or
+/// account switch while widgets stay mounted.
+class _SwitchableRelayConfigNotifier extends RelayConfigNotifier {
+  final RelayConfig initial;
+
+  _SwitchableRelayConfigNotifier(this.initial);
+
+  @override
+  RelayConfig build() => initial;
 }
 
 class _RecordingRelaySocket extends RelaySocket {
@@ -241,6 +262,11 @@ class _FakeChannelsNotifier extends ChannelsNotifier {
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  setUp(() async {
+    SharedPreferences.setMockInitialValues({});
+    _testPrefs = await SharedPreferences.getInstance();
+  });
+
   setUpAll(() {
     _setMockMediaUploadPlatformHandler((call) async {
       switch (call.method) {
@@ -262,6 +288,72 @@ void main() {
   });
 
   group('ComposeBar', () {
+    testWidgets('mounted composer does not carry draft text across an in-place '
+        'identity switch', (tester) async {
+      final keysA = nostr.Keys.generate();
+      final keysB = nostr.Keys.generate();
+      const relayUrl = 'http://localhost:3000';
+
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(keysA.nsec),
+          relayConfig: () => _SwitchableRelayConfigNotifier(
+            RelayConfig(baseUrl: relayUrl, nsec: keysA.nsec),
+          ),
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      String? storedText(nostr.Keys keys) {
+        final raw = _testPrefs.getString(
+          'compose_drafts_v1:$relayUrl:${keys.public}',
+        );
+        if (raw == null) return null;
+        final drafts = jsonDecode(raw) as List;
+        if (drafts.isEmpty) return null;
+        return (drafts.first as Map<String, dynamic>)['text'] as String?;
+      }
+
+      // Identity A types a draft; it persists into A's namespaced store.
+      await _expandComposer(tester);
+      await tester.enterText(find.byType(TextField), 'identity A secret draft');
+      await tester.pump();
+      expect(storedText(keysA), 'identity A secret draft');
+
+      // Switch identity in place while the composer stays mounted.
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(ComposeBar)),
+      );
+      container
+          .read(relayConfigProvider.notifier)
+          .update(baseUrl: relayUrl, nsec: keysB.nsec);
+      await tester.pumpAndSettle();
+
+      // The mounted composer must not carry identity A's text forward.
+      final textField = tester.widget<TextField>(find.byType(TextField));
+      expect(textField.controller!.text, isEmpty);
+      expect(storedText(keysB), isNull);
+
+      // Identity B's edits persist only into B's store; A's is untouched.
+      await tester.enterText(find.byType(TextField), 'identity B text');
+      await tester.pump();
+      expect(storedText(keysB), 'identity B text');
+      expect(storedText(keysA), 'identity A secret draft');
+
+      // Switching back restores identity A's own draft into the composer.
+      container
+          .read(relayConfigProvider.notifier)
+          .update(baseUrl: relayUrl, nsec: keysA.nsec);
+      await tester.pumpAndSettle();
+      expect(textField.controller!.text, 'identity A secret draft');
+      expect(storedText(keysB), 'identity B text');
+    });
+
     testWidgets('inserts a community emoji at the cursor from the action row', (
       tester,
     ) async {
