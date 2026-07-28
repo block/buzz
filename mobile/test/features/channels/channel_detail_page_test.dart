@@ -909,53 +909,66 @@ void main() {
       expect(findRichText('Newest live update'), findsOneWidget);
     });
 
-    testWidgets('preserves an initial message deep-link position', (
-      tester,
-    ) async {
-      final initialMessages = [
-        for (var i = 0; i < 40; i++)
-          _textMsg(
-            id: 'msg$i',
-            pubkey: 'alice',
-            content: 'Message $i',
-            createdAt: 1000 + i,
+    testWidgets(
+      'keeps a deep-linked message in view when its page arrives after a '
+      'small scroll near the latest message',
+      (tester) async {
+        tester.view.physicalSize = const Size(400, 800);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        // The deep-link target lives in an older page that has not loaded yet.
+        final messagesNotifier = _FakeMessagesNotifier([
+          for (var i = 30; i < 60; i++)
+            _textMsg(
+              id: 'msg$i',
+              pubkey: 'alice',
+              content: 'Message $i',
+              createdAt: 1000 + i * 1000,
+            ),
+        ]);
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: const [],
+            messagesNotifier: messagesNotifier,
+            initialMessageId: 'msg3',
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            },
           ),
-      ];
-      final messagesNotifier = _FakeMessagesNotifier(initialMessages);
+        );
+        await tester.pumpAndSettle();
 
-      await tester.pumpWidget(
-        _buildTestable(
-          messages: const [],
-          messagesNotifier: messagesNotifier,
-          initialMessageId: 'msg5',
-          users: const {
-            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
-          },
-        ),
-      );
-      await tester.pumpAndSettle();
+        // Small scrolls that keep the newest message visible, so isAtLatest
+        // stays true while the scroll offset becomes non-zero. This lets a
+        // later programmatic jumpTo dispatch ScrollEndNotification.
+        for (final dy in const [10.0, 20.0, 30.0]) {
+          await tester.drag(
+            find.byKey(const ValueKey('channel-message-list')),
+            Offset(0, dy),
+          );
+          await tester.pumpAndSettle();
+        }
 
-      expect(findRichText('Message 5'), findsOneWidget);
-      expect(findRichText('Message 39'), findsNothing);
-      expect(
-        find.byKey(const ValueKey('channel-jump-to-latest')),
-        findsOneWidget,
-      );
+        // The older page containing the deep-link target arrives.
+        messagesNotifier.setMessages([
+          for (var i = 0; i < 60; i++)
+            _textMsg(
+              id: 'msg$i',
+              pubkey: 'alice',
+              content: 'Message $i',
+              createdAt: 1000 + i * 1000,
+            ),
+        ]);
+        await tester.pumpAndSettle();
 
-      messagesNotifier.setMessages([
-        ...initialMessages,
-        _textMsg(
-          id: 'newest',
-          pubkey: 'alice',
-          content: 'Newest live update',
-          createdAt: 2000,
-        ),
-      ]);
-      await tester.pumpAndSettle();
-
-      expect(findRichText('Message 5'), findsOneWidget);
-      expect(findRichText('Newest live update'), findsNothing);
-    });
+        // The deep-link jump must stick rather than snapping back to newest.
+        expect(findRichText('Message 3'), findsOneWidget);
+        expect(findRichText('Message 59'), findsNothing);
+      },
+    );
 
     testWidgets('groups consecutive messages from same author', (tester) async {
       final messages = [

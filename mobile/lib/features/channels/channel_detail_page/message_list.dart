@@ -157,6 +157,12 @@ class _MessageList extends HookConsumerWidget {
       }
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!context.mounted || !itemScrollController.isAttached) return;
+        itemScrollController.jumpTo(index: targetIndex, alignment: 0.35);
+        // A deep link intentionally parks the viewport away from the newest
+        // message, so follow-latest must stay off after the jump. jumpTo can
+        // synchronously dispatch ScrollEndNotification, which would otherwise
+        // re-arm follow mode and auto-scroll straight back to index 0.
+        followsLatest.value = false;
         didJumpToInitialMessage.value = true;
         followsLatest.value = false;
         isAtLatest.value = false;
