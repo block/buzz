@@ -838,6 +838,16 @@ pub enum UsersCmd {
         #[arg(long, value_enum)]
         status: PresenceStatus,
     },
+    /// Set your user status (NIP-38 kind:30315 — the "status" line on your profile)
+    #[command(name = "set-status")]
+    SetStatus {
+        /// Status text. Empty text clears the status.
+        #[arg(long)]
+        text: String,
+        /// Optional emoji shown before the status text
+        #[arg(long)]
+        emoji: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1924,7 +1934,13 @@ mod tests {
         );
         assert_eq!(
             names(&cmd, "users"),
-            vec!["get", "presence", "set-presence", "set-profile"]
+            vec![
+                "get",
+                "presence",
+                "set-presence",
+                "set-profile",
+                "set-status"
+            ]
         );
         assert_eq!(
             names(&cmd, "workflows"),
@@ -2011,7 +2027,7 @@ mod tests {
             ("repos", 4),
             ("social", 7),
             ("upload", 1),
-            ("users", 4),
+            ("users", 5),
             ("workflows", 8),
         ];
 

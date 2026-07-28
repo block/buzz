@@ -304,6 +304,36 @@ pub async fn cmd_set_presence(client: &BuzzClient, status: &str) -> Result<(), C
     Ok(())
 }
 
+/// Set user status — sign and submit a NIP-38 kind:30315 user status event.
+///
+/// Uses the `d:general` coordinate that the desktop client reads for the
+/// profile status line. Empty text clears the status (replaceable event with
+/// empty content).
+pub async fn cmd_set_status(
+    client: &BuzzClient,
+    text: &str,
+    emoji: Option<&str>,
+) -> Result<(), CliError> {
+    use nostr::{EventBuilder, Kind, Tag};
+
+    const KIND_USER_STATUS: u16 = 30315;
+    let text = text.trim();
+    let mut tags = vec![Tag::parse(["d", "general"])
+        .map_err(|e| CliError::Usage(format!("internal tag error: {e}")))?];
+    if let Some(emoji) = emoji.map(str::trim).filter(|e| !e.is_empty()) {
+        tags.push(
+            Tag::parse(["emoji", emoji])
+                .map_err(|e| CliError::Usage(format!("invalid emoji tag: {e}")))?,
+        );
+    }
+
+    let builder = EventBuilder::new(Kind::Custom(KIND_USER_STATUS), text).tags(tags);
+    let event = client.sign_event(builder)?;
+    let resp = client.submit_event(event).await?;
+    println!("{}", normalize_write_response(&resp));
+    Ok(())
+}
+
 pub async fn dispatch(
     cmd: crate::UsersCmd,
     client: &BuzzClient,
@@ -331,6 +361,9 @@ pub async fn dispatch(
         }
         UsersCmd::Presence { pubkeys } => cmd_get_presence(client, &pubkeys).await,
         UsersCmd::SetPresence { status } => cmd_set_presence(client, &status.to_string()).await,
+        UsersCmd::SetStatus { text, emoji } => {
+            cmd_set_status(client, &text, emoji.as_deref()).await
+        }
     }
 }
 
