@@ -6,6 +6,8 @@ import { buildUnifiedGroups } from "./unifiedAgentGroups.ts";
 const commandPersonas = [
   "chief-of-staff",
   "operations",
+  "intelligence",
+  "logistics",
   "navigation",
   "daily-routine",
   "reporting",
@@ -15,7 +17,7 @@ const commandPersonas = [
   displayName: slug,
 }));
 
-test("separates the six stable advisers into one ordered Command Team group", () => {
+test("separates the eight stable advisers into one ordered Command Team group", () => {
   const fizz = { id: "builtin:fizz", displayName: "Fizz" };
   const agents = [
     {
@@ -36,7 +38,7 @@ test("separates the six stable advisers into one ordered Command Team group", ()
     result.groups.map(({ persona }) => persona.id),
     ["builtin:fizz"],
   );
-  assert.equal(result.commandTeamGroups[2].agents[0].pubkey, "a".repeat(64));
+  assert.equal(result.commandTeamGroups[4].agents[0].pubkey, "a".repeat(64));
 });
 
 test("does not duplicate a command persona or lose unknown agents", () => {

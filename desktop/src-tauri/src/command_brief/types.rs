@@ -21,6 +21,8 @@ pub enum Classification {
 pub enum AdviserId {
     ChiefOfStaff,
     Operations,
+    Intelligence,
+    Logistics,
     Navigation,
     DailyRoutine,
     Reporting,
@@ -33,6 +35,8 @@ pub enum AdviserId {
 pub enum BriefSection {
     Today,
     Operations,
+    Intelligence,
+    Logistics,
     Navigation,
     DailyRoutine,
     Reports,
@@ -49,6 +53,7 @@ pub enum BriefSection {
 pub enum SourceKind {
     Rag,
     Memory,
+    WorldMonitor,
     Calendar,
     Reminders,
     Notes,
@@ -85,16 +90,18 @@ pub const MAX_TEXT_BYTES: usize = 4096;
 /// Maximum count for general contract arrays.
 pub const MAX_ARRAY_ITEMS: usize = 64;
 /// Number of specialist contributions required by one complete brief.
-pub const SPECIALIST_COUNT: usize = 5;
+pub const SPECIALIST_COUNT: usize = 7;
 /// Exact specialist identities required by a complete brief and Chief input.
 pub const SPECIALIST_ADVISERS: [AdviserId; SPECIALIST_COUNT] = [
     AdviserId::Operations,
+    AdviserId::Intelligence,
+    AdviserId::Logistics,
     AdviserId::Navigation,
     AdviserId::DailyRoutine,
     AdviserId::Reporting,
     AdviserId::Plans,
 ];
-/// Maximum final dissent retained across all five specialist contributions.
+/// Maximum final dissent retained across all specialist contributions.
 pub const MAX_AGGREGATE_DISSENT_ITEMS: usize = SPECIALIST_COUNT * MAX_ARRAY_ITEMS;
 /// Maximum sources admitted to one frozen run ledger.
 pub const MAX_SOURCE_LEDGER_ITEMS: usize = 256;
@@ -550,6 +557,8 @@ fn valid_sections(sections: &BTreeMap<BriefSection, Vec<CitedFinding>>) -> bool 
     let expected = BTreeSet::from([
         BriefSection::Today,
         BriefSection::Operations,
+        BriefSection::Intelligence,
+        BriefSection::Logistics,
         BriefSection::Navigation,
         BriefSection::DailyRoutine,
         BriefSection::Reports,
@@ -612,6 +621,8 @@ fn parse_raw_contribution(
     }
     let expected_section = match contribution.adviser {
         AdviserId::Operations => BriefSection::Operations,
+        AdviserId::Intelligence => BriefSection::Intelligence,
+        AdviserId::Logistics => BriefSection::Logistics,
         AdviserId::Navigation => BriefSection::Navigation,
         AdviserId::DailyRoutine => BriefSection::DailyRoutine,
         AdviserId::Reporting => BriefSection::Reports,

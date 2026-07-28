@@ -3,7 +3,7 @@ import type { OfficialSourceReference } from "./contracts";
 
 export const MAX_TEXT_BYTES = 4096;
 export const MAX_ARRAY_ITEMS = 64;
-export const SPECIALIST_COUNT = 5;
+export const SPECIALIST_COUNT = 7;
 export const MAX_AGGREGATE_DISSENT_ITEMS = SPECIALIST_COUNT * MAX_ARRAY_ITEMS;
 export const MAX_SOURCE_LEDGER_ITEMS = 256;
 
@@ -13,6 +13,8 @@ export const ADVISORY_LIMITATION =
 export const BRIEF_SECTIONS = Object.freeze([
   "today",
   "operations",
+  "intelligence",
+  "logistics",
   "navigation",
   "daily_routine",
   "reports",
@@ -26,6 +28,8 @@ export type BriefSection = (typeof BRIEF_SECTIONS)[number];
 export const ADVISER_IDS = Object.freeze([
   "chief_of_staff",
   "operations",
+  "intelligence",
+  "logistics",
   "navigation",
   "daily_routine",
   "reporting",
@@ -35,6 +39,8 @@ export type AdviserId = (typeof ADVISER_IDS)[number];
 
 const SPECIALISTS = Object.freeze([
   "operations",
+  "intelligence",
+  "logistics",
   "navigation",
   "daily_routine",
   "reporting",
@@ -44,6 +50,7 @@ const SPECIALISTS = Object.freeze([
 const SOURCE_KINDS = Object.freeze([
   "rag",
   "memory",
+  "world_monitor",
   "calendar",
   "reminders",
   "notes",
@@ -304,6 +311,8 @@ function expectedSection(
 ): BriefSection {
   return {
     operations: "operations",
+    intelligence: "intelligence",
+    logistics: "logistics",
     navigation: "navigation",
     daily_routine: "daily_routine",
     reporting: "reports",

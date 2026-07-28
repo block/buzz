@@ -1,8 +1,8 @@
 use super::types::{
     AdviserContribution, AdviserId, BriefLifecycleRecord, BriefRunState, BriefRunStatus,
-    BriefSchedule, BriefSection, CitedFinding, CommandBrief, PublishedCommandBrief,
+    BriefSchedule, BriefSection, CitedFinding, CommandBrief, PublishedCommandBrief, SourceKind,
     SourceLedgerEntry, ADVISORY_LIMITATION, MAX_AGGREGATE_DISSENT_ITEMS, MAX_ARRAY_ITEMS,
-    MAX_TEXT_BYTES,
+    MAX_TEXT_BYTES, SPECIALIST_ADVISERS, SPECIALIST_COUNT,
 };
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
@@ -17,6 +17,8 @@ fn sections() -> Value {
     json!({
         "today": [finding("A supported specialist finding.")],
         "operations": [],
+        "intelligence": [],
+        "logistics": [],
         "navigation": [],
         "daily_routine": [],
         "reports": [],
@@ -50,6 +52,8 @@ fn contribution(adviser: &str) -> Value {
         "adviser": adviser,
         "section": match adviser {
             "operations" => "operations",
+            "intelligence" => "intelligence",
+            "logistics" => "logistics",
             "navigation" => "navigation",
             "daily_routine" => "daily_routine",
             "reporting" => "reports",
@@ -80,6 +84,8 @@ pub(crate) fn brief_value() -> Value {
         "sourceFreshness": { "classification": "OFFICIAL", "asOf": NOW, "staleSourceIds": [] },
         "contributions": [
             contribution("operations"),
+            contribution("intelligence"),
+            contribution("logistics"),
             contribution("navigation"),
             contribution("daily_routine"),
             contribution("reporting"),
@@ -115,7 +121,20 @@ fn serializes_the_exact_camel_case_official_wire_shape() {
             .as_object()
             .expect("sections object")
             .len(),
-        9
+        11
+    );
+    assert_eq!(SPECIALIST_COUNT, 7);
+    assert_eq!(
+        SPECIALIST_ADVISERS,
+        [
+            AdviserId::Operations,
+            AdviserId::Intelligence,
+            AdviserId::Logistics,
+            AdviserId::Navigation,
+            AdviserId::DailyRoutine,
+            AdviserId::Reporting,
+            AdviserId::Plans,
+        ]
     );
     assert_eq!(
         serde_json::to_value(AdviserId::Navigation).expect("serialize adviser"),
@@ -124,6 +143,10 @@ fn serializes_the_exact_camel_case_official_wire_shape() {
     assert_eq!(
         serde_json::to_value(BriefSection::Planning306090).expect("serialize section"),
         "planning_30_60_90"
+    );
+    assert_eq!(
+        serde_json::to_value(SourceKind::WorldMonitor).expect("serialize source kind"),
+        "world_monitor"
     );
     assert_eq!(
         serde_json::to_value(BriefRunState::CollectingSources).expect("serialize state"),
@@ -136,7 +159,7 @@ fn rejects_closed_enum_unknowns_and_non_official_classification() {
     for (path, replacement) in [
         ("adviser", "unapproved"),
         ("section", "unapproved"),
-        ("sourceKind", "network"),
+        ("sourceKind", "unknown_osint"),
         ("classification", "PUBLIC"),
     ] {
         let mut value = brief_value();
@@ -371,7 +394,7 @@ fn rejects_control_characters_and_every_bounded_text_and_array_overflow() {
 }
 
 #[test]
-fn final_dissent_accepts_five_specialist_budgets_but_no_more() {
+fn final_dissent_accepts_seven_specialist_budgets_but_no_more() {
     let mut aggregate = Vec::with_capacity(MAX_AGGREGATE_DISSENT_ITEMS);
     let mut at_limit = brief_value();
     for (specialist_index, contribution) in at_limit["contributions"]

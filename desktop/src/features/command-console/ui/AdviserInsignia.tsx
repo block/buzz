@@ -2,8 +2,10 @@ import {
   Anchor,
   Bell,
   ClipboardList,
+  Fuel,
   Radar,
   Route,
+  ScanSearch,
   type LucideIcon,
 } from "lucide-react";
 
@@ -30,6 +32,16 @@ export const ADVISER_IDENTITIES: Record<CommandAdviserId, AdviserIdentity> = {
     label: "Operations Adviser — radar plot",
     symbol: "radar-plot",
     icon: Radar,
+  },
+  intelligence: {
+    label: "Maritime N2 Adviser — intelligence scan",
+    symbol: "intelligence-scan",
+    icon: ScanSearch,
+  },
+  logistics: {
+    label: "Logistics Adviser — replenishment",
+    symbol: "replenishment",
+    icon: Fuel,
   },
   navigation: {
     label: "Navigation Adviser — sextant",

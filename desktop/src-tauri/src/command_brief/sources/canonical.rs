@@ -386,7 +386,7 @@ pub(super) fn canonical_ledger(
 ) -> Result<CanonicalLedgerOutput, SourceCollectionError> {
     let mut by_source = BTreeMap::<String, CandidateSource>::new();
     let mut limitations = BTreeSet::new();
-    let mut rejected_by_kind = [0_usize; 6];
+    let mut rejected_by_kind = [0_usize; 7];
     let mut rejected_command_team_discussions = 0_usize;
     for mut candidate in candidates {
         let Some((quote, truncated)) =
@@ -427,7 +427,7 @@ pub(super) fn canonical_ledger(
             .cmp(&retention_priority(right.source_kind))
             .then_with(|| left.source_id.cmp(&right.source_id))
     });
-    let mut omitted_by_kind = [0_usize; 6];
+    let mut omitted_by_kind = [0_usize; 7];
     let mut omitted_command_team_discussions = 0_usize;
     if candidates.len() > MAX_CANONICAL_LEDGER_ITEMS {
         for candidate in &candidates[MAX_CANONICAL_LEDGER_ITEMS..] {
@@ -497,14 +497,15 @@ const fn retention_priority(kind: SourceKind) -> u8 {
         SourceKind::File => 3,
         SourceKind::Memory => 4,
         SourceKind::Rag => 5,
+        SourceKind::WorldMonitor => 6,
     }
 }
 
 pub(super) struct CanonicalLedgerOutput {
     pub(super) ledger: Vec<SourceLedgerEntry>,
     pub(super) limitations: BTreeSet<String>,
-    pub(super) omitted_by_kind: [usize; 6],
-    pub(super) rejected_by_kind: [usize; 6],
+    pub(super) omitted_by_kind: [usize; 7],
+    pub(super) rejected_by_kind: [usize; 7],
     pub(super) omitted_command_team_discussions: usize,
     pub(super) rejected_command_team_discussions: usize,
 }
@@ -527,17 +528,18 @@ pub(super) fn apply_command_team_ledger_losses(
 }
 
 pub(super) fn apply_ledger_omissions(
-    omitted_by_kind: &[usize; 6],
+    omitted_by_kind: &[usize; 7],
     degraded: &mut BTreeSet<BriefSection>,
     limitations: &mut BTreeSet<String>,
 ) {
     for (kind, count) in [
         (SourceKind::Rag, omitted_by_kind[0]),
         (SourceKind::Memory, omitted_by_kind[1]),
-        (SourceKind::Calendar, omitted_by_kind[2]),
-        (SourceKind::Reminders, omitted_by_kind[3]),
-        (SourceKind::Notes, omitted_by_kind[4]),
-        (SourceKind::File, omitted_by_kind[5]),
+        (SourceKind::WorldMonitor, omitted_by_kind[2]),
+        (SourceKind::Calendar, omitted_by_kind[3]),
+        (SourceKind::Reminders, omitted_by_kind[4]),
+        (SourceKind::Notes, omitted_by_kind[5]),
+        (SourceKind::File, omitted_by_kind[6]),
     ] {
         if count == 0 {
             continue;
@@ -548,6 +550,9 @@ pub(super) fn apply_ledger_omissions(
         ));
         match kind {
             SourceKind::Rag | SourceKind::Memory => degraded.extend(RAG_MEMORY_SECTIONS),
+            SourceKind::WorldMonitor => {
+                degraded.insert(BriefSection::Intelligence);
+            }
             SourceKind::Calendar | SourceKind::Reminders | SourceKind::Notes | SourceKind::File => {
                 degraded.insert(BriefSection::DailyRoutine);
             }
@@ -556,17 +561,18 @@ pub(super) fn apply_ledger_omissions(
 }
 
 pub(super) fn apply_ledger_rejections(
-    rejected_by_kind: &[usize; 6],
+    rejected_by_kind: &[usize; 7],
     degraded: &mut BTreeSet<BriefSection>,
     limitations: &mut BTreeSet<String>,
 ) {
     for (kind, count) in [
         (SourceKind::Rag, rejected_by_kind[0]),
         (SourceKind::Memory, rejected_by_kind[1]),
-        (SourceKind::Calendar, rejected_by_kind[2]),
-        (SourceKind::Reminders, rejected_by_kind[3]),
-        (SourceKind::Notes, rejected_by_kind[4]),
-        (SourceKind::File, rejected_by_kind[5]),
+        (SourceKind::WorldMonitor, rejected_by_kind[2]),
+        (SourceKind::Calendar, rejected_by_kind[3]),
+        (SourceKind::Reminders, rejected_by_kind[4]),
+        (SourceKind::Notes, rejected_by_kind[5]),
+        (SourceKind::File, rejected_by_kind[6]),
     ] {
         if count == 0 {
             continue;
@@ -577,6 +583,9 @@ pub(super) fn apply_ledger_rejections(
         ));
         match kind {
             SourceKind::Rag | SourceKind::Memory => degraded.extend(RAG_MEMORY_SECTIONS),
+            SourceKind::WorldMonitor => {
+                degraded.insert(BriefSection::Intelligence);
+            }
             SourceKind::Calendar | SourceKind::Reminders | SourceKind::Notes | SourceKind::File => {
                 degraded.insert(BriefSection::DailyRoutine);
             }
@@ -588,6 +597,7 @@ const fn source_kind_name(kind: SourceKind) -> &'static str {
     match kind {
         SourceKind::Rag => "RAG",
         SourceKind::Memory => "Memory",
+        SourceKind::WorldMonitor => "World Monitor",
         SourceKind::Calendar => "calendar",
         SourceKind::Reminders => "reminder",
         SourceKind::Notes => "note",
@@ -609,10 +619,11 @@ const fn source_priority(kind: SourceKind) -> u8 {
     match kind {
         SourceKind::Rag => 0,
         SourceKind::Memory => 1,
-        SourceKind::Calendar => 2,
-        SourceKind::Reminders => 3,
-        SourceKind::Notes => 4,
-        SourceKind::File => 5,
+        SourceKind::WorldMonitor => 2,
+        SourceKind::Calendar => 3,
+        SourceKind::Reminders => 4,
+        SourceKind::Notes => 5,
+        SourceKind::File => 6,
     }
 }
 

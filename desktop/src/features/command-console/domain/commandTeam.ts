@@ -21,6 +21,18 @@ export const COMMAND_TEAM_PERSONAS = Object.freeze([
     detail: "Priorities, readiness and risk",
   },
   {
+    adviser: "intelligence",
+    personaId: "builtin:command-intelligence",
+    label: "Maritime N2",
+    detail: "Regional intelligence, threats and warning",
+  },
+  {
+    adviser: "logistics",
+    personaId: "builtin:command-logistics",
+    label: "Logistics",
+    detail: "Replenishment, sustainment and dependencies",
+  },
+  {
     adviser: "navigation",
     personaId: "builtin:command-navigation",
     label: "Navigation",

@@ -393,6 +393,8 @@ fn adviser_for_persona(persona_id: &str) -> Option<AdviserId> {
     match persona_id {
         "builtin:command-chief-of-staff" => Some(AdviserId::ChiefOfStaff),
         "builtin:command-operations" => Some(AdviserId::Operations),
+        "builtin:command-intelligence" => Some(AdviserId::Intelligence),
+        "builtin:command-logistics" => Some(AdviserId::Logistics),
         "builtin:command-navigation" => Some(AdviserId::Navigation),
         "builtin:command-daily-routine" => Some(AdviserId::DailyRoutine),
         "builtin:command-reporting" => Some(AdviserId::Reporting),
@@ -405,6 +407,8 @@ const fn adviser_label(adviser: AdviserId) -> &'static str {
     match adviser {
         AdviserId::ChiefOfStaff => "chief_of_staff",
         AdviserId::Operations => "operations",
+        AdviserId::Intelligence => "intelligence",
+        AdviserId::Logistics => "logistics",
         AdviserId::Navigation => "navigation",
         AdviserId::DailyRoutine => "daily_routine",
         AdviserId::Reporting => "reporting",
@@ -472,6 +476,8 @@ mod tests {
         match persona_id {
             "builtin:command-chief-of-staff" => "chief_of_staff",
             "builtin:command-operations" => "operations",
+            "builtin:command-intelligence" => "intelligence",
+            "builtin:command-logistics" => "logistics",
             "builtin:command-navigation" => "navigation",
             "builtin:command-daily-routine" => "daily_routine",
             "builtin:command-reporting" => "reporting",
@@ -484,6 +490,8 @@ mod tests {
         match adviser {
             "chief_of_staff" => "conflicts_and_gaps",
             "operations" => "operations",
+            "intelligence" => "intelligence",
+            "logistics" => "logistics",
             "navigation" => "navigation",
             "daily_routine" => "daily_routine",
             "reporting" => "reports",

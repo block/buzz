@@ -806,6 +806,8 @@ async fn chief_accepts_the_full_aggregate_dissent_sequence_without_truncation() 
             let adviser = contribution.adviser();
             let section = match adviser {
                 AdviserId::Operations => "operations",
+                AdviserId::Intelligence => "intelligence",
+                AdviserId::Logistics => "logistics",
                 AdviserId::Navigation => "navigation",
                 AdviserId::DailyRoutine => "daily_routine",
                 AdviserId::Reporting => "reports",
@@ -814,6 +816,8 @@ async fn chief_accepts_the_full_aggregate_dissent_sequence_without_truncation() 
             };
             let wire_adviser = match adviser {
                 AdviserId::Operations => "operations",
+                AdviserId::Intelligence => "intelligence",
+                AdviserId::Logistics => "logistics",
                 AdviserId::Navigation => "navigation",
                 AdviserId::DailyRoutine => "daily_routine",
                 AdviserId::Reporting => "reporting",

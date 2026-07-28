@@ -40,6 +40,7 @@ export type SourceReference = ContractBase & {
   readonly sourceKind:
     | "rag"
     | "memory"
+    | "world_monitor"
     | "calendar"
     | "reminders"
     | "notes"

@@ -118,6 +118,8 @@ fn trusted_source_context(run_id: &str) -> FrozenSourceContext {
 fn section_for(adviser: AdviserId) -> BriefSection {
     match adviser {
         AdviserId::Operations => BriefSection::Operations,
+        AdviserId::Intelligence => BriefSection::Intelligence,
+        AdviserId::Logistics => BriefSection::Logistics,
         AdviserId::Navigation => BriefSection::Navigation,
         AdviserId::DailyRoutine => BriefSection::DailyRoutine,
         AdviserId::Reporting => BriefSection::Reports,

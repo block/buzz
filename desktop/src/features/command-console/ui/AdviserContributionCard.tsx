@@ -10,6 +10,8 @@ import { SourceCitationLink } from "./SourceCitationLink";
 
 const ADVISER_LABELS: Record<AdviserContribution["adviser"], string> = {
   operations: "Operations",
+  intelligence: "Maritime N2",
+  logistics: "Logistics",
   navigation: "Navigation",
   daily_routine: "Daily Routine",
   reporting: "Reporting",

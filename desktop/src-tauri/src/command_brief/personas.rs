@@ -25,6 +25,12 @@ impl PersonaDefinition {
 
 const SPECIALIST_SOURCES: &[SourceKind] = &[SourceKind::Rag, SourceKind::Memory];
 const SPECIALIST_TOOLS: &[&str] = &["memory", "rag"];
+const INTELLIGENCE_SOURCES: &[SourceKind] = &[
+    SourceKind::Rag,
+    SourceKind::Memory,
+    SourceKind::WorldMonitor,
+];
+const INTELLIGENCE_TOOLS: &[&str] = &["memory", "rag", "world_monitor"];
 const ROUTINE_SOURCES: &[SourceKind] = &[
     SourceKind::Rag,
     SourceKind::Memory,
@@ -85,6 +91,33 @@ const OPERATIONS: PersonaDefinition = PersonaDefinition {
     system_prompt: specialist_prompt!("Operations", "operations", "operations", ""),
 };
 
+const INTELLIGENCE: PersonaDefinition = PersonaDefinition {
+    adviser: AdviserId::Intelligence,
+    purpose: "Assess regional intelligence, threats, indicators, and warning relevant to command.",
+    permitted_sections: &[BriefSection::Intelligence],
+    permitted_source_kinds: INTELLIGENCE_SOURCES,
+    permitted_tool_labels: INTELLIGENCE_TOOLS,
+    output_schema_instruction: OUTPUT_SCHEMA,
+    safety_boundary: SPECIALIST_BOUNDARY,
+    system_prompt: specialist_prompt!(
+        "Maritime N2",
+        "intelligence",
+        "intelligence",
+        " Distinguish reported information, observed indicators, assumptions, and assessment."
+    ),
+};
+
+const LOGISTICS: PersonaDefinition = PersonaDefinition {
+    adviser: AdviserId::Logistics,
+    purpose: "Assess replenishment, sustainment, logistics constraints, dependencies, and risks.",
+    permitted_sections: &[BriefSection::Logistics],
+    permitted_source_kinds: SPECIALIST_SOURCES,
+    permitted_tool_labels: SPECIALIST_TOOLS,
+    output_schema_instruction: OUTPUT_SCHEMA,
+    safety_boundary: SPECIALIST_BOUNDARY,
+    system_prompt: specialist_prompt!("Logistics", "logistics", "logistics", ""),
+};
+
 const NAVIGATION: PersonaDefinition = PersonaDefinition {
     adviser: AdviserId::Navigation,
     purpose: "Identify navigation considerations and source limitations for the command team.",
@@ -134,14 +167,23 @@ const PLANS: PersonaDefinition = PersonaDefinition {
     system_prompt: specialist_prompt!("Plans", "plans", "planning_30_60_90", ""),
 };
 
-const SPECIALISTS: &[&PersonaDefinition] =
-    &[&OPERATIONS, &NAVIGATION, &DAILY_ROUTINE, &REPORTING, &PLANS];
+const SPECIALISTS: &[&PersonaDefinition] = &[
+    &OPERATIONS,
+    &INTELLIGENCE,
+    &LOGISTICS,
+    &NAVIGATION,
+    &DAILY_ROUTINE,
+    &REPORTING,
+    &PLANS,
+];
 
 /// Returns the immutable definition for a closed native adviser ID.
 pub const fn definition_for(adviser: AdviserId) -> &'static PersonaDefinition {
     match adviser {
         AdviserId::ChiefOfStaff => &CHIEF_OF_STAFF,
         AdviserId::Operations => &OPERATIONS,
+        AdviserId::Intelligence => &INTELLIGENCE,
+        AdviserId::Logistics => &LOGISTICS,
         AdviserId::Navigation => &NAVIGATION,
         AdviserId::DailyRoutine => &DAILY_ROUTINE,
         AdviserId::Reporting => &REPORTING,
@@ -149,7 +191,7 @@ pub const fn definition_for(adviser: AdviserId) -> &'static PersonaDefinition {
     }
 }
 
-/// Returns the stable execution order for the five tool-constrained specialists.
+/// Returns the stable execution order for the seven tool-constrained specialists.
 pub const fn specialist_definitions() -> &'static [&'static PersonaDefinition] {
     SPECIALISTS
 }

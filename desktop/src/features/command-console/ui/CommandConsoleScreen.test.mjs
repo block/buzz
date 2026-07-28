@@ -34,6 +34,8 @@ test("CommandConsoleScreen renders the usable Command Adviser route", () => {
   for (const adviser of [
     "chief-of-staff",
     "operations",
+    "intelligence",
+    "logistics",
     "navigation",
     "daily-routine",
     "reporting",
@@ -41,7 +43,7 @@ test("CommandConsoleScreen renders the usable Command Adviser route", () => {
   ]) {
     assert.match(html, new RegExp(`data-testid="adviser-insignia-${adviser}"`));
   }
-  assert.equal((html.match(/>Message</g) ?? []).length, 6);
+  assert.equal((html.match(/>Message</g) ?? []).length, 8);
   assert.doesNotMatch(html, />Command Console</);
   assert.doesNotMatch(html, /unsigned|fingerprint|replication/i);
 });

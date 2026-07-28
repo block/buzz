@@ -6,6 +6,8 @@ import type {
 export const SECTION_LABELS: Record<BriefSection, string> = {
   today: "Today at a glance",
   operations: "Operational priorities and risks",
+  intelligence: "Intelligence outlook and warning",
+  logistics: "Logistics and sustainment",
   navigation: "Navigation considerations",
   daily_routine: "Daily routine and calendar",
   reports: "Reports and returns due",
@@ -19,6 +21,8 @@ export const COMMAND_READING_ORDER: readonly BriefSection[] = [
   "decisions",
   "today",
   "operations",
+  "intelligence",
+  "logistics",
   "navigation",
   "daily_routine",
   "reports",

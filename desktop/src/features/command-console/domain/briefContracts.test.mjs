@@ -41,6 +41,8 @@ function source(overrides = {}) {
 function contribution(adviser, overrides = {}) {
   const section = {
     operations: "operations",
+    intelligence: "intelligence",
+    logistics: "logistics",
     navigation: "navigation",
     daily_routine: "daily_routine",
     reporting: "reports",
@@ -70,6 +72,8 @@ function brief(overrides = {}) {
     sections: {
       today: [finding()],
       operations: [],
+      intelligence: [],
+      logistics: [],
       navigation: [],
       daily_routine: [],
       reports: [],
@@ -89,6 +93,8 @@ function brief(overrides = {}) {
     },
     contributions: [
       contribution("operations"),
+      contribution("intelligence"),
+      contribution("logistics"),
       contribution("navigation"),
       contribution("daily_routine"),
       contribution("reporting"),
@@ -108,6 +114,8 @@ test("parses and freezes the exact OFFICIAL brief wire shape", () => {
   assert.deepEqual(Object.keys(parsed.sections), [
     "today",
     "operations",
+    "intelligence",
+    "logistics",
     "navigation",
     "daily_routine",
     "reports",
@@ -122,7 +130,7 @@ test("rejects extra keys, prototype pollution, unknown closed values, and unsafe
   for (const value of [
     brief({ unknown: true }),
     brief({ classification: "PUBLIC" }),
-    brief({ sourceLedger: [source({ sourceKind: "network" })] }),
+    brief({ sourceLedger: [source({ sourceKind: "unknown_osint" })] }),
     brief({ contributions: [contribution("unapproved")] }),
     brief({ sections: { ...brief().sections, unknown: [] } }),
   ]) {
@@ -252,7 +260,7 @@ test("enforces text and array budgets, rejects controls, and only accepts post-s
   assert.equal(Object.isFrozen(published), true);
 });
 
-test("accepts the five-specialist aggregate dissent budget but no more", () => {
+test("accepts the seven-specialist aggregate dissent budget but no more", () => {
   const atLimitBrief = brief();
   const atLimit = [];
   atLimitBrief.contributions.forEach((specialist, specialistIndex) => {

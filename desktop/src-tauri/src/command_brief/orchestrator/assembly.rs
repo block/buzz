@@ -96,6 +96,8 @@ pub(super) fn assemble_brief(
     let mut sections = BTreeMap::<BriefSection, Vec<CitedFinding>>::from([
         (BriefSection::Today, chief.findings),
         (BriefSection::Operations, Vec::new()),
+        (BriefSection::Intelligence, Vec::new()),
+        (BriefSection::Logistics, Vec::new()),
         (BriefSection::Navigation, Vec::new()),
         (BriefSection::DailyRoutine, Vec::new()),
         (BriefSection::Reports, Vec::new()),
@@ -170,6 +172,8 @@ pub(super) fn limitation_only_contribution(
 pub(super) fn section_for_adviser(adviser: AdviserId) -> BriefSection {
     match adviser {
         AdviserId::Operations => BriefSection::Operations,
+        AdviserId::Intelligence => BriefSection::Intelligence,
+        AdviserId::Logistics => BriefSection::Logistics,
         AdviserId::Navigation => BriefSection::Navigation,
         AdviserId::DailyRoutine => BriefSection::DailyRoutine,
         AdviserId::Reporting => BriefSection::Reports,
@@ -189,6 +193,8 @@ pub(super) fn adviser_display(adviser: AdviserId) -> &'static str {
     match adviser {
         AdviserId::ChiefOfStaff => "Chief of Staff",
         AdviserId::Operations => "Operations",
+        AdviserId::Intelligence => "Intelligence",
+        AdviserId::Logistics => "Logistics",
         AdviserId::Navigation => "Navigation",
         AdviserId::DailyRoutine => "Daily Routine",
         AdviserId::Reporting => "Reporting",
@@ -200,6 +206,8 @@ pub(super) fn adviser_label(adviser: AdviserId) -> &'static str {
     match adviser {
         AdviserId::ChiefOfStaff => "chief_of_staff",
         AdviserId::Operations => "operations",
+        AdviserId::Intelligence => "intelligence",
+        AdviserId::Logistics => "logistics",
         AdviserId::Navigation => "navigation",
         AdviserId::DailyRoutine => "daily_routine",
         AdviserId::Reporting => "reporting",
