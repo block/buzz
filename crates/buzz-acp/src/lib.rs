@@ -9,6 +9,7 @@ mod pool;
 mod pool_lifecycle;
 mod queue;
 mod relay;
+mod reply_broker;
 mod setup_mode;
 mod usage;
 
@@ -35,7 +36,7 @@ use config::{
 };
 use filter::SubscriptionRule;
 use futures_util::FutureExt;
-use nostr::{PublicKey, ToBech32};
+use nostr::PublicKey;
 use pool::{
     AgentPool, ControlSignal, IdleSwitchResult, OwnedAgent, PromptContext, PromptOutcome,
     PromptResult, PromptSource, SessionState, TimeoutKind,
@@ -1314,6 +1315,18 @@ async fn tokio_main() -> Result<()> {
         );
     }
 
+    let broker_state_dir = reply_broker::state_dir_from_env(&config.config_path)
+        .map_err(|e| anyhow::anyhow!("reply broker state setup failed: {e}"))?;
+    let reply_broker = reply_broker::start(
+        config.relay_url.clone(),
+        config.keys.clone(),
+        std::env::var("BUZZ_AUTH_TAG")
+            .ok()
+            .filter(|tag| !tag.is_empty()),
+        broker_state_dir,
+    )
+    .map_err(|e| anyhow::anyhow!("reply broker startup failed: {e}"))?;
+
     let mut pool = if config.lazy_pool {
         AgentPool::from_slots((0..config.agents).map(|_| None).collect())
     } else {
@@ -1528,7 +1541,7 @@ async fn tokio_main() -> Result<()> {
 
     let base_prompt_content = config.base_prompt_content.take();
     let ctx = Arc::new(PromptContext {
-        mcp_servers: build_mcp_servers(&config),
+        mcp_servers: build_mcp_servers(&config, Some(reply_broker.endpoint())),
         initial_message: config.initial_message.clone(),
         idle_timeout: Duration::from_secs(config.idle_timeout_secs),
         max_turn_duration: Duration::from_secs(config.max_turn_duration_secs),
@@ -4139,7 +4152,10 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
     Ok(())
 }
 
-fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
+fn build_mcp_servers(
+    config: &Config,
+    reply_broker: Option<&reply_broker::ReplyBrokerEndpoint>,
+) -> Vec<McpServer> {
     if config.mcp_command.is_empty() {
         return vec![];
     }
@@ -4152,32 +4168,20 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
         command: config.mcp_command.clone(),
         args: vec![],
         env: {
-            let mut env = vec![
-                EnvVar {
-                    name: "BUZZ_RELAY_URL".into(),
-                    value: config.relay_url.clone(),
-                },
-                EnvVar {
-                    name: "BUZZ_PRIVATE_KEY".into(),
-                    // bech32 encoding of a valid secret key is infallible.
-                    // Panic here is correct: injecting a bogus secret would cause
-                    // delayed, hard-to-diagnose agent failures downstream.
-                    value: config
-                        .keys
-                        .secret_key()
-                        .to_bech32()
-                        .expect("secret key bech32 encoding should never fail"),
-                },
-            ];
-            // Forward BUZZ_AUTH_TAG (NIP-OA owner attestation credential)
-            // so the MCP server can attach it to every signed event.
-            if let Ok(auth_tag) = std::env::var("BUZZ_AUTH_TAG") {
-                if !auth_tag.is_empty() {
-                    env.push(EnvVar {
-                        name: "BUZZ_AUTH_TAG".into(),
-                        value: auth_tag,
-                    });
-                }
+            // Worker MCP servers receive no signing key or owner attestation.
+            // `BUZZ_REPLY_BROKER_*` is a narrowly scoped local capability: it
+            // can create one schema-validated reply through the harness broker,
+            // never run arbitrary Buzz CLI operations or sign arbitrary events.
+            let mut env = Vec::new();
+            if let Some(broker) = reply_broker {
+                env.push(EnvVar {
+                    name: "BUZZ_REPLY_BROKER_URL".into(),
+                    value: broker.url.clone(),
+                });
+                env.push(EnvVar {
+                    name: "BUZZ_REPLY_BROKER_CAPABILITY".into(),
+                    value: broker.capability.clone(),
+                });
             }
             // Forward the agent's display name so dev-mcp can use it as the git
             // author name instead of the raw npub. Read from the process env
@@ -5004,50 +5008,40 @@ mod build_mcp_servers_tests {
     #[test]
     fn session_new_mcp_server_has_required_fields() {
         let config = test_config();
-        let servers = build_mcp_servers(&config);
+        let servers = build_mcp_servers(&config, None);
         assert_eq!(servers.len(), 1);
         let server = &servers[0];
         assert_eq!(server.name, "test-mcp-server");
 
         let names: Vec<&str> = server.env.iter().map(|e| e.name.as_str()).collect();
         assert!(
-            names.contains(&"BUZZ_RELAY_URL"),
-            "missing BUZZ_RELAY_URL; got {names:?}"
-        );
-        assert!(
-            names.contains(&"BUZZ_PRIVATE_KEY"),
-            "missing BUZZ_PRIVATE_KEY; got {names:?}"
+            names.is_empty(),
+            "workers must not receive relay credentials: {names:?}"
         );
     }
 
     #[test]
-    fn session_new_mcp_server_forwards_buzz_auth_tag() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        std::env::set_var("BUZZ_AUTH_TAG", "test-attestation-tag");
+    fn session_new_mcp_server_receives_only_reply_broker_capability() {
         let config = test_config();
-        let servers = build_mcp_servers(&config);
-        std::env::remove_var("BUZZ_AUTH_TAG");
+        let broker = reply_broker::ReplyBrokerEndpoint {
+            url: "tcp://127.0.0.1:9999".into(),
+            capability: "scoped-capability".into(),
+        };
+        let servers = build_mcp_servers(&config, Some(&broker));
 
         let server = &servers[0];
-        let auth_tag_env = server.env.iter().find(|e| e.name == "BUZZ_AUTH_TAG");
+        let names: Vec<&str> = server.env.iter().map(|entry| entry.name.as_str()).collect();
         assert!(
-            auth_tag_env.is_some(),
-            "BUZZ_AUTH_TAG should be forwarded when set"
+            names.contains(&"BUZZ_REPLY_BROKER_URL")
+                && names.contains(&"BUZZ_REPLY_BROKER_CAPABILITY"),
+            "missing reply capability: {names:?}"
         );
-        assert_eq!(auth_tag_env.unwrap().value, "test-attestation-tag");
-    }
-
-    #[test]
-    fn session_new_mcp_server_skips_empty_buzz_auth_tag() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        std::env::set_var("BUZZ_AUTH_TAG", "");
-        let config = test_config();
-        let servers = build_mcp_servers(&config);
-        std::env::remove_var("BUZZ_AUTH_TAG");
-
-        let server = &servers[0];
-        let has_auth_tag = server.env.iter().any(|e| e.name == "BUZZ_AUTH_TAG");
-        assert!(!has_auth_tag, "empty BUZZ_AUTH_TAG should not be forwarded");
+        assert!(
+            !names
+                .iter()
+                .any(|name| name.contains("PRIVATE_KEY") || name.contains("AUTH_TAG")),
+            "signing credentials must never appear in the worker MCP config: {names:?}"
+        );
     }
 
     #[test]
@@ -5055,7 +5049,7 @@ mod build_mcp_servers_tests {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("BUZZ_ACP_DISPLAY_NAME", "Duncan");
         let config = test_config();
-        let servers = build_mcp_servers(&config);
+        let servers = build_mcp_servers(&config, None);
         std::env::remove_var("BUZZ_ACP_DISPLAY_NAME");
 
         let entry = servers[0]
@@ -5074,7 +5068,7 @@ mod build_mcp_servers_tests {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::remove_var("BUZZ_ACP_DISPLAY_NAME");
         let config = test_config();
-        let servers = build_mcp_servers(&config);
+        let servers = build_mcp_servers(&config, None);
 
         // Absent, not empty-valued: dev-mcp distinguishes the two and only
         // falls back to the npub when the key is missing or blank.
@@ -5092,7 +5086,7 @@ mod build_mcp_servers_tests {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("BUZZ_ACP_DISPLAY_NAME", "");
         let config = test_config();
-        let servers = build_mcp_servers(&config);
+        let servers = build_mcp_servers(&config, None);
         std::env::remove_var("BUZZ_ACP_DISPLAY_NAME");
 
         assert!(
@@ -5108,7 +5102,7 @@ mod build_mcp_servers_tests {
     fn empty_mcp_command_returns_no_servers() {
         let mut config = test_config();
         config.mcp_command = "".into();
-        let servers = build_mcp_servers(&config);
+        let servers = build_mcp_servers(&config, None);
         assert!(
             servers.is_empty(),
             "empty mcp_command should produce no MCP servers"
@@ -5119,7 +5113,7 @@ mod build_mcp_servers_tests {
     fn absolute_path_mcp_command_uses_file_stem_as_name() {
         let mut config = test_config();
         config.mcp_command = "/opt/bin/my-mcp-server".into();
-        let servers = build_mcp_servers(&config);
+        let servers = build_mcp_servers(&config, None);
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].name, "my-mcp-server");
     }
@@ -5140,7 +5134,7 @@ mod build_mcp_servers_tests {
 
         // Confirm a non-empty command with no stem (e.g. just a dot) also falls back.
         config.mcp_command = ".".into();
-        let servers = build_mcp_servers(&config);
+        let servers = build_mcp_servers(&config, None);
         assert_eq!(servers.len(), 1);
         assert_eq!(
             servers[0].name, "mcp",

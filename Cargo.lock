@@ -766,6 +766,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64",
+ "buzz-cli",
  "buzz-core",
  "buzz-persona",
  "buzz-sdk",
@@ -986,6 +987,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "uuid",
  "windows-sys 0.61.2",
  "zeroize",
 ]

@@ -74,12 +74,11 @@ impl SharedState {
 
 fn build_bootstrap(cwd: &Path, shell_hint: &str) -> String {
     let stack = detect_stack(cwd);
-    let buzz_hint =
-        if std::env::var("BUZZ_RELAY_URL").is_ok() && std::env::var("BUZZ_PRIVATE_KEY").is_ok() {
-            "\nBuzz relay configured. Run `buzz --help` to see available commands.\n"
-        } else {
-            ""
-        };
+    let buzz_hint = if std::env::var("BUZZ_REPLY_BROKER_URL").is_ok() {
+        "\nBuzz replies are available through the relay_reply tool; raw Buzz CLI publishing is intentionally unavailable.\n"
+    } else {
+        ""
+    };
     format!(
         "Working directory: {}\n\
          Detected stack: {}\n\
@@ -167,8 +166,9 @@ pub async fn run(
     cmd.arg(shell_arg).arg(&p.command);
     cmd.current_dir(&workdir);
     cmd.env("PATH", &state.shim.path_env);
-    // NOSTR_PRIVATE_KEY is already removed from this process's env (shim.rs).
-    // BUZZ_PRIVATE_KEY is intentionally inherited — the buzz CLI needs it.
+    // Raw signing credentials are removed before this MCP server starts.
+    // Shell children receive no signing capability; relay_reply is the only
+    // available write path and is constrained by the harness broker.
     for (k, v) in &state.shim.git_env {
         cmd.env(k, v);
     }
