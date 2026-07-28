@@ -35,8 +35,9 @@ use app_state::{build_app_state, resolve_persisted_identity, AppState};
 use builderlab::*;
 use commands::*;
 use deep_link::{
-    acknowledge_pending_community_deep_link, handle_deep_link_url,
-    take_pending_community_deep_link, PendingCommunityDeepLinks,
+    acknowledge_pending_agent_snapshot_import, acknowledge_pending_community_deep_link,
+    handle_deep_link_url, take_pending_agent_snapshot_import, take_pending_community_deep_link,
+    PendingAgentSnapshotImports, PendingCommunityDeepLinks,
 };
 use huddle::audio_output::{
     get_audio_output_device, list_audio_output_devices, set_audio_output_device,
@@ -354,6 +355,7 @@ pub fn run() {
         })
         .manage(build_app_state())
         .manage(ClipboardState::new())
+        .manage(PendingAgentSnapshotImports::default())
         .manage(PendingCommunityDeepLinks::default())
         .manage(BuilderlabSession::default())
         .manage(BuilderlabLogin::default())
@@ -556,6 +558,17 @@ pub fn run() {
                         handle_deep_link_url(&dl_handle, url.as_str());
                     }
                 });
+                match app.deep_link().get_current() {
+                    Ok(Some(urls)) => {
+                        for url in urls {
+                            handle_deep_link_url(app.handle(), url.as_str());
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        eprintln!("buzz-desktop: failed to read launch-time deep link: {error}");
+                    }
+                }
             }
 
             // Defer launch-time agent restoration until `apply_workspace` has
@@ -639,6 +652,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            take_pending_agent_snapshot_import,
+            acknowledge_pending_agent_snapshot_import,
             take_pending_community_deep_link,
             acknowledge_pending_community_deep_link,
             start_builderlab_login,

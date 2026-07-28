@@ -64,6 +64,39 @@ pub(crate) struct KnownAcpRuntime {
     pub auth_probe_args: Option<&'static [&'static str]>,
 }
 
+pub(super) const HERMES_RUNTIME: KnownAcpRuntime = KnownAcpRuntime {
+    id: "hermes",
+    label: "Hermes",
+    commands: &["hermes-acp"],
+    aliases: &[],
+    avatar_url: "",
+    mcp_command: None,
+    mcp_hooks: false,
+    underlying_cli: None,
+    cli_install_commands: &[],
+    cli_install_commands_windows: &[],
+    adapter_install_commands: &[],
+    cli_install_instructions_url: "",
+    adapter_install_instructions_url: "",
+    cli_install_hint: "",
+    adapter_install_hint: "",
+    skill_dir: None,
+    supports_acp_model_switching: false,
+    model_env_var: None,
+    provider_env_var: None,
+    provider_locked: true,
+    default_env: &[],
+    config_file_path: None,
+    config_file_format: None,
+    supports_acp_native_config: false,
+    thinking_env_var: None,
+    max_tokens_env_var: None,
+    context_limit_env_var: None,
+    required_normalized_fields: &[],
+    login_hint: None,
+    auth_probe_args: None,
+};
+
 impl KnownAcpRuntime {
     /// Return the CLI install commands for the current platform.
     ///
@@ -120,5 +153,19 @@ mod tests {
         );
         assert!(codex.adapter_install_instructions_url.contains("codex-acp"));
         assert!(codex.cli_install_hint.contains("Codex CLI"));
+    }
+
+    #[test]
+    fn hermes_runtime_resolves_to_hermes_acp_with_conservative_metadata() {
+        let hermes = known_acp_runtime_exact("hermes").unwrap();
+        assert_eq!(hermes.label, "Hermes");
+        assert_eq!(hermes.commands, &["hermes-acp"]);
+        assert!(hermes.aliases.is_empty());
+        assert!(hermes.underlying_cli.is_none());
+        assert!(hermes.cli_install_commands.is_empty());
+        assert!(hermes.adapter_install_commands.is_empty());
+        assert!(hermes.model_env_var.is_none());
+        assert!(hermes.provider_env_var.is_none());
+        assert!(hermes.required_normalized_fields.is_empty());
     }
 }

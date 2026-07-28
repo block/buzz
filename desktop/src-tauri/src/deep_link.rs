@@ -1,10 +1,205 @@
-use std::{collections::VecDeque, sync::Mutex};
+use std::{
+    collections::VecDeque,
+    io::Read,
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
+
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
 use serde::Serialize;
 use tauri::{Emitter, Manager, State};
 use url::Url;
 
-use crate::nostr_bind;
+use crate::{
+    decode_snapshot_from_bytes, managed_agents::agent_snapshot::MemoryLevel, nostr_bind,
+    MAX_SNAPSHOT_JSON_BYTES,
+};
+
+const AGENT_SNAPSHOT_HANDOFF_EVENT: &str = "agent-snapshot-import-available";
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PendingAgentSnapshotImport {
+    id: String,
+    file_bytes: Vec<u8>,
+    file_name: String,
+    snapshot_kind: String,
+}
+
+#[derive(Default)]
+pub(crate) struct PendingAgentSnapshotImports(Mutex<VecDeque<PendingAgentSnapshotImport>>);
+
+impl PendingAgentSnapshotImports {
+    fn enqueue(&self, pending: PendingAgentSnapshotImport) {
+        let mut queue = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if queue.iter().any(|item| item.id == pending.id) {
+            return;
+        }
+        queue.push_back(pending);
+    }
+
+    fn first(&self) -> Option<PendingAgentSnapshotImport> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .front()
+            .cloned()
+    }
+
+    fn acknowledge(&self, id: &str) -> bool {
+        let mut queue = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if queue.front().is_some_and(|item| item.id == id) {
+            queue.pop_front();
+            true
+        } else {
+            false
+        }
+    }
+}
+
+#[tauri::command]
+pub(crate) fn take_pending_agent_snapshot_import(
+    pending: State<'_, PendingAgentSnapshotImports>,
+) -> Option<PendingAgentSnapshotImport> {
+    pending.first()
+}
+
+#[tauri::command]
+pub(crate) fn acknowledge_pending_agent_snapshot_import(
+    id: String,
+    app: tauri::AppHandle,
+    pending: State<'_, PendingAgentSnapshotImports>,
+) -> bool {
+    let acknowledged = pending.acknowledge(&id);
+    if acknowledged && pending.first().is_some() {
+        let _ = app.emit(AGENT_SNAPSHOT_HANDOFF_EVENT, ());
+    }
+    acknowledged
+}
+
+fn parse_agent_snapshot_handoff_id(url: &Url) -> Option<String> {
+    let params = url.query_pairs().collect::<Vec<_>>();
+    if params.len() != 1 || params[0].0 != "handoff" {
+        return None;
+    }
+    let candidate = params[0].1.as_ref();
+    let parsed = uuid::Uuid::parse_str(candidate).ok()?;
+    (parsed.to_string() == candidate).then(|| candidate.to_owned())
+}
+
+fn agent_snapshot_handoff_dir() -> Result<PathBuf, String> {
+    dirs::home_dir()
+        .map(|home| {
+            home.join("Library")
+                .join("Application Support")
+                .join("Co-Agent")
+                .join("buzz-handoffs")
+        })
+        .ok_or_else(|| "cannot resolve the current user's home directory".to_string())
+}
+
+#[cfg(unix)]
+fn validate_agent_snapshot_handoff_metadata(
+    metadata: &std::fs::Metadata,
+    expected_uid: u32,
+) -> Result<(), String> {
+    if !metadata.file_type().is_file() {
+        return Err("handoff is not a regular file".to_string());
+    }
+    if metadata.uid() != expected_uid {
+        return Err("handoff is not owned by the current user".to_string());
+    }
+    if metadata.mode() & 0o077 != 0 {
+        return Err("handoff has group or world permissions".to_string());
+    }
+    if metadata.len() > MAX_SNAPSHOT_JSON_BYTES as u64 {
+        return Err("handoff exceeds the agent JSON snapshot size limit".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn read_agent_snapshot_handoff_from_dir(dir: &Path, handoff_id: &str) -> Result<Vec<u8>, String> {
+    let parsed =
+        uuid::Uuid::parse_str(handoff_id).map_err(|_| "handoff id is not a UUID".to_string())?;
+    if parsed.to_string() != handoff_id {
+        return Err("handoff id is not a canonical lowercase UUID".to_string());
+    }
+
+    let dir_metadata = std::fs::symlink_metadata(dir)
+        .map_err(|error| format!("cannot inspect handoff directory: {error}"))?;
+    if dir_metadata.file_type().is_symlink() || !dir_metadata.is_dir() {
+        return Err("handoff directory is not a real directory".to_string());
+    }
+
+    let path = dir.join(format!("{handoff_id}.agent.json"));
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&path)
+        .map_err(|error| format!("cannot securely open handoff: {error}"))?;
+    let opened_metadata = file
+        .metadata()
+        .map_err(|error| format!("cannot inspect open handoff: {error}"))?;
+    let expected_uid = dirs::home_dir()
+        .ok_or_else(|| "cannot resolve the current user's home directory".to_string())?
+        .metadata()
+        .map_err(|error| format!("cannot inspect the current user's home directory: {error}"))?
+        .uid();
+    validate_agent_snapshot_handoff_metadata(&opened_metadata, expected_uid)?;
+
+    let mut bytes = Vec::with_capacity(opened_metadata.len() as usize);
+    file.by_ref()
+        .take(MAX_SNAPSHOT_JSON_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("cannot read handoff: {error}"))?;
+    if bytes.len() > MAX_SNAPSHOT_JSON_BYTES {
+        return Err("handoff exceeds the agent JSON snapshot size limit".to_string());
+    }
+
+    let snapshot = decode_snapshot_from_bytes(&bytes)
+        .map_err(|error| format!("invalid agent snapshot handoff: {error}"))?;
+    if snapshot.memory.level != MemoryLevel::None || !snapshot.memory.entries.is_empty() {
+        return Err("agent snapshot handoff must be config-only".to_string());
+    }
+
+    let current_metadata = std::fs::symlink_metadata(&path)
+        .map_err(|error| format!("cannot re-inspect handoff before deletion: {error}"))?;
+    if current_metadata.file_type().is_symlink()
+        || current_metadata.dev() != opened_metadata.dev()
+        || current_metadata.ino() != opened_metadata.ino()
+    {
+        return Err("handoff changed while it was being read".to_string());
+    }
+    std::fs::remove_file(&path)
+        .map_err(|error| format!("cannot delete accepted handoff: {error}"))?;
+    Ok(bytes)
+}
+
+#[cfg(not(unix))]
+fn read_agent_snapshot_handoff_from_dir(_dir: &Path, _handoff_id: &str) -> Result<Vec<u8>, String> {
+    Err("agent snapshot handoffs require POSIX file security".to_string())
+}
+
+fn queue_agent_snapshot_handoff(app: &tauri::AppHandle, handoff_id: String) -> Result<(), String> {
+    let bytes = read_agent_snapshot_handoff_from_dir(&agent_snapshot_handoff_dir()?, &handoff_id)?;
+    app.state::<PendingAgentSnapshotImports>()
+        .enqueue(PendingAgentSnapshotImport {
+            file_name: format!("{handoff_id}.agent.json"),
+            id: handoff_id,
+            file_bytes: bytes,
+            snapshot_kind: "agent".to_string(),
+        });
+    Ok(())
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -310,6 +505,18 @@ pub(crate) fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
     }
 
     match url.host_str() {
+        Some("import-agent-snapshot") => {
+            let Some(handoff_id) = parse_agent_snapshot_handoff_id(&url) else {
+                eprintln!("buzz-desktop: snapshot handoff deep link has an invalid id: {url_str}");
+                return;
+            };
+            if let Err(error) = queue_agent_snapshot_handoff(app, handoff_id) {
+                eprintln!("buzz-desktop: rejecting agent snapshot handoff: {error}");
+                return;
+            }
+            activate_main_window(app);
+            let _ = app.emit(AGENT_SNAPSHOT_HANDOFF_EVENT, ());
+        }
         Some("connect") => {
             let Some(relay_url) = parse_websocket_relay_param(&url) else {
                 eprintln!("buzz-desktop: connect deep link missing/invalid relay: {url_str}");
@@ -383,6 +590,10 @@ pub(crate) fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "deep_link/agent_snapshot_handoff.rs"]
+mod agent_snapshot_handoff_tests;
 
 #[cfg(test)]
 mod tests {
