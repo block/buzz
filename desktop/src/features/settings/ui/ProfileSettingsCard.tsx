@@ -223,10 +223,12 @@ export function ProfileSettingsCard({
   const updateProfileMutation = useUpdateProfileMutation();
   const profile = profileQuery.data;
 
+  const currentName = profile?.name ?? "";
   const currentDisplayName = profile?.displayName ?? "";
   const currentAvatarUrl = profile?.avatarUrl ?? "";
   const currentAbout = profile?.about ?? "";
   const [displayNameDraft, setDisplayNameDraft] = React.useState("");
+  const [nameDraft, setNameDraft] = React.useState("");
   const [avatarUrlDraft, setAvatarUrlDraft] = React.useState("");
   const [aboutDraft, setAboutDraft] = React.useState("");
   const [uploadedAvatarUrlDraft, setUploadedAvatarUrlDraft] = React.useState<
@@ -260,6 +262,12 @@ export function ProfileSettingsCard({
   const avatarEditorFinishTimeoutRef = React.useRef<number | null>(null);
   const savedScrollTopRef = React.useRef<number | null>(null);
   isEditingProfileMetadataRef.current = isEditingProfileMetadata;
+
+  React.useEffect(() => {
+    if (!isEditingProfileMetadataRef.current) {
+      setNameDraft(currentName);
+    }
+  }, [currentName]);
 
   React.useEffect(() => {
     if (!isEditingProfileMetadataRef.current) {
@@ -330,17 +338,22 @@ export function ProfileSettingsCard({
   }, []);
 
   const nextDisplayName = displayNameDraft.trim();
+  const nextName = nameDraft.trim();
   const nextAvatarUrl = avatarUrlDraft.trim();
   const nextAbout = aboutDraft.trim();
   const updatePayload = React.useMemo(() => {
     const payload: {
       displayName?: string;
+      name?: string;
       avatarUrl?: string;
       about?: string;
     } = {};
 
     if (nextDisplayName.length > 0 && nextDisplayName !== currentDisplayName) {
       payload.displayName = nextDisplayName;
+    }
+    if (nextName !== currentName) {
+      payload.name = nextName;
     }
     if (nextAvatarUrl.length > 0 && nextAvatarUrl !== currentAvatarUrl) {
       payload.avatarUrl = nextAvatarUrl;
@@ -354,9 +367,11 @@ export function ProfileSettingsCard({
     currentAbout,
     currentAvatarUrl,
     currentDisplayName,
+    currentName,
     nextAbout,
     nextAvatarUrl,
     nextDisplayName,
+    nextName,
   ]);
 
   const hasPendingDisplayNameClearRequest =
@@ -480,21 +495,16 @@ export function ProfileSettingsCard({
       return false;
     }
 
-    await updateProfileMutation.mutateAsync(updatePayload);
+    const updatedProfile =
+      await updateProfileMutation.mutateAsync(updatePayload);
     setIsEditingProfileMetadata(false);
-    setDisplayNameDraft(updatePayload.displayName ?? currentDisplayName);
-    setAvatarUrlDraft(updatePayload.avatarUrl ?? currentAvatarUrl);
-    setAboutDraft(updatePayload.about ?? currentAbout);
+    setNameDraft(updatedProfile.name ?? "");
+    setDisplayNameDraft(updatedProfile.displayName ?? "");
+    setAvatarUrlDraft(updatedProfile.avatarUrl ?? "");
+    setAboutDraft(updatedProfile.about ?? "");
     toast.success("Profile saved");
     return true;
-  }, [
-    canSave,
-    currentAbout,
-    currentAvatarUrl,
-    currentDisplayName,
-    updatePayload,
-    updateProfileMutation,
-  ]);
+  }, [canSave, updatePayload, updateProfileMutation]);
 
   const handleProfileMetadataEdit = React.useCallback(() => {
     if (!isEditingProfileMetadata) {
@@ -801,6 +811,42 @@ export function ProfileSettingsCard({
                                   title={displayNameDraft || "Not set"}
                                 >
                                   {displayNameDraft || "Not set"}
+                                </p>
+                              )}
+                            </div>
+                          </div>
+
+                          <div className="flex min-h-16 items-center gap-4 px-4 py-3">
+                            <div className="min-w-0 flex-1 space-y-1">
+                              <label
+                                className="block text-sm font-medium"
+                                htmlFor="profile-name"
+                              >
+                                Nostr handle
+                              </label>
+                              <p className="text-xs text-muted-foreground/75">
+                                A short profile name. It does not need to be
+                                unique.
+                              </p>
+                              {isEditingProfileMetadata ? (
+                                <Input
+                                  className="h-auto border-0 bg-transparent px-0 py-0 text-sm text-muted-foreground shadow-none placeholder:text-muted-foreground/60 focus-visible:ring-0"
+                                  data-testid="profile-name"
+                                  disabled={updateProfileMutation.isPending}
+                                  id="profile-name"
+                                  onChange={(event) =>
+                                    setNameDraft(event.target.value)
+                                  }
+                                  placeholder="e.g. theangrypit"
+                                  value={nameDraft}
+                                />
+                              ) : (
+                                <p
+                                  className="min-w-0 truncate text-sm text-muted-foreground"
+                                  data-testid="profile-name-value"
+                                  title={nameDraft || "Not set"}
+                                >
+                                  {nameDraft || "Not set"}
                                 </p>
                               )}
                             </div>

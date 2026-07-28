@@ -152,7 +152,10 @@ export function CommunityOnboardingFlow({
   const queryClient = useQueryClient();
   const systemColorScheme = useSystemColorScheme();
   const [displayName, setDisplayName] = React.useState("");
+  const [name, setName] = React.useState("");
+  const nameWasEditedRef = React.useRef(false);
   const [avatarUrl, setAvatarUrl] = React.useState("");
+  const avatarWasEditedRef = React.useRef(false);
   const avatarPresentation = useAvatarPresentation(avatarUrl);
   const [isUploadingAvatar, setIsUploadingAvatar] = React.useState(false);
   const [isAvatarEditorOpen, setIsAvatarEditorOpen] = React.useState(false);
@@ -301,7 +304,10 @@ export function CommunityOnboardingFlow({
             prev === "" ? (profile.displayName ?? "") : prev,
           );
         }
-        if (profile.avatarUrl) {
+        if (!nameWasEditedRef.current && profile.name) {
+          setName((prev) => (prev === "" ? (profile.name ?? "") : prev));
+        }
+        if (!avatarWasEditedRef.current && profile.avatarUrl) {
           setAvatarUrl((prev) =>
             prev === "" ? (profile.avatarUrl ?? "") : prev,
           );
@@ -385,12 +391,18 @@ export function CommunityOnboardingFlow({
       const candidateAvatarUrl = avatarUrl.trim();
       const presentationState = avatarPresentation?.state;
       const shouldSaveCandidate =
+        avatarWasEditedRef.current &&
         candidateAvatarUrl.length > 0 &&
         presentationState !== "failed" &&
         presentationState !== "pending";
+      const shouldClearAvatar =
+        avatarWasEditedRef.current && candidateAvatarUrl.length === 0;
 
       const deferredAvatar =
-        candidateAvatarUrl && presentationState && presentationState !== "ready"
+        avatarWasEditedRef.current &&
+        candidateAvatarUrl &&
+        presentationState &&
+        presentationState !== "ready"
           ? registerAvatarWhenReady({
               avatarUrl: candidateAvatarUrl,
               relayUrl: transaction.relayUrl,
@@ -400,7 +412,12 @@ export function CommunityOnboardingFlow({
       try {
         const profile = await updateProfile({
           displayName: displayName.trim(),
-          avatarUrl: shouldSaveCandidate ? candidateAvatarUrl : undefined,
+          ...(nameWasEditedRef.current ? { name: name.trim() } : {}),
+          avatarUrl: shouldSaveCandidate
+            ? candidateAvatarUrl
+            : shouldClearAvatar
+              ? ""
+              : undefined,
         });
         deferredAvatar?.release({
           expectedPubkey: profile.pubkey,
@@ -503,8 +520,8 @@ export function CommunityOnboardingFlow({
                 <div className="shrink-0">
                   <h1 className="text-title font-normal">Build your profile</h1>
                   <p className="mx-auto mt-3 max-w-[380px] text-sm leading-6 text-foreground/80">
-                    Add a name and avatar. They’ll show up on your messages,
-                    reactions, and agent handoffs.
+                    Add a display name, Nostr handle, and avatar. They’ll show
+                    up on your messages, reactions, and agent handoffs.
                   </p>
                 </div>
                 <div className="flex min-h-0 w-full flex-1 flex-col items-center justify-center pt-8">
@@ -519,23 +536,52 @@ export function CommunityOnboardingFlow({
                     htmlFor="community-display-name"
                   >
                     <span className="mb-2 block pl-4 text-sm text-foreground">
-                      Your username
+                      Display name
                     </span>
                     <Input
-                      aria-label="Community username"
-                      autoCapitalize="none"
-                      autoComplete="username"
+                      aria-label="Community display name"
+                      autoComplete="name"
                       autoCorrect="off"
                       className="h-14 rounded-2xl border-[color:rgb(var(--buzz-onboarding-avatar-control-fg)_/_0.28)] bg-[rgb(var(--buzz-onboarding-avatar-dialog-bg)/0.95)] px-5 text-sm shadow-none placeholder:text-muted-foreground/60 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[color:rgb(var(--buzz-onboarding-avatar-control-fg)_/_0.5)] md:text-sm"
                       data-testid="community-profile-name-key"
                       disabled={isPending || isUploadingAvatar}
                       id="community-display-name"
                       onChange={(event) => setDisplayName(event.target.value)}
-                      placeholder="Enter your username here"
+                      placeholder="Enter your display name"
                       ref={nameInputRef}
                       spellCheck={false}
                       type="text"
                       value={displayName}
+                    />
+                  </label>
+                  <label
+                    className="mt-4 block w-full max-w-[412px] text-left"
+                    htmlFor="community-name"
+                  >
+                    <span className="mb-1 block pl-4 text-sm text-foreground">
+                      Nostr handle{" "}
+                      <span className="text-foreground/60">(optional)</span>
+                    </span>
+                    <span className="mb-2 block pl-4 text-xs text-foreground/65">
+                      A short profile name. It does not need to be unique.
+                    </span>
+                    <Input
+                      aria-label="Community Nostr handle"
+                      autoCapitalize="none"
+                      autoComplete="off"
+                      autoCorrect="off"
+                      className="h-14 rounded-2xl border-[color:rgb(var(--buzz-onboarding-avatar-control-fg)_/_0.28)] bg-[rgb(var(--buzz-onboarding-avatar-dialog-bg)/0.95)] px-5 text-sm shadow-none placeholder:text-muted-foreground/60 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[color:rgb(var(--buzz-onboarding-avatar-control-fg)_/_0.5)] md:text-sm"
+                      data-testid="community-profile-handle"
+                      disabled={isPending || isUploadingAvatar}
+                      id="community-name"
+                      onChange={(event) => {
+                        nameWasEditedRef.current = true;
+                        setName(event.target.value);
+                      }}
+                      placeholder="e.g. theangrypit"
+                      spellCheck={false}
+                      type="text"
+                      value={name}
                     />
                   </label>
                 </div>
@@ -606,7 +652,10 @@ export function CommunityOnboardingFlow({
                       emojiPickerThemeVars={NEUTRAL_EMOJI_PICKER_THEME_VARS}
                       onDone={() => setIsAvatarEditorOpen(false)}
                       onUploadingChange={setIsUploadingAvatar}
-                      onUrlChange={setAvatarUrl}
+                      onUrlChange={(nextAvatarUrl) => {
+                        avatarWasEditedRef.current = true;
+                        setAvatarUrl(nextAvatarUrl);
+                      }}
                       presentation="onboarding-modal"
                       previewName={displayName.trim() || "Your profile"}
                       testIdPrefix="community-avatar"

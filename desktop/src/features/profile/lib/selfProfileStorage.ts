@@ -34,6 +34,8 @@ export const SELF_PROFILE_CACHE_EVENT = "buzz:self-profile-cache";
 export type SelfProfileCache = {
   version: 1;
   displayName: string | null;
+  /** Kind-0 `name`, kept distinct from the human-facing display name. */
+  name: string | null;
   /** Original relay URL from the kind-0 profile event. */
   avatarUrl: string | null;
   about: string | null;
@@ -58,6 +60,7 @@ export type SelfProfileCache = {
 const DEFAULT_CACHE: SelfProfileCache = Object.freeze({
   version: 1,
   displayName: null,
+  name: null,
   avatarUrl: null,
   about: null,
   avatarDataUrl: null,
@@ -86,6 +89,7 @@ export function parseSelfProfileCache(json: unknown): SelfProfileCache | null {
 
   const displayName =
     typeof obj.displayName === "string" ? obj.displayName : null;
+  const name = typeof obj.name === "string" ? obj.name : null;
   const avatarUrl = typeof obj.avatarUrl === "string" ? obj.avatarUrl : null;
   const about = typeof obj.about === "string" ? obj.about : null;
   // Defense-in-depth: avatarDataUrl flows into an <img src> sink; only accept
@@ -107,6 +111,7 @@ export function parseSelfProfileCache(json: unknown): SelfProfileCache | null {
   return {
     version: 1,
     displayName,
+    name,
     avatarUrl,
     about,
     avatarDataUrl,

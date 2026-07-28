@@ -13,6 +13,9 @@ use buzz_core_pkg::kind::{KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST};
 use nostr::{EventBuilder, EventId, Kind, Tag};
 use uuid::Uuid;
 
+mod profile;
+pub use profile::{build_patched_profile, build_profile, ProfileMetadataPatch};
+
 // ── Constants ────────────────────────────────────────────────────────────────
 
 /// Maximum content size — matches buzz-sdk (64 KiB).
@@ -466,36 +469,6 @@ pub fn build_set_canvas(channel_id: Uuid, content: &str) -> Result<EventBuilder,
     check_content(content)?;
     let tags = vec![tag(vec!["h", &channel_id.to_string()])?];
     Ok(EventBuilder::new(Kind::Custom(40100), content).tags(tags))
-}
-
-// ── Profile ──────────────────────────────────────────────────────────────────
-
-/// Kind 0 — NIP-01 profile metadata (full snapshot).
-pub fn build_profile(
-    display_name: Option<&str>,
-    name: Option<&str>,
-    picture: Option<&str>,
-    about: Option<&str>,
-    nip05: Option<&str>,
-) -> Result<EventBuilder, String> {
-    let mut map = serde_json::Map::new();
-    if let Some(v) = display_name {
-        map.insert("display_name".into(), serde_json::Value::String(v.into()));
-    }
-    if let Some(v) = name {
-        map.insert("name".into(), serde_json::Value::String(v.into()));
-    }
-    if let Some(v) = picture {
-        map.insert("picture".into(), serde_json::Value::String(v.into()));
-    }
-    if let Some(v) = about {
-        map.insert("about".into(), serde_json::Value::String(v.into()));
-    }
-    if let Some(v) = nip05 {
-        map.insert("nip05".into(), serde_json::Value::String(v.into()));
-    }
-    let content = serde_json::Value::Object(map).to_string();
-    Ok(EventBuilder::new(Kind::Custom(0), content))
 }
 
 // ── Huddles ──────────────────────────────────────────────────────────────────

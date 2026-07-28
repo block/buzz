@@ -5400,6 +5400,7 @@ async function handleGetProfile(config: E2eConfig | undefined) {
   if (events.length === 0) {
     return {
       pubkey: identity.pubkey,
+      name: null,
       display_name: null,
       about: null,
       avatar_url: null,
@@ -5411,6 +5412,7 @@ async function handleGetProfile(config: E2eConfig | undefined) {
   const content = JSON.parse(events[0].content ?? "{}");
   return {
     pubkey: identity.pubkey,
+    name: content.name ?? null,
     display_name: content.display_name ?? content.name ?? null,
     about: content.about ?? null,
     avatar_url: content.picture ?? null,
@@ -5423,6 +5425,7 @@ async function handleGetProfile(config: E2eConfig | undefined) {
 async function handleUpdateProfile(
   args: {
     displayName?: string;
+    name?: string;
     avatarUrl?: string;
     about?: string;
     nip05Handle?: string;
@@ -5447,10 +5450,12 @@ async function handleUpdateProfile(
 
     const profile = ensureMockProfile(config);
     const hasDisplayNameUpdate = typeof args.displayName === "string";
+    const hasNameUpdate = typeof args.name === "string";
     const hasAvatarUrlUpdate = typeof args.avatarUrl === "string";
     const hasAboutUpdate = typeof args.about === "string";
     const hasNip05HandleUpdate = typeof args.nip05Handle === "string";
     const nextDisplayName = args.displayName?.trim() ?? "";
+    const nextName = args.name?.trim() ?? "";
     const nextAvatarUrl = args.avatarUrl?.trim() ?? "";
     const nextAbout = args.about?.trim() ?? "";
     const nextNip05Handle = args.nip05Handle?.trim() ?? "";
@@ -5458,6 +5463,9 @@ async function handleUpdateProfile(
     if (hasDisplayNameUpdate && nextDisplayName !== profile.display_name) {
       profile.display_name = nextDisplayName || null;
       applyMockDisplayName(profile.pubkey, profile.display_name);
+    }
+    if (hasNameUpdate && nextName !== profile.name) {
+      profile.name = nextName || null;
     }
     if (hasAvatarUrlUpdate && nextAvatarUrl !== profile.avatar_url) {
       profile.avatar_url = nextAvatarUrl || null;
@@ -5476,16 +5484,35 @@ async function handleUpdateProfile(
   const currentEvents = await relayQuery(config, [
     { kinds: [0], authors: [identity.pubkey], limit: 1 },
   ]);
-  const currentContent = currentEvents[0]
+  const currentContent: unknown = currentEvents[0]
     ? JSON.parse(currentEvents[0].content ?? "{}")
     : {};
-  const profileContent = JSON.stringify({
-    display_name: args.displayName ?? currentContent.display_name ?? undefined,
-    name: currentContent.display_name ?? undefined,
-    picture: args.avatarUrl ?? currentContent.picture ?? undefined,
-    about: args.about ?? currentContent.about ?? undefined,
-    nip05: args.nip05Handle ?? currentContent.nip05 ?? undefined,
-  });
+  if (
+    typeof currentContent !== "object" ||
+    currentContent === null ||
+    Array.isArray(currentContent)
+  ) {
+    throw new Error("Existing profile metadata must be a JSON object.");
+  }
+  const updated: Record<string, unknown> = { ...currentContent };
+  for (const [field, value] of [
+    ["display_name", args.displayName],
+    ["name", args.name],
+    ["picture", args.avatarUrl],
+    ["about", args.about],
+    ["nip05", args.nip05Handle],
+  ] as const) {
+    if (typeof value !== "string") {
+      continue;
+    }
+    const trimmed = value.trim();
+    if (trimmed) {
+      updated[field] = trimmed;
+    } else {
+      delete updated[field];
+    }
+  }
+  const profileContent = JSON.stringify(updated);
   await submitSignedEvent(config, {
     kind: 0,
     content: profileContent,
@@ -5493,9 +5520,9 @@ async function handleUpdateProfile(
   });
 
   // Return the updated profile in RawProfile shape
-  const updated = JSON.parse(profileContent);
   return {
     pubkey: identity.pubkey,
+    name: updated.name ?? null,
     display_name: updated.display_name ?? null,
     about: updated.about ?? null,
     avatar_url: updated.picture ?? null,
@@ -5529,6 +5556,7 @@ async function handleGetUserProfile(
   if (events.length === 0) {
     return {
       pubkey: targetPubkey,
+      name: null,
       display_name: null,
       about: null,
       avatar_url: null,
@@ -5540,6 +5568,7 @@ async function handleGetUserProfile(
   const content = JSON.parse(events[0].content ?? "{}");
   return {
     pubkey: targetPubkey,
+    name: content.name ?? null,
     display_name: content.display_name ?? content.name ?? null,
     about: content.about ?? null,
     avatar_url: content.picture ?? null,

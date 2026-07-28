@@ -125,6 +125,8 @@ export type Identity = {
 
 export type Profile = {
   pubkey: string;
+  /** Kind-0 `name`, a short user-chosen handle. It is not guaranteed unique. */
+  name: string | null;
   displayName: string | null;
   avatarUrl: string | null;
   about: string | null;
@@ -170,6 +172,8 @@ export type UserSearchPage = {
 
 export type UpdateProfileInput = {
   displayName?: string;
+  /** Kind-0 `name`. Empty/whitespace removes it; omission preserves it. */
+  name?: string;
   avatarUrl?: string;
   about?: string;
   nip05Handle?: string;
