@@ -8,6 +8,17 @@ use sha2::{Digest, Sha256};
 
 use crate::error::CliError;
 
+/// Receipt returned by the portable relay artifact API after storing a blob.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ArtifactReceipt {
+    /// Hex-encoded SHA-256 of the stored bytes.
+    pub sha256: String,
+    /// Size of the stored artifact in bytes.
+    pub size: u64,
+    /// Relay-relative or absolute URL from which the artifact can be fetched.
+    pub url: String,
+}
+
 /// Descriptor returned by the relay after a successful upload.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BlobDescriptor {
@@ -107,6 +118,36 @@ fn sign_nip98(
         .map_err(|e| CliError::Other(format!("NIP-98 signing failed: {e}")))?;
     let json = event.as_json();
     Ok(format!("Nostr {}", B64.encode(json.as_bytes())))
+}
+
+pub(crate) fn normalize_artifact_sha256(value: &str) -> Result<String, CliError> {
+    crate::validate::validate_hex64(value).map_err(|_| {
+        CliError::Usage("artifact sha256 must be exactly 64 hex characters".to_string())
+    })?;
+    Ok(value.to_ascii_lowercase())
+}
+
+fn parse_artifact_receipt(body: &[u8]) -> Result<ArtifactReceipt, CliError> {
+    let mut receipt: ArtifactReceipt = serde_json::from_slice(body)
+        .map_err(|e| CliError::Other(format!("invalid artifact receipt: {e}")))?;
+    receipt.sha256 = normalize_artifact_sha256(&receipt.sha256)
+        .map_err(|e| CliError::Other(format!("invalid artifact receipt: {e}")))?;
+    Ok(receipt)
+}
+
+fn artifact_sha256(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
+}
+
+fn verify_artifact_bytes(expected_sha256: &str, bytes: &[u8]) -> Result<(), CliError> {
+    let expected_sha256 = normalize_artifact_sha256(expected_sha256)?;
+    let actual_sha256 = artifact_sha256(bytes);
+    if actual_sha256 != expected_sha256 {
+        return Err(CliError::Other(format!(
+            "artifact content verification failed: expected {expected_sha256}, got {actual_sha256}"
+        )));
+    }
+    Ok(())
 }
 
 fn relay_server_tag(relay_url: &str) -> Option<String> {
@@ -1255,6 +1296,113 @@ impl BuzzClient {
         .await
     }
 
+    /// Store bytes through the portable `POST /artifacts` API.
+    ///
+    /// The returned receipt is accepted only when its hash and size match the
+    /// locally computed values for `body`.
+    pub async fn put_artifact(&self, body: bytes::Bytes) -> Result<ArtifactReceipt, CliError> {
+        let expected_sha256 = artifact_sha256(&body);
+        let expected_size = body.len() as u64;
+        let url = format!("{}/artifacts", self.relay_url);
+
+        self.with_retry_body(|| {
+            let body = body.clone();
+            let url = url.clone();
+            let expected_sha256 = expected_sha256.clone();
+            async move {
+                let auth = sign_nip98(&self.keys, "POST", &url, Some(&body))?;
+                let resp = self
+                    .with_auth_tag(
+                        self.http
+                            .post(&url)
+                            .header("Authorization", auth)
+                            .header("Content-Type", "application/octet-stream")
+                            .body(body),
+                    )
+                    .send()
+                    .await?;
+                if !resp.status().is_success() {
+                    let status = resp.status().as_u16();
+                    let body = resp.text().await.unwrap_or_default();
+                    return Err(CliError::Relay { status, body });
+                }
+                let response_body = resp.bytes().await?;
+                let receipt = parse_artifact_receipt(&response_body)?;
+                if receipt.sha256 != expected_sha256 {
+                    return Err(CliError::Other(format!(
+                        "artifact receipt hash mismatch: expected {expected_sha256}, got {}",
+                        receipt.sha256
+                    )));
+                }
+                if receipt.size != expected_size {
+                    return Err(CliError::Other(format!(
+                        "artifact receipt size mismatch: expected {expected_size}, got {}",
+                        receipt.size
+                    )));
+                }
+                Ok(receipt)
+            }
+        })
+        .await
+    }
+
+    /// Fetch and verify bytes through the portable `GET /artifacts/{sha256}` API.
+    ///
+    /// Bytes are returned only after their SHA-256 matches the requested
+    /// content address.
+    pub async fn get_artifact(&self, sha256: &str) -> Result<bytes::Bytes, CliError> {
+        let sha256 = normalize_artifact_sha256(sha256)?;
+        let url = format!("{}/artifacts/{sha256}", self.relay_url);
+
+        self.with_retry_body(|| {
+            let sha256 = sha256.clone();
+            let url = url.clone();
+            async move {
+                let auth = sign_nip98(&self.keys, "GET", &url, Some(b""))?;
+                let resp = self
+                    .with_auth_tag(self.http.get(&url).header("Authorization", auth))
+                    .send()
+                    .await?;
+                if !resp.status().is_success() {
+                    let status = resp.status().as_u16();
+                    let body = resp.text().await.unwrap_or_default();
+                    return Err(CliError::Relay { status, body });
+                }
+                let bytes = resp.bytes().await?;
+                verify_artifact_bytes(&sha256, &bytes)?;
+                Ok(bytes)
+            }
+        })
+        .await
+    }
+
+    /// Probe portable artifact presence with a GET-signed, empty-payload NIP-98 proof.
+    pub async fn head_artifact(&self, sha256: &str) -> Result<bool, CliError> {
+        let sha256 = normalize_artifact_sha256(sha256)?;
+        let url = format!("{}/artifacts/{sha256}", self.relay_url);
+
+        self.with_retry_body(|| {
+            let url = url.clone();
+            async move {
+                let auth = sign_nip98(&self.keys, "GET", &url, Some(b""))?;
+                let resp = self
+                    .with_auth_tag(self.http.head(&url).header("Authorization", auth))
+                    .send()
+                    .await?;
+                if resp.status() == reqwest::StatusCode::NOT_FOUND {
+                    return Ok(false);
+                }
+                if !resp.status().is_success() {
+                    let status = resp.status().as_u16();
+                    let body = resp.text().await.unwrap_or_default();
+                    return Err(CliError::Relay { status, body });
+                }
+                Ok(true)
+            }
+        })
+        .await
+    }
+
     async fn handle_response(&self, resp: reqwest::Response) -> Result<String, CliError> {
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
@@ -1293,6 +1441,106 @@ pub fn normalize_relay_url(url: &str) -> String {
         .replace("ws://", "http://")
         .trim_end_matches('/')
         .to_string()
+}
+
+#[cfg(test)]
+mod artifact_tests {
+    use base64::Engine;
+    use nostr::{JsonUtil, Keys, Kind};
+
+    use super::{
+        artifact_sha256, normalize_artifact_sha256, parse_artifact_receipt, sign_nip98,
+        verify_artifact_bytes, ArtifactReceipt,
+    };
+
+    const SHA256: &str = "01e782826ae5182220bd6158f883d01ceb1bce659dc020e7c511f802a9aa7737";
+
+    #[test]
+    fn artifact_sha_validation_accepts_and_normalizes_hex() {
+        assert_eq!(
+            normalize_artifact_sha256(SHA256).expect("lowercase SHA validates"),
+            SHA256
+        );
+        assert_eq!(
+            normalize_artifact_sha256(&SHA256.to_ascii_uppercase())
+                .expect("uppercase SHA validates"),
+            SHA256
+        );
+    }
+
+    #[test]
+    fn artifact_sha_validation_rejects_wrong_length_and_non_hex() {
+        assert!(normalize_artifact_sha256("abcd").is_err());
+        assert!(normalize_artifact_sha256(&"g".repeat(64)).is_err());
+        assert!(normalize_artifact_sha256(&format!("{SHA256}0")).is_err());
+    }
+
+    #[test]
+    fn artifact_receipt_parses_portable_shape() {
+        let body = format!(r#"{{"sha256":"{SHA256}","size":8,"url":"/artifacts/{SHA256}"}}"#);
+        let parsed = parse_artifact_receipt(body.as_bytes()).expect("portable receipt parses");
+        assert_eq!(
+            parsed,
+            ArtifactReceipt {
+                sha256: SHA256.to_string(),
+                size: 8,
+                url: format!("/artifacts/{SHA256}"),
+            }
+        );
+    }
+
+    #[test]
+    fn artifact_receipt_rejects_invalid_hash() {
+        let body = br#"{"sha256":"not-a-hash","size":8,"url":"/artifacts/not-a-hash"}"#;
+        assert!(parse_artifact_receipt(body).is_err());
+    }
+
+    #[test]
+    fn artifact_hash_verification_accepts_matching_bytes() {
+        assert!(verify_artifact_bytes(SHA256, b"portable").is_ok());
+    }
+
+    #[test]
+    fn artifact_hash_verification_rejects_mismatch() {
+        assert!(verify_artifact_bytes(SHA256, b"tampered").is_err());
+    }
+
+    #[test]
+    fn artifact_empty_payload_get_proof_has_required_nip98_tags() {
+        let url = format!("https://relay.example/artifacts/{SHA256}");
+        let header =
+            sign_nip98(&Keys::generate(), "GET", &url, Some(b"")).expect("NIP-98 proof signs");
+        let encoded = header
+            .strip_prefix("Nostr ")
+            .expect("NIP-98 authorization scheme");
+        let json = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .expect("base64 event decodes");
+        let event = nostr::Event::from_json(
+            std::str::from_utf8(&json).expect("event serialization is UTF-8"),
+        )
+        .expect("event parses");
+
+        assert_eq!(event.kind, Kind::Custom(27235));
+        let tags: Vec<Vec<String>> = event
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice().to_vec())
+            .collect();
+        assert!(tags.iter().any(|tag| {
+            tag.first().map(String::as_str) == Some("u")
+                && tag.get(1).map(String::as_str) == Some(url.as_str())
+        }));
+        assert!(tags.iter().any(|tag| tag.as_slice() == ["method", "GET"]));
+        let empty_payload_sha256 = artifact_sha256(b"");
+        assert!(tags.iter().any(|tag| {
+            tag.first().map(String::as_str) == Some("payload")
+                && tag.get(1).map(String::as_str) == Some(empty_payload_sha256.as_str())
+        }));
+        assert!(tags
+            .iter()
+            .any(|tag| tag.first().map(String::as_str) == Some("nonce")));
+    }
 }
 
 /// Convert an HTTP(S) relay base URL back to a WebSocket URL for NIP-01 connections.

@@ -227,6 +227,9 @@ enum Cmd {
     /// Upload files to the relay's Blossom store
     #[command(subcommand)]
     Upload(UploadCmd),
+    /// Store, fetch, and probe portable relay artifacts
+    #[command(subcommand)]
+    Artifact(ArtifactCmd),
     /// Agent engram management — persistent memory per NIP-AE
     #[command(subcommand)]
     Mem(MemCmd),
@@ -1536,6 +1539,28 @@ pub enum MediaCmd {
     },
 }
 
+/// Subcommands for the portable relay artifact API.
+#[derive(Subcommand)]
+pub enum ArtifactCmd {
+    /// Store a file in the portable relay artifact store
+    Put {
+        /// Path to the file to store
+        file: std::path::PathBuf,
+    },
+    /// Fetch and verify an artifact before writing it
+    Get {
+        /// Artifact SHA-256 (64 hex characters)
+        sha256: String,
+        /// Output path (defaults to ./<sha256>)
+        out: Option<std::path::PathBuf>,
+    },
+    /// Check whether an artifact is present
+    Head {
+        /// Artifact SHA-256 (64 hex characters)
+        sha256: String,
+    },
+}
+
 /// Subcommands for `buzz mem`.
 #[derive(Subcommand)]
 pub enum MemCmd {
@@ -1786,6 +1811,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Pr(sub) => commands::pr::dispatch(sub, &client).await,
         Cmd::Media(sub) => commands::upload::dispatch_media(sub, &client).await,
         Cmd::Upload(sub) => commands::upload::dispatch(sub, &client).await,
+        Cmd::Artifact(sub) => commands::artifact::dispatch(sub, &client).await,
         Cmd::Mem(sub) => commands::mem::dispatch(sub, &client).await,
         Cmd::Moderation(sub) => commands::moderation::dispatch(sub, &client, &cli.format).await,
         Cmd::Pack(_) => unreachable!("handled above"),
@@ -1807,6 +1833,7 @@ mod tests {
     fn command_inventory_is_stable() {
         let expected_groups: Vec<&str> = vec![
             "agents",
+            "artifact",
             "canvas",
             "channels",
             "dms",
@@ -1975,6 +2002,7 @@ mod tests {
             vec!["create", "get", "list", "status"]
         );
         assert_eq!(names(&cmd, "media"), vec!["get"]);
+        assert_eq!(names(&cmd, "artifact"), vec!["get", "head", "put"]);
         assert_eq!(names(&cmd, "upload"), vec!["file"]);
         assert_eq!(names(&cmd, "pack"), vec!["inspect", "validate"]);
         assert_eq!(
@@ -1996,6 +2024,7 @@ mod tests {
     fn subcommand_counts_are_stable() {
         let expected: Vec<(&str, usize)> = vec![
             ("agents", 5),
+            ("artifact", 3),
             ("canvas", 2),
             ("channels", 16),
             ("dms", 4),
