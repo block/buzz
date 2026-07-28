@@ -55,9 +55,14 @@ The chart fails at `helm install` / `helm template` time with a clear message if
 ## Relay Pod extensions
 
 The chart exposes narrow extension points for init containers, volumes, relay
-volume mounts, and image command/argument overrides. For example, an init
-container can copy a wrapper binary into a shared volume and make that wrapper
-the relay entrypoint:
+volume mounts, and image command/argument overrides. `extraManifests` creates
+independent Kubernetes resources but cannot modify the chart-managed relay
+Deployment. These extension values insert fields into that Deployment, avoiding
+duplication of its environment, probes, security context, secrets, and
+chart-owned volumes.
+
+For example, an init container can copy a wrapper binary into a shared volume
+and make that wrapper the relay entrypoint:
 
 ```yaml
 extraInitContainers:
