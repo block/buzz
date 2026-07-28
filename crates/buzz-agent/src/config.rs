@@ -798,7 +798,7 @@ impl Config {
             base_url,
             anthropic_api_version: env_or("ANTHROPIC_API_VERSION", "2023-06-01"),
             openai_api,
-            max_rounds: parse_env("BUZZ_AGENT_MAX_ROUNDS", 0)?,
+            max_rounds: parse_env("BUZZ_AGENT_MAX_ROUNDS", 50)?,
             max_output_tokens: parse_env("BUZZ_AGENT_MAX_OUTPUT_TOKENS", 32_768)?,
             llm_timeout: Duration::from_secs(parse_env("BUZZ_AGENT_LLM_TIMEOUT_SECS", 240)?),
             tool_timeout: Duration::from_secs(parse_env("BUZZ_AGENT_TOOL_TIMEOUT_SECS", 660)?),

@@ -109,6 +109,13 @@ async fn cmd_reports(
 ) -> Result<(), CliError> {
     let mut path = format!("/moderation/reports?limit={limit}");
     if let Some(s) = status {
+        // Validate status is a simple alphanumeric identifier to prevent
+        // query-parameter injection (e.g. --status "open&limit=99999").
+        if !s.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return Err(CliError::Usage(format!(
+                "invalid status '{s}': must be alphanumeric (e.g. open, resolved, dismissed, escalated)"
+            )));
+        }
         path.push_str(&format!("&status={s}"));
     }
     let resp = client.get_authed(&path).await?;
