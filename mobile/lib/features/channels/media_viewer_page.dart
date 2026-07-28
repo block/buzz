@@ -11,6 +11,7 @@ import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 
 part 'media_viewer_page/image_controls.dart';
+part 'media_viewer_page/route_transition.dart';
 
 const _imageViewerPushDuration = Duration(milliseconds: 260);
 const _imageViewerPopDuration = Duration(milliseconds: 170);
@@ -221,27 +222,6 @@ void openVideoViewer(
   );
 }
 
-class _MediaViewerRouteTransition extends StatelessWidget {
-  final Animation<double> animation;
-  final Widget child;
-
-  const _MediaViewerRouteTransition({
-    required this.animation,
-    required this.child,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final fade = CurvedAnimation(
-      parent: animation,
-      curve: Curves.easeOutCubic,
-      reverseCurve: Curves.easeInOutCubic,
-    );
-
-    return FadeTransition(opacity: fade, child: child);
-  }
-}
-
 // StatefulWidget retained: imperative gesture/animation controllers with
 // listener lifecycle don't map cleanly to hooks (allowed exception).
 class MediaImageViewerPage extends StatefulWidget {
@@ -269,7 +249,7 @@ class MediaImageViewerPage extends StatefulWidget {
 }
 
 class _MediaImageViewerPageState extends State<MediaImageViewerPage>
-    with SingleTickerProviderStateMixin {
+    with TickerProviderStateMixin {
   late final List<MediaViewerImage> _images;
   late final int _initialIndex;
   late final PageController _pageController;
@@ -277,6 +257,8 @@ class _MediaImageViewerPageState extends State<MediaImageViewerPage>
   late final List<TransformationController> _transformationControllers;
   late final List<VoidCallback> _transformationListeners;
   late final AnimationController _snapBackController;
+  late final AnimationController _zoomResetController;
+  VoidCallback? _zoomResetListener;
   final Set<int> _fullResolutionIndices = <int>{};
   late int _currentIndex;
   bool _isTransformed = false;
@@ -320,6 +302,10 @@ class _MediaImageViewerPageState extends State<MediaImageViewerPage>
       vsync: this,
       duration: const Duration(milliseconds: 200),
     );
+    _zoomResetController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 180),
+    );
   }
 
   @override
@@ -340,6 +326,11 @@ class _MediaImageViewerPageState extends State<MediaImageViewerPage>
     _pageController.dispose();
     _pagePosition.dispose();
     _snapBackController.dispose();
+    final zoomResetListener = _zoomResetListener;
+    if (zoomResetListener != null) {
+      _zoomResetController.removeListener(zoomResetListener);
+    }
+    _zoomResetController.dispose();
     super.dispose();
   }
 
@@ -454,6 +445,42 @@ class _MediaImageViewerPageState extends State<MediaImageViewerPage>
       return;
     }
     setState(() => _fullResolutionIndices.add(index));
+  }
+
+  void _resetImageTransform(int index) {
+    final controller = _transformationControllers[index];
+    if (!_hasImageTransform(controller.value)) {
+      return;
+    }
+
+    final previousListener = _zoomResetListener;
+    if (previousListener != null) {
+      _zoomResetController.removeListener(previousListener);
+    }
+    _zoomResetController.stop();
+
+    if (MediaQuery.disableAnimationsOf(context)) {
+      controller.value = Matrix4.identity();
+      _zoomResetListener = null;
+      return;
+    }
+
+    final animation =
+        Matrix4Tween(
+          begin: Matrix4.copy(controller.value),
+          end: Matrix4.identity(),
+        ).animate(
+          CurvedAnimation(
+            parent: _zoomResetController,
+            curve: Curves.easeOutCubic,
+          ),
+        );
+    void listener() => controller.value = animation.value;
+    _zoomResetListener = listener;
+    _zoomResetController
+      ..reset()
+      ..addListener(listener)
+      ..forward();
   }
 
   void _onImageInteractionEnd(ScaleEndDetails details) {
@@ -590,57 +617,64 @@ class _MediaImageViewerPageState extends State<MediaImageViewerPage>
                               Size(constraints.maxWidth, constraints.maxHeight),
                               image.aspectRatio,
                             );
-                            return InteractiveViewer(
-                              transformationController:
-                                  _transformationControllers[index],
-                              onInteractionStart: (details) =>
-                                  _onImageInteractionStart(index, details),
-                              onInteractionUpdate: (details) =>
-                                  _onImageInteractionUpdate(index, details),
-                              onInteractionEnd: _onImageInteractionEnd,
-                              panEnabled: _isTransformed,
-                              scaleEnabled: true,
-                              minScale: 1,
-                              maxScale: 4,
-                              boundaryMargin: const EdgeInsets.all(Grid.xxl),
-                              clipBehavior: Clip.none,
-                              child: Align(
-                                alignment: Alignment.center,
-                                child: SizedBox(
-                                  width: viewerSize.width,
-                                  height: viewerSize.height,
-                                  child: HeroMode(
-                                    key: index == _initialIndex
-                                        ? const ValueKey(
-                                            'message-media-image-viewer-hero-mode',
-                                          )
-                                        : ValueKey(
-                                            'message-media-image-viewer-hero-mode-$index',
-                                          ),
-                                    enabled:
-                                        !_disableHeroOnDismiss &&
-                                        index == _initialIndex,
-                                    child: MediaViewerHero(
-                                      tag: image.heroTag,
-                                      child: MediaImage(
-                                        key: ValueKey(
-                                          'message-media-image-viewer-image:$index',
-                                        ),
-                                        url: image.url,
-                                        decodeWidth:
-                                            _fullResolutionIndices.contains(
-                                              index,
+                            return GestureDetector(
+                              key: ValueKey(
+                                'message-media-image-viewer-gesture:$index',
+                              ),
+                              behavior: HitTestBehavior.opaque,
+                              onDoubleTap: () => _resetImageTransform(index),
+                              child: InteractiveViewer(
+                                transformationController:
+                                    _transformationControllers[index],
+                                onInteractionStart: (details) =>
+                                    _onImageInteractionStart(index, details),
+                                onInteractionUpdate: (details) =>
+                                    _onImageInteractionUpdate(index, details),
+                                onInteractionEnd: _onImageInteractionEnd,
+                                panEnabled: _isTransformed,
+                                scaleEnabled: true,
+                                minScale: 1,
+                                maxScale: 4,
+                                boundaryMargin: const EdgeInsets.all(Grid.xxl),
+                                clipBehavior: Clip.none,
+                                child: Align(
+                                  alignment: Alignment.center,
+                                  child: SizedBox(
+                                    width: viewerSize.width,
+                                    height: viewerSize.height,
+                                    child: HeroMode(
+                                      key: index == _initialIndex
+                                          ? const ValueKey(
+                                              'message-media-image-viewer-hero-mode',
                                             )
-                                            ? null
-                                            : image.previewDecodeWidth,
-                                        boundDecodeToLayout: false,
-                                        fit: BoxFit.contain,
-                                        semanticLabel: image.semanticLabel,
-                                        errorBuilder: (_, _, _) =>
-                                            const _MediaLoadFailure(
-                                              message: 'Failed to load image',
-                                              icon: LucideIcons.imageOff,
+                                          : ValueKey(
+                                              'message-media-image-viewer-hero-mode-$index',
                                             ),
+                                      enabled:
+                                          !_disableHeroOnDismiss &&
+                                          index == _initialIndex,
+                                      child: MediaViewerHero(
+                                        tag: image.heroTag,
+                                        child: MediaImage(
+                                          key: ValueKey(
+                                            'message-media-image-viewer-image:$index',
+                                          ),
+                                          url: image.url,
+                                          decodeWidth:
+                                              _fullResolutionIndices.contains(
+                                                index,
+                                              )
+                                              ? null
+                                              : image.previewDecodeWidth,
+                                          boundDecodeToLayout: false,
+                                          fit: BoxFit.contain,
+                                          semanticLabel: image.semanticLabel,
+                                          errorBuilder: (_, _, _) =>
+                                              const _MediaLoadFailure(
+                                                message: 'Failed to load image',
+                                                icon: LucideIcons.imageOff,
+                                              ),
+                                        ),
                                       ),
                                     ),
                                   ),

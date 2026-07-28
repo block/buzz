@@ -571,6 +571,90 @@ Photos
         },
       );
 
+      testWidgets('double tap resets the fullscreen image transform', (
+        tester,
+      ) async {
+        const imageUrl = 'https://example.com/media/double-tap-reset.png';
+
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content:
+                  'Look\n![image](https://example.com/media/double-tap-reset.png)',
+              tags: [
+                [
+                  'imeta',
+                  'url https://example.com/media/double-tap-reset.png',
+                  'm image/png',
+                ],
+              ],
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final transformationController = await _openImageViewer(
+          tester,
+          imageUrl,
+        );
+        _applyImageViewerTransform(
+          transformationController,
+          dx: 32,
+          dy: 24,
+          scale: 2,
+        );
+        await tester.pump();
+
+        final gestureSurface = find.byKey(
+          const ValueKey('message-media-image-viewer-gesture:0'),
+        );
+        await tester.tap(gestureSurface);
+        await tester.pump(const Duration(milliseconds: 50));
+        await tester.tap(gestureSurface);
+        await tester.pumpAndSettle();
+
+        expect(
+          transformationController.value.storage,
+          orderedEquals(Matrix4.identity().storage),
+        );
+        expect(_isImageViewerHeroEnabled(tester), isTrue);
+      });
+
+      testWidgets('swiping down dismisses the fullscreen gallery', (
+        tester,
+      ) async {
+        const imageUrl = 'https://example.com/media/swipe-dismiss.png';
+
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content:
+                  'Look\n![image](https://example.com/media/swipe-dismiss.png)',
+              tags: [
+                [
+                  'imeta',
+                  'url https://example.com/media/swipe-dismiss.png',
+                  'm image/png',
+                ],
+              ],
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        await _openImageViewer(tester, imageUrl);
+
+        await tester.drag(
+          find.byKey(const ValueKey('message-media-image-viewer-gesture:0')),
+          const Offset(0, 180),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(const ValueKey('message-media-image-viewer')),
+          findsNothing,
+        );
+      });
+
       testWidgets(
         'disables hero on back navigation after the fullscreen image is transformed',
         (tester) async {
