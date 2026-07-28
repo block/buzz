@@ -164,22 +164,30 @@ impl SubscriptionRegistry {
         conn_id: ConnId,
         sub_id: &str,
     ) -> Option<RemovedSubscription> {
-        // Never hold a `subs` shard while touching an index shard. Fan-out
-        // snapshots index entries for the same reason below.
-        let removed = {
-            let mut conn_subs = self.subs.get_mut(&conn_id)?;
-            conn_subs.remove(sub_id)
-        };
+        self.remove_subscription_inner(conn_id, sub_id, || {})
+    }
 
-        if let Some((filters, community_id, channel_id)) = removed {
-            self.remove_from_index(conn_id, sub_id, &filters, community_id, channel_id);
-            metrics::gauge!("buzz_subscriptions_active").decrement(1.0);
-            return Some(RemovedSubscription {
-                community_id,
-                channel_id,
-            });
-        }
-        None
+    fn remove_subscription_inner<F>(
+        &self,
+        conn_id: ConnId,
+        sub_id: &str,
+        after_remove: F,
+    ) -> Option<RemovedSubscription>
+    where
+        F: FnOnce(),
+    {
+        let mut conn_subs = self.subs.get_mut(&conn_id)?;
+        let (filters, community_id, channel_id) = conn_subs.remove(sub_id)?;
+
+        after_remove();
+        self.remove_from_index(conn_id, sub_id, &filters, community_id, channel_id);
+        drop(conn_subs);
+
+        metrics::gauge!("buzz_subscriptions_active").decrement(1.0);
+        Some(RemovedSubscription {
+            community_id,
+            channel_id,
+        })
     }
 
     /// Remove all subscriptions for a connection and clean up index entries.
@@ -693,6 +701,62 @@ mod tests {
         let event = make_stored_event(Kind::TextNote, Some(channel_id));
         let matches = registry.fan_out(&event);
         assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn test_subscription_removal_cannot_delete_replacement_index() {
+        let registry = Arc::new(SubscriptionRegistry::new());
+        let conn_id = Uuid::new_v4();
+        let channel_id = Uuid::new_v4();
+        let sub_id = "same-id".to_string();
+        let filters = vec![Filter::new().kind(Kind::TextNote)];
+        registry.register(conn_id, sub_id.clone(), filters.clone(), Some(channel_id));
+
+        let (removed_tx, removed_rx) = std::sync::mpsc::sync_channel(0);
+        let (resume_tx, resume_rx) = std::sync::mpsc::sync_channel(0);
+        let remove_registry = Arc::clone(&registry);
+        let remove_sub_id = sub_id.clone();
+        let remove = std::thread::spawn(move || {
+            remove_registry.remove_subscription_inner(conn_id, &remove_sub_id, || {
+                removed_tx.send(()).expect("signal authoritative removal");
+                resume_rx.recv().expect("resume index cleanup");
+            })
+        });
+
+        removed_rx.recv().expect("old subscription removed");
+
+        let (registered_tx, registered_rx) = std::sync::mpsc::sync_channel(0);
+        let register_registry = Arc::clone(&registry);
+        let register_sub_id = sub_id.clone();
+        let register = std::thread::spawn(move || {
+            register_registry.register(conn_id, register_sub_id, filters, Some(channel_id));
+            registered_tx
+                .send(())
+                .expect("signal replacement registration");
+        });
+
+        let replacement_finished_early = registered_rx
+            .recv_timeout(Duration::from_millis(100))
+            .is_ok();
+        resume_tx.send(()).expect("resume old cleanup");
+        remove.join().expect("removal thread completes");
+        if !replacement_finished_early {
+            registered_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("replacement registration completes");
+        }
+        register.join().expect("registration thread completes");
+        assert!(
+            !replacement_finished_early,
+            "replacement must wait until old index cleanup is complete"
+        );
+
+        let event = make_stored_event(Kind::TextNote, Some(channel_id));
+        assert_eq!(
+            registry.fan_out(&event),
+            vec![(conn_id, sub_id)],
+            "replacement must remain reachable through its index"
+        );
     }
 
     #[test]
