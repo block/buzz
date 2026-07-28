@@ -30,7 +30,7 @@ use buzz_core::event::StoredEvent;
 use buzz_core::filter::filters_match;
 use buzz_core::identity::{
     AuthenticatedPrincipal, AuthorizationDecision, IdentityAuthenticator, IdentityDenialCode,
-    ReadOperation, ReplicationPeerAuthenticator,
+    Principal, ReadOperation, ReplicationPeerAuthenticator,
 };
 use buzz_core::ingest::{apply_effective_event, decide_event, is_ephemeral_kind, EventDecision};
 use buzz_core::replication::{
@@ -44,7 +44,7 @@ use identity::{
     LocalAuthenticationEvidence, LocalIdentityAdapter, LocalIdentityError, LocalPeerEvidence,
 };
 use nostr::hashes::Hash as _;
-use nostr::{Alphabet, Event, Filter, SingleLetterTag, TagKind};
+use nostr::{Alphabet, Event, Filter, PublicKey, SingleLetterTag, TagKind};
 use serde::Serialize;
 use serde_json::{json, Value};
 use thiserror::Error;
@@ -272,6 +272,26 @@ impl EventStore {
         Ok(WriteResult::accepted(&event, "stored", true))
     }
 
+    /// Returns every durable journal event carrying an `x` tag equal to
+    /// `sha256`. Scans the full journal (not just effective heads): a
+    /// superseded event's artifact reference still authorizes custody, and
+    /// replication serves the journal, not the effective view.
+    pub async fn journal_events_referencing(&self, sha256: &str) -> Vec<Event> {
+        let inner = self.inner.lock().await;
+        inner
+            .journal
+            .iter()
+            .filter(|event| {
+                event.tags.iter().any(|tag| {
+                    let values = tag.as_slice();
+                    values.first().map(String::as_str) == Some("x")
+                        && values.get(1).map(String::as_str) == Some(sha256)
+                })
+            })
+            .cloned()
+            .collect()
+    }
+
     /// Returns matching effective events in newest-first order.
     pub async fn query(&self, filters: &[Filter]) -> Result<Vec<Event>, QueryError> {
         validate_filters(filters)?;
@@ -489,6 +509,11 @@ pub struct LocalRelay {
     replication_policy: Arc<dyn ReplicationPolicy>,
     identity: Option<Arc<LocalIdentityAdapter>>,
     artifacts_dir: Option<PathBuf>,
+    /// Owner anchor + node label. When both are present (with an identity
+    /// adapter), the artifact store enforces upload admission (owner or
+    /// admitted peers) and the reference rule on fetch/head. Absent anchors
+    /// preserve the ungoverned legacy behavior.
+    governance: Option<(nostr::PublicKey, String)>,
 }
 
 impl LocalRelay {
@@ -549,6 +574,19 @@ impl LocalRelay {
         identity: Option<Arc<LocalIdentityAdapter>>,
         artifacts_dir: Option<PathBuf>,
     ) -> Arc<Self> {
+        Self::open_governed(store, replication_policy, identity, artifacts_dir, None)
+    }
+
+    /// Builds a relay with an owner anchor and node label, activating
+    /// declaration-governed artifact access (upload admission and the
+    /// reference rule) alongside journal-derived trust.
+    pub fn open_governed(
+        store: Arc<EventStore>,
+        replication_policy: Arc<dyn ReplicationPolicy>,
+        identity: Option<Arc<LocalIdentityAdapter>>,
+        artifacts_dir: Option<PathBuf>,
+        governance: Option<(nostr::PublicKey, String)>,
+    ) -> Arc<Self> {
         let (live_events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         Arc::new(Self {
             store,
@@ -556,6 +594,7 @@ impl LocalRelay {
             replication_policy,
             identity,
             artifacts_dir,
+            governance,
         })
     }
 
@@ -903,6 +942,68 @@ async fn replication_ingest(
     Ok(Json(receipts))
 }
 
+/// Extracts the Nostr pubkey from an authenticated principal, when it is one.
+fn principal_pubkey(authenticated: &AuthenticatedPrincipal) -> Option<PublicKey> {
+    match &authenticated.principal {
+        Principal::Nostr { pubkey } => Some(*pubkey),
+        _ => None,
+    }
+}
+
+/// Upload admission (evaluation rule 4): with governance anchors set, blobs
+/// are stored only for the owner or an admitted replication peer.
+fn authorize_artifact_upload(
+    relay: &LocalRelay,
+    principal: Option<&AuthenticatedPrincipal>,
+) -> Result<(), ApiError> {
+    let Some((owner, _)) = relay.governance.as_ref() else {
+        return Ok(());
+    };
+    let allowed = principal.and_then(principal_pubkey).is_some_and(|pubkey| {
+        pubkey == *owner
+            || relay
+                .identity
+                .as_ref()
+                .is_some_and(|identity| identity.is_admitted_verification_key(&pubkey))
+    });
+    if allowed {
+        Ok(())
+    } else {
+        Err(ApiError::Identity(LocalIdentityError::denied(
+            IdentityDenialCode::ScopeDenied,
+        )))
+    }
+}
+
+/// Fetch/head authorization (evaluation rule 4): with governance anchors
+/// set, a blob is disclosed only to the owner or a principal whose active
+/// read grant covers a stream that selects a referencing journal event.
+async fn authorize_artifact_fetch(
+    relay: &LocalRelay,
+    principal: Option<&AuthenticatedPrincipal>,
+    sha256: &str,
+) -> Result<(), ApiError> {
+    let Some((owner, node_label)) = relay.governance.as_ref() else {
+        return Ok(());
+    };
+    let allowed = match principal.and_then(principal_pubkey) {
+        Some(pubkey) if pubkey == *owner => true,
+        Some(pubkey) => {
+            declarations::artifact_fetch_allowed(&relay.store, owner, node_label, &pubkey, sha256)
+                .await
+                .map_err(|error| ApiError::BadRequest(error.to_string()))?
+        }
+        None => false,
+    };
+    if allowed {
+        Ok(())
+    } else {
+        Err(ApiError::Identity(LocalIdentityError::denied(
+            IdentityDenialCode::ScopeDenied,
+        )))
+    }
+}
+
 /// Stores one immutable blob under its SHA-256. The NIP-98 payload tag binds
 /// the uploader's proof to the exact content, so authentication doubles as an
 /// integrity commitment over the artifact.
@@ -914,7 +1015,8 @@ async fn artifact_upload(
     let Some(dir) = relay.artifacts_dir.clone() else {
         return Err(ApiError::NotFound("artifact store is not enabled".into()));
     };
-    authenticate_http(&relay, &headers, "/artifacts", &body).await?;
+    let principal = authenticate_http(&relay, &headers, "/artifacts", &body).await?;
+    authorize_artifact_upload(&relay, principal.as_ref())?;
     if body.is_empty() {
         return Err(ApiError::BadRequest("artifact body is empty".into()));
     }
@@ -962,7 +1064,7 @@ async fn artifact_head(
     let sha256 = sha256.to_ascii_lowercase();
     // A HEAD is a metadata-only GET; the same GET-signed NIP-98 proof (URL +
     // empty-payload binding) authorizes it, so callers need no HEAD variant.
-    authenticate_http_method(
+    let principal = authenticate_http_method(
         &relay,
         &headers,
         "GET",
@@ -970,6 +1072,7 @@ async fn artifact_head(
         b"",
     )
     .await?;
+    authorize_artifact_fetch(&relay, principal.as_ref(), &sha256).await?;
     if tokio::fs::try_exists(dir.join(&sha256))
         .await
         .map_err(StoreError::Io)?
@@ -996,7 +1099,7 @@ async fn artifact_fetch(
         ));
     }
     let sha256 = sha256.to_ascii_lowercase();
-    authenticate_http_method(
+    let principal = authenticate_http_method(
         &relay,
         &headers,
         "GET",
@@ -1004,6 +1107,7 @@ async fn artifact_fetch(
         b"",
     )
     .await?;
+    authorize_artifact_fetch(&relay, principal.as_ref(), &sha256).await?;
     let path = dir.join(&sha256);
     let bytes = match tokio::fs::read(&path).await {
         Ok(bytes) => bytes,

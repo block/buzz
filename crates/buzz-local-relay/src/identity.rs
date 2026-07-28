@@ -228,6 +228,15 @@ impl LocalIdentityAdapter {
     /// Used by transports whose request evidence (for example payload-bound
     /// NIP-98) has independently proven control of `pubkey`; this applies the
     /// destination-controlled trust configuration only.
+    /// Reports whether a pubkey is an active verification key for any
+    /// admitted replication peer (artifact upload admission: uploads
+    /// accompany stream pushes, so admitted pushers may store blobs).
+    pub fn is_admitted_verification_key(&self, pubkey: &PublicKey) -> bool {
+        self.peer_trust
+            .values()
+            .any(|trust| trust.verification_methods.contains_key(pubkey))
+    }
+
     pub fn bind_peer_key(
         &self,
         source: &ReplicationSourceId,

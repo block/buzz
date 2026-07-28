@@ -181,6 +181,9 @@ async fn main() -> anyhow::Result<()> {
     if !peer_trust.is_empty() && !config.require_auth {
         bail!("peer trust requires --require-auth: replication peers are bound cryptographically");
     }
+    // Owner + node label activate declaration-governed artifact access
+    // alongside journal-derived trust (both anchors, same identity data).
+    let governance = config.owner.zip(config.node_label.clone());
     let relay = if config.require_auth {
         let sources: Vec<ReplicationSourceId> = peer_trust
             .iter()
@@ -191,18 +194,20 @@ async fn main() -> anyhow::Result<()> {
             proof_store,
         )
         .context("failed to open authentication proof store")?;
-        LocalRelay::open_full_with_store(
+        LocalRelay::open_governed(
             store,
             Arc::new(ReplicationSourceAllowlist::new(sources)),
             Some(Arc::new(adapter)),
             artifacts_dir,
+            governance,
         )
     } else {
-        LocalRelay::open_full_with_store(
+        LocalRelay::open_governed(
             store,
             Arc::new(buzz_local_relay::ReplicationDisabled),
             None,
             artifacts_dir,
+            governance,
         )
     };
     let listener = TcpListener::bind(address)

@@ -10,7 +10,11 @@
     "known_failure_annotation": {
       "field": "known_failures",
       "meaning": "An optional array on a required check. Each entry names an adapter that is expected to fail the check today; it records an implementation gap and does not weaken the profile requirement."
-    }
+    },
+    "known_gaps": [
+      "laptop-reference: from_source stream selections fail closed during artifact fetch authorization (the local journal records no ingest provenance); readers granted only a provenance-selected stream cannot fetch referenced blobs that CF would serve. Filter and mirror selections are fully enforced."
+    ],
+    "revision": 2
   },
   "profile": "portable-relay-artifacts-v0.1",
   "applies_to": [
@@ -115,13 +119,7 @@
         "status": 403,
         "code": "scope_denied",
         "stored": false
-      },
-      "known_failures": [
-        {
-          "adapter": "laptop-reference",
-          "observed": "artifact_upload authenticates the caller but does not restrict uploads to the owner or admitted peers"
-        }
-      ]
+      }
     },
     {
       "id": "upload-unauthenticated-denied",
@@ -260,13 +258,7 @@
         "status": 403,
         "code": "scope_denied",
         "body_disclosed": false
-      },
-      "known_failures": [
-        {
-          "adapter": "laptop-reference",
-          "observed": "artifact_fetch serves stored bytes to any authenticated principal without checking stream grants or x-tag references"
-        }
-      ]
+      }
     },
     {
       "id": "head-reader-non-referencing-stream-denied",
@@ -282,13 +274,7 @@
       "expected": {
         "status": 403,
         "code": "scope_denied"
-      },
-      "known_failures": [
-        {
-          "adapter": "laptop-reference",
-          "observed": "artifact_head reports stored-byte presence to any authenticated principal without checking stream grants or x-tag references"
-        }
-      ]
+      }
     },
     {
       "id": "get-reader-unreferenced-denied",
@@ -303,13 +289,7 @@
         "status": 403,
         "code": "scope_denied",
         "body_disclosed": false
-      },
-      "known_failures": [
-        {
-          "adapter": "laptop-reference",
-          "observed": "artifact_fetch has no reference index or stream-grant gate"
-        }
-      ]
+      }
     },
     {
       "id": "head-reader-unreferenced-denied",
@@ -325,13 +305,7 @@
       "expected": {
         "status": 403,
         "code": "scope_denied"
-      },
-      "known_failures": [
-        {
-          "adapter": "laptop-reference",
-          "observed": "artifact_head has no reference index or stream-grant gate"
-        }
-      ]
+      }
     },
     {
       "id": "get-unauthenticated-denied",
