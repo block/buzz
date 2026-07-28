@@ -1,9 +1,11 @@
+@import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700;800&display=swap");
+
 :root {
-  font-family:
-    "Helvetica Neue", Helvetica, Arial, ui-sans-serif, system-ui, sans-serif;
-  color: #231e1e;
-  background: #d7e7f6;
+  font-family: "Space Grotesk", "Segoe UI", "PingFang SC", "Helvetica Neue", sans-serif;
+  color: #1c1917;
+  background: #fff8f0;
   font-synthesis: none;
+  letter-spacing: -0.01em;
 }
 
 * {
@@ -29,17 +31,18 @@ select {
 }
 
 button {
-  color: white;
-  background: #231e1e;
-  border: 0;
-  border-radius: 999px;
+  color: #fafaf9;
+  background: #1c1917;
+  border: 3px solid #1c1917;
+  border-radius: 0;
   padding: 0.75rem 1.25rem;
   cursor: pointer;
+  font-weight: 700;
 }
 
 .app {
   min-height: 100vh;
-  background: linear-gradient(180deg, #d7d72e 0%, #dfe379 24%, #d7e7f6 78%);
+  background: #fff8f0;
 }
 
 .app-header {
@@ -72,8 +75,8 @@ button {
   display: grid;
   place-items: center;
   border-radius: 0.7rem;
-  color: #d7d72e;
-  background: #231e1e;
+  color: #1c1917;
+  background: #fbbf24;
 }
 
 .brand-mark svg {
@@ -86,10 +89,9 @@ nav {
   align-items: center;
   gap: 0.35rem;
   padding: 0.3rem;
-  border: 1px solid rgb(35 30 30 / 10%);
-  border-radius: 999px;
-  background: rgb(255 255 255 / 42%);
-  backdrop-filter: blur(12px);
+  border: 3px solid #1c1917;
+  border-radius: 0;
+  background: #ffffff;
 }
 
 .nav-link {
@@ -731,4 +733,21 @@ dd {
   dd + dt {
     margin-top: 0.9rem;
   }
+}
+
+.lang-switch {
+  display: inline-flex;
+  gap: 0.25rem;
+  margin-left: 0.5rem;
+}
+.lang-switch button {
+  padding: 0.45rem 0.75rem;
+  background: #ffffff;
+  color: #1c1917;
+  border: 3px solid #1c1917;
+  border-radius: 0;
+  font-weight: 700;
+}
+.lang-switch button.on {
+  background: #fbbf24;
 }

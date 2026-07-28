@@ -36,6 +36,7 @@ import {
   useThreadViewMode,
   type ThreadViewMode,
 } from "@/features/channels/lib/threadViewModePreference";
+import { LanguageToggle, useI18n } from "@/shared/i18n";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import {
@@ -410,6 +411,7 @@ const ACCENT_PICKER_TRANSITION = {
 };
 
 function ThemeSettingsCard() {
+  const { t } = useI18n();
   const {
     setTheme,
     selectedThemeName,
@@ -517,26 +519,50 @@ function ThemeSettingsCard() {
       data-testid="settings-theme"
     >
       <SettingsSectionHeader
-        title="Appearance"
-        description="Choose a theme for Buzz."
+        title={t("appearance.title")}
+        description={t("appearance.description")}
       />
+
+      <div className="mb-6 space-y-2" data-testid="settings-language">
+        <div>
+          <h3 className="text-sm font-semibold text-foreground">
+            {t("appearance.language.title")}
+          </h3>
+          <p className="text-sm text-muted-foreground">
+            {t("appearance.language.description")}
+          </p>
+        </div>
+        <LanguageToggle variant="full" testId="settings-language-toggle" />
+      </div>
 
       {/* Mode selector: System / Light / Dark */}
       <div className="mb-4 flex gap-2">
         {(
           [
-            { mode: "system" as const, label: "System", Icon: SunMoon },
-            { mode: "light" as const, label: "Light", Icon: Sun },
-            { mode: "dark" as const, label: "Dark", Icon: Moon },
+            {
+              mode: "system" as const,
+              label: t("appearance.mode.system"),
+              Icon: SunMoon,
+            },
+            {
+              mode: "light" as const,
+              label: t("appearance.mode.light"),
+              Icon: Sun,
+            },
+            {
+              mode: "dark" as const,
+              label: t("appearance.mode.dark"),
+              Icon: Moon,
+            },
           ] as const
         ).map(({ mode, label, Icon }) => (
           <button
             aria-pressed={selectedMode === mode}
             className={cn(
-              "flex items-center gap-2 rounded-lg border px-4 py-2 text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
+              "flex items-center gap-2 rounded-lg border-2 border-border px-4 py-2 text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
               selectedMode === mode
-                ? "border-primary bg-primary/10 text-foreground"
-                : "border-border/70 text-muted-foreground hover:border-border hover:text-foreground",
+                ? "border-primary bg-primary/15 text-foreground"
+                : "text-muted-foreground hover:border-foreground/50 hover:text-foreground",
             )}
             data-testid={`appearance-mode-${mode}`}
             key={mode}

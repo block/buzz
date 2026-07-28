@@ -7,6 +7,7 @@ import {
   useState,
 } from "react";
 import { ApiFailure, request } from "./api";
+import { getLang, setLang as persistLang, t, type Lang } from "./i18n";
 import type {
   FeedbackDetail,
   FeedbackSummary,
@@ -68,16 +69,16 @@ function StateView<T>({
   children: (data: T) => ReactNode;
 }) {
   if (resource.loading && !resource.data)
-    return <div className="state">Loading…</div>;
+    return <div className="state">{t("loading")}</div>;
   if (resource.error && !resource.data) {
     const forbidden =
       resource.error instanceof ApiFailure && resource.error.status === 403;
     return (
       <div className="state error" role="alert">
-        <h2>{forbidden ? "Access denied" : "Could not load data"}</h2>
+        <h2>{forbidden ? t("access_denied") : t("load_failed")}</h2>
         <p>{resource.error.message}</p>
         <button type="button" onClick={resource.refetch}>
-          Retry
+          {t("retry")}
         </button>
       </div>
     );
@@ -799,6 +800,7 @@ function ArrowIcon() {
 
 export function App() {
   const { path } = usePath();
+  const [lang, setLangState] = useState<Lang>(() => getLang());
   const report = path.match(/^\/reports\/([^/]+)$/);
   const feedback = path.match(/^\/feedback\/([^/]+)$/);
   const content = report ? (
@@ -810,24 +812,45 @@ export function App() {
   ) : (
     <Reports />
   );
+  const switchLang = (next: Lang) => {
+    persistLang(next);
+    setLangState(next);
+    document.documentElement.lang = next === "zh" ? "zh-CN" : "en";
+  };
   return (
-    <div className="app">
+    <div className="app" data-lang={lang}>
       <header className="app-header">
         <Link href="/reports" className="brand">
           <span className="brand-mark">
             <BuzzMark />
           </span>
           <span>
-            Buzz <b>Admin</b>
+            {t("brand", lang)}
           </span>
         </Link>
         <nav>
           <Link href="/reports" className="nav-link" activeWhenNested>
-            <ReportIcon /> Reports
+            <ReportIcon /> {t("nav_reports", lang)}
           </Link>
           <Link href="/feedback" className="nav-link" activeWhenNested>
-            <FeedbackIcon /> Feedback
+            <FeedbackIcon /> {t("nav_feedback", lang)}
           </Link>
+          <span className="lang-switch" aria-label={t("lang", lang)}>
+            <button
+              type="button"
+              className={lang === "en" ? "on" : undefined}
+              onClick={() => switchLang("en")}
+            >
+              EN
+            </button>
+            <button
+              type="button"
+              className={lang === "zh" ? "on" : undefined}
+              onClick={() => switchLang("zh")}
+            >
+              中文
+            </button>
+          </span>
         </nav>
       </header>
       <main>{content}</main>

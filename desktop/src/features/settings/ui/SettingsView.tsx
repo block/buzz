@@ -12,6 +12,7 @@ import {
   resolveEnabled,
   useFeatureSnapshot,
 } from "@/shared/features/useFeatureEnabled";
+import { type MsgKey, useI18n } from "@/shared/i18n";
 import { topChromeBackdrop } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
 import {
@@ -49,11 +50,11 @@ type SettingsViewProps = SettingsPanelProps & {
 };
 
 const settingsNavGroups: Array<{
-  label: string;
+  labelKey: MsgKey;
   sections: SettingsSection[];
 }> = [
   {
-    label: "Personal",
+    labelKey: "settings.group.personal",
     sections: [
       "profile",
       "appearance",
@@ -64,21 +65,41 @@ const settingsNavGroups: Array<{
     ],
   },
   {
-    label: "Communities",
+    labelKey: "settings.group.communities",
     sections: ["hosted-communities", "channel-templates", "community-members"],
   },
   {
-    label: "App",
+    labelKey: "settings.group.app",
     sections: ["agents", "compute", "experimental", "mobile", "updates"],
   },
 ];
 
+const SETTINGS_SECTION_LABEL_KEYS: Record<SettingsSection, MsgKey> = {
+  appearance: "settings.section.appearance",
+  profile: "settings.section.profile",
+  notifications: "settings.section.notifications",
+  experimental: "settings.section.experimental",
+  agents: "settings.section.agents",
+  "channel-templates": "settings.section.channel-templates",
+  compute: "settings.section.compute",
+  shortcuts: "settings.section.shortcuts",
+  "hosted-communities": "settings.section.hosted-communities",
+  "community-members": "settings.section.community-members",
+  moderation: "settings.section.moderation",
+  "custom-emoji": "settings.section.custom-emoji",
+  "local-archive": "settings.section.local-archive",
+  mobile: "settings.section.mobile",
+  updates: "settings.section.updates",
+};
+
 function SettingsSectionButton({
   active,
+  label,
   onSelect,
   section,
 }: {
   active: boolean;
+  label: string;
   onSelect: (section: SettingsSection) => void;
   section: (typeof settingsSections)[number];
 }) {
@@ -91,7 +112,7 @@ function SettingsSectionButton({
         data-testid={`settings-nav-${section.value}`}
         isActive={active}
         onClick={() => onSelect(section.value)}
-        tooltip={section.label}
+        tooltip={label}
         type="button"
       >
         <Icon
@@ -102,7 +123,7 @@ function SettingsSectionButton({
               : "text-sidebar-foreground/70",
           )}
         />
-        <SidebarMenuLabel>{section.label}</SidebarMenuLabel>
+        <SidebarMenuLabel>{label}</SidebarMenuLabel>
       </SidebarMenuButton>
     </SidebarMenuItem>
   );
@@ -125,6 +146,7 @@ export function SettingsView({
   onSetSoundForSlot,
   section,
 }: SettingsViewProps) {
+  const { t } = useI18n();
   const { isMobile, open: sidebarOpen, setOpen: setSidebarOpen } = useSidebar();
   const myMembershipQuery = useMyRelayMembershipLookupQuery();
   const featureState = useFeatureSnapshot();
@@ -274,23 +296,27 @@ export function SettingsView({
               progress.
             </div>
           ) : null}
-          {visibleNavGroups.map((group) => (
-            <SidebarGroup key={group.label}>
-              <SidebarGroupLabel>{group.label}</SidebarGroupLabel>
-              <SidebarGroupContent>
-                <SidebarMenu aria-label={`${group.label} settings sections`}>
-                  {group.sections.map((entry) => (
-                    <SettingsSectionButton
-                      active={entry.value === section}
-                      key={entry.value}
-                      onSelect={onSectionChange}
-                      section={entry}
-                    />
-                  ))}
-                </SidebarMenu>
-              </SidebarGroupContent>
-            </SidebarGroup>
-          ))}
+          {visibleNavGroups.map((group) => {
+            const groupLabel = t(group.labelKey);
+            return (
+              <SidebarGroup key={group.labelKey}>
+                <SidebarGroupLabel>{groupLabel}</SidebarGroupLabel>
+                <SidebarGroupContent>
+                  <SidebarMenu aria-label={`${groupLabel} settings sections`}>
+                    {group.sections.map((entry) => (
+                      <SettingsSectionButton
+                        active={entry.value === section}
+                        key={entry.value}
+                        label={t(SETTINGS_SECTION_LABEL_KEYS[entry.value])}
+                        onSelect={onSectionChange}
+                        section={entry}
+                      />
+                    ))}
+                  </SidebarMenu>
+                </SidebarGroupContent>
+              </SidebarGroup>
+            );
+          })}
         </SidebarContent>
 
         <SidebarFooter>

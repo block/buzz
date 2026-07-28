@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="raft">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Buzz UI Preview · BC home / Raft theme</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700;800&display=swap" rel="stylesheet" />
+  <style>
+    :root, html[data-theme="raft"] {
+      --bg: #fff8f0;
+      --paper: #ffffff;
+      --ink: #1c1917;
+      --muted: #57534e;
+      --line: #1c1917;
+      --accent: #fbbf24;
+      --accent-soft: #fef3c7;
+      --ok: #15803d;
+      --ok-soft: #dcfce7;
+      --bad: #e11d48;
+      --side: #292524;
+      --side-text: #fafaf9;
+      --side-muted: #a8a29e;
+      --side-accent: #fbbf24;
+      --radius: 0px;
+      --border-w: 3px;
+      --font: "Space Grotesk", "Segoe UI", "PingFang SC", "Helvetica Neue", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      font-family: var(--font);
+      background: var(--bg);
+      color: var(--ink);
+      letter-spacing: -0.01em;
+    }
+    .shell { display: flex; height: 100%; min-height: 100vh; }
+    .side {
+      width: 280px; flex-shrink: 0;
+      background: var(--side); color: var(--side-text);
+      border-right: var(--border-w) solid var(--line);
+      display: flex; flex-direction: column;
+    }
+    .brand {
+      padding: 18px 16px; font-weight: 800; font-size: 1.15rem;
+      border-bottom: var(--border-w) solid #44403c;
+      display: flex; align-items: center; gap: 10px;
+    }
+    .mark {
+      width: 36px; height: 36px; background: var(--accent); color: var(--ink);
+      display: grid; place-items: center; font-weight: 900; border: 2px solid var(--ink);
+    }
+    .nav { padding: 12px; display: flex; flex-direction: column; gap: 6px; flex: 1; overflow: auto; }
+    .nav a {
+      color: var(--side-text); text-decoration: none; padding: 10px 12px;
+      border: 2px solid transparent; font-weight: 600;
+    }
+    .nav a:hover, .nav a.on {
+      background: color-mix(in srgb, var(--side) 70%, #fff 12%);
+      border-color: var(--side-accent);
+    }
+    .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 8px; background: #71717a; }
+    .dot.ok { background: #22c55e; }
+    .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+    .top {
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+      padding: 12px 16px; background: var(--paper);
+      border-bottom: var(--border-w) solid var(--line);
+    }
+    .top h1 { margin: 0; font-size: 1.1rem; font-weight: 800; }
+    .actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .btn {
+      border: var(--border-w) solid var(--line); background: var(--ink); color: var(--side-text);
+      padding: 8px 14px; font: inherit; font-weight: 700; cursor: pointer; border-radius: var(--radius);
+    }
+    .btn.ghost { background: var(--paper); color: var(--ink); }
+    .btn.primary { background: var(--accent); color: var(--ink); }
+    .btn.on { outline: 3px solid var(--accent); outline-offset: 1px; }
+    .content { flex: 1; display: grid; grid-template-columns: 1fr 320px; min-height: 0; }
+    .chat {
+      border-right: var(--border-w) solid var(--line); display: flex; flex-direction: column;
+      background: var(--paper);
+    }
+    .msgs { flex: 1; overflow: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+    .msg {
+      border: var(--border-w) solid var(--line); padding: 12px 14px; background: var(--bg);
+      max-width: 85%;
+    }
+    .msg.me { align-self: flex-end; background: var(--accent-soft); }
+    .msg .who { font-size: 0.8rem; color: var(--muted); font-weight: 700; margin-bottom: 4px; }
+    .composer {
+      border-top: var(--border-w) solid var(--line); padding: 12px; display: flex; gap: 8px;
+    }
+    .composer input {
+      flex: 1; border: var(--border-w) solid var(--line); padding: 10px 12px; font: inherit;
+      background: #fff; border-radius: var(--radius);
+    }
+    .panel { padding: 16px; overflow: auto; background: var(--bg); }
+    .card {
+      background: var(--paper); border: var(--border-w) solid var(--line);
+      padding: 14px; margin-bottom: 12px;
+      box-shadow: 5px 5px 0 var(--ink);
+    }
+    .card.ok { background: var(--ok-soft); }
+    .card h3 { margin: 0 0 6px; font-size: 0.95rem; font-weight: 800; }
+    .card p { margin: 0; color: var(--muted); font-size: 0.88rem; font-weight: 600; }
+    .banner {
+      margin: 12px 16px 0; padding: 10px 12px; border: var(--border-w) solid var(--line);
+      background: var(--accent-soft); font-weight: 700; font-size: 0.9rem;
+    }
+    @media (max-width: 900px) {
+      .content { grid-template-columns: 1fr; }
+      .side { width: 72px; }
+      .side .label { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <aside class="side">
+      <div class="brand"><span class="mark">B</span><span class="label" data-i18n="brand">Buzz · Raft skin</span></div>
+      <nav class="nav">
+        <a class="on" href="#"><span class="dot ok"></span><span class="label" data-i18n="nav_channels">Channels</span></a>
+        <a href="#"><span class="dot"></span><span class="label" data-i18n="nav_dms">DMs</span></a>
+        <a href="#"><span class="dot ok"></span><span class="label" data-i18n="nav_agents">Agents</span></a>
+        <a href="#"><span class="dot"></span><span class="label" data-i18n="nav_settings">Settings</span></a>
+      </nav>
+    </aside>
+    <div class="main">
+      <header class="top">
+        <h1 data-i18n="title">#WORK总控 · UI preview</h1>
+        <div class="actions">
+          <button type="button" class="btn ghost" id="btn-en" onclick="setLang('en')">EN</button>
+          <button type="button" class="btn ghost" id="btn-zh" onclick="setLang('zh')">中文</button>
+          <button type="button" class="btn primary" data-i18n="btn_theme">BC home theme</button>
+        </div>
+      </header>
+      <div class="banner" data-i18n="banner">
+        Preview only — theme tokens from BC home_portal (raft). Not production :3000 yet.
+      </div>
+      <div class="content">
+        <section class="chat">
+          <div class="msgs">
+            <div class="msg">
+              <div class="who">@Cindy</div>
+              <div data-i18n="msg1">Theme aligned to BC home: cream paper, charcoal sidebar, amber accent, hard borders.</div>
+            </div>
+            <div class="msg me">
+              <div class="who" data-i18n="you">You</div>
+              <div data-i18n="msg2">Also want Chinese / English switch.</div>
+            </div>
+            <div class="msg">
+              <div class="who">@Cindy</div>
+              <div data-i18n="msg3">Language toggle is live in this preview (top-right EN / 中文).</div>
+            </div>
+          </div>
+          <div class="composer">
+            <input id="composer" data-i18n-placeholder="ph_composer" placeholder="Message…" />
+            <button type="button" class="btn" data-i18n="send">Send</button>
+          </div>
+        </section>
+        <aside class="panel">
+          <div class="card ok">
+            <h3 data-i18n="card_status">Service status</h3>
+            <p data-i18n="card_status_body">Preview shell · theme OK · i18n OK</p>
+          </div>
+          <div class="card">
+            <h3 data-i18n="card_next">Next</h3>
+            <p data-i18n="card_next_body">Wire same tokens into desktop/web builds; ship language preference to settings.</p>
+          </div>
+          <div class="card">
+            <h3 data-i18n="card_note">Note</h3>
+            <p data-i18n="card_note_body">Production Buzz still old skin until image rebuild / mount.</p>
+          </div>
+        </aside>
+      </div>
+    </div>
+  </div>
+  <script>
+    const dict = {
+      en: {
+        brand: "Buzz · Raft skin",
+        nav_channels: "Channels",
+        nav_dms: "DMs",
+        nav_agents: "Agents",
+        nav_settings: "Settings",
+        title: "#WORK总控 · UI preview",
+        btn_theme: "BC home theme",
+        banner: "Preview only — theme tokens from BC home_portal (raft). Not production :3000 yet.",
+        msg1: "Theme aligned to BC home: cream paper, charcoal sidebar, amber accent, hard borders.",
+        msg2: "Also want Chinese / English switch.",
+        msg3: "Language toggle is live in this preview (top-right EN / 中文).",
+        you: "You",
+        ph_composer: "Message…",
+        send: "Send",
+        card_status: "Service status",
+        card_status_body: "Preview shell · theme OK · i18n OK",
+        card_next: "Next",
+        card_next_body: "Wire same tokens into desktop/web builds; ship language preference to settings.",
+        card_note: "Note",
+        card_note_body: "Production Buzz still old skin until image rebuild / mount.",
+      },
+      zh: {
+        brand: "Buzz · Raft 皮",
+        nav_channels: "频道",
+        nav_dms: "私信",
+        nav_agents: "Agent",
+        nav_settings: "设置",
+        title: "#WORK总控 · UI 预览",
+        btn_theme: "BC 总控主题",
+        banner: "仅预览 — 主题来自 BC home_portal（raft）。生产 :3000 尚未更换。",
+        msg1: "主题已对齐 BC home：奶油纸、炭灰侧栏、琥珀强调、硬边框。",
+        msg2: "还要中英文切换。",
+        msg3: "本预览右上角 EN / 中文 可切换语言。",
+        you: "你",
+        ph_composer: "输入消息…",
+        send: "发送",
+        card_status: "服务状态",
+        card_status_body: "预览壳 · 主题 OK · 中英切换 OK",
+        card_next: "下一步",
+        card_next_body: "把同套 token 接到 desktop/web 构建；语言偏好写入设置。",
+        card_note: "说明",
+        card_note_body: "生产 Buzz 仍是旧皮，需重建镜像或挂载后才变。",
+      },
+    };
+
+    function setLang(lang) {
+      const t = dict[lang] || dict.zh;
+      document.documentElement.lang = lang === "zh" ? "zh-CN" : "en";
+      document.querySelectorAll("[data-i18n]").forEach((el) => {
+        const k = el.getAttribute("data-i18n");
+        if (t[k] != null) el.textContent = t[k];
+      });
+      document.querySelectorAll("[data-i18n-placeholder]").forEach((el) => {
+        const k = el.getAttribute("data-i18n-placeholder");
+        if (t[k] != null) el.setAttribute("placeholder", t[k]);
+      });
+      document.getElementById("btn-en").classList.toggle("on", lang === "en");
+      document.getElementById("btn-zh").classList.toggle("on", lang === "zh");
+      localStorage.setItem("buzz-preview-lang", lang);
+    }
+
+    setLang(localStorage.getItem("buzz-preview-lang") || "zh");
+  </script>
+</body>
+</html>

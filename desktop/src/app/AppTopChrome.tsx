@@ -6,6 +6,7 @@ import {
   PanelLeftOpen,
 } from "lucide-react";
 
+import { LanguageToggle, useI18n } from "@/shared/i18n";
 import { isMacPlatform } from "@/shared/lib/platform";
 import { useIsFullscreen } from "@/shared/lib/useIsFullscreen";
 import { Button } from "@/shared/ui/button";
@@ -36,10 +37,11 @@ function preventTopChromeWheel(event: WheelEvent) {
 
 function TopChromeSidebarTrigger() {
   const sidebar = useOptionalSidebar();
+  const { t } = useI18n();
 
   return (
     <Button
-      aria-label="Toggle Sidebar"
+      aria-label={t("chrome.toggleSidebar")}
       className={TOP_CHROME_ICON_BUTTON_CLASS}
       data-sidebar="trigger"
       disabled={!sidebar}
@@ -51,7 +53,7 @@ function TopChromeSidebarTrigger() {
       variant="ghost"
     >
       {sidebar?.open ? <PanelLeftClose /> : <PanelLeftOpen />}
-      <span className="sr-only">Toggle Sidebar</span>
+      <span className="sr-only">{t("chrome.toggleSidebar")}</span>
     </Button>
   );
 }
@@ -63,6 +65,7 @@ export function AppTopChrome({
   onGoForward,
   hasCommunityRail = false,
 }: AppTopChromeProps) {
+  const { t } = useI18n();
   const topChromeRef = React.useRef<HTMLDivElement>(null);
   const isFullscreen = useIsFullscreen();
   // On macOS the traffic-light buttons overlay the chrome (see
@@ -106,10 +109,15 @@ export function AppTopChrome({
       data-tauri-drag-region
       data-testid="app-top-chrome"
     >
-      <div className={cn("flex items-center gap-0.5", navRowAlignmentClass)}>
+      <div
+        className={cn(
+          "flex min-w-0 flex-1 items-center gap-0.5",
+          navRowAlignmentClass,
+        )}
+      >
         <TopChromeSidebarTrigger />
         <Button
-          aria-label="Go back"
+          aria-label={t("chrome.back")}
           className={HISTORY_ICON_BUTTON_CLASS}
           data-testid="global-back"
           disabled={!canGoBack}
@@ -120,7 +128,7 @@ export function AppTopChrome({
           <ChevronLeft />
         </Button>
         <Button
-          aria-label="Go forward"
+          aria-label={t("chrome.forward")}
           className={HISTORY_ICON_BUTTON_CLASS}
           data-testid="global-forward"
           disabled={!canGoForward}
@@ -130,6 +138,15 @@ export function AppTopChrome({
         >
           <ChevronRight />
         </Button>
+      </div>
+      <div
+        className={cn(
+          "ml-auto flex shrink-0 items-center",
+          navRowAlignmentClass,
+        )}
+        data-tauri-drag-region="false"
+      >
+        <LanguageToggle />
       </div>
     </div>
   );
