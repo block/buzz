@@ -133,6 +133,13 @@ tr:hover td{background:var(--bg3)}
     <span class="live-dot"></span> Auto-refresh 5s
   </div>
   <button class="btn" id="auto-btn" onclick="toggleAuto()" style="display:none">⏸ Pause</button>
+  <!-- Cross-site navigation -->
+  <div style="display:flex;gap:2px;margin-left:auto">
+    <a href="../../landing/index.html" style="padding:6px 12px;font-size:11px;color:var(--text3);text-decoration:none;border-radius:6px;transition:all .12s" onmouseover="this.style.color='var(--accent)';this.style.background='var(--bg3)'" onmouseout="this.style.color='var(--text3)';this.style.background='transparent'">🐝 Home</a>
+    <a href="../workflow-builder/index.html" style="padding:6px 12px;font-size:11px;color:var(--text3);text-decoration:none;border-radius:6px;transition:all .12s" onmouseover="this.style.color='var(--accent)';this.style.background='var(--bg3)'" onmouseout="this.style.color='var(--text3)';this.style.background='transparent'">⚙️ Builder</a>
+    <a href="#" style="padding:6px 12px;font-size:11px;color:var(--accent);text-decoration:none;font-weight:700;background:rgba(47,129,247,.1);border-radius:6px">📊 Dashboard</a>
+    <a href="../dev-docs/index.html" style="padding:6px 12px;font-size:11px;color:var(--text3);text-decoration:none;border-radius:6px;transition:all .12s" onmouseover="this.style.color='var(--accent)';this.style.background='var(--bg3)'" onmouseout="this.style.color='var(--text3)';this.style.background='transparent'">📖 Docs</a>
+  </div>
 </div>
 
 <div class="container" id="container">

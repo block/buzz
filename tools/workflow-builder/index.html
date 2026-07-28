@@ -171,6 +171,13 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
       <button class="btn btn-sm btn-ghost" onclick="resetAll()" title="Clear everything">🗑️</button>
     </div>
   </div>
+  <!-- Cross-site navigation -->
+  <div style="display:flex;gap:0;border-bottom:1px solid var(--border);padding:0 12px">
+    <a href="../../landing/index.html" style="flex:1;text-align:center;padding:8px 4px;font-size:11px;color:var(--text3);text-decoration:none;border-bottom:2px solid transparent;transition:all .12s" onmouseover="this.style.color='var(--accent)';this.style.borderColor='var(--accent)'" onmouseout="this.style.color='var(--text3)';this.style.borderColor='transparent'">🐝 Home</a>
+    <a href="#" style="flex:1;text-align:center;padding:8px 4px;font-size:11px;color:var(--accent);text-decoration:none;border-bottom:2px solid var(--accent);font-weight:700">⚙️ Builder</a>
+    <a href="../ops-dashboard/index.html" style="flex:1;text-align:center;padding:8px 4px;font-size:11px;color:var(--text3);text-decoration:none;border-bottom:2px solid transparent;transition:all .12s" onmouseover="this.style.color='var(--accent)';this.style.borderColor='var(--accent)'" onmouseout="this.style.color='var(--text3)';this.style.borderColor='transparent'">📊 Dashboard</a>
+    <a href="../dev-docs/index.html" style="flex:1;text-align:center;padding:8px 4px;font-size:11px;color:var(--text3);text-decoration:none;border-bottom:2px solid transparent;transition:all .12s" onmouseover="this.style.color='var(--accent)';this.style.borderColor='var(--accent)'" onmouseout="this.style.color='var(--text3)';this.style.borderColor='transparent'">📖 Docs</a>
+  </div>
 
   <div class="config-area">
     <!-- Name -->
@@ -260,6 +267,10 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
   <div class="yaml-output" id="yaml-output"></div>
   <div class="validation" id="validation">
     <h4 class="ok">✅ Valid — ready to deploy</h4>
+  </div>
+  <div style="padding:10px 16px;border-top:1px solid var(--border);font-size:11px;color:var(--text3);display:flex;gap:12px;flex-shrink:0">
+    <a href="../dev-docs/index.html" onclick="show('workflow')" style="color:var(--text3);text-decoration:none" onmouseover="this.style.color='var(--accent)'" onmouseout="this.style.color='var(--text3)'">📖 Workflow Docs</a>
+    <a href="../ops-dashboard/index.html" style="color:var(--text3);text-decoration:none" onmouseover="this.style.color='var(--accent)'" onmouseout="this.style.color='var(--text3)'">📊 Monitor Runs</a>
   </div>
 </div>
 

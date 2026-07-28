@@ -132,6 +132,13 @@ td code{font-family:var(--mono);font-size:12px}
     </div>
     <div class="tag">Developer Reference</div>
   </div>
+  <!-- Cross-site navigation -->
+  <div style="display:flex;gap:0;border-bottom:1px solid var(--border);padding:0 12px;margin-bottom:8px">
+    <a href="../../landing/index.html" style="flex:1;text-align:center;padding:8px 4px;font-size:11px;color:var(--text3);text-decoration:none;border-bottom:2px solid transparent;transition:all .12s" onmouseover="this.style.color='var(--accent)';this.style.borderColor='var(--accent)'" onmouseout="this.style.color='var(--text3)';this.style.borderColor='transparent'">🐝 Home</a>
+    <a href="../workflow-builder/index.html" style="flex:1;text-align:center;padding:8px 4px;font-size:11px;color:var(--text3);text-decoration:none;border-bottom:2px solid transparent;transition:all .12s" onmouseover="this.style.color='var(--accent)';this.style.borderColor='var(--accent)'" onmouseout="this.style.color='var(--text3)';this.style.borderColor='transparent'">⚙️ Builder</a>
+    <a href="../ops-dashboard/index.html" style="flex:1;text-align:center;padding:8px 4px;font-size:11px;color:var(--text3);text-decoration:none;border-bottom:2px solid transparent;transition:all .12s" onmouseover="this.style.color='var(--accent)';this.style.borderColor='var(--accent)'" onmouseout="this.style.color='var(--text3)';this.style.borderColor='transparent'">📊 Dashboard</a>
+    <a href="#" style="flex:1;text-align:center;padding:8px 4px;font-size:11px;color:var(--accent);text-decoration:none;border-bottom:2px solid var(--accent);font-weight:700">📖 Docs</a>
+  </div>
 
   <div class="nav-group">
     <div class="nav-group-title">Getting Started</div>
@@ -508,6 +515,11 @@ agent → dev-mcp:    MCP protocol (stdio, rmcp)</pre>
         <tr><td><code>{{steps.ID.output.X}}</code></td><td>After step ID completes</td><td>Step result field</td></tr>
       </tbody>
     </table>
+  </div>
+
+  <div class="callout callout-tip">
+    <div class="callout-title">🎨 Visual Builder</div>
+    Prefer a GUI? Use the <a href="../workflow-builder/index.html" style="color:var(--accent)">Workflow Builder</a> to design workflows visually — drag steps, set triggers, validate, and export YAML. Then monitor runs on the <a href="../ops-dashboard/index.html" style="color:var(--accent)">Ops Dashboard</a>.
   </div>
 </div>
 

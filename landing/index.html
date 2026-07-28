@@ -123,11 +123,20 @@ nav ul{display:none}
 <li><a href="#compare">vs Discord</a></li>
 <li><a href="#agents">AI Agents</a></li>
 <li><a href="#security">Security</a></li>
+<li style="position:relative">
+<a href="#" onclick="document.getElementById('tools-dropdown').classList.toggle('show');return false">Tools ▾</a>
+<div id="tools-dropdown" style="display:none;position:absolute;top:100%;left:0;background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:8px;min-width:200px;z-index:200;box-shadow:0 8px 24px rgba(0,0,0,.4)">
+<a href="../tools/workflow-builder/index.html" style="display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:6px;font-size:13px">⚙️ Workflow Builder</a>
+<a href="../tools/ops-dashboard/index.html" style="display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:6px;font-size:13px">📊 Ops Dashboard</a>
+<a href="../tools/dev-docs/index.html" style="display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:6px;font-size:13px">📖 Developer Docs</a>
+</div>
+</li>
 <li><a href="https://github.com/block/buzz">GitHub</a></li>
 </ul>
 <a class="nav-cta" href="#download">Get Started</a>
 </div>
 </nav>
+<style>#tools-dropdown.show{display:block!important}</style>
 
 <!-- Hero -->
 <div class="hero">
@@ -296,10 +305,18 @@ nav ul{display:none}
 </ul>
 </div>
 <div>
+<h4>Tools</h4>
+<ul>
+<li><a href="tools/workflow-builder/index.html">⚙️ Workflow Builder</a></li>
+<li><a href="tools/ops-dashboard/index.html">📊 Ops Dashboard</a></li>
+<li><a href="tools/dev-docs/index.html">📖 Developer Docs</a></li>
+</ul>
+</div>
+<div>
 <h4>Developers</h4>
 <ul>
 <li><a href="https://github.com/block/buzz">GitHub</a></li>
-<li><a href="#">API Docs</a></li>
+<li><a href="tools/dev-docs/index.html">API Docs</a></li>
 <li><a href="#">NIPs</a></li>
 <li><a href="#">Contributing</a></li>
 </ul>
