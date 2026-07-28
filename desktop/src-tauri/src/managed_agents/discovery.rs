@@ -41,6 +41,7 @@ fn common_binary_paths() -> &'static [PathBuf] {
                 home.join(".local/bin"),
                 home.join(".volta/bin"),
                 home.join(".asdf/shims"),
+                home.join(".bun/bin"),
             ]);
         }
         // Windows well-known dirs for npm global shims and standalone installer targets.
