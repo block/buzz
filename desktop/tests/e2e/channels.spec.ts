@@ -487,8 +487,13 @@ async function expectIntroActionsShareRow(
   }
 }
 
-test.beforeEach(async ({ page }) => {
-  await installMockBridge(page);
+test.beforeEach(async ({ page }, testInfo) => {
+  await installMockBridge(
+    page,
+    testInfo.title.includes("cached profile labels")
+      ? { usersBatchDelayMs: 10_000 }
+      : undefined,
+  );
 });
 
 test("sidebar shows all channel types", async ({ page }) => {
@@ -513,6 +518,41 @@ test("sidebar shows all channel types", async ({ page }) => {
   const dmList = page.getByTestId("dm-list");
   await expect(dmList).toContainText("alice-tyler");
   await expect(dmList).toContainText("bob-tyler");
+});
+
+test("shows cached profile labels while relay profiles revalidate", async ({
+  page,
+}) => {
+  await page.addInitScript(
+    ({ alicePubkey }) => {
+      window.localStorage.setItem(
+        "buzz-user-labels.v1:ws://localhost:3000",
+        JSON.stringify({
+          version: 1,
+          updatedAt: Date.now(),
+          profiles: {
+            [alicePubkey]: {
+              displayName: "Cached Alice",
+              name: "alice",
+              nip05Handle: null,
+            },
+          },
+        }),
+      );
+    },
+    { alicePubkey: TEST_IDENTITIES.alice.pubkey },
+  );
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+
+  const aliceMessage = page
+    .getByTestId("message-row")
+    .filter({ hasText: "Hey team — checking in." });
+  await expect(aliceMessage.getByTestId("message-author")).toHaveText(
+    "Cached Alice",
+    { timeout: 1_000 },
+  );
 });
 
 test("shows presence in sidebar, DM header, and member list", async ({

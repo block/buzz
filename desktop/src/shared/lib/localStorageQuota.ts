@@ -12,6 +12,7 @@ const PURE_CACHE_KEY_PREFIXES = [
   "buzz-channels.v1:",
   "buzz-sidebar-skeleton-shape.v1:",
   "buzz-timeline-skeleton-shape.v1:",
+  "buzz-user-labels.v1:",
 ];
 
 const QUOTA_RECOVERY_MARKER_KEY = "buzz-local-storage-quota-recovery.v1";
