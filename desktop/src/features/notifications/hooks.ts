@@ -5,6 +5,11 @@ import { useUsersBatchQuery } from "@/features/profile/hooks";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { Channel, FeedItem, HomeFeedResponse } from "@/shared/api/types";
 import {
+  DEFAULT_CHANNEL_NOTIFY_STATE,
+  type ResolvedChannelNotifyState,
+} from "./lib/resolveChannelNotifyState";
+import { allowsFeedItemForChannel } from "./lib/shouldNotify";
+import {
   getDesktopNotificationPermissionState,
   requestDesktopNotificationAccess,
   type DesktopNotificationPermissionState,
@@ -364,7 +369,6 @@ export function useHomeFeedNotificationState(
   readStateVersion: number,
   highPriorityChannelIds: ReadonlySet<string>,
   profiles?: UserProfileLookup,
-  mutedChannelIds?: ReadonlySet<string>,
   localUnreadFeedIds: ReadonlySet<string> = EMPTY_FEED_ID_SET,
   extraInboxItems: readonly FeedItem[] = [],
   getThreadReadAt: (
@@ -377,6 +381,11 @@ export function useHomeFeedNotificationState(
   // has not been advanced by opening Home.
   getMessageReadAt: (messageId: string) => number | null = () => null,
   channels: ReadonlyArray<Pick<Channel, "id" | "name" | "channelType">> = [],
+  // Resolved per-channel notification prefs (NIP-CN). Defaults to the
+  // all-defaults state so callers that have no prefs store behave as before.
+  resolveChannelNotify: (
+    channelId: string,
+  ) => ResolvedChannelNotifyState = () => DEFAULT_CHANNEL_NOTIFY_STATE,
 ) {
   useFeedDesktopNotifications(
     feed,
@@ -384,8 +393,8 @@ export function useHomeFeedNotificationState(
     settings,
     setDesktopEnabled,
     profiles,
-    mutedChannelIds,
     channels,
+    resolveChannelNotify,
   );
   const normalizedPubkey = pubkey?.trim().toLowerCase() ?? "";
   const [seenFeedIds, setSeenFeedIds] = React.useState<string[]>(() =>
@@ -441,8 +450,12 @@ export function useHomeFeedNotificationState(
       }
       if (
         item.channelId &&
-        mutedChannelIds?.has(item.channelId) &&
-        item.category !== "mention"
+        !allowsFeedItemForChannel(
+          resolveChannelNotify(item.channelId),
+          item.category === "mention",
+          item.tags,
+          normalizedPubkey,
+        )
       ) {
         continue;
       }
@@ -477,8 +490,9 @@ export function useHomeFeedNotificationState(
     highPriorityChannelIds,
     isHomeActive,
     localUnreadFeedIds,
-    mutedChannelIds,
+    normalizedPubkey,
     readStateVersion,
+    resolveChannelNotify,
     seenFeedIds,
     settings.homeBadgeEnabled,
   ]);

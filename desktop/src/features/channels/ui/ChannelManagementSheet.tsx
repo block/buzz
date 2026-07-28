@@ -81,6 +81,7 @@ import {
   NarrativeField,
   NarrativeGroup,
 } from "./ChannelManagementSheetRows";
+import { ChannelNotificationsSection } from "./ChannelNotificationsSection";
 import {
   ChannelManagementModerationActions,
   useChannelModerationCapabilities,
@@ -808,6 +809,10 @@ function ChannelManagementPanelContent({
                 testId="channel-canvas-ingress"
                 trailing={canvasQuery.isLoading ? "Loading..." : undefined}
               />
+            ) : null}
+
+            {resolvedChannel.channelType !== "dm" ? (
+              <ChannelNotificationsSection channelId={resolvedChannel.id} />
             ) : null}
 
             <FieldGroup>

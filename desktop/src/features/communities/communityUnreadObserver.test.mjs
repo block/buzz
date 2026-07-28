@@ -148,7 +148,9 @@ test("fetchCommunityUnread returns dot and mention count without total unread co
     () => [],
     // 5. mutes events (parallel with read-state)
     () => [],
-    // 6. unread events
+    // 6. notify-prefs events (parallel with read-state)
+    () => [],
+    // 7. unread events
     () => [
       event({
         id: "unread".padEnd(64, "0"),
@@ -156,7 +158,7 @@ test("fetchCommunityUnread returns dot and mention count without total unread co
         tags: [["h", CHANNEL_ID]],
       }),
     ],
-    // 7. mention events
+    // 8. mention events
     () => [
       event({
         id: "mention".padEnd(64, "0"),
@@ -245,9 +247,11 @@ test("fetchCommunityUnread ignores self-authored and read thread/message events"
     ],
     // 5. mutes events (parallel with read-state)
     () => [],
-    // 6. unread events
+    // 6. notify-prefs events (parallel with read-state)
+    () => [],
+    // 7. unread events
     () => [threadReply, selfMention],
-    // 7. mention events
+    // 8. mention events
     () => [threadReply, selfMention],
   ]);
 
@@ -296,6 +300,8 @@ test("fetchCommunityUnread excludes muted-only channel — returns hasUnread:fal
         content: mutesContent([MUTED_CHANNEL]),
       }),
     ],
+    // 6. notify-prefs events (parallel with read-state)
+    () => [],
     // No per-channel fetches should follow — muted channel is skipped
   ]);
 
@@ -352,7 +358,9 @@ test("fetchCommunityUnread counts unmuted channel but skips muted channel", asyn
         content: mutesContent([MUTED_CHANNEL]),
       }),
     ],
-    // 6. unread events for UNMUTED_CHANNEL (muted channel loop iteration never fires)
+    // 6. notify-prefs events (parallel with read-state)
+    () => [],
+    // 7. unread events for UNMUTED_CHANNEL (muted channel loop iteration never fires)
     () => [
       event({
         id: "unread".padEnd(64, "0"),
@@ -360,7 +368,7 @@ test("fetchCommunityUnread counts unmuted channel but skips muted channel", asyn
         tags: [["h", UNMUTED_CHANNEL]],
       }),
     ],
-    // 7. mention events for UNMUTED_CHANNEL
+    // 8. mention events for UNMUTED_CHANNEL
     () => [
       event({
         id: "mention".padEnd(64, "0"),
@@ -416,7 +424,9 @@ test("fetchCommunityUnread treats decryption failure as empty mutes set", async 
         content: "corrupted-ciphertext",
       }),
     ],
-    // 6. unread events — channel is NOT muted (decryption failed → empty set)
+    // 6. notify-prefs events (parallel with read-state)
+    () => [],
+    // 7. unread events — channel is NOT muted (decryption failed → empty set)
     () => [
       event({
         id: "unread".padEnd(64, "0"),
@@ -424,7 +434,7 @@ test("fetchCommunityUnread treats decryption failure as empty mutes set", async 
         tags: [["h", CHANNEL_ID]],
       }),
     ],
-    // 7. mention events
+    // 8. mention events
     () => [],
   ]);
 
@@ -469,7 +479,9 @@ test("fetchCommunityUnread treats absent mutes blob as empty mutes set", async (
     () => [],
     // 5. mutes events — none
     () => [],
-    // 6. unread events
+    // 6. notify-prefs events (parallel with read-state)
+    () => [],
+    // 7. unread events
     () => [
       event({
         id: "unread".padEnd(64, "0"),
@@ -477,7 +489,7 @@ test("fetchCommunityUnread treats absent mutes blob as empty mutes set", async (
         tags: [["h", CHANNEL_ID]],
       }),
     ],
-    // 7. mention events
+    // 8. mention events
     () => [],
   ]);
 
@@ -537,9 +549,11 @@ function baseRelay(unreadEvent, mutesPayload = null) {
     // 5. mutes events
     () =>
       mutesPayload ? [event({ pubkey: PUBKEY, content: mutesPayload })] : [],
-    // 6. unread events — the single event under test
+    // 6. notify-prefs events (parallel with read-state)
+    () => [],
+    // 7. unread events — the single event under test
     () => [unreadEvent],
-    // 7. mention events
+    // 8. mention events
     () => [],
   ]);
 }
@@ -671,9 +685,11 @@ function quietRelay() {
     () => [],
     // 5. mutes events
     () => [],
-    // 6. unread events — none
+    // 6. notify-prefs events (parallel with read-state)
     () => [],
-    // 7. mention events — none
+    // 7. unread events — none
+    () => [],
+    // 8. mention events — none
     () => [],
   ]);
 }
@@ -720,9 +736,11 @@ function quietRelayWithReadState(readAtSeconds) {
     ],
     // 5. mutes events
     () => [],
-    // 6. unread events — none (marker covers everything)
+    // 6. notify-prefs events (parallel with read-state)
     () => [],
-    // 7. mention events — none
+    // 7. unread events — none (marker covers everything)
+    () => [],
+    // 8. mention events — none
     () => [],
   ]);
 }
@@ -796,7 +814,9 @@ test("fetchCommunityUnread forced-unread channel that is also muted → hasUnrea
         content: mutesContent([CHANNEL_ID]),
       }),
     ],
-    // No per-channel fetches expected — muted channel is skipped
+    // 6. notify-prefs events (parallel with read-state)
+    () => [],
+    // 7. no unread fetch for a muted channel; 8. mention fetch returns nothing
   ]);
 
   const result = await fetchCommunityUnread({
@@ -840,7 +860,9 @@ test("fetchCommunityUnread readForcedUnread returns empty map → falls through 
     () => [],
     // 5. mutes
     () => [],
-    // 6. unread events
+    // 6. notify-prefs events (parallel with read-state)
+    () => [],
+    // 7. unread events
     () => [
       event({
         id: "real-unread".padEnd(64, "0"),
@@ -848,7 +870,7 @@ test("fetchCommunityUnread readForcedUnread returns empty map → falls through 
         tags: [["h", CHANNEL_ID]],
       }),
     ],
-    // 7. mention events
+    // 8. mention events
     () => [],
   ]);
 
@@ -918,4 +940,190 @@ test("fetchCommunityUnread forced-unread with null baseline + synced marker pres
   });
 
   assert.deepEqual(result, { hasUnread: false, mentionCount: 0 });
+});
+
+// ── NIP-CN per-channel notification prefs ──────────────────────────────────
+
+// Encode a notify-prefs payload (decryptNotifyPrefs stub returns content as-is).
+function notifyPrefsContent(channels) {
+  return JSON.stringify({ version: 1, channels });
+}
+
+// A relay serving one stream channel plus the read-state / mutes / prefs trio.
+// `mutes` and `prefs` are the blob stubs; the per-channel fetches follow.
+function relayWithPrefs({ mutes = [], prefs = [], perChannel = [] }) {
+  return relayFor([
+    // 1. member events
+    () => [
+      event({
+        tags: [
+          ["d", CHANNEL_ID],
+          ["p", PUBKEY],
+        ],
+      }),
+    ],
+    // 2. metadata events (parallel with visibility)
+    () => [
+      event({
+        tags: [
+          ["d", CHANNEL_ID],
+          ["t", "stream"],
+        ],
+      }),
+    ],
+    // 3. visibility events
+    () => [],
+    // 4. read-state events (parallel with mutes)
+    () => [],
+    // 5. mutes events
+    () => mutes,
+    // 6. notify-prefs events
+    () => prefs,
+    ...perChannel,
+  ]);
+}
+
+function unreadEvent() {
+  return event({
+    id: "unread".padEnd(64, "0"),
+    created_at: 20,
+    tags: [["h", CHANNEL_ID]],
+  });
+}
+
+function mentionEvent() {
+  return event({
+    id: "mention".padEnd(64, "0"),
+    created_at: 30,
+    tags: [
+      ["h", CHANNEL_ID],
+      ["p", PUBKEY],
+    ],
+  });
+}
+
+async function pollWithPrefs(relay) {
+  return fetchCommunityUnread({
+    client: relay,
+    pubkey: PUBKEY,
+    nowSeconds: 100,
+    decryptReadState: async (v) => v,
+    decryptMutes: async (v) => v,
+    decryptNotifyPrefs: async (v) => v,
+    readThreadRelationships: readRelationships(),
+    readForcedUnread: () => ({}),
+  });
+}
+
+test("fetchCommunityUnread counts a mention in a muted channel (no dot)", async () => {
+  const relay = relayWithPrefs({
+    mutes: [event({ pubkey: PUBKEY, content: mutesContent([CHANNEL_ID]) })],
+    // Muted → no unread fetch is issued, so the mention fetch is next in line.
+    perChannel: [() => [mentionEvent()]],
+  });
+
+  assert.deepEqual(await pollWithPrefs(relay), {
+    hasUnread: true,
+    mentionCount: 1,
+  });
+});
+
+test("fetchCommunityUnread skips the dot for a prefs level 'mute' channel", async () => {
+  const relay = relayWithPrefs({
+    prefs: [
+      event({
+        pubkey: PUBKEY,
+        content: notifyPrefsContent({
+          [CHANNEL_ID]: { level: "mute", updatedAt: 10 },
+        }),
+      }),
+    ],
+    perChannel: [() => []],
+  });
+
+  assert.deepEqual(await pollWithPrefs(relay), {
+    hasUnread: false,
+    mentionCount: 0,
+  });
+});
+
+test("fetchCommunityUnread lights the dot at prefs level 'mentions'", async () => {
+  const relay = relayWithPrefs({
+    prefs: [
+      event({
+        pubkey: PUBKEY,
+        content: notifyPrefsContent({
+          [CHANNEL_ID]: { level: "mentions", updatedAt: 10 },
+        }),
+      }),
+    ],
+    perChannel: [() => [unreadEvent()], () => []],
+  });
+
+  assert.deepEqual(await pollWithPrefs(relay), {
+    hasUnread: true,
+    mentionCount: 0,
+  });
+});
+
+test("fetchCommunityUnread lets a newer legacy unmute revive a stale prefs mute", async () => {
+  const relay = relayWithPrefs({
+    mutes: [
+      event({
+        pubkey: PUBKEY,
+        content: JSON.stringify({
+          version: 1,
+          channels: { [CHANNEL_ID]: { muted: false, updatedAt: 20 } },
+        }),
+      }),
+    ],
+    prefs: [
+      event({
+        pubkey: PUBKEY,
+        content: notifyPrefsContent({
+          [CHANNEL_ID]: { level: "mute", updatedAt: 10 },
+        }),
+      }),
+    ],
+    perChannel: [() => [unreadEvent()], () => []],
+  });
+
+  assert.deepEqual(await pollWithPrefs(relay), {
+    hasUnread: true,
+    mentionCount: 0,
+  });
+});
+
+test("fetchCommunityUnread ignores a notify-prefs blob authored by someone else", async () => {
+  // A relay that ignores the `authors` filter and replays one of the user's own
+  // older ciphertexts under a foreign key would otherwise roll the prefs back —
+  // here a stale level "mute" that would silence the community rail.
+  const relay = relayWithPrefs({
+    prefs: [
+      event({
+        pubkey: "beef".padEnd(64, "0"),
+        content: notifyPrefsContent({
+          [CHANNEL_ID]: { level: "mute", updatedAt: 10 },
+        }),
+      }),
+    ],
+    perChannel: [() => [unreadEvent()], () => []],
+  });
+
+  assert.deepEqual(await pollWithPrefs(relay), {
+    hasUnread: true,
+    mentionCount: 0,
+  });
+});
+
+test("fetchCommunityUnread treats a corrupt notify-prefs blob as no prefs", async () => {
+  const relay = relayWithPrefs({
+    prefs: [event({ pubkey: PUBKEY, content: "not-json" })],
+    perChannel: [() => [unreadEvent()], () => []],
+  });
+
+  assert.deepEqual(await pollWithPrefs(relay), {
+    hasUnread: true,
+    mentionCount: 0,
+  });
 });

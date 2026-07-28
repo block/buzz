@@ -3,7 +3,7 @@ import test from "node:test";
 
 import {
   isHighPriorityEventForUser,
-  shouldNotifyForEvent,
+  notifyDecisionForEvent,
 } from "./shouldNotify.ts";
 
 const PUBKEY = "a".repeat(64);
@@ -39,20 +39,23 @@ const opts = (overrides = {}) => ({
   ...overrides,
 });
 
+const unreadFor = (event, pubkey, options) =>
+  notifyDecisionForEvent(event, pubkey, options).unread;
+
 test("top-level message (no e-tags) notifies", () => {
-  assert.equal(shouldNotifyForEvent(makeEvent([]), PUBKEY, opts()), true);
+  assert.equal(unreadFor(makeEvent([]), PUBKEY, opts()), true);
 });
 
 test("top-level message with unrelated p-tag notifies", () => {
   assert.equal(
-    shouldNotifyForEvent(makeEvent([pTag(OTHER_PUBKEY)]), PUBKEY, opts()),
+    unreadFor(makeEvent([pTag(OTHER_PUBKEY)]), PUBKEY, opts()),
     true,
   );
 });
 
 test("broadcast reply to unrelated thread notifies", () => {
   const event = makeEvent([replyTag(ROOT_ID), broadcastTag()]);
-  assert.equal(shouldNotifyForEvent(event, PUBKEY, opts()), true);
+  assert.equal(unreadFor(event, PUBKEY, opts()), true);
 });
 
 test("broadcast reply with root+reply tags notifies", () => {
@@ -61,7 +64,7 @@ test("broadcast reply with root+reply tags notifies", () => {
     replyTag(PARENT_ID),
     broadcastTag(),
   ]);
-  assert.equal(shouldNotifyForEvent(event, PUBKEY, opts()), true);
+  assert.equal(unreadFor(event, PUBKEY, opts()), true);
 });
 
 test("thread reply with p-tag mention of currentPubkey notifies", () => {
@@ -70,12 +73,12 @@ test("thread reply with p-tag mention of currentPubkey notifies", () => {
     replyTag(PARENT_ID),
     pTag(PUBKEY),
   ]);
-  assert.equal(shouldNotifyForEvent(event, PUBKEY, opts()), true);
+  assert.equal(unreadFor(event, PUBKEY, opts()), true);
 });
 
 test("p-tag mention matching is case-insensitive", () => {
   const event = makeEvent([replyTag(ROOT_ID), pTag(PUBKEY.toUpperCase())]);
-  assert.equal(shouldNotifyForEvent(event, PUBKEY, opts()), true);
+  assert.equal(unreadFor(event, PUBKEY, opts()), true);
 });
 
 test("p-tag mention of a different pubkey does not trigger mention path", () => {
@@ -84,17 +87,13 @@ test("p-tag mention of a different pubkey does not trigger mention path", () => 
     replyTag(PARENT_ID),
     pTag(OTHER_PUBKEY),
   ]);
-  assert.equal(shouldNotifyForEvent(event, PUBKEY, opts()), false);
+  assert.equal(unreadFor(event, PUBKEY, opts()), false);
 });
 
 test("thread reply to participated thread notifies", () => {
   const event = makeEvent([rootTag(ROOT_ID), replyTag(PARENT_ID)]);
   assert.equal(
-    shouldNotifyForEvent(
-      event,
-      PUBKEY,
-      opts({ participatedRootIds: new Set([ROOT_ID]) }),
-    ),
+    unreadFor(event, PUBKEY, opts({ participatedRootIds: new Set([ROOT_ID]) })),
     true,
   );
 });
@@ -102,11 +101,7 @@ test("thread reply to participated thread notifies", () => {
 test("shallow thread reply (root===parent) to participated thread notifies", () => {
   const event = makeEvent([replyTag(ROOT_ID)]);
   assert.equal(
-    shouldNotifyForEvent(
-      event,
-      PUBKEY,
-      opts({ participatedRootIds: new Set([ROOT_ID]) }),
-    ),
+    unreadFor(event, PUBKEY, opts({ participatedRootIds: new Set([ROOT_ID]) })),
     true,
   );
 });
@@ -114,11 +109,7 @@ test("shallow thread reply (root===parent) to participated thread notifies", () 
 test("thread reply to followed thread notifies", () => {
   const event = makeEvent([rootTag(ROOT_ID), replyTag(PARENT_ID)]);
   assert.equal(
-    shouldNotifyForEvent(
-      event,
-      PUBKEY,
-      opts({ followedRootIds: new Set([ROOT_ID]) }),
-    ),
+    unreadFor(event, PUBKEY, opts({ followedRootIds: new Set([ROOT_ID]) })),
     true,
   );
 });
@@ -126,24 +117,20 @@ test("thread reply to followed thread notifies", () => {
 test("thread reply to authored thread notifies", () => {
   const event = makeEvent([rootTag(ROOT_ID), replyTag(PARENT_ID)]);
   assert.equal(
-    shouldNotifyForEvent(
-      event,
-      PUBKEY,
-      opts({ authoredRootIds: new Set([ROOT_ID]) }),
-    ),
+    unreadFor(event, PUBKEY, opts({ authoredRootIds: new Set([ROOT_ID]) })),
     true,
   );
 });
 
 test("thread reply to unrelated thread does not notify", () => {
   const event = makeEvent([rootTag(ROOT_ID), replyTag(PARENT_ID)]);
-  assert.equal(shouldNotifyForEvent(event, PUBKEY, opts()), false);
+  assert.equal(unreadFor(event, PUBKEY, opts()), false);
 });
 
 test("muted thread reply suppresses participated", () => {
   const event = makeEvent([rootTag(ROOT_ID), replyTag(PARENT_ID)]);
   assert.equal(
-    shouldNotifyForEvent(
+    unreadFor(
       event,
       PUBKEY,
       opts({
@@ -158,7 +145,7 @@ test("muted thread reply suppresses participated", () => {
 test("muted thread reply suppresses followed", () => {
   const event = makeEvent([rootTag(ROOT_ID), replyTag(PARENT_ID)]);
   assert.equal(
-    shouldNotifyForEvent(
+    unreadFor(
       event,
       PUBKEY,
       opts({
@@ -173,7 +160,7 @@ test("muted thread reply suppresses followed", () => {
 test("muted thread reply suppresses authored", () => {
   const event = makeEvent([rootTag(ROOT_ID), replyTag(PARENT_ID)]);
   assert.equal(
-    shouldNotifyForEvent(
+    unreadFor(
       event,
       PUBKEY,
       opts({
@@ -192,11 +179,7 @@ test("muted thread reply still notifies when currentPubkey is mentioned via p-ta
     pTag(PUBKEY),
   ]);
   assert.equal(
-    shouldNotifyForEvent(
-      event,
-      PUBKEY,
-      opts({ mutedRootIds: new Set([ROOT_ID]) }),
-    ),
+    unreadFor(event, PUBKEY, opts({ mutedRootIds: new Set([ROOT_ID]) })),
     true,
   );
 });
@@ -204,11 +187,7 @@ test("muted thread reply still notifies when currentPubkey is mentioned via p-ta
 test("muted rootId does not suppress a top-level (non-reply) message", () => {
   const event = makeEvent([]);
   assert.equal(
-    shouldNotifyForEvent(
-      event,
-      PUBKEY,
-      opts({ mutedRootIds: new Set([ROOT_ID]) }),
-    ),
+    unreadFor(event, PUBKEY, opts({ mutedRootIds: new Set([ROOT_ID]) })),
     true,
   );
 });
@@ -216,24 +195,20 @@ test("muted rootId does not suppress a top-level (non-reply) message", () => {
 test("omitting mutedRootIds parameter defaults to empty set and still notifies participated", () => {
   const event = makeEvent([rootTag(ROOT_ID), replyTag(PARENT_ID)]);
   assert.equal(
-    shouldNotifyForEvent(
-      event,
-      PUBKEY,
-      opts({ participatedRootIds: new Set([ROOT_ID]) }),
-    ),
+    unreadFor(event, PUBKEY, opts({ participatedRootIds: new Set([ROOT_ID]) })),
     true,
   );
 });
 
 test("omitting mutedRootIds for unrelated thread returns false without throwing", () => {
   const event = makeEvent([rootTag(ROOT_ID), replyTag(PARENT_ID)]);
-  assert.equal(shouldNotifyForEvent(event, PUBKEY, opts()), false);
+  assert.equal(unreadFor(event, PUBKEY, opts()), false);
 });
 
 test("muted shallow thread reply (rootId falls back to parentId) is suppressed", () => {
   const event = makeEvent([replyTag(ROOT_ID)]);
   assert.equal(
-    shouldNotifyForEvent(
+    unreadFor(
       event,
       PUBKEY,
       opts({
@@ -252,11 +227,7 @@ test("broadcast reply on a muted thread still notifies (broadcast overrides mute
     broadcastTag(),
   ]);
   assert.equal(
-    shouldNotifyForEvent(
-      event,
-      PUBKEY,
-      opts({ mutedRootIds: new Set([ROOT_ID]) }),
-    ),
+    unreadFor(event, PUBKEY, opts({ mutedRootIds: new Set([ROOT_ID]) })),
     true,
   );
 });
@@ -268,7 +239,7 @@ test("empty currentPubkey skips p-tag check — muted thread is suppressed", () 
     pTag(PUBKEY),
   ]);
   assert.equal(
-    shouldNotifyForEvent(
+    unreadFor(
       event,
       "",
       opts({
@@ -287,11 +258,7 @@ test("empty currentPubkey with participated thread still notifies (no mute)", ()
     pTag(PUBKEY),
   ]);
   assert.equal(
-    shouldNotifyForEvent(
-      event,
-      "",
-      opts({ participatedRootIds: new Set([ROOT_ID]) }),
-    ),
+    unreadFor(event, "", opts({ participatedRootIds: new Set([ROOT_ID]) })),
     true,
   );
 });
@@ -325,4 +292,57 @@ test("isHighPriorityEventForUser returns false when currentPubkey is empty", () 
 test("isHighPriorityEventForUser returns false for event with no tags at all", () => {
   const event = makeEvent([]);
   assert.equal(isHighPriorityEventForUser(event, PUBKEY), false);
+});
+
+// ── decision tiers (channel-blind defaults) ───────────────────────────────────
+
+test("top-level post decision alerts without mention tier", () => {
+  assert.deepEqual(notifyDecisionForEvent(makeEvent([]), PUBKEY, opts()), {
+    unread: true,
+    alert: true,
+    highPriority: false,
+  });
+});
+
+test("p-tag mention decision is the full mention tier", () => {
+  const event = makeEvent([
+    rootTag(ROOT_ID),
+    replyTag(PARENT_ID),
+    pTag(PUBKEY),
+  ]);
+  assert.deepEqual(notifyDecisionForEvent(event, PUBKEY, opts()), {
+    unread: true,
+    alert: true,
+    highPriority: true,
+  });
+});
+
+test("broadcast reply decision is mention tier at level 'all'", () => {
+  const event = makeEvent([replyTag(ROOT_ID), broadcastTag()]);
+  assert.deepEqual(notifyDecisionForEvent(event, PUBKEY, opts()), {
+    unread: true,
+    alert: true,
+    highPriority: true,
+  });
+});
+
+test("followed thread reply decision alerts without mention tier", () => {
+  const event = makeEvent([rootTag(ROOT_ID), replyTag(PARENT_ID)]);
+  assert.deepEqual(
+    notifyDecisionForEvent(
+      event,
+      PUBKEY,
+      opts({ followedRootIds: new Set([ROOT_ID]) }),
+    ),
+    { unread: true, alert: true, highPriority: false },
+  );
+});
+
+test("ignored thread reply decision is all-false", () => {
+  const event = makeEvent([rootTag(ROOT_ID), replyTag(PARENT_ID)]);
+  assert.deepEqual(notifyDecisionForEvent(event, PUBKEY, opts()), {
+    unread: false,
+    alert: false,
+    highPriority: false,
+  });
 });

@@ -17,6 +17,25 @@ export function isBroadcastReply(tags: string[][]): boolean {
   return tags.some((tag) => tag[0] === "broadcast" && tag[1] === "1");
 }
 
+/** Channel-wide notification marker of an `@channel` / `@here` post (#3146). */
+export type EventNotifyMode = "channel" | "here";
+
+/**
+ * Read the `["notify","channel"|"here"]` marker from an event's tags.
+ *
+ * Deliberately distinct from {@link isBroadcastReply}: that marks a NIP-CW
+ * thread reply surfaced to the channel timeline, this marks a channel-wide
+ * mention. The two must never be conflated — they are gated by different
+ * per-channel preferences (NIP-CN).
+ */
+export function eventNotifyMode(tags: string[][]): EventNotifyMode | null {
+  for (const tag of tags) {
+    if (tag[0] !== "notify") continue;
+    if (tag[1] === "channel" || tag[1] === "here") return tag[1];
+  }
+  return null;
+}
+
 export function isThreadReply(tags: string[][]): boolean {
   const ref = getThreadReference(tags);
   return ref.parentId !== null && !isBroadcastReply(tags);

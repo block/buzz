@@ -5,10 +5,7 @@ import {
   type UseLiveChannelUpdatesOptions,
 } from "@/features/channels/useLiveChannelUpdates";
 import {
-  countUnreadAppBadgeObservedEvents,
-  countUnreadBadgeObservedEvents,
-  countUnreadHighPriorityObservedEvents,
-  countUnreadObservedEvents,
+  aggregateUnreadChannels,
   makeObservedUnreadEvent,
   mapsEqual,
   observedUnreadEventReadAt,
@@ -28,8 +25,13 @@ import {
 import {
   hasMentionForEvent,
   isHighPriorityEventForUser,
-  shouldNotifyForEvent,
+  notifyDecisionForEvent,
+  type ChannelNotifyPrefsLookup,
 } from "@/features/notifications/lib/shouldNotify";
+import {
+  DEFAULT_CHANNEL_NOTIFY_STATE,
+  type ResolvedChannelNotifyState,
+} from "@/features/notifications/lib/resolveChannelNotifyState";
 import type { RelayClient } from "@/shared/api/relayClientSession";
 import type { Channel, RelayEvent } from "@/shared/api/types";
 import { CHANNEL_MESSAGE_EVENT_KINDS } from "@/shared/constants/kinds";
@@ -143,6 +145,7 @@ export function useUnreadChannels(
     relayClient,
     relayUrl: relayUrlOption,
     mutedChannelIds: mutedChannelIdsOption,
+    channelPrefs: channelPrefsOption,
     ...liveUpdateOptions
   } = options;
   const activeChannelId = activeChannel?.id ?? null;
@@ -238,6 +241,19 @@ export function useUnreadChannels(
   // so the catch-up loop always reads the latest set without being a dep.
   const mutedChannelIdsRef = React.useRef<ReadonlySet<string>>(new Set());
   mutedChannelIdsRef.current = mutedChannelIdsOption ?? new Set();
+
+  // Same pattern for the NIP-CN prefs lookup: the async catch-up and the live
+  // callbacks read the latest resolver through the ref instead of taking it as
+  // a dependency, while `resolveChannelNotify` stays reference-stable.
+  const channelPrefsRef = React.useRef<ChannelNotifyPrefsLookup | undefined>(
+    undefined,
+  );
+  channelPrefsRef.current = channelPrefsOption;
+  const resolveChannelNotify = React.useCallback(
+    (channelId: string): ResolvedChannelNotifyState =>
+      channelPrefsRef.current?.(channelId) ?? DEFAULT_CHANNEL_NOTIFY_STATE,
+    [],
+  );
 
   // Thread reply events that triggered notifications — surfaced in the Home
   // activity feed as synthetic FeedItems.
@@ -403,7 +419,10 @@ export function useUnreadChannels(
       const isHighPriority =
         channel?.channelType === "dm" ||
         (normalizedPubkey !== null &&
-          isHighPriorityEventForUser(event, normalizedPubkey));
+          isHighPriorityEventForUser(event, normalizedPubkey, {
+            channelId,
+            channelPrefs: resolveChannelNotify,
+          }));
       const isThreadedReply =
         getThreadReference(event.tags).parentId !== null &&
         !isBroadcastReply(event.tags);
@@ -414,6 +433,9 @@ export function useUnreadChannels(
           createdAt: event.created_at,
           rootId: resolveObservedUnreadRootId(event.tags),
           highPriority: isHighPriority,
+          directMention:
+            normalizedPubkey !== null &&
+            hasMentionForEvent(event, normalizedPubkey),
           channelType: channel?.channelType,
           isThreadedReply,
         }),
@@ -446,6 +468,7 @@ export function useUnreadChannels(
       normalizedPubkey,
       recordMentionedRoot,
       recordUnreadEvent,
+      resolveChannelNotify,
     ],
   );
 
@@ -558,6 +581,7 @@ export function useUnreadChannels(
     authoredRootIds: authoredRootIdsRef.current,
     mutedRootIds: mutedRootIdsRef.current,
     mutedChannelIds: mutedChannelIdsRef.current,
+    channelPrefs: resolveChannelNotify,
   });
 
   // Effect-key the catch-up on the *set* of channel IDs, not the array
@@ -676,14 +700,15 @@ export function useUnreadChannels(
             const eventChannelId =
               event.tags.find((t) => t[0] === "h")?.[1] ?? null;
             if (
-              !shouldNotifyForEvent(event, normalizedPubkey ?? "", {
+              !notifyDecisionForEvent(event, normalizedPubkey ?? "", {
                 participatedRootIds: participatedRootIdsRef.current,
                 followedRootIds: options.followedRootIds ?? EMPTY_SET,
                 authoredRootIds: authoredRootIdsRef.current,
                 mutedRootIds: mutedRootIdsRef.current,
                 mutedChannelIds: mutedChannelIdsRef.current,
+                channelPrefs: resolveChannelNotify,
                 channelId: eventChannelId,
-              })
+              }).unread
             ) {
               continue;
             }
@@ -696,13 +721,19 @@ export function useUnreadChannels(
             const isHighPriority =
               chType === "dm" ||
               (normalizedPubkey !== null &&
-                isHighPriorityEventForUser(event, normalizedPubkey));
+                isHighPriorityEventForUser(event, normalizedPubkey, {
+                  channelId: eventChannelId,
+                  channelPrefs: resolveChannelNotify,
+                }));
             unreadEvents.push(
               makeObservedUnreadEvent({
                 id: event.id,
                 createdAt: event.created_at,
                 rootId: resolveObservedUnreadRootId(event.tags),
                 highPriority: isHighPriority,
+                directMention:
+                  normalizedPubkey !== null &&
+                  hasMentionForEvent(event, normalizedPubkey),
                 channelType: chType,
                 isThreadedReply,
               }),
@@ -815,6 +846,7 @@ export function useUnreadChannels(
     normalizedRelayUrl,
     recordUnreadEvent,
     relayClient,
+    resolveChannelNotify,
   ]);
 
   // Unread = channels (excluding active) that have either been manually
@@ -836,82 +868,38 @@ export function useUnreadChannels(
         };
       }
 
-      const unread = new Set<string>();
-      const highPriority = new Set<string>();
-      const counts = new Map<string, number>();
-      let unreadChannelNotificationCount = 0;
-
-      for (const channel of channels) {
-        if (channel.id === activeChannelId) continue;
-
-        if (Object.hasOwn(forcedUnreadRef.current, channel.id)) {
-          // Forced-unread is dot tier only — not high-priority.
-          unread.add(channel.id);
-          counts.set(channel.id, 1);
-          unreadChannelNotificationCount += 1;
-          continue;
-        }
-
-        if (latestByChannelRef.current.get(channel.id) === undefined) continue;
-
-        const observedEvents = observedUnreadEventsByChannelRef.current.get(
-          channel.id,
-        );
-        const channelReadAt = getEffectiveTimestamp(channel.id);
-        const readAtForObservedEvent = (event: ObservedUnreadEvent) =>
-          observedUnreadEventReadAt(
-            event,
-            channelReadAt,
-            (rootId) => getOwnTimestamp(`thread:${rootId}`),
-            (messageId) => getOwnTimestamp(`msg:${messageId}`),
-          );
-
-        const unreadCount = countUnreadObservedEvents(
-          observedEvents,
-          readAtForObservedEvent,
-        );
-        if (unreadCount === 0) continue;
-
-        unread.add(channel.id);
-        const badgeCount = countUnreadBadgeObservedEvents(
-          observedEvents,
-          readAtForObservedEvent,
-        );
-        counts.set(channel.id, badgeCount);
-        unreadChannelNotificationCount += countUnreadAppBadgeObservedEvents(
-          observedEvents,
-          readAtForObservedEvent,
-        );
-
-        // DM channels: any unread DM is high-priority.
-        if (channel.channelType === "dm") {
-          highPriority.add(channel.id);
-        } else if (
-          countUnreadHighPriorityObservedEvents(
-            observedEvents,
-            readAtForObservedEvent,
-          ) > 0
-        ) {
-          // Non-DM: high-priority only if at least one mention/broadcast
-          // remains unread in its own channel/thread context.
-          highPriority.add(channel.id);
-        }
-      }
-
-      return {
-        unreadChannelIds: unread,
-        highPriorityUnreadChannelIds: highPriority,
-        unreadChannelCounts: counts,
-        unreadChannelNotificationCount,
-      };
+      return aggregateUnreadChannels({
+        channels,
+        activeChannelId,
+        hasForcedUnread: (channelId) =>
+          Object.hasOwn(forcedUnreadRef.current, channelId),
+        hasObservedLatest: (channelId) =>
+          latestByChannelRef.current.get(channelId) !== undefined,
+        getObservedEvents: (channelId) =>
+          observedUnreadEventsByChannelRef.current.get(channelId),
+        getReadAt: (channelId) => {
+          const channelReadAt = getEffectiveTimestamp(channelId);
+          return (event: ObservedUnreadEvent) =>
+            observedUnreadEventReadAt(
+              event,
+              channelReadAt,
+              (rootId) => getOwnTimestamp(`thread:${rootId}`),
+              (messageId) => getOwnTimestamp(`msg:${messageId}`),
+            );
+        },
+        isMutedChannel: (channelId) =>
+          resolveChannelNotify(channelId).level === "mute",
+      });
     }, [
       activeChannelId,
       channels,
+      channelPrefsOption,
       getEffectiveTimestamp,
       getOwnTimestamp,
       isReadStateReady,
       latestVersion,
       readStateVersion,
+      resolveChannelNotify,
     ]);
 
   // Stabilize Set references: only replace when contents actually change,

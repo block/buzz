@@ -1,9 +1,21 @@
+import { channelNotifyHeaderSuffix } from "@/features/notifications/lib/channelNotifyLabels";
+import type { ResolvedChannelNotifyState } from "@/features/notifications/lib/resolveChannelNotifyState";
 import type { Channel } from "@/shared/api/types";
 
-export function getChannelDescription(channel: Channel | null): string {
+/**
+ * Header description line for a channel. When `notify` is supplied and the
+ * channel's NIP-CN level is not the default, the level is appended so the
+ * header explains why the channel is quiet.
+ */
+export function getChannelDescription(
+  channel: Channel | null,
+  notify?: ResolvedChannelNotifyState | null,
+): string {
   if (!channel) {
     return "Connect to the relay to browse channels and read messages.";
   }
+
+  const notifySuffix = notify ? channelNotifyHeaderSuffix(notify) : null;
 
   const prefixes = [
     channel.archivedAt ? "Archived." : null,
@@ -17,6 +29,8 @@ export function getChannelDescription(channel: Channel | null): string {
   );
 
   const parts = [...prefixes, detail ?? null].filter(Boolean);
+  const body =
+    parts.length > 0 ? parts.join(" ") : "Channel details and activity.";
 
-  return parts.length > 0 ? parts.join(" ") : "Channel details and activity.";
+  return notifySuffix ? `${body} ${notifySuffix}` : body;
 }

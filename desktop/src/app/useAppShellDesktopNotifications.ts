@@ -1,10 +1,12 @@
 import * as React from "react";
 
 import {
+  feedOwnsThreadReplyNotification,
   shouldBounceForChannelNotification,
   toSearchHit,
 } from "@/app/AppShell.helpers";
 import { getThreadReference } from "@/features/messages/lib/threading";
+import type { ResolvedChannelNotifyState } from "@/features/notifications/lib/resolveChannelNotifyState";
 import { hasMentionForEvent } from "@/features/notifications/lib/shouldNotify";
 import type { NotificationSettings } from "@/features/notifications/hooks";
 import {
@@ -30,6 +32,7 @@ export function useAppShellDesktopNotifications({
   notificationSettings,
   openSearchHit,
   pubkey,
+  resolveChannelNotify,
 }: {
   channels: Channel[];
   goChannel: (channelId: string) => Promise<unknown>;
@@ -39,11 +42,18 @@ export function useAppShellDesktopNotifications({
     hit: import("@/shared/api/types").SearchHit,
   ) => Promise<unknown>;
   pubkey?: string;
+  /**
+   * Resolved per-channel notification prefs (NIP-CN). Only `desktop` is read
+   * here: it silences this channel's banner, sound, and dock bounce on desktop
+   * clients without changing whether the event counts as unread.
+   */
+  resolveChannelNotify: (channelId: string) => ResolvedChannelNotifyState;
 }) {
   const handleChannelNotification = React.useEffectEvent(
-    (_channelId: string, event: RelayEvent) => {
+    (channelId: string, event: RelayEvent) => {
       if (!shouldBounceForChannelNotification(event.tags)) return;
       if (!notificationSettings.desktopEnabled) return;
+      if (!resolveChannelNotify(channelId).desktop) return;
       void requestDockBounce();
     },
   );
@@ -52,7 +62,8 @@ export function useAppShellDesktopNotifications({
     (event: RelayEvent, channel: Channel) => {
       if (
         !notificationSettings.desktopEnabled ||
-        !notificationSettings.slotAlertsEnabled.dm
+        !notificationSettings.slotAlertsEnabled.dm ||
+        !resolveChannelNotify(channel.id).desktop
       ) {
         return;
       }
@@ -84,9 +95,11 @@ export function useAppShellDesktopNotifications({
 
   const handleThreadReplyDesktopNotification = React.useEffectEvent(
     (channelId: string, event: RelayEvent) => {
+      const channelNotify = resolveChannelNotify(channelId);
       if (
         !notificationSettings.desktopEnabled ||
-        !notificationSettings.slotAlertsEnabled.thread_reply
+        !notificationSettings.slotAlertsEnabled.thread_reply ||
+        !channelNotify.desktop
       ) {
         return;
       }
@@ -95,6 +108,16 @@ export function useAppShellDesktopNotifications({
       // path — skip them here so they don't notify (and sound) twice.
       const normalizedPubkey = pubkey?.trim().toLowerCase() ?? "";
       if (hasMentionForEvent(event, normalizedPubkey)) {
+        return;
+      }
+      // Same for @channel / @here markers the feed will carry as mentions.
+      if (
+        feedOwnsThreadReplyNotification(
+          channelNotify,
+          event.tags,
+          normalizedPubkey,
+        )
+      ) {
         return;
       }
 

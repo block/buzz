@@ -8,6 +8,11 @@ import {
 import { getThreadReference } from "@/features/messages/lib/threading";
 import type { FeedItem, HomeFeedResponse } from "@/shared/api/types";
 import {
+  DEFAULT_CHANNEL_NOTIFY_STATE,
+  type ResolvedChannelNotifyState,
+} from "./lib/resolveChannelNotifyState";
+import { allowsFeedItemForChannel } from "./lib/shouldNotify";
+import {
   collectHomeAlertItems,
   eligibleFeedNotificationItems,
   type NotificationChannel,
@@ -74,8 +79,10 @@ export function useFeedDesktopNotifications(
   settings: NotificationSettings,
   setDesktopEnabled: (enabled: boolean) => Promise<boolean>,
   profiles?: UserProfileLookup,
-  mutedChannelIds?: ReadonlySet<string>,
   channels: readonly NotificationChannel[] = [],
+  resolveChannelNotify: (
+    channelId: string,
+  ) => ResolvedChannelNotifyState = () => DEFAULT_CHANNEL_NOTIFY_STATE,
 ) {
   const normalizedPubkey = pubkey?.trim().toLowerCase() ?? "";
   const seenItemIdsRef = React.useRef<Set<string>>(
@@ -168,12 +175,22 @@ export function useFeedDesktopNotifications(
           channels,
         )
           .filter((item) => !nextSeenItemIds.has(item.id))
-          .filter(
-            (item) =>
-              !item.channelId ||
-              !mutedChannelIds?.has(item.channelId) ||
-              item.category === "mention",
-          )
+          // Per-channel gate: the NIP-CN level and broadcasts opt-out decide
+          // eligibility, and `desktop: false` silences this channel's banners
+          // on desktop without touching its unread state.
+          .filter((item) => {
+            if (!item.channelId) return true;
+            const state = resolveChannelNotify(item.channelId);
+            return (
+              state.desktop &&
+              allowsFeedItemForChannel(
+                state,
+                item.category === "mention",
+                item.tags,
+                normalizedPubkey,
+              )
+            );
+          })
       : [];
 
     for (const item of currentFeedItems) {
@@ -216,7 +233,7 @@ export function useFeedDesktopNotifications(
   }, [
     feed,
     channels,
-    mutedChannelIds,
+    resolveChannelNotify,
     normalizedPubkey,
     profiles,
     settings.desktopEnabled,

@@ -14,6 +14,7 @@ import { useChannelBrowserDialog } from "@/app/useChannelBrowserDialog";
 import { useMarkAsReadShortcuts } from "@/app/useMarkAsReadShortcuts";
 import { useSettingsShortcuts } from "@/app/useSettingsShortcuts";
 import { useAppShellDesktopNotifications } from "@/app/useAppShellDesktopNotifications";
+import { useChannelNotificationSettings } from "@/app/useChannelNotificationSettings";
 import { useAppShellLifecycleEffects } from "@/app/useAppShellLifecycleEffects";
 import { useThreadActivityFeedItems } from "@/app/useThreadActivityFeedItems";
 import { useTauriWindowDrag } from "@/app/useTauriWindowDrag";
@@ -70,7 +71,6 @@ import { useReminderNotifications } from "@/features/reminders/useReminderNotifi
 import { AppSidebar } from "@/features/sidebar/ui/AppSidebar";
 import { requestFocusedThreadClose } from "@/features/channels/focusedThreadCloseRequest";
 import { CommunityRail } from "@/features/sidebar/ui/CommunityRail";
-import { useChannelMutes } from "@/features/sidebar/lib/useChannelMutes";
 import { useChannelStars } from "@/features/sidebar/lib/useChannelStars";
 import { useCommunities } from "@/features/communities/useCommunities";
 import {
@@ -161,8 +161,9 @@ export function AppShell() {
   const startupReady = useDeferredStartup();
 
   const identityQuery = useIdentityQuery();
-  const { mutedChannelIds, muteChannel, unmuteChannel } = useChannelMutes(
+  const channelNotify = useChannelNotificationSettings(
     identityQuery.data?.pubkey,
+    communitiesHook.activeCommunity?.relayUrl,
   );
   const { starredChannelIds, starChannel, unstarChannel } = useChannelStars(
     identityQuery.data?.pubkey,
@@ -310,6 +311,7 @@ export function AppShell() {
     notificationSettings: notificationSettings.settings,
     openSearchHit,
     pubkey: identityQuery.data?.pubkey,
+    resolveChannelNotify: channelNotify.resolveChannelNotify,
   });
 
   const {
@@ -343,9 +345,10 @@ export function AppShell() {
     relayClient,
     relayUrl: communitiesHook.activeCommunity?.relayUrl,
     currentPubkey: identityQuery.data?.pubkey,
-    mutedChannelIds,
+    mutedChannelIds: channelNotify.mutedChannelIds,
+    channelPrefs: channelNotify.resolveChannelNotify,
     notifyForActiveChannel: notificationSettings.settings.notifyWhileViewing,
-    onChannelMessage: handleChannelNotification,
+    onChannelAlert: handleChannelNotification,
     onDmMessage: handleDmNotification,
     onLiveMention: refetchHomeFeedFromLiveSignal,
     onThreadReplyDesktopNotification: handleThreadReplyDesktopNotification,
@@ -413,12 +416,12 @@ export function AppShell() {
       readStateVersion,
       highPriorityUnreadChannelIds,
       feedProfilesQuery.data?.profiles,
-      mutedChannelIds,
       feedItemState.unreadSet,
       threadActivityFeedItems,
       getThreadReadAt,
       getMessageReadAt,
       channels,
+      channelNotify.resolveChannelNotify,
     );
 
   const dueReminderBadge = useDueReminderBadgeCount(
@@ -735,6 +738,8 @@ export function AppShell() {
             threadActivityItems,
             threadActivityFeedItems,
             feedItemState,
+            channelNotify,
+            mentionUnreadChannelIds: highPriorityUnreadChannelIds,
             onOpenSettings: handleOpenSettings,
           }}
         >
@@ -907,9 +912,6 @@ export function AppShell() {
                           selectedView={selectedView}
                           unreadChannelIds={unreadChannelIds}
                           unreadChannelCounts={unreadChannelCounts}
-                          mutedChannelIds={mutedChannelIds}
-                          onMuteChannel={muteChannel}
-                          onUnmuteChannel={unmuteChannel}
                           starredChannelIds={starredChannelIds}
                           onStarChannel={starChannel}
                           onUnstarChannel={unstarChannel}
