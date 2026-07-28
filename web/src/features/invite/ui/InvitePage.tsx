@@ -24,6 +24,20 @@ type JoinPolicy = {
 
 type PolicyDocument = { title: string; markdown: string };
 
+/** Convert relay invite sentinels into user-facing recovery guidance. */
+function inviteClaimErrorMessage(message: string): string {
+  if (message.includes("invite_exhausted")) {
+    return "This invite has reached its use limit. Ask for a new invite.";
+  }
+  if (message.includes("invite_expired")) {
+    return "This invite has expired. Ask for a new invite.";
+  }
+  if (message.includes("invite_invalid")) {
+    return "This invite is invalid. Check the link or ask for a new invite.";
+  }
+  return message;
+}
+
 /** Landing page for a community invite link (`/invite/<code>`). */
 export function InvitePage({ code }: { code: string }) {
   const relay = relayWsUrl();
@@ -110,9 +124,9 @@ export function InvitePage({ code }: { code: string }) {
       await claimInviteInBrowser(code, receipt);
       window.location.assign("/");
     } catch (error) {
-      setBrowserJoinError(
-        error instanceof Error ? error.message : "Could not claim this invite.",
-      );
+      const message =
+        error instanceof Error ? error.message : "Could not claim this invite.";
+      setBrowserJoinError(inviteClaimErrorMessage(message));
     } finally {
       setJoiningBrowser(false);
     }

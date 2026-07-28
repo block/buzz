@@ -28,18 +28,32 @@ export type MachineOnboardingPage =
   | "setup"
   | "config";
 
+/** A pending navigation the parent should execute after RouterProvider mounts. */
+export type PostOnboardingNavigation = {
+  to: string;
+  search?: Record<string, string>;
+};
+
 export function MachineOnboardingFlow({
   complete,
   continueWithIdentity,
   identityLost,
   initialPage,
   queryClient,
+  navigateAfterComplete,
 }: {
   complete: (pubkey?: string) => void;
   continueWithIdentity: (pubkey: string) => void;
   identityLost: boolean;
   initialPage?: MachineOnboardingPage;
   queryClient: QueryClient;
+  /**
+   * Called when the user finishes onboarding and requests navigation to a
+   * specific route (e.g. Settings → Agents). The parent owns the RouterProvider,
+   * so navigation must be deferred to it — calling router.navigate() here races
+   * with RouterProvider mounting.
+   */
+  navigateAfterComplete?: (nav: PostOnboardingNavigation) => void;
 }) {
   const [page, setPage] = React.useState<MachineOnboardingPage>(
     identityLost ? "key-import" : (initialPage ?? "identity"),
@@ -157,7 +171,11 @@ export function MachineOnboardingFlow({
                   onClick={() => void loadFreshIdentity()}
                   type="button"
                 >
-                  {isPending ? "Saving identity…" : "Create a new identity key"}
+                  {isPending
+                    ? "Loading identity…"
+                    : selectedPubkey
+                      ? "Continue setup"
+                      : "Create a new identity key"}
                 </Button>
                 <Button
                   className="h-9 rounded-full bg-foreground/10 px-5 hover:bg-foreground/15"
@@ -166,7 +184,9 @@ export function MachineOnboardingFlow({
                   type="button"
                   variant="ghost"
                 >
-                  Use an existing key
+                  {selectedPubkey
+                    ? "Use a different key instead"
+                    : "Use an existing key"}
                 </Button>
               </div>
               <IdentityKeyHelpDialog />
@@ -224,6 +244,17 @@ export function MachineOnboardingFlow({
                     return;
                   }
                   setPage("config");
+                },
+                navigateToAgentSettings: () => {
+                  // Complete onboarding first, then delegate the Settings → Agents
+                  // navigation to the parent.  The parent owns RouterProvider, so
+                  // navigation from within the onboarding flow races with the
+                  // router mounting — calling router.navigate() here is unsafe.
+                  complete(selectedPubkey ?? undefined);
+                  navigateAfterComplete?.({
+                    to: "/settings",
+                    search: { section: "agents" },
+                  });
                 },
               }}
               direction="forward"

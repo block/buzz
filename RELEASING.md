@@ -57,10 +57,13 @@ or mobile GitHub Release.
 2. **Merge the PR.** `auto-tag-on-release-pr-merge` pushes
    `relay-v<version>`.
 3. **The tag triggers `docker.yml`.** Stable releases update the version
-   aliases and `latest`; prereleases do not.
+   aliases and `latest`; prereleases do not. Each release also publishes an
+   optimized, symbol-bearing image under matching `debug-` tags (for example,
+   `debug-0.3.0` and `debug-latest`) for native profiling. The ordinary tags
+   remain stripped and are the default for deployments that do not need it.
 
 Every push to `main` continues to publish the rolling relay `:main` and
-`:sha-<7>` tags.
+`:sha-<7>` tags, plus matching `:debug-main` and `:debug-sha-<7>` variants.
 
 ### Mobile
 

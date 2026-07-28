@@ -30,6 +30,9 @@ class _SystemMessageRow extends ConsumerWidget {
     final channelCreator = systemEvent.type == SystemEventType.channelCreated
         ? systemEvent.actorPubkey?.trim()
         : null;
+    final usesMessageStyleLayout =
+        groupedMembership != null ||
+        (channelCreator != null && channelCreator.isNotEmpty);
 
     String resolveLabel(String? pubkey) {
       if (pubkey == null) return 'Someone';
@@ -68,66 +71,83 @@ class _SystemMessageRow extends ConsumerWidget {
       }
     }
 
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onLongPress: () => showMessageActions(
-        context: context,
-        ref: ref,
-        message: message,
-        channelId: channelId,
-        canManageMessage: false,
-        allMessages: null,
-        currentPubkey: currentPubkey,
-        isMember: isMember,
-        isArchived: isArchived,
-      ),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            if (groupedMembership != null)
-              _MembershipSystemMessageContent(
-                event: groupedMembership,
-                createdAt: message.createdAt,
-                resolveLabel: resolveLabel,
-                userCache: userCache,
-              )
-            else if (channelCreator != null && channelCreator.isNotEmpty)
-              _MessageStyleSystemMessageContent(
-                displayPubkey: channelCreator,
-                createdAt: message.createdAt,
-                resolveLabel: resolveLabel,
-                userCache: userCache,
-                actionSpans: const [TextSpan(text: 'created this channel')],
-              )
-            else
-              Row(
-                children: [
-                  _systemEventAvatar(context, systemEvent, userCache),
-                  const SizedBox(width: Grid.xxs),
-                  Expanded(
-                    child: Text(
-                      systemEvent.describe(resolveLabel),
-                      style: context.textTheme.bodyLarge?.copyWith(
-                        color: context.colors.onSurfaceVariant,
+    return Material(
+      color: Colors.transparent,
+      borderRadius: BorderRadius.circular(Radii.md),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        key: ValueKey('system-message-row-${message.id}'),
+        borderRadius: BorderRadius.circular(Radii.md),
+        highlightColor: context.colors.primary.withValues(alpha: 0.1),
+        onLongPress: () => showMessageActions(
+          context: context,
+          ref: ref,
+          message: message,
+          channelId: channelId,
+          canManageMessage: false,
+          allMessages: null,
+          currentPubkey: currentPubkey,
+          isMember: isMember,
+          isArchived: isArchived,
+        ),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (groupedMembership != null)
+                _MembershipSystemMessageContent(
+                  event: groupedMembership,
+                  createdAt: message.createdAt,
+                  resolveLabel: resolveLabel,
+                  userCache: userCache,
+                )
+              else if (channelCreator != null && channelCreator.isNotEmpty)
+                _MessageStyleSystemMessageContent(
+                  displayPubkey: channelCreator,
+                  createdAt: message.createdAt,
+                  resolveLabel: resolveLabel,
+                  userCache: userCache,
+                  actionSpans: const [TextSpan(text: 'created this channel')],
+                )
+              else
+                Row(
+                  children: [
+                    _systemEventAvatar(context, systemEvent, userCache),
+                    const SizedBox(width: Grid.xxs),
+                    Expanded(
+                      child: Text(
+                        systemEvent.describe(resolveLabel),
+                        style: systemMessageBodyTextStyle.copyWith(
+                          color: context.colors.onSurfaceVariant,
+                        ),
                       ),
                     ),
-                  ),
-                  _messageTimestamp(context, message.createdAt),
-                ],
-              ),
-            if (reactions.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(left: 36 + Grid.xxs),
-                child: ReactionRow(
-                  reactions: reactions,
-                  onToggle: groupedMessages == null
-                      ? (emoji) => toggleReaction(ref, message, emoji)
-                      : toggleGroupedReaction,
+                    _messageTimestamp(
+                      context,
+                      message.createdAt,
+                      key: ValueKey('system-message-timestamp-${message.id}'),
+                    ),
+                  ],
                 ),
-              ),
-          ],
+              if (reactions.isNotEmpty)
+                Padding(
+                  padding: EdgeInsets.only(
+                    left:
+                        (usesMessageStyleLayout ? messageAvatarSize : 36) +
+                        (usesMessageStyleLayout
+                            ? messageAvatarContentGap
+                            : Grid.xxs),
+                  ),
+                  child: ReactionRow(
+                    reactions: reactions,
+                    onToggle: groupedMessages == null
+                        ? (emoji) => toggleReaction(ref, message, emoji)
+                        : toggleGroupedReaction,
+                  ),
+                ),
+            ],
+          ),
         ),
       ),
     );
@@ -282,7 +302,7 @@ class _MembershipSystemMessageContent extends StatelessWidget {
 }
 
 TextStyle? _systemActionTextStyle(BuildContext context) {
-  return context.textTheme.bodyLarge?.copyWith(
+  return systemMessageBodyTextStyle.copyWith(
     color: context.colors.onSurfaceVariant,
   );
 }
@@ -310,28 +330,33 @@ class _MessageStyleSystemMessageContent extends StatelessWidget {
         _UserAvatar(
           profile: userCache[displayPubkey.toLowerCase()],
           pubkey: displayPubkey,
-          size: 36,
+          size: messageAvatarSize,
         ),
-        const SizedBox(width: Grid.xxs),
+        const SizedBox(width: messageAvatarContentGap),
         Expanded(
           child: Transform.translate(
             offset: const Offset(0, -Grid.quarter),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.center,
-                  children: [
-                    Text(
-                      resolveLabel(displayPubkey),
-                      style: context.textTheme.titleSmall?.copyWith(
-                        color: context.colors.onSurface,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(width: Grid.xxs),
-                    _messageTimestamp(context, createdAt),
-                  ],
+                MessageAuthorMeta(
+                  displayName: resolveLabel(displayPubkey),
+                  username: messageUsernameLabel(
+                    userCache[displayPubkey.toLowerCase()],
+                  ),
+                  timestamp: formatMessageTime(createdAt),
+                  nameColor: context.colors.onSurface,
+                  metadataColor: context.colors.onSurfaceVariant,
+                  nameStyle: systemMessageHeadingTextStyle,
+                  displayNameKey: ValueKey(
+                    'system-message-author-$displayPubkey',
+                  ),
+                  usernameKey: ValueKey(
+                    'system-message-username-$displayPubkey',
+                  ),
+                  timestampKey: ValueKey(
+                    'system-message-timestamp-$displayPubkey',
+                  ),
                 ),
                 Text.rich(
                   TextSpan(
@@ -482,10 +507,11 @@ class _ThreadSummaryRow extends ConsumerWidget {
         );
       },
       child: Padding(
+        key: ValueKey('thread-summary-${message.id}'),
         padding: const EdgeInsets.only(
-          left: 36 + Grid.xxs,
+          left: messageAvatarSize + messageAvatarContentGap,
           top: Grid.half,
-          bottom: Grid.half,
+          bottom: Grid.xs,
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
@@ -509,36 +535,38 @@ class _ThreadSummaryRow extends ConsumerWidget {
               ),
             ),
             const SizedBox(width: Grid.xxs),
-            Text.rich(
-              TextSpan(
-                children: [
-                  TextSpan(
-                    text:
-                        '${summary.replyCount} ${summary.replyCount == 1 ? 'reply' : 'replies'}',
-                    style: context.textTheme.labelMedium?.copyWith(
-                      color: context.colors.primary,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                  if (summary.lastReplyAt case final lastReplyAt?) ...[
-                    TextSpan(
-                      text: ' · ',
-                      style: context.textTheme.labelMedium?.copyWith(
-                        color: context.colors.onSurfaceVariant.withValues(
-                          alpha: 0.5,
-                        ),
-                      ),
-                    ),
+            Flexible(
+              child: Text.rich(
+                TextSpan(
+                  children: [
                     TextSpan(
                       text:
-                          'last reply ${formatThreadSummaryLastReplyTime(lastReplyAt)}',
-                      style: context.textTheme.labelMedium?.copyWith(
-                        color: context.colors.onSurfaceVariant,
-                        fontWeight: FontWeight.w400,
+                          '${summary.replyCount} ${summary.replyCount == 1 ? 'reply' : 'replies'}',
+                      style: replyPreviewTextStyle.copyWith(
+                        color: context.colors.primary,
                       ),
                     ),
+                    if (summary.lastReplyAt case final lastReplyAt?) ...[
+                      TextSpan(
+                        text: ' · ',
+                        style: replyPreviewTextStyle.copyWith(
+                          color: context.colors.onSurfaceVariant.withValues(
+                            alpha: 0.5,
+                          ),
+                        ),
+                      ),
+                      TextSpan(
+                        text:
+                            'last reply ${formatThreadSummaryLastReplyTime(lastReplyAt)}',
+                        style: replyPreviewTextStyle.copyWith(
+                          color: context.colors.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
                   ],
-                ],
+                ),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
               ),
             ),
           ],

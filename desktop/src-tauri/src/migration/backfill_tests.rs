@@ -299,3 +299,34 @@ fn slug_collision_fails_loudly_per_record_and_continues() {
     let clean_rec = records.iter().find(|r| r.pubkey == clean).unwrap();
     assert_eq!(clean_rec.persona_id.as_deref(), Some(clean.as_str()));
 }
+
+#[cfg(unix)]
+#[test]
+fn backfill_creates_the_backup_owner_only() {
+    // Same contract as the live store writer: this backup is a verbatim copy of
+    // a file that carries plaintext agent nsecs when the keyring is unreachable,
+    // so it is owner-only from the initial open rather than via a post-write
+    // chmod that would leave a umask window.
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let pubkey = "e".repeat(64);
+    let mut record = standalone_agent_json("Solo", &pubkey, Some("P"));
+    record["private_key_nsec"] = serde_json::json!("nsec1exampleplaintextkey");
+    write_agents_json(dir.path(), &serde_json::json!([record]));
+
+    assert_eq!(
+        backfill_standalone_agents_in_dir(&base(dir.path())).unwrap(),
+        1
+    );
+
+    let bak = base(dir.path()).join("managed-agents.json.pre-backfill.bak");
+    let mode = std::fs::metadata(&bak).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "backup of an inline nsec must be owner-only");
+    assert!(
+        std::fs::read_to_string(&bak)
+            .unwrap()
+            .contains("nsec1exampleplaintextkey"),
+        "the fixture really did carry an inline key"
+    );
+}

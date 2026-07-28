@@ -108,6 +108,8 @@ re-install hooks after env changes. Before agents run Git or hooks, activate the
 repo's Hermit environment (`. ./bin/activate-hermit`); do not rewrite hook
 commands to compensate for an unconfigured shell `PATH`.
 
+**Commit with `git commit -s`.** The required **DCO Check** fails any PR with a commit missing a `Signed-off-by` trailer, and `just hooks` installs a `commit-msg` hook that adds it to commits you create locally (`git rebase` and `git cherry-pick` still need `--signoff`) — if you build commit commands programmatically, include `-s` every time. To repair a branch that already has unsigned commits: `git rebase --signoff main`, then force-push.
+
 Additional rules:
 - No `unsafe` code
 - Do not introduce new `unwrap()` or `expect()` in production paths — use `?` and proper error types
@@ -341,9 +343,19 @@ Add specs to `desktop/tests/e2e/` and register them in `playwright.config.ts`
 (`smoke` project `testMatch`). Every test calls `installMockBridge(page)` for
 mock Tauri IPC. Mock pubkey, channel names, and UUIDs live in `e2eBridge.ts`.
 
+**Always build with `pnpm build:e2e`, never `pnpm run build`.** The mock Tauri
+bridge is compiled in only for `--mode e2e` (see `installE2eBridgeIfConfigured`
+in `desktop/src/main.tsx`). A plain `pnpm run build` strips it, so
+`window.__TAURI_INTERNALS__` is never defined and **every** mock-mode spec fails
+with `Cannot read properties of undefined (reading 'invoke')` — the app renders
+"Community connection failed" instead of the UI under test. That looks exactly
+like a product bug rather than a build mistake, so it burns real time.
+`pnpm test:e2e:smoke` and `pnpm test:e2e:integration` run the right build for
+you; prefer them over a manual build plus `playwright test`.
+
 **Stale server:** `reuseExistingServer: true` means a previous build's server
-serves old code. Kill port 4173 and `pnpm run build` before re-running tests
-after code changes.
+serves old code. Kill port 4173 and re-run `pnpm build:e2e` before re-running
+tests after code changes.
 
 **`addInitScript` before bridge:** `page.addInitScript` (localStorage seeding)
 must run BEFORE `installMockBridge(page)` — React reads state on mount, the
@@ -552,6 +564,15 @@ To run the app locally (starts Docker, relay, iOS simulator automatically):
 ```bash
 just mobile-dev
 ```
+
+When run from a git worktree, `just mobile-dev` (and `just
+mobile-build-android`) give the debug build a per-worktree app identifier
+(keyed to the worktree directory name) and a branch-labelled app name via
+`scripts/mobile-worktree-overrides.sh`, so builds from multiple worktrees
+install side by side. Release builds are unaffected. `just mobile-clean`
+removes stale worktree-suffixed installs from simulators/emulators. See
+[mobile/README.md](mobile/README.md) for direct Xcode / Android Studio
+usage.
 
 ### Testing Conventions
 

@@ -82,13 +82,113 @@ test("dropping a file on the channel column attaches it to the composer", async 
 
   const dropZone = page.getByTestId("channel-drop-zone");
   await dropZone.dispatchEvent("dragenter", { dataTransfer });
-  await expect(dropZone.getByText("Drop files to upload")).toBeVisible();
+  const overlay = dropZone.getByTestId("drop-zone-overlay");
+  const label = dropZone.getByTestId("drop-zone-label");
+  await expect(overlay).toBeVisible();
+  await expect(label).toContainText("Drop files to upload");
+
+  const [dropZoneBox, overlayBox, overlayStyles, stacking] = await Promise.all([
+    dropZone.boundingBox(),
+    overlay.boundingBox(),
+    page.evaluate(() => {
+      const overlayElement = document.querySelector<HTMLElement>(
+        '[data-testid="drop-zone-overlay"]',
+      );
+      const contentSurface = document.querySelector<HTMLElement>(
+        "[data-buzz-content-surface]",
+      );
+      if (!(overlayElement && contentSurface)) return null;
+      const overlayStyle = getComputedStyle(overlayElement);
+      return {
+        backdropFilter: overlayStyle.backdropFilter,
+        containerRadius: getComputedStyle(contentSurface).borderRadius,
+        overlayRadius: overlayStyle.borderRadius,
+      };
+    }),
+    page.evaluate(() => {
+      const overlayElement = document.querySelector<HTMLElement>(
+        '[data-testid="drop-zone-overlay"]',
+      );
+      const composerOverlayElement = document.querySelector<HTMLElement>(
+        '[data-testid="channel-composer-overlay"]',
+      );
+      if (!(overlayElement && composerOverlayElement)) return null;
+      return {
+        composer: Number.parseInt(
+          getComputedStyle(composerOverlayElement).zIndex,
+          10,
+        ),
+        dropZone: Number.parseInt(getComputedStyle(overlayElement).zIndex, 10),
+      };
+    }),
+  ]);
+
+  expect(overlayBox).toEqual(dropZoneBox);
+  expect(overlayStyles).not.toBeNull();
+  expect(overlayStyles?.overlayRadius).toBe(overlayStyles?.containerRadius);
+  expect(overlayStyles?.backdropFilter).toContain("blur");
+  expect(stacking).not.toBeNull();
+  expect(stacking?.dropZone).toBeGreaterThan(stacking?.composer ?? 0);
 
   await dropZone.dispatchEvent("drop", { dataTransfer });
   await expect(page.getByTestId("message-composer")).toContainText(
     "quarterly-report.pdf",
   );
 });
+
+for (const theme of ["buzz", "buzz-dark", "github-light", "github-dark"]) {
+  test(`drop prompt has accessible text contrast in ${theme}`, async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.evaluate((selectedTheme) => {
+      window.localStorage.setItem("buzz-theme", selectedTheme);
+    }, theme);
+    await page.reload();
+    await page.getByTestId("channel-general").click();
+
+    const dataTransfer = await page.evaluateHandle(() => {
+      const transfer = new DataTransfer();
+      transfer.items.add(
+        new File(["contrast check"], "contrast-check.txt", {
+          type: "text/plain",
+        }),
+      );
+      return transfer;
+    });
+    const dropZone = page.getByTestId("channel-drop-zone");
+    await dropZone.dispatchEvent("dragenter", { dataTransfer });
+
+    const contrastRatio = await dropZone
+      .getByTestId("drop-zone-label")
+      .evaluate((element) => {
+        const parseRgb = (value: string) =>
+          (value.match(/[\d.]+/g) ?? []).slice(0, 3).map(Number);
+        const luminance = (color: number[]) =>
+          color
+            .map((channel) => {
+              const value = channel / 255;
+              return value <= 0.04045
+                ? value / 12.92
+                : ((value + 0.055) / 1.055) ** 2.4;
+            })
+            .reduce(
+              (sum, channel, index) =>
+                sum + channel * [0.2126, 0.7152, 0.0722][index],
+              0,
+            );
+        const style = getComputedStyle(element);
+        const foreground = luminance(parseRgb(style.color));
+        const background = luminance(parseRgb(style.backgroundColor));
+        return (
+          (Math.max(foreground, background) + 0.05) /
+          (Math.min(foreground, background) + 0.05)
+        );
+      });
+
+    expect(contrastRatio).toBeGreaterThanOrEqual(4.5);
+  });
+}
 
 test("forum posts emit a FileCard for generic attachments, not a broken image", async ({
   page,
