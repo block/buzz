@@ -253,9 +253,13 @@ fn build_merged_status_event(
         .map(Tag::parse)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| format!("build merged status tags: {error}"))?;
+    // `.allow_self_tagging()`: `owner` is this signer's own pubkey, so nostr
+    // 0.44 would strip `["p", owner]` and ship the status event without the
+    // recipient the readers index on.
     EventBuilder::new(Kind::Custom(1631), "")
         .tags(tags)
         .custom_created_at(Timestamp::from(created_at))
+        .allow_self_tagging()
         .sign_with_keys(keys)
         .map(|event| event.as_json())
         .map_err(|error| format!("sign merged pull request status: {error}"))
@@ -291,9 +295,12 @@ fn build_pull_request_status_event(
         .map(Tag::parse)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| format!("build pull request status tags: {error}"))?;
+    // See `build_merged_status_event` — `owner` is the signer, so the
+    // `["p", owner]` tag needs `.allow_self_tagging()` to survive.
     EventBuilder::new(kind, "")
         .tags(tags)
         .custom_created_at(Timestamp::from(created_at.max(Timestamp::now().as_secs())))
+        .allow_self_tagging()
         .sign_with_keys(keys)
         .map(|event| event.as_json())
         .map_err(|error| format!("sign pull request status: {error}"))
@@ -828,6 +835,68 @@ mod tests {
         );
         assert_eq!(other.code, "merge_failed");
         assert!(other.recovery.is_none());
+    }
+
+    /// The owner `p` tag names the signer, so nostr 0.44 scrubs it unless the
+    /// builder opts into self-tagging. Readers index PR status events by
+    /// `#p` (`projectPullRequests.mjs` reads them back as `recipients`), so a
+    /// stripped tag silently drops the owner from the participant set.
+    #[test]
+    fn pull_request_status_events_keep_the_owner_p_tag() {
+        let keys = Keys::generate();
+        let owner = keys.public_key().to_hex();
+        let repo_address = format!("30617:{owner}:buzz");
+        let author = "b".repeat(64);
+
+        let merged = Event::from_json(
+            build_merged_status_event(
+                &keys,
+                &repo_address,
+                &"d".repeat(64),
+                &author,
+                &"e".repeat(40),
+                123,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            merged
+                .tags
+                .iter()
+                .any(|tag| tag.as_slice() == ["p", owner.as_str()]),
+            "kind 1631 lost the owner `p` tag: {:?}",
+            merged.tags
+        );
+
+        for (status, kind) in [("open", 1630u16), ("closed", 1632), ("draft", 1633)] {
+            let event = Event::from_json(
+                build_pull_request_status_event(
+                    &keys,
+                    &repo_address,
+                    &"d".repeat(64),
+                    &author,
+                    status,
+                    123,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(event.kind.as_u16(), kind);
+            assert!(
+                event
+                    .tags
+                    .iter()
+                    .any(|tag| tag.as_slice() == ["p", owner.as_str()]),
+                "kind {kind} ({status}) lost the owner `p` tag: {:?}",
+                event.tags
+            );
+            // The author is a distinct pubkey, so it must still ride along.
+            assert!(event
+                .tags
+                .iter()
+                .any(|tag| tag.as_slice() == ["p", author.as_str()]));
+        }
     }
 
     #[test]

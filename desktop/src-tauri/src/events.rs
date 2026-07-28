@@ -266,6 +266,11 @@ pub fn build_delete_channel(channel_id: Uuid) -> Result<EventBuilder, String> {
 // ── Membership ───────────────────────────────────────────────────────────────
 
 /// Kind 9000 — add member.
+///
+/// `.allow_self_tagging()` is required: self-add is a first-class relay path,
+/// so `actor == target` and the `["p", target]` tag matches the signer. nostr
+/// 0.44 strips matching `p` tags by default, which would send the event with
+/// no target and fail as `missing p tag`.
 pub fn build_add_member(
     channel_id: Uuid,
     target_pubkey: &str,
@@ -279,17 +284,24 @@ pub fn build_add_member(
     if let Some(r) = role {
         tags.push(tag(vec!["role", r])?);
     }
-    Ok(EventBuilder::new(Kind::Custom(9000), "").tags(tags))
+    Ok(EventBuilder::new(Kind::Custom(9000), "")
+        .tags(tags)
+        .allow_self_tagging())
 }
 
 /// Kind 9001 — remove member.
+///
+/// Self-remove is a supported relay path, so this needs
+/// `.allow_self_tagging()` for the same reason as [`build_add_member`].
 pub fn build_remove_member(channel_id: Uuid, target_pubkey: &str) -> Result<EventBuilder, String> {
     check_pubkey(target_pubkey)?;
     let tags = vec![
         tag(vec!["h", &channel_id.to_string()])?,
         tag(vec!["p", &target_pubkey.to_ascii_lowercase()])?,
     ];
-    Ok(EventBuilder::new(Kind::Custom(9001), "").tags(tags))
+    Ok(EventBuilder::new(Kind::Custom(9001), "")
+        .tags(tags)
+        .allow_self_tagging())
 }
 
 // ── Messages ─────────────────────────────────────────────────────────────────
@@ -929,6 +941,58 @@ mod tests {
         assert_eq!(tags[2], vec!["reason", "returned"]);
         assert_eq!(tags.len(), 3, "self unarchive must not carry auth tag");
         assert_eq!(event.pubkey.to_hex(), TARGET_HEX);
+    }
+
+    // ── Self-targeted membership keeps its `p` tag ──────────────────────
+    //
+    // Self-add and self-remove are supported relay paths, so `actor ==
+    // target`. Without `.allow_self_tagging()` nostr 0.44 scrubs the `p` tag
+    // that names the signer and the relay rejects with `missing p tag`.
+
+    fn self_membership_tags(builder: EventBuilder) -> (Vec<Vec<String>>, String) {
+        let secret = nostr::SecretKey::from_hex(
+            "0000000000000000000000000000000000000000000000000000000000000004",
+        )
+        .unwrap();
+        let keys = Keys::new(secret);
+        let event = builder.sign_with_keys(&keys).unwrap();
+        (
+            event.tags.iter().map(|t| t.as_slice().to_vec()).collect(),
+            keys.public_key().to_hex(),
+        )
+    }
+
+    #[test]
+    fn add_member_self_targeted_keeps_p_tag() {
+        let secret = nostr::SecretKey::from_hex(
+            "0000000000000000000000000000000000000000000000000000000000000004",
+        )
+        .unwrap();
+        let self_hex = Keys::new(secret).public_key().to_hex();
+        let channel = Uuid::parse_str(CH_ID).unwrap();
+        let (tags, signer) =
+            self_membership_tags(build_add_member(channel, &self_hex, Some("bot")).unwrap());
+        assert!(
+            tags.iter().any(|t| t[0] == "p" && t[1] == signer),
+            "self `p` tag was stripped at signing: {tags:?}"
+        );
+        assert!(tags.iter().any(|t| t[0] == "role" && t[1] == "bot"));
+    }
+
+    #[test]
+    fn remove_member_self_targeted_keeps_p_tag() {
+        let secret = nostr::SecretKey::from_hex(
+            "0000000000000000000000000000000000000000000000000000000000000004",
+        )
+        .unwrap();
+        let self_hex = Keys::new(secret).public_key().to_hex();
+        let channel = Uuid::parse_str(CH_ID).unwrap();
+        let (tags, signer) =
+            self_membership_tags(build_remove_member(channel, &self_hex).unwrap());
+        assert!(
+            tags.iter().any(|t| t[0] == "p" && t[1] == signer),
+            "self `p` tag was stripped at signing: {tags:?}"
+        );
     }
 
     // ── build_message_edit `p`-tag emission (lane 8ace8eed) ──────────────
