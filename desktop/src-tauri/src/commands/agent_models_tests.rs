@@ -223,6 +223,102 @@ fn saved_agent_model_discovery_uses_record_snapshot_for_definition_less_agent() 
     assert_eq!(discovery.provider_env_var, Some("GOOSE_PROVIDER"));
 }
 
+#[test]
+fn saved_agent_model_discovery_uses_descriptor_provider_mapping() {
+    let record: crate::managed_agents::ManagedAgentRecord = serde_json::from_str(
+        r#"{
+            "pubkey": "mapped1234",
+            "name": "mapped-agent",
+            "private_key_nsec": "",
+            "relay_url": "",
+            "acp_command": "buzz-acp",
+            "agent_command": "goose",
+            "runtime": "goose",
+            "agent_args": [],
+            "mcp_command": "",
+            "turn_timeout_seconds": 320,
+            "parallelism": 1,
+            "system_prompt": null,
+            "model": "provider-model",
+            "provider": "openai-compat",
+            "env_vars": {
+                "OPENAI_COMPAT_API_KEY": "test-key",
+                "OPENAI_COMPAT_BASE_URL": "https://provider.example/v1"
+            },
+            "created_at": "",
+            "updated_at": "",
+            "last_started_at": null,
+            "last_stopped_at": null,
+            "last_exit_code": null,
+            "last_error": null
+        }"#,
+    )
+    .expect("sample managed agent record");
+
+    let discovery = agent_model_discovery_config(&record, &[], &Default::default())
+        .expect("saved discovery config");
+
+    assert_eq!(discovery.provider.as_deref(), Some("openai-compat"));
+    assert_eq!(
+        discovery.env.get("GOOSE_PROVIDER").map(String::as_str),
+        Some("openai")
+    );
+    assert_eq!(
+        discovery.env.get("OPENAI_HOST").map(String::as_str),
+        Some("https://provider.example/v1")
+    );
+    assert_eq!(
+        discovery
+            .env
+            .get("GOOSE_PROVIDER__HOST")
+            .map(String::as_str),
+        Some("https://provider.example/v1")
+    );
+}
+
+#[test]
+fn draft_agent_model_discovery_applies_aliases_with_scope_precedence() {
+    let definition_env = BTreeMap::from([
+        ("OPENAI_API_KEY".to_string(), "definition-key".to_string()),
+        (
+            "OPENAI_HOST".to_string(),
+            "https://definition.example/v1".to_string(),
+        ),
+    ]);
+    let user_env = BTreeMap::from([
+        ("OPENAI_COMPAT_API_KEY".to_string(), "user-key".to_string()),
+        (
+            "OPENAI_COMPAT_BASE_URL".to_string(),
+            "https://user.example/v1".to_string(),
+        ),
+        ("GOOSE_PROVIDER".to_string(), "anthropic".to_string()),
+    ]);
+
+    let env =
+        draft_agent_model_discovery_env("goose", Some("openai-compat"), &definition_env, &user_env);
+
+    assert_eq!(
+        env.get("GOOSE_PROVIDER").map(String::as_str),
+        Some("openai")
+    );
+    assert_eq!(
+        env.get("OPENAI_API_KEY").map(String::as_str),
+        Some("user-key")
+    );
+    assert_eq!(
+        env.get("GOOSE_PROVIDER__API_KEY").map(String::as_str),
+        Some("user-key")
+    );
+    assert_eq!(
+        env.get("OPENAI_HOST").map(String::as_str),
+        Some("https://user.example/v1")
+    );
+    assert_eq!(
+        env.get("GOOSE_PROVIDER__HOST").map(String::as_str),
+        Some("https://user.example/v1")
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Provider resolution for discovery
 // ---------------------------------------------------------------------------
@@ -509,7 +605,8 @@ fn linked_instance_ignores_model_provider_prompt_writes() {
         Some(Some("explicit-model".to_string())),
         Some(Some("explicit-prov".to_string())),
         Some(Some("explicit-prompt".to_string())),
-    );
+    )
+    .expect("linked provider write is ignored");
 
     assert!(
         record.model.is_none(),
@@ -560,7 +657,8 @@ fn definition_less_instance_accepts_model_provider_prompt_writes() {
         Some(Some("new-model".to_string())),
         Some(Some("new-prov".to_string())),
         Some(Some("new-prompt".to_string())),
-    );
+    )
+    .expect("standalone provider write is valid");
 
     assert_eq!(record.model.as_deref(), Some("new-model"));
     assert_eq!(record.provider.as_deref(), Some("new-prov"));
