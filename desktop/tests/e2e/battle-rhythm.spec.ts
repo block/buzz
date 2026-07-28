@@ -70,6 +70,48 @@ test("Battle Rhythm persists a manual weekly routine and honours an exclusion", 
   await expect(screen.getByText("Manual", { exact: true })).toBeVisible();
 });
 
+test("Battle Rhythm opens read-only plan milestones without duplicating them", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await page.getByTestId("open-plans-view").click();
+  const plans = page.getByTestId("plans-screen");
+  await plans.getByRole("button", { name: "New Plan" }).click();
+  const create = page.getByRole("dialog", { name: "New operational plan" });
+  await create.getByLabel("Plan title").fill("Sea readiness plan");
+  await create
+    .getByLabel("Purpose")
+    .fill("Prepare HMAS Supply for the assigned logistics mission.");
+  await create.getByLabel("Mission-ready date").fill("2026-07-31");
+  await create.getByRole("button", { name: "Create plan" }).click();
+
+  const detail = page.getByTestId("plan-detail-screen");
+  await detail.getByRole("button", { name: "Add task" }).click();
+  const task = page.getByRole("dialog", { name: "New planning task" });
+  await task.getByLabel("Task").fill("Complete securing for sea rounds");
+  await task.getByLabel("WBS").fill("1.1");
+  await task.getByLabel("Owner").fill("Executive Officer");
+  await task.getByLabel("Start", { exact: true }).fill("2026-07-29");
+  await task.getByLabel("Due").fill("2026-07-29");
+  await task.getByLabel("Duration (working days)").fill("1");
+  await task.getByRole("button", { name: "Save task" }).click();
+
+  await page.getByTestId("open-battle-rhythm-view").click();
+  const rhythm = page.getByTestId("battle-rhythm-screen");
+  const milestone = rhythm.getByTestId("plan-task-milestone");
+  await expect(milestone).toHaveText(/Complete securing for sea rounds/);
+  await milestone.click();
+
+  await expect(page).toHaveURL(/#\/plans\/.+\?task=.+/);
+  await expect(
+    page.getByRole("dialog", { name: "Edit planning task" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("dialog", { name: "Edit manual event" }),
+  ).toHaveCount(0);
+});
+
 test("Battle Rhythm reviews and applies a Shortcast document import", async ({
   page,
 }) => {

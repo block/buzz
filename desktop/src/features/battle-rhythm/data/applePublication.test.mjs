@@ -56,6 +56,38 @@ test("projects only approved events with stable Battle Rhythm IDs", () => {
   assert.match(projected[0].notes, /Responsible: Navigator/);
 });
 
+test("projects linked plan milestones with stable plan-task identities", () => {
+  const projected = projectBattleRhythmToApple(
+    [event()],
+    [
+      {
+        kind: "planTask",
+        id: "plan-task:task-a",
+        title: "1.1 Prepare logistics support plan",
+        date: "2026-08-04",
+        allDay: true,
+        visualStatus: "inProgress",
+        owner: "Logistics Officer",
+        projectId: "deployment-1",
+        taskId: "task-a",
+        href: "/plans/deployment-1?task=task-a",
+      },
+    ],
+  );
+
+  assert.equal(projected.length, 2);
+  assert.deepEqual(projected[1], {
+    external_id: "plan-task:task-a",
+    title: "1.1 Prepare logistics support plan",
+    start: "2026-08-04T00:00:00+10:00",
+    end: "2026-08-05T00:00:00+10:00",
+    is_all_day: true,
+    location: null,
+    notes:
+      "Plan milestone · in progress\nResponsible: Logistics Officer\nOpen: /plans/deployment-1?task=task-a",
+  });
+});
+
 test("publishes the authoritative coverage and parses reconciliation counts", async () => {
   calls.length = 0;
   response = {

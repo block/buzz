@@ -1,5 +1,11 @@
 import * as React from "react";
 import { ChevronLeft, ChevronRight, Filter, History, Plus } from "lucide-react";
+import { useAppNavigation } from "@/app/navigation/useAppNavigation";
+import {
+  projectTaskMilestones,
+  type PlanTaskCalendarProjection,
+} from "@/features/plans/domain/calendarProjection";
+import { usePlansQuery } from "@/features/plans/hooks";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { readAppleInputs } from "@/shared/api/tauriAppleInputs";
 import {
@@ -42,6 +48,8 @@ export function BattleRhythmScreen() {
   const [appleBusy, setAppleBusy] = React.useState(false);
   const range = React.useMemo(() => getYearRange(day, TIME_ZONE, 24), [day]);
   const rhythm = useBattleRhythmQuery(identity.data?.pubkey, range);
+  const plans = usePlansQuery(identity.data?.pubkey);
+  const { goPlan } = useAppNavigation();
   const mutations = useBattleRhythmMutations(
     identity.data?.pubkey ?? "",
     range,
@@ -50,13 +58,32 @@ export function BattleRhythmScreen() {
     () => expandRecurringEvents(rhythm.data?.events ?? [], range),
     [range, rhythm.data?.events],
   );
+  const planMilestones = React.useMemo(
+    () =>
+      projectTaskMilestones(
+        plans.data?.tasks ?? [],
+        plans.data?.projects ?? [],
+      ).filter(
+        (milestone) =>
+          milestone.date >= range.start.slice(0, 10) &&
+          milestone.date < range.end.slice(0, 10),
+      ),
+    [plans.data?.projects, plans.data?.tasks, range],
+  );
+  const dayPlanMilestones = planMilestones.filter(
+    (milestone) => milestone.date === day,
+  );
   const visibleEvents = events.filter(
     (event) => event.start.slice(0, 10) === day || view !== "Day",
   );
   const publishToApple = React.useCallback(async () => {
     setAppleBusy(true);
     try {
-      const status = await publishBattleRhythmToApple(events, range);
+      const status = await publishBattleRhythmToApple(
+        events,
+        range,
+        planMilestones,
+      );
       setAppleStatus(status);
     } catch (cause) {
       setAppleStatus({
@@ -75,7 +102,7 @@ export function BattleRhythmScreen() {
     } finally {
       setAppleBusy(false);
     }
-  }, [events, range]);
+  }, [events, planMilestones, range]);
   React.useEffect(() => {
     if (!rhythm.isSuccess) return;
     setAppleStatus((current) =>
@@ -119,7 +146,9 @@ export function BattleRhythmScreen() {
         <MonthCalendar
           day={day}
           events={events}
+          planMilestones={planMilestones}
           onEdit={openEditor}
+          onOpenPlanMilestone={openPlanMilestone}
           timeZone={TIME_ZONE}
         />
       );
@@ -128,16 +157,20 @@ export function BattleRhythmScreen() {
         <WeekCalendar
           day={day}
           events={events}
+          planMilestones={planMilestones}
           onEdit={openEditor}
+          onOpenPlanMilestone={openPlanMilestone}
           timeZone={TIME_ZONE}
         />
       );
     return (
       <DayShortcast
         events={visibleEvents}
+        planMilestones={dayPlanMilestones}
         routineState="Alongside"
         timeZone={TIME_ZONE}
         onEdit={openEditor}
+        onOpenPlanMilestone={openPlanMilestone}
       />
     );
   };
@@ -151,6 +184,9 @@ export function BattleRhythmScreen() {
       : undefined;
     setEditingEvent(original);
     setEditorOpen(true);
+  }
+  function openPlanMilestone(milestone: PlanTaskCalendarProjection) {
+    void goPlan(milestone.projectId, { taskId: milestone.taskId });
   }
   return (
     <main

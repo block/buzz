@@ -3,7 +3,8 @@ import {
   type AppleInputPermission,
   type AppleInputResponse,
 } from "@/shared/api/tauriAppleInputs";
-import type { DateRange } from "../domain/dateRange";
+import type { PlanTaskCalendarProjection } from "@/features/plans/domain/calendarProjection";
+import { type DateRange, localDateTimeToRfc3339 } from "../domain/dateRange";
 import type { BattleRhythmEvent } from "../domain/contracts";
 
 export type ApplePublicationState =
@@ -30,8 +31,9 @@ function bounded(value: string | null, maximum: number): string | null {
 
 export function projectBattleRhythmToApple(
   events: readonly BattleRhythmEvent[],
+  planMilestones: readonly PlanTaskCalendarProjection[] = [],
 ) {
-  return events
+  const calendarEvents = events
     .filter((event) => event.status === "approved")
     .map((event) => {
       const notes = [
@@ -56,6 +58,36 @@ export function projectBattleRhythmToApple(
         notes: bounded(notes, 4096),
       });
     });
+  const taskMilestones = planMilestones.map((milestone) => {
+    const next = new Date(`${milestone.date}T12:00:00Z`);
+    next.setUTCDate(next.getUTCDate() + 1);
+    const status = milestone.visualStatus
+      .replace(/([a-z])([A-Z])/g, "$1 $2")
+      .toLowerCase();
+    return Object.freeze({
+      external_id: milestone.id,
+      title: milestone.title.slice(0, 512),
+      start: localDateTimeToRfc3339(
+        `${milestone.date}T00:00`,
+        "Australia/Sydney",
+      ),
+      end: localDateTimeToRfc3339(
+        `${next.toISOString().slice(0, 10)}T00:00`,
+        "Australia/Sydney",
+      ),
+      is_all_day: true,
+      location: null,
+      notes: bounded(
+        [
+          `Plan milestone · ${status}`,
+          `Responsible: ${milestone.owner}`,
+          `Open: ${milestone.href}`,
+        ].join("\n"),
+        4096,
+      ),
+    });
+  });
+  return [...calendarEvents, ...taskMilestones];
 }
 
 function count(value: string | undefined): number {
@@ -119,13 +151,14 @@ export function parseApplePublicationStatus(
 export async function publishBattleRhythmToApple(
   events: readonly BattleRhythmEvent[],
   coverage: DateRange,
+  planMilestones: readonly PlanTaskCalendarProjection[] = [],
 ): Promise<ApplePublicationStatus> {
   const response = await readAppleInputs({
     operation: "reconcile_calendar",
     arguments: {
       coverage_start: coverage.start,
       coverage_end: coverage.end,
-      projections: projectBattleRhythmToApple(events),
+      projections: projectBattleRhythmToApple(events, planMilestones),
     },
   });
   return parseApplePublicationStatus(response);
