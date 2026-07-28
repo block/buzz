@@ -144,6 +144,28 @@ pub enum ActionDef {
         /// Duration string (e.g. `"5m"`, `"1h"`).
         duration: String,
     },
+    /// Count events matching a filter. Returns `{ "count": N }` as step output,
+    /// usable in subsequent `if:` conditions (e.g. threshold alerts).
+    QueryCount {
+        /// Channel UUID. Defaults to the trigger's channel.
+        #[serde(default)]
+        channel: Option<String>,
+        /// Event kinds to count (e.g. `[9]` for messages). Required.
+        kinds: Vec<u32>,
+        /// Only count events newer than this duration (e.g. `"1h"`, `"30m"`).
+        #[serde(default)]
+        since: Option<String>,
+    },
+    /// Fetch recent messages from a channel. Returns an array of
+    /// `{ "id", "content", "author", "created_at" }` as step output.
+    QueryMessages {
+        /// Channel UUID. Defaults to the trigger's channel.
+        #[serde(default)]
+        channel: Option<String>,
+        /// Maximum number of messages to return (newest first). Default 10, max 50.
+        #[serde(default)]
+        limit: Option<u32>,
+    },
 }
 
 impl WorkflowDef {
@@ -351,9 +373,11 @@ mod tests {
             "  - id: hook\n    action: call_webhook\n    url: https://hooks.example.com/notify\n    method: POST\n",
             "  - id: approve\n    action: request_approval\n    from: '@manager'\n    message: Approve?\n    timeout: 4h\n",
             "  - id: wait\n    action: delay\n    duration: 5m\n",
+            "  - id: count\n    action: query_count\n    kinds: [9]\n    since: 1h\n",
+            "  - id: msgs\n    action: query_messages\n    limit: 5\n",
         );
         let (def, _) = parse_yaml(yaml).expect("parse failed");
-        assert_eq!(def.steps.len(), 5);
+        assert_eq!(def.steps.len(), 7);
 
         assert!(matches!(
             &def.steps[0].action,
@@ -372,6 +396,11 @@ mod tests {
             ActionDef::RequestApproval { .. }
         ));
         assert!(matches!(&def.steps[4].action, ActionDef::Delay { .. }));
+        assert!(matches!(&def.steps[5].action, ActionDef::QueryCount { .. }));
+        assert!(matches!(
+            &def.steps[6].action,
+            ActionDef::QueryMessages { .. }
+        ));
     }
 
     #[test]

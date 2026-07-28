@@ -12,6 +12,7 @@
 use std::collections::HashMap;
 
 use buzz_core::tenant::CommunityId;
+use chrono::Utc;
 use evalexpr::HashMapContext;
 use nostr::ToBech32;
 use serde_json::Value as JsonValue;
@@ -454,6 +455,19 @@ pub fn resolve_step_templates(
         }),
         Delay { duration } => Ok(Delay {
             duration: duration.clone(),
+        }),
+        QueryCount {
+            channel,
+            kinds,
+            since,
+        } => Ok(QueryCount {
+            channel: t_opt(channel)?,
+            kinds: kinds.clone(),
+            since: since.clone(),
+        }),
+        QueryMessages { channel, limit } => Ok(QueryMessages {
+            channel: t_opt(channel)?,
+            limit: *limit,
         }),
     }
 }
@@ -907,7 +921,155 @@ pub async fn dispatch_action(
                 serde_json::json!({ "slept_secs": secs }),
             ))
         }
+
+        QueryCount {
+            channel,
+            kinds,
+            since,
+        } => {
+            if kinds.is_empty() {
+                return Err(WorkflowError::InvalidDefinition(format!(
+                    "QueryCount step '{step_id}': 'kinds' must not be empty"
+                )));
+            }
+
+            let channel_id = resolve_query_channel(channel.as_deref(), &trigger_ctx.channel_id)?;
+            let channel_uuid = Uuid::parse_str(&channel_id).map_err(|e| {
+                WorkflowError::InvalidDefinition(format!("QueryCount: invalid channel UUID: {e}"))
+            })?;
+
+            let since_dt = match since.as_deref() {
+                Some(dur) => {
+                    let secs = parse_duration_secs(dur)?;
+                    Some(Utc::now() - chrono::Duration::seconds(i64::try_from(secs).unwrap_or(0)))
+                }
+                None => None,
+            };
+
+            let query = build_channel_query(
+                community_id,
+                channel_uuid,
+                kinds.iter().map(|k| *k as i32).collect(),
+                since_dt,
+                None,
+            );
+
+            let count = engine
+                .db
+                .count_events(&query)
+                .await
+                .map_err(|e| WorkflowError::WebhookError(format!("QueryCount: {e}")))?;
+
+            info!(
+                run_id = %run_id,
+                step = step_id,
+                channel = %channel_id,
+                count,
+                "QueryCount → {count} events"
+            );
+
+            Ok(StepResult::Completed(serde_json::json!({ "count": count })))
+        }
+
+        QueryMessages { channel, limit } => {
+            let channel_id = resolve_query_channel(channel.as_deref(), &trigger_ctx.channel_id)?;
+            let channel_uuid = Uuid::parse_str(&channel_id).map_err(|e| {
+                WorkflowError::InvalidDefinition(format!(
+                    "QueryMessages: invalid channel UUID: {e}"
+                ))
+            })?;
+
+            let limit = limit.unwrap_or(10).min(50) as i64;
+
+            let query = build_channel_query(
+                community_id,
+                channel_uuid,
+                vec![9], // KIND_STREAM_MESSAGE
+                None,
+                Some(limit),
+            );
+
+            let events = engine
+                .db
+                .query_events(&query)
+                .await
+                .map_err(|e| WorkflowError::WebhookError(format!("QueryMessages: {e}")))?;
+
+            let messages: Vec<JsonValue> = events
+                .into_iter()
+                .map(|e| {
+                    serde_json::json!({
+                        "id": e.event.id.to_hex(),
+                        "content": e.event.content,
+                        "author": e.event.pubkey.to_hex(),
+                        "created_at": e.event.created_at.as_secs(),
+                    })
+                })
+                .collect();
+
+            info!(
+                run_id = %run_id,
+                step = step_id,
+                channel = %channel_id,
+                fetched = messages.len(),
+                "QueryMessages → {} messages",
+                messages.len()
+            );
+
+            Ok(StepResult::Completed(
+                serde_json::json!({ "messages": messages }),
+            ))
+        }
     }
+}
+
+/// Build a community-scoped `EventQuery` with only the fields relevant to
+/// workflow query actions. All other fields default to None/false.
+fn build_channel_query(
+    community_id: CommunityId,
+    channel_uuid: Uuid,
+    kinds: Vec<i32>,
+    since: Option<chrono::DateTime<Utc>>,
+    limit: Option<i64>,
+) -> buzz_db::EventQuery {
+    buzz_db::EventQuery {
+        community_id,
+        channel_id: Some(channel_uuid),
+        kinds: Some(kinds),
+        pubkey: None,
+        since,
+        until: None,
+        limit,
+        offset: None,
+        p_tag_hex: None,
+        d_tag: None,
+        d_tags: None,
+        before_id: None,
+        global_only: false,
+        authors: None,
+        ids: None,
+        e_tags: None,
+        channel_ids: None,
+        max_limit: None,
+    }
+}
+
+/// Resolve the channel for a query action: use the override if provided,
+/// otherwise fall back to the trigger's channel. Fails if neither is set.
+fn resolve_query_channel(
+    channel_override: Option<&str>,
+    trigger_channel: &str,
+) -> Result<String, WorkflowError> {
+    let channel = channel_override
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.to_owned())
+        .unwrap_or_else(|| trigger_channel.to_owned());
+    if channel.trim().is_empty() {
+        return Err(WorkflowError::InvalidDefinition(
+            "query action has no channel (neither override nor trigger.channel_id)".into(),
+        ));
+    }
+    Ok(channel)
 }
 
 /// Generate a cryptographically random approval token.
