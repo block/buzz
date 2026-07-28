@@ -46,6 +46,19 @@ services:
       BUZZ_SPAWNER_MAX_AGENTS: ${BUZZ_SPAWNER_MAX_AGENTS:-16}
       BUZZ_SPAWNER_MAX_CPU_MILLIS: ${BUZZ_SPAWNER_MAX_CPU_MILLIS:-4000}
       BUZZ_SPAWNER_MAX_MEMORY_MIB: ${BUZZ_SPAWNER_MAX_MEMORY_MIB:-8192}
+      # How this spawner names itself in the desktop's picker. Without these,
+      # `Config::default_name` falls back to $HOSTNAME — which inside a
+      # container is its short ID, so the picker offers something like
+      # "8c6b9debbaf9" and the operator has no way to say otherwise. Left unset
+      # the fallback still applies, so this only ever improves on the default.
+      BUZZ_SPAWNER_NAME: ${BUZZ_SPAWNER_NAME:-}
+      BUZZ_SPAWNER_DESCRIPTION: ${BUZZ_SPAWNER_DESCRIPTION:-}
+      # Provider/model used when a spec names neither. The buzz-agent harness
+      # refuses to start without a provider, and a spec is allowed to omit it —
+      # a spawner has no global settings to fall back on, so the operator
+      # supplies the host default here.
+      BUZZ_SPAWNER_DEFAULT_PROVIDER: ${BUZZ_SPAWNER_DEFAULT_PROVIDER:-}
+      BUZZ_SPAWNER_DEFAULT_MODEL: ${BUZZ_SPAWNER_DEFAULT_MODEL:-}
       # Names of variables to forward into agent containers — not KEY=VALUE
       # pairs. The value is read from this service's own environment, so a
       # rotated credential is picked up by restarting the spawner.
