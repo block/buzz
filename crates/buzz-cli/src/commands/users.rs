@@ -1,7 +1,7 @@
 use buzz_core::kind::KIND_MANAGED_AGENT;
 use nostr::PublicKey;
 
-use crate::client::{normalize_write_response, BuzzClient};
+use crate::client::{extract_d_tag, normalize_write_response, BuzzClient};
 use crate::error::CliError;
 use crate::validate::validate_hex64;
 
@@ -116,10 +116,8 @@ fn owned_agent_pubkeys_from_events(events: &[serde_json::Value], query: &str) ->
             if !name.eq_ignore_ascii_case(query) {
                 return None;
             }
-            event.get("tags")?.as_array()?.iter().find_map(|tag| {
-                let tag = tag.as_array()?;
-                (tag.first()?.as_str()? == "d").then(|| tag.get(1)?.as_str().map(str::to_string))?
-            })
+            let pubkey = extract_d_tag(event);
+            (!pubkey.is_empty()).then_some(pubkey)
         })
         .collect();
     pubkeys.sort();
@@ -140,6 +138,121 @@ async fn owned_agent_pubkeys_by_name(
     Ok(owned_agent_pubkeys_from_events(&events, query))
 }
 
+fn profile_content(event: &serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+    event
+        .get("content")
+        .and_then(|value| value.as_str())
+        .and_then(|content| serde_json::from_str::<serde_json::Value>(content).ok())
+        .and_then(|content| content.as_object().cloned())
+        .unwrap_or_default()
+}
+
+fn name_search_profiles(events: &[serde_json::Value], query: &str) -> Vec<serde_json::Value> {
+    let lower_query = query.to_ascii_lowercase();
+    events
+        .iter()
+        .filter_map(|event| {
+            let mut profile = profile_content(event);
+            let display_name = profile
+                .get("display_name")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            let name = profile
+                .get("name")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            if !display_name.to_ascii_lowercase().contains(&lower_query)
+                && !name.to_ascii_lowercase().contains(&lower_query)
+            {
+                return None;
+            }
+            profile.insert(
+                "pubkey".to_string(),
+                serde_json::json!(event
+                    .get("pubkey")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("")),
+            );
+            Some(serde_json::Value::Object(profile))
+        })
+        .collect()
+}
+
+fn auth_tag_values(event: &serde_json::Value) -> Vec<&serde_json::Value> {
+    event
+        .get("tags")
+        .and_then(|tags| tags.as_array())
+        .into_iter()
+        .flatten()
+        .filter(|tag| {
+            tag.as_array()
+                .and_then(|values| values.first())
+                .and_then(|value| value.as_str())
+                == Some("auth")
+        })
+        .collect()
+}
+
+fn owner_verification(event: &serde_json::Value, expected_owner: &str) -> &'static str {
+    let Some(agent_pubkey) = event
+        .get("pubkey")
+        .and_then(|value| value.as_str())
+        .and_then(|value| PublicKey::parse(value).ok())
+    else {
+        return "invalid_agent_pubkey";
+    };
+    let auth_tags = auth_tag_values(event);
+    let [auth_tag] = auth_tags.as_slice() else {
+        return if auth_tags.is_empty() {
+            "missing_auth"
+        } else {
+            "multiple_auth_tags"
+        };
+    };
+    let Ok(auth_tag_json) = serde_json::to_string(auth_tag) else {
+        return "invalid_auth";
+    };
+    match buzz_sdk::nip_oa::verify_auth_tag(&auth_tag_json, &agent_pubkey) {
+        Ok(owner) if owner.to_hex() == expected_owner => "verified",
+        Ok(_) => "owner_mismatch",
+        Err(_) => "invalid_auth",
+    }
+}
+
+fn owner_scoped_profiles(
+    events: &[serde_json::Value],
+    pubkeys: &[String],
+    owner: &str,
+    effective_owner: &str,
+) -> Vec<serde_json::Value> {
+    pubkeys
+        .iter()
+        .map(|pubkey| {
+            let event = events.iter().find(|event| {
+                event.get("pubkey").and_then(|value| value.as_str()) == Some(pubkey.as_str())
+            });
+            let mut profile = event.map(profile_content).unwrap_or_default();
+            let verification = if PublicKey::parse(pubkey).is_err() {
+                "invalid_agent_pubkey"
+            } else {
+                event
+                    .map(|event| owner_verification(event, owner))
+                    .unwrap_or("missing_profile")
+            };
+            profile.insert("pubkey".to_string(), serde_json::json!(pubkey));
+            profile.insert("verification".to_string(), serde_json::json!(verification));
+            profile.insert(
+                "owned_by_me".to_string(),
+                serde_json::json!(verification == "verified" && owner == effective_owner),
+            );
+            if verification == "verified" {
+                profile.insert("owner_pubkey".to_string(), serde_json::json!(owner));
+            }
+            serde_json::Value::Object(profile)
+        })
+        .collect()
+}
+
 /// Search for users by display name via NIP-50 full-text search on kind:0 profiles.
 /// Returns [] if the relay does not implement NIP-50 search.
 async fn search_by_name(
@@ -153,70 +266,40 @@ async fn search_by_name(
     }
 
     let owner = resolve_owner(client, owner)?;
-    let (raw, result_owner) = if let Some(owner) = owner {
+    let profiles = if let Some(owner) = owner {
         let pubkeys = owned_agent_pubkeys_by_name(client, &owner, query).await?;
         if pubkeys.is_empty() {
             println!("[]");
             return Ok(());
         }
-        let filter = serde_json::json!({
-            "kinds": [0],
-            "authors": pubkeys,
-            "limit": pubkeys.len(),
-        });
-        (client.query(&filter).await?, Some(owner))
+        let valid_pubkeys: Vec<&String> = pubkeys
+            .iter()
+            .filter(|pubkey| PublicKey::parse(pubkey.as_str()).is_ok())
+            .collect();
+        let events = if valid_pubkeys.is_empty() {
+            Vec::new()
+        } else {
+            let filter = serde_json::json!({
+                "kinds": [0],
+                "authors": valid_pubkeys,
+                "limit": valid_pubkeys.len(),
+            });
+            let raw = client.query(&filter).await?;
+            serde_json::from_str(&raw)
+                .map_err(|e| CliError::Other(format!("failed to parse response: {e}")))?
+        };
+        owner_scoped_profiles(&events, &pubkeys, &owner, &effective_owner(client))
     } else {
         let filter = serde_json::json!({
             "kinds": [0],
             "search": query,
             "limit": 100
         });
-        (client.query(&filter).await?, None)
+        let raw = client.query(&filter).await?;
+        let events: Vec<serde_json::Value> = serde_json::from_str(&raw)
+            .map_err(|e| CliError::Other(format!("failed to parse response: {e}")))?;
+        name_search_profiles(&events, query)
     };
-
-    // Parse and filter client-side for case-insensitive substring match
-    // on display_name or name fields (NIP-50 may return broader matches).
-    let events: serde_json::Value = serde_json::from_str(&raw)
-        .map_err(|e| CliError::Other(format!("failed to parse response: {e}")))?;
-
-    let Some(arr) = events.as_array() else {
-        println!("[]");
-        return Ok(());
-    };
-
-    let lower_query = query.to_ascii_lowercase();
-    let profiles: Vec<serde_json::Value> = arr
-        .iter()
-        .filter_map(|event| {
-            let content_str = event.get("content").and_then(|v| v.as_str())?;
-            let content: serde_json::Value = serde_json::from_str(content_str).ok()?;
-            let display_name = content
-                .get("display_name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let name = content.get("name").and_then(|v| v.as_str()).unwrap_or("");
-            if !display_name.to_ascii_lowercase().contains(&lower_query)
-                && !name.to_ascii_lowercase().contains(&lower_query)
-            {
-                return None;
-            }
-            let mut profile = content;
-            if let Some(obj) = profile.as_object_mut() {
-                obj.insert(
-                    "pubkey".to_string(),
-                    serde_json::json!(event.get("pubkey").and_then(|v| v.as_str()).unwrap_or("")),
-                );
-                if let Some(owner) = &result_owner {
-                    obj.insert("owner_pubkey".to_string(), serde_json::json!(owner));
-                    obj.insert(
-                        "owned_by_me".to_string(),
-                        serde_json::json!(owner == &effective_owner(client)),
-                    );
-                }
-            }
-            Some(profile)
-        })
-        .collect();
     let output = match format {
         crate::OutputFormat::Compact => {
             let compact: Vec<serde_json::Value> = profiles
@@ -227,7 +310,7 @@ async fn search_by_name(
                         "display_name": p.get("display_name").or_else(|| p.get("name")).cloned().unwrap_or_default(),
                     });
                     if let Some(obj) = value.as_object_mut() {
-                        for field in ["owner_pubkey", "owned_by_me"] {
+                        for field in ["owner_pubkey", "owned_by_me", "verification"] {
                             if let Some(field_value) = p.get(field) {
                                 obj.insert(field.to_string(), field_value.clone());
                             }
@@ -435,7 +518,11 @@ pub async fn dispatch(
 
 #[cfg(test)]
 mod tests {
-    use super::{owned_agent_pubkeys_from_events, presence_subject};
+    use super::{
+        owned_agent_pubkeys_from_events, owner_scoped_profiles, owner_verification,
+        presence_subject,
+    };
+    use nostr::Keys;
     use serde_json::json;
 
     #[test]
@@ -458,6 +545,118 @@ mod tests {
             json!({"content": r#"{"name":"Honey"}"#, "tags": [["p", "b"]]}),
         ];
         assert!(owned_agent_pubkeys_from_events(&events, "Honey").is_empty());
+    }
+
+    fn profile_event(agent_keys: &Keys, auth_tags: Vec<serde_json::Value>) -> serde_json::Value {
+        json!({
+            "pubkey": agent_keys.public_key().to_hex(),
+            "content": r#"{"display_name":"Renamed Honey"}"#,
+            "tags": auth_tags,
+        })
+    }
+
+    #[test]
+    fn owner_verification_requires_one_valid_auth_tag_for_requested_owner() {
+        let owner_keys = Keys::generate();
+        let agent_keys = Keys::generate();
+        let foreign_owner_keys = Keys::generate();
+        let valid_tag: serde_json::Value = serde_json::from_str(
+            &buzz_sdk::nip_oa::compute_auth_tag(&owner_keys, &agent_keys.public_key(), "kind=9")
+                .unwrap(),
+        )
+        .unwrap();
+        let foreign_tag: serde_json::Value = serde_json::from_str(
+            &buzz_sdk::nip_oa::compute_auth_tag(
+                &foreign_owner_keys,
+                &agent_keys.public_key(),
+                "kind=9",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            owner_verification(
+                &profile_event(&agent_keys, vec![valid_tag.clone()]),
+                &owner_keys.public_key().to_hex(),
+            ),
+            "verified"
+        );
+        assert_eq!(
+            owner_verification(
+                &profile_event(&agent_keys, vec![foreign_tag]),
+                &owner_keys.public_key().to_hex(),
+            ),
+            "owner_mismatch"
+        );
+        assert_eq!(
+            owner_verification(
+                &profile_event(&agent_keys, vec![]),
+                &owner_keys.public_key().to_hex()
+            ),
+            "missing_auth"
+        );
+        assert_eq!(
+            owner_verification(
+                &profile_event(&agent_keys, vec![valid_tag.clone(), valid_tag]),
+                &owner_keys.public_key().to_hex(),
+            ),
+            "multiple_auth_tags"
+        );
+        assert_eq!(
+            owner_verification(
+                &profile_event(
+                    &agent_keys,
+                    vec![json!([
+                        "auth",
+                        owner_keys.public_key().to_hex(),
+                        "kind=9",
+                        "0".repeat(128)
+                    ])],
+                ),
+                &owner_keys.public_key().to_hex(),
+            ),
+            "invalid_auth"
+        );
+    }
+
+    #[test]
+    fn owner_scoped_profiles_keep_drifted_and_missing_profiles_without_claiming_ownership() {
+        let owner_keys = Keys::generate();
+        let agent_keys = Keys::generate();
+        let missing_keys = Keys::generate();
+        let auth_tag: serde_json::Value = serde_json::from_str(
+            &buzz_sdk::nip_oa::compute_auth_tag(&owner_keys, &agent_keys.public_key(), "kind=9")
+                .unwrap(),
+        )
+        .unwrap();
+        let events = vec![profile_event(&agent_keys, vec![auth_tag])];
+        let pubkeys = vec![
+            agent_keys.public_key().to_hex(),
+            missing_keys.public_key().to_hex(),
+            "malformed".to_string(),
+        ];
+
+        let profiles = owner_scoped_profiles(
+            &events,
+            &pubkeys,
+            &owner_keys.public_key().to_hex(),
+            &owner_keys.public_key().to_hex(),
+        );
+
+        assert_eq!(profiles[0]["display_name"], "Renamed Honey");
+        assert_eq!(profiles[0]["verification"], "verified");
+        assert_eq!(profiles[0]["owned_by_me"], true);
+        assert_eq!(
+            profiles[0]["owner_pubkey"],
+            owner_keys.public_key().to_hex()
+        );
+        assert_eq!(profiles[1]["verification"], "missing_profile");
+        assert_eq!(profiles[1]["owned_by_me"], false);
+        assert!(profiles[1].get("owner_pubkey").is_none());
+        assert_eq!(profiles[2]["verification"], "invalid_agent_pubkey");
+        assert_eq!(profiles[2]["owned_by_me"], false);
+        assert!(profiles[2].get("owner_pubkey").is_none());
     }
 
     #[test]
