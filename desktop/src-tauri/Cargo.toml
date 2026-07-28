@@ -88,6 +88,7 @@ url = "2"
 buzz_core_pkg = { package = "buzz-core", path = "../../crates/buzz-core" }
 buzz_persona_pkg = { package = "buzz-persona", path = "../../crates/buzz-persona" }
 buzz_sdk_pkg = { package = "buzz-sdk", path = "../../crates/buzz-sdk" }
+buzz_ws_client_pkg = { package = "buzz-ws-client", path = "../../crates/buzz-ws-client" }
 buzz_agent_pkg = { package = "buzz-agent", path = "../../crates/buzz-agent" }
 iroh = { version = "1.0.2", optional = true }
 mesh-llm-sdk = { git = "https://github.com/Mesh-LLM/mesh-llm.git", rev = "f455d493a2ae82baf2a326e2d0fda351433b4b30", package = "mesh-llm-sdk", default-features = false, features = ["client", "serving"], optional = true }

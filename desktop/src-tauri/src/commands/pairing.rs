@@ -6,12 +6,13 @@ use buzz_core_pkg::kind::KIND_PAIRING;
 use buzz_core_pkg::pairing::qr::encode_qr;
 use buzz_core_pkg::pairing::session::PairingSession;
 use buzz_core_pkg::pairing::types::{AbortReason, PayloadType};
+use buzz_ws_client_pkg::connect_websocket;
 use futures_util::{SinkExt, StreamExt};
 use nostr::ToBech32;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::mpsc;
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
@@ -264,7 +265,7 @@ async fn pairing_ws_task_inner(
     outbound_rx: &mut mpsc::Receiver<String>,
     app: &AppHandle,
 ) -> Result<(), String> {
-    let (ws, _) = connect_async(relay_url)
+    let (ws, _) = connect_websocket(relay_url)
         .await
         .map_err(|e| format!("WebSocket connection failed: {e}"))?;
     let (mut write, mut read) = ws.split();
