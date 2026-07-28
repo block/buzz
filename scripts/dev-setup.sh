@@ -89,11 +89,13 @@ fail_if_local_redis_blocks_compose() {
   if docker ps --format '{{.Names}}' | grep -qx 'buzz-redis'; then
     return
   fi
+  # buzz-redis maps host port 6380 (remapped from 6379 to coexist with a local
+  # brew Redis serving another project). Only guard the port buzz actually binds.
   local redis_pids
-  redis_pids=$(lsof -nP -iTCP:6379 -sTCP:LISTEN 2>/dev/null | awk 'NR > 1 && $1 == "redis-ser" {print $2}' | sort -u | tr '
+  redis_pids=$(lsof -nP -iTCP:6380 -sTCP:LISTEN 2>/dev/null | awk 'NR > 1 && $1 == "redis-ser" {print $2}' | sort -u | tr '
 ' ' ' || true)
   if [[ -n "${redis_pids}" ]]; then
-    error "Local Redis is already listening on port 6379 (pid(s): ${redis_pids}). Stop it before running setup: brew services stop redis"
+    error "Local Redis is already listening on port 6380 (pid(s): ${redis_pids}). Stop it before running setup: brew services stop redis"
     exit 1
   fi
 }
