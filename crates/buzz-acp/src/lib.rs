@@ -938,6 +938,9 @@ enum SwitchOutcome {
     Switched,
     /// Not in the process catalog — pick rejected, session untouched.
     UnsupportedModel,
+    /// The process catalog has not been captured yet, so nothing can be
+    /// validated against — pick deferred, session untouched.
+    CatalogUnavailable,
     /// No turn in flight and no idle agent holds a session for the channel.
     NoActiveTurn,
 }
@@ -945,12 +948,19 @@ enum SwitchOutcome {
 impl SwitchOutcome {
     /// `control_result` status string. Consumed by the desktop's model picker —
     /// do not change these without updating it.
+    ///
+    /// `CatalogUnavailable` reports as `unsupported_model` rather than adding a
+    /// status: both mean "pick rejected, session untouched", which is all the
+    /// picker acts on. It is also unreachable from the desktop, whose model
+    /// list is populated from this same catalog — with no catalog there is
+    /// nothing to pick. Only `!model`, which can be typed before the first
+    /// session binds, distinguishes the two, and it does so on the variant.
     fn status(&self) -> &'static str {
         match self {
             Self::Sent => "sent",
             Self::TurnEnding => "turn_ending",
             Self::Switched => "switched",
-            Self::UnsupportedModel => "unsupported_model",
+            Self::UnsupportedModel | Self::CatalogUnavailable => "unsupported_model",
             Self::NoActiveTurn => "no_active_turn",
         }
     }
@@ -958,11 +968,13 @@ impl SwitchOutcome {
 
 /// Switch the model backing `channel_id` (Phase 3a, Option ii).
 ///
-/// Pre-cancel guard: an unsupported pick is rejected against the process-wide
-/// catalog before anything is disturbed, on both paths. The catalog is only
-/// unknown before the first session of the process binds, in which case the
-/// pick is passed through and validated at apply time instead (the turn
-/// restarts on the unchanged model + an `unsupported_model` result).
+/// Pre-cancel guard: every pick is validated against the process-wide catalog
+/// before anything is disturbed, on both paths. No catalog means nothing to
+/// validate against, so the pick is deferred rather than passed through: the
+/// window where the catalog is missing is the first turn's `session/new`, which
+/// is already registered in flight, so passing an unvalidated pick through
+/// there cancels and requeues a live turn on the strength of a possible typo —
+/// and the fresh session then falls back to the unchanged model anyway.
 ///
 /// Busy path: deliver `SwitchModel` over the in-flight task's oneshot — the
 /// task cancels the turn, sets `desired_model`, and requeues the batch so it
@@ -976,7 +988,10 @@ fn switch_model_for_channel(
     channel_id: Uuid,
     model_id: &str,
 ) -> SwitchOutcome {
-    if catalog.is_some_and(|caps| !caps.contains(model_id)) {
+    let Some(caps) = catalog else {
+        return SwitchOutcome::CatalogUnavailable;
+    };
+    if !caps.contains(model_id) {
         return SwitchOutcome::UnsupportedModel;
     }
 
@@ -1098,6 +1113,11 @@ fn handle_model_command(
             Some(listing) => format!("`{model_id}` isn't one of my models.\n\n{listing}"),
             None => format!("`{model_id}` isn't one of my models."),
         },
+        // Nothing to validate the pick against yet, so it was not applied. The
+        // no-argument branch above says the same thing for the same reason.
+        SwitchOutcome::CatalogUnavailable => {
+            "I don't know my model list yet — ask again in a moment.".to_string()
+        }
         // No agent holds a session for this channel, so there is nothing to
         // switch. Say so rather than claiming a switch that never happened.
         SwitchOutcome::NoActiveTurn => {
@@ -4741,11 +4761,45 @@ mod owner_control_command_tests {
             handle_model_command(&mut pool, &empty, channel_id, ""),
             "I don't know my model list yet — ask again in a moment."
         );
-        // No catalog and no session: nothing to switch, and the reply must not
-        // claim otherwise.
+        // A named pick is deferred for the same reason, not passed through:
+        // there is nothing to validate it against.
         assert_eq!(
             handle_model_command(&mut pool, &empty, channel_id, "haiku"),
-            "I have no session for this channel yet — message me first, then `!model`."
+            "I don't know my model list yet — ask again in a moment."
+        );
+    }
+
+    /// The catalog is missing only until the process's first `session/new`
+    /// responds — and that call is already registered in flight. Passing an
+    /// unvalidated pick through there would cancel and requeue a live turn on
+    /// the strength of a possible typo, and the fresh session would then fall
+    /// back to the unchanged model anyway.
+    #[tokio::test]
+    async fn model_command_does_not_cancel_the_first_turn_without_a_catalog() {
+        let channel_id = Uuid::new_v4();
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let empty = pool::ModelCatalog::default();
+        let (control_tx, mut control_rx) = tokio::sync::oneshot::channel();
+        let abort_handle = pool.join_set.spawn(async {});
+        pool.task_map_mut().insert(
+            abort_handle.id(),
+            pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                turn_id: "test-turn-id".to_string(),
+                recoverable_batch: None,
+                control_tx: Some(control_tx),
+                steer_tx: None,
+            },
+        );
+
+        assert_eq!(
+            handle_model_command(&mut pool, &empty, channel_id, "haiku"),
+            "I don't know my model list yet — ask again in a moment."
+        );
+        assert!(
+            control_rx.try_recv().is_err(),
+            "an unvalidatable pick must not cancel the in-flight turn"
         );
     }
 
@@ -4769,6 +4823,12 @@ mod owner_control_command_tests {
         assert_eq!(SwitchOutcome::Switched.status(), "switched");
         assert_eq!(
             SwitchOutcome::UnsupportedModel.status(),
+            "unsupported_model"
+        );
+        // Deliberately shares `unsupported_model`: both mean "rejected, session
+        // untouched", and the desktop cannot reach this variant anyway.
+        assert_eq!(
+            SwitchOutcome::CatalogUnavailable.status(),
             "unsupported_model"
         );
         assert_eq!(SwitchOutcome::NoActiveTurn.status(), "no_active_turn");
