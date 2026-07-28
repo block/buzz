@@ -20,6 +20,20 @@ use crate::usage::{TurnUsage, UsageTracker};
 /// Lines exceeding this limit are rejected to prevent OOM from rogue agents.
 const MAX_LINE_SIZE: usize = 10_000_000; // 10 MB
 
+/// Signing material belongs to the harness or its dedicated broker, never to
+/// the model subprocess.  Keep this list at the final spawn boundary: callers
+/// may add arbitrary persona environment entries, but they cannot reintroduce
+/// a raw signing capability through `AcpClient::spawn`.
+const WORKER_RESTRICTED_ENV_KEYS: &[&str] = &[
+    "BUZZ_PRIVATE_KEY",
+    "BUZZ_AUTH_TAG",
+    "NOSTR_PRIVATE_KEY",
+    "BUZZ_ACP_PRIVATE_KEY",
+    // The durable ledger contains signed events (and potentially their NIP-OA
+    // tag).  Workers do not need its filesystem location to use relay_reply.
+    "BUZZ_ACP_STATE_DIR",
+];
+
 /// An MCP server configuration passed to `session/new`.
 ///
 /// Corresponds to the `McpServerStdio` variant in the ACP schema.
@@ -423,6 +437,14 @@ impl AcpClient {
             // Callers MUST still call shutdown().await for guaranteed cleanup.
             .kill_on_drop(true);
 
+        // Start from the ambient environment but explicitly remove every raw
+        // signing credential before any persona configuration is applied.
+        // This protects against both desktop-injected credentials and callers
+        // that accidentally pass a reserved key in `extra_env`.
+        for key in WORKER_RESTRICTED_ENV_KEYS {
+            cmd.env_remove(key);
+        }
+
         // Per-persona env vars (e.g., GOOSE_PROVIDER, BUZZ_AGENT_PROVIDER).
         // For most keys, operator precedence wins: skip injection if already set
         // in the parent environment.
@@ -448,6 +470,13 @@ impl AcpClient {
         let codex_merge_active = codex_config_value.is_some();
 
         for (key, value) in extra_env {
+            if WORKER_RESTRICTED_ENV_KEYS.contains(&key.as_str()) {
+                tracing::warn!(
+                    key,
+                    "refusing to inject a broker-restricted value into worker"
+                );
+                continue;
+            }
             if key == "CODEX_CONFIG" && codex_merge_active {
                 // Handled by build_codex_config_env; skip here to avoid double-setting.
                 continue;

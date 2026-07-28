@@ -5,7 +5,7 @@ mod error;
 mod validate;
 
 use clap::{Parser, Subcommand};
-use client::BuzzClient;
+pub use client::BuzzClient;
 use error::CliError;
 use nostr::Keys;
 use uuid::Uuid;
@@ -82,11 +82,11 @@ struct Cli {
     relay: String,
 
     /// Nostr private key (hex or nsec). This is the CLI's identity.
-    #[arg(long, env = "BUZZ_PRIVATE_KEY")]
+    #[arg(long, env = "BUZZ_PRIVATE_KEY", hide_env_values = true)]
     private_key: Option<String>,
 
     /// NIP-OA auth tag JSON (owner attestation). Injected into every signed event.
-    #[arg(long, env = "BUZZ_AUTH_TAG")]
+    #[arg(long, env = "BUZZ_AUTH_TAG", hide_env_values = true)]
     auth_tag: Option<String>,
 
     /// Output format: 'json' (default, full fields) or 'compact' (reduced fields).
@@ -1801,6 +1801,45 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn top_level_help_never_renders_environment_values() {
+        const TEST_PRIVATE_KEY: &str = "nsec1testhelpmustneverrender";
+        const TEST_AUTH_TAG: &str = "[\"auth\",\"test-help-value\"]";
+
+        let old_private_key = std::env::var_os("BUZZ_PRIVATE_KEY");
+        let old_auth_tag = std::env::var_os("BUZZ_AUTH_TAG");
+        // Environment mutation is process-global. This test restores both values
+        // before asserting so its sentinel cannot leak into other test cases.
+        unsafe {
+            std::env::set_var("BUZZ_PRIVATE_KEY", TEST_PRIVATE_KEY);
+            std::env::set_var("BUZZ_AUTH_TAG", TEST_AUTH_TAG);
+        }
+        let mut help = Vec::new();
+        Cli::command()
+            .write_long_help(&mut help)
+            .expect("render CLI help");
+        let help = String::from_utf8(help).expect("help is UTF-8");
+        unsafe {
+            match old_private_key {
+                Some(value) => std::env::set_var("BUZZ_PRIVATE_KEY", value),
+                None => std::env::remove_var("BUZZ_PRIVATE_KEY"),
+            }
+            match old_auth_tag {
+                Some(value) => std::env::set_var("BUZZ_AUTH_TAG", value),
+                None => std::env::remove_var("BUZZ_AUTH_TAG"),
+            }
+        }
+
+        assert!(
+            !help.contains(TEST_PRIVATE_KEY),
+            "top-level help must not render a private-key environment value"
+        );
+        assert!(
+            !help.contains(TEST_AUTH_TAG),
+            "top-level help must not render an auth-tag environment value"
+        );
     }
 
     #[test]

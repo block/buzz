@@ -462,6 +462,14 @@ pub fn spawn_agent_child(
         return Err(error);
     }
     let runtime_key = ManagedAgentRuntimeKey::new(record.pubkey.clone(), relay_url)?;
+    // Durable broker ledger: scoped to this exact agent+relay runtime pair so
+    // a restart can reconcile a previously signed reply without crossing a
+    // relay boundary or sharing state with another agent identity.
+    let reply_state_dir = super::managed_agents_base_dir(app)?
+        .join("reply-state")
+        .join(runtime_key.runtime_id());
+    std::fs::create_dir_all(&reply_state_dir)
+        .map_err(|error| format!("failed to create managed reply state directory: {error}"))?;
     // Resolve the effective harness (agent command) from the linked persona, so
     // persona harness edits propagate on the next spawn; an explicit per-agent
     // override wins. `agent_args` and `mcp_command` are pure derivations of the
@@ -579,6 +587,7 @@ pub fn spawn_agent_child(
     command.env("RUST_LOG", child_rust_log_filter());
     command.env("BUZZ_PRIVATE_KEY", &record.private_key_nsec);
     command.env("BUZZ_RELAY_URL", &effective_relay_url);
+    command.env("BUZZ_ACP_STATE_DIR", &reply_state_dir);
     command.env("BUZZ_ACP_LAZY_POOL", if lazy { "true" } else { "false" });
     command.env("BUZZ_ACP_AGENT_COMMAND", &resolved_agent_command);
     command.env("BUZZ_ACP_AGENT_ARGS", agent_args.join(","));
