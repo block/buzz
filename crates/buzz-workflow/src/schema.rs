@@ -202,12 +202,6 @@ impl WorkflowDef {
                         step.id
                     )));
                 }
-                ActionDef::SetChannelTopic { .. } => {
-                    return Err(WorkflowError::InvalidDefinition(format!(
-                        "step '{}' uses 'set_channel_topic' which is not yet implemented",
-                        step.id
-                    )));
-                }
                 _ => {}
             }
         }
@@ -419,13 +413,14 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_unimplemented_set_channel_topic() {
+    fn validate_accepts_set_channel_topic() {
+        // set_channel_topic is now implemented — validate() should accept it.
         let yaml = "name: Topic Test\ntrigger:\n  on: webhook\nsteps:\n  - id: topic\n    action: set_channel_topic\n    topic: new\n";
-        let err = parse_yaml(yaml).unwrap_err();
-        assert!(
-            err.to_string().contains("set_channel_topic"),
-            "expected set_channel_topic rejection, got: {err}"
-        );
+        let (def, _) = parse_yaml(yaml).expect("set_channel_topic should validate");
+        assert!(matches!(
+            def.steps[0].action,
+            ActionDef::SetChannelTopic { .. }
+        ));
     }
 
     #[test]

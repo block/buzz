@@ -71,4 +71,27 @@ pub trait ActionSink: Send + Sync {
         author_pubkey: &str,
         workflow_depth: usize,
     ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>>;
+
+    /// Update a channel's topic on behalf of a workflow owner.
+    ///
+    /// Emits a NIP-29 edit-metadata event (kind:9002) carrying a `topic` tag.
+    /// The relay's side-effect handler applies the topic change after
+    /// membership/permission checks. Same community-scoping and keypair-signs
+    /// semantics as [`send_message`].
+    ///
+    /// - `community_id`: the owning community of the workflow run.
+    /// - `channel_id`: UUID string of the target channel.
+    /// - `topic`: the new topic string (must not be empty).
+    /// - `author_pubkey`: hex pubkey of the workflow owner (attribution `p` tag).
+    /// - `workflow_depth`: trigger-chain depth for loop prevention.
+    ///
+    /// Returns the event ID hex string on success.
+    fn set_channel_topic(
+        &self,
+        community_id: CommunityId,
+        channel_id: &str,
+        topic: &str,
+        author_pubkey: &str,
+        workflow_depth: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>>;
 }

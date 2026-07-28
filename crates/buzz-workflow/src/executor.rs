@@ -596,10 +596,54 @@ pub async fn dispatch_action(
             Err(WorkflowError::NotImplemented("SendDm".into()))
         }
 
-        SetChannelTopic { topic: _ } => {
-            warn!(run_id = %run_id, step = step_id, "SetChannelTopic not yet implemented");
-            // TODO (WF-07): update channel topic via DB.
-            Err(WorkflowError::NotImplemented("SetChannelTopic".into()))
+        SetChannelTopic { topic } => {
+            // Load workflow metadata for owner attribution, scoped to the
+            // run's community — same rationale as SendMessage.
+            let wf_run = engine
+                .db
+                .get_workflow_run(community_id, run_id)
+                .await
+                .map_err(|e| {
+                    WorkflowError::WebhookError(format!(
+                        "SetChannelTopic: failed to load workflow run {run_id}: {e}"
+                    ))
+                })?;
+            let workflow = engine
+                .db
+                .get_workflow(community_id, wf_run.workflow_id)
+                .await
+                .map_err(|e| {
+                    WorkflowError::WebhookError(format!(
+                        "SetChannelTopic: failed to load workflow {}: {e}",
+                        wf_run.workflow_id
+                    ))
+                })?;
+            let owner_pubkey_hex = hex::encode(&workflow.owner_pubkey);
+
+            info!(
+                run_id = %run_id,
+                step = step_id,
+                channel = %trigger_ctx.channel_id,
+                "SetChannelTopic → {:?}",
+                topic
+            );
+
+            let event_id = engine
+                .action_sink()?
+                .set_channel_topic(
+                    community_id,
+                    &trigger_ctx.channel_id,
+                    topic,
+                    &owner_pubkey_hex,
+                    trigger_ctx.workflow_depth,
+                )
+                .await
+                .map_err(WorkflowError::from)?;
+
+            Ok(StepResult::Completed(serde_json::json!({
+                "set": true,
+                "event_id": event_id,
+            })))
         }
 
         AddReaction { emoji } => {

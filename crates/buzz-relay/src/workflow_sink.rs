@@ -367,6 +367,101 @@ impl ActionSink for RelayActionSink {
             Ok(event_id_hex)
         })
     }
+
+    fn set_channel_topic(
+        &self,
+        community_id: CommunityId,
+        channel_id: &str,
+        topic: &str,
+        author_pubkey: &str,
+        workflow_depth: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>> {
+        let channel_id = channel_id.to_owned();
+        let topic = topic.to_owned();
+        let author_pubkey = author_pubkey.to_owned();
+
+        Box::pin(async move {
+            let state = self
+                .state
+                .upgrade()
+                .ok_or_else(|| ActionSinkError::Database("relay is shutting down".into()))?;
+
+            // Resolve the run's owning community → tenant (same rationale as
+            // send_message: a community-B workflow must mutate B's channel).
+            let host = state
+                .db
+                .lookup_community_host(community_id)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?
+                .ok_or_else(|| {
+                    ActionSinkError::Database(format!(
+                        "workflow run community {community_id} is not mapped to a host"
+                    ))
+                })?;
+            let tenant = buzz_core::tenant::TenantContext::resolved(community_id, host);
+
+            if topic.trim().is_empty() {
+                return Err(ActionSinkError::EmptyContent);
+            }
+
+            let channel_uuid = Uuid::parse_str(&channel_id)
+                .map_err(|e| ActionSinkError::InvalidInput(format!("invalid UUID: {e}")))?;
+
+            // Build a NIP-29 edit-metadata event (kind:9002) with a `topic`
+            // tag, plus attribution `p` and `buzz:workflow` (depth) tags.
+            // The SDK's build_set_topic produces h+topic tags; we rebuild with
+            // the full tag set here so the extra tags ride along. The relay's
+            // side-effect handler (handle_edit_metadata) applies the topic
+            // change during ingest after membership/permission checks.
+            let workflow_tag_depth = workflow_depth.to_string();
+            let h_tag = Tag::parse(["h", &channel_id])
+                .map_err(|e| ActionSinkError::EventBuild(format!("h tag: {e}")))?;
+            let topic_tag = Tag::parse(["topic", &topic])
+                .map_err(|e| ActionSinkError::EventBuild(format!("topic tag: {e}")))?;
+            let p_tag = Tag::parse(["p", &author_pubkey])
+                .map_err(|e| ActionSinkError::EventBuild(format!("p tag: {e}")))?;
+            let wf_tag = Tag::parse(["buzz:workflow", "true", &workflow_tag_depth])
+                .map_err(|e| ActionSinkError::EventBuild(format!("workflow tag: {e}")))?;
+            let event = EventBuilder::new(Kind::Custom(9002), "")
+                .tags([h_tag, topic_tag, p_tag, wf_tag])
+                .sign_with_keys(&state.relay_keypair)
+                .map_err(|e| ActionSinkError::EventBuild(format!("sign: {e}")))?;
+
+            let kind_u32: u32 = 9002;
+            let (stored_event, was_inserted) = state
+                .db
+                .insert_event(tenant.community(), &event, Some(channel_uuid))
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+            if !was_inserted {
+                return Err(ActionSinkError::Database(
+                    "topic event was not inserted (replaceable LWW rejected)".into(),
+                ));
+            }
+
+            // Fan out via the shared dispatch path (Redis + local subscribers +
+            // audit) so realtime subscribers see the metadata event. The actual
+            // topic mutation is applied by the side-effect handler during
+            // ingest, not here.
+            dispatch_persistent_event(
+                &tenant,
+                &state,
+                &stored_event,
+                kind_u32,
+                &author_pubkey,
+                None,
+            )
+            .await;
+
+            let event_id_hex = stored_event.event.id.to_hex();
+            info!(
+                community_id = %community_id,
+                channel = %channel_id,
+                "Workflow set_channel_topic → event {event_id_hex}"
+            );
+            Ok(event_id_hex)
+        })
+    }
 }
 
 #[cfg(test)]
