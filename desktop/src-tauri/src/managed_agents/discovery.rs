@@ -13,7 +13,6 @@ use crate::managed_agents::{
 mod runtime_metadata;
 
 pub(crate) use runtime_metadata::KnownAcpRuntime;
-use runtime_metadata::HERMES_RUNTIME;
 
 const GOOSE_AVATAR_URL: &str = "https://goose-docs.ai/img/logo_dark.png";
 const CLAUDE_CODE_AVATAR_URL: &str = "https://anthropic.gallerycdn.vsassets.io/extensions/anthropic/claude-code/2.1.77/1773707456892/Microsoft.VisualStudio.Services.Icons.Default";
@@ -170,7 +169,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         // Verified: `codex login status` exits 0 when logged in, non-zero otherwise.
         auth_probe_args: Some(&["codex", "login", "status"]),
     },
-    HERMES_RUNTIME,
+    runtime_metadata::HERMES_RUNTIME,
     KnownAcpRuntime {
         id: "buzz-agent",
         label: "Buzz Agent",
@@ -458,7 +457,6 @@ pub fn try_record_agent_command(
         }
     }
 
-    // No runtime id set — legacy agent; use the safe default.
     Ok(default_agent_command())
 }
 
