@@ -10,14 +10,27 @@ import { getThreadReference, isBroadcastReply } from "./threading";
 
 const CHANNEL_TIMELINE_KINDS = new Set<number>(CHANNEL_TIMELINE_CONTENT_KINDS);
 
-function retainRefetchReconciliationEvents(events: RelayEvent[]) {
+function retainRefetchReconciliationEvents(
+  events: RelayEvent[],
+  retainNonBroadcastThreadReplies: boolean,
+) {
   return events.filter((event) => {
     if (!CHANNEL_TIMELINE_KINDS.has(event.kind)) return false;
     if (event.pending) return true;
+    if (!retainNonBroadcastThreadReplies) return false;
     const thread = getThreadReference(event.tags);
     return thread.parentId !== null && !isBroadcastReply(event.tags);
   });
 }
+
+export type ReconcileChannelWindowMessagesOptions = {
+  /**
+   * Preserve cache-only non-broadcast replies that the authoritative channel
+   * window omits. Flattened private/DM refetches disable this before
+   * rehydrating replies for the roots in the replacement window.
+   */
+  retainNonBroadcastThreadReplies?: boolean;
+};
 
 /**
  * Project the timeline from the authoritative window while retaining local
@@ -26,12 +39,14 @@ function retainRefetchReconciliationEvents(events: RelayEvent[]) {
 export function reconcileChannelWindowMessages(
   window: ChannelWindowStore,
   messages: RelayEvent[],
+  options?: ReconcileChannelWindowMessagesOptions,
 ) {
   const windowEvents = flattenChannelWindowEvents(window);
   const authoritativeIds = new Set(windowEvents.map((event) => event.id));
-  const retained = retainRefetchReconciliationEvents(messages).filter(
-    (event) => !authoritativeIds.has(event.id),
-  );
+  const retained = retainRefetchReconciliationEvents(
+    messages,
+    options?.retainNonBroadcastThreadReplies !== false,
+  ).filter((event) => !authoritativeIds.has(event.id));
 
   // Reconcile acknowledgements against cache-only rows without changing the
   // authoritative window's order. The render key moves from an optimistic row

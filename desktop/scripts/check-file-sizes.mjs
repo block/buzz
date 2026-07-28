@@ -79,7 +79,7 @@ const overrides = new Map([
   // is test-only content; the override covers the test growth accumulated
   // across the local-archive + agent-metric-archive PR series. store_tests.rs
   // (~731 lines) is under 1000 so needs no override.
-  ["src-tauri/src/archive/mod_tests.rs", 1208],
+  ["src-tauri/src/archive/mod_tests.rs", 1304],
   // unified-agent-model 1A.1: profile reconcile split to agents_profile.rs,
   // ratcheting 1443 -> 1295. Queued to split further in the A2 fold.
   // global-agent-config: resolve_deploy_model_provider + visibility exports

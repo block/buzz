@@ -428,12 +428,23 @@ function mergeThreadSummaries(
   };
 }
 
+export type BuildMainTimelineEntriesOptions = {
+  /**
+   * When true, reply-tagged events render as ordinary timeline rows and
+   * thread-summary badges are suppressed. Presentation only — does not alter
+   * event tags. See `shouldFlattenChannelTimeline`.
+   */
+  flattenReplies?: boolean;
+};
+
 export function buildMainTimelineEntries(
   messages: TimelineMessage[],
   unreadReplyIds: ReadonlySet<string> = new Set(),
   relaySummaries: ReadonlyMap<string, ChannelWindowThreadSummary> = new Map(),
   profiles?: UserProfileLookup,
+  options?: BuildMainTimelineEntriesOptions,
 ): MainTimelineEntry[] {
+  const flattenReplies = options?.flattenReplies === true;
   const { descendantStatsByMessageId } = buildThreadPanelIndex(
     messages,
     unreadReplyIds,
@@ -442,24 +453,32 @@ export function buildMainTimelineEntries(
   return messages
     .filter(
       (message) =>
-        message.parentId == null || isBroadcastReply(message.tags ?? []),
+        flattenReplies ||
+        message.parentId == null ||
+        isBroadcastReply(message.tags ?? []),
     )
     .map((message) => {
-      const relaySummary = relaySummaries.get(message.id);
+      // Flattened private/DM replies keep NIP-10 tags but render as depth-0
+      // timeline posts (no thread indent / "1 reply" badge).
+      const displayMessage =
+        flattenReplies && message.parentId != null
+          ? { ...message, depth: 0 }
+          : message;
+      if (flattenReplies || displayMessage.kind === KIND_HUDDLE_STARTED) {
+        return { message: displayMessage, summary: null };
+      }
+      const relaySummary = relaySummaries.get(displayMessage.id);
       return {
-        message,
-        summary:
-          message.kind === KIND_HUDDLE_STARTED
-            ? null
-            : mergeThreadSummaries(
-                buildSummaryForDirectReplies(
-                  message.id,
-                  descendantStatsByMessageId,
-                ),
-                relaySummary
-                  ? buildRelayThreadSummary(message.id, relaySummary, profiles)
-                  : null,
-              ),
+        message: displayMessage,
+        summary: mergeThreadSummaries(
+          buildSummaryForDirectReplies(
+            displayMessage.id,
+            descendantStatsByMessageId,
+          ),
+          relaySummary
+            ? buildRelayThreadSummary(displayMessage.id, relaySummary, profiles)
+            : null,
+        ),
       };
     });
 }

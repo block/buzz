@@ -1,4 +1,4 @@
-import type { RelayEvent } from "@/shared/api/types";
+import type { Channel, RelayEvent } from "@/shared/api/types";
 
 export type ThreadReference = {
   parentId: string | null;
@@ -20,6 +20,22 @@ export function isBroadcastReply(tags: string[][]): boolean {
 export function isThreadReply(tags: string[][]): boolean {
   const ref = getThreadReference(tags);
   return ref.parentId !== null && !isBroadcastReply(tags);
+}
+
+/**
+ * Private rooms and DMs render reply-tagged events inline on the channel
+ * timeline (no "N replies" summary collapse). Wire tags are unchanged —
+ * NIP-10 reply/root markers stay on the event for ACP turn receipts.
+ *
+ * Covers AEON Aspect private offices (e.g. Nexus `#aspect-nexus` /
+ * `7e8c4840-d401-4701-afc9-7ae7174cfc4e`) where agent replies should read as
+ * ordinary chat posts.
+ */
+export function shouldFlattenChannelTimeline(
+  channel: Pick<Channel, "channelType" | "visibility"> | null | undefined,
+): boolean {
+  if (!channel) return false;
+  return channel.visibility === "private" || channel.channelType === "dm";
 }
 
 export function getThreadReference(tags: string[][]): ThreadReference {

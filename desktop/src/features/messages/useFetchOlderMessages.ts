@@ -68,6 +68,7 @@ export function useFetchOlderMessages(channel: Channel | null) {
         queryClient,
         channelId,
         () => channelId === channel?.id,
+        channel,
       );
     } catch (error) {
       console.error("Failed to fetch older messages", channelId, error);
@@ -75,7 +76,7 @@ export function useFetchOlderMessages(channel: Channel | null) {
       isFetchingOlderRef.current = false;
       setIsFetchingOlder(false);
     }
-  }, [channel?.id, channelId, queryClient]);
+  }, [channel, channelId, queryClient]);
 
   return { fetchOlder, isFetchingOlder, hasOlderMessages, historyExhausted };
 }

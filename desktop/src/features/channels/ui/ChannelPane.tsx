@@ -59,7 +59,7 @@ import type { ChannelPaneProps } from "@/features/channels/ui/ChannelPane.types"
 import * as agentSessionSelection from "@/features/channels/ui/agentSessionSelection";
 import { usePrepareDmSendChannel } from "@/features/channels/ui/usePrepareDmSendChannel";
 import { Button } from "@/shared/ui/button";
-import { buildMainTimelineEntries } from "@/features/messages/lib/threadPanel";
+import { useChannelMainTimelineEntries } from "@/features/messages/lib/channelMainTimeline";
 import { useRenderScopedReactionHydration } from "@/features/messages/lib/useRenderScopedReactionHydration";
 import type { TimelineMessage } from "@/features/messages/types";
 import { isWelcomeExperienceChannel as isWelcomeExperience } from "@/features/onboarding/welcome";
@@ -456,16 +456,13 @@ export const ChannelPane = React.memo(function ChannelPane({
 
     return messages.filter((message) => !isWelcomeSetupSystemMessage(message));
   }, [activeChannel, messages]);
-  const mainTimelineEntries = React.useMemo(
-    () =>
-      buildMainTimelineEntries(
-        visibleMessages,
-        new Set(),
-        threadSummaries,
-        profiles,
-      ),
-    [profiles, threadSummaries, visibleMessages],
-  );
+  const { entries: mainTimelineEntries, flattenReplies } =
+    useChannelMainTimelineEntries(
+      activeChannel,
+      visibleMessages,
+      threadSummaries,
+      profiles,
+    );
   useRenderScopedReactionHydration({
     activeChannel,
     mainTimelineEntries,
@@ -667,6 +664,7 @@ export const ChannelPane = React.memo(function ChannelPane({
             entranceMessageId={entranceMessageId}
             onEntranceMessageComplete={onEntranceMessageComplete}
             mainEntries={mainTimelineEntries}
+            flattenReplies={flattenReplies}
             threadSummaries={threadSummaries}
             messages={visibleMessages}
             firstUnreadMessageId={firstUnreadMessageId}

@@ -154,6 +154,41 @@ test("test_projection_retains_pending_send_and_non_broadcast_thread_reply", asyn
   );
 });
 
+test("test_flattened_refetch_drops_cache_only_replies but keeps live authoritative replies", () => {
+  const harness = createHarness();
+  const staleReply = {
+    ...event("stale-reply", 105),
+    tags: [
+      ["h", "channel"],
+      ["e", "stale-root", "", "root"],
+      ["e", "stale-parent", "", "reply"],
+    ],
+  };
+  const liveReply = {
+    ...event("live-reply", 110),
+    tags: [
+      ["h", "channel"],
+      ["e", "older-root", "", "root"],
+      ["e", "older-root", "", "reply"],
+    ],
+  };
+  const window = mergeLiveChannelWindowEvent(
+    harness.client.getQueryData(harness.windowKey),
+    liveReply,
+  );
+
+  const projected = reconcileChannelWindowMessages(
+    window,
+    [staleReply, liveReply],
+    { retainNonBroadcastThreadReplies: false },
+  );
+
+  assert.deepEqual(
+    projected.map((item) => item.content),
+    ["initial", "live-reply"],
+  );
+});
+
 test("test_projection_replaces_pending_send_with_authoritative_event", () => {
   const harness = createHarness();
   const pending = { ...event("accepted", 110), pending: true };
