@@ -669,6 +669,15 @@ fn validate_multiple_event_handling(
 }
 
 pub(crate) fn normalize_agent_command_identity(command: &str) -> String {
+    const BUNDLED_REMOTE_ADAPTER: &str = "buzz-a2a-acp";
+    const BUNDLED_TARGET_SUFFIXES: &[&str] = &[
+        "-aarch64-apple-darwin",
+        "-x86-64-apple-darwin",
+        "-aarch64-unknown-linux-gnu",
+        "-x86-64-unknown-linux-gnu",
+        "-x86-64-pc-windows-msvc",
+    ];
+
     let normalized = command.trim().replace('\\', "/");
     let trimmed = normalized.trim_end_matches('/');
     let basename = trimmed
@@ -677,12 +686,22 @@ pub(crate) fn normalize_agent_command_identity(command: &str) -> String {
         .expect("rsplit always yields at least one element");
     let lower = basename.to_ascii_lowercase();
     let stem = lower.strip_suffix(".exe").unwrap_or(&lower);
-    stem.chars()
+    let identity: String = stem
+        .chars()
         .map(|character| match character {
             ' ' | '_' => '-',
             _ => character,
         })
-        .collect()
+        .collect();
+
+    if BUNDLED_TARGET_SUFFIXES
+        .iter()
+        .any(|suffix| identity == format!("{BUNDLED_REMOTE_ADAPTER}{suffix}"))
+    {
+        BUNDLED_REMOTE_ADAPTER.to_string()
+    } else {
+        identity
+    }
 }
 
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
@@ -1603,6 +1622,38 @@ mod tests {
         assert_eq!(normalize_agent_command_identity("   "), "");
         assert_eq!(normalize_agent_command_identity("/"), "");
         assert_eq!(normalize_agent_command_identity("///"), "");
+    }
+
+    #[test]
+    fn normalizes_bundled_remote_adapter_target_suffixes() {
+        assert_eq!(
+            normalize_agent_command_identity(
+                "/Applications/Buzz Alpha.app/Contents/MacOS/buzz-a2a-acp-aarch64-apple-darwin"
+            ),
+            "buzz-a2a-acp"
+        );
+        assert_eq!(
+            normalize_agent_command_identity(
+                r"C:\Program Files\Buzz\buzz-a2a-acp-x86_64-pc-windows-msvc.exe"
+            ),
+            "buzz-a2a-acp"
+        );
+        assert_eq!(
+            normalize_agent_command_identity("/opt/buzz/buzz-a2a-acp-aarch64-unknown-linux-gnu"),
+            "buzz-a2a-acp"
+        );
+    }
+
+    #[test]
+    fn preserves_unrecognized_target_suffixed_commands() {
+        assert_eq!(
+            normalize_agent_command_identity("/opt/tools/custom-agent-aarch64-apple-darwin"),
+            "custom-agent-aarch64-apple-darwin"
+        );
+        assert_eq!(
+            normalize_agent_command_identity("/opt/tools/buzz-a2a-acp-not-a-target"),
+            "buzz-a2a-acp-not-a-target"
+        );
     }
 
     #[test]

@@ -19,6 +19,7 @@ use crate::usage::{TurnUsage, UsageTracker};
 /// Maximum allowed size of a single NDJSON line from the agent's stdout.
 /// Lines exceeding this limit are rejected to prevent OOM from rogue agents.
 const MAX_LINE_SIZE: usize = 10_000_000; // 10 MB
+const MAX_AGENT_MESSAGE_BYTES: usize = 60 * 1024;
 
 /// Env var that tells a goose ACP child not to start its cron scheduler.
 /// Injected unconditionally by [`AcpClient::spawn`]; see the call site for why.
@@ -204,6 +205,10 @@ pub struct AcpClient {
     /// deltas. Both goose and buzz-agent emit this notification; goose gates
     /// on client capability advertisement, buzz-agent emits unconditionally.
     goose_usage: UsageTracker,
+    /// Text emitted as ACP `agent_message_chunk` notifications during the
+    /// current prompt. Remote adapters can hand this buffer back to the host
+    /// for proxy-signed publication without receiving the proxy private key.
+    agent_message: String,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -529,7 +534,15 @@ impl AcpClient {
             active_run_id: None,
             steer_rx: None,
             goose_usage: UsageTracker::default(),
+            agent_message: String::new(),
         })
+    }
+
+    /// Take the text emitted by the agent during the current prompt.
+    pub fn take_agent_message(&mut self) -> Option<String> {
+        let message = std::mem::take(&mut self.agent_message);
+        let message = message.trim();
+        (!message.is_empty()).then(|| message.to_string())
     }
 
     /// Attach a local observer feed to this ACP client.
@@ -721,6 +734,7 @@ impl AcpClient {
         idle_timeout: std::time::Duration,
         max_duration: std::time::Duration,
     ) -> Result<StopReason, AcpError> {
+        self.agent_message.clear();
         let params = build_prompt_params(session_id, prompt_blocks);
         let hard_deadline = tokio::time::Instant::now() + max_duration;
         self.current_hard_deadline = Some(hard_deadline);
@@ -1576,6 +1590,15 @@ impl AcpClient {
             "agent_message_chunk" => {
                 if let Some(text) = update["content"]["text"].as_str() {
                     tracing::info!(target: "acp::stream", "{text}");
+                    let remaining =
+                        MAX_AGENT_MESSAGE_BYTES.saturating_sub(self.agent_message.len());
+                    if remaining > 0 {
+                        let mut end = remaining.min(text.len());
+                        while end > 0 && !text.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        self.agent_message.push_str(&text[..end]);
+                    }
                 }
                 false
             }
@@ -3266,6 +3289,31 @@ mod tests {
         AcpClient::spawn("cat", &[], &[], false)
             .await
             .expect("spawn cat as inert client")
+    }
+
+    #[tokio::test]
+    async fn agent_message_chunks_are_collected_for_host_publication() {
+        let mut client = spawn_inert_client().await;
+        for text in ["hello ", "from remote"] {
+            let message = serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "sessionId": "test-session",
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": { "type": "text", "text": text },
+                    },
+                },
+            });
+            let _ = client.handle_session_update(&message);
+        }
+
+        assert_eq!(
+            client.take_agent_message().as_deref(),
+            Some("hello from remote")
+        );
+        assert_eq!(client.take_agent_message(), None);
     }
 
     /// Build a `session/update` JSON-RPC notification carrying a

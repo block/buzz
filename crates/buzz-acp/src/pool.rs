@@ -532,6 +532,9 @@ pub struct PromptContext {
     /// the desktop keys per (agent, relay) pair, e.g. `session_config_captured`,
     /// mirroring the `managed_agent_runtime_lifecycle` frames.
     pub relay_url: String,
+    /// Publish ACP message chunks with the Buzz-local proxy identity. This is
+    /// enabled only for remote A2A adapters, which must not receive Buzz keys.
+    pub publish_agent_output: bool,
 }
 
 impl AgentPool {
@@ -2031,6 +2034,19 @@ pub async fn run_prompt_task(
                             Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
                         )
                         .await;
+                        if let Err(error) =
+                            publish_captured_agent_output(&mut agent, &ctx, batch.as_ref()).await
+                        {
+                            send_prompt_result(
+                                &result_tx,
+                                &turn_id,
+                                agent,
+                                source,
+                                PromptOutcome::Error(error),
+                                None,
+                            );
+                            return;
+                        }
                         send_prompt_result(
                             &result_tx,
                             &turn_id,
@@ -2049,6 +2065,20 @@ pub async fn run_prompt_task(
     match prompt_result {
         Ok(stop_reason) => {
             log_stop_reason(&source, &stop_reason);
+
+            if let Err(error) =
+                publish_captured_agent_output(&mut agent, &ctx, batch.as_ref()).await
+            {
+                send_prompt_result(
+                    &result_tx,
+                    &turn_id,
+                    agent,
+                    source,
+                    PromptOutcome::Error(error),
+                    None,
+                );
+                return;
+            }
 
             let should_rotate = matches!(
                 stop_reason,
@@ -3591,6 +3621,77 @@ pub(crate) async fn post_failure_notice(
     }
 }
 
+fn automatic_reply_thread_ref(batch: &FlushBatch) -> Option<buzz_sdk::ThreadRef> {
+    let triggering = &batch.events.last()?.event;
+    let parsed = crate::queue::parse_thread_tags(triggering);
+    let root_event_id = parsed
+        .root_event_id
+        .as_deref()
+        .and_then(|root| nostr::EventId::from_hex(root).ok())
+        .unwrap_or(triggering.id);
+    Some(buzz_sdk::ThreadRef {
+        root_event_id,
+        parent_event_id: root_event_id,
+    })
+}
+
+async fn publish_captured_agent_output(
+    agent: &mut OwnedAgent,
+    ctx: &PromptContext,
+    batch: Option<&FlushBatch>,
+) -> Result<(), AcpError> {
+    let message = agent.acp.take_agent_message();
+    if !ctx.publish_agent_output {
+        return Ok(());
+    }
+    let (Some(message), Some(batch)) = (message, batch) else {
+        return Ok(());
+    };
+    let thread_ref = automatic_reply_thread_ref(batch);
+    let builder = buzz_sdk::build_message(
+        batch.channel_id,
+        &message,
+        thread_ref.as_ref(),
+        &[],
+        false,
+        &[],
+    )
+    .map_err(|error| AcpError::Protocol(format!("build remote agent reply: {error}")))?;
+    let event = builder
+        .sign_with_keys(&ctx.agent_keys)
+        .map_err(|error| AcpError::Protocol(format!("sign remote agent reply: {error}")))?;
+
+    let mut last_error = None;
+    for delay in [
+        Duration::ZERO,
+        Duration::from_millis(100),
+        Duration::from_millis(300),
+    ] {
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
+        match tokio::time::timeout(Duration::from_secs(5), ctx.rest_client.submit_event(&event))
+            .await
+        {
+            Ok(Ok(_)) => {
+                tracing::info!(
+                    target: "pool::prompt",
+                    channel = %batch.channel_id,
+                    event_id = %event.id,
+                    "published remote agent output through Buzz proxy"
+                );
+                return Ok(());
+            }
+            Ok(Err(error)) => last_error = Some(error.to_string()),
+            Err(_) => last_error = Some("relay submission timed out".to_string()),
+        }
+    }
+    Err(AcpError::Protocol(format!(
+        "publish remote agent reply: {}",
+        last_error.unwrap_or_else(|| "unknown relay error".to_string())
+    )))
+}
+
 /// Best-effort: remove a reaction via a signed kind:5 (NIP-09) deletion event.
 ///
 /// Queries kind:7 reactions by our pubkey targeting the event, finds the matching
@@ -4518,6 +4619,46 @@ mod tests {
     }
 
     #[test]
+    fn automatic_remote_reply_uses_trigger_as_root_for_top_level_message() {
+        let batch = one_event_batch(Uuid::new_v4());
+        let triggering_id = batch.events[0].event.id;
+
+        let thread_ref = automatic_reply_thread_ref(&batch).expect("reply target");
+
+        assert_eq!(thread_ref.root_event_id, triggering_id);
+        assert_eq!(thread_ref.parent_event_id, triggering_id);
+    }
+
+    #[test]
+    fn automatic_remote_reply_stays_flat_in_existing_thread() {
+        let keys = Keys::generate();
+        let root = EventBuilder::new(Kind::Custom(9), "root")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let root_hex = root.id.to_hex();
+        let root_tag = Tag::parse(["e", root_hex.as_str(), "", "root"]).unwrap();
+        let triggering = EventBuilder::new(Kind::Custom(9), "follow-up")
+            .tags([root_tag])
+            .sign_with_keys(&keys)
+            .unwrap();
+        let batch = FlushBatch {
+            channel_id: Uuid::new_v4(),
+            events: vec![crate::queue::BatchEvent {
+                event: triggering,
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+
+        let thread_ref = automatic_reply_thread_ref(&batch).expect("reply target");
+
+        assert_eq!(thread_ref.root_event_id, root.id);
+        assert_eq!(thread_ref.parent_event_id, root.id);
+    }
+
+    #[test]
     fn test_requeue_cancelled_batch_maps_control_signal_to_cancel_reason() {
         let cases = [
             (ControlSignal::Steer, Some(CancelReason::Steer)),
@@ -5370,6 +5511,7 @@ mod tests {
             memory_enabled: false,
             harness_name: "goose".to_string(),
             relay_url: "ws://127.0.0.1:3000".to_string(),
+            publish_agent_output: false,
         }
     }
 
