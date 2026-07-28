@@ -13,6 +13,7 @@ import {
   getThreadReference,
   isBroadcastReply,
 } from "@/features/messages/lib/threading";
+import { parseForwardEnvelope } from "@/features/messages/lib/forwardMessage";
 import {
   formatOwnerLabel,
   resolveUserLabel,
@@ -34,6 +35,7 @@ import {
   KIND_STREAM_MESSAGE_V2,
   KIND_STREAM_MESSAGE_EDIT,
   KIND_STREAM_MESSAGE_DIFF,
+  KIND_STREAM_MESSAGE_FORWARD,
   KIND_SYSTEM_MESSAGE,
 } from "@/shared/constants/kinds";
 import { resolveEventAuthorPubkey } from "@/shared/lib/authors";
@@ -51,6 +53,7 @@ export function isTimelineContentEvent(event: RelayEvent) {
     event.kind === KIND_STREAM_MESSAGE ||
     event.kind === KIND_STREAM_MESSAGE_V2 ||
     event.kind === KIND_STREAM_MESSAGE_DIFF ||
+    event.kind === KIND_STREAM_MESSAGE_FORWARD ||
     event.kind === KIND_SYSTEM_MESSAGE ||
     event.kind === KIND_JOB_REQUEST ||
     event.kind === KIND_JOB_ACCEPTED ||
@@ -592,13 +595,51 @@ export function collectMessageMentionPubkeys(
   return [...pubkeys];
 }
 
+/**
+ * Pubkeys the embedded original of a kind-40009 forward needs profiles for:
+ * its author plus everyone it mentions.
+ *
+ * Both render inside the forward's own timeline row, so they belong in the
+ * same batched profile request as the outer message's pubkeys — otherwise
+ * every forwarded row fires its own single-pubkey query for the author and the
+ * embedded `@mentions` never resolve to a name.
+ */
+export function collectForwardEmbeddedPubkeys(
+  events: Array<{ kind?: number; tags?: string[][] }>,
+) {
+  const pubkeys = new Set<string>();
+
+  for (const event of events) {
+    if (event.kind !== KIND_STREAM_MESSAGE_FORWARD) {
+      continue;
+    }
+
+    const original = parseForwardEnvelope(event.tags ?? [])?.original;
+    if (!original) {
+      continue;
+    }
+
+    pubkeys.add(normalizePubkey(original.pubkey));
+    for (const tag of original.tags) {
+      const pubkey = getMentionTagPubkey(tag);
+      if (pubkey) {
+        pubkeys.add(pubkey);
+      }
+    }
+  }
+
+  return [...pubkeys].filter((pubkey) => pubkey.length > 0);
+}
+
 /** Every pubkey a channel surface needs profiles for: authors (signer +
- *  attributed actor), mentions, and reaction actors, deduplicated. */
+ *  attributed actor), mentions, forwarded originals, and reaction actors,
+ *  deduplicated. */
 export function collectMessageProfilePubkeys(events: RelayEvent[]) {
   return [
     ...new Set([
       ...collectMessageAuthorPubkeys(events),
       ...collectMessageMentionPubkeys(events),
+      ...collectForwardEmbeddedPubkeys(events),
       ...collectReactionActorPubkeys(events),
     ]),
   ];

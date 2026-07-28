@@ -82,8 +82,8 @@ export BUZZ_PRIVATE_KEY="nsec1..."   # from the mint output
 
 | Scope | Self-mintable | Needed for |
 |-------|:---:|------------|
-| `messages:read` | ✅ | `messages get`, `messages thread`, `messages search`, `feed get` |
-| `messages:write` | ✅ | `messages send`, `messages edit`, `messages delete`, `reactions`, `messages vote` |
+| `messages:read` | ✅ | `messages get`, `messages thread`, `messages search`, `feed get`, `messages forward` (source fetch) |
+| `messages:write` | ✅ | `messages send`, `messages forward`, `messages edit`, `messages delete`, `reactions`, `messages vote` |
 | `channels:read` | ✅ | `channels list`, `channels get`, `channels members` |
 | `channels:write` | ✅ | `channels create`, `channels update`, `channels join`, `channels leave`, `channels topic`, `channels purpose` |
 | `users:read` | ✅ | `users get`, `users presence` |
@@ -228,6 +228,68 @@ buzz messages edit --event "$EVENT_ID" --content "Edited by CLI test" | jq .
 
 # messages delete
 buzz messages delete --event "$REPLY_ID" | jq .
+```
+
+Forwarding (kind:40009) copies the complete signed original into a `fwd` tag —
+the relay re-verifies that signature, so a forward is a fact, not a claim. The
+`--note` is your own text; the original is never merged into it. `--to-channel`
+takes a channel UUID or a DM UUID (DMs are channels), and needs a second
+channel to forward into:
+
+```bash
+# A second destination channel
+DEST_ID=$(buzz channels create --name "fwd-dest-$RANDOM" --type stream \
+  --visibility open | jq -r '.channel_id')
+
+# A message to forward
+SRC_MSG=$(buzz messages send --channel "$CHANNEL_ID" --content "Forward me" | jq -r '.event_id')
+
+# messages forward (no note)
+FWD=$(buzz messages forward --event "$SRC_MSG" --to-channel "$DEST_ID" | jq .)
+echo "$FWD"
+# Expected: {"event_id":"...","accepted":true,"message":"..."}
+FWD_ID=$(echo "$FWD" | jq -r '.event_id')
+
+# messages forward with a note (mentions in the note resolve against the destination)
+buzz messages forward --event "$SRC_MSG" --to-channel "$DEST_ID" \
+  --note "@someone relevant to us" | jq .
+
+# messages forward with a note from stdin
+echo 'Note with `backticks` stays literal.' \
+  | buzz messages forward --event "$SRC_MSG" --to-channel "$DEST_ID" --note - | jq .
+
+# Forward into a DM (see 6.6 for $DM_ID)
+buzz messages forward --event "$SRC_MSG" --to-channel "$DM_ID" | jq .
+
+# Forwards are part of the default message-kind set, so a plain read shows them
+buzz messages get --channel "$DEST_ID" | jq '[.[] | select(.kind == 40009)] | length'
+# Expected: >= 1 (default kinds are 9, 40002, 40008, 45001, 45003, 40009)
+buzz messages search --query "relevant to us" | jq '[.[] | select(.kind == 40009)] | length'
+# Expected: >= 1 — forward notes are searchable in the default kind set
+
+# Inspect the forward envelope in the destination
+buzz messages get --channel "$DEST_ID" --kinds 40009 | jq '.[0].tags'
+# Expected tags: ["h",<dest>], ["fwd",<original event JSON>], ["k","9"],
+#   ["fwd-src",<source uuid>,"channel"], ["q",<original id>,"",<original author>]
+# For a private-channel or DM source there is no "q" tag and the label is
+# "private" / "dm".
+
+# Forwarding a forward flattens — the embedded original is forwarded, never nested
+buzz messages forward --event "$FWD_ID" --to-channel "$CHANNEL_ID" | jq .
+# Expected: the new forward's "k" tag is still "9" and its fwd-src is the
+# original source channel, not "$DEST_ID"
+
+# A forward is a normal own message: edit the note, delete it, reply to it
+buzz messages edit --event "$FWD_ID" --content "Updated note" | jq .
+buzz messages delete --event "$FWD_ID" | jq .
+
+# Error paths (exit 1)
+buzz messages forward --event "$(printf 'f%.0s' {1..64})" --to-channel "$DEST_ID"
+# Expected: exit 1, "event ... not found"
+
+CANVAS_ID=$(buzz canvas set --channel "$CHANNEL_ID" --content "# c" | jq -r '.event_id')
+buzz messages forward --event "$CANVAS_ID" --to-channel "$DEST_ID"
+# Expected: exit 1, "kind 40100 cannot be forwarded (forwardable kinds: 9, 40002, 45001, 45003)"
 ```
 
 ### 6.4 Diff Messages

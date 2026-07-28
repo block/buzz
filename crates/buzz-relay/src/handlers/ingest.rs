@@ -30,10 +30,11 @@ use buzz_core::kind::{
     KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST, KIND_PRESENCE_UPDATE,
     KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_REACTION, KIND_READ_STATE, KIND_REPORT,
     KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF,
-    KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED,
-    KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEXT_NOTE, KIND_USER_STATUS,
-    KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE,
-    RELAY_ADMIN_REMOVE_MEMBER, RELAY_ADMIN_SET_WORKSPACE_PROFILE,
+    KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_FORWARD, KIND_STREAM_MESSAGE_PINNED,
+    KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM,
+    KIND_TEXT_NOTE, KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
+    RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER,
+    RELAY_ADMIN_SET_WORKSPACE_PROFILE,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_core::verification::verify_event;
@@ -253,6 +254,9 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         | KIND_STREAM_MESSAGE_SCHEDULED
         | KIND_STREAM_REMINDER
         | KIND_STREAM_MESSAGE_DIFF
+        // A forward is an ordinary root message authored by the forwarder; the
+        // embedded original rides along in a `fwd` tag.
+        | KIND_STREAM_MESSAGE_FORWARD
         | KIND_FORUM_POST
         | KIND_FORUM_VOTE
         | KIND_FORUM_COMMENT => Ok(Scope::MessagesWrite),
@@ -476,6 +480,9 @@ pub(crate) fn requires_h_channel_scope(kind: u32) -> bool {
             | KIND_STREAM_MESSAGE_SCHEDULED
             | KIND_STREAM_REMINDER
             | KIND_STREAM_MESSAGE_DIFF
+            // A forward lands in a destination channel or DM (`h` is the
+            // destination); the source channel travels in `fwd-src`.
+            | KIND_STREAM_MESSAGE_FORWARD
             | KIND_CANVAS
             | KIND_FORUM_POST
             | KIND_FORUM_VOTE
@@ -510,15 +517,47 @@ pub(crate) async fn check_channel_membership(
     pubkey_bytes: &[u8],
     channel: Option<&buzz_db::channel::ChannelRecord>,
 ) -> Result<(), String> {
-    match state
+    let is_member = state
         .is_member_cached(tenant.community(), ch_id, pubkey_bytes)
         .await
-    {
-        Ok(true) => return Ok(()),
-        Ok(false) => {}
-        Err(e) => return Err(format!("error: database error: {e}")),
+        .map_err(|e| format!("error: database error: {e}"))?;
+    resolve_channel_read_access(tenant, state, ch_id, is_member, channel).await
+}
+
+/// Same read gate as [`check_channel_membership`], but the membership lookup
+/// goes straight to the DB instead of the 10-second positive cache.
+///
+/// Used where a stale `is_member = true` would leak data rather than merely
+/// delay a denial — the forward source-channel gate, where a revoked member
+/// could otherwise keep exfiltrating a private channel for the cache TTL.
+/// Forwards are rare relative to messages, so the extra query is cheap.
+pub(crate) async fn check_channel_membership_uncached(
+    tenant: &TenantContext,
+    state: &AppState,
+    ch_id: Uuid,
+    pubkey_bytes: &[u8],
+    channel: Option<&buzz_db::channel::ChannelRecord>,
+) -> Result<(), String> {
+    let is_member = state
+        .db
+        .is_member(tenant.community(), ch_id, pubkey_bytes)
+        .await
+        .map_err(|e| format!("error: database error: {e}"))?;
+    resolve_channel_read_access(tenant, state, ch_id, is_member, channel).await
+}
+
+/// Shared tail of the read gate: members pass, everyone else needs the channel
+/// to be open.
+async fn resolve_channel_read_access(
+    tenant: &TenantContext,
+    state: &AppState,
+    ch_id: Uuid,
+    is_member: bool,
+    channel: Option<&buzz_db::channel::ChannelRecord>,
+) -> Result<(), String> {
+    if is_member {
+        return Ok(());
     }
-    // Not a member — check if channel is open.
     let is_open = match channel {
         Some(ch) => ch.visibility == "open",
         None => state
@@ -960,6 +999,171 @@ fn validate_diff_event(event: &Event) -> Result<(), String> {
     if !has_commit {
         return Err("diff event requires a commit tag".to_string());
     }
+    Ok(())
+}
+
+/// The `fwd-src` label the source channel row actually warrants.
+///
+/// A DM is a channel with `channel_type = 'dm'`, so it is classified first;
+/// everything else splits on visibility. Keeping this derivation in one place is
+/// what lets the relay reject a spoofed label instead of trusting the client's
+/// claim about how private the source was.
+fn forward_source_type_for_channel(
+    channel: &buzz_db::channel::ChannelRecord,
+) -> buzz_core::forward::ForwardSourceType {
+    use buzz_core::forward::ForwardSourceType;
+    if channel.channel_type == "dm" {
+        ForwardSourceType::Dm
+    } else if channel.visibility == "open" {
+        ForwardSourceType::Channel
+    } else {
+        ForwardSourceType::Private
+    }
+}
+
+/// Read the forward envelope out of a `kind:40009` event, mapping every
+/// structural failure onto the standard `invalid:` rejection shape.
+fn parse_forward_envelope(
+    event: &Event,
+) -> Result<buzz_core::forward::ForwardEnvelope, IngestError> {
+    buzz_core::forward::ForwardEnvelope::parse(event)
+        .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))
+}
+
+/// Require the embedded original to be an event this relay actually stored, in
+/// this community, in the channel the envelope names as its source.
+///
+/// A valid Schnorr signature only proves *someone* authored the bytes — not that
+/// they were ever published here. Without this gate, a signed event from another
+/// community (or one never published at all) could be forwarded into a channel
+/// with authentic-looking attribution. NIP-01 ids hash pubkey/kind/tags/content/
+/// created_at, so an id hit proves the embedded copy is byte-equivalent to the
+/// stored row; the stored `channel_id` is then the relay's own record of where
+/// it lived, which no client can forge.
+fn check_forward_provenance(
+    stored_original: Option<&buzz_core::StoredEvent>,
+    source_channel_id: Uuid,
+) -> Result<(), IngestError> {
+    let Some(stored) = stored_original else {
+        return Err(IngestError::Rejected(
+            "restricted: forwarded original was never published to this community".into(),
+        ));
+    };
+    if stored.channel_id != Some(source_channel_id) {
+        return Err(IngestError::Rejected(
+            "restricted: forwarded original is not stored in the fwd-src channel".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Validate a `kind:40009` forward before it is stored.
+///
+/// Structural checks (tag cardinality, size cap, `k`/`fwd-src`/`q` agreement,
+/// marked `e` tags) live in [`buzz_core::forward::ForwardEnvelope::parse`]. This
+/// function adds what only the relay can know:
+///
+/// 1. the embedded original's signature is real (re-derived id + Schnorr check),
+/// 2. the original is actually stored in *this* community, in the `fwd-src`
+///    channel (see [`check_forward_provenance`]),
+/// 3. the source channel exists and its `fwd-src` label matches the row,
+/// 4. the forwarder may *read* the source — member, or the source is open.
+///
+/// Steps 2 and 4 are the laundering gate: without them the relay would happily
+/// bless a leaked private message, or a signed event from somewhere else
+/// entirely, as a signature-verified copy in a public channel.
+/// Destination gates (token scope, membership, archived, bans, imeta) are the
+/// ordinary pipeline and are not repeated here.
+async fn validate_forward_event(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    event: &Event,
+) -> Result<(), IngestError> {
+    let envelope = parse_forward_envelope(event)?;
+
+    // Signature verification is CPU-bound — same spawn_blocking treatment as the
+    // outer event's verify.
+    let envelope = Arc::new(envelope);
+    let envelope_for_verify = Arc::clone(&envelope);
+    match tokio::task::spawn_blocking(move || envelope_for_verify.verify_embedded()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            return Err(IngestError::Rejected(format!(
+                "invalid: forwarded original failed verification: {e}"
+            )));
+        }
+        Err(e) => {
+            error!("spawn_blocking panicked verifying forwarded original: {e}");
+            return Err(IngestError::Internal(
+                "error: internal verification error".into(),
+            ));
+        }
+    }
+
+    let stored_original = match state
+        .db
+        .get_event_by_id(tenant.community(), envelope.original.id.as_bytes())
+        .await
+    {
+        Ok(stored) => stored,
+        Err(e) => {
+            return Err(IngestError::Internal(format!(
+                "error: looking up forwarded original: {e}"
+            )));
+        }
+    };
+    check_forward_provenance(stored_original.as_ref(), envelope.source_channel_id)?;
+
+    let source_channel = match state
+        .db
+        .get_channel(tenant.community(), envelope.source_channel_id)
+        .await
+    {
+        Ok(channel) => channel,
+        Err(buzz_db::DbError::ChannelNotFound(_)) => {
+            return Err(IngestError::Rejected(
+                "invalid: forward source channel not found".into(),
+            ));
+        }
+        Err(e) => {
+            return Err(IngestError::Internal(format!(
+                "error: looking up forward source channel: {e}"
+            )));
+        }
+    };
+
+    let actual_source_type = forward_source_type_for_channel(&source_channel);
+    if actual_source_type != envelope.source_type {
+        return Err(IngestError::Rejected(format!(
+            "invalid: fwd-src type {} does not match source channel ({})",
+            envelope.source_type, actual_source_type
+        )));
+    }
+
+    // Read access to the source, checked against the forwarder's own key.
+    // Uncached on purpose: a member removed seconds ago must not be able to
+    // keep forwarding out of a private channel for the cache TTL.
+    let forwarder_bytes = event.pubkey.to_bytes().to_vec();
+    if let Err(reason) = check_channel_membership_uncached(
+        tenant,
+        state,
+        envelope.source_channel_id,
+        &forwarder_bytes,
+        Some(&source_channel),
+    )
+    .await
+    {
+        // `check_channel_membership_uncached` reports DB faults with the `error:` prefix;
+        // those are server faults, not a forbidden forward.
+        return Err(if reason.starts_with("error:") {
+            IngestError::Internal(reason)
+        } else {
+            IngestError::Rejected(
+                "restricted: cannot forward from a channel you are not a member of".into(),
+            )
+        });
+    }
+
     Ok(())
 }
 
@@ -2018,6 +2222,10 @@ async fn ingest_event_inner(
         validate_diff_event(&event).map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
+    if kind_u32 == KIND_STREAM_MESSAGE_FORWARD {
+        validate_forward_event(tenant, state, &event).await?;
+    }
+
     if kind_u32 == KIND_AGENT_ENGRAM {
         validate_engram_envelope(&event)
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
@@ -2559,7 +2767,7 @@ mod tests {
         KIND_MANAGED_AGENT, KIND_PERSONA, KIND_PRESENCE_UPDATE, KIND_STREAM_MESSAGE,
         KIND_STREAM_MESSAGE_DIFF, KIND_TEAM, KIND_USER_STATUS,
     };
-    use nostr::{EventBuilder, Kind};
+    use nostr::{EventBuilder, JsonUtil, Kind};
 
     /// A banned relay admin must be refused with the same wire prefix and
     /// transport status as every other durable-restriction refusal:
@@ -2891,6 +3099,7 @@ mod tests {
             KIND_NIP29_LEAVE_REQUEST,
             KIND_STREAM_MESSAGE_EDIT,
             KIND_STREAM_MESSAGE_DIFF,
+            KIND_STREAM_MESSAGE_FORWARD,
             KIND_CANVAS,
             KIND_FORUM_POST,
             KIND_FORUM_VOTE,
@@ -3141,6 +3350,403 @@ mod tests {
             ],
         );
         assert!(validate_diff_event(&event).is_err());
+    }
+
+    // -- kind:40009 message forwards -----------------------------------------
+
+    const FORWARD_SOURCE_CHANNEL: &str = "11111111-1111-4111-8111-111111111111";
+    const FORWARD_DEST_CHANNEL: &str = "22222222-2222-4222-8222-222222222222";
+
+    fn forward_source_id() -> Uuid {
+        Uuid::parse_str(FORWARD_SOURCE_CHANNEL).expect("source uuid")
+    }
+
+    fn forward_dest_id() -> Uuid {
+        Uuid::parse_str(FORWARD_DEST_CHANNEL).expect("dest uuid")
+    }
+
+    fn make_event_with_owned_tags(kind: u32, content: &str, tags: &[Vec<String>]) -> Event {
+        let borrowed: Vec<Vec<&str>> = tags
+            .iter()
+            .map(|parts| parts.iter().map(String::as_str).collect())
+            .collect();
+        let refs: Vec<&[&str]> = borrowed.iter().map(|parts| parts.as_slice()).collect();
+        make_event_with_tags(kind, content, &refs)
+    }
+
+    /// A signed kind:9 original living in the source channel.
+    fn forward_original() -> Event {
+        make_event_with_tags(
+            KIND_STREAM_MESSAGE,
+            "original text",
+            &[&["h", FORWARD_SOURCE_CHANNEL]],
+        )
+    }
+
+    fn owned_tag(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|p| (*p).to_string()).collect()
+    }
+
+    /// Canonical tag set for forwarding `original` out of an open channel.
+    fn open_forward_tags(original: &Event) -> Vec<Vec<String>> {
+        buzz_core::forward::forward_tags(
+            forward_dest_id(),
+            original,
+            forward_source_id(),
+            buzz_core::forward::ForwardSourceType::Channel,
+        )
+        .expect("build forward tags")
+    }
+
+    fn make_forward(tags: &[Vec<String>]) -> Event {
+        make_event_with_owned_tags(KIND_STREAM_MESSAGE_FORWARD, "the note", tags)
+    }
+
+    fn replace_forward_tag(
+        tags: &[Vec<String>],
+        name: &str,
+        replacement: Vec<String>,
+    ) -> Vec<Vec<String>> {
+        tags.iter()
+            .map(|parts| {
+                if parts.first().map(String::as_str) == Some(name) {
+                    replacement.clone()
+                } else {
+                    parts.clone()
+                }
+            })
+            .collect()
+    }
+
+    fn drop_forward_tag(tags: &[Vec<String>], name: &str) -> Vec<Vec<String>> {
+        tags.iter()
+            .filter(|parts| parts.first().map(String::as_str) != Some(name))
+            .cloned()
+            .collect()
+    }
+
+    /// Rejection message for a forward built from `tags`, or a panic if accepted.
+    fn forward_rejection(tags: &[Vec<String>]) -> String {
+        match parse_forward_envelope(&make_forward(tags)) {
+            Err(IngestError::Rejected(message)) => message,
+            Err(other) => panic!("expected a client rejection, got {other:?}"),
+            Ok(_) => panic!("malformed forward was accepted"),
+        }
+    }
+
+    fn channel_record(channel_type: &str, visibility: &str) -> buzz_db::channel::ChannelRecord {
+        buzz_db::channel::ChannelRecord {
+            id: forward_source_id(),
+            name: "source".to_string(),
+            channel_type: channel_type.to_string(),
+            visibility: visibility.to_string(),
+            description: None,
+            canvas: None,
+            created_by: Vec::new(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            archived_at: None,
+            deleted_at: None,
+            nip29_group_id: None,
+            topic_required: false,
+            max_members: None,
+            topic: None,
+            topic_set_by: None,
+            topic_set_at: None,
+            purpose: None,
+            purpose_set_by: None,
+            purpose_set_at: None,
+            ttl_seconds: None,
+            ttl_deadline: None,
+        }
+    }
+
+    /// A forward is an ordinary channel-scoped root message: MessagesWrite, `h`
+    /// mandatory, never global, no post-storage side effects, client-authorable.
+    #[test]
+    fn forward_kind_is_a_channel_scoped_message_write() {
+        let dummy = make_dummy_event();
+        assert_eq!(
+            required_scope_for_kind(KIND_STREAM_MESSAGE_FORWARD, &dummy).unwrap(),
+            Scope::MessagesWrite,
+        );
+        assert!(requires_h_channel_scope(KIND_STREAM_MESSAGE_FORWARD));
+        assert!(!is_global_only_kind(KIND_STREAM_MESSAGE_FORWARD));
+        assert!(!crate::handlers::side_effects::is_side_effect_kind(
+            KIND_STREAM_MESSAGE_FORWARD
+        ));
+        assert!(!buzz_core::kind::is_relay_only_kind(
+            KIND_STREAM_MESSAGE_FORWARD
+        ));
+    }
+
+    #[test]
+    fn forward_envelope_accepts_a_canonical_open_forward() {
+        let original = forward_original();
+        let envelope =
+            parse_forward_envelope(&make_forward(&open_forward_tags(&original))).expect("parse");
+
+        assert_eq!(envelope.original.id, original.id);
+        assert_eq!(envelope.source_channel_id, forward_source_id());
+        assert_eq!(
+            envelope.source_type,
+            buzz_core::forward::ForwardSourceType::Channel
+        );
+        assert_eq!(
+            envelope.quote.as_ref().map(|q| q.event_id.clone()),
+            Some(original.id.to_hex())
+        );
+        assert!(envelope.verify_embedded().is_ok());
+    }
+
+    #[test]
+    fn forward_rejects_missing_and_duplicate_fwd_tags() {
+        let tags = open_forward_tags(&forward_original());
+
+        assert!(forward_rejection(&drop_forward_tag(&tags, "fwd")).contains("missing fwd tag"));
+
+        let mut doubled = tags.clone();
+        doubled.push(
+            tags.iter()
+                .find(|parts| parts[0] == "fwd")
+                .expect("fwd tag")
+                .clone(),
+        );
+        assert!(forward_rejection(&doubled).contains("exactly one fwd tag"));
+    }
+
+    #[test]
+    fn forward_rejects_oversized_fwd_tag() {
+        let big = make_event_with_tags(
+            KIND_STREAM_MESSAGE,
+            &"x".repeat(buzz_core::forward::FWD_MAX_BYTES + 16),
+            &[&["h", FORWARD_SOURCE_CHANNEL]],
+        );
+        let tags = vec![
+            owned_tag(&["h", FORWARD_DEST_CHANNEL]),
+            owned_tag(&["fwd", &big.as_json()]),
+            owned_tag(&["k", "9"]),
+            owned_tag(&["fwd-src", FORWARD_SOURCE_CHANNEL, "private"]),
+        ];
+        assert!(forward_rejection(&tags).contains("limit is"));
+    }
+
+    #[test]
+    fn forward_rejects_unparseable_embedded_event() {
+        let tags = replace_forward_tag(
+            &open_forward_tags(&forward_original()),
+            "fwd",
+            owned_tag(&["fwd", "{not an event}"]),
+        );
+        assert!(forward_rejection(&tags).contains("not a parseable event"));
+    }
+
+    /// Forwarding a forward is flattened client-side, so depth is always 1 — an
+    /// embedded kind:40009 must never be blessed by the relay.
+    #[test]
+    fn forward_rejects_an_embedded_forward() {
+        let inner = make_event_with_tags(
+            KIND_STREAM_MESSAGE_FORWARD,
+            "note",
+            &[&["h", FORWARD_SOURCE_CHANNEL]],
+        );
+        let tags = vec![
+            owned_tag(&["h", FORWARD_DEST_CHANNEL]),
+            owned_tag(&["fwd", &inner.as_json()]),
+            owned_tag(&["k", "40009"]),
+            owned_tag(&["fwd-src", FORWARD_SOURCE_CHANNEL, "channel"]),
+        ];
+        assert!(forward_rejection(&tags).contains("is not forwardable"));
+    }
+
+    #[test]
+    fn forward_rejects_missing_or_mismatched_k_tag() {
+        let tags = open_forward_tags(&forward_original());
+
+        assert!(forward_rejection(&drop_forward_tag(&tags, "k")).contains("missing k tag"));
+
+        let mismatched = replace_forward_tag(&tags, "k", owned_tag(&["k", "40002"]));
+        assert!(forward_rejection(&mismatched).contains("does not match embedded kind"));
+    }
+
+    #[test]
+    fn forward_rejects_malformed_or_disagreeing_fwd_src() {
+        let tags = open_forward_tags(&forward_original());
+
+        assert!(
+            forward_rejection(&drop_forward_tag(&tags, "fwd-src")).contains("missing fwd-src tag")
+        );
+
+        let no_label = replace_forward_tag(
+            &tags,
+            "fwd-src",
+            owned_tag(&["fwd-src", FORWARD_SOURCE_CHANNEL]),
+        );
+        assert!(forward_rejection(&no_label).contains("missing source type label"));
+
+        let unknown_label = replace_forward_tag(
+            &tags,
+            "fwd-src",
+            owned_tag(&["fwd-src", FORWARD_SOURCE_CHANNEL, "secret"]),
+        );
+        assert!(forward_rejection(&unknown_label).contains("unknown fwd-src type"));
+
+        // A source uuid that disagrees with the embedded original's own h tag
+        // would let a forwarder claim the content came from somewhere else.
+        let wrong_uuid = replace_forward_tag(
+            &tags,
+            "fwd-src",
+            owned_tag(&["fwd-src", FORWARD_DEST_CHANNEL, "channel"]),
+        );
+        assert!(forward_rejection(&wrong_uuid).contains("does not match embedded h tag"));
+    }
+
+    #[test]
+    fn forward_rejects_quote_tags_that_lie_or_leak() {
+        let original = forward_original();
+        let tags = open_forward_tags(&original);
+
+        let bad_id = replace_forward_tag(
+            &tags,
+            "q",
+            owned_tag(&["q", &"a".repeat(64), "", &original.pubkey.to_hex()]),
+        );
+        assert!(forward_rejection(&bad_id).contains("q tag id"));
+
+        // A `q` tag on a private source would publish a link to content the
+        // destination cannot read.
+        let private = replace_forward_tag(
+            &tags,
+            "fwd-src",
+            owned_tag(&["fwd-src", FORWARD_SOURCE_CHANNEL, "private"]),
+        );
+        assert!(forward_rejection(&private).contains("only allowed for channel sources"));
+    }
+
+    /// Forwards are always thread roots in v1; a marked `e` tag would make one a
+    /// reply and split thread-counter maintenance.
+    #[test]
+    fn forward_rejects_marked_e_tags() {
+        for marker in ["root", "reply"] {
+            let mut tags = open_forward_tags(&forward_original());
+            tags.push(owned_tag(&["e", &"c".repeat(64), "", marker]));
+            assert!(forward_rejection(&tags).contains("marked e tags"));
+        }
+    }
+
+    /// The embedded copy is a claim until its signature is checked — a tampered
+    /// original must not survive verification.
+    #[test]
+    fn forward_embedded_verification_rejects_a_tampered_original() {
+        let original = forward_original();
+        let mut json: serde_json::Value =
+            serde_json::from_str(&original.as_json()).expect("parse json");
+        json["content"] = serde_json::Value::String("tampered".to_string());
+
+        let tags = vec![
+            owned_tag(&["h", FORWARD_DEST_CHANNEL]),
+            owned_tag(&["fwd", &json.to_string()]),
+            owned_tag(&["k", "9"]),
+            owned_tag(&["fwd-src", FORWARD_SOURCE_CHANNEL, "private"]),
+        ];
+        let envelope = parse_forward_envelope(&make_forward(&tags)).expect("parse");
+        assert!(envelope.verify_embedded().is_err());
+    }
+
+    /// The `fwd-src` label is checked against the actual row, so a client cannot
+    /// downgrade a private source to "channel" to get a linkable attribution.
+    #[test]
+    fn forward_source_type_is_derived_from_the_channel_row() {
+        use buzz_core::forward::ForwardSourceType;
+        assert_eq!(
+            forward_source_type_for_channel(&channel_record("stream", "open")),
+            ForwardSourceType::Channel
+        );
+        assert_eq!(
+            forward_source_type_for_channel(&channel_record("stream", "private")),
+            ForwardSourceType::Private
+        );
+        assert_eq!(
+            forward_source_type_for_channel(&channel_record("forum", "private")),
+            ForwardSourceType::Private
+        );
+        // channel_type wins over visibility: a DM is a DM however it is stored.
+        assert_eq!(
+            forward_source_type_for_channel(&channel_record("dm", "private")),
+            ForwardSourceType::Dm
+        );
+        assert_eq!(
+            forward_source_type_for_channel(&channel_record("dm", "open")),
+            ForwardSourceType::Dm
+        );
+    }
+
+    /// Rejection message from the provenance gate, or a panic if it passed.
+    fn provenance_rejection(stored: Option<&buzz_core::StoredEvent>) -> String {
+        match check_forward_provenance(stored, forward_source_id()) {
+            Err(IngestError::Rejected(message)) => message,
+            Err(other) => panic!("expected a client rejection, got {other:?}"),
+            Ok(()) => panic!("a forward with no valid provenance was accepted"),
+        }
+    }
+
+    /// A valid embedded signature only proves authorship. The relay also
+    /// requires the original to be stored *here*, in the claimed source
+    /// channel — otherwise a signed event from elsewhere could be laundered in
+    /// with authentic-looking attribution.
+    #[test]
+    fn forward_provenance_requires_the_stored_original_in_the_source_channel() {
+        let original = forward_original();
+
+        assert!(provenance_rejection(None).contains("never published to this community"));
+
+        let elsewhere = buzz_core::StoredEvent::new(original.clone(), Some(forward_dest_id()));
+        assert!(
+            provenance_rejection(Some(&elsewhere)).contains("not stored in the fwd-src channel")
+        );
+
+        let global = buzz_core::StoredEvent::new(original.clone(), None);
+        assert!(provenance_rejection(Some(&global)).contains("not stored in the fwd-src channel"));
+
+        let stored = buzz_core::StoredEvent::new(original, Some(forward_source_id()));
+        assert!(check_forward_provenance(Some(&stored), forward_source_id()).is_ok());
+    }
+
+    /// Outer `imeta` is what generic NIP-92 consumers render; it must be the
+    /// embedded original's set verbatim.
+    #[test]
+    fn forward_rejects_divergent_outer_imeta() {
+        let original = make_event_with_tags(
+            KIND_STREAM_MESSAGE,
+            "with attachment",
+            &[
+                &["h", FORWARD_SOURCE_CHANNEL],
+                &["imeta", "url https://example.test/a.png"],
+            ],
+        );
+        let tags = open_forward_tags(&original);
+
+        let mut extra = tags.clone();
+        extra.push(owned_tag(&["imeta", "url https://evil.test/b.png"]));
+        assert!(forward_rejection(&extra).contains("imeta tags must be copied verbatim"));
+
+        assert!(forward_rejection(&drop_forward_tag(&tags, "imeta"))
+            .contains("imeta tags must be copied verbatim"));
+    }
+
+    /// Exactly one destination, so a generic NIP-29 consumer cannot scope the
+    /// same signed forward into a different channel.
+    #[test]
+    fn forward_rejects_ambiguous_destination_h_tags() {
+        let tags = open_forward_tags(&forward_original());
+
+        assert!(
+            forward_rejection(&drop_forward_tag(&tags, "h")).contains("missing destination h tag")
+        );
+
+        let mut doubled = tags.clone();
+        doubled.push(owned_tag(&["h", FORWARD_SOURCE_CHANNEL]));
+        assert!(forward_rejection(&doubled).contains("exactly one destination h tag"));
     }
 
     fn make_dummy_event() -> Event {

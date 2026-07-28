@@ -6,6 +6,7 @@ mod commands;
 mod deep_link;
 mod event_sync;
 mod events;
+mod events_forward;
 mod huddle;
 mod managed_agents;
 mod media_proxy;
@@ -733,6 +734,7 @@ pub fn run() {
             get_feed,
             search_messages,
             send_channel_message,
+            forward_message,
             send_managed_agent_channel_message,
             has_managed_agent_channel_message_marker,
             get_forum_posts,

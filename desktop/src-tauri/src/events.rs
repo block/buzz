@@ -16,7 +16,7 @@ use uuid::Uuid;
 // ── Constants ────────────────────────────────────────────────────────────────
 
 /// Maximum content size — matches buzz-sdk (64 KiB).
-const MAX_CONTENT_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_CONTENT_BYTES: usize = 64 * 1024;
 
 /// Maximum mention count — matches buzz-sdk.
 const MAX_MENTIONS: usize = 50;
@@ -26,11 +26,11 @@ const MAX_EMOJI_CHARS: usize = 64;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-fn tag(parts: Vec<&str>) -> Result<Tag, String> {
+pub(crate) fn tag(parts: Vec<&str>) -> Result<Tag, String> {
     Tag::parse(parts).map_err(|e| format!("invalid tag: {e}"))
 }
 
-fn check_content(content: &str) -> Result<(), String> {
+pub(crate) fn check_content(content: &str) -> Result<(), String> {
     if content.len() > MAX_CONTENT_BYTES {
         return Err(format!(
             "content exceeds maximum size of {} bytes (got {})",
@@ -60,7 +60,7 @@ fn thread_tags(tr: &ThreadRef) -> Result<Vec<Tag>, String> {
     }
 }
 
-fn mention_tags(mentions: &[&str]) -> Result<Vec<Tag>, String> {
+pub(crate) fn mention_tags(mentions: &[&str]) -> Result<Vec<Tag>, String> {
     if mentions.len() > MAX_MENTIONS {
         return Err(format!("too many mentions (max {MAX_MENTIONS})"));
     }

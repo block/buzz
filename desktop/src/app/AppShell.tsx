@@ -65,7 +65,7 @@ import {
 } from "@/features/settings/ui/SettingsPanels";
 import { HuddleBar, HuddleProvider } from "@/features/huddle";
 import { useDueReminderBadgeCount } from "@/features/reminders/hooks";
-import { RemindMeLaterProvider } from "@/features/reminders/ui/RemindMeLaterProvider";
+import { MessageActionProviders } from "@/app/MessageActionProviders";
 import { useReminderNotifications } from "@/features/reminders/useReminderNotifications";
 import { AppSidebar } from "@/features/sidebar/ui/AppSidebar";
 import { requestFocusedThreadClose } from "@/features/channels/focusedThreadCloseRequest";
@@ -742,7 +742,7 @@ export function AppShell() {
           }}
         >
           <HuddleProvider>
-            <RemindMeLaterProvider pubkey={identityQuery.data?.pubkey}>
+            <MessageActionProviders pubkey={identityQuery.data?.pubkey}>
               <div
                 className="buzz-huddle-shell relative h-dvh overflow-hidden overscroll-none"
                 data-huddle-open={isHuddleDrawerOpen}
@@ -988,7 +988,7 @@ export function AppShell() {
                   />
                 </div>
               </div>
-            </RemindMeLaterProvider>
+            </MessageActionProviders>
           </HuddleProvider>
         </AppShellProvider>
       </ChannelNavigationProvider>

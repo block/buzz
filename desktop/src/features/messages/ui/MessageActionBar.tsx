@@ -6,6 +6,7 @@ import {
   CornerUpLeft,
   EllipsisVertical,
   Flag,
+  Forward,
   Link2,
   MailCheck,
   MailOpen,
@@ -15,6 +16,7 @@ import {
 } from "lucide-react";
 import * as React from "react";
 
+import { canForwardMessageKind } from "@/features/messages/lib/forwardMessage";
 import { buildMessageLink } from "@/features/messages/lib/messageLink";
 import { EmojiPicker } from "@/features/custom-emoji/ui/EmojiPicker";
 import { useCustomEmoji } from "@/features/custom-emoji/hooks";
@@ -66,6 +68,7 @@ function MoreActionsMenu({
   onDelete,
   onEdit,
   onFollowThread,
+  onForward,
   onMarkUnread,
   onMarkRead,
   onOpenChange,
@@ -82,6 +85,7 @@ function MoreActionsMenu({
   onDelete?: (message: TimelineMessage) => void;
   onEdit?: (message: TimelineMessage) => void;
   onFollowThread?: (message: TimelineMessage) => void;
+  onForward?: (message: TimelineMessage) => void;
   onMarkUnread?: (message: TimelineMessage) => void;
   onMarkRead?: (message: TimelineMessage) => void;
   onOpenChange: (open: boolean) => void;
@@ -240,6 +244,21 @@ function MoreActionsMenu({
             </DropdownMenuItem>
           ) : null}
 
+          {onForward &&
+          hasCopyActions &&
+          channelId &&
+          canForwardMessageKind(message.kind) ? (
+            <DropdownMenuItem
+              data-testid={`forward-message-${message.id}`}
+              onClick={() => {
+                onForward(message);
+              }}
+            >
+              <Forward className="h-4 w-4" />
+              Forward message…
+            </DropdownMenuItem>
+          ) : null}
+
           {canReport || onDelete ? <DropdownMenuSeparator /> : null}
 
           {canReport ? (
@@ -371,6 +390,7 @@ export const MessageActionBar = React.memo(function MessageActionBar({
   onDelete,
   onEdit,
   onFollowThread,
+  onForward,
   onMarkUnread,
   onMarkRead,
   onReactionBadgeBurstRequest,
@@ -390,6 +410,9 @@ export const MessageActionBar = React.memo(function MessageActionBar({
   onDelete?: (message: TimelineMessage) => void;
   onEdit?: (message: TimelineMessage) => void;
   onFollowThread?: (message: TimelineMessage) => void;
+  /** Opens the "Forward message…" dialog; hidden when omitted or when the
+   *  message kind is not forwardable. */
+  onForward?: (message: TimelineMessage) => void;
   onMarkUnread?: (message: TimelineMessage) => void;
   onMarkRead?: (message: TimelineMessage) => void;
   onReactionBadgeBurstRequest?: (emoji: string) => void;
@@ -574,6 +597,7 @@ export const MessageActionBar = React.memo(function MessageActionBar({
               onDelete={onDelete}
               onEdit={onEdit}
               onFollowThread={onFollowThread}
+              onForward={onForward}
               onMarkUnread={onMarkUnread}
               onMarkRead={onMarkRead}
               onOpenChange={setIsDropdownOpen}

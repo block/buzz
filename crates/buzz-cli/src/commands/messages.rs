@@ -1,3 +1,5 @@
+use buzz_core::forward::{ForwardEnvelope, ForwardSourceType, FORWARDABLE_KINDS};
+use buzz_core::kind::{event_kind_u32, KIND_STREAM_MESSAGE_FORWARD};
 use buzz_sdk::{DeleteMessageOptions, DiffMeta, ThreadRef, VoteDirection};
 use nostr::PublicKey;
 use uuid::Uuid;
@@ -5,7 +7,7 @@ use uuid::Uuid;
 use crate::client::{normalize_events, normalize_write_response, BuzzClient};
 use crate::error::CliError;
 use crate::validate::{
-    infer_language, parse_event_id, parse_uuid, read_or_stdin, truncate_diff,
+    infer_language, parse_event_id, parse_uuid, read_or_stdin, sdk_err, truncate_diff,
     validate_content_size, validate_hex64, validate_uuid, MAX_DIFF_BYTES,
 };
 use buzz_sdk::mentions::{
@@ -273,7 +275,7 @@ pub async fn cmd_get_messages(
     let limit = limit.unwrap_or(50).min(200);
 
     let mut filter = serde_json::json!({
-        "kinds": [9, 40002, 40008, 45001, 45003],
+        "kinds": [9, 40002, 40008, 45001, 45003, KIND_STREAM_MESSAGE_FORWARD],
         "#h": [channel_id],
         "limit": limit
     });
@@ -358,7 +360,7 @@ pub async fn cmd_search(
     };
 
     let mut filter = serde_json::json!({
-        "kinds": [9, 40002, 45001, 45003],
+        "kinds": [9, 40002, 45001, 45003, KIND_STREAM_MESSAGE_FORWARD],
         "limit": limit
     });
     if let Some(q) = query {
@@ -573,6 +575,207 @@ pub async fn cmd_send_message(
 
     let event = client.sign_event(builder)?;
 
+    let resp = client.submit_event(event).await?;
+    println!("{}", normalize_write_response(&resp));
+    Ok(())
+}
+
+pub struct ForwardMessageParams {
+    pub event_id: String,
+    pub to_channel_id: String,
+    pub note: Option<String>,
+}
+
+/// Kinds fetched when resolving `--event`: everything forwardable, plus kind
+/// 40009 itself so a forward-of-a-forward can be flattened to its original.
+fn forward_fetch_kinds() -> Vec<u32> {
+    let mut kinds = FORWARDABLE_KINDS.to_vec();
+    kinds.push(KIND_STREAM_MESSAGE_FORWARD);
+    kinds
+}
+
+fn forwardable_kinds_list() -> String {
+    FORWARDABLE_KINDS
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Fetch one complete *signed* event by id.
+///
+/// Deliberately bypasses [`normalize_events`], which drops `sig`: a forward
+/// carries the original verbatim so the relay can re-verify its signature, so
+/// the signature has to survive this round trip. `kinds` is passed through when
+/// present — `ids` filters skip the relay p-gate, but the query stays explicit.
+async fn fetch_signed_event(
+    client: &BuzzClient,
+    event_id: &str,
+    kinds: Option<&[u32]>,
+) -> Result<Option<nostr::Event>, CliError> {
+    let mut filter = serde_json::json!({ "ids": [event_id], "limit": 1 });
+    if let Some(kinds) = kinds {
+        filter["kinds"] = serde_json::json!(kinds);
+    }
+    let raw = client.query(&filter).await?;
+    let events: Vec<serde_json::Value> = serde_json::from_str(&raw)
+        .map_err(|e| CliError::Other(format!("failed to parse query response: {e}")))?;
+    let Some(first) = events.into_iter().next() else {
+        return Ok(None);
+    };
+    let event = serde_json::from_value::<nostr::Event>(first)
+        .map_err(|e| CliError::Other(format!("relay returned an unparseable event: {e}")))?;
+    Ok(Some(event))
+}
+
+/// Explain why `--event` resolved to nothing: either the event exists but its
+/// kind is not forwardable (name the kind), or it genuinely isn't there.
+///
+/// A failure of the diagnostic lookup itself is propagated verbatim — a timeout
+/// or relay error must keep its network/relay exit code instead of being
+/// misreported as a client-side input error.
+async fn unforwardable_event_error(client: &BuzzClient, event_id: &str) -> CliError {
+    match fetch_signed_event(client, event_id, None).await {
+        Ok(Some(event)) => CliError::Usage(format!(
+            "kind {} cannot be forwarded (forwardable kinds: {})",
+            event_kind_u32(&event),
+            forwardable_kinds_list()
+        )),
+        Ok(None) => CliError::Usage(format!("event {event_id} not found")),
+        Err(e) => e,
+    }
+}
+
+/// Read an event's channel UUID straight off its `h` tag.
+fn event_channel_uuid(event: &nostr::Event) -> Result<Uuid, CliError> {
+    event
+        .tags
+        .iter()
+        .map(|t| t.as_slice())
+        .find(|parts| parts.first().is_some_and(|name| name == "h"))
+        .and_then(|parts| parts.get(1))
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .ok_or_else(|| {
+            CliError::Usage(format!(
+                "event {} has no valid h tag — cannot determine its source channel",
+                event.id.to_hex()
+            ))
+        })
+}
+
+/// Classify a source channel from its kind:39000 metadata tags.
+///
+/// Fails closed: without an explicit `public` tag the channel counts as
+/// private, which drops the `q` back-reference and the linkable attribution
+/// rather than advertising a link readers may not be able to follow.
+fn forward_source_type_from_metadata(event: &serde_json::Value) -> ForwardSourceType {
+    let mut channel_type = "";
+    let mut public = false;
+    for tag in event
+        .get("tags")
+        .and_then(|t| t.as_array())
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+    {
+        let Some(parts) = tag.as_array() else {
+            continue;
+        };
+        match parts.first().and_then(|v| v.as_str()).unwrap_or("") {
+            "t" => channel_type = parts.get(1).and_then(|v| v.as_str()).unwrap_or(""),
+            "public" => public = true,
+            _ => {}
+        }
+    }
+
+    if channel_type == buzz_core::channel::ChannelType::Dm.as_str() {
+        ForwardSourceType::Dm
+    } else if public {
+        ForwardSourceType::Channel
+    } else {
+        ForwardSourceType::Private
+    }
+}
+
+/// Resolve the `fwd-src` class of the channel the original lives in.
+async fn resolve_forward_source_type(
+    client: &BuzzClient,
+    source_channel_id: &str,
+) -> Result<ForwardSourceType, CliError> {
+    let filter = serde_json::json!({
+        "kinds": [39000],
+        "#d": [source_channel_id],
+        "limit": 1,
+    });
+    let raw = client.query(&filter).await?;
+    let events: Vec<serde_json::Value> = serde_json::from_str(&raw).unwrap_or_default();
+    let event = events.first().ok_or_else(|| {
+        CliError::Other(format!(
+            "no channel metadata for source channel {source_channel_id} — cannot classify the source"
+        ))
+    })?;
+    Ok(forward_source_type_from_metadata(event))
+}
+
+/// Forward a message into another channel or DM (kind 40009).
+///
+/// The note is the forwarder's own content; the original signed event is copied
+/// verbatim into the `fwd` tag. Forwarding a forward flattens to the embedded
+/// original, so forwards never nest.
+pub async fn cmd_forward_message(
+    client: &BuzzClient,
+    p: ForwardMessageParams,
+) -> Result<(), CliError> {
+    validate_hex64(&p.event_id)?;
+    let destination_uuid = parse_uuid(&p.to_channel_id)?;
+    let note = match p.note {
+        Some(ref n) => read_or_stdin(n)?,
+        None => String::new(),
+    };
+    validate_content_size(&note)?;
+
+    let fetched =
+        match fetch_signed_event(client, &p.event_id, Some(&forward_fetch_kinds())).await? {
+            Some(event) => event,
+            None => return Err(unforwardable_event_error(client, &p.event_id).await),
+        };
+
+    // Flatten: forwarding a forward forwards its embedded original, keeping
+    // forward depth at 1 (the relay rejects an embedded kind 40009).
+    let original = if event_kind_u32(&fetched) == KIND_STREAM_MESSAGE_FORWARD {
+        ForwardEnvelope::parse(&fetched)
+            .map_err(|e| {
+                CliError::Other(format!(
+                    "cannot flatten forward {}: {e}",
+                    fetched.id.to_hex()
+                ))
+            })?
+            .original
+    } else {
+        fetched
+    };
+
+    let source_uuid = event_channel_uuid(&original)?;
+    let source_type = resolve_forward_source_type(client, &source_uuid.to_string()).await?;
+
+    // Mentions in the note resolve against the destination channel — that's
+    // where the note lands. The original author is never p-tagged.
+    let mut mentions = resolve_content_mentions(client, &p.to_channel_id, &note).await;
+    let stripped = strip_code_regions(&note);
+    let uri_pubkeys = extract_nostr_uris(&stripped);
+    merge_mentions(&mut mentions, &uri_pubkeys, MENTION_CAP);
+    let mention_refs: Vec<&str> = mentions.iter().map(String::as_str).collect();
+
+    let builder = buzz_sdk::build_forward(
+        destination_uuid,
+        &original,
+        source_uuid,
+        source_type,
+        &note,
+        &mention_refs,
+    )
+    .map_err(sdk_err)?;
+
+    let event = client.sign_event(builder)?;
     let resp = client.submit_event(event).await?;
     println!("{}", normalize_write_response(&resp));
     Ok(())
@@ -812,6 +1015,21 @@ pub async fn dispatch(
             )
             .await
         }
+        MessagesCmd::Forward {
+            event,
+            to_channel,
+            note,
+        } => {
+            cmd_forward_message(
+                client,
+                ForwardMessageParams {
+                    event_id: event,
+                    to_channel_id: to_channel,
+                    note,
+                },
+            )
+            .await
+        }
         MessagesCmd::Edit { event, content } => cmd_edit_message(client, &event, &content).await,
         MessagesCmd::Delete {
             event,
@@ -876,7 +1094,11 @@ pub async fn dispatch(
 
 #[cfg(test)]
 mod tests {
-    use super::{find_root_from_tags, match_profiles_by_name, parse_member_pubkeys};
+    use super::{
+        event_channel_uuid, find_root_from_tags, forward_fetch_kinds,
+        forward_source_type_from_metadata, forwardable_kinds_list, match_profiles_by_name,
+        parse_member_pubkeys, ForwardSourceType, KIND_STREAM_MESSAGE_FORWARD,
+    };
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
     };
@@ -1163,5 +1385,79 @@ mod tests {
             profile_event(PK_VALID_A, Some("Aaron"), None),
         ];
         assert_eq!(match_profiles_by_name(&events, "Aaron").len(), 1);
+    }
+
+    // --- forward ---
+
+    const CHANNEL_UUID: &str = "11111111-1111-4111-8111-111111111111";
+
+    #[test]
+    fn forward_fetch_kinds_include_forwardables_plus_the_forward_kind() {
+        let kinds = forward_fetch_kinds();
+        for expected in [9, 40002, 45001, 45003, KIND_STREAM_MESSAGE_FORWARD] {
+            assert!(kinds.contains(&expected), "missing kind {expected}");
+        }
+        assert_eq!(forwardable_kinds_list(), "9, 40002, 45001, 45003");
+    }
+
+    #[test]
+    fn source_type_from_metadata_classifies_open_private_and_dm() {
+        let open = json!({"tags": [["d", CHANNEL_UUID], ["public"], ["t", "stream"]]});
+        assert_eq!(
+            forward_source_type_from_metadata(&open),
+            ForwardSourceType::Channel
+        );
+
+        let private = json!({"tags": [["d", CHANNEL_UUID], ["private"], ["t", "forum"]]});
+        assert_eq!(
+            forward_source_type_from_metadata(&private),
+            ForwardSourceType::Private
+        );
+
+        // `t=dm` wins over visibility — DM metadata also carries `private`.
+        let dm = json!({"tags": [["d", CHANNEL_UUID], ["private"], ["t", "dm"], ["hidden"]]});
+        assert_eq!(
+            forward_source_type_from_metadata(&dm),
+            ForwardSourceType::Dm
+        );
+    }
+
+    #[test]
+    fn source_type_from_metadata_fails_closed_without_a_public_tag() {
+        let bare = json!({"tags": [["d", CHANNEL_UUID]]});
+        assert_eq!(
+            forward_source_type_from_metadata(&bare),
+            ForwardSourceType::Private
+        );
+        assert_eq!(
+            forward_source_type_from_metadata(&json!({})),
+            ForwardSourceType::Private
+        );
+    }
+
+    fn signed_event(tags: Vec<Vec<&str>>) -> nostr::Event {
+        let tags: Vec<nostr::Tag> = tags
+            .iter()
+            .map(|parts| nostr::Tag::parse(parts.iter().copied()).expect("tag"))
+            .collect();
+        nostr::EventBuilder::new(nostr::Kind::Custom(9), "body")
+            .tags(tags)
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign")
+    }
+
+    #[test]
+    fn event_channel_uuid_reads_the_h_tag() {
+        let event = signed_event(vec![vec!["h", CHANNEL_UUID]]);
+        assert_eq!(
+            event_channel_uuid(&event).expect("uuid").to_string(),
+            CHANNEL_UUID
+        );
+    }
+
+    #[test]
+    fn event_channel_uuid_rejects_missing_and_malformed_h_tags() {
+        assert!(event_channel_uuid(&signed_event(vec![])).is_err());
+        assert!(event_channel_uuid(&signed_event(vec![vec!["h", "not-a-uuid"]])).is_err());
     }
 }

@@ -136,7 +136,7 @@ class SearchNotifier extends Notifier<SearchState> {
       final session = ref.read(relaySessionProvider.notifier);
       final events = await session.fetchHistory(
         NostrFilter(
-          kinds: const [9, 40002, 45001, 45003],
+          kinds: const [9, 40002, EventKind.streamMessageForward, 45001, 45003],
           search: query,
           limit: 20,
         ),

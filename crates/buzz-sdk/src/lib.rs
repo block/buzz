@@ -82,6 +82,8 @@ pub use buzz_core::channel::ChannelType as ChannelKind;
 pub use buzz_core::channel::ChannelVisibility as Visibility;
 /// Member role.
 pub use buzz_core::channel::MemberRole;
+/// Visibility class of the channel a forwarded message came from.
+pub use buzz_core::forward::ForwardSourceType;
 
 /// Errors returned by SDK builder functions.
 #[derive(Debug, thiserror::Error)]

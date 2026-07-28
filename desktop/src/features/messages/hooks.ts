@@ -40,9 +40,18 @@ import {
   addReaction,
   deleteMessage,
   editMessage,
+  getEventById,
   removeReaction,
   sendChannelMessage,
 } from "@/shared/api/tauri";
+import { forwardMessage } from "@/shared/api/tauriForward";
+import {
+  buildForwardTags,
+  forwardSourceTypeForChannel,
+  getEventChannelId,
+  parseForwardEnvelope,
+  resolveForwardOriginal,
+} from "@/features/messages/lib/forwardMessage";
 import { getChannelWindowEvents } from "@/shared/api/channelWindow";
 import type { Channel, Identity, RelayEvent } from "@/shared/api/types";
 // Same .mjs the renderer uses, so the cache-update projection can't drift
@@ -65,6 +74,7 @@ import {
   CHANNEL_TIMELINE_CONTENT_KINDS,
   KIND_CHANNEL_THREAD_SUMMARY,
   KIND_STREAM_MESSAGE,
+  KIND_STREAM_MESSAGE_FORWARD,
   KIND_SYSTEM_MESSAGE,
 } from "@/shared/constants/kinds";
 
@@ -630,6 +640,83 @@ export function useSendMessageMutation(
       });
       queryClient.setQueryData(windowKey, next);
       projectChannelWindowMessages(queryClient, context.channelId);
+    },
+  });
+}
+
+/**
+ * Publish a kind-40009 forward of `message` into `destination`.
+ *
+ * The `fwd` tag must carry the COMPLETE signed original event. Timeline rows
+ * are sig-stripped, so the original is re-fetched by id — except when the
+ * message is itself a forward, whose tags already embed the complete signed
+ * original (forwarding a forward flattens to depth 1).
+ *
+ * No optimistic cache write: the forwarder stays in place and the destination
+ * channel picks the event up through its live subscription / next fetch.
+ *
+ * `senderPubkey` is the forwarder's own pubkey — the note's recipients are
+ * derived from it exactly as the ordinary send path derives them.
+ */
+export function useForwardMessageMutation(senderPubkey: string | undefined) {
+  const queryClient = useQueryClient();
+
+  return useMutation<
+    { eventId: string; createdAt: number },
+    Error,
+    {
+      destination: Channel;
+      note: string;
+      /** Pubkeys the note @mentions, resolved against `destination`. */
+      mentionPubkeys?: string[];
+      message: { id: string; kind?: number; tags?: string[][] };
+    }
+  >({
+    mutationFn: async ({ destination, note, mentionPubkeys, message }) => {
+      if (destination.channelType === "forum") {
+        throw new Error("Messages cannot be forwarded into a forum.");
+      }
+
+      if (!senderPubkey) {
+        throw new Error("No identity available for sending messages.");
+      }
+
+      const original =
+        message.kind === KIND_STREAM_MESSAGE_FORWARD
+          ? (parseForwardEnvelope(message.tags ?? [])?.original ?? null)
+          : resolveForwardOriginal(await getEventById(message.id));
+      if (!original) {
+        throw new Error("This message cannot be forwarded.");
+      }
+
+      // The fwd-src label must match the source channel row; the source is
+      // the ORIGINAL's own channel (which, for a flattened re-forward, is not
+      // the channel the user is forwarding from).
+      const sourceChannelId = getEventChannelId(original);
+      const sourceChannel = queryClient
+        .getQueryData<Channel[]>(channelsQueryKey)
+        ?.find((channel) => channel.id === sourceChannelId);
+      if (!sourceChannel) {
+        throw new Error("The original message's channel is unavailable.");
+      }
+
+      const forwardTags = buildForwardTags({
+        original,
+        sourceType: forwardSourceTypeForChannel(sourceChannel),
+      });
+      // Same recipient derivation as an ordinary send: note @mentions notify,
+      // and a DM destination always p-tags its other participants.
+      const recipientPubkeys = messageMentionPubkeys(
+        destination,
+        senderPubkey,
+        mentionPubkeys,
+      );
+      return forwardMessage(
+        destination.id,
+        note.trim(),
+        forwardTags,
+        recipientPubkeys,
+      );
     },
   });
 }

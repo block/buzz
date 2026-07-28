@@ -33,6 +33,7 @@ import 'date_formatters.dart';
 import 'day_divider.dart';
 import 'dm_channel_labels.dart';
 import 'ephemeral_channel_display.dart';
+import 'forwarded_message_quote.dart';
 import 'manage_channel_sheet.dart';
 import 'members_sheet.dart';
 import 'message_actions.dart';

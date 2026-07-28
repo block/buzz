@@ -409,6 +409,29 @@ pub enum MessagesCmd {
         #[arg(long)]
         reply_to: Option<String>,
     },
+    /// Forward a message into another channel or DM
+    #[command(
+        after_help = "The note is your own text — the original message is copied verbatim into a \
+`fwd` tag, never merged into the note. --to-channel takes a channel UUID or a \
+DM UUID (DMs are channels). Forwarding a forward flattens: the embedded \
+original is forwarded instead, so forwards are never nested.\n\n\
+Examples:\n  \
+buzz messages forward --event <HEX> --to-channel <UUID>\n  \
+buzz messages forward --event <HEX> --to-channel <UUID> --note \"@alice relevant to us\"\n  \
+buzz messages forward --event <HEX> --to-channel <DM-UUID> --note -"
+    )]
+    Forward {
+        /// Event ID of the message to forward (64-char hex)
+        #[arg(long)]
+        event: String,
+        /// Destination channel or DM UUID
+        #[arg(long = "to-channel")]
+        to_channel: String,
+        /// Optional note to send with the forward — supports @mentions and
+        /// markdown. Use '-' to read from stdin.
+        #[arg(long)]
+        note: Option<String>,
+    },
     /// Edit a previously sent message
     Edit {
         /// Event ID of the message to edit (64-char hex)
@@ -1920,6 +1943,7 @@ mod tests {
             vec![
                 "delete",
                 "edit",
+                "forward",
                 "get",
                 "search",
                 "send",
@@ -2046,7 +2070,7 @@ mod tests {
             ("feed", 1),
             ("issues", 4),
             ("media", 1),
-            ("messages", 8),
+            ("messages", 9),
             ("pack", 2),
             ("patches", 4),
             ("pr", 5),

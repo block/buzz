@@ -44,6 +44,7 @@ import {
   KIND_REPO_ANNOUNCEMENT,
   KIND_REPO_STATE,
   KIND_STREAM_MESSAGE_EDIT,
+  KIND_STREAM_MESSAGE_FORWARD,
   KIND_SYSTEM_MESSAGE,
   KIND_TEXT_NOTE,
   KIND_USER_STATUS,
@@ -4341,6 +4342,7 @@ const TIMELINE_KINDS = new Set([
   9,
   40002,
   40008,
+  KIND_STREAM_MESSAGE_FORWARD,
   40099,
   43001,
   43002,
@@ -11392,6 +11394,7 @@ export function maybeInstallE2eTauriMocks() {
         if (delayMs > 0) {
           await new Promise((resolve) => window.setTimeout(resolve, delayMs));
         }
+        // sadscan:disable np.generic.1 -- mock pairing fixture for the E2E bridge, not a real secret
         return "nostrpair://8f4b8db31967ce14fef970a1ff1e8eecf19a430aa1c83875e2f5be68dcac0f1a?relay=wss%3A%2F%2Frelay.example.com&secret=87d5a8cfd5807a0cb44f728b67d88d6dcb8daf99be137c158f21a50c1e913c0a&v=1";
       }
       case "cancel_pairing":

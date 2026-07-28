@@ -18,6 +18,8 @@ pub mod error;
 pub mod event;
 /// NIP-01 subscription filter matching.
 pub mod filter;
+/// Message-forward envelope contract shared by the relay validator and the SDK.
+pub mod forward;
 /// Git permission types — ref patterns, protection rules, policy evaluation.
 pub mod git_perms;
 /// Shared invite-link contract constants.
