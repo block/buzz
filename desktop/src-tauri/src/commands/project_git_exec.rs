@@ -185,9 +185,15 @@ fn configure_git_auth(command: &mut Command, auth: &GitAuthConfig, needs_credent
 /// Format a path for git `credential.helper`.
 ///
 /// Git for Windows invokes helpers via MinGW bash, which treats `\` as
-/// escapes. Forward slashes work on every platform git supports.
-fn credential_helper_config_value(path: &std::path::Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
+/// escapes — use forward slashes. If the path contains whitespace or `'`,
+/// emit a `!` shell command with POSIX single quotes so `sh -c` does not
+/// word-split (or break on an apostrophe).
+pub(crate) fn credential_helper_config_value(path: &std::path::Path) -> String {
+    let path = path.to_string_lossy().replace('\\', "/");
+    if path.chars().all(|c| !c.is_whitespace() && c != '\'') {
+        return path;
+    }
+    format!("!'{}'", path.replace('\'', "'\\''"))
 }
 
 fn apply_git_config(command: &mut Command, entries: &[(&str, String)]) {
@@ -338,6 +344,28 @@ mod tests {
         assert_eq!(
             credential_helper_config_value(&path),
             "C:/Users/x/AppData/Local/Buzz/git-credential-nostr.exe",
+        );
+    }
+
+    #[test]
+    fn credential_helper_config_value_quotes_spaces() {
+        let path = std::path::PathBuf::from(
+            r"C:\Users\Buzz User\AppData\Local\Buzz\git-credential-nostr.exe",
+        );
+        assert_eq!(
+            credential_helper_config_value(&path),
+            "!'C:/Users/Buzz User/AppData/Local/Buzz/git-credential-nostr.exe'",
+        );
+    }
+
+    #[test]
+    fn credential_helper_config_value_escapes_apostrophes() {
+        let path = std::path::PathBuf::from(
+            r"C:\Users\O'Buzz User\AppData\Local\Buzz\git-credential-nostr.exe",
+        );
+        assert_eq!(
+            credential_helper_config_value(&path),
+            "!'C:/Users/O'\\''Buzz User/AppData/Local/Buzz/git-credential-nostr.exe'",
         );
     }
 
