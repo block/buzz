@@ -1,0 +1,24 @@
+[Unit]
+Description=Buzz agent %i
+After=network-online.target
+Wants=network-online.target
+# A long-running agent must never be rate-limited into staying down: a unit
+# held by the start limiter looks exactly like an agent that silently died,
+# and only `systemctl reset-failed` clears it.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# Holds the agent's minted nsec. Written by the provider with umask 077 and
+# chmod 600; systemd reads it as the owning user.
+EnvironmentFile=%h/.config/buzz-acp/%i.env
+# Absolute path, substituted at install time from the host's resolved
+# `buzz-acp`. systemd does not expand environment variables in the program
+# position, and the shell indirection that would work around that is not worth
+# adding to a unit whose environment carries a private key.
+ExecStart=@BUZZ_ACP_BIN@
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

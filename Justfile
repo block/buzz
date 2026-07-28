@@ -319,6 +319,12 @@ test-unit:
         # because nothing in CI runs `cargo test --workspace` — workspace
         # membership alone buys clippy/check, not a single executed test.
         cargo nextest run -p buzz-backend-kubernetes
+        # Remote-deploy provider (buzz-backend-ssh). Infra-free: the deploy
+        # tests execute the generated script against a local /bin/sh with a
+        # stubbed HOME, no network. This is the only place the shell-injection
+        # canary runs — the Windows job's copy of these tests is #[cfg(unix)]d
+        # out — so dropping this step lets an injection regression ship green.
+        cargo nextest run -p buzz-backend-ssh
     else
         ./scripts/run-tests.sh unit
     fi

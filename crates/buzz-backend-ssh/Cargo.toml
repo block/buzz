@@ -1,0 +1,31 @@
+[package]
+name = "buzz-backend-ssh"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Buzz backend provider that deploys managed agents to a remote host over SSH"
+
+# Deliberately binary-only and deliberately NOT bundled with the desktop app
+# (not in `tauri.conf.json` externalBin, not in `scripts/bundle-sidecars.sh`).
+# `discover_provider_candidates` prepends the app bundle's own directory to the
+# provider search path, so shipping this inside the bundle would give every
+# install an auto-discovered SSH-deploy capability and quietly undermine the
+# "Only use providers from trusted sources" warning the desktop shows. It is a
+# release artifact the user installs to `~/.local/bin`, which is already on the
+# discovery path.
+[[bin]]
+name = "buzz-backend-ssh"
+path = "src/main.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+zeroize = { workspace = true }
+# Deploy can install `buzz-acp` on the host by streaming it inside the script
+# that already travels on the SSH stdin channel. base64 is what keeps raw bytes
+# from corrupting that stream; sha2 is what lets the host refuse a payload that
+# arrived damaged. Both are already workspace dependencies.
+base64 = { workspace = true }
+sha2 = { workspace = true }
