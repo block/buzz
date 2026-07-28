@@ -20,9 +20,9 @@
 //! newest timestamp and collide on the bumped second. run.sh serialization is
 //! the guard against parallel adds (e.g. `xargs -P`).
 
-use std::sync::Arc;
+use std::{env, sync::Arc};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST;
 use buzz_core::tenant::{relay_url_authority, TenantContext};
 use buzz_db::{Db, DbConfig};
@@ -74,6 +74,8 @@ enum Command {
     ListMembers,
     /// Generate a new Nostr keypair (for bootstrapping).
     GenerateKey,
+    /// Print the public key for a private key without echoing the secret.
+    PublicKey,
     /// Run pending database migrations.
     Migrate,
     /// Inspect deployment-wide Buzz product feedback.
@@ -134,6 +136,13 @@ async fn run(cli: Cli) -> Result<i32> {
             println!("Public key:  {}", keys.public_key().to_hex());
             println!("Secret key:  {}", keys.secret_key().display_secret());
             println!("\nSet BUZZ_PRIVATE_KEY to the secret key to use this identity.");
+            Ok(0)
+        }
+        Command::PublicKey => {
+            let private_key =
+                env::var("BUZZ_PRIVATE_KEY").context("BUZZ_PRIVATE_KEY must be set")?;
+            let keys = Keys::parse(private_key.trim())?;
+            println!("{}", keys.public_key().to_hex());
             Ok(0)
         }
         Command::Migrate => {

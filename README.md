@@ -156,6 +156,23 @@ For a frontend-only split-terminal preview (relay logs separate from Vite output
 
 For agents, set `BUZZ_PRIVATE_KEY` and use [`buzz-cli`](crates/buzz-cli) — JSON in, JSON out, designed for LLM tool calls.
 
+### Steve's local pilot notes
+
+The upstream default remains `ws://localhost:3000`, but Steve's local pilot uses `localhost:3030` for active work so port `3000` can stay available for other local apps and old archive checks.
+If you are continuing Steve's pilot, start with:
+
+```bash
+./scripts/buzz-pilot-smoke.sh
+```
+
+The old `localhost:3000` pilot community is archive/reference only.
+The active `localhost:3030` `buzz-pilot` channel contains a Day 0 summary of the old archive, not a raw-message migration.
+As of Monday, July 27, 2026, the Day 0 pilot channels on `localhost:3030` are intended to stay durable for continuity and should not auto-archive after idle time.
+If you need to verify or repair who can manage those channels, start with `./scripts/audit-day0-channel-authority.sh`.
+If ordinary Buzz-authorized membership repair is unavailable, export a Buzz write identity for proof with `BUZZ_PILOT_PROOF_PRIVATE_KEY` or `BUZZ_PRIVATE_KEY`, then run `./scripts/repair-day0-channel-authority.sh --allow-local-fallback`. The helper derives the target pubkey from that identity, creates a fresh backup before the local-only fallback, and then proves the repaired path.
+Agent task updates should go to the `agent-runs` channel through `scripts/post-pilot-agent-update.sh`, with Slack kept optional and advisory-only.
+See [`AGENTS.md`](AGENTS.md), [`CONCEPTS.md`](CONCEPTS.md), and [`docs/pilots/buzz-local-continuity-runbook.md`](docs/pilots/buzz-local-continuity-runbook.md) before touching local Buzz data.
+
 ---
 
 ## Windows prerequisites

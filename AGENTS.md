@@ -69,6 +69,8 @@ web/                  # Browser web client (repo browser, served by the relay)
 mobile/               # Flutter mobile app
 migrations/           # SQL migrations (auto-applied on relay startup)
 scripts/              # Dev tooling
+docs/solutions/       # Documented solutions and practices with YAML frontmatter
+CONCEPTS.md           # Shared project vocabulary for Buzz communities and pilot terms
 .env.example          # Config template — copy to .env before running
 ```
 
@@ -83,6 +85,9 @@ just setup                # install deps, run migrations
 just relay                # start relay at ws://localhost:3000
 just ci                   # run before any PR
 ```
+
+These are upstream local-development defaults. Steve's local pilot has a
+separate port policy below.
 
 See CONTRIBUTING.md for full setup details and dependency requirements.
 
@@ -162,6 +167,110 @@ check existing reply handlers for the pattern.
 (`BUZZ_RELAY_URL`, `BUZZ_PRIVATE_KEY`, `BUZZ_AUTH_TAG`) are auto-injected
 by the ACP harness into managed agent subprocesses. In development, set
 `BUZZ_PRIVATE_KEY` and `BUZZ_RELAY_URL` in your environment manually.
+
+### Steve Local Pilot Continuity
+
+For Steve's local pilot, do not use port `3000` for active Buzz work. The
+Getting Started block above remains correct for upstream defaults, but this
+pilot overrides it. Use `localhost:3030` as the active local community, with
+health on `8088` and metrics on `9202`. The older `localhost:3000` community is
+archive/reference only.
+
+Before changing local Buzz data or trying to recover old messages, run the
+read-only smoke check:
+
+```bash
+./scripts/buzz-pilot-smoke.sh
+```
+
+If the check says the relay is absent, start the Steve-local relay with:
+
+```bash
+RELAY_URL=ws://localhost:3030 \
+BUZZ_BIND_ADDR=127.0.0.1:3030 \
+BUZZ_HEALTH_PORT=8088 \
+BUZZ_METRICS_PORT=9202 \
+BUZZ_RELAY_URL=ws://localhost:3030 \
+just relay
+```
+
+The old pilot messages were not migrated into `localhost:3030` one by one.
+Instead, they were summarized into the active Day 0 `buzz-pilot` channel as
+event `295d3891fb6a200a325f148ed651e4fc519f7b51f9d15bb9cad84b041871d8aa`.
+Raw old messages remain attached to the `localhost:3000` archive community
+unless Steve explicitly chooses a backup-first export or migration later.
+
+As of Monday, July 27, 2026, the four Day 0 pilot channels on
+`localhost:3030` are intended to stay durable for pilot continuity:
+`buzz-pilot`, `install-support`, `repo-review`, and `agent-runs` should not be
+treated as 1-hour ephemeral rooms.
+
+The Day 0 channels also need a normal authority path, not just durable TTL
+state. Before using direct local database edits for Day 0 channel maintenance,
+run:
+
+```bash
+scripts/audit-day0-channel-authority.sh
+```
+
+Preferred steady state:
+
+- One durable Steve-controlled manager pubkey is an `owner` or `admin` on all four Day 0 channels.
+- Routine maintenance uses normal Buzz commands such as `buzz channels members`, `buzz channels add-member`, and `buzz channels update --no-ttl`.
+- Local SQL repair is fallback-only for this pilot and should not become the routine path.
+
+If ordinary `add-member` cannot recover Day 0 authority, use the repo-local
+repair helper. The helper can derive the target pubkey from the exported proof
+identity, so `--target-pubkey` is optional when that private key is present:
+
+```bash
+export BUZZ_PILOT_PROOF_PRIVATE_KEY=<nsec-or-64-char-hex-private-key>
+export BUZZ_PRIVATE_KEY="$BUZZ_PILOT_PROOF_PRIVATE_KEY"
+export BUZZ_RELAY_URL=http://localhost:3030
+./scripts/repair-day0-channel-authority.sh --allow-local-fallback
+```
+
+Important:
+
+- If `--target-pubkey` is omitted, the helper derives the target pubkey from `BUZZ_PILOT_PROOF_PRIVATE_KEY` or `BUZZ_PRIVATE_KEY`.
+- If the target pubkey is not yet a relay member for `localhost:3030`, `--allow-local-fallback` creates a backup and adds local relay membership before channel repair.
+- Unless `--skip-proof` is set, the helper also needs a Buzz write identity in shell via `BUZZ_PILOT_PROOF_PRIVATE_KEY` or `BUZZ_PRIVATE_KEY`.
+- For Steve's pilot, prefer a temporary shell export from the Buzz Mac app's Settings > Profile > Private key reveal flow. Do not put Steve's identity key in this repo's `.env`, docs, examples, shell history, Slack, or any tracked file.
+- Use a persistent secret file only if Steve explicitly chooses that tradeoff later; the default is "reveal, export for this terminal, run the repair, close the terminal."
+- The helper first tries normal Buzz-authorized membership repair when a current authorized `BUZZ_PRIVATE_KEY` is available.
+- If fallback is still needed, the helper creates a fresh local Postgres backup before injecting Day 0 channel authority and then proves the repaired path with `buzz channels update --no-ttl`.
+
+Before touching local Buzz data, read:
+
+- `docs/pilots/buzz-local-continuity-runbook.md`
+- `docs/pilots/2026-07-25-buzz-day0-slack-visibility.md`
+- `docs/dogfood-reports/2026-07-26-codex-fix-dev-startup-pilot-buzz-continuity-handoff.md`
+- `docs/solutions/developer-experience/local-pilot-community-authority.md`
+
+Use `CONCEPTS.md` for shared vocabulary such as Buzz Community, Host
+Authority, Active Pilot Community, Archive Community, Day 0 Summary, and Smoke
+Check. These terms matter because local host/port changes can select different
+communities even when the same database is running.
+
+For agent task visibility in Steve's pilot, use:
+
+```bash
+scripts/post-pilot-agent-update.sh \
+  --status started \
+  --task-title "Short task title" \
+  --summary "One-line root summary" \
+  --next-owner "Codex"
+```
+
+Contract for that helper:
+
+- Canonical Buzz destination is `BUZZ_PILOT_AGENT_RUNS_CHANNEL_ID` on the active `localhost:3030` community.
+- `BUZZ_PILOT_CHANNEL_ID_OVERRIDE` is test-only and should be used only for explicit local proof runs.
+- Root task posts should normally use `--status started`.
+- Follow-up replies should use `--reply-to <event-id>` with one of: `blocked`, `needs-steve`, `changed`, `handoff`, `done`.
+- Slack mirroring is optional visibility only, controlled by `BUZZ_PILOT_SLACK_WEBHOOK_URL`.
+- Keep secrets in environment or other untracked local storage only. Do not place relay keys, webhook URLs, or auth material in tracked docs, fixtures, prompts, or CLI history.
+- Slack payloads must stay sanitized: short status, short task label, Buzz reference, and changed artifact names only. Never include `localhost` URLs, raw logs, or secrets.
 
 ### Building the CLI
 

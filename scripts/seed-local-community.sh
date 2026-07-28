@@ -10,12 +10,26 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${REPO_ROOT}"
 
+CALLER_PGHOST="${PGHOST-}"
+CALLER_PGPORT="${PGPORT-}"
+CALLER_PGUSER="${PGUSER-}"
+CALLER_PGPASSWORD="${PGPASSWORD-}"
+CALLER_PGDATABASE="${PGDATABASE-}"
+CALLER_RELAY_URL="${RELAY_URL-}"
+
 if [[ -f ".env" ]]; then
   set -o allexport
   # shellcheck disable=SC1091
   source .env
   set +o allexport
 fi
+
+[[ -n "${CALLER_PGHOST}" ]] && PGHOST="${CALLER_PGHOST}"
+[[ -n "${CALLER_PGPORT}" ]] && PGPORT="${CALLER_PGPORT}"
+[[ -n "${CALLER_PGUSER}" ]] && PGUSER="${CALLER_PGUSER}"
+[[ -n "${CALLER_PGPASSWORD}" ]] && PGPASSWORD="${CALLER_PGPASSWORD}"
+[[ -n "${CALLER_PGDATABASE}" ]] && PGDATABASE="${CALLER_PGDATABASE}"
+[[ -n "${CALLER_RELAY_URL}" ]] && RELAY_URL="${CALLER_RELAY_URL}"
 
 export PGHOST="${PGHOST:-localhost}"
 export PGPORT="${PGPORT:-5432}"

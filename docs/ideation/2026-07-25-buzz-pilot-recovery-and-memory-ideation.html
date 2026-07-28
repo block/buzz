@@ -1,0 +1,303 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Ideation: Buzz Pilot Recovery And Memory</title>
+  <style>
+    :root {
+      --ink: #1f2520;
+      --muted: #647067;
+      --paper: #f7f1e5;
+      --panel: #fffaf0;
+      --line: #d9cbb7;
+      --accent: #c78322;
+      --accent-dark: #794d10;
+      --green: #47624b;
+      --blue: #334d6e;
+      --shadow: 0 18px 42px rgba(66, 46, 20, 0.12);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 12% 8%, rgba(199, 131, 34, 0.18), transparent 28rem),
+        radial-gradient(circle at 88% 18%, rgba(71, 98, 75, 0.16), transparent 24rem),
+        linear-gradient(135deg, #fbf5e9 0%, var(--paper) 56%, #efe1ca 100%);
+      font: 16px/1.55 Georgia, "Times New Roman", serif;
+    }
+    main {
+      width: min(960px, calc(100% - 32px));
+      margin: 40px auto;
+    }
+    header, section, footer {
+      background: rgba(255, 250, 240, 0.88);
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      box-shadow: var(--shadow);
+      padding: 28px;
+      margin: 18px 0;
+    }
+    h1, h2, h3 {
+      font-family: "Avenir Next", "Trebuchet MS", sans-serif;
+      line-height: 1.1;
+      margin: 0 0 14px;
+    }
+    h1 {
+      font-size: clamp(2.25rem, 7vw, 4.4rem);
+      letter-spacing: -0.055em;
+      max-width: 820px;
+    }
+    h2 {
+      color: var(--accent-dark);
+      font-size: 1.45rem;
+      letter-spacing: -0.02em;
+    }
+    h3 { font-size: 1.15rem; }
+    p, li { max-width: 74ch; }
+    code {
+      background: #f1e2c7;
+      border: 1px solid #dfc8a4;
+      border-radius: 7px;
+      padding: 0.08rem 0.32rem;
+      font-family: "SFMono-Regular", ui-monospace, monospace;
+      font-size: 0.9em;
+    }
+    a { color: var(--blue); }
+    .meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 22px;
+    }
+    .pill {
+      background: #efe1ca;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 7px 11px;
+      color: #594a35;
+      font: 0.86rem/1.1 "Avenir Next", sans-serif;
+    }
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 14px;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 18px;
+    }
+    .idea {
+      border-left: 6px solid var(--accent);
+    }
+    .idea:nth-child(even) { border-left-color: var(--green); }
+    .jump-list {
+      display: grid;
+      gap: 8px;
+      margin: 10px 0 20px;
+      padding: 0;
+      list-style: none;
+    }
+    .jump-list a {
+      display: block;
+      background: #f5ead8;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 10px 12px;
+      text-decoration: none;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 12px;
+      font-size: 0.95rem;
+    }
+    th, td {
+      border-bottom: 1px solid var(--line);
+      padding: 10px 8px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      font-family: "Avenir Next", sans-serif;
+      color: var(--accent-dark);
+    }
+    .diagram {
+      margin: 16px 0;
+      padding: 16px;
+      background: #f2e4ce;
+      border-radius: 18px;
+      border: 1px solid var(--line);
+      overflow-x: auto;
+    }
+    svg { max-width: 100%; height: auto; display: block; }
+    footer {
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <p class="pill">Ideation Artifact</p>
+    <h1>Buzz Pilot Recovery And Memory</h1>
+    <p>Ranked next moves after the local Buzz pilot came up once, shut down, and left the Mac app running. The center question is whether the earlier pilot community can be recovered as useful agent memory, and what to do next without losing confidence.</p>
+    <div class="meta">
+      <span class="pill">Date: <time datetime="2026-07-25">2026-07-25</time></span>
+      <span class="pill">Topic: buzz-pilot-recovery-and-memory</span>
+      <span class="pill">Focus: local pilot continuity, old community recovery, agent memory</span>
+      <span class="pill">Mode: repo-grounded</span>
+    </div>
+  </header>
+
+  <section id="grounding-context">
+    <h2>Grounding Context</h2>
+    <p>Buzz stores conversation state as signed events in a relay-backed event log. In this local setup, the backing services are Docker Compose services, and the durable data lives in named volumes such as <code>buzz-postgres-data</code>. Docker's own Compose docs say named volumes are not removed by default on <code>docker compose down</code>, but are removed by <code>--volumes</code>.</p>
+    <p>Local metadata inspection found active Docker services for Postgres, Redis, MinIO, Prometheus, Adminer, and Keycloak. The named volumes <code>buzz-postgres-data</code>, <code>buzz-minio-data</code>, and <code>buzz-prometheus-data</code> exist.</p>
+    <p>The database currently has two meaningful local communities. <code>localhost:3000</code> has 2 channels and 44 events: <code>codex-pilot-smoke</code> and <code>pilot-demo</code>. <code>localhost:3030</code> has 4 channels and 176 events: <code>buzz-pilot</code>, <code>install-support</code>, <code>repo-review</code>, and <code>agent-runs</code>.</p>
+    <p>Port inspection found <code>3000</code> still held by a Node process, while <code>3030</code> and <code>8088</code> were no longer listening. That means the old community is likely still stored, but it is not currently reachable through the normal old authority because the relay is not running on <code>localhost:3000</code>.</p>
+    <p>The repo's seed script intentionally treats loopback authorities as distinct hosts. Because <code>localhost:3000</code> and <code>localhost:3030</code> map to distinct community rows, switching ports can feel like memory loss even when the same Postgres volume still contains both logs.</p>
+  </section>
+
+  <section id="topic-axes">
+    <h2>Topic Axes</h2>
+    <ul>
+      <li>Recoverability: how to get the prior conversation back without data mutation.</li>
+      <li>Continuity: how to keep one stable pilot identity and community going forward.</li>
+      <li>Visibility: how to make active and blocked agent work obvious.</li>
+      <li>Memory value: how to turn Buzz threads into reusable agent context.</li>
+      <li>Safety: how to avoid losing data or leaking credentials while experimenting.</li>
+    </ul>
+  </section>
+
+  <section id="ranked-ideas">
+    <h2>Ranked Ideas</h2>
+    <ol class="jump-list">
+      <li><a href="#idea-1">1. Recover old community by replaying its original authority</a></li>
+      <li><a href="#idea-2">2. Make a pilot continuity runbook before more feature work</a></li>
+      <li><a href="#idea-3">3. Promote Buzz threads into a memory index, not raw memory</a></li>
+      <li><a href="#idea-4">4. Stabilize one pilot community and freeze the other as an archive</a></li>
+      <li><a href="#idea-5">5. Add a daily agent pulse that mirrors only summaries to Slack</a></li>
+      <li><a href="#idea-6">6. Create a backup-first migration experiment for host/port moves</a></li>
+    </ol>
+
+    <article class="card idea" id="idea-1">
+      <h3>1. Recover old community by replaying its original authority</h3>
+      <p><strong>Axis:</strong> Recoverability</p>
+      <p><strong>Description:</strong> Treat <code>localhost:3000</code> as the old community's key, not just a port. Free port <code>3000</code>, stop any competing relay, and start Buzz on the default authority so the desktop and CLI resolve the same community row that already has <code>codex-pilot-smoke</code> and <code>pilot-demo</code>.</p>
+      <p><strong>Basis:</strong> direct: local DB metadata shows <code>localhost:3000</code> has 2 channels and 44 events; repo seed logic creates distinct host rows for <code>localhost:3000</code> and <code>localhost:3030</code>.</p>
+      <p><strong>Rationale:</strong> This is the highest-confidence way to get the old conversation back because it avoids rewriting event ownership, channel IDs, or community foreign keys.</p>
+      <p><strong>Downsides:</strong> Requires stopping or moving the Node app on port <code>3000</code>. It may be inconvenient while Amancha Wedding is active.</p>
+      <p><strong>Confidence:</strong> 90%</p>
+      <p><strong>Complexity:</strong> Low</p>
+    </article>
+
+    <article class="card idea" id="idea-2">
+      <h3>2. Make a pilot continuity runbook before more feature work</h3>
+      <p><strong>Axis:</strong> Continuity</p>
+      <p><strong>Description:</strong> Write a short operator runbook that answers: which port is canonical today, which community should agents write to, how to restart safely, how to check event counts, how to avoid <code>dev-reset</code>, and how to back up the database volume before risky experiments.</p>
+      <p><strong>Basis:</strong> direct: local notes already record port collision, alternate port setup, channel IDs, CLI smoke evidence, and the distinction between the app and the relay.</p>
+      <p><strong>Rationale:</strong> A runbook turns fragile terminal memory into a repeatable operating surface. It is the fastest way to prevent "where did my memory go?" from recurring.</p>
+      <p><strong>Downsides:</strong> It is not glamorous, and it will need updates as the pilot settles.</p>
+      <p><strong>Confidence:</strong> 86%</p>
+      <p><strong>Complexity:</strong> Low</p>
+    </article>
+
+    <article class="card idea" id="idea-3">
+      <h3>3. Promote Buzz threads into a memory index, not raw memory</h3>
+      <p><strong>Axis:</strong> Memory value</p>
+      <p><strong>Description:</strong> Define "agent memory" as an index of durable Buzz task threads plus closing summaries, not as every message being automatically trusted. Agents should read thread roots and closeouts through <code>buzz-cli</code>, then cite the thread/event IDs they relied on.</p>
+      <p><strong>Basis:</strong> reasoned: Buzz's event-log model makes retrieval and attribution strong, but raw chat is noisy; a curated memory index gives agents enough context without making every transient message canonical.</p>
+      <p><strong>Rationale:</strong> This preserves the thing you hoped for, "my conversations become memory," while avoiding the trap where unresolved setup chatter becomes false institutional knowledge.</p>
+      <p><strong>Downsides:</strong> Requires discipline: every useful thread needs a closeout that says what is true, what changed, and what is still uncertain.</p>
+      <p><strong>Confidence:</strong> 82%</p>
+      <p><strong>Complexity:</strong> Medium</p>
+      <div class="diagram" aria-label="Memory index diagram">
+        <svg viewBox="0 0 760 220" role="img">
+          <rect x="20" y="30" width="180" height="70" rx="18" fill="#fffaf0" stroke="#c78322" stroke-width="3"/>
+          <text x="110" y="61" text-anchor="middle" font-family="Avenir Next, sans-serif" font-size="16" fill="#1f2520">Buzz Thread</text>
+          <text x="110" y="84" text-anchor="middle" font-family="Avenir Next, sans-serif" font-size="13" fill="#647067">raw conversation</text>
+          <path d="M205 65 C260 65, 270 65, 320 65" fill="none" stroke="#794d10" stroke-width="3"/>
+          <polygon points="320,65 307,57 307,73" fill="#794d10"/>
+          <rect x="330" y="30" width="180" height="70" rx="18" fill="#fffaf0" stroke="#47624b" stroke-width="3"/>
+          <text x="420" y="61" text-anchor="middle" font-family="Avenir Next, sans-serif" font-size="16" fill="#1f2520">Closeout</text>
+          <text x="420" y="84" text-anchor="middle" font-family="Avenir Next, sans-serif" font-size="13" fill="#647067">what to trust</text>
+          <path d="M515 65 C570 65, 580 65, 630 65" fill="none" stroke="#794d10" stroke-width="3"/>
+          <polygon points="630,65 617,57 617,73" fill="#794d10"/>
+          <rect x="640" y="30" width="100" height="70" rx="18" fill="#fffaf0" stroke="#334d6e" stroke-width="3"/>
+          <text x="690" y="61" text-anchor="middle" font-family="Avenir Next, sans-serif" font-size="16" fill="#1f2520">Agent</text>
+          <text x="690" y="84" text-anchor="middle" font-family="Avenir Next, sans-serif" font-size="13" fill="#647067">cites IDs</text>
+          <text x="380" y="150" text-anchor="middle" font-family="Georgia, serif" font-size="17" fill="#1f2520">Memory is not "everything said"; memory is "retrieved thread + trusted closeout + cited event IDs."</text>
+        </svg>
+      </div>
+    </article>
+
+    <article class="card idea" id="idea-4">
+      <h3>4. Stabilize one pilot community and freeze the other as an archive</h3>
+      <p><strong>Axis:</strong> Continuity</p>
+      <p><strong>Description:</strong> Pick one canonical pilot authority for new work. Keep the other community read-only/archive until a proper migration path exists. For example: continue Day 1 on <code>localhost:3030</code>, but temporarily restart <code>localhost:3000</code> only to read/export the older demo conversations.</p>
+      <p><strong>Basis:</strong> direct: the DB currently contains both communities with different channel sets and event counts.</p>
+      <p><strong>Rationale:</strong> This avoids accidental split-brain while preserving prior context.</p>
+      <p><strong>Downsides:</strong> The archive is not visible from the active community unless linked or exported.</p>
+      <p><strong>Confidence:</strong> 80%</p>
+      <p><strong>Complexity:</strong> Low</p>
+    </article>
+
+    <article class="card idea" id="idea-5">
+      <h3>5. Add a daily agent pulse that mirrors only summaries to Slack</h3>
+      <p><strong>Axis:</strong> Visibility</p>
+      <p><strong>Description:</strong> Keep Buzz canonical, but have a daily or per-task pulse summarize active threads to Slack: active, blocked, changed artifacts, and needs Steve. Do not mirror raw logs or secrets.</p>
+      <p><strong>Basis:</strong> direct: the Day 0 note already defines a webhook-first Slack visibility track; external: Slack incoming webhooks are designed for simple app-to-channel posting, and Slack Web API posting can be added later for richer threading.</p>
+      <p><strong>Rationale:</strong> This makes agent work visible without turning Slack into the memory database.</p>
+      <p><strong>Downsides:</strong> Adds another inbox if summaries are too frequent or too vague.</p>
+      <p><strong>Confidence:</strong> 74%</p>
+      <p><strong>Complexity:</strong> Medium</p>
+    </article>
+
+    <article class="card idea" id="idea-6">
+      <h3>6. Create a backup-first migration experiment for host/port moves</h3>
+      <p><strong>Axis:</strong> Safety</p>
+      <p><strong>Description:</strong> Before any aliasing or merge attempt, take a Postgres backup, then test a scripted migration in a disposable copy. The goal would be to move or duplicate the old <code>localhost:3000</code> community into the canonical pilot authority without corrupting signed event expectations or foreign-key relationships.</p>
+      <p><strong>Basis:</strong> direct: the <code>communities</code> table has one unique host per community and many dependent tables; Docker Compose uses named volumes for persistence.</p>
+      <p><strong>Rationale:</strong> This is the path if preserving one unified community becomes more valuable than keeping old and new communities separate.</p>
+      <p><strong>Downsides:</strong> It is easy to over-invest here too early. Read/export first; migrate only if the old conversations are actually valuable enough.</p>
+      <p><strong>Confidence:</strong> 65%</p>
+      <p><strong>Complexity:</strong> High</p>
+    </article>
+  </section>
+
+  <section id="rejection-summary">
+    <h2>Rejection Summary</h2>
+    <table>
+      <thead>
+        <tr><th>#</th><th>Idea</th><th>Reason Rejected</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>1</td><td>Merge <code>localhost:3000</code> and <code>localhost:3030</code> immediately in-place</td><td>Too risky without backup and schema-specific migration; many tables reference <code>community_id</code>.</td></tr>
+        <tr><td>2</td><td>Treat the running Mac app as the memory store</td><td>Incorrect model; the app is a client, while durable memory is in relay/Postgres events.</td></tr>
+        <tr><td>3</td><td>Keep switching ports opportunistically</td><td>Creates split-brain local communities and makes retrieval feel random.</td></tr>
+        <tr><td>4</td><td>Use <code>dev-reset</code> to get unstuck</td><td>Dangerous for this pilot because it intentionally deletes development data and volumes.</td></tr>
+        <tr><td>5</td><td>Mirror all Buzz messages to Slack</td><td>Leaks too much context and makes Slack an accidental second memory store.</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section id="sources">
+    <h2>Sources</h2>
+    <ul>
+      <li>Local repo: <code>README.md</code>, <code>AGENTS.md</code>, <code>docker-compose.yml</code>, <code>justfile</code>, <code>scripts/seed-local-community.sh</code>.</li>
+      <li>Local DB metadata queried from <code>buzz-postgres</code> without reading message contents.</li>
+      <li><a href="https://docs.docker.com/reference/cli/docker/compose/down/">Docker Compose down reference</a>.</li>
+      <li><a href="https://github.com/nostr-protocol/nips/blob/master/01.md">NIP-01 protocol reference</a>.</li>
+    </ul>
+  </section>
+
+  <footer class="composition-signal">
+    Composed 2026-07-25 by ce-ideate from local Buzz pilot state and repo inspection.
+  </footer>
+</main>
+</body>
+</html>
