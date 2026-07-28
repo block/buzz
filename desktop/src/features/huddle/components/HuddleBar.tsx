@@ -493,21 +493,29 @@ export function HuddleBar({
   async function handleLeave() {
     if (isLeaving) return;
     const leavingChannelId = barState?.ephemeral_channel_id ?? null;
+    // Snapshot for rollback: leaving is only optimistic if a failed teardown can
+    // put the bar back exactly as it was.
+    const previousState = state;
     stateGenerationRef.current += 1;
     locallyLeavingChannelRef.current = leavingChannelId;
     setIsLeaving(true);
+    // Close the drawer now rather than after teardown. leaveHuddle() stops the
+    // worklet, stops the mic track, and round-trips Rust `leave_huddle`; waiting
+    // on all three reads as an unresponsive click. `locallyLeavingChannelRef`
+    // already suppresses in-flight "still active" states for this channel, so
+    // nothing reopens the drawer behind us.
+    setState(null);
     try {
-      const backendClean = await leaveHuddle();
-      if (backendClean) {
-        setState(null);
-      } else {
+      // If cleanup failed, restore the bar so the user can retry.
+      if (!(await leaveHuddle())) {
         locallyLeavingChannelRef.current = null;
         stateGenerationRef.current += 1;
+        setState(previousState);
       }
-      // If cleanup failed, keep the bar visible so the user can retry.
     } catch (e) {
       locallyLeavingChannelRef.current = null;
       stateGenerationRef.current += 1;
+      setState(previousState);
       console.error("Failed to leave huddle:", e);
     } finally {
       setIsLeaving(false);

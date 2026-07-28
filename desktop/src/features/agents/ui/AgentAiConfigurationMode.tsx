@@ -6,6 +6,16 @@ import type { InheritedDefault } from "./bakedEnvHelpers";
 
 export type { AgentAiConfigurationMode } from "./agentAiConfigurationPolicy";
 
+/**
+ * Motion shared by the sliding pill and the labels it slides under. Both halves
+ * must use it: a bare `transition-colors` falls back to Tailwind's 150ms
+ * default, so the label finishes recoloring ~100ms before the 250ms pill
+ * arrives beneath it, and on a different curve.
+ */
+const TAB_MOTION = "duration-[250ms] ease-out motion-reduce:transition-none";
+
+const TAB_TRIGGER_CLASS = `relative z-10 h-full rounded-md bg-transparent text-xs font-medium shadow-none transition-colors ${TAB_MOTION} data-[state=active]:bg-transparent data-[state=active]:shadow-none`;
+
 export function HarnessModelDefaultNotice({
   harness,
   model,
@@ -86,24 +96,18 @@ export function AgentAiConfigurationModeField({
         <TabsList className="relative isolate grid h-9 w-full grid-cols-2 overflow-hidden rounded-lg bg-muted p-0.5">
           <div
             aria-hidden="true"
-            className="absolute bottom-0.5 left-0.5 top-0.5 z-0 rounded-md bg-background shadow-sm transition-transform duration-[250ms] ease-out"
+            className={`absolute bottom-0.5 left-0.5 top-0.5 z-0 rounded-md bg-background shadow-sm transition-transform ${TAB_MOTION}`}
             style={{
               transform: `translateX(${mode === "custom" ? 100 : 0}%)`,
               width: "calc((100% - 4px) / 2)",
             }}
           />
-          <TabsTrigger
-            className="relative z-10 h-full rounded-md bg-transparent text-xs font-medium shadow-none transition-colors data-[state=active]:bg-transparent data-[state=active]:shadow-none"
-            value="defaults"
-          >
+          <TabsTrigger className={TAB_TRIGGER_CLASS} value="defaults">
             {needsProviderSelection
               ? "Use agent defaults"
               : "Use harness defaults"}
           </TabsTrigger>
-          <TabsTrigger
-            className="relative z-10 h-full rounded-md bg-transparent text-xs font-medium shadow-none transition-colors data-[state=active]:bg-transparent data-[state=active]:shadow-none"
-            value="custom"
-          >
+          <TabsTrigger className={TAB_TRIGGER_CLASS} value="custom">
             Customize for this agent
           </TabsTrigger>
         </TabsList>

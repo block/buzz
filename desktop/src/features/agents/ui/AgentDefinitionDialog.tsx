@@ -834,7 +834,10 @@ export function AgentDefinitionDialog({
             ) : null}
 
             <div
-              className="space-y-5"
+              // Keyed to fade the incoming mode in: this section's height changes
+              // instantly while the pill slides 250ms. Values live in parent state.
+              key={aiConfigurationMode}
+              className="animate-in space-y-5 fade-in-0 duration-[250ms] ease-out motion-reduce:animate-none"
               data-testid={`agent-${aiConfigurationMode}-configuration-section`}
             >
               {aiConfigurationMode === "custom" ? (
