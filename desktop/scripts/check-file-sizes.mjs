@@ -627,7 +627,11 @@ const overrides = new Map([
   // return value so the frontend immediately has the updated env.
   // +1: rebase over main (#2680) — requires_external_cli: false added to
   // save_custom_harness catalog entry construction (new required field).
-  ["src-tauri/src/commands/agent_discovery.rs", 2167],
+  // -359: install command execution (spawn, output drain under timeout, retry
+  // with backoff, output truncation) extracted to agent_discovery/install_exec.rs
+  // alongside its tests, matching the managed_node.rs / post_install_verification.rs
+  // split. The entries above describe the file's history, not its current shape.
+  ["src-tauri/src/commands/agent_discovery.rs", 1808],
   // draft-persistence predicate: submit-time `loadDraft` check + inline comment
   // + deps-array entry in submitMessage closes the never-persisted-boundary
   // defect (Thufir Pass-3 finding). Load-bearing correctness fix; queued to
