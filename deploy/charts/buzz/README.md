@@ -52,6 +52,28 @@ See:
 
 The chart fails at `helm install` / `helm template` time with a clear message if any of these are missing or malformed (see `templates/_validate.tpl`).
 
+## Key-value backend: Redis or Valkey
+
+The relay reaches its key-value store through a single `REDIS_URL` connection
+string over the RESP protocol, so it works unchanged against Redis **or**
+[Valkey](https://valkey.io), the permissively-licensed (BSD-3) fork of Redis.
+Buzz's full command surface — including the five server-side Lua scripts — was
+verified identical on a live Valkey 8.1.6 instance, with Buzz's own
+Redis-dependent test suites passing in full. No Redis modules, streams, cluster
+APIs, or keyspace notifications are used.
+
+Redis remains the default. Three ways to run on Valkey, none of which change
+`REDIS_URL` or the client:
+
+- **Bundled eval subchart:** `--set valkey.enabled=true` (instead of
+  `redis.enabled=true`) brings up an in-cluster Valkey and composes `REDIS_URL`
+  from it. `redis.enabled` and `valkey.enabled` are mutually exclusive.
+- **Managed endpoint (e.g. AWS ElastiCache running Valkey):** leave both
+  subcharts disabled and set `externalRedis.url` to the managed endpoint — it
+  accepts any RESP-compatible URL: `--set externalRedis.url=rediss://my-valkey-endpoint:6379`.
+- **Existing Secret:** provide `REDIS_URL` in `secrets.existingSecret` pointing
+  at any RESP endpoint.
+
 ## Relay Pod extensions
 
 The chart exposes narrow extension points for init containers, volumes, relay
@@ -121,13 +143,13 @@ an Ingress or HTTPRoute for the pairing Service; route the public hostname to
 
 ## HA (production)
 
-`replicaCount > 1` hard-requires Redis:
+`replicaCount > 1` hard-requires a key-value backend (Redis or Valkey):
 
-- Redis (`redis.enabled=true`, `externalRedis.url`, or `REDIS_URL` in `existingSecret`) — for `buzz-pubsub` fan-out
+- Redis or Valkey (`redis.enabled=true`, `valkey.enabled=true`, `externalRedis.url`, or `REDIS_URL` in `existingSecret`) — for `buzz-pubsub` fan-out
 
 It does **not** require ReadWriteMany git storage. Git ref/object state is object-store-backed (each request hydrates an ephemeral repo from S3-compatible storage; writer serialization is the object-store pointer CAS — see `docs/git-on-object-storage.md`), and repo-name uniqueness lives in Postgres. Each replica can use its own `ReadWriteOnce` volume; no shared filesystem is needed.
 
-The chart **template-fails** if the Redis invariant is broken at `replicaCount > 1`. No silent degradation.
+The chart **template-fails** if the key-value invariant is broken at `replicaCount > 1`. No silent degradation.
 
 ### Relay autoscaling
 

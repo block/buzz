@@ -1,0 +1,11 @@
+# Opt-in override: run the key-value backend on Valkey (BSD-3) instead of Redis.
+# Keeps the service *named* `redis` on purpose, so the relay's `depends_on` and
+# `REDIS_URL=...@redis:6379` resolve unchanged — swapping the engine needs zero
+# relay edits. Enable with `BUZZ_COMPOSE_VALKEY=true ./run.sh start`; the default
+# `./run.sh start` still runs Redis. For a managed endpoint, see README.
+services:
+  redis:
+    image: valkey/valkey:8-alpine
+    command: ["valkey-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?set REDIS_PASSWORD}"]
+    healthcheck:
+      test: ["CMD-SHELL", "valkey-cli -a \"$${REDIS_PASSWORD}\" ping | grep -q PONG"]

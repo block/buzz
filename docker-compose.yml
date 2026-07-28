@@ -52,6 +52,32 @@ services:
       com.buzz.env: "dev"
     restart: unless-stopped
 
+  # Opt-in BSD-3 alternative to Redis (drop-in RESP fork). Off by default; bring
+  # it up with `docker compose --profile valkey up valkey` and point the relay at
+  # `REDIS_URL=redis://localhost:6380`. On 6380 to coexist with redis on 6379.
+  valkey:
+    image: valkey/valkey:8-alpine
+    container_name: buzz-valkey
+    profiles: ["valkey"]
+    ports:
+      - "6380:6379"
+    networks:
+      - buzz-net
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+    labels:
+      com.buzz.service: "valkey"
+      com.buzz.env: "dev"
+    restart: unless-stopped
+
   adminer:
     image: adminer:latest
     container_name: buzz-adminer

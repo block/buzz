@@ -130,6 +130,44 @@ tests:
             value: "false"
         template: templates/deployment.yaml
 
+  - it: renders HA cleanly with the bundled Valkey subchart instead of Redis
+    release:
+      name: rel
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      valkey.enabled: true
+      s3.endpoint: http://minio:9000
+      s3.accessKey: a
+      s3.secretKey: s
+      replicaCount: 3
+      persistence.git.accessMode: ReadWriteOnce
+    asserts:
+      - equal:
+          path: spec.replicas
+          value: 3
+        template: templates/deployment.yaml
+      # REDIS_URL is composed from the Valkey subchart and is a required env
+      # (optional:false) — Valkey is the multi-replica pubsub backend here.
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: REDIS_URL
+            valueFrom:
+              secretKeyRef:
+                name: rel-buzz-relay
+                key: REDIS_URL
+                optional: false
+        template: templates/deployment.yaml
+      # And the composed URL points at the Valkey Service, not Redis.
+      - matchRegex:
+          path: data.REDIS_URL
+          decodeBase64: true
+          pattern: "@rel-valkey:6379$"
+        template: templates/secret-chart.yaml
+        documentIndex: 0
+
   - it: mounts a per-pod emptyDir git scratch volume when persistence is disabled
     set:
       relayUrl: wss://buzz.example.com

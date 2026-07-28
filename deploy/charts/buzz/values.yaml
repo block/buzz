@@ -313,7 +313,20 @@ redis:
     enabled: true
     size: 4Gi
 externalRedis:
-  url: ""                        # redis://:pass@host:6379
+  url: ""                        # redis://:pass@host:6379 — any RESP-compatible endpoint (Redis OR managed Valkey, e.g. ElastiCache)
+
+# ── Valkey ───────────────────────────────────────────────────────────────────
+# Opt-in BSD-3 alternative to the Redis subchart (drop-in RESP fork). Composes
+# REDIS_URL exactly as Redis does; mutually exclusive with redis.enabled. For a
+# managed endpoint (e.g. ElastiCache), leave this off and set externalRedis.url.
+valkey:
+  enabled: false
+  auth:
+    existingSecret: '{{ if contains "buzz" .Release.Name }}{{ .Release.Name }}-relay{{ else }}{{ .Release.Name }}-buzz-relay{{ end }}'
+    existingSecretPasswordKey: redis-password
+  persistence:
+    enabled: true
+    size: 4Gi
 
 # ── S3 / object storage (media) ──────────────────────────────────────────────
 # Production: point endpoint/bucket at an external S3-compatible service and

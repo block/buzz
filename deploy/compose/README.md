@@ -41,6 +41,37 @@ keypair.
 
 Run `./run.sh backup-hint` for the backup checklist.
 
+## Key-value backend: Redis or Valkey
+
+The relay talks to its key-value store through a single `REDIS_URL` connection
+string using the RESP protocol, so it works unchanged against Redis **or**
+[Valkey](https://valkey.io) — the permissively-licensed (BSD-3) fork of Redis.
+This was verified by inventorying every command Buzz issues (including the
+commands inside its five Lua scripts) and replaying them against a live Valkey
+8.1.6 instance: all behaved identically, and Buzz's own Redis-dependent test
+suites (pub/sub presence + NIP-98 replay protection, the fenced-lease tunnel
+suite, and the mesh registry suite) passed in full. No Redis modules, streams,
+cluster APIs, or keyspace notifications are used.
+
+Redis remains the default. To run the bundled key-value service on Valkey
+instead — for a fully Apache-2.0/BSD self-host stack — enable the override:
+
+```bash
+BUZZ_COMPOSE_VALKEY=true ./run.sh start
+```
+
+This swaps the container image to `valkey/valkey:8-alpine`; the service keeps
+the name `redis`, so `REDIS_URL` and `REDIS_PASSWORD` are unchanged.
+
+**Managed Valkey (e.g. AWS ElastiCache):** skip the local service entirely and
+point `REDIS_URL` in `.env` at the managed endpoint — the relay dials whatever
+RESP-compatible host the connection string names:
+
+```bash
+# .env
+REDIS_URL=rediss://my-valkey-endpoint.cache.amazonaws.com:6379
+```
+
 ## Validation
 
 Before sharing an install link publicly, verify a fresh install with:

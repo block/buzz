@@ -1,0 +1,10 @@
+# Valkey shape: in-cluster Valkey subchart instead of Redis, single replica.
+# Render-only check that the chart wires the drop-in RESP backend end to end.
+relayUrl: wss://buzz.example.com
+ownerPubkey: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+postgresql:
+  enabled: true
+valkey:
+  enabled: true
+minio:
+  enabled: true
