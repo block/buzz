@@ -32,6 +32,48 @@ async function createWorkflow(
   await expect(dialog).not.toBeVisible();
 }
 
+// ⌥↓/⌥↑ on macOS; Ctrl+Alt+↓/↑ on Windows/Linux (plain Alt+arrows are
+// bound to back/forward there). Playwright drives the platform the runner
+// is on, so pick the combo to match.
+const NEXT_CHANNEL_SHORTCUT =
+  process.platform === "darwin" ? "Alt+ArrowDown" : "Control+Alt+ArrowDown";
+const PREVIOUS_CHANNEL_SHORTCUT =
+  process.platform === "darwin" ? "Alt+ArrowUp" : "Control+Alt+ArrowUp";
+
+test("keyboard shortcut steps through sidebar channels without wrapping", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  // Mock member stream channels in default alphabetical sidebar order:
+  // agents, all-replies, deep-history, engineering, general, random,
+  // secret-projects. Forums (watercooler, announcements) and DMs are not
+  // part of the cycle.
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  await page.keyboard.press(NEXT_CHANNEL_SHORTCUT);
+  await expect(page.getByTestId("chat-title")).toHaveText("random");
+
+  await page.keyboard.press(NEXT_CHANNEL_SHORTCUT);
+  await expect(page.getByTestId("chat-title")).toHaveText("secret-projects");
+
+  await page.keyboard.press(PREVIOUS_CHANNEL_SHORTCUT);
+  await expect(page.getByTestId("chat-title")).toHaveText("random");
+
+  await page.keyboard.press(PREVIOUS_CHANNEL_SHORTCUT);
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  await page.keyboard.press(PREVIOUS_CHANNEL_SHORTCUT);
+  await expect(page.getByTestId("chat-title")).toHaveText("engineering");
+
+  // Top of the list: stays put, no wraparound.
+  await page.getByTestId("channel-agents").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("agents");
+  await page.keyboard.press(PREVIOUS_CHANNEL_SHORTCUT);
+  await expect(page.getByTestId("chat-title")).toHaveText("agents");
+});
+
 test("global back and forward move across channel routes", async ({ page }) => {
   await page.goto("/");
 
