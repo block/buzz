@@ -371,6 +371,20 @@ fn build_client_capabilities() -> serde_json::Value {
     })
 }
 
+const HERMES_ACP_HOST_ENV: [(&str, &str); 1] = [("HERMES_ACP_SKIP_CONFIGURED_MCP", "1")];
+
+/// Environment defaults required when Buzz owns an ACP runtime process.
+///
+/// Hermes otherwise starts globally configured MCP servers before it responds
+/// to `initialize`. Buzz supplies session MCP servers explicitly through
+/// `session/new`, so unrelated global startup must not block this host.
+fn acp_host_env_for_agent(agent_command: &str) -> &'static [(&'static str, &'static str)] {
+    match crate::config::normalize_agent_command_identity(agent_command).as_str() {
+        "hermes" | "hermes-agent" | "hermes-acp" => &HERMES_ACP_HOST_ENV,
+        _ => &[],
+    }
+}
+
 impl AcpClient {
     /// Kill the agent subprocess and wait for it to exit (no zombies).
     ///
@@ -462,6 +476,16 @@ impl AcpClient {
         }
         if let Some(merged) = codex_config_value {
             cmd.env("CODEX_CONFIG", merged);
+        }
+
+        // Runtime host defaults apply to every AcpClient spawn path, including
+        // model probes and managed sessions. Preserve explicit parent/persona
+        // values under the same operator-wins contract as other environment.
+        for &(key, value) in acp_host_env_for_agent(command) {
+            let supplied_by_persona = extra_env.iter().any(|(extra_key, _)| extra_key == key);
+            if std::env::var_os(key).is_none() && !supplied_by_persona {
+                cmd.env(key, value);
+            }
         }
 
         // Buzz-managed agents must never execute the operator's personal cron
@@ -2037,6 +2061,166 @@ fn configure_no_window(cmd: &mut tokio::process::Command) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hermes_spawn_skips_unrelated_configured_mcp_startup() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // This test exercises the host default. An explicit inherited value is
+        // covered separately and intentionally wins over that default.
+        if std::env::var_os("HERMES_ACP_SKIP_CONFIGURED_MCP").is_some() {
+            return;
+        }
+
+        let test_dir =
+            std::env::temp_dir().join(format!("buzz-acp-hermes-env-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&test_dir).expect("create Hermes env test directory");
+        let hermes_acp = test_dir.join("hermes-acp");
+        std::fs::write(
+            &hermes_acp,
+            r#"#!/bin/sh
+IFS= read -r _request
+if [ "${HERMES_ACP_SKIP_CONFIGURED_MCP:-}" != "1" ]; then
+  echo "missing HERMES_ACP_SKIP_CONFIGURED_MCP=1" >&2
+  exit 64
+fi
+printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":2,"agentCapabilities":{},"agentInfo":{"name":"hermes-test","version":"0"}}}'
+sleep 1
+"#,
+        )
+        .expect("write Hermes env test executable");
+        let mut permissions = std::fs::metadata(&hermes_acp)
+            .expect("stat Hermes env test executable")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&hermes_acp, permissions)
+            .expect("make Hermes env test executable");
+
+        let mut client = AcpClient::spawn(
+            hermes_acp.to_str().expect("test path is valid UTF-8"),
+            &[],
+            &[],
+            false,
+        )
+        .await
+        .expect("spawn Hermes env test executable");
+        let initialize_result = client.initialize().await;
+        client.shutdown().await;
+        std::fs::remove_dir_all(&test_dir).expect("remove Hermes env test directory");
+
+        assert!(
+            initialize_result.is_ok(),
+            "Buzz-owned Hermes ACP sessions must skip unrelated configured MCP startup; \
+             initialize result: {initialize_result:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hermes_spawn_preserves_explicit_configured_mcp_policy() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let test_dir =
+            std::env::temp_dir().join(format!("buzz-acp-hermes-env-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&test_dir).expect("create Hermes env test directory");
+        let hermes_agent = test_dir.join("hermes-agent");
+        let expected_key = format!("BUZZ_TEST_EXPECTED_MCP_POLICY_{}", std::process::id());
+        let script = r#"#!/bin/sh
+IFS= read -r _request
+if [ "${HERMES_ACP_SKIP_CONFIGURED_MCP-}" != "${__EXPECTED_KEY__-}" ]; then
+  echo "explicit HERMES_ACP_SKIP_CONFIGURED_MCP policy was overwritten" >&2
+  exit 64
+fi
+printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":2,"agentCapabilities":{},"agentInfo":{"name":"hermes-test","version":"0"}}}'
+sleep 1
+"#
+        .replace("__EXPECTED_KEY__", &expected_key);
+        std::fs::write(&hermes_agent, script).expect("write Hermes env test executable");
+        let mut permissions = std::fs::metadata(&hermes_agent)
+            .expect("stat Hermes env test executable")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&hermes_agent, permissions)
+            .expect("make Hermes env test executable");
+
+        let explicit_value = "0";
+        let expected_value =
+            std::env::var("HERMES_ACP_SKIP_CONFIGURED_MCP").unwrap_or(explicit_value.into());
+        let extra_env = vec![
+            (
+                "HERMES_ACP_SKIP_CONFIGURED_MCP".to_string(),
+                explicit_value.to_string(),
+            ),
+            (expected_key, expected_value),
+        ];
+        let mut client = AcpClient::spawn(
+            hermes_agent.to_str().expect("test path is valid UTF-8"),
+            &[],
+            &extra_env,
+            false,
+        )
+        .await
+        .expect("spawn Hermes env test executable");
+        let initialize_result = client.initialize().await;
+        client.shutdown().await;
+        std::fs::remove_dir_all(&test_dir).expect("remove Hermes env test directory");
+
+        assert!(
+            initialize_result.is_ok(),
+            "an explicit parent or persona MCP policy must override the Buzz host default; \
+             initialize result: {initialize_result:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_preserves_provider_qualified_model_id() {
+        let result = serde_json::json!({
+            "models": {
+                "currentModelId": "openai-codex:gpt-5.6-sol",
+                "availableModels": [
+                    {
+                        "modelId": "openai-codex:gpt-5.6-luna",
+                        "name": "GPT-5.6 Luna"
+                    }
+                ]
+            }
+        });
+
+        assert_eq!(
+            super::resolve_model_switch_method(&result, "openai-codex:gpt-5.6-luna"),
+            Some(super::ModelSwitchMethod::SetModel {
+                model_id: "openai-codex:gpt-5.6-luna".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn hermes_host_environment_recognizes_supported_command_identities() {
+        for command in [
+            "hermes",
+            "hermes-agent",
+            "hermes-acp",
+            "/opt/hermes/bin/hermes-acp",
+            r"C:\Users\test\bin\HERMES_ACP.EXE",
+        ] {
+            assert_eq!(
+                super::acp_host_env_for_agent(command),
+                &[("HERMES_ACP_SKIP_CONFIGURED_MCP", "1")],
+                "unexpected ACP host environment for {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_hermes_host_environment_is_unchanged() {
+        for command in ["codex-acp", "claude-agent-acp", "goose", "custom-acp"] {
+            assert!(
+                super::acp_host_env_for_agent(command).is_empty(),
+                "non-Hermes command must not receive Hermes host environment: {command}"
+            );
+        }
+    }
 
     #[test]
     fn stop_reason_parses_all_known_values() {
