@@ -52,6 +52,57 @@ See:
 
 The chart fails at `helm install` / `helm template` time with a clear message if any of these are missing or malformed (see `templates/_validate.tpl`).
 
+## Relay Pod extensions
+
+The chart exposes narrow extension points for init containers, volumes, relay
+volume mounts, and image command/argument overrides. `extraManifests` creates
+independent Kubernetes resources but cannot modify the chart-managed relay
+Deployment. These extension values insert fields into that Deployment, avoiding
+duplication of its environment, probes, security context, secrets, and
+chart-owned volumes.
+
+For example, an init container can copy a wrapper binary into a shared volume
+and make that wrapper the relay entrypoint:
+
+```yaml
+extraInitContainers:
+  - name: install-wrapper
+    image: example.com/wrapper-init:v1
+    args: [/opt/wrapper/wrapper]
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 65532
+      runAsGroup: 65532
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop: [ALL]
+    resources:
+      requests:
+        cpu: 10m
+        memory: 16Mi
+    volumeMounts:
+      - name: wrapper
+        mountPath: /opt/wrapper
+
+extraVolumes:
+  - name: wrapper
+    emptyDir: {}
+
+relay:
+  command: [/opt/wrapper/wrapper]
+  args: [/usr/local/bin/buzz-relay]
+  extraVolumeMounts:
+    - name: wrapper
+      mountPath: /opt/wrapper
+```
+
+These values are raw Kubernetes fragments rendered with `toYaml`, not `tpl`.
+The chart does not validate cross-field relationships: extension names must not
+collide with chart-owned containers or volumes, mounts must reference existing
+volumes, and each init container must define an appropriate security context
+and resources. Empty `relay.command` and `relay.args` arrays preserve the image
+defaults; non-empty values override its entrypoint and arguments respectively.
+
 ## Device pairing relay
 
 The chart can run Buzz's stateless pairing WebSocket relay as an independent

@@ -1854,7 +1854,8 @@ pub enum ModelSwitchMethod {
 
 /// Extract `configOptions` entries with `category == "model"` from a `session/new` result.
 ///
-/// Returns the raw JSON array entries. Each entry has `configId`, `displayName`,
+/// Returns the raw JSON array entries. Each entry has `configId` (spelled `id`
+/// by some adapters, e.g. claude-agent-acp), `displayName`,
 /// `options: [{ value, displayName }]`, etc.
 pub fn extract_model_config_options(result: &serde_json::Value) -> Vec<serde_json::Value> {
     result["configOptions"]
@@ -1888,7 +1889,14 @@ pub fn resolve_model_switch_method(
     // 1. Search stable configOptions for a "model"-category entry whose
     //    options contain a value matching desired_model.
     for config_opt in extract_model_config_options(session_new_result) {
-        let config_id = match config_opt.get("configId").and_then(|v| v.as_str()) {
+        // Adapters disagree on the key: the ACP spec says `configId`, but
+        // claude-agent-acp emits `id`. Accept both; the set request always
+        // uses `configId` on the wire.
+        let config_id = match config_opt
+            .get("configId")
+            .or_else(|| config_opt.get("id"))
+            .and_then(|v| v.as_str())
+        {
             Some(id) => id,
             None => continue,
         };
@@ -2460,6 +2468,36 @@ mod tests {
             Some(super::ModelSwitchMethod::ConfigOption {
                 config_id: "model".to_string(),
                 option_value: "claude-sonnet-4-20250514".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn resolve_accepts_id_keyed_config_options() {
+        // claude-agent-acp (observed on v0.61.0) keys config options with
+        // `id` instead of the spec's `configId`. Payload mirrors its real
+        // `session/new` response.
+        let result = serde_json::json!({
+            "configOptions": [{
+                "id": "model",
+                "name": "Model",
+                "category": "model",
+                "type": "select",
+                "currentValue": "default",
+                "options": [
+                    { "value": "default", "name": "Default" },
+                    { "value": "opus[1m]", "name": "Opus" },
+                    { "value": "sonnet", "name": "Sonnet" }
+                ]
+            }],
+            "models": null
+        });
+        let method = super::resolve_model_switch_method(&result, "opus[1m]");
+        assert_eq!(
+            method,
+            Some(super::ModelSwitchMethod::ConfigOption {
+                config_id: "model".to_string(),
+                option_value: "opus[1m]".to_string(),
             })
         );
     }

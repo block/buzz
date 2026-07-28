@@ -347,7 +347,12 @@ const overrides = new Map([
   // absent, so AdapterMissing replaces the misleading NotInstalled. Includes
   // the deliberate-divergence doc comments; net after the inline preset
   // entries.push block collapsed into the helper.
-  ["src-tauri/src/managed_agents/discovery.rs", 1835],
+  // +6: legacy Goose Windows install dir (%USERPROFILE%\goose) probed in
+  // common_binary_paths so pre-#2680 standalone installs are discoverable.
+  // +19: codex-acp minimum-version gate — MIN_CODEX_ACP_VERSION plus the strict
+  // three-component parse in probe_codex_acp_version, so an outdated 1.x adapter
+  // is offered a reinstall instead of classifying as Available on major alone.
+  ["src-tauri/src/managed_agents/discovery.rs", 1860],
   // BYOH — save_custom_harness_to_dir (backup-swap atomic write) + save_and_warm /
   // delete_and_warm (persist-mutex serialization for concurrent-safe registry
   // refresh, B-6). Also: id/collision/load/registry tests (from the file base) +
@@ -392,9 +397,13 @@ const overrides = new Map([
   // Available both-present AND adapter-present/CLI-absent — the selectability
   // regression guard), bound to an injectable resolver so the tests stay
   // PATH-independent.
-  // +2 (1871 -> 1873): the AgentDefinition and ManagedAgentRecord fixtures each
+  // +51: codex-acp minimum-version gate — probe_codex_acp_version assertions carry
+  // the full (major, minor, patch) triple instead of a bare major, plus
+  // below-the-floor and uncomparable-version (partial / prerelease) classification
+  // regressions for the fail-closed parse.
+  // +2 (1922 -> 1924): the AgentDefinition and ManagedAgentRecord fixtures each
   // set the new mandatory `catalog_source` field.
-  ["src-tauri/src/managed_agents/discovery/tests.rs", 1873],
+  ["src-tauri/src/managed_agents/discovery/tests.rs", 1924],
   // identity-import-keyring: the identity resolution state machine's behavioral
   // matrix (46 tests over FakeIdentityStore — probe × marker × file cells,
   // adoption / read-back-corruption / marker-failure arms, recovery-mode
@@ -634,7 +643,13 @@ const overrides = new Map([
   // return value so the frontend immediately has the updated env.
   // +1: rebase over main (#2680) — requires_external_cli: false added to
   // save_custom_harness catalog entry construction (new required field).
-  ["src-tauri/src/commands/agent_discovery.rs", 2167],
+  // -359: install command execution (spawn, output drain under timeout, retry
+  // with backoff, output truncation) extracted to agent_discovery/install_exec.rs
+  // alongside its tests, matching the managed_node.rs / post_install_verification.rs
+  // split. The entries above describe the file's history, not its current shape.
+  // +27: codex-acp minimum-version gate — test_plan_adapter_install_updates_older_
+  // 1x_codex_binary pins that a 1.x adapter below the floor still plans a reinstall.
+  ["src-tauri/src/commands/agent_discovery.rs", 1835],
   // draft-persistence predicate: submit-time `loadDraft` check + inline comment
   // + deps-array entry in submitMessage closes the never-persisted-boundary
   // defect (Thufir Pass-3 finding). Load-bearing correctness fix; queued to
