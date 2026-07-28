@@ -18,6 +18,7 @@ import 'package:buzz/features/channels/compose_bar.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/mentions/mention_candidates.dart';
 import 'package:buzz/features/channels/mentions/mention_candidates_provider.dart';
+import 'package:buzz/features/channels/photo_library.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
@@ -150,11 +151,13 @@ Widget _buildComposeBar({
   bool? supportsShowingSystemContextMenu,
   List<CustomEmoji> customEmoji = const <CustomEmoji>[],
   RelayConfigNotifier Function()? relayConfig,
+  PhotoLibrary photoLibrary = const _EmptyPhotoLibrary(),
 }) {
   return ProviderScope(
     overrides: [
       customEmojiListProvider.overrideWithValue(customEmoji),
       mediaUploadServiceProvider.overrideWithValue(uploadService),
+      photoLibraryProvider.overrideWithValue(photoLibrary),
       currentPubkeyProvider.overrideWith((ref) => currentPubkey),
       channelMembersProvider(
         'channel-1',
@@ -199,6 +202,32 @@ class _FakeRelayConfigNotifier extends RelayConfigNotifier {
     baseUrl: 'http://localhost:3000',
     nsec: nostr.Keys.generate().nsec,
   );
+}
+
+class _EmptyPhotoLibrary implements PhotoLibrary {
+  const _EmptyPhotoLibrary();
+
+  @override
+  Future<List<RecentPhoto>> loadRecentPhotos() async => const [];
+
+  @override
+  Future<List<XFile>> resolveSelectedPhotos(List<RecentPhoto> photos) async =>
+      const [];
+}
+
+class _FakePhotoLibrary implements PhotoLibrary {
+  final List<RecentPhoto> photos;
+
+  const _FakePhotoLibrary(this.photos);
+
+  @override
+  Future<List<RecentPhoto>> loadRecentPhotos() async => photos;
+
+  @override
+  Future<List<XFile>> resolveSelectedPhotos(List<RecentPhoto> photos) async => [
+    for (final photo in photos)
+      XFile.fromData(_pngBytes, name: '${photo.id}.png'),
+  ];
 }
 
 /// Relay config that starts from a fixed identity and can be switched
@@ -434,8 +463,7 @@ void main() {
         ),
       );
 
-      await _openAttachmentMenu(tester);
-      await tester.tap(find.text('Photos'));
+      await _openSystemPhotoPicker(tester);
       await tester.pumpAndSettle();
 
       expect(find.byTooltip('Remove attachment'), findsOneWidget);
@@ -455,15 +483,173 @@ void main() {
       expect(find.byTooltip('Remove attachment'), findsNothing);
     });
 
-    testWidgets('keeps upload progress visible after the picker closes', (
+    testWidgets('uploads multiple system-selected photos in picker order', (
       tester,
     ) async {
-      final pickedImage = Completer<XFile?>();
       final uploadService = MediaUploadService(
         baseUrl: 'https://relay.example',
         nsec: nostr.Keys.generate().nsec,
+        httpClient: http_testing.MockClient((request) async {
+          final mimeType = request.headers.entries
+              .firstWhere((entry) => entry.key.toLowerCase() == 'content-type')
+              .value;
+          final isGif = mimeType == 'image/gif';
+          return http.Response(
+            jsonEncode({
+              'url': isGif
+                  ? 'https://relay.example/media/two.gif'
+                  : 'https://relay.example/media/one.png',
+              'sha256': isGif
+                  ? '2222222222222222222222222222222222222222222222222222222222222222'
+                  : '1111111111111111111111111111111111111111111111111111111111111111',
+              'size': request.bodyBytes.length,
+              'type': mimeType,
+              'uploaded': 1,
+            }),
+            200,
+          );
+        }),
+        pickGalleryImage: () async => null,
+        pickGalleryImages: () async => [
+          XFile.fromData(_pngBytes, name: 'one.png'),
+          XFile.fromData(_gifBytes, name: 'two.gif'),
+        ],
         pickGalleryVideo: () async => null,
-        pickGalleryImage: () => pickedImage.future,
+      );
+
+      String? sentContent;
+      List<List<String>> sentMediaTags = const [];
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: uploadService,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {
+                sentContent = content;
+                sentMediaTags = mediaTags;
+              },
+        ),
+      );
+
+      await _openSystemPhotoPicker(tester);
+      await tester.pumpAndSettle();
+
+      expect(find.byTooltip('Remove attachment'), findsNWidgets(2));
+
+      await _expandComposer(tester);
+      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      await tester.pumpAndSettle();
+
+      expect(
+        sentContent,
+        '\n![image](https://relay.example/media/one.png)'
+        '\n![image](https://relay.example/media/two.gif)',
+      );
+      expect(sentMediaTags, hasLength(2));
+      expect(sentMediaTags.map((tag) => tag[1]), [
+        'url https://relay.example/media/one.png',
+        'url https://relay.example/media/two.gif',
+      ]);
+    });
+
+    testWidgets('numbers recent photo selection and returns to the menu', (
+      tester,
+    ) async {
+      final photoLibrary = _FakePhotoLibrary([
+        RecentPhoto(id: 'one', thumbnailBytes: _gifBytes),
+        RecentPhoto(id: 'two', thumbnailBytes: _gifBytes),
+        RecentPhoto(id: 'three', thumbnailBytes: _gifBytes),
+      ]);
+
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          photoLibrary: photoLibrary,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      await _openAttachmentMenu(tester);
+      await tester.tap(find.text('Photos'));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('photo-gallery-picker')),
+        findsOneWidget,
+      );
+      expect(find.byTooltip('Back to attachment options'), findsWidgets);
+      expect(
+        find.byKey(const ValueKey('attachment-trigger-photos')).hitTestable(),
+        findsOneWidget,
+      );
+      expect(find.text('All photos'), findsOneWidget);
+
+      await tester.tap(find.byKey(const ValueKey('recent-photo-two')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('recent-photo-one')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Add 2 photos'), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('photo-selection-index-two')),
+          matching: find.text('1'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('photo-selection-index-one')),
+          matching: find.text('2'),
+        ),
+        findsOneWidget,
+      );
+
+      await tester.tap(find.byKey(const ValueKey('recent-photo-two')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Add 1 photo'), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('photo-selection-index-one')),
+          matching: find.text('1'),
+        ),
+        findsOneWidget,
+      );
+
+      await tester.tap(find.byKey(const ValueKey('photo-gallery-back')));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('photo-gallery-picker')), findsNothing);
+      expect(
+        find.byKey(const ValueKey('attachment-trigger-menu')).hitTestable(),
+        findsOneWidget,
+      );
+      expect(find.text('Camera'), findsOneWidget);
+      expect(find.text('Photos'), findsOneWidget);
+    });
+
+    testWidgets('keeps upload progress visible after the picker closes', (
+      tester,
+    ) async {
+      final uploadResponse = Completer<http.Response>();
+      final uploadService = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: nostr.Keys.generate().nsec,
+        httpClient: http_testing.MockClient((request) => uploadResponse.future),
+        pickGalleryVideo: () async => null,
+        pickGalleryImage: () async => null,
+        pickGalleryImages: () async => [
+          XFile.fromData(_pngBytes, name: 'tiny.png'),
+        ],
       );
 
       await tester.pumpWidget(
@@ -478,17 +664,28 @@ void main() {
         ),
       );
 
-      await _openAttachmentMenu(tester);
-      await tester.tap(find.text('Photos'));
+      await _openSystemPhotoPicker(tester);
       await tester.pump();
 
       expect(
         find.byKey(const ValueKey('compose-upload-progress')),
         findsOneWidget,
       );
-      expect(find.text('Uploading attachment…'), findsOneWidget);
+      expect(find.bySemanticsLabel('Uploading attachment…'), findsOneWidget);
 
-      pickedImage.complete(null);
+      uploadResponse.complete(
+        http.Response(
+          jsonEncode({
+            'url': 'https://relay.example/media/test.png',
+            'sha256':
+                '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+            'size': 16,
+            'type': 'image/png',
+            'uploaded': 1,
+          }),
+          200,
+        ),
+      );
       await tester.pumpAndSettle();
 
       expect(
@@ -1053,8 +1250,7 @@ void main() {
         ),
       );
 
-      await _openAttachmentMenu(tester);
-      await tester.tap(find.text('Photos'));
+      await _openSystemPhotoPicker(tester);
       await tester.pumpAndSettle();
 
       final attachmentFinder = find.byKey(
@@ -1109,8 +1305,7 @@ void main() {
         ),
       );
 
-      await _openAttachmentMenu(tester);
-      await tester.tap(find.text('Photos'));
+      await _openSystemPhotoPicker(tester);
       await tester.pumpAndSettle();
 
       expect(find.textContaining('upload failed'), findsOneWidget);
@@ -1150,8 +1345,7 @@ void main() {
           ),
         );
 
-        await _openAttachmentMenu(tester);
-        await tester.tap(find.text('Photos'));
+        await _openSystemPhotoPicker(tester);
         await tester.pumpAndSettle();
 
         expect(
@@ -1199,8 +1393,7 @@ void main() {
         ),
       );
 
-      await _openAttachmentMenu(tester);
-      await tester.tap(find.text('Photos'));
+      await _openSystemPhotoPicker(tester);
       await tester.pumpAndSettle();
 
       expect(
@@ -1426,8 +1619,7 @@ void main() {
         ),
       );
 
-      await _openAttachmentMenu(tester);
-      await tester.tap(find.text('Photos'));
+      await _openSystemPhotoPicker(tester);
       await tester.pumpAndSettle();
 
       expect(
@@ -1745,6 +1937,13 @@ Future<void> _expandComposer(WidgetTester tester) async {
 Future<void> _openAttachmentMenu(WidgetTester tester) async {
   await tester.tap(find.byTooltip('Add attachment').hitTestable());
   await tester.pumpAndSettle();
+}
+
+Future<void> _openSystemPhotoPicker(WidgetTester tester) async {
+  await _openAttachmentMenu(tester);
+  await tester.tap(find.text('Photos'));
+  await tester.pumpAndSettle();
+  await tester.tap(find.text('All photos'));
 }
 
 Future<void> _selectAndSendAgentMention(WidgetTester tester) async {

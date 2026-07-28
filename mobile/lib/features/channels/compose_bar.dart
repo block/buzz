@@ -1,10 +1,12 @@
 import 'dart:async';
 import 'dart:collection';
+import 'dart:math' as math;
 
 import 'package:camera/camera.dart' as camera;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/physics.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
@@ -28,21 +30,18 @@ import 'emoji_picker.dart';
 import 'mentions/mention_candidates.dart';
 import 'mentions/mention_candidates_provider.dart';
 import 'mentions/mention_ranking.dart';
+import 'photo_library.dart';
 
 part 'compose_bar/helpers.dart';
 part 'compose_bar/markdown_editing_controller.dart';
 part 'compose_bar/suggestions.dart';
 part 'compose_bar/formatting_toolbar.dart';
 part 'compose_bar/attachments.dart';
+part 'compose_bar/photo_gallery_picker.dart';
+part 'compose_bar/ios_photo_picker.dart';
+part 'compose_bar/ios_attachment_popover.dart';
 part 'compose_bar/camera_preview.dart';
 part 'compose_bar/send_button.dart';
-
-const _pastedImageMimeTypes = <String>[
-  'image/jpeg',
-  'image/jpg',
-  'image/png',
-  'image/webp',
-];
 
 /// Rich compose bar with @mention autocomplete and a markdown formatting
 /// toolbar. Used in both channel and thread views — the caller provides an
@@ -120,8 +119,15 @@ class ComposeBar extends HookConsumerWidget {
     }, [controller, draftKey, draftIdentity]);
     final focusNode = useFocusNode();
     final isComposerExpanded = useState(false);
-    final showAttachments = useState(false);
-    final showCamera = useState(false);
+    final attachmentSurface = useState(_AttachmentSurface.closed);
+    final iosAttachmentPopover = useMemoized(
+      _IOSAttachmentPopoverController.new,
+    );
+    useEffect(
+      () =>
+          () => unawaited(iosAttachmentPopover.dispose()),
+      [iosAttachmentPopover],
+    );
     final isSending = useState(false);
     final showFormatting = useState(false);
     final attachments = useState<List<BlobDescriptor>>([]);
@@ -389,8 +395,7 @@ class ComposeBar extends HookConsumerWidget {
       mentionMap.value.clear();
       mentionQuery.value = null;
       channelQuery.value = null;
-      showAttachments.value = false;
-      showCamera.value = false;
+      attachmentSurface.value = _AttachmentSurface.closed;
       showFormatting.value = false;
       uploadError.value = null;
       focusNode.requestFocus();
@@ -533,6 +538,63 @@ class ComposeBar extends HookConsumerWidget {
       }
     }
 
+    Future<void> pickThenUpload({
+      required Future<XFile?> Function() pick,
+      required Future<BlobDescriptor> Function(XFile file) upload,
+    }) async {
+      uploadError.value = null;
+      try {
+        final picked = await pick();
+        if (picked == null || !context.mounted) return;
+        await pickAndUpload(() => upload(picked));
+      } catch (error) {
+        if (context.mounted) {
+          uploadError.value = _formatUploadError(error);
+        }
+      }
+    }
+
+    Future<void> uploadImages(List<XFile> images) async {
+      if (images.isEmpty) return;
+      uploadError.value = null;
+      uploadingCount.value += images.length;
+      try {
+        final results = await Future.wait([
+          for (final image in images)
+            () async {
+              try {
+                final uploaded = await ref
+                    .read(mediaUploadServiceProvider)
+                    .uploadImage(image);
+                return (uploaded: uploaded, error: null);
+              } catch (error) {
+                return (uploaded: null, error: error);
+              }
+            }(),
+        ]);
+        if (!context.mounted) return;
+
+        final uploaded = [for (final result in results) ?result.uploaded];
+        if (uploaded.isNotEmpty) {
+          attachments.value = [...attachments.value, ...uploaded];
+        }
+        final firstError = results
+            .map((result) => result.error)
+            .whereType<Object>()
+            .firstOrNull;
+        if (firstError != null) {
+          uploadError.value = _formatUploadError(firstError);
+        }
+      } finally {
+        if (context.mounted) {
+          uploadingCount.value = math.max(
+            0,
+            uploadingCount.value - images.length,
+          );
+        }
+      }
+    }
+
     Widget buildContextMenu(
       BuildContext context,
       EditableTextState editableTextState,
@@ -621,31 +683,77 @@ class ComposeBar extends HookConsumerWidget {
 
     // ----- Widget tree ----------------------------------------------------
 
-    void chooseAttachment(Future<BlobDescriptor?> Function() pick) {
-      showAttachments.value = false;
-      showCamera.value = false;
-      pickAndUpload(pick);
+    void chooseAttachment(Future<void> Function() choose) {
+      attachmentSurface.value = _AttachmentSurface.closed;
+      unawaited(choose());
     }
 
     void toggleAttachments() {
-      if (showCamera.value) {
-        showCamera.value = false;
-        showAttachments.value = false;
+      attachmentSurface.value = switch (attachmentSurface.value) {
+        _AttachmentSurface.closed => _AttachmentSurface.menu,
+        _AttachmentSurface.menu => _AttachmentSurface.closed,
+        _AttachmentSurface.camera ||
+        _AttachmentSurface.photos => _AttachmentSurface.menu,
+      };
+    }
+
+    void handleAttachmentTap(BuildContext triggerContext) {
+      if (defaultTargetPlatform != TargetPlatform.iOS ||
+          attachmentSurface.value != _AttachmentSurface.closed) {
+        toggleAttachments();
         return;
       }
-      showCamera.value = false;
-      showAttachments.value = !showAttachments.value;
+
+      focusNode.unfocus();
+      unawaited(
+        iosAttachmentPopover
+            .present(
+              sourceContext: triggerContext,
+              onCapture: (image) => pickAndUpload(
+                () => ref.read(mediaUploadServiceProvider).uploadImage(image),
+              ),
+              onChoosePhotos: uploadImages,
+              onAllPhotos: () => chooseAttachment(() async {
+                final photos = await ref
+                    .read(mediaUploadServiceProvider)
+                    .pickGalleryImages();
+                await uploadImages(photos);
+              }),
+              onVideo: () => chooseAttachment(() {
+                final service = ref.read(mediaUploadServiceProvider);
+                return pickThenUpload(
+                  pick: service.pickGalleryVideo,
+                  upload: service.uploadVideo,
+                );
+              }),
+              onFiles: () => chooseAttachment(() {
+                final service = ref.read(mediaUploadServiceProvider);
+                return pickThenUpload(
+                  pick: service.pickAttachmentFile,
+                  upload: service.uploadFile,
+                );
+              }),
+            )
+            .then((didPresent) {
+              if (!didPresent && context.mounted) toggleAttachments();
+            }),
+      );
     }
 
     void openCamera() {
       focusNode.unfocus();
-      showAttachments.value = false;
-      showCamera.value = true;
+      attachmentSurface.value = _AttachmentSurface.camera;
     }
 
     final motionDuration = reducedMotion
         ? Duration.zero
-        : const Duration(milliseconds: 180);
+        : Duration(
+            milliseconds:
+                attachmentSurface.value == _AttachmentSurface.camera ||
+                    attachmentSurface.value == _AttachmentSurface.photos
+                ? 320
+                : 250,
+          );
     final suggestionOverlayController = useMemoized(
       OverlayPortalController.new,
     );
@@ -659,8 +767,7 @@ class ComposeBar extends HookConsumerWidget {
 
     void expandComposer() {
       if (isComposerExpanded.value) return;
-      showAttachments.value = false;
-      showCamera.value = false;
+      attachmentSurface.value = _AttachmentSurface.closed;
       isComposerExpanded.value = true;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (context.mounted) focusNode.requestFocus();
@@ -687,40 +794,48 @@ class ComposeBar extends HookConsumerWidget {
             ),
           )
         : const SizedBox.shrink(key: ValueKey('no-suggestions'));
-    final overlayPanel = showCamera.value
-        ? KeyedSubtree(
-            key: const ValueKey('camera-preview'),
-            child: _InlineCameraPreview(
-              onClose: () => showCamera.value = false,
-              onCapture: (image) async {
-                showCamera.value = false;
-                await pickAndUpload(
-                  () => ref.read(mediaUploadServiceProvider).uploadImage(image),
-                );
-              },
-            ),
-          )
-        : showAttachments.value
-        ? KeyedSubtree(
-            key: const ValueKey('attachment-menu'),
-            child: Align(
-              alignment: Alignment.bottomLeft,
-              heightFactor: 1,
-              child: _AttachmentMenu(
-                onCamera: openCamera,
-                onPhotos: () => chooseAttachment(
-                  ref.read(mediaUploadServiceProvider).pickAndUploadImage,
-                ),
-                onVideo: () => chooseAttachment(
-                  ref.read(mediaUploadServiceProvider).pickAndUploadVideo,
-                ),
-                onFiles: () => chooseAttachment(
-                  ref.read(mediaUploadServiceProvider).pickAndUploadFile,
-                ),
-              ),
-            ),
-          )
-        : suggestionPanel;
+    Widget buildOverlayPanel(_AttachmentSurface surface) {
+      return _AttachmentSurfacePanel(
+        key: ValueKey(
+          surface == _AttachmentSurface.closed
+              ? 'composer-suggestions'
+              : 'attachment-surface',
+        ),
+        surface: surface,
+        suggestionPanel: suggestionPanel,
+        onBack: () => attachmentSurface.value = _AttachmentSurface.menu,
+        onCamera: openCamera,
+        onPhotos: () {
+          focusNode.unfocus();
+          attachmentSurface.value = _AttachmentSurface.photos;
+        },
+        onVideo: () => chooseAttachment(() {
+          final service = ref.read(mediaUploadServiceProvider);
+          return pickThenUpload(
+            pick: service.pickGalleryVideo,
+            upload: service.uploadVideo,
+          );
+        }),
+        onFiles: () => chooseAttachment(() {
+          final service = ref.read(mediaUploadServiceProvider);
+          return pickThenUpload(
+            pick: service.pickAttachmentFile,
+            upload: service.uploadFile,
+          );
+        }),
+        onCapture: (image) async {
+          attachmentSurface.value = _AttachmentSurface.closed;
+          await pickAndUpload(
+            () => ref.read(mediaUploadServiceProvider).uploadImage(image),
+          );
+        },
+        onPickAllPhotos: ref.read(mediaUploadServiceProvider).pickGalleryImages,
+        onChoosePhotos: (photos) async {
+          attachmentSurface.value = _AttachmentSurface.closed;
+          await uploadImages(photos);
+        },
+      );
+    }
 
     // Suggestions and attachments live in the overlay so showing them cannot
     // reflow the composer. Both stay anchored just above the capsule.
@@ -737,19 +852,50 @@ class ComposeBar extends HookConsumerWidget {
             layoutInfo.childPaintTransform,
             Offset.zero,
           );
-          return Positioned(
-            left: composerOrigin.dx,
-            bottom: layoutInfo.overlaySize.height - composerOrigin.dy,
-            width: layoutInfo.childSize.width,
-            child: ClipRect(
-              child: Padding(
-                padding: const EdgeInsets.only(bottom: Grid.xxs),
-                child: _SuggestionPanelMotion(
-                  duration: motionDuration,
-                  child: overlayPanel,
+          return ValueListenableBuilder<_AttachmentSurface>(
+            valueListenable: attachmentSurface,
+            builder: (context, surface, _) {
+              final surfaceDuration = reducedMotion
+                  ? Duration.zero
+                  : Duration(
+                      milliseconds:
+                          surface == _AttachmentSurface.camera ||
+                              surface == _AttachmentSurface.photos
+                          ? 320
+                          : 250,
+                    );
+              final expandedSurfaceCoversComposer =
+                  surface == _AttachmentSurface.camera ||
+                  surface == _AttachmentSurface.photos;
+              final overlayAnchorY =
+                  composerOrigin.dy +
+                  (expandedSurfaceCoversComposer
+                      ? layoutInfo.childSize.height + Grid.twelve
+                      : 0);
+              return AnimatedPositioned(
+                duration: surfaceDuration,
+                curve:
+                    surface == _AttachmentSurface.camera ||
+                        surface == _AttachmentSurface.photos
+                    ? const Cubic(0.34, 1.25, 0.64, 1)
+                    : const Cubic(0.22, 1, 0.36, 1),
+                left: composerOrigin.dx,
+                bottom: layoutInfo.overlaySize.height - overlayAnchorY,
+                width: layoutInfo.childSize.width,
+                child: ClipRect(
+                  child: Padding(
+                    padding: const EdgeInsets.only(bottom: Grid.xxs),
+                    child: surface == _AttachmentSurface.closed
+                        ? _SuggestionPanelMotion(
+                            duration: surfaceDuration,
+                            alignment: Alignment.bottomLeft,
+                            child: buildOverlayPanel(surface),
+                          )
+                        : buildOverlayPanel(surface),
+                  ),
                 ),
-              ),
-            ),
+              );
+            },
           );
         },
         child: Container(
@@ -822,8 +968,9 @@ class ComposeBar extends HookConsumerWidget {
                 Row(
                   children: [
                     _AttachmentTrigger(
-                      open: showAttachments.value || showCamera.value,
-                      onTap: toggleAttachments,
+                      surface: attachmentSurface.value,
+                      formattingOpen: false,
+                      onTap: handleAttachmentTap,
                     ),
                     const SizedBox(width: Grid.xxs),
                     Expanded(
@@ -872,15 +1019,13 @@ class ComposeBar extends HookConsumerWidget {
                             Row(
                               children: [
                                 _AttachmentTrigger(
-                                  open:
-                                      showAttachments.value ||
-                                      showCamera.value ||
-                                      showFormatting.value,
-                                  onTap: () {
+                                  surface: attachmentSurface.value,
+                                  formattingOpen: showFormatting.value,
+                                  onTap: (triggerContext) {
                                     if (showFormatting.value) {
                                       showFormatting.value = false;
                                     } else {
-                                      toggleAttachments();
+                                      handleAttachmentTap(triggerContext);
                                     }
                                   },
                                 ),
@@ -911,24 +1056,24 @@ class ComposeBar extends HookConsumerWidget {
                                               _ComposeAction(
                                                 icon: LucideIcons.atSign,
                                                 onTap: () {
-                                                  showAttachments.value = false;
-                                                  showCamera.value = false;
+                                                  attachmentSurface.value =
+                                                      _AttachmentSurface.closed;
                                                   triggerMention();
                                                 },
                                               ),
                                               _ComposeAction(
                                                 icon: LucideIcons.hash,
                                                 onTap: () {
-                                                  showAttachments.value = false;
-                                                  showCamera.value = false;
+                                                  attachmentSurface.value =
+                                                      _AttachmentSurface.closed;
                                                   triggerChannel();
                                                 },
                                               ),
                                               _ComposeAction(
                                                 icon: LucideIcons.smilePlus,
                                                 onTap: () {
-                                                  showAttachments.value = false;
-                                                  showCamera.value = false;
+                                                  attachmentSurface.value =
+                                                      _AttachmentSurface.closed;
                                                   showEmojiPicker(
                                                     context: context,
                                                     onSelect: insertEmoji,
@@ -938,8 +1083,8 @@ class ComposeBar extends HookConsumerWidget {
                                               _ComposeAction(
                                                 icon: LucideIcons.aLargeSmall,
                                                 onTap: () {
-                                                  showAttachments.value = false;
-                                                  showCamera.value = false;
+                                                  attachmentSurface.value =
+                                                      _AttachmentSurface.closed;
                                                   showFormatting.value = true;
                                                 },
                                               ),
