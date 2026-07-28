@@ -99,6 +99,12 @@ class _IOSInlinePhotoPicker extends HookWidget {
         if (photos.isNotEmpty) {
           await onChoosePhotos(photos);
         }
+      } catch (_) {
+        if (context.mounted) {
+          ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+            const SnackBar(content: Text('Unable to open your photo library.')),
+          );
+        }
       } finally {
         if (context.mounted) isProcessing.value = false;
       }

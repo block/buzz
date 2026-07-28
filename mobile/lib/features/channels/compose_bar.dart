@@ -703,9 +703,20 @@ class ComposeBar extends HookConsumerWidget {
 
     // ----- Widget tree ----------------------------------------------------
 
-    void chooseAttachment(Future<void> Function() choose) {
+    void chooseAttachment(
+      Future<void> Function() choose, {
+      String? errorMessage,
+    }) {
       attachmentSurface.value = _AttachmentSurface.closed;
-      unawaited(choose());
+      unawaited(() async {
+        try {
+          await choose();
+        } catch (error) {
+          if (context.mounted) {
+            uploadError.value = errorMessage ?? _formatUploadError(error);
+          }
+        }
+      }());
     }
 
     void toggleAttachments() {
@@ -738,7 +749,7 @@ class ComposeBar extends HookConsumerWidget {
                     .read(mediaUploadServiceProvider)
                     .pickGalleryImages();
                 await uploadImages(photos);
-              }),
+              }, errorMessage: 'Unable to open your photo library.'),
               onVideo: () => chooseAttachment(() {
                 final service = ref.read(mediaUploadServiceProvider);
                 return pickThenUpload(

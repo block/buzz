@@ -174,3 +174,55 @@ final class NativeAttachmentPopoverCoordinator: NSObject {
     return viewController
   }
 }
+
+func makeNativeAttachmentMenuButton(
+  title: String,
+  symbol: String,
+  action: UIAction
+) -> UIButton {
+  let button = UIButton(primaryAction: action)
+  button.accessibilityLabel = title
+
+  let symbolConfiguration = UIImage.SymbolConfiguration(
+    pointSize: 18,
+    weight: .regular
+  )
+  let iconView = UIImageView(
+    image: UIImage(
+      systemName: symbol,
+      withConfiguration: symbolConfiguration
+    )
+  )
+  iconView.tintColor = .label
+  iconView.contentMode = .center
+  iconView.translatesAutoresizingMaskIntoConstraints = false
+
+  let titleLabel = UILabel()
+  titleLabel.text = title
+  titleLabel.textColor = .label
+  titleLabel.font = .preferredFont(forTextStyle: .body)
+  titleLabel.adjustsFontForContentSizeCategory = true
+  titleLabel.textAlignment = .left
+  titleLabel.translatesAutoresizingMaskIntoConstraints = false
+
+  button.addSubview(iconView)
+  button.addSubview(titleLabel)
+  NSLayoutConstraint.activate([
+    iconView.leadingAnchor.constraint(equalTo: button.leadingAnchor, constant: 14),
+    iconView.centerYAnchor.constraint(equalTo: button.centerYAnchor),
+    iconView.widthAnchor.constraint(equalToConstant: 26),
+    titleLabel.leadingAnchor.constraint(
+      equalTo: iconView.trailingAnchor,
+      constant: 12
+    ),
+    titleLabel.trailingAnchor.constraint(
+      equalTo: button.trailingAnchor,
+      constant: -14
+    ),
+    titleLabel.centerYAnchor.constraint(equalTo: button.centerYAnchor),
+  ])
+  button.configurationUpdateHandler = { button in
+    button.alpha = button.isHighlighted ? 0.62 : 1
+  }
+  return button
+}

@@ -129,12 +129,36 @@ List<int> _testPngChunk(String type, List<int> payload) {
 }
 
 const _mediaUploadPlatformChannel = MethodChannel('buzz/media_upload');
+const _nativeAttachmentPopoverChannel = MethodChannel(
+  'buzz/native_attachment_popover',
+);
 
 void _setMockMediaUploadPlatformHandler(
   Future<Object?> Function(MethodCall call)? handler,
 ) {
   TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
       .setMockMethodCallHandler(_mediaUploadPlatformChannel, handler);
+}
+
+void _setMockNativeAttachmentPopoverHandler(
+  Future<Object?> Function(MethodCall call)? handler,
+) {
+  TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+      .setMockMethodCallHandler(_nativeAttachmentPopoverChannel, handler);
+}
+
+Future<void> _sendNativeAttachmentPopoverCall(
+  WidgetTester tester,
+  String method, [
+  Object? arguments,
+]) async {
+  await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+    _nativeAttachmentPopoverChannel.name,
+    _nativeAttachmentPopoverChannel.codec.encodeMethodCall(
+      MethodCall(method, arguments),
+    ),
+    null,
+  );
 }
 
 /// Shared mock prefs for the compose bar's draft store. Initialized in
@@ -191,6 +215,54 @@ Widget _buildComposeBar({
             alignment: Alignment.bottomCenter,
             child: ComposeBar(channelId: 'channel-1', onSend: onSend),
           ),
+        ),
+      ),
+    ),
+  );
+}
+
+Widget _buildNativePopoverOwnershipHarness({
+  required MediaUploadService uploadService,
+  required bool includeFirstComposer,
+}) {
+  return ProviderScope(
+    overrides: [
+      customEmojiListProvider.overrideWithValue(const []),
+      mediaUploadServiceProvider.overrideWithValue(uploadService),
+      photoLibraryProvider.overrideWithValue(const _EmptyPhotoLibrary()),
+      currentPubkeyProvider.overrideWith((ref) => null),
+      channelMembersProvider(
+        'channel-1',
+      ).overrideWith((ref) => Future.value(const <ChannelMember>[])),
+      agentDirectoryProvider.overrideWith(
+        (ref) async => const <AgentDirectoryEntry>[],
+      ),
+      agentOwnersProvider.overrideWith((ref) async => const <String, String>{}),
+      relayClientProvider.overrideWithValue(
+        RelayClient(baseUrl: 'http://localhost:3000'),
+      ),
+      relayConfigProvider.overrideWith(_FakeRelayConfigNotifier.new),
+      savedPrefsProvider.overrideWithValue(_testPrefs),
+      channelsProvider.overrideWith(() => _FakeChannelsNotifier(const [])),
+    ],
+    child: MaterialApp(
+      theme: AppTheme.light(),
+      home: Scaffold(
+        body: Column(
+          mainAxisAlignment: MainAxisAlignment.end,
+          children: [
+            if (includeFirstComposer)
+              ComposeBar(
+                key: const ValueKey('first-composer'),
+                channelId: 'channel-1',
+                onSend: (_, _, {mediaTags = const []}) async {},
+              ),
+            ComposeBar(
+              key: const ValueKey('second-composer'),
+              channelId: 'channel-1',
+              onSend: (_, _, {mediaTags = const []}) async {},
+            ),
+          ],
         ),
       ),
     ),
@@ -418,6 +490,121 @@ void main() {
 
       expect(textField.controller!.text, 'hello :meow:world');
       expect(textField.controller!.selection.baseOffset, 12);
+    });
+
+    testWidgets('native All Photos picker failures show an error', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      _setMockNativeAttachmentPopoverHandler((call) async {
+        return switch (call.method) {
+          'isSupported' || 'present' => true,
+          'dismiss' => null,
+          _ => null,
+        };
+      });
+      final uploadService = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: nostr.Keys.generate().nsec,
+        pickGalleryImage: () async => null,
+        pickGalleryImages: () async =>
+            throw PlatformException(code: 'photo_picker_failed'),
+        pickGalleryVideo: () async => null,
+      );
+
+      try {
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: uploadService,
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+
+        await tester.tap(find.byTooltip('Add attachment').hitTestable());
+        await tester.pumpAndSettle();
+        await _sendNativeAttachmentPopoverCall(tester, 'pickAllPhotos');
+        await _sendNativeAttachmentPopoverCall(tester, 'dismissed');
+        await tester.pumpAndSettle();
+
+        expect(find.text('Unable to open your photo library.'), findsOneWidget);
+      } finally {
+        await _sendNativeAttachmentPopoverCall(tester, 'dismissed');
+        await tester.pumpWidget(const SizedBox.shrink());
+        _setMockNativeAttachmentPopoverHandler(null);
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
+    testWidgets('disposing a non-owner keeps native popover callbacks active', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      var presentCalls = 0;
+      var dismissCalls = 0;
+      var pickAllPhotosCalls = 0;
+      _setMockNativeAttachmentPopoverHandler((call) async {
+        switch (call.method) {
+          case 'isSupported':
+            return true;
+          case 'present':
+            presentCalls += 1;
+            return true;
+          case 'dismiss':
+            dismissCalls += 1;
+            return null;
+        }
+        return null;
+      });
+      final uploadService = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: nostr.Keys.generate().nsec,
+        pickGalleryImage: () async => null,
+        pickGalleryImages: () async {
+          pickAllPhotosCalls += 1;
+          return const [];
+        },
+        pickGalleryVideo: () async => null,
+      );
+
+      try {
+        await tester.pumpWidget(
+          _buildNativePopoverOwnershipHarness(
+            uploadService: uploadService,
+            includeFirstComposer: true,
+          ),
+        );
+
+        await tester.tap(find.byTooltip('Add attachment').hitTestable().at(1));
+        await tester.pumpAndSettle();
+        expect(presentCalls, 1);
+
+        await tester.pumpWidget(
+          _buildNativePopoverOwnershipHarness(
+            uploadService: uploadService,
+            includeFirstComposer: false,
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(dismissCalls, 0);
+
+        await _sendNativeAttachmentPopoverCall(tester, 'pickAllPhotos');
+        await tester.pumpAndSettle();
+        expect(pickAllPhotosCalls, 1);
+
+        await _sendNativeAttachmentPopoverCall(tester, 'dismissed');
+      } finally {
+        await _sendNativeAttachmentPopoverCall(tester, 'dismissed');
+        await tester.pumpWidget(const SizedBox.shrink());
+        _setMockNativeAttachmentPopoverHandler(null);
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
     });
 
     testWidgets('uploads an image and sends markdown plus imeta tags', (

@@ -45,6 +45,7 @@ final class NativeAttachmentPopoverViewController:
   private var selectedPhotoPaths: [String] = []
   private var cameraConfigured = false
   private var cameraIsStarting = false
+  private var cameraStartupGeneration = 0
   private var cameraIsCapturing = false
   private var activeCameraCaptureID: Int64?
   private var isFinishing = false
@@ -134,21 +135,21 @@ final class NativeAttachmentPopoverViewController:
     ])
 
     stack.addArrangedSubview(
-      makeMenuButton(
+      makeNativeAttachmentMenuButton(
         title: "Camera",
         symbol: "camera",
         action: UIAction { [weak self] _ in self?.showCamera() }
       )
     )
     stack.addArrangedSubview(
-      makeMenuButton(
+      makeNativeAttachmentMenuButton(
         title: "Photos",
         symbol: "photo.on.rectangle.angled",
         action: UIAction { [weak self] _ in self?.showPhotos() }
       )
     )
     stack.addArrangedSubview(
-      makeMenuButton(
+      makeNativeAttachmentMenuButton(
         title: "Video",
         symbol: "video",
         action: UIAction { [weak self] _ in
@@ -157,7 +158,7 @@ final class NativeAttachmentPopoverViewController:
       )
     )
     stack.addArrangedSubview(
-      makeMenuButton(
+      makeNativeAttachmentMenuButton(
         title: "Files",
         symbol: "doc",
         action: UIAction { [weak self] _ in
@@ -166,58 +167,6 @@ final class NativeAttachmentPopoverViewController:
       )
     )
     return container
-  }
-
-  private func makeMenuButton(
-    title: String,
-    symbol: String,
-    action: UIAction
-  ) -> UIButton {
-    let button = UIButton(primaryAction: action)
-    button.accessibilityLabel = title
-
-    let symbolConfiguration = UIImage.SymbolConfiguration(
-      pointSize: 18,
-      weight: .regular
-    )
-    let iconView = UIImageView(
-      image: UIImage(
-        systemName: symbol,
-        withConfiguration: symbolConfiguration
-      )
-    )
-    iconView.tintColor = .label
-    iconView.contentMode = .center
-    iconView.translatesAutoresizingMaskIntoConstraints = false
-
-    let titleLabel = UILabel()
-    titleLabel.text = title
-    titleLabel.textColor = .label
-    titleLabel.font = .preferredFont(forTextStyle: .body)
-    titleLabel.adjustsFontForContentSizeCategory = true
-    titleLabel.textAlignment = .left
-    titleLabel.translatesAutoresizingMaskIntoConstraints = false
-
-    button.addSubview(iconView)
-    button.addSubview(titleLabel)
-    NSLayoutConstraint.activate([
-      iconView.leadingAnchor.constraint(equalTo: button.leadingAnchor, constant: 14),
-      iconView.centerYAnchor.constraint(equalTo: button.centerYAnchor),
-      iconView.widthAnchor.constraint(equalToConstant: 26),
-      titleLabel.leadingAnchor.constraint(
-        equalTo: iconView.trailingAnchor,
-        constant: 12
-      ),
-      titleLabel.trailingAnchor.constraint(
-        equalTo: button.trailingAnchor,
-        constant: -14
-      ),
-      titleLabel.centerYAnchor.constraint(equalTo: button.centerYAnchor),
-    ])
-    button.configurationUpdateHandler = { button in
-      button.alpha = button.isHighlighted ? 0.62 : 1
-    }
-    return button
   }
 
   private func showPhotos() {
@@ -676,17 +625,24 @@ final class NativeAttachmentPopoverViewController:
   private func startCamera() {
     guard !cameraIsStarting else { return }
     cameraIsStarting = true
+    cameraStartupGeneration += 1
+    let startupGeneration = cameraStartupGeneration
 
     switch AVCaptureDevice.authorizationStatus(for: .video) {
     case .authorized:
-      configureAndStartCamera()
+      configureAndStartCamera(startupGeneration: startupGeneration)
     case .notDetermined:
       AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
-        guard let self else { return }
-        if granted {
-          self.configureAndStartCamera()
-        } else {
-          DispatchQueue.main.async {
+        DispatchQueue.main.async {
+          guard
+            let self,
+            self.cameraStartupIsCurrent(startupGeneration)
+          else { return }
+          if granted {
+            self.configureAndStartCamera(
+              startupGeneration: startupGeneration
+            )
+          } else {
             self.cameraIsStarting = false
             self.showCameraUnavailable(
               "Camera access is needed to take a photo."
@@ -700,7 +656,7 @@ final class NativeAttachmentPopoverViewController:
     }
   }
 
-  private func configureAndStartCamera() {
+  private func configureAndStartCamera(startupGeneration: Int) {
     cameraQueue.async { [weak self] in
       guard let self else { return }
       do {
@@ -733,7 +689,11 @@ final class NativeAttachmentPopoverViewController:
         if !self.cameraSession.isRunning {
           self.cameraSession.startRunning()
         }
-        DispatchQueue.main.async {
+        DispatchQueue.main.async { [weak self] in
+          guard
+            let self,
+            self.cameraStartupIsCurrent(startupGeneration)
+          else { return }
           self.cameraIsStarting = false
           self.installCameraPreview()
         }
@@ -741,12 +701,20 @@ final class NativeAttachmentPopoverViewController:
         if self.cameraSession.isRunning {
           self.cameraSession.stopRunning()
         }
-        DispatchQueue.main.async {
+        DispatchQueue.main.async { [weak self] in
+          guard
+            let self,
+            self.cameraStartupIsCurrent(startupGeneration)
+          else { return }
           self.cameraIsStarting = false
           self.showCameraUnavailable("Camera isn’t available here.")
         }
       }
     }
+  }
+
+  private func cameraStartupIsCurrent(_ generation: Int) -> Bool {
+    generation == cameraStartupGeneration && surface == .camera && !isFinishing
   }
 
   private func installCameraPreview() {
@@ -779,6 +747,8 @@ final class NativeAttachmentPopoverViewController:
   }
 
   private func stopCamera() {
+    cameraStartupGeneration += 1
+    cameraIsStarting = false
     cameraRotationObservation?.invalidate()
     cameraRotationObservation = nil
     cameraRotationCoordinator = nil
