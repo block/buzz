@@ -1301,6 +1301,7 @@ dependencies = [
  "tower-service",
  "tracing",
  "url",
+ "windows-registry",
 ]
 
 [[package]]

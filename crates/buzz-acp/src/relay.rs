@@ -437,7 +437,7 @@ pub struct BuzzEvent {
 #[derive(Debug, thiserror::Error)]
 pub enum RelayError {
     #[error("WebSocket error: {0}")]
-    WebSocket(Box<tokio_tungstenite::tungstenite::Error>),
+    WebSocket(#[source] Box<tokio_tungstenite::tungstenite::Error>),
 
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
@@ -3347,17 +3347,27 @@ fn jittered_duration(base: Duration) -> Duration {
 
 /// Classify a `RelayError` as a DNS resolution failure.
 ///
-/// Matches the OS-level "name not found" strings surfaced by the platform's
-/// resolver, covering macOS (`nodename nor servname`), Linux (`Name or service not
-/// known`), and common BSD/Windows variants (`No such host`,
-/// `failed to lookup address`). These are transient on brownouts and must NOT
-/// consume a backoff ladder rung — they retry on a flat `DNS_RETRY_INTERVAL`.
+/// Walks the error source chain so connector context does not hide the
+/// resolver failure. Matches hyper-util's typed DNS error plus the OS-level
+/// strings surfaced on macOS, Linux, BSD, and Windows. These are transient on
+/// brownouts and must NOT consume a backoff ladder rung — they retry on a flat
+/// `DNS_RETRY_INTERVAL`.
 pub(crate) fn is_dns_error(err: &RelayError) -> bool {
-    let msg = err.to_string();
-    msg.contains("nodename nor servname")
-        || msg.contains("Name or service not known")
-        || msg.contains("No such host")
-        || msg.contains("failed to lookup address")
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(err);
+    while let Some(error) = current {
+        let message = error.to_string().to_ascii_lowercase();
+        if message == "dns error"
+            || message.contains("nodename nor servname")
+            || message.contains("name or service not known")
+            || message.contains("no such host")
+            || message.contains("failed to lookup address")
+        {
+            return true;
+        }
+        current = error.source();
+    }
+
+    false
 }
 
 /// Shutdown-aware fixed-duration sleep for REQ pacing in `resubscribe_after_reconnect`.
@@ -6021,6 +6031,21 @@ mod tests {
         assert!(
             is_dns_error(&ws_io_err),
             "WebSocket-wrapped I/O DNS error must be classified as DNS"
+        );
+        #[derive(Debug, thiserror::Error)]
+        #[error("connection failed")]
+        struct NestedConnectionError {
+            #[source]
+            source: std::io::Error,
+        }
+        let nested_dns_err = RelayError::WebSocket(Box::new(tungstenite::Error::Io(
+            std::io::Error::other(NestedConnectionError {
+                source: std::io::Error::other("Name or service not known"),
+            }),
+        )));
+        assert!(
+            is_dns_error(&nested_dns_err),
+            "connector context must not hide a nested resolver failure"
         );
         // Normal connection errors are NOT DNS errors.
         assert!(!is_dns_error(&RelayError::Timeout));
