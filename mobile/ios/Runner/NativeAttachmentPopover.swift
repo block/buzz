@@ -46,6 +46,7 @@ final class NativeAttachmentPopoverViewController:
   private var cameraConfigured = false
   private var cameraIsStarting = false
   private var cameraIsCapturing = false
+  private var activeCameraCaptureID: Int64?
   private var isFinishing = false
   private var didNotifyDismissal = false
 
@@ -100,6 +101,7 @@ final class NativeAttachmentPopoverViewController:
 
   override func viewWillDisappear(_ animated: Bool) {
     super.viewWillDisappear(animated)
+    invalidateCameraCapture()
     stopCamera()
   }
 
@@ -328,6 +330,7 @@ final class NativeAttachmentPopoverViewController:
 
   private func showMenu() {
     guard surface != .menu else { return }
+    invalidateCameraCapture()
     selectionGeneration += 1
     selectionTask?.cancel()
     selectionTask = nil
@@ -811,10 +814,9 @@ final class NativeAttachmentPopoverViewController:
         connection.videoRotationAngle = angle
       }
     }
-    cameraOutput.capturePhoto(
-      with: AVCapturePhotoSettings(),
-      delegate: self
-    )
+    let settings = AVCapturePhotoSettings()
+    activeCameraCaptureID = settings.uniqueID
+    cameraOutput.capturePhoto(with: settings, delegate: self)
   }
 
   func photoOutput(
@@ -825,6 +827,7 @@ final class NativeAttachmentPopoverViewController:
     guard error == nil, let data = photo.fileDataRepresentation() else {
       DispatchQueue.main.async { [weak self] in
         self?.completeCameraCapture(
+          captureID: photo.resolvedSettings.uniqueID,
           path: nil,
           errorMessage: "Unable to capture the photo."
         )
@@ -844,6 +847,7 @@ final class NativeAttachmentPopoverViewController:
             return
           }
           self.completeCameraCapture(
+            captureID: photo.resolvedSettings.uniqueID,
             path: destinationURL.path,
             errorMessage: nil
           )
@@ -851,6 +855,7 @@ final class NativeAttachmentPopoverViewController:
       } catch {
         DispatchQueue.main.async { [weak self] in
           self?.completeCameraCapture(
+            captureID: photo.resolvedSettings.uniqueID,
             path: nil,
             errorMessage: "Unable to prepare the captured photo."
           )
@@ -861,9 +866,17 @@ final class NativeAttachmentPopoverViewController:
 
   @MainActor
   private func completeCameraCapture(
+    captureID: Int64,
     path: String?,
     errorMessage: String?
   ) {
+    guard
+      captureID == activeCameraCaptureID, surface == .camera, !isFinishing
+    else {
+      if let path { Self.removeTemporaryFiles([path]) }
+      return
+    }
+    activeCameraCaptureID = nil
     cameraIsCapturing = false
     cameraCaptureButton?.isEnabled = true
     if let path {
@@ -875,6 +888,12 @@ final class NativeAttachmentPopoverViewController:
     } else if !isFinishing, let errorMessage {
       showError(errorMessage)
     }
+  }
+
+  private func invalidateCameraCapture() {
+    activeCameraCaptureID = nil
+    cameraIsCapturing = false
+    cameraCaptureButton?.isEnabled = true
   }
 
   private func showCameraUnavailable(_ message: String) {
