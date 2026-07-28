@@ -340,7 +340,7 @@ pub struct ManagedAgentRecord {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        alias = "persona_name_in_team"
+        alias = "persona_name_in_pack"
     )]
     pub persona_name_in_team: Option<String>,
     #[serde(default)]
