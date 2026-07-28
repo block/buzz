@@ -7,9 +7,12 @@ const VALID_FEED_TYPES: &[&str] = &["mentions", "needs_action", "activity", "age
 
 /// Feed types requested when `--types` is omitted.
 ///
-/// `agent_activity` is deliberately absent — the relay canonicalizes it to
-/// `activity`, so including both would just dedupe to the same feed.
-const DEFAULT_FEED_TYPES: &[&str] = &["mentions", "needs_action", "activity"];
+/// Only the addressed-to-me feeds are on by default. `activity` (and its
+/// `agent_activity` alias, which the relay canonicalizes to `activity`) is an
+/// unbounded community firehose that would drown the mention and needs-action
+/// rows an agent actually has to act on — request it explicitly with
+/// `--types activity`.
+const DEFAULT_FEED_TYPES: &[&str] = &["mentions", "needs_action"];
 
 /// Build the `POST /query` filter for the activity feed.
 ///
@@ -116,12 +119,12 @@ mod tests {
     const PK: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     #[test]
-    fn default_requests_all_bounded_feeds() {
+    fn default_requests_the_addressed_to_me_feeds() {
         let filter = build_feed_filter(PK, None, 20, None).expect("default filter builds");
         assert_eq!(
             filter["feed_types"],
-            serde_json::json!(["mentions", "needs_action", "activity"]),
-            "without --types the query must still route to the bounded feeds so marker-only @channel rows appear"
+            serde_json::json!(["mentions", "needs_action"]),
+            "the default routes to the bounded addressed-to-me feeds (so marker-only @channel rows appear) and leaves the activity firehose to an explicit --types"
         );
         assert_eq!(filter["#p"], serde_json::json!([PK]));
         assert_eq!(filter["limit"], serde_json::json!(20));

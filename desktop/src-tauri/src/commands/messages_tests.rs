@@ -219,6 +219,21 @@ fn legacy_managed_agent_auth_tag_skips_self_attestation() {
 }
 
 #[test]
+fn mention_feed_items_use_the_singular_frontend_category() {
+    // The frontend contract is `category: "mention"` (singular) — see
+    // `desktop/src/shared/api/tauri.ts`. The plural "mentions" belongs to the
+    // relay-side `feed_types` namespace only.
+    assert_eq!(MENTION_CATEGORY, "mention");
+
+    let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "hello")
+        .sign_with_keys(&Keys::generate())
+        .expect("event should sign");
+
+    let item = feed_item_from_event(&event, MENTION_CATEGORY);
+    assert_eq!(item.category, "mention");
+}
+
+#[test]
 fn mentions_feed_filter_requests_bounded_feed() {
     let pubkey = "aa".repeat(32);
 

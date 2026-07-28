@@ -41,6 +41,14 @@ const TIMELINE_KINDS: [u32; 11] = [
     buzz_core_pkg::kind::KIND_HUDDLE_STARTED,
 ];
 
+/// `FeedItem.category` value for mention rows.
+///
+/// Singular — this is the frontend contract (`desktop/src/shared/api/tauri.ts`
+/// declares `category: "mention" | ...` and consumers compare `=== "mention"`).
+/// The plural `"mentions"` used in [`mentions_feed_filter`] is the relay-side
+/// `feed_types` value, a different namespace.
+const MENTION_CATEGORY: &str = "mention";
+
 /// Filter for the Inbox mentions section.
 ///
 /// `feed_types` routes the query to the relay's bounded mentions feed —
@@ -134,7 +142,7 @@ pub async fn get_feed(
 
     let mentions: Vec<FeedItemInfo> = mention_events
         .iter()
-        .map(|ev| feed_item_from_event(ev, "mentions"))
+        .map(|ev| feed_item_from_event(ev, MENTION_CATEGORY))
         .collect();
     let needs_action: Vec<FeedItemInfo> = approval_events
         .iter()

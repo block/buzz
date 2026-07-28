@@ -1064,9 +1064,15 @@ async fn query_events_authed(
             .since
             .and_then(|s| chrono::DateTime::from_timestamp(s.as_secs() as i64, 0));
 
+        // Merge semantics: every requested feed type is queried with the FULL
+        // effective limit, then the results are merged — deduped by event id (an
+        // event can qualify for two categories), sorted newest-first with `id`
+        // ascending as a deterministic tie-break, and truncated to the limit.
+        // A single shared running budget would instead let whichever category
+        // ran first consume the whole limit and starve the rest.
         let mut seen_types = std::collections::HashSet::new();
         let mut seen = std::collections::HashSet::new();
-        let mut feed_count = 0i64;
+        let mut merged = Vec::new();
         for feed_type in &feed_types {
             let canonical = if feed_type == "agent_activity" {
                 "activity"
@@ -1076,10 +1082,6 @@ async fn query_events_authed(
             if !seen_types.insert(canonical) {
                 continue;
             }
-            if feed_count >= limit {
-                break;
-            }
-            let remaining = limit - feed_count;
             let type_events = match canonical {
                 "mentions" => state
                     .db
@@ -1088,7 +1090,7 @@ async fn query_events_authed(
                         &pubkey_bytes,
                         &accessible_channels,
                         since,
-                        remaining,
+                        limit,
                     )
                     .await
                     .map_err(|e| internal_error(&format!("feed mentions error: {e}")))?,
@@ -1099,13 +1101,13 @@ async fn query_events_authed(
                         &pubkey_bytes,
                         &accessible_channels,
                         since,
-                        remaining,
+                        limit,
                     )
                     .await
                     .map_err(|e| internal_error(&format!("feed needs_action error: {e}")))?,
                 "activity" => state
                     .db
-                    .query_feed_activity(tenant.community(), &accessible_channels, since, remaining)
+                    .query_feed_activity(tenant.community(), &accessible_channels, since, limit)
                     .await
                     .map_err(|e| internal_error(&format!("feed activity error: {e}")))?,
                 _ => continue,
@@ -1123,12 +1125,21 @@ async fn query_events_authed(
                 if !buzz_core::filter::reader_authorized_for_event(&se.event, &authed_pubkey_hex) {
                     continue;
                 }
-                if let Ok(v) = serde_json::to_value(&se.event) {
-                    events.push(v);
-                    feed_count += 1;
-                }
+                merged.push(se);
             }
         }
+        merged.sort_by(|a, b| {
+            b.event
+                .created_at
+                .cmp(&a.event.created_at)
+                .then_with(|| a.event.id.cmp(&b.event.id))
+        });
+        merged.truncate(limit as usize);
+        events.extend(
+            merged
+                .iter()
+                .filter_map(|se| serde_json::to_value(&se.event).ok()),
+        );
         handled.insert(idx);
     }
 

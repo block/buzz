@@ -130,7 +130,9 @@ fn build_mentions_query(
     if let Some(s) = since {
         qb.push(" AND m.event_created_at >= ").push_bind(s);
     }
-    qb.push(" ORDER BY m.event_created_at DESC LIMIT ")
+    // `e.id ASC` is a deterministic tie-break: equal-timestamp rows would
+    // otherwise order arbitrarily, making `LIMIT` pagination unstable.
+    qb.push(" ORDER BY m.event_created_at DESC, e.id ASC LIMIT ")
         .push_bind(limit);
 
     // Branch 2 — NIP-CM `["notify", "channel"]` events in channels the caller
@@ -178,10 +180,10 @@ fn build_mentions_query(
     if let Some(s) = since {
         qb.push(" AND n.event_created_at >= ").push_bind(s);
     }
-    qb.push(" ORDER BY n.event_created_at DESC LIMIT ")
+    qb.push(" ORDER BY n.event_created_at DESC, e.id ASC LIMIT ")
         .push_bind(limit);
 
-    qb.push(")) u ORDER BY created_at DESC LIMIT ")
+    qb.push(")) u ORDER BY created_at DESC, id ASC LIMIT ")
         .push_bind(limit);
     qb
 }
@@ -252,7 +254,8 @@ fn build_needs_action_query(
     if let Some(s) = since {
         qb.push(" AND m.event_created_at >= ").push_bind(s);
     }
-    qb.push(" ORDER BY m.event_created_at DESC LIMIT ")
+    // `e.id ASC` keeps equal-timestamp rows in a stable order across pages.
+    qb.push(" ORDER BY m.event_created_at DESC, e.id ASC LIMIT ")
         .push_bind(limit);
     qb
 }
@@ -306,7 +309,9 @@ fn build_activity_query(
     if let Some(s) = since {
         qb.push(" AND created_at >= ").push_bind(s);
     }
-    qb.push(" ORDER BY created_at DESC LIMIT ").push_bind(limit);
+    // `id ASC` keeps equal-timestamp rows in a stable order across pages.
+    qb.push(" ORDER BY created_at DESC, id ASC LIMIT ")
+        .push_bind(limit);
     qb
 }
 
@@ -1322,7 +1327,8 @@ mod tests {
             "@channel rows must be bounded to members who joined before the relay admitted the event: {sql}"
         );
         assert!(
-            sql.contains(") UNION (") && sql.contains(")) u ORDER BY created_at DESC LIMIT "),
+            sql.contains(") UNION (")
+                && sql.contains(")) u ORDER BY created_at DESC, id ASC LIMIT "),
             "both branches must be deduplicated and ordered together: {sql}"
         );
         assert!(
@@ -1337,6 +1343,40 @@ mod tests {
             sql.matches("LIMIT ").count(),
             3,
             "each branch and the outer query must carry the feed limit: {sql}"
+        );
+    }
+
+    #[test]
+    fn feed_queries_order_by_created_at_with_an_id_tie_break() {
+        let community = buzz_core::CommunityId::from_uuid(Uuid::new_v4());
+        let pubkey = vec![0x42; 32];
+        let channel_id = Uuid::new_v4();
+
+        let mut mentions = build_mentions_query(community, &pubkey, &[channel_id], None, 10);
+        let mentions_query = mentions.build();
+        let mentions_sql = sqlx::Execute::sql(mentions_query).as_str().to_string();
+        assert!(
+            mentions_sql.contains("ORDER BY m.event_created_at DESC, e.id ASC")
+                && mentions_sql.contains("ORDER BY n.event_created_at DESC, e.id ASC")
+                && mentions_sql.contains("ORDER BY created_at DESC, id ASC"),
+            "every mentions ordering needs an id tie-break for stable pagination: {mentions_sql}"
+        );
+
+        let mut needs_action =
+            build_needs_action_query(community, &pubkey, &[channel_id], None, 10);
+        let needs_action_query = needs_action.build();
+        let needs_action_sql = sqlx::Execute::sql(needs_action_query).as_str().to_string();
+        assert!(
+            needs_action_sql.contains("ORDER BY m.event_created_at DESC, e.id ASC"),
+            "needs_action ordering needs an id tie-break: {needs_action_sql}"
+        );
+
+        let mut activity = build_activity_query(community, &[channel_id], None, 10);
+        let activity_query = activity.build();
+        let activity_sql = sqlx::Execute::sql(activity_query).as_str().to_string();
+        assert!(
+            activity_sql.contains("ORDER BY created_at DESC, id ASC"),
+            "activity ordering needs an id tie-break: {activity_sql}"
         );
     }
 

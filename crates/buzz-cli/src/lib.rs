@@ -949,7 +949,8 @@ pub enum FeedCmd {
         /// Maximum number of results to return
         #[arg(long)]
         limit: Option<u32>,
-        /// Comma-separated feed types to include: mentions, needs_action, activity, agent_activity
+        /// Comma-separated feed types: mentions, needs_action, activity,
+        /// agent_activity [default: mentions,needs_action]
         #[arg(long)]
         types: Option<String>,
     },
