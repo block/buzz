@@ -79,8 +79,6 @@ pub(crate) fn reconcile_agents_in_dir(base_dir: &Path, keys: &nostr::Keys) -> Re
         return Ok(0);
     }
 
-    let owner_pubkey = keys.public_key().to_hex();
-
     let db_path = base_dir.join("retention.db");
     let conn =
         open_retention_db(&db_path).map_err(|e| format!("failed to open retention db: {e}"))?;
@@ -94,45 +92,65 @@ pub(crate) fn reconcile_agents_in_dir(base_dir: &Path, keys: &nostr::Keys) -> Re
             continue;
         }
 
-        let existing =
-            get_retained_event(&conn, KIND_MANAGED_AGENT, &owner_pubkey, &record.pubkey)?;
-
-        // Build the event first and compare ITS content, so the comparison and
-        // the retained row share one serialization of the projection (mirrors
-        // `migrate_personas_in_dir`). Serializing the projection independently
-        // here would silently diverge if `build_agent_event` ever changed how
-        // it serializes — republishing every agent every boot. Content is
-        // timestamp-independent, so the monotonic bump below never forces a
-        // spurious republish; an unchanged agent is still a true no-op.
-        let event = build_agent_event(record)?
-            .custom_created_at(monotonic_created_at(
-                existing.as_ref().map(|row| row.created_at),
-            ))
-            .sign_with_keys(keys)
-            .map_err(|e| format!("failed to sign event for '{}': {e}", record.name))?;
-
-        let content = event.content.clone();
-        if existing.as_ref().is_some_and(|row| row.content == content) {
-            continue;
+        if retain_agent_record(&conn, keys, record)? {
+            reconciled += 1;
         }
-
-        retain_event(
-            &conn,
-            &RetainedEvent {
-                kind: KIND_MANAGED_AGENT,
-                pubkey: owner_pubkey.clone(),
-                d_tag: record.pubkey.clone(),
-                content,
-                created_at: event.created_at.as_secs() as i64,
-                raw_event: event.as_json(),
-                pending_sync: true,
-            },
-        )
-        .map_err(|e| format!("failed to retain '{}': {e}", record.name))?;
-        reconciled += 1;
     }
 
     Ok(reconciled)
+}
+
+/// Retain `record`'s kind:30177 identity record, marking it `pending_sync`
+/// for the flush loop, when its projection differs from the retained head.
+/// Returns `Ok(true)` when a row was (re)written and `Ok(false)` when the
+/// retained content already matches (a true no-op — no `pending_sync` churn).
+///
+/// This is the single content-diff + monotonic-bump engine shared by the
+/// boot-time reconcile above and the interactive edit paths
+/// (`retain_managed_agent_pending`, persona-rename propagation). Every
+/// mutation of an agent's published identity must go through it so the
+/// retained record can never silently drift from `managed-agents.json`.
+pub(crate) fn retain_agent_record(
+    conn: &rusqlite::Connection,
+    keys: &nostr::Keys,
+    record: &ManagedAgentRecord,
+) -> Result<bool, String> {
+    let owner_pubkey = keys.public_key().to_hex();
+    let existing = get_retained_event(conn, KIND_MANAGED_AGENT, &owner_pubkey, &record.pubkey)?;
+
+    // Build the event first and compare ITS content, so the comparison and
+    // the retained row share one serialization of the projection (mirrors
+    // `migrate_personas_in_dir`). Serializing the projection independently
+    // here would silently diverge if `build_agent_event` ever changed how
+    // it serializes — republishing every agent every boot. Content is
+    // timestamp-independent, so the monotonic bump below never forces a
+    // spurious republish; an unchanged agent is still a true no-op.
+    let event = build_agent_event(record)?
+        .custom_created_at(monotonic_created_at(
+            existing.as_ref().map(|row| row.created_at),
+        ))
+        .sign_with_keys(keys)
+        .map_err(|e| format!("failed to sign event for '{}': {e}", record.name))?;
+
+    let content = event.content.clone();
+    if existing.as_ref().is_some_and(|row| row.content == content) {
+        return Ok(false);
+    }
+
+    retain_event(
+        conn,
+        &RetainedEvent {
+            kind: KIND_MANAGED_AGENT,
+            pubkey: owner_pubkey,
+            d_tag: record.pubkey.clone(),
+            content,
+            created_at: event.created_at.as_secs() as i64,
+            raw_event: event.as_json(),
+            pending_sync: true,
+        },
+    )
+    .map_err(|e| format!("failed to retain '{}': {e}", record.name))?;
+    Ok(true)
 }
 
 #[cfg(test)]

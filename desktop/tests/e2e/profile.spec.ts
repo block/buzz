@@ -936,10 +936,10 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
   await expect(page.getByTestId("agent-memory-list")).toContainText("orphan");
 });
 
-test("restored activity deep link hides the back arrow", async ({ page }) => {
+test("restored Inbox deep link hides the back arrow", async ({ page }) => {
   // Charlie is a `bot` member of #agents and authors a seeded message there;
   // seeding a managed agent with the same pubkey makes that message's avatar
-  // open a managed-agent profile panel with the Activity ingress. Unlike an
+  // open a managed-agent profile panel with the Inbox ingress. Unlike an
   // agent created at runtime through the bridge, this seed survives
   // `page.reload()` because init scripts re-run on navigation.
   const agentPubkey = TEST_IDENTITIES.charlie.pubkey;
@@ -1542,6 +1542,6 @@ test("shows agent runtimes in agent settings", async ({ page }) => {
 
   await openSettings(page, "agents");
 
-  await expect(page.getByTestId("settings-agent-runtimes")).toBeVisible();
+  await expect(page.getByTestId("settings-harnesses")).toBeVisible();
   await expect(page.getByTestId("doctor-runtime-goose")).toContainText("Goose");
 });

@@ -272,6 +272,15 @@ pub async fn update_persona(
 
                 if agents_modified {
                     save_managed_agents(&app, &records)?;
+                    // Keep retained kind:30177 identity records in lockstep with
+                    // the rename (#2423): `record.name` is part of the published
+                    // identity projection, so skipping this strands the relay on
+                    // the stale name→pubkey binding until the next boot reconcile.
+                    // Avatar-only edits are excluded — the avatar is not in the
+                    // projection, so retaining would be a guaranteed no-op.
+                    for record in records.iter().filter(|r| renamed.contains(&r.pubkey)) {
+                        super::agents::retain_managed_agent_pending(&app, &state, record);
+                    }
                 }
 
                 params

@@ -13,6 +13,7 @@ import { EmojiBurstProvider } from "@/shared/ui/EmojiBurstProvider";
 import { PoofBurstProvider } from "@/shared/ui/PoofBurstProvider";
 import { Toaster } from "@/shared/ui/sonner";
 import { TooltipProvider } from "@/shared/ui/tooltip";
+import { recoverLocalStorageQuotaOnStartup } from "@/shared/lib/localStorageQuota";
 
 type E2eWindow = Window & {
   __BUZZ_E2E__?: unknown;
@@ -110,6 +111,7 @@ async function installE2eBridgeIfConfigured() {
 async function bootstrap() {
   resetDevWebviewStateFromUrl();
   configureDevE2eBridgeFromUrl();
+  recoverLocalStorageQuotaOnStartup();
   await installE2eBridgeIfConfigured();
   await migrateLegacyCommunityStorageBeforeRender();
   renderApp();

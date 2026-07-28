@@ -15,8 +15,25 @@ license permits redistribution.
 | `kimi.png` | [MoonshotAI/kimi-cli](https://github.com/MoonshotAI/kimi-cli) | `4a550effdfcb29a25a5d325bf935296cc50cd417` | Apache-2.0; NOTICE: Kimi Code CLI © 2025 Moonshot AI | `web/public/logo.png` | None |
 | `grok.svg` | [SpaceXAI brand guidelines](https://x.ai/legal/brand-guidelines) | Retrieved 2026-07-25 | xAI Brand Guidelines: marks may be used to accurately refer to xAI or its services; logos must be used exactly as provided | `SpaceXAI_Grok_Assets.zip` → `Grok_Logomark_Dark.svg` | None |
 
+## Inline SVG marks (`RUNTIME_MARKS`)
+
+Monochrome marks inlined as `currentColor` paths in
+`desktop/src/features/onboarding/ui/HarnessMarks.tsx` (no files under
+`public/`), so they adapt to dark/light themes without bitmap filters.
+
+| Mark | Upstream | Version/Commit | License | Source path | Modifications |
+|---|---|---|---|---|---|
+| Goose | [block/goose](https://github.com/block/goose) | `305849b71709b95b86ed9f11bd3bc939899c0aab` | Apache-2.0 © Block, Inc. | `documentation/static/img/goose.svg` | `fill="#101010"` → `currentColor`; dropped the redundant clipPath wrapper |
+| Cursor | [simple-icons](https://github.com/simple-icons/simple-icons) | `16.27.1` (slug `cursor`) | CC0-1.0 (path data); nominative use of the Cursor mark to identify Cursor's harness | `icons/cursor.svg` | `fill` → `currentColor` |
+
+Codex deliberately has **no** bundled mark: the OpenAI blossom was removed
+from simple-icons in v16 at the vendor's request, so we do not ship it —
+Codex renders `RuntimeIcon`'s neutral terminal-glyph fallback instead.
+
 `amp.png` and `opencode.svg` predate this file; their provenance was not
-recorded when they were added. Cursor intentionally uses the generic terminal
-fallback: Cursor's official brand page offers downloadable assets, but neither
-that page nor its Terms of Service grants third parties permission to
-redistribute them. The previous unproven `cursor.png` was removed.
+recorded when they were added. Cursor previously used the generic terminal
+fallback because Cursor's own brand page does not grant redistribution; the
+CC0-licensed simple-icons path (above) resolves that, mirroring the grok
+nominative-use precedent. The previous unproven `cursor.png` was removed, as
+were the unproven `chatgpt.png` and `goose.png` builtin-runtime bitmaps
+(replaced by the inline marks above).

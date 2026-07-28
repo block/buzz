@@ -21,7 +21,10 @@ pub(crate) use path::should_skip_claude_executable;
 pub(crate) use path::should_use_inherited;
 
 mod metadata;
-pub(crate) use metadata::{resolve_effective_prompt_model_provider, runtime_metadata_env_vars};
+pub(crate) use metadata::{
+    resolve_effective_prompt_model_provider, resolve_session_title, runtime_metadata_env_vars,
+    SESSION_TITLE_ENV_VAR,
+};
 
 mod stop;
 pub(crate) use stop::managed_agent_runtime_keys;
@@ -766,6 +769,15 @@ pub fn spawn_agent_child(
     } else {
         command.env_remove("BUZZ_ACP_MODEL");
     }
+    // Session title for the harness to pass out-of-band on `session/new`. The
+    // adapter names the session after it; it never reaches the prompt, so this
+    // is display metadata only. `spawn_config_hash` hashes the same resolve, so
+    // a rename raises the restart badge instead of leaving the process stale.
+    if let Some(title) = resolve_session_title(record.display_name.as_deref(), &record.name) {
+        command.env(SESSION_TITLE_ENV_VAR, title);
+    } else {
+        command.env_remove(SESSION_TITLE_ENV_VAR);
+    }
     build_buzz_agent_provider_defaults(&mut command);
     if let Some(meta) = runtime_meta {
         for (key, value) in runtime_metadata_env_vars(
@@ -823,7 +835,8 @@ pub fn spawn_agent_child(
             "GIT_CONFIG_KEY_0",
             format!("credential.{relay_http_url}/git.helper"),
         );
-        command.env("GIT_CONFIG_VALUE_0", cred_helper.display().to_string());
+        let helper = cred_helper.to_string_lossy().replace('\\', "/");
+        command.env("GIT_CONFIG_VALUE_0", helper);
         command.env(
             "GIT_CONFIG_KEY_1",
             format!("credential.{relay_http_url}/git.useHttpPath"),

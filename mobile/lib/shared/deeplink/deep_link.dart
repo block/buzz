@@ -83,6 +83,38 @@ class MessageDeepLink extends BuzzDeepLink {
       'thread: $threadRootId)';
 }
 
+/// Build a canonical `buzz://message` link for a channel message.
+///
+/// Mirrors `desktop/src/features/messages/lib/messageLink.ts` so links copied
+/// or shared from mobile round-trip through every client's parser:
+/// `buzz://message?channel=<uuid>&id=<eventId>[&thread=<rootId>]`.
+///
+/// An empty [threadRootId] is treated as "no thread" so callers can pass
+/// through a nullable thread reference without extra checks.
+String buildMessageLink({
+  required String channelId,
+  required String messageId,
+  String? threadRootId,
+}) {
+  if (channelId.isEmpty) {
+    throw ArgumentError('buildMessageLink: channelId is required');
+  }
+  if (messageId.isEmpty) {
+    throw ArgumentError('buildMessageLink: messageId is required');
+  }
+
+  final params = <String, String>{
+    'channel': channelId,
+    'id': messageId,
+    if (threadRootId != null && threadRootId.isNotEmpty) 'thread': threadRootId,
+  };
+  return Uri(
+    scheme: 'buzz',
+    host: 'message',
+    queryParameters: params,
+  ).toString();
+}
+
 /// Parse a `buzz://message?…` URI into a [MessageDeepLink].
 ///
 /// Returns `null` for non-`buzz` schemes, non-`message` hosts (e.g.

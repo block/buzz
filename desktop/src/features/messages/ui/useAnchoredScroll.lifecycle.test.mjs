@@ -173,7 +173,7 @@ function makePinnedCenterNodes() {
         listener(event);
     },
     getBoundingClientRect() {
-      return { top: 0 };
+      return { bottom: this.clientHeight, top: 0 };
     },
     querySelector() {
       return row;
@@ -232,12 +232,13 @@ function makePinnedCenterNodes() {
   };
 }
 
-function Harness({ channelId, refs }) {
+function Harness({ channelId, onTargetSettled, refs }) {
   useAnchoredScroll({
     channelId,
     contentRef: refs.content,
     isLoading: false,
     messages: [{ id: "selected" }],
+    onTargetSettled,
     pinTargetCentered: true,
     scrollContainerRef: refs.container,
     targetMessageId: "selected",
@@ -310,6 +311,68 @@ test("channel change attaches pinned-center observers after refs mount", async (
   await act(async () => {
     root.unmount();
   });
+});
+
+test("pinned target settles only after resize correction and a paint frame", async () => {
+  const refs = {
+    container: { current: null },
+    content: { current: null },
+  };
+  const root = createRoot(document.createElement("div"));
+  const settled = [];
+  const nodes = makePinnedCenterNodes();
+  refs.container.current = nodes.container;
+  refs.content.current = nodes.content;
+
+  await act(async () => {
+    root.render(
+      React.createElement(Harness, {
+        channelId: "conversation",
+        onTargetSettled: (messageId) => settled.push(messageId),
+        refs,
+      }),
+    );
+  });
+
+  assert.deepEqual(settled, [], "initial target reach is not settled");
+  nodes.moveSelectedRowBy(96);
+  nodes.resizeObservers[0].callback();
+  assert.deepEqual(settled, [], "resize callback waits for the paint frame");
+  await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+
+  assert.deepEqual(settled, ["selected"]);
+  assert.deepEqual(nodes.container.scrollWrites, [96]);
+  await act(async () => root.unmount());
+});
+
+test("user interaction releases and retires a pending pinned target", async () => {
+  const refs = {
+    container: { current: null },
+    content: { current: null },
+  };
+  const root = createRoot(document.createElement("div"));
+  const settled = [];
+  const nodes = makePinnedCenterNodes();
+  refs.container.current = nodes.container;
+  refs.content.current = nodes.content;
+
+  await act(async () => {
+    root.render(
+      React.createElement(Harness, {
+        channelId: "conversation",
+        onTargetSettled: (messageId) => settled.push(messageId),
+        refs,
+      }),
+    );
+  });
+  await act(async () => nodes.container.dispatchEvent({ type: "wheel" }));
+  nodes.moveSelectedRowBy(96);
+  nodes.resizeObservers[0].callback();
+  await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+
+  assert.deepEqual(settled, ["selected"]);
+  assert.deepEqual(nodes.container.scrollWrites, []);
+  await act(async () => root.unmount());
 });
 
 test("mounted virtual target retires bottom intent before direct centering", async () => {

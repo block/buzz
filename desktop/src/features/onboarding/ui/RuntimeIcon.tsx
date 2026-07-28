@@ -3,17 +3,15 @@ import { TerminalSquare } from "lucide-react";
 
 import type { AcpRuntimeCatalogEntry } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
-import { useTheme } from "@/shared/theme/ThemeProvider";
 import { BuzzMark } from "@/shared/ui/buzz-logo/BuzzMark";
-import chatgptLogoUrl from "../assets/harness-logos/chatgpt.png?inline";
 import claudeLogoUrl from "../assets/harness-logos/claude.png?inline";
-import gooseLogoUrl from "../assets/harness-logos/goose.png?inline";
+import { RUNTIME_MARKS } from "./HarnessMarks";
 
 // Bundled logos for compiled-in runtimes (inline base64, no network fetch).
+// Monochrome marks live in RUNTIME_MARKS instead — inline SVGs that follow
+// `currentColor`, so they adapt to dark/light without bitmap filters.
 const RUNTIME_LOGOS: Record<string, string> = {
   claude: claudeLogoUrl,
-  codex: chatgptLogoUrl,
-  goose: gooseLogoUrl,
 };
 
 // Public-path logos for bundled presets. Served from /harness-logos/ at runtime.
@@ -51,15 +49,20 @@ export function RuntimeIcon({
   runtime: AcpRuntimeCatalogEntry;
 }) {
   const [imageFailed, setImageFailed] = React.useState(false);
-  const { isDark } = useTheme();
   // Only use bundled logo maps — never render user-supplied avatar URLs for
   // custom/preset entries (tracking pixel / spoofing vector, security line).
   const id = runtime.id.trim().toLowerCase();
   const imageUrl = getRuntimeLogoUrl(runtime);
-  const shouldForceForegroundColor = !imageUrl && id === "goose";
+  const Mark = RUNTIME_MARKS[id];
 
   if (isBuzzRuntime(runtime)) {
-    return <BuzzMark className="h-7 w-10 text-foreground" />;
+    // The mark's wide viewBox letterboxes inside a square box, so honoring
+    // the caller's size keeps it optically in line with the square logos.
+    return <BuzzMark className={cn(className, "text-foreground")} />;
+  }
+
+  if (Mark) {
+    return <Mark className={cn(className, "p-0.5 text-foreground")} />;
   }
 
   if (imageUrl && !imageFailed) {
@@ -71,8 +74,6 @@ export function RuntimeIcon({
           className,
           id === "omp" && "bg-[#0d0d0d] p-1",
           id === "grok" && "bg-white p-1",
-          shouldForceForegroundColor &&
-            (isDark ? "brightness-0 invert" : "brightness-0"),
         )}
         onError={() => setImageFailed(true)}
         src={imageUrl}
