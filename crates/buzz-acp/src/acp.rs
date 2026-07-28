@@ -465,27 +465,28 @@ impl AcpClient {
         // entry falls through to the standard operator-wins treatment below.
         let codex_merge_active = codex_config_value.is_some();
 
+        // Apply runtime host defaults before persona values. `Command::env`
+        // handles keys using native platform semantics (case-insensitive on
+        // Windows), so a later persona entry overrides the matching default
+        // without a separate, potentially inconsistent key comparison.
+        // Inherited parent values still win over both layers.
+        for &(key, value) in acp_host_env_for_agent(command) {
+            if std::env::var_os(key).is_none() {
+                cmd.env(key, value);
+            }
+        }
+
         for (key, value) in extra_env {
             if key == "CODEX_CONFIG" && codex_merge_active {
                 // Handled by build_codex_config_env; skip here to avoid double-setting.
                 continue;
             }
-            if std::env::var(key).is_err() {
+            if std::env::var_os(key).is_none() {
                 cmd.env(key, value);
             }
         }
         if let Some(merged) = codex_config_value {
             cmd.env("CODEX_CONFIG", merged);
-        }
-
-        // Runtime host defaults apply to every AcpClient spawn path, including
-        // model probes and managed sessions. Preserve explicit parent/persona
-        // values under the same operator-wins contract as other environment.
-        for &(key, value) in acp_host_env_for_agent(command) {
-            let supplied_by_persona = extra_env.iter().any(|(extra_key, _)| extra_key == key);
-            if std::env::var_os(key).is_none() && !supplied_by_persona {
-                cmd.env(key, value);
-            }
         }
 
         // Buzz-managed agents must never execute the operator's personal cron
@@ -2203,6 +2204,8 @@ sleep 1
             "hermes-acp",
             "/opt/hermes/bin/hermes-acp",
             r"C:\Users\test\bin\HERMES_ACP.EXE",
+            r"C:\Users\test\AppData\Roaming\npm\hermes-acp.cmd",
+            r"C:\Tools\Hermes\HERMES-AGENT.BAT",
         ] {
             assert_eq!(
                 super::acp_host_env_for_agent(command),
