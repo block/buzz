@@ -71,19 +71,34 @@ export function readyHarnessId(
  * Returns the setter to hand the saved id; `onReady` then fires with it, so
  * callers reuse their normal dropdown-change path instead of growing a second
  * selection code path.
+ *
+ * `active` is the owning dialog's open state. The wait is only meaningful
+ * while that dialog is open: both host dialogs stay mounted across closes, so
+ * a pending id would otherwise survive the close and select into reset — or
+ * hidden — form state whenever discovery caught up. Going inactive both blocks
+ * `onReady` and drops the pending id, so a later publish is a no-op and
+ * reopening starts clean. A second save before the first publishes replaces
+ * it: the field holds one harness, so the latest save wins.
  */
 export function usePendingHarnessSelection(
   runtimes: ReadonlyArray<{ id: string }>,
   onReady: (id: string) => void,
+  active: boolean,
 ): (id: string) => void {
   const [pendingId, setPendingId] = React.useState<string | null>(null);
-  const readyId = readyHarnessId(runtimes, pendingId);
+  // Gated at render, not just in the effect, so a catalog update landing in
+  // the same commit as the close cannot slip a selection through.
+  const readyId = active ? readyHarnessId(runtimes, pendingId) : null;
 
   React.useEffect(() => {
+    if (!active) {
+      setPendingId(null);
+      return;
+    }
     if (readyId === null) return;
     setPendingId(null);
     onReady(readyId);
-  }, [onReady, readyId]);
+  }, [active, onReady, readyId]);
 
   return setPendingId;
 }

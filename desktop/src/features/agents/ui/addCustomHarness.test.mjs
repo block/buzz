@@ -12,7 +12,9 @@
  *      the definition file; the harness becomes a catalog entry when the
  *      invalidated discovery query refetches. Selecting on save would pick an
  *      id no entry backs. The hook must wait for the catalog, fire exactly
- *      once, and stay silent when the user cancels.
+ *      once, stay silent when the user cancels, and drop the pending id when
+ *      its dialog closes — the host dialogs stay mounted, so a stale id would
+ *      otherwise select into reset form state on a later publish.
  *
  * The hook is mounted for real (react-dom/client + act) rather than simulated,
  * so its effect wiring — including the guard that survives the dialogs'
@@ -150,8 +152,9 @@ test("no pending id is never ready even against a populated catalog", () => {
 
 /**
  * Mount the real hook over a mutable catalog. Returns the setter the dialogs
- * call on save, a `setRuntimes` to simulate the discovery refetch, and the log
- * of ids the hook handed back for selection.
+ * call on save, a `setRuntimes` to simulate the discovery refetch, a `setOpen`
+ * to simulate the owning dialog closing and reopening, and the log of ids the
+ * hook handed back for selection.
  */
 async function mountPendingSelection(initialRuntimes = []) {
   const selected = [];
@@ -159,11 +162,13 @@ async function mountPendingSelection(initialRuntimes = []) {
 
   function Harness() {
     const [runtimes, setRuntimes] = React.useState(initialRuntimes);
+    const [open, setOpen] = React.useState(true);
     // Deliberately NOT memoized: both dialogs pass a plain function
     // declaration, so `onReady` has a fresh identity on every render.
     const onReady = (id) => selected.push(id);
-    control.save = usePendingHarnessSelection(runtimes, onReady);
+    control.save = usePendingHarnessSelection(runtimes, onReady, open);
     control.setRuntimes = setRuntimes;
+    control.setOpen = setOpen;
     return null;
   }
 
@@ -263,6 +268,77 @@ test("two harnesses registered in a row are each selected when published", async
     control.setRuntimes([{ id: "claude" }, { id: "first" }, { id: "second" }]),
   );
   assert.deepEqual(selected, ["first", "second"]);
+
+  await act(async () => root.unmount());
+});
+
+test("a second save before the first publishes selects only the later harness", async () => {
+  const { control, root, selected } = await mountPendingSelection([
+    { id: "claude" },
+  ]);
+
+  // The dropdown holds one harness, so the latest registration wins: the
+  // first id is dropped rather than queued behind the second.
+  await act(async () => control.save("first"));
+  await act(async () => control.save("second"));
+  await act(async () =>
+    control.setRuntimes([{ id: "claude" }, { id: "first" }, { id: "second" }]),
+  );
+  assert.deepEqual(selected, ["second"]);
+
+  await act(async () => root.unmount());
+});
+
+// ── Lifecycle: a pending id never outlives the dialog that created it ────────
+
+test("a harness published after its dialog closed is never selected", async () => {
+  const { control, root, selected } = await mountPendingSelection([
+    { id: "claude" },
+  ]);
+
+  // Both host dialogs stay mounted when closed, so the hook keeps running.
+  await act(async () => control.save("my-harness"));
+  await act(async () => control.setOpen(false));
+  await act(async () =>
+    control.setRuntimes([{ id: "claude" }, { id: "my-harness" }]),
+  );
+
+  // Selecting here would write into form state the close already reset.
+  assert.deepEqual(selected, []);
+
+  await act(async () => root.unmount());
+});
+
+test("reopening after closing mid-registration does not select the abandoned harness", async () => {
+  const { control, root, selected } = await mountPendingSelection([
+    { id: "claude" },
+  ]);
+
+  await act(async () => control.save("my-harness"));
+  await act(async () => control.setOpen(false));
+  await act(async () =>
+    control.setRuntimes([{ id: "claude" }, { id: "my-harness" }]),
+  );
+  // The reopened dialog seeds from its own initial values; a stale pending id
+  // must not overwrite them.
+  await act(async () => control.setOpen(true));
+  assert.deepEqual(selected, []);
+
+  await act(async () => root.unmount());
+});
+
+test("a harness saved after reopening is still selected when published", async () => {
+  const { control, root, selected } = await mountPendingSelection([
+    { id: "claude" },
+  ]);
+
+  await act(async () => control.setOpen(false));
+  await act(async () => control.setOpen(true));
+  await act(async () => control.save("my-harness"));
+  await act(async () =>
+    control.setRuntimes([{ id: "claude" }, { id: "my-harness" }]),
+  );
+  assert.deepEqual(selected, ["my-harness"]);
 
   await act(async () => root.unmount());
 });

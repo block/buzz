@@ -546,10 +546,13 @@ export function AgentInstanceEditDialog({
   }
 
   // Routed through the normal change handler so a harness registered inline
-  // pins its command and resets model/provider like a hand-picked one.
+  // pins its command and resets model/provider like a hand-picked one. Scoped
+  // to `open` so a pending id can't outlive the dialog that started the
+  // registration.
   const selectSavedHarness = usePendingHarnessSelection(
     runtimes,
     handleRuntimeDropdownChange,
+    open,
   );
 
   function handleProviderDropdownChange(nextValue: string) {

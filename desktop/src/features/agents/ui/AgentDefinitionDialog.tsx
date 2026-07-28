@@ -694,10 +694,12 @@ export function AgentDefinitionDialog({
   }
 
   // Routed through the normal change handler so a harness registered inline
-  // resets model/provider exactly as a hand-picked one would.
+  // resets model/provider exactly as a hand-picked one would. Scoped to `open`
+  // so a pending id can't outlive the dialog that started the registration.
   const selectSavedHarness = usePendingHarnessSelection(
     runtimes,
     handleRuntimeDropdownChange,
+    open,
   );
 
   function handleProviderDropdownChange(nextValue: string) {

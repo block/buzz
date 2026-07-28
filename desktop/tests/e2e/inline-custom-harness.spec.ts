@@ -6,10 +6,13 @@
  * path existed. The harness dropdowns now carry the entry directly.
  *
  * Covers, on all three surfaces (create, edit definition, edit instance):
- *  - the entry is present in the harness dropdown
- *  - choosing it opens the registration form without changing the selection
+ *  - choosing the entry opens the registration form
  *  - saving registers the harness and selects it in the dropdown
- *  - dismissing the form leaves the previous selection untouched
+ *
+ * Create and instance edit additionally assert the sentinel never becomes the
+ * selection; create alone covers dismissing the form leaving the previous
+ * selection untouched. The three surfaces share the same routing, so those
+ * checks are not repeated on every one.
  */
 import { expect, test } from "@playwright/test";
 
