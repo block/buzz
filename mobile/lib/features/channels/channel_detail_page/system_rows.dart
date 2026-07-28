@@ -123,7 +123,11 @@ class _SystemMessageRow extends ConsumerWidget {
                         ),
                       ),
                     ),
-                    _messageTimestamp(context, message.createdAt),
+                    _messageTimestamp(
+                      context,
+                      message.createdAt,
+                      key: ValueKey('system-message-timestamp-${message.id}'),
+                    ),
                   ],
                 ),
               if (reactions.isNotEmpty)

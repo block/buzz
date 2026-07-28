@@ -1302,6 +1302,51 @@ void main() {
       expect(find.text('Bob left the channel'), findsOneWidget);
     });
 
+    testWidgets(
+      'constrains generic system timestamps at accessibility text sizes',
+      (tester) async {
+        tester.view.physicalSize = const Size(240, 600);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [
+              _systemMsg(
+                id: 'sys-accessible',
+                payload: {
+                  'type': 'topic_changed',
+                  'actor': 'alice',
+                  'topic': 'Release planning',
+                },
+                createdAt:
+                    DateTime(2026, 7, 28, 12, 34).millisecondsSinceEpoch ~/
+                    1000,
+              ),
+            ],
+            users: {
+              'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            },
+            textScaler: const TextScaler.linear(3),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final timestampFinder = find.byKey(
+          const ValueKey('system-message-timestamp-sys-accessible'),
+        );
+        final timestamp = tester.widget<Text>(timestampFinder);
+        expect(timestamp.maxLines, 1);
+        expect(timestamp.overflow, TextOverflow.ellipsis);
+        expect(
+          tester.getSize(timestampFinder).width,
+          lessThanOrEqualTo(Grid.xxl),
+        );
+        expect(tester.takeException(), isNull);
+      },
+    );
+
     testWidgets('renders member_removed system event', (tester) async {
       final messages = [
         _systemMsg(

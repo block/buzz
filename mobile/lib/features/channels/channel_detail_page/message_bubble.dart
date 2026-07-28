@@ -206,11 +206,17 @@ class _MessageBubble extends ConsumerWidget {
   }
 }
 
-Widget _messageTimestamp(BuildContext context, int createdAt) {
-  return Text(
-    formatMessageTime(createdAt),
-    style: messageTimestampTextStyle.copyWith(
-      color: context.colors.onSurfaceVariant,
+Widget _messageTimestamp(BuildContext context, int createdAt, {Key? key}) {
+  return ConstrainedBox(
+    constraints: const BoxConstraints(maxWidth: Grid.xxl),
+    child: Text(
+      key: key,
+      formatMessageTime(createdAt),
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: messageTimestampTextStyle.copyWith(
+        color: context.colors.onSurfaceVariant,
+      ),
     ),
   );
 }
