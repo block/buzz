@@ -1,0 +1,206 @@
+# Valkey backend integration lane.
+#
+# Buzz's key-value backend is store-agnostic (single REDIS_URL seam over RESP),
+# and Valkey — the permissively-licensed BSD-3 fork of Redis — is a verified
+# drop-in. This lane runs Buzz's existing backend-integration suite against a
+# Valkey service instead of Redis, converting that one-time verification into a
+# continuously enforced guarantee.
+#
+# It is deliberately kept OFF the pull-request path so it costs the project
+# nothing per-PR: it runs on a weekly schedule, on manual dispatch, and on a PR
+# only when explicitly labeled `test-valkey`.
+name: Valkey Integration
+
+on:
+  schedule:
+    # Weekly, Monday 06:17 UTC. Off-peak; no PR-path cost.
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+  pull_request:
+    types: [labeled]
+
+concurrency:
+  group: valkey-integration-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  BUZZ_TEST_POSTGRES_PASSWORD: buzz_dev
+
+permissions: {}
+
+jobs:
+  valkey-backend-integration:
+    name: Backend Integration on Valkey
+    # Schedule/dispatch always; on PRs only when the `test-valkey` label is applied.
+    if: >
+      github.event_name != 'pull_request' ||
+      github.event.label.name == 'test-valkey'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+      # This lane runs off the PR pipeline, so it can't consume ci.yml's
+      # desktop-e2e-relay artifact — but it CAN restore the same relay-artifacts
+      # cache ci.yml populates on every push to main. Scheduled runs execute on
+      # main, so most weekly runs hit a matching key and skip the relay compile +
+      # archive entirely. Same key + same build recipe as ci.yml keep the cached
+      # archive byte-compatible.
+      - name: Restore relay artifacts cache
+        id: relay-artifacts-cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            target/ci/buzz-relay
+            target/ci/git-credential-nostr
+            target/ci/backend-integration-tests.tar.zst
+          key: relay-artifacts-${{ runner.os }}-${{ hashFiles('crates/**', 'migrations/**', 'Dockerfile', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml', '.github/workflows/ci.yml') }}
+      - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
+        if: steps.relay-artifacts-cache.outputs.cache-hit != 'true'
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        if: steps.relay-artifacts-cache.outputs.cache-hit != 'true'
+        with:
+          workspaces: "."
+          save-if: ${{ github.event_name == 'schedule' }}
+      - name: Install cargo-nextest
+        if: steps.relay-artifacts-cache.outputs.cache-hit != 'true'
+        uses: taiki-e/install-action@0fd46367812ee04360509b4169d9f659d6892bb2 # v2.79.15
+        with:
+          tool: cargo-nextest@0.9.136
+
+      # Same recipe as ci.yml's "Build relay artifacts" — kept byte-identical so
+      # the cached archive is reusable across both lanes.
+      - name: Build relay artifacts
+        if: steps.relay-artifacts-cache.outputs.cache-hit != 'true'
+        run: |
+          cargo build --profile ci -p buzz-relay -p git-credential-nostr
+          cargo nextest archive \
+            --cargo-profile ci \
+            -p buzz-db \
+            -p buzz-relay \
+            -p buzz-test-client \
+            --lib \
+            --test e2e_event_reminder \
+            --archive-file target/ci/backend-integration-tests.tar.zst
+      - name: Save relay artifacts cache
+        if: steps.relay-artifacts-cache.outputs.cache-hit != 'true' && github.event_name == 'schedule'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            target/ci/buzz-relay
+            target/ci/git-credential-nostr
+            target/ci/backend-integration-tests.tar.zst
+          key: relay-artifacts-${{ runner.os }}-${{ hashFiles('crates/**', 'migrations/**', 'Dockerfile', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml', '.github/workflows/ci.yml') }}
+
+      # Valkey stands in for Redis: the compose `valkey` profile publishes it on
+      # host port 6380. Everything else (postgres, minio) is identical to ci.yml.
+      - name: Start integration services (Valkey instead of Redis)
+        run: |
+          for attempt in 1 2 3; do
+            if docker compose --profile valkey up -d postgres valkey minio minio-init; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "docker compose up failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "docker compose up failed (attempt $attempt), retrying in $((attempt * 5))s..." >&2
+            sleep $((attempt * 5))
+          done
+      - name: Wait for integration services
+        run: |
+          wait_healthy() {
+            local service="$1"
+            local container="$2"
+            for attempt in $(seq 1 60); do
+              status=$(docker inspect --format='{{.State.Health.Status}}' "${container}" 2>/dev/null || echo "not_found")
+              if [ "${status}" = "healthy" ]; then
+                echo "${service} is healthy"
+                return 0
+              fi
+              sleep 2
+            done
+            docker logs "${container}" || true
+            return 1
+          }
+          wait_healthy "Postgres" "buzz-postgres"
+          wait_healthy "Valkey" "buzz-valkey"
+          wait_healthy "MinIO" "buzz-minio"
+      - name: Apply schema and seed deployment community
+        # Mirrors ci.yml backend-integration: the reminder scheduler binds the
+        # deployment community once at boot and exits on an unmapped host, so the
+        # 'localhost:3000' community MUST exist before the relay starts.
+        env:
+          PGHOST: localhost
+          PGPORT: "5432"
+          PGUSER: buzz
+          PGPASSWORD: buzz_dev
+          PGDATABASE: buzz
+          PGSCHEMA_PLAN_HOST: localhost
+          PGSCHEMA_PLAN_PORT: "5432"
+          PGSCHEMA_PLAN_DB: buzz
+          PGSCHEMA_PLAN_USER: buzz
+          PGSCHEMA_PLAN_PASSWORD: buzz_dev
+        run: |
+          ./bin/pgschema apply --file schema/schema.sql --auto-approve
+          docker exec -i -e PGPASSWORD=buzz_dev buzz-postgres \
+            psql -U buzz -d buzz -v ON_ERROR_STOP=1 < scripts/attach-schema-partitions.sql
+          docker exec -e PGPASSWORD=buzz_dev buzz-postgres \
+            psql -U buzz -d buzz -qtA -c "
+          INSERT INTO communities (id, host)
+          VALUES ('00000000-0000-4000-8000-00000000c0de', 'localhost:3000')
+          ON CONFLICT (lower(host)) DO NOTHING
+          ;"
+      - name: Start relay (REDIS_URL → Valkey)
+        run: |
+          chmod +x ./target/ci/buzz-relay
+          nohup env \
+            DATABASE_URL="postgres://buzz:${BUZZ_TEST_POSTGRES_PASSWORD}@localhost:5432/buzz" \
+            REDIS_URL=redis://localhost:6380 \
+            RELAY_URL=ws://localhost:3000 \
+            BUZZ_BIND_ADDR=0.0.0.0:3000 \
+            BUZZ_REQUIRE_AUTH_TOKEN=false \
+            BUZZ_RECONCILE_CHANNELS=true \
+            BUZZ_GIT_PROBE_WRITERS=8 \
+            SPROUT_REMINDER_SCHEDULER_INTERVAL_SECS=1 \
+            ./target/ci/buzz-relay > /tmp/buzz-relay.log 2>&1 &
+          echo $! > /tmp/buzz-relay.pid
+          for attempt in $(seq 1 60); do
+            if ! kill -0 "$(cat /tmp/buzz-relay.pid)" 2>/dev/null; then
+              cat /tmp/buzz-relay.log
+              exit 1
+            fi
+            status_code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:3000/_readiness || true)
+            if [ "${status_code}" = "200" ]; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat /tmp/buzz-relay.log
+          exit 1
+      - name: Invite security tests
+        run: |
+          cargo nextest run \
+            --archive-file target/ci/backend-integration-tests.tar.zst \
+            -E '(package(buzz-db) and test(/relay_invite::tests/)) or (package(buzz-relay) and test(/api::invites::tests/))' \
+            --run-ignored ignored-only
+        env:
+          DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz
+      - name: NIP-ER reminder e2e
+        run: |
+          cargo nextest run \
+            --archive-file target/ci/backend-integration-tests.tar.zst \
+            -E 'binary(e2e_event_reminder)' \
+            --run-ignored ignored-only
+        env:
+          RELAY_URL: ws://localhost:3000
+      - name: Upload relay log
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: valkey-backend-integration-relay-log
+          path: /tmp/buzz-relay.log
+          if-no-files-found: ignore
