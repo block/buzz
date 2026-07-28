@@ -1,6 +1,8 @@
 name: Docker image
 
-# Builds and publishes the public Buzz relay image as ghcr.io/block/buzz.
+# Builds and publishes the public Buzz relay images as ghcr.io/block/buzz.
+# Normal tags contain stripped binaries; matching debug-* tags contain the same
+# optimized binaries with line-table debug information for native profilers.
 #
 # Strategy: each architecture builds on its native runner (ubuntu-24.04 for
 # amd64, ubuntu-24.04-arm for arm64), pushes to GHCR by digest, then a final
@@ -15,8 +17,10 @@ name: Docker image
 #
 # Triggers:
 #   - push to main           → :main + :sha-<7>
+#                              + :debug-main + :debug-sha-<7>
 #   - push tags relay-v*.*.* → :{version} + :{major}.{minor} + :{major}
-#                              (+ :latest for stable, NOT for prereleases)
+#                              + matching :debug-* tags
+#                              (+ :latest/:debug-latest for stable releases)
 #   - pull_request           → build only (no push), cache stays warm
 #   - workflow_dispatch      → manual relay-tag rescue at the tag itself
 #
@@ -95,10 +99,6 @@ jobs:
             runner: ubuntu-24.04-arm
             arch: arm64
 
-    outputs:
-      # Used downstream by `merge` to stitch the manifest.
-      version: ${{ steps.meta.outputs.version }}
-
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
@@ -163,12 +163,13 @@ jobs:
             org.opencontainers.image.description=WebSocket relay server for the Buzz communications platform
             org.opencontainers.image.licenses=Apache-2.0
 
-      - name: Build and push by digest
-        id: build
+      - name: Build and push release image by digest
+        id: build-release
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf  # v7.2.0
         with:
           context: .
           file: ./Dockerfile
+          target: runtime
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
           # Push by digest, not by tag — the merge job assembles the tags
@@ -180,25 +181,49 @@ jobs:
           cache-to: |
             ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && format('type=registry,ref={0}-buildcache:{1},mode=max,compression=zstd', env.IMAGE_NAME, matrix.arch) || '' }}
 
-      - name: Export digest
+      - name: Build and push debug image by digest
+        id: build-debug
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf  # v7.2.0
+        with:
+          context: .
+          file: ./Dockerfile
+          target: runtime-debug
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
+          cache-from: |
+            type=registry,ref=${{ env.IMAGE_NAME }}-buildcache:${{ matrix.arch }}
+
+      - name: Export release and debug digests
         if: github.event_name != 'pull_request'
         env:
-          DIGEST: ${{ steps.build.outputs.digest }}
+          RELEASE_DIGEST: ${{ steps.build-release.outputs.digest }}
+          DEBUG_DIGEST: ${{ steps.build-debug.outputs.digest }}
         run: |
-          mkdir -p /tmp/digests
-          touch "/tmp/digests/${DIGEST#sha256:}"
+          mkdir -p /tmp/digests-release /tmp/digests-debug
+          touch "/tmp/digests-release/${RELEASE_DIGEST#sha256:}"
+          touch "/tmp/digests-debug/${DEBUG_DIGEST#sha256:}"
 
-      - name: Upload digest
+      - name: Upload release digest
         if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: digests-${{ matrix.arch }}
-          path: /tmp/digests/*
+          name: digests-release-${{ matrix.arch }}
+          path: /tmp/digests-release/*
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload debug digest
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: digests-debug-${{ matrix.arch }}
+          path: /tmp/digests-debug/*
           if-no-files-found: error
           retention-days: 1
 
   merge:
-    name: Merge multi-arch manifest
+    name: Merge ${{ matrix.variant }} multi-arch manifest
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     needs: build
@@ -208,13 +233,21 @@ jobs:
       packages: write    # push the merged manifest
       id-token: write    # OIDC for provenance attestation on the manifest
       attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: release
+            tag_prefix: ""
+          - variant: debug
+            tag_prefix: debug-
 
     steps:
       - name: Download all per-arch digests
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           path: /tmp/digests
-          pattern: digests-*
+          pattern: digests-${{ matrix.variant }}-*
           merge-multiple: true
 
       - name: Set up Docker Buildx
@@ -237,9 +270,12 @@ jobs:
           # the build job's `meta` step for why match=^relay-v(.*)$, why
           # value=${{ inputs.version }} carries the rescue-dispatch version,
           # and why :latest is left to flavor.latest=auto.
+          flavor: |
+            latest=auto
+            prefix=${{ matrix.tag_prefix }},onlatest=true
           tags: |
             type=ref,event=branch,enable=${{ github.event_name != 'workflow_dispatch' || inputs.version == '' }}
-            type=sha,prefix=sha-,format=short,enable=${{ github.event_name != 'workflow_dispatch' || inputs.version == '' }}
+            type=sha,prefix=${{ matrix.tag_prefix }}sha-,format=short,enable=${{ github.event_name != 'workflow_dispatch' || inputs.version == '' }}
             type=semver,pattern={{version}},match=^relay-v(.*)$,value=${{ inputs.version }}
             type=semver,pattern={{major}}.{{minor}},match=^relay-v(.*)$,value=${{ inputs.version }}
             type=semver,pattern={{major}},match=^relay-v(.*)$,value=${{ inputs.version }}
@@ -284,11 +320,12 @@ jobs:
       - name: Summary
         env:
           IMAGE_NAME: ${{ env.IMAGE_NAME }}
+          VARIANT: ${{ matrix.variant }}
           MERGED_DIGEST: ${{ steps.manifest.outputs.digest }}
           META_TAGS: ${{ steps.meta.outputs.tags }}
         run: |
           {
-            echo "### Published \`${IMAGE_NAME}\`"
+            echo "### Published \`${IMAGE_NAME}\` (${VARIANT})"
             echo
             echo "**Digest:** \`${MERGED_DIGEST}\`"
             echo
