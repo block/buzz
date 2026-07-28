@@ -8,6 +8,7 @@ export function VerifiedBadge({ verifiedName }: { verifiedName: string }) {
           aria-label={`Verified corporate identity: ${verifiedName}`}
           className="inline-flex shrink-0 items-center"
           data-testid="verified-corporate-identity"
+          role="img"
         >
           <svg
             aria-hidden="true"

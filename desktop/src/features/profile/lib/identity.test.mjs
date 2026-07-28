@@ -129,10 +129,7 @@ test("stabiliser: a real profile change swaps the reference (re-render fires)", 
 });
 
 test("formats a chosen name followed by the authoritative display name", () => {
-  assert.equal(
-    formatVerifiedUserLabel("Franco", "fsola"),
-    "Franco (fsola)",
-  );
+  assert.equal(formatVerifiedUserLabel("Franco", "fsola"), "Franco (fsola)");
 });
 
 test("does not duplicate equal chosen and authoritative names", () => {

@@ -101,8 +101,8 @@ pub async fn get_profile(state: State<'_, AppState>) -> Result<ProfileInfo, Stri
         .map(nostr_convert::profile_info_from_event)
         .transpose()?
         .unwrap_or_else(|| empty_profile_info(&current_pubkey_hex_unwrap(&state)));
-    profile.verified_name = verified_identities(&events, relay_self.as_deref())
-        .remove(&profile.pubkey);
+    profile.verified_name =
+        verified_identities(&events, relay_self.as_deref()).remove(&profile.pubkey);
     Ok(profile)
 }
 
@@ -266,8 +266,8 @@ pub async fn get_user_profile(
         .map(nostr_convert::profile_info_from_event)
         .transpose()?
         .unwrap_or_else(|| empty_profile_info(&target));
-    profile.verified_name = verified_identities(&events, relay_self.as_deref())
-        .remove(&profile.pubkey);
+    profile.verified_name =
+        verified_identities(&events, relay_self.as_deref()).remove(&profile.pubkey);
     Ok(profile)
 }
 
@@ -488,22 +488,23 @@ mod tests {
     fn verified_identity_requires_relay_signed_nip85_assertion() {
         let relay = nostr::Keys::generate();
         let subject = nostr::Keys::generate().public_key().to_hex();
-        let event = nostr::EventBuilder::new(
-            nostr::Kind::Custom(KIND_USER_TRUSTED_ASSERTION as u16),
-            "",
-        )
-        .tags([
-            nostr::Tag::parse(["d", subject.as_str()]).unwrap(),
-            nostr::Tag::parse(["p", subject.as_str()]).unwrap(),
-            nostr::Tag::parse(["verified", "corporate"]).unwrap(),
-            nostr::Tag::parse(["display_name", "Franco Sola"]).unwrap(),
-            nostr::Tag::parse(["issuer", "cf-doorman-production"]).unwrap(),
-        ])
-        .sign_with_keys(&relay)
-        .unwrap();
+        let event =
+            nostr::EventBuilder::new(nostr::Kind::Custom(KIND_USER_TRUSTED_ASSERTION as u16), "")
+                .tags([
+                    nostr::Tag::parse(["d", subject.as_str()]).unwrap(),
+                    nostr::Tag::parse(["p", subject.as_str()]).unwrap(),
+                    nostr::Tag::parse(["verified", "corporate"]).unwrap(),
+                    nostr::Tag::parse(["display_name", "Franco Sola"]).unwrap(),
+                    nostr::Tag::parse(["issuer", "cf-doorman-production"]).unwrap(),
+                ])
+                .sign_with_keys(&relay)
+                .unwrap();
 
         let verified = verified_identities(&[event], Some(&relay.public_key().to_hex()));
-        assert_eq!(verified.get(&subject).map(String::as_str), Some("Franco Sola"));
+        assert_eq!(
+            verified.get(&subject).map(String::as_str),
+            Some("Franco Sola")
+        );
     }
 
     #[test]

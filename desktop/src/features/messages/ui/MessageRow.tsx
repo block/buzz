@@ -557,9 +557,7 @@ export const MessageRow = React.memo(
         ) : (
           authorNode
         )}
-        {verifiedName ? (
-          <VerifiedBadge verifiedName={verifiedName} />
-        ) : null}
+        {verifiedName ? <VerifiedBadge verifiedName={verifiedName} /> : null}
         {agentOwnerNode}
         {inlineMetadataNode}
         {message.personaDisplayName &&
