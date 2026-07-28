@@ -2030,107 +2030,82 @@ async fn tokio_main() -> Result<()> {
                                 continue;
                             }
 
-                            // Check: kind:9, content "!shutdown", from owner, mentions THIS agent.
-                            let is_shutdown = is_owner_control_command(
-                                &buzz_event.event,
-                                kind_u32,
-                                "!shutdown",
-                                &pubkey_hex,
-                            );
-                            if is_shutdown {
-                                let owner = owner_cache.get();
-                                if let Some(owner) = owner {
-                                    if buzz_event.event.pubkey.to_hex() == *owner {
-                                        tracing::info!(
-                                            channel_id = %buzz_event.channel_id,
-                                            sender = %buzz_event.event.pubkey.to_hex(),
-                                            "shutdown command from owner — exiting gracefully"
-                                        );
-                                        let _ = shutdown_tx.send(());
-                                        continue;
-                                    }
-                                }
-                                // Not from owner — fall through to normal prompt handling.
-                                // Don't drop it — it's a regular message that happens to
-                                // contain "!shutdown" from a non-owner.
-                            }
-
-                            // Mirrors !shutdown: kind:9, content "!cancel", from
-                            // owner, mentions THIS agent. Must be BEFORE
+                            // Owner control commands: kind:9 mentioning THIS
+                            // agent, from the owner. Consumed by the harness
+                            // and never forwarded to the agent. Must be BEFORE
                             // queue.push() — the event content is moved by push.
                             //
-                            // Mode-independent: !cancel fires regardless of
-                            // --multiple-event-handling. It is explicit user
+                            // Mode-independent: they fire regardless of
+                            // --multiple-event-handling. They are explicit user
                             // intent, not an automatic policy decision.
-                            let is_cancel = is_owner_control_command(
-                                &buzz_event.event,
-                                kind_u32,
-                                "!cancel",
-                                &pubkey_hex,
-                            );
-                            if is_cancel {
-                                if let Some(owner) = owner_cache.get() {
-                                    if buzz_event.event.pubkey.to_hex() == *owner {
-                                        let fired = signal_in_flight_task(
-                                            &mut pool,
-                                            buzz_event.channel_id,
-                                            ControlSignal::Cancel,
-                                        );
-                                        if !fired {
-                                            tracing::warn!(
-                                                channel_id = %buzz_event.channel_id,
-                                                "!cancel received but no in-flight task — no-op"
-                                            );
-                                        }
-                                        continue; // consume event — do NOT push to queue
-                                    }
-                                }
-                                // Not from owner — fall through to normal prompt handling.
-                            }
-
-                            // Mirrors !shutdown / !cancel: kind:9, content
-                            // "!rotate", from owner, mentions THIS agent.
                             //
-                            // Rotation is explicit owner intent to start the
-                            // next turn in this channel with a fresh ACP
-                            // session. It is consumed by the harness and never
-                            // forwarded to the agent. If a turn is in-flight,
-                            // cancel it, drop its triggering batch, and
-                            // invalidate the channel session when the task
-                            // returns. If idle, invalidate the cached channel
-                            // session immediately. Queued future events remain
-                            // queued and will create a fresh session on dispatch.
-                            let is_rotate = is_owner_control_command(
-                                &buzz_event.event,
-                                kind_u32,
-                                "!rotate",
-                                &pubkey_hex,
-                            );
-                            if is_rotate {
-                                if let Some(owner) = owner_cache.get() {
-                                    if buzz_event.event.pubkey.to_hex() == *owner {
-                                        let fired = signal_in_flight_task(
-                                            &mut pool,
-                                            buzz_event.channel_id,
-                                            ControlSignal::Rotate,
-                                        );
-                                        if fired {
-                                            tracing::info!(
-                                                channel_id = %buzz_event.channel_id,
-                                                "!rotate received — cancelling in-flight turn and rotating session"
-                                            );
-                                        } else {
-                                            let invalidated = pool.invalidate_channel_sessions(buzz_event.channel_id);
-                                            tracing::info!(
-                                                channel_id = %buzz_event.channel_id,
-                                                invalidated,
-                                                "!rotate received — invalidated idle channel session(s)"
-                                            );
-                                        }
-                                        continue; // consume event — do NOT push to queue
-                                    }
+                            // An unrecognized command, an arity mismatch, or a
+                            // non-owner author all fall through to normal prompt
+                            // handling — a stranger typing "!cancel" is still
+                            // sending the agent a message.
+                            let command = owner_control_command(&buzz_event.event, kind_u32, &pubkey_hex)
+                                .filter(|_| owner_cache.get() == Some(buzz_event.event.pubkey.to_hex().as_str()));
+                            match command {
+                                Some(("!shutdown", "")) => {
+                                    tracing::info!(
+                                        channel_id = %buzz_event.channel_id,
+                                        sender = %buzz_event.event.pubkey.to_hex(),
+                                        "shutdown command from owner — exiting gracefully"
+                                    );
+                                    let _ = shutdown_tx.send(());
+                                    continue;
                                 }
-                                // Not from owner — fall through to normal prompt handling.
+                                Some(("!cancel", "")) => {
+                                    let fired = signal_in_flight_task(
+                                        &mut pool,
+                                        buzz_event.channel_id,
+                                        ControlSignal::Cancel,
+                                    );
+                                    if !fired {
+                                        tracing::warn!(
+                                            channel_id = %buzz_event.channel_id,
+                                            "!cancel received but no in-flight task — no-op"
+                                        );
+                                    }
+                                    continue; // consume event — do NOT push to queue
+                                }
+                                // Rotation is explicit owner intent to start the
+                                // next turn in this channel with a fresh ACP
+                                // session. If a turn is in-flight, cancel it, drop
+                                // its triggering batch, and invalidate the channel
+                                // session when the task returns. If idle,
+                                // invalidate the cached channel session
+                                // immediately. Queued future events remain queued
+                                // and will create a fresh session on dispatch.
+                                Some(("!rotate", "")) => {
+                                    let fired = signal_in_flight_task(
+                                        &mut pool,
+                                        buzz_event.channel_id,
+                                        ControlSignal::Rotate,
+                                    );
+                                    if fired {
+                                        tracing::info!(
+                                            channel_id = %buzz_event.channel_id,
+                                            "!rotate received — cancelling in-flight turn and rotating session"
+                                        );
+                                    } else {
+                                        let invalidated = pool.invalidate_channel_sessions(buzz_event.channel_id);
+                                        tracing::info!(
+                                            channel_id = %buzz_event.channel_id,
+                                            invalidated,
+                                            "!rotate received — invalidated idle channel session(s)"
+                                        );
+                                    }
+                                    continue; // consume event — do NOT push to queue
+                                }
+                                // Everything else falls through to normal prompt
+                                // handling. The parser accepts any `!token`, so
+                                // this arm is what keeps an unknown bang word — or
+                                // a known one carrying args it does not take — a
+                                // message to the agent rather than a swallowed
+                                // event. See
+                                // `owner_control_command_falls_through_on_unmatched_shapes`.
+                                _ => {}
                             }
 
                             // Coarse security policy: drop events from disallowed
@@ -2716,15 +2691,37 @@ fn event_mentions_agent(event: &nostr::Event, agent_pubkey_hex: &str) -> bool {
     })
 }
 
-fn is_owner_control_command(
-    event: &nostr::Event,
+/// Split a kind:9 mention of this agent into `(command, args)` when its content
+/// starts with a `!token`, or with an `@mention` followed by one. Ownership is
+/// NOT checked here — callers re-check the author so a non-owner's `!cancel`
+/// still reaches the agent as a prompt.
+fn owner_control_command<'a>(
+    event: &'a nostr::Event,
     kind_u32: u32,
-    command: &str,
     agent_pubkey_hex: &str,
-) -> bool {
-    kind_u32 == KIND_STREAM_MESSAGE
-        && event.content.trim() == command
-        && event_mentions_agent(event, agent_pubkey_hex)
+) -> Option<(&'a str, &'a str)> {
+    if kind_u32 != KIND_STREAM_MESSAGE || !event_mentions_agent(event, agent_pubkey_hex) {
+        return None;
+    }
+    let content = event.content.trim();
+    // Mentioning is how a client addresses an agent, so `@Name !rotate` is the
+    // natural gesture, and a display name may hold spaces (`@Codex (Sol)`).
+    // Skip past the mention to the first `!`-initiated token rather than
+    // matching the name: the `p` tag already proved the mention is ours.
+    let content = if content.starts_with('@') {
+        content
+            .char_indices()
+            .find(|&(i, c)| c == '!' && content[..i].ends_with(char::is_whitespace))
+            .map_or("", |(i, _)| &content[i..])
+    } else {
+        content
+    };
+    if !content.starts_with('!') {
+        return None;
+    }
+    let (command, args) =
+        content.split_at(content.find(char::is_whitespace).unwrap_or(content.len()));
+    Some((command, args.trim()))
 }
 
 // ── signal_in_flight_task ─────────────────────────────────────────────────────
@@ -4246,35 +4243,79 @@ mod owner_control_command_tests {
     }
 
     #[test]
-    fn owner_control_command_requires_kind_content_and_agent_mention() {
+    fn owner_control_command_splits_command_and_args() {
+        let agent = "ab".repeat(32);
+        for (content, expected) in [
+            (" !rotate ", Some(("!rotate", ""))),
+            ("!shutdown", Some(("!shutdown", ""))),
+            ("!cancel", Some(("!cancel", ""))),
+            ("!rotate\tnow\n", Some(("!rotate", "now"))),
+            // Arity is enforced by the caller's match arms, not the parser:
+            // `("!shutdown", "please")` matches no arm and falls through.
+            ("!shutdown please", Some(("!shutdown", "please"))),
+            ("!bogus", Some(("!bogus", ""))),
+            // Clients address an agent by mention, and a display name may hold
+            // spaces, so a leading mention is skipped without matching a name.
+            ("@Claude !rotate", Some(("!rotate", ""))),
+            ("@Claude !rotate now", Some(("!rotate", "now"))),
+            ("@Will Pfleger !rotate", Some(("!rotate", ""))),
+            ("@Codex (Sol) !cancel", Some(("!cancel", ""))),
+            ("@Claude", None),
+            // A leading `@` arms the scan for the rest of the content, so a
+            // bang anywhere after one is a command.
+            ("@Claude please run !rotate", Some(("!rotate", ""))),
+            // Without that leading `@`, a bang never fires.
+            ("hello @Claude !rotate", None),
+            ("hello !rotate", None),
+            ("", None),
+        ] {
+            let event = make_event(KIND_STREAM_MESSAGE, content, Some(&agent));
+            assert_eq!(
+                owner_control_command(&event, KIND_STREAM_MESSAGE, &agent),
+                expected,
+                "content {content:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn owner_control_command_requires_kind_and_agent_mention() {
         let agent = "ab".repeat(32);
 
-        let event = make_event(KIND_STREAM_MESSAGE, " !rotate ", Some(&agent));
-        assert!(is_owner_control_command(
-            &event,
-            KIND_STREAM_MESSAGE,
-            "!rotate",
-            &agent
-        ));
-
         let wrong_kind = make_event(1, "!rotate", Some(&agent));
-        assert!(!is_owner_control_command(&wrong_kind, 1, "!rotate", &agent));
-
-        let wrong_content = make_event(KIND_STREAM_MESSAGE, "!cancel", Some(&agent));
-        assert!(!is_owner_control_command(
-            &wrong_content,
-            KIND_STREAM_MESSAGE,
-            "!rotate",
-            &agent
-        ));
+        assert!(owner_control_command(&wrong_kind, 1, &agent).is_none());
 
         let no_mention = make_event(KIND_STREAM_MESSAGE, "!rotate", None);
-        assert!(!is_owner_control_command(
-            &no_mention,
-            KIND_STREAM_MESSAGE,
-            "!rotate",
-            &agent
-        ));
+        assert!(owner_control_command(&no_mention, KIND_STREAM_MESSAGE, &agent).is_none());
+
+        let other_agent = make_event(KIND_STREAM_MESSAGE, "!rotate", Some(&"cd".repeat(32)));
+        assert!(owner_control_command(&other_agent, KIND_STREAM_MESSAGE, &agent).is_none());
+    }
+
+    /// The parser accepts any `!token`, so the control-command match must reject
+    /// what it does not handle rather than consume it.
+    ///
+    /// Two shapes reach the match and must survive it: a bang word no arm names,
+    /// and a known command carrying args it does not take. Both parse cleanly —
+    /// that is the parser's job — and both have to fall through the `_` arm to
+    /// normal prompt handling, or the owner's message is silently swallowed with
+    /// no reply and no queued turn.
+    #[test]
+    fn owner_control_command_falls_through_on_unmatched_shapes() {
+        let agent = "ab".repeat(32);
+
+        for content in ["!bogus", "!shutdown please"] {
+            let event = make_event(KIND_STREAM_MESSAGE, content, Some(&agent));
+            let parsed = owner_control_command(&event, KIND_STREAM_MESSAGE, &agent);
+            assert!(parsed.is_some(), "content {content:?} must parse");
+            assert!(
+                !matches!(
+                    parsed,
+                    Some(("!shutdown", "") | ("!cancel", "") | ("!rotate", ""))
+                ),
+                "content {content:?} must not match a control arm",
+            );
+        }
     }
 
     #[test]
