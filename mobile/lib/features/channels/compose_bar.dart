@@ -42,6 +42,7 @@ part 'compose_bar/ios_photo_picker.dart';
 part 'compose_bar/ios_attachment_popover.dart';
 part 'compose_bar/camera_preview.dart';
 part 'compose_bar/send_button.dart';
+part 'compose_bar/layout.dart';
 
 /// Rich compose bar with @mention autocomplete and a markdown formatting
 /// toolbar. Used in both channel and thread views — the caller provides an
@@ -898,217 +899,45 @@ class ComposeBar extends HookConsumerWidget {
             },
           );
         },
-        child: Container(
-          decoration: BoxDecoration(
-            color: context.colors.surfaceContainerHighest,
-            borderRadius: BorderRadius.circular(Radii.dialog),
-            border: Border.all(
-              color: Colors.black.withValues(alpha: 0.04),
-              width: 1,
-            ),
-          ),
-          padding: const EdgeInsets.all(Grid.xxs),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              if (hasAttachments || hasPendingUploads) ...[
-                _AttachmentStrip(
-                  attachments: attachments.value,
-                  uploadingCount: uploadingCount.value,
-                  onRemove: removeAttachment,
-                ),
-                const SizedBox(height: Grid.xxs),
-              ],
-
-              if (uploadError.value case final error?) ...[
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: Text(
-                    error,
-                    style: context.textTheme.bodySmall?.copyWith(
-                      color: context.colors.error,
-                    ),
-                  ),
-                ),
-                const SizedBox(height: Grid.xxs),
-              ],
-
-              // Keep the default state out of the focus system entirely so
-              // restored native focus cannot expand a newly opened channel.
-              if (isComposerExpanded.value)
-                TextField(
-                  controller: controller,
-                  focusNode: focusNode,
-                  textInputAction: TextInputAction.send,
-                  contextMenuBuilder: buildContextMenu,
-                  contentInsertionConfiguration: ContentInsertionConfiguration(
-                    allowedMimeTypes: _pastedImageMimeTypes,
-                    onContentInserted: uploadPastedImage,
-                  ),
-                  onSubmitted: (_) => send(),
-                  minLines: 1,
-                  maxLines: 5,
-                  style: context.textTheme.bodyLarge,
-                  decoration: InputDecoration(
-                    hintText: resolvedHint,
-                    hintStyle: context.textTheme.bodyLarge?.copyWith(
-                      color: context.colors.onSurfaceVariant,
-                    ),
-                    border: InputBorder.none,
-                    enabledBorder: InputBorder.none,
-                    focusedBorder: InputBorder.none,
-                    contentPadding: const EdgeInsets.symmetric(
-                      horizontal: Grid.half,
-                      vertical: Grid.half,
-                    ),
-                    isDense: true,
-                  ),
-                )
-              else
-                Row(
-                  children: [
-                    _AttachmentTrigger(
-                      surface: attachmentSurface.value,
-                      formattingOpen: false,
-                      onTap: handleAttachmentTap,
-                    ),
-                    const SizedBox(width: Grid.xxs),
-                    Expanded(
-                      child: Semantics(
-                        button: true,
-                        label: resolvedHint,
-                        child: GestureDetector(
-                          behavior: HitTestBehavior.opaque,
-                          onTap: expandComposer,
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(
-                              vertical: Grid.half,
-                            ),
-                            child: Align(
-                              alignment: Alignment.centerLeft,
-                              child: Text(
-                                resolvedHint,
-                                style: context.textTheme.bodyLarge?.copyWith(
-                                  color: context.colors.onSurfaceVariant,
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-
-              ClipRect(
-                child: Align(
-                  alignment: Alignment.topCenter,
-                  heightFactor: composerExpansionValue,
-                  child: IgnorePointer(
-                    ignoring: composerExpansionValue < 0.98,
-                    child: Opacity(
-                      opacity: composerExpansionProgress,
-                      child: Transform.translate(
-                        offset: Offset(
-                          0,
-                          Grid.xxs * (1 - composerExpansionProgress),
-                        ),
-                        child: Column(
-                          children: [
-                            const SizedBox(height: Grid.xxs),
-                            Row(
-                              children: [
-                                _AttachmentTrigger(
-                                  surface: attachmentSurface.value,
-                                  formattingOpen: showFormatting.value,
-                                  onTap: (triggerContext) {
-                                    if (showFormatting.value) {
-                                      showFormatting.value = false;
-                                    } else {
-                                      handleAttachmentTap(triggerContext);
-                                    }
-                                  },
-                                ),
-                                const SizedBox(width: Grid.half),
-                                Expanded(
-                                  child: AnimatedSwitcher(
-                                    duration: motionDuration,
-                                    switchInCurve: Curves.easeOutCubic,
-                                    switchOutCurve: Curves.easeInCubic,
-                                    layoutBuilder:
-                                        (currentChild, previousChildren) =>
-                                            Stack(
-                                              alignment: Alignment.centerLeft,
-                                              children: [
-                                                ...previousChildren,
-                                                ?currentChild,
-                                              ],
-                                            ),
-                                    child: showFormatting.value
-                                        ? _FormattingToolbar(
-                                            onFormat: applyFormat,
-                                          )
-                                        : Row(
-                                            key: const ValueKey(
-                                              'standard-actions',
-                                            ),
-                                            children: [
-                                              _ComposeAction(
-                                                icon: LucideIcons.atSign,
-                                                onTap: () {
-                                                  attachmentSurface.value =
-                                                      _AttachmentSurface.closed;
-                                                  triggerMention();
-                                                },
-                                              ),
-                                              _ComposeAction(
-                                                icon: LucideIcons.hash,
-                                                onTap: () {
-                                                  attachmentSurface.value =
-                                                      _AttachmentSurface.closed;
-                                                  triggerChannel();
-                                                },
-                                              ),
-                                              _ComposeAction(
-                                                icon: LucideIcons.smilePlus,
-                                                onTap: () {
-                                                  attachmentSurface.value =
-                                                      _AttachmentSurface.closed;
-                                                  showEmojiPicker(
-                                                    context: context,
-                                                    onSelect: insertEmoji,
-                                                  );
-                                                },
-                                              ),
-                                              _ComposeAction(
-                                                icon: LucideIcons.aLargeSmall,
-                                                onTap: () {
-                                                  attachmentSurface.value =
-                                                      _AttachmentSurface.closed;
-                                                  showFormatting.value = true;
-                                                },
-                                              ),
-                                              const Spacer(),
-                                              _SendButton(
-                                                isDisabled: hasPendingUploads,
-                                                isSending: isSending.value,
-                                                onTap: send,
-                                              ),
-                                            ],
-                                          ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          ),
+        child: _ComposeBarLayout(
+          attachments: attachments.value,
+          uploadingCount: uploadingCount.value,
+          onRemoveAttachment: removeAttachment,
+          uploadError: uploadError.value,
+          isExpanded: isComposerExpanded.value,
+          controller: controller,
+          focusNode: focusNode,
+          contextMenuBuilder: buildContextMenu,
+          onContentInserted: uploadPastedImage,
+          onSend: () => unawaited(send()),
+          resolvedHint: resolvedHint,
+          attachmentSurface: attachmentSurface.value,
+          onAttachmentTap: handleAttachmentTap,
+          onExpand: expandComposer,
+          expansionValue: composerExpansionValue,
+          expansionProgress: composerExpansionProgress,
+          formattingOpen: showFormatting.value,
+          onCloseFormatting: () => showFormatting.value = false,
+          motionDuration: motionDuration,
+          onFormat: applyFormat,
+          onMention: () {
+            attachmentSurface.value = _AttachmentSurface.closed;
+            triggerMention();
+          },
+          onChannel: () {
+            attachmentSurface.value = _AttachmentSurface.closed;
+            triggerChannel();
+          },
+          onEmoji: () {
+            attachmentSurface.value = _AttachmentSurface.closed;
+            showEmojiPicker(context: context, onSelect: insertEmoji);
+          },
+          onOpenFormatting: () {
+            attachmentSurface.value = _AttachmentSurface.closed;
+            showFormatting.value = true;
+          },
+          hasPendingUploads: hasPendingUploads,
+          isSending: isSending.value,
         ),
       ),
     );
