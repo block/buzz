@@ -11,6 +11,7 @@ members = [
     "crates/buzz-audit",
     "crates/buzz-acp",
     "crates/buzz-agent",
+    "crates/buzz-backend-ssh",
     "crates/sprig",
     "crates/buzz-test-client",
     "crates/buzz-ws-client",

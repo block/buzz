@@ -291,6 +291,12 @@ test-unit:
         # Gateway unit and black-box HTTP tests are infra-free. Postgres-backed
         # contract/race tests run in the dedicated CI job below.
         cargo nextest run -p buzz-push-gateway
+        # Remote-deploy provider (buzz-backend-ssh). Infra-free: the deploy
+        # tests execute the generated script against a local /bin/sh with a
+        # stubbed HOME, no network. This is the only place the shell-injection
+        # canary runs — the Windows job's copy of these tests is #[cfg(unix)]d
+        # out — so dropping this step lets an injection regression ship green.
+        cargo nextest run -p buzz-backend-ssh
     else
         ./scripts/run-tests.sh unit
     fi
