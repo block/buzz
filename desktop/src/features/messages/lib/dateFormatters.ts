@@ -7,39 +7,65 @@
  * - `formatDayHeading` — label for day dividers / sticky headers.
  *   Returns "Today", "Yesterday", or a date like "Monday, March 31st".
  * - `isSameDay` — compare two unix-second timestamps.
+ *
+ * All formatters follow the system timezone as resolved at call time, so a
+ * timezone change while the app is running is picked up without a restart.
  */
-
-const TIME_FORMATTER = new Intl.DateTimeFormat("en-US", {
-  hour: "numeric",
-  minute: "2-digit",
-});
 
 const DAY_PERIOD_SUFFIX_RE = /[\s\u00a0\u202f]*(?:AM|PM)$/i;
 
-const FULL_DATE_TIME_FORMATTER = new Intl.DateTimeFormat("en-US", {
-  weekday: "long",
-  year: "numeric",
-  month: "long",
-  day: "numeric",
-  hour: "numeric",
-  minute: "2-digit",
-});
+interface TimelineDateFormatters {
+  time: Intl.DateTimeFormat;
+  fullDateTime: Intl.DateTimeFormat;
+  weekday: Intl.DateTimeFormat;
+  longMonth: Intl.DateTimeFormat;
+  shortMonth: Intl.DateTimeFormat;
+}
 
-const WEEKDAY_FORMATTER = new Intl.DateTimeFormat("en-US", {
-  weekday: "long",
-});
+let cachedTimeZone: string | null = null;
+let cachedFormatters: TimelineDateFormatters | null = null;
 
-const LONG_MONTH_FORMATTER = new Intl.DateTimeFormat("en-US", {
-  month: "long",
-});
-
-const SHORT_MONTH_FORMATTER = new Intl.DateTimeFormat("en-US", {
-  month: "short",
-});
+/**
+ * An `Intl.DateTimeFormat` snapshots the timezone it was constructed in, so a
+ * plain module-level instance keeps formatting in a stale zone for the whole
+ * life of the app when the OS timezone changes underneath it (travel,
+ * DST-less VMs, manual changes). Cache per resolved timezone instead:
+ * instances are reused while the zone is stable and rebuilt when it changes.
+ */
+function currentFormatters(): TimelineDateFormatters {
+  const timeZone = new Intl.DateTimeFormat().resolvedOptions().timeZone;
+  if (cachedFormatters === null || cachedTimeZone !== timeZone) {
+    cachedTimeZone = timeZone;
+    cachedFormatters = {
+      time: new Intl.DateTimeFormat("en-US", {
+        hour: "numeric",
+        minute: "2-digit",
+      }),
+      fullDateTime: new Intl.DateTimeFormat("en-US", {
+        weekday: "long",
+        year: "numeric",
+        month: "long",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+      }),
+      weekday: new Intl.DateTimeFormat("en-US", {
+        weekday: "long",
+      }),
+      longMonth: new Intl.DateTimeFormat("en-US", {
+        month: "long",
+      }),
+      shortMonth: new Intl.DateTimeFormat("en-US", {
+        month: "short",
+      }),
+    };
+  }
+  return cachedFormatters;
+}
 
 /** Short clock time, e.g. "2:34 PM". */
 export function formatTime(unixSeconds: number): string {
-  return TIME_FORMATTER.format(new Date(unixSeconds * 1_000));
+  return currentFormatters().time.format(new Date(unixSeconds * 1_000));
 }
 
 /** Short clock time with the AM/PM marker removed, e.g. "2:34". */
@@ -49,7 +75,7 @@ export function formatTimeWithoutDayPeriod(time: string): string {
 
 /** Full date + time for tooltips, e.g. "Wednesday, April 2, 2026 at 2:34 PM". */
 export function formatFullDateTime(unixSeconds: number): string {
-  return FULL_DATE_TIME_FORMATTER.format(new Date(unixSeconds * 1_000));
+  return currentFormatters().fullDateTime.format(new Date(unixSeconds * 1_000));
 }
 
 /**
@@ -71,9 +97,10 @@ export function formatDayHeading(unixSeconds: number): string {
     return "Yesterday";
   }
 
-  const dateLabel = `${WEEKDAY_FORMATTER.format(date)}, ${formatMonthDayOrdinal(
+  const formatters = currentFormatters();
+  const dateLabel = `${formatters.weekday.format(date)}, ${formatMonthDayOrdinal(
     date,
-    LONG_MONTH_FORMATTER,
+    formatters.longMonth,
   )}`;
   return date.getFullYear() === now.getFullYear()
     ? dateLabel
@@ -101,7 +128,7 @@ export function startOfLocalDaySeconds(unixSeconds: number): number {
 export function formatShortMonthDayOrdinal(unixSeconds: number): string {
   return formatMonthDayOrdinal(
     new Date(unixSeconds * 1_000),
-    SHORT_MONTH_FORMATTER,
+    currentFormatters().shortMonth,
   );
 }
 

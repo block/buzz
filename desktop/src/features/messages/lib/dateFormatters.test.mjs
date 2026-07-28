@@ -3,8 +3,10 @@ import test from "node:test";
 
 import {
   formatDayHeading,
+  formatFullDateTime,
   formatShortMonthDayOrdinal,
   formatThreadSummaryLastReplyTime,
+  formatTime,
   formatTimeWithoutDayPeriod,
   startOfLocalDaySeconds,
 } from "./dateFormatters.ts";
@@ -152,4 +154,30 @@ test("startOfLocalDaySeconds separates adjacent calendar days", () => {
     startOfLocalDaySeconds(lateOn14),
     startOfLocalDaySeconds(earlyOn15),
   );
+});
+
+test("formatters follow a system timezone change without a restart", () => {
+  const originalTz = process.env.TZ;
+  const unixSeconds = Date.UTC(2026, 3, 2, 21, 34) / 1_000;
+  try {
+    process.env.TZ = "America/Los_Angeles";
+    assert.equal(formatTime(unixSeconds), "2:34 PM");
+    assert.equal(
+      formatFullDateTime(unixSeconds),
+      "Thursday, April 2, 2026 at 2:34 PM",
+    );
+
+    process.env.TZ = "Australia/Melbourne";
+    assert.equal(formatTime(unixSeconds), "8:34 AM");
+    assert.equal(
+      formatFullDateTime(unixSeconds),
+      "Friday, April 3, 2026 at 8:34 AM",
+    );
+  } finally {
+    if (originalTz === undefined) {
+      delete process.env.TZ;
+    } else {
+      process.env.TZ = originalTz;
+    }
+  }
 });
