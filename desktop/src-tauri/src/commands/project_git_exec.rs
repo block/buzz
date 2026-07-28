@@ -185,9 +185,11 @@ fn configure_git_auth(command: &mut Command, auth: &GitAuthConfig, needs_credent
 /// Format a path for git `credential.helper`.
 ///
 /// Git for Windows invokes helpers via MinGW bash, which treats `\` as
-/// escapes. Forward slashes work on every platform git supports.
+/// escapes, so paths are normalized to forward slashes first. The result is
+/// then shell-escaped — see `git_credential_helper_config_value` for why a
+/// naive whole-value quote doesn't work.
 fn credential_helper_config_value(path: &std::path::Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
+    crate::managed_agents::git_credential_helper_config_value(path)
 }
 
 fn apply_git_config(command: &mut Command, entries: &[(&str, String)]) {
@@ -338,6 +340,24 @@ mod tests {
         assert_eq!(
             credential_helper_config_value(&path),
             "C:/Users/x/AppData/Local/Buzz/git-credential-nostr.exe",
+        );
+    }
+
+    #[test]
+    fn credential_helper_config_value_escapes_spaces() {
+        let path = std::path::PathBuf::from("/Users/x/My Apps/git-credential-nostr");
+        assert_eq!(
+            credential_helper_config_value(&path),
+            r"/Users/x/My\ Apps/git-credential-nostr",
+        );
+    }
+
+    #[test]
+    fn credential_helper_config_value_escapes_apostrophes() {
+        let path = std::path::PathBuf::from("/Users/o'brien/git-credential-nostr");
+        assert_eq!(
+            credential_helper_config_value(&path),
+            r"/Users/o\'brien/git-credential-nostr",
         );
     }
 

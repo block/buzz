@@ -590,6 +590,29 @@ pub fn resolve_command(command: &str) -> Option<PathBuf> {
     result
 }
 
+/// Escape a path for use as a git `credential.helper` config value.
+///
+/// Git builds the helper command by concatenating the raw `credential.helper`
+/// string with an operation (`get`/`store`/`erase`) and running the result
+/// through `sh -c`, so any shell metacharacter in the path (most commonly a
+/// space) gets word-split and breaks the invocation. Git also detects an
+/// absolute-path helper by checking whether the *unescaped* string starts
+/// with a path separator (or drive letter on Windows) — quoting the value as
+/// a whole hides that leading character and git falls back to treating it as
+/// a bare helper name instead. So each shell-special character is escaped
+/// individually with a backslash, leaving the leading separator intact.
+pub fn git_credential_helper_config_value(path: &std::path::Path) -> String {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    let mut escaped = String::with_capacity(normalized.len());
+    for ch in normalized.chars() {
+        if !(ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':')) {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped
+}
+
 /// Clear the resolve_command cache so that newly-installed binaries are detected.
 pub fn clear_resolve_cache() {
     let mut guard = resolve_cache().lock().unwrap_or_else(|e| e.into_inner());
