@@ -8,34 +8,10 @@
 use serde::Serialize;
 
 use mesh_llm_client::models::catalog::{parse_size_gb, MODEL_CATALOG};
+use mesh_llm_client::network::nostr::auto_model_pack;
 use mesh_llm_node::models::{default_huggingface_cache_dir, scan_installed_models};
 use mesh_llm_system::hardware;
-use mesh_llm_system::vram::{format_rated_capacity, rated_capacity_gb};
-
-/// Buzz-curated tier picks. These are the models we know survive the agent
-/// harness on shared compute — deliberately non-reasoning instruction models,
-/// so agents stay snappy instead of burning hidden reasoning tokens.
-///
-/// The large pick is resolved through mesh-llm's remote catalog
-/// (huggingface.co/datasets/meshllm/catalog), so it does not need to exist in
-/// the compiled `MODEL_CATALOG`; the entry is synthesized below.
-const CURATED_LARGE: &str = "gemma-4-26B-A4B-it-UD-Q4_K_M";
-const CURATED_LARGE_SIZE: &str = "17GB";
-const CURATED_LARGE_FILE: &str = "gemma-4-26B-A4B-it-UD-Q4_K_M.gguf";
-const CURATED_LARGE_DESCRIPTION: &str =
-    "Gemma 4 26B MoE (4B active) — Buzz default for 64GB+ machines";
-const CURATED_SMALL: &str = "Gemma-4-E4B-it-Q4_K_M";
-/// Rated-capacity boundary between the two curated tiers, in GB (marketing
-/// capacity — a "64GB" Mac rates as 64 even though usable AI memory is less).
-const CURATED_LARGE_MIN_RATED_GB: u64 = 64;
-
-/// The Buzz-curated recommendation for a machine's rated memory capacity.
-fn buzz_recommended_model(rated_gb: Option<u64>) -> &'static str {
-    match rated_gb {
-        Some(gb) if gb >= CURATED_LARGE_MIN_RATED_GB => CURATED_LARGE,
-        _ => CURATED_SMALL,
-    }
-}
+use mesh_llm_system::vram::format_rated_capacity;
 
 /// How a model sits inside this machine's usable AI memory.
 /// Mirrors mesh-llm's private `fit_code_for_size_label` thresholds.
@@ -84,6 +60,12 @@ pub struct MeshCatalogEntry {
     /// Buzz-curated pick — known to survive the agent harness. Curated
     /// entries render above the fold; everything else is "advanced".
     pub curated: bool,
+    /// Whether this model's weights plus working headroom actually fit in the
+    /// free space on the model-cache volume. A model can fit in AI memory and
+    /// still be undownloadable; without this the failure only surfaces at the
+    /// end of a multi-gigabyte download. `true` when the probe failed, so a
+    /// bad probe never blocks a download.
+    pub fits_disk: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -98,6 +80,24 @@ pub struct MeshModelCatalog {
     pub recommended: Option<String>,
     /// Ranked: recommended first, then by fit, then larger first within a fit.
     pub entries: Vec<MeshCatalogEntry>,
+    /// Free space on the model-cache volume. Zero when the probe failed, in
+    /// which case the UI shows "—" rather than a wrong number.
+    pub disk_free_bytes: u64,
+    pub disk_free_display: String,
+}
+
+/// Working headroom multiplier over raw weight size: downloads land in a
+/// temp file alongside the final blob, so a model needs more than its own
+/// size free to complete.
+const DISK_HEADROOM: f64 = 1.15;
+
+/// Whether `size_gb` of weights fit in `disk_free_bytes`. A failed probe
+/// (`0`) returns `true` so a bad probe never blocks a download.
+fn fits_disk(size_gb: f64, disk_free_bytes: u64) -> bool {
+    if disk_free_bytes == 0 {
+        return true;
+    }
+    size_gb * DISK_HEADROOM <= disk_free_bytes as f64 / 1e9
 }
 
 /// Survey hardware and rank the curated catalog for this machine.
@@ -111,7 +111,52 @@ pub fn model_catalog() -> MeshModelCatalog {
         survey.vram_bytes,
         vram_gb,
         &installed_names(),
+        free_disk_bytes(&default_huggingface_cache_dir()),
     )
+}
+
+/// Free bytes on the volume backing `path`, via POSIX `df`. Returns 0 on any
+/// exec/parse failure so callers fall back to "—" instead of a wrong figure.
+fn free_disk_bytes(path: &std::path::Path) -> u64 {
+    // `df` needs an existing path; walk up to the nearest ancestor that
+    // exists (the HF cache dir is absent until the first download).
+    let mut probe = path;
+    while !probe.exists() {
+        match probe.parent() {
+            Some(parent) => probe = parent,
+            None => return 0,
+        }
+    }
+    let output = match std::process::Command::new("df")
+        .args(["-k", "-P"])
+        .arg(probe)
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        _ => return 0,
+    };
+    // `df -P` prints a header then one data line; column 4 is available 1K blocks.
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .nth(1)
+        .and_then(|line| line.split_whitespace().nth(3))
+        .and_then(|kb| kb.parse::<u64>().ok())
+        .map(|kb| kb * 1024)
+        .unwrap_or(0)
+}
+
+fn format_disk(bytes: u64) -> String {
+    if bytes == 0 {
+        return "—".to_string();
+    }
+    let gb = bytes as f64 / 1e9;
+    if gb >= 1000.0 {
+        format!("{:.1} TB", gb / 1000.0)
+    } else if gb >= 10.0 {
+        format!("{} GB", gb.round() as u64)
+    } else {
+        format!("{gb:.1} GB")
+    }
 }
 
 fn installed_names() -> Vec<(String, String)> {
@@ -135,12 +180,14 @@ fn build_catalog(
     vram_bytes: u64,
     vram_gb: f64,
     installed: &[(String, String)],
+    disk_free_bytes: u64,
 ) -> MeshModelCatalog {
     let is_installed = |file: &str, name: &str| {
         installed
             .iter()
             .any(|(f, model_ref)| f == file || model_ref.contains(name))
     };
+    let recommended = auto_model_pack(vram_gb).into_iter().next();
     let mut entries: Vec<MeshCatalogEntry> = MODEL_CATALOG
         .iter()
         .filter(|m| !is_draft_only(&m.name))
@@ -149,8 +196,9 @@ fn build_catalog(
             MeshCatalogEntry {
                 fit: fit_code(size_gb, vram_gb),
                 installed: is_installed(&m.file, &m.name),
-                recommended: false,
-                curated: false,
+                recommended: recommended.as_deref() == Some(m.name.as_str()),
+                curated: recommended.as_deref() == Some(m.name.as_str()),
+                fits_disk: fits_disk(size_gb, disk_free_bytes),
                 name: m.name.clone(),
                 size: m.size.clone(),
                 size_gb,
@@ -158,32 +206,6 @@ fn build_catalog(
             }
         })
         .collect();
-
-    // The compiled MODEL_CATALOG does not know the Buzz large pick; it
-    // resolves through mesh-llm's remote catalog at download time. Synthesize
-    // its entry so the picker can offer it.
-    if !entries.iter().any(|e| e.name == CURATED_LARGE) {
-        let size_gb = parse_size_gb(CURATED_LARGE_SIZE);
-        entries.push(MeshCatalogEntry {
-            fit: fit_code(size_gb, vram_gb),
-            installed: is_installed(CURATED_LARGE_FILE, CURATED_LARGE),
-            recommended: false,
-            curated: false,
-            name: CURATED_LARGE.to_string(),
-            size: CURATED_LARGE_SIZE.to_string(),
-            size_gb,
-            description: CURATED_LARGE_DESCRIPTION.to_string(),
-        });
-    }
-
-    let recommended = Some(buzz_recommended_model(rated_capacity_gb(vram_bytes)).to_string());
-    for entry in &mut entries {
-        entry.recommended = recommended.as_deref() == Some(entry.name.as_str());
-        // Both curated tiers are always offered: the recommended one for this
-        // machine plus the other pick (e.g. the small one as an explicit
-        // lighter choice on big machines).
-        entry.curated = entry.name == CURATED_LARGE || entry.name == CURATED_SMALL;
-    }
 
     entries.sort_by(|a, b| {
         b.recommended
@@ -199,6 +221,8 @@ fn build_catalog(
         vram_gb,
         recommended,
         entries,
+        disk_free_bytes,
+        disk_free_display: format_disk(disk_free_bytes),
     }
 }
 
@@ -229,7 +253,7 @@ mod tests {
 
     #[test]
     fn catalog_ranks_recommended_first_then_fit() {
-        let catalog = build_catalog(Some("Test GPU".into()), 24_000_000_000, 24.0, &[]);
+        let catalog = build_catalog(Some("Test GPU".into()), 24_000_000_000, 24.0, &[], 0);
         assert!(
             !catalog.entries.is_empty(),
             "curated catalog must not be empty"
@@ -255,32 +279,21 @@ mod tests {
     }
 
     #[test]
-    fn recommendation_follows_buzz_curated_tiers() {
-        // 64GB+ rated machines get the large curated pick.
-        let large = build_catalog(None, 64_000_000_000, 64.0, &[]);
-        assert_eq!(large.recommended.as_deref(), Some(CURATED_LARGE));
-        let big = build_catalog(None, 128_000_000_000, 128.0, &[]);
-        assert_eq!(big.recommended.as_deref(), Some(CURATED_LARGE));
-        // Below the boundary: the small curated pick — never a reasoning
-        // model, never sub-4B guesswork.
-        let small = build_catalog(None, 32_000_000_000, 32.0, &[]);
-        assert_eq!(small.recommended.as_deref(), Some(CURATED_SMALL));
-        let tiny = build_catalog(None, 16_000_000_000, 16.0, &[]);
-        assert_eq!(tiny.recommended.as_deref(), Some(CURATED_SMALL));
+    fn recommendation_matches_desktop_app_model_packs() {
+        let big = build_catalog(None, 128_000_000_000, 128.0, &[], 0);
+        assert_eq!(big.recommended.as_deref(), Some("Qwen3-Coder-Next-Q4_K_M"));
+        let medium = build_catalog(None, 56_000_000_000, 56.0, &[], 0);
+        assert_eq!(medium.recommended.as_deref(), Some("GLM-4.7-Flash-Q4_K_M"));
+        let tiny = build_catalog(None, 4_000_000_000, 4.0, &[], 0);
+        assert_eq!(tiny.recommended.as_deref(), Some("Qwen3-4B-Q4_K_M"));
     }
 
     #[test]
-    fn curated_picks_lead_the_catalog() {
-        let catalog = build_catalog(None, 96_000_000_000, 96.0, &[]);
-        // Recommended curated entry first, the other curated pick second,
-        // advanced entries after.
-        assert_eq!(catalog.entries[0].name, CURATED_LARGE);
+    fn recommended_model_leads_the_catalog() {
+        let catalog = build_catalog(None, 128_000_000_000, 128.0, &[], 0);
+        assert_eq!(catalog.entries[0].name, "Qwen3-Coder-Next-Q4_K_M");
         assert!(catalog.entries[0].recommended && catalog.entries[0].curated);
-        assert_eq!(catalog.entries[1].name, CURATED_SMALL);
-        assert!(catalog.entries[1].curated && !catalog.entries[1].recommended);
-        assert!(catalog.entries[2..].iter().all(|e| !e.curated));
-        // The synthesized large pick carries a real size for fit ranking.
-        assert!(catalog.entries[0].size_gb > 10.0);
+        assert!(catalog.entries[1..].iter().all(|e| !e.curated));
     }
 
     #[test]
@@ -289,13 +302,57 @@ mod tests {
             "Qwen3-8B-Q4_K_M.gguf".to_string(),
             "unsloth/Qwen3-8B-GGUF:Q4_K_M".to_string(),
         )];
-        let catalog = build_catalog(None, 96_000_000_000, 96.0, &installed);
+        let catalog = build_catalog(None, 96_000_000_000, 96.0, &installed, 0);
         let qwen8b = catalog.entries.iter().find(|e| e.name == "Qwen3-8B-Q4_K_M");
         if let Some(entry) = qwen8b {
             assert!(entry.installed, "cached file must mark entry installed");
         }
         // A machine with nothing installed marks nothing installed.
-        let empty = build_catalog(None, 96_000_000_000, 96.0, &[]);
+        let empty = build_catalog(None, 96_000_000_000, 96.0, &[], 0);
         assert!(empty.entries.iter().all(|e| !e.installed));
+    }
+
+    #[test]
+    fn disk_probe_gates_entries_and_never_blocks_on_failure() {
+        // 19GB free cannot hold the 48GB recommendation plus headroom.
+        let tight = build_catalog(None, 128_000_000_000, 128.0, &[], 19_000_000_000);
+        let large = tight
+            .entries
+            .iter()
+            .find(|e| e.name == "Qwen3-Coder-Next-Q4_K_M")
+            .expect("desktop-app recommendation present");
+        assert!(!large.fits_disk, "48GB weights must not fit in 19GB free");
+        assert_eq!(tight.disk_free_bytes, 19_000_000_000);
+        assert_eq!(tight.disk_free_display, "19 GB");
+
+        // Plenty of room: same entry fits.
+        let roomy = build_catalog(None, 128_000_000_000, 128.0, &[], 2_000_000_000_000);
+        assert!(
+            roomy
+                .entries
+                .iter()
+                .find(|e| e.name == "Qwen3-Coder-Next-Q4_K_M")
+                .expect("desktop-app recommendation present")
+                .fits_disk
+        );
+        assert_eq!(roomy.disk_free_display, "2.0 TB");
+
+        // Failed probe (0) must never mark anything unfittable.
+        let unknown = build_catalog(None, 128_000_000_000, 128.0, &[], 0);
+        assert!(unknown.entries.iter().all(|e| e.fits_disk));
+        assert_eq!(unknown.disk_free_display, "\u{2014}");
+    }
+
+    #[test]
+    fn format_disk_scales_and_falls_back() {
+        assert_eq!(format_disk(0), "\u{2014}");
+        assert_eq!(format_disk(512 * 1_000_000_000), "512 GB");
+        assert_eq!(format_disk(2_500 * 1_000_000_000), "2.5 TB");
+        assert_eq!(format_disk(4_400_000_000), "4.4 GB");
+    }
+
+    #[test]
+    fn real_disk_probe_returns_a_figure() {
+        assert!(free_disk_bytes(std::path::Path::new("/")) > 0);
     }
 }

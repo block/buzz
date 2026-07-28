@@ -94,6 +94,12 @@ export type MeshCatalogEntry = {
    * render above the fold; everything else is "advanced".
    */
   curated: boolean;
+  /**
+   * Whether the weights plus working headroom fit in free space on the
+   * model-cache volume. `true` when the disk probe failed, so a bad probe
+   * never blocks a download.
+   */
+  fitsDisk: boolean;
 };
 
 export type MeshModelCatalog = {
@@ -103,6 +109,10 @@ export type MeshModelCatalog = {
   recommended: string | null;
   /** Ranked: recommended first, then curated, then by fit, larger first. */
   entries: MeshCatalogEntry[];
+  /** Free space on the model-cache volume; 0 when the probe failed. */
+  diskFreeBytes: number;
+  /** Display-formatted free space, or "—" when the probe failed. */
+  diskFreeDisplay: string;
 };
 
 /**

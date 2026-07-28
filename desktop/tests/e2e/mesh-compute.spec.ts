@@ -27,11 +27,26 @@ test("Share compute has a clear empty state and starts and stops sharing", async
   const model = page.getByTestId("mesh-share-compute-model");
 
   await expect(card).toContainText("Not sharing right now");
-  await expect(card).toContainText(
-    "Choose a suggested model below, or enter a model reference or local file",
-  );
+  await expect(model).not.toBeVisible();
   await expect(toggle).toBeDisabled();
+  await page.getByTestId("mesh-smart-recommend").click();
+  const scan = page.getByTestId("mesh-hardware-scan");
+  await expect(scan).toContainText("Chip");
+  await expect(scan).toContainText("AI memory");
+  await expect(scan).toContainText("Free disk");
+  await expect(scan).toContainText("Best model");
+  await expect(page.getByTestId("mesh-recommendation-result")).toBeVisible({
+    timeout: 4_000,
+  });
+  await expect(model).not.toBeVisible();
+  await page.getByTestId("mesh-use-recommendation").click();
+  await expect(
+    page.getByTestId("mesh-smart-recommendation-selected"),
+  ).toContainText("Qwen3-Coder-Next-Q4_K_M");
+  await expect(model).toHaveValue("Qwen3-Coder-Next-Q4_K_M");
+  await expect(toggle).toBeEnabled();
 
+  // A member can still override the explicit recommendation.
   await model.fill("hf://demo/SmolLM2-135M-Instruct-GGUF:Q4_K_M");
   await expect(card).toContainText(
     "Buzz downloads remote models when sharing starts",
@@ -55,6 +70,33 @@ test("Share compute has a clear empty state and starts and stops sharing", async
       page.evaluate(() => (window as E2eWindow).__BUZZ_E2E_COMMANDS__ ?? []),
     )
     .toContain("mesh_stop_node");
+});
+
+test("accepted smart recommendation is restored when Settings is reopened", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await openSettings(page, "compute");
+
+  await expect(page.getByTestId("mesh-smart-recommend")).toBeVisible();
+  await page.getByTestId("mesh-smart-recommend").click();
+  await expect(page.getByTestId("mesh-recommendation-result")).toBeVisible({
+    timeout: 4_000,
+  });
+  await page.getByTestId("mesh-use-recommendation").click();
+
+  // Settings is route-backed, so reload restores the current Compute section;
+  // there is no app-shell settings button to click while already inside it.
+  await page.reload();
+  await expect(page.getByTestId("settings-view")).toBeVisible();
+  await expect(
+    page.getByTestId("mesh-smart-recommendation-selected"),
+  ).toContainText("Qwen3-Coder-Next-Q4_K_M");
+  await expect(page.getByTestId("mesh-smart-recommend")).not.toBeVisible();
+  await expect(page.getByTestId("mesh-share-compute-model")).toHaveValue(
+    "Qwen3-Coder-Next-Q4_K_M",
+  );
 });
 
 test("a consuming client can switch to sharing its saved local model", async ({

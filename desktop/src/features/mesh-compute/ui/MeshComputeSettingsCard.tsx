@@ -1,5 +1,5 @@
 import * as React from "react";
-import { ChevronDown, Cpu } from "lucide-react";
+import { Check, ChevronDown, Cpu, Sparkles } from "lucide-react";
 
 import { Input } from "@/shared/ui/input";
 import { Switch } from "@/shared/ui/switch";
@@ -34,6 +34,8 @@ import { deriveMeshShareToggle } from "../shareToggleState";
 import { deriveServingIndicator } from "../servingUsage";
 
 const MODEL_DRAFT_STORAGE_KEY = "buzz.mesh-compute.share.model.v1";
+const ACCEPTED_RECOMMENDATION_STORAGE_KEY =
+  "buzz.mesh-compute.share.accepted-recommendation.v1";
 const MAX_VRAM_DRAFT_STORAGE_KEY = "buzz.mesh-compute.share.max-vram-gb.v1";
 
 function readDraft(key: string): string {
@@ -69,13 +71,30 @@ export function MeshComputeSettingsCard() {
     MeshModelOption[]
   >([]);
   const [catalog, setCatalog] = React.useState<MeshModelCatalog | null>(null);
-  const [modelInput, setModelInput] = React.useState(() =>
+  const [acceptedRecommendation] = React.useState(() =>
+    readDraft(ACCEPTED_RECOMMENDATION_STORAGE_KEY),
+  );
+  const [savedModelDraft] = React.useState(() =>
     readDraft(MODEL_DRAFT_STORAGE_KEY),
+  );
+  // An accepted recommendation restores the compact result. A saved manual
+  // choice still restores the editable model controls (required when replacing
+  // a running client with this machine's local share choice), while retaining
+  // the diagnostic CTA above it.
+  const [modelInput, setModelInput] = React.useState(
+    acceptedRecommendation || savedModelDraft,
   );
   const [maxVramGb, setMaxVramGb] = React.useState<string>(() =>
     readDraft(MAX_VRAM_DRAFT_STORAGE_KEY),
   );
   const [advancedOpen, setAdvancedOpen] = React.useState(false);
+  const [recommenderState, setRecommenderState] = React.useState<
+    "idle" | "scanning" | "result" | "selected"
+  >(acceptedRecommendation ? "selected" : "idle");
+  const [scanStep, setScanStep] = React.useState(0);
+  const [manualOpen, setManualOpen] = React.useState(
+    acceptedRecommendation !== "" || savedModelDraft !== "",
+  );
   const [actionInFlight, setActionInFlight] = React.useState(false);
   const [pendingAction, setPendingAction] = React.useState<
     "start" | "stop" | null
@@ -123,6 +142,20 @@ export function MeshComputeSettingsCard() {
       cancelled = true;
     };
   }, []);
+
+  React.useEffect(() => {
+    if (recommenderState !== "scanning") return;
+    if (scanStep >= 4) {
+      setRecommenderState("result");
+      return;
+    }
+    const timer = window.setTimeout(() => setScanStep((step) => step + 1), 450);
+    return () => window.clearTimeout(timer);
+  }, [recommenderState, scanStep]);
+
+  const recommendation = catalog?.entries.find(
+    (entry) => entry.recommended && entry.fit !== "too_large" && entry.fitsDisk,
+  );
 
   // Mirror only a SERVE runtime's model into the field. A client reports the
   // remote model it is consuming; copying that value here both loses the
@@ -272,119 +305,207 @@ export function MeshComputeSettingsCard() {
           />
         </SettingsOptionRow>
 
-        <div className="px-4 pb-4 pt-5">
-          <label
-            className="mb-3 flex items-center gap-2 text-sm font-medium"
-            htmlFor="mesh-share-compute-model"
-          >
-            <Cpu className="h-4 w-4 text-muted-foreground" />
-            Model
-          </label>
-          <div className="flex flex-col gap-2">
-            <Input
-              data-testid="mesh-share-compute-model"
-              disabled={controlsDisabled}
-              id="mesh-share-compute-model"
-              onChange={(e) => {
-                const next = e.target.value;
-                setModelInput(next);
-                writeDraft(MODEL_DRAFT_STORAGE_KEY, next);
+        <div className="border-t border-border/60 px-4 py-4">
+          {recommenderState === "selected" ? (
+            <button
+              className="flex w-full items-center justify-between rounded-lg border border-primary/30 bg-primary/5 px-3 py-2 text-left hover:bg-primary/10"
+              data-testid="mesh-smart-recommendation-selected"
+              onClick={() => setRecommenderState("result")}
+              type="button"
+            >
+              <span>
+                <span className="block text-sm font-medium">
+                  Smart recommendation
+                </span>
+                <span className="block text-sm text-muted-foreground">
+                  {modelInput}
+                </span>
+              </span>
+              <span className="text-sm text-primary">View recommendation</span>
+            </button>
+          ) : recommenderState === "idle" ? (
+            <button
+              className="flex w-full items-center justify-center gap-2 rounded-lg bg-primary px-4 py-3 text-sm font-semibold text-primary-foreground shadow-sm hover:bg-primary/90 disabled:opacity-50"
+              data-testid="mesh-smart-recommend"
+              disabled={!catalog}
+              onClick={() => {
+                setScanStep(0);
+                setRecommenderState("scanning");
               }}
-              placeholder="Qwen3-8B-Q4_K_M or hf://meshllm/qwen3-8b@main"
-              value={modelInput}
-            />
-            <p className="text-sm font-normal text-muted-foreground">
-              Choose a suggested model below, or enter a model reference or
-              local file. Buzz downloads remote models when sharing starts.
-            </p>
-            {catalog && catalog.entries.length > 0 ? (
-              <CatalogPicker
-                catalog={catalog}
-                disabled={controlsDisabled}
-                onPick={(name) => {
-                  setModelInput(name);
-                  writeDraft(MODEL_DRAFT_STORAGE_KEY, name);
-                }}
-                selected={modelInput.trim()}
-              />
-            ) : null}
-            {installedModels.length > 0 ? (
-              <div className="mt-1">
-                <p className="text-sm font-normal text-muted-foreground">
-                  Already installed on this machine:
-                </p>
-                <ul
-                  className="mt-1 flex flex-wrap gap-1.5"
-                  data-testid="mesh-share-compute-installed-list"
-                >
-                  {installedModels.map((m) => (
-                    <li key={m.id}>
-                      <button
-                        className="rounded border border-border/60 bg-muted/20 px-2 py-0.5 text-sm hover:bg-muted/40 disabled:cursor-not-allowed disabled:opacity-50"
-                        disabled={controlsDisabled}
-                        onClick={() => {
-                          setModelInput(m.id);
-                          writeDraft(MODEL_DRAFT_STORAGE_KEY, m.id);
-                        }}
-                        type="button"
-                      >
-                        {m.name ?? m.id}
-                      </button>
-                    </li>
-                  ))}
-                </ul>
+              type="button"
+            >
+              <Sparkles className="h-4 w-4" />
+              Find the best model for this machine
+            </button>
+          ) : recommenderState === "scanning" ? (
+            <HardwareScan catalog={catalog} revealed={scanStep} />
+          ) : recommendation ? (
+            <div
+              className="rounded-xl border border-primary/30 bg-gradient-to-br from-primary/10 via-background to-background p-4"
+              data-testid="mesh-recommendation-result"
+            >
+              <div className="flex items-center gap-2 text-sm font-semibold text-primary">
+                <Sparkles className="h-4 w-4" /> Best match
               </div>
-            ) : null}
-          </div>
+              <p className="mt-2 text-base font-semibold">
+                {recommendation.name}
+              </p>
+              <p className="mt-1 text-sm text-muted-foreground">
+                {recommendation.description} · {recommendation.size} ·{" "}
+                {FIT_LABEL[recommendation.fit]}
+              </p>
+              <div className="mt-4 flex flex-wrap gap-2">
+                <button
+                  className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+                  data-testid="mesh-use-recommendation"
+                  onClick={() => {
+                    setModelInput(recommendation.name);
+                    writeDraft(MODEL_DRAFT_STORAGE_KEY, recommendation.name);
+                    writeDraft(
+                      ACCEPTED_RECOMMENDATION_STORAGE_KEY,
+                      recommendation.name,
+                    );
+                    setManualOpen(true);
+                    setRecommenderState("selected");
+                  }}
+                  type="button"
+                >
+                  Use this model
+                </button>
+                <button
+                  className="rounded-lg border border-border px-4 py-2 text-sm font-medium hover:bg-muted"
+                  data-testid="mesh-see-other-options"
+                  onClick={() => setManualOpen(true)}
+                  type="button"
+                >
+                  See other options
+                </button>
+              </div>
+            </div>
+          ) : (
+            <p className="text-sm text-muted-foreground">
+              No compatible recommendation was found. Choose a model manually.
+            </p>
+          )}
         </div>
 
-        <details
-          className="px-4 py-3"
-          onToggle={(e) =>
-            setAdvancedOpen((e.target as HTMLDetailsElement).open)
-          }
-          open={advancedOpen}
-        >
-          <summary className="flex cursor-pointer items-center gap-1.5 text-sm font-medium text-foreground">
-            <ChevronDown
-              className={cn(
-                "h-4 w-4 text-muted-foreground transition-transform",
-                advancedOpen ? "rotate-0" : "-rotate-90",
-              )}
-            />
-            Advanced
-          </summary>
-          <div className="mt-3 flex flex-col gap-2">
-            <label className="text-sm font-medium" htmlFor="mesh-vram">
-              Max VRAM (GB)
-            </label>
-            <Input
-              data-testid="mesh-share-compute-vram"
-              id="mesh-vram"
-              inputMode="decimal"
-              onChange={(e) => {
-                const next = e.target.value;
-                setMaxVramGb(next);
-                writeDraft(MAX_VRAM_DRAFT_STORAGE_KEY, next);
-              }}
-              placeholder="No limit"
-              value={maxVramGb}
-            />
-            {status?.consoleUrl ? (
-              <p className="text-sm font-normal text-muted-foreground">
-                Debug console:{" "}
-                <a
-                  className="underline"
-                  href={status.consoleUrl}
-                  rel="noreferrer"
-                  target="_blank"
-                >
-                  {status.consoleUrl}
-                </a>
-              </p>
-            ) : null}
-          </div>
-        </details>
+        {manualOpen ? (
+          <>
+            <div className="px-4 pb-4 pt-5">
+              <label
+                className="mb-3 flex items-center gap-2 text-sm font-medium"
+                htmlFor="mesh-share-compute-model"
+              >
+                <Cpu className="h-4 w-4 text-muted-foreground" />
+                Model
+              </label>
+              <div className="flex flex-col gap-2">
+                <Input
+                  data-testid="mesh-share-compute-model"
+                  disabled={controlsDisabled}
+                  id="mesh-share-compute-model"
+                  onChange={(e) => {
+                    const next = e.target.value;
+                    setModelInput(next);
+                    writeDraft(MODEL_DRAFT_STORAGE_KEY, next);
+                  }}
+                  placeholder="Qwen3-8B-Q4_K_M or hf://meshllm/qwen3-8b@main"
+                  value={modelInput}
+                />
+                <p className="text-sm font-normal text-muted-foreground">
+                  Choose a suggested model below, or enter a model reference or
+                  local file. Buzz downloads remote models when sharing starts.
+                </p>
+                {catalog && catalog.entries.length > 0 ? (
+                  <CatalogPicker
+                    catalog={catalog}
+                    disabled={controlsDisabled}
+                    onPick={(name) => {
+                      setModelInput(name);
+                      writeDraft(MODEL_DRAFT_STORAGE_KEY, name);
+                    }}
+                    selected={modelInput.trim()}
+                  />
+                ) : null}
+                {installedModels.length > 0 ? (
+                  <div className="mt-1">
+                    <p className="text-sm font-normal text-muted-foreground">
+                      Already installed on this machine:
+                    </p>
+                    <ul
+                      className="mt-1 flex flex-wrap gap-1.5"
+                      data-testid="mesh-share-compute-installed-list"
+                    >
+                      {installedModels.map((m) => (
+                        <li key={m.id}>
+                          <button
+                            className="rounded border border-border/60 bg-muted/20 px-2 py-0.5 text-sm hover:bg-muted/40 disabled:cursor-not-allowed disabled:opacity-50"
+                            disabled={controlsDisabled}
+                            onClick={() => {
+                              setModelInput(m.id);
+                              writeDraft(MODEL_DRAFT_STORAGE_KEY, m.id);
+                            }}
+                            type="button"
+                          >
+                            {m.name ?? m.id}
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+              </div>
+            </div>
+
+            <details
+              className="px-4 py-3"
+              onToggle={(e) =>
+                setAdvancedOpen((e.target as HTMLDetailsElement).open)
+              }
+              open={advancedOpen}
+            >
+              <summary className="flex cursor-pointer items-center gap-1.5 text-sm font-medium text-foreground">
+                <ChevronDown
+                  className={cn(
+                    "h-4 w-4 text-muted-foreground transition-transform",
+                    advancedOpen ? "rotate-0" : "-rotate-90",
+                  )}
+                />
+                Advanced
+              </summary>
+              <div className="mt-3 flex flex-col gap-2">
+                <label className="text-sm font-medium" htmlFor="mesh-vram">
+                  Max VRAM (GB)
+                </label>
+                <Input
+                  data-testid="mesh-share-compute-vram"
+                  id="mesh-vram"
+                  inputMode="decimal"
+                  onChange={(e) => {
+                    const next = e.target.value;
+                    setMaxVramGb(next);
+                    writeDraft(MAX_VRAM_DRAFT_STORAGE_KEY, next);
+                  }}
+                  placeholder="No limit"
+                  value={maxVramGb}
+                />
+                {status?.consoleUrl ? (
+                  <p className="text-sm font-normal text-muted-foreground">
+                    Debug console:{" "}
+                    <a
+                      className="underline"
+                      href={status.consoleUrl}
+                      rel="noreferrer"
+                      target="_blank"
+                    >
+                      {status.consoleUrl}
+                    </a>
+                  </p>
+                ) : null}
+              </div>
+            </details>
+          </>
+        ) : null}
       </SettingsOptionGroup>
 
       <p className="mt-3 rounded-lg bg-muted/30 px-3 py-2 text-sm font-normal text-muted-foreground">
@@ -404,6 +525,65 @@ export function MeshComputeSettingsCard() {
  * option group while the backend streams mesh-download-progress events —
  * the answer to "it just greys out while downloading".
  */
+function HardwareScan({
+  catalog,
+  revealed,
+}: {
+  catalog: MeshModelCatalog | null;
+  revealed: number;
+}) {
+  const recommendation = catalog?.entries.find(
+    (entry) => entry.recommended && entry.fit !== "too_large" && entry.fitsDisk,
+  );
+  const items = [
+    ["Chip", catalog?.gpuName ?? "Detecting…"],
+    ["AI memory", catalog?.vramDisplay ?? "Detecting…"],
+    ["Free disk", catalog?.diskFreeDisplay ?? "Detecting…"],
+    ["Best model", recommendation?.name ?? "Comparing…"],
+  ];
+  return (
+    <div
+      className="min-h-[24rem] overflow-hidden rounded-xl border border-primary/30 bg-gradient-to-br from-primary/10 via-background to-muted/30 px-4 py-8"
+      data-testid="mesh-hardware-scan"
+    >
+      <div className="flex flex-col items-center">
+        <div className="relative flex h-24 w-24 items-center justify-center">
+          <span className="absolute h-full w-full animate-ping rounded-full border border-primary/20" />
+          <span className="absolute h-2/3 w-2/3 rounded-full border border-primary/40" />
+          <Sparkles className="h-6 w-6 animate-pulse text-primary" />
+        </div>
+        <p className="mt-3 text-lg font-semibold">Checking your machine…</p>
+      </div>
+      <div className="mx-auto mt-5 grid max-w-md gap-2 font-mono">
+        {items.map(([label, value], index) => {
+          const isRevealed = index < revealed;
+          return (
+            <div
+              className={cn(
+                "grid grid-cols-[1rem_7rem_minmax(0,1fr)] items-center gap-2 rounded-lg px-2 py-1.5 transition-all duration-300",
+                isRevealed
+                  ? "translate-y-0 opacity-100"
+                  : "translate-y-2 opacity-30",
+              )}
+              key={label}
+            >
+              {isRevealed ? (
+                <Check className="h-4 w-4 text-emerald-500" />
+              ) : (
+                <span className="text-sm text-muted-foreground">›</span>
+              )}
+              <span className="text-sm text-muted-foreground">{label}</span>
+              <span className="min-w-0 truncate text-sm font-medium">
+                {isRevealed ? value : ""}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function DownloadProgressBar({
   progress,
 }: {
@@ -482,14 +662,19 @@ function CatalogPicker({
   return (
     <div className="mt-1" data-testid="mesh-share-compute-catalog">
       <p className="text-sm font-normal text-muted-foreground">
-        Recommended for this machine
+        Models ranked for this machine
         {catalog.gpuName ? ` (${catalog.gpuName}, ` : " ("}
-        {catalog.vramDisplay} AI memory):
+        {catalog.vramDisplay} AI memory
+        {catalog.diskFreeDisplay === "—"
+          ? ""
+          : `, ${catalog.diskFreeDisplay} free`}
+        ):
       </p>
       <ul className="mt-1.5 flex max-h-56 flex-col gap-1 overflow-y-auto">
         {visible.map((entry) => {
           const isSelected = entry.name === selected;
           const tooLarge = entry.fit === "too_large";
+          const noDisk = !entry.fitsDisk;
           return (
             <li key={entry.name}>
               <button
@@ -501,7 +686,7 @@ function CatalogPicker({
                   "disabled:cursor-not-allowed disabled:opacity-50",
                 )}
                 data-testid={`mesh-catalog-${entry.name}`}
-                disabled={disabled || tooLarge}
+                disabled={disabled || tooLarge || noDisk}
                 onClick={() => onPick(entry.name)}
                 title={entry.description}
                 type="button"
@@ -518,6 +703,11 @@ function CatalogPicker({
                 {entry.recommended ? (
                   <span className="shrink-0 rounded bg-primary/15 px-1.5 text-2xs font-medium text-primary">
                     Recommended
+                  </span>
+                ) : null}
+                {noDisk && !tooLarge ? (
+                  <span className="shrink-0 rounded bg-muted px-1.5 text-2xs font-medium text-amber-600 dark:text-amber-400">
+                    Not enough disk
                   </span>
                 ) : null}
                 {entry.installed ? (

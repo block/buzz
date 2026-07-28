@@ -9488,6 +9488,28 @@ export function maybeInstallE2eTauriMocks() {
       }
       case "mesh_installed_models":
         return mockMeshState.models;
+      case "mesh_model_catalog":
+        return {
+          gpuName: "Apple M3 Max",
+          vramDisplay: "64 GB",
+          vramGb: 64,
+          recommended: "Qwen3-Coder-Next-Q4_K_M",
+          diskFreeBytes: 512_000_000_000,
+          diskFreeDisplay: "512 GB",
+          entries: [
+            {
+              name: "Qwen3-Coder-Next-Q4_K_M",
+              size: "48GB",
+              sizeGb: 48,
+              description: "Qwen3 Coder Next ~85B dense, frontier coding model",
+              fit: "comfortable",
+              installed: false,
+              recommended: true,
+              curated: true,
+              fitsDisk: true,
+            },
+          ],
+        };
       case "mesh_node_status":
         return meshNodeStatus(mockMeshState.nodeState, mockMeshState.nodeMode);
       case "mesh_serving_usage":

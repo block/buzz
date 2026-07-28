@@ -41,16 +41,23 @@ impl OutputSink for TauriProgressSink {
             status,
         } = event
         {
+            let status_label = match status {
+                ModelProgressStatus::Ensuring => "preparing",
+                ModelProgressStatus::Downloading => "downloading",
+                ModelProgressStatus::Ready => "done",
+            };
+            if !matches!(status, ModelProgressStatus::Downloading) {
+                eprintln!(
+                    "buzz-mesh: model progress status={status_label} label={label} file={}",
+                    file.as_deref().unwrap_or("unknown")
+                );
+            }
             let payload = MeshDownloadProgress {
                 label,
                 file,
                 downloaded_bytes,
                 total_bytes,
-                status: match status {
-                    ModelProgressStatus::Ensuring => "preparing",
-                    ModelProgressStatus::Downloading => "downloading",
-                    ModelProgressStatus::Ready => "done",
-                },
+                status: status_label,
                 done: matches!(status, ModelProgressStatus::Ready),
             };
             let _ = self.app.emit(MESH_DOWNLOAD_PROGRESS_EVENT, payload);

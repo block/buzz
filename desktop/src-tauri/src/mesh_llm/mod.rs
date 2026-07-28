@@ -309,6 +309,8 @@ pub const MESH_WORKER_STACK_SIZE: usize = 8 * 1024 * 1024;
 /// `serve::start()` where the UI can only show a frozen "starting…" state.
 /// Already-installed models return immediately from the cache scan.
 async fn ensure_model_downloaded(model: &str) -> anyhow::Result<()> {
+    let started = std::time::Instant::now();
+    eprintln!("buzz-mesh: checking model cache model={model}");
     let model_owned = model.to_string();
     let installed = tokio::task::spawn_blocking(move || {
         let cache = mesh_llm_node::models::default_huggingface_cache_dir();
@@ -319,18 +321,46 @@ async fn ensure_model_downloaded(model: &str) -> anyhow::Result<()> {
     .await
     .unwrap_or(false);
     if installed {
+        eprintln!(
+            "buzz-mesh: model already installed model={model} elapsed_ms={}",
+            started.elapsed().as_millis()
+        );
         return Ok(());
     }
-    mesh_llm_host_runtime::models::download_model_ref_with_progress_details(model, true)
-        .await
-        .map(|_| ())
-        .map_err(|error| anyhow::anyhow!("downloading {model} failed: {error}"))
+    eprintln!("buzz-mesh: preparing model download model={model}");
+    match mesh_llm_host_runtime::models::download_model_ref_with_progress_details(model, true).await
+    {
+        Ok(_) => {
+            eprintln!(
+                "buzz-mesh: model download ready model={model} elapsed_ms={}",
+                started.elapsed().as_millis()
+            );
+            Ok(())
+        }
+        Err(error) => {
+            eprintln!(
+                "buzz-mesh: model download failed model={model} elapsed_ms={} error={error:#}",
+                started.elapsed().as_millis()
+            );
+            Err(anyhow::anyhow!("downloading {model} failed: {error}"))
+        }
+    }
 }
 
 impl DesktopMeshRuntime {
     pub async fn start(mut request: StartMeshNodeRequest) -> anyhow::Result<Self> {
+        let started = std::time::Instant::now();
         sanitize_no_leak_request(&mut request)?;
+        eprintln!(
+            "buzz-mesh: start requested mode={:?} model={}",
+            request.mode,
+            request.model_id.as_deref().unwrap_or("none")
+        );
         initialize_mesh_native_runtime().await?;
+        eprintln!(
+            "buzz-mesh: native runtime ready elapsed_ms={}",
+            started.elapsed().as_millis()
+        );
         let model_id = request
             .model_id
             .clone()
@@ -392,7 +422,27 @@ impl DesktopMeshRuntime {
                         .trust_policy(TrustPolicy::Allowlist)
                         .trust_owners(owners);
                 }
-                DesktopMeshHandle::Ready(serve::start(builder.build()).await?)
+                eprintln!(
+                    "buzz-mesh: model prepared; starting serve runtime model={} api_port={} console_port={} elapsed_ms={}",
+                    model_id.as_deref().unwrap_or("none"),
+                    api_port,
+                    console_port,
+                    started.elapsed().as_millis()
+                );
+                let ready = serve::start(builder.build()).await.map_err(|error| {
+                    eprintln!(
+                        "buzz-mesh: serve runtime failed model={} elapsed_ms={} error={error:#}",
+                        model_id.as_deref().unwrap_or("none"),
+                        started.elapsed().as_millis()
+                    );
+                    error
+                })?;
+                eprintln!(
+                    "buzz-mesh: serve runtime ready model={} elapsed_ms={}",
+                    model_id.as_deref().unwrap_or("none"),
+                    started.elapsed().as_millis()
+                );
+                DesktopMeshHandle::Ready(ready)
             }
             MeshNodeMode::Client => {
                 let mut builder = client::EmbeddedClientConfig::builder()
