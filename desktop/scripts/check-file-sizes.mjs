@@ -697,12 +697,18 @@ const overrides = new Map([
   // hidden-key projection keeps the top-level secret out of Advanced rows.
   // +6 (1195 -> 1201): rebase onto main — this PR's model-source label wiring
   // lands on top of main's dialog growth. Queued to split.
-  ["src/features/agents/ui/AgentInstanceEditDialog.tsx", 1201],
+  // +28 (1201 -> 1229): inline "Add custom harness…" entry — sentinel option,
+  // modal state, and the AddCustomHarnessDialog mount. The shared routing and
+  // deferred-selection logic lives in addCustomHarness.ts to keep this minimal.
+  ["src/features/agents/ui/AgentInstanceEditDialog.tsx", 1229],
   // AgentDefinitionDialog grew past 1000 with the following load-bearing fixes:
   // isRuntimeAutoSeededRef tracking for edit-mode seeding (Fizz shows models);
   // runtimeSupportsLlmProviderSelection guard on discovery provider (codex fix);
   // hideProviderIds computation for Databricks v1 gate. Queued to split.
-  ["src/features/agents/ui/AgentDefinitionDialog.tsx", 1035],
+  // +28 (1020 -> 1048): inline "Add custom harness…" entry — sentinel option,
+  // modal state, and the AddCustomHarnessDialog mount. The shared routing and
+  // deferred-selection logic lives in addCustomHarness.ts to keep this minimal.
+  ["src/features/agents/ui/AgentDefinitionDialog.tsx", 1048],
   // #2630 emoji picker search: the shadow-root search-input autofocus effect
   // (rAF retry loop) took this file 999 -> 1026 and landed without this entry,
   // so main's Desktop Core went red. Queued to split with the rest of this list.

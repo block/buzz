@@ -83,6 +83,12 @@ import {
 import { useProviderApiKeyFieldState } from "./providerApiKeyFieldState";
 import { buildRuntimeModelProviderPayload } from "./agentDefinitionSubmitPayload";
 import { AgentDefinitionDialogFooter } from "./AgentDefinitionDialogFooter";
+import { AddCustomHarnessDialog } from "./AddCustomHarnessDialog";
+import {
+  ADD_CUSTOM_HARNESS_OPTION,
+  runtimeDropdownAction,
+  usePendingHarnessSelection,
+} from "./addCustomHarness";
 
 type AgentDefinitionDialogProps = {
   open: boolean;
@@ -167,6 +173,7 @@ export function AgentDefinitionDialog({
   const [isAvatarUploadPending, setIsAvatarUploadPending] =
     React.useState(false);
   const [hasUserChanges, setHasUserChanges] = React.useState(false);
+  const [isAddHarnessOpen, setIsAddHarnessOpen] = React.useState(false);
   const {
     globalConfig,
     inheritedDefaults: {
@@ -308,6 +315,7 @@ export function AgentDefinitionDialog({
       setShowAdvancedFields(false);
       setIsAvatarUploadPending(false);
       setHasUserChanges(false);
+      setIsAddHarnessOpen(false);
       // isRuntimeAutoSeededRef and hasSeededForOpenRef are NOT reset here — the
       // [initialValues, open] effect resets both when the dialog re-opens.
     }
@@ -578,6 +586,7 @@ export function AgentDefinitionDialog({
       runtimes,
       runtimesLoading,
     });
+  runtimeDropdownOptions.push(ADD_CUSTOM_HARNESS_OPTION);
   const runtimeSummaryLabel = selectedRuntime
     ? formatRuntimeOptionLabel(selectedRuntime)
     : runtime.trim() || "Not configured";
@@ -662,9 +671,13 @@ export function AgentDefinitionDialog({
   }
 
   function handleRuntimeDropdownChange(nextValue: string) {
+    const action = runtimeDropdownAction(nextValue);
+    if (action.kind === "add-custom-harness") {
+      setIsAddHarnessOpen(true);
+      return;
+    }
     setHasUserChanges(true);
-    const nextRuntime =
-      nextValue === NO_RUNTIME_DROPDOWN_VALUE ? "" : nextValue;
+    const nextRuntime = action.runtimeId;
     // The user made an explicit choice — no longer auto-seeded.
     isRuntimeAutoSeededRef.current = false;
     setRuntime(nextRuntime);
@@ -679,6 +692,15 @@ export function AgentDefinitionDialog({
       }),
     );
   }
+
+  // Routed through the normal change handler so a harness registered inline
+  // resets model/provider exactly as a hand-picked one would. Scoped to `open`
+  // so a pending id can't outlive the dialog that started the registration.
+  const selectSavedHarness = usePendingHarnessSelection(
+    runtimes,
+    handleRuntimeDropdownChange,
+    open,
+  );
 
   function handleProviderDropdownChange(nextValue: string) {
     setHasUserChanges(true);
@@ -942,6 +964,12 @@ export function AgentDefinitionDialog({
               onOpenChange={setAiDefaultsOpen}
               open={runtimeCanChooseLlmProvider && aiDefaultsOpen}
               returnFocusRef={aiDefaultsTriggerRef}
+            />
+
+            <AddCustomHarnessDialog
+              onOpenChange={setIsAddHarnessOpen}
+              onSaved={selectSavedHarness}
+              open={isAddHarnessOpen}
             />
 
             {isCreateMode ? createRunSection : null}
