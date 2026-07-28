@@ -1,0 +1,38 @@
+{
+  "source": {
+    "schemaVersion": 1,
+    "id": "fas-2026",
+    "type": "fas",
+    "displayName": "FAS 2026",
+    "coverageStart": "2026-08-01T00:00:00+10:00",
+    "coverageEnd": "2026-08-31T00:00:00+10:00",
+    "documentName": "fas.pdf",
+    "documentHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "revisionId": "rev-1",
+    "priorRevisionId": null,
+    "importedAt": "2026-07-28T10:00:00+10:00",
+    "status": "approved",
+    "sourceReference": "trusted-lan://fas.pdf"
+  },
+  "event": {
+    "schemaVersion": 1,
+    "id": "event-1",
+    "ownership": { "kind": "manual" },
+    "title": "Sail",
+    "description": null,
+    "type": "passage",
+    "start": "2026-08-03T08:00:00+10:00",
+    "end": "2026-08-03T09:00:00+10:00",
+    "allDay": false,
+    "timeZone": "Australia/Sydney",
+    "status": "approved",
+    "location": null,
+    "responsibleOwner": null,
+    "participants": [],
+    "remarks": null,
+    "linkedPlanId": null,
+    "linkedTaskId": null,
+    "linkedMissionRequirementId": null,
+    "parentActivityId": null
+  }
+}

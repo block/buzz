@@ -9,6 +9,8 @@
 pub mod agent_memory_canonical;
 /// NIP-AM: Agent Turn Metric — payload type and encrypt/decrypt helpers.
 pub mod agent_turn_metric;
+/// Battle Rhythm calendar source, event, and revision wire contracts.
+pub mod battle_rhythm;
 /// Channel and membership enums shared across crates.
 pub mod channel;
 /// NIP-CB: encrypted owner-only Daily Command Brief lifecycle events.
