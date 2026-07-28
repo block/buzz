@@ -1,7 +1,7 @@
 use super::command_team_discussions::COMMAND_TEAM_COLLECTION;
 use super::*;
 
-const MAX_CANONICAL_LEDGER_ITEMS: usize = 48;
+const MAX_CANONICAL_LEDGER_ITEMS: usize = 72;
 const MAX_CANONICAL_SOURCE_QUOTE_BYTES: usize = 1_024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]

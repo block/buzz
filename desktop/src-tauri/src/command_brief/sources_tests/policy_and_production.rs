@@ -318,7 +318,7 @@ fn ledger_truncation_tracks_omitted_kinds_and_degrades_affected_sections() {
         .freeze()
         .expect("bounded ledger");
 
-    assert_eq!(context.ledger().len(), 48);
+    assert_eq!(context.ledger().len(), 72);
     for kind in [
         SourceKind::Calendar,
         SourceKind::Reminders,
@@ -620,7 +620,13 @@ fn production_backend_uses_fixed_tool_arguments_and_rejects_snapshot_mismatch() 
 
     let cancellation = CancellationToken::new();
     assert!(backend
-        .collect_rag(&snapshot, &intent, &cancellation)
+        .collect_rag(
+            &snapshot,
+            &intent,
+            intent.context_query(),
+            snapshot.logical_collections(),
+            &cancellation,
+        )
         .is_ok());
     assert!(backend.collect_memory(&intent, &cancellation).is_ok());
     assert_eq!(backend.memory_conflict_count(), 2);

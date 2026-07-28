@@ -31,6 +31,11 @@ const INTELLIGENCE_SOURCES: &[SourceKind] = &[
     SourceKind::WorldMonitor,
 ];
 const INTELLIGENCE_TOOLS: &[&str] = &["memory", "rag", "world_monitor"];
+const LOGISTICS_SOURCES: &[SourceKind] = &[
+    SourceKind::Rag,
+    SourceKind::Memory,
+    SourceKind::WorldMonitor,
+];
 const ROUTINE_SOURCES: &[SourceKind] = &[
     SourceKind::Rag,
     SourceKind::Memory,
@@ -111,7 +116,7 @@ const LOGISTICS: PersonaDefinition = PersonaDefinition {
     adviser: AdviserId::Logistics,
     purpose: "Assess replenishment, sustainment, logistics constraints, dependencies, and risks.",
     permitted_sections: &[BriefSection::Logistics],
-    permitted_source_kinds: SPECIALIST_SOURCES,
+    permitted_source_kinds: LOGISTICS_SOURCES,
     permitted_tool_labels: SPECIALIST_TOOLS,
     output_schema_instruction: OUTPUT_SCHEMA,
     safety_boundary: SPECIALIST_BOUNDARY,

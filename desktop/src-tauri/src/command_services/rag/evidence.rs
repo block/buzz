@@ -108,7 +108,7 @@ impl VerifiedRagSnapshot {
             || logical_collections.len() > 256
             || logical_collections
                 .iter()
-                .any(|name| !valid_catalogue_name(name))
+                .any(|name| !valid_trusted_lan_collection_name(name))
             || logical_collections.iter().collect::<BTreeSet<_>>().len()
                 != logical_collections.len()
         {
@@ -123,6 +123,17 @@ impl VerifiedRagSnapshot {
             assurance: RagSnapshotAssurance::TrustedLanObserved,
         })
     }
+}
+
+fn valid_trusted_lan_collection_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value.trim() == value
+        && value
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        && !value.chars().any(char::is_control)
 }
 
 #[cfg_attr(

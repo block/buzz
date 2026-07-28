@@ -24,7 +24,7 @@ use super::scheduler::{LocalModelScheduler, SchedulerError, SchedulerJobKey};
 use super::sources::{
     load_command_team_discussions, CommandTeamDiscussionBatch, FrozenSourceContext,
     ProductionSourceBackend, SourceBackend, SourceCollectionError, SourceCollector,
-    TrustedLanSourceBackend,
+    TrustedLanSourceBackend, WorldMonitorBriefCollector,
 };
 use super::types::{
     AdviserContribution, AdviserId, BriefRunState, BriefRunStatus, BriefSection, CitedFinding,
@@ -282,9 +282,10 @@ impl CommandBriefOrchestrator {
             .app_config_dir()
             .map_err(|_| ProductionOrchestratorError)?
             .join("trusted-lan-sources.json");
-        let (advisers, source_loader): (
+        let (advisers, source_loader, world_monitor_endpoint): (
             Arc<dyn BriefAdviserProvider>,
             Arc<dyn providers::SourceBackendLoader>,
+            String,
         ) = if let Some(config) = load_optional_trusted_lan_config(&trusted_lan_path)
             .map_err(|_| ProductionOrchestratorError)?
         {
@@ -302,6 +303,7 @@ impl CommandBriefOrchestrator {
                     config: config.clone(),
                     app: app.clone(),
                 }),
+                config.world_monitor().endpoint().to_string(),
             )
         } else {
             (
@@ -310,11 +312,17 @@ impl CommandBriefOrchestrator {
                         .map_err(|_| ProductionOrchestratorError)?,
                 ),
                 Arc::new(ProductionSourceBackendLoader { app: app.clone() }),
+                buzz_command_sources_pkg::DEFAULT_WORLD_MONITOR_ENDPOINT.to_string(),
             )
         };
         Ok(Self::new(
             scheduler,
-            Arc::new(ReloadingSourceProvider::new(source_loader, apple_selection)),
+            Arc::new(ReloadingSourceProvider::new_with_world_monitor(
+                source_loader,
+                apple_selection,
+                app.clone(),
+                world_monitor_endpoint,
+            )),
             advisers,
             persistence,
         ))

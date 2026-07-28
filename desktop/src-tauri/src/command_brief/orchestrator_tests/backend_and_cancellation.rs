@@ -19,6 +19,8 @@ impl SourceBackend for CountingSourceBackend {
         &self,
         _snapshot: &VerifiedRagSnapshot,
         _intent: &FixedRetrievalIntent,
+        _query: &str,
+        _collections: &[String],
         _cancellation: &CancellationToken,
     ) -> Result<Value, SourceReadError> {
         unreachable!("a pre-cancelled collection must not reach the backend")
@@ -94,6 +96,8 @@ impl SourceBackend for ReloadingBackend {
         &self,
         snapshot: &VerifiedRagSnapshot,
         intent: &FixedRetrievalIntent,
+        query: &str,
+        _collections: &[String],
         _cancellation: &CancellationToken,
     ) -> Result<Value, SourceReadError> {
         Ok(json!({
@@ -103,7 +107,7 @@ impl SourceBackend for ReloadingBackend {
                 "retrieved_content": "untrusted_evidence",
                 "instruction_effect": "none"
             },
-            "query": intent.query(),
+            "query": query,
             "snapshot": {"active_snapshot_id": snapshot.snapshot_id()},
             "retrieved_at": OBSERVED,
             "total": 1,
@@ -284,6 +288,8 @@ impl SourceBackend for ActiveCancellationBackend {
         &self,
         _snapshot: &VerifiedRagSnapshot,
         _intent: &FixedRetrievalIntent,
+        _query: &str,
+        _collections: &[String],
         cancellation: &CancellationToken,
     ) -> Result<Value, SourceReadError> {
         self.rag_calls.fetch_add(1, Ordering::SeqCst);

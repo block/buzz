@@ -87,6 +87,8 @@ pub(crate) trait SourceBackend: Send + Sync {
         &self,
         snapshot: &VerifiedRagSnapshot,
         intent: &FixedRetrievalIntent,
+        query: &str,
+        collections: &[String],
         cancellation: &CancellationToken,
     ) -> Result<Value, SourceReadError>;
 
@@ -133,9 +135,11 @@ where
         &self,
         snapshot: &VerifiedRagSnapshot,
         intent: &FixedRetrievalIntent,
+        query: &str,
+        collections: &[String],
         cancellation: &CancellationToken,
     ) -> Result<Value, SourceReadError> {
-        (**self).collect_rag(snapshot, intent, cancellation)
+        (**self).collect_rag(snapshot, intent, query, collections, cancellation)
     }
 
     fn collect_memory(
@@ -290,7 +294,9 @@ impl SourceBackend for ProductionSourceBackend {
     fn collect_rag(
         &self,
         snapshot: &VerifiedRagSnapshot,
-        intent: &FixedRetrievalIntent,
+        _intent: &FixedRetrievalIntent,
+        query: &str,
+        collections: &[String],
         cancellation: &CancellationToken,
     ) -> Result<Value, SourceReadError> {
         if cancellation.is_cancelled() {
@@ -305,8 +311,8 @@ impl SourceBackend for ProductionSourceBackend {
                 &self.rag,
                 RAG_TOOL,
                 json!({
-                    "query": intent.query(),
-                    "collections": snapshot.logical_collections(),
+                    "query": query,
+                    "collections": collections,
                     "top_k": RETRIEVAL_RESULT_LIMIT,
                 }),
                 cancellation,
@@ -452,7 +458,9 @@ impl SourceBackend for TrustedLanSourceBackend {
     fn collect_rag(
         &self,
         snapshot: &VerifiedRagSnapshot,
-        intent: &FixedRetrievalIntent,
+        _intent: &FixedRetrievalIntent,
+        query: &str,
+        collections: &[String],
         cancellation: &CancellationToken,
     ) -> Result<Value, SourceReadError> {
         if cancellation.is_cancelled() {
@@ -463,7 +471,7 @@ impl SourceBackend for TrustedLanSourceBackend {
         }
         let result = self
             .client
-            .search_rag(intent.query(), snapshot.logical_collections())
+            .search_rag(query, collections)
             .map_err(|error| {
                 eprintln!("buzz-desktop: trusted LAN RAG read failed: {error:?}");
                 SourceReadError::new("rag_read_unavailable")
@@ -670,6 +678,7 @@ pub(crate) struct SourceCollector<B> {
     co_request: String,
     observed_at: String,
     apple_selection: AppleBriefSelection,
+    world_monitor: Option<WorldMonitorBriefCollector>,
 }
 
 impl<B: SourceBackend> SourceCollector<B> {
@@ -700,7 +709,13 @@ impl<B: SourceBackend> SourceCollector<B> {
             co_request: co_request.to_string(),
             observed_at: observed_at.to_string(),
             apple_selection,
+            world_monitor: None,
         })
+    }
+
+    pub(crate) fn with_world_monitor(mut self, collector: WorldMonitorBriefCollector) -> Self {
+        self.world_monitor = Some(collector);
+        self
     }
 
     pub(crate) fn backend(&self) -> &B {
@@ -726,6 +741,16 @@ impl<B: SourceBackend> SourceCollector<B> {
         let mut degraded = BTreeSet::new();
         let mut limitations = BTreeSet::new();
         let command_team_discussions = self.backend.command_team_discussions();
+        let mut world_monitor_focus = self.co_request.clone();
+        for candidate in &command_team_discussions.candidates {
+            if world_monitor_focus.len() >= 16 * 1024 {
+                break;
+            }
+            world_monitor_focus.push('\n');
+            let remaining = (16_usize * 1024).saturating_sub(world_monitor_focus.len());
+            let (quote, _) = truncate_utf8(&candidate.quote, remaining);
+            world_monitor_focus.push_str(&quote);
+        }
         ensure_collection_active(cancellation)?;
         candidates.extend(command_team_discussions.candidates);
         limitations.extend(command_team_discussions.limitations);
@@ -747,43 +772,73 @@ impl<B: SourceBackend> SourceCollector<B> {
 
         let mut rag_available = true;
         let mut memory_available = true;
+        let doctrine_collections = snapshot
+            .logical_collections()
+            .iter()
+            .filter(|collection| {
+                intents.first().is_some_and(|intent| {
+                    intent.doctrine_collections().contains(&collection.as_str())
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
         for intent in &intents {
             ensure_collection_active(cancellation)?;
             if rag_available {
-                let result = self.backend.collect_rag(&snapshot, intent, cancellation);
+                if !doctrine_collections.is_empty() {
+                    let doctrine_result = self.backend.collect_rag(
+                        &snapshot,
+                        intent,
+                        intent.doctrine_query(),
+                        &doctrine_collections,
+                        cancellation,
+                    );
+                    ensure_collection_active(cancellation)?;
+                    match doctrine_result {
+                        Ok(value) => {
+                            let records = extract_rag_records(
+                                &snapshot,
+                                intent.doctrine_query(),
+                                &value,
+                                &self.observed_at,
+                                &doctrine_collections,
+                            );
+                            match records {
+                                Ok(records) => candidates.extend(records),
+                                Err(_) => {
+                                    limitations.insert(format!(
+                                        "{:?} doctrine evidence was malformed; broader knowledge retrieval continued.",
+                                        intent.adviser()
+                                    ));
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            limitations.insert(format!(
+                                "{:?} doctrine lookup was unavailable: {}; broader knowledge retrieval continued.",
+                                intent.adviser(),
+                                error.code()
+                            ));
+                        }
+                    }
+                }
+                let result = self.backend.collect_rag(
+                    &snapshot,
+                    intent,
+                    intent.context_query(),
+                    snapshot.logical_collections(),
+                    cancellation,
+                );
                 ensure_collection_active(cancellation)?;
                 match result {
                     Ok(value) => {
-                        let records = match snapshot.assurance() {
-                            RagSnapshotAssurance::SignedSnapshot => {
-                                extract_verified_rag_evidence(&snapshot, intent.query(), &value)
-                                    .map(|records| {
-                                        records
-                                            .into_iter()
-                                            .map(|record| CandidateSource {
-                                                source_id: record.source_id,
-                                                source_kind: SourceKind::Rag,
-                                                collection: record.collection,
-                                                document_id: record.document_id,
-                                                chunk_id: record.chunk_id,
-                                                timestamp: record.retrieved_at.clone(),
-                                                location: record.location,
-                                                retrieved_at: record.retrieved_at,
-                                                observed_at: self.observed_at.clone(),
-                                                quote: record.quote,
-                                            })
-                                            .collect()
-                                    })
-                            }
-                            RagSnapshotAssurance::TrustedLanObserved => {
-                                extract_trusted_lan_rag_evidence(
-                                    &value,
-                                    intent.query(),
-                                    &self.observed_at,
-                                    snapshot.logical_collections(),
-                                )
-                            }
-                        };
+                        let records = extract_rag_records(
+                            &snapshot,
+                            intent.context_query(),
+                            &value,
+                            &self.observed_at,
+                            snapshot.logical_collections(),
+                        );
                         match records {
                             Ok(records) => {
                                 candidates.extend(records);
@@ -875,6 +930,18 @@ impl<B: SourceBackend> SourceCollector<B> {
             }
         }
 
+        if let Some(world_monitor) = &self.world_monitor {
+            ensure_collection_active(cancellation)?;
+            let batch =
+                world_monitor.collect(&world_monitor_focus, &self.observed_at, cancellation);
+            ensure_collection_active(cancellation)?;
+            candidates.extend(batch.candidates);
+            if batch.quota_limited || !batch.limitations.is_empty() {
+                degraded.insert(BriefSection::Intelligence);
+            }
+            limitations.extend(batch.limitations);
+        }
+
         for request in self
             .apple_selection
             .brief_requests(&self.observed_at)
@@ -953,6 +1020,42 @@ impl<B: SourceBackend> SourceCollector<B> {
     }
 }
 
+fn extract_rag_records(
+    snapshot: &VerifiedRagSnapshot,
+    query: &str,
+    value: &Value,
+    observed_at: &str,
+    collections: &[String],
+) -> Result<Vec<CandidateSource>, SourceReadError> {
+    match snapshot.assurance() {
+        RagSnapshotAssurance::SignedSnapshot => {
+            extract_verified_rag_evidence(snapshot, query, value)
+                .map(|records| {
+                    records
+                        .into_iter()
+                        .map(|record| CandidateSource {
+                            source_id: record.source_id,
+                            source_kind: SourceKind::Rag,
+                            collection: record.collection,
+                            document_id: record.document_id,
+                            chunk_id: record.chunk_id,
+                            timestamp: record.retrieved_at.clone(),
+                            location: record.location,
+                            retrieved_at: record.retrieved_at,
+                            observed_at: observed_at.to_string(),
+                            quote: record.quote,
+                        })
+                        .collect()
+                })
+                .map_err(|_| SourceReadError::new("rag_evidence_invalid"))
+        }
+        RagSnapshotAssurance::TrustedLanObserved => {
+            extract_trusted_lan_rag_evidence(value, query, observed_at, collections)
+                .map_err(|_| SourceReadError::new("rag_evidence_invalid"))
+        }
+    }
+}
+
 fn ensure_collection_active(cancellation: &CancellationToken) -> Result<(), SourceCollectionError> {
     if cancellation.is_cancelled() {
         Err(SourceCollectionError::Cancelled)
@@ -974,3 +1077,5 @@ use retrieval_intents::fixed_retrieval_intents;
 pub(crate) use retrieval_intents::FixedRetrievalIntent;
 mod trusted_lan_evidence;
 use trusted_lan_evidence::*;
+mod world_monitor;
+pub(crate) use world_monitor::WorldMonitorBriefCollector;

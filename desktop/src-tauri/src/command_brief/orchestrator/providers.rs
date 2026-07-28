@@ -386,9 +386,11 @@ impl SourceBackendLoader for TrustedLanSourceBackendLoader {
 pub(crate) struct ReloadingSourceProvider {
     loader: Arc<dyn SourceBackendLoader>,
     apple_selection: AppleBriefSelection,
+    world_monitor: Option<(tauri::AppHandle, String)>,
 }
 
 impl ReloadingSourceProvider {
+    #[cfg(test)]
     pub(crate) const fn new(
         loader: Arc<dyn SourceBackendLoader>,
         apple_selection: AppleBriefSelection,
@@ -396,6 +398,20 @@ impl ReloadingSourceProvider {
         Self {
             loader,
             apple_selection,
+            world_monitor: None,
+        }
+    }
+
+    pub(crate) fn new_with_world_monitor(
+        loader: Arc<dyn SourceBackendLoader>,
+        apple_selection: AppleBriefSelection,
+        app: tauri::AppHandle,
+        endpoint: String,
+    ) -> Self {
+        Self {
+            loader,
+            apple_selection,
+            world_monitor: Some((app, endpoint)),
         }
     }
 }
@@ -413,6 +429,7 @@ impl BriefSourceProvider for ReloadingSourceProvider {
         let run_id = run_id.to_string();
         let co_request = co_request.to_string();
         let observed_at = observed_at.to_string();
+        let world_monitor = self.world_monitor.clone();
         Box::pin(async move {
             let backend = loader.load(cancellation.clone()).await?;
             if cancellation.is_cancelled() {
@@ -421,6 +438,12 @@ impl BriefSourceProvider for ReloadingSourceProvider {
             let collection_cancellation = cancellation.clone();
             let result = tokio::task::spawn_blocking(move || {
                 SourceCollector::new(backend, &run_id, &co_request, &observed_at, apple_selection)
+                    .map(|collector| match world_monitor {
+                        Some((app, endpoint)) => collector.with_world_monitor(
+                            WorldMonitorBriefCollector::from_app(&app, &endpoint),
+                        ),
+                        None => collector,
+                    })
                     .and_then(|collector| {
                         collector.freeze_with_cancellation(&collection_cancellation)
                     })

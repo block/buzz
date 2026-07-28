@@ -2,10 +2,12 @@ use super::personas::{definition_for, specialist_definitions, PersonaDefinition}
 use super::types::{AdviserId, BriefSection, SourceKind, ADVISORY_LIMITATION};
 
 #[test]
-fn pins_the_exact_six_native_personas_and_specialist_order() {
+fn pins_the_exact_eight_native_personas_and_specialist_order() {
     let roster = [
         AdviserId::ChiefOfStaff,
         AdviserId::Operations,
+        AdviserId::Intelligence,
+        AdviserId::Logistics,
         AdviserId::Navigation,
         AdviserId::DailyRoutine,
         AdviserId::Reporting,
@@ -23,6 +25,8 @@ fn pins_the_exact_six_native_personas_and_specialist_order() {
             .collect::<Vec<_>>(),
         vec![
             AdviserId::Operations,
+            AdviserId::Intelligence,
+            AdviserId::Logistics,
             AdviserId::Navigation,
             AdviserId::DailyRoutine,
             AdviserId::Reporting,
@@ -47,6 +51,22 @@ fn persona_tool_and_source_policy_is_owned_by_rust() {
         );
         assert_eq!(definition.permitted_tool_labels, &["memory", "rag"]);
     }
+
+    for adviser in [AdviserId::Intelligence, AdviserId::Logistics] {
+        let definition = definition_for(adviser);
+        assert_eq!(
+            definition.permitted_source_kinds,
+            &[
+                SourceKind::Rag,
+                SourceKind::Memory,
+                SourceKind::WorldMonitor
+            ]
+        );
+    }
+    assert_eq!(
+        definition_for(AdviserId::Intelligence).permitted_tool_labels,
+        &["memory", "rag", "world_monitor"]
+    );
 
     let routine = definition_for(AdviserId::DailyRoutine);
     assert_eq!(
@@ -109,6 +129,8 @@ fn fixed_prompts_are_structured_advisory_and_cannot_be_renderer_overridden() {
 fn every_model_prompt_spells_out_the_exact_rust_output_contract() {
     for adviser in [
         AdviserId::Operations,
+        AdviserId::Intelligence,
+        AdviserId::Logistics,
         AdviserId::Navigation,
         AdviserId::DailyRoutine,
         AdviserId::Reporting,
