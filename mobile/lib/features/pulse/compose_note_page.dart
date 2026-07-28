@@ -82,7 +82,6 @@ class ComposeNotePage extends HookConsumerWidget {
                       height: 16,
                       child: BuzzLoadingIndicator(
                         size: 16,
-                        color: context.colors.onPrimary,
                         semanticLabel: _isReply
                             ? 'Sending reply'
                             : 'Publishing post',

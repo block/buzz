@@ -119,7 +119,6 @@ class InviteJoinSheet extends ConsumerWidget {
                             height: 16,
                             child: BuzzLoadingIndicator(
                               size: 16,
-                              color: context.colors.onPrimary,
                               semanticLabel: 'Joining community',
                             ),
                           )
