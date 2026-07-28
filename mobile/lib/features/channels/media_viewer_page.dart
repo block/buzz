@@ -4,11 +4,15 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/physics.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:video_player/video_player.dart';
 
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
+import 'media_viewer_hero.dart';
+
+export 'media_viewer_hero.dart';
 
 part 'media_viewer_page/image_controls.dart';
 part 'media_viewer_page/route_transition.dart';
@@ -54,77 +58,6 @@ class MediaViewerImage {
     this.aspectRatio,
     this.preloadProvider,
   });
-}
-
-/// Keeps image-viewer shared-element motion consistent at every source.
-class MediaViewerHero extends StatelessWidget {
-  /// The identity shared by the inline image and full-screen image.
-  final Object tag;
-
-  /// The image rendered during and after the shared-element transition.
-  final Widget child;
-
-  /// Creates an image-viewer shared element.
-  const MediaViewerHero({super.key, required this.tag, required this.child});
-
-  @override
-  Widget build(BuildContext context) {
-    return Hero(
-      tag: tag,
-      createRectTween: (begin, end) => RectTween(begin: begin, end: end),
-      flightShuttleBuilder:
-          (
-            flightContext,
-            animation,
-            flightDirection,
-            fromHeroContext,
-            toHeroContext,
-          ) {
-            final sourceHero = fromHeroContext.widget;
-            final destinationHero = toHeroContext.widget;
-            final sourceChild = sourceHero is Hero ? sourceHero.child : child;
-            final destinationChild = destinationHero is Hero
-                ? destinationHero.child
-                : child;
-            return _MediaViewerHeroFlight(
-              animation: animation,
-              sourceChild: sourceChild,
-              destinationChild: destinationChild,
-            );
-          },
-      child: child,
-    );
-  }
-}
-
-class _MediaViewerHeroFlight extends StatelessWidget {
-  final Animation<double> animation;
-  final Widget sourceChild;
-  final Widget destinationChild;
-
-  const _MediaViewerHeroFlight({
-    required this.animation,
-    required this.sourceChild,
-    required this.destinationChild,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final destinationOpacity = CurvedAnimation(
-      parent: animation,
-      curve: const Interval(0.18, 0.82, curve: Curves.easeInOutCubic),
-    );
-    return Stack(
-      fit: StackFit.expand,
-      children: [
-        FadeTransition(
-          opacity: ReverseAnimation(destinationOpacity),
-          child: sourceChild,
-        ),
-        FadeTransition(opacity: destinationOpacity, child: destinationChild),
-      ],
-    );
-  }
 }
 
 PageRoute<void> buildImageViewerRoute({
@@ -222,9 +155,7 @@ void openVideoViewer(
   );
 }
 
-// StatefulWidget retained: imperative gesture/animation controllers with
-// listener lifecycle don't map cleanly to hooks (allowed exception).
-class MediaImageViewerPage extends StatefulWidget {
+class MediaImageViewerPage extends HookConsumerWidget {
   final String imageUrl;
   final Object heroTag;
   final String? semanticLabel;
@@ -244,346 +175,325 @@ class MediaImageViewerPage extends StatefulWidget {
     this.onMore,
   });
 
-  @override
-  State<MediaImageViewerPage> createState() => _MediaImageViewerPageState();
-}
-
-class _MediaImageViewerPageState extends State<MediaImageViewerPage>
-    with TickerProviderStateMixin {
-  late final List<MediaViewerImage> _images;
-  late final int _initialIndex;
-  late final PageController _pageController;
-  late final ValueNotifier<double> _pagePosition;
-  late final List<TransformationController> _transformationControllers;
-  late final List<VoidCallback> _transformationListeners;
-  late final AnimationController _snapBackController;
-  late final AnimationController _zoomResetController;
-  VoidCallback? _zoomResetListener;
-  final Set<int> _fullResolutionIndices = <int>{};
-  late int _currentIndex;
-  bool _isTransformed = false;
-  bool _disableHeroOnDismiss = false;
-  double _dragOffset = 0;
-  bool _isDragging = false;
-
   static const _dismissThreshold = 100.0;
   static const _dismissVelocity = 700.0;
   static const _backgroundFadeDivisor = 300.0;
   static const _filmstripScrubExtent = 44.0;
+
   @override
-  void initState() {
-    super.initState();
-    _images =
-        widget.galleryItems ??
-        [
-          MediaViewerImage(
-            url: widget.imageUrl,
-            heroTag: widget.heroTag,
-            semanticLabel: widget.semanticLabel,
-          ),
-        ];
-    _initialIndex = widget.initialIndex.clamp(0, _images.length - 1).toInt();
-    _currentIndex = _initialIndex;
-    _pageController = PageController(initialPage: _initialIndex);
-    _pagePosition = ValueNotifier(_initialIndex.toDouble());
-    _pageController.addListener(_handlePagePositionChanged);
-    _transformationControllers = [
-      for (var index = 0; index < _images.length; index++)
-        TransformationController(),
-    ];
-    _transformationListeners = [];
-    for (var index = 0; index < _transformationControllers.length; index++) {
-      final controllerIndex = index;
-      void listener() => _handleTransformChanged(controllerIndex);
-      _transformationListeners.add(listener);
-      _transformationControllers[index].addListener(listener);
-    }
-    _snapBackController = AnimationController(
-      vsync: this,
+  Widget build(BuildContext context, WidgetRef ref) {
+    final images = useMemoized(
+      () =>
+          galleryItems ??
+          [
+            MediaViewerImage(
+              url: imageUrl,
+              heroTag: heroTag,
+              semanticLabel: semanticLabel,
+            ),
+          ],
+      [galleryItems, imageUrl, heroTag, semanticLabel],
+    );
+    final safeInitialIndex = initialIndex.clamp(0, images.length - 1).toInt();
+    final currentIndex = useState(safeInitialIndex);
+    final pageController = usePageController(initialPage: safeInitialIndex);
+    final pagePosition = useState(safeInitialIndex.toDouble());
+    final transformationControllers = useMemoized(
+      () => [
+        for (var index = 0; index < images.length; index++)
+          TransformationController(),
+      ],
+      [images],
+    );
+    final snapBackController = useAnimationController(
       duration: const Duration(milliseconds: 200),
     );
-    _zoomResetController = AnimationController(
-      vsync: this,
+    final zoomResetController = useAnimationController(
       duration: const Duration(milliseconds: 180),
     );
-  }
+    final zoomResetListener = useRef<VoidCallback?>(null);
+    final fullResolutionIndices = useState<Set<int>>(<int>{});
+    final isTransformed = useState(false);
+    final disableHeroOnDismiss = useState(false);
+    final dragOffset = useState(0.0);
+    final isDragging = useState(false);
 
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    _precacheViewerImages(context, _images, _currentIndex);
-  }
-
-  @override
-  void dispose() {
-    for (var index = 0; index < _transformationControllers.length; index++) {
-      _transformationControllers[index].removeListener(
-        _transformationListeners[index],
-      );
-      _transformationControllers[index].dispose();
-    }
-    _pageController.removeListener(_handlePagePositionChanged);
-    _pageController.dispose();
-    _pagePosition.dispose();
-    _snapBackController.dispose();
-    final zoomResetListener = _zoomResetListener;
-    if (zoomResetListener != null) {
-      _zoomResetController.removeListener(zoomResetListener);
-    }
-    _zoomResetController.dispose();
-    super.dispose();
-  }
-
-  void _handlePagePositionChanged() {
-    if (!_pageController.hasClients) return;
-    final nextPosition = _pageController.page;
-    if (nextPosition == null ||
-        (nextPosition - _pagePosition.value).abs() < 0.0001) {
-      return;
-    }
-    _pagePosition.value = nextPosition;
-  }
-
-  void _handleTransformChanged(int index) {
-    if (index != _currentIndex) return;
-    final isTransformed = _hasImageTransform(
-      _transformationControllers[index].value,
-    );
-    if (isTransformed == _isTransformed) {
-      return;
-    }
-
-    setState(() {
-      _isTransformed = isTransformed;
-      // If the user zooms in while dragging, cancel the drag.
-      if (_isTransformed && _isDragging) {
-        _isDragging = false;
-        _dragOffset = 0;
+    void handlePagePositionChanged() {
+      if (!pageController.hasClients) return;
+      final nextPosition = pageController.page;
+      if (nextPosition == null ||
+          (nextPosition - pagePosition.value).abs() < 0.0001) {
+        return;
       }
-    });
-  }
+      pagePosition.value = nextPosition;
+    }
 
-  void _onPageChanged(int index) {
-    _precacheViewerImages(context, _images, index);
-    setState(() {
-      _currentIndex = index;
-      _isTransformed = _hasImageTransform(
-        _transformationControllers[index].value,
+    void handleTransformChanged(int index) {
+      if (index != currentIndex.value) return;
+      final nextIsTransformed = _hasImageTransform(
+        transformationControllers[index].value,
       );
-      _disableHeroOnDismiss = index != _initialIndex;
-      _dragOffset = 0;
-      _isDragging = false;
-    });
-  }
+      if (nextIsTransformed == isTransformed.value) {
+        return;
+      }
 
-  void _onFilmstripScrubUpdate(double delta) {
-    if (_isTransformed || !_pageController.hasClients) return;
-    final position = _pageController.position;
-    final viewport = position.viewportDimension;
-    if (viewport <= 0) return;
-    final target =
-        (_pageController.offset - ((delta / _filmstripScrubExtent) * viewport))
-            .clamp(position.minScrollExtent, position.maxScrollExtent)
-            .toDouble();
-    _pageController.jumpTo(target);
-  }
-
-  void _onFilmstripScrubEnd() {
-    if (!_pageController.hasClients) return;
-    final targetPage = (_pageController.page ?? _currentIndex.toDouble())
-        .round()
-        .clamp(0, _images.length - 1);
-    if (MediaQuery.disableAnimationsOf(context)) {
-      _pageController.jumpToPage(targetPage);
-      return;
+      isTransformed.value = nextIsTransformed;
+      if (nextIsTransformed && isDragging.value) {
+        isDragging.value = false;
+        dragOffset.value = 0;
+      }
     }
-    _pageController.animateToPage(
-      targetPage,
-      duration: const Duration(milliseconds: 180),
-      curve: Curves.easeOutCubic,
-    );
-  }
 
-  void _onImageInteractionStart(int index, ScaleStartDetails details) {
-    if (details.pointerCount > 1) {
-      _upgradeToFullResolution(index);
-    }
-    if (details.pointerCount == 1 && !_isTransformed) {
-      _isDragging = true;
-    }
-  }
+    useEffect(() {
+      pageController.addListener(handlePagePositionChanged);
+      return () => pageController.removeListener(handlePagePositionChanged);
+    }, [pageController]);
 
-  void _onImageInteractionUpdate(int index, ScaleUpdateDetails details) {
-    if (details.pointerCount > 1 || details.scale != 1) {
-      final needsFullResolution =
-          _images[index].previewDecodeWidth != null &&
-          !_fullResolutionIndices.contains(index);
-      if (_isDragging || needsFullResolution) {
-        setState(() {
+    useEffect(() {
+      final listeners = <VoidCallback>[];
+      for (var index = 0; index < transformationControllers.length; index++) {
+        final controllerIndex = index;
+        void listener() => handleTransformChanged(controllerIndex);
+        listeners.add(listener);
+        transformationControllers[index].addListener(listener);
+      }
+      return () {
+        for (var index = 0; index < transformationControllers.length; index++) {
+          transformationControllers[index]
+            ..removeListener(listeners[index])
+            ..dispose();
+        }
+      };
+    }, [transformationControllers]);
+
+    useEffect(() {
+      var cancelled = false;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!cancelled && context.mounted) {
+          _precacheViewerImages(context, images, currentIndex.value);
+        }
+      });
+      return () => cancelled = true;
+    }, [images]);
+
+    useEffect(() {
+      return () {
+        final listener = zoomResetListener.value;
+        if (listener != null) {
+          zoomResetController.removeListener(listener);
+        }
+      };
+    }, [zoomResetController]);
+
+    void onPageChanged(int index) {
+      _precacheViewerImages(context, images, index);
+      currentIndex.value = index;
+      isTransformed.value = _hasImageTransform(
+        transformationControllers[index].value,
+      );
+      disableHeroOnDismiss.value = index != safeInitialIndex;
+      dragOffset.value = 0;
+      isDragging.value = false;
+    }
+
+    void onFilmstripScrubUpdate(double delta) {
+      if (isTransformed.value || !pageController.hasClients) return;
+      final position = pageController.position;
+      final viewport = position.viewportDimension;
+      if (viewport <= 0) return;
+      final target =
+          (pageController.offset - ((delta / _filmstripScrubExtent) * viewport))
+              .clamp(position.minScrollExtent, position.maxScrollExtent)
+              .toDouble();
+      pageController.jumpTo(target);
+    }
+
+    void onFilmstripScrubEnd() {
+      if (!pageController.hasClients) return;
+      final targetPage = (pageController.page ?? currentIndex.value.toDouble())
+          .round()
+          .clamp(0, images.length - 1);
+      if (MediaQuery.disableAnimationsOf(context)) {
+        pageController.jumpToPage(targetPage);
+        return;
+      }
+      pageController.animateToPage(
+        targetPage,
+        duration: const Duration(milliseconds: 180),
+        curve: Curves.easeOutCubic,
+      );
+    }
+
+    void upgradeToFullResolution(int index) {
+      if (images[index].previewDecodeWidth == null ||
+          fullResolutionIndices.value.contains(index)) {
+        return;
+      }
+      fullResolutionIndices.value = {...fullResolutionIndices.value, index};
+    }
+
+    void onImageInteractionStart(int index, ScaleStartDetails details) {
+      if (details.pointerCount > 1) {
+        upgradeToFullResolution(index);
+      }
+      if (details.pointerCount == 1 && !isTransformed.value) {
+        isDragging.value = true;
+      }
+    }
+
+    void onImageInteractionUpdate(int index, ScaleUpdateDetails details) {
+      if (details.pointerCount > 1 || details.scale != 1) {
+        final needsFullResolution =
+            images[index].previewDecodeWidth != null &&
+            !fullResolutionIndices.value.contains(index);
+        if (isDragging.value || needsFullResolution) {
           if (needsFullResolution) {
-            _fullResolutionIndices.add(index);
+            fullResolutionIndices.value = {
+              ...fullResolutionIndices.value,
+              index,
+            };
           }
-          _isDragging = false;
-          _dragOffset = 0;
-        });
+          isDragging.value = false;
+          dragOffset.value = 0;
+        }
+        return;
       }
-      return;
-    }
 
-    if (!_isDragging || _isTransformed) return;
-    setState(() {
-      _dragOffset = (_dragOffset + details.focalPointDelta.dy).clamp(
+      if (!isDragging.value || isTransformed.value) return;
+      dragOffset.value = (dragOffset.value + details.focalPointDelta.dy).clamp(
         0.0,
         MediaQuery.sizeOf(context).height,
       );
-    });
-  }
-
-  void _upgradeToFullResolution(int index) {
-    if (_images[index].previewDecodeWidth == null ||
-        _fullResolutionIndices.contains(index)) {
-      return;
-    }
-    setState(() => _fullResolutionIndices.add(index));
-  }
-
-  void _resetImageTransform(int index) {
-    final controller = _transformationControllers[index];
-    if (!_hasImageTransform(controller.value)) {
-      return;
     }
 
-    final previousListener = _zoomResetListener;
-    if (previousListener != null) {
-      _zoomResetController.removeListener(previousListener);
-    }
-    _zoomResetController.stop();
+    void resetImageTransform(int index) {
+      final controller = transformationControllers[index];
+      if (!_hasImageTransform(controller.value)) {
+        return;
+      }
 
-    if (MediaQuery.disableAnimationsOf(context)) {
-      controller.value = Matrix4.identity();
-      _zoomResetListener = null;
-      return;
-    }
+      final previousListener = zoomResetListener.value;
+      if (previousListener != null) {
+        zoomResetController.removeListener(previousListener);
+      }
+      zoomResetController.stop();
 
-    final animation =
-        Matrix4Tween(
-          begin: Matrix4.copy(controller.value),
-          end: Matrix4.identity(),
-        ).animate(
-          CurvedAnimation(
-            parent: _zoomResetController,
-            curve: Curves.easeOutCubic,
-          ),
-        );
-    void listener() => controller.value = animation.value;
-    _zoomResetListener = listener;
-    _zoomResetController
-      ..reset()
-      ..addListener(listener)
-      ..forward();
-  }
+      if (MediaQuery.disableAnimationsOf(context)) {
+        controller.value = Matrix4.identity();
+        zoomResetListener.value = null;
+        return;
+      }
 
-  void _onImageInteractionEnd(ScaleEndDetails details) {
-    if (!_isDragging) return;
-    _finishVerticalDismiss(details.velocity.pixelsPerSecond.dy);
-  }
-
-  void _finishVerticalDismiss(double velocity) {
-    _isDragging = false;
-
-    if (_dragOffset > _dismissThreshold || velocity > _dismissVelocity) {
-      unawaited(_dismiss());
-    } else {
-      _animateSnapBack();
-    }
-  }
-
-  void _animateSnapBack() {
-    final startOffset = _dragOffset;
-    final tween = Tween<double>(begin: startOffset, end: 0);
-
-    void listener() {
-      setState(() {
-        _dragOffset = tween.evaluate(_snapBackController);
-      });
-    }
-
-    _snapBackController
-      ..stop()
-      ..reset()
-      ..addListener(listener);
-    _snapBackController
-        .animateWith(
-          SpringSimulation(
-            SpringDescription.withDurationAndBounce(
-              duration: const Duration(milliseconds: 260),
-              bounce: 0.14,
+      final animation =
+          Matrix4Tween(
+            begin: Matrix4.copy(controller.value),
+            end: Matrix4.identity(),
+          ).animate(
+            CurvedAnimation(
+              parent: zoomResetController,
+              curve: Curves.easeOutCubic,
             ),
-            0,
-            1,
-            0,
-            snapToEnd: true,
-          ),
-        )
-        .whenCompleteOrCancel(() {
-          _snapBackController.removeListener(listener);
-        });
-  }
-
-  bool get _canDismissWithHero => !_isTransformed || _disableHeroOnDismiss;
-
-  Future<void> _prepareHeroFallbackDismiss() async {
-    if (_canDismissWithHero) {
-      return;
+          );
+      void listener() => controller.value = animation.value;
+      zoomResetListener.value = listener;
+      zoomResetController
+        ..reset()
+        ..addListener(listener)
+        ..forward();
     }
 
-    setState(() {
-      _disableHeroOnDismiss = true;
-    });
+    bool canDismissWithHero() =>
+        !isTransformed.value || disableHeroOnDismiss.value;
 
-    await WidgetsBinding.instance.endOfFrame;
-  }
-
-  Future<void> _dismiss() async {
-    await _prepareHeroFallbackDismiss();
-    if (!mounted) {
-      return;
+    Future<void> prepareHeroFallbackDismiss() async {
+      if (canDismissWithHero()) {
+        return;
+      }
+      disableHeroOnDismiss.value = true;
+      await WidgetsBinding.instance.endOfFrame;
     }
-    Navigator.of(context).maybePop();
-  }
 
-  Future<void> _replyInThread() async {
-    final onReply = widget.onReply;
-    if (onReply == null) return;
-    final route = ModalRoute.of(context);
-    await _dismiss();
-    await route?.completed;
-    onReply();
-  }
+    Future<void> dismiss() async {
+      await prepareHeroFallbackDismiss();
+      if (!context.mounted) {
+        return;
+      }
+      Navigator.of(context).maybePop();
+    }
 
-  void _showMoreActions() {
-    widget.onMore?.call(context, _images[_currentIndex].url);
-  }
+    void animateSnapBack() {
+      final tween = Tween<double>(begin: dragOffset.value, end: 0);
 
-  @override
-  Widget build(BuildContext context) {
+      void listener() {
+        dragOffset.value = tween.evaluate(snapBackController);
+      }
+
+      snapBackController
+        ..stop()
+        ..reset()
+        ..addListener(listener);
+      snapBackController
+          .animateWith(
+            SpringSimulation(
+              SpringDescription.withDurationAndBounce(
+                duration: const Duration(milliseconds: 260),
+                bounce: 0.14,
+              ),
+              0,
+              1,
+              0,
+              snapToEnd: true,
+            ),
+          )
+          .whenCompleteOrCancel(() {
+            snapBackController.removeListener(listener);
+          });
+    }
+
+    void finishVerticalDismiss(double velocity) {
+      isDragging.value = false;
+      if (dragOffset.value > _dismissThreshold || velocity > _dismissVelocity) {
+        unawaited(dismiss());
+      } else {
+        animateSnapBack();
+      }
+    }
+
+    void onImageInteractionEnd(ScaleEndDetails details) {
+      if (!isDragging.value) return;
+      finishVerticalDismiss(details.velocity.pixelsPerSecond.dy);
+    }
+
+    Future<void> replyInThread() async {
+      final callback = onReply;
+      if (callback == null) return;
+      final route = ModalRoute.of(context);
+      await dismiss();
+      await route?.completed;
+      callback();
+    }
+
+    void showMoreActions() {
+      onMore?.call(context, images[currentIndex.value].url);
+    }
+
     final viewportHeight = MediaQuery.sizeOf(context).height;
-    final dragProgress = (_dragOffset / viewportHeight).clamp(0.0, 1.0);
+    final dragProgress = (dragOffset.value / viewportHeight).clamp(0.0, 1.0);
     final imageScale = 1 - (dragProgress * 0.1);
-    final chromeOpacity = (1 - (_dragOffset / 160)).clamp(0.0, 1.0);
+    final chromeOpacity = (1 - (dragOffset.value / 160)).clamp(0.0, 1.0);
 
     return PopScope<void>(
-      canPop: _canDismissWithHero,
+      canPop: canDismissWithHero(),
       onPopInvokedWithResult: (didPop, result) {
         if (didPop) {
           return;
         }
-        unawaited(_dismiss());
+        unawaited(dismiss());
       },
       child: Scaffold(
         key: const ValueKey('message-media-image-viewer'),
         backgroundColor: Colors.black.withValues(
-          alpha: (1 - (_dragOffset.abs() / _backgroundFadeDivisor)).clamp(
+          alpha: (1 - (dragOffset.value.abs() / _backgroundFadeDivisor)).clamp(
             0.3,
             1.0,
           ),
@@ -592,19 +502,19 @@ class _MediaImageViewerPageState extends State<MediaImageViewerPage>
           children: [
             Positioned.fill(
               child: Transform.translate(
-                offset: Offset(0, _dragOffset),
+                offset: Offset(0, dragOffset.value),
                 child: Transform.scale(
                   scale: imageScale,
                   child: PageView.builder(
                     key: const ValueKey('message-media-image-viewer-pages'),
-                    controller: _pageController,
-                    physics: _isTransformed
+                    controller: pageController,
+                    physics: isTransformed.value
                         ? const NeverScrollableScrollPhysics()
                         : const PageScrollPhysics(),
-                    itemCount: _images.length,
-                    onPageChanged: _onPageChanged,
+                    itemCount: images.length,
+                    onPageChanged: onPageChanged,
                     itemBuilder: (context, index) {
-                      final image = _images[index];
+                      final image = images[index];
                       final viewPadding = MediaQuery.viewPaddingOf(context);
                       return Padding(
                         padding: EdgeInsets.only(
@@ -622,16 +532,16 @@ class _MediaImageViewerPageState extends State<MediaImageViewerPage>
                                 'message-media-image-viewer-gesture:$index',
                               ),
                               behavior: HitTestBehavior.opaque,
-                              onDoubleTap: () => _resetImageTransform(index),
+                              onDoubleTap: () => resetImageTransform(index),
                               child: InteractiveViewer(
                                 transformationController:
-                                    _transformationControllers[index],
+                                    transformationControllers[index],
                                 onInteractionStart: (details) =>
-                                    _onImageInteractionStart(index, details),
+                                    onImageInteractionStart(index, details),
                                 onInteractionUpdate: (details) =>
-                                    _onImageInteractionUpdate(index, details),
-                                onInteractionEnd: _onImageInteractionEnd,
-                                panEnabled: _isTransformed,
+                                    onImageInteractionUpdate(index, details),
+                                onInteractionEnd: onImageInteractionEnd,
+                                panEnabled: isTransformed.value,
                                 scaleEnabled: true,
                                 minScale: 1,
                                 maxScale: 4,
@@ -643,7 +553,7 @@ class _MediaImageViewerPageState extends State<MediaImageViewerPage>
                                     width: viewerSize.width,
                                     height: viewerSize.height,
                                     child: HeroMode(
-                                      key: index == _initialIndex
+                                      key: index == safeInitialIndex
                                           ? const ValueKey(
                                               'message-media-image-viewer-hero-mode',
                                             )
@@ -651,8 +561,8 @@ class _MediaImageViewerPageState extends State<MediaImageViewerPage>
                                               'message-media-image-viewer-hero-mode-$index',
                                             ),
                                       enabled:
-                                          !_disableHeroOnDismiss &&
-                                          index == _initialIndex,
+                                          !disableHeroOnDismiss.value &&
+                                          index == safeInitialIndex,
                                       child: MediaViewerHero(
                                         tag: image.heroTag,
                                         child: MediaImage(
@@ -661,9 +571,8 @@ class _MediaImageViewerPageState extends State<MediaImageViewerPage>
                                           ),
                                           url: image.url,
                                           decodeWidth:
-                                              _fullResolutionIndices.contains(
-                                                index,
-                                              )
+                                              fullResolutionIndices.value
+                                                  .contains(index)
                                               ? null
                                               : image.previewDecodeWidth,
                                           boundDecodeToLayout: false,
@@ -697,25 +606,27 @@ class _MediaImageViewerPageState extends State<MediaImageViewerPage>
                 opacity: chromeOpacity,
                 child: SafeArea(
                   child: _MediaViewerBottomControls(
-                    images: _images,
-                    currentIndex: _currentIndex,
-                    pagePosition: _pagePosition,
-                    onScrubUpdate: _onFilmstripScrubUpdate,
-                    onScrubEnd: _onFilmstripScrubEnd,
+                    images: images,
+                    currentIndex: currentIndex.value,
+                    pagePosition: pagePosition,
+                    onScrubUpdate: onFilmstripScrubUpdate,
+                    onScrubEnd: onFilmstripScrubEnd,
                     onSelect: (index) {
-                      if (index == _currentIndex) return;
-                      _pageController.animateToPage(
+                      if (index == currentIndex.value) return;
+                      if (MediaQuery.disableAnimationsOf(context)) {
+                        pageController.jumpToPage(index);
+                        return;
+                      }
+                      pageController.animateToPage(
                         index,
-                        duration: MediaQuery.disableAnimationsOf(context)
-                            ? Duration.zero
-                            : const Duration(milliseconds: 220),
+                        duration: const Duration(milliseconds: 220),
                         curve: Curves.easeOutCubic,
                       );
                     },
-                    onReply: widget.onReply == null
+                    onReply: onReply == null
                         ? null
-                        : () => unawaited(_replyInThread()),
-                    onMore: widget.onMore == null ? null : _showMoreActions,
+                        : () => unawaited(replyInThread()),
+                    onMore: onMore == null ? null : showMoreActions,
                   ),
                 ),
               ),
@@ -730,7 +641,7 @@ class _MediaImageViewerPageState extends State<MediaImageViewerPage>
                     key: const ValueKey('message-media-image-viewer-close'),
                     icon: LucideIcons.x,
                     tooltip: 'Close image viewer',
-                    onPressed: () => unawaited(_dismiss()),
+                    onPressed: () => unawaited(dismiss()),
                   ),
                 ),
               ),

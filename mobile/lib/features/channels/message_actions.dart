@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -240,7 +241,7 @@ void showImageActions({
                   color: sheetContext.colors.error,
                 ),
                 title: Text(
-                  'Delete upload',
+                  'Delete message',
                   style: TextStyle(color: sheetContext.colors.error),
                 ),
                 onTap: () {
@@ -285,14 +286,16 @@ Future<_DownloadedImage> _downloadImage(WidgetRef ref, String imageUrl) async {
   }
   return _DownloadedImage(
     bytes: response.bodyBytes,
-    filename: _downloadedImageFilename(
+    filename: downloadedImageFilename(
       imageUrl,
       response.headers['content-type'],
     ),
   );
 }
 
-String _downloadedImageFilename(String imageUrl, String? contentType) {
+/// Returns a safe image filename while preserving supported image formats.
+@visibleForTesting
+String downloadedImageFilename(String imageUrl, String? contentType) {
   final pathSegments = Uri.tryParse(imageUrl)?.pathSegments;
   final rawName = pathSegments == null || pathSegments.isEmpty
       ? ''
@@ -301,13 +304,14 @@ String _downloadedImageFilename(String imageUrl, String? contentType) {
       .replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '-')
       .replaceAll(RegExp(r'-+'), '-');
   if (RegExp(
-    r'\.(avif|bmp|heic|heif|jpe?g|png|webp)$',
+    r'\.(avif|bmp|gif|heic|heif|jpe?g|png|webp)$',
     caseSensitive: false,
   ).hasMatch(safeName)) {
     return safeName;
   }
   final extension = switch (contentType?.split(';').first.trim()) {
     'image/avif' => '.avif',
+    'image/gif' => '.gif',
     'image/heic' => '.heic',
     'image/heif' => '.heif',
     'image/png' => '.png',
@@ -324,6 +328,25 @@ Future<void> _saveImage(
 ) async {
   final messenger = ScaffoldMessenger.maybeOf(context);
   try {
+    final needsPhotoLibraryPermission =
+        defaultTargetPlatform == TargetPlatform.iOS ||
+        await requiresLegacyMediaStoragePermission();
+    if (needsPhotoLibraryPermission) {
+      final permission = await PhotoManager.requestPermissionExtend(
+        requestOption: const PermissionRequestOption(
+          iosAccessLevel: IosAccessLevel.addOnly,
+          androidPermission: AndroidPermission(
+            type: RequestType.image,
+            mediaLocation: false,
+          ),
+        ),
+      );
+      if (!permission.isAuth) {
+        throw const FileSystemException(
+          'Photo library permission was not granted.',
+        );
+      }
+    }
     final image = await _downloadImage(ref, imageUrl);
     await PhotoManager.editor.saveImage(image.bytes, filename: image.filename);
     messenger?.showSnackBar(

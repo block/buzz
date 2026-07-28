@@ -9,12 +9,23 @@ import 'package:buzz/features/channels/media_viewer_page.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 
-Widget _testable(Widget child, {List<Override> overrides = const []}) {
+Widget _testable(
+  Widget child, {
+  List<Override> overrides = const [],
+  bool disableAnimations = false,
+}) {
   return ProviderScope(
     overrides: overrides,
     child: MaterialApp(
       theme: AppTheme.light(),
-      home: Scaffold(body: child),
+      home: Builder(
+        builder: (context) => MediaQuery(
+          data: MediaQuery.of(
+            context,
+          ).copyWith(disableAnimations: disableAnimations),
+          child: Scaffold(body: child),
+        ),
+      ),
     ),
   );
 }
@@ -527,6 +538,110 @@ Photos
           expect(thirdSemantics.properties.selected, isTrue);
         },
       );
+
+      testWidgets(
+        'jumps to a selected gallery thumbnail when motion is disabled',
+        (tester) async {
+          const first = 'https://example.com/media/reduced-motion-one.png';
+          const second = 'https://example.com/media/reduced-motion-two.png';
+          await tester.pumpWidget(
+            _testable(
+              const MessageContent(
+                content:
+                    '''
+![image]($first)
+![image]($second)
+''',
+                tags: [
+                  ['imeta', 'url $first', 'm image/png'],
+                  ['imeta', 'url $second', 'm image/png'],
+                ],
+              ),
+              disableAnimations: true,
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          await tester.tap(
+            find.byKey(const ValueKey('message-media-carousel-item:$first')),
+          );
+          await tester.pumpAndSettle();
+          await tester.tap(
+            find.byKey(
+              const ValueKey('message-media-image-viewer-thumbnail:1'),
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          final selectedThumbnail = tester.widget<Semantics>(
+            find
+                .ancestor(
+                  of: find.byKey(
+                    const ValueKey('message-media-image-viewer-thumbnail:1'),
+                  ),
+                  matching: find.byType(Semantics),
+                )
+                .first,
+          );
+          expect(selectedThumbnail.properties.selected, isTrue);
+          expect(tester.takeException(), isNull);
+        },
+      );
+
+      testWidgets('resets carousel paging when gallery images change', (
+        tester,
+      ) async {
+        const firstGallery = [
+          'https://example.com/media/first-a.png',
+          'https://example.com/media/first-b.png',
+          'https://example.com/media/first-c.png',
+        ];
+        const secondGallery = [
+          'https://example.com/media/second-a.png',
+          'https://example.com/media/second-b.png',
+        ];
+
+        Widget gallery(List<String> urls) => _testable(
+          MessageContent(
+            content: urls.map((url) => '![image]($url)').join('\n'),
+            tags: [
+              for (final url in urls) ['imeta', 'url $url', 'm image/png'],
+            ],
+          ),
+        );
+
+        await tester.pumpWidget(gallery(firstGallery));
+        await tester.pumpAndSettle();
+        final firstCarousel = tester.widget<PageView>(
+          find.descendant(
+            of: find.byKey(const ValueKey('message-media-carousel')),
+            matching: find.byType(PageView),
+          ),
+        );
+
+        await tester.fling(
+          find.byKey(const ValueKey('message-media-carousel')),
+          const Offset(-700, 0),
+          1200,
+        );
+        await tester.pumpAndSettle();
+        expect(firstCarousel.controller!.page, greaterThan(0));
+
+        await tester.pumpWidget(gallery(secondGallery));
+        await tester.pumpAndSettle();
+        final secondCarousel = tester.widget<PageView>(
+          find.descendant(
+            of: find.byKey(const ValueKey('message-media-carousel')),
+            matching: find.byType(PageView),
+          ),
+        );
+
+        expect(
+          secondCarousel.controller,
+          isNot(same(firstCarousel.controller)),
+        );
+        expect(secondCarousel.controller!.page, 0);
+      });
 
       testWidgets(
         'disables hero on close after the fullscreen image is transformed',

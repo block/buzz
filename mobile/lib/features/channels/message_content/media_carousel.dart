@@ -107,6 +107,7 @@ class _MessageImageCarousel extends HookConsumerWidget {
   final MediaViewerMoreAction? onMore;
 
   const _MessageImageCarousel({
+    super.key,
     required this.items,
     required this.leadingOverflow,
     required this.trailingOverflow,

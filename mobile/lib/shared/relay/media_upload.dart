@@ -21,6 +21,8 @@ const _mediaUploadPlatformChannelName = 'buzz/media_upload';
 const _sanitizeImageForUploadMethod = 'sanitizeImageForUpload';
 const _transcodeVideoToMp4Method = 'transcodeVideoToMp4';
 const _transcodeImageToJpegMethod = 'transcodeImageToJpeg';
+const _requiresLegacyMediaStoragePermissionMethod =
+    'requiresLegacyMediaStoragePermission';
 const _readClipboardImageMethod = 'readClipboardImage';
 const _clipboardHasImageMethod = 'clipboardHasImage';
 const _uploadAuthKind = 24242;
@@ -38,6 +40,17 @@ const _heicBrands = {
 final _mediaUploadPlatformChannel = MethodChannel(
   _mediaUploadPlatformChannelName,
 );
+
+/// Whether saving media needs Android's pre-scoped-storage runtime permission.
+Future<bool> requiresLegacyMediaStoragePermission() async {
+  if (defaultTargetPlatform != TargetPlatform.android) {
+    return false;
+  }
+  return await _mediaUploadPlatformChannel.invokeMethod<bool>(
+        _requiresLegacyMediaStoragePermissionMethod,
+      ) ??
+      false;
+}
 
 const _allowedImageMimeTypes = {
   'image/jpeg',

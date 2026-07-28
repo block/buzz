@@ -244,6 +244,9 @@ class MessageContent extends HookConsumerWidget {
       children: [
         if (trailingGallery.content.trim().isNotEmpty) markdown,
         _MessageImageCarousel(
+          key: ValueKey(
+            trailingGallery.items.map((item) => item.url).join('\u0000'),
+          ),
           items: trailingGallery.items,
           leadingOverflow: mediaCarouselLeadingOverflow,
           trailingOverflow: mediaCarouselTrailingOverflow,
