@@ -260,13 +260,7 @@ export function useReactionHandler(
         setPending(false);
       }
     },
-    [
-      message,
-      onToggleReaction,
-      pending,
-      reactions,
-      sourceReactions,
-    ],
+    [message, onToggleReaction, pending, reactions, sourceReactions],
   );
 
   return {

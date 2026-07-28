@@ -242,6 +242,15 @@ desktop-release-build target="aarch64-apple-darwin":
     pnpm install
     cd {{desktop_dir}} && pnpm tauri build --features mesh-llm --target {{target}}
 
+# Sign and install the locally built macOS app with a stable local identity.
+# Run once with `--create-identity` if this machine has no code-signing identity.
+desktop-install-local-macos *ARGS:
+    ./desktop/scripts/install-local-macos-app.sh {{ARGS}}
+
+# Verify the installed macOS app has a stable Keychain-friendly signature.
+desktop-signing-status:
+    ./desktop/scripts/install-local-macos-app.sh --status
+
 # Run desktop checks suitable for CI / pre-push
 desktop-ci: desktop-check desktop-test desktop-tauri-fmt-check desktop-build desktop-tauri-check desktop-tauri-test
 

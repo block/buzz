@@ -1,5 +1,13 @@
 import * as React from "react";
-import { Building2, Check, Copy, Pencil, ShieldBan, Trash2, X } from "lucide-react";
+import {
+  Building2,
+  Check,
+  Copy,
+  Pencil,
+  ShieldBan,
+  Trash2,
+  X,
+} from "lucide-react";
 
 import type { TimelineReaction } from "@/features/messages/types";
 import {
@@ -83,9 +91,7 @@ export function CrmActionCard({
       ? extractCrmRedditDraft(action.content)
       : null;
   const calendarSlots =
-    action.actionType === "calendar_book"
-      ? action.calendarSlots ?? []
-      : [];
+    action.actionType === "calendar_book" ? (action.calendarSlots ?? []) : [];
   const leadControlReactions =
     action.actionType === "lead_control"
       ? (action.leadControlChoices ??

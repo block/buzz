@@ -14,7 +14,10 @@ export type CrmActionCard = {
 
 export type CrmCalendarSlot = { label: string; reaction: string };
 
-const CONTROL_REACTIONS: Record<CrmActionCard["actionType"], readonly string[]> = {
+const CONTROL_REACTIONS: Record<
+  CrmActionCard["actionType"],
+  readonly string[]
+> = {
   reddit_mark_posted: ["✅", "❌"],
   lead_categorize: ["👍", "📅", "ℹ️", "👎", "🕒", "⛔", "🔀", "❌"],
   outreach_approve: ["✅", "❌", "✏️"],
@@ -54,9 +57,10 @@ function readableContent(
     .replace(ACTION_FOOTERS[actionType], "")
     .replace(LEAD_CONTROL_OPTIONS, "");
 
-  return (actionType === "calendar_book"
-    ? readable.replace(CALENDAR_SLOT, "").replace(/\n{3,}/g, "\n\n")
-    : readable
+  return (
+    actionType === "calendar_book"
+      ? readable.replace(CALENDAR_SLOT, "").replace(/\n{3,}/g, "\n\n")
+      : readable
   ).trim();
 }
 
@@ -99,7 +103,9 @@ export function isCrmActionControlReaction(
   action: CrmActionCard | null,
   emoji: string,
 ): boolean {
-  return Boolean(action && CONTROL_REACTIONS[action.actionType].includes(emoji));
+  return Boolean(
+    action && CONTROL_REACTIONS[action.actionType].includes(emoji),
+  );
 }
 
 /** Return only the explicitly delimited read-only Reddit draft, if present. */
@@ -110,9 +116,7 @@ export function extractCrmRedditDraft(content: string): string | null {
 }
 
 /** Return the booked-slot choices that CRM explicitly rendered for this card. */
-export function extractCrmCalendarSlots(
-  content: string,
-): CrmCalendarSlot[] {
+export function extractCrmCalendarSlots(content: string): CrmCalendarSlot[] {
   const slots: CrmCalendarSlot[] = [];
   const seen = new Set<number>();
 

@@ -59,6 +59,10 @@ doc/
 # Local identity files
 identity.key
 **/identity.key
+*.p12
+*.pfx
+*.pem
+*.key
 
 # Claude Code worktrees
 .claude/worktrees/

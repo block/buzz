@@ -92,17 +92,9 @@ test("applyOptimisticReaction: no-op when adding an emoji the user already react
 });
 
 test("replaceOwnChoiceReactions: keeps exactly one selected safeguard reaction", () => {
-  const source = [
-    pill("⛔", 1, true),
-    pill("🏢", 1),
-    pill("❤️", 1),
-  ];
+  const source = [pill("⛔", 1, true), pill("🏢", 1), pill("❤️", 1)];
 
-  const result = replaceOwnChoiceReactions(
-    source,
-    ["⛔", "🏢", "🗑️"],
-    "🏢",
-  );
+  const result = replaceOwnChoiceReactions(source, ["⛔", "🏢", "🗑️"], "🏢");
 
   assert.deepEqual(
     result.map((reaction) => [reaction.emoji, reaction.reactedByCurrentUser]),

@@ -60,20 +60,25 @@ pub fn build_imeta_tag(d: &BlobDescriptor) -> Vec<String> {
     tag
 }
 
-/// MIME types accepted for upload.
-const ALLOWED_MIMES: &[&str] = &[
-    "image/jpeg",
-    "image/png",
-    "image/gif",
-    "image/webp",
-    "video/mp4",
-];
-
 /// Maximum file size for image uploads (50 MB).
 const MAX_IMAGE_BYTES: u64 = 50 * 1024 * 1024;
 
 /// Maximum file size for video uploads (500 MB).
 const MAX_VIDEO_BYTES: u64 = 500 * 1024 * 1024;
+
+/// Maximum generic attachment size. This matches the relay's default
+/// `BUZZ_MAX_FILE_BYTES`; the relay remains the final authority.
+const MAX_FILE_BYTES: u64 = 100 * 1024 * 1024;
+
+fn max_upload_bytes(mime: &str) -> u64 {
+    if mime.starts_with("video/") {
+        MAX_VIDEO_BYTES
+    } else if mime.starts_with("image/") {
+        MAX_IMAGE_BYTES
+    } else {
+        MAX_FILE_BYTES
+    }
+}
 
 /// Sign a NIP-98 HTTP auth event (kind:27235) and return the Authorization header value.
 ///
@@ -1113,16 +1118,11 @@ impl BuzzClient {
             .map(|t| t.mime_type().to_string())
             .unwrap_or_else(|| "application/octet-stream".to_string());
 
-        if !ALLOWED_MIMES.contains(&mime.as_str()) {
-            return Err(CliError::Usage(format!("unsupported file type: {mime}")));
-        }
-
-        // 3. Size check
-        let max = if mime.starts_with("video/") {
-            MAX_VIDEO_BYTES
-        } else {
-            MAX_IMAGE_BYTES
-        };
+        // 3. Size check. The relay owns content-type validation for generic
+        // attachments (documents, archives, and deny-listed active content).
+        // Keeping a partial MIME allow-list here would reject safe formats
+        // such as PDFs before the relay can apply its authoritative policy.
+        let max = max_upload_bytes(&mime);
         if bytes.len() as u64 > max {
             return Err(CliError::Usage(format!(
                 "file too large: {} bytes (max {})",
@@ -1588,7 +1588,7 @@ mod retry_policy_tests {
     use axum::body::Body;
     use axum::extract::State;
     use axum::http::{HeaderMap, Response, StatusCode};
-    use axum::routing::post;
+    use axum::routing::{post, put};
     use axum::Router;
     use nostr::{EventBuilder, Keys, Kind};
     use tokio::net::TcpListener;
@@ -2199,6 +2199,45 @@ mod retry_policy_tests {
         );
     }
 
+    /// Generic attachments are validated by the relay, which knows the active
+    /// file deny-list. The CLI must not reject a safe document before it reaches
+    /// that authoritative validation path.
+    #[tokio::test]
+    async fn upload_file_allows_relay_validated_pdf_attachments() {
+        use std::io::Write;
+
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(b"%PDF-1.7\n% local test fixture\n").unwrap();
+        let file_path = tmp.path().to_str().unwrap().to_string();
+
+        let attempts = Arc::new(AtomicU32::new(0));
+        let attempts_for_handler = attempts.clone();
+        let app = Router::new().route(
+            "/upload",
+            put(move |_headers: HeaderMap, _body: Body| {
+                let attempts = attempts_for_handler.clone();
+                async move {
+                    attempts.fetch_add(1, Ordering::SeqCst);
+                    let body = r#"{"url":"https://relay.test/media/document.pdf","sha256":"aabbcc","size":28,"type":"application/pdf","uploaded":0}"#;
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap()
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let client = test_client(&format!("http://{addr}"));
+        let descriptor = client.upload_file(&file_path).await.unwrap();
+
+        assert_eq!(descriptor.mime_type, "application/pdf");
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
     /// When all retry attempts for a stored event end with a partial body (200
     /// headers, dropped connection), the final error must be `DeliveryUnknown`
     /// (retryable:false) — the relay may have stored the event on any attempt, so
@@ -2297,7 +2336,8 @@ mod retry_policy_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        advance_query_cursor, create_response_with_id, extract_relay_response_field, BuzzClient,
+        advance_query_cursor, create_response_with_id, extract_relay_response_field,
+        max_upload_bytes, BuzzClient, MAX_FILE_BYTES, MAX_IMAGE_BYTES, MAX_VIDEO_BYTES,
     };
     use nostr::{EventBuilder, Keys, Kind, Tag};
 
@@ -2313,6 +2353,14 @@ mod tests {
 
         assert_eq!(filter["until"], serde_json::json!(10));
         assert_eq!(filter["before_id"], serde_json::json!("b".repeat(64)));
+    }
+
+    #[test]
+    fn generic_attachments_use_the_relay_file_limit() {
+        assert_eq!(max_upload_bytes("application/octet-stream"), MAX_FILE_BYTES);
+        assert_eq!(max_upload_bytes("application/pdf"), MAX_FILE_BYTES);
+        assert_eq!(max_upload_bytes("image/png"), MAX_IMAGE_BYTES);
+        assert_eq!(max_upload_bytes("video/mp4"), MAX_VIDEO_BYTES);
     }
 
     #[test]

@@ -15,6 +15,7 @@ DRY_RUN=0
 STATUS_ONLY=0
 SEARCH_LIST_CHANGED=0
 ORIGINAL_KEYCHAINS=""
+IDENTITY_TMPDIR=""
 
 usage() {
   cat <<'USAGE'
@@ -191,7 +192,19 @@ ensure_keychain_in_search_list() {
   SEARCH_LIST_CHANGED=1
 }
 
-trap restore_keychain_search_list EXIT
+cleanup_on_exit() {
+  local status=$?
+
+  if [[ -n "$IDENTITY_TMPDIR" && -d "$IDENTITY_TMPDIR" ]]; then
+    chmod -R u+w "$IDENTITY_TMPDIR" >/dev/null 2>&1 || true
+    rm -rf -- "$IDENTITY_TMPDIR" >/dev/null 2>&1 || true
+  fi
+
+  restore_keychain_search_list || true
+  exit "$status"
+}
+
+trap cleanup_on_exit EXIT
 
 find_identity_hash() {
   security find-identity -p codesigning -v 2>/dev/null |
@@ -208,8 +221,8 @@ create_identity() {
     return 0
   fi
 
-  local tmpdir
-  tmpdir="$(mktemp -d /tmp/buzz-local-codesign.XXXXXX)"
+  IDENTITY_TMPDIR="$(mktemp -d /tmp/buzz-local-codesign.XXXXXX)"
+  local tmpdir="$IDENTITY_TMPDIR"
   local cert="$tmpdir/codesign.crt"
   local key="$tmpdir/codesign.key"
   local p12="$tmpdir/codesign.p12"
@@ -236,7 +249,8 @@ create_identity() {
   security add-trusted-cert -r trustRoot -p codeSign -k "$KEYCHAIN_PATH" "$cert" >/dev/null
 
   chmod -R u+w "$tmpdir"
-  rm -R "$tmpdir"
+  rm -rf -- "$tmpdir"
+  IDENTITY_TMPDIR=""
 }
 
 sign_nested_executables() {
