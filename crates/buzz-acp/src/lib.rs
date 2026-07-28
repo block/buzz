@@ -4140,10 +4140,37 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
 }
 
 fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
-    if config.mcp_command.is_empty() {
-        return vec![];
+    let browser = std::env::var("BUZZ_ACP_BROWSER_MCP_COMMAND")
+        .ok()
+        .filter(|command| !command.is_empty())
+        .map(|command| {
+            let args = std::env::var("BUZZ_ACP_BROWSER_MCP_ARGS")
+                .ok()
+                .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
+                .unwrap_or_default();
+            (command, args)
+        });
+    build_mcp_servers_with_browser(config, browser)
+}
+
+fn build_mcp_servers_with_browser(
+    config: &Config,
+    browser: Option<(String, Vec<String>)>,
+) -> Vec<McpServer> {
+    let mut servers = Vec::new();
+    if let Some((command, args)) = browser {
+        servers.push(McpServer {
+            name: "playwright".into(),
+            command,
+            args,
+            env: vec![],
+        });
     }
-    vec![McpServer {
+
+    if config.mcp_command.is_empty() {
+        return servers;
+    }
+    servers.push(McpServer {
         name: std::path::Path::new(&config.mcp_command)
             .file_stem()
             .and_then(|s| s.to_str())
@@ -4193,7 +4220,8 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
             }
             env
         },
-    }]
+    });
+    servers
 }
 
 #[cfg(test)]
@@ -5146,6 +5174,43 @@ mod build_mcp_servers_tests {
             servers[0].name, "mcp",
             "Path::new(\".\").file_stem() is None — should fall back to \"mcp\""
         );
+    }
+
+    #[test]
+    fn browser_mcp_is_added_alongside_dev_mcp() {
+        let config = test_config();
+        let servers = build_mcp_servers_with_browser(
+            &config,
+            Some((
+                "/opt/homebrew/bin/npx".into(),
+                vec![
+                    "--yes".into(),
+                    "@playwright/mcp@0.0.78".into(),
+                    "--browser".into(),
+                    "chrome".into(),
+                    "--isolated".into(),
+                ],
+            )),
+        );
+
+        assert_eq!(servers.len(), 2);
+        assert_eq!(servers[0].name, "playwright");
+        assert_eq!(servers[0].command, "/opt/homebrew/bin/npx");
+        assert_eq!(servers[0].args[1], "@playwright/mcp@0.0.78");
+        assert_eq!(servers[1].name, "test-mcp-server");
+    }
+
+    #[test]
+    fn browser_mcp_works_without_dev_mcp() {
+        let mut config = test_config();
+        config.mcp_command.clear();
+        let servers = build_mcp_servers_with_browser(
+            &config,
+            Some(("npx".into(), vec!["@playwright/mcp@0.0.78".into()])),
+        );
+
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].name, "playwright");
     }
 }
 
