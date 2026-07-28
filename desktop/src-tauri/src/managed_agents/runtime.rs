@@ -1488,9 +1488,8 @@ pub fn build_managed_agent_summary(
             hash_drift || availability_drift
         });
 
-    // Resolve the effective harness the same way, then derive args/mcp from it,
-    // so the UI reflects the persona's current harness (or an explicit pin).
-    let effective_command = crate::managed_agents::record_agent_command(record, personas);
+    let effective_command =
+        crate::managed_agents::record_agent_command_for_app(app, record, personas);
     let effective_args = normalize_agent_args(&effective_command, record.agent_args.clone());
     let effective_mcp_command = known_acp_runtime(&effective_command)
         .and_then(|r| r.mcp_command)
@@ -1669,10 +1668,11 @@ pub fn spawn_agent_child(
     // frozen record snapshot. Mirrors the model resolution below.
     let personas = super::load_personas(app).unwrap_or_default();
     let teams = super::load_teams(app).unwrap_or_default();
-    // Load global config once; used for runtime_metadata_env_vars (model/provider fallback)
-    // and for the env-var merge at spawn time.
+    // Load global config once for runtime metadata and the spawn environment.
     let global = crate::managed_agents::load_global_agent_config(app).unwrap_or_default();
-    let effective_command = super::record_agent_command(record, &personas);
+    let preferred_runtime = global.preferred_runtime.as_deref();
+    let effective_command =
+        super::record_agent_command_with_preferred_runtime(record, &personas, preferred_runtime);
     let agent_args = normalize_agent_args(&effective_command, record.agent_args.clone());
     let resolved_acp_command = resolve_command(&record.acp_command)
         .ok_or_else(|| missing_command_message(&record.acp_command, "ACP harness command"))?;
@@ -1745,8 +1745,13 @@ pub fn spawn_agent_child(
     // Enable MCP hook tools (_Stop, _PostCompact) for agents that need them.
     // Uses "*" because build_mcp_servers() hard-codes the server name to "buzz-mcp".
     let runtime_meta = known_acp_runtime(&effective_command);
-    if runtime_meta.is_some_and(|r| r.mcp_hooks) {
+    if command_adviser::should_enable_mcp_hooks(
+        runtime_meta.is_some_and(|runtime| runtime.mcp_hooks),
+        record.persona_id.as_deref(),
+    ) {
         command.env("MCP_HOOK_SERVERS", "*");
+    } else {
+        command.env_remove("MCP_HOOK_SERVERS");
     }
 
     // ── Readiness check: set setup-payload if agent is not ready ─────────────

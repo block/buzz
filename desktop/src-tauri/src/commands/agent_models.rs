@@ -11,7 +11,9 @@ pub use lmstudio::{get_lmstudio_readiness, LmStudioReadinessState};
 use lmstudio::{lmstudio_readiness_from_models, normalize_lmstudio_models};
 pub(crate) use lmstudio::{read_lmstudio_readiness, LmStudioReadiness};
 mod discovery_config;
+mod harness_restart;
 use discovery_config::{saved_agent_model_discovery_config, DiscoverAgentModelsInput};
+use harness_restart::{restart_live_pairs, should_restart_after_harness_edit};
 
 use super::agent_model_process::run_agent_models_command;
 use super::agent_update_rollback::{rollback_failed_agent_update, AgentUpdateRollback};
@@ -72,8 +74,8 @@ pub async fn get_agent_models(
         // frozen record snapshot. An explicit per-agent override wins.
         let personas = load_personas(&app).unwrap_or_default();
         let global = crate::managed_agents::load_global_agent_config(&app).unwrap_or_default();
-        let effective_command = crate::managed_agents::record_agent_command(record, &personas);
-
+        let effective_command =
+            crate::managed_agents::record_agent_command_for_app(&app, record, &personas);
         let args = normalize_agent_args(&effective_command, record.agent_args.clone());
 
         let resolved_agent = resolve_command(&effective_command)
@@ -81,9 +83,7 @@ pub async fn get_agent_models(
             .unwrap_or_else(|| effective_command.clone());
 
         // Discovery uses the same live agent → persona → global projection as
-        // readiness and spawn, including the post-user-layer native security
-        // projection. A saved record therefore cannot become stale when its
-        // linked persona or global fallback changes.
+        // readiness and spawn.
         let discovery = saved_agent_model_discovery_config(record, &personas, &global);
 
         (
@@ -762,9 +762,6 @@ async fn discover_databricks_models(
 
 /// Update mutable fields on an existing managed agent record.
 ///
-/// Does NOT auto-restart the agent. Runtime config changes (system prompt,
-/// parallelism, commands, toolsets) take effect on the next agent spawn.
-/// Name changes are synced to the relay immediately via a kind:0 re-publish.
 #[tauri::command]
 pub async fn update_managed_agent(
     input: UpdateManagedAgentRequest,
@@ -772,7 +769,7 @@ pub async fn update_managed_agent(
     state: State<'_, AppState>,
 ) -> Result<UpdateManagedAgentResponse, String> {
     // Phase 1: local save (synchronous, under lock)
-    let (summary, sync_params, rollback) = {
+    let (summary, sync_params, rollback, restart_keys) = {
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
@@ -790,7 +787,9 @@ pub async fn update_managed_agent(
 
         let record = find_managed_agent_mut(&mut records, &input.pubkey)?;
         let previous_record = record.clone();
-
+        let personas = load_personas(&app).unwrap_or_default();
+        let previous_command =
+            crate::managed_agents::record_agent_command_for_app(&app, &previous_record, &personas);
         let mut name_changed = false;
         if let Some(name_update) = input.name {
             let trimmed = name_update.trim().to_string();
@@ -898,10 +897,21 @@ pub async fn update_managed_agent(
             .iter()
             .find(|r| r.pubkey == input.pubkey)
             .ok_or_else(|| format!("agent {} not found", input.pubkey))?;
+        let current_command =
+            crate::managed_agents::record_agent_command_for_app(&app, record, &personas);
+        let live_keys =
+            crate::managed_agents::managed_agent_runtime_keys(&runtimes, &record.pubkey);
+        let restart_keys = if should_restart_after_harness_edit(
+            &previous_command,
+            &current_command,
+            record.auto_restart_on_config_change,
+            live_keys.len(),
+        ) {
+            live_keys
+        } else {
+            Vec::new()
+        };
 
-        // Publish the edit to the relay. After-save, inside the lock, before
-        // any .await. The retention upsert hashes the opt-IN projection, so an
-        // update that touched only runtime/local fields is a no-op publish.
         super::agents::retain_managed_agent_pending(&app, &state, record);
 
         let sync_params = if name_changed {
@@ -918,7 +928,8 @@ pub async fn update_managed_agent(
             // not the frozen snapshot, so an inherited harness picks the right
             // default avatar.
             let personas = load_personas(&app).unwrap_or_default();
-            let effective_command = crate::managed_agents::record_agent_command(record, &personas);
+            let effective_command =
+                crate::managed_agents::record_agent_command_for_app(&app, record, &personas);
             let avatar_url = record
                 .avatar_url
                 .clone()
@@ -934,7 +945,7 @@ pub async fn update_managed_agent(
             build_managed_agent_summary(&app, record, &runtimes, &personas)?
         };
         let rollback = name_changed.then(|| AgentUpdateRollback::new(previous_record, record));
-        (summary, sync_params, rollback)
+        (summary, sync_params, rollback, restart_keys)
     }; // lock dropped here
 
     try_regenerate_nest(&app);
@@ -962,6 +973,8 @@ pub async fn update_managed_agent(
             ));
         }
     }
+
+    restart_live_pairs(&app, &summary.pubkey, restart_keys);
 
     Ok(UpdateManagedAgentResponse {
         agent: summary,

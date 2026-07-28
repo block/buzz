@@ -29,11 +29,10 @@ export type ModelRoutingPreference = "cloud_first" | "local_first";
 export type WorldMonitorConnection = {
   readonly endpoint: string;
   readonly status:
-    | "not_configured"
-    | "configured"
+    | "not_connected"
     | "connected"
     | "unavailable"
-    | "unauthorised"
+    | "reauthorise"
     | "quota_limited";
   readonly briefUsed: number;
   readonly briefLimit: 25;
@@ -42,11 +41,10 @@ export type WorldMonitorConnection = {
 };
 
 const WORLD_MONITOR_STATUSES = new Set([
-  "not_configured",
-  "configured",
+  "not_connected",
   "connected",
   "unavailable",
-  "unauthorised",
+  "reauthorise",
   "quota_limited",
 ]);
 
@@ -208,17 +206,15 @@ export async function getWorldMonitorConnection(): Promise<WorldMonitorConnectio
   );
 }
 
-export async function saveWorldMonitorApiKey(
-  apiKey: string,
-): Promise<WorldMonitorConnection> {
+export async function connectWorldMonitorOauth(): Promise<WorldMonitorConnection> {
   return parseWorldMonitorConnection(
-    await invokeTauri<unknown>("save_world_monitor_api_key", { apiKey }),
+    await invokeTauri<unknown>("connect_world_monitor_oauth"),
   );
 }
 
-export async function removeWorldMonitorApiKey(): Promise<WorldMonitorConnection> {
+export async function disconnectWorldMonitor(): Promise<WorldMonitorConnection> {
   return parseWorldMonitorConnection(
-    await invokeTauri<unknown>("remove_world_monitor_api_key"),
+    await invokeTauri<unknown>("disconnect_world_monitor"),
   );
 }
 

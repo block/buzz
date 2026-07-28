@@ -3,7 +3,35 @@ use serde_json::Value;
 
 use super::{CandidateSource, SourceCollectionError};
 use crate::command_brief::types::SourceKind;
-use crate::command_services::rag::RagSnapshotError;
+use crate::command_services::rag::{RagSnapshotError, VerifiedRagSnapshot};
+use crate::command_services::trusted_lan::{catalogue_fingerprint, TrustedLanError};
+
+pub(crate) fn trusted_lan_snapshot_from_catalogue(
+    catalogue: Result<Value, TrustedLanError>,
+    rag_endpoint: &str,
+    observed_at: &str,
+) -> Result<(VerifiedRagSnapshot, bool), SourceCollectionError> {
+    let (catalogue, collections, available) = match catalogue {
+        Ok(catalogue) => {
+            let collections = observed_collection_names(&catalogue)?;
+            (catalogue, collections, true)
+        }
+        Err(_) => (
+            serde_json::json!({
+                "endpoint": rag_endpoint,
+                "status": "unavailable",
+            }),
+            vec!["rag-unavailable".to_string()],
+            false,
+        ),
+    };
+    let fingerprint =
+        catalogue_fingerprint(&catalogue).map_err(|_| SourceCollectionError::RagInvalid)?;
+    let snapshot =
+        VerifiedRagSnapshot::from_trusted_lan_observation(&fingerprint, observed_at, collections)
+            .map_err(|_| SourceCollectionError::RagInvalid)?;
+    Ok((snapshot, available))
+}
 
 pub(super) fn observed_collection_names(
     value: &Value,
@@ -15,19 +43,19 @@ pub(super) fn observed_collection_names(
         .ok_or(SourceCollectionError::RagInvalid)?;
     let mut names = collections
         .iter()
-        .map(|collection| {
+        .filter_map(|collection| {
             collection
                 .get("name")
                 .and_then(Value::as_str)
                 .filter(|name| valid_observed_field(name, 256))
                 .map(str::to_string)
-                .ok_or(SourceCollectionError::RagInvalid)
         })
-        .collect::<Result<Vec<_>, _>>()?;
-    names.sort();
-    if names.windows(2).any(|pair| pair[0] == pair[1]) {
+        .collect::<Vec<_>>();
+    if names.is_empty() {
         return Err(SourceCollectionError::RagInvalid);
     }
+    names.sort();
+    names.dedup();
     Ok(names)
 }
 

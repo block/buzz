@@ -282,7 +282,7 @@ impl DevMcp {
         match &self.command_adviser {
             Some(tools) => tools.world_monitor(tool, arguments).await,
             None => CallToolResult::error(vec![rmcp::model::Content::text(
-                "World Monitor is not configured; continue with available evidence.",
+                "World Monitor is not connected; continue with available evidence.",
             )]),
         }
     }

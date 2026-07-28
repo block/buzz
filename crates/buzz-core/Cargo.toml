@@ -20,6 +20,8 @@ chrono     = { workspace = true }
 hex        = { workspace = true }
 hmac       = { workspace = true }
 sha2       = { workspace = true }
+base64     = "0.22"
+flate2     = "1"
 rand              = { workspace = true }
 subtle            = { workspace = true }
 zeroize           = { workspace = true }

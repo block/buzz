@@ -17,10 +17,11 @@ use crate::{
     app_state::AppState,
     managed_agents::{
         agent_readiness, current_instance_id, find_managed_agent_mut, known_acp_runtime,
-        load_global_agent_config, load_managed_agents, load_personas, record_agent_command,
-        resolve_effective_agent_env, save_global_agent_config, save_managed_agents,
-        stop_managed_agent_process, sync_managed_agent_processes, validate_global_config,
-        AgentReadiness, BackendKind, GlobalAgentConfig,
+        load_global_agent_config, load_managed_agents, load_personas,
+        record_agent_command_with_preferred_runtime, resolve_effective_agent_env,
+        save_global_agent_config, save_managed_agents, stop_managed_agent_process,
+        sync_managed_agent_processes, validate_global_config, AgentReadiness, BackendKind,
+        GlobalAgentConfig,
     },
 };
 
@@ -198,12 +199,28 @@ fn collect_restart_candidates(
             if !has_live_runtime {
                 return false;
             }
-            let effective_cmd = record_agent_command(record, &all_personas);
-            let runtime_meta = known_acp_runtime(&effective_cmd);
-            let old_effective =
-                resolve_effective_agent_env(record, &all_personas, runtime_meta, old_global);
-            let new_effective =
-                resolve_effective_agent_env(record, &all_personas, runtime_meta, new_global);
+            let old_command = record_agent_command_with_preferred_runtime(
+                record,
+                &all_personas,
+                old_global.preferred_runtime.as_deref(),
+            );
+            let new_command = record_agent_command_with_preferred_runtime(
+                record,
+                &all_personas,
+                new_global.preferred_runtime.as_deref(),
+            );
+            let old_effective = resolve_effective_agent_env(
+                record,
+                &all_personas,
+                known_acp_runtime(&old_command),
+                old_global,
+            );
+            let new_effective = resolve_effective_agent_env(
+                record,
+                &all_personas,
+                known_acp_runtime(&new_command),
+                new_global,
+            );
             let old_ready = matches!(agent_readiness(&old_effective), AgentReadiness::Ready);
             let new_ready = matches!(agent_readiness(&new_effective), AgentReadiness::Ready);
             // For a Ready+running agent: the process must be alive now and the
@@ -212,8 +229,9 @@ fn collect_restart_candidates(
             // scan and Phase 2.  NotReady→Ready bypasses the alive check
             // because Phase 2 will stop-then-start unconditionally.
             let env_changed = old_ready && old_effective.env != new_effective.env;
+            let command_changed = old_command != new_command;
 
-            should_restart_on_config_change(old_ready, new_ready, env_changed)
+            should_restart_on_config_change(old_ready, new_ready, env_changed, command_changed)
         })
         .map(|r| r.pubkey.clone())
         .collect();
@@ -301,22 +319,40 @@ async fn restart_local_agent_on_config_change(
         }
 
         // Re-check the eligibility predicate under lock:
-        //   (old NotReady && new Ready)  OR  (old Ready && env changed)
+        //   command changed  OR  (old NotReady && new Ready)
+        //   OR  (old Ready && env changed)
         // TODO: busy/mid-turn deferral would slot in here
         //
         // Reuse personas_snapshot from Phase 1 — avoids loading personas again
         // per agent when the save-command personas haven't changed.
-        let effective_cmd = record_agent_command(record, &personas_owned);
-        let runtime_meta = known_acp_runtime(&effective_cmd);
-        let old_effective =
-            resolve_effective_agent_env(record, &personas_owned, runtime_meta, &old_global_clone);
-        let new_effective =
-            resolve_effective_agent_env(record, &personas_owned, runtime_meta, &new_global_clone);
+        let old_command = record_agent_command_with_preferred_runtime(
+            record,
+            &personas_owned,
+            old_global_clone.preferred_runtime.as_deref(),
+        );
+        let new_command = record_agent_command_with_preferred_runtime(
+            record,
+            &personas_owned,
+            new_global_clone.preferred_runtime.as_deref(),
+        );
+        let old_effective = resolve_effective_agent_env(
+            record,
+            &personas_owned,
+            known_acp_runtime(&old_command),
+            &old_global_clone,
+        );
+        let new_effective = resolve_effective_agent_env(
+            record,
+            &personas_owned,
+            known_acp_runtime(&new_command),
+            &new_global_clone,
+        );
         let old_ready = matches!(agent_readiness(&old_effective), AgentReadiness::Ready);
         let new_ready = matches!(agent_readiness(&new_effective), AgentReadiness::Ready);
         // Under lock, the alive check was already done above via process_is_running.
         let env_changed = old_ready && old_effective.env != new_effective.env;
-        if !should_restart_on_config_change(old_ready, new_ready, env_changed) {
+        let command_changed = old_command != new_command;
+        if !should_restart_on_config_change(old_ready, new_ready, env_changed, command_changed) {
             return Err(format!(
                 "agent {pubkey_owned} restart condition no longer valid under lock"
             ));
@@ -398,6 +434,8 @@ fn persist_last_error(app: &AppHandle, pubkey: &str, error: &str) -> Result<(), 
 /// delegate to this predicate.
 ///
 /// Conditions:
+/// - `command changed`: the saved global harness changed the executable inherited
+///   by this running agent, so the existing child cannot adopt it in place.
 /// - `NotReady → Ready`: blocked on missing key, now unblocked.
 /// - `Ready + env changed`: running with stale env; env is baked at spawn time.
 ///   Also covers `Ready → NotReady` when the env changed (key removed).
@@ -411,8 +449,13 @@ fn persist_last_error(app: &AppHandle, pubkey: &str, error: &str) -> Result<(), 
 /// restart would not repair the missing auth token. If the binary disappears,
 /// the process would already be dead and the PID alive-check in the candidate
 /// scan would have excluded it.
-fn should_restart_on_config_change(old_ready: bool, new_ready: bool, env_changed: bool) -> bool {
-    (!old_ready && new_ready) || (old_ready && env_changed)
+fn should_restart_on_config_change(
+    old_ready: bool,
+    new_ready: bool,
+    env_changed: bool,
+    command_changed: bool,
+) -> bool {
+    command_changed || (!old_ready && new_ready) || (old_ready && env_changed)
 }
 
 #[cfg(test)]
@@ -424,7 +467,7 @@ mod tests {
     fn env_changed_running_agent_is_candidate() {
         // old_ready=true, new_ready=true, env_changed=true
         assert!(
-            should_restart_on_config_change(true, true, true),
+            should_restart_on_config_change(true, true, true, false),
             "running agent with changed env must be restarted"
         );
     }
@@ -434,8 +477,18 @@ mod tests {
     fn unchanged_running_agent_is_not_candidate() {
         // old_ready=true, new_ready=true, env_changed=false
         assert!(
-            !should_restart_on_config_change(true, true, false),
+            !should_restart_on_config_change(true, true, false, false),
             "running agent with identical env must NOT be restarted"
+        );
+    }
+
+    /// Changing the inherited harness must restart a live agent even when both
+    /// harnesses are authenticated and their effective env maps are identical.
+    #[test]
+    fn changed_runtime_is_candidate_even_when_both_ready_and_env_unchanged() {
+        assert!(
+            should_restart_on_config_change(true, true, false, true),
+            "a live agent must restart when its effective command changes"
         );
     }
 
@@ -444,7 +497,7 @@ mod tests {
     fn not_ready_to_ready_is_candidate() {
         // old_ready=false, new_ready=true, env_changed=false (env_changed irrelevant)
         assert!(
-            should_restart_on_config_change(false, true, false),
+            should_restart_on_config_change(false, true, false, false),
             "NotReady → Ready must be a restart candidate"
         );
     }
@@ -455,7 +508,7 @@ mod tests {
     fn ready_to_not_ready_env_changed_is_candidate() {
         // old_ready=true (had key), new_ready=false (key removed), env_changed=true
         assert!(
-            should_restart_on_config_change(true, false, true),
+            should_restart_on_config_change(true, false, true, false),
             "Ready → NotReady with env change must be a restart candidate"
         );
     }
@@ -465,7 +518,7 @@ mod tests {
     fn both_not_ready_unchanged_is_not_candidate() {
         // old_ready=false, new_ready=false, env_changed=false
         assert!(
-            !should_restart_on_config_change(false, false, false),
+            !should_restart_on_config_change(false, false, false, false),
             "both NotReady with no env change must NOT be a candidate"
         );
     }
@@ -476,7 +529,7 @@ mod tests {
         // Changed one unrelated env var but still missing the required key.
         // old_ready=false, new_ready=false, env_changed=true
         assert!(
-            !should_restart_on_config_change(false, false, true),
+            !should_restart_on_config_change(false, false, true, false),
             "NotReady→NotReady (env changed but still broken) must NOT be a candidate"
         );
     }
@@ -490,7 +543,7 @@ mod tests {
     fn not_ready_to_ready_with_env_change_is_candidate() {
         // old_ready=false, new_ready=true, env_changed=true
         assert!(
-            should_restart_on_config_change(false, true, true),
+            should_restart_on_config_change(false, true, true, false),
             "NotReady → Ready (with env change) must be a restart candidate"
         );
     }

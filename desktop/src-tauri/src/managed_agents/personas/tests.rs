@@ -186,6 +186,9 @@ fn n2_and_planning_prompts_pin_osint_provenance_and_virtual_jpg_behaviour() {
         .expect("N2 adviser should exist");
     for required in [
         "world_monitor_",
+        "MUST call at least one relevant world_monitor_ tool",
+        "Do not send a pickup acknowledgement",
+        "same turn",
         "reported information",
         "observed indicators",
         "assumptions",
@@ -227,6 +230,38 @@ fn n2_and_planning_prompts_pin_osint_provenance_and_virtual_jpg_behaviour() {
             1
         );
     }
+}
+
+#[test]
+fn merge_personas_upgrades_the_unmodified_n2_prompt_without_overwriting_custom_edits() {
+    let current = built_in_persona_records("2026-07-28T00:00:00Z")
+        .into_iter()
+        .find(|record| record.id == "builtin:command-intelligence")
+        .expect("N2 adviser should exist");
+
+    let mut previous = current.clone();
+    previous.system_prompt = super::PREVIOUS_COMMAND_INTELLIGENCE_PROMPT.to_string();
+    let (upgraded, changed) = merge_personas(vec![previous], "2026-07-28T00:00:01Z");
+    assert!(changed);
+    let upgraded_n2 = upgraded
+        .iter()
+        .find(|record| record.id == "builtin:command-intelligence")
+        .expect("upgraded N2 adviser should exist");
+    assert_eq!(upgraded_n2.system_prompt, current.system_prompt);
+    assert_eq!(upgraded_n2.updated_at, "2026-07-28T00:00:01Z");
+
+    let mut customised = current.clone();
+    customised.system_prompt.push_str("\nUser customisation.");
+    let (preserved, changed) = merge_personas(vec![customised.clone()], "2026-07-28T00:00:02Z");
+    assert!(
+        changed,
+        "the other missing built-ins should still be inserted"
+    );
+    let preserved_n2 = preserved
+        .iter()
+        .find(|record| record.id == "builtin:command-intelligence")
+        .expect("customised N2 adviser should exist");
+    assert_eq!(preserved_n2.system_prompt, customised.system_prompt);
 }
 
 #[test]
@@ -596,5 +631,31 @@ fn fizz_builtin_resolves_to_buzz_agent() {
         effective_agent_command(Some("builtin:fizz"), &records, None),
         "buzz-agent",
         "Fizz must resolve to buzz-agent specifically"
+    );
+}
+
+#[test]
+fn command_adviser_builtins_default_to_single_turn_parallelism() {
+    let records = built_in_persona_records("2026-07-28T00:00:00Z");
+    let command_team: Vec<_> = records
+        .iter()
+        .filter(|persona| persona.id.starts_with("builtin:command-"))
+        .collect();
+
+    assert!(!command_team.is_empty(), "Command Team personas must exist");
+    assert!(
+        command_team
+            .iter()
+            .all(|persona| persona.parallelism == Some(1)),
+        "every Command Team persona must default to one concurrent turn"
+    );
+
+    let fizz = records
+        .iter()
+        .find(|persona| persona.id == "builtin:fizz")
+        .expect("Fizz built-in must exist");
+    assert_eq!(
+        fizz.parallelism, None,
+        "the Command Team limit must not change unrelated built-ins"
     );
 }

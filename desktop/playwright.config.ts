@@ -118,6 +118,7 @@ export default defineConfig({
         "**/command-console.spec.ts",
         "**/command-team-conversations.spec.ts",
         "**/daily-command-brief.spec.ts",
+        "**/world-monitor-connection.spec.ts",
         "**/command-adviser-naval-ui.spec.ts",
         "**/observer-archive-policy.spec.ts",
       ],

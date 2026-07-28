@@ -313,29 +313,12 @@ pub fn default_agent_command() -> String {
 ///   3. legacy fallback: the linked persona's `runtime` (records created
 ///      before the unified model carry `persona_id` but no `runtime`);
 ///   4. `default_agent_command()`.
+#[cfg(test)]
 pub fn record_agent_command(
     record: &crate::managed_agents::types::ManagedAgentRecord,
     personas: &[crate::managed_agents::types::AgentDefinition],
 ) -> String {
-    if let Some(pin) = record
-        .agent_command_override
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        return pin.to_string();
-    }
-
-    if let Some(command) = record
-        .runtime
-        .as_deref()
-        .and_then(known_acp_runtime_exact)
-        .and_then(|r| r.commands.first().copied())
-    {
-        return command.to_string();
-    }
-
-    effective_agent_command(record.persona_id.as_deref(), personas, None)
+    crate::managed_agents::record_agent_command_with_preferred_runtime(record, personas, None)
 }
 
 /// Resolve the agent command (harness) for a spawn/deploy/summary. The linked

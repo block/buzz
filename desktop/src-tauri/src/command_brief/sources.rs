@@ -344,6 +344,7 @@ impl SourceBackend for ProductionSourceBackend {
 #[derive(Clone, Debug)]
 pub(crate) struct TrustedLanSourceBackend {
     snapshot: VerifiedRagSnapshot,
+    rag_catalogue_available: bool,
     client: TrustedLanSourceClient,
     command_team_discussions: CommandTeamDiscussionBatch,
     post_recheck_warning: Arc<Mutex<Option<String>>>,
@@ -357,20 +358,14 @@ impl TrustedLanSourceBackend {
         let client = config
             .source_client()
             .map_err(|_| SourceCollectionError::RagUnavailable)?;
-        let catalogue = client
-            .catalogue()
-            .map_err(|_| SourceCollectionError::RagUnavailable)?;
-        let fingerprint =
-            catalogue_fingerprint(&catalogue).map_err(|_| SourceCollectionError::RagInvalid)?;
-        let collections = observed_collection_names(&catalogue)?;
-        let snapshot = VerifiedRagSnapshot::from_trusted_lan_observation(
-            &fingerprint,
+        let (snapshot, rag_catalogue_available) = trusted_lan_snapshot_from_catalogue(
+            client.catalogue(),
+            config.rag_url().as_str(),
             observed_at,
-            collections,
-        )
-        .map_err(|_| SourceCollectionError::RagInvalid)?;
+        )?;
         Ok(Self {
             snapshot,
+            rag_catalogue_available,
             client,
             command_team_discussions: CommandTeamDiscussionBatch::default(),
             post_recheck_warning: Arc::new(Mutex::new(None)),
@@ -412,6 +407,9 @@ impl SourceBackend for TrustedLanSourceBackend {
         }
         if snapshot != &self.snapshot {
             return Err(SourceReadError::new("rag_catalogue_mismatch"));
+        }
+        if !self.rag_catalogue_available {
+            return Err(SourceReadError::new("rag_read_unavailable"));
         }
         let result = self
             .client
@@ -472,6 +470,9 @@ impl SourceBackend for TrustedLanSourceBackend {
     ) -> Result<(), SourceCollectionError> {
         if cancellation.is_cancelled() {
             return Err(SourceCollectionError::Cancelled);
+        }
+        if !self.rag_catalogue_available {
+            return Ok(());
         }
         // This is deliberately audit-only. A changed catalogue must never
         // restart, invalidate, or fail an in-flight trusted-LAN brief.
@@ -991,6 +992,7 @@ mod retrieval_intents;
 use retrieval_intents::fixed_retrieval_intents;
 pub(crate) use retrieval_intents::FixedRetrievalIntent;
 mod trusted_lan_evidence;
-use trusted_lan_evidence::*;
+pub(crate) use trusted_lan_evidence::trusted_lan_snapshot_from_catalogue;
+use trusted_lan_evidence::{extract_trusted_lan_memory_evidence, extract_trusted_lan_rag_evidence};
 mod world_monitor;
 pub(crate) use world_monitor::WorldMonitorBriefCollector;

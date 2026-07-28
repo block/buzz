@@ -93,7 +93,11 @@ pub(crate) fn resolve_effective_agent_env(
     runtime: Option<&KnownAcpRuntime>,
     global: &GlobalAgentConfig,
 ) -> EffectiveAgentEnv {
-    let effective_command = crate::managed_agents::record_agent_command(record, personas);
+    let effective_command = crate::managed_agents::record_agent_command_with_preferred_runtime(
+        record,
+        personas,
+        global.preferred_runtime.as_deref(),
+    );
 
     // Layer 1: baked build defaults (floor — internal builds only; OSS = empty).
     let mut env = baked_build_env();
@@ -1395,6 +1399,29 @@ mod tests {
             effective.env.get("BUZZ_AGENT_MODEL").map(String::as_str),
             Some("claude-opus-4-5")
         );
+    }
+
+    #[test]
+    fn resolve_effective_agent_env_reports_global_preferred_runtime() {
+        let definition: crate::managed_agents::AgentDefinition =
+            serde_json::from_value(serde_json::json!({
+                "id": "global-runtime-agent",
+                "display_name": "Global Runtime Agent",
+                "system_prompt": "",
+                "created_at": "",
+                "updated_at": ""
+            }))
+            .expect("minimal definition");
+        let record = definition.into_agent_record();
+        let global = GlobalAgentConfig {
+            preferred_runtime: Some("codex".to_string()),
+            ..Default::default()
+        };
+
+        let effective =
+            resolve_effective_agent_env(&record, &[], known_acp_runtime_exact("codex"), &global);
+
+        assert_eq!(effective.effective_command, "codex-acp");
     }
 
     // ── provider-specific model fallback tests ────────────────────────────

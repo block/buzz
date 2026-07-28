@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use buzz_command_sources_pkg::mcp_http::McpHttpClient;
+use buzz_command_sources_pkg::oauth::WorldMonitorOAuthStore;
 use buzz_command_sources_pkg::usage::{
     UsageAdmission, UsageError, UsagePool, WorldMonitorUsageLedger,
 };
@@ -57,15 +58,16 @@ impl WorldMonitorBriefCollector {
             .app_config_dir()
             .map(|directory| directory.join("world-monitor-usage.json"))
             .unwrap_or_else(|_| std::env::temp_dir().join("world-monitor-usage-unavailable.json"));
-        let executor =
-            crate::secret_store::SecretStore::shared(crate::app_state::keyring_service())
-                .load(buzz_command_sources_pkg::WORLD_MONITOR_KEYCHAIN_KEY)
-                .ok()
-                .flatten()
-                .and_then(|api_key| McpHttpClient::world_monitor(endpoint, api_key).ok())
-                .map(|client| {
-                    Arc::new(HttpWorldMonitorExecutor { client }) as Arc<dyn WorldMonitorExecutor>
-                });
+        let oauth_path = ledger_path.parent().map(|directory| {
+            directory.join(buzz_command_sources_pkg::WORLD_MONITOR_OAUTH_FILENAME)
+        });
+        let executor = oauth_path
+            .and_then(|path| WorldMonitorOAuthStore::new(path).ok())
+            .filter(|store| store.load().ok().flatten().is_some())
+            .and_then(|store| McpHttpClient::world_monitor(endpoint, store).ok())
+            .map(|client| {
+                Arc::new(HttpWorldMonitorExecutor { client }) as Arc<dyn WorldMonitorExecutor>
+            });
         Self {
             executor,
             ledger_path,
@@ -89,7 +91,7 @@ impl WorldMonitorBriefCollector {
             return WorldMonitorBriefBatch {
                 candidates: Vec::new(),
                 limitations: vec![
-                    "World Monitor is not configured for the Maritime N2 update.".to_string(),
+                    "World Monitor is not connected for the Maritime N2 update.".to_string()
                 ],
                 quota_limited: false,
             };
@@ -346,7 +348,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_key_degrades_without_network_or_quota_use() {
+    fn missing_oauth_degrades_without_network_or_quota_use() {
         let directory = tempfile::tempdir().expect("tempdir");
         let collector =
             WorldMonitorBriefCollector::unavailable(directory.path().join("usage.json"));
@@ -356,7 +358,7 @@ mod tests {
             &CancellationToken::new(),
         );
         assert!(batch.candidates.is_empty());
-        assert!(batch.limitations[0].contains("not configured"));
+        assert!(batch.limitations[0].contains("not connected"));
         assert!(!directory.path().join("usage.json").exists());
     }
 

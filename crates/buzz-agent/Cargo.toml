@@ -49,6 +49,7 @@ sha2 = { workspace = true }
 urlencoding = "2"
 webbrowser = "1"
 buzz-core = { path = "../buzz-core" }
+uuid = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31", default-features = false, features = ["signal", "process"] }

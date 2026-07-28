@@ -1,6 +1,34 @@
 use super::*;
 
 #[test]
+fn harness_edit_restart_requires_changed_command_live_pair_and_enabled_policy() {
+    assert!(should_restart_after_harness_edit(
+        "buzz-agent",
+        "codex-acp",
+        true,
+        1,
+    ));
+    assert!(!should_restart_after_harness_edit(
+        "codex-acp",
+        "codex-acp",
+        true,
+        1,
+    ));
+    assert!(!should_restart_after_harness_edit(
+        "buzz-agent",
+        "codex-acp",
+        true,
+        0,
+    ));
+    assert!(!should_restart_after_harness_edit(
+        "buzz-agent",
+        "codex-acp",
+        false,
+        1,
+    ));
+}
+
+#[test]
 fn openai_model_normalization_keeps_agent_text_models() {
     let models = normalize_openai_compatible_models(
         OpenAiModelListResponse {

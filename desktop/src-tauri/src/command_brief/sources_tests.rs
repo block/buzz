@@ -5,8 +5,9 @@ use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 
 use super::sources::{
-    CommandTeamDiscussionBatch, FixedRetrievalIntent, FrozenSourceContext, ProductionSourceBackend,
-    SourceBackend, SourceCollectionError, SourceCollector, SourceReadError, SourceToolCaller,
+    trusted_lan_snapshot_from_catalogue, CommandTeamDiscussionBatch, FixedRetrievalIntent,
+    FrozenSourceContext, ProductionSourceBackend, SourceBackend, SourceCollectionError,
+    SourceCollector, SourceReadError, SourceToolCaller,
 };
 use super::types::{AdviserId, BriefSection, SourceKind, MAX_ARRAY_ITEMS, MAX_TEXT_BYTES};
 use crate::command_services::apple_inputs::{
@@ -18,6 +19,7 @@ use crate::command_services::policy::{
     VerifiedService, MEMORY_CATALOG_TOOLS, RAG_CATALOG_TOOLS,
 };
 use crate::command_services::rag::VerifiedRagSnapshot;
+use crate::command_services::trusted_lan::TrustedLanError;
 use sha2::{Digest, Sha256};
 
 const SNAPSHOT_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -216,6 +218,40 @@ fn selection() -> AppleBriefSelection {
 
 fn collector(backend: FakeBackend, request: &str) -> SourceCollector<FakeBackend> {
     collector_for_run(backend, RUN_A, request)
+}
+
+#[test]
+fn trusted_lan_catalogue_outage_creates_a_fail_soft_rag_snapshot() {
+    let (snapshot, available) = trusted_lan_snapshot_from_catalogue(
+        Err(TrustedLanError::ServiceUnavailable),
+        "http://192.168.1.107:8005/mcp/",
+        OBSERVED_AT,
+    )
+    .expect("an unavailable trusted-LAN RAG must not block the brief");
+
+    assert!(!available);
+    assert_eq!(snapshot.logical_collections(), ["rag-unavailable"]);
+    assert_eq!(snapshot.physical_collections(), ["rag-unavailable"]);
+    assert_eq!(snapshot.snapshot_id().len(), 64);
+}
+
+#[test]
+fn trusted_lan_catalogue_skips_one_malformed_collection_without_blocking_valid_ones() {
+    let (snapshot, available) = trusted_lan_snapshot_from_catalogue(
+        Ok(json!({
+            "collections": [
+                {"name": "ADF Doctrine", "chunks": 2644},
+                {"name": "Australian Government Doctrine ", "chunks": 3751}
+            ],
+            "total_chunks": 6395
+        })),
+        "http://192.168.1.107:8005/mcp/",
+        OBSERVED_AT,
+    )
+    .expect("one malformed collection must not invalidate the whole catalogue");
+
+    assert!(available);
+    assert_eq!(snapshot.logical_collections(), ["ADF Doctrine"]);
 }
 
 fn collector_for_run(

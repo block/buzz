@@ -1,13 +1,14 @@
 use std::{fmt, time::Duration};
 
 use reqwest::{
-    header::{ACCEPT, CONTENT_TYPE},
+    header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE},
     redirect::Policy,
     StatusCode,
 };
 use serde_json::{json, Value};
 use url::Url;
-use zeroize::Zeroizing;
+
+use crate::oauth::{WorldMonitorOAuthError, WorldMonitorOAuthStore};
 
 const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const WORLD_MONITOR_HOST: &str = "api.worldmonitor.app";
@@ -36,7 +37,7 @@ pub enum McpHttpError {
 
 pub struct McpHttpClient {
     endpoint: Url,
-    api_key: Option<Zeroizing<String>>,
+    oauth: Option<WorldMonitorOAuthStore>,
     client: reqwest::Client,
 }
 
@@ -45,13 +46,16 @@ impl fmt::Debug for McpHttpClient {
         formatter
             .debug_struct("McpHttpClient")
             .field("endpoint", &self.endpoint)
-            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .field("oauth", &self.oauth.as_ref().map(|_| "configured"))
             .finish_non_exhaustive()
     }
 }
 
 impl McpHttpClient {
-    pub fn world_monitor(endpoint: &str, api_key: String) -> Result<Self, McpHttpError> {
+    pub fn world_monitor(
+        endpoint: &str,
+        oauth: WorldMonitorOAuthStore,
+    ) -> Result<Self, McpHttpError> {
         let endpoint = Url::parse(endpoint).map_err(|_| McpHttpError::InvalidEndpoint)?;
         if endpoint.scheme() != "https"
             || endpoint.host_str() != Some(WORLD_MONITOR_HOST)
@@ -61,10 +65,17 @@ impl McpHttpClient {
         {
             return Err(McpHttpError::InvalidEndpoint);
         }
-        Self::new(endpoint, Some(api_key))
+        Self::new_with_oauth(endpoint, Some(oauth))
     }
 
-    pub fn new(endpoint: Url, api_key: Option<String>) -> Result<Self, McpHttpError> {
+    pub fn new(endpoint: Url) -> Result<Self, McpHttpError> {
+        Self::new_with_oauth(endpoint, None)
+    }
+
+    fn new_with_oauth(
+        endpoint: Url,
+        oauth: Option<WorldMonitorOAuthStore>,
+    ) -> Result<Self, McpHttpError> {
         let client = reqwest::Client::builder()
             .redirect(Policy::none())
             .timeout(Duration::from_secs(10))
@@ -72,7 +83,7 @@ impl McpHttpClient {
             .map_err(|_| McpHttpError::InvalidEndpoint)?;
         Ok(Self {
             endpoint,
-            api_key: api_key.map(Zeroizing::new),
+            oauth,
             client,
         })
     }
@@ -91,6 +102,10 @@ impl McpHttpClient {
     }
 
     async fn request(&self, id: u64, method: &str, params: Value) -> Result<Value, McpHttpError> {
+        let bearer = match &self.oauth {
+            Some(store) => Some(store.bearer_token().await.map_err(map_oauth_error)?),
+            None => None,
+        };
         let mut request = self
             .client
             .post(self.endpoint.clone())
@@ -102,8 +117,8 @@ impl McpHttpClient {
                 "method": method,
                 "params": params
             }));
-        if let Some(api_key) = &self.api_key {
-            request = request.header("X-WorldMonitor-Key", api_key.as_str());
+        if let Some(bearer) = &bearer {
+            request = request.header(AUTHORIZATION, format!("Bearer {}", bearer.as_str()));
         }
         let response = request.send().await.map_err(|error| {
             if error.is_timeout() {
@@ -156,6 +171,17 @@ impl McpHttpClient {
     }
 }
 
+fn map_oauth_error(error: WorldMonitorOAuthError) -> McpHttpError {
+    match error {
+        WorldMonitorOAuthError::NotConnected | WorldMonitorOAuthError::Reauthorise => {
+            McpHttpError::Unauthorized
+        }
+        WorldMonitorOAuthError::State | WorldMonitorOAuthError::Unavailable => {
+            McpHttpError::Unavailable
+        }
+    }
+}
+
 fn parse_sse(bytes: &[u8]) -> Result<Value, McpHttpError> {
     let text = std::str::from_utf8(bytes).map_err(|_| McpHttpError::InvalidResponse)?;
     text.lines()
@@ -190,14 +216,17 @@ fn parse_envelope(envelope: Value, id: u64) -> Result<Value, McpHttpError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::oauth::{WorldMonitorOAuthCredentials, WorldMonitorOAuthStore};
+    use tempfile::tempdir;
 
     #[test]
     fn endpoint_accepts_only_https_world_monitor_mcp() {
-        assert!(McpHttpClient::world_monitor(
-            "https://api.worldmonitor.app/mcp",
-            "wm_live_redacted_value".to_string()
-        )
-        .is_ok());
+        let directory = tempdir().expect("directory");
+        let store =
+            WorldMonitorOAuthStore::new(directory.path().join("oauth.json")).expect("store");
+        assert!(
+            McpHttpClient::world_monitor("https://api.worldmonitor.app/mcp", store.clone()).is_ok()
+        );
         for endpoint in [
             "http://api.worldmonitor.app/mcp",
             "https://api.worldmonitor.app/api/mcp",
@@ -205,19 +234,33 @@ mod tests {
             "https://api.worldmonitor.app/mcp?key=secret",
         ] {
             assert!(matches!(
-                McpHttpClient::world_monitor(endpoint, "wm_live_redacted_value".to_string()),
+                McpHttpClient::world_monitor(endpoint, store.clone()),
                 Err(McpHttpError::InvalidEndpoint)
             ));
         }
     }
 
     #[test]
-    fn debug_never_contains_the_key() {
-        let key = "wm_live_never_print_this";
-        let client =
-            McpHttpClient::world_monitor("https://api.worldmonitor.app/mcp", key.to_string())
-                .expect("valid client");
-        assert!(!format!("{client:?}").contains(key));
+    fn debug_never_contains_oauth_tokens() {
+        let directory = tempdir().expect("directory");
+        let store =
+            WorldMonitorOAuthStore::new(directory.path().join("oauth.json")).expect("store");
+        store
+            .save(
+                &WorldMonitorOAuthCredentials::from_exchange(
+                    "client".to_string(),
+                    "access-never-print".to_string(),
+                    "refresh-never-print".to_string(),
+                    3600,
+                )
+                .expect("credentials"),
+            )
+            .expect("save");
+        let client = McpHttpClient::world_monitor("https://api.worldmonitor.app/mcp", store)
+            .expect("valid client");
+        let debug = format!("{client:?}");
+        assert!(!debug.contains("access-never-print"));
+        assert!(!debug.contains("refresh-never-print"));
     }
 
     #[test]

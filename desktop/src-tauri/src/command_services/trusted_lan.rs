@@ -82,16 +82,11 @@ impl CloudProviderConfig {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct WorldMonitorConfig {
     endpoint: String,
-    keychain_key: String,
 }
 
 impl WorldMonitorConfig {
     pub(crate) fn endpoint(&self) -> &str {
         &self.endpoint
-    }
-
-    pub(crate) fn keychain_key(&self) -> &str {
-        &self.keychain_key
     }
 }
 
@@ -192,7 +187,7 @@ impl TrustedLanConfig {
             self.openai.endpoint(),
             self.openai.model(),
             self.world_monitor.endpoint(),
-            self.world_monitor.keychain_key(),
+            "oauth",
         );
         hex::encode(Sha256::digest(basis.as_bytes()))
     }
@@ -523,14 +518,15 @@ struct RawCloudProviderConfig {
 #[serde(deny_unknown_fields)]
 struct RawWorldMonitorConfig {
     endpoint: String,
-    keychain_key: String,
+    #[serde(default)]
+    keychain_key: Option<String>,
 }
 
 impl Default for RawWorldMonitorConfig {
     fn default() -> Self {
         Self {
             endpoint: buzz_command_sources_pkg::DEFAULT_WORLD_MONITOR_ENDPOINT.to_string(),
-            keychain_key: buzz_command_sources_pkg::WORLD_MONITOR_KEYCHAIN_KEY.to_string(),
+            keychain_key: None,
         }
     }
 }
@@ -539,13 +535,15 @@ fn validate_world_monitor(
     raw: RawWorldMonitorConfig,
 ) -> Result<WorldMonitorConfig, TrustedLanError> {
     if raw.endpoint != buzz_command_sources_pkg::DEFAULT_WORLD_MONITOR_ENDPOINT
-        || raw.keychain_key != buzz_command_sources_pkg::WORLD_MONITOR_KEYCHAIN_KEY
+        || raw
+            .keychain_key
+            .as_deref()
+            .is_some_and(|key| key != "command.world-monitor.api-key")
     {
         return Err(TrustedLanError::InvalidConfig);
     }
     Ok(WorldMonitorConfig {
         endpoint: raw.endpoint,
-        keychain_key: raw.keychain_key,
     })
 }
 

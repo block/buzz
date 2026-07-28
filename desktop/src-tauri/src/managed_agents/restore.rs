@@ -86,6 +86,47 @@ pub fn backfill_persona_snapshots(app: &tauri::AppHandle) -> Result<(), String> 
     Ok(())
 }
 
+fn migrated_command_adviser_parallelism(
+    persona_id: Option<&str>,
+    current_parallelism: u32,
+) -> Option<u32> {
+    let is_command_adviser = persona_id.is_some_and(|id| id.starts_with("builtin:command-"));
+    (is_command_adviser && current_parallelism == super::DEFAULT_AGENT_PARALLELISM).then_some(1)
+}
+
+/// Migrate existing Command Team instances that still carry Buzz's legacy
+/// default of 24 concurrent turns to the deliberate single-turn default.
+///
+/// This runs before launch restore so no legacy Command Team process is
+/// respawned with an oversized ACP worker pool. Values already changed away
+/// from the old default are preserved.
+pub fn migrate_command_adviser_parallelism(app: &tauri::AppHandle) -> Result<usize, String> {
+    let state = app.state::<AppState>();
+    let _store_guard = state
+        .managed_agents_store_lock
+        .lock()
+        .map_err(|error| error.to_string())?;
+
+    let mut records = load_managed_agents(app)?;
+    let now = util::now_iso();
+    let mut changed = 0;
+    for record in &mut records {
+        let Some(parallelism) =
+            migrated_command_adviser_parallelism(record.persona_id.as_deref(), record.parallelism)
+        else {
+            continue;
+        };
+        record.parallelism = parallelism;
+        record.updated_at = now.clone();
+        changed += 1;
+    }
+
+    if changed > 0 {
+        save_managed_agents(app, &records)?;
+    }
+    Ok(changed)
+}
+
 /// Restore managed agents that were running before the app was closed.
 ///
 /// Split into three phases to minimise lock contention with the frontend:
@@ -408,6 +449,7 @@ pub async fn restore_managed_agents_on_launch(
     // start_managed_agent — ensuring boot-restored agents get the same profile
     // self-healing as UI-started agents.
     let reconcile_personas = super::load_personas(app).unwrap_or_default();
+    let reconcile_global = super::load_global_agent_config(app).unwrap_or_default();
     let reconcile_items: Vec<(String, crate::commands::ProfileReconcileData)> =
         successfully_spawned
             .iter()
@@ -417,7 +459,11 @@ pub async fn restore_managed_agents_on_launch(
                 // derivation (the snapshot may be empty/stale for an inherited
                 // harness). Mirrors the UI start path.
                 let effective_command =
-                    crate::managed_agents::record_agent_command(record, &reconcile_personas);
+                    crate::managed_agents::record_agent_command_with_preferred_runtime(
+                        record,
+                        &reconcile_personas,
+                        reconcile_global.preferred_runtime.as_deref(),
+                    );
                 Some((
                     pubkey.clone(),
                     crate::commands::ProfileReconcileData {
@@ -474,4 +520,26 @@ fn persist_restore_error(
     record.updated_at = util::now_iso();
     record.last_error = Some(error);
     save_managed_agents(app, &records)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::migrated_command_adviser_parallelism;
+
+    #[test]
+    fn migrates_only_legacy_command_team_parallelism() {
+        assert_eq!(
+            migrated_command_adviser_parallelism(Some("builtin:command-n2"), 24),
+            Some(1)
+        );
+        assert_eq!(
+            migrated_command_adviser_parallelism(Some("builtin:command-operations"), 1),
+            None
+        );
+        assert_eq!(
+            migrated_command_adviser_parallelism(Some("builtin:fizz"), 24),
+            None
+        );
+        assert_eq!(migrated_command_adviser_parallelism(None, 24), None);
+    }
 }

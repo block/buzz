@@ -18,6 +18,14 @@ const sectionFindings = {
   operations: [
     finding("Confirm readiness dependencies before the next activity."),
   ],
+  intelligence: [
+    finding("Review the regional intelligence picture and warning indicators."),
+  ],
+  logistics: [
+    finding(
+      "Confirm tanker sustainment dependencies and replenishment priorities.",
+    ),
+  ],
   navigation: [
     finding("Review the cited navigation considerations and limitations."),
   ],
@@ -41,6 +49,8 @@ const specialistFindings = {
     ...sectionFindings.operations,
     ...sectionFindings.sources,
   ],
+  intelligence: sectionFindings.intelligence,
+  logistics: sectionFindings.logistics,
   navigation: sectionFindings.navigation,
   daily_routine: sectionFindings.daily_routine,
   reports: sectionFindings.reports,
@@ -88,6 +98,8 @@ const publishedBrief = {
     },
     contributions: [
       ["operations", "operations"],
+      ["intelligence", "intelligence"],
+      ["logistics", "logistics"],
       ["navigation", "navigation"],
       ["daily_routine", "daily_routine"],
       ["reporting", "reports"],
@@ -150,6 +162,8 @@ test("matches the selected naval briefing direction", async ({ page }) => {
   for (const adviser of [
     "chief-of-staff",
     "operations",
+    "intelligence",
+    "logistics",
     "navigation",
     "daily-routine",
     "reporting",

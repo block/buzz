@@ -394,3 +394,45 @@ test("refresh failure is redacted for display and does not discard a prior brief
     await hook.unmount();
   }
 });
+
+test("a successfully loaded terminal brief clears an earlier unavailable banner", async () => {
+  let listener;
+  let latestAttempts = 0;
+  const published = Object.freeze({ brief: { runId: "run-1" } });
+  const deps = {
+    getStatus: async () => ({
+      classification: "OFFICIAL",
+      current: null,
+      history: [],
+    }),
+    getLatest: async () => {
+      latestAttempts += 1;
+      if (latestAttempts === 1) throw new Error("temporary store contention");
+      return published;
+    },
+    getSchedule: async () => schedule,
+    start: async () => status("queued"),
+    cancel: async () => status("cancelled"),
+    setSchedule: async () => schedule,
+    subscribeStatus: async (next) => {
+      listener = next;
+      return () => {};
+    },
+  };
+  const hook = renderHook(() => useDailyCommandBrief(deps));
+
+  try {
+    await hook.mount();
+    assert.equal(hook.value.error, "Daily Command Brief is unavailable.");
+
+    await act(async () => {
+      listener(status("degraded", { sequence: 4 }));
+      await Promise.resolve();
+    });
+
+    assert.equal(hook.value.latest, published);
+    assert.equal(hook.value.error, null);
+  } finally {
+    await hook.unmount();
+  }
+});

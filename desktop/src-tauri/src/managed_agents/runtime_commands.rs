@@ -5,11 +5,10 @@ use tauri::{AppHandle, Emitter, Manager};
 use super::{
     agent_readiness, append_log_marker, current_instance_id, find_managed_agent_mut,
     load_global_agent_config, load_managed_agents, load_personas, managed_agent_runtime_log_path,
-    process_is_running, record_agent_command, resolve_effective_agent_env, save_managed_agents,
-    spawn_agent_child, terminate_process, terminate_untracked_pair_runtime,
-    write_agent_runtime_receipt, AgentReadiness, BackendKind, ManagedAgentPairRuntime,
-    ManagedAgentRuntimeKey, ManagedAgentRuntimeLifecycle, ManagedAgentRuntimeReceipt,
-    ManagedAgentRuntimeStatus,
+    process_is_running, resolve_effective_agent_env, save_managed_agents, spawn_agent_child,
+    terminate_process, terminate_untracked_pair_runtime, write_agent_runtime_receipt,
+    AgentReadiness, BackendKind, ManagedAgentPairRuntime, ManagedAgentRuntimeKey,
+    ManagedAgentRuntimeLifecycle, ManagedAgentRuntimeReceipt, ManagedAgentRuntimeStatus,
 };
 use crate::app_state::AppState;
 
@@ -53,7 +52,11 @@ fn status_for_with(
     inputs: StatusInputs<'_>,
 ) -> ManagedAgentRuntimeStatus {
     let StatusInputs { personas, global } = inputs;
-    let command = record_agent_command(record, personas);
+    let command = super::record_agent_command_with_preferred_runtime(
+        record,
+        personas,
+        global.preferred_runtime.as_deref(),
+    );
     let metadata = super::known_acp_runtime(&command);
     let effective = resolve_effective_agent_env(record, personas, metadata, global);
     let local_setup = matches!(agent_readiness(&effective), AgentReadiness::Ready);
@@ -431,7 +434,11 @@ fn unkeyable_failed_status(
     personas: &[super::AgentDefinition],
     global: &super::GlobalAgentConfig,
 ) -> ManagedAgentRuntimeStatus {
-    let command = record_agent_command(record, personas);
+    let command = super::record_agent_command_with_preferred_runtime(
+        record,
+        personas,
+        global.preferred_runtime.as_deref(),
+    );
     let metadata = super::known_acp_runtime(&command);
     let effective = resolve_effective_agent_env(record, personas, metadata, global);
     ManagedAgentRuntimeStatus {

@@ -91,6 +91,22 @@ fn hash_is_deterministic() {
 }
 
 #[test]
+fn global_preferred_runtime_changes_spawn_hash_for_unpinned_agent() {
+    let rec = record();
+    let buzz_default = GlobalAgentConfig::default();
+    let codex_default = GlobalAgentConfig {
+        preferred_runtime: Some("codex".to_string()),
+        ..Default::default()
+    };
+
+    assert_ne!(
+        spawn_config_hash(&rec, &[], &[], "wss://ws.example", &buzz_default),
+        spawn_config_hash(&rec, &[], &[], "wss://ws.example", &codex_default),
+        "changing the global default harness must mark an inherited running agent for restart"
+    );
+}
+
+#[test]
 fn materializing_runtime_keeps_hash_stable() {
     // Migration cutover invariant (Phase 1A): materializing the linked
     // persona's runtime onto the record must NOT change the spawn hash —

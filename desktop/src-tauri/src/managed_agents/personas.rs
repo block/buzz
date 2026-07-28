@@ -56,8 +56,11 @@ const COMMAND_CHIEF_OF_STAFF_PROMPT: &str = command_adviser_prompt!(
 const COMMAND_OPERATIONS_PROMPT: &str = command_adviser_prompt!(
     "You are the Operations Adviser. Advise on operational priorities, readiness, dependencies, risks, current activities, and upcoming commitments. Separate confirmed facts from assumptions and identify missing readiness inputs. For a substantive deployment or mission, recommend a mission-specific Buzz channel as a virtual Joint Planning Group and @mention the Chief of Staff, Maritime N2, Logistics, Navigation, Plans, and other relevant advisers."
 );
-const COMMAND_INTELLIGENCE_PROMPT: &str = command_adviser_prompt!(
+const PREVIOUS_COMMAND_INTELLIGENCE_PROMPT: &str = command_adviser_prompt!(
     "You are the Maritime N2 Adviser. Assess regional intelligence, threats, warning, political and economic conditions, unrest, military posture, maritime activity, chokepoints, and supply-chain factors. Use only the curated world_monitor_ tools for OSINT in this phase. Clearly distinguish reported information, observed indicators, assumptions, and assessment. When a country is material, record its ISO 3166-1 alpha-2 code in the outcome summary or assumptions so future briefs can refresh it deterministically."
+);
+const COMMAND_INTELLIGENCE_PROMPT: &str = command_adviser_prompt!(
+    "You are the Maritime N2 Adviser. Assess regional intelligence, threats, warning, political and economic conditions, unrest, military posture, maritime activity, chokepoints, and supply-chain factors. Use only the curated world_monitor_ tools for OSINT in this phase. For every question about current or recent intelligence, you MUST call at least one relevant world_monitor_ tool before replying, then provide the evidence-based assessment in the same turn. Do not send a pickup acknowledgement or promise to gather the information later. If a World Monitor call fails, report that failure and continue with the other available evidence. Clearly distinguish reported information, observed indicators, assumptions, and assessment. When a country is material, record its ISO 3166-1 alpha-2 code in the outcome summary or assumptions so future briefs can refresh it deterministically."
 );
 const COMMAND_LOGISTICS_PROMPT: &str = command_adviser_prompt!(
     "You are the Logistics Adviser. Advise on replenishment, sustainment, fuel, stores, maintenance dependencies, support availability, port and supply-chain constraints, and logistics risk for a replenishment ship. Separate confirmed capacity and demand from assumptions."
@@ -256,7 +259,7 @@ fn built_in_persona_records(now: &str) -> Vec<AgentDefinition> {
             env_vars: std::collections::BTreeMap::new(),
             respond_to: None,
             respond_to_allowlist: Vec::new(),
-            parallelism: None,
+            parallelism: persona.id.starts_with("builtin:command-").then_some(1),
             created_at: now.to_string(),
             updated_at: now.to_string(),
         })
@@ -304,6 +307,16 @@ fn merge_personas(mut stored: Vec<AgentDefinition>, now: &str) -> (Vec<AgentDefi
         if let Some(existing) = stored.iter_mut().find(|record| record.id == built_in.id) {
             if !existing.is_builtin {
                 existing.is_builtin = true;
+                changed = true;
+            }
+            // Built-in prompts are normally preserved so local edits survive
+            // upgrades. Replace only the exact N2 prompt shipped immediately
+            // before the same-turn World Monitor requirement was added.
+            if existing.id == "builtin:command-intelligence"
+                && existing.system_prompt == PREVIOUS_COMMAND_INTELLIGENCE_PROMPT
+            {
+                existing.system_prompt = built_in.system_prompt.clone();
+                existing.updated_at = now.to_string();
                 changed = true;
             }
         } else {

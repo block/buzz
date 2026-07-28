@@ -202,7 +202,9 @@ test.describe("welcome and channel agent entry points", () => {
     await expect(page.getByTestId("chat-title")).toHaveText("random");
   });
 
-  test("only Fizz is already in the channel", async ({ page }) => {
+  test("the standing command team remains available when Fizz is in the channel", async ({
+    page,
+  }) => {
     await installMockBridge(page, {
       activePersonaIds: ["builtin:fizz"],
       managedAgents: [
@@ -216,10 +218,13 @@ test.describe("welcome and channel agent entry points", () => {
       ],
     });
     const dialog = await openAgentPicker(page);
-    await expect(dialog).toContainText(
+    await expect(dialog).toContainText("Chief of Staff");
+    await expect(dialog).toContainText("Maritime N2 Adviser");
+    await expect(dialog).toContainText("Logistics Adviser");
+    await expect(dialog).not.toContainText(
       "All of your agents are already in this channel.",
     );
-    await dialog.screenshot({ path: `${SHOTS}/02-only-fizz-in-channel.png` });
+    await dialog.screenshot({ path: `${SHOTS}/02-command-team-available.png` });
   });
 
   test("some personal agents are available", async ({ page }) => {
@@ -255,7 +260,9 @@ test.describe("welcome and channel agent entry points", () => {
     await dialog.screenshot({ path: `${SHOTS}/03-agents-available.png` });
   });
 
-  test("all personal agents are already in the channel", async ({ page }) => {
+  test("the standing command team remains available when personal agents are in the channel", async ({
+    page,
+  }) => {
     await installMockBridge(page, {
       activePersonaIds: ["builtin:fizz"],
       personas: [scoutPersona, editorPersona],
@@ -284,9 +291,14 @@ test.describe("welcome and channel agent entry points", () => {
       ],
     });
     const dialog = await openAgentPicker(page);
-    await expect(dialog).toContainText(
+    await expect(dialog).toContainText("Chief of Staff");
+    await expect(dialog).toContainText("Maritime N2 Adviser");
+    await expect(dialog).toContainText("Logistics Adviser");
+    await expect(dialog).not.toContainText(
       "All of your agents are already in this channel.",
     );
-    await dialog.screenshot({ path: `${SHOTS}/04-all-agents-in-channel.png` });
+    await dialog.screenshot({
+      path: `${SHOTS}/04-command-team-remains-available.png`,
+    });
   });
 });

@@ -985,6 +985,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "urlencoding",
+ "uuid",
  "webbrowser",
 ]
 
@@ -993,9 +994,11 @@ name = "buzz-command-sources"
 version = "0.1.0"
 dependencies = [
  "atomic-write-file",
+ "base64 0.22.1",
  "chrono",
  "fs2",
  "hex",
+ "rand 0.10.2",
  "reqwest 0.13.4",
  "serde",
  "serde_jcs",
@@ -1011,7 +1014,9 @@ dependencies = [
 name = "buzz-core"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
+ "flate2",
  "hex",
  "hmac 0.13.0",
  "nostr",
@@ -1075,6 +1080,7 @@ dependencies = [
  "opus",
  "plist",
  "png 0.18.1",
+ "rand 0.10.2",
  "regex",
  "reqwest 0.13.4",
  "rodio",

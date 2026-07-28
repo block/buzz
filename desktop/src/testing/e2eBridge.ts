@@ -134,6 +134,8 @@ type MockSearchProfileSeed = {
 type E2eConfig = {
   mode?: "mock" | "relay";
   mock?: {
+    /** World Monitor status returned by the mock Tauri bridge. */
+    worldMonitorConnection?: unknown;
     /** Native Daily Command Brief status view returned by the mock Tauri bridge. */
     commandBriefStatus?: unknown;
     /** Latest immutable Daily Command Brief publication returned by the bridge. */
@@ -2122,6 +2124,20 @@ function resetMockPersonas(config?: E2eConfig) {
       avatar_url:
         "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96'%3E%3Ccircle cx='48' cy='48' r='45' fill='%23071a2f' stroke='%23d8aa4f' stroke-width='3'/%3E%3Cg fill='none' stroke='%23e5bd65' stroke-width='3'%3E%3Ccircle cx='48' cy='48' r='29'/%3E%3Ccircle cx='48' cy='48' r='18' opacity='.65'/%3E%3Cpath d='M48 19v58M19 48h58M48 48l24-17'/%3E%3Ccircle cx='65' cy='36' r='3' fill='%23e5bd65'/%3E%3C/g%3E%3C/svg%3E",
       system_prompt: "You are the Operations Adviser.",
+      default_active: true,
+    },
+    {
+      id: "builtin:command-intelligence",
+      display_name: "Maritime N2 Adviser",
+      avatar_url: null,
+      system_prompt: "You are the Maritime N2 Adviser.",
+      default_active: true,
+    },
+    {
+      id: "builtin:command-logistics",
+      display_name: "Logistics Adviser",
+      avatar_url: null,
+      system_prompt: "You are the Logistics Adviser.",
       default_active: true,
     },
     {
@@ -8976,6 +8992,19 @@ export function maybeInstallE2eTauriMocks() {
   window.__BUZZ_E2E_COMMAND_LOG__ = [];
   window.__BUZZ_E2E_SIGNED_EVENTS__ = [];
   window.__BUZZ_E2E_WEBVIEW_ZOOM__ = 1;
+  const seededWorldMonitorConnection = config.mock?.worldMonitorConnection;
+  let mockWorldMonitorConnection: Record<string, unknown> =
+    seededWorldMonitorConnection !== null &&
+    typeof seededWorldMonitorConnection === "object"
+      ? { ...seededWorldMonitorConnection }
+      : {
+          endpoint: "https://api.worldmonitor.app/mcp",
+          status: "not_connected",
+          briefUsed: 0,
+          briefLimit: 25,
+          directUsed: 0,
+          directLimit: 25,
+        };
   window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ = ({
     channelName,
     content,
@@ -9217,9 +9246,10 @@ export function maybeInstallE2eTauriMocks() {
     const activeConfig = getConfig();
     const identity = getActiveIdentity(activeConfig);
     window.__BUZZ_E2E_COMMANDS__?.push(command);
+    const safePayload = payload;
     const loggedPayload = (() => {
       try {
-        return JSON.parse(JSON.stringify(payload ?? null));
+        return JSON.parse(JSON.stringify(safePayload ?? null));
       } catch {
         return null;
       }
@@ -9228,7 +9258,10 @@ export function maybeInstallE2eTauriMocks() {
       command,
       payload: loggedPayload,
     });
-    window.__BUZZ_E2E_COMMAND_LOG__?.push({ command, payload });
+    window.__BUZZ_E2E_COMMAND_LOG__?.push({
+      command,
+      payload: loggedPayload,
+    });
 
     switch (command) {
       case "get_builderlab_auth":
@@ -9443,6 +9476,33 @@ export function maybeInstallE2eTauriMocks() {
             (payload as { preference?: string } | null)?.preference ??
             "cloud_first",
         };
+      case "get_world_monitor_connection":
+        return mockWorldMonitorConnection;
+      case "connect_world_monitor_oauth":
+        mockWorldMonitorConnection = {
+          ...mockWorldMonitorConnection,
+          status: "connected",
+        };
+        return mockWorldMonitorConnection;
+      case "test_world_monitor_connection":
+        mockWorldMonitorConnection = {
+          ...mockWorldMonitorConnection,
+          status:
+            (
+              mockWorldMonitorConnection as {
+                status?: string;
+              }
+            ).status === "not_connected"
+              ? "not_connected"
+              : "connected",
+        };
+        return mockWorldMonitorConnection;
+      case "disconnect_world_monitor":
+        mockWorldMonitorConnection = {
+          ...mockWorldMonitorConnection,
+          status: "not_connected",
+        };
+        return mockWorldMonitorConnection;
       case "start_command_brief":
         return (
           activeConfig?.mock?.commandBriefStart ?? {

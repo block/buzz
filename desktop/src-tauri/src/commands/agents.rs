@@ -1083,7 +1083,7 @@ pub async fn start_managed_agent(
         // a persona-inherited harness).
         let reconcile_personas = load_personas(&app).unwrap_or_default();
         let reconcile_effective_command =
-            crate::managed_agents::record_agent_command(record, &reconcile_personas);
+            crate::managed_agents::record_agent_command_for_app(&app, record, &reconcile_personas);
 
         let reconcile = ProfileReconcileData {
             private_key_nsec: record.private_key_nsec.clone(),

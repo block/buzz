@@ -3,10 +3,14 @@ import { expect, test, type Page } from "@playwright/test";
 import { installMockBridge } from "../helpers/bridge";
 
 const OPERATIONS_PERSONA_ID = "builtin:command-operations";
+const INTELLIGENCE_PERSONA_ID = "builtin:command-intelligence";
+const LOGISTICS_PERSONA_ID = "builtin:command-logistics";
 const OPERATIONS_PUBKEY = "f".repeat(64);
 const COMMAND_TEAM_PERSONA_IDS = [
   "builtin:command-chief-of-staff",
   OPERATIONS_PERSONA_ID,
+  INTELLIGENCE_PERSONA_ID,
+  LOGISTICS_PERSONA_ID,
   "builtin:command-navigation",
   "builtin:command-daily-routine",
   "builtin:command-reporting",
@@ -44,8 +48,15 @@ async function invokeMock<T>(
 }
 
 async function managedOperationsAgents(page: Page): Promise<ManagedAgent[]> {
+  return managedAgentsForPersona(page, OPERATIONS_PERSONA_ID);
+}
+
+async function managedAgentsForPersona(
+  page: Page,
+  personaId: string,
+): Promise<ManagedAgent[]> {
   const agents = await invokeMock<ManagedAgent[]>(page, "list_managed_agents");
-  return agents.filter((agent) => agent.persona_id === OPERATIONS_PERSONA_ID);
+  return agents.filter((agent) => agent.persona_id === personaId);
 }
 
 async function commandCount(page: Page, command: string): Promise<number> {
@@ -156,4 +167,52 @@ test("a Command Team start error stays visible and does not navigate", async ({
   await expect(page).toHaveURL(agentsUrl);
   expect(await managedOperationsAgents(page)).toHaveLength(1);
   expect(await commandCount(page, "open_dm")).toBe(0);
+});
+
+test("Maritime N2 and Logistics each reuse one managed agent and one DM", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/");
+
+  const expected = [
+    {
+      personaId: INTELLIGENCE_PERSONA_ID,
+      title: "Maritime N2 Adviser",
+    },
+    {
+      personaId: LOGISTICS_PERSONA_ID,
+      title: "Logistics Adviser",
+    },
+  ] as const;
+
+  for (const [index, adviser] of expected.entries()) {
+    await page.getByTestId("open-agents-view").click();
+    const card = page.getByTestId(`persona-agent-row-${adviser.personaId}`);
+    await card.getByRole("button", { name: "Message" }).click();
+    await expect(page.getByTestId("chat-title")).toContainText(adviser.title);
+    const firstDmId = await page
+      .locator("[data-active='true'][data-channel-id]")
+      .getAttribute("data-channel-id");
+    expect(firstDmId).toBeTruthy();
+
+    const firstAgents = await managedAgentsForPersona(page, adviser.personaId);
+    expect(firstAgents).toHaveLength(1);
+    expect(firstAgents[0]?.status).toBe("running");
+    expect(await commandCount(page, "create_managed_agent")).toBe(index + 1);
+
+    await page.getByTestId("open-agents-view").click();
+    await page
+      .getByTestId(`persona-agent-row-${adviser.personaId}`)
+      .getByRole("button", { name: "Message" })
+      .click();
+
+    await expect(
+      page.locator("[data-active='true'][data-channel-id]"),
+    ).toHaveAttribute("data-channel-id", firstDmId ?? "");
+    const secondAgents = await managedAgentsForPersona(page, adviser.personaId);
+    expect(secondAgents).toHaveLength(1);
+    expect(secondAgents[0]?.pubkey).toBe(firstAgents[0]?.pubkey);
+    expect(await commandCount(page, "create_managed_agent")).toBe(index + 1);
+  }
 });

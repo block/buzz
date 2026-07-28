@@ -389,6 +389,12 @@ pub(super) fn canonical_ledger(
     let mut rejected_by_kind = [0_usize; 7];
     let mut rejected_command_team_discussions = 0_usize;
     for mut candidate in candidates {
+        let (quote, credential_redacted) = redact_credential_bearing_source(&candidate.quote);
+        candidate.quote = quote;
+        if credential_redacted {
+            limitations
+                .insert("Potential credential values were redacted from source evidence.".into());
+        }
         let Some((quote, truncated)) =
             canonical_quote(&candidate.quote, MAX_CANONICAL_SOURCE_QUOTE_BYTES)
         else {
@@ -631,6 +637,44 @@ fn digest_text(value: &str) -> String {
     hex::encode(Sha256::digest(value.as_bytes()))
 }
 
+fn redact_credential_bearing_source(value: &str) -> (String, bool) {
+    let normalized = value
+        .to_ascii_lowercase()
+        .replace(['"', '\'', '`'], "")
+        .replace('\u{00a0}', " ");
+    let labels = [
+        "password",
+        "passwd",
+        "pwd",
+        "api key",
+        "api_key",
+        "api-key",
+        "access token",
+        "access_token",
+        "refresh token",
+        "refresh_token",
+        "authorization",
+    ];
+    let contains_assignment = labels.iter().any(|label| {
+        normalized.match_indices(label).any(|(start, _)| {
+            let tail = normalized[start + label.len()..].trim_start();
+            tail.starts_with(':')
+                || tail.starts_with('=')
+                || tail
+                    .strip_prefix("is")
+                    .is_some_and(|value| value.starts_with(char::is_whitespace))
+        })
+    }) || normalized.contains("bearer token ");
+    if contains_assignment {
+        (
+            "[REDACTED: credential-bearing source evidence]".to_string(),
+            true,
+        )
+    } else {
+        (value.to_string(), false)
+    }
+}
+
 fn canonical_quote(value: &str, maximum_bytes: usize) -> Option<(String, bool)> {
     if value.trim().is_empty() {
         return None;
@@ -756,5 +800,26 @@ mod tests {
         assert!(limitations
             .iter()
             .any(|item| item.contains("malformed Command-team discussion")));
+    }
+
+    #[test]
+    fn credential_like_source_values_are_redacted_before_entering_the_ledger() {
+        let sensitive = "example-sensitive-value";
+        let candidates = vec![candidate(
+            1,
+            SourceKind::Rag,
+            "AI Notes",
+            &format!("Server details: user: planner password: {sensitive}"),
+        )];
+
+        let canonical =
+            canonical_ledger("brief-run:test", "a".repeat(64).as_str(), candidates).unwrap();
+        let quote = canonical.ledger[0].quote();
+
+        assert!(!quote.contains(sensitive));
+        assert!(quote.contains("[REDACTED:"));
+        assert!(canonical
+            .limitations
+            .contains("Potential credential values were redacted from source evidence."));
     }
 }

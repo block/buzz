@@ -290,8 +290,8 @@ async fn restart_setup_mode_agents_after_install(
         app_state::AppState,
         managed_agents::{
             agent_readiness, known_acp_runtime, load_global_agent_config, load_managed_agents,
-            load_personas, record_agent_command, resolve_effective_agent_env, AgentReadiness,
-            BackendKind,
+            load_personas, record_agent_command_for_app, resolve_effective_agent_env,
+            AgentReadiness, BackendKind,
         },
     };
     use tauri::Manager;
@@ -315,7 +315,7 @@ async fn restart_setup_mode_agents_after_install(
             .iter()
             .filter(|record| {
                 let is_local = record.backend == BackendKind::Local;
-                let effective_cmd = record_agent_command(record, &personas);
+                let effective_cmd = record_agent_command_for_app(&app_for_scan, record, &personas);
                 let runtime_matches =
                     known_acp_runtime(&effective_cmd).is_some_and(|r| r.id == runtime_id_owned);
                 let setup_mode = runtimes
@@ -381,9 +381,9 @@ async fn restart_single_agent_after_install(
         app_state::AppState,
         managed_agents::{
             agent_readiness, current_instance_id, find_managed_agent_mut, known_acp_runtime,
-            load_global_agent_config, load_managed_agents, load_personas, record_agent_command,
-            resolve_effective_agent_env, save_managed_agents, stop_managed_agent_process,
-            sync_managed_agent_processes, AgentReadiness, BackendKind,
+            load_global_agent_config, load_managed_agents, load_personas,
+            record_agent_command_for_app, resolve_effective_agent_env, save_managed_agents,
+            stop_managed_agent_process, sync_managed_agent_processes, AgentReadiness, BackendKind,
         },
     };
     use tauri::Manager;
@@ -436,7 +436,7 @@ async fn restart_single_agent_after_install(
         let personas = load_personas(&app_for_stop).unwrap_or_default();
         let global = load_global_agent_config(&app_for_stop).unwrap_or_default();
 
-        let effective_cmd = record_agent_command(record, &personas);
+        let effective_cmd = record_agent_command_for_app(&app_for_stop, record, &personas);
         let runtime_matches =
             known_acp_runtime(&effective_cmd).is_some_and(|r| r.id == runtime_id_owned);
         if !runtime_matches {

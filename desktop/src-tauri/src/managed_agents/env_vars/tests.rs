@@ -212,7 +212,7 @@ fn reserved_keys_include_command_adviser_source_injection() {
         "COMMAND_ADVISER_RAG_URL",
         "COMMAND_ADVISER_WORLD_MONITOR_ENDPOINT",
         "COMMAND_ADVISER_WORLD_MONITOR_USAGE_PATH",
-        "COMMAND_ADVISER_WORLD_MONITOR_API_KEY",
+        "COMMAND_ADVISER_WORLD_MONITOR_OAUTH_PATH",
     ] {
         assert!(is_reserved_env_key(key), "{key} should be reserved");
     }

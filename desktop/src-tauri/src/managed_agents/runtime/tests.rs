@@ -92,6 +92,26 @@ fn buzz_agent_resolved_via_path() {
 }
 
 #[test]
+fn command_team_personas_disable_developer_lifecycle_hooks() {
+    assert!(!super::command_adviser::should_enable_mcp_hooks(
+        true,
+        Some("builtin:command-intelligence")
+    ));
+    assert!(!super::command_adviser::should_enable_mcp_hooks(
+        true,
+        Some("builtin:command-logistics")
+    ));
+    assert!(super::command_adviser::should_enable_mcp_hooks(
+        true,
+        Some("builtin:software-engineer")
+    ));
+    assert!(super::command_adviser::should_enable_mcp_hooks(true, None));
+    assert!(!super::command_adviser::should_enable_mcp_hooks(
+        false, None
+    ));
+}
+
+#[test]
 fn codex_has_mcp_command() {
     let p = known_acp_runtime("codex-acp").expect("should resolve");
     assert!(!p.mcp_hooks, "codex-acp does not handle MCP_HOOK_SERVERS");

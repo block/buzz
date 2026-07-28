@@ -198,6 +198,7 @@ export function useDailyCommandBrief(
           return;
         }
         setLatest(brief);
+        setError(null);
       } catch {
         if (mountedRef.current && request === latestGenerationRef.current) {
           setError(DISPLAY_ERROR);

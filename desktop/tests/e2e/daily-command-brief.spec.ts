@@ -14,6 +14,8 @@ const finding = {
 const sectionKeys = [
   "today",
   "operations",
+  "intelligence",
+  "logistics",
   "navigation",
   "daily_routine",
   "reports",
@@ -27,6 +29,8 @@ const sections = Object.fromEntries(sectionKeys.map((key) => [key, [finding]]));
 
 const contributions = [
   ["operations", "operations"],
+  ["intelligence", "intelligence"],
+  ["logistics", "logistics"],
   ["navigation", "navigation"],
   ["daily_routine", "daily_routine"],
   ["reporting", "reports"],
@@ -63,7 +67,10 @@ const published = {
     snapshotId: "snapshot-verified",
     sections,
     degradedSections: ["navigation"],
-    missingInformation: ["Reminders permission is denied."],
+    missingInformation: [
+      "Reminders permission is denied.",
+      "World Monitor was unavailable for the Maritime N2 update.",
+    ],
     dissent: ["Plans retains a dissenting view."],
     sourceLedger: [
       {
@@ -151,6 +158,8 @@ test("renders a complete degraded brief with retained evidence boundaries", asyn
     "Decisions and approvals required",
     "Today at a glance",
     "Operational priorities and risks",
+    "Intelligence and operating environment",
+    "Logistics and sustainment",
     "Navigation considerations",
     "Daily routine and calendar",
     "Reports and returns due",
@@ -162,7 +171,27 @@ test("renders a complete degraded brief with retained evidence boundaries", asyn
   }
 
   const headings = brief.locator("[data-testid='brief-main-sections'] h3");
-  await expect(headings.first()).toHaveText("Decisions and approvals required");
+  await expect(headings).toHaveText([
+    "Decisions and approvals required",
+    "Today at a glance",
+    "Operational priorities and risks",
+    "Intelligence and operating environment",
+    "Logistics and sustainment",
+    "Navigation considerations",
+    "Daily routine and calendar",
+    "Reports and returns due",
+    "30, 60 and 90-day outlook",
+  ]);
+  await expect(
+    brief
+      .getByTestId("brief-main-sections")
+      .getByText("World Monitor was unavailable for the Maritime N2 update."),
+  ).toHaveCount(0);
+  await expect(
+    brief.getByText(
+      "World Monitor was unavailable for the Maritime N2 update.",
+    ),
+  ).toBeHidden();
 
   const disclosure = brief.getByTestId("brief-evidence-disclosure");
   await expect(disclosure).not.toHaveAttribute("open", "");
@@ -185,6 +214,11 @@ test("renders a complete degraded brief with retained evidence boundaries", asyn
   ).toBeVisible();
   await expect(
     brief.getByText("Reminders permission is denied.").first(),
+  ).toBeVisible();
+  await expect(
+    brief.getByText(
+      "World Monitor was unavailable for the Maritime N2 update.",
+    ),
   ).toBeVisible();
   await expect(
     brief

@@ -2,6 +2,7 @@ use std::{path::PathBuf, sync::Arc};
 
 use buzz_command_sources::{
     mcp_http::McpHttpClient,
+    oauth::WorldMonitorOAuthStore,
     usage::{UsageAdmission, UsagePool, WorldMonitorUsageLedger},
     world_monitor::{NormalizedWorldMonitorEvidence, WorldMonitorRequest, WorldMonitorTool},
 };
@@ -9,7 +10,6 @@ use rmcp::model::{CallToolResult, Content};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
-use zeroize::Zeroize;
 
 const N2_PERSONA: &str = "builtin:command-intelligence";
 
@@ -98,21 +98,18 @@ impl CommandAdviserTools {
         let rag = std::env::var("COMMAND_ADVISER_RAG_URL")
             .ok()
             .and_then(|endpoint| url::Url::parse(&endpoint).ok())
-            .and_then(|endpoint| McpHttpClient::new(endpoint, None).ok());
+            .and_then(|endpoint| McpHttpClient::new(endpoint).ok());
 
-        let mut api_key = std::env::var("COMMAND_ADVISER_WORLD_MONITOR_API_KEY").ok();
-        std::env::remove_var("COMMAND_ADVISER_WORLD_MONITOR_API_KEY");
         let endpoint = std::env::var("COMMAND_ADVISER_WORLD_MONITOR_ENDPOINT").ok();
-        let world_monitor =
-            endpoint
-                .as_deref()
-                .zip(api_key.as_deref())
-                .and_then(|(endpoint, key)| {
-                    McpHttpClient::world_monitor(endpoint, key.to_string()).ok()
-                });
-        if let Some(key) = &mut api_key {
-            key.zeroize();
-        }
+        let world_monitor = endpoint
+            .as_deref()
+            .zip(std::env::var_os("COMMAND_ADVISER_WORLD_MONITOR_OAUTH_PATH"))
+            .and_then(|(endpoint, path)| {
+                WorldMonitorOAuthStore::new(PathBuf::from(path))
+                    .ok()
+                    .map(|store| (endpoint, store))
+            })
+            .and_then(|(endpoint, store)| McpHttpClient::world_monitor(endpoint, store).ok());
         let usage = std::env::var_os("COMMAND_ADVISER_WORLD_MONITOR_USAGE_PATH")
             .map(PathBuf::from)
             .map(WorldMonitorUsageLedger::new);
@@ -176,7 +173,7 @@ impl CommandAdviserTools {
         };
         let (Some(client), Some(usage)) = (&self.inner.world_monitor, &self.inner.usage) else {
             return error_result(
-                "World Monitor is not configured; continue with available evidence.",
+                "World Monitor is not connected; continue with available evidence.",
             );
         };
         let admission = match usage.admit(UsagePool::Direct, &request, chrono::Local::now()) {

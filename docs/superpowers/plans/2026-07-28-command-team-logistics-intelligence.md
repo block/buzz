@@ -4,9 +4,16 @@
 
 **Goal:** Add Logistics and Maritime N2 as native Command Team advisers, make adviser conversations doctrine-aware, and add bounded World Monitor intelligence to N2 conversations and the Daily Command Brief.
 
-**Architecture:** Extend the existing managed-agent and command-brief paths rather than creating another application. A small shared Rust library owns MCP HTTP parsing, the curated World Monitor tool vocabulary, freshness handling, and one locked JSON quota/cache ledger used by both the desktop brief collector and `buzz-dev-mcp`; Tauri continues to own Keychain access and injects the N2 credential only into the managed N2 process. Existing Buzz discussions, encrypted outcomes, RAG, Memory, cloud/local routing, signed brief persistence, and naval UI remain authoritative.
+**Architecture:** Extend the existing managed-agent and command-brief paths rather than creating another application. A small shared Rust library owns MCP HTTP parsing, OAuth token rotation, the curated World Monitor tool vocabulary, freshness handling, and one locked JSON quota/cache ledger used by both the desktop brief collector and `buzz-dev-mcp`. Existing Buzz discussions, encrypted outcomes, RAG, Memory, cloud/local routing, signed brief persistence, and naval UI remain authoritative.
 
-**Tech Stack:** Rust 1.88, Tokio, Reqwest, RMCP, Serde, Tauri 2, macOS Keychain through the existing `SecretStore`, React 19, TypeScript, Node test runner, Playwright, pnpm, Hermit.
+**Tech Stack:** Rust 1.88, Tokio, Reqwest, RMCP, Serde, OAuth 2.1 PKCE, Tauri 2, React 19, TypeScript, Node test runner, Playwright, pnpm, Hermit.
+
+> **28 July OAuth correction:** World Monitor Pro supplies MCP access through
+> OAuth and does not issue an API key. Any API-key or
+> `command.world-monitor.api-key` detail later in this execution log describes
+> the superseded first implementation. The accepted implementation is the
+> browser OAuth flow, rotating local credentials, `Connect World Monitor` UI,
+> and `COMMAND_ADVISER_WORLD_MONITOR_OAUTH_PATH`.
 
 ## Global Constraints
 
@@ -15,8 +22,8 @@
 - The standing Command Team contains exactly eight advisers; the Daily Command Brief contains exactly seven specialist contributions plus the Chief of Staff.
 - Every adviser seeks the logical RAG collection `ADF Doctrine` before broader knowledge for substantive advice.
 - Doctrine is guidance, not a response gate. No result or unavailable RAG must not cause an adviser to refuse an assessment.
-- World Monitor MCP defaults to the already tested `https://api.worldmonitor.app/mcp` endpoint and authenticates with `X-WorldMonitor-Key`.
-- The World Monitor API key is stored at rest only in macOS Keychain under `command.world-monitor.api-key`; it is never returned to React, written to logs, inserted into prompts, or persisted in Buzz.
+- World Monitor MCP defaults to the already tested `https://api.worldmonitor.app/mcp` endpoint and authenticates with OAuth 2.1 bearer tokens from the World Monitor Pro sign-in flow.
+- No API key is requested. Rotating OAuth credentials live in one permission-restricted local file so both the desktop brief collector and the Maritime N2 MCP tool process can refresh them safely without copying credentials into React, prompts, logs, or Buzz.
 - World Monitor daily application budgets are independent: 25 attempted `tools/call` requests for all brief updates combined and 25 for direct N2 questions, per local calendar day.
 - The 25-call briefing allowance is a ceiling, not a target.
 - Cache World Monitor results for 15 minutes by tool name plus RFC 8785-style canonical arguments; a cache hit spends no call.
@@ -107,7 +114,7 @@
 - Produces matching TypeScript `"intelligence"`, `"logistics"`, and `"world_monitor"` literals.
 - Sets `SPECIALIST_COUNT` to `7` and specialist order to Operations, Intelligence, Logistics, Navigation, Daily Routine, Reporting, Plans.
 
-- [ ] **Step 1: Write failing Rust closed-contract tests**
+- [x] **Step 1: Write failing Rust closed-contract tests**
 
 Update the fixture sections and contributions and add these assertions:
 
@@ -137,7 +144,7 @@ The valid `brief_value()` fixture must contain seven contributions and eleven
 section keys. Keep the existing rejection test and add `"unknown_osint"` as an
 invalid source kind.
 
-- [ ] **Step 2: Run the Rust tests and verify RED**
+- [x] **Step 2: Run the Rust tests and verify RED**
 
 Run:
 
@@ -149,7 +156,7 @@ cargo test --manifest-path desktop/src-tauri/Cargo.toml command_brief::types_tes
 Expected: compilation fails because `Intelligence`, `Logistics`, and
 `WorldMonitor` do not exist.
 
-- [ ] **Step 3: Write failing TypeScript roster and parser tests**
+- [x] **Step 3: Write failing TypeScript roster and parser tests**
 
 Require the exact adviser order:
 
@@ -174,7 +181,7 @@ Require `ADVISER_IDENTITIES.intelligence.symbol === "intelligence-scan"` and
 parser fixture to seven contributions, eleven sections, and a valid
 `world_monitor` source.
 
-- [ ] **Step 4: Run the frontend tests and verify RED**
+- [x] **Step 4: Run the frontend tests and verify RED**
 
 Run:
 
@@ -185,7 +192,7 @@ pnpm test -- --test-name-pattern="Command Team|brief contract|adviser insignia"
 
 Expected: failures report the missing adviser, section, and identity literals.
 
-- [ ] **Step 5: Implement the minimum closed enums and UI roster**
+- [x] **Step 5: Implement the minimum closed enums and UI roster**
 
 Add the Rust variants and exact arrays:
 
@@ -231,7 +238,7 @@ Update every exhaustive match and strict key set in Rust and TypeScript.
 Use the existing `Radar` for Operations, `ScanSearch` for N2, and `Fuel` for
 Logistics. Preserve the existing sextant asset for Navigation.
 
-- [ ] **Step 6: Run focused tests and verify GREEN**
+- [x] **Step 6: Run focused tests and verify GREEN**
 
 Run:
 
@@ -245,7 +252,7 @@ pnpm typecheck
 
 Expected: all commands pass.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add desktop/src-tauri/src/command_brief/types.rs \
@@ -274,7 +281,7 @@ git commit -m "feat: expand the command team roster"
 - Extends `command-discussion-outcome-v1` with advisers and sections already added in Task 1.
 - Requires the N2 prompt to record ISO 3166-1 alpha-2 codes in outcomes when a country is material; this provides deterministic focus hints to Task 7.
 
-- [ ] **Step 1: Write failing built-in persona tests**
+- [x] **Step 1: Write failing built-in persona tests**
 
 Assert the merged built-in list contains both stable IDs once, remains
 idempotent on a second merge, and that both definitions have `model: None` and
@@ -293,7 +300,7 @@ Assert the N2 prompt contains `world_monitor_`, `reported information`,
 `mission-specific Buzz channel`, `virtual Joint Planning Group`, and
 `@mention`.
 
-- [ ] **Step 2: Run persona tests and verify RED**
+- [x] **Step 2: Run persona tests and verify RED**
 
 Run:
 
@@ -304,7 +311,7 @@ cargo test --manifest-path desktop/src-tauri/Cargo.toml managed_agents::personas
 
 Expected: failures identify the two missing definitions and prompt clauses.
 
-- [ ] **Step 3: Write failing discussion-outcome tests**
+- [x] **Step 3: Write failing discussion-outcome tests**
 
 Add controlled records for:
 
@@ -328,7 +335,7 @@ Require both persona/adviser mappings, valid slugs, selection, supersession,
 and per-adviser limits. Retain rejection of a Logistics body written by the N2
 persona.
 
-- [ ] **Step 4: Run discussion tests and verify RED**
+- [x] **Step 4: Run discussion tests and verify RED**
 
 Run:
 
@@ -339,7 +346,7 @@ cargo test --manifest-path desktop/src-tauri/Cargo.toml command_team_discussions
 
 Expected: the new persona IDs are rejected as unknown.
 
-- [ ] **Step 5: Implement the two persona definitions and prompt behaviour**
+- [x] **Step 5: Implement the two persona definitions and prompt behaviour**
 
 Add symbolic navy/gold SVG data URLs and definitions:
 
@@ -371,7 +378,7 @@ Put N2 after Operations and Logistics after N2 in the built-in order. Extend
 `adviser_for_persona` and `adviser_label`. Keep outcome schema v1 and its
 current bounds.
 
-- [ ] **Step 6: Run focused tests and verify GREEN**
+- [x] **Step 6: Run focused tests and verify GREEN**
 
 Run:
 
@@ -383,7 +390,7 @@ cargo test --manifest-path desktop/src-tauri/Cargo.toml command_team_discussions
 
 Expected: both suites pass.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add desktop/src-tauri/src/managed_agents/personas.rs \
@@ -444,7 +451,7 @@ pub struct NormalizedWorldMonitorEvidence {
   Monitor endpoints, responses over 2 MiB, invalid JSON-RPC IDs, and MCP
   `isError`.
 
-- [ ] **Step 1: Create the crate manifest and failing transport tests**
+- [x] **Step 1: Create the crate manifest and failing transport tests**
 
 Register `crates/buzz-command-sources` as a workspace member and dependency.
 Use existing workspace `tokio`, `reqwest`, `serde`, `serde_json`, `chrono`,
@@ -463,7 +470,7 @@ Write fake HTTP-server tests named:
 The fake server must inspect the real request header and return controlled
 wire responses; do not assert only on a mock invocation count.
 
-- [ ] **Step 2: Run transport tests and verify RED**
+- [x] **Step 2: Run transport tests and verify RED**
 
 Run:
 
@@ -474,7 +481,7 @@ cargo test -p buzz-command-sources mcp_http
 
 Expected: compilation fails because the client types do not exist.
 
-- [ ] **Step 3: Write failing tool and freshness tests**
+- [x] **Step 3: Write failing tool and freshness tests**
 
 Require the exact seven upstream tool names:
 
@@ -494,7 +501,7 @@ Require `country_code` to be two uppercase ASCII letters, `limit` to be
 arguments. Test RFC3339, Unix-second, Unix-millisecond, zero, future, absent,
 24-hour tactical, and seven-day strategic freshness cases.
 
-- [ ] **Step 4: Run tool tests and verify RED**
+- [x] **Step 4: Run tool tests and verify RED**
 
 Run:
 
@@ -505,7 +512,7 @@ cargo test -p buzz-command-sources world_monitor
 
 Expected: compilation fails because the tool and freshness types do not exist.
 
-- [ ] **Step 5: Implement the minimum client**
+- [x] **Step 5: Implement the minimum client**
 
 Use a Reqwest client with redirects disabled and a ten-second timeout. Send:
 
@@ -533,7 +540,7 @@ Maritime Activity. Use seven days for Country Risk, Chokepoint Status, and
 Supply Chain Data. A missing, zero, more-than-five-minutes-future, or unparsable
 source time is `Unknown`; an older valid source time is `Stale`.
 
-- [ ] **Step 6: Run crate tests and verify GREEN**
+- [x] **Step 6: Run crate tests and verify GREEN**
 
 Run:
 
@@ -545,7 +552,7 @@ cargo clippy -p buzz-command-sources --all-targets -- -D warnings
 
 Expected: both commands pass with no secret in failure output.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add Cargo.toml Cargo.lock \
@@ -594,7 +601,7 @@ pub struct WorldMonitorUsageLedger {
 - `store_success(cache_key, evidence, now_local)` atomically stores a bounded
   cache result.
 
-- [ ] **Step 1: Write failing ledger tests**
+- [x] **Step 1: Write failing ledger tests**
 
 Create tests named:
 
@@ -611,7 +618,7 @@ Create tests named:
 Use two `WorldMonitorUsageLedger` instances pointing to the same temporary
 path in the concurrency test.
 
-- [ ] **Step 2: Run ledger tests and verify RED**
+- [x] **Step 2: Run ledger tests and verify RED**
 
 Run:
 
@@ -622,7 +629,7 @@ cargo test -p buzz-command-sources usage
 
 Expected: compilation fails because the usage types do not exist.
 
-- [ ] **Step 3: Implement locked atomic state**
+- [x] **Step 3: Implement locked atomic state**
 
 Persist this bounded shape:
 
@@ -643,7 +650,7 @@ network request, and persist via a same-directory temporary file plus rename.
 On Unix, set file mode `0o600`. Do not decrement a reservation when the
 network request fails.
 
-- [ ] **Step 4: Run tests and verify GREEN**
+- [x] **Step 4: Run tests and verify GREEN**
 
 Run:
 
@@ -655,7 +662,7 @@ cargo test -p buzz-command-sources
 
 Expected: all tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add Cargo.toml Cargo.lock crates/buzz-command-sources
@@ -703,7 +710,7 @@ pub struct WorldMonitorConnectionView {
 }
 ```
 
-- [ ] **Step 1: Write failing native configuration and command tests**
+- [x] **Step 1: Write failing native configuration and command tests**
 
 Require legacy `trusted-lan-sources.json` files without `world_monitor` to load
 with the default endpoint and keychain identifier. Require config save to
@@ -720,7 +727,7 @@ Use an injected fake secret store and fake `McpHttpClient` to prove:
 - `401`, `429`, timeout, malformed, and success map to stable redacted status;
 - returned serialised JSON never contains `wm_live_`.
 
-- [ ] **Step 2: Run native tests and verify RED**
+- [x] **Step 2: Run native tests and verify RED**
 
 Run:
 
@@ -732,7 +739,7 @@ cargo test --manifest-path desktop/src-tauri/Cargo.toml trusted_lan
 
 Expected: missing module, commands, and config fields.
 
-- [ ] **Step 3: Write failing API, hook, and card tests**
+- [x] **Step 3: Write failing API, hook, and card tests**
 
 Require exact IPC response keys:
 
@@ -762,7 +769,7 @@ The card test must assert:
 - text shows `Brief 3/25` and `Direct questions 4/25`;
 - no arbitrary pixel text classes are introduced.
 
-- [ ] **Step 4: Run frontend tests and verify RED**
+- [x] **Step 4: Run frontend tests and verify RED**
 
 Run:
 
@@ -773,7 +780,7 @@ pnpm test -- --test-name-pattern="World Monitor"
 
 Expected: imports fail because the API, hook, and card do not exist.
 
-- [ ] **Step 5: Implement native and frontend configuration**
+- [x] **Step 5: Implement native and frontend configuration**
 
 Use:
 
@@ -792,7 +799,7 @@ Render the connection card below the advisory notice and above the Daily
 Command Brief. Keep it compact and visually consistent with the navy/gold
 Command Adviser theme.
 
-- [ ] **Step 6: Run focused tests and verify GREEN**
+- [x] **Step 6: Run focused tests and verify GREEN**
 
 Run:
 
@@ -808,7 +815,7 @@ pnpm check:px-text
 
 Expected: all commands pass.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add desktop/src-tauri/src/command_services/trusted_lan.rs \
@@ -862,7 +869,7 @@ COMMAND_ADVISER_WORLD_MONITOR_API_KEY
   `world_monitor_chokepoint_status`,
   `world_monitor_supply_chain_data`.
 
-- [ ] **Step 1: Write failing sidecar tool tests**
+- [x] **Step 1: Write failing sidecar tool tests**
 
 Construct `CommandAdviserTools` with a fake RAG MCP server and fake World
 Monitor server. Prove:
@@ -875,7 +882,7 @@ Monitor server. Prove:
 - World Monitor cache hits return the original retrieval time;
 - the seven methods emit only their approved argument fields.
 
-- [ ] **Step 2: Run sidecar tests and verify RED**
+- [x] **Step 2: Run sidecar tests and verify RED**
 
 Run:
 
@@ -886,7 +893,7 @@ cargo test -p buzz-dev-mcp command_adviser
 
 Expected: missing module and tools.
 
-- [ ] **Step 3: Write failing runtime environment tests**
+- [x] **Step 3: Write failing runtime environment tests**
 
 Require:
 
@@ -898,7 +905,7 @@ Require:
 - `buzz-dev-mcp` shell child removes
   `COMMAND_ADVISER_WORLD_MONITOR_API_KEY`.
 
-- [ ] **Step 4: Run runtime tests and verify RED**
+- [x] **Step 4: Run runtime tests and verify RED**
 
 Run:
 
@@ -912,7 +919,7 @@ cargo test -p buzz-dev-mcp shell
 Expected: assertions fail because protected variables are not installed or
 removed.
 
-- [ ] **Step 5: Implement sidecar tools and protected injection**
+- [x] **Step 5: Implement sidecar tools and protected injection**
 
 In managed-agent spawn, call one helper after user environment layering:
 
@@ -934,7 +941,7 @@ through the direct pool, executes only when reserved, stores successful
 evidence, and returns compact JSON text. Each method returns cached evidence
 without an outbound call.
 
-- [ ] **Step 6: Run focused tests and verify GREEN**
+- [x] **Step 6: Run focused tests and verify GREEN**
 
 Run:
 
@@ -948,7 +955,7 @@ cargo test --manifest-path desktop/src-tauri/Cargo.toml managed_agents::env_vars
 
 Expected: all commands pass.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add crates/buzz-dev-mcp/src/command_adviser.rs \
@@ -995,7 +1002,7 @@ pub struct WorldMonitorBriefBatch {
     command-team outcomes: country risk, maritime activity, and country news;
   - maximum 23 planned calls before cache/quota admission.
 
-- [ ] **Step 1: Write failing doctrine-intent tests**
+- [x] **Step 1: Write failing doctrine-intent tests**
 
 For every specialist, require:
 
@@ -1009,7 +1016,7 @@ Test a RAG catalogue without `ADF Doctrine`: collection proceeds with the
 general query and one bounded limitation. Test doctrine call failure:
 subsequent general RAG and Memory calls still occur.
 
-- [ ] **Step 2: Run doctrine tests and verify RED**
+- [x] **Step 2: Run doctrine tests and verify RED**
 
 Run:
 
@@ -1021,7 +1028,7 @@ cargo test --manifest-path desktop/src-tauri/Cargo.toml sources_tests
 
 Expected: missing doctrine/context fields and one-call behaviour.
 
-- [ ] **Step 3: Write failing World Monitor collection tests**
+- [x] **Step 3: Write failing World Monitor collection tests**
 
 Use a fake World Monitor executor and real usage ledger. Assert:
 
@@ -1039,7 +1046,7 @@ Use a fake World Monitor executor and real usage ledger. Assert:
 - `SourceKind::WorldMonitor` survives canonicalisation and is available to
   Intelligence and Logistics.
 
-- [ ] **Step 4: Run World Monitor source tests and verify RED**
+- [x] **Step 4: Run World Monitor source tests and verify RED**
 
 Run:
 
@@ -1051,7 +1058,7 @@ cargo test --manifest-path desktop/src-tauri/Cargo.toml canonical
 
 Expected: missing collector and source-kind counter handling.
 
-- [ ] **Step 5: Implement doctrine-first collection**
+- [x] **Step 5: Implement doctrine-first collection**
 
 For each specialist:
 
@@ -1064,7 +1071,7 @@ For each specialist:
 Do not set global `rag_available = false` merely because the doctrine call
 failed. Set it false only after the broader RAG call fails.
 
-- [ ] **Step 6: Implement the N2 update collector**
+- [x] **Step 6: Implement the N2 update collector**
 
 Load the World Monitor key natively, build the deterministic plan, admit each
 request through `UsagePool::Brief`, and append successful evidence as
@@ -1088,7 +1095,7 @@ shared usage path, then attach it to the existing `SourceCollector`. Missing
 configuration attaches an unavailable collector rather than rejecting the
 source backend.
 
-- [ ] **Step 7: Run focused tests and verify GREEN**
+- [x] **Step 7: Run focused tests and verify GREEN**
 
 Run:
 
@@ -1102,7 +1109,7 @@ cargo test --manifest-path desktop/src-tauri/Cargo.toml world_monitor
 
 Expected: all commands pass.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add desktop/src-tauri/src/command_brief/sources/retrieval_intents.rs \
@@ -1141,7 +1148,7 @@ git commit -m "feat: collect doctrine and n2 brief evidence"
 - Specialist order exactly matches Task 1.
 - Visible section order exactly matches the approved design.
 
-- [ ] **Step 1: Write failing persona and orchestration tests**
+- [x] **Step 1: Write failing persona and orchestration tests**
 
 Require seven definitions in this order:
 
@@ -1162,7 +1169,7 @@ cite ledger IDs, preserve dissent, and keep proposals pending. Run the fake
 orchestrator and assert seven specialist executions, a Chief input containing
 seven validated contributions, and partial completion when N2 fails.
 
-- [ ] **Step 2: Run Rust tests and verify RED**
+- [x] **Step 2: Run Rust tests and verify RED**
 
 Run:
 
@@ -1174,7 +1181,7 @@ cargo test --manifest-path desktop/src-tauri/Cargo.toml command_brief::orchestra
 
 Expected: five-specialist expectations fail.
 
-- [ ] **Step 3: Write failing presentation tests**
+- [x] **Step 3: Write failing presentation tests**
 
 Render a complete brief and assert index order:
 
@@ -1196,7 +1203,7 @@ Require the labels `Intelligence and operating environment` and
 `Logistics and sustainment`. Require World Monitor evidence to appear only
 inside the collapsed Evidence and system status disclosure.
 
-- [ ] **Step 4: Run frontend tests and verify RED**
+- [x] **Step 4: Run frontend tests and verify RED**
 
 Run:
 
@@ -1207,7 +1214,7 @@ pnpm test -- --test-name-pattern="Daily Command Brief"
 
 Expected: missing section cards and five-specialist parser fixture failures.
 
-- [ ] **Step 5: Implement specialist definitions and orchestration**
+- [x] **Step 5: Implement specialist definitions and orchestration**
 
 Add:
 
@@ -1229,14 +1236,14 @@ Keep specialist execution sequential by default and preserve the existing
 maximum concurrency of two. Update all five-specialist copy, collection sizes,
 contribution maps, dissent caps, and mock outputs to seven.
 
-- [ ] **Step 6: Implement decision-first presentation**
+- [x] **Step 6: Implement decision-first presentation**
 
 Insert Intelligence immediately after Operations and Logistics immediately
 after Intelligence. Add exact labels in `briefPresentation.ts`. Preserve
 Decisions first and keep Sources, individual contributions, lifecycle,
 warnings, and system provenance inside `BriefEvidenceDisclosure`.
 
-- [ ] **Step 7: Run focused tests and verify GREEN**
+- [x] **Step 7: Run focused tests and verify GREEN**
 
 Run:
 
@@ -1253,7 +1260,7 @@ pnpm typecheck
 
 Expected: all commands pass.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add desktop/src-tauri/src/command_brief/personas.rs \
@@ -1290,7 +1297,7 @@ git commit -m "feat: add intelligence and logistics to command briefs"
 - Live acceptance uses the real signed Command Adviser app, current
   cloud/local route, trusted-LAN RAG/Memory, and World Monitor subscription.
 
-- [ ] **Step 1: Write failing E2E specs**
+- [x] **Step 1: Write failing E2E specs**
 
 The connection spec must:
 
@@ -1307,7 +1314,7 @@ Update conversation E2E to Message N2 and Logistics twice each and prove reuse.
 Update brief E2E to assert the nine visible section cards in exact order and a
 World Monitor failure warning inside the collapsed evidence disclosure.
 
-- [ ] **Step 2: Run E2E specs and verify RED**
+- [x] **Step 2: Run E2E specs and verify RED**
 
 Run:
 
@@ -1323,7 +1330,7 @@ pnpm exec playwright test --project=smoke \
 
 Expected: missing mock commands, two agents, and two brief sections.
 
-- [ ] **Step 3: Implement mock bridge support and documentation**
+- [x] **Step 3: Implement mock bridge support and documentation**
 
 Add exact mock handlers for the four World Monitor Tauri commands and register
 the spec in the smoke project. Update the operator document with:
@@ -1337,13 +1344,13 @@ the spec in the smoke project. Update the operator document with:
 - fail-soft World Monitor behaviour;
 - no background polling.
 
-- [ ] **Step 4: Run E2E specs and verify GREEN**
+- [x] **Step 4: Run E2E specs and verify GREEN**
 
 Run the same Playwright command from Step 2.
 
 Expected: all three specs pass.
 
-- [ ] **Step 5: Run the full automated gates**
+- [x] **Step 5: Run the full automated gates**
 
 Run:
 

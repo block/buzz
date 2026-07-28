@@ -1,15 +1,13 @@
 use tauri::{AppHandle, Manager};
-use zeroize::Zeroize;
-
 const ENV_KEYS: &[&str] = &[
     "COMMAND_ADVISER_PERSONA_ID",
     "COMMAND_ADVISER_RAG_URL",
     "COMMAND_ADVISER_WORLD_MONITOR_ENDPOINT",
     "COMMAND_ADVISER_WORLD_MONITOR_USAGE_PATH",
-    "COMMAND_ADVISER_WORLD_MONITOR_API_KEY",
+    "COMMAND_ADVISER_WORLD_MONITOR_OAUTH_PATH",
 ];
 
-fn is_command_adviser_persona(persona_id: &str) -> bool {
+pub(super) fn is_command_adviser_persona(persona_id: &str) -> bool {
     matches!(
         persona_id,
         "builtin:command-chief-of-staff"
@@ -21,6 +19,13 @@ fn is_command_adviser_persona(persona_id: &str) -> bool {
             | "builtin:command-reporting"
             | "builtin:command-plans"
     )
+}
+
+pub(super) fn should_enable_mcp_hooks(
+    runtime_supports_hooks: bool,
+    persona_id: Option<&str>,
+) -> bool {
+    runtime_supports_hooks && !persona_id.is_some_and(is_command_adviser_persona)
 }
 
 pub(super) fn apply_source_env(
@@ -57,12 +62,9 @@ pub(super) fn apply_source_env(
         config_dir.join("world-monitor-usage.json"),
     );
     if persona_id == "builtin:command-intelligence" {
-        if let Ok(Some(mut api_key)) =
-            crate::secret_store::SecretStore::shared(crate::app_state::keyring_service())
-                .load(buzz_command_sources_pkg::WORLD_MONITOR_KEYCHAIN_KEY)
-        {
-            command.env("COMMAND_ADVISER_WORLD_MONITOR_API_KEY", &api_key);
-            api_key.zeroize();
-        }
+        command.env(
+            "COMMAND_ADVISER_WORLD_MONITOR_OAUTH_PATH",
+            config_dir.join(buzz_command_sources_pkg::WORLD_MONITOR_OAUTH_FILENAME),
+        );
     }
 }

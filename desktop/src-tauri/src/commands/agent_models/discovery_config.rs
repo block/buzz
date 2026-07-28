@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 
 use crate::managed_agents::{
-    known_acp_runtime, record_agent_command, resolve_effective_agent_env,
+    known_acp_runtime, record_agent_command_with_preferred_runtime, resolve_effective_agent_env,
     resolve_effective_model_provider, AgentDefinition, GlobalAgentConfig, ManagedAgentRecord,
 };
 
@@ -34,7 +34,11 @@ pub(super) fn saved_agent_model_discovery_config(
     personas: &[AgentDefinition],
     global: &GlobalAgentConfig,
 ) -> SavedAgentModelDiscoveryConfig {
-    let agent_command = record_agent_command(record, personas);
+    let agent_command = record_agent_command_with_preferred_runtime(
+        record,
+        personas,
+        global.preferred_runtime.as_deref(),
+    );
     let runtime = known_acp_runtime(&agent_command);
     let effective = resolve_effective_agent_env(record, personas, runtime, global);
     let (model, provider) = resolve_effective_model_provider(record, personas, global);

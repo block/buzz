@@ -4,11 +4,14 @@
 //! NIP-44-v2 encrypts the bounded payload to the same keypair.
 
 use chrono::DateTime;
+use flate2::{read::ZlibDecoder, write::ZlibEncoder, Compression};
 use nostr::{nips::nip44, Event, EventBuilder, Keys, Kind, Tag};
 use serde::{Deserialize, Serialize};
+use std::io::{Read, Write};
 
 pub use crate::command_brief_wire::CommandBriefWire;
 use crate::kind::KIND_COMMAND_BRIEF;
+use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
 
 /// Current encrypted payload schema version.
 pub const COMMAND_BRIEF_PAYLOAD_VERSION: u32 = 1;
@@ -16,6 +19,8 @@ pub const COMMAND_BRIEF_PAYLOAD_VERSION: u32 = 1;
 pub const MAX_COMMAND_BRIEF_ID_BYTES: usize = 256;
 /// Shared relay and local maximum for final NIP-CB ciphertext bytes.
 pub const MAX_EVENT_CONTENT_BYTES: usize = 256 * 1024;
+const COMPRESSED_PAYLOAD_PREFIX: &str = "zlib-v1:";
+const MAX_DECOMPRESSED_PAYLOAD_BYTES: usize = 2 * 1024 * 1024;
 
 /// Closed terminal lifecycle vocabulary persisted by NIP-CB.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -178,7 +183,7 @@ pub fn build_command_brief_event(
     payload: &CommandBriefEventPayload,
 ) -> Result<Event, CommandBriefEventError> {
     payload.validate()?;
-    let plaintext = serde_json::to_string(payload).map_err(|_| CommandBriefEventError::Invalid)?;
+    let plaintext = encode_payload(payload)?;
     let owner = owner_keys.public_key();
     let ciphertext = nip44::encrypt(
         owner_keys.secret_key(),
@@ -220,8 +225,7 @@ pub fn decrypt_command_brief_event(
     }
     let plaintext = nip44::decrypt(owner_keys.secret_key(), &owner, &event.content)
         .map_err(|_| CommandBriefEventError::Cryptography)?;
-    let payload: CommandBriefEventPayload =
-        serde_json::from_str(&plaintext).map_err(|_| CommandBriefEventError::Invalid)?;
+    let payload = decode_payload(&plaintext)?;
     payload.validate()?;
     if payload.run_id != envelope.run_id
         || payload.lifecycle_state.as_tag() != envelope.status
@@ -230,6 +234,44 @@ pub fn decrypt_command_brief_event(
         return Err(CommandBriefEventError::Invalid);
     }
     Ok(payload)
+}
+
+fn encode_payload(payload: &CommandBriefEventPayload) -> Result<String, CommandBriefEventError> {
+    let plaintext = serde_json::to_vec(payload).map_err(|_| CommandBriefEventError::Invalid)?;
+    if plaintext.len() > MAX_DECOMPRESSED_PAYLOAD_BYTES {
+        return Err(CommandBriefEventError::Invalid);
+    }
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+    encoder
+        .write_all(&plaintext)
+        .map_err(|_| CommandBriefEventError::Invalid)?;
+    let compressed = encoder
+        .finish()
+        .map_err(|_| CommandBriefEventError::Invalid)?;
+    Ok(format!(
+        "{COMPRESSED_PAYLOAD_PREFIX}{}",
+        STANDARD_NO_PAD.encode(compressed)
+    ))
+}
+
+fn decode_payload(plaintext: &str) -> Result<CommandBriefEventPayload, CommandBriefEventError> {
+    let Some(encoded) = plaintext.strip_prefix(COMPRESSED_PAYLOAD_PREFIX) else {
+        return serde_json::from_str(plaintext).map_err(|_| CommandBriefEventError::Invalid);
+    };
+    let compressed = STANDARD_NO_PAD
+        .decode(encoded)
+        .map_err(|_| CommandBriefEventError::Invalid)?;
+    let mut decoder = ZlibDecoder::new(compressed.as_slice());
+    let mut decoded = Vec::new();
+    decoder
+        .by_ref()
+        .take((MAX_DECOMPRESSED_PAYLOAD_BYTES + 1) as u64)
+        .read_to_end(&mut decoded)
+        .map_err(|_| CommandBriefEventError::Invalid)?;
+    if decoded.len() > MAX_DECOMPRESSED_PAYLOAD_BYTES {
+        return Err(CommandBriefEventError::Invalid);
+    }
+    serde_json::from_slice(&decoded).map_err(|_| CommandBriefEventError::Invalid)
 }
 
 struct PublicEnvelope {

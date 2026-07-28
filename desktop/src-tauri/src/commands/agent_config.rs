@@ -367,7 +367,12 @@ pub async fn get_agent_config_surface(
     };
 
     let personas = load_personas(&app).unwrap_or_default();
-    let effective_cmd = crate::managed_agents::record_agent_command(&record, &personas);
+    let global = crate::managed_agents::load_global_agent_config(&app).unwrap_or_default();
+    let effective_cmd = crate::managed_agents::record_agent_command_with_preferred_runtime(
+        &record,
+        &personas,
+        global.preferred_runtime.as_deref(),
+    );
     let runtime_meta = known_acp_runtime(&effective_cmd);
     let runtime_key = ManagedAgentRuntimeKey::new(
         pubkey.clone(),
@@ -377,8 +382,6 @@ pub async fn get_agent_config_surface(
         ),
     )?;
     let session_cache = state.get_session_cache(&runtime_key);
-    let global = crate::managed_agents::load_global_agent_config(&app).unwrap_or_default();
-
     Ok(resolve_config_surface(
         record,
         &personas,

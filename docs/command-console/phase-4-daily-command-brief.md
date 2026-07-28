@@ -1,46 +1,81 @@
 # Command Console Phase 4 Daily Command Brief
 
-Phase 4 turns the local macOS Command Console into a scheduled, evidence-cited
-Daily Command Brief. Five specialist advisers run against one frozen OFFICIAL
-source snapshot. A tool-free Chief of Staff then consolidates their validated
-contributions without removing dissent or adding unsupported claims.
+Phase 4 turns the macOS Command Console into a scheduled, evidence-cited Daily
+Command Brief. The standing Command Team contains eight reusable Buzz agents:
+the Chief of Staff, Operations, Maritime N2, Logistics, Navigation, Daily
+Routine, Reporting, and Plans advisers. Seven specialists run against one
+frozen source ledger. A tool-free Chief of Staff then consolidates their
+validated contributions without removing dissent or adding unsupported claims.
 
 The application remains advisory and non-accredited. It does not make
 navigational decisions, create executable navigation orders, control ship
 systems, or authorise workspace actions. Proposed actions remain visibly
 `pending`.
 
-## Local-only execution boundary
+## Model routing and doctrine-guided advice
 
-Every Phase 4 brief is classified `OFFICIAL`. Adviser generation uses the
-MacBook LM Studio native API with only catalogue-admitted literal-loopback
-Memory and RAG MCP services. There is no cloud fallback. The egress and source
-policies reject non-loopback service endpoints, pseudo-tool calls written as
-reasoning text, retrieved instructions, mixed snapshots, unsupported Chief of
-Staff claims, and non-pending actions.
+The Command Console provides one persistent `Cloud models first` or `Local
+model first` choice. Cloud-first uses the configured LiteLLM/OpenAI route and
+falls back to LM Studio; local-first reverses that preference. Both routes
+receive the same bounded, frozen source ledger, so switching models does not
+silently change the evidence assembled for the run.
+
+Before substantive advice, each adviser first searches the logical RAG
+collection `ADF Doctrine`, then searches the broader trusted knowledge
+collections. Doctrine guides the assessment when present; it is not a refusal
+gate. If doctrine or another source is absent or unavailable, the adviser still
+provides its assessment from the remaining evidence and clearly identifies the
+gap. Retrieved text remains evidence rather than instructions.
 
 The default specialist concurrency is one and the only permitted alternative
-is two. The Chief of Staff runs after all five specialists and receives no
-tools. A source failure degrades the affected section; it never grants
-permission to fabricate evidence or silently substitute a cloud provider.
+is two. The Chief of Staff runs after all seven specialists and receives no
+tools. A source failure produces a useful partial brief and a concise notice;
+it does not permit fabricated evidence.
 
-The complete brief contains these nine sections:
+The decision-facing brief displays these nine cards in order:
 
-1. Today at a glance
-2. Operational priorities and risks
-3. Navigation considerations
-4. Daily routine and calendar
-5. Reports and returns due
-6. 30, 60 and 90 day planning horizon
-7. Decisions required
-8. Conflicts and gaps
-9. Sources
+1. Decisions and approvals required
+2. Today at a glance
+3. Operational priorities and risks
+4. Intelligence and operating environment
+5. Logistics and sustainment
+6. Navigation considerations
+7. Daily routine and calendar
+8. Reports and returns due
+9. 30, 60 and 90-day outlook
 
 Every displayed factual finding cites an entry in the bounded source ledger.
 The ledger exposes provenance metadata and freshness, not the retrieved passage
-or hidden model context. One brief is bound to exactly one admitted snapshot
-ID. Stale sources, permission denial, missing information, Memory conflicts,
-degraded sections, limitations, and dissent remain visible.
+or hidden model context. Conflicts, source notes, connector notices, adviser
+detail, freshness, and system status remain available under the collapsed
+`Evidence and system status` disclosure.
+
+## World Monitor for Maritime N2
+
+World Monitor is a curated read-only OSINT source for the Maritime N2. Configure
+it from the `World Monitor OSINT` card in Command Console: select `Connect
+World Monitor`, complete the World Monitor Pro OAuth consent in the browser,
+and then `Test connection`. Pro access uses the remote MCP server directly;
+no API key is created or requested. The short-lived access token and rotating
+refresh token are held in one permission-restricted local credential file
+shared by Daily Brief collection and the Maritime N2 tool process.
+
+The application uses two independent local-day allowances: 25 attempted calls
+for all Daily Command Brief updates and 25 for direct N2 questions. Results are
+cached for 15 minutes by tool and canonical arguments, and a cache hit consumes
+no call. There is no background polling.
+
+A comprehensive brief request is deterministic and bounded: eight global
+queries plus three country-focused queries for each of at most five ISO
+3166-1 alpha-2 country codes. The maximum plan is therefore 23 calls, below the
+25-call brief ceiling. The ceiling is not a target; cached or unnecessary
+requests are skipped.
+
+Missing connection, expired OAuth consent, quota exhaustion, timeouts, and
+individual query failures are fail-soft. Other valid intelligence evidence is
+retained, the Intelligence section still receives the evidence available to
+it, and the World Monitor notice appears under `Evidence and system status`
+rather than displacing the decision-facing brief.
 
 ## Schedule and recovery semantics
 
@@ -65,17 +100,18 @@ and does not acquire or modify the daily claim.
 
 ## Source and readiness diagnostics
 
-The Command Console reports the active Buzz relay, local compute, LM Studio,
-Memory, RAG, and Apple-input status. A service is admitted only after its
-native validator succeeds:
+The Command Console reports the active Buzz relay, cloud/local model route, LM
+Studio, Memory, RAG, World Monitor, and Apple-input status.
 
 - LM Studio must be a literal-loopback native API with the selected model and
   structured-output behavior.
 - Memory must have protected credentials, expected node identity, an allowed
   read-only adviser tool, valid immutable revision evidence, and no unresolved
   conflicted field used by the brief.
-- RAG must have the expected signed active snapshot, service/model revisions,
-  catalogue, point counts, freshness, and authenticated read-only tools.
+- RAG exposes authenticated read-only doctrine and general-knowledge tools.
+  An unavailable doctrine result is reported but does not block advice.
+- World Monitor exposes only the curated Maritime N2 tool set and is bounded
+  by the shared 25/25 usage ledger and 15-minute cache.
 - Apple inputs remain read-only and allowlisted. Permission denial or stale
   data is reported per section and fails soft.
 
@@ -203,7 +239,7 @@ wrong MCP paths, symlinks, and non-executable or relative drivers. It first
 runs a tool-free LM Studio native API health smoke, then invokes the reviewed
 driver with the three validated loopback URLs and the validated model ID.
 
-The runner does not itself prove structured MCP calls, five specialist
+The runner does not itself prove structured MCP calls, seven specialist
 executions, signed-application provenance, offline egress isolation, resource
 limits, or signed-history reload. Those claims belong to the reviewed driver
 and its retained evidence. A zero driver exit means only that the reviewed
@@ -230,7 +266,7 @@ The reviewed driver and operator procedure must:
 4. Restart Buzz, LM Studio, the local relay/data services, Memory, RAG, and the
    application. Do not infer offline operation from an already-running cache.
 5. Prove local Memory read/write, mirrored RAG retrieval, allowlisted Apple
-   input, five specialist calls, tool-free consolidation, terminal spool
+   input, seven specialist calls, tool-free consolidation, terminal spool
    commit, and a complete or truthfully degraded brief.
 6. Inspect packet-filter counters and process connection telemetry and prove
    there was no outbound OpenAI, LiteLLM, telemetry, webhook, updater, or

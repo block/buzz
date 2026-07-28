@@ -604,8 +604,11 @@ test.describe("community rail", () => {
         }),
       );
     }, `community-rail-button-${COMMUNITY_B.id}`);
+    const dragStatus = page.getByTestId("community-rail").getByRole("status");
+    await expect(dragStatus).toContainText(COMMUNITY_B.id);
     // ArrowUp moves the active item one slot up.
     await page.keyboard.press("ArrowUp");
+    await expect(dragStatus).toContainText(COMMUNITY_A.id);
     // Space drops the item — same synthetic dispatch for consistency.
     await page.evaluate((testId) => {
       const el = document.querySelector(`[data-testid="${testId}"]`);

@@ -51,9 +51,9 @@ use huddle::{
 };
 use managed_agents::{
     backfill_persona_snapshots, ensure_nest, list_managed_agent_runtimes,
-    put_managed_agent_runtime_lifecycle, reconcile_managed_agent_runtimes,
-    restart_managed_agent_runtime, start_managed_agent_runtime, stop_managed_agent_runtime,
-    try_regenerate_nest,
+    migrate_command_adviser_parallelism, put_managed_agent_runtime_lifecycle,
+    reconcile_managed_agent_runtimes, restart_managed_agent_runtime, start_managed_agent_runtime,
+    stop_managed_agent_runtime, try_regenerate_nest,
 };
 #[cfg(not(feature = "mesh-llm"))]
 use mesh_llm_stubs::*;
@@ -443,6 +443,17 @@ pub fn run() {
             if let Err(e) = backfill_persona_snapshots(&app_handle) {
                 eprintln!("buzz-desktop: persona-snapshot backfill failed: {e}");
             }
+            match migrate_command_adviser_parallelism(&app_handle) {
+                Ok(changed) if changed > 0 => {
+                    eprintln!(
+                        "buzz-desktop: migrated {changed} Command Team agent(s) to single-turn parallelism"
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("buzz-desktop: Command Team parallelism migration failed: {e}");
+                }
+            }
 
             // Store the AppHandle so huddle commands can emit `huddle-state-changed`
             // events via `huddle::emit_huddle_state` without threading the handle
@@ -676,8 +687,8 @@ pub fn run() {
             get_model_routing_preference,
             set_model_routing_preference,
             get_world_monitor_connection,
-            save_world_monitor_api_key,
-            remove_world_monitor_api_key,
+            connect_world_monitor_oauth,
+            disconnect_world_monitor,
             test_world_monitor_connection,
             get_identity,
             get_nsec,

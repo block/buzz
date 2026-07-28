@@ -7,10 +7,12 @@ license.workspace = true
 
 [dependencies]
 atomic-write-file = "0.3"
+base64 = "0.22"
 chrono = { workspace = true }
 fs2 = "0.4.3"
 hex = { workspace = true }
-reqwest = { workspace = true, features = ["stream"] }
+rand = { workspace = true }
+reqwest = { workspace = true, features = ["form", "stream"] }
 serde = { workspace = true }
 serde_jcs = "0.2"
 serde_json = { workspace = true }

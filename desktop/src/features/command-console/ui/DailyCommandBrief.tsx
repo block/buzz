@@ -104,9 +104,12 @@ function BriefStatus({
 function WatchItems({ published }: { published: PublishedCommandBrief }) {
   const { brief } = published;
   const conflicts = brief.sections.conflicts_and_gaps;
+  const decisionFacingMissingInformation = brief.missingInformation.filter(
+    (item) => !item.startsWith("World Monitor "),
+  );
   const hasItems =
     brief.degradedSections.length > 0 ||
-    brief.missingInformation.length > 0 ||
+    decisionFacingMissingInformation.length > 0 ||
     brief.dissent.length > 0 ||
     conflicts.length > 0;
 
@@ -129,11 +132,11 @@ function WatchItems({ published }: { published: PublishedCommandBrief }) {
             </ul>
           </div>
         ) : null}
-        {brief.missingInformation.length > 0 ? (
+        {decisionFacingMissingInformation.length > 0 ? (
           <div>
             <h4 className="font-semibold">Missing information</h4>
             <ul className="mt-1 list-disc pl-5">
-              {brief.missingInformation.map((item) => (
+              {decisionFacingMissingInformation.map((item) => (
                 <li key={item}>{item}</li>
               ))}
             </ul>

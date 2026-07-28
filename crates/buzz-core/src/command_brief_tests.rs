@@ -1,5 +1,6 @@
-use nostr::{EventBuilder, Keys, Kind, Tag};
+use nostr::{nips::nip44, EventBuilder, Keys, Kind, Tag};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 use super::command_brief::{
     build_command_brief_event, decrypt_command_brief_event, CommandBriefEventPayload,
@@ -41,6 +42,8 @@ fn command_brief(run_id: &str) -> serde_json::Value {
         "sections": {
             "today": [finding()],
             "operations": [],
+            "intelligence": [],
+            "logistics": [],
             "navigation": [],
             "daily_routine": [],
             "reports": [],
@@ -73,6 +76,8 @@ fn command_brief(run_id: &str) -> serde_json::Value {
         },
         "contributions": [
             contribution("operations", "operations"),
+            contribution("intelligence", "intelligence"),
+            contribution("logistics", "logistics"),
             contribution("navigation", "navigation"),
             contribution("daily_routine", "daily_routine"),
             contribution("reporting", "reports"),
@@ -80,6 +85,56 @@ fn command_brief(run_id: &str) -> serde_json::Value {
         ],
         "advisoryLimitation": ADVISORY_LIMITATION
     })
+}
+
+#[test]
+fn strict_final_brief_accepts_seven_specialists_and_world_monitor() {
+    let mut brief = command_brief("run-1");
+    brief["sourceLedger"][0]["sourceKind"] = json!("world_monitor");
+    assert!(CommandBriefWire::try_from(brief).is_ok());
+}
+
+#[test]
+fn comprehensive_seven_adviser_brief_fits_the_encrypted_event_budget() {
+    let owner = Keys::generate();
+    let mut brief = command_brief("run-1");
+    brief["sourceLedger"] = serde_json::Value::Array(
+        (0..72)
+            .map(|index| {
+                json!({
+                    "classification": "OFFICIAL",
+                    "ledgerId": format!("ledger-{index}"),
+                    "sourceId": format!("source-{index}"),
+                    "sourceKind": if index % 8 == 0 { "world_monitor" } else { "rag" },
+                    "collection": "ADF Doctrine",
+                    "documentId": format!("document-{index}"),
+                    "chunkId": format!("chunk-{index}"),
+                    "timestamp": "2026-07-25T06:00:00Z",
+                    "snapshotId": "snapshot-1",
+                    "quotedLocation": {
+                        "quote": "x".repeat(1024),
+                        "location": format!("section {index}")
+                    },
+                    "retrievedAt": "2026-07-25T06:00:00Z",
+                    "observedAt": "2026-07-25T06:00:00Z"
+                })
+            })
+            .collect(),
+    );
+    for contribution in brief["contributions"]
+        .as_array_mut()
+        .expect("contributions")
+    {
+        contribution["limitations"] = json!(["a".repeat(4096), "b".repeat(4096)]);
+    }
+    let mut comprehensive = payload(CommandBriefLifecycleState::Degraded);
+    comprehensive.final_brief =
+        Some(CommandBriefWire::try_from(brief).expect("valid comprehensive brief"));
+
+    assert!(
+        build_command_brief_event(&owner, &comprehensive).is_ok(),
+        "the bounded seven-adviser brief must remain persistable"
+    );
 }
 
 fn payload(state: CommandBriefLifecycleState) -> CommandBriefEventPayload {
@@ -127,6 +182,34 @@ fn owner_to_self_round_trip_has_exact_public_envelope() {
     assert!(
         decrypt_command_brief_event(&owner, &event).expect("decrypt") == expected,
         "decrypted payload must equal the input"
+    );
+}
+
+#[test]
+fn legacy_uncompressed_payloads_remain_readable() {
+    let owner = Keys::generate();
+    let expected = payload(CommandBriefLifecycleState::Completed);
+    let plaintext = serde_json::to_string(&expected).expect("legacy JSON");
+    let ciphertext = nip44::encrypt(
+        owner.secret_key(),
+        &owner.public_key(),
+        plaintext,
+        nip44::Version::V2,
+    )
+    .expect("legacy encryption");
+    let event = EventBuilder::new(Kind::Custom(44_210), ciphertext)
+        .tags([
+            Tag::public_key(owner.public_key()),
+            Tag::parse(["d", "run-1"]).expect("d"),
+            Tag::parse(["status", "completed"]).expect("status"),
+        ])
+        .allow_self_tagging()
+        .sign_with_keys(&owner)
+        .expect("sign");
+
+    assert!(
+        decrypt_command_brief_event(&owner, &event).expect("legacy decrypt") == expected,
+        "legacy uncompressed events must remain readable"
     );
 }
 
@@ -212,6 +295,12 @@ fn payload_bounds_and_terminal_shapes_are_enforced() {
     large_but_structurally_valid["sourceLedger"] = serde_json::Value::Array(
         (0..256)
             .map(|index| {
+                let quote = (0..64)
+                    .map(|block| {
+                        let digest = Sha256::digest(format!("{index}:{block}").as_bytes());
+                        hex::encode(digest)
+                    })
+                    .collect::<String>();
                 json!({
                     "classification": "OFFICIAL",
                     "ledgerId": format!("ledger-{index}"),
@@ -223,7 +312,7 @@ fn payload_bounds_and_terminal_shapes_are_enforced() {
                     "timestamp": "2026-07-25T06:00:00Z",
                     "snapshotId": "snapshot-1",
                     "quotedLocation": {
-                        "quote": "x".repeat(4096),
+                        "quote": quote,
                         "location": format!("section {index}")
                     },
                     "retrievedAt": "2026-07-25T06:00:00Z",

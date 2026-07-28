@@ -127,6 +127,8 @@ export type MockAgentMemoryListing = {
 };
 
 type MockBridgeOptions = {
+  /** World Monitor status returned by the mock Tauri bridge. */
+  worldMonitorConnection?: unknown;
   /** Native Daily Command Brief status view returned by the mock Tauri bridge. */
   commandBriefStatus?: unknown;
   /** Latest immutable Daily Command Brief publication returned by the bridge. */

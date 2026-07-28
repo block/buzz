@@ -63,10 +63,6 @@ fn routing_preference_defaults_local_and_accepts_cloud_first() {
         legacy.world_monitor().endpoint(),
         "https://api.worldmonitor.app/mcp"
     );
-    assert_eq!(
-        legacy.world_monitor().keychain_key(),
-        "command.world-monitor.api-key"
-    );
 }
 
 #[test]

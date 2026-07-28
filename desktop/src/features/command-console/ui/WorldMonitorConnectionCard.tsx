@@ -1,27 +1,22 @@
 import { Globe2, Loader2, ShieldCheck } from "lucide-react";
-import { useState } from "react";
 
 import { Button } from "@/shared/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/shared/ui/card";
-import { Input } from "@/shared/ui/input";
 
 import { useWorldMonitorConnection } from "../hooks/useWorldMonitorConnection";
 
 const STATUS_LABELS = {
-  not_configured: "Not configured",
-  configured: "Configured",
+  not_connected: "Not connected",
   connected: "Connected",
   unavailable: "Unavailable",
-  unauthorised: "Key rejected",
+  reauthorise: "Reconnect required",
   quota_limited: "Provider quota limited",
 } as const;
 
 export function WorldMonitorConnectionCard() {
   const worldMonitor = useWorldMonitorConnection();
-  const [apiKey, setApiKey] = useState("");
   const connection = worldMonitor.connection;
-  const configured =
-    connection !== null && connection.status !== "not_configured";
+  const connected = connection !== null && connection.status === "connected";
 
   return (
     <Card data-testid="world-monitor-connection">
@@ -55,28 +50,17 @@ export function WorldMonitorConnectionCard() {
           </span>
         </div>
         <div className="flex flex-wrap gap-2">
-          <Input
-            aria-label="World Monitor API key"
-            autoComplete="off"
-            className="min-w-64 flex-1"
-            onChange={(event) => setApiKey(event.target.value)}
-            placeholder="wm_live_…"
-            type="password"
-            value={apiKey}
-          />
           <Button
-            disabled={worldMonitor.busy || apiKey.length === 0}
-            onClick={() => {
-              void worldMonitor.save(apiKey).then((saved) => {
-                if (saved) setApiKey("");
-              });
-            }}
+            disabled={worldMonitor.busy || connected}
+            onClick={() => void worldMonitor.connect()}
             type="button"
           >
-            Save
+            {connection?.status === "reauthorise"
+              ? "Reconnect World Monitor"
+              : "Connect World Monitor"}
           </Button>
           <Button
-            disabled={worldMonitor.busy || !configured}
+            disabled={worldMonitor.busy || !connected}
             onClick={() => void worldMonitor.test()}
             type="button"
             variant="secondary"
@@ -84,12 +68,12 @@ export function WorldMonitorConnectionCard() {
             Test connection
           </Button>
           <Button
-            disabled={worldMonitor.busy || !configured}
-            onClick={() => void worldMonitor.remove()}
+            disabled={worldMonitor.busy || !connected}
+            onClick={() => void worldMonitor.disconnect()}
             type="button"
             variant="ghost"
           >
-            Remove
+            Disconnect
           </Button>
         </div>
         {worldMonitor.busy ? (
@@ -102,8 +86,8 @@ export function WorldMonitorConnectionCard() {
           <p className="text-sm text-destructive">{worldMonitor.error}</p>
         ) : null}
         <p className="text-xs text-muted-foreground">
-          The key is stored in macOS Keychain and is never returned to this
-          screen.
+          Uses your World Monitor Pro account through OAuth. No API key is
+          required.
         </p>
       </CardContent>
     </Card>

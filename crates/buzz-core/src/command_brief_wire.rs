@@ -9,7 +9,7 @@ use serde_json::Value;
 const MAX_TEXT_BYTES: usize = 4096;
 const MAX_ARRAY_ITEMS: usize = 64;
 const MAX_SOURCE_LEDGER_ITEMS: usize = 256;
-const MAX_AGGREGATE_DISSENT_ITEMS: usize = 5 * MAX_ARRAY_ITEMS;
+const MAX_AGGREGATE_DISSENT_ITEMS: usize = 7 * MAX_ARRAY_ITEMS;
 const ADVISORY_LIMITATION: &str = "This Daily Command Brief is advisory only. Navigation content identifies considerations and source limitations; it does not generate executable navigation orders or make navigational decisions.";
 
 /// An exact, fully validated canonical `CommandBrief` JSON value.
@@ -70,6 +70,8 @@ enum OfficialClassification {
 #[serde(rename_all = "snake_case")]
 enum Adviser {
     Operations,
+    Intelligence,
+    Logistics,
     Navigation,
     DailyRoutine,
     Reporting,
@@ -81,6 +83,8 @@ enum Adviser {
 enum Section {
     Today,
     Operations,
+    Intelligence,
+    Logistics,
     Navigation,
     DailyRoutine,
     Reports,
@@ -96,6 +100,7 @@ enum Section {
 enum SourceKind {
     Rag,
     Memory,
+    WorldMonitor,
     Calendar,
     Reminders,
     Notes,
@@ -198,7 +203,7 @@ fn validate_command_brief(raw: &RawCommandBrief) -> Result<(), ()> {
         || !valid_text(&raw.snapshot_id)
         || raw.advisory_limitation != ADVISORY_LIMITATION
         || raw.source_ledger.len() > MAX_SOURCE_LEDGER_ITEMS
-        || raw.contributions.len() != 5
+        || raw.contributions.len() != 7
         || !valid_unique_sections(&raw.degraded_sections)
         || !valid_text_array(&raw.missing_information, MAX_ARRAY_ITEMS)
         || !valid_text_array(&raw.dissent, MAX_AGGREGATE_DISSENT_ITEMS)
@@ -209,6 +214,8 @@ fn validate_command_brief(raw: &RawCommandBrief) -> Result<(), ()> {
     let expected_sections = BTreeSet::from([
         Section::Today,
         Section::Operations,
+        Section::Intelligence,
+        Section::Logistics,
         Section::Navigation,
         Section::DailyRoutine,
         Section::Reports,
@@ -262,6 +269,8 @@ fn validate_command_brief(raw: &RawCommandBrief) -> Result<(), ()> {
 
     let expected_advisers = BTreeSet::from([
         Adviser::Operations,
+        Adviser::Intelligence,
+        Adviser::Logistics,
         Adviser::Navigation,
         Adviser::DailyRoutine,
         Adviser::Reporting,
@@ -314,6 +323,8 @@ fn validate_command_brief(raw: &RawCommandBrief) -> Result<(), ()> {
 fn section_for_adviser(adviser: Adviser) -> Section {
     match adviser {
         Adviser::Operations => Section::Operations,
+        Adviser::Intelligence => Section::Intelligence,
+        Adviser::Logistics => Section::Logistics,
         Adviser::Navigation => Section::Navigation,
         Adviser::DailyRoutine => Section::DailyRoutine,
         Adviser::Reporting => Section::Reports,

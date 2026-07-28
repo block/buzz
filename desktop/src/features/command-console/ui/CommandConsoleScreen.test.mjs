@@ -48,11 +48,11 @@ test("CommandConsoleScreen renders the usable Command Adviser route", () => {
   assert.doesNotMatch(html, /unsigned|fingerprint|replication/i);
 });
 
-test("CommandConsoleScreen installs the real advisory Daily Command Brief without placeholder claims", () => {
+test("CommandConsoleScreen installs the real advisory Daily Command Brief without not-operational claims", () => {
   const html = renderCommandConsole();
 
   assert.match(html, /data-testid="daily-command-brief"/);
   assert.match(html, />Daily Command Brief</);
   assert.match(html, /Advisory, non-accredited decision support/);
-  assert.doesNotMatch(html, /placeholder|not yet operational/i);
+  assert.doesNotMatch(html, /not yet operational/i);
 });

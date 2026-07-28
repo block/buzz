@@ -86,7 +86,11 @@ pub(crate) fn spawn_config_hash(
     }
     let record = &record;
 
-    let effective_command = crate::managed_agents::record_agent_command(record, personas);
+    let effective_command = crate::managed_agents::record_agent_command_with_preferred_runtime(
+        record,
+        personas,
+        global.preferred_runtime.as_deref(),
+    );
     let runtime_meta = known_acp_runtime(&effective_command);
     let effective = resolve_effective_agent_env(record, personas, runtime_meta, global);
 

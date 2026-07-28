@@ -84,6 +84,10 @@ function PublishedEvidence({
 }: {
   published: PublishedCommandBrief;
 }) {
+  const connectorNotices = published.brief.missingInformation.filter((item) =>
+    item.startsWith("World Monitor "),
+  );
+
   return (
     <>
       <PublicationMetadata published={published} />
@@ -97,6 +101,19 @@ function PublishedEvidence({
           {published.brief.advisoryLimitation}
         </AlertDescription>
       </Alert>
+
+      {connectorNotices.length > 0 ? (
+        <Alert>
+          <AlertTitle>Connector notices</AlertTitle>
+          <AlertDescription>
+            <ul className="list-disc pl-5">
+              {connectorNotices.map((notice) => (
+                <li key={notice}>{notice}</li>
+              ))}
+            </ul>
+          </AlertDescription>
+        </Alert>
+      ) : null}
 
       <section aria-labelledby="adviser-contributions-heading">
         <h3

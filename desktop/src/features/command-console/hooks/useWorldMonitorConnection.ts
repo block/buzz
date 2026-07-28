@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 
 import {
+  connectWorldMonitorOauth,
+  disconnectWorldMonitor,
   getWorldMonitorConnection,
-  removeWorldMonitorApiKey,
-  saveWorldMonitorApiKey,
   testWorldMonitorConnection,
   type WorldMonitorConnection,
 } from "@/shared/api/tauriCommandBrief";
@@ -45,8 +45,8 @@ export function useWorldMonitorConnection() {
     connection,
     busy,
     error,
-    save: (apiKey: string) => perform(() => saveWorldMonitorApiKey(apiKey)),
-    remove: () => perform(removeWorldMonitorApiKey),
+    connect: () => perform(connectWorldMonitorOauth),
+    disconnect: () => perform(disconnectWorldMonitor),
     test: () => perform(testWorldMonitorConnection),
   };
 }
