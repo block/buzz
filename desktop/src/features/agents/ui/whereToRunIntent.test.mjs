@@ -59,3 +59,32 @@ test("provider draft resolves with coerced config values", () => {
     config: { region: "us", size: 3 },
   });
 });
+
+test("crabbox-style enum draft coerces and resolves", () => {
+  const draft = providerDraft({
+    runOn: "crabbox",
+    probedProvider: {
+      ok: true,
+      name: "Crabbox",
+      config_schema: {
+        properties: {
+          provider: {
+            type: "string",
+            enum: ["", "local-container", "hetzner"],
+          },
+          idle_timeout: {
+            type: "string",
+            enum: ["30m", "4h"],
+          },
+        },
+      },
+    },
+    providerConfig: { provider: "local-container", idle_timeout: "4h" },
+  });
+  assert.equal(canSubmitWhereToRun(draft), true);
+  assert.deepEqual(resolveBackendIntent(draft), {
+    type: "provider",
+    id: "crabbox",
+    config: { provider: "local-container", idle_timeout: "4h" },
+  });
+});

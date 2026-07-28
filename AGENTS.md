@@ -17,6 +17,7 @@ Buzz spans five repos. This one (`block/buzz`) is the OSS source for the relay, 
 | [squareup/sprout-oss](https://github.com/squareup/sprout-oss) | CI pipeline building the relay Docker image and pushing to internal ECR |
 | [squareup/block-coder-tf-stacks](https://github.com/squareup/block-coder-tf-stacks) | Terraform + ArgoCD deploying the relay to the staging Kubernetes cluster |
 | [squareup/sprout-backend-blox](https://github.com/squareup/sprout-backend-blox) | Desktop backend provider script connecting Blox workstation agents to the relay |
+| OSS: [`examples/buzz-backend-crabbox`](examples/buzz-backend-crabbox) · `just install-backend-crabbox` | First-class Desktop **Run on → Crabbox** backend ([docs](docs/backend-providers/crabbox.md)) |
 
 ```
 block/buzz (source)
