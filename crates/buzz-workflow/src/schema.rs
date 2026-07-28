@@ -191,19 +191,8 @@ impl WorkflowDef {
                 )));
             }
 
-            // Temporary guard: reject actions that are not yet fully implemented.
-            // This surfaces the gap at definition time (YAML import / REST ingest)
-            // instead of failing at runtime with WorkflowError::NotImplemented.
-            // Each action is removed from this guard as it is completed.
-            match &step.action {
-                ActionDef::SendDm { .. } => {
-                    return Err(WorkflowError::InvalidDefinition(format!(
-                        "step '{}' uses 'send_dm' which is not yet implemented",
-                        step.id
-                    )));
-                }
-                _ => {}
-            }
+            // All actions are now implemented — the temporary NotImplemented
+            // guard has been fully removed as of send_dm completion.
         }
 
         if let TriggerDef::Schedule { cron, interval } = &self.trigger {
@@ -403,13 +392,11 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_unimplemented_send_dm() {
+    fn validate_accepts_send_dm() {
+        // send_dm is now implemented — validate() should accept it.
         let yaml = "name: DM Test\ntrigger:\n  on: webhook\nsteps:\n  - id: dm\n    action: send_dm\n    to: abc123\n    text: hi\n";
-        let err = parse_yaml(yaml).unwrap_err();
-        assert!(
-            err.to_string().contains("send_dm"),
-            "expected send_dm rejection, got: {err}"
-        );
+        let (def, _) = parse_yaml(yaml).expect("send_dm should validate");
+        assert!(matches!(def.steps[0].action, ActionDef::SendDm { .. }));
     }
 
     #[test]

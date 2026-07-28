@@ -563,6 +563,113 @@ impl ActionSink for RelayActionSink {
             Ok(event_id_hex)
         })
     }
+
+    fn send_dm(
+        &self,
+        community_id: CommunityId,
+        recipient_pubkey: &str,
+        text: &str,
+        author_pubkey: &str,
+        workflow_depth: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>> {
+        let recipient_pubkey = recipient_pubkey.to_owned();
+        let text = text.to_owned();
+        let author_pubkey = author_pubkey.to_owned();
+
+        Box::pin(async move {
+            let state = self
+                .state
+                .upgrade()
+                .ok_or_else(|| ActionSinkError::Database("relay is shutting down".into()))?;
+
+            let host = state
+                .db
+                .lookup_community_host(community_id)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?
+                .ok_or_else(|| {
+                    ActionSinkError::Database(format!(
+                        "workflow run community {community_id} is not mapped to a host"
+                    ))
+                })?;
+            let tenant = buzz_core::tenant::TenantContext::resolved(community_id, host);
+
+            if text.trim().is_empty() {
+                return Err(ActionSinkError::EmptyContent);
+            }
+
+            // Parse recipient pubkey hex → raw bytes for open_dm.
+            let recipient_bytes = hex::decode(&recipient_pubkey).map_err(|e| {
+                ActionSinkError::InvalidInput(format!("invalid recipient pubkey: {e}"))
+            })?;
+            let owner_bytes = hex::decode(&author_pubkey).map_err(|e| {
+                ActionSinkError::InvalidInput(format!("invalid author pubkey: {e}"))
+            })?;
+
+            // Open (or reuse) a private DM channel between owner + recipient.
+            // Buzz models DMs as private channels, not NIP-17 gift-wraps.
+            let participant_refs: Vec<&[u8]> = vec![&recipient_bytes];
+            let (dm_channel, _was_created) = state
+                .db
+                .open_dm(community_id, &participant_refs, &owner_bytes)
+                .await
+                .map_err(|e| ActionSinkError::Database(format!("open_dm: {e}")))?;
+
+            // Post a kind:9 message into the DM channel, signed by the relay
+            // keypair with attribution + workflow-depth tags — same shape as
+            // send_message but targeting the DM channel.
+            let channel_id_str = dm_channel.id.to_string();
+            let workflow_tag_depth = workflow_depth.to_string();
+            let p_tag = Tag::parse(["p", &author_pubkey])
+                .map_err(|e| ActionSinkError::EventBuild(format!("p tag: {e}")))?;
+            let h_tag = Tag::parse(["h", &channel_id_str])
+                .map_err(|e| ActionSinkError::EventBuild(format!("h tag: {e}")))?;
+            let wf_tag = Tag::parse(["buzz:workflow", "true", &workflow_tag_depth])
+                .map_err(|e| ActionSinkError::EventBuild(format!("workflow tag: {e}")))?;
+            // Also tag the recipient so they receive the message.
+            let recip_tag = Tag::parse(["p", &recipient_pubkey])
+                .map_err(|e| ActionSinkError::EventBuild(format!("recipient p tag: {e}")))?;
+            let event = EventBuilder::new(Kind::Custom(KIND_STREAM_MESSAGE as u16), &text)
+                .tags([p_tag, h_tag, wf_tag, recip_tag])
+                .sign_with_keys(&state.relay_keypair)
+                .map_err(|e| ActionSinkError::EventBuild(format!("sign: {e}")))?;
+
+            let (stored_event, was_inserted) = state
+                .db
+                .insert_event_with_thread_metadata(
+                    tenant.community(),
+                    &event,
+                    Some(dm_channel.id),
+                    None,
+                )
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+            if !was_inserted {
+                return Err(ActionSinkError::Database(
+                    "DM message event was not inserted".into(),
+                ));
+            }
+
+            dispatch_persistent_event(
+                &tenant,
+                &state,
+                &stored_event,
+                KIND_STREAM_MESSAGE,
+                &author_pubkey,
+                None,
+            )
+            .await;
+
+            let event_id_hex = stored_event.event.id.to_hex();
+            info!(
+                community_id = %community_id,
+                dm_channel = %dm_channel.id,
+                recipient = %recipient_pubkey,
+                "Workflow send_dm → event {event_id_hex}"
+            );
+            Ok(event_id_hex)
+        })
+    }
 }
 
 #[cfg(test)]

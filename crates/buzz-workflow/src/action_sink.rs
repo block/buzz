@@ -116,4 +116,27 @@ pub trait ActionSink: Send + Sync {
         author_pubkey: &str,
         workflow_depth: usize,
     ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>>;
+
+    /// Send a direct message to a user on behalf of a workflow owner.
+    ///
+    /// Opens (or reuses) a private DM channel between the workflow owner and
+    /// `recipient_pubkey`, then posts a kind:9 message into it. Buzz models
+    /// DMs as private channels rather than NIP-17 gift-wraps.
+    ///
+    /// - `community_id`: the owning community of the workflow run.
+    /// - `recipient_pubkey`: hex pubkey of the DM recipient.
+    /// - `text`: message body (must not be empty/whitespace-only).
+    /// - `author_pubkey`: hex pubkey of the workflow owner (DM participant +
+    ///   attribution `p` tag).
+    /// - `workflow_depth`: trigger-chain depth for loop prevention.
+    ///
+    /// Returns the message event ID hex string on success.
+    fn send_dm(
+        &self,
+        community_id: CommunityId,
+        recipient_pubkey: &str,
+        text: &str,
+        author_pubkey: &str,
+        workflow_depth: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>>;
 }

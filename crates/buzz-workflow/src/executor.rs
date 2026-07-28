@@ -590,10 +590,61 @@ pub async fn dispatch_action(
             })))
         }
 
-        SendDm { to, text: _ } => {
-            warn!(run_id = %run_id, step = step_id, "SendDm not yet implemented (to={to})");
-            // TODO (WF-07): emit DM event.
-            Err(WorkflowError::NotImplemented("SendDm".into()))
+        SendDm { to, text } => {
+            // Resolve `to` — may be a hex pubkey or {{trigger.author}} already
+            // resolved to a hex pubkey by the template step.
+            let recipient = to.trim();
+            if recipient.is_empty() {
+                return Err(WorkflowError::InvalidDefinition(format!(
+                    "SendDm step '{step_id}': 'to' resolved to empty"
+                )));
+            }
+
+            // Load workflow owner for the DM participant set + attribution.
+            let wf_run = engine
+                .db
+                .get_workflow_run(community_id, run_id)
+                .await
+                .map_err(|e| {
+                    WorkflowError::WebhookError(format!(
+                        "SendDm: failed to load workflow run {run_id}: {e}"
+                    ))
+                })?;
+            let workflow = engine
+                .db
+                .get_workflow(community_id, wf_run.workflow_id)
+                .await
+                .map_err(|e| {
+                    WorkflowError::WebhookError(format!(
+                        "SendDm: failed to load workflow {}: {e}",
+                        wf_run.workflow_id
+                    ))
+                })?;
+            let owner_pubkey_hex = hex::encode(&workflow.owner_pubkey);
+
+            info!(
+                run_id = %run_id,
+                step = step_id,
+                to = recipient,
+                "SendDm → {recipient}"
+            );
+
+            let event_id = engine
+                .action_sink()?
+                .send_dm(
+                    community_id,
+                    recipient,
+                    text,
+                    &owner_pubkey_hex,
+                    trigger_ctx.workflow_depth,
+                )
+                .await
+                .map_err(WorkflowError::from)?;
+
+            Ok(StepResult::Completed(serde_json::json!({
+                "sent": true,
+                "event_id": event_id,
+            })))
         }
 
         SetChannelTopic { topic } => {
