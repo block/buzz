@@ -12,6 +12,9 @@ test("Battle Rhythm persists a manual weekly routine and honours an exclusion", 
   await expect(page).toHaveURL(/#\/battle-rhythm$/);
   const screen = page.getByTestId("battle-rhythm-screen");
   await expect(screen).toBeVisible();
+  await expect(
+    screen.getByRole("button", { name: "Published to Apple" }),
+  ).toBeVisible();
 
   for (const view of ["Year", "Month", "Week", "Day"]) {
     await screen.getByLabel("Calendar view").selectOption(view);

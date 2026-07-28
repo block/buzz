@@ -56,6 +56,19 @@ final class ProtocolTests: XCTestCase {
         XCTAssertThrowsError(try AppleInputResponse(source: "notes", permission: .authorized, records: [huge]).encodeLine())
     }
 
+    func testDecodesBoundedCalendarReconciliationAndRejectsDuplicateIDs() throws {
+        let valid = #"{"operation":"reconcile_calendar","arguments":{"coverage_start":"2026-07-01T00:00:00Z","coverage_end":"2026-08-01T00:00:00Z","projections":[{"external_id":"battle-rhythm:brief","title":"Navigation brief","start":"2026-07-29T08:00:00Z","end":"2026-07-29T08:30:00Z","is_all_day":false,"location":"Bridge","notes":null}]}}"#
+        let request = try AppleInputRequest.decode(line: valid)
+        guard case .reconcileCalendar(let payload) = request.payload else {
+            return XCTFail("wrong payload")
+        }
+        XCTAssertEqual(payload.projections.count, 1)
+        XCTAssertEqual(payload.projections[0].externalID, "battle-rhythm:brief")
+
+        let duplicate = #"{"operation":"reconcile_calendar","arguments":{"coverage_start":"2026-07-01T00:00:00Z","coverage_end":"2026-08-01T00:00:00Z","projections":[{"external_id":"battle-rhythm:brief","title":"One","start":"2026-07-29T08:00:00Z","end":"2026-07-29T08:30:00Z","is_all_day":false,"location":null,"notes":null},{"external_id":"battle-rhythm:brief","title":"Two","start":"2026-07-30T08:00:00Z","end":"2026-07-30T08:30:00Z","is_all_day":false,"location":null,"notes":null}]}}"#
+        XCTAssertThrowsError(try AppleInputRequest.decode(line: duplicate))
+    }
+
     func testSubprocessRejectsMalformedAndOversizedLinesWithoutCrashing() throws {
         let malformed = try runHelper(input: "{bad}\n")
         XCTAssertTrue(malformed.contains(#""source":"protocol""#))

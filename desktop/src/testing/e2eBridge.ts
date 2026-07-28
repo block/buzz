@@ -9513,6 +9513,38 @@ export function maybeInstallE2eTauriMocks() {
         // Exercise the fully local deterministic fallback in browser E2E. The
         // native Rust tests cover provider-neutral model routing separately.
         return null;
+      case "read_apple_inputs": {
+        const request = (payload as { request?: { operation?: string } } | null)
+          ?.request;
+        if (request?.operation === "reconcile_calendar") {
+          return {
+            source: "calendar",
+            permission: "authorized",
+            observedAt: new Date().toISOString(),
+            records: [
+              {
+                fields: {
+                  calendar_identifier: "e2e-battle-rhythm",
+                  created: "1",
+                  updated: "0",
+                  deleted: "0",
+                  unchanged: "0",
+                },
+              },
+            ],
+            truncated: false,
+            error: null,
+          };
+        }
+        return {
+          source: "calendar",
+          permission: "authorized",
+          observedAt: new Date().toISOString(),
+          records: [],
+          truncated: false,
+          error: null,
+        };
+      }
       case "get_command_brief_status":
         return (
           activeConfig?.mock?.commandBriefStatus ?? {

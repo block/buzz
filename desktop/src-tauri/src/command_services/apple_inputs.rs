@@ -17,8 +17,12 @@ use std::os::unix::fs::PermissionsExt;
 const HELPER_NAME: &str = "buzz-apple-inputs";
 const MAXIMUM_STDOUT_BYTES: usize = 1024 * 1024;
 const MAXIMUM_STDERR_BYTES: usize = 64 * 1024;
+const MAXIMUM_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 const PERMISSION_TIMEOUT: Duration = Duration::from_secs(30);
+#[path = "apple_inputs_pdf.rs"]
+mod pdf;
+pub(crate) use pdf::extract_planning_pdf;
 #[cfg_attr(
     not(test),
     allow(dead_code, reason = "Phase 5 loads the protected brief selection")
@@ -91,6 +95,26 @@ pub(crate) struct PdfArguments {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CalendarProjectionArguments {
+    external_id: String,
+    title: String,
+    start: String,
+    end: String,
+    is_all_day: bool,
+    location: Option<String>,
+    notes: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ReconcileCalendarArguments {
+    coverage_start: String,
+    coverage_end: String,
+    projections: Vec<CalendarProjectionArguments>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(
     tag = "operation",
     content = "arguments",
@@ -105,6 +129,7 @@ pub(crate) enum AppleInputRequest {
     ReadNotes(NotesArguments),
     ReadFiles(FilesArguments),
     ExtractPdf(PdfArguments),
+    ReconcileCalendar(ReconcileCalendarArguments),
 }
 
 #[cfg_attr(
@@ -124,6 +149,7 @@ impl AppleInputRequest {
             Self::ReadNotes(_) => AppleInputSource::Notes,
             Self::ReadFiles(_) => AppleInputSource::Files,
             Self::ExtractPdf(_) => AppleInputSource::Files,
+            Self::ReconcileCalendar(_) => AppleInputSource::Calendar,
         }
     }
 
@@ -131,6 +157,7 @@ impl AppleInputRequest {
         match self {
             Self::RequestPermission(_) => PERMISSION_TIMEOUT,
             Self::ExtractPdf(_) => Duration::from_secs(60),
+            Self::ReconcileCalendar(_) => PERMISSION_TIMEOUT,
             _ => DEFAULT_TIMEOUT,
         }
     }
@@ -177,6 +204,9 @@ impl AppleInputRequest {
         match self {
             Self::ReadCalendar(arguments) => Some((&arguments.start, &arguments.end)),
             Self::ReadReminders(arguments) => Some((&arguments.start, &arguments.end)),
+            Self::ReconcileCalendar(arguments) => {
+                Some((&arguments.coverage_start, &arguments.coverage_end))
+            }
             _ => None,
         }
     }
@@ -620,7 +650,7 @@ fn supervise_helper(
     let mut request_line =
         serde_json::to_vec(request).map_err(|_| SupervisionError::RequestEncoding)?;
     request_line.push(b'\n');
-    if request_line.len() > 64 * 1024 {
+    if request_line.len() > MAXIMUM_REQUEST_BYTES {
         return Err(SupervisionError::RequestEncoding);
     }
 
@@ -774,58 +804,6 @@ pub(crate) fn read_apple_inputs_blocking(request: AppleInputRequest) -> AppleInp
         Ok(response) => response,
         Err(error) => fail_soft(source, &error),
     }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct PlanningPdfPage {
-    pub(crate) page: usize,
-    pub(crate) text: String,
-    pub(crate) confidence: Option<f64>,
-}
-
-pub(crate) fn extract_planning_pdf(path: &Path) -> Result<Vec<PlanningPdfPage>, String> {
-    let response = read_apple_inputs_blocking(AppleInputRequest::ExtractPdf(PdfArguments {
-        path: path
-            .to_str()
-            .ok_or_else(|| "selected PDF path is not valid UTF-8".to_string())?
-            .to_string(),
-    }));
-    if let Some(error) = response.error() {
-        return Err(error.to_string());
-    }
-    response
-        .records()
-        .iter()
-        .map(|record| {
-            let page = record
-                .fields()
-                .get("page")
-                .and_then(|value| value.parse::<usize>().ok())
-                .filter(|page| *page > 0)
-                .ok_or_else(|| "PDF helper returned an invalid page number".to_string())?;
-            let text = record
-                .fields()
-                .get("text")
-                .cloned()
-                .ok_or_else(|| "PDF helper omitted page text".to_string())?;
-            let confidence = record
-                .fields()
-                .get("confidence")
-                .map(|value| {
-                    value
-                        .parse::<f64>()
-                        .ok()
-                        .filter(|value| (0.0..=1.0).contains(value))
-                        .ok_or_else(|| "PDF helper returned invalid OCR confidence".to_string())
-                })
-                .transpose()?;
-            Ok(PlanningPdfPage {
-                page,
-                text,
-                confidence,
-            })
-        })
-        .collect()
 }
 
 #[cfg(all(test, unix))]
@@ -993,5 +971,22 @@ printf '%s\n' '{}'
             r#"{"operation":"request_permission","arguments":{"source":"notes"}}"#,
         );
         assert!(decoded.is_err());
+    }
+
+    #[test]
+    fn calendar_reconciliation_request_is_closed_and_source_scoped() {
+        let decoded = serde_json::from_str::<AppleInputRequest>(
+            r#"{"operation":"reconcile_calendar","arguments":{"coverage_start":"2026-07-01T00:00:00Z","coverage_end":"2026-08-01T00:00:00Z","projections":[{"external_id":"battle-rhythm:brief","title":"Navigation brief","start":"2026-07-29T08:00:00Z","end":"2026-07-29T08:30:00Z","is_all_day":false,"location":"Bridge","notes":null}]}}"#,
+        )
+        .expect("closed reconciliation request");
+        assert_eq!(decoded.source_name(), "calendar");
+        assert_eq!(
+            decoded.read_window(),
+            Some(("2026-07-01T00:00:00Z", "2026-08-01T00:00:00Z"))
+        );
+        let unknown = serde_json::from_str::<AppleInputRequest>(
+            r#"{"operation":"reconcile_calendar","arguments":{"coverage_start":"2026-07-01T00:00:00Z","coverage_end":"2026-08-01T00:00:00Z","projections":[],"calendar_name":"Personal"}}"#,
+        );
+        assert!(unknown.is_err());
     }
 }

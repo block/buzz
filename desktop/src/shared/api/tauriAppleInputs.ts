@@ -42,6 +42,22 @@ export type AppleInputRequest =
   | {
       operation: "read_files";
       arguments: { paths: string[] };
+    }
+  | {
+      operation: "reconcile_calendar";
+      arguments: {
+        coverage_start: string;
+        coverage_end: string;
+        projections: Array<{
+          external_id: string;
+          title: string;
+          start: string;
+          end: string;
+          is_all_day: boolean;
+          location: string | null;
+          notes: string | null;
+        }>;
+      };
     };
 
 export type AppleInputResponse = {

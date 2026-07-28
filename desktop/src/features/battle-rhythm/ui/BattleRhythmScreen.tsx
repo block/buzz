@@ -1,6 +1,11 @@
 import * as React from "react";
 import { ChevronLeft, ChevronRight, Filter, History, Plus } from "lucide-react";
 import { useIdentityQuery } from "@/shared/api/hooks";
+import { readAppleInputs } from "@/shared/api/tauriAppleInputs";
+import {
+  publishBattleRhythmToApple,
+  type ApplePublicationStatus,
+} from "../data/applePublication";
 import { dayInTimeZone, getYearRange } from "../domain/dateRange";
 import { expandRecurringEvents } from "../domain/occurrences";
 import type { BattleRhythmEvent } from "../domain/contracts";
@@ -32,6 +37,9 @@ export function BattleRhythmScreen() {
   >();
   const [historyOpen, setHistoryOpen] = React.useState(false);
   const [importOpen, setImportOpen] = React.useState(false);
+  const [appleStatus, setAppleStatus] =
+    React.useState<ApplePublicationStatus>();
+  const [appleBusy, setAppleBusy] = React.useState(false);
   const range = React.useMemo(() => getYearRange(day, TIME_ZONE, 24), [day]);
   const rhythm = useBattleRhythmQuery(identity.data?.pubkey, range);
   const mutations = useBattleRhythmMutations(
@@ -45,6 +53,65 @@ export function BattleRhythmScreen() {
   const visibleEvents = events.filter(
     (event) => event.start.slice(0, 10) === day || view !== "Day",
   );
+  const publishToApple = React.useCallback(async () => {
+    setAppleBusy(true);
+    try {
+      const status = await publishBattleRhythmToApple(events, range);
+      setAppleStatus(status);
+    } catch (cause) {
+      setAppleStatus({
+        state: "unavailable",
+        permission: "unavailable",
+        calendarIdentifier: null,
+        created: 0,
+        updated: 0,
+        deleted: 0,
+        unchanged: 0,
+        error:
+          cause instanceof Error
+            ? cause.message
+            : "Apple Calendar publication is unavailable.",
+      });
+    } finally {
+      setAppleBusy(false);
+    }
+  }, [events, range]);
+  React.useEffect(() => {
+    if (!rhythm.isSuccess) return;
+    setAppleStatus((current) =>
+      current
+        ? { ...current, state: "changes_pending" }
+        : {
+            state: "changes_pending",
+            permission: "unavailable",
+            calendarIdentifier: null,
+            created: 0,
+            updated: 0,
+            deleted: 0,
+            unchanged: 0,
+            error: null,
+          },
+    );
+    void publishToApple();
+  }, [publishToApple, rhythm.isSuccess]);
+  async function handleApplePublication() {
+    if (appleStatus?.state === "permission_required") {
+      await readAppleInputs({
+        operation: "request_permission",
+        arguments: { source: "calendar" },
+      });
+    }
+    await publishToApple();
+  }
+  const appleLabel = appleBusy
+    ? "Publishing…"
+    : appleStatus?.state === "published"
+      ? "Published to Apple"
+      : appleStatus?.state === "permission_required"
+        ? "Allow Apple Calendar"
+        : appleStatus?.state === "changes_pending"
+          ? "Changes pending"
+          : "Retry Apple publication";
   const renderView = () => {
     if (view === "Year") return <YearTimeline events={events} />;
     if (view === "Month")
@@ -189,11 +256,16 @@ export function BattleRhythmScreen() {
             Filters
           </button>
           <button
-            className="rounded border px-3 py-2 text-sm"
-            disabled
+            className="rounded border px-3 py-2 text-sm disabled:opacity-50"
+            disabled={appleBusy || !rhythm.isSuccess}
+            onClick={handleApplePublication}
+            title={
+              appleStatus?.error ??
+              "One-way publication to HMAS Supply Battle Rhythm"
+            }
             type="button"
           >
-            Apple unavailable
+            {appleLabel}
           </button>
           <button
             className="rounded bg-primary px-3 py-2 text-sm text-primary-foreground"

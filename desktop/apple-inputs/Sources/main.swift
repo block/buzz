@@ -91,6 +91,27 @@ func response(for request: AppleInputRequest) async -> AppleInputResponse {
                 return AppleInputRecord(fields: fields)
             }
             return .init(source: "files", permission: .authorized, records: records)
+        case .reconcileCalendar(let payload):
+            let result = EventKitWriter().reconcile(
+                projections: payload.projections,
+                coverageStart: payload.coverageStart,
+                coverageEnd: payload.coverageEnd
+            )
+            var fields = [
+                "created": String(result.created),
+                "updated": String(result.updated),
+                "deleted": String(result.deleted),
+                "unchanged": String(result.unchanged),
+            ]
+            if let calendarIdentifier = result.calendarIdentifier {
+                fields["calendar_identifier"] = calendarIdentifier
+            }
+            return .init(
+                source: "calendar",
+                permission: result.permission,
+                records: [AppleInputRecord(fields: fields)],
+                error: result.error
+            )
         }
     } catch {
         return .init(source: request.operation.rawValue, permission: .unavailable, records: [], error: error.localizedDescription)

@@ -1,11 +1,12 @@
 import Foundation
 
 enum ProtocolLimits {
-    static let maximumLineBytes = 64 * 1024
+    static let maximumLineBytes = 8 * 1024 * 1024
     static let maximumResponseBytes = 1024 * 1024
     static let maximumArrayCount = 32
     static let maximumStringBytes = 1024
     static let maximumRecords = 100
+    static let maximumCalendarProjections = 2_000
     static let maximumWindow: TimeInterval = 366 * 86_400
 }
 
@@ -16,6 +17,7 @@ enum AppleInputOperation: String, Codable {
     case readCalendar = "read_calendar", readReminders = "read_reminders"
     case readNotes = "read_notes", readFiles = "read_files"
     case extractPDF = "extract_pdf"
+    case reconcileCalendar = "reconcile_calendar"
 }
 enum PermissionSource: String { case calendar, reminders, notes, files }
 enum PermissionState: String, Codable { case notDetermined = "not_determined", denied, authorized, restricted, unavailable }
@@ -35,10 +37,16 @@ struct ReminderPayload { let listIdentifiers: [String]; let start: Date; let end
 struct NotesPayload { let folderIdentifiers: [String]; let maximum: Int }
 struct FilesPayload { let paths: [String] }
 struct PDFPayload { let path: String }
+struct ReconcileCalendarPayload {
+    let coverageStart: Date
+    let coverageEnd: Date
+    let projections: [CalendarProjection]
+}
 enum AppleInputPayload {
     case permission(PermissionPayload), listCalendars, listReminderLists, listNoteFolders
     case readCalendar(CalendarPayload), readReminders(ReminderPayload), readNotes(NotesPayload), readFiles(FilesPayload)
     case extractPDF(PDFPayload)
+    case reconcileCalendar(ReconcileCalendarPayload)
 }
 struct AppleInputRequest {
     let operation: AppleInputOperation
@@ -101,6 +109,59 @@ struct AppleInputRequest {
                 throw AppleInputFailure.invalidRequest("path must be a bounded absolute path")
             }
             return .init(operation: operation, payload: .extractPDF(.init(path: path)))
+        case .reconcileCalendar:
+            try exact(arguments, keys: ["coverage_start", "coverage_end", "projections"])
+            let coverageStart = try date(arguments["coverage_start"], name: "coverage_start")
+            let coverageEnd = try date(arguments["coverage_end"], name: "coverage_end")
+            guard coverageStart < coverageEnd,
+                  coverageEnd.timeIntervalSince(coverageStart) <= 5 * 366 * 86_400 else {
+                throw AppleInputFailure.invalidRequest("calendar publication coverage is invalid")
+            }
+            guard let rawProjections = arguments["projections"] as? [[String: Any]],
+                  rawProjections.count <= ProtocolLimits.maximumCalendarProjections else {
+                throw AppleInputFailure.invalidRequest("calendar projections exceed the bounded limit")
+            }
+            let projections = try rawProjections.map { value in
+                try exact(value, keys: [
+                    "external_id", "title", "start", "end", "is_all_day",
+                    "location", "notes",
+                ])
+                guard let externalID = value["external_id"] as? String,
+                      externalID.hasPrefix("battle-rhythm:"),
+                      !externalID.isEmpty,
+                      externalID.utf8.count <= 512,
+                      let title = value["title"] as? String,
+                      !title.isEmpty,
+                      title.utf8.count <= 512,
+                      let isAllDay = value["is_all_day"] as? Bool else {
+                    throw AppleInputFailure.invalidRequest("calendar projection fields are invalid")
+                }
+                let start = try date(value["start"], name: "projection start")
+                let end = try date(value["end"], name: "projection end")
+                guard start < end, start < coverageEnd, end > coverageStart else {
+                    throw AppleInputFailure.invalidRequest("calendar projection is outside coverage")
+                }
+                return CalendarProjection(
+                    externalID: externalID,
+                    title: title,
+                    start: start,
+                    end: end,
+                    isAllDay: isAllDay,
+                    location: try optionalString(value["location"], name: "location", maximum: 1_024),
+                    notes: try optionalString(value["notes"], name: "notes", maximum: 4_096)
+                )
+            }
+            guard Set(projections.map(\.externalID)).count == projections.count else {
+                throw AppleInputFailure.invalidRequest("calendar projection IDs must be unique")
+            }
+            return .init(
+                operation: operation,
+                payload: .reconcileCalendar(.init(
+                    coverageStart: coverageStart,
+                    coverageEnd: coverageEnd,
+                    projections: projections
+                ))
+            )
         }
     }
 
@@ -125,6 +186,20 @@ struct AppleInputRequest {
             throw AppleInputFailure.invalidRequest("\(name) must be an ISO-8601 date")
         }
         return parsed
+    }
+    private static func optionalString(
+        _ value: Any?,
+        name: String,
+        maximum: Int
+    ) throws -> String? {
+        if value is NSNull { return nil }
+        guard let text = value as? String,
+              !text.isEmpty,
+              text.utf8.count <= maximum,
+              !text.contains("\0") else {
+            throw AppleInputFailure.invalidRequest("\(name) must be null or bounded text")
+        }
+        return text
     }
 }
 
