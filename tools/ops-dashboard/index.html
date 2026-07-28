@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Buzz Ops Dashboard</title>
+<style>
+:root{
+  --bg:#0a0e14;--bg2:#11161d;--bg3:#1a1f29;--bg4:#222934;
+  --border:#2a313c;--border2:#384049;
+  --text:#e6edf3;--text2:#7d8590;--text3:#565f6a;
+  --accent:#2f81f7;--accent2:#3fb950;--accent3:#bc8cff;
+  --red:#f85149;--amber:#d29922;--cyan:#39d0d8;
+  --radius:12px;--radius-sm:8px;
+  --shadow:0 2px 8px rgba(0,0,0,.3);
+  --gradient:linear-gradient(135deg,#2f81f7,#bc8cff);
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;-webkit-font-smoothing:antialiased}
+::-webkit-scrollbar{width:8px;height:8px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
+
+/* ── Top Bar ──────────────────────────── */
+.topbar{position:sticky;top:0;z-index:100;background:rgba(10,14,20,.9);backdrop-filter:blur(12px);border-bottom:1px solid var(--border);padding:14px 24px;display:flex;align-items:center;gap:16px}
+.topbar .logo{display:flex;align-items:center;gap:10px;font-size:18px;font-weight:800}
+.topbar .logo-icon{width:36px;height:36px;border-radius:10px;background:var(--gradient);display:flex;align-items:center;justify-content:center;font-size:20px;box-shadow:0 2px 12px rgba(47,129,247,.3)}
+.topbar .logo-text span{background:var(--gradient);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+.url-bar{flex:1;display:flex;gap:8px;max-width:500px}
+.url-bar input{flex:1;padding:9px 14px;background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);font-size:13px;font-family:inherit;transition:border-color .15s}
+.url-bar input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(47,129,247,.12)}
+.btn{padding:9px 18px;border-radius:var(--radius-sm);font-size:13px;font-weight:600;cursor:pointer;border:1px solid var(--border2);background:var(--bg3);color:var(--text);transition:all .15s}
+.btn:hover{background:var(--bg4)}
+.btn-primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn-primary:hover{background:#4b91f9;box-shadow:0 2px 12px rgba(47,129,247,.3)}
+.refresh-indicator{font-size:12px;color:var(--text3);white-space:nowrap}
+.refresh-indicator .live-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--accent2);animation:pulse 2s infinite;margin-right:4px}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+
+/* ── Layout ──────────────────────────── */
+.container{max-width:1400px;margin:0 auto;padding:24px}
+.grid{display:grid;gap:16px}
+
+/* ── Status Cards ─────────────────────── */
+.status-grid{grid-template-columns:repeat(auto-fit,minmax(200px,1fr));margin-bottom:16px}
+.stat-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:20px;display:flex;flex-direction:column;gap:4px;transition:all .2s;position:relative;overflow:hidden}
+.stat-card:hover{border-color:var(--border2);transform:translateY(-2px);box-shadow:var(--shadow)}
+.stat-card::before{content:'';position:absolute;left:0;top:0;width:3px;height:100%}
+.stat-card.green::before{background:var(--accent2)}
+.stat-card.red::before{background:var(--red)}
+.stat-card.blue::before{background:var(--accent)}
+.stat-card.purple::before{background:var(--accent3)}
+.stat-card.amber::before{background:var(--amber)}
+.stat-label{font-size:11px;text-transform:uppercase;letter-spacing:.8px;color:var(--text3);font-weight:700}
+.stat-value{font-size:28px;font-weight:800;letter-spacing:-.5px}
+.stat-value.green{color:var(--accent2)}
+.stat-value.red{color:var(--red)}
+.stat-value.blue{color:var(--accent)}
+.stat-sub{font-size:12px;color:var(--text2);margin-top:2px}
+
+/* ── Section ──────────────────────────── */
+.section{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;margin-bottom:16px}
+.section-header{padding:16px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+.section-header h2{font-size:15px;font-weight:700;display:flex;align-items:center;gap:8px}
+.section-body{padding:20px}
+
+/* ── Table ────────────────────────────── */
+table{width:100%;border-collapse:collapse}
+th{text-align:left;padding:10px 12px;font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--text3);font-weight:700;border-bottom:1px solid var(--border)}
+td{padding:10px 12px;font-size:13px;border-bottom:1px solid var(--border)}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:var(--bg3)}
+
+/* ── Status Badges ────────────────────── */
+.badge{display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:99px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.4px}
+.badge-completed{background:rgba(63,185,80,.12);color:var(--accent2)}
+.badge-running{background:rgba(47,129,247,.12);color:var(--accent)}
+.badge-failed{background:rgba(248,81,73,.12);color:var(--red)}
+.badge-waiting_approval{background:rgba(188,140,255,.12);color:var(--accent3)}
+.badge-pending{background:rgba(125,133,144,.12);color:var(--text2)}
+.badge-cancelled{background:rgba(125,133,144,.12);color:var(--text2)}
+
+/* ── Info Grid ────────────────────────── */
+.info-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:12px}
+.info-item{background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius-sm);padding:14px}
+.info-item .key{font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;font-weight:600}
+.info-item .val{font-size:14px;font-weight:600;word-break:break-all}
+.info-item .val code{font-family:'SF Mono',Consolas,monospace;font-size:12px;background:var(--bg);padding:2px 6px;border-radius:4px}
+
+/* ── Empty / Error ────────────────────── */
+.empty{text-align:center;padding:60px 20px;color:var(--text3)}
+.empty .emoji{font-size:48px;margin-bottom:12px}
+.empty h3{font-size:16px;font-weight:700;color:var(--text2);margin-bottom:6px}
+.empty p{font-size:13px;line-height:1.5}
+.error-box{background:rgba(248,81,73,.08);border:1px solid rgba(248,81,73,.3);border-radius:var(--radius-sm);padding:14px 16px;color:var(--red);font-size:13px;margin-bottom:16px;display:flex;align-items:flex-start;gap:8px}
+
+/* ── Loading ──────────────────────────── */
+.loading{display:flex;align-items:center;justify-content:center;padding:40px;color:var(--text3)}
+.spinner{width:24px;height:24px;border:3px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite;margin-right:10px}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* ── Uptime bar ───────────────────────── */
+.uptime-bar{display:flex;gap:2px;height:32px;border-radius:6px;overflow:hidden}
+.uptime-segment{flex:1;border-radius:2px;transition:opacity .2s}
+.uptime-up{background:var(--accent2)}
+.uptime-down{background:var(--red)}
+.uptime-unknown{background:var(--border)}
+
+/* ── Toast ────────────────────────────── */
+.toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%) translateY(100px);background:var(--accent);color:#fff;padding:10px 20px;border-radius:8px;font-size:13px;font-weight:600;box-shadow:0 8px 24px rgba(0,0,0,.4);transition:transform .3s;z-index:1000}
+.toast.show{transform:translateX(-50%) translateY(0)}
+
+@media(max-width:768px){
+  .topbar{flex-wrap:wrap}
+  .url-bar{max-width:none;width:100%;order:3}
+  .status-grid{grid-template-columns:1fr 1fr}
+}
+</style>
+</head>
+<body>
+
+<!-- ════════ Top Bar ════════ -->
+<div class="topbar">
+  <div class="logo">
+    <div class="logo-icon">📊</div>
+    <div class="logo-text"><span>Buzz</span> Ops</div>
+  </div>
+  <div class="url-bar">
+    <input type="text" id="relay-url" placeholder="http://localhost:3000" value="http://localhost:3000">
+    <button class="btn btn-primary" onclick="connect()">Connect</button>
+  </div>
+  <div class="refresh-indicator" id="refresh-indicator" style="display:none">
+    <span class="live-dot"></span> Auto-refresh 5s
+  </div>
+  <button class="btn" id="auto-btn" onclick="toggleAuto()" style="display:none">⏸ Pause</button>
+</div>
+
+<div class="container" id="container">
+  <!-- Initial empty state -->
+  <div class="empty" id="initial-empty">
+    <div class="emoji">📊</div>
+    <h3>Connect to a relay</h3>
+    <p>Enter your relay URL above and click Connect.<br>Default: <code>http://localhost:3000</code></p>
+  </div>
+
+  <div id="dashboard" style="display:none">
+    <!-- Error box -->
+    <div id="error-box" style="display:none"></div>
+
+    <!-- Status Cards -->
+    <div class="grid status-grid" id="status-cards"></div>
+
+    <!-- Uptime -->
+    <div class="section">
+      <div class="section-header"><h2>📈 Uptime (last 60 checks)</h2></div>
+      <div class="section-body">
+        <div class="uptime-bar" id="uptime-bar"></div>
+        <div style="display:flex;justify-content:space-between;margin-top:8px;font-size:11px;color:var(--text3)">
+          <span>60 checks ago</span><span id="uptime-pct"></span><span>now</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Workflow Runs -->
+    <div class="section">
+      <div class="section-header">
+        <h2>🔄 Workflow Runs</h2>
+        <div style="display:flex;gap:8px;align-items:center">
+          <input type="text" id="wf-filter" placeholder="Filter workflow UUID…" style="padding:6px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:12px;width:200px">
+          <button class="btn" style="padding:6px 12px;font-size:12px" onclick="loadWorkflowRuns()">Refresh</button>
+        </div>
+      </div>
+      <div class="section-body" style="padding:0">
+        <div id="runs-loading" class="loading"><div class="spinner"></div> Loading runs…</div>
+        <div id="runs-table" style="display:none;overflow-x:auto">
+          <table>
+            <thead><tr>
+              <th>Status</th><th>Run ID</th><th>Workflow</th><th>Step</th><th>Started</th><th>Completed</th><th>Error</th>
+            </tr></thead>
+            <tbody id="runs-tbody"></tbody>
+          </table>
+        </div>
+        <div id="runs-empty" class="empty" style="display:none">
+          <div class="emoji">🔄</div><h3>No workflow runs</h3><p>No runs found for this workflow ID.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Relay Info -->
+    <div class="section">
+      <div class="section-header"><h2>ℹ️ Relay Info</h2></div>
+      <div class="section-body">
+        <div class="info-grid" id="relay-info"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div class="toast" id="toast"></div>
+
+<script>
+// ── State ──────────────────────────────────────────────────────────
+let relayUrl = '';
+let autoTimer = null;
+let uptimeHistory = [];
+const MAX_UPTIME = 60;
+
+// ── Utils ──────────────────────────────────────────────────────────
+function showToast(msg) {
+  const t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 2000);
+}
+function fmtDuration(secs) {
+  if (secs < 60) return `${secs}s`;
+  if (secs < 3600) return `${Math.floor(secs/60)}m ${secs%60}s`;
+  if (secs < 86400) return `${Math.floor(secs/3600)}h ${Math.floor((secs%3600)/60)}m`;
+  return `${Math.floor(secs/86400)}d ${Math.floor((secs%86400)/3600)}h`;
+}
+function fmtTime(iso) {
+  if (!iso) return '—';
+  try { return new Date(iso).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'}); }
+  catch { return iso; }
+}
+function shortId(id) { return id ? `${id.slice(0,8)}…${id.slice(-4)}` : '—'; }
+
+// ── Connect ────────────────────────────────────────────────────────
+async function connect() {
+  relayUrl = document.getElementById('relay-url').value.trim().replace(/\/$/,'');
+  if (!relayUrl) { showToast('Enter a relay URL'); return; }
+
+  document.getElementById('initial-empty').style.display = 'none';
+  document.getElementById('dashboard').style.display = 'block';
+  document.getElementById('auto-btn').style.display = 'inline-flex';
+  document.getElementById('refresh-indicator').style.display = 'inline-flex';
+
+  uptimeHistory = [];
+  await refreshAll();
+  startAuto();
+  showToast(`Connected to ${relayUrl}`);
+}
+
+// ── Auto-refresh ───────────────────────────────────────────────────
+function startAuto() {
+  stopAuto();
+  autoTimer = setInterval(refreshAllStatus, 5000);
+}
+function stopAuto() { if (autoTimer) { clearInterval(autoTimer); autoTimer = null; } }
+function toggleAuto() {
+  const btn = document.getElementById('auto-btn');
+  const ind = document.getElementById('refresh-indicator');
+  if (autoTimer) {
+    stopAuto();
+    btn.textContent = '▶ Resume'; ind.style.display = 'none';
+  } else {
+    startAuto();
+    btn.textContent = '⏸ Pause'; ind.style.display = 'inline-flex';
+  }
+}
+
+// ── Fetch helpers ──────────────────────────────────────────────────
+async function fetchJson(path) {
+  const resp = await fetch(`${relayUrl}${path}`);
+  if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
+  return resp.json();
+}
+
+function showError(msg) {
+  const box = document.getElementById('error-box');
+  box.innerHTML = `⚠️ ${msg}`;
+  box.style.display = 'flex';
+}
+function hideError() { document.getElementById('error-box').style.display = 'none'; }
+
+// ── Refresh: Status ────────────────────────────────────────────────
+async function refreshAllStatus() {
+  let ready = false, status = null, version = '', uptime = 0;
+  try {
+    // Readiness
+    try {
+      const r = await fetchJson('/_readiness');
+      ready = r.status === 'ready';
+    } catch { ready = false; }
+
+    // Status
+    try {
+      status = await fetchJson('/_status');
+      version = status.version || '';
+      uptime = status.uptime_seconds || 0;
+    } catch {}
+
+    hideError();
+  } catch (e) {
+    showError(`Cannot reach relay at ${relayUrl}: ${e.message}`);
+    ready = false;
+  }
+
+  // Uptime tracking
+  uptimeHistory.push(ready);
+  if (uptimeHistory.length > MAX_UPTIME) uptimeHistory.shift();
+
+  renderStatusCards(ready, version, uptime);
+  renderUptime();
+}
+
+async function refreshAll() {
+  await refreshAllStatus();
+  await loadRelayInfo();
+  await loadWorkflowRuns();
+}
+
+// ── Render: Status Cards ───────────────────────────────────────────
+function renderStatusCards(ready, version, uptime) {
+  const cards = [
+    { label:'Relay Status', value: ready?'Online':'Offline', cls: ready?'green':'red',
+      sub: ready ? 'Accepting connections' : 'Not ready' },
+    { label:'Version', value: version || '—', cls:'blue', sub:'buzz-relay' },
+    { label:'Uptime', value: ready ? fmtDuration(uptime) : '—', cls:'purple', sub: ready ? 'since last restart' : '' },
+    { label:'Health Port', value:'8081', cls:'amber', sub:'/_readiness' },
+  ];
+  document.getElementById('status-cards').innerHTML = cards.map(c => `
+    <div class="stat-card ${c.cls}">
+      <div class="stat-label">${c.label}</div>
+      <div class="stat-value ${c.cls}">${c.value}</div>
+      <div class="stat-sub">${c.sub}</div>
+    </div>`).join('');
+}
+
+// ── Render: Uptime Bar ─────────────────────────────────────────────
+function renderUptime() {
+  const bar = document.getElementById('uptime-bar');
+  const segments = [];
+  // Pad with unknowns if we don't have enough history
+  const padded = [...Array(Math.max(0, MAX_UPTIME - uptimeHistory.length)).fill(null), ...uptimeHistory];
+  padded.forEach(up => {
+    const cls = up === null ? 'unknown' : (up ? 'up' : 'down');
+    segments.push(`<div class="uptime-segment uptime-${cls}"></div>`);
+  });
+  bar.innerHTML = segments.join('');
+
+  const upCount = uptimeHistory.filter(Boolean).length;
+  const pct = uptimeHistory.length ? Math.round((upCount / uptimeHistory.length) * 100) : 100;
+  document.getElementById('uptime-pct').textContent = `${pct}% up`;
+}
+
+// ── Render: Workflow Runs ──────────────────────────────────────────
+async function loadWorkflowRuns() {
+  const filter = document.getElementById('wf-filter')?.value.trim();
+  document.getElementById('runs-loading').style.display = 'flex';
+  document.getElementById('runs-table').style.display = 'none';
+  document.getElementById('runs-empty').style.display = 'none';
+
+  if (!filter) {
+    document.getElementById('runs-loading').style.display = 'none';
+    document.getElementById('runs-empty').style.display = 'block';
+    document.querySelector('#runs-empty p').textContent = 'Enter a workflow UUID above to see its runs.';
+    return;
+  }
+
+  try {
+    const runs = await fetchJson(`/workflow-runs?workflow=${filter}&limit=50`);
+    document.getElementById('runs-loading').style.display = 'none';
+
+    if (!runs.length) {
+      document.getElementById('runs-empty').style.display = 'block';
+      return;
+    }
+
+    const tbody = document.getElementById('runs-tbody');
+    tbody.innerHTML = runs.map(r => `
+      <tr>
+        <td><span class="badge badge-${r.status}">${r.status}</span></td>
+        <td><code>${shortId(r.id)}</code></td>
+        <td><code>${shortId(r.workflow_id)}</code></td>
+        <td>${r.current_step}</td>
+        <td>${fmtTime(r.started_at)}</td>
+        <td>${fmtTime(r.completed_at)}</td>
+        <td style="color:var(--red);font-size:12px">${r.error_message ? r.error_message.slice(0,50) : '—'}</td>
+      </tr>`).join('');
+    document.getElementById('runs-table').style.display = 'block';
+  } catch (e) {
+    document.getElementById('runs-loading').style.display = 'none';
+    document.getElementById('runs-empty').style.display = 'block';
+    document.querySelector('#runs-empty p').textContent = `Error: ${e.message}`;
+  }
+}
+
+// ── Render: Relay Info (NIP-11) ────────────────────────────────────
+async function loadRelayInfo() {
+  const container = document.getElementById('relay-info');
+  try {
+    // NIP-11 via Accept header
+    const resp = await fetch(`${relayUrl}/`, { headers: { 'Accept': 'application/nostr+json' } });
+    const info = await resp.json();
+
+    const items = [
+      { key:'Name', val: info.name || '—' },
+      { key:'Description', val: info.description || '—' },
+      { key:'Software', val: `<code>${info.software || '—'}</code>` },
+      { key:'Version', val: info.version || '—' },
+      { key:'Supported NIPs', val: (info.supported_nips || []).join(', ') || '—' },
+      { key:'Pubkey', val: `<code>${shortId(info.pubkey || '')}</code>` },
+      { key:'Contact', val: info.contact || '—' },
+      { key:'Limitation', val: info.limitation ? JSON.stringify(info.limitation).slice(0,80) : '—' },
+    ];
+    container.innerHTML = items.map(i => `
+      <div class="info-item">
+        <div class="key">${i.key}</div>
+        <div class="val">${i.val}</div>
+      </div>`).join('');
+  } catch {
+    container.innerHTML = '<div class="info-item"><div class="key">Info</div><div class="val" style="color:var(--text3)">Unable to fetch NIP-11 info</div></div>';
+  }
+}
+
+// Enter key on URL bar
+document.getElementById('relay-url').addEventListener('keydown', e => {
+  if (e.key === 'Enter') connect();
+});
+</script>
+</body>
+</html>
