@@ -103,7 +103,7 @@ test("add community starts with create and join choices", async ({ page }) => {
   await expect(
     page.getByRole("heading", { name: "Create a new community" }),
   ).toBeVisible();
-  await page.getByRole("button", { name: "Continue to Builderlab" }).click();
+  await page.getByRole("button", { name: "Sign in" }).click();
   await page.getByRole("button", { name: "Connect and continue" }).click();
   await expect(page.getByLabel("Community address")).toBeVisible();
 });
