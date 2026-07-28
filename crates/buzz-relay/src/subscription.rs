@@ -286,7 +286,14 @@ impl SubscriptionRegistry {
                 .map(|entry| entry.value().clone())
             {
                 for (conn_id, sub_id) in candidates {
-                    self.push_match(conn_id, &sub_id, event, &mut results, &mut seen);
+                    self.push_match(
+                        conn_id,
+                        &sub_id,
+                        community_id,
+                        event,
+                        &mut results,
+                        &mut seen,
+                    );
                 }
             }
             // Also check wildcard (channel-only, kindless) index.
@@ -296,7 +303,14 @@ impl SubscriptionRegistry {
                 .map(|entry| entry.value().clone())
             {
                 for (conn_id, sub_id) in wildcards {
-                    self.push_match(conn_id, &sub_id, event, &mut results, &mut seen);
+                    self.push_match(
+                        conn_id,
+                        &sub_id,
+                        community_id,
+                        event,
+                        &mut results,
+                        &mut seen,
+                    );
                 }
             }
         } else {
@@ -315,7 +329,14 @@ impl SubscriptionRegistry {
                     .map(|entry| entry.value().clone())
                 {
                     for (conn_id, sub_id) in candidates {
-                        self.push_match(conn_id, &sub_id, event, &mut results, &mut seen);
+                        self.push_match(
+                            conn_id,
+                            &sub_id,
+                            community_id,
+                            event,
+                            &mut results,
+                            &mut seen,
+                        );
                     }
                 }
             }
@@ -325,7 +346,14 @@ impl SubscriptionRegistry {
                 .map(|entry| entry.value().clone())
             {
                 for (conn_id, sub_id) in candidates {
-                    self.push_match(conn_id, &sub_id, event, &mut results, &mut seen);
+                    self.push_match(
+                        conn_id,
+                        &sub_id,
+                        community_id,
+                        event,
+                        &mut results,
+                        &mut seen,
+                    );
                 }
             }
             // Also check global wildcard (kindless global subs).
@@ -335,7 +363,14 @@ impl SubscriptionRegistry {
                 .map(|entry| entry.value().clone())
             {
                 for (conn_id, sub_id) in wildcards {
-                    self.push_match(conn_id, &sub_id, event, &mut results, &mut seen);
+                    self.push_match(
+                        conn_id,
+                        &sub_id,
+                        community_id,
+                        event,
+                        &mut results,
+                        &mut seen,
+                    );
                 }
             }
         }
@@ -392,13 +427,20 @@ impl SubscriptionRegistry {
         &self,
         conn_id: ConnId,
         sub_id: &str,
+        community_id: CommunityId,
         event: &StoredEvent,
         results: &mut Vec<(ConnId, SubId)>,
         seen: &mut HashSet<(ConnId, SubId)>,
     ) {
         if let Some(conn_subs) = self.subs.get(&conn_id) {
-            if let Some((filters, _, _)) = conn_subs.get(sub_id) {
-                if filters_match(filters, event) {
+            if let Some((filters, sub_community_id, sub_channel_id)) = conn_subs.get(sub_id) {
+                // Candidate snapshots can become stale while a same-ID replacement
+                // moves the subscription. Re-check its authoritative scope before
+                // matching so an old index entry cannot deliver across scopes.
+                if *sub_community_id == community_id
+                    && *sub_channel_id == event.channel_id
+                    && filters_match(filters, event)
+                {
                     let entry = (conn_id, sub_id.to_string());
                     if seen.insert(entry.clone()) {
                         results.push(entry);
@@ -651,6 +693,50 @@ mod tests {
         let event = make_stored_event(Kind::TextNote, Some(channel_id));
         let matches = registry.fan_out(&event);
         assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn test_stale_candidate_snapshot_does_not_cross_subscription_scope() {
+        let registry = SubscriptionRegistry::new();
+        let conn_id = Uuid::new_v4();
+        let channel_a = Uuid::new_v4();
+        let channel_b = Uuid::new_v4();
+        let sub_id = "same-id".to_string();
+        let filters = vec![Filter::new().kind(Kind::TextNote)];
+        registry.register(conn_id, sub_id.clone(), filters.clone(), Some(channel_a));
+
+        // Reproduce fan-out's unlocked candidate snapshot, then move the same
+        // subscription ID before the authoritative subscription lookup.
+        let key = IndexKey {
+            channel_id: channel_a,
+            kind: Kind::TextNote,
+        };
+        let candidates = registry
+            .channel_kind_index
+            .get(&(test_community(), key))
+            .expect("channel A candidate exists")
+            .value()
+            .clone();
+        registry.register(conn_id, sub_id, filters, Some(channel_b));
+
+        let event = make_stored_event(Kind::TextNote, Some(channel_a));
+        let mut results = Vec::new();
+        let mut seen = HashSet::new();
+        for (candidate_conn_id, candidate_sub_id) in candidates {
+            registry.push_match(
+                candidate_conn_id,
+                &candidate_sub_id,
+                test_community(),
+                &event,
+                &mut results,
+                &mut seen,
+            );
+        }
+
+        assert!(
+            results.is_empty(),
+            "replacement on channel B received channel A event through stale snapshot"
+        );
     }
 
     #[test]
