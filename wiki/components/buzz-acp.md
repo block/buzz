@@ -8,7 +8,7 @@ ACP (Agent Communication Protocol) harness. Bridges Nostr relay events to AI age
 - Translates Nostr events → JSON-RPC calls for the agent
 - Translates agent responses → Nostr events published to the relay
 - Accumulates turn `agent_message_chunk` text and fallback-publishes text responses to the channel on `StopReason::EndTurn` if no tool published a message
-- Sanitizes pseudo-tool parameter blocks (` ```json ... ``` `) and special tokens (`<|tool_call>`, `<|im_end|>`) via `clean_agent_text_response`
+- Sanitizes pseudo-tool parameter blocks (` ```json ... ``` `), Python pseudo-code blocks (` ```python def reply_to_mention... ``` `), raw CLI stdout execution outputs (`{"accept": true, "event_id": "..."}`), and special tokens (`<|tool_call>`, `<|im_end|>`) via `clean_agent_text_response`
 - Handles reconnection, subscription management, and agent lifecycle
 
 **Related:**

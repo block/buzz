@@ -156,7 +156,38 @@ When using local OpenAI-compatible LLM endpoints (e.g. OMLX, Ollama, or local 4-
 
 1. **Empty `content` with non-empty `reasoning_content`**: Local reasoning models output text under `reasoning_content` or `reasoning` while leaving `content: ""`. Both `parse_openai` and `parse_responses` in `buzz-agent` (`crates/buzz-agent/src/llm.rs`) fall back to `reasoning` when `text` is empty and no tool calls exist.
 2. **Fallback Turn Text Publishing**: When models output text without executing a `buzz messages send` tool call, `buzz-acp` (`crates/buzz-acp/src/pool.rs`) accumulates `agent_message_chunk` text during the turn and posts it directly to the channel as a `kind: 9` event upon `StopReason::EndTurn`.
-3. **Cleaning Pseudo-tool Code Blocks**: `clean_agent_text_response` strips trailing ` ```json ... ``` ` parameter blocks and special model tokens (`<|tool_call>`, `<|im_end|>`) so that only clean conversational text is posted to the channel.
+3. **Cleaning Pseudo-tool Code Blocks & CLI Payloads**: `clean_agent_text_response` strips pseudo-tool JSON blocks (` ```json ... ``` `), Python pseudo-code blocks (` ```python def reply_to_mention... ``` `), raw CLI stdout execution outputs (`{"accept": true, "event_id": "..."}`), step-by-step pseudo-execution noise, and special model tokens (`<|tool_call>`, `<|im_end|>`) so that only clean conversational text is posted to the channel.
+
+## Duplicate Agent Cards Appearing in UI (Builtin Personas vs Standalone Managed Agents)
+
+The desktop UI renders agent cards in `UnifiedAgentsSection.tsx` by running `buildUnifiedGroups(personas, agents)`.
+
+- Top cards (with alien face avatars) are **Builtin Personas** (`builtin:fizz`, `builtin:honey`, `builtin:bumble`).
+- Bottom cards (with grey circle avatars) are **Managed Agent Instances** loaded from `managed-agents.json`.
+
+If an agent record in `managed-agents.json` has `"persona_id": null` (or omitted), `buildUnifiedGroups` cannot associate the managed agent instance with its builtin persona. It places the agent under `ungrouped`, displaying duplicate standalone cards.
+
+**Fix:** Ensure each agent record in `managed-agents.json` explicitly references its corresponding persona ID:
+
+```json
+[
+  {
+    "name": "Fizz",
+    "persona_id": "builtin:fizz",
+    ...
+  },
+  {
+    "name": "Honey",
+    "persona_id": "builtin:honey",
+    ...
+  },
+  {
+    "name": "Bumble",
+    "persona_id": "builtin:bumble",
+    ...
+  }
+]
+```
 
 ## "Agent; owner unavailable" badge next to agent name
 
