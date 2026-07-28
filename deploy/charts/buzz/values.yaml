@@ -217,6 +217,9 @@ pairingRelay:
     annotations: {}
   podAnnotations: {}
   podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
   resources:
     requests:
       cpu: "50m"

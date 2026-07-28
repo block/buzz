@@ -282,6 +282,9 @@
         },
         "podAnnotations": { "type": "object" },
         "podLabels": { "type": "object" },
+        "nodeSelector": { "type": "object" },
+        "tolerations": { "type": "array" },
+        "affinity": { "type": "object" },
         "resources": { "type": "object" }
       }
     },
