@@ -94,7 +94,7 @@ impl ObserverHandle {
         match self.inner.buffer.lock() {
             Ok(buffer) => buffer.iter().cloned().collect(),
             Err(error) => {
-                tracing::warn!(target: "observer", "observer replay buffer lock poisoned: {error}");
+                tracing::warn!(target: "buzz_acp::observer", "observer replay buffer lock poisoned: {error}");
                 Vec::new()
             }
         }
@@ -128,7 +128,7 @@ impl ObserverHandle {
                 buffer.push_back(event.clone());
             }
             Err(error) => {
-                tracing::warn!(target: "observer", "observer replay buffer lock poisoned: {error}");
+                tracing::warn!(target: "buzz_acp::observer", "observer replay buffer lock poisoned: {error}");
             }
         }
 
