@@ -16,6 +16,7 @@
 #   buzz-ctx sync                       # push journal to the cloud replica
 #   buzz-ctx bind-agent <name> [days]   # mint an agent key + NIP-OA binding
 #   buzz-ctx artifact <file>            # store an immutable content-addressed blob
+#   buzz-ctx announce <file> [message]  # store a blob + announce its manifest
 #   buzz-ctx fetch <sha256> [out]       # fetch + verify an artifact
 #   buzz-ctx agreement export <stream> <reader-pubkey>...  # declare (offer)
 #   buzz-ctx agreement admit <source> <principal> <pubkey>...  # sink trust half
@@ -108,6 +109,56 @@ case "${1:-}" in
     file="${2:?usage: buzz-ctx artifact <file>}"
     relay="$(relay_for_write)"
     "$CLIENT" upload "$KEY" "$relay" "$file" | sed 's/^200 //' | jq -r '"stored artifact " + .sha256 + " (" + (.size|tostring) + " bytes) — reference with tag [\"x\",\"" + .sha256 + "\"]"'
+    ;;
+  announce)
+    file="${2:?usage: buzz-ctx announce <file> [message]}"
+    CONTEXT="${BUZZ_CTX_CONTEXT:-5b2ab726-c2b0-4bce-bcb9-bf5f7f883f0b}"
+    relay="$(relay_for_write)"
+    upload_result="$("$CLIENT" upload "$KEY" "$relay" "$file")" \
+      || die "artifact upload failed for $file; manifest not posted"
+    receipt="$(printf '%s' "$upload_result" | sed 's/^200 //')"
+    receipt_sha="$(printf '%s' "$receipt" | jq -er '.sha256 | select(type == "string")')" \
+      || die "artifact upload returned an invalid sha256 receipt; manifest not posted"
+    receipt_size="$(printf '%s' "$receipt" | jq -er '.size | select(type == "number")')" \
+      || die "artifact upload returned an invalid size receipt; manifest not posted"
+    local_sha="$(shasum -a 256 "$file" | awk '{print $1}')" \
+      || die "could not compute sha256 for $file; manifest not posted"
+    [ "$local_sha" = "$receipt_sha" ] \
+      || die "artifact sha256 mismatch (local $local_sha, receipt $receipt_sha); manifest not posted"
+    message="${3:-artifact $(basename "$file") ($receipt_size bytes)}"
+    signer_key="$KEY"
+    signer_pub="$PUBKEY"
+    auth_tag="null"
+    if [ -f "$HOME_DIR/agents/$AGENT.key" ]; then
+      signer_key="$HOME_DIR/agents/$AGENT.key"
+      signer_pub="$("$CLIENT" pubkey "$signer_key")"
+      auth_tag="$(cat "$HOME_DIR/agents/$AGENT.auth" 2>/dev/null || echo null)"
+    fi
+    event="$(jq -n --arg pk "$signer_pub" --arg c "$message" \
+      --arg sha "$receipt_sha" --arg context "$CONTEXT" \
+      --arg agent "$AGENT" --arg machine "$MACHINE" --arg ts "$(date +%s)" \
+      --argjson auth "$auth_tag" \
+      '{pubkey:$pk, created_at:($ts|tonumber), kind:1,
+        tags:([["x",$sha],["h",$context],["agent",$agent],["machine",$machine]]
+              + (if $auth == null then [] else [$auth] end)),
+        content:$c}')" \
+      || die "could not build artifact manifest event"
+    tmp="$(mktemp)" || die "could not create temporary manifest file"
+    printf '%s' "$event" > "$tmp" \
+      || { rm -f "$tmp"; die "could not write temporary manifest file"; }
+    post_result="$("$CLIENT" post "$signer_key" "$relay" "$tmp")" \
+      || { rm -f "$tmp"; die "manifest event post failed"; }
+    rm -f "$tmp"
+    acceptance="$(printf '%s' "$post_result" | sed 's/^200 //' \
+      | jq -er 'select(.accepted | type == "boolean") | "\(.accepted) (\(.message // "no message"))"')" \
+      || die "manifest event post returned an invalid acceptance receipt"
+    case "$acceptance" in
+      true\ *) ;;
+      *) die "manifest event rejected: $acceptance" ;;
+    esac
+    echo "sha256: $receipt_sha"
+    echo "manifest accepted: $acceptance"
+    echo "context: $CONTEXT"
     ;;
   fetch)
     sha="${2:?usage: buzz-ctx fetch <sha256> [out]}"
