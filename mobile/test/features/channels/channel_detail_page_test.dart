@@ -23,6 +23,7 @@ import 'package:buzz/features/channels/small_avatar.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
 import 'package:buzz/features/profile/user_cache_provider.dart';
 import 'package:buzz/features/profile/user_profile.dart';
+import 'package:buzz/shared/preferences/show_join_leave_messages_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/skeleton.dart';
@@ -153,6 +154,10 @@ Widget _buildTestable({
   String? initialThreadRootId,
   Map<String, List<NostrEvent>> threadReplies = const {},
   TextScaler textScaler = TextScaler.noScaling,
+  // On by default so system-row rendering tests exercise the join/leave
+  // rows; the dedicated filtering test passes false to cover the app
+  // default (hidden).
+  bool showJoinLeaveMessages = true,
   RelaySessionNotifier? relaySessionNotifier,
 }) {
   final resolvedChannel = channel ?? _testChannel;
@@ -170,6 +175,9 @@ Widget _buildTestable({
       ).overrideWith(() => _FakeTypingNotifier(typing)),
       userCacheProvider.overrideWith(() => _FakeUserCacheNotifier(users)),
       profileProvider.overrideWith(() => _FakeProfileNotifier()),
+      showJoinLeaveMessagesProvider.overrideWith(
+        () => _FakeShowJoinLeaveMessagesNotifier(showJoinLeaveMessages),
+      ),
       channelsProvider.overrideWith(() => fakeChannelsNotifier),
       channelDetailsProvider(_channelId).overrideWith(
         (ref) async => ChannelDetails.fromChannel(resolvedChannel),
@@ -904,6 +912,45 @@ void main() {
   });
 
   group('System messages', () {
+    testWidgets('hides join/leave rows when the setting is off (the default)', (
+      tester,
+    ) async {
+      final messages = [
+        _systemMsg(
+          id: 'sys1',
+          payload: {'type': 'member_joined', 'actor': 'bob', 'target': 'bob'},
+        ),
+        _systemMsg(
+          id: 'sys2',
+          payload: {'type': 'member_left', 'actor': 'bob'},
+        ),
+        _systemMsg(
+          id: 'sys3',
+          payload: {
+            'type': 'member_removed',
+            'actor': 'alice',
+            'target': 'bob',
+          },
+        ),
+      ];
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: messages,
+          showJoinLeaveMessages: false,
+          users: {
+            'bob': const UserProfile(pubkey: 'bob', displayName: 'Bob'),
+            'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(findRichText('joined the channel'), findsNothing);
+      expect(find.text('Bob left the channel'), findsNothing);
+      expect(find.text('Alice removed Bob from the channel'), findsNothing);
+    });
+
     testWidgets('renders channel_created system event', (tester) async {
       final messages = [
         _systemMsg(
@@ -1944,6 +1991,14 @@ class _SynchronousReadStateNotifier extends ReadStateNotifier {
     markedContexts[contextId] = unixTimestamp;
     state = state.copyWithContext(contextId, unixTimestamp);
   }
+}
+
+class _FakeShowJoinLeaveMessagesNotifier extends ShowJoinLeaveMessagesNotifier {
+  _FakeShowJoinLeaveMessagesNotifier(this._value);
+  final bool _value;
+
+  @override
+  bool build() => _value;
 }
 
 class _FakeProfileNotifier extends ProfileNotifier {

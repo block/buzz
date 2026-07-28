@@ -51,8 +51,8 @@ import {
   type WelcomeComposerBannerState,
 } from "@/features/channels/ui/WelcomeComposerBanner";
 import {
-  isWelcomeSetupSystemMessage,
   mentionsKnownAgent,
+  useVisibleTimelineMessages,
 } from "@/features/channels/ui/ChannelPane.helpers";
 import { useChannelIntro } from "@/features/channels/ui/useChannelIntro";
 import type { ChannelPaneProps } from "@/features/channels/ui/ChannelPane.types";
@@ -449,13 +449,7 @@ export const ChannelPane = React.memo(function ChannelPane({
     onOpenMembers,
     onWelcomeAddAgent: onAddAgent ? handleWelcomeAddAgent : undefined,
   });
-  const visibleMessages = React.useMemo(() => {
-    if (!isWelcomeExperience(activeChannel)) {
-      return messages;
-    }
-
-    return messages.filter((message) => !isWelcomeSetupSystemMessage(message));
-  }, [activeChannel, messages]);
+  const visibleMessages = useVisibleTimelineMessages(messages, activeChannel);
   const mainTimelineEntries = React.useMemo(
     () =>
       buildMainTimelineEntries(

@@ -5,6 +5,7 @@ import {
   openChannelBrowser,
   TEST_IDENTITIES,
 } from "../helpers/bridge";
+import { enableJoinLeaveMessages } from "../helpers/joinLeaveMessages";
 
 const MOCK_VIEWER_PUBKEY = "deadbeef".repeat(8);
 
@@ -1064,6 +1065,7 @@ test("mentioning a non-member provider managed agent deploys it before sending",
 test("system add rows use plain names while remove rows retain agent mention styling", async ({
   page,
 }) => {
+  await enableJoinLeaveMessages(page);
   await installMockBridge(page, {
     managedAgents: [
       {
@@ -1144,6 +1146,7 @@ test("groups member additions and joins with hidden names in the standard toolti
     { pubkey: "15".repeat(32), displayName: "Olivia Park" },
     { pubkey: "16".repeat(32), displayName: "Sam Rivera" },
   ];
+  await enableJoinLeaveMessages(page);
   await installMockBridge(page, {
     searchProfiles: [actor, ...targets],
   });
@@ -1249,6 +1252,7 @@ test("groups member additions and joins with hidden names in the standard toolti
 });
 
 test("system agent profile only exposes message action", async ({ page }) => {
+  await enableJoinLeaveMessages(page);
   await page.goto("/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
@@ -1294,6 +1298,7 @@ test("system agent profile only exposes message action", async ({ page }) => {
 });
 
 test("system agent avatar only exposes message action", async ({ page }) => {
+  await enableJoinLeaveMessages(page);
   await page.goto("/");
   await page.getByTestId("channel-random").click();
   await expect(page.getByTestId("chat-title")).toHaveText("random");
@@ -1375,6 +1380,7 @@ test("profile-only agent author hides actions without agent access", async ({
 test("system member-joined rows render the joined person as a plain profile name", async ({
   page,
 }) => {
+  await enableJoinLeaveMessages(page);
   await page.goto("/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");

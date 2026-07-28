@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
+import { enableJoinLeaveMessages } from "../helpers/joinLeaveMessages";
 
 // Custom-emoji end-to-end guard.
 //
@@ -445,6 +446,7 @@ test("adding a custom emoji while editing keeps the image after save (Bug 2)", a
 // affordance. This drives the real react flow on a system row and asserts the
 // pill appears — the surface the fix targeted.
 test("a system message accepts a custom-emoji reaction", async ({ page }) => {
+  await enableJoinLeaveMessages(page);
   await openGeneral(page);
 
   const row = page.getByTestId("system-message-row").first();

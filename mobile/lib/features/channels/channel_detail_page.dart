@@ -7,6 +7,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
+import '../../shared/preferences/show_join_leave_messages_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
@@ -345,10 +346,24 @@ class ChannelDetailPage extends HookConsumerWidget {
                         final summaries = ref
                             .read(channelMessagesProvider(channel.id).notifier)
                             .threadSummaries;
-                        final entries = buildMainTimelineEntries(
-                          messages,
-                          relaySummaries: summaries,
+                        final showJoinLeave = ref.watch(
+                          showJoinLeaveMessagesProvider,
                         );
+                        const joinLeaveTypes = {
+                          SystemEventType.memberJoined,
+                          SystemEventType.memberLeft,
+                          SystemEventType.memberRemoved,
+                        };
+                        final entries =
+                            buildMainTimelineEntries(
+                              messages,
+                              relaySummaries: summaries,
+                            ).where((entry) {
+                              final type = entry.message.systemEvent?.type;
+                              return showJoinLeave ||
+                                  type == null ||
+                                  !joinLeaveTypes.contains(type);
+                            }).toList();
                         return _MessageList(
                           entries: entries,
                           allMessages: messages,

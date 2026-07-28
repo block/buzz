@@ -73,6 +73,7 @@ import { HarnessesSettingsPanel } from "./HarnessesSettingsPanel";
 import { ExperimentalFeaturesCard } from "./ExperimentalFeaturesCard";
 import { KeyboardShortcutsCard } from "./KeyboardShortcutsCard";
 import { MeshComputeSettingsCard } from "@/features/mesh-compute/ui/MeshComputeSettingsCard";
+import { MessageDisplaySettingsCard } from "./MessageDisplaySettingsCard";
 import { MobilePairingCard } from "./MobilePairingCard";
 import { ModerationQueueCard } from "./ModerationQueueCard";
 import { NotificationSettingsCard } from "./NotificationSettingsCard";
@@ -824,7 +825,12 @@ export function renderSettingsSection(
     case "compute":
       return <MeshComputeSettingsCard />;
     case "appearance":
-      return <ThemeSettingsCard />;
+      return (
+        <div className="space-y-12">
+          <ThemeSettingsCard />
+          <MessageDisplaySettingsCard />
+        </div>
+      );
     case "shortcuts":
       return <KeyboardShortcutsCard />;
     case "hosted-communities":
