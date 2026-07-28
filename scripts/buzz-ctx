@@ -39,7 +39,12 @@ LOCAL_URL="${BUZZ_CTX_LOCAL:-http://127.0.0.1:7777}"
 CLOUD_URL="${BUZZ_CTX_CLOUD:-https://buzz-portable-relay.ted-slusser-a00.workers.dev}"
 AGENT="${BUZZ_CTX_AGENT:-unattributed}"
 CLIENT="$HOME_DIR/bin/sovereign-client"
-KEY="$HOME_DIR/node.key"
+# Signing identity. On a solo node this is the node key (owner, transport,
+# and signer collapsed — legitimate for one-operator hosts). Hosts that
+# separate transport from application identity (e.g. enterprise nodes with
+# hardware-derived principals) point BUZZ_CTX_KEY at the application
+# signing key instead.
+KEY="${BUZZ_CTX_KEY:-$HOME_DIR/node.key}"
 MACHINE="$(hostname -s)"
 
 die() { echo "buzz-ctx: $*" >&2; exit 1; }
@@ -68,6 +73,12 @@ post_event() { # $1 = unsigned event JSON
   printf '%s' "$1" > "$tmp"
   "$CLIENT" post "$KEY" "$relay" "$tmp" >/dev/null
   rm -f "$tmp"
+}
+
+pin_for_export() { # $1 = stream id → current export declaration head id ("" if none)
+  "$CLIENT" query "$KEY" "$(relay_for_read)" \
+    "[{\"kinds\":[30700],\"#d\":[\"export/$1\"]}]" 2>/dev/null \
+    | sed 's/^200 //' | jq -r '.[0].id // empty'
 }
 
 case "${1:-}" in
@@ -138,16 +149,23 @@ case "${1:-}" in
         shift 4
         [ $# -ge 1 ] || die "at least one verification pubkey required"
         keys="$(printf '%s\n' "$@" | jq -R . | jq -sc 'map(["p", .])')"
+        pin="$(pin_for_export "$source_id")"
         event="$(jq -n --arg pk "$PUBKEY" --arg d "admit/$source_id" \
-          --arg n "$NODE_LABEL" \
+          --arg n "$NODE_LABEL" --arg pin "$pin" \
           --arg principal "$principal" --argjson keys "$keys" \
           --arg ts "$(date +%s)" \
           '{pubkey:$pk, created_at:($ts|tonumber), kind:30700,
-            tags:([["d",$d],["n",$n]] + $keys),
+            tags:([["d",$d],["n",$n]]
+                  + (if $pin == "" then [] else [["e",$pin]] end)
+                  + $keys),
             content:({status:"active", principal:$principal,
                       retention:{keep:"journal"}}|tojson)}')"
         post_event "$event"
-        echo "declared admit/$source_id on node $NODE_LABEL (principal $principal, $# key(s))"
+        if [ -n "$pin" ]; then
+          echo "declared admit/$source_id on node $NODE_LABEL (principal $principal, $# key(s), pinned ${pin:0:12}…)"
+        else
+          echo "declared admit/$source_id on node $NODE_LABEL (principal $principal, $# key(s), UNPINNED — no export head found; re-admit once the export exists)"
+        fi
         ;;
       read)
         # Source-side reader grant: which principal may drain this exported
@@ -157,15 +175,18 @@ case "${1:-}" in
         shift 4
         [ $# -ge 1 ] || die "at least one reader pubkey required"
         keys="$(printf '%s\n' "$@" | jq -R . | jq -sc 'map(["p", .])')"
+        pin="$(pin_for_export "$stream")"
         event="$(jq -n --arg pk "$PUBKEY" --arg d "read/$stream" \
-          --arg n "$NODE_LABEL" \
+          --arg n "$NODE_LABEL" --arg pin "$pin" \
           --arg principal "$principal" --argjson keys "$keys" \
           --arg ts "$(date +%s)" \
           '{pubkey:$pk, created_at:($ts|tonumber), kind:30700,
-            tags:([["d",$d],["n",$n]] + $keys),
+            tags:([["d",$d],["n",$n]]
+                  + (if $pin == "" then [] else [["e",$pin]] end)
+                  + $keys),
             content:({status:"active", principal:$principal}|tojson)}')"
         post_event "$event"
-        echo "declared read/$stream on node $NODE_LABEL (principal $principal, $# key(s))"
+        echo "declared read/$stream on node $NODE_LABEL (principal $principal, $# key(s)$([ -n "$pin" ] && echo ", pinned ${pin:0:12}…" || echo ", UNPINNED"))"
         ;;
       migrate)
         # Sweep bootstrap config files into owner-signed declarations, per
@@ -232,9 +253,11 @@ case "${1:-}" in
             "OFFER OPEN: export by \($exports[0].pubkey[0:12])… (event \($exports[0].id[0:12])…), no admit half yet"
           else
             $exports[0] as $e | $admits[0] as $a |
-            ($a.tags[] | select(.[0]=="e") | .[1]) as $pin |
+            ([$a.tags[] | select(.[0]=="e") | .[1]][0]) as $pin |
             (if status($e) != "active" then "UNMATCHED: export status \(status($e))"
              elif status($a) != "active" then "UNMATCHED: admit status \(status($a))"
+             elif $pin == null then
+               "UNPINNED: admit by \($a.pubkey[0:12])… carries no export pin — re-admit against export \($e.id[0:12])…"
              elif $pin != $e.id then
                "DRIFT: admit by \($a.pubkey[0:12])… pins \($pin[0:12])… but export head is \($e.id[0:12])… — re-pin required"
              elif ([$e.tags[] | select(.[0]=="p") | .[1]] | index($a.pubkey)) == null then

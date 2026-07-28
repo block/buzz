@@ -50,18 +50,25 @@ relay_for_read() {
 RELAY="$(relay_for_read)"
 HEADS="$("$CLIENT" query "$STEWARD_KEY" "$RELAY" '[{"kinds":[30700]}]' | sed 's/^200 //')"
 
-# ── Mandate: which nodes am I steward of? ──────────────────────────────────
-MANDATES="$(printf '%s' "$HEADS" | jq -c --arg me "$STEWARD_PUB" --arg owner "$OWNER_PUB" '
+# ── Mandate: which nodes am I steward of, with which powers? ───────────────
+# The mandate's declared powers are the contract: "observe" is required to
+# run at all; "report" is required to publish. A mandate that grants less
+# gets less — the steward enforces its own bounds.
+MANDATE_HEADS="$(printf '%s' "$HEADS" | jq -c --arg me "$STEWARD_PUB" --arg owner "$OWNER_PUB" '
   [.[]
    | select(.pubkey == $owner)
    | select([.tags[] | select(.[0]=="d") | .[1]][0] // "" | startswith("steward/"))
    | select((.content | fromjson).status // "active" == "active")
    | select([.tags[] | select(.[0]=="p") | .[1]] | index($me) != null)
-   | [.tags[] | select(.[0]=="n") | .[1]][0]
-   | select(. != null)]
-  | unique')"
+   | {node: ([.tags[] | select(.[0]=="n") | .[1]][0]),
+      powers: ((.content | fromjson).powers // []),
+      h: ([.tags[] | select(.[0]=="h") | .[1]][0])}
+   | select(.node != null)]')"
+MANDATES="$(printf '%s' "$MANDATE_HEADS" | jq -c '[.[] | select(.powers | index("observe") != null) | .node] | unique')"
 [ "$(printf '%s' "$MANDATES" | jq 'length')" -gt 0 ] \
-  || die "no active steward mandate names this key ($STEWARD_PUB) — mint one: buzz-ctx agreement steward <principal> $STEWARD_PUB"
+  || die "no active steward mandate with observe power names this key ($STEWARD_PUB) — mint one: buzz-ctx agreement steward <principal> $STEWARD_PUB"
+MAY_REPORT="$(printf '%s' "$MANDATE_HEADS" | jq -r '[.[] | select(.powers | index("report") != null)] | length > 0')"
+CONTEXT_H="$(printf '%s' "$MANDATE_HEADS" | jq -r '[.[] | .h | select(. != null)][0] // empty')"
 
 # ── Observe ────────────────────────────────────────────────────────────────
 health_line() { # $1 label, $2 url
@@ -87,31 +94,55 @@ FINDINGS="$(mktemp)"
     | [$all[] | select(.pubkey == $owner)] as $mine
     | [$all[] | select(.pubkey != $owner)] as $foreign
     | "## Governance",
+      # Per-domain, per the adapters actual evaluation: a domain with no
+      # owner-signed head for the node is unclaimed (bootstrap governs).
       ( $nodes[] as $node
         | "- node \($node): " + (
             ["admit","read","export","steward"]
             | map(. as $r
-                | [$mine[] | select(tag(.;"n") == $node and role(.) == $r and st(.) == "active")]
-                | "\($r)=\(length)")
-            | join(" ")) + " (journal-governed)"
+                | [$mine[] | select(tag(.;"n") == $node and role(.) == $r)] as $hs
+                | if ($hs | length) == 0 then "\($r)=unclaimed(bootstrap)"
+                  else "\($r)=\([$hs[] | select(st(.) == "active")] | length)/\($hs | length) journal"
+                  end)
+            | join(" "))
       ),
       "",
       "## Drift",
-      # Open offers: my exports whose offered parties have no admit half.
+      # Open offers: an offer closes only on an ACTIVE admit authored by a
+      # party the export actually offers to. Revoked, unpinned-by-stranger,
+      # or unoffered admits do not close anything.
       ( [ $mine[]
           | select(role(.) == "export" and st(.) == "active")
-          | stream(.) as $s
-          | select(([$foreign[] | select(tag(.;"d") == ("admit/" + $s))] | length) == 0)
-          | "- OFFER OPEN: export/\($s) has no admit half from any offered party" ]
+          | . as $e
+          | stream($e) as $s
+          | [$e.tags[] | select(.[0]=="p") | .[1]] as $offered
+          | [$foreign[]
+             | select(tag(.;"d") == ("admit/" + $s) and st(.) == "active")
+             | .pubkey as $author
+             | select(($offered | index($author)) != null)] as $valid
+          | select(($valid | length) == 0)
+          | "- OFFER OPEN: export/\($s) has no active admit from an offered party" ]
         | .[] ),
-      # Stale pins: foreign admits whose e-tag no longer pins my export head.
+      # Pin health of admits from offered parties: stale pins drift; a
+      # missing pin is its own finding, not silently tolerated.
       ( [ $foreign[]
           | select(role(.) == "admit" and st(.) == "active")
-          | stream(.) as $s
-          | tag(.;"e") as $pin
-          | ([$mine[] | select(tag(.;"d") == ("export/" + $s))][0]) as $exp
-          | select($exp != null and $pin != null and $pin != $exp.id)
-          | "- DRIFT: admit/\($s) by \(.pubkey[0:12])… pins \($pin[0:12])… but export head is \($exp.id[0:12])… — re-pin required" ]
+          | . as $a
+          | stream($a) as $s
+          | ([$mine[] | select(tag(.;"d") == ("export/" + $s) and st(.) == "active")][0]) as $exp
+          | select($exp != null)
+          | ([$exp.tags[] | select(.[0]=="p") | .[1]]) as $offered
+          | if ($offered | index($a.pubkey)) == null then
+              "- UNOFFERED: admit/\($s) by \($a.pubkey[0:12])… who is not an offered party on the export"
+            else
+              ([$a.tags[] | select(.[0]=="e") | .[1]][0]) as $pin
+              | if $pin == null then
+                  "- UNPINNED: admit/\($s) by \($a.pubkey[0:12])… carries no export pin — re-admit required"
+                elif $pin != $exp.id then
+                  "- DRIFT: admit/\($s) by \($a.pubkey[0:12])… pins \($pin[0:12])… but export head is \($exp.id[0:12])… — re-pin required"
+                else empty end
+            end
+          | select(. != null) ]
         | .[] ),
       # Unscoped heads govern nothing — likely pre-node-scoping relics.
       ( [ $mine[]
@@ -128,7 +159,13 @@ FINDINGS="$(mktemp)"
   '
 } > "$FINDINGS"
 
-# ── Report (deduped) ───────────────────────────────────────────────────────
+# ── Report (deduped, powers-gated) ─────────────────────────────────────────
+if [ "$MAY_REPORT" != "true" ]; then
+  echo "steward: no mandate grants report power — observing only, nothing published"
+  cat "$FINDINGS"
+  rm -f "$FINDINGS"
+  exit 0
+fi
 DIGEST="$(shasum -a 256 "$FINDINGS" | awk '{print $1}')"
 LAST="$(cat "$STATE_DIR/last-report.sha" 2>/dev/null || true)"
 if [ "$DIGEST" = "$LAST" ]; then
@@ -144,8 +181,10 @@ BODY="$(printf 'STEWARD REPORT (%s@%s)\nmandates: %s\n\n%s' \
 AUTH_TAG="$(cat "$STEWARD_AUTH" 2>/dev/null || echo null)"
 EVENT="$(jq -n --arg pk "$STEWARD_PUB" --arg c "$BODY" --arg machine "$MACHINE" \
   --arg ts "$(date +%s)" --argjson auth "$AUTH_TAG" --argjson nodes "$MANDATES" \
+  --arg h "$CONTEXT_H" \
   '{pubkey:$pk, created_at:($ts|tonumber), kind:1,
     tags:([["t","steward:report"],["agent","steward"],["machine",$machine]]
+          + (if $h == "" then [] else [["h",$h]] end)
           + ($nodes | map(["n", .]))
           + (if $auth == null then [] else [$auth] end)),
     content:$c}')"
