@@ -1069,6 +1069,7 @@ mod integration_tests {
                 &channel.id.to_string(),
                 "heads up @Robby — please take a look",
                 &author_hex,
+                0,
             )
             .await
             .expect("send_message");
