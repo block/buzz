@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import { EditorContent } from "@tiptap/react";
+import { useDictation } from "@/features/messages/lib/useDictation";
 import { useChannelLinks } from "@/features/messages/lib/useChannelLinks";
 import { handleAgentSnapshotPaste } from "@/features/messages/lib/agentSnapshotClipboard";
 import { useComposerAutofocus } from "@/features/messages/lib/useComposerAutofocus";
@@ -692,8 +693,19 @@ function MessageComposerImpl({
   // Plain Enter → submit is now handled inside the Tiptap `submitOnEnter`
   // extension (fires before ProseMirror's splitBlock). This wrapper only
   // handles autocomplete arrow/enter keys and Escape for edit mode.
+  // ── Dictation (hold ⌃Space or mic button → speech-to-text) ─────────
+  // Enter while dictating stops the session and sends once the trailing
+  // phrase has been flushed into the doc.
+  const dictationSubmit = React.useCallback(
+    () => submitMessageRef.current(),
+    [],
+  );
+  const dictation = useDictation(richText.editor, dictationSubmit);
+
   const handleEditorKeyDown = React.useCallback(
     (event: React.KeyboardEvent<HTMLDivElement>) => {
+      if (dictation.handleComposerKeyDown(event)) return;
+
       // Let autocomplete handle keys first
       const emojiResult = emojiAutocomplete.handleEmojiKeyDown(event);
       if (emojiResult.handled) {
@@ -744,6 +756,7 @@ function MessageComposerImpl({
       linkEditor.isCardOpen,
       linkEditor.focusCardFirstControl,
       onCancelEdit,
+      dictation.handleComposerKeyDown,
     ],
   );
 
@@ -988,6 +1001,7 @@ function MessageComposerImpl({
             <ComposerDockToolbar
               layoutMode={layoutMode}
               composerDisabled={disabled}
+              dictationStatus={dictation.status}
               editor={richText.editor}
               extraActions={toolbarExtraActions}
               formattingDisabled={disabled}
@@ -996,6 +1010,7 @@ function MessageComposerImpl({
               isSending={isSending}
               isUploading={media.isUploading}
               onCaptureSelection={handleCaptureSelection}
+              onDictationToggle={dictation.toggle}
               onEmojiPickerOpenChange={setIsEmojiPickerOpen}
               onEmojiSelect={insertEmoji}
               onFormattingToggle={handleFormattingToggle}

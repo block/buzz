@@ -1,7 +1,9 @@
 import * as React from "react";
 import type { Editor } from "@tiptap/react";
 import { AnimatePresence, motion } from "motion/react";
-import { ALargeSmall, ArrowUp, AtSign, Paperclip, X } from "lucide-react";
+import { ALargeSmall, ArrowUp, AtSign, Mic, Paperclip, X } from "lucide-react";
+
+import type { DictationStatus } from "../lib/useDictation";
 
 import { Button } from "@/shared/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
@@ -19,6 +21,7 @@ const presenceSpring = {
 export const MessageComposerToolbar = React.memo(
   function MessageComposerToolbar({
     composerDisabled,
+    dictationStatus,
     editor,
     extraActions,
     formattingDisabled,
@@ -27,6 +30,7 @@ export const MessageComposerToolbar = React.memo(
     isSending,
     isUploading,
     onCaptureSelection,
+    onDictationToggle,
     onEmojiPickerOpenChange,
     onEmojiSelect,
     onFormattingToggle,
@@ -36,6 +40,7 @@ export const MessageComposerToolbar = React.memo(
     sendDisabled,
   }: {
     composerDisabled: boolean;
+    dictationStatus?: DictationStatus;
     editor: Editor | null;
     extraActions?: React.ReactNode;
     formattingDisabled: boolean;
@@ -44,6 +49,8 @@ export const MessageComposerToolbar = React.memo(
     isSending: boolean;
     isUploading: boolean;
     onCaptureSelection: () => void;
+    /** When omitted, the dictation mic button is not rendered. */
+    onDictationToggle?: () => void;
     onEmojiPickerOpenChange: (open: boolean) => void;
     onEmojiSelect: (emoji: string) => void;
     onFormattingToggle: (pressed: boolean) => void;
@@ -224,6 +231,42 @@ export const MessageComposerToolbar = React.memo(
                     <TooltipContent>Formatting</TooltipContent>
                   </Tooltip>
                 </motion.div>
+                {onDictationToggle ? (
+                  <Tooltip disableHoverableContent>
+                    <TooltipTrigger asChild>
+                      <Button
+                        aria-label={
+                          dictationStatus === "recording"
+                            ? "Stop dictation"
+                            : "Start dictation"
+                        }
+                        aria-pressed={dictationStatus === "recording"}
+                        data-testid="message-dictation"
+                        disabled={composerDisabled}
+                        onClick={onDictationToggle}
+                        onMouseDown={onCaptureSelection}
+                        size="icon"
+                        type="button"
+                        variant={
+                          dictationStatus === "recording" ? "default" : "ghost"
+                        }
+                      >
+                        <Mic
+                          className={
+                            dictationStatus === "recording"
+                              ? "animate-pulse"
+                              : undefined
+                          }
+                        />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      {dictationStatus === "recording"
+                        ? "Stop dictation"
+                        : "Dictate (hold Space, or ⌃Space)"}
+                    </TooltipContent>
+                  </Tooltip>
+                ) : null}
               </motion.div>
             )}
           </AnimatePresence>
