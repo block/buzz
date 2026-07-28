@@ -2071,6 +2071,50 @@ async fn handle_leave_request(
 // handle_reaction() removed — kind:7 reaction dedup and DB writes are now
 // handled inline in ingest_event() before storage (see ingest.rs step 20a).
 
+/// Soft-delete the live `events` row for an addressable coordinate so REQs stop
+/// returning it.
+///
+/// Shared by the workflow branch and the generic NIP-33 branch of
+/// [`handle_a_tag_deletion`]. Ownership of the coordinate is already enforced by
+/// [`validate_standard_deletion_event`] before the event is stored, so this
+/// helper does not re-check it.
+async fn soft_delete_addressable_coordinate(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    kind: u32,
+    pubkey_hex: &str,
+    d_tag: &str,
+) -> anyhow::Result<()> {
+    let pubkey_bytes = hex::decode(pubkey_hex)
+        .map_err(|e| anyhow::anyhow!("invalid pubkey hex in a-tag {pubkey_hex}: {e}"))?;
+    // Safe cast: NIP-33 kinds are 30000-39999, well within i32
+    let kind_i32 = kind as i32;
+    let deleted = state
+        .db
+        .soft_delete_by_coordinate(tenant.community(), kind_i32, &pubkey_bytes, d_tag)
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "failed to soft-delete by coordinate {kind_i32}:{pubkey_hex}:{d_tag}: {e}"
+            )
+        })?;
+
+    if deleted {
+        tracing::info!(
+            kind,
+            d_tag,
+            "NIP-09 a-tag deletion: soft-deleted addressable event by coordinate"
+        );
+    } else {
+        tracing::debug!(
+            kind,
+            d_tag,
+            "NIP-09 a-tag deletion: no live row matched coordinate"
+        );
+    }
+    Ok(())
+}
+
 /// Handle NIP-09 deletion via `a` tag (addressable/parameterized-replaceable events).
 /// Parses "kind:pubkey:d-tag" and deletes the corresponding DB record.
 async fn handle_a_tag_deletion(
@@ -2147,6 +2191,18 @@ async fn handle_a_tag_deletion(
                     }
                 }
             }
+
+            // The DB row and the engine cache are gone; the kind:30620 definition
+            // event must follow, or `workflows list` / `workflows get` keep
+            // returning a workflow that `workflows trigger` rejects (#2879).
+            soft_delete_addressable_coordinate(
+                tenant,
+                state,
+                buzz_core::kind::KIND_WORKFLOW_DEF,
+                pubkey_hex,
+                d_tag,
+            )
+            .await?;
         }
         // Generic NIP-33 (parameterized-replaceable) soft-delete by coordinate.
         //
@@ -2157,38 +2213,7 @@ async fn handle_a_tag_deletion(
         // live row matching `(kind, pubkey, d_tag)` so REQs stop returning it.
         // See https://github.com/block/sprout/issues/714.
         k if is_parameterized_replaceable(k) => {
-            let pubkey_bytes = match hex::decode(pubkey_hex) {
-                Ok(b) => b,
-                Err(e) => {
-                    return Err(anyhow::anyhow!(
-                        "invalid pubkey hex in a-tag {pubkey_hex}: {e}"
-                    ));
-                }
-            };
-            // Safe cast: NIP-33 kinds are 30000–39999, well within i32.
-            let kind_i32 = k as i32;
-            let deleted = state
-                .db
-                .soft_delete_by_coordinate(tenant.community(), kind_i32, &pubkey_bytes, d_tag)
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "failed to soft-delete by coordinate {kind_i32}:{pubkey_hex}:{d_tag}: {e}"
-                    )
-                })?;
-            if deleted {
-                tracing::info!(
-                    kind = k,
-                    d_tag = d_tag,
-                    "NIP-09 a-tag deletion: soft-deleted addressable event by coordinate"
-                );
-            } else {
-                tracing::debug!(
-                    kind = k,
-                    d_tag = d_tag,
-                    "NIP-09 a-tag deletion: no live row matched coordinate"
-                );
-            }
+            soft_delete_addressable_coordinate(tenant, state, k, pubkey_hex, d_tag).await?;
         }
         _ => {
             tracing::debug!(
