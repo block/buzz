@@ -174,6 +174,13 @@ fn command_team_builtins_are_active_symbolic_and_route_independent() {
         assert!(record.system_prompt.contains(
             "If no applicable doctrine is retrieved, continue with a reasoned assessment."
         ));
+        assert!(record.system_prompt.contains("PLANNING DATA AND PROPOSALS"));
+        assert!(record
+            .system_prompt
+            .contains("Battle Rhythm is the approved ship schedule"));
+        assert!(record
+            .system_prompt
+            .contains("Never claim that a proposed planning change has been applied"));
     }
 }
 
@@ -229,6 +236,36 @@ fn n2_and_planning_prompts_pin_osint_provenance_and_virtual_jpg_behaviour() {
                 .count(),
             1
         );
+    }
+}
+
+#[test]
+fn merge_personas_upgrades_unmodified_command_prompts_for_planning_evidence() {
+    let current = built_in_persona_records("2026-07-29T00:00:00Z");
+    let mut previous = current.clone();
+    for record in &mut previous {
+        if record.id.starts_with("builtin:command-") {
+            record.system_prompt = record
+                .system_prompt
+                .strip_suffix(super::COMMAND_PLANNING_INTEGRATION)
+                .expect("new built-in prompt should end with planning integration")
+                .to_string();
+        }
+    }
+
+    let (upgraded, changed) = merge_personas(previous, "2026-07-29T00:00:01Z");
+
+    assert!(changed);
+    for expected in current
+        .iter()
+        .filter(|record| record.id.starts_with("builtin:command-"))
+    {
+        let actual = upgraded
+            .iter()
+            .find(|record| record.id == expected.id)
+            .expect("command persona should remain present");
+        assert_eq!(actual.system_prompt, expected.system_prompt);
+        assert_eq!(actual.updated_at, "2026-07-29T00:00:01Z");
     }
 }
 

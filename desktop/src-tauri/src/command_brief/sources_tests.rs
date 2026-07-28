@@ -6,8 +6,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::sources::{
     trusted_lan_snapshot_from_catalogue, CommandTeamDiscussionBatch, FixedRetrievalIntent,
-    FrozenSourceContext, ProductionSourceBackend, SourceBackend, SourceCollectionError,
-    SourceCollector, SourceReadError, SourceToolCaller,
+    FrozenSourceContext, PlanningEvidenceBatch, ProductionSourceBackend, SourceBackend,
+    SourceCollectionError, SourceCollector, SourceReadError, SourceToolCaller,
 };
 use super::types::{AdviserId, BriefSection, SourceKind, MAX_ARRAY_ITEMS, MAX_TEXT_BYTES};
 use crate::command_services::apple_inputs::{
@@ -37,6 +37,7 @@ struct FakeState {
     recheck_snapshot: Option<String>,
     post_recheck_limitations: Vec<String>,
     command_team_discussions: CommandTeamDiscussionBatch,
+    planning_evidence: PlanningEvidenceBatch,
     memory_conflict_count: u64,
     bind_rag_query: bool,
 }
@@ -158,6 +159,14 @@ impl SourceBackend for FakeBackend {
             .lock()
             .expect("fake state")
             .command_team_discussions
+            .clone()
+    }
+
+    fn planning_evidence(&self) -> PlanningEvidenceBatch {
+        self.state
+            .lock()
+            .expect("fake state")
+            .planning_evidence
             .clone()
     }
 

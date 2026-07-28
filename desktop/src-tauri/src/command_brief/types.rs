@@ -54,6 +54,8 @@ pub enum SourceKind {
     Rag,
     Memory,
     WorldMonitor,
+    BattleRhythm,
+    Plans,
     Calendar,
     Reminders,
     Notes,

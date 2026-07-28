@@ -55,6 +55,10 @@ pub(crate) trait SourceBackend: Send + Sync {
         CommandTeamDiscussionBatch::default()
     }
 
+    fn planning_evidence(&self) -> PlanningEvidenceBatch {
+        PlanningEvidenceBatch::default()
+    }
+
     fn collect_rag(
         &self,
         snapshot: &VerifiedRagSnapshot,
@@ -87,62 +91,6 @@ pub(crate) trait SourceBackend: Send + Sync {
     }
 }
 
-impl<T> SourceBackend for Arc<T>
-where
-    T: SourceBackend + ?Sized,
-{
-    fn verify_active_rag_snapshot(&self) -> Result<VerifiedRagSnapshot, SourceCollectionError> {
-        (**self).verify_active_rag_snapshot()
-    }
-
-    fn memory_conflict_count(&self) -> u64 {
-        (**self).memory_conflict_count()
-    }
-
-    fn command_team_discussions(&self) -> CommandTeamDiscussionBatch {
-        (**self).command_team_discussions()
-    }
-
-    fn collect_rag(
-        &self,
-        snapshot: &VerifiedRagSnapshot,
-        intent: &FixedRetrievalIntent,
-        query: &str,
-        collections: &[String],
-        cancellation: &CancellationToken,
-    ) -> Result<Value, SourceReadError> {
-        (**self).collect_rag(snapshot, intent, query, collections, cancellation)
-    }
-
-    fn collect_memory(
-        &self,
-        intent: &FixedRetrievalIntent,
-        cancellation: &CancellationToken,
-    ) -> Result<Value, SourceReadError> {
-        (**self).collect_memory(intent, cancellation)
-    }
-
-    fn collect_apple(
-        &self,
-        request: &AppleInputRequest,
-        cancellation: &CancellationToken,
-    ) -> Result<AppleInputResponse, SourceCollectionError> {
-        (**self).collect_apple(request, cancellation)
-    }
-
-    fn recheck_rag_snapshot(
-        &self,
-        expected: &VerifiedRagSnapshot,
-        cancellation: &CancellationToken,
-    ) -> Result<(), SourceCollectionError> {
-        (**self).recheck_rag_snapshot(expected, cancellation)
-    }
-
-    fn post_recheck_limitations(&self) -> Vec<String> {
-        (**self).post_recheck_limitations()
-    }
-}
-
 /// Concrete production backend for the verified local RAG, Memory, and signed
 /// Apple helper sources.
 #[derive(Clone)]
@@ -152,6 +100,7 @@ pub(crate) struct ProductionSourceBackend {
     memory: Option<AuthenticatedSourceService>,
     memory_conflict_count: u64,
     command_team_discussions: CommandTeamDiscussionBatch,
+    planning_evidence: PlanningEvidenceBatch,
     caller: Arc<dyn SourceToolCaller>,
 }
 
@@ -188,6 +137,7 @@ impl ProductionSourceBackend {
             memory,
             memory_conflict_count,
             command_team_discussions: CommandTeamDiscussionBatch::default(),
+            planning_evidence: PlanningEvidenceBatch::default(),
             caller: Arc::new(AuthenticatedMcpSourceCaller),
         })
     }
@@ -197,6 +147,14 @@ impl ProductionSourceBackend {
         command_team_discussions: CommandTeamDiscussionBatch,
     ) -> Self {
         self.command_team_discussions = command_team_discussions;
+        self
+    }
+
+    pub(super) fn with_planning_evidence(
+        mut self,
+        planning_evidence: PlanningEvidenceBatch,
+    ) -> Self {
+        self.planning_evidence = planning_evidence;
         self
     }
 
@@ -214,6 +172,7 @@ impl ProductionSourceBackend {
             memory: Some(memory),
             memory_conflict_count,
             command_team_discussions: CommandTeamDiscussionBatch::default(),
+            planning_evidence: PlanningEvidenceBatch::default(),
             caller,
         }
     }
@@ -233,6 +192,10 @@ impl SourceBackend for ProductionSourceBackend {
 
     fn command_team_discussions(&self) -> CommandTeamDiscussionBatch {
         self.command_team_discussions.clone()
+    }
+
+    fn planning_evidence(&self) -> PlanningEvidenceBatch {
+        self.planning_evidence.clone()
     }
 
     fn collect_rag(
@@ -347,6 +310,7 @@ pub(crate) struct TrustedLanSourceBackend {
     rag_catalogue_available: bool,
     client: TrustedLanSourceClient,
     command_team_discussions: CommandTeamDiscussionBatch,
+    planning_evidence: PlanningEvidenceBatch,
     post_recheck_warning: Arc<Mutex<Option<String>>>,
 }
 
@@ -368,6 +332,7 @@ impl TrustedLanSourceBackend {
             rag_catalogue_available,
             client,
             command_team_discussions: CommandTeamDiscussionBatch::default(),
+            planning_evidence: PlanningEvidenceBatch::default(),
             post_recheck_warning: Arc::new(Mutex::new(None)),
         })
     }
@@ -377,6 +342,14 @@ impl TrustedLanSourceBackend {
         command_team_discussions: CommandTeamDiscussionBatch,
     ) -> Self {
         self.command_team_discussions = command_team_discussions;
+        self
+    }
+
+    pub(super) fn with_planning_evidence(
+        mut self,
+        planning_evidence: PlanningEvidenceBatch,
+    ) -> Self {
+        self.planning_evidence = planning_evidence;
         self
     }
 }
@@ -392,6 +365,10 @@ impl SourceBackend for TrustedLanSourceBackend {
 
     fn command_team_discussions(&self) -> CommandTeamDiscussionBatch {
         self.command_team_discussions.clone()
+    }
+
+    fn planning_evidence(&self) -> PlanningEvidenceBatch {
+        self.planning_evidence.clone()
     }
 
     fn collect_rag(
@@ -699,6 +676,9 @@ impl<B: SourceBackend> SourceCollector<B> {
         ensure_collection_active(cancellation)?;
         candidates.extend(command_team_discussions.candidates);
         limitations.extend(command_team_discussions.limitations);
+        let planning_evidence = self.backend.planning_evidence();
+        candidates.extend(planning_evidence.candidates);
+        limitations.extend(planning_evidence.limitations);
         if snapshot.assurance() == RagSnapshotAssurance::TrustedLanObserved {
             limitations.insert(
                 "Unsigned trusted-LAN evidence was observed directly from the approved LAN services; it is not a signed RAG snapshot or replicated Memory revision."
@@ -976,6 +956,7 @@ fn ensure_collection_active(cancellation: &CancellationToken) -> Result<(), Sour
 mod backend_tools;
 use backend_tools::AuthenticatedMcpSourceCaller;
 pub(crate) use backend_tools::SourceToolCaller;
+mod arc_backend;
 mod canonical;
 use canonical::*;
 mod command_team_discussions;
@@ -986,6 +967,8 @@ mod errors;
 pub(crate) use errors::{SourceCollectionError, SourceReadError};
 mod limitations;
 use limitations::*;
+mod planning_evidence;
+pub(crate) use planning_evidence::{load_planning_evidence, PlanningEvidenceBatch};
 mod rag_collection;
 use rag_collection::extract_rag_records;
 mod retrieval_intents;

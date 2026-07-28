@@ -143,6 +143,7 @@ export function ConstraintEditorDialog({
           <label className="grid gap-1 text-sm">
             Disposition
             <select
+              aria-label="Disposition"
               className="rounded border bg-background px-3 py-2"
               onChange={(event) =>
                 setStatus(event.target.value as ConstraintStatus)

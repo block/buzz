@@ -51,6 +51,8 @@ const SOURCE_KINDS = Object.freeze([
   "rag",
   "memory",
   "world_monitor",
+  "battle_rhythm",
+  "plans",
   "calendar",
   "reminders",
   "notes",

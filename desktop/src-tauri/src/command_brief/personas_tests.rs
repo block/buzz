@@ -47,7 +47,12 @@ fn persona_tool_and_source_policy_is_owned_by_rust() {
         let definition = definition_for(adviser);
         assert_eq!(
             definition.permitted_source_kinds,
-            &[SourceKind::Rag, SourceKind::Memory]
+            &[
+                SourceKind::Rag,
+                SourceKind::Memory,
+                SourceKind::BattleRhythm,
+                SourceKind::Plans
+            ]
         );
         assert_eq!(definition.permitted_tool_labels, &["memory", "rag"]);
     }
@@ -59,7 +64,9 @@ fn persona_tool_and_source_policy_is_owned_by_rust() {
             &[
                 SourceKind::Rag,
                 SourceKind::Memory,
-                SourceKind::WorldMonitor
+                SourceKind::WorldMonitor,
+                SourceKind::BattleRhythm,
+                SourceKind::Plans
             ]
         );
     }
@@ -74,6 +81,8 @@ fn persona_tool_and_source_policy_is_owned_by_rust() {
         &[
             SourceKind::Rag,
             SourceKind::Memory,
+            SourceKind::BattleRhythm,
+            SourceKind::Plans,
             SourceKind::Calendar,
             SourceKind::Reminders,
             SourceKind::Notes,
@@ -154,6 +163,8 @@ fn every_model_prompt_spells_out_the_exact_rust_output_contract() {
                 "{adviser:?} prompt omitted required contract field {field}"
             );
         }
+        assert!(prompt.contains("signed Battle Rhythm and command plan"));
+        assert!(prompt.contains("pending proposal"));
     }
 
     let chief = definition_for(AdviserId::ChiefOfStaff).system_prompt();

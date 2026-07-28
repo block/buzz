@@ -204,23 +204,27 @@ fn source_order(adviser: AdviserId, left: &ValidatedSource, right: &ValidatedSou
 const fn model_source_priority(adviser: AdviserId, kind: SourceKind) -> u8 {
     if matches!(adviser, AdviserId::DailyRoutine) {
         match kind {
-            SourceKind::Calendar => 0,
-            SourceKind::Reminders => 1,
-            SourceKind::Notes => 2,
-            SourceKind::File => 3,
-            SourceKind::Memory => 4,
-            SourceKind::Rag => 5,
-            SourceKind::WorldMonitor => 6,
+            SourceKind::BattleRhythm => 0,
+            SourceKind::Plans => 1,
+            SourceKind::Calendar => 2,
+            SourceKind::Reminders => 3,
+            SourceKind::Notes => 4,
+            SourceKind::File => 5,
+            SourceKind::Memory => 6,
+            SourceKind::Rag => 7,
+            SourceKind::WorldMonitor => 8,
         }
     } else if matches!(adviser, AdviserId::Intelligence) {
         match kind {
             SourceKind::Rag => 0,
             SourceKind::WorldMonitor => 1,
-            SourceKind::Memory => 2,
-            SourceKind::Calendar => 3,
-            SourceKind::Reminders => 4,
-            SourceKind::Notes => 5,
-            SourceKind::File => 6,
+            SourceKind::BattleRhythm => 2,
+            SourceKind::Plans => 3,
+            SourceKind::Memory => 4,
+            SourceKind::Calendar => 5,
+            SourceKind::Reminders => 6,
+            SourceKind::Notes => 7,
+            SourceKind::File => 8,
         }
     } else {
         source_priority(kind)
@@ -230,12 +234,14 @@ const fn model_source_priority(adviser: AdviserId, kind: SourceKind) -> u8 {
 const fn source_priority(kind: SourceKind) -> u8 {
     match kind {
         SourceKind::Rag => 0,
-        SourceKind::Memory => 1,
-        SourceKind::WorldMonitor => 2,
-        SourceKind::Calendar => 3,
-        SourceKind::Reminders => 4,
-        SourceKind::Notes => 5,
-        SourceKind::File => 6,
+        SourceKind::BattleRhythm => 1,
+        SourceKind::Plans => 2,
+        SourceKind::Memory => 3,
+        SourceKind::WorldMonitor => 4,
+        SourceKind::Calendar => 5,
+        SourceKind::Reminders => 6,
+        SourceKind::Notes => 7,
+        SourceKind::File => 8,
     }
 }
 

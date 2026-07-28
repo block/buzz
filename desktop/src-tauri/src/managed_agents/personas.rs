@@ -34,6 +34,14 @@ const COMMAND_DAILY_ROUTINE_AVATAR: &str = "data:image/svg+xml,%3Csvg xmlns='htt
 const COMMAND_REPORTING_AVATAR: &str = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96'%3E%3Ccircle cx='48' cy='48' r='45' fill='%23071a2f' stroke='%23d8aa4f' stroke-width='3'/%3E%3Cg fill='none' stroke='%23e5bd65' stroke-width='4' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='29' y='25' width='38' height='50' rx='4'/%3E%3Cpath d='M40 25v-5h16v5M39 41h18M39 51h18M39 61h12'/%3E%3C/g%3E%3C/svg%3E";
 const COMMAND_PLANS_AVATAR: &str = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96'%3E%3Ccircle cx='48' cy='48' r='45' fill='%23071a2f' stroke='%23d8aa4f' stroke-width='3'/%3E%3Cg fill='none' stroke='%23e5bd65' stroke-width='4' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='27' cy='67' r='6'/%3E%3Ccircle cx='69' cy='29' r='6'/%3E%3Cpath d='M33 64c15-3 9-22 25-25M52 32l12 4-4 12'/%3E%3C/g%3E%3C/svg%3E";
 
+macro_rules! command_planning_integration {
+    () => {
+        "\n\nPLANNING DATA AND PROPOSALS\nBattle Rhythm is the approved ship schedule and Plans is the approved project, dependency, critical-path, milestone, and mission-constraint state. When either is supplied as signed Buzz evidence, use it before relying on conversational recollection. Identify schedule conflicts, missing prerequisites, deadlines, critical-path effects, and unresolved constraints relevant to your role. You may recommend an exact calendar, task, dependency, or constraint change, but present it as a proposal requiring the Commanding Officer's review. Never claim that a proposed planning change has been applied unless a later signed Buzz event confirms it."
+    };
+}
+
+const COMMAND_PLANNING_INTEGRATION: &str = command_planning_integration!();
+
 macro_rules! command_adviser_prompt {
     ($role:literal) => {
         concat!(
@@ -45,7 +53,8 @@ macro_rules! command_adviser_prompt {
             "The signed Buzz messages are the complete transcript. Do not copy the raw Buzz transcript into memory. Record an outcome only when the discussion establishes an accepted decision, assigned action, material risk, confirmed assumption, unresolved question worth carrying forward, or planning conclusion useful to a future brief. Do not record greetings, filler, repeated information, or exploratory suggestions that were not accepted.\n",
             "Read the channel UUID and optional thread root from [Context], and the triggering 64-character Buzz Event ID from the latest [Buzz event]. Compute outcome_id as lowercase SHA-256 of the UTF-8 string <persona-id>\\n<channel-id>\\n<triggering-event-id> with no trailing newline. On macOS this is: printf '%s\\n%s\\n%s' '<persona-id>' '<channel-id>' '<triggering-event-id>' | shasum -a 256.\n",
             "Write strict JSON with schema command-discussion-outcome-v1 and exactly these fields: schema, outcome_id, adviser, recorded_at, origin, status, summary, decisions, actions, risks, assumptions, unresolved_questions, brief_sections, review_at, supersedes. origin contains channel_id, thread_root_event_id, and last_event_id. status is active, closed, or superseded. Each action contains description, owner, and due_at. brief_sections uses only today, operations, intelligence, logistics, navigation, daily_routine, reports, planning_30_60_90, decisions, conflicts_and_gaps, or sources.\n",
-            "Write it with `buzz mem set mem/command-brief/<adviser>/<yyyy-mm-dd>/<outcome-id> -`. Say “Recorded for future briefs” only after `buzz mem set` succeeds. If it fails, deliver the advisory answer and say the outcome was not recorded and can be retried. A correction updates the same slug. If asked to forget it, use `buzz mem rm`. A later outcome that invalidates an earlier one lists the earlier outcome_id in supersedes."
+            "Write it with `buzz mem set mem/command-brief/<adviser>/<yyyy-mm-dd>/<outcome-id> -`. Say “Recorded for future briefs” only after `buzz mem set` succeeds. If it fails, deliver the advisory answer and say the outcome was not recorded and can be retried. A correction updates the same slug. If asked to forget it, use `buzz mem rm`. A later outcome that invalidates an earlier one lists the earlier outcome_id in supersedes.",
+            command_planning_integration!()
         )
     };
 }
@@ -310,11 +319,15 @@ fn merge_personas(mut stored: Vec<AgentDefinition>, now: &str) -> (Vec<AgentDefi
                 changed = true;
             }
             // Built-in prompts are normally preserved so local edits survive
-            // upgrades. Replace only the exact N2 prompt shipped immediately
-            // before the same-turn World Monitor requirement was added.
-            if existing.id == "builtin:command-intelligence"
-                && existing.system_prompt == PREVIOUS_COMMAND_INTELLIGENCE_PROMPT
-            {
+            // upgrades. Replace only an exact previously shipped prompt.
+            let previous_planning_prompt = built_in
+                .system_prompt
+                .strip_suffix(COMMAND_PLANNING_INTEGRATION);
+            let upgrades_planning_prompt = existing.id.starts_with("builtin:command-")
+                && previous_planning_prompt == Some(existing.system_prompt.as_str());
+            let upgrades_n2_prompt = existing.id == "builtin:command-intelligence"
+                && existing.system_prompt == PREVIOUS_COMMAND_INTELLIGENCE_PROMPT;
+            if upgrades_planning_prompt || upgrades_n2_prompt {
                 existing.system_prompt = built_in.system_prompt.clone();
                 existing.updated_at = now.to_string();
                 changed = true;

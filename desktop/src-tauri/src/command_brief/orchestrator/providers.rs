@@ -1,4 +1,5 @@
 use super::*;
+use crate::command_brief::sources::{load_planning_evidence, PlanningEvidenceBatch};
 use crate::command_services::trusted_lan::{ModelRoutingPreference, TrustedLanConfig};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -317,19 +318,28 @@ impl SourceBackendLoader for ProductionSourceBackendLoader {
             if cancellation.is_cancelled() {
                 return Err(SourceCollectionError::Cancelled);
             }
-            let command_team_discussions = load_command_team_discussions(&app, Utc::now())
-                .await
-                .unwrap_or_else(|_| {
-                    CommandTeamDiscussionBatch::unavailable(
-                        "Command-team discussion memory was unavailable.",
-                    )
-                });
+            let observed_at = Utc::now();
+            let (command_team_discussions, planning_evidence) = tokio::join!(
+                load_command_team_discussions(&app, observed_at),
+                load_planning_evidence(&app, observed_at)
+            );
+            let command_team_discussions = command_team_discussions.unwrap_or_else(|_| {
+                CommandTeamDiscussionBatch::unavailable(
+                    "Command-team discussion memory was unavailable.",
+                )
+            });
+            let planning_evidence = planning_evidence.unwrap_or_else(|_| {
+                PlanningEvidenceBatch::unavailable(
+                    "Battle Rhythm and Plans evidence was unavailable.",
+                )
+            });
             if cancellation.is_cancelled() {
                 return Err(SourceCollectionError::Cancelled);
             }
             let backend = ProductionSourceBackend::from_app(app)
                 .await?
-                .with_command_team_discussions(command_team_discussions);
+                .with_command_team_discussions(command_team_discussions)
+                .with_planning_evidence(planning_evidence);
             if cancellation.is_cancelled() {
                 return Err(SourceCollectionError::Cancelled);
             }
@@ -356,20 +366,30 @@ impl SourceBackendLoader for TrustedLanSourceBackendLoader {
                 return Err(SourceCollectionError::Cancelled);
             }
             let observed_at_value = Utc::now();
-            let command_team_discussions = load_command_team_discussions(&app, observed_at_value)
-                .await
-                .unwrap_or_else(|_| {
-                    CommandTeamDiscussionBatch::unavailable(
-                        "Command-team discussion memory was unavailable.",
-                    )
-                });
+            let (command_team_discussions, planning_evidence) = tokio::join!(
+                load_command_team_discussions(&app, observed_at_value),
+                load_planning_evidence(&app, observed_at_value)
+            );
+            let command_team_discussions = command_team_discussions.unwrap_or_else(|_| {
+                CommandTeamDiscussionBatch::unavailable(
+                    "Command-team discussion memory was unavailable.",
+                )
+            });
+            let planning_evidence = planning_evidence.unwrap_or_else(|_| {
+                PlanningEvidenceBatch::unavailable(
+                    "Battle Rhythm and Plans evidence was unavailable.",
+                )
+            });
             if cancellation.is_cancelled() {
                 return Err(SourceCollectionError::Cancelled);
             }
             let observed_at = observed_at_value.to_rfc3339_opts(SecondsFormat::Millis, true);
             let backend = tokio::task::spawn_blocking(move || {
-                TrustedLanSourceBackend::from_config(&config, &observed_at)
-                    .map(|backend| backend.with_command_team_discussions(command_team_discussions))
+                TrustedLanSourceBackend::from_config(&config, &observed_at).map(|backend| {
+                    backend
+                        .with_command_team_discussions(command_team_discussions)
+                        .with_planning_evidence(planning_evidence)
+                })
             })
             .await
             .map_err(|_| SourceCollectionError::RagInvalid)??;

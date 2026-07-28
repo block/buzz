@@ -71,3 +71,31 @@ fn command_team_discussion_failure_is_a_warning_without_section_degradation() {
         .any(|item| item.contains("discussion memory was unavailable")));
     assert!(context.degraded_sections().is_empty());
 }
+
+#[test]
+fn signed_battle_rhythm_and_plan_state_enter_the_brief_as_distinct_sources() {
+    let backend = FakeBackend::with_state(|state| {
+        state.planning_evidence = PlanningEvidenceBatch::for_test();
+    });
+
+    let context = collector(backend, "Prepare today's command brief.")
+        .freeze()
+        .expect("planning evidence remains an optional source");
+
+    let battle_rhythm = context
+        .ledger()
+        .iter()
+        .find(|source| source.collection() == "battle_rhythm")
+        .expect("Battle Rhythm source");
+    assert_eq!(battle_rhythm.source_kind(), SourceKind::BattleRhythm);
+    assert!(battle_rhythm.quote().contains("Sail Manila"));
+
+    let plan = context
+        .ledger()
+        .iter()
+        .find(|source| source.collection() == "command_plans")
+        .expect("Plans source");
+    assert_eq!(plan.source_kind(), SourceKind::Plans);
+    assert!(plan.quote().contains("Repair davit"));
+    assert!(context.degraded_sections().is_empty());
+}

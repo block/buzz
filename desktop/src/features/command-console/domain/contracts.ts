@@ -41,6 +41,8 @@ export type SourceReference = ContractBase & {
     | "rag"
     | "memory"
     | "world_monitor"
+    | "battle_rhythm"
+    | "plans"
     | "calendar"
     | "reminders"
     | "notes"
@@ -256,9 +258,17 @@ export function parseSourceReference(value: unknown): SourceReference | null {
     value.version !== COMMAND_CONTRACT_VERSION ||
     !isClassification(value.classification) ||
     !isText(value.ledgerId) ||
-    !["rag", "memory", "calendar", "reminders", "notes", "file"].includes(
-      value.sourceKind as string,
-    ) ||
+    ![
+      "rag",
+      "memory",
+      "world_monitor",
+      "battle_rhythm",
+      "plans",
+      "calendar",
+      "reminders",
+      "notes",
+      "file",
+    ].includes(value.sourceKind as string) ||
     !isText(value.sourceId) ||
     !isText(value.collection) ||
     !isText(value.documentId) ||

@@ -126,6 +126,16 @@ test("parses and freezes the exact OFFICIAL brief wire shape", () => {
   ]);
 });
 
+test("accepts signed Battle Rhythm and Plans source kinds", () => {
+  for (const sourceKind of ["battle_rhythm", "plans"]) {
+    const parsed = parseCommandBrief(
+      brief({ sourceLedger: [source({ sourceKind })] }),
+    );
+    assert.ok(parsed);
+    assert.equal(parsed.sourceLedger[0].sourceKind, sourceKind);
+  }
+});
+
 test("rejects extra keys, prototype pollution, unknown closed values, and unsafe classification", () => {
   for (const value of [
     brief({ unknown: true }),
