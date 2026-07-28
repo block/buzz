@@ -74,7 +74,11 @@ async fn authorize_operator_request(
         Some(q) if !q.is_empty() => format!("{path}?{q}"),
         _ => path.to_string(),
     };
-    let url = format!("{origin}{path_with_query}");
+    // `RELAY_OPERATOR_API_ORIGIN` is validated to carry no path, so the
+    // deployment's `BUZZ_BASE_PATH` prefix is applied here — the operator's
+    // signed `u` tag is the URL they actually called, prefix included.
+    let base_path = state.config.base_path.as_str();
+    let url = format!("{origin}{base_path}{path_with_query}");
     let (pubkey, event_id_bytes) = bridge::verify_bridge_auth_with_options(
         headers,
         method,

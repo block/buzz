@@ -192,8 +192,14 @@ async fn check_nip98_replay_with_guard(
 /// pass and the relay would proceed against the wrong tenant's auth context),
 /// and (b) reject every legitimate request whose community host isn't the
 /// single configured one. Substituting `tenant.host()` closes both directions.
+/// `base_path` is the deployment's `BUZZ_BASE_PATH` prefix (empty when the relay
+/// serves at the root). Callers pass the route's own unprefixed path — the same
+/// literal the route is declared with — and the prefix is applied here, at the
+/// single choke point, so a prefixed deployment reconstructs the URL the client
+/// actually signed instead of 401ing on a path mismatch.
 pub(crate) fn nip98_expected_url(
     config_relay_url: &str,
+    base_path: &str,
     tenant: &TenantContext,
     path: &str,
 ) -> String {
@@ -202,7 +208,7 @@ pub(crate) fn nip98_expected_url(
     } else {
         "http"
     };
-    format!("{scheme}://{}{path}", tenant.host())
+    format!("{scheme}://{}{base_path}{path}", tenant.host())
 }
 
 /// Construct the NIP-42 expected `relay` URL for a connection bound to `tenant`.
@@ -220,15 +226,22 @@ pub(crate) fn nip98_expected_url(
 /// the client's connect URL embedded in the signed AUTH event; the helper
 /// preserves the deployment's TLS posture from `config_relay_url`'s prefix so
 /// `wss://` deployments stay `wss://` and `ws://` dev/test stays `ws://`.
-/// Path is empty — clients put the bare WS origin (`ws://host[:port]`) in the
-/// `relay` tag, matching how `EventBuilder::auth` accepts a [`nostr::RelayUrl`].
-pub(crate) fn nip42_expected_relay_url(config_relay_url: &str, tenant: &TenantContext) -> String {
+/// Path is the deployment's `BUZZ_BASE_PATH` prefix and nothing more: clients put
+/// their connect URL in the `relay` tag, which is the bare WS origin
+/// (`ws://host[:port]`) at the root and `ws://host[:port]/<prefix>` when the relay
+/// is served under one. Matching how `EventBuilder::auth` accepts a
+/// [`nostr::RelayUrl`].
+pub(crate) fn nip42_expected_relay_url(
+    config_relay_url: &str,
+    base_path: &str,
+    tenant: &TenantContext,
+) -> String {
     let scheme = if config_relay_url.trim_start().starts_with("wss://") {
         "wss"
     } else {
         "ws"
     };
-    format!("{scheme}://{}", tenant.host())
+    format!("{scheme}://{}{base_path}", tenant.host())
 }
 
 /// Extract a channel UUID from a single filter's `#h` tag.
@@ -632,7 +645,12 @@ pub async fn submit_event(
             )
         })?;
 
-    let url = nip98_expected_url(&state.config.relay_url, &tenant, "/events");
+    let url = nip98_expected_url(
+        &state.config.relay_url,
+        &state.config.base_path,
+        &tenant,
+        "/events",
+    );
     let (pubkey, event_id_bytes) = verify_bridge_auth(
         &headers,
         "POST",
@@ -900,7 +918,12 @@ pub async fn query_events(
             )
         })?;
 
-    let url = nip98_expected_url(&state.config.relay_url, &tenant, "/query");
+    let url = nip98_expected_url(
+        &state.config.relay_url,
+        &state.config.base_path,
+        &tenant,
+        "/query",
+    );
     let (pubkey, event_id_bytes) = verify_bridge_auth(
         &headers,
         "POST",
@@ -1335,7 +1358,12 @@ pub async fn count_events(
             )
         })?;
 
-    let url = nip98_expected_url(&state.config.relay_url, &tenant, "/count");
+    let url = nip98_expected_url(
+        &state.config.relay_url,
+        &state.config.base_path,
+        &tenant,
+        "/count",
+    );
     let (pubkey, event_id_bytes) = verify_bridge_auth(
         &headers,
         "POST",
@@ -2066,7 +2094,12 @@ async fn authorize_moderation_read(
         Some(q) if !q.is_empty() => format!("{path}?{q}"),
         _ => path.to_string(),
     };
-    let url = nip98_expected_url(&state.config.relay_url, &tenant, &path_with_query);
+    let url = nip98_expected_url(
+        &state.config.relay_url,
+        &state.config.base_path,
+        &tenant,
+        &path_with_query,
+    );
     let (pubkey, event_id_bytes) =
         verify_bridge_auth(headers, "GET", &url, None, state.config.require_auth_token)?;
     check_nip98_replay(state, &tenant, event_id_bytes).await?;
@@ -2462,7 +2495,7 @@ mod tests {
 
         let config_relay_url = "wss://host-a.example"; // doesn't matter — only used for scheme.
         let tenant_b = fresh_tenant("host-b.example");
-        let expected_url = nip98_expected_url(config_relay_url, &tenant_b, "/events");
+        let expected_url = nip98_expected_url(config_relay_url, "", &tenant_b, "/events");
 
         let (status, body) = verify_bridge_auth(&headers, "POST", &expected_url, Some(b""), true)
             .expect_err(
@@ -2528,7 +2561,7 @@ mod tests {
         // tenant host — proving the helper uses `tenant.host()`, not the config.
         let config_relay_url = "wss://other-config-host.example";
         let tenant_a = fresh_tenant("host-a.example");
-        let expected_url = nip98_expected_url(config_relay_url, &tenant_a, "/events");
+        let expected_url = nip98_expected_url(config_relay_url, "", &tenant_a, "/events");
 
         let (pubkey, _event_id_bytes) =
             verify_bridge_auth(&headers, "POST", &expected_url, Some(b""), true)
@@ -2553,7 +2586,7 @@ mod tests {
             Some(q) if !q.is_empty() => format!("{path}?{q}"),
             _ => path.to_string(),
         };
-        nip98_expected_url(config_relay_url, tenant, &path_with_query)
+        nip98_expected_url(config_relay_url, "", tenant, &path_with_query)
     }
 
     /// L7 read-auth blocker (Wren, #1591 sweep): the CLI signs the *full*
@@ -2675,15 +2708,15 @@ mod tests {
         let tenant_a = fresh_tenant("host-a.example");
         let tenant_b = fresh_tenant("host-b.example");
 
-        let url_a = nip98_expected_url("wss://config-host.example", &tenant_a, "/events");
-        let url_b = nip98_expected_url("wss://config-host.example", &tenant_b, "/events");
+        let url_a = nip98_expected_url("wss://config-host.example", "", &tenant_a, "/events");
+        let url_b = nip98_expected_url("wss://config-host.example", "", &tenant_b, "/events");
         assert_eq!(url_a, "https://host-a.example/events");
         assert_eq!(url_b, "https://host-b.example/events");
 
         // Same tenant, two different config hosts → output is identical.
         // (If config-host ever leaked into the URL, this assertion would bite.)
         let url_a_alt_config =
-            nip98_expected_url("wss://different-config.example", &tenant_a, "/events");
+            nip98_expected_url("wss://different-config.example", "", &tenant_a, "/events");
         assert_eq!(
             url_a, url_a_alt_config,
             "config-relay-url's host MUST NOT influence the NIP-98 expected URL — \
@@ -2698,14 +2731,66 @@ mod tests {
     fn nip98_expected_url_derives_scheme_from_config() {
         let tenant = fresh_tenant("host-a.example");
         assert_eq!(
-            nip98_expected_url("wss://config.example", &tenant, "/events"),
+            nip98_expected_url("wss://config.example", "", &tenant, "/events"),
             "https://host-a.example/events",
             "wss:// production config → https:// URL"
         );
         assert_eq!(
-            nip98_expected_url("ws://config.example", &tenant, "/events"),
+            nip98_expected_url("ws://config.example", "", &tenant, "/events"),
             "http://host-a.example/events",
             "ws:// dev config → http:// URL"
+        );
+    }
+
+    /// A relay served under `BUZZ_BASE_PATH` must reconstruct the *prefixed* URL,
+    /// because that is what the client signed into its NIP-98 `u` tag. Getting
+    /// this wrong 401s every authenticated HTTP call on a prefixed deployment
+    /// while looking like a signature failure.
+    #[test]
+    fn nip98_expected_url_includes_the_base_path_prefix() {
+        let tenant = fresh_tenant("host-a.example");
+        assert_eq!(
+            nip98_expected_url("wss://config.example", "/relay", &tenant, "/events"),
+            "https://host-a.example/relay/events"
+        );
+        assert_eq!(
+            nip98_expected_url("wss://config.example", "/buzz/relay", &tenant, "/query"),
+            "https://host-a.example/buzz/relay/query"
+        );
+        assert_eq!(
+            nip98_expected_url(
+                "wss://config.example",
+                "/relay",
+                &tenant,
+                "/moderation/audit?limit=20"
+            ),
+            "https://host-a.example/relay/moderation/audit?limit=20",
+            "the prefix precedes the path and the query stays last"
+        );
+        assert_eq!(
+            nip98_expected_url("wss://config.example", "", &tenant, "/events"),
+            "https://host-a.example/events",
+            "an empty prefix is byte-identical to pre-base-path behavior"
+        );
+    }
+
+    /// NIP-42 sibling: the `relay` tag carries the client's connect URL, which
+    /// includes the prefix when the relay is served under one.
+    #[test]
+    fn nip42_expected_relay_url_includes_the_base_path_prefix() {
+        let tenant = fresh_tenant("host-a.example");
+        assert_eq!(
+            nip42_expected_relay_url("wss://config.example", "/relay", &tenant),
+            "wss://host-a.example/relay"
+        );
+        assert_eq!(
+            nip42_expected_relay_url("ws://config.example", "/relay", &tenant),
+            "ws://host-a.example/relay"
+        );
+        assert_eq!(
+            nip42_expected_relay_url("wss://config.example", "", &tenant),
+            "wss://host-a.example",
+            "an empty prefix is byte-identical to pre-base-path behavior"
         );
     }
 
@@ -2752,7 +2837,7 @@ mod tests {
         let config_relay_url = "ws://host-a.example:3100";
         let signed_relay_url = "ws://host-a.example:3100";
         let tenant_b = fresh_tenant("host-b.example:3100");
-        let expected = nip42_expected_relay_url(config_relay_url, &tenant_b);
+        let expected = nip42_expected_relay_url(config_relay_url, "", &tenant_b);
 
         let err = verify_nip42_with_urls(challenge, signed_relay_url, &expected).expect_err(
             "cross-host NIP-42 AUTH event MUST be rejected — row 44 sibling: \
@@ -2778,7 +2863,7 @@ mod tests {
         // host — proving the helper uses `tenant.host()`, not the config.
         let config_relay_url = "ws://other-config-host.example";
         let tenant_a = fresh_tenant("host-a.example:3100");
-        let expected = nip42_expected_relay_url(config_relay_url, &tenant_a);
+        let expected = nip42_expected_relay_url(config_relay_url, "", &tenant_a);
 
         verify_nip42_with_urls(challenge, signed_relay_url, &expected)
             .expect("matching-host NIP-42 AUTH event must verify");
@@ -2792,15 +2877,16 @@ mod tests {
         let tenant_a = fresh_tenant("host-a.example:3100");
         let tenant_b = fresh_tenant("host-b.example:3100");
 
-        let url_a = nip42_expected_relay_url("ws://config-host.example", &tenant_a);
-        let url_b = nip42_expected_relay_url("ws://config-host.example", &tenant_b);
+        let url_a = nip42_expected_relay_url("ws://config-host.example", "", &tenant_a);
+        let url_b = nip42_expected_relay_url("ws://config-host.example", "", &tenant_b);
         assert_eq!(url_a, "ws://host-a.example:3100");
         assert_eq!(url_b, "ws://host-b.example:3100");
 
         // Same tenant, two different config hosts → output is identical.
         // (If config-host ever leaked into the URL, this assertion would bite —
         // catches the exact "reverted to config host" regression.)
-        let url_a_alt_config = nip42_expected_relay_url("ws://different-config.example", &tenant_a);
+        let url_a_alt_config =
+            nip42_expected_relay_url("ws://different-config.example", "", &tenant_a);
         assert_eq!(
             url_a, url_a_alt_config,
             "config-relay-url's host MUST NOT influence the NIP-42 expected URL — \
@@ -2816,12 +2902,12 @@ mod tests {
     fn nip42_expected_relay_url_derives_scheme_from_config() {
         let tenant = fresh_tenant("host-a.example:3100");
         assert_eq!(
-            nip42_expected_relay_url("wss://config.example", &tenant),
+            nip42_expected_relay_url("wss://config.example", "", &tenant),
             "wss://host-a.example:3100",
             "wss:// production config → wss:// URL"
         );
         assert_eq!(
-            nip42_expected_relay_url("ws://config.example", &tenant),
+            nip42_expected_relay_url("ws://config.example", "", &tenant),
             "ws://host-a.example:3100",
             "ws:// dev config → ws:// URL"
         );

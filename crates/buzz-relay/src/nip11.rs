@@ -180,9 +180,14 @@ pub async fn relay_info_handler(
     axum::response::Json(nip11_document(&state, raw_host).await)
 }
 
+/// `base_path` is the deployment's `BUZZ_BASE_PATH` prefix (empty when the relay
+/// serves at the root). Push clients dial the advertised `origin` directly, so a
+/// prefixed deployment must advertise the prefix or every push registration
+/// lands on a path the gateway does not route.
 fn push_descriptor(
     push_configured: bool,
     relay_url: &str,
+    base_path: &str,
     executor_key_id: &str,
     relay_keypair: &nostr::Keys,
     tenant_host: Option<&str>,
@@ -195,7 +200,7 @@ fn push_descriptor(
         "ws"
     };
     Some(serde_json::json!({
-        "origin": format!("{scheme}://{host}"),
+        "origin": format!("{scheme}://{host}{base_path}"),
         "keys": [{
             "id": executor_key_id,
             "pubkey": relay_keypair.public_key().to_hex(),
@@ -253,6 +258,7 @@ pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &st
     if let Some(push) = push_descriptor(
         state.config.push_gateway_delivery_url.is_some(),
         &state.config.relay_url,
+        &state.config.base_path,
         &state.config.push_executor_key_id,
         &state.relay_keypair,
         tenant_host.as_deref(),
@@ -341,17 +347,41 @@ mod tests {
     #[test]
     fn push_descriptor_is_gated_by_gateway_configuration_and_tenant_binding() {
         let keys = nostr::Keys::generate();
-        assert!(
-            push_descriptor(false, "ws://relay", "key", &keys, Some("tenant.example")).is_none()
-        );
-        assert!(push_descriptor(true, "ws://relay", "key", &keys, None).is_none());
-        let descriptor = push_descriptor(true, "ws://relay", "key", &keys, Some("tenant.example"))
-            .expect("configured push descriptor");
+        assert!(push_descriptor(
+            false,
+            "ws://relay",
+            "",
+            "key",
+            &keys,
+            Some("tenant.example")
+        )
+        .is_none());
+        assert!(push_descriptor(true, "ws://relay", "", "key", &keys, None).is_none());
+        let descriptor =
+            push_descriptor(true, "ws://relay", "", "key", &keys, Some("tenant.example"))
+                .expect("configured push descriptor");
         assert_eq!(descriptor["origin"], "ws://tenant.example");
         assert_eq!(
             descriptor["push_kinds"],
             serde_json::json!(crate::handlers::push_lease::PUSH_KINDS)
         );
+    }
+
+    /// Push clients dial the advertised `origin` verbatim, so a relay served
+    /// under `BUZZ_BASE_PATH` has to advertise the prefix.
+    #[test]
+    fn push_descriptor_origin_carries_the_base_path_prefix() {
+        let keys = nostr::Keys::generate();
+        let descriptor = push_descriptor(
+            true,
+            "wss://relay",
+            "/relay",
+            "key",
+            &keys,
+            Some("tenant.example"),
+        )
+        .expect("configured push descriptor");
+        assert_eq!(descriptor["origin"], "wss://tenant.example/relay");
     }
 
     #[test]

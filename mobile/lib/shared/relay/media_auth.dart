@@ -4,6 +4,7 @@ import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
+import 'relay_endpoint.dart';
 import 'relay_provider.dart';
 
 const _mediaGetAuthKind = 24242;
@@ -95,7 +96,7 @@ class MediaGetAuthService {
     if (mediaAuthority.toLowerCase() != relayAuthority.toLowerCase()) {
       return false;
     }
-    return uri.path.startsWith('/media/');
+    return isRelayMediaPath(uri.path);
   }
 
   nostr.Event _buildGetAuthEvent(String nsec) {

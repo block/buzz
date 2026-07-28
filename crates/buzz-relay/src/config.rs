@@ -74,6 +74,27 @@ pub struct Config {
     pub db_pool_size: u32,
     /// Public WebSocket URL of this relay, advertised in NIP-11.
     pub relay_url: String,
+    /// URL path prefix the relay is served under (`BUZZ_BASE_PATH`).
+    ///
+    /// Empty by default: every route mounts at the root and behavior is
+    /// identical to deployments that never set this. When non-empty, the whole
+    /// HTTP + WebSocket surface nests under the prefix, so the relay can sit
+    /// behind a gateway that routes by path instead of by hostname — the
+    /// WebSocket lands on `wss://host/<prefix>` and the bridge endpoints on
+    /// `https://host/<prefix>/events` and friends.
+    ///
+    /// Normalized at load time to exactly one leading slash and no trailing
+    /// slash (`relay`, `/relay`, and `/relay/` all become `/relay`). The
+    /// prefix participates in NIP-98 `u` tags and the NIP-42 `relay` tag, so
+    /// it must match what clients connect to byte-for-byte. `RELAY_URL` and
+    /// `BUZZ_MEDIA_BASE_URL` must carry the same prefix.
+    ///
+    /// Known limitation: the browser web bundle (`BUZZ_WEB_DIR`) references its
+    /// assets at absolute `/assets/...` URLs baked in at build time, so serving
+    /// that SPA under a prefix additionally requires rebuilding it with a
+    /// matching Vite `base`. The relay's protocol surface — WebSocket, bridge,
+    /// media, git — is unaffected.
+    pub base_path: String,
     /// Public WebSocket URL of the dedicated device-pairing relay, when configured.
     pub pairing_relay_url: Option<String>,
     /// Maximum number of concurrent WebSocket connections.
@@ -275,6 +296,47 @@ fn parse_bind_addr(raw: &str) -> Result<SocketAddr, ConfigError> {
         .map_err(|e| ConfigError::InvalidBindAddr(e.to_string()))
 }
 
+/// Normalize a `BUZZ_BASE_PATH` value to the canonical form the router and the
+/// auth-URL builders expect: either empty (mount at the root) or exactly one
+/// leading slash with no trailing slash.
+///
+/// The prefix is concatenated into signed-URL expectations (NIP-98 `u`, NIP-42
+/// `relay`), so anything that could make the server's reconstruction differ from
+/// the client's connect URL is rejected at startup rather than surfacing later
+/// as an unexplainable 401. That means no query, fragment, whitespace, dot
+/// segments, or empty interior segments.
+pub(crate) fn normalize_base_path(raw: &str) -> Result<String, ConfigError> {
+    let trimmed = raw.trim();
+    let stripped = trimmed.trim_matches('/');
+    if stripped.is_empty() {
+        // Unset, blank, and a bare "/" all mean "serve at the root".
+        return Ok(String::new());
+    }
+
+    let invalid = |reason: &str| {
+        Err(ConfigError::InvalidValue(format!(
+            "BUZZ_BASE_PATH {reason} (got {raw:?})"
+        )))
+    };
+
+    if stripped.contains('?') || stripped.contains('#') {
+        return invalid("must not contain a query string or fragment");
+    }
+    if stripped.chars().any(char::is_whitespace) {
+        return invalid("must not contain whitespace");
+    }
+    for segment in stripped.split('/') {
+        if segment.is_empty() {
+            return invalid("must not contain empty path segments");
+        }
+        if segment == "." || segment == ".." {
+            return invalid("must not contain dot segments");
+        }
+    }
+
+    Ok(format!("/{stripped}"))
+}
+
 fn positive_u64_from_env(name: &str, default: u64) -> Result<u64, ConfigError> {
     match std::env::var(name) {
         Ok(raw) => raw
@@ -440,6 +502,11 @@ impl Config {
 
         let relay_url =
             std::env::var("RELAY_URL").unwrap_or_else(|_| "ws://localhost:3000".to_string());
+
+        let base_path = match std::env::var("BUZZ_BASE_PATH") {
+            Ok(raw) => normalize_base_path(&raw)?,
+            Err(_) => String::new(),
+        };
 
         let pairing_relay_url = std::env::var("BUZZ_PAIRING_RELAY_URL")
             .ok()
@@ -891,6 +958,7 @@ impl Config {
             redis_pool_size,
             db_pool_size,
             relay_url,
+            base_path,
             pairing_relay_url,
             max_connections,
             max_concurrent_handlers,
@@ -950,9 +1018,87 @@ mod tests {
     static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
+    fn base_path_normalizes_equivalent_spellings() {
+        for raw in ["relay", "/relay", "relay/", "/relay/", "  /relay/  "] {
+            assert_eq!(
+                normalize_base_path(raw).expect("valid prefix"),
+                "/relay",
+                "{raw:?} should normalize to /relay"
+            );
+        }
+        assert_eq!(
+            normalize_base_path("/buzz/relay").expect("valid prefix"),
+            "/buzz/relay",
+            "multi-segment prefixes are preserved"
+        );
+    }
+
+    #[test]
+    fn base_path_treats_blank_and_root_as_unprefixed() {
+        for raw in ["", "   ", "/", "//"] {
+            assert_eq!(
+                normalize_base_path(raw).expect("valid prefix"),
+                "",
+                "{raw:?} should mean serve at the root"
+            );
+        }
+    }
+
+    #[test]
+    fn base_path_rejects_values_that_would_break_signed_urls() {
+        // Each of these would make the server's URL reconstruction differ from
+        // the client's connect URL, surfacing as an unexplainable 401.
+        for raw in [
+            "/relay?x=1",
+            "/relay#frag",
+            "/re lay",
+            "/relay//inner",
+            "/relay/../etc",
+            "/./relay",
+        ] {
+            let err = normalize_base_path(raw).expect_err("should be rejected");
+            assert!(
+                matches!(err, ConfigError::InvalidValue(_)),
+                "{raw:?} should be an InvalidValue error, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn base_path_defaults_to_empty_when_unset() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous = std::env::var_os("BUZZ_BASE_PATH");
+        std::env::remove_var("BUZZ_BASE_PATH");
+        let config = Config::from_env().expect("default config");
+        assert_eq!(
+            config.base_path, "",
+            "an unset BUZZ_BASE_PATH must leave routes at the root"
+        );
+
+        std::env::set_var("BUZZ_BASE_PATH", "relay/");
+        let prefixed = Config::from_env().expect("prefixed config");
+        assert_eq!(prefixed.base_path, "/relay");
+
+        std::env::set_var("BUZZ_BASE_PATH", "/relay?x=1");
+        assert!(
+            Config::from_env().is_err(),
+            "an invalid prefix must fail startup, not degrade silently"
+        );
+
+        match previous {
+            Some(value) => std::env::set_var("BUZZ_BASE_PATH", value),
+            None => std::env::remove_var("BUZZ_BASE_PATH"),
+        }
+    }
+
+    #[test]
     fn defaults_are_valid() {
         let _guard = ENV_MUTEX.lock().unwrap();
         let config = Config::from_env().expect("default config");
+        assert_eq!(
+            config.base_path, "",
+            "base_path should default to empty (root-mounted)"
+        );
         assert!(config.bind_addr.port() > 0);
         assert!(!config.database_url.is_empty());
         assert!(!config.redis_url.is_empty());
