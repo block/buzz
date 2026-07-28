@@ -2913,3 +2913,84 @@ async fn test_nip29_relay_rejects_last_owner_self_demotion() {
         "the last owner must keep their role"
     );
 }
+
+/// A COUNT filter whose constraint cannot become a SQL predicate must not be
+/// answered from the pushed-down exact-count path. `filter_fully_pushable`
+/// used to report these as pushable, so `/count` skipped post-filtering and
+/// returned every matching event across all of the caller's accessible
+/// channels instead of zero.
+///
+/// Affected shapes: a single `#h` value that is not a channel UUID (the shape
+/// a stock NIP-29 client sends), and an empty value set on any tag field.
+#[tokio::test]
+#[ignore]
+async fn test_count_unpushable_filters_do_not_count_all_channels() {
+    let http = relay_http_url();
+    let keys = Keys::generate();
+    let pubkey_hex = keys.public_key().to_hex();
+
+    let channel = create_test_channel(&keys).await;
+    let mut client = BuzzTestClient::connect(&relay_url(), &keys)
+        .await
+        .expect("connect");
+    for i in 0..2 {
+        let content = format!("count-probe {} {}", i, uuid::Uuid::new_v4());
+        client
+            .send_text_message(&keys, &channel, &content, 9)
+            .await
+            .expect("send message");
+    }
+    client.disconnect().await.expect("disconnect");
+
+    let http_client = reqwest::Client::new();
+    let count_of = |filter: serde_json::Value| {
+        let http_client = http_client.clone();
+        let http = http.clone();
+        let pubkey_hex = pubkey_hex.clone();
+        async move {
+            let resp = http_client
+                .post(format!("{http}/count"))
+                .header("X-Pubkey", &pubkey_hex)
+                .header("Content-Type", "application/json")
+                .body(serde_json::to_string(&serde_json::json!([filter])).unwrap())
+                .send()
+                .await
+                .expect("submit count");
+            assert!(
+                resp.status().is_success(),
+                "count failed: {}",
+                resp.status()
+            );
+            let body: serde_json::Value = resp.json().await.expect("parse count response");
+            body["count"].as_u64().expect("count field")
+        }
+    };
+
+    // Baseline: the caller can see their own channel's messages, so a wrong
+    // answer below is an over-count rather than an empty database.
+    assert_eq!(
+        count_of(serde_json::json!({"kinds": [9], "#h": [&channel]})).await,
+        2,
+        "sanity: a single channel-UUID #h still counts exactly",
+    );
+
+    // A bare NIP-29 group id parses as no channel, so nothing constrains the
+    // SQL. Before the fix this returned the caller-wide kind:9 total.
+    assert_eq!(
+        count_of(serde_json::json!({"kinds": [9], "#h": ["general"]})).await,
+        0,
+        "a #h value that is not a channel UUID must not count other channels",
+    );
+
+    // An empty value set matches nothing, on any tag field.
+    assert_eq!(
+        count_of(serde_json::json!({"kinds": [9], "#t": []})).await,
+        0,
+        "an empty #t set must not count every accessible event",
+    );
+    assert_eq!(
+        count_of(serde_json::json!({"kinds": [9], "#h": []})).await,
+        0,
+        "an empty #h set must not count every accessible event",
+    );
+}

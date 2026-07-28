@@ -765,11 +765,18 @@ pub(crate) fn count_fallback_exceeded(candidate_count: usize) -> bool {
 /// an exact count without post-filtering.
 ///
 /// Pushed constraints: kinds, authors (single or multi), ids, since, until,
-/// channel_id (#h single), #p (single), #d (single, NIP-33-only kinds), #e (any),
-/// channel_ids (injected by caller).
+/// channel_id (#h single, and only when the value parses as a channel UUID),
+/// #p (single), #d (single, NIP-33-only kinds), #e (any), channel_ids
+/// (injected by caller).
 ///
-/// Anything else (multi-#p, #t, #a, search, multi-#h, #d on non-NIP-33)
-/// requires post-filtering and cannot use the fast COUNT path.
+/// Anything else (multi-#p, #t, #a, search, multi-#h, non-UUID #h, #d on
+/// non-NIP-33) requires post-filtering and cannot use the fast COUNT path.
+///
+/// An empty value set is never pushable, on any field. Such a filter matches
+/// nothing, but `filter_to_query_params` drops the constraint rather than
+/// emitting a predicate for it, so a pushed-down COUNT would return every
+/// candidate row instead of zero. `kinds: []` is the exception: it already
+/// becomes a match-nothing sentinel the DB layer short-circuits on.
 pub fn filter_fully_pushable(filter: &Filter) -> bool {
     // Check if filter exclusively targets NIP-33 kinds (needed for #d pushability).
     let is_nip33_only = filter.kinds.as_ref().is_some_and(|ks| {
@@ -781,10 +788,23 @@ pub fn filter_fully_pushable(filter: &Filter) -> bool {
 
     for (tag_key, tag_values) in filter.generic_tags.iter() {
         let key = tag_key.to_string();
+        // An empty value set matches no event (`filters_match` rejects a
+        // present tag key with no matching value), but no arm emits a
+        // predicate for it, so a pushed-down COUNT would return every
+        // candidate row instead of zero.
+        if tag_values.is_empty() {
+            return false;
+        }
         match key.as_str() {
             "h" => {
                 // Single #h is pushed as channel_id; multi-#h is not.
                 if tag_values.len() > 1 {
+                    return false;
+                }
+                // ...and only when the value parses as a channel UUID. Callers
+                // derive `channel_id` by parsing it, so a non-UUID value (e.g.
+                // a bare NIP-29 group id) leaves the query unconstrained.
+                if !tag_values.iter().any(|v| v.parse::<uuid::Uuid>().is_ok()) {
                     return false;
                 }
             }
@@ -811,6 +831,14 @@ pub fn filter_fully_pushable(filter: &Filter) -> bool {
                 }
             }
         }
+    }
+    // `authors: []` and `ids: []` match nothing for the same reason, and
+    // `filter_to_query_params` maps both to `None` instead of a predicate.
+    // (`kinds: []` is already handled there as a match-nothing sentinel.)
+    if filter.authors.as_ref().is_some_and(|a| a.is_empty())
+        || filter.ids.as_ref().is_some_and(|i| i.is_empty())
+    {
+        return false;
     }
     // search field is not pushed by filter_to_query_params
     if filter.search.is_some() {
@@ -1278,6 +1306,100 @@ fn topic_for_subscription(channel_id: Option<uuid::Uuid>) -> EventTopic {
 mod tests {
     use super::*;
     use nostr::{Alphabet, Filter, SingleLetterTag};
+
+    /// `filter_fully_pushable` returning `true` promises an exact count with
+    /// no post-filtering, which holds only if the filter's constraints reach
+    /// SQL. Check that implication against the query the COUNT callers build.
+    fn assert_pushable_implies_h_reaches_sql(filter: &Filter, case: &str) {
+        let community = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::new_v4());
+        let channel_id = extract_channel_id_from_filter(filter);
+        let query = filter_to_query_params(filter, channel_id, community);
+
+        let h_tag = SingleLetterTag::lowercase(Alphabet::H);
+        if !filter.generic_tags.contains_key(&h_tag) {
+            return;
+        }
+        if filter_fully_pushable(filter) {
+            assert!(
+                query.channel_id.is_some(),
+                "{case}: filter_fully_pushable() claims an exact count, but the \
+                 #h constraint never reaches SQL (channel_id is None), so \
+                 count_events() counts every accessible channel instead",
+            );
+        }
+    }
+
+    /// A single `#h` value that is not a channel UUID, the shape a stock
+    /// NIP-29 client sends (`{"kinds":[9],"#h":["general"]}`). Nothing pushes
+    /// it into SQL, so the COUNT fast path must not be taken.
+    #[test]
+    fn single_unparseable_h_value_is_not_fully_pushable() {
+        let filter = Filter::new()
+            .kind(nostr::Kind::Custom(9))
+            .custom_tags(SingleLetterTag::lowercase(Alphabet::H), ["general"]);
+        // Assert directly too: the helper's check is gated on pushability,
+        // so alone it would run no assertion once this case is fixed.
+        assert!(
+            !filter_fully_pushable(&filter),
+            "a #h value that is not a channel UUID reaches no SQL predicate, \
+             so it must not take the exact-count fast path",
+        );
+        assert_pushable_implies_h_reaches_sql(&filter, "single non-UUID #h");
+    }
+
+    /// `authors: []` and `ids: []` are the same match-nothing shape as an
+    /// empty tag set, on fields `filter_to_query_params` maps to `None`.
+    #[test]
+    fn empty_authors_or_ids_is_never_fully_pushable() {
+        for raw in [
+            r##"{"kinds":[9],"authors":[]}"##,
+            r##"{"kinds":[9],"ids":[]}"##,
+        ] {
+            let filter: Filter = serde_json::from_str(raw).expect("filter parses");
+            assert!(
+                !filter_fully_pushable(&filter),
+                "{raw}: matches nothing but pushes no SQL predicate, so it \
+                 must not take the exact-count fast path",
+            );
+        }
+    }
+
+    /// The empty-set hole is not `#h`-specific: no generic-tag arm can
+    /// represent an empty set in SQL, and such a filter matches no event.
+    /// All of these parse straight from client JSON.
+    #[test]
+    fn empty_tag_value_set_is_never_fully_pushable() {
+        for raw in [
+            r##"{"kinds":[9],"#h":[]}"##,
+            r##"{"kinds":[9],"#p":[]}"##,
+            r##"{"kinds":[9],"#e":[]}"##,
+            r##"{"kinds":[9],"#t":[]}"##,
+            r##"{"kinds":[30078],"#d":[]}"##,
+        ] {
+            let filter: Filter = serde_json::from_str(raw).expect("filter parses");
+            assert!(
+                !filter_fully_pushable(&filter),
+                "{raw}: an empty tag-value set matches nothing but pushes no \
+                 SQL predicate, so it must not take the exact-count fast path",
+            );
+        }
+    }
+
+    /// Guard against over-correcting: a single parseable channel UUID *is*
+    /// pushed as `channel_id`, and must stay on the fast path.
+    #[test]
+    fn single_uuid_h_value_stays_fully_pushable() {
+        let channel = uuid::Uuid::new_v4();
+        let filter = Filter::new().kind(nostr::Kind::Custom(9)).custom_tags(
+            SingleLetterTag::lowercase(Alphabet::H),
+            [channel.to_string()],
+        );
+        assert!(
+            filter_fully_pushable(&filter),
+            "a single channel UUID is pushed as channel_id and must remain pushable",
+        );
+        assert_pushable_implies_h_reaches_sql(&filter, "single UUID #h");
+    }
 
     #[test]
     fn global_queries_push_access_scope_before_limit() {
