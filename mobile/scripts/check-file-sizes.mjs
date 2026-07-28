@@ -15,16 +15,8 @@ const rules = [
   },
 ];
 
-// TEMP — these files exceed the 1000-line limit and are queued to be split.
-// Do not add to this list; split the file instead. Remove each entry as its
-// file is broken up.
-const overrides = new Map([
-]);
-
 await runFileSizeCheck({
   projectRoot,
   rules,
-  overrides,
   label: "Mobile",
-  scriptPath: "mobile/scripts/check-file-sizes.mjs",
 });
