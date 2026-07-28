@@ -30,3 +30,24 @@ fn event_contract_rejects_unknown_recurrence_fields() {
     event["recurrence"]["unexpected"] = serde_json::json!(true);
     assert!(serde_json::from_value::<BattleRhythmEventV1>(event).is_err());
 }
+
+#[test]
+fn event_contract_rejects_invalid_recurrence_cross_fields() {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../desktop/src/features/battle-rhythm/domain/fixtures/contracts-v1.json"
+    ))
+    .expect("fixture JSON");
+    for (field, value) in [
+        ("frequency", serde_json::json!("hourly")),
+        ("interval", serde_json::json!(0)),
+        ("seriesId", serde_json::json!("")),
+    ] {
+        let mut event = fixture["event"].clone();
+        event["recurrence"][field] = value;
+        assert!(serde_json::from_value::<BattleRhythmEventV1>(event).is_err());
+    }
+    let mut event = fixture["event"].clone();
+    event["excludedOccurrenceStarts"] =
+        serde_json::json!(["2026-08-17T08:00:00+10:00", "2026-08-17T08:00:00+10:00"]);
+    assert!(serde_json::from_value::<BattleRhythmEventV1>(event).is_err());
+}

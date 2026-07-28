@@ -242,23 +242,34 @@ function recurrence(
     seriesId: string(o.seriesId, "seriesId", 256),
   });
 }
-function localParts(value: string) {
-  const match = ISO.exec(value);
-  if (!match) fail("recurrence timestamp must be ISO-8601");
+function localParts(value: string, timeZone: string) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(new Date(value));
+  const item = (type: string) =>
+    parts.find((part) => part.type === type)?.value;
   return {
-    year: Number(match[1]),
-    month: Number(match[2]),
-    day: Number(match[3]),
-    time: `${match[4]}:${match[5]}:${match[6]}`,
+    year: Number(item("year")),
+    month: Number(item("month")),
+    day: Number(item("day")),
+    time: `${item("hour")}:${item("minute")}:${item("second")}`,
   };
 }
 function isOccurrence(
   start: string,
   occurrence: string,
   rule: BattleRhythmRecurrence,
+  timeZone: string,
 ): boolean {
-  const first = localParts(start),
-    next = localParts(occurrence);
+  const first = localParts(start, timeZone),
+    next = localParts(occurrence, timeZone);
   if (first.time !== next.time) return false;
   const firstDay = Date.UTC(first.year, first.month - 1, first.day);
   const nextDay = Date.UTC(next.year, next.month - 1, next.day);
@@ -274,19 +285,25 @@ function excludedOccurrences(
   value: unknown,
   start: string,
   rule: BattleRhythmRecurrence | null,
+  timeZone: string,
 ): readonly string[] {
   if (!Array.isArray(value) || value.length > 512)
     fail("excluded occurrences invalid");
   if (value.length && !rule) fail("exclusions require recurrence");
   const parsed = value.map((item) => timestamp(item, "excluded occurrence"));
-  if (parsed.some((item, index) => index > 0 && parsed[index - 1] >= item))
+  if (
+    parsed.some(
+      (item, index) =>
+        index > 0 && Date.parse(parsed[index - 1]!) >= Date.parse(item),
+    )
+  )
     fail("excluded occurrences must be sorted and unique");
   if (
     rule &&
     parsed.some(
       (item) =>
         (rule.until !== null && Date.parse(item) > Date.parse(rule.until)) ||
-        !isOccurrence(start, item, rule),
+        !isOccurrence(start, item, rule, timeZone),
     )
   )
     fail("excluded occurrence outside series");
@@ -331,6 +348,7 @@ export function parseBattleRhythmEvent(value: unknown): BattleRhythmEvent {
       o.excludedOccurrenceStarts,
       start,
       parsedRecurrence,
+      string(o.timeZone, "timeZone", 128),
     ),
   });
 }

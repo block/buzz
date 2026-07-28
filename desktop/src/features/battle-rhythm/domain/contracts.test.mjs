@@ -77,6 +77,28 @@ test("manual event parser rejects source revision ownership", () => {
       ownership: { kind: "manual", sourceId: "fas" },
     }),
   );
+  assert.throws(() =>
+    parseBattleRhythmEvent({
+      ...event,
+      recurrence: { ...event.recurrence, until: null },
+      excludedOccurrenceStarts: ["2026-08-10T08:00:00Z"],
+    }),
+  );
+  assert.equal(
+    parseBattleRhythmEvent({
+      ...event,
+      start: "2026-09-28T08:00:00+10:00",
+      end: "2026-09-28T09:00:00+10:00",
+      recurrence: {
+        frequency: "weekly",
+        interval: 1,
+        until: "2026-10-12T08:00:00+11:00",
+        seriesId: "dst-routine",
+      },
+      excludedOccurrenceStarts: ["2026-10-05T08:00:00+11:00"],
+    }).excludedOccurrenceStarts[0],
+    "2026-10-05T08:00:00+11:00",
+  );
 });
 
 test("parsers reject unknown fields, non-ISO dates, unordered coverage, and invalid all-day values", () => {
