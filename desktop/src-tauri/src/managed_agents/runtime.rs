@@ -590,6 +590,25 @@ pub fn spawn_agent_child(
             command.env("BUZZ_ACP_MCP_COMMAND", "");
         }
     }
+    // Codex's Chrome extension broker is owned by the Codex host and is not
+    // exposed through ACP. Give Buzz-managed Codex sessions an independent,
+    // isolated browser boundary via the official Playwright MCP server instead.
+    // Pin the package version so agent startup cannot silently change behavior.
+    if known_acp_runtime(effective_command).is_some_and(|runtime| runtime.id == "codex") {
+        if let Some(npx) = resolve_command("npx") {
+            command.env("BUZZ_ACP_BROWSER_MCP_COMMAND", npx);
+            command.env(
+                "BUZZ_ACP_BROWSER_MCP_ARGS",
+                r#"["--yes","@playwright/mcp@0.0.78","--browser","chrome","--isolated"]"#,
+            );
+        } else {
+            command.env("BUZZ_ACP_BROWSER_MCP_COMMAND", "");
+            command.env("BUZZ_ACP_BROWSER_MCP_ARGS", "[]");
+        }
+    } else {
+        command.env("BUZZ_ACP_BROWSER_MCP_COMMAND", "");
+        command.env("BUZZ_ACP_BROWSER_MCP_ARGS", "[]");
+    }
     // Enable MCP hook tools (_Stop, _PostCompact) for agents that need them.
     // Uses "*" because build_mcp_servers() hard-codes the server name to "buzz-mcp".
     let runtime_meta = known_acp_runtime(effective_command);
