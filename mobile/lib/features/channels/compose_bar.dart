@@ -44,6 +44,8 @@ part 'compose_bar/camera_preview.dart';
 part 'compose_bar/send_button.dart';
 part 'compose_bar/layout.dart';
 
+const _maxConcurrentImageUploads = 3;
+
 /// Rich compose bar with @mention autocomplete and a markdown formatting
 /// toolbar. Used in both channel and thread views — the caller provides an
 /// [onSend] callback that handles actual message submission.
@@ -560,19 +562,36 @@ class ComposeBar extends HookConsumerWidget {
       uploadError.value = null;
       uploadingCount.value += images.length;
       try {
-        final results = await Future.wait([
-          for (final image in images)
-            () async {
-              try {
-                final uploaded = await ref
-                    .read(mediaUploadServiceProvider)
-                    .uploadImage(image);
-                return (uploaded: uploaded, error: null);
-              } catch (error) {
-                return (uploaded: null, error: error);
-              }
-            }(),
-        ]);
+        Future<({BlobDescriptor? uploaded, Object? error})> uploadImage(
+          XFile image,
+        ) async {
+          try {
+            final uploaded = await ref
+                .read(mediaUploadServiceProvider)
+                .uploadImage(image);
+            return (uploaded: uploaded, error: null);
+          } catch (error) {
+            return (uploaded: null, error: error);
+          }
+        }
+
+        final results = <({BlobDescriptor? uploaded, Object? error})>[];
+        for (
+          var start = 0;
+          start < images.length;
+          start += _maxConcurrentImageUploads
+        ) {
+          final end = math.min(
+            start + _maxConcurrentImageUploads,
+            images.length,
+          );
+          results.addAll(
+            await Future.wait([
+              for (final image in images.sublist(start, end))
+                uploadImage(image),
+            ]),
+          );
+        }
         if (!context.mounted) return;
 
         final uploaded = [for (final result in results) ?result.uploaded];

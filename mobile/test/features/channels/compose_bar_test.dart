@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -553,6 +554,73 @@ void main() {
         'url https://relay.example/media/one.png',
         'url https://relay.example/media/two.gif',
       ]);
+    });
+
+    testWidgets('bounds concurrent system-selected photo uploads', (
+      tester,
+    ) async {
+      final releaseFirstBatch = Completer<void>();
+      var requestsStarted = 0;
+      var activeRequests = 0;
+      var peakActiveRequests = 0;
+      final uploadService = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: nostr.Keys.generate().nsec,
+        httpClient: http_testing.MockClient((request) async {
+          requestsStarted += 1;
+          final requestNumber = requestsStarted;
+          activeRequests += 1;
+          peakActiveRequests = math.max(peakActiveRequests, activeRequests);
+          if (requestNumber <= 3) {
+            await releaseFirstBatch.future;
+          }
+          activeRequests -= 1;
+          return http.Response(
+            jsonEncode({
+              'url': 'https://relay.example/media/photo-$requestNumber.png',
+              'sha256':
+                  '1111111111111111111111111111111111111111111111111111111111111111',
+              'size': request.bodyBytes.length,
+              'type': 'image/png',
+              'uploaded': 1,
+            }),
+            200,
+          );
+        }),
+        pickGalleryImage: () async => null,
+        pickGalleryImages: () async => [
+          for (var index = 0; index < 5; index += 1)
+            XFile.fromData(_pngBytes, name: 'photo-$index.png'),
+        ],
+        pickGalleryVideo: () async => null,
+      );
+
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: uploadService,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      await _openSystemPhotoPicker(tester);
+      for (var frame = 0; frame < 20 && requestsStarted < 3; frame += 1) {
+        await tester.pump(const Duration(milliseconds: 20));
+      }
+
+      expect(requestsStarted, 3);
+      expect(peakActiveRequests, 3);
+
+      releaseFirstBatch.complete();
+      await tester.pumpAndSettle();
+
+      expect(requestsStarted, 5);
+      expect(peakActiveRequests, 3);
+      expect(find.byTooltip('Remove attachment'), findsNWidgets(5));
     });
 
     testWidgets('numbers recent photo selection and returns to the menu', (

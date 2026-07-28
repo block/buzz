@@ -35,14 +35,16 @@ class _IOSAttachmentPopoverController {
       switch (call.method) {
         case 'cameraCaptured':
           if (call.arguments case final String path) {
-            await onCapture(XFile(path));
+            await processCapturedImage(XFile(path), onCapture);
           }
         case 'photosSelected':
           final paths = (call.arguments as List<Object?>? ?? const [])
               .whereType<String>()
               .toList();
           if (paths.isNotEmpty) {
-            await onChoosePhotos([for (final path in paths) XFile(path)]);
+            await processTemporaryImages([
+              for (final path in paths) XFile(path),
+            ], onChoosePhotos);
           }
         case 'pickAllPhotos':
           onAllPhotos();

@@ -4,182 +4,8 @@ import PhotosUI
 import UIKit
 import UniformTypeIdentifiers
 
-final class NativeAttachmentPopoverCoordinator: NSObject {
-  private let channel: FlutterMethodChannel
-  private weak var parentViewController: UIViewController?
-  private weak var presentedController: UIViewController?
-  private weak var sourceAnchorView: UIView?
-
-  init(
-    messenger: FlutterBinaryMessenger,
-    parentViewController: UIViewController?
-  ) {
-    channel = FlutterMethodChannel(
-      name: "buzz/native_attachment_popover",
-      binaryMessenger: messenger
-    )
-    self.parentViewController = parentViewController
-    super.init()
-
-    channel.setMethodCallHandler { [weak self] call, result in
-      self?.handle(call, result: result)
-    }
-  }
-
-  private func handle(
-    _ call: FlutterMethodCall,
-    result: @escaping FlutterResult
-  ) {
-    switch call.method {
-    case "isSupported":
-      if #available(iOS 26.0, *) {
-        result(true)
-      } else {
-        result(false)
-      }
-    case "present":
-      guard
-        let arguments = call.arguments as? [String: Any],
-        let x = arguments["x"] as? NSNumber,
-        let y = arguments["y"] as? NSNumber,
-        let width = arguments["width"] as? NSNumber,
-        let height = arguments["height"] as? NSNumber
-      else {
-        result(
-          FlutterError(
-            code: "invalid_arguments",
-            message: "Expected the attachment trigger bounds.",
-            details: nil
-          )
-        )
-        return
-      }
-
-      let sourceRect = CGRect(
-        x: CGFloat(truncating: x),
-        y: CGFloat(truncating: y),
-        width: CGFloat(truncating: width),
-        height: CGFloat(truncating: height)
-      )
-      DispatchQueue.main.async { [weak self] in
-        result(self?.presentPopover(sourceRect: sourceRect) ?? false)
-      }
-    case "dismiss":
-      DispatchQueue.main.async { [weak self] in
-        if #available(iOS 26.0, *),
-          let controller =
-            self?.presentedController
-            as? NativeAttachmentPopoverViewController
-        {
-          controller.dismissAndNotify()
-        } else {
-          self?.presentedController?.dismiss(animated: true)
-        }
-        result(nil)
-      }
-    default:
-      result(FlutterMethodNotImplemented)
-    }
-  }
-
-  @MainActor
-  private func presentPopover(sourceRect: CGRect) -> Bool {
-    guard #available(iOS 26.0, *) else { return false }
-    guard presentedController == nil else { return true }
-    let rootViewController =
-      parentViewController ?? activeWindowRootViewController()
-    guard let presenter = topViewController(from: rootViewController) else {
-      return false
-    }
-
-    let sourceView = presenter.view
-    let convertedRect: CGRect
-    if let window = sourceView?.window {
-      convertedRect = sourceView?.convert(sourceRect, from: window) ?? sourceRect
-    } else {
-      convertedRect = sourceRect
-    }
-
-    let anchorView = makeSourceAnchor(frame: convertedRect)
-    sourceView?.addSubview(anchorView)
-    sourceAnchorView = anchorView
-
-    let availableWidth = max(
-      320,
-      min(
-        (sourceView?.bounds.width ?? UIScreen.main.bounds.width) - 24,
-        430
-      )
-    )
-    let controller = NativeAttachmentPopoverViewController(
-      channel: channel,
-      expandedWidth: availableWidth
-    )
-    controller.modalPresentationStyle = .popover
-    controller.preferredTransition = .zoom { [weak anchorView] _ in
-      anchorView
-    }
-    controller.onDismiss = { [weak self] in
-      self?.presentedController = nil
-      self?.sourceAnchorView?.removeFromSuperview()
-      self?.channel.invokeMethod("dismissed", arguments: nil)
-    }
-
-    guard let popover = controller.popoverPresentationController else {
-      anchorView.removeFromSuperview()
-      return false
-    }
-    popover.sourceView = anchorView
-    popover.sourceRect = anchorView.bounds
-    popover.permittedArrowDirections = [.down]
-    popover.backgroundColor = .clear
-    popover.delegate = controller
-
-    presentedController = controller
-    presenter.present(controller, animated: true)
-    return true
-  }
-
-  @MainActor
-  private func makeSourceAnchor(frame: CGRect) -> UIView {
-    let anchor = UIView(frame: frame)
-    anchor.isUserInteractionEnabled = false
-    anchor.accessibilityElementsHidden = true
-    anchor.backgroundColor = .clear
-    anchor.layer.cornerRadius = min(frame.width, frame.height) / 2
-    anchor.layer.cornerCurve = .continuous
-    return anchor
-  }
-
-  @MainActor
-  private func activeWindowRootViewController() -> UIViewController? {
-    UIApplication.shared.connectedScenes
-      .compactMap { $0 as? UIWindowScene }
-      .filter { $0.activationState == .foregroundActive }
-      .flatMap(\.windows)
-      .first(where: \.isKeyWindow)?
-      .rootViewController
-  }
-
-  @MainActor
-  private func topViewController(
-    from viewController: UIViewController?
-  ) -> UIViewController? {
-    if let presented = viewController?.presentedViewController {
-      return topViewController(from: presented)
-    }
-    if let navigation = viewController as? UINavigationController {
-      return topViewController(from: navigation.visibleViewController)
-    }
-    if let tab = viewController as? UITabBarController {
-      return topViewController(from: tab.selectedViewController)
-    }
-    return viewController
-  }
-}
-
 @available(iOS 26.0, *)
-private final class NativeAttachmentPopoverViewController:
+final class NativeAttachmentPopoverViewController:
   UIViewController,
   PHPickerViewControllerDelegate,
   UIPopoverPresentationControllerDelegate,
@@ -211,11 +37,16 @@ private final class NativeAttachmentPopoverViewController:
   private weak var cameraPreviewView: UIView?
   private weak var photoActionButton: UIButton?
   private weak var cameraCaptureButton: UIButton?
+  private var cameraDevice: AVCaptureDevice?
+  private var cameraRotationCoordinator: AVCaptureDevice.RotationCoordinator?
+  private var cameraRotationObservation: NSKeyValueObservation?
   private var selectionGeneration = 0
+  private var selectionTask: Task<Void, Never>?
   private var selectedPhotoPaths: [String] = []
   private var cameraConfigured = false
   private var cameraIsStarting = false
   private var cameraIsCapturing = false
+  private var isFinishing = false
   private var didNotifyDismissal = false
 
   var onDismiss: (() -> Void)?
@@ -395,7 +226,7 @@ private final class NativeAttachmentPopoverViewController:
     configuration.filter = .images
     configuration.selectionLimit = 0
     configuration.selection = .continuousAndOrdered
-    configuration.preferredAssetRepresentationMode = .current
+    configuration.preferredAssetRepresentationMode = .compatible
     configuration.disabledCapabilities = [
       .search,
       .stagingArea,
@@ -498,6 +329,9 @@ private final class NativeAttachmentPopoverViewController:
   private func showMenu() {
     guard surface != .menu else { return }
     selectionGeneration += 1
+    selectionTask?.cancel()
+    selectionTask = nil
+    Self.removeTemporaryFiles(selectedPhotoPaths)
     selectedPhotoPaths = []
     stopCamera()
 
@@ -595,7 +429,8 @@ private final class NativeAttachmentPopoverViewController:
     prominent: Bool = false,
     action: UIAction
   ) -> UIButton {
-    var configuration = prominent
+    var configuration =
+      prominent
       ? UIButton.Configuration.prominentGlass()
       : UIButton.Configuration.glass()
     configuration.title = title
@@ -706,24 +541,38 @@ private final class NativeAttachmentPopoverViewController:
   ) {
     selectionGeneration += 1
     let generation = selectionGeneration
+    selectionTask?.cancel()
+    selectionTask = nil
+    Self.removeTemporaryFiles(selectedPhotoPaths)
     selectedPhotoPaths = []
     updatePhotoAction(count: results.count, preparing: !results.isEmpty)
 
     guard !results.isEmpty else { return }
-    Task {
+    selectionTask = Task { [weak self] in
+      guard let self else { return }
+      var paths: [String] = []
       do {
-        var paths: [String] = []
         for result in results {
-          paths.append(try await exportPickerResult(result))
+          try Task.checkCancellation()
+          paths.append(try await self.exportPickerResult(result))
         }
+        try Task.checkCancellation()
         await MainActor.run {
-          guard generation == self.selectionGeneration else { return }
+          guard generation == self.selectionGeneration else {
+            Self.removeTemporaryFiles(paths)
+            return
+          }
           self.selectedPhotoPaths = paths
+          self.selectionTask = nil
           self.updatePhotoAction(count: paths.count, preparing: false)
         }
+      } catch is CancellationError {
+        Self.removeTemporaryFiles(paths)
       } catch {
+        Self.removeTemporaryFiles(paths)
         await MainActor.run {
           guard generation == self.selectionGeneration else { return }
+          self.selectionTask = nil
           self.selectedPhotoPaths = []
           self.updatePhotoAction(count: 0, preparing: false)
           self.showError("Unable to prepare the selected photos.")
@@ -757,7 +606,13 @@ private final class NativeAttachmentPopoverViewController:
     if selectedPhotoPaths.isEmpty {
       finish(method: "pickAllPhotos")
     } else {
-      finish(method: "photosSelected", arguments: selectedPhotoPaths)
+      let paths = selectedPhotoPaths
+      selectedPhotoPaths = []
+      finish(
+        method: "photosSelected",
+        arguments: paths,
+        temporaryPaths: paths
+      )
     }
   }
 
@@ -806,6 +661,12 @@ private final class NativeAttachmentPopoverViewController:
           continuation.resume(throwing: error)
         }
       }
+    }
+  }
+
+  private static func removeTemporaryFiles(_ paths: [String]) {
+    for path in paths where !path.isEmpty {
+      try? FileManager.default.removeItem(atPath: path)
     }
   }
 
@@ -858,6 +719,7 @@ private final class NativeAttachmentPopoverViewController:
             throw NativeAttachmentPopoverError.cameraUnavailable
           }
           self.cameraSession.addInput(input)
+          self.cameraDevice = device
           guard self.cameraSession.canAddOutput(self.cameraOutput) else {
             throw NativeAttachmentPopoverError.cameraUnavailable
           }
@@ -894,9 +756,29 @@ private final class NativeAttachmentPopoverViewController:
     layer.frame = previewView.bounds
     previewView.layer.insertSublayer(layer, at: 0)
     cameraPreviewLayer = layer
+
+    if let cameraDevice {
+      let coordinator = AVCaptureDevice.RotationCoordinator(
+        device: cameraDevice,
+        previewLayer: layer
+      )
+      cameraRotationCoordinator = coordinator
+      cameraRotationObservation = coordinator.observe(
+        \.videoRotationAngleForHorizonLevelPreview,
+        options: [.initial, .new]
+      ) { [weak layer] coordinator, _ in
+        guard let connection = layer?.connection else { return }
+        let angle = coordinator.videoRotationAngleForHorizonLevelPreview
+        guard connection.isVideoRotationAngleSupported(angle) else { return }
+        connection.videoRotationAngle = angle
+      }
+    }
   }
 
   private func stopCamera() {
+    cameraRotationObservation?.invalidate()
+    cameraRotationObservation = nil
+    cameraRotationCoordinator = nil
     cameraPreviewLayer?.removeFromSuperlayer()
     cameraPreviewLayer = nil
     cameraQueue.async { [weak self] in
@@ -920,6 +802,15 @@ private final class NativeAttachmentPopoverViewController:
     ) {
       self.cameraCaptureButton?.transform = .identity
     }
+    if let connection = cameraOutput.connection(with: .video),
+      let cameraRotationCoordinator
+    {
+      let angle =
+        cameraRotationCoordinator.videoRotationAngleForHorizonLevelCapture
+      if connection.isVideoRotationAngleSupported(angle) {
+        connection.videoRotationAngle = angle
+      }
+    }
     cameraOutput.capturePhoto(
       with: AVCapturePhotoSettings(),
       delegate: self
@@ -931,20 +822,58 @@ private final class NativeAttachmentPopoverViewController:
     didFinishProcessingPhoto photo: AVCapturePhoto,
     error: Error?
   ) {
-    cameraIsCapturing = false
-    cameraCaptureButton?.isEnabled = true
     guard error == nil, let data = photo.fileDataRepresentation() else {
-      showError("Unable to capture the photo.")
+      DispatchQueue.main.async { [weak self] in
+        self?.completeCameraCapture(
+          path: nil,
+          errorMessage: "Unable to capture the photo."
+        )
+      }
       return
     }
-    do {
-      let destinationURL = FileManager.default.temporaryDirectory
-        .appendingPathComponent(UUID().uuidString)
-        .appendingPathExtension("jpg")
-      try data.write(to: destinationURL, options: .atomic)
-      finish(method: "cameraCaptured", arguments: destinationURL.path)
-    } catch {
-      showError("Unable to prepare the captured photo.")
+
+    DispatchQueue.global(qos: .userInitiated).async {
+      do {
+        let destinationURL = FileManager.default.temporaryDirectory
+          .appendingPathComponent(UUID().uuidString)
+          .appendingPathExtension("jpg")
+        try data.write(to: destinationURL, options: .atomic)
+        DispatchQueue.main.async { [weak self] in
+          guard let self else {
+            Self.removeTemporaryFiles([destinationURL.path])
+            return
+          }
+          self.completeCameraCapture(
+            path: destinationURL.path,
+            errorMessage: nil
+          )
+        }
+      } catch {
+        DispatchQueue.main.async { [weak self] in
+          self?.completeCameraCapture(
+            path: nil,
+            errorMessage: "Unable to prepare the captured photo."
+          )
+        }
+      }
+    }
+  }
+
+  @MainActor
+  private func completeCameraCapture(
+    path: String?,
+    errorMessage: String?
+  ) {
+    cameraIsCapturing = false
+    cameraCaptureButton?.isEnabled = true
+    if let path {
+      finish(
+        method: "cameraCaptured",
+        arguments: path,
+        temporaryPaths: [path]
+      )
+    } else if !isFinishing, let errorMessage {
+      showError(errorMessage)
     }
   }
 
@@ -990,22 +919,54 @@ private final class NativeAttachmentPopoverViewController:
     photoPickerViewController = nil
   }
 
-  private func finish(method: String, arguments: Any? = nil) {
+  private func finish(
+    method: String,
+    arguments: Any? = nil,
+    temporaryPaths: [String] = []
+  ) {
+    guard !isFinishing else {
+      Self.removeTemporaryFiles(temporaryPaths)
+      return
+    }
+    isFinishing = true
+    view.isUserInteractionEnabled = false
+    selectionGeneration += 1
+    selectionTask?.cancel()
+    selectionTask = nil
     stopCamera()
     dismiss(animated: true) { [weak self] in
-      guard let self else { return }
-      self.channel.invokeMethod(method, arguments: arguments)
+      guard let self else {
+        Self.removeTemporaryFiles(temporaryPaths)
+        return
+      }
+      self.channel.invokeMethod(method, arguments: arguments) { _ in
+        Self.removeTemporaryFiles(temporaryPaths)
+      }
       self.notifyDismissalIfNeeded()
     }
   }
 
-  fileprivate func dismissAndNotify() {
+  func dismissAndNotify() {
+    guard !isFinishing else { return }
+    isFinishing = true
+    view.isUserInteractionEnabled = false
+    selectionGeneration += 1
+    selectionTask?.cancel()
+    selectionTask = nil
+    Self.removeTemporaryFiles(selectedPhotoPaths)
+    selectedPhotoPaths = []
+    stopCamera()
     dismiss(animated: true) { [weak self] in
       self?.notifyDismissalIfNeeded()
     }
   }
 
   private func notifyDismissalIfNeeded() {
+    selectionGeneration += 1
+    selectionTask?.cancel()
+    selectionTask = nil
+    Self.removeTemporaryFiles(selectedPhotoPaths)
+    selectedPhotoPaths = []
     guard !didNotifyDismissal else { return }
     didNotifyDismissal = true
     onDismiss?()

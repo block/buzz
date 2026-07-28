@@ -76,9 +76,16 @@ class _IOSInlinePhotoPicker extends HookWidget {
       if (!canSelect) return;
       isProcessing.value = true;
       try {
-        await onChoosePhotos([
-          for (final path in selectedPaths.value) XFile(path),
-        ]);
+        final paths = List<String>.from(selectedPaths.value);
+        final claimed =
+            await pickerChannel.value?.invokeMethod<bool>(
+              'claimSelection',
+              paths,
+            ) ??
+            false;
+        if (!claimed) return;
+        final photos = [for (final path in paths) XFile(path)];
+        await processTemporaryImages(photos, onChoosePhotos);
       } finally {
         if (context.mounted) isProcessing.value = false;
       }

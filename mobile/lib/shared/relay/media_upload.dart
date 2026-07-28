@@ -255,8 +255,10 @@ class MediaUploadService {
     return uploadImage(XFile.fromData(bytes));
   }
 
+  /// Opens the system gallery video picker.
   Future<XFile?> pickGalleryVideo() => _pickGalleryVideo();
 
+  /// Sanitizes and uploads [pickedVideo] as an MP4 attachment.
   Future<BlobDescriptor> uploadVideo(XFile pickedVideo) async {
     final length = await pickedVideo.length();
     if (length > _maxVideoSizeBytes) {
@@ -296,6 +298,7 @@ class MediaUploadService {
     return uploadVideo(pickedVideo);
   }
 
+  /// Opens the system document picker for a generic file attachment.
   Future<XFile?> pickAttachmentFile() async {
     final pickAttachmentFile = _pickAttachmentFile;
     if (pickAttachmentFile == null) {
@@ -304,6 +307,7 @@ class MediaUploadService {
     return pickAttachmentFile();
   }
 
+  /// Uploads [pickedFile] as a size-limited generic attachment.
   Future<BlobDescriptor> uploadFile(XFile pickedFile) async {
     final length = await pickedFile.length();
     if (length == 0) {

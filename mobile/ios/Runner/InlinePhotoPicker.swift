@@ -36,6 +36,8 @@ final class InlinePhotoPickerPlatformView: NSObject, FlutterPlatformView {
   private weak var parentViewController: UIViewController?
   private var pickerViewController: PHPickerViewController?
   private var selectionGeneration = 0
+  private var selectionTask: Task<Void, Never>?
+  private var selectedTemporaryPaths: [String] = []
 
   init(
     frame: CGRect,
@@ -51,6 +53,20 @@ final class InlinePhotoPickerPlatformView: NSObject, FlutterPlatformView {
     self.parentViewController = parentViewController
     super.init()
 
+    channel.setMethodCallHandler { [weak self] call, result in
+      guard call.method == "claimSelection" else {
+        result(FlutterMethodNotImplemented)
+        return
+      }
+      let paths = call.arguments as? [String] ?? []
+      guard let self, paths == self.selectedTemporaryPaths else {
+        result(false)
+        return
+      }
+      self.selectedTemporaryPaths = []
+      result(true)
+    }
+
     containerView.backgroundColor = .clear
     if #available(iOS 17.0, *) {
       installPicker()
@@ -58,6 +74,9 @@ final class InlinePhotoPickerPlatformView: NSObject, FlutterPlatformView {
   }
 
   deinit {
+    selectionTask?.cancel()
+    Self.removeTemporaryFiles(selectedTemporaryPaths)
+    channel.setMethodCallHandler(nil)
     pickerViewController?.willMove(toParent: nil)
     pickerViewController?.view.removeFromSuperview()
     pickerViewController?.removeFromParent()
@@ -73,7 +92,7 @@ final class InlinePhotoPickerPlatformView: NSObject, FlutterPlatformView {
     configuration.filter = .images
     configuration.selectionLimit = 0
     configuration.selection = .continuousAndOrdered
-    configuration.preferredAssetRepresentationMode = .current
+    configuration.preferredAssetRepresentationMode = .compatible
     configuration.disabledCapabilities = [
       .search,
       .stagingArea,
@@ -128,7 +147,8 @@ final class InlinePhotoPickerPlatformView: NSObject, FlutterPlatformView {
         }
 
         do {
-          let fileExtension = sourceURL.pathExtension.isEmpty
+          let fileExtension =
+            sourceURL.pathExtension.isEmpty
             ? (UTType(typeIdentifier)?.preferredFilenameExtension ?? "jpg")
             : sourceURL.pathExtension
           let destinationURL = FileManager.default.temporaryDirectory
@@ -145,6 +165,12 @@ final class InlinePhotoPickerPlatformView: NSObject, FlutterPlatformView {
       }
     }
   }
+
+  private static func removeTemporaryFiles(_ paths: [String]) {
+    for path in paths where !path.isEmpty {
+      try? FileManager.default.removeItem(atPath: path)
+    }
+  }
 }
 
 extension InlinePhotoPickerPlatformView: PHPickerViewControllerDelegate {
@@ -154,6 +180,10 @@ extension InlinePhotoPickerPlatformView: PHPickerViewControllerDelegate {
   ) {
     selectionGeneration += 1
     let generation = selectionGeneration
+    selectionTask?.cancel()
+    selectionTask = nil
+    Self.removeTemporaryFiles(selectedTemporaryPaths)
+    selectedTemporaryPaths = []
     channel.invokeMethod(
       "selectionCountChanged",
       arguments: results.count
@@ -164,20 +194,32 @@ extension InlinePhotoPickerPlatformView: PHPickerViewControllerDelegate {
       return
     }
 
-    Task {
+    selectionTask = Task { [weak self] in
+      guard let self else { return }
+      var paths: [String] = []
       do {
-        var paths: [String] = []
         for result in results {
-          paths.append(try await exportPickerResult(result))
+          try Task.checkCancellation()
+          paths.append(try await self.exportPickerResult(result))
         }
+        try Task.checkCancellation()
         await MainActor.run {
-          guard generation == selectionGeneration else { return }
-          channel.invokeMethod("selectionDidChange", arguments: paths)
+          guard generation == self.selectionGeneration else {
+            Self.removeTemporaryFiles(paths)
+            return
+          }
+          self.selectedTemporaryPaths = paths
+          self.selectionTask = nil
+          self.channel.invokeMethod("selectionDidChange", arguments: paths)
         }
+      } catch is CancellationError {
+        Self.removeTemporaryFiles(paths)
       } catch {
+        Self.removeTemporaryFiles(paths)
         await MainActor.run {
-          guard generation == selectionGeneration else { return }
-          channel.invokeMethod(
+          guard generation == self.selectionGeneration else { return }
+          self.selectionTask = nil
+          self.channel.invokeMethod(
             "didFail",
             arguments: "Unable to prepare the selected photos."
           )
