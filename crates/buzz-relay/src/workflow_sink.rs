@@ -606,6 +606,22 @@ impl ActionSink for RelayActionSink {
                 ActionSinkError::InvalidInput(format!("invalid author pubkey: {e}"))
             })?;
 
+            // Verify the recipient is a member of the workflow's community
+            // before opening a DM channel. Without this, a workflow could
+            // create DM channels to arbitrary pubkeys outside the community
+            // (spam surface). The owner is implicitly a member (they authored
+            // the workflow), so only the recipient needs checking.
+            let recipient_is_member = state
+                .db
+                .is_relay_member(community_id, &recipient_pubkey)
+                .await
+                .map_err(|e| ActionSinkError::Database(format!("is_relay_member: {e}")))?;
+            if !recipient_is_member {
+                return Err(ActionSinkError::InvalidInput(format!(
+                    "send_dm recipient {recipient_pubkey} is not a member of community {community_id}"
+                )));
+            }
+
             // Open (or reuse) a private DM channel between owner + recipient.
             // Buzz models DMs as private channels, not NIP-17 gift-wraps.
             let participant_refs: Vec<&[u8]> = vec![&recipient_bytes];

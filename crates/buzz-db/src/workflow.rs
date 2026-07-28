@@ -449,6 +449,38 @@ pub async fn list_enabled_channel_workflows(
     rows.into_iter().map(row_to_workflow_record).collect()
 }
 
+/// Atomically expire pending approvals whose `expires_at` has passed.
+///
+/// Selects pending approvals where `expires_at <= now`, updates them to
+/// `expired` in the same statement (so two concurrent reapers cannot both
+/// act), and returns the `(community_id, run_id)` pairs so the caller can
+/// transition the waiting runs to `Failed`. Without this, expired approvals
+/// accumulate indefinitely and their runs stay stuck in `waiting_approval`.
+pub async fn expire_pending_approvals(
+    pool: &PgPool,
+    now: DateTime<Utc>,
+) -> Result<Vec<(CommunityId, Uuid)>> {
+    let rows = sqlx::query(
+        r#"
+        UPDATE workflow_approvals
+        SET status = 'expired'
+        WHERE status = 'pending' AND expires_at <= $1
+        RETURNING community_id, run_id
+        "#,
+    )
+    .bind(now)
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter()
+        .map(|row| {
+            let community_id: Uuid = row.try_get("community_id")?;
+            let run_id: Uuid = row.try_get("run_id")?;
+            Ok((CommunityId::from_uuid(community_id), run_id))
+        })
+        .collect()
+}
+
 /// List all active, enabled workflows with a `schedule` trigger across all channels.
 ///
 /// Used by the cron scheduler. Filters by trigger type in SQL to avoid loading

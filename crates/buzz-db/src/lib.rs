@@ -2541,6 +2541,18 @@ impl Db {
         workflow::list_all_enabled_workflows(&self.pool).await
     }
 
+    /// Atomically expire pending approvals whose `expires_at` has passed.
+    ///
+    /// Returns the `(community_id, run_id)` pairs of the expired approvals so
+    /// the caller can transition the waiting runs to `Failed`. See
+    /// [`workflow::expire_pending_approvals`] for details.
+    pub async fn expire_pending_approvals(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<(CommunityId, uuid::Uuid)>> {
+        workflow::expire_pending_approvals(&self.pool, now).await
+    }
+
     /// Claim a scheduled workflow fire for an authoritative schedule instant.
     ///
     /// Returns `Some` only for the first pod to claim `(community_id,

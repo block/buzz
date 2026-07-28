@@ -846,7 +846,11 @@ pub async fn dispatch_action(
             };
 
             // Emit the kind:46010 request event so approvers are notified.
-            engine
+            // If publication fails, mark the just-created approval row as
+            // denied so it doesn't linger as a phantom pending row that the
+            // reaper would later expire — fail fast with a clear error instead
+            // of leaving the run stuck in waiting_approval with no notify.
+            if let Err(e) = engine
                 .action_sink()?
                 .request_approval(
                     community_id,
@@ -856,7 +860,29 @@ pub async fn dispatch_action(
                     &owner_pubkey_hex,
                 )
                 .await
-                .map_err(WorkflowError::from)?;
+            {
+                // Best-effort cleanup: mark the approval denied so the reaper
+                // doesn't have to wait for expiry. A failure here is logged,
+                // not fatal — the reaper will still clean it up on expiry.
+                let err = WorkflowError::from(e);
+                if let Err(cleanup_err) = engine
+                    .db
+                    .update_approval(
+                        community_id,
+                        &token,
+                        buzz_db::workflow::ApprovalStatus::Denied,
+                        None,
+                        Some("approval request event publication failed"),
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        run_id = %run_id,
+                        "Failed to clean up approval after event publish failure: {cleanup_err}"
+                    );
+                }
+                return Err(err);
+            }
 
             Ok(StepResult::Suspended {
                 approval_token: token,

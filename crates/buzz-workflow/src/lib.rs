@@ -462,6 +462,15 @@ impl WorkflowEngine {
 
             let now = Utc::now();
 
+            // Reap expired approval requests: transition pending approvals past
+            // their expires_at to 'expired' (atomically, so only one pod acts)
+            // and fail the waiting runs so they don't stick in waiting_approval
+            // forever. The update + run-fail are separate statements, so a
+            // crash between them leaves an 'expired' approval with a still-
+            // 'waiting_approval' run — harmless: the next tick reaps it again
+            // (update returns no rows) but the run is failed idempotently.
+            self.reap_expired_approvals(now).await;
+
             let workflows = match self.db.list_all_enabled_workflows().await {
                 Ok(wf) => wf,
                 Err(e) => {
@@ -697,6 +706,57 @@ impl WorkflowEngine {
             let active_ids: std::collections::HashSet<(CommunityId, Uuid)> =
                 workflows.iter().map(|w| (w.community_id, w.id)).collect();
             self.last_fired.retain(|key, _| active_ids.contains(key));
+        }
+    }
+
+    /// Reap expired pending approvals and fail their waiting runs.
+    ///
+    /// Called from the cron loop each tick. `expire_pending_approvals` is an
+    /// atomic `UPDATE ... WHERE status='pending' AND expires_at <= now
+    /// RETURNING`, so across N pods only the rows one pod updates are returned
+    /// to it — no double-fail. Each returned `(community, run)` is transitioned
+    /// to `Failed` with an explanatory error message; the run's stored trace is
+    /// preserved for diagnostics.
+    async fn reap_expired_approvals(&self, now: DateTime<Utc>) {
+        let expired = match self.db.expire_pending_approvals(now).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("Cron tick: failed to reap expired approvals: {e}");
+                return;
+            }
+        };
+        for (community_id, run_id) in expired {
+            // Load the current trace to preserve it in the failed run.
+            let trace = self
+                .db
+                .get_workflow_run(community_id, run_id)
+                .await
+                .map(|r| r.execution_trace)
+                .unwrap_or(serde_json::json!([]));
+            if let Err(e) = self
+                .db
+                .update_workflow_run(
+                    community_id,
+                    run_id,
+                    buzz_db::workflow::RunStatus::Failed,
+                    0,
+                    &trace,
+                    Some("approval request expired before a decision was made"),
+                )
+                .await
+            {
+                tracing::warn!(
+                    community_id = %community_id,
+                    run_id = %run_id,
+                    "Cron tick: failed to mark expired-approval run as failed: {e}"
+                );
+            } else {
+                tracing::info!(
+                    community_id = %community_id,
+                    run_id = %run_id,
+                    "Workflow run failed — approval expired"
+                );
+            }
         }
     }
 }
