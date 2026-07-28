@@ -3,6 +3,68 @@ use crate::error::CliError;
 use crate::validate::{read_or_stdin, sdk_err, validate_hex64, validate_repo_id};
 use buzz_sdk::{GitIssueMeta, GitRepoCoord, GitStatusMeta};
 
+fn issue_comment_recipients(
+    raw: &str,
+    issue_id: &str,
+    repo: &GitRepoCoord,
+    additional: &[String],
+) -> Result<Vec<String>, CliError> {
+    let events: Vec<serde_json::Value> = serde_json::from_str(raw)
+        .map_err(|error| CliError::Other(format!("failed to parse relay response: {error}")))?;
+    let issue = events
+        .iter()
+        .find(|event| {
+            event.get("kind").and_then(serde_json::Value::as_u64) == Some(1621)
+                && event
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|id| id.eq_ignore_ascii_case(issue_id))
+        })
+        .ok_or_else(|| CliError::NotFound(format!("issue not found: {issue_id}")))?;
+    let tags = issue
+        .get("tags")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| CliError::Other("issue event is missing tags".into()))?;
+    let repo_address = format!("30617:{}:{}", repo.owner.to_ascii_lowercase(), repo.id);
+    let belongs_to_repo = tags.iter().any(|tag| {
+        tag.as_array().is_some_and(|values| {
+            values.first().and_then(serde_json::Value::as_str) == Some("a")
+                && values.get(1).and_then(serde_json::Value::as_str) == Some(repo_address.as_str())
+        })
+    });
+    if !belongs_to_repo {
+        return Err(CliError::Usage(format!(
+            "issue {issue_id} does not belong to repository {repo_address}"
+        )));
+    }
+
+    let author = issue
+        .get("pubkey")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| CliError::Other("issue event is missing its author pubkey".into()))?;
+    validate_hex64(author)
+        .map_err(|_| CliError::Other("issue event has an invalid author pubkey".into()))?;
+
+    let mut recipients = vec![author.to_ascii_lowercase()];
+    for tag in tags {
+        let Some(values) = tag.as_array() else {
+            continue;
+        };
+        if values.first().and_then(serde_json::Value::as_str) != Some("p") {
+            continue;
+        }
+        let recipient = values
+            .get(1)
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| CliError::Other("issue event contains an invalid p tag".into()))?;
+        validate_hex64(recipient)
+            .map_err(|_| CliError::Other("issue event contains an invalid p tag".into()))?;
+        recipients.push(recipient.to_ascii_lowercase());
+    }
+    recipients.extend(additional.iter().cloned());
+    Ok(recipients)
+}
+
 pub async fn cmd_comment_issue(
     client: &BuzzClient,
     issue: &str,
@@ -24,7 +86,16 @@ pub async fn cmd_comment_issue(
         owner: repo_owner.to_string(),
         id: repo_id.to_string(),
     };
-    let builder = buzz_sdk::build_git_issue_comment(&repo, issue, body, to).map_err(sdk_err)?;
+    let issue_id = issue.to_ascii_lowercase();
+    let filter = serde_json::json!({
+        "kinds": [1621],
+        "ids": [issue_id],
+        "limit": 1,
+    });
+    let raw = client.query(&filter).await?;
+    let recipients = issue_comment_recipients(&raw, &issue_id, &repo, to)?;
+    let builder =
+        buzz_sdk::build_git_issue_comment(&repo, &issue_id, body, &recipients).map_err(sdk_err)?;
     let event = client.sign_event(builder)?;
     let resp = client.submit_event(event).await?;
     println!("{resp}");
@@ -229,5 +300,77 @@ pub async fn dispatch(cmd: crate::IssuesCmd, client: &BuzzClient) -> Result<(), 
             )
             .await
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn issue_event_json(
+        issue_id: &str,
+        author: &str,
+        repo_address: &str,
+        recipients: &[&str],
+    ) -> String {
+        let mut tags = vec![serde_json::json!(["a", repo_address])];
+        tags.extend(
+            recipients
+                .iter()
+                .map(|recipient| serde_json::json!(["p", recipient])),
+        );
+        serde_json::json!([{
+            "id": issue_id,
+            "pubkey": author,
+            "kind": 1621,
+            "tags": tags,
+        }])
+        .to_string()
+    }
+
+    #[test]
+    fn comment_recipients_include_issue_author_and_existing_recipients() {
+        let owner = "a".repeat(64);
+        let author = "b".repeat(64);
+        let existing = "c".repeat(64);
+        let additional = "d".repeat(64);
+        let issue_id = "e".repeat(64);
+        let repo = GitRepoCoord {
+            owner: owner.clone(),
+            id: "repo".into(),
+        };
+        let raw = issue_event_json(
+            &issue_id,
+            &author,
+            &format!("30617:{owner}:repo"),
+            &[&owner, &existing],
+        );
+
+        let recipients =
+            issue_comment_recipients(&raw, &issue_id, &repo, std::slice::from_ref(&additional))
+                .unwrap();
+
+        assert_eq!(recipients, vec![author, owner, existing, additional]);
+    }
+
+    #[test]
+    fn comment_recipients_reject_issue_from_another_repo() {
+        let owner = "a".repeat(64);
+        let issue_id = "e".repeat(64);
+        let repo = GitRepoCoord {
+            owner,
+            id: "expected".into(),
+        };
+        let raw = issue_event_json(
+            &issue_id,
+            &"b".repeat(64),
+            &format!("30617:{}:other", "a".repeat(64)),
+            &[],
+        );
+
+        let error = issue_comment_recipients(&raw, &issue_id, &repo, &[]).unwrap_err();
+
+        assert!(matches!(error, CliError::Usage(_)));
+        assert!(error.to_string().contains("does not belong to repository"));
     }
 }
