@@ -337,18 +337,20 @@ class _OriginalPost extends ConsumerWidget {
               Expanded(
                 child: Row(
                   children: [
-                    Flexible(
+                    Expanded(
                       child: GestureDetector(
                         onTap: () => showUserProfileSheet(context, post.pubkey),
                         child: Text(
                           displayName,
+                          maxLines: 1,
                           style: messageUsernameTextStyle,
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),
                     ),
                     const SizedBox(width: Grid.xxs),
-                    Flexible(
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: Grid.xxl),
                       child: Text(
                         formatRelativeTime(post.createdAt),
                         maxLines: 1,
@@ -425,7 +427,7 @@ class _ReplyRow extends ConsumerWidget {
               Expanded(
                 child: Row(
                   children: [
-                    Flexible(
+                    Expanded(
                       child: GestureDetector(
                         onTap: () =>
                             showUserProfileSheet(context, reply.pubkey),
@@ -438,7 +440,8 @@ class _ReplyRow extends ConsumerWidget {
                       ),
                     ),
                     const SizedBox(width: Grid.xxs),
-                    Flexible(
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: Grid.xxl),
                       child: Text(
                         formatRelativeTime(reply.createdAt),
                         maxLines: 1,

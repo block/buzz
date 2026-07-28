@@ -216,6 +216,30 @@ void main() {
       },
     );
 
+    testWidgets('gives the author unused timestamp width', (tester) async {
+      _setSurfaceSize(tester, const Size(320, 600));
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+      final createdAt = DateTime.now().millisecondsSinceEpoch ~/ 1000 - 120;
+      const displayName = 'A moderately long forum author name';
+
+      await tester.pumpWidget(
+        _buildPostCard(
+          post: _makePost(createdAt: createdAt),
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: displayName),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(tester.getSize(find.text(displayName)).width, greaterThan(150));
+      expect(find.text('2m ago'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+
     testWidgets('truncates long content', (tester) async {
       final longContent = 'A' * 300;
       await tester.pumpWidget(
@@ -584,6 +608,50 @@ void main() {
         expect(timestamp.maxLines, 1);
         expect(timestamp.overflow, TextOverflow.ellipsis);
       }
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('gives thread authors unused timestamp width', (tester) async {
+      _setSurfaceSize(tester, const Size(320, 800));
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+      final createdAt = DateTime.now().millisecondsSinceEpoch ~/ 1000 - 120;
+      const postAuthor = 'A moderately long original author';
+      const replyAuthor = 'A moderately long reply author';
+
+      await tester.pumpWidget(
+        _buildThreadPage(
+          threadResponse: ForumThreadResponse(
+            post: _makePost(createdAt: createdAt),
+            replies: [
+              ThreadReply(
+                eventId: 'reply',
+                pubkey: 'bob',
+                content: 'A reply',
+                kind: 45003,
+                createdAt: createdAt,
+                channelId: _channelId,
+                tags: const [
+                  ['h', _channelId],
+                ],
+                depth: 1,
+              ),
+            ],
+            totalReplies: 1,
+          ),
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: postAuthor),
+            'bob': UserProfile(pubkey: 'bob', displayName: replyAuthor),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(tester.getSize(find.text(postAuthor)).width, greaterThan(150));
+      expect(tester.getSize(find.text(replyAuthor)).width, greaterThan(140));
+      expect(find.text('2m ago'), findsNWidgets(2));
       expect(tester.takeException(), isNull);
     });
 

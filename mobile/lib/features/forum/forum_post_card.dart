@@ -71,19 +71,21 @@ class ForumPostCard extends ConsumerWidget {
                   child: _PostAvatar(profile: profile, pubkey: post.pubkey),
                 ),
                 const SizedBox(width: Grid.xxs),
-                Flexible(
+                Expanded(
                   child: GestureDetector(
                     behavior: HitTestBehavior.opaque,
                     onTap: () => showUserProfileSheet(context, post.pubkey),
                     child: Text(
                       displayName,
+                      maxLines: 1,
                       style: messageUsernameTextStyle,
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
                 ),
                 const SizedBox(width: Grid.xxs),
-                Flexible(
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: Grid.xxl),
                   child: Text(
                     formatRelativeTime(post.createdAt),
                     maxLines: 1,
