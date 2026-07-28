@@ -176,6 +176,7 @@ impl ActionSink for RelayActionSink {
         channel_id: &str,
         text: &str,
         author_pubkey: &str,
+        workflow_depth: usize,
     ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>> {
         let channel_id = channel_id.to_owned();
         let text = text.to_owned();
@@ -254,15 +255,19 @@ impl ActionSink for RelayActionSink {
             //    - Signed by relay keypair (event.pubkey = relay pubkey)
             //    - `p` tag attributes the message to the workflow owner
             //    - `h` tag scopes to the channel (NIP-29, canonical UUID)
-            //    - `buzz:workflow` tag prevents recursive workflow triggering
+            //    - `buzz:workflow` tag carries the trigger-chain depth so the
+            //      engine can cap cross-workflow loops (A→B→A). Legacy form
+            //      `["buzz:workflow","true"]` (no depth) is treated as depth 0
+            //      on read, so older workflow messages still parse.
             //    - one `p` tag per `@Name` that resolves to a channel member,
             //      so mentioned agents are woken (wake is `p`-tag gated)
+            let workflow_tag_depth = workflow_depth.to_string();
             let mut tags = vec![
                 Tag::parse(["p", &author_pubkey_hex])
                     .map_err(|e| ActionSinkError::EventBuild(format!("p tag: {e}")))?,
                 Tag::parse(["h", &channel_id_canonical])
                     .map_err(|e| ActionSinkError::EventBuild(format!("h tag: {e}")))?,
-                Tag::parse(["buzz:workflow", "true"])
+                Tag::parse(["buzz:workflow", "true", &workflow_tag_depth])
                     .map_err(|e| ActionSinkError::EventBuild(format!("workflow tag: {e}")))?,
             ];
 

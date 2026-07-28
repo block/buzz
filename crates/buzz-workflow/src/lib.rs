@@ -53,6 +53,16 @@ use dashmap::DashMap;
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 
+/// Maximum depth of the workflow trigger chain.
+///
+/// A human-authored event starts at depth 0. When a workflow run produces an
+/// event that triggers another workflow, the depth increments. This cap
+/// prevents unbounded cross-workflow loops (A→B→A→…) that the single-hop
+/// `buzz:workflow` tag check in the relay cannot catch — that check only
+/// suppresses the *immediate* echo of a relay-authored message back to the
+/// same harness, not transitive chains across distinct workflows.
+pub const MAX_WORKFLOW_DEPTH: usize = 3;
+
 /// Runtime configuration for the workflow engine.
 #[derive(Clone, Debug)]
 pub struct WorkflowConfig {
@@ -314,6 +324,25 @@ impl WorkflowEngine {
         }
 
         let trigger_ctx = build_trigger_context(event);
+
+        // Suppress triggering when the event is already deep in a workflow
+        // chain. This catches cross-workflow loops (A→B→A) that the relay's
+        // single-hop `buzz:workflow` tag check cannot — that check only
+        // suppresses the immediate echo of a relay-authored message, not
+        // transitive chains across distinct workflows. Depth 0 = human event.
+        if trigger_ctx.workflow_depth > MAX_WORKFLOW_DEPTH {
+            tracing::warn!(
+                community_id = %community_id,
+                channel_id = %channel_id,
+                depth = trigger_ctx.workflow_depth,
+                event_id = %event.event.id.to_hex(),
+                "Suppressing workflow trigger — chain depth {} exceeds max {} \
+                 (possible cross-workflow loop)",
+                trigger_ctx.workflow_depth,
+                MAX_WORKFLOW_DEPTH,
+            );
+            return Ok(());
+        }
 
         let trigger_ctx_json: serde_json::Value = match serde_json::to_value(&trigger_ctx) {
             Ok(v) => v,
@@ -885,6 +914,32 @@ pub fn build_trigger_context(event: &buzz_core::StoredEvent) -> executor::Trigge
     let kind_u32 = event_kind_u32(&event.event);
     let content = event.event.content.clone();
 
+    // Extract the workflow trigger-chain depth from the `buzz:workflow` tag.
+    // Workflow-emitted events carry `["buzz:workflow", "true", "<depth>"]`;
+    // human-authored events have no such tag (depth 0). A workflow at depth N
+    // emits events tagged depth N, so the triggered workflow runs at depth N+1.
+    let workflow_depth = event
+        .event
+        .tags
+        .iter()
+        .find_map(|tag| {
+            let parts = tag.as_slice();
+            if parts.first().map(|s| s.as_str()) == Some("buzz:workflow") {
+                // Third element (index 2) is the depth; fall back to 0 for the
+                // legacy two-element form `["buzz:workflow", "true"]`.
+                parts
+                    .get(2)
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .map(|d| d + 1)
+                    // Legacy tag without a depth field → this event was emitted
+                    // by a workflow at an unknown (treat as 0) depth.
+                    .or(Some(1))
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0);
+
     let author = event
         .event
         .tags
@@ -948,6 +1003,7 @@ pub fn build_trigger_context(event: &buzz_core::StoredEvent) -> executor::Trigge
         emoji,
         message_id,
         webhook_fields: HashMap::new(),
+        workflow_depth,
     }
 }
 
@@ -1535,6 +1591,49 @@ steps:
         ctx.timestamp
             .parse::<u64>()
             .expect("timestamp should be a u64 string");
+    }
+
+    #[test]
+    fn build_trigger_context_human_event_has_depth_zero() {
+        let stored = make_message_event();
+        let ctx = build_trigger_context(&stored);
+        assert_eq!(ctx.workflow_depth, 0, "human-authored event → depth 0");
+    }
+
+    #[test]
+    fn build_trigger_context_workflow_event_increments_depth() {
+        use nostr::{EventBuilder, Keys, Kind, Tag};
+        use uuid::Uuid;
+        let keys = Keys::generate();
+        // Simulate a workflow-emitted event tagged depth 2.
+        let wf_tag = Tag::parse(["buzz:workflow", "true", "2"]).expect("tag parse");
+        let event = EventBuilder::new(Kind::Custom(9), "workflow msg")
+            .tags([wf_tag])
+            .sign_with_keys(&keys)
+            .expect("sign");
+        let stored = buzz_core::StoredEvent::new(event, Some(Uuid::new_v4()));
+        let ctx = build_trigger_context(&stored);
+        assert_eq!(
+            ctx.workflow_depth, 3,
+            "depth-2 event → triggered workflow at 3"
+        );
+    }
+
+    #[test]
+    fn build_trigger_context_legacy_workflow_tag_treated_as_depth_1() {
+        // Legacy two-element tag `["buzz:workflow", "true"]` (no depth field).
+        use nostr::{EventBuilder, Keys, Kind, Tag};
+        use uuid::Uuid;
+        let keys = Keys::generate();
+        let wf_tag = Tag::parse(["buzz:workflow", "true"]).expect("tag parse");
+        let event = EventBuilder::new(Kind::Custom(9), "legacy workflow msg")
+            .tags([wf_tag])
+            .sign_with_keys(&keys)
+            .expect("sign");
+        let stored = buzz_core::StoredEvent::new(event, Some(Uuid::new_v4()));
+        let ctx = build_trigger_context(&stored);
+        // Legacy tag → treat the emitting workflow as depth 0, so this is 1.
+        assert_eq!(ctx.workflow_depth, 1);
     }
 
     #[test]

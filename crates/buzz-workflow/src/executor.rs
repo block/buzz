@@ -39,6 +39,13 @@ pub struct TriggerContext {
     pub message_id: String,
     /// Arbitrary webhook body fields (webhook trigger).
     pub webhook_fields: HashMap<String, String>,
+    /// Workflow trigger-chain depth. `0` for a human-authored event;
+    /// `N+1` when the event was produced by a workflow run at depth `N`.
+    /// Capped by [`crate::MAX_WORKFLOW_DEPTH`] to prevent cross-workflow
+    /// loops (A→B→A) that the single-hop `buzz:workflow` tag check cannot
+    /// catch.
+    #[serde(default)]
+    pub workflow_depth: usize,
 }
 
 impl TriggerContext {
@@ -567,7 +574,13 @@ pub async fn dispatch_action(
 
             let event_id = engine
                 .action_sink()?
-                .send_message(community_id, &channel_id, text, &owner_pubkey_hex)
+                .send_message(
+                    community_id,
+                    &channel_id,
+                    text,
+                    &owner_pubkey_hex,
+                    trigger_ctx.workflow_depth,
+                )
                 .await
                 .map_err(WorkflowError::from)?;
 
@@ -1226,7 +1239,7 @@ mod tests {
             timestamp: "1700000000".to_owned(),
             emoji: "fire".to_owned(),
             message_id: "event-id-hex".to_owned(),
-            webhook_fields: HashMap::new(),
+            ..Default::default()
         }
     }
 

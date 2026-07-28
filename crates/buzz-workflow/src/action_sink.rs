@@ -57,6 +57,10 @@ pub trait ActionSink: Send + Sync {
     /// - `text`: message body (must not be empty/whitespace-only)
     /// - `author_pubkey`: hex-encoded pubkey of the workflow owner (used for
     ///   the `p` attribution tag; the relay keypair signs the event)
+    /// - `workflow_depth`: the trigger-chain depth of the run emitting this
+    ///   message. Stamped into the `buzz:workflow` tag so a downstream workflow
+    ///   that triggers off this event can compute its own depth and the engine
+    ///   can cap the chain (see `MAX_WORKFLOW_DEPTH`).
     ///
     /// Returns the event ID hex string on success.
     fn send_message(
@@ -65,5 +69,6 @@ pub trait ActionSink: Send + Sync {
         channel_id: &str,
         text: &str,
         author_pubkey: &str,
+        workflow_depth: usize,
     ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>>;
 }
