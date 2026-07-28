@@ -7,6 +7,7 @@ import {
   HatGlasses,
   Pencil,
   Play,
+  UploadCloud,
   Users,
   X,
 } from "lucide-react";
@@ -39,13 +40,18 @@ import { ComposerImageEditor } from "./ComposerImageEditor";
 export function DropZoneOverlay({ className }: { className?: string }) {
   return (
     <div
+      data-testid="drop-zone-overlay"
       className={cn(
         "pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-2xl border-2 border-dashed border-primary bg-primary/10",
         className,
       )}
     >
-      <span className="text-sm font-medium text-primary">
-        Drop files to upload
+      <span
+        className="flex items-center gap-2 rounded-full bg-foreground px-4 py-2 text-sm font-semibold text-background shadow-sm ring-1 ring-background/15"
+        data-testid="drop-zone-label"
+      >
+        <UploadCloud aria-hidden="true" className="size-4" />
+        <span>Drop files to upload</span>
       </span>
     </div>
   );

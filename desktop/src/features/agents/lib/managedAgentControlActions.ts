@@ -92,13 +92,18 @@ export async function respawnManagedAgentWithRules({
   agent,
   startManagedAgent,
   stopManagedAgent,
+  onStopped,
 }: {
   agent: ManagedAgent;
   startManagedAgent: StartManagedAgent;
   stopManagedAgent: StopManagedAgent;
+  /** Called after a successful stop and before start begins — use this to
+   * clear stale working badges at the right boundary. */
+  onStopped?: () => void;
 }) {
   if (agent.backend.type === "local" && isManagedAgentActive(agent)) {
     await stopManagedAgent(agent.pubkey);
+    onStopped?.();
   }
 
   await startManagedAgent(agent.pubkey);

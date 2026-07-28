@@ -1,5 +1,99 @@
 part of '../compose_bar.dart';
 
+class _SuggestionPanelMotion extends HookWidget {
+  final Duration duration;
+  final Alignment alignment;
+  final Widget child;
+
+  const _SuggestionPanelMotion({
+    required this.duration,
+    required this.alignment,
+    required this.child,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final reducedMotion = MediaQuery.disableAnimationsOf(context);
+    final springController = useAnimationController(
+      initialValue: 1,
+      upperBound: 1.08,
+    );
+    final springValue = useAnimation(springController);
+    final previousChildKey = useRef<Key?>(child.key);
+
+    useEffect(() {
+      if (previousChildKey.value == child.key) return null;
+      previousChildKey.value = child.key;
+      if (reducedMotion) {
+        springController.value = 1;
+      } else {
+        springController
+          ..stop()
+          ..value = 0.9
+          ..animateWith(
+            SpringSimulation(
+              SpringDescription.withDurationAndBounce(
+                duration: const Duration(milliseconds: 320),
+                bounce: 0.18,
+              ),
+              0.9,
+              1,
+              0,
+              snapToEnd: true,
+            ),
+          );
+      }
+      return null;
+    }, [child.key, reducedMotion]);
+
+    return Transform.scale(
+      scale: springValue,
+      alignment: alignment,
+      child: AnimatedSize(
+        duration: duration,
+        curve: Curves.easeInOutCubic,
+        alignment: alignment,
+        child: AnimatedSwitcher(
+          duration: duration,
+          reverseDuration: duration,
+          layoutBuilder: (currentChild, previousChildren) => Stack(
+            alignment: alignment,
+            clipBehavior: Clip.none,
+            children: [...previousChildren, ?currentChild],
+          ),
+          transitionBuilder: (child, animation) {
+            final curvedAnimation = CurvedAnimation(
+              parent: animation,
+              curve: Curves.easeOutBack,
+              reverseCurve: Curves.easeInOutCubic,
+            );
+
+            return AnimatedBuilder(
+              animation: curvedAnimation,
+              child: child,
+              builder: (context, child) => IgnorePointer(
+                ignoring: animation.status == AnimationStatus.reverse,
+                child: Opacity(
+                  opacity: animation.value.clamp(0.0, 1.0),
+                  child: Transform.translate(
+                    offset: Offset(0, Grid.xs * (1 - animation.value)),
+                    child: Transform.scale(
+                      scale: 0.92 + (0.08 * curvedAnimation.value),
+                      alignment: alignment,
+                      child: child,
+                    ),
+                  ),
+                ),
+              ),
+            );
+          },
+          child: child,
+        ),
+      ),
+    );
+  }
+}
+
 class _MentionSuggestions extends StatelessWidget {
   final List<MentionCandidate> suggestions;
   final Map<String, UserProfile> userCache;
@@ -22,16 +116,11 @@ class _MentionSuggestions extends StatelessWidget {
       clipBehavior: Clip.hardEdge,
       decoration: BoxDecoration(
         color: context.colors.surfaceContainerHighest,
-        borderRadius: const BorderRadius.vertical(
-          top: Radius.circular(Radii.dialog),
+        borderRadius: BorderRadius.circular(Radii.dialog),
+        border: Border.all(
+          color: Colors.black.withValues(alpha: 0.04),
+          width: 1,
         ),
-        boxShadow: [
-          BoxShadow(
-            color: context.colors.shadow.withValues(alpha: 0.08),
-            blurRadius: 8,
-            offset: const Offset(0, -2),
-          ),
-        ],
       ),
       child: ListView.separated(
         shrinkWrap: true,
@@ -49,16 +138,17 @@ class _MentionSuggestions extends StatelessWidget {
             visualDensity: VisualDensity.compact,
             leading: AvatarImage(
               imageUrl: avatarUrl,
-              radius: 14,
+              radius: 18,
               backgroundColor: context.colors.primaryContainer,
               fallback: Text(
                 name[0].toUpperCase(),
-                style: context.textTheme.labelSmall?.copyWith(
+                style: context.textTheme.labelMedium?.copyWith(
                   color: context.colors.onPrimaryContainer,
+                  fontWeight: FontWeight.w600,
                 ),
               ),
             ),
-            title: Text(name, style: context.textTheme.bodyMedium),
+            title: Text(name, style: context.textTheme.titleSmall),
             subtitle: _MentionSuggestionInfo.build(
               context,
               candidate: candidate,
@@ -176,16 +266,11 @@ class _ChannelSuggestions extends StatelessWidget {
       clipBehavior: Clip.hardEdge,
       decoration: BoxDecoration(
         color: context.colors.surfaceContainerHighest,
-        borderRadius: const BorderRadius.vertical(
-          top: Radius.circular(Radii.dialog),
+        borderRadius: BorderRadius.circular(Radii.dialog),
+        border: Border.all(
+          color: Colors.black.withValues(alpha: 0.04),
+          width: 1,
         ),
-        boxShadow: [
-          BoxShadow(
-            color: context.colors.shadow.withValues(alpha: 0.08),
-            blurRadius: 8,
-            offset: const Offset(0, -2),
-          ),
-        ],
       ),
       child: ListView.separated(
         shrinkWrap: true,
@@ -197,21 +282,16 @@ class _ChannelSuggestions extends StatelessWidget {
           return ListTile(
             dense: true,
             visualDensity: VisualDensity.compact,
-            leading: Icon(
-              channel.isForum ? LucideIcons.messageSquare : LucideIcons.hash,
-              size: 18,
-              color: context.colors.onSurfaceVariant,
-            ),
-            title: Text(
-              '#${channel.name}',
-              style: context.textTheme.bodyMedium,
-            ),
-            trailing: Text(
-              channel.channelType,
-              style: context.textTheme.labelSmall?.copyWith(
+            horizontalTitleGap: 0,
+            leading: SizedBox.square(
+              dimension: 36,
+              child: Icon(
+                LucideIcons.hash,
+                size: 20,
                 color: context.colors.onSurfaceVariant,
               ),
             ),
+            title: Text(channel.name, style: context.textTheme.bodyLarge),
             onTap: () => onSelect(channel),
           );
         },

@@ -11,7 +11,6 @@ import {
   FlaskConical,
   Keyboard,
   LayoutTemplate,
-  LockKeyhole,
   MessagesSquare,
   MonitorCog,
   Moon,
@@ -20,6 +19,7 @@ import {
   Smile,
   Sun,
   SunMoon,
+  Ticket,
   UserRound,
   type LucideIcon,
 } from "lucide-react";
@@ -69,7 +69,7 @@ import {
   withAccentPreviewVars,
 } from "@/shared/theme/useThemePreviewVars";
 import { ChannelTemplatesSettingsCard } from "./ChannelTemplatesSettingsCard";
-import { DoctorSettingsPanel } from "./DoctorSettingsPanel";
+import { HarnessesSettingsPanel } from "./HarnessesSettingsPanel";
 import { ExperimentalFeaturesCard } from "./ExperimentalFeaturesCard";
 import { KeyboardShortcutsCard } from "./KeyboardShortcutsCard";
 import { MeshComputeSettingsCard } from "@/features/mesh-compute/ui/MeshComputeSettingsCard";
@@ -77,7 +77,6 @@ import { MobilePairingCard } from "./MobilePairingCard";
 import { ModerationQueueCard } from "./ModerationQueueCard";
 import { NotificationSettingsCard } from "./NotificationSettingsCard";
 import { PreventSleepSettingsCard } from "./PreventSleepSettingsCard";
-import { ActiveAgentCommunitiesSettingsCard } from "./ActiveAgentCommunitiesSettingsCard";
 import { AgentDefaultsSettingsCard } from "./AgentDefaultsSettingsCard";
 import { HostedCommunitiesSettingsCard } from "./HostedCommunitiesSettingsCard";
 import { SettingsOptionGroup, SettingsOptionRow } from "./SettingsOptionGroup";
@@ -202,8 +201,8 @@ export const settingsSections: SettingsSectionDescriptor[] = [
   },
   {
     value: "community-members",
-    label: "Community access",
-    icon: LockKeyhole,
+    label: "Invites",
+    icon: Ticket,
   },
   {
     value: "moderation",
@@ -814,8 +813,7 @@ export function renderSettingsSection(
       return (
         <div className="space-y-12">
           <PreventSleepSettingsCard />
-          <DoctorSettingsPanel />
-          <ActiveAgentCommunitiesSettingsCard />
+          <HarnessesSettingsPanel />
           <AgentDefaultsSettingsCard />
         </div>
       );

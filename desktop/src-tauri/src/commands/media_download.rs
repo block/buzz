@@ -281,7 +281,7 @@ async fn fetch_blob_bytes_with_cap(
     state: &State<'_, AppState>,
     cap: u64,
 ) -> Result<Vec<u8>, String> {
-    // Fetch bytes via the no-redirect media client (goes through WARP tunnel).
+    // Fetch bytes via the no-redirect media client (goes through the VPN tunnel).
     // A no-redirect client keeps the minted media auth token from being
     // forwarded across origins by a relay-issued 3xx (redirect-hop SSRF); a
     // 3xx is returned verbatim and rejected by the `is_success` check below.
@@ -610,6 +610,7 @@ mod tests {
             version: FORMAT_VERSION,
             definition: AgentSnapshotDefinition {
                 name: "test".to_string(),
+                source_is_builtin: false,
                 system_prompt: None,
                 runtime: None,
                 model: None,
@@ -659,6 +660,7 @@ mod tests {
             version: FORMAT_VERSION,
             definition: AgentSnapshotDefinition {
                 name: "test".to_string(),
+                source_is_builtin: false,
                 system_prompt: None,
                 runtime: None,
                 model: None,
@@ -704,6 +706,7 @@ mod tests {
             version: FORMAT_VERSION,
             definition: AgentSnapshotDefinition {
                 name: "test".to_string(),
+                source_is_builtin: false,
                 system_prompt: None,
                 runtime: None,
                 model: None,
