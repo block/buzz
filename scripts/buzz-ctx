@@ -20,6 +20,7 @@
 #   buzz-ctx agreement export <stream> <reader-pubkey>...  # declare (offer)
 #   buzz-ctx agreement admit <source> <principal> <pubkey>...  # sink trust half
 #   buzz-ctx agreement read <stream> <principal> <pubkey>...   # reader grant
+#   buzz-ctx agreement steward <principal> <steward-pubkey>    # observe+report role
 #   buzz-ctx agreement match <stream>   # evaluate the matched-pair rule
 #   buzz-ctx agreement list             # all declaration heads
 #   buzz-ctx agreement migrate          # sweep config files into declarations
@@ -198,6 +199,22 @@ case "${1:-}" in
             fi
           done
         fi
+        ;;
+      steward)
+        # Operational role grant: observe + report ONLY, per the steward
+        # role in the draft spec. Confers no config authority and no key
+        # custody; scoped to the node named by BUZZ_CTX_NODE.
+        principal="${3:?usage: buzz-ctx agreement steward <principal> <steward-pubkey>}"
+        steward_pk="${4:?steward agent pubkey required}"
+        event="$(jq -n --arg pk "$PUBKEY" --arg d "steward/$NODE_LABEL" \
+          --arg n "$NODE_LABEL" --arg principal "$principal" \
+          --arg steward "$steward_pk" --arg ts "$(date +%s)" \
+          '{pubkey:$pk, created_at:($ts|tonumber), kind:30700,
+            tags:[["d",$d],["n",$n],["p",$steward],["h","shared/steward-reports"]],
+            content:({status:"active", principal:$principal,
+                      powers:["observe","report"]}|tojson)}')"
+        post_event "$event"
+        echo "declared steward/$NODE_LABEL (principal $principal, observe+report)"
         ;;
       match)
         stream="${3:?usage: buzz-ctx agreement match <stream>}"

@@ -1,0 +1,162 @@
+#!/usr/bin/env bash
+# buzz-steward — the read-only steward.
+#
+# An agent principal with observe + report powers and nothing else. On every
+# run it first verifies its own mandate: an ACTIVE owner-signed
+# `steward/<node>` declaration head (kind 30700) naming its pubkey. No
+# mandate, no work — the steward's authority is journal-verified at startup,
+# by the same evaluation rules the adapters enforce.
+#
+# Duties (v0, all observation):
+#   - node health (local sovereign relay + cloud rendezvous)
+#   - governance state per mandated node (journal-governed vs bootstrap,
+#     active head counts per domain)
+#   - agreement drift (open offers, stale admit pins, unscoped heads,
+#     foreign halves without a local matching export)
+#   - custody-exposure notices (mirror-mode exports offered to readers)
+#
+# Reports are ordinary kind-1 events tagged t=steward:report into the
+# shared context, signed with the steward's OWN bound key (NIP-OA
+# capability attached). Unchanged findings are not re-posted: the report
+# body is hashed and compared against the last posted report.
+set -euo pipefail
+
+HOME_DIR="${BUZZ_CTX_HOME:-$HOME/.buzz-local}"
+LOCAL_URL="${BUZZ_CTX_LOCAL:-http://127.0.0.1:7777}"
+CLOUD_URL="${BUZZ_CTX_CLOUD:-https://buzz-portable-relay.ted-slusser-a00.workers.dev}"
+CLIENT="$HOME_DIR/bin/sovereign-client"
+STEWARD_KEY="$HOME_DIR/agents/steward.key"
+STEWARD_AUTH="$HOME_DIR/agents/steward.auth"
+STATE_DIR="$HOME_DIR/steward"
+OWNER_KEY="$HOME_DIR/node.key"
+MACHINE="$(hostname -s)"
+
+die() { echo "buzz-steward: $*" >&2; exit 1; }
+[ -x "$CLIENT" ] || die "missing client at $CLIENT"
+[ -f "$STEWARD_KEY" ] || die "no steward key — commission first: buzz-ctx bind-agent steward"
+[ -f "$OWNER_KEY" ] || die "missing owner key at $OWNER_KEY (needed to identify the owner, never to sign)"
+STEWARD_PUB="$("$CLIENT" pubkey "$STEWARD_KEY")"
+OWNER_PUB="$("$CLIENT" pubkey "$OWNER_KEY")"
+mkdir -p "$STATE_DIR"
+
+relay_for_read() {
+  if curl -sf --max-time 2 "$LOCAL_URL/health" >/dev/null; then
+    echo "$LOCAL_URL"
+  else
+    echo "$CLOUD_URL"
+  fi
+}
+
+RELAY="$(relay_for_read)"
+HEADS="$("$CLIENT" query "$STEWARD_KEY" "$RELAY" '[{"kinds":[30700]}]' | sed 's/^200 //')"
+
+# ── Mandate: which nodes am I steward of? ──────────────────────────────────
+MANDATES="$(printf '%s' "$HEADS" | jq -c --arg me "$STEWARD_PUB" --arg owner "$OWNER_PUB" '
+  [.[]
+   | select(.pubkey == $owner)
+   | select([.tags[] | select(.[0]=="d") | .[1]][0] // "" | startswith("steward/"))
+   | select((.content | fromjson).status // "active" == "active")
+   | select([.tags[] | select(.[0]=="p") | .[1]] | index($me) != null)
+   | [.tags[] | select(.[0]=="n") | .[1]][0]
+   | select(. != null)]
+  | unique')"
+[ "$(printf '%s' "$MANDATES" | jq 'length')" -gt 0 ] \
+  || die "no active steward mandate names this key ($STEWARD_PUB) — mint one: buzz-ctx agreement steward <principal> $STEWARD_PUB"
+
+# ── Observe ────────────────────────────────────────────────────────────────
+health_line() { # $1 label, $2 url
+  if curl -sf --max-time 4 "$2/health" >/dev/null; then
+    echo "- $1: healthy"
+  else
+    echo "- $1: UNREACHABLE"
+  fi
+}
+
+FINDINGS="$(mktemp)"
+{
+  echo "## Health"
+  health_line "ted-laptop ($LOCAL_URL)" "$LOCAL_URL"
+  health_line "cf-rendezvous" "$CLOUD_URL"
+  echo
+  printf '%s' "$HEADS" | jq -r --arg owner "$OWNER_PUB" --argjson nodes "$MANDATES" '
+    def tag(e; k): [e.tags[] | select(.[0]==k) | .[1]][0];
+    def st(e): ((e.content | fromjson).status // "active");
+    def role(e): (tag(e;"d") // "") | split("/")[0];
+    def stream(e): (tag(e;"d") // "") as $d | $d | ltrimstr(($d | split("/")[0]) + "/");
+    [.[] | select(tag(.;"d") != null)] as $all
+    | [$all[] | select(.pubkey == $owner)] as $mine
+    | [$all[] | select(.pubkey != $owner)] as $foreign
+    | "## Governance",
+      ( $nodes[] as $node
+        | "- node \($node): " + (
+            ["admit","read","export","steward"]
+            | map(. as $r
+                | [$mine[] | select(tag(.;"n") == $node and role(.) == $r and st(.) == "active")]
+                | "\($r)=\(length)")
+            | join(" ")) + " (journal-governed)"
+      ),
+      "",
+      "## Drift",
+      # Open offers: my exports whose offered parties have no admit half.
+      ( [ $mine[]
+          | select(role(.) == "export" and st(.) == "active")
+          | stream(.) as $s
+          | select(([$foreign[] | select(tag(.;"d") == ("admit/" + $s))] | length) == 0)
+          | "- OFFER OPEN: export/\($s) has no admit half from any offered party" ]
+        | .[] ),
+      # Stale pins: foreign admits whose e-tag no longer pins my export head.
+      ( [ $foreign[]
+          | select(role(.) == "admit" and st(.) == "active")
+          | stream(.) as $s
+          | tag(.;"e") as $pin
+          | ([$mine[] | select(tag(.;"d") == ("export/" + $s))][0]) as $exp
+          | select($exp != null and $pin != null and $pin != $exp.id)
+          | "- DRIFT: admit/\($s) by \(.pubkey[0:12])… pins \($pin[0:12])… but export head is \($exp.id[0:12])… — re-pin required" ]
+        | .[] ),
+      # Unscoped heads govern nothing — likely pre-node-scoping relics.
+      ( [ $mine[]
+          | select(tag(.;"n") == null)
+          | "- UNSCOPED: \(tag(.;"d")) governs no node (missing n tag)" ]
+        | .[] ),
+      "",
+      "## Custody exposure",
+      ( [ $mine[]
+          | select(role(.) == "export" and st(.) == "active")
+          | select(((.content | fromjson).selection // {}) | .mirror == true)
+          | "- NOTE: export/\(stream(.)) is a WHOLE-JOURNAL mirror offered to \([.tags[] | select(.[0]=="p")] | length) reader key(s)" ]
+        | .[] )
+  '
+} > "$FINDINGS"
+
+# ── Report (deduped) ───────────────────────────────────────────────────────
+DIGEST="$(shasum -a 256 "$FINDINGS" | awk '{print $1}')"
+LAST="$(cat "$STATE_DIR/last-report.sha" 2>/dev/null || true)"
+if [ "$DIGEST" = "$LAST" ]; then
+  echo "steward: findings unchanged since last report ($DIGEST) — nothing to post"
+  cat "$FINDINGS"
+  rm -f "$FINDINGS"
+  exit 0
+fi
+
+BODY="$(printf 'STEWARD REPORT (%s@%s)\nmandates: %s\n\n%s' \
+  "steward" "$MACHINE" "$(printf '%s' "$MANDATES" | jq -r 'join(", ")')" \
+  "$(cat "$FINDINGS")")"
+AUTH_TAG="$(cat "$STEWARD_AUTH" 2>/dev/null || echo null)"
+EVENT="$(jq -n --arg pk "$STEWARD_PUB" --arg c "$BODY" --arg machine "$MACHINE" \
+  --arg ts "$(date +%s)" --argjson auth "$AUTH_TAG" --argjson nodes "$MANDATES" \
+  '{pubkey:$pk, created_at:($ts|tonumber), kind:1,
+    tags:([["t","steward:report"],["agent","steward"],["machine",$machine]]
+          + ($nodes | map(["n", .]))
+          + (if $auth == null then [] else [$auth] end)),
+    content:$c}')"
+
+WRITE_RELAY="$LOCAL_URL"
+curl -sf --max-time 2 "$WRITE_RELAY/health" >/dev/null \
+  || die "local sovereign node unreachable — reports go to the source of truth"
+TMP="$(mktemp)"; printf '%s' "$EVENT" > "$TMP"
+"$CLIENT" post "$STEWARD_KEY" "$WRITE_RELAY" "$TMP" >/dev/null
+rm -f "$TMP"
+echo "$DIGEST" > "$STATE_DIR/last-report.sha"
+echo "steward: report posted (steward-signed, $(wc -c < "$FINDINGS" | tr -d ' ') bytes of findings)"
+cat "$FINDINGS"
+rm -f "$FINDINGS"
