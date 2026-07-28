@@ -42,6 +42,13 @@
     "defaultValue": "high"
   },
   {
+    "note": "Anthropic adaptive xhigh-capable: claude-opus-5",
+    "provider": "anthropic",
+    "model": "claude-opus-5",
+    "validValues": ["low", "medium", "high", "xhigh", "max"],
+    "defaultValue": "high"
+  },
+  {
     "note": "Anthropic adaptive xhigh-capable: claude-mythos-5",
     "provider": "anthropic",
     "model": "claude-mythos-5",

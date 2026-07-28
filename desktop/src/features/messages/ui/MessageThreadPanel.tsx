@@ -251,11 +251,6 @@ export function MessageThreadPanel({
   // conditional activity accessory (agent working and/or someone typing).
   const hasComposerBottomActivity =
     activityAccessoryVisible || threadTypingPubkeys.length > 0;
-  useComposerHeightPadding(
-    threadBodyRef,
-    threadComposerWrapperRef,
-    isSinglePanelView,
-  );
 
   // Live ref so onCaptureSendContext can read reply state at submit time
   // (before any async mention-flow awaits change navigation state).
@@ -490,19 +485,31 @@ export function MessageThreadPanel({
     threadHead,
   ]);
 
-  const { isAtBottom, newMessageCount, onScroll, scrollToBottom } =
-    useAnchoredScroll({
-      channelId: threadHeadId,
-      contentRef: threadContentRef,
-      isLoading: threadRepliesPending || repliesRenderState === "pending",
-      messages: threadMessages,
-      highlightTargetMessage: scrollTargetHighlights,
-      onTargetReached: onScrollTargetResolved,
-      onTargetSettled: onScrollTargetSettled,
-      pinTargetCentered: !scrollTargetHighlights,
-      scrollContainerRef: threadBodyRef,
-      targetMessageId: scrollTargetId,
-    });
+  const {
+    isAtBottom,
+    newMessageCount,
+    onScroll,
+    scrollToBottom,
+    settleAtBottomAfterLayout,
+  } = useAnchoredScroll({
+    channelId: threadHeadId,
+    contentRef: threadContentRef,
+    isLoading: threadRepliesPending || repliesRenderState === "pending",
+    messages: threadMessages,
+    highlightTargetMessage: scrollTargetHighlights,
+    onTargetReached: onScrollTargetResolved,
+    onTargetSettled: onScrollTargetSettled,
+    pinTargetCentered: !scrollTargetHighlights,
+    scrollContainerRef: threadBodyRef,
+    targetMessageId: scrollTargetId,
+  });
+  useComposerHeightPadding(
+    threadBodyRef,
+    threadComposerWrapperRef,
+    isSinglePanelView,
+    "padding",
+    settleAtBottomAfterLayout,
+  );
 
   const knownAgentPubkeys = useKnownAgentPubkeys();
   const initialAgentPubkeys = React.useMemo(() => {
