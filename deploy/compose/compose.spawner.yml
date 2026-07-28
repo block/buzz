@@ -59,6 +59,11 @@ services:
       # supplies the host default here.
       BUZZ_SPAWNER_DEFAULT_PROVIDER: ${BUZZ_SPAWNER_DEFAULT_PROVIDER:-}
       BUZZ_SPAWNER_DEFAULT_MODEL: ${BUZZ_SPAWNER_DEFAULT_MODEL:-}
+      # Providers/models advertised in the announcement, as a JSON array. Without
+      # it the desktop's model field degrades to free text ("Model list
+      # unavailable from this server") — a client cannot know what the host can
+      # run unless the host says so.
+      BUZZ_SPAWNER_AI_CATALOG: ${BUZZ_SPAWNER_AI_CATALOG:-}
       # Names of variables to forward into agent containers — not KEY=VALUE
       # pairs. The value is read from this service's own environment, so a
       # rotated credential is picked up by restarting the spawner.
