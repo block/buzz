@@ -1151,8 +1151,8 @@ fn append_reply_instruction(s: &mut String, event_id: &str) {
         "\nIMPORTANT: For ordinary replies in this turn, use `--reply-to {event_id}` \
          on `buzz messages send` so the conversation stays threaded. \
          If the human explicitly asks for a channel-root, top-level, \
-         or broadcast post, send that message without `--reply-to`. \
-         If the requested destination is ambiguous, ask before sending."
+         or broadcast post, send that message with `--top-level` instead of \
+         `--reply-to`. If the requested destination is ambiguous, ask before sending."
     ));
 }
 
@@ -1167,7 +1167,8 @@ fn append_new_thread_reply_instruction(s: &mut String, event_id: &str) {
          this turn, use `--reply-to {event_id}` on `buzz messages send` — the \
          triggering message is the thread root. Do NOT reply into any other \
          (older) thread. If the human explicitly asks for a channel-root, \
-         top-level, or broadcast post, send that message without `--reply-to`."
+         top-level, or broadcast post, send that message with `--top-level` \
+         instead of `--reply-to`."
     ));
 }
 
@@ -3908,8 +3909,8 @@ mod tests {
             "channel thread reply should describe reply-to as the default"
         );
         assert!(
-            prompt.contains("send that message without `--reply-to`"),
-            "channel thread reply should allow explicit channel-root/top-level requests"
+            prompt.contains("send that message with `--top-level`"),
+            "channel thread reply should teach the automatic-context opt-out"
         );
         assert!(
             !prompt.contains("Do not broadcast to the channel"),
@@ -3982,6 +3983,10 @@ mod tests {
         assert!(
             prompt.contains("new top-level message"),
             "top-level human message should use the new-thread instruction"
+        );
+        assert!(
+            prompt.contains("send that message with `--top-level`"),
+            "new-thread instruction should teach the automatic-context opt-out"
         );
     }
 

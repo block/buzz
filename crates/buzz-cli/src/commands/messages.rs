@@ -566,16 +566,21 @@ pub struct SendMessageParams {
     pub content: String,
     pub kind: Option<u16>,
     pub reply_to: Option<String>,
+    pub top_level: bool,
     pub broadcast: bool,
     pub files: Vec<String>,
     pub mentions: Vec<String>,
 }
 
 fn reply_to_from_sources(
+    top_level: bool,
     explicit: Option<String>,
     env_value: Option<String>,
     file_path: Option<&std::ffi::OsStr>,
 ) -> Option<String> {
+    if top_level {
+        return None;
+    }
     explicit
         .or_else(|| {
             env_value.and_then(|value| {
@@ -590,8 +595,9 @@ fn reply_to_from_sources(
         })
 }
 
-fn automatic_reply_to(explicit: Option<String>) -> Option<String> {
+fn automatic_reply_to(top_level: bool, explicit: Option<String>) -> Option<String> {
     reply_to_from_sources(
+        top_level,
         explicit,
         std::env::var("BUZZ_REPLY_TO").ok(),
         std::env::var_os("BUZZ_REPLY_TO_FILE").as_deref(),
@@ -608,7 +614,7 @@ pub async fn cmd_send_message(
     // bugs for agent and human users alike.
     p.content = read_or_stdin(&p.content)?;
     validate_content_size(&p.content)?;
-    p.reply_to = automatic_reply_to(p.reply_to);
+    p.reply_to = automatic_reply_to(p.top_level, p.reply_to);
     if let Some(ref r) = p.reply_to {
         validate_hex64(r)?;
     }
@@ -905,6 +911,7 @@ pub async fn dispatch(
             content,
             kind,
             reply_to,
+            top_level,
             broadcast,
             files,
             mentions,
@@ -916,6 +923,7 @@ pub async fn dispatch(
                     content,
                     kind,
                     reply_to,
+                    top_level,
                     broadcast,
                     files,
                     mentions,
@@ -1046,6 +1054,7 @@ mod tests {
         std::fs::write(file.path(), ID_B).unwrap();
         assert_eq!(
             reply_to_from_sources(
+                false,
                 Some(ID_A.into()),
                 Some(ID_B.into()),
                 Some(file.path().as_os_str()),
@@ -1061,6 +1070,7 @@ mod tests {
         std::fs::write(file.path(), ID_A).unwrap();
         assert_eq!(
             reply_to_from_sources(
+                false,
                 None,
                 Some(format!(" {ID_B}\n")),
                 Some(file.path().as_os_str()),
@@ -1075,16 +1085,36 @@ mod tests {
         let file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(file.path(), format!(" {ID_A}\n")).unwrap();
         assert_eq!(
-            reply_to_from_sources(None, Some("  ".into()), Some(file.path().as_os_str()))
-                .as_deref(),
+            reply_to_from_sources(
+                false,
+                None,
+                Some("  ".into()),
+                Some(file.path().as_os_str()),
+            )
+            .as_deref(),
             Some(ID_A)
         );
         std::fs::write(file.path(), "").unwrap();
         assert_eq!(
-            reply_to_from_sources(None, None, Some(file.path().as_os_str())),
+            reply_to_from_sources(false, None, None, Some(file.path().as_os_str())),
             None
         );
-        assert_eq!(reply_to_from_sources(None, None, None), None);
+        assert_eq!(reply_to_from_sources(false, None, None, None), None);
+    }
+
+    #[test]
+    fn top_level_suppresses_explicit_environment_and_file_reply_targets() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), ID_A).unwrap();
+        assert_eq!(
+            reply_to_from_sources(
+                true,
+                Some(ID_A.into()),
+                Some(ID_B.into()),
+                Some(file.path().as_os_str()),
+            ),
+            None
+        );
     }
 
     #[test]
