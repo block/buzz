@@ -1,6 +1,7 @@
 import * as React from "react";
 import { ArrowDown } from "lucide-react";
 
+import { ChannelWorldViews } from "@/features/channels/ui/ChannelWorldViews";
 import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
 import { orderMentionPubkeysByText } from "@/features/messages/lib/orderMentionPubkeys";
 import { normalizePubkey } from "@/shared/lib/pubkey";
@@ -597,6 +598,17 @@ export function MessageThreadPanel({
             />
           </div>
         </div>
+
+        {channelId ? (
+          <ChannelWorldViews
+            canEdit={channel?.isMember === true && !channel.archivedAt}
+            channelId={channelId}
+            scope={{
+              kind: "thread",
+              threadRootEventId: threadHead.id,
+            }}
+          />
+        ) : null}
 
         {showThreadHeadDivider ? (
           <div

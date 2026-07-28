@@ -198,7 +198,7 @@ export function ChannelMembersBar({
         <Tooltip disableHoverableContent>
           <TooltipTrigger asChild>
             <Button
-              aria-label="Manage channel"
+              aria-label="Manage channel HMR PROBE 2109"
               data-testid="channel-management-trigger"
               onClick={onManageChannel}
               size="icon"

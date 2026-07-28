@@ -70,6 +70,8 @@ type MessageTimelineProps = {
   scrollContainerRef?: React.RefObject<HTMLDivElement | null>;
   /** True when the timeline has the composer overlay below it. */
   hasComposerOverlay?: boolean;
+  /** The parent already consumed the measured channel-header inset. */
+  hasExternalTopChromeClearance?: boolean;
   isFetchingOlder?: boolean;
   messageFooters?: Record<string, React.ReactNode>;
   /** Map from lowercase pubkey → persona display name for bot members. */
@@ -161,6 +163,7 @@ const MessageTimelineBase = React.forwardRef<
     currentPubkey,
     fetchOlder,
     hasComposerOverlay = true,
+    hasExternalTopChromeClearance = false,
     hasOlderMessages = true,
     historyExhausted = false,
     isFetchingOlder = false,
@@ -627,6 +630,7 @@ const MessageTimelineBase = React.forwardRef<
       messageFooters={messageFooters}
       mainEntries={renderedMessages === messages ? mainEntries : undefined}
       leadingContent={virtualizedLeadingContent}
+      hasExternalTopChromeClearance={hasExternalTopChromeClearance}
       historyExhausted={renderedHistoryExhausted}
       threadSummaries={threadSummaries}
       messages={renderedMessages}
@@ -726,9 +730,11 @@ const MessageTimelineBase = React.forwardRef<
             <div
               className={cn(
                 "flex w-full flex-col gap-2",
-                showChannelIntroOnly
-                  ? "pt-[var(--channel-top-chrome-height,4.5rem)]"
-                  : channelChrome.contentPadding,
+                hasExternalTopChromeClearance
+                  ? null
+                  : showChannelIntroOnly
+                    ? "pt-[var(--channel-top-chrome-height,4.5rem)]"
+                    : channelChrome.contentPadding,
                 (showIntro || showGenericEmpty || showMessageList) &&
                   "min-h-full",
               )}

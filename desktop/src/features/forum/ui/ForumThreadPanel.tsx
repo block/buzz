@@ -1,6 +1,7 @@
 import { ArrowLeft, MessageSquare } from "lucide-react";
 import * as React from "react";
 
+import { ChannelWorldViews } from "@/features/channels/ui/ChannelWorldViews";
 import {
   resolveUserLabel,
   type UserProfileLookup,
@@ -26,6 +27,7 @@ type ForumThreadPanelProps = {
   isLoading: boolean;
   isSendingReply: boolean;
   channelId: string;
+  canEditWorldViews: boolean;
   currentPubkey?: string;
   profiles?: UserProfileLookup;
   onBack: () => void;
@@ -128,6 +130,7 @@ export function ForumThreadPanel({
   thread,
   isLoading,
   isSendingReply,
+  canEditWorldViews,
   channelId,
   currentPubkey,
   profiles,
@@ -202,7 +205,10 @@ export function ForumThreadPanel({
     profiles?.[post.pubkey.toLowerCase()]?.avatarUrl ?? null;
 
   return (
-    <div className={cn("flex h-full flex-col", channelChrome.contentPadding)}>
+    <div
+      className={cn("flex h-full flex-col", channelChrome.contentPadding)}
+      data-testid="forum-thread-panel"
+    >
       <div className="border-b border-border/60 px-4 py-3">
         <Button
           className="gap-1.5 text-muted-foreground"
@@ -264,6 +270,12 @@ export function ForumThreadPanel({
             />
           </div>
         </div>
+
+        <ChannelWorldViews
+          canEdit={canEditWorldViews}
+          channelId={channelId}
+          scope={{ kind: "thread", threadRootEventId: post.eventId }}
+        />
 
         <div className="flex items-center gap-1.5 border-b border-border/60 px-4 py-2.5 text-sm font-medium text-muted-foreground">
           <MessageSquare className="h-4 w-4" />

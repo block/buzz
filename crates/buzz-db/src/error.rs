@@ -37,6 +37,19 @@ pub enum DbError {
     #[error("access denied: {0}")]
     AccessDenied(String),
 
+    /// An optimistic channel document write did not name the current revision.
+    #[error(
+        "revision conflict: expected {expected}, current {current}",
+        expected = expected.as_deref().unwrap_or("none"),
+        current = current.as_deref().unwrap_or("none")
+    )]
+    RevisionConflict {
+        /// Revision supplied by the writer, or `None` for an expected create.
+        expected: Option<String>,
+        /// Current live revision, or `None` when the coordinate is absent.
+        current: Option<String>,
+    },
+
     /// JSON serialization or deserialization failed.
     #[error("serialization error: {0}")]
     Serde(#[from] serde_json::Error),

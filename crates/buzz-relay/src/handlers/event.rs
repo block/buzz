@@ -1163,6 +1163,7 @@ mod tests {
     use buzz_core::kind::{
         KIND_AGENT_OBSERVER_FRAME, KIND_CANVAS, KIND_FORUM_COMMENT, KIND_FORUM_POST,
         KIND_FORUM_VOTE, KIND_PRESENCE_UPDATE, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_DIFF,
+        KIND_WORLD_VIEW_BINDINGS,
     };
     use buzz_core::observer::{
         encrypt_observer_payload, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -1215,6 +1216,7 @@ mod tests {
             KIND_STREAM_MESSAGE,
             KIND_STREAM_MESSAGE_DIFF,
             KIND_CANVAS,
+            KIND_WORLD_VIEW_BINDINGS,
             KIND_FORUM_POST,
             KIND_FORUM_VOTE,
             KIND_FORUM_COMMENT,

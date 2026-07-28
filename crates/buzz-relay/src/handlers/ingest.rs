@@ -32,11 +32,12 @@ use buzz_core::kind::{
     KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF,
     KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED,
     KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEXT_NOTE, KIND_USER_STATUS,
-    KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE,
-    RELAY_ADMIN_REMOVE_MEMBER, RELAY_ADMIN_SET_WORKSPACE_PROFILE,
+    KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, KIND_WORLD_VIEW_BINDINGS, RELAY_ADMIN_ADD_MEMBER,
+    RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER, RELAY_ADMIN_SET_WORKSPACE_PROFILE,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_core::verification::verify_event;
+use buzz_core::world_view::decode_verified_world_view_bindings_event;
 use buzz_core::CommunityId;
 use nostr::Event;
 
@@ -289,7 +290,9 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
                 Ok(Scope::ChannelsWrite)
             }
         }
-        KIND_NIP29_CREATE_GROUP | KIND_CANVAS => Ok(Scope::ChannelsWrite),
+        KIND_NIP29_CREATE_GROUP | KIND_CANVAS | KIND_WORLD_VIEW_BINDINGS => {
+            Ok(Scope::ChannelsWrite)
+        }
         KIND_NIP29_JOIN_REQUEST | KIND_NIP29_LEAVE_REQUEST | KIND_NIP43_LEAVE_REQUEST => {
             Ok(Scope::ChannelsRead)
         }
@@ -477,6 +480,7 @@ pub(crate) fn requires_h_channel_scope(kind: u32) -> bool {
             | KIND_STREAM_REMINDER
             | KIND_STREAM_MESSAGE_DIFF
             | KIND_CANVAS
+            | KIND_WORLD_VIEW_BINDINGS
             | KIND_FORUM_POST
             | KIND_FORUM_VOTE
             | KIND_FORUM_COMMENT
@@ -1758,6 +1762,21 @@ async fn ingest_event_inner(
         ));
     }
 
+    let world_view_admission = if kind_u32 == KIND_WORLD_VIEW_BINDINGS {
+        let channel_id = channel_id.expect("world-view bindings require channel scope");
+        let admission = decode_verified_world_view_bindings_event(&event)
+            .map_err(|error| IngestError::Rejected(format!("invalid: {error}")))?;
+        if admission.channel_id != channel_id {
+            return Err(IngestError::Rejected(
+                "invalid: world-view bindings event channel did not match its relay coordinate"
+                    .into(),
+            ));
+        }
+        Some(admission)
+    } else {
+        None
+    };
+
     if let Some(ch_id) = channel_id {
         check_token_channel_access(&auth, ch_id).map_err(IngestError::AuthFailed)?;
     } else if auth.channel_ids().is_some() {
@@ -2409,7 +2428,42 @@ async fn ingest_event_inner(
         });
     }
 
-    let (stored_event, was_inserted) = if buzz_core::kind::is_replaceable(kind_u32) {
+    let (stored_event, was_inserted) = if let Some(admission) = &world_view_admission {
+        let channel_id = channel_id.expect("validated world-view bindings have channel scope");
+        let d_tag = admission.snapshot.document.scope.d_tag();
+        let expected_revision_event_id = admission
+            .previous_revision_event_id
+            .as_ref()
+            .map(|event_id| &event_id.as_bytes()[..]);
+        state
+            .db
+            .replace_scoped_world_view_bindings_event(
+                tenant.community(),
+                &event,
+                channel_id,
+                &d_tag,
+                expected_revision_event_id,
+            )
+            .await
+            .map_err(|error| match error {
+                buzz_db::DbError::RevisionConflict { expected, current } => {
+                    let mut next_command = format!("buzz world-views get --channel {channel_id}");
+                    if let Some(thread_root_event_id) =
+                        admission.snapshot.document.scope.thread_root_event_id()
+                    {
+                        next_command.push_str(" --thread-root ");
+                        next_command.push_str(thread_root_event_id);
+                    }
+                    IngestError::Rejected(format!(
+                        "conflict: world-view bindings revision changed \
+                         (expected {}, current {}); refresh with `{next_command}`",
+                        expected.as_deref().unwrap_or("none"),
+                        current.as_deref().unwrap_or("none")
+                    ))
+                }
+                other => IngestError::Internal(format!("error: {other}")),
+            })?
+    } else if buzz_core::kind::is_replaceable(kind_u32) {
         // NIP-16 replaceable event — atomic replace with stale-write protection.
         // channel_id is None for global kinds (0, 1, 3) due to step 5b above.
         state

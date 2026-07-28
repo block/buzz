@@ -108,6 +108,8 @@ type TimelineMessageListProps = {
   threadUnreadCounts?: ReadonlyMap<string, number>;
   /** Content rendered as the first virtual row before channel history. */
   leadingContent?: React.ReactNode;
+  /** The parent already consumed the measured channel-header inset. */
+  hasExternalTopChromeClearance?: boolean;
   /**
    * True when the loaded window provably starts at the channel's beginning.
    * Proves the oldest loaded day's boundary so its divider may render.
@@ -156,6 +158,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   threadUnreadCounts,
   unfollowThreadById,
   leadingContent,
+  hasExternalTopChromeClearance = false,
   historyExhausted = false,
   useVirtualizer = false,
   onStartReached,
@@ -326,6 +329,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
       <VirtualizedTimelineRows
         dayGroups={dayGroups}
         historyExhausted={historyExhausted}
+        hasExternalTopChromeClearance={hasExternalTopChromeClearance}
         leadingContent={leadingContent}
         onAtBottomStateChange={onAtBottomStateChange}
         onStartReached={onStartReached}
@@ -378,6 +382,7 @@ type VirtualizedTimelineRowsProps = {
   dayGroups: TimelineDayGroup[];
   historyExhausted: boolean;
   leadingContent?: React.ReactNode;
+  hasExternalTopChromeClearance: boolean;
   onAtBottomStateChange?: (atBottom: boolean) => void;
   onStartReached?: () => boolean;
   onVirtualizerApiChange?: (api: TimelineVirtualizerApi | null) => void;
@@ -417,6 +422,7 @@ function VirtualizedTimelineRows({
   dayGroups,
   historyExhausted,
   leadingContent,
+  hasExternalTopChromeClearance,
   onAtBottomStateChange,
   onStartReached,
   onVirtualizerApiChange,
@@ -587,7 +593,12 @@ function VirtualizedTimelineRows({
       <PreserveVirtualizedItemVisibilityContext value={isPrepend}>
         <VList
           ref={listRef}
-          className="h-full min-h-0 w-full overflow-y-auto overflow-x-hidden overscroll-contain px-2 pt-[var(--channel-top-chrome-height,4.5rem)]"
+          className={cn(
+            "h-full min-h-0 w-full overflow-y-auto overflow-x-hidden overscroll-contain px-2",
+            hasExternalTopChromeClearance
+              ? null
+              : "pt-[var(--channel-top-chrome-height,4.5rem)]",
+          )}
           data={items}
           item={VirtualizedTimelineItemShell}
           itemSize={estimateItemSize}

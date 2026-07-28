@@ -185,6 +185,9 @@ enum Cmd {
     /// Get and set channel canvas documents
     #[command(subcommand)]
     Canvas(CanvasCmd),
+    /// Bind, inspect, and resolve Shivai world views for channels
+    #[command(subcommand, name = "world-views")]
+    WorldViews(WorldViewsCmd),
     /// Add, remove, and list emoji reactions
     #[command(subcommand)]
     Reactions(ReactionsCmd),
@@ -691,6 +694,117 @@ pub enum CanvasCmd {
         /// Canvas content (markdown; use '-' to read from stdin)
         #[arg(long)]
         content: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum WorldViewsCmd {
+    /// Get the ordered world view bindings document for a channel
+    Get {
+        /// Channel UUID
+        #[arg(long)]
+        channel: String,
+        /// Exact thread-root event id; omit for channel declarations
+        #[arg(long)]
+        thread_root: Option<String>,
+    },
+    /// Replace the ordered world view bindings document for a channel
+    Set {
+        /// Channel UUID
+        #[arg(long)]
+        channel: String,
+        /// Versioned bindings JSON (use '-' to read from stdin)
+        #[arg(long)]
+        document: String,
+        /// Current event revision, or the literal `none` for first creation
+        #[arg(long)]
+        expected_revision: String,
+    },
+    /// List connected local and hosted world sources without exposing credentials
+    Sources,
+    /// Trust one canonical Shivai origin for public world-view resolution
+    TrustOrigin {
+        /// Exact HTTPS origin to trust
+        #[arg(long)]
+        origin: String,
+    },
+    /// Revoke public world-view resolution trust for one origin
+    RevokeOriginTrust {
+        /// Exact HTTPS origin whose trust should be revoked
+        #[arg(long)]
+        origin: String,
+    },
+    /// List authored views for one connected source
+    Catalog {
+        /// Source id from `buzz world-views sources` (`hosted:<id>` or `local:<id>`)
+        #[arg(long)]
+        source: String,
+        /// Exact Shivai origin from `buzz world-views sources`
+        #[arg(long)]
+        origin: String,
+    },
+    /// Bind one connected source and authored view with revision protection
+    Bind {
+        /// Channel UUID
+        #[arg(long)]
+        channel: String,
+        /// Exact thread-root event id; omit for a channel binding
+        #[arg(long)]
+        thread_root: Option<String>,
+        /// Source id from `buzz world-views sources` (`hosted:<id>` or `local:<id>`)
+        #[arg(long)]
+        source: String,
+        /// Exact Shivai origin from `buzz world-views sources`
+        #[arg(long)]
+        origin: String,
+        /// Qualified authored view name from `buzz world-views catalog`
+        #[arg(long)]
+        view: String,
+        /// Optional channel-authored label
+        #[arg(long)]
+        label: Option<String>,
+        /// Initial presentation: graph or tasks
+        #[arg(long, default_value = "graph")]
+        display: String,
+        /// Existing binding UUID to replace; omit to append or reuse an exact match
+        #[arg(long)]
+        binding: Option<String>,
+        /// Current event revision, or the literal `none` for first creation
+        #[arg(long)]
+        expected_revision: String,
+    },
+    /// Resolve one binding into current normalized Shivai presentation JSON
+    Resolve {
+        /// Channel UUID
+        #[arg(long)]
+        channel: String,
+        /// Exact thread-root event id; omit to resolve channel declarations
+        #[arg(long)]
+        thread_root: Option<String>,
+        /// Binding UUID; optional only when the channel has exactly one binding
+        #[arg(long)]
+        binding: Option<String>,
+    },
+    /// Apply one revision-checked script through host-owned authority
+    Script {
+        /// Channel UUID whose effective binding authorizes the target
+        #[arg(long)]
+        channel: String,
+        /// Exact thread-root event id; omit for a channel-scoped operation
+        #[arg(long)]
+        thread_root: Option<String>,
+        /// Exact binding UUID; resolved by the host instead of the agent
+        #[arg(long)]
+        binding: String,
+        /// Current hosted package revision from `world-views resolve`
+        #[arg(long)]
+        expected_revision: String,
+        /// WorldLang command document (use '-' to read from stdin)
+        #[arg(long)]
+        script: String,
+        /// Opaque agent/channel/binding/revision grant from the host prompt
+        #[arg(long)]
+        grant: String,
     },
 }
 
@@ -1772,6 +1886,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Messages(sub) => commands::messages::dispatch(sub, &client, &cli.format).await,
         Cmd::Channels(sub) => commands::channels::dispatch(sub, &client, &cli.format).await,
         Cmd::Canvas(sub) => commands::channels::dispatch_canvas(sub, &client).await,
+        Cmd::WorldViews(sub) => commands::world_views::dispatch(sub, &client).await,
         Cmd::Reactions(sub) => commands::reactions::dispatch(sub, &client).await,
         Cmd::Emoji(sub) => commands::emoji::dispatch(sub, &client).await,
         Cmd::Dms(sub) => commands::dms::dispatch(sub, &client).await,
@@ -1827,6 +1942,7 @@ mod tests {
             "upload",
             "users",
             "workflows",
+            "world-views",
         ];
 
         let cmd = Cli::command();

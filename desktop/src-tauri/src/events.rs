@@ -9,7 +9,7 @@
 //! Each function validates inputs and returns a nostr::EventBuilder.
 //! Signing and submission happen in relay::submit_event.
 
-use buzz_core_pkg::kind::{KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST};
+use buzz_core_pkg::kind::{KIND_CANVAS, KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST};
 use nostr::{EventBuilder, EventId, Kind, Tag};
 use uuid::Uuid;
 
@@ -465,7 +465,7 @@ pub fn build_remove_reaction(reaction_event_id: EventId) -> Result<EventBuilder,
 pub fn build_set_canvas(channel_id: Uuid, content: &str) -> Result<EventBuilder, String> {
     check_content(content)?;
     let tags = vec![tag(vec!["h", &channel_id.to_string()])?];
-    Ok(EventBuilder::new(Kind::Custom(40100), content).tags(tags))
+    Ok(EventBuilder::new(Kind::Custom(KIND_CANVAS as u16), content).tags(tags))
 }
 
 // ── Profile ──────────────────────────────────────────────────────────────────

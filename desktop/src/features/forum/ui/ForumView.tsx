@@ -132,6 +132,7 @@ export function ForumView({
 
     return (
       <ForumThreadPanel
+        canEditWorldViews={channel.isMember && !channel.archivedAt}
         canDeletePost={canDeleteExpandedPost}
         currentPubkey={effectiveCurrentPubkey}
         isDeletingPost={deletePostMutation.isPending}

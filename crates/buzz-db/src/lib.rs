@@ -3903,6 +3903,123 @@ impl Db {
             true,
         ))
     }
+
+    /// Atomically replace one channel-owned world-view binding scope.
+    ///
+    /// Unlike ordinary NIP-33 coordinates, this state belongs to the channel
+    /// scope rather than an individual author. The exact key is
+    /// `(community, channel, kind, d_tag)`, and every write must name the
+    /// current event id (or explicitly expect no current event).
+    pub async fn replace_scoped_world_view_bindings_event(
+        &self,
+        community_id: CommunityId,
+        event: &nostr::Event,
+        channel_id: Uuid,
+        d_tag: &str,
+        expected_revision_event_id: Option<&[u8]>,
+    ) -> Result<(StoredEvent, bool)> {
+        let kind_i32 = buzz_core::kind::event_kind_i32(event);
+        if kind_i32 != buzz_core::kind::KIND_WORLD_VIEW_BINDINGS as i32 {
+            return Err(DbError::InvalidData(
+                "scoped world-view replacement requires kind 40101".into(),
+            ));
+        }
+
+        let lock_key = event_replacement_lock_key(
+            community_id,
+            kind_i32,
+            channel_id.as_bytes(),
+            Some(d_tag.as_bytes()),
+        );
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(lock_key)
+            .execute(&mut *tx)
+            .await?;
+
+        let current_event_id: Option<Vec<u8>> = sqlx::query_scalar(
+            "SELECT id FROM events \
+             WHERE community_id = $1 AND channel_id = $2 AND kind = $3 \
+               AND d_tag = $4 AND deleted_at IS NULL \
+             LIMIT 1",
+        )
+        .bind(community_id.as_uuid())
+        .bind(channel_id)
+        .bind(kind_i32)
+        .bind(d_tag)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        if current_event_id.as_deref() != expected_revision_event_id {
+            tx.rollback().await?;
+            return Err(DbError::RevisionConflict {
+                expected: expected_revision_event_id.map(hex::encode),
+                current: current_event_id.as_deref().map(hex::encode),
+            });
+        }
+
+        if current_event_id.is_some() {
+            sqlx::query(
+                "UPDATE events SET deleted_at = NOW() \
+                 WHERE community_id = $1 AND channel_id = $2 AND kind = $3 \
+                   AND d_tag = $4 AND deleted_at IS NULL",
+            )
+            .bind(community_id.as_uuid())
+            .bind(channel_id)
+            .bind(kind_i32)
+            .bind(d_tag)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        let created_at_secs = event.created_at.as_secs() as i64;
+        let created_at = chrono::DateTime::from_timestamp(created_at_secs, 0)
+            .ok_or(DbError::InvalidTimestamp(created_at_secs))?;
+        let tags_json = serde_json::to_value(&event.tags)?;
+        let sig_bytes = event.sig.serialize();
+        let received_at = chrono::Utc::now();
+        let insert_result = sqlx::query(
+            "INSERT INTO events \
+             (community_id, id, pubkey, created_at, kind, tags, content, sig, \
+              received_at, channel_id, d_tag, not_before) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) \
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(community_id.as_uuid())
+        .bind(event.id.as_bytes().as_slice())
+        .bind(event.pubkey.to_bytes().as_slice())
+        .bind(created_at)
+        .bind(kind_i32)
+        .bind(&tags_json)
+        .bind(&event.content)
+        .bind(sig_bytes.as_slice())
+        .bind(received_at)
+        .bind(channel_id)
+        .bind(d_tag)
+        .bind(event::extract_not_before(event))
+        .execute(&mut *tx)
+        .await?;
+
+        if insert_result.rows_affected() == 0 {
+            tx.rollback().await?;
+            return Ok((
+                StoredEvent::with_received_at(event.clone(), received_at, Some(channel_id), false),
+                false,
+            ));
+        }
+
+        tx.commit().await?;
+        if let Err(error) =
+            crate::insert_mentions(&self.pool, community_id, event, Some(channel_id)).await
+        {
+            tracing::warn!(event_id = %event.id, "Failed to insert mentions: {error}");
+        }
+
+        Ok((
+            StoredEvent::with_received_at(event.clone(), received_at, Some(channel_id), true),
+            true,
+        ))
+    }
 }
 
 /// A full API token record.
@@ -4014,6 +4131,90 @@ mod tests {
             .await
             .expect("insert community");
         id
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn scoped_world_view_replacement_enforces_channel_revision_across_authors() {
+        use nostr::{EventBuilder, Keys, Kind, Tag};
+
+        let db = setup_db().await;
+        let community_uuid = make_community(&db.pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let channel_id = Uuid::new_v4();
+        let first_keys = Keys::generate();
+        let second_keys = Keys::generate();
+        sqlx::query(
+            "INSERT INTO channels \
+             (id, community_id, name, channel_type, visibility, created_by) \
+             VALUES ($1, $2, $3, 'stream'::channel_type, \
+                     'open'::channel_visibility, $4)",
+        )
+        .bind(channel_id)
+        .bind(community_uuid)
+        .bind(format!("world-view-revision-{}", channel_id.simple()))
+        .bind(first_keys.public_key().to_bytes().as_slice())
+        .execute(&db.pool)
+        .await
+        .expect("insert channel");
+
+        let d_tag = buzz_core::world_view::CHANNEL_WORLD_VIEW_BINDINGS_D_TAG;
+        let tags = vec![
+            Tag::parse(["h", channel_id.to_string().as_str()]).expect("h tag"),
+            Tag::parse(["d", d_tag]).expect("d tag"),
+            Tag::parse(["prev", ""]).expect("prev tag"),
+        ];
+        let first = EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_WORLD_VIEW_BINDINGS as u16),
+            "{\"version\":2,\"scope\":{\"kind\":\"channel\"},\"bindings\":[]}",
+        )
+        .tags(tags.clone())
+        .sign_with_keys(&first_keys)
+        .expect("sign first revision");
+        assert!(
+            db.replace_scoped_world_view_bindings_event(
+                community,
+                &first,
+                channel_id,
+                d_tag,
+                None,
+            )
+            .await
+            .expect("create first revision")
+            .1
+        );
+
+        let second = EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_WORLD_VIEW_BINDINGS as u16),
+            "{\"version\":2,\"scope\":{\"kind\":\"channel\"},\"bindings\":[]}",
+        )
+        .tags(tags)
+        .sign_with_keys(&second_keys)
+        .expect("sign second revision");
+        let stale_error = db
+            .replace_scoped_world_view_bindings_event(community, &second, channel_id, d_tag, None)
+            .await
+            .expect_err("stale create must conflict");
+        assert!(matches!(
+            &stale_error,
+            DbError::RevisionConflict {
+                expected: None,
+                current: Some(current),
+            } if current == &first.id.to_hex()
+        ));
+
+        assert!(
+            db.replace_scoped_world_view_bindings_event(
+                community,
+                &second,
+                channel_id,
+                d_tag,
+                Some(first.id.as_bytes().as_slice()),
+            )
+            .await
+            .expect("replace current revision")
+            .1
+        );
     }
 
     #[tokio::test]

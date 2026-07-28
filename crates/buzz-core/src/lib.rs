@@ -38,6 +38,8 @@ pub mod relay;
 pub mod tenant;
 /// Schnorr signature and event ID verification.
 pub mod verification;
+/// Channel-scoped Shivai world view binding contracts.
+pub mod world_view;
 
 pub use error::VerificationError;
 pub use event::StoredEvent;

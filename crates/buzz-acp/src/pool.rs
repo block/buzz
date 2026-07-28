@@ -1467,33 +1467,36 @@ pub async fn run_prompt_task(
         }
     }
 
-    // Canvas metadata fetch — same lifecycle as core: once per new channel session,
-    // never for heartbeats, cached until session invalidation.
-    //
-    // DM check: use startup channel_info first; lazy-fetch only when missing.
-    // A confirmed DM never receives a canvas section. If the channel type cannot
-    // be determined (metadata absent and lazy fetch fails/unknown), skip the canvas
-    // rather than assuming non-DM — failing closed on DM ambiguity is safer.
-    //
-    // I3 lifecycle: hold the fetched section in a local `pending_canvas` and
-    // commit it to `canvas_sections` only after session creation succeeds. This
-    // prevents a stale revision A surviving a failed create and being re-used by
-    // the next attempt after the canvas was cleared.
+    // Canvas is stable session narrative, but world bindings are live operational
+    // context. Cache only Canvas; fetch and render world bindings on every channel
+    // prompt so agents see newly bound views and current local edit authority.
     let mut pending_canvas: Option<(Uuid, String)> = None;
-    // Channel name for the session title, from the same single resolve the
-    // canvas DM check uses — see `resolve_new_session_channel_context`.
+    let mut current_world_views: Option<String> = None;
+    // Channel name for the session title, from the same single resolve used by
+    // the canvas and live world-view DM gates.
     let mut title_channel: Option<String> = None;
     if let PromptSource::Channel(cid) = &source {
         let is_new_channel_session = !agent.state.sessions.contains_key(cid);
         let needs_canvas = is_new_channel_session && !agent.state.canvas_sections.contains_key(cid);
         let needs_title = is_new_channel_session && ctx.session_title.is_some();
-        if needs_canvas || needs_title {
-            let (is_dm, resolved_channel) =
-                resolve_new_session_channel_context(&ctx.channel_info, *cid).await;
+        let (is_dm, resolved_channel) =
+            resolve_new_session_channel_context(&ctx.channel_info, *cid).await;
+        if needs_title {
             title_channel = resolved_channel;
-            // A confirmed DM never receives a canvas section; an undeterminable
-            // channel type fails closed as a DM for the same reason.
-            if needs_canvas && !is_dm {
+        }
+        if !is_dm {
+            let authorities = load_world_authority_registry(&ctx.cwd);
+            let agent_pubkey = ctx.agent_keys.public_key().to_hex();
+            let thread_root_event_id = batch.as_ref().and_then(world_view_thread_root);
+            current_world_views = fetch_world_view_bindings_section(
+                *cid,
+                thread_root_event_id.as_deref(),
+                &ctx.rest_client,
+                &authorities,
+                &agent_pubkey,
+            )
+            .await;
+            if needs_canvas {
                 if let Some(section) = fetch_canvas_section(*cid, &ctx.rest_client).await {
                     pending_canvas = Some((*cid, section));
                 }
@@ -1508,15 +1511,15 @@ pub async fn run_prompt_task(
         PromptSource::Heartbeat => None,
     };
 
-    // The canvas metadata section — channel-scoped, absent for heartbeats/DMs.
-    // Prefer the committed cache; fall back to pending (for new sessions being created now).
+    // Canvas is session narrative. Keep live world-view state separate so it
+    // rides in every user turn rather than freezing in session/new.
     let agent_canvas: Option<String> = match &source {
         PromptSource::Channel(cid) => agent
             .state
             .canvas_sections
             .get(cid)
             .cloned()
-            .or_else(|| pending_canvas.as_ref().map(|(_, s)| s.clone())),
+            .or_else(|| pending_canvas.as_ref().map(|(_, section)| section.clone())),
         PromptSource::Heartbeat => None,
     };
 
@@ -1839,6 +1842,7 @@ pub async fn run_prompt_task(
                 system_prompt: ctx.system_prompt.as_deref(),
                 team_instructions: ctx.team_instructions.as_deref(),
                 agent_canvas: agent_canvas.as_deref(),
+                agent_world_views: current_world_views.as_deref(),
             },
         )
     } else {
@@ -2363,55 +2367,414 @@ pub(crate) async fn fetch_channel_info(
 ///
 /// Called at most once per new channel session; the result is cached in
 /// `SessionState::canvas_sections` and cleared on session invalidation.
-async fn fetch_canvas_section(channel_id: Uuid, rest: &RestClient) -> Option<String> {
+async fn fetch_channel_context_events(
+    channel_id: Uuid,
+    rest: &RestClient,
+    kind: u32,
+    surface: &'static str,
+    d_tag: Option<&str>,
+) -> Option<Vec<serde_json::Value>> {
     use nostr::{Alphabet, SingleLetterTag};
 
     let h_tag = SingleLetterTag::lowercase(Alphabet::H);
-    let filter = nostr::Filter::new()
-        .kind(nostr::Kind::Custom(buzz_core::kind::KIND_CANVAS as u16))
+    let mut filter = nostr::Filter::new()
+        .kind(nostr::Kind::Custom(kind as u16))
         .custom_tags(h_tag, [channel_id.to_string()])
         .limit(1);
-
-    const CANVAS_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+    if let Some(d_tag) = d_tag {
+        let d_tag_key = SingleLetterTag::lowercase(Alphabet::D);
+        filter = filter.custom_tags(d_tag_key, [d_tag]);
+    }
+    const CHANNEL_CONTEXT_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
     let json = match tokio::time::timeout(
-        CANVAS_FETCH_TIMEOUT,
+        CHANNEL_CONTEXT_FETCH_TIMEOUT,
         rest.query(std::slice::from_ref(&filter)),
     )
     .await
     {
-        Ok(Ok(v)) => v,
-        Ok(Err(e)) => {
+        Ok(Ok(value)) => value,
+        Ok(Err(error)) => {
             tracing::warn!(
-                target: "canvas::fetch",
+                target: "channel_context::fetch",
                 channel = %channel_id,
-                "canvas query failed: {e} — emitting no section"
+                surface,
+                "channel context query failed: {error}",
             );
             return None;
         }
         Err(_) => {
             tracing::warn!(
-                target: "canvas::fetch",
+                target: "channel_context::fetch",
                 channel = %channel_id,
-                timeout_ms = CANVAS_FETCH_TIMEOUT.as_millis() as u64,
-                "canvas fetch timed out — emitting no section"
+                surface,
+                timeout_ms = CHANNEL_CONTEXT_FETCH_TIMEOUT.as_millis() as u64,
+                "channel context fetch timed out",
             );
             return None;
         }
     };
-
-    let events = match json.as_array() {
-        Some(arr) => arr,
+    match json.as_array() {
+        Some(events) => Some(events.clone()),
         None => {
             tracing::warn!(
-                target: "canvas::fetch",
+                target: "channel_context::fetch",
                 channel = %channel_id,
-                "canvas query response is not a JSON array — emitting no section"
+                surface,
+                "channel context query response is not a JSON array",
             );
-            return None;
+            None
         }
+    }
+}
+
+async fn fetch_canvas_section(channel_id: Uuid, rest: &RestClient) -> Option<String> {
+    let events = fetch_channel_context_events(
+        channel_id,
+        rest,
+        buzz_core::kind::KIND_CANVAS,
+        "canvas",
+        None,
+    )
+    .await?;
+    canvas_section_from_query_response(&events, &channel_id.to_string())
+}
+
+fn load_world_authority_registry(cwd: &str) -> buzz_core::world_view::WorldAuthorityRegistry {
+    use buzz_core::world_view::{
+        decode_world_authority_registry, WorldAuthorityRegistry, WORLD_AUTHORITY_REGISTRY_FILE_NAME,
     };
 
-    canvas_section_from_query_response(events, &channel_id.to_string())
+    let path = std::path::Path::new(cwd).join(WORLD_AUTHORITY_REGISTRY_FILE_NAME);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return WorldAuthorityRegistry::default();
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "channel_context::world_authority",
+                path = %path.display(),
+                %error,
+                "failed to read world authority registry",
+            );
+            return WorldAuthorityRegistry::default();
+        }
+    };
+    let value = match serde_json::from_str(&text) {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(
+                target: "channel_context::world_authority",
+                path = %path.display(),
+                %error,
+                "world authority registry contains invalid JSON",
+            );
+            return WorldAuthorityRegistry::default();
+        }
+    };
+    let decoded = match decode_world_authority_registry(value) {
+        Ok(decoded) => decoded,
+        Err(error) => {
+            tracing::warn!(
+                target: "channel_context::world_authority",
+                path = %path.display(),
+                %error,
+                "world authority registry failed validation",
+            );
+            return WorldAuthorityRegistry::default();
+        }
+    };
+    if decoded.migrated {
+        let mut bytes = match serde_json::to_vec_pretty(&decoded.registry) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                tracing::warn!(
+                    target: "channel_context::world_authority",
+                    path = %path.display(),
+                    %error,
+                    "failed to encode migrated world authority registry",
+                );
+                return WorldAuthorityRegistry::default();
+            }
+        };
+        bytes.push(b'\n');
+        if let Err(error) = std::fs::write(&path, bytes) {
+            tracing::warn!(
+                target: "channel_context::world_authority",
+                path = %path.display(),
+                %error,
+                "failed to persist migrated world authority registry",
+            );
+            return WorldAuthorityRegistry::default();
+        }
+    }
+    decoded.registry
+}
+
+/// Filesystem authority exposed to a Codex-backed Buzz agent's local-exec
+/// sandbox.
+///
+/// Private registry, capability secrets, and mutable local world roots are
+/// never exposed. All world mutations cross the same scoped Buzz command
+/// broker, regardless of whether the underlying authority is local or hosted.
+pub(crate) fn world_agent_filesystem_permissions(
+    cwd: &str,
+) -> std::collections::BTreeMap<String, crate::acp::CodexFilesystemPathAccess> {
+    use buzz_core::world_view::{
+        WORLD_AUTHORITY_REGISTRY_FILE_NAME, WORLD_AUTHORITY_SECRET_DIRECTORY,
+    };
+    use std::path::Path;
+
+    let root = Path::new(cwd);
+    if !root.is_absolute() {
+        tracing::warn!(
+            target: "channel_context::world_authority",
+            %cwd,
+            "cannot scope world authority paths from a non-absolute agent working directory",
+        );
+        return std::collections::BTreeMap::new();
+    }
+
+    let mut permissions = std::collections::BTreeMap::new();
+
+    // Insert exact private discovery paths last so a malformed registry cannot
+    // promote either path through an identical authority entry.
+    permissions.insert(
+        root.join(WORLD_AUTHORITY_REGISTRY_FILE_NAME)
+            .to_string_lossy()
+            .into_owned(),
+        crate::acp::CodexFilesystemPathAccess::Deny,
+    );
+    permissions.insert(
+        root.join(WORLD_AUTHORITY_SECRET_DIRECTORY)
+            .to_string_lossy()
+            .into_owned(),
+        crate::acp::CodexFilesystemPathAccess::Deny,
+    );
+    permissions
+}
+
+fn world_view_thread_root(batch: &FlushBatch) -> Option<String> {
+    let event = &batch.events.last()?.event;
+    let thread_tags = crate::queue::parse_thread_tags(event);
+    thread_tags.root_event_id.or_else(|| {
+        (event.kind.as_u16() as u32 == buzz_core::kind::KIND_FORUM_POST).then(|| event.id.to_hex())
+    })
+}
+
+async fn fetch_world_view_bindings_state(
+    channel_id: Uuid,
+    rest: &RestClient,
+    scope: &buzz_core::world_view::WorldViewBindingScope,
+) -> Result<Option<ExactWorldViewBindingsPromptState>, ()> {
+    let d_tag = scope.d_tag();
+    let events = fetch_channel_context_events(
+        channel_id,
+        rest,
+        buzz_core::kind::KIND_WORLD_VIEW_BINDINGS,
+        "world-views",
+        Some(&d_tag),
+    )
+    .await
+    .ok_or(())?;
+    if events.is_empty() {
+        return Ok(None);
+    }
+    world_view_bindings_state_from_query_response(&events, &channel_id.to_string(), scope)
+        .map(Some)
+        .ok_or(())
+}
+
+async fn fetch_world_view_bindings_section(
+    channel_id: Uuid,
+    thread_root_event_id: Option<&str>,
+    rest: &RestClient,
+    authorities: &buzz_core::world_view::WorldAuthorityRegistry,
+    agent_pubkey: &str,
+) -> Option<String> {
+    use buzz_core::world_view::{
+        effective_world_view_bindings, WorldViewBindingScope, WorldViewBindingsSnapshot,
+    };
+
+    let channel_scope = WorldViewBindingScope::Channel;
+    let channel_state = fetch_world_view_bindings_state(channel_id, rest, &channel_scope)
+        .await
+        .ok()?;
+    let effective_scope = match thread_root_event_id {
+        Some(event_id) => WorldViewBindingScope::thread(event_id).ok()?,
+        None => WorldViewBindingScope::Channel,
+    };
+    let thread_state = match &effective_scope {
+        WorldViewBindingScope::Channel => None,
+        WorldViewBindingScope::Thread { .. } => {
+            fetch_world_view_bindings_state(channel_id, rest, &effective_scope)
+                .await
+                .ok()?
+        }
+    };
+    let channel_snapshot = channel_state
+        .as_ref()
+        .map(|state| state.snapshot.clone())
+        .unwrap_or_else(|| WorldViewBindingsSnapshot::empty(channel_scope));
+    let thread_snapshot = match &effective_scope {
+        WorldViewBindingScope::Channel => None,
+        WorldViewBindingScope::Thread { .. } => Some(
+            thread_state
+                .as_ref()
+                .map(|state| state.snapshot.clone())
+                .unwrap_or_else(|| WorldViewBindingsSnapshot::empty(effective_scope.clone())),
+        ),
+    };
+    let effective =
+        effective_world_view_bindings(&channel_snapshot, thread_snapshot.as_ref()).ok()?;
+    if effective.bindings.is_empty() {
+        return None;
+    }
+    let timestamp = [channel_state.as_ref(), thread_state.as_ref()]
+        .into_iter()
+        .flatten()
+        .max_by_key(|state| state.snapshot.updated_at)
+        .map(|state| state.timestamp.clone())
+        .expect("effective bindings have at least one source event");
+    let state = EffectiveWorldViewBindingsPromptState {
+        effective,
+        timestamp,
+        channel_uuid: channel_id.to_string(),
+    };
+    let resolutions =
+        futures_util::future::join_all(state.effective.bindings.iter().map(|entry| {
+            let request = buzz_world_view_resolver::WorldViewResolutionRequest {
+                channel_id,
+                binding: entry.binding.clone(),
+                declared_scope: entry.declared_scope.clone(),
+                effective_scope: state.effective.effective_scope.clone(),
+                binding_revision_event_id: entry.binding_revision_event_id.clone(),
+            };
+            async move {
+                let binding_id = request.binding.id;
+                let resolution = buzz_world_view_resolver::resolve_world_view(request, authorities)
+                    .await
+                    .map_err(|error| error.to_string());
+                (binding_id, resolution)
+            }
+        }))
+        .await;
+    let authority_grants =
+        issue_world_authority_grants(channel_id, agent_pubkey, &state, authorities, &resolutions);
+    Some(render_world_view_bindings_section(
+        &state,
+        authorities,
+        &resolutions,
+        &authority_grants,
+    ))
+}
+
+fn issue_world_authority_grants(
+    channel_id: Uuid,
+    agent_pubkey: &str,
+    state: &EffectiveWorldViewBindingsPromptState,
+    authorities: &buzz_core::world_view::WorldAuthorityRegistry,
+    resolutions: &[(
+        Uuid,
+        Result<buzz_world_view_resolver::ResolvedWorldView, String>,
+    )],
+) -> std::collections::HashMap<Uuid, String> {
+    use buzz_core::world_view::{
+        issue_world_authority_grant, WorldAuthorityGrantScope, WorldMutationAuthority,
+        WORLD_AUTHORITY_GRANT_TTL_SECONDS,
+    };
+    use buzz_world_view_resolver::WorldViewResolutionAuthority;
+    use zeroize::Zeroizing;
+
+    let mut grants = std::collections::HashMap::with_capacity(resolutions.len());
+    let expires_at_unix_seconds =
+        chrono::Utc::now().timestamp() + WORLD_AUTHORITY_GRANT_TTL_SECONDS;
+    for entry in &state.effective.bindings {
+        let Some(Ok(resolved)) = resolutions
+            .iter()
+            .find(|(binding_id, _)| binding_id == &entry.binding.id)
+            .map(|(_, resolution)| resolution)
+        else {
+            continue;
+        };
+        let mutation_authority = match &resolved.authority {
+            WorldViewResolutionAuthority::LocalWorldMirrorLatest { origin, mirror_id } => {
+                WorldMutationAuthority::LocalWorldMirrorLatest {
+                    origin: origin.clone(),
+                    mirror_id: mirror_id.clone(),
+                }
+            }
+            WorldViewResolutionAuthority::HostedWorldLatest {
+                origin,
+                hosted_world_id,
+            }
+            | WorldViewResolutionAuthority::HostedWorldLiveViewShare {
+                origin,
+                hosted_world_id,
+            } => WorldMutationAuthority::HostedWorldLatest {
+                origin: origin.clone(),
+                hosted_world_id: hosted_world_id.clone(),
+            },
+            WorldViewResolutionAuthority::HostedWorldViewExport { .. } => continue,
+        };
+        let Some(delegation) = authorities.resolve_mutation_delegation(
+            channel_id,
+            &entry.declared_scope,
+            entry.binding.id,
+            &entry.binding_revision_event_id,
+        ) else {
+            continue;
+        };
+        if delegation.authority != mutation_authority {
+            continue;
+        }
+        let secret_file = match &mutation_authority {
+            WorldMutationAuthority::LocalWorldMirrorLatest { origin, mirror_id } => authorities
+                .resolve_local(origin, mirror_id)
+                .map(|authority| authority.capability_secret_file.as_str()),
+            WorldMutationAuthority::HostedWorldLatest {
+                origin,
+                hosted_world_id,
+            } => authorities
+                .resolve_hosted(origin, hosted_world_id)
+                .map(|authority| authority.credential_file.as_str()),
+        };
+        let Some(secret_file) = secret_file else {
+            continue;
+        };
+        let authority_secret = match std::fs::read(secret_file) {
+            Ok(secret) => Zeroizing::new(secret),
+            Err(error) => {
+                tracing::warn!(
+                    binding_id = %entry.binding.id,
+                    error = %error,
+                    "could not read private world authority while minting scoped grant"
+                );
+                continue;
+            }
+        };
+        let scope = WorldAuthorityGrantScope {
+            agent_pubkey: agent_pubkey.to_owned(),
+            channel_id,
+            effective_scope: state.effective.effective_scope.clone(),
+            binding_id: entry.binding.id,
+            binding_revision_event_id: entry.binding_revision_event_id.clone(),
+            source_revision: resolved.source_revision.clone(),
+        };
+        match issue_world_authority_grant(&scope, &authority_secret, expires_at_unix_seconds) {
+            Ok(grant) => {
+                grants.insert(entry.binding.id, grant);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    binding_id = %entry.binding.id,
+                    error = %error,
+                    "could not mint scoped world authority grant"
+                );
+            }
+        }
+    }
+    grants
 }
 
 /// Parse a canvas query response array and render a `[Channel Canvas]` section.
@@ -2422,65 +2785,105 @@ async fn fetch_canvas_section(channel_id: Uuid, rest: &RestClient) -> Option<Str
 /// Returns `None` on: empty array, blank content, malformed/partial event JSON
 /// (requires a complete, structurally valid Nostr event), or an out-of-range
 /// `created_at` timestamp. Never falls back to epoch or raw integers.
-pub(crate) fn canvas_section_from_query_response(
+fn verified_channel_event_from_query_response(
     events: &[serde_json::Value],
     channel_uuid: &str,
-) -> Option<String> {
+    expected_kind: u32,
+    surface: &'static str,
+) -> Option<nostr::Event> {
     let raw = events.first()?;
-
-    // Deserialise as a complete Nostr Event. Partial objects (missing pubkey,
-    // sig, kind, or tags) are rejected here rather than trusted implicitly.
     let event = match serde_json::from_value::<nostr::Event>(raw.clone()) {
-        Ok(ev) => ev,
-        Err(err) => {
+        Ok(event) => event,
+        Err(error) => {
             tracing::warn!(
-                target: "canvas::fetch",
+                target: "channel_context::fetch",
                 channel = %channel_uuid,
-                %err,
-                "canvas query returned a malformed event — emitting no section",
+                surface,
+                %error,
+                "channel context query returned a malformed event",
             );
             return None;
         }
     };
-
-    // Verify the event's id and signature agree with its content.
-    // A structurally complete but tampered event must not supply trusted metadata.
-    if let Err(err) = event.verify() {
+    if let Err(error) = event.verify() {
         tracing::warn!(
-            target: "canvas::fetch",
+            target: "channel_context::fetch",
             channel = %channel_uuid,
-            %err,
-            "canvas event failed signature verification — emitting no section",
+            surface,
+            %error,
+            "channel context event failed signature verification",
         );
         return None;
     }
-
-    // Validate kind: must be KIND_CANVAS (40100).
-    if event.kind != nostr::Kind::Custom(buzz_core::kind::KIND_CANVAS as u16) {
+    if event.kind != nostr::Kind::Custom(expected_kind as u16) {
         tracing::warn!(
-            target: "canvas::fetch",
+            target: "channel_context::fetch",
             channel = %channel_uuid,
+            surface,
             kind = %event.kind.as_u16(),
-            "canvas event has unexpected kind — emitting no section",
+            expected_kind,
+            "channel context event has unexpected kind",
         );
         return None;
     }
-
-    // Validate h-tag: must carry the channel UUID we queried.
-    // The REST boundary filters by #h, but we verify here to prevent a
-    // misbehaving relay from injecting a different channel's canvas.
     let h_tag_matches = event.tags.iter().any(|tag| {
-        let v = tag.as_slice();
-        v.len() >= 2 && v[0] == "h" && v[1] == channel_uuid
+        let value = tag.as_slice();
+        value.len() >= 2 && value[0] == "h" && value[1] == channel_uuid
     });
     if !h_tag_matches {
         tracing::warn!(
-            target: "canvas::fetch",
+            target: "channel_context::fetch",
             channel = %channel_uuid,
-            "canvas event is missing expected h-tag — emitting no section",
+            surface,
+            "channel context event is missing expected h-tag",
         );
         return None;
     }
+    Some(event)
+}
+
+fn channel_event_timestamp(
+    event: &nostr::Event,
+    channel_uuid: &str,
+    surface: &'static str,
+) -> Option<String> {
+    let seconds = match i64::try_from(event.created_at.as_secs()) {
+        Ok(seconds) => seconds,
+        Err(_) => {
+            tracing::warn!(
+                target: "channel_context::fetch",
+                channel = %channel_uuid,
+                surface,
+                "channel context event created_at overflows i64",
+            );
+            return None;
+        }
+    };
+    match chrono::DateTime::from_timestamp(seconds, 0) {
+        Some(timestamp) => Some(timestamp.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+        None => {
+            tracing::warn!(
+                target: "channel_context::fetch",
+                channel = %channel_uuid,
+                surface,
+                seconds,
+                "channel context event has out-of-range created_at",
+            );
+            None
+        }
+    }
+}
+
+pub(crate) fn canvas_section_from_query_response(
+    events: &[serde_json::Value],
+    channel_uuid: &str,
+) -> Option<String> {
+    let event = verified_channel_event_from_query_response(
+        events,
+        channel_uuid,
+        buzz_core::kind::KIND_CANVAS,
+        "canvas",
+    )?;
 
     // Blank content means the canvas was cleared; do not fall back to older events.
     if event.content.trim().is_empty() {
@@ -2494,33 +2897,7 @@ pub(crate) fn canvas_section_from_query_response(
 
     let id = event.id.to_hex();
 
-    // Convert the Nostr timestamp to a UTC RFC3339 string with Z suffix.
-    // Use checked conversion: a u64 that exceeds i64::MAX (e.g. Timestamp::max())
-    // wraps silently with `as i64`, producing a negative value that chrono would
-    // accept as a date in 1969. Reject out-of-range values explicitly instead.
-    let ts_secs = match i64::try_from(event.created_at.as_secs()) {
-        Ok(s) => s,
-        Err(_) => {
-            tracing::warn!(
-                target: "canvas::fetch",
-                channel = %channel_uuid,
-                "canvas event created_at overflows i64 — emitting no section",
-            );
-            return None;
-        }
-    };
-    let timestamp = match chrono::DateTime::from_timestamp(ts_secs, 0) {
-        Some(dt) => dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        None => {
-            tracing::warn!(
-                target: "canvas::fetch",
-                channel = %channel_uuid,
-                ts_secs,
-                "canvas event has out-of-range created_at — emitting no section",
-            );
-            return None;
-        }
-    };
+    let timestamp = channel_event_timestamp(&event, channel_uuid, "canvas")?;
 
     tracing::info!(
         target: "canvas::fetch",
@@ -2542,6 +2919,383 @@ pub(crate) fn render_canvas_section(event_id: &str, timestamp: &str, channel_uui
          Last modified: {timestamp}\n\
          Fetch current content with: buzz canvas get --channel {channel_uuid}"
     )
+}
+
+#[derive(Debug, Clone)]
+struct ExactWorldViewBindingsPromptState {
+    snapshot: buzz_core::world_view::WorldViewBindingsSnapshot,
+    timestamp: String,
+}
+
+#[derive(Debug, Clone)]
+struct EffectiveWorldViewBindingsPromptState {
+    effective: buzz_core::world_view::EffectiveWorldViewBindings,
+    timestamp: String,
+    channel_uuid: String,
+}
+
+fn world_view_bindings_state_from_query_response(
+    events: &[serde_json::Value],
+    channel_uuid: &str,
+    expected_scope: &buzz_core::world_view::WorldViewBindingScope,
+) -> Option<ExactWorldViewBindingsPromptState> {
+    let event = verified_channel_event_from_query_response(
+        events,
+        channel_uuid,
+        buzz_core::kind::KIND_WORLD_VIEW_BINDINGS,
+        "world-views",
+    )?;
+    let expected_channel_id = match Uuid::parse_str(channel_uuid) {
+        Ok(channel_id) => channel_id,
+        Err(error) => {
+            tracing::warn!(
+                target: "channel_context::fetch",
+                channel = %channel_uuid,
+                %error,
+                "world-view query used an invalid channel coordinate",
+            );
+            return None;
+        }
+    };
+    let snapshot = match buzz_core::world_view::world_view_bindings_snapshot_from_verified_event(
+        &event,
+        expected_channel_id,
+        expected_scope,
+    ) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            tracing::warn!(
+                target: "channel_context::fetch",
+                channel = %channel_uuid,
+                %error,
+                "world view bindings event failed envelope validation",
+            );
+            return None;
+        }
+    };
+    let timestamp = channel_event_timestamp(&event, channel_uuid, "world-views")?;
+    Some(ExactWorldViewBindingsPromptState {
+        snapshot,
+        timestamp,
+    })
+}
+
+fn render_world_view_bindings_section(
+    state: &EffectiveWorldViewBindingsPromptState,
+    authorities: &buzz_core::world_view::WorldAuthorityRegistry,
+    resolutions: &[(
+        Uuid,
+        Result<buzz_world_view_resolver::ResolvedWorldView, String>,
+    )],
+    authority_grants: &std::collections::HashMap<Uuid, String>,
+) -> String {
+    use buzz_core::world_view::{WorldViewBindingScope, WorldViewDisplayMode, WorldViewReference};
+    use buzz_world_view_resolver::{WorldViewResolutionAuthority, WorldViewResolutionFreshness};
+
+    let mut lines = vec![
+        "[Shivai World Views]".to_string(),
+        "Command surface: run supplied commands through the Buzz workspace shell tool; do not substitute a sandboxed local-exec tool.".to_string(),
+        format!(
+            "Effective scope: {}",
+            world_view_scope_label(&state.effective.effective_scope)
+        ),
+        format!(
+            "Channel bindings revision (event ID): {}",
+            state
+                .effective
+                .channel_revision_event_id
+                .as_deref()
+                .unwrap_or("none")
+        ),
+        format!("Last modified: {}", state.timestamp),
+    ];
+    if matches!(
+        state.effective.effective_scope,
+        WorldViewBindingScope::Thread { .. }
+    ) {
+        lines.insert(
+            3,
+            format!(
+                "Thread bindings revision (event ID): {}",
+                state
+                    .effective
+                    .thread_revision_event_id
+                    .as_deref()
+                    .unwrap_or("none")
+            ),
+        );
+    }
+    for entry in &state.effective.bindings {
+        let binding = &entry.binding;
+        let resolution = resolutions
+            .iter()
+            .find(|(binding_id, _)| binding_id == &binding.id)
+            .map(|(_, resolution)| resolution);
+        let resolved_source_revision = resolution
+            .and_then(|resolution| resolution.as_ref().ok())
+            .map(|resolved| resolved.source_revision.as_str());
+        let local_authority = match &binding.reference {
+            WorldViewReference::LocalWorldMirrorLatest { origin, mirror_id } => {
+                authorities.resolve_local(origin, mirror_id)
+            }
+            WorldViewReference::HostedWorldLatest { .. }
+            | WorldViewReference::HostedWorldViewExport { .. }
+            | WorldViewReference::HostedWorldLiveViewShare { .. } => None,
+        };
+        let hosted_authority = match &binding.reference {
+            WorldViewReference::HostedWorldLatest {
+                origin,
+                hosted_world_id,
+            } => authorities.resolve_hosted(origin, hosted_world_id),
+            WorldViewReference::HostedWorldLiveViewShare { .. } => resolution
+                .and_then(|resolution| resolution.as_ref().ok())
+                .and_then(|resolved| match &resolved.authority {
+                    WorldViewResolutionAuthority::HostedWorldLiveViewShare {
+                        origin,
+                        hosted_world_id,
+                    } => authorities.resolve_hosted(origin, hosted_world_id),
+                    _ => None,
+                }),
+            WorldViewReference::HostedWorldViewExport { .. }
+            | WorldViewReference::LocalWorldMirrorLatest { .. } => None,
+        };
+        let source = match &binding.reference {
+            WorldViewReference::LocalWorldMirrorLatest { .. } => "local-world-mirror-latest",
+            WorldViewReference::HostedWorldViewExport { .. } => "hosted-world-view-export",
+            WorldViewReference::HostedWorldLiveViewShare { .. } => "hosted-world-live-view-share",
+            WorldViewReference::HostedWorldLatest { .. } => "hosted-world-latest",
+        };
+        let display = match binding.display_mode {
+            WorldViewDisplayMode::Graph => "graph",
+            WorldViewDisplayMode::Tasks => "tasks",
+        };
+        lines.push(format!(
+            "- {} | {} | {} | realm={} | view={} | display={}",
+            binding.id,
+            binding.label.as_deref().unwrap_or("Untitled view"),
+            source,
+            binding.realm_qualified_name,
+            binding.view_qualified_name,
+            display,
+        ));
+        lines.push(format!(
+            "  Declaration: scope={} binding-revision={}",
+            world_view_scope_label(&entry.declared_scope),
+            entry.binding_revision_event_id
+        ));
+
+        match resolution {
+            Some(Ok(resolved)) => {
+                let freshness = match resolved.freshness {
+                    WorldViewResolutionFreshness::Pinned => "pinned",
+                    WorldViewResolutionFreshness::LatestAtResolution => "latest-at-resolution",
+                };
+                lines.push(format!(
+                    "  Resolved source revision: {} ({freshness})",
+                    resolved.source_revision
+                ));
+                lines.push(format!(
+                    "  Effective scope: {}",
+                    world_view_scope_label(&resolved.effective_scope)
+                ));
+                lines.push(format!(
+                    "  Counts: nodes={} ready={} actionable-ready={} satisfied={} blocked={}",
+                    resolved.view_dump.counts.nodes,
+                    resolved.view_dump.counts.ready,
+                    resolved.view_dump.counts.actionable_ready,
+                    resolved.view_dump.counts.satisfied,
+                    resolved.view_dump.counts.blocked,
+                ));
+                lines.push(format!(
+                    "  Ready leaves: {}",
+                    world_view_node_names(&resolved.view_dump.ready_leaves)
+                ));
+                lines.push(format!(
+                    "  Blocked nodes: {}",
+                    world_view_blocked_node_names(&resolved.view_dump.blocked_nodes)
+                ));
+                lines.push(format!(
+                    "  Satisfied nodes: {}",
+                    world_view_node_names(&resolved.view_dump.satisfied_nodes)
+                ));
+                lines.push(format!("  Refresh: {}", resolved.next_command));
+            }
+            Some(Err(error)) => {
+                lines.push(format!(
+                    "  Resolution unavailable: {}",
+                    compact_world_view_diagnostic(error)
+                ));
+                let mut retry =
+                    format!("buzz world-views resolve --channel {}", state.channel_uuid);
+                if let Some(thread_root_event_id) =
+                    state.effective.effective_scope.thread_root_event_id()
+                {
+                    retry.push_str(" --thread-root ");
+                    retry.push_str(thread_root_event_id);
+                }
+                retry.push_str(" --binding ");
+                retry.push_str(&binding.id.to_string());
+                lines.push(format!("  Retry: {retry}"));
+            }
+            None => {
+                lines.push("  Resolution unavailable: resolver produced no readback".into());
+            }
+        }
+
+        match (&binding.reference, local_authority, hosted_authority) {
+            (
+                WorldViewReference::LocalWorldMirrorLatest { .. },
+                Some(_),
+                _,
+            ) => match (
+                resolved_source_revision,
+                authority_grants.get(&binding.id),
+            ) {
+                (Some(source_revision), Some(authority_grant)) => {
+                    let script_command = scoped_world_view_script_command(
+                        &state.channel_uuid,
+                        &state.effective.effective_scope,
+                        binding.id,
+                        source_revision,
+                        authority_grant,
+                    );
+                    lines.push(
+                        "  Authority: mutable local world available through a host-owned scoped command."
+                            .into(),
+                    );
+                    lines.push(format!("  Mutation command: {script_command}"));
+                    lines.push(
+                        "  Command access: pipe ordinary `world ...` lines to this command. Buzz resolves private machine-local authority from the agent/channel/thread/revision grant; never request paths or credentials. On a revision conflict, reread the binding and make one deliberate retry with the refreshed command."
+                            .into(),
+                    );
+                }
+                _ => lines.push(
+                    "  Authority: read-only for this agent; the local source is connected, but a user has not enabled agent edits for this binding."
+                        .into(),
+                ),
+            },
+            (WorldViewReference::LocalWorldMirrorLatest { .. }, None, _) => lines.push(
+                "  Authority: read-only public mirror; no mutable source is registered on this host."
+                    .into(),
+            ),
+            (WorldViewReference::HostedWorldViewExport { .. }, _, _) => {
+                lines.push("  Authority: read-only hosted view export".into());
+            }
+            (
+                WorldViewReference::HostedWorldLatest { .. }
+                | WorldViewReference::HostedWorldLiveViewShare { .. },
+                _,
+                Some(_),
+            ) => match (
+                resolved_source_revision,
+                authority_grants.get(&binding.id),
+            ) {
+                (Some(source_revision), Some(authority_grant)) => {
+                    let script_command = scoped_world_view_script_command(
+                        &state.channel_uuid,
+                        &state.effective.effective_scope,
+                        binding.id,
+                        source_revision,
+                        authority_grant,
+                    );
+                    lines.push(
+                        "  Authority: mutable hosted world available through a host-owned scoped command."
+                            .into(),
+                    );
+                    lines.push(format!("  Mutation command: {script_command}"));
+                    lines.push(
+                        "  Command access: pipe ordinary `world ...` lines to this command. Buzz resolves private machine-local authority from the agent/channel/thread/revision grant; never request or print credentials. On a revision conflict, reread the binding and make one deliberate retry with the refreshed command."
+                            .into(),
+                    );
+                }
+                _ => lines.push(
+                    "  Authority: read-only for this agent; hosted edit authority is connected, but a user has not enabled agent edits for this binding."
+                        .into(),
+                ),
+            },
+            (
+                WorldViewReference::HostedWorldLatest { .. }
+                | WorldViewReference::HostedWorldLiveViewShare { .. },
+                _,
+                None,
+            ) => lines.push(
+                "  Authority: read-only on this client; register the hosted edit-share URL here before a user can enable agent edits."
+                    .into(),
+            ),
+        }
+    }
+    lines.join("\n")
+}
+
+fn scoped_world_view_script_command(
+    channel_id: &str,
+    scope: &buzz_core::world_view::WorldViewBindingScope,
+    binding_id: Uuid,
+    source_revision: &str,
+    authority_grant: &str,
+) -> String {
+    let mut command = format!("buzz world-views script --channel {channel_id}");
+    if let Some(thread_root_event_id) = scope.thread_root_event_id() {
+        command.push_str(" --thread-root ");
+        command.push_str(thread_root_event_id);
+    }
+    command.push_str(" --binding ");
+    command.push_str(&binding_id.to_string());
+    command.push_str(" --expected-revision ");
+    command.push_str(source_revision);
+    command.push_str(" --script - --grant ");
+    command.push_str(authority_grant);
+    command
+}
+
+fn world_view_scope_label(scope: &buzz_core::world_view::WorldViewBindingScope) -> String {
+    match scope {
+        buzz_core::world_view::WorldViewBindingScope::Channel => "channel".into(),
+        buzz_core::world_view::WorldViewBindingScope::Thread {
+            thread_root_event_id,
+        } => format!("thread:{thread_root_event_id}"),
+    }
+}
+
+fn world_view_node_names(nodes: &[buzz_world_view_resolver::ResolvedWorldViewNode]) -> String {
+    if nodes.is_empty() {
+        return "none".into();
+    }
+    nodes
+        .iter()
+        .map(|node| node.qualified_name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn world_view_blocked_node_names(
+    nodes: &[buzz_world_view_resolver::ResolvedWorldViewNode],
+) -> String {
+    if nodes.is_empty() {
+        return "none".into();
+    }
+    nodes
+        .iter()
+        .map(|node| {
+            let blockers = if node.blockers.is_empty() {
+                "unspecified".into()
+            } else {
+                node.blockers.join(", ")
+            };
+            format!("{} <- {blockers}", node.qualified_name)
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn compact_world_view_diagnostic(diagnostic: &str) -> String {
+    diagnostic
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(500)
+        .collect()
 }
 
 /// Fetch conversation context (thread or DM) for a batch before prompting.
@@ -5679,6 +6433,360 @@ mod tests {
             !section.contains("+00:00"),
             "timestamp must not use +00:00 offset"
         );
+    }
+
+    fn empty_resolved_world_view(
+        binding_id: Uuid,
+        authority: serde_json::Value,
+    ) -> buzz_world_view_resolver::ResolvedWorldView {
+        let source_revision = "c".repeat(64);
+        let presentation_model = serde_json::json!({
+            "graph": { "kind": "empty", "reason": "no-preferences" },
+            "revision": source_revision.clone(),
+            "selection": {
+                "realmQualifiedName": "delivery::main",
+                "viewQualifiedName": "delivery::main::@Remaining"
+            }
+        });
+        serde_json::from_value(serde_json::json!({
+            "formatVersion": 1,
+            "bindingId": binding_id,
+            "channelId": CHANNEL_UUID,
+            "declaredScope": { "kind": "channel" },
+            "effectiveScope": { "kind": "channel" },
+            "bindingRevisionEventId": "a".repeat(64),
+            "sourceRevision": source_revision,
+            "freshness": "latest-at-resolution",
+            "authority": authority,
+            "realm": {
+                "name": "main",
+                "qualifiedName": "delivery::main"
+            },
+            "view": {
+                "name": "Remaining",
+                "qualifiedName": "delivery::main::@Remaining"
+            },
+            "viewDump": {
+                "counts": {
+                    "nodes": 0,
+                    "edges": 0,
+                    "ready": 0,
+                    "actionableReady": 0,
+                    "satisfied": 0,
+                    "blocked": 0
+                },
+                "nodes": [],
+                "readyLeaves": [],
+                "satisfiedNodes": [],
+                "blockedNodes": [],
+                "edges": []
+            },
+            "presentation": {
+                "formatVersion": 1,
+                "dark": presentation_model,
+                "light": presentation_model
+            },
+            "resolvedAt": "2026-07-24T12:00:00Z",
+            "nextCommand": format!(
+                "buzz world-views resolve --channel {CHANNEL_UUID} --binding {binding_id}"
+            )
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn world_view_prompt_only_exposes_local_scoped_command_after_consent() {
+        use buzz_core::world_view::{
+            LocalWorldAuthority, WorldAuthorityRegistry, WorldMutationAuthority, WorldViewBinding,
+            WorldViewBindingScope, WorldViewBindingsDocument, WorldViewDisplayMode,
+            WorldViewMutationDelegation, WorldViewReference, WORLD_AUTHORITY_REGISTRY_VERSION,
+            WORLD_VIEW_BINDINGS_VERSION,
+        };
+
+        let binding_id = Uuid::nil();
+        let document = WorldViewBindingsDocument {
+            version: WORLD_VIEW_BINDINGS_VERSION,
+            scope: WorldViewBindingScope::Channel,
+            bindings: vec![WorldViewBinding {
+                id: binding_id,
+                label: Some("Delivery".into()),
+                reference: WorldViewReference::LocalWorldMirrorLatest {
+                    origin: "https://manifest.shivai.space".into(),
+                    mirror_id: "mirror-1".into(),
+                },
+                realm_qualified_name: "delivery::main".into(),
+                view_qualified_name: "delivery::main::@Remaining".into(),
+                display_mode: WorldViewDisplayMode::Tasks,
+            }],
+        };
+        let event = EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_WORLD_VIEW_BINDINGS as u16),
+            serde_json::to_string(&document).unwrap(),
+        )
+        .tags([
+            Tag::parse(["h", CHANNEL_UUID]).unwrap(),
+            Tag::parse([
+                "d",
+                buzz_core::world_view::CHANNEL_WORLD_VIEW_BINDINGS_D_TAG,
+            ])
+            .unwrap(),
+            Tag::parse(["prev", ""]).unwrap(),
+        ])
+        .sign_with_keys(&Keys::generate())
+        .unwrap();
+        let mut registry = WorldAuthorityRegistry {
+            version: WORLD_AUTHORITY_REGISTRY_VERSION,
+            trusted_origins: vec!["https://manifest.shivai.space".into()],
+            local_authorities: vec![LocalWorldAuthority {
+                origin: "https://manifest.shivai.space".into(),
+                mirror_id: "mirror-1".into(),
+                source_root: "/worlds/delivery.world".into(),
+                capability_secret_file: "/credentials/local-delivery.txt".into(),
+            }],
+            hosted_authorities: Vec::new(),
+            mutation_delegations: Vec::new(),
+        };
+
+        let exact_state = world_view_bindings_state_from_query_response(
+            &[serde_json::to_value(event).unwrap()],
+            CHANNEL_UUID,
+            &WorldViewBindingScope::Channel,
+        )
+        .expect("valid world binding event");
+        let state = EffectiveWorldViewBindingsPromptState {
+            effective: buzz_core::world_view::effective_world_view_bindings(
+                &exact_state.snapshot,
+                None,
+            )
+            .expect("effective channel bindings"),
+            timestamp: exact_state.timestamp,
+            channel_uuid: CHANNEL_UUID.into(),
+        };
+        let resolved = empty_resolved_world_view(
+            binding_id,
+            serde_json::json!({
+                "kind": "local-world-mirror-latest",
+                "origin": "https://manifest.shivai.space",
+                "mirrorId": "mirror-1"
+            }),
+        );
+        let section = render_world_view_bindings_section(
+            &state,
+            &registry,
+            &[(binding_id, Ok(resolved))],
+            &std::collections::HashMap::new(),
+        );
+
+        assert!(section.contains(&format!("--binding {binding_id}")));
+        assert!(section.contains("Effective scope: channel"));
+        assert!(section.contains("Declaration: scope=channel binding-revision="));
+        assert!(section.contains(
+            "Authority: read-only for this agent; the local source is connected, but a user has not enabled agent edits for this binding."
+        ));
+        assert!(!section.contains("/worlds/delivery.world"));
+        assert!(!section.contains("Mutation command:"));
+        assert!(!section.contains("world hosted sync-local"));
+
+        let authority_root =
+            std::env::temp_dir().join(format!("buzz-acp-local-grant-{}", Uuid::new_v4()));
+        std::fs::create_dir(&authority_root).expect("create local authority fixture root");
+        let capability_secret_file = authority_root.join("local.capability");
+        std::fs::write(&capability_secret_file, "private-local-capability")
+            .expect("write local capability fixture");
+        registry.local_authorities[0].capability_secret_file =
+            capability_secret_file.to_string_lossy().into_owned();
+        registry
+            .mutation_delegations
+            .push(WorldViewMutationDelegation {
+                channel_id: Uuid::parse_str(CHANNEL_UUID).unwrap(),
+                declared_scope: WorldViewBindingScope::Channel,
+                binding_id,
+                binding_revision_event_id: state.effective.bindings[0]
+                    .binding_revision_event_id
+                    .clone(),
+                authority: WorldMutationAuthority::LocalWorldMirrorLatest {
+                    origin: "https://manifest.shivai.space".into(),
+                    mirror_id: "mirror-1".into(),
+                },
+            });
+        let resolved = empty_resolved_world_view(
+            binding_id,
+            serde_json::json!({
+                "kind": "local-world-mirror-latest",
+                "origin": "https://manifest.shivai.space",
+                "mirrorId": "mirror-1"
+            }),
+        );
+        let resolutions = vec![(binding_id, Ok(resolved))];
+        let authority_grants = issue_world_authority_grants(
+            Uuid::parse_str(CHANNEL_UUID).unwrap(),
+            &"d".repeat(64),
+            &state,
+            &registry,
+            &resolutions,
+        );
+        let section =
+            render_world_view_bindings_section(&state, &registry, &resolutions, &authority_grants);
+
+        assert!(section.contains(
+            "Authority: mutable local world available through a host-owned scoped command."
+        ));
+        assert!(section.contains("Mutation command: buzz world-views script"));
+        assert!(section.contains("never request paths or credentials"));
+        assert!(!section.contains("/worlds/delivery.world"));
+        assert!(!section.contains(&capability_secret_file.to_string_lossy().to_string()));
+        assert!(!section.contains("private-local-capability"));
+        std::fs::remove_dir_all(authority_root).expect("remove local authority fixture root");
+    }
+
+    #[test]
+    fn world_view_prompt_renders_scoped_hosted_world_command() {
+        use buzz_core::world_view::{
+            verify_world_authority_grant, EffectiveWorldViewBinding, EffectiveWorldViewBindings,
+            HostedWorldAuthority, WorldAuthorityGrantScope, WorldAuthorityRegistry,
+            WorldMutationAuthority, WorldViewBinding, WorldViewBindingScope, WorldViewDisplayMode,
+            WorldViewMutationDelegation, WorldViewReference, WORLD_AUTHORITY_REGISTRY_VERSION,
+        };
+
+        let binding_id = Uuid::nil();
+        let binding = WorldViewBinding {
+            id: binding_id,
+            label: Some("Hosted delivery".into()),
+            reference: WorldViewReference::HostedWorldLatest {
+                origin: "https://manifest.shivai.space".into(),
+                hosted_world_id: "hosted-1".into(),
+            },
+            realm_qualified_name: "delivery::main".into(),
+            view_qualified_name: "delivery::main::@Remaining".into(),
+            display_mode: WorldViewDisplayMode::Tasks,
+        };
+        let state = EffectiveWorldViewBindingsPromptState {
+            effective: EffectiveWorldViewBindings {
+                effective_scope: WorldViewBindingScope::Channel,
+                bindings: vec![EffectiveWorldViewBinding {
+                    binding,
+                    declared_scope: WorldViewBindingScope::Channel,
+                    binding_revision_event_id: "a".repeat(64),
+                }],
+                channel_revision_event_id: Some("a".repeat(64)),
+                thread_revision_event_id: None,
+            },
+            timestamp: "2026-07-24T12:00:00Z".into(),
+            channel_uuid: CHANNEL_UUID.into(),
+        };
+        let authority_root =
+            std::env::temp_dir().join(format!("buzz-acp-world-grant-{}", Uuid::new_v4()));
+        std::fs::create_dir(&authority_root).expect("create authority fixture root");
+        let credential_file = authority_root.join("hosted-1.edit-share");
+        std::fs::write(&credential_file, "private-edit-share").expect("write authority fixture");
+        let registry = WorldAuthorityRegistry {
+            version: WORLD_AUTHORITY_REGISTRY_VERSION,
+            trusted_origins: vec!["https://manifest.shivai.space".into()],
+            local_authorities: Vec::new(),
+            hosted_authorities: vec![HostedWorldAuthority {
+                origin: "https://manifest.shivai.space".into(),
+                hosted_world_id: "hosted-1".into(),
+                credential_file: credential_file.to_string_lossy().into_owned(),
+            }],
+            mutation_delegations: vec![WorldViewMutationDelegation {
+                channel_id: Uuid::parse_str(CHANNEL_UUID).unwrap(),
+                declared_scope: WorldViewBindingScope::Channel,
+                binding_id,
+                binding_revision_event_id: "a".repeat(64),
+                authority: WorldMutationAuthority::HostedWorldLatest {
+                    origin: "https://manifest.shivai.space".into(),
+                    hosted_world_id: "hosted-1".into(),
+                },
+            }],
+        };
+        let resolved = empty_resolved_world_view(
+            binding_id,
+            serde_json::json!({
+                "kind": "hosted-world-latest",
+                "origin": "https://manifest.shivai.space",
+                "hostedWorldId": "hosted-1"
+            }),
+        );
+
+        let resolutions = vec![(binding_id, Ok(resolved))];
+        let agent_pubkey = "d".repeat(64);
+        let authority_grants = issue_world_authority_grants(
+            Uuid::parse_str(CHANNEL_UUID).unwrap(),
+            &agent_pubkey,
+            &state,
+            &registry,
+            &resolutions,
+        );
+        let authority_grant = authority_grants
+            .get(&binding_id)
+            .expect("host issued scoped grant");
+        verify_world_authority_grant(
+            authority_grant,
+            b"private-edit-share",
+            &WorldAuthorityGrantScope {
+                agent_pubkey,
+                channel_id: Uuid::parse_str(CHANNEL_UUID).unwrap(),
+                effective_scope: WorldViewBindingScope::Channel,
+                binding_id,
+                binding_revision_event_id: "a".repeat(64),
+                source_revision: "c".repeat(64),
+            },
+            chrono::Utc::now().timestamp(),
+        )
+        .expect("grant verifies against exact prompt scope");
+        let section =
+            render_world_view_bindings_section(&state, &registry, &resolutions, &authority_grants);
+
+        assert!(section.contains(
+            "Authority: mutable hosted world available through a host-owned scoped command."
+        ));
+        assert!(section.contains(
+            "Command surface: run supplied commands through the Buzz workspace shell tool"
+        ));
+        assert!(section.contains(&format!(
+            "Mutation command: buzz world-views script --channel {CHANNEL_UUID} --binding {binding_id} --expected-revision {} --script - --grant {authority_grant}",
+            "c".repeat(64),
+        )));
+        assert!(section.contains("Buzz resolves private machine-local authority"));
+        assert!(section.contains("never request or print credentials"));
+        assert!(!section.contains(&credential_file.to_string_lossy().to_string()));
+        assert!(!section.contains("--edit-share"));
+        assert!(!section.contains("--base-url"));
+        assert!(!section.contains("world hosted"));
+        assert!(!section.contains("private-edit-share"));
+        std::fs::remove_dir_all(authority_root).expect("remove authority fixture root");
+    }
+
+    #[test]
+    fn world_agent_filesystem_permissions_deny_discovery_without_exposing_local_sources() {
+        use buzz_core::world_view::{
+            WORLD_AUTHORITY_REGISTRY_FILE_NAME, WORLD_AUTHORITY_SECRET_DIRECTORY,
+        };
+
+        let root = std::env::temp_dir().join(format!("buzz-acp-permissions-{}", Uuid::new_v4()));
+        let local_source = root.join("private.world");
+        let permissions = world_agent_filesystem_permissions(root.to_str().unwrap());
+        assert_eq!(
+            permissions.get(
+                &root
+                    .join(WORLD_AUTHORITY_REGISTRY_FILE_NAME)
+                    .to_string_lossy()
+                    .into_owned()
+            ),
+            Some(&crate::acp::CodexFilesystemPathAccess::Deny)
+        );
+        assert_eq!(
+            permissions.get(
+                &root
+                    .join(WORLD_AUTHORITY_SECRET_DIRECTORY)
+                    .to_string_lossy()
+                    .into_owned()
+            ),
+            Some(&crate::acp::CodexFilesystemPathAccess::Deny)
+        );
+        assert!(!permissions.contains_key(&local_source.to_string_lossy().into_owned()));
+        assert_eq!(permissions.len(), 2);
+        assert!(world_agent_filesystem_permissions("relative/nest").is_empty());
     }
 
     // ── new-session channel context (one resolve, two consumers) ─────────────

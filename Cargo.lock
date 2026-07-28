@@ -769,6 +769,7 @@ dependencies = [
  "buzz-core",
  "buzz-persona",
  "buzz-sdk",
+ "buzz-world-view-resolver",
  "chrono",
  "clap",
  "evalexpr",
@@ -791,6 +792,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -888,6 +890,7 @@ dependencies = [
  "buzz-core",
  "buzz-persona",
  "buzz-sdk",
+ "buzz-world-view-resolver",
  "buzz-ws-client",
  "bytes",
  "chrono",
@@ -908,6 +911,7 @@ dependencies = [
  "tokio",
  "url",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -1282,6 +1286,19 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "buzz-world-view-resolver"
+version = "0.1.0"
+dependencies = [
+ "buzz-core",
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
  "uuid",
 ]
 

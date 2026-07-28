@@ -39,6 +39,12 @@ impl Shim {
             symlink(&self_exe, &dir.path().join(name))?;
         }
 
+        if let Some(world_binary) =
+            shivai_world_binary_for_shim(&self_exe, std::env::var_os("SHIVAI_WORLD_BIN").as_deref())
+        {
+            symlink(&world_binary, &dir.path().join("world"))?;
+        }
+
         let original = std::env::var_os("PATH").unwrap_or_default();
         let mut entries = vec![PathBuf::from(dir.path())];
         entries.extend(std::env::split_paths(&original));
@@ -73,6 +79,20 @@ impl Shim {
             git_env,
         })
     }
+}
+
+fn shivai_world_binary_for_shim(
+    self_exe: &Path,
+    configured: Option<&std::ffi::OsStr>,
+) -> Option<PathBuf> {
+    let configured = configured
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute() && path.is_file());
+    configured.or_else(|| {
+        let sibling =
+            self_exe.with_file_name(format!("shivai-world{}", std::env::consts::EXE_SUFFIX));
+        sibling.is_file().then_some(sibling)
+    })
 }
 
 struct KeyInfo {
@@ -359,6 +379,28 @@ pub fn artifact_dir(session_root: &Path) -> PathBuf {
 }
 
 #[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn world_shim_prefers_configured_binary_then_bundled_sibling() {
+        let dir = tempfile::tempdir().unwrap();
+        let self_exe = dir.path().join("buzz-dev-mcp");
+        let sibling =
+            self_exe.with_file_name(format!("shivai-world{}", std::env::consts::EXE_SUFFIX));
+        let configured = dir.path().join("configured-world");
+        std::fs::write(&self_exe, b"helper").unwrap();
+        std::fs::write(&sibling, b"bundled").unwrap();
+        std::fs::write(&configured, b"configured").unwrap();
+
+        assert_eq!(
+            shivai_world_binary_for_shim(&self_exe, Some(configured.as_os_str())),
+            Some(configured)
+        );
+        assert_eq!(shivai_world_binary_for_shim(&self_exe, None), Some(sibling));
+    }
+}
+
 mod git_user_name_tests {
     use super::{
         build_git_env, is_git_crud, is_unicode_format, sanitize_git_user_name, KeyInfo,

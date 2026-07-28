@@ -30,6 +30,7 @@ import { UserProfilePanel } from "@/features/profile/ui/UserProfilePanel";
 import { ChannelFindBar } from "@/features/search/ui/ChannelFindBar";
 import { AgentSessionThreadPanel } from "@/features/channels/ui/AgentSessionThreadPanel";
 import { ChannelManagementAuxiliaryPanel } from "@/features/channels/ui/ChannelManagementAuxiliaryPanel";
+import { ChannelWorldViews } from "@/features/channels/ui/ChannelWorldViews";
 import { RightAuxiliaryPane } from "@/features/channels/ui/RightAuxiliaryPane";
 import { ThreadViewModeToggle } from "@/features/channels/ui/ThreadViewModeToggle";
 import { FocusThreadDrawer } from "@/features/channels/ui/FocusThreadDrawer";
@@ -51,6 +52,7 @@ import {
   type WelcomeComposerBannerState,
 } from "@/features/channels/ui/WelcomeComposerBanner";
 import {
+  findLastOwnEditableMessage,
   isWelcomeSetupSystemMessage,
   mentionsKnownAgent,
 } from "@/features/channels/ui/ChannelPane.helpers";
@@ -63,7 +65,6 @@ import { buildMainTimelineEntries } from "@/features/messages/lib/threadPanel";
 import { useRenderScopedReactionHydration } from "@/features/messages/lib/useRenderScopedReactionHydration";
 import type { TimelineMessage } from "@/features/messages/types";
 import { isWelcomeExperienceChannel as isWelcomeExperience } from "@/features/onboarding/welcome";
-import { KIND_SYSTEM_MESSAGE } from "@/shared/constants/kinds";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
 import { channelChrome } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
@@ -163,6 +164,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   typingPubkeys,
 }: ChannelPaneProps) {
   const timelineScrollRef = React.useRef<HTMLDivElement>(null);
+  const mainColumnRef = React.useRef<HTMLElement>(null);
   const messageTimelineRef = React.useRef<MessageTimelineHandle>(null);
   const composerWrapperRef = React.useRef<HTMLDivElement>(null);
   const completedWelcomeBannerChannelIdsRef = React.useRef(new Set<string>());
@@ -220,6 +222,7 @@ export const ChannelPane = React.memo(function ChannelPane({
     `${activeChannelId}:${isSinglePanelView}:${hasMainComposerOverlay}`,
     "css-variable",
     () => messageTimelineRef.current?.settleAtBottom() ?? false,
+    mainColumnRef,
   );
   const clearWelcomeComposerDismissTimer = React.useCallback(() => {
     if (welcomeComposerDismissTimerRef.current !== null) {
@@ -264,44 +267,24 @@ export const ChannelPane = React.memo(function ChannelPane({
   const mainEditTarget = editTarget && !isEditInThread ? editTarget : null;
   const threadEditTarget = editTarget && isEditInThread ? editTarget : null;
 
-  const findLastOwnEditable = React.useCallback(
-    (candidates: TimelineMessage[]): TimelineMessage | null => {
-      if (!onEdit || !currentPubkey) return null;
-      let best: TimelineMessage | null = null;
-      for (const message of candidates) {
-        if (
-          message.kind === KIND_SYSTEM_MESSAGE ||
-          message.pubkey !== currentPubkey ||
-          message.pending
-        ) {
-          continue;
-        }
-        if (!best || message.createdAt >= best.createdAt) {
-          best = message;
-        }
-      }
-      return best;
-    },
-    [onEdit, currentPubkey],
-  );
-
   const handleEditLastOwnMainMessage = React.useCallback((): boolean => {
-    const target = findLastOwnEditable(messages);
-    if (!target || !onEdit) return false;
+    if (!onEdit) return false;
+    const target = findLastOwnEditableMessage(messages, currentPubkey);
+    if (!target) return false;
     onEdit(target);
     return true;
-  }, [findLastOwnEditable, messages, onEdit]);
+  }, [currentPubkey, messages, onEdit]);
 
   const handleEditLastOwnThreadMessage = React.useCallback((): boolean => {
     if (!onEdit) return false;
     const scope: TimelineMessage[] = [];
     if (threadHeadMessage) scope.push(threadHeadMessage);
     for (const entry of threadMessages) scope.push(entry.message);
-    const target = findLastOwnEditable(scope);
+    const target = findLastOwnEditableMessage(scope, currentPubkey);
     if (!target) return false;
     onEdit(target);
     return true;
-  }, [findLastOwnEditable, onEdit, threadHeadMessage, threadMessages]);
+  }, [currentPubkey, onEdit, threadHeadMessage, threadMessages]);
 
   const timeoutState = useTimeoutState();
 
@@ -580,6 +563,8 @@ export const ChannelPane = React.memo(function ChannelPane({
     isSinglePanelView,
     useSplitAuxiliaryPane,
   });
+  const worldViewChannel =
+    activeChannel?.channelType === "dm" ? null : activeChannel;
   return (
     <div className="relative flex min-h-0 min-w-0 flex-1 flex-row overflow-hidden">
       {!isSinglePanelView ? (
@@ -599,6 +584,7 @@ export const ChannelPane = React.memo(function ChannelPane({
           className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
           inert={channelIsCovered ? true : undefined}
           data-testid="channel-drop-zone"
+          ref={mainColumnRef}
           onDragEnter={
             canDropInMainColumn ? mainComposerMedia.handleDragEnter : undefined
           }
@@ -617,6 +603,17 @@ export const ChannelPane = React.memo(function ChannelPane({
           }
         >
           {header}
+          {worldViewChannel ? (
+            <div className={channelChrome.contentPadding}>
+              <ChannelWorldViews
+                canEdit={
+                  worldViewChannel.isMember && !worldViewChannel.archivedAt
+                }
+                channelId={worldViewChannel.id}
+                key={worldViewChannel.id}
+              />
+            </div>
+          ) : null}
           {channelFind.isOpen ? (
             <div className={cn("absolute inset-x-0 z-40", channelChrome.top)}>
               <ChannelFindBar
@@ -640,6 +637,7 @@ export const ChannelPane = React.memo(function ChannelPane({
             fetchOlder={fetchOlder}
             followThreadById={followThreadById}
             hasComposerOverlay={hasMainComposerOverlay}
+            hasExternalTopChromeClearance={worldViewChannel !== null}
             hasOlderMessages={hasOlderMessages}
             historyExhausted={historyExhausted}
             huddleMemberPubkeys={huddleMemberPubkeys}

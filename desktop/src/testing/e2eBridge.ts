@@ -12,6 +12,14 @@ import {
 import { relayClient } from "@/shared/api/relayClient";
 import type { ConnectionState } from "@/shared/api/relayClientShared";
 import type { ChannelTemplate, RelayEvent } from "@/shared/api/types";
+import type {
+  ResolvedWorldView,
+  WorldViewAuthority,
+  WorldViewBindingsDocument,
+  WorldViewCatalog,
+  WorldViewMutationDelegation,
+  WorldViewResolutionRequest,
+} from "@/shared/api/worldViewTypes";
 import { getMarkdownParseCount } from "@/shared/ui/markdown/nodeCache";
 import { syncAgentTurnsFromEvents } from "@/features/agents/activeAgentTurnsStore";
 import { recordTimeoutFromRejection } from "@/features/moderation/lib/timeoutStore";
@@ -248,6 +256,14 @@ type E2eConfig = {
     deepHistoryMessageCount?: number;
     feedReadError?: string;
     canvasReadError?: string;
+    worldViewBindings?: WorldViewBindingsDocument;
+    worldViewThreadBindings?: Record<string, WorldViewBindingsDocument>;
+    resolvedWorldViews?: Record<string, ResolvedWorldView>;
+    worldAuthorities?: WorldViewAuthority[];
+    trustedWorldOrigins?: string[];
+    worldViewMutationDelegations?: WorldViewMutationDelegation[];
+    worldViewCatalog?: WorldViewCatalog;
+    worldViewCatalogAfterHostedRegistration?: WorldViewCatalog;
     /** Delay (ms) for `apply_workspace` so e2e tests can observe the
      *  community-switch gate. 0/undefined = instant. */
     applyCommunityDelayMs?: number;
@@ -11126,6 +11142,285 @@ export function maybeInstallE2eTauriMocks() {
         }
         // Return the no-canvas success shape — content null means no canvas set.
         return { content: null, updated_at: null, author: null };
+      }
+      case "set_world_view_bindings": {
+        const { document } = payload as {
+          document: WorldViewBindingsDocument;
+        };
+        if (activeConfig) {
+          activeConfig.mock ??= {};
+          if (document.scope.kind === "thread") {
+            activeConfig.mock.worldViewThreadBindings = {
+              ...activeConfig.mock.worldViewThreadBindings,
+              [document.scope.threadRootEventId]: document,
+            };
+          } else {
+            activeConfig.mock.worldViewBindings = document;
+          }
+        }
+        return {
+          ok: true,
+          revisionEventId: mockEventId(),
+          nextReadCommand: "buzz world-views get --channel mock-channel",
+        };
+      }
+      case "get_world_view_bindings": {
+        const { threadRootEventId } = payload as {
+          threadRootEventId: string | null;
+        };
+        const document = threadRootEventId
+          ? (activeConfig?.mock?.worldViewThreadBindings?.[
+              threadRootEventId
+            ] ?? {
+              version: 4,
+              scope: {
+                kind: "thread" as const,
+                threadRootEventId,
+              },
+              bindings: [],
+            })
+          : (activeConfig?.mock?.worldViewBindings ?? {
+              version: 4,
+              scope: { kind: "channel" as const },
+              bindings: [],
+            });
+        return {
+          document,
+          revisionEventId: document.bindings.length > 0 ? "1".repeat(64) : null,
+          updatedAt: null,
+          author: null,
+          nextReadCommand: "buzz world-views get --channel mock-channel",
+        };
+      }
+      case "get_effective_world_view_bindings": {
+        const { threadRootEventId } = payload as {
+          threadRootEventId: string | null;
+        };
+        // The long-lived E2E fixtures predate production's 64-hex Nostr ID
+        // decoder and intentionally use readable IDs. Normalize only the mock
+        // response boundary; production inputs remain strict.
+        const effectiveThreadScope = threadRootEventId
+          ? {
+              kind: "thread" as const,
+              threadRootEventId: /^[0-9a-f]{64}$/.test(threadRootEventId)
+                ? threadRootEventId
+                : "f".repeat(64),
+            }
+          : null;
+        const channelDocument = activeConfig?.mock?.worldViewBindings ?? {
+          version: 4,
+          scope: { kind: "channel" as const },
+          bindings: [],
+        };
+        const threadDocument = threadRootEventId
+          ? activeConfig?.mock?.worldViewThreadBindings?.[threadRootEventId]
+          : undefined;
+        const threadBindingIds = new Set(
+          threadDocument?.bindings.map((binding) => binding.id) ?? [],
+        );
+        const channelBindings = channelDocument.bindings
+          .filter((binding) => !threadBindingIds.has(binding.id))
+          .map((binding) => ({
+            binding,
+            declaredScope: channelDocument.scope,
+            bindingRevisionEventId: "1".repeat(64),
+          }));
+        const threadBindings =
+          threadDocument?.bindings.map((binding) => ({
+            binding,
+            declaredScope: effectiveThreadScope ?? threadDocument.scope,
+            bindingRevisionEventId: "2".repeat(64),
+          })) ?? [];
+        return {
+          effectiveScope:
+            effectiveThreadScope ?? ({ kind: "channel" } as const),
+          bindings: [...channelBindings, ...threadBindings],
+          channelRevisionEventId:
+            channelDocument.bindings.length > 0 ? "1".repeat(64) : null,
+          threadRevisionEventId:
+            threadDocument && threadDocument.bindings.length > 0
+              ? "2".repeat(64)
+              : null,
+          nextReadCommands: [
+            "buzz world-views get --channel mock-channel",
+            "buzz world-views resolve --channel mock-channel",
+          ],
+        };
+      }
+      case "list_world_authorities": {
+        return {
+          authorities: activeConfig?.mock?.worldAuthorities ?? [],
+          trustedOrigins: activeConfig?.mock?.trustedWorldOrigins ?? [
+            "https://manifest.shivai.space",
+          ],
+        };
+      }
+      case "trust_world_origin": {
+        const { origin } = payload as { origin: string };
+        const trustedOrigins = activeConfig?.mock?.trustedWorldOrigins ?? [
+          "https://manifest.shivai.space",
+        ];
+        const changed = !trustedOrigins.includes(origin);
+        if (activeConfig) {
+          activeConfig.mock ??= {};
+          activeConfig.mock.trustedWorldOrigins = changed
+            ? [...trustedOrigins, origin]
+            : trustedOrigins;
+        }
+        return { changed, origin, trusted: true };
+      }
+      case "revoke_world_origin_trust": {
+        const { origin } = payload as { origin: string };
+        const trustedOrigins = activeConfig?.mock?.trustedWorldOrigins ?? [
+          "https://manifest.shivai.space",
+        ];
+        const retained = trustedOrigins.filter(
+          (trustedOrigin) => trustedOrigin !== origin,
+        );
+        if (activeConfig) {
+          activeConfig.mock ??= {};
+          activeConfig.mock.trustedWorldOrigins = retained;
+        }
+        return {
+          changed: retained.length !== trustedOrigins.length,
+          origin,
+          trusted: false,
+        };
+      }
+      case "list_world_view_mutation_delegations": {
+        return {
+          delegations: activeConfig?.mock?.worldViewMutationDelegations ?? [],
+        };
+      }
+      case "authorize_world_view_mutation": {
+        const delegation = payload as WorldViewMutationDelegation;
+        if (activeConfig) {
+          activeConfig.mock ??= {};
+          const existing = activeConfig.mock.worldViewMutationDelegations ?? [];
+          activeConfig.mock.worldViewMutationDelegations = [
+            ...existing.filter(
+              (candidate) =>
+                candidate.channelId !== delegation.channelId ||
+                candidate.bindingId !== delegation.bindingId ||
+                JSON.stringify(candidate.declaredScope) !==
+                  JSON.stringify(delegation.declaredScope),
+            ),
+            delegation,
+          ];
+        }
+        return { delegation };
+      }
+      case "revoke_world_view_mutation": {
+        const request = payload as Pick<
+          WorldViewMutationDelegation,
+          "bindingId" | "channelId" | "declaredScope"
+        >;
+        const existing = activeConfig?.mock?.worldViewMutationDelegations ?? [];
+        const retained = existing.filter(
+          (candidate) =>
+            candidate.channelId !== request.channelId ||
+            candidate.bindingId !== request.bindingId ||
+            JSON.stringify(candidate.declaredScope) !==
+              JSON.stringify(request.declaredScope),
+        );
+        if (activeConfig?.mock) {
+          activeConfig.mock.worldViewMutationDelegations = retained;
+        }
+        return { revoked: retained.length !== existing.length };
+      }
+      case "connect_local_world_authority": {
+        const { sourceRoot } = payload as { sourceRoot: string };
+        return {
+          authority: {
+            origin: "https://manifest.shivai.space",
+            mirrorId: "mirror-buzz-main",
+            sourceRoot,
+          },
+          worldRef: {
+            kind: "local-world-mirror-latest",
+            origin: "https://manifest.shivai.space",
+            mirrorId: "mirror-buzz-main",
+          },
+        };
+      }
+      case "catalog_world_views": {
+        const hasRegisteredHostedAuthority =
+          window.__BUZZ_E2E_COMMANDS__?.includes(
+            "register_hosted_world_authority",
+          ) ?? false;
+        const configuredCatalog = hasRegisteredHostedAuthority
+          ? (activeConfig?.mock?.worldViewCatalogAfterHostedRegistration ??
+            activeConfig?.mock?.worldViewCatalog)
+          : activeConfig?.mock?.worldViewCatalog;
+        return (
+          configuredCatalog ?? {
+            formatVersion: 1,
+            revision: "revision-world-view-1",
+            worldQualifiedName: "world",
+            views: [
+              {
+                name: "@Board",
+                qualifiedName: "@main::Board",
+                realm: {
+                  name: "main",
+                  qualifiedName: "world::main",
+                },
+              },
+            ],
+          }
+        );
+      }
+      case "plugin:dialog|open": {
+        return "/workspace/buzz-integration.world";
+      }
+      case "publish_hosted_world_live_view_share": {
+        const { reference, viewQualifiedName } = payload as {
+          reference: {
+            kind: "hosted-world-latest";
+            origin: string;
+            hostedWorldId: string;
+          };
+          viewQualifiedName: string;
+        };
+        return {
+          hostedWorldId: reference.hostedWorldId,
+          sourceRevision: "hosted-revision-1",
+          packageRevision: "revision-world-view-1",
+          realmQualifiedName: "world::main",
+          viewQualifiedName,
+          shareToken: "public-live-view-token",
+          shareUrlPath: "/world/live/public-live-view-token",
+          title: "@Board",
+        };
+      }
+      case "resolve_world_view": {
+        const { request } = payload as {
+          request: WorldViewResolutionRequest;
+        };
+        const resolved =
+          activeConfig?.mock?.resolvedWorldViews?.[request.binding.id];
+        if (!resolved) {
+          throw new Error(
+            `No mocked Shivai world view resolution for ${request.binding.id}`,
+          );
+        }
+        return resolved;
+      }
+      case "register_hosted_world_authority": {
+        return {
+          authority: {
+            origin: "https://manifest.shivai.space",
+            hostedWorldId: "mock-hosted-world",
+            credentialFile:
+              "/tmp/buzz-world-authority-secrets/mock-hosted-world.edit-share",
+          },
+          revision: "revision-world-view-1",
+          worldRef: {
+            kind: "hosted-world-latest",
+            origin: "https://manifest.shivai.space",
+            hostedWorldId: "mock-hosted-world",
+          },
+        };
       }
       // ── Local-save archive ──────────────────────────────────────────────
       // These stubs drive the LocalArchiveSettingsCard in screenshot / UI tests

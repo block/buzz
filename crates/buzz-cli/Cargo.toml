@@ -44,12 +44,14 @@ chrono = { workspace = true }
 # Typed event builders for all write operations
 buzz-sdk = { workspace = true }
 buzz-core = { workspace = true }
+buzz-world-view-resolver = { workspace = true }
 
 # Base64 encoding — NIP-98 event serialization for Authorization header
 base64 = "0.22"
 
 # SHA-256 — NIP-98 payload hash tag, Blossom file hash, mem patch base-hash
 sha2 = "0.11"
+zeroize = { workspace = true }
 
 # Unified-diff parser and strict applier — `mem patch`
 diffy = "0.5"

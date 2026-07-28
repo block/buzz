@@ -59,6 +59,8 @@ mod window_chrome;
 mod window_vibrancy;
 mod workflows;
 mod workspace;
+mod world_authorities;
+mod world_views;
 
 pub use agent_auth::*;
 pub use agent_config::*;
@@ -110,3 +112,5 @@ pub use window_chrome::*;
 pub use window_vibrancy::*;
 pub use workflows::*;
 pub use workspace::*;
+pub use world_authorities::*;
+pub use world_views::*;

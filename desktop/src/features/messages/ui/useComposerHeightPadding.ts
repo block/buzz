@@ -13,9 +13,9 @@ export function shouldUseComposerPaddingFallback({
 }
 
 /**
- * Observes the height of the composer overlay and sets the scroll
- * container's `paddingBottom` to match, so content is never hidden
- * behind the absolutely-positioned composer.
+ * Observes the composer overlay height and either applies matching scroll
+ * padding or exposes it as `--composer-overlay-height` on a shared layout
+ * ancestor, so content is never hidden behind the absolute overlay.
  *
  * If the reader is already near the bottom, the legacy fallback follows only
  * initial measurement and growth. Consumers with semantic bottom ownership may
@@ -27,6 +27,7 @@ export function useComposerHeightPadding(
   resetKey?: unknown,
   mode: "padding" | "css-variable" = "padding",
   settleAtBottom?: () => boolean,
+  cssVariableTargetRef?: React.RefObject<HTMLElement | null>,
 ) {
   const settleAtBottomRef = React.useRef(settleAtBottom);
   settleAtBottomRef.current = settleAtBottom;
@@ -39,6 +40,7 @@ export function useComposerHeightPadding(
     if (!scrollEl || !composerEl) {
       return;
     }
+    const cssVariableTarget = cssVariableTargetRef?.current ?? scrollEl;
 
     const getScrollElement = (): HTMLElement =>
       mode === "css-variable"
@@ -79,7 +81,10 @@ export function useComposerHeightPadding(
       const wasAtBottom = isNearBottom();
 
       if (mode === "css-variable") {
-        scrollEl.style.setProperty("--composer-overlay-height", `${padding}px`);
+        cssVariableTarget.style.setProperty(
+          "--composer-overlay-height",
+          `${padding}px`,
+        );
       } else {
         scrollEl.style.paddingBottom = `${padding}px`;
       }
@@ -116,10 +121,10 @@ export function useComposerHeightPadding(
         cancelAnimationFrame(followBottomFrame);
       }
       if (mode === "css-variable") {
-        scrollEl.style.removeProperty("--composer-overlay-height");
+        cssVariableTarget.style.removeProperty("--composer-overlay-height");
       } else {
         scrollEl.style.paddingBottom = "";
       }
     };
-  }, [scrollContainerRef, composerRef, mode, resetKey]);
+  }, [composerRef, cssVariableTargetRef, mode, resetKey, scrollContainerRef]);
 }

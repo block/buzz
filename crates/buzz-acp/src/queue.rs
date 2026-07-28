@@ -1372,6 +1372,11 @@ pub struct FormatPromptArgs<'a> {
     /// For legacy agents it rides in the user message on every turn of the
     /// session, alongside `[Base]`/`[System]`/`[Agent Memory — core]`.
     pub agent_canvas: Option<&'a str>,
+    /// Freshly resolved operational state for the effective channel/thread scope.
+    ///
+    /// Unlike Canvas and agent core, this section is never session-cached:
+    /// every agent protocol receives it in the current user turn.
+    pub agent_world_views: Option<&'a str>,
 }
 
 /// Format the `[Base]` section for the base prompt.
@@ -1389,9 +1394,10 @@ pub(crate) fn base_section(base_prompt: &str) -> String {
 /// 0. `[Base]` — base prompt (only for legacy agents without systemPrompt support)
 /// 1. `[System]` — system prompt (only for legacy agents without systemPrompt support)
 /// 2. `[Agent Memory — core]` — if agent core memory is set
-/// 3. `[Context]` — scope, channel name, and contextual hints for the agent
-/// 4. `[Thread Context]` or `[Conversation Context]` — if fetched
-/// 5. `[Event]` / `[Buzz events]` — the triggering event(s)
+/// 3. `[Shivai World Views]` — freshly resolved effective scope, if bound
+/// 4. `[Context]` — scope, channel name, and contextual hints for the agent
+/// 5. `[Thread Context]` or `[Conversation Context]` — if fetched
+/// 6. `[Event]` / `[Buzz events]` — the triggering event(s)
 ///
 /// Each section is returned as its own block rather than one joined string so
 /// the observer frame's size trimmer (`fit_observer_event_to_budget`) elides
@@ -1421,7 +1427,7 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
         .map(|ci| ci.channel_type == "dm")
         .unwrap_or(false);
 
-    let mut sections: Vec<String> = Vec::with_capacity(7);
+    let mut sections: Vec<String> = Vec::with_capacity(8);
 
     // For legacy agents (protocol_version < 2), inject base_prompt and
     // system_prompt as user-message sections. Modern agents receive these
@@ -1455,6 +1461,12 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
         if let Some(canvas) = args.agent_canvas {
             sections.push(canvas.to_string());
         }
+    }
+
+    // World views are live operational state rather than session narrative.
+    // Deliver the freshly resolved section on every turn for every protocol.
+    if let Some(world_views) = args.agent_world_views {
+        sections.push(world_views.to_string());
     }
 
     // 2. Context hints (with a human-aware reply anchor).
@@ -4504,6 +4516,49 @@ mod tests {
             !prompt.contains("[Channel Canvas]"),
             "modern agent must not get canvas in user message (it's in systemPrompt); got: {prompt}"
         );
+    }
+
+    #[test]
+    fn test_format_prompt_world_views_injected_for_every_agent_protocol() {
+        let world_views = "[Shivai World Views]\nEffective scope: channel\nReady leaves: Ship";
+        let batch = FlushBatch {
+            channel_id: Uuid::new_v4(),
+            events: vec![BatchEvent {
+                event: make_event("hi"),
+                prompt_tag: "test".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+
+        for has_system_prompt_support in [false, true] {
+            let sections = format_prompt(
+                &batch,
+                &FormatPromptArgs {
+                    agent_world_views: Some(world_views),
+                    has_system_prompt_support,
+                    ..Default::default()
+                },
+            );
+            assert_eq!(
+                sections
+                    .iter()
+                    .filter(|section| section.starts_with("[Shivai World Views]"))
+                    .count(),
+                1,
+                "each turn must carry exactly one live world-view section"
+            );
+            let world_views_position = sections
+                .iter()
+                .position(|section| section.starts_with("[Shivai World Views]"))
+                .expect("world-view section");
+            let context_position = sections
+                .iter()
+                .position(|section| section.starts_with("[Context]"))
+                .expect("context section");
+            assert!(world_views_position < context_position);
+        }
     }
 
     #[test]

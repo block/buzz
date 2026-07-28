@@ -43,6 +43,28 @@ export function isWelcomeSetupSystemMessage(message: TimelineMessage) {
   }
 }
 
+export function findLastOwnEditableMessage(
+  candidates: TimelineMessage[],
+  currentPubkey: string | null | undefined,
+): TimelineMessage | null {
+  if (!currentPubkey) return null;
+
+  let best: TimelineMessage | null = null;
+  for (const message of candidates) {
+    if (
+      message.kind === KIND_SYSTEM_MESSAGE ||
+      message.pubkey !== currentPubkey ||
+      message.pending
+    ) {
+      continue;
+    }
+    if (!best || message.createdAt >= best.createdAt) {
+      best = message;
+    }
+  }
+  return best;
+}
+
 export function mentionsKnownAgent(
   mentionPubkeys: string[],
   knownAgentPubkeys: ReadonlySet<string>,

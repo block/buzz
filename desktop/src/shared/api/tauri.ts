@@ -37,6 +37,39 @@ import type {
   GitBashPrerequisite,
   RuntimeConfigSurface,
 } from "@/shared/api/types";
+import {
+  decodeEffectiveWorldViewBindings,
+  decodeResolvedWorldView,
+  decodeAuthorizeWorldViewMutationResult,
+  decodePublishedHostedWorldLiveViewShare,
+  decodeConnectLocalWorldAuthorityResult,
+  decodeRevokeWorldViewMutationResult,
+  decodeWorldViewMutationDelegations,
+  decodeWorldViewAuthorityList,
+  decodeSetWorldOriginTrustResult,
+  decodeWorldViewCatalog,
+  type ConnectLocalWorldAuthorityInput,
+  type AuthorizeWorldViewMutationInput,
+  type AuthorizeWorldViewMutationResult,
+  type ConnectLocalWorldAuthorityResult,
+  type EffectiveWorldViewBindings,
+  type RegisterHostedWorldAuthorityInput,
+  type RegisterHostedWorldAuthorityResult,
+  type PublishedHostedWorldLiveViewShare,
+  type RevokeWorldViewMutationInput,
+  type RevokeWorldViewMutationResult,
+  type ResolvedWorldView,
+  type SetWorldViewBindingsInput,
+  type SetWorldViewBindingsResult,
+  type WorldViewBindingsResponse,
+  type WorldViewAuthorityListResult,
+  type SetWorldOriginTrustInput,
+  type SetWorldOriginTrustResult,
+  type WorldViewMutationDelegationListResult,
+  type WorldViewCatalog,
+  type WorldViewReference,
+  type WorldViewResolutionRequest,
+} from "@/shared/api/worldViewTypes";
 
 export * from "@/shared/api/tauriChannels";
 
@@ -259,6 +292,10 @@ type RawSetCanvasResult = {
   event_id: string;
 };
 
+type RawWorldViewBindingsResponse = WorldViewBindingsResponse;
+
+type RawSetWorldViewBindingsResult = SetWorldViewBindingsResult;
+
 /** Error normalized from a rejected Tauri invocation with its wire payload. */
 export class TauriInvokeError extends Error {
   readonly payload: unknown;
@@ -440,6 +477,137 @@ export async function setCanvas(
     ok: response.ok,
     eventId: response.event_id,
   };
+}
+
+export async function listWorldAuthorities(): Promise<WorldViewAuthorityListResult> {
+  const response = await invokeTauri<unknown>("list_world_authorities");
+  return decodeWorldViewAuthorityList(response);
+}
+
+export async function trustWorldOrigin(
+  input: SetWorldOriginTrustInput,
+): Promise<SetWorldOriginTrustResult> {
+  const response = await invokeTauri<unknown>("trust_world_origin", input);
+  return decodeSetWorldOriginTrustResult(response);
+}
+
+export async function revokeWorldOriginTrust(
+  input: SetWorldOriginTrustInput,
+): Promise<SetWorldOriginTrustResult> {
+  const response = await invokeTauri<unknown>(
+    "revoke_world_origin_trust",
+    input,
+  );
+  return decodeSetWorldOriginTrustResult(response);
+}
+
+export async function listWorldViewMutationDelegations(): Promise<WorldViewMutationDelegationListResult> {
+  const response = await invokeTauri<unknown>(
+    "list_world_view_mutation_delegations",
+  );
+  return decodeWorldViewMutationDelegations(response);
+}
+
+export async function authorizeWorldViewMutation(
+  input: AuthorizeWorldViewMutationInput,
+): Promise<AuthorizeWorldViewMutationResult> {
+  const response = await invokeTauri<unknown>(
+    "authorize_world_view_mutation",
+    input,
+  );
+  return decodeAuthorizeWorldViewMutationResult(response);
+}
+
+export async function revokeWorldViewMutation(
+  input: RevokeWorldViewMutationInput,
+): Promise<RevokeWorldViewMutationResult> {
+  const response = await invokeTauri<unknown>(
+    "revoke_world_view_mutation",
+    input,
+  );
+  return decodeRevokeWorldViewMutationResult(response);
+}
+
+export async function connectLocalWorldAuthority(
+  input: ConnectLocalWorldAuthorityInput,
+): Promise<ConnectLocalWorldAuthorityResult> {
+  const response = await invokeTauri<unknown>(
+    "connect_local_world_authority",
+    input,
+  );
+  return decodeConnectLocalWorldAuthorityResult(response);
+}
+
+export async function catalogWorldViews(
+  reference: WorldViewReference,
+): Promise<WorldViewCatalog> {
+  const response = await invokeTauri<unknown>("catalog_world_views", {
+    reference,
+  });
+  return decodeWorldViewCatalog(response);
+}
+
+export async function registerHostedWorldAuthority(
+  input: RegisterHostedWorldAuthorityInput,
+): Promise<RegisterHostedWorldAuthorityResult> {
+  return await invokeTauri<RegisterHostedWorldAuthorityResult>(
+    "register_hosted_world_authority",
+    { credential: input.credential, origin: input.origin },
+  );
+}
+
+export async function publishHostedWorldLiveViewShare(input: {
+  reference: Extract<WorldViewReference, { kind: "hosted-world-latest" }>;
+  viewQualifiedName: string;
+}): Promise<PublishedHostedWorldLiveViewShare> {
+  const response = await invokeTauri<unknown>(
+    "publish_hosted_world_live_view_share",
+    input,
+  );
+  return decodePublishedHostedWorldLiveViewShare(response);
+}
+
+export async function getWorldViewBindings(
+  channelId: string,
+  threadRootEventId: string | null = null,
+): Promise<WorldViewBindingsResponse> {
+  return await invokeTauri<RawWorldViewBindingsResponse>(
+    "get_world_view_bindings",
+    { channelId, threadRootEventId },
+  );
+}
+
+export async function getEffectiveWorldViewBindings(
+  channelId: string,
+  threadRootEventId: string | null = null,
+): Promise<EffectiveWorldViewBindings> {
+  const response = await invokeTauri<unknown>(
+    "get_effective_world_view_bindings",
+    { channelId, threadRootEventId },
+  );
+  return decodeEffectiveWorldViewBindings(response);
+}
+
+export async function setWorldViewBindings(
+  input: SetWorldViewBindingsInput,
+): Promise<SetWorldViewBindingsResult> {
+  return await invokeTauri<RawSetWorldViewBindingsResult>(
+    "set_world_view_bindings",
+    {
+      channelId: input.channelId,
+      expectedRevisionEventId: input.expectedRevisionEventId,
+      document: input.document,
+    },
+  );
+}
+
+export async function resolveWorldView(
+  request: WorldViewResolutionRequest,
+): Promise<ResolvedWorldView> {
+  const response = await invokeTauri<unknown>("resolve_world_view", {
+    request,
+  });
+  return decodeResolvedWorldView(response);
 }
 
 export async function getHomeFeed(

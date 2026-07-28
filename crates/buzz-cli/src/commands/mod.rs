@@ -18,3 +18,4 @@ pub mod social;
 pub mod upload;
 pub mod users;
 pub mod workflows;
+pub mod world_views;

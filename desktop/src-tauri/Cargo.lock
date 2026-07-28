@@ -1023,6 +1023,7 @@ dependencies = [
  "buzz-media",
  "buzz-persona",
  "buzz-sdk",
+ "buzz-world-view-resolver",
  "bytes",
  "bzip2 0.6.1",
  "chrono",
@@ -1140,6 +1141,19 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
+name = "buzz-world-view-resolver"
+version = "0.1.0"
+dependencies = [
+ "buzz-core",
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
  "uuid",
 ]
 

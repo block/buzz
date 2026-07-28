@@ -286,6 +286,8 @@ pub(crate) async fn rearm_relay_mesh_for_running_agents(app: &AppHandle) -> Resu
     }
 
     let records = crate::managed_agents::load_managed_agents(app).unwrap_or_default();
+    let personas = crate::managed_agents::load_personas(app).unwrap_or_default();
+    let global = crate::managed_agents::load_global_agent_config(app).unwrap_or_default();
     let mesh_records: Vec<_> = records
         .into_iter()
         .filter_map(|record| {
@@ -293,6 +295,18 @@ pub(crate) async fn rearm_relay_mesh_for_running_agents(app: &AppHandle) -> Resu
                 .map(|mesh_model_id| (record, mesh_model_id))
         })
         .collect();
+    if mesh_records.is_empty() {
+        return Ok(());
+    }
+
+    if recovery == MeshRuntimeRecovery::RestartRequired {
+        eprintln!(
+            "buzz-mesh: supervised client startup lost its ingress before the SDK exposed a shutdown handle; restarting Buzz"
+        );
+        app.request_restart();
+        return Ok(());
+    }
+
     let mut first_error = None;
     for (record, mesh_model_id) in &mesh_records {
         match crate::commands::mesh_llm::ensure_relay_mesh_for_record(
@@ -484,7 +498,6 @@ mod tests {
     fn only_running_relay_mesh_agents_trigger_rearm() {
         let personas: Vec<crate::managed_agents::AgentDefinition> = Vec::new();
         let global = crate::managed_agents::GlobalAgentConfig::default();
-
         let empty = active_set(&[]);
         assert!(running_relay_mesh_model_id(
             &mesh_record("stopped", Some(std::process::id())),
