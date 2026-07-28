@@ -384,8 +384,11 @@ function runtimeDetailText(runtime: AcpRuntimeCatalogEntry): string {
   if (runtime.availability === "adapter_outdated") {
     return "ACP adapter detected but outdated — reinstall required.";
   }
-  if (runtime.availability === "cli_missing") {
-    return "ACP adapter detected; CLI missing.";
+  if (
+    runtime.availability === "cli_missing" ||
+    runtime.availability === "not_installed"
+  ) {
+    return "CLI not detected.";
   }
   return "";
 }
@@ -605,14 +608,14 @@ function RuntimeProvidersSection({
           Set up your agent harnesses
         </h1>
         <p className="mx-auto mt-3 max-w-[760px] text-sm leading-6 text-foreground/90">
-          Buzz detected the harnesses available on this machine. Install or sign
-          in to at least one to continue.
+          Buzz checks for command-line harnesses on this machine. Install the
+          CLI or sign in to at least one to continue.
         </p>
       </div>
 
       <div className="flex w-full flex-1 flex-col items-center justify-center gap-8 py-10">
         {orderedItems.length > 0 ? (
-          <div className="grid min-w-0 w-full max-w-[592px] grid-cols-1 gap-4 md:grid-cols-2">
+          <div className="grid min-w-0 w-full max-w-[1200px] grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
             {orderedItems.map((runtime) => (
               <RuntimeCard
                 installResults={installResults}
@@ -629,8 +632,8 @@ function RuntimeProvidersSection({
             className="max-w-[560px] rounded-2xl bg-white/70 px-6 py-6 text-sm text-muted-foreground"
             data-testid="onboarding-acp-empty"
           >
-            No supported agent harnesses were detected yet. Install Claude Code
-            or Codex, then check again.
+            No supported command-line harnesses were detected yet. Install a
+            supported CLI, then check again.
           </p>
         )}
 
@@ -711,6 +714,23 @@ function SetupStepContent({
         >
           Back
         </Button>
+
+        <p className="text-xs text-foreground/50">
+          More harnesses (Cursor, Grok, Amp&hellip;){" "}
+          {actions.navigateToAgentSettings ? (
+            <button
+              className="text-foreground/70 underline underline-offset-2 hover:text-foreground"
+              data-testid="onboarding-setup-more-harnesses"
+              onClick={actions.navigateToAgentSettings}
+              type="button"
+            >
+              Settings → Agents
+            </button>
+          ) : (
+            <span className="text-foreground/70">Settings → Agents</span>
+          )}{" "}
+          after setup.
+        </p>
       </OnboardingFooter>
     </OnboardingSlideTransition>
   );

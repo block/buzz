@@ -1,3 +1,5 @@
+import 'dart:async';
+import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -6,20 +8,65 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
 import 'package:gpt_markdown/custom_widgets/markdown_config.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:open_filex/open_filex.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../shared/clipboard_utils.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/syntax_highlight.dart';
 import '../../shared/theme/theme.dart';
-import '../custom_emoji/custom_emoji.dart';
-import '../custom_emoji/custom_emoji_provider.dart';
-import '../custom_emoji/custom_emoji_render.dart';
+import '../../shared/custom_emoji/custom_emoji.dart';
+import '../../shared/custom_emoji/custom_emoji_provider.dart';
+import '../../shared/custom_emoji/custom_emoji_render.dart';
 import 'media_viewer_page.dart';
 import 'message_media.dart';
 
+part 'message_content/media_carousel.dart';
+
 const _messageMediaMaxInlineWidth = 320.0;
 const _messageMediaMaxImageHeight = 240.0;
+
+typedef OpenDownloadedFile =
+    Future<void> Function(
+      String url,
+      Map<String, String> headers,
+      String filename,
+    );
+
+final openDownloadedFileProvider = Provider<OpenDownloadedFile>((ref) {
+  final client = ref.watch(mediaHttpClientProvider);
+  return (url, headers, filename) async {
+    final response = await client.get(Uri.parse(url), headers: headers);
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw HttpException(
+        'Attachment download failed (${response.statusCode})',
+        uri: Uri.parse(url),
+      );
+    }
+
+    final directory = await getTemporaryDirectory();
+    final safeName = _safeDownloadedFilename(filename);
+    final file = File(
+      '${directory.path}${Platform.pathSeparator}'
+      '${DateTime.now().microsecondsSinceEpoch}-$safeName',
+    );
+    await file.writeAsBytes(response.bodyBytes, flush: true);
+    final result = await OpenFilex.open(file.path);
+    if (result.type != ResultType.done) {
+      throw FileSystemException(result.message, file.path);
+    }
+  };
+});
+
+String _safeDownloadedFilename(String filename) {
+  final safe = filename
+      .split(RegExp(r'[/\\]'))
+      .last
+      .replaceAll(RegExp(r'[\x00-\x1F\x7F]'), '')
+      .trim();
+  return safe.isEmpty ? 'attachment' : safe;
+}
 
 /// Renders message content with markdown formatting, @mentions, #channel links,
 /// and media-aware markdown images/videos.
@@ -48,9 +95,24 @@ class MessageContent extends HookConsumerWidget {
   /// mentioned user's pubkey.
   final void Function(String pubkey)? onMentionTap;
 
+  /// Opens the message's thread from the full-screen image viewer.
+  final VoidCallback? onMediaReply;
+
+  /// Opens message-specific actions for an image in the full-screen viewer.
+  final MediaViewerMoreAction? onMediaMore;
+
   final TextStyle? baseStyle;
 
   final int? maxLines;
+
+  /// Allows a multi-image carousel to reclaim leading space reserved by the
+  /// surrounding message layout, while keeping its image count aligned with
+  /// the message body.
+  final double mediaCarouselLeadingOverflow;
+
+  /// Allows a multi-image carousel to continue through the trailing page
+  /// gutter while keeping its first image and count aligned with the body.
+  final double mediaCarouselTrailingOverflow;
 
   const MessageContent({
     super.key,
@@ -61,8 +123,12 @@ class MessageContent extends HookConsumerWidget {
     this.tags = const [],
     this.onChannelTap,
     this.onMentionTap,
+    this.onMediaReply,
+    this.onMediaMore,
     this.baseStyle,
     this.maxLines,
+    this.mediaCarouselLeadingOverflow = 0,
+    this.mediaCarouselTrailingOverflow = 0,
   });
 
   @override
@@ -71,6 +137,10 @@ class MessageContent extends HookConsumerWidget {
         baseStyle ??
         context.textTheme.bodyMedium?.copyWith(color: context.colors.onSurface);
     final imetaByUrl = parseImetaTags(tags);
+    final trailingGallery = maxLines == null
+        ? _extractTrailingImageGallery(content, imetaByUrl)
+        : null;
+    final markdownContent = trailingGallery?.content ?? content;
     final customEmoji = _mergeCustomEmoji(
       customEmojiFromTags(tags),
       ref.watch(customEmojiListProvider),
@@ -80,7 +150,7 @@ class MessageContent extends HookConsumerWidget {
       // Convert autolinks and bare URLs to standard markdown links,
       // but skip content inside backticks (inline code / fenced blocks).
       final buffer = StringBuffer();
-      final parts = content.split('`');
+      final parts = markdownContent.split('`');
       for (var i = 0; i < parts.length; i++) {
         if (i.isOdd) {
           // Inside backticks — preserve as-is.
@@ -142,16 +212,16 @@ class MessageContent extends HookConsumerWidget {
         result = '\u200B$result';
       }
       return result;
-    }, [content, mentionNames]);
+    }, [markdownContent, mentionNames]);
 
-    return GptMarkdown(
+    final markdown = GptMarkdown(
       finalContent,
       style: style,
       followLinkColor: false,
       codeBuilder: (context, name, code, closed) =>
           _MessageCodeBlock(name: name, code: code),
       linkBuilder: (context, linkText, url, linkStyle) =>
-          _buildLink(context, linkText, url, linkStyle, style),
+          _buildLink(context, ref, linkText, url, linkStyle, style),
       imageBuilder: (context, imageUrl) =>
           _buildMedia(context, imageUrl, imetaByUrl[imageUrl]),
       maxLines: maxLines,
@@ -166,6 +236,25 @@ class MessageContent extends HookConsumerWidget {
         ...MarkdownComponent.inlineComponents,
       ],
     );
+    if (trailingGallery == null) return markdown;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (trailingGallery.content.trim().isNotEmpty) markdown,
+        _MessageImageCarousel(
+          key: ValueKey(
+            trailingGallery.items.map((item) => item.url).join('\u0000'),
+          ),
+          items: trailingGallery.items,
+          leadingOverflow: mediaCarouselLeadingOverflow,
+          trailingOverflow: mediaCarouselTrailingOverflow,
+          onReply: onMediaReply,
+          onMore: onMediaMore,
+        ),
+      ],
+    );
   }
 
   Widget _buildMedia(BuildContext context, String imageUrl, ImetaEntry? imeta) {
@@ -177,11 +266,14 @@ class MessageContent extends HookConsumerWidget {
       url: imageUrl,
       imeta: imeta,
       semanticLabel: imeta?.alt ?? 'Message image',
+      onReply: onMediaReply,
+      onMore: onMediaMore,
     );
   }
 
   Widget _buildLink(
     BuildContext context,
+    WidgetRef ref,
     InlineSpan linkText,
     String url,
     TextStyle linkStyle,
@@ -198,10 +290,29 @@ class MessageContent extends HookConsumerWidget {
     final baseStyle = fallbackStyle ?? linkStyle;
 
     return GestureDetector(
-      onTap: () {
+      onTap: () async {
         final uri = Uri.tryParse(url);
-        if (uri != null && (uri.scheme == 'http' || uri.scheme == 'https')) {
-          launchUrl(uri, mode: LaunchMode.externalApplication);
+        if (uri == null || (uri.scheme != 'http' && uri.scheme != 'https')) {
+          return;
+        }
+
+        final auth = ref.read(mediaGetAuthServiceProvider);
+        if (!auth.isRelayMediaUrl(url)) {
+          await launchUrl(uri, mode: LaunchMode.externalApplication);
+          return;
+        }
+
+        try {
+          await ref.read(openDownloadedFileProvider)(
+            url,
+            auth.headersFor(url),
+            text,
+          );
+        } catch (_) {
+          if (!context.mounted) return;
+          ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+            const SnackBar(content: Text('Could not open attachment')),
+          );
         }
       },
       child: Text(
@@ -234,17 +345,22 @@ class _MessageImagePreview extends HookConsumerWidget {
   final String url;
   final ImetaEntry? imeta;
   final String semanticLabel;
+  final VoidCallback? onReply;
+  final MediaViewerMoreAction? onMore;
 
   const _MessageImagePreview({
     required this.url,
     required this.imeta,
     required this.semanticLabel,
+    required this.onReply,
+    required this.onMore,
   });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final heroTag = useMemoized(() => Object());
     final layout = _resolveImagePreviewLayout(context, imeta?.aspectRatio);
+    final previewDecodeWidth = layout.width ?? _messageMediaMaxWidth(context);
 
     return Padding(
       padding: const EdgeInsets.only(top: Grid.half),
@@ -254,6 +370,10 @@ class _MessageImagePreview extends HookConsumerWidget {
           imageUrl: url,
           heroTag: heroTag,
           semanticLabel: semanticLabel,
+          previewDecodeWidth: previewDecodeWidth,
+          aspectRatio: imeta?.aspectRatio,
+          onReply: onReply,
+          onMore: onMore,
         ),
         child: _MessageMediaPreviewFrame(
           previewKey: ValueKey('message-media-image-preview:$url'),
@@ -261,15 +381,19 @@ class _MessageImagePreview extends HookConsumerWidget {
           width: layout.width,
           height: layout.height,
           constraints: layout.constraints,
-          child: Hero(
+          child: MediaViewerHero(
             tag: heroTag,
-            child: MediaImage(
-              url: url,
-              fit: layout.fit,
-              semanticLabel: semanticLabel,
-              errorBuilder: (_, _, _) => _MediaPreviewFallback(
-                icon: LucideIcons.imageOff,
-                label: 'Image unavailable',
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(Radii.md),
+              child: MediaImage(
+                url: url,
+                decodeWidth: previewDecodeWidth,
+                fit: layout.fit,
+                semanticLabel: semanticLabel,
+                errorBuilder: (_, _, _) => _MediaPreviewFallback(
+                  icon: LucideIcons.imageOff,
+                  label: 'Image unavailable',
+                ),
               ),
             ),
           ),

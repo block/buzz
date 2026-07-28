@@ -55,6 +55,7 @@ import { useDeferredModalOpen } from "@/shared/ui/deferredModalOpen";
 import { SidebarUpdateCard } from "@/features/settings/SidebarUpdateCard";
 import { useUpdaterContext } from "@/features/settings/hooks/UpdaterProvider";
 import { shouldShowSidebarUpdateCard } from "@/features/settings/sidebarUpdateCardVisibility";
+import type { SettingsSection } from "@/features/settings/ui/SettingsPanels";
 import type {
   Channel,
   ChannelVisibility,
@@ -155,7 +156,7 @@ type AppSidebarProps = {
    */
   searchChannels: Channel[];
   searchFocusRequest: number;
-  onSelectSettings: (section?: "profile" | "appearance") => void;
+  onSelectSettings: (section?: SettingsSection) => void;
   onSetPresenceStatus?: (status: "online" | "away" | "offline") => void;
   onSetUserStatus: (text: string, emoji: string) => void;
   onClearUserStatus: () => void;
@@ -561,7 +562,9 @@ export function AppSidebar({
       variant="sidebar"
     >
       <div
-        className="relative flex min-h-0 flex-1 flex-col overflow-hidden"
+        className={`relative flex min-h-0 flex-1 flex-col overflow-hidden ${
+          communities.length > 1 ? "md:-ml-[11px] md:w-[calc(100%+11px)]" : ""
+        }`}
         data-sidebar-background
         data-testid="app-sidebar-scroll-anchor"
       >

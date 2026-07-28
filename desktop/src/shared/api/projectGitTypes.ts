@@ -43,6 +43,7 @@ export type ProjectRepoDiff = {
   files: ProjectRepoDiffFile[];
   additions: number;
   deletions: number;
+  commitBody: string | null;
 };
 
 export type ProjectLocalRepoSnapshot = {

@@ -3,7 +3,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 
 import '../../shared/relay/relay.dart';
-import '../custom_emoji/custom_emoji.dart';
+import '../../shared/custom_emoji/custom_emoji.dart';
 import 'channel_window.dart';
 
 enum SystemEventType {
@@ -171,6 +171,11 @@ class TimelineMessage {
     this.parentId,
     this.rootId,
   });
+
+  /// Attachment messages stay visually distinct from surrounding messages,
+  /// even when several are sent by the same author in quick succession.
+  bool get hasAttachments =>
+      tags.any((tag) => tag.isNotEmpty && tag.first == 'imeta');
 }
 
 @immutable

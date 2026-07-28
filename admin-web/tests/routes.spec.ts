@@ -58,6 +58,72 @@ test("report rows render the relay response contract", async ({ page }) => {
   await expect(page.getByText("Unknown date")).toHaveCount(0);
 });
 
+test("event report detail renders the reported message content", async ({
+  page,
+}) => {
+  const id = "0e6caad8-1e18-4cd7-84fa-7264103f0a08";
+  await page.route(`**/api/admin/v1/reports/${id}`, (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        id,
+        communityId: "6d474feb-c50a-44e4-a0b5-f30532df49bc",
+        communityHost: "design.buzz.xyz",
+        reporterPubkey: "21".repeat(32),
+        targetKind: "event",
+        target: "12".repeat(32),
+        reportType: "spam",
+        status: "open",
+        createdAt: "2026-07-17T17:30:00Z",
+        message: {
+          authorPubkey: "31".repeat(32),
+          content:
+            "This is the complete reported message.\nIt preserves lines.",
+          createdAt: "2026-07-17T17:25:00Z",
+          deletedAt: null,
+        },
+      }),
+    }),
+  );
+
+  await page.goto(`/reports/${id}`);
+  await expect(
+    page.getByText("This is the complete reported message.", { exact: false }),
+  ).toBeVisible();
+  await expect(page.getByText("31".repeat(32))).toBeVisible();
+  await expect(
+    page.getByText("Message content is unavailable", { exact: false }),
+  ).toHaveCount(0);
+});
+
+test("event report detail explains when message content is unavailable", async ({
+  page,
+}) => {
+  const id = "0e6caad8-1e18-4cd7-84fa-7264103f0a09";
+  await page.route(`**/api/admin/v1/reports/${id}`, (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        id,
+        communityId: "6d474feb-c50a-44e4-a0b5-f30532df49bc",
+        communityHost: "design.buzz.xyz",
+        reporterPubkey: "21".repeat(32),
+        targetKind: "event",
+        target: "12".repeat(32),
+        reportType: "spam",
+        status: "open",
+        createdAt: "2026-07-17T17:30:00Z",
+        message: null,
+      }),
+    }),
+  );
+
+  await page.goto(`/reports/${id}`);
+  await expect(
+    page.getByText("Message content is unavailable", { exact: false }),
+  ).toBeVisible();
+});
+
 test("feedback cards open the complete submission", async ({ page }) => {
   const id = "feed0000-0000-4000-8000-000000000001";
   const fullBody = `${"Long feedback ".repeat(30)}end of feedback`;

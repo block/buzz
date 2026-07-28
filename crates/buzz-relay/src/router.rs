@@ -4,8 +4,9 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use axum::{
+    body::Body,
     extract::{ConnectInfo, FromRequest, State, WebSocketUpgrade},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, Request, StatusCode},
     middleware,
     response::{IntoResponse, Json},
     routing::{get, post, put},
@@ -16,7 +17,7 @@ use tower::ServiceExt;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::services::ServeDir;
-use tower_http::trace::TraceLayer;
+use tower_http::trace::{HttpMakeClassifier, TraceLayer};
 
 use crate::api;
 use crate::audio;
@@ -187,8 +188,21 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 
     merged
         .layer(middleware::from_fn(track_metrics))
-        .layer(TraceLayer::new_for_http())
+        .layer(http_trace_layer())
         .layer(build_cors_layer(&state.config.cors_origins))
+}
+
+fn http_trace_layer() -> TraceLayer<HttpMakeClassifier, fn(&Request<Body>) -> tracing::Span> {
+    TraceLayer::new_for_http().make_span_with(make_http_span as fn(&Request<Body>) -> tracing::Span)
+}
+
+fn make_http_span(request: &Request<Body>) -> tracing::Span {
+    tracing::info_span!(
+        target: "buzz_relay",
+        "http.request",
+        otel.kind = "server",
+        http.request.method = %request.method(),
+    )
 }
 
 fn is_admin_spa_path(path: &str) -> bool {
@@ -435,9 +449,14 @@ fn build_cors_layer(cors_origins: &[String]) -> CorsLayer {
 mod tests {
     use axum::{routing::get, Router};
     use futures_util::SinkExt;
+    use opentelemetry::trace::TracerProvider as _;
+    use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
     use tokio::net::TcpListener;
     use tokio::sync::mpsc;
     use tokio_tungstenite::{connect_async, tungstenite::Message};
+    use tower::ServiceBuilder;
+    use tracing::Instrument as _;
+    use tracing_subscriber::prelude::*;
 
     use super::*;
 
@@ -469,6 +488,60 @@ mod tests {
         assert!(should_serve_spa("/", true));
         assert!(should_serve_spa("/repos/example", true));
         assert!(!should_serve_spa("/arbitrary", true));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn http_and_datastore_spans_are_exported_in_the_same_trace() {
+        let exporter = InMemorySpanExporter::default();
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_opentelemetry::layer()
+                .with_tracer(provider.tracer("test"))
+                .with_filter(crate::telemetry::otel_env_filter(None)),
+        );
+        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+        let service = ServiceBuilder::new()
+            .layer(http_trace_layer())
+            .service(tower::service_fn(
+                |_: axum::http::Request<axum::body::Body>| async {
+                    async {}
+                        .instrument(tracing::info_span!(
+                            target: "buzz_datastore",
+                            "SELECT",
+                            otel.kind = "client",
+                            db.system.name = "postgresql",
+                        ))
+                        .await;
+                    Ok::<_, std::convert::Infallible>(axum::response::Response::new(
+                        axum::body::Body::empty(),
+                    ))
+                },
+            ));
+
+        service
+            .oneshot(
+                axum::http::Request::get("/")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        provider.force_flush().unwrap();
+        let spans = exporter.get_finished_spans().unwrap();
+        let http = spans
+            .iter()
+            .find(|span| span.name == "http.request")
+            .unwrap();
+        let datastore = spans.iter().find(|span| span.name == "SELECT").unwrap();
+
+        assert_eq!(
+            datastore.span_context.trace_id(),
+            http.span_context.trace_id()
+        );
+        assert_eq!(datastore.parent_span_id, http.span_context.span_id());
     }
 
     async fn handler_receives_message_with_limit(limit: usize, size: usize) -> bool {

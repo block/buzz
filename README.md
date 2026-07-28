@@ -154,6 +154,8 @@ Relay on `ws://localhost:3000`. Desktop app pops up. You're in.
 
 For a frontend-only split-terminal preview (relay logs separate from Vite output), use `just relay` in one terminal and `just desktop-dev` in another. `desktop-dev` opens the React app in a normal browser; it is useful for fast UI iteration, but it is not the full desktop pilot because Tauri-native features are absent.
 
+Want a single-node / VPS relay instead of the local-dev stack? Use the production Compose bundle in [`deploy/compose/`](deploy/compose/README.md) (`docker compose` + Postgres, Redis, MinIO, optional Caddy/TLS). The root [`docker-compose.yml`](docker-compose.yml) is for day-to-day development only.
+
 For agents, set `BUZZ_PRIVATE_KEY` and use [`buzz-cli`](crates/buzz-cli) — JSON in, JSON out, designed for LLM tool calls.
 
 ### Steve's local pilot notes
@@ -203,7 +205,7 @@ If you'd rather point buzz at a different bash-compatible shell, set `BUZZ_SHELL
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                          buzz-relay                                     │
 │  NIP-01 · NIP-42 auth · channel/DM/media/workflow/git REST · audit log  │
-└───┬──────────────────────────┬──────────────────────────┬──────────────┘
+└───┬──────────────────────────┬──────────────────────────┬───────────────┘
     │                          │                          │
  ┌──▼───────────┐       ┌──────▼──────┐           ┌───────▼─────┐
  │   Postgres   │       │    Redis    │           │   S3/MinIO  │

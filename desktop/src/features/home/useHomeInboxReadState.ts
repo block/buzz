@@ -1,7 +1,6 @@
 import * as React from "react";
 
 import type { InboxItem } from "@/features/home/lib/inbox";
-import { maxReadAt } from "@/features/channels/readState/readStateFormat";
 import {
   getThreadReference,
   isThreadReply,
@@ -29,6 +28,8 @@ type UseHomeInboxReadStateOptions = {
   ) => void;
   /** Advance the thread read marker to the given unix-seconds timestamp. */
   markThreadRead: (rootId: string, timestamp: number) => void;
+  /** Advance a reply's per-message read marker to the given unix-seconds timestamp. */
+  markMessageRead: (messageId: string, timestamp: number) => void;
   /** Local fallback: mark a non-channel item done. */
   markDoneLocal: (id: string) => void;
   /** Local inbox row override: mark an item unread without touching the channel. */
@@ -46,7 +47,8 @@ function getInboxThreadRootId(item: InboxItem): string | null {
     return null;
   }
 
-  return getThreadReference(item.item.tags).rootId;
+  const thread = getThreadReference(item.item.tags);
+  return thread.rootId ?? thread.parentId;
 }
 
 export function getGroupedChannelReadTimestamp(
@@ -95,10 +97,10 @@ export function resolveInboxItemReadAt(
   const channelId = item.item.channelId;
   const threadRootId = getInboxThreadRootId(item);
   if (threadRootId) {
-    return maxReadAt(
-      options.getThreadReadAt(threadRootId, channelId),
-      options.getMessageReadAt?.(item.item.id) ?? null,
-    );
+    if (options.getMessageReadAt) {
+      return options.getMessageReadAt(item.item.id);
+    }
+    return options.getThreadReadAt(threadRootId, channelId);
   }
 
   return channelId ? options.getChannelReadAt(channelId) : null;
@@ -110,9 +112,10 @@ export function resolveInboxItemReadAt(
  * belong to a channel (reminders etc.).
  *
  * "Mark as read" on channel-backed items is routed through `markChannelRead`;
- * thread rows use their own `thread:<root>` marker so they do not affect the
- * sidebar channel dot. "Mark unread" is item-local: it only reopens the
- * specific inbox row and must not light up the channel.
+ * thread rows advance the same per-message markers as the channel thread
+ * panel, plus the aggregate `thread:<root>` marker for compatibility. "Mark
+ * unread" is item-local: it only reopens the specific inbox row and must not
+ * light up the channel.
  */
 export function useHomeInboxReadState({
   items,
@@ -124,6 +127,7 @@ export function useHomeInboxReadState({
   localUnreadSet = EMPTY_ITEM_SET,
   markChannelRead,
   markThreadRead,
+  markMessageRead,
   markDoneLocal,
   markUnreadLocal,
   undoDoneLocal,
@@ -183,6 +187,14 @@ export function useHomeInboxReadState({
       }
       const threadRootId = item ? getInboxThreadRootId(item) : null;
       if (item && threadRootId) {
+        const markedReplyIds = new Set<string>();
+        for (const reply of [item.item, ...item.groupItems]) {
+          if (!isThreadReply(reply.tags) || markedReplyIds.has(reply.id)) {
+            continue;
+          }
+          markedReplyIds.add(reply.id);
+          markMessageRead(reply.id, reply.createdAt);
+        }
         markThreadRead(threadRootId, item.latestActivityAt);
         const groupedChannelRead = getGroupedChannelReadTimestamp(item);
         if (groupedChannelRead) {
@@ -204,7 +216,14 @@ export function useHomeInboxReadState({
       }
       markDoneLocal(itemId);
     },
-    [itemById, markChannelRead, markDoneLocal, markThreadRead, undoUnreadLocal],
+    [
+      itemById,
+      markChannelRead,
+      markDoneLocal,
+      markMessageRead,
+      markThreadRead,
+      undoUnreadLocal,
+    ],
   );
 
   const markItemUnread = React.useCallback(
