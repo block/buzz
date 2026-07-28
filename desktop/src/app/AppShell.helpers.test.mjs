@@ -20,6 +20,17 @@ test("battle rhythm route selects its own sidebar destination", () => {
   });
 });
 
+test("planning routes select Plans without selecting developer Projects", () => {
+  assert.deepEqual(deriveShellRoute("/plans"), {
+    selectedChannelId: null,
+    selectedView: "plans",
+  });
+  assert.deepEqual(deriveShellRoute("/plans/deployment-1"), {
+    selectedChannelId: null,
+    selectedView: "plans",
+  });
+});
+
 test("shouldBounceForChannelNotification_allowsTopLevelChannelMessages", () => {
   assert.equal(shouldBounceForChannelNotification([["h", "channel"]]), true);
 });

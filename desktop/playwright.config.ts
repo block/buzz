@@ -118,6 +118,7 @@ export default defineConfig({
         "**/command-console.spec.ts",
         "**/battle-rhythm.spec.ts",
         "**/battle-rhythm-screenshots.spec.ts",
+        "**/plans.spec.ts",
         "**/command-team-conversations.spec.ts",
         "**/daily-command-brief.spec.ts",
         "**/world-monitor-connection.spec.ts",

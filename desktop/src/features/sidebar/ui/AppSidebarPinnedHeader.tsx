@@ -2,6 +2,7 @@ import {
   Activity,
   Bot,
   CalendarDays,
+  ChartGantt,
   FolderGit2,
   Inbox,
   ShieldCheck,
@@ -28,6 +29,7 @@ type SidebarSelectedView =
   | "console"
   | "workflows"
   | "pulse"
+  | "plans"
   | "projects"
   | "battleRhythm";
 
@@ -51,6 +53,7 @@ type AppSidebarPrimaryMenuProps = {
   onSelectBattleRhythm: () => void;
   onSelectCommandConsole: () => void;
   onSelectHome: () => void;
+  onSelectPlans: () => void;
   onSelectProjects: () => void;
   onSelectPulse: () => void;
   onSelectWorkflows: () => void;
@@ -98,6 +101,7 @@ export function AppSidebarPrimaryMenu({
   onSelectBattleRhythm,
   onSelectCommandConsole,
   onSelectHome,
+  onSelectPlans,
   onSelectProjects,
   onSelectPulse,
   onSelectWorkflows,
@@ -139,6 +143,18 @@ export function AppSidebarPrimaryMenu({
           >
             <CalendarDays className="h-4 w-4" />
             <SidebarMenuLabel>Battle Rhythm</SidebarMenuLabel>
+          </SidebarMenuButton>
+        </SidebarMenuItem>
+        <SidebarMenuItem>
+          <SidebarMenuButton
+            data-testid="open-plans-view"
+            isActive={selectedView === "plans"}
+            onClick={onSelectPlans}
+            tooltip="Plans"
+            type="button"
+          >
+            <ChartGantt className="h-4 w-4" />
+            <SidebarMenuLabel>Plans</SidebarMenuLabel>
           </SidebarMenuButton>
         </SidebarMenuItem>
         <FeatureGate feature="pulse">

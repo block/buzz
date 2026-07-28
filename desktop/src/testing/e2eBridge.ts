@@ -38,6 +38,9 @@ import {
   KIND_HUDDLE_STARTED,
   KIND_MEMBER_ADDED_NOTIFICATION,
   KIND_MEMBER_REMOVED_NOTIFICATION,
+  KIND_MISSION_CONSTRAINT,
+  KIND_PLANNING_PROJECT,
+  KIND_PLANNING_TASK,
   KIND_REPO_ANNOUNCEMENT,
   KIND_REPO_STATE,
   KIND_STREAM_MESSAGE_EDIT,
@@ -2814,6 +2817,134 @@ let mockClosedChannelLiveSubscription = false;
 const realSockets = new Map<number, WebSocket>();
 let mockManagedAgents: MockManagedAgent[] = [];
 let mockManagedAgentRuntimes: MockManagedAgentRuntimeRow[] = [];
+
+function mockPlanningSchedule(payload: unknown) {
+  const input = (payload as { input?: Record<string, unknown> } | null)?.input;
+  const tasks = (input?.tasks ?? []) as Array<{
+    id: string;
+    durationWorkdays: number;
+    dependencyIds: string[];
+    plannedStart: string | null;
+    dueDate: string | null;
+    status: string;
+  }>;
+  if (!tasks.length) throw new Error("The plan contains no tasks.");
+  const byId = new Map(tasks.map((task) => [task.id, task]));
+  const indegree = new Map(tasks.map((task) => [task.id, 0]));
+  const successors = new Map(tasks.map((task) => [task.id, [] as string[]]));
+  for (const task of tasks) {
+    for (const dependency of task.dependencyIds) {
+      if (!byId.has(dependency))
+        throw new Error(`Missing dependency ${dependency}.`);
+      indegree.set(task.id, (indegree.get(task.id) ?? 0) + 1);
+      successors.get(dependency)?.push(task.id);
+    }
+  }
+  const queue = [...indegree]
+    .filter(([, degree]) => degree === 0)
+    .map(([id]) => id);
+  const order: string[] = [];
+  while (queue.length) {
+    const id = queue.shift();
+    if (!id) break;
+    order.push(id);
+    for (const successor of successors.get(id) ?? []) {
+      const next = (indegree.get(successor) ?? 0) - 1;
+      indegree.set(successor, next);
+      if (next === 0) queue.push(successor);
+    }
+  }
+  if (order.length !== tasks.length)
+    throw new Error("The task dependency graph contains a cycle.");
+  const projectStart =
+    tasks
+      .map((task) => task.plannedStart)
+      .filter((value): value is string => Boolean(value))
+      .sort()[0] ?? new Date().toISOString().slice(0, 10);
+  const startOffset = new Map<string, number>();
+  for (const id of order) {
+    const task = byId.get(id);
+    if (!task) continue;
+    startOffset.set(
+      id,
+      Math.max(
+        0,
+        ...task.dependencyIds.map(
+          (dependency) =>
+            (startOffset.get(dependency) ?? 0) +
+            (byId.get(dependency)?.durationWorkdays ?? 1),
+        ),
+      ),
+    );
+  }
+  const tail = new Map<string, number>();
+  for (const id of [...order].reverse()) {
+    tail.set(
+      id,
+      Math.max(
+        0,
+        ...(successors.get(id) ?? []).map(
+          (successor) =>
+            (byId.get(successor)?.durationWorkdays ?? 1) +
+            (tail.get(successor) ?? 0),
+        ),
+      ),
+    );
+  }
+  const duration = Math.max(
+    ...tasks.map(
+      (task) => (startOffset.get(task.id) ?? 0) + (task.durationWorkdays ?? 1),
+    ),
+  );
+  const addWorkingDays = (value: string, amount: number) => {
+    const date = new Date(`${value}T12:00:00Z`);
+    let remaining = amount;
+    while (remaining > 0) {
+      date.setUTCDate(date.getUTCDate() + 1);
+      if (date.getUTCDay() !== 0 && date.getUTCDay() !== 6) remaining -= 1;
+    }
+    return date.toISOString().slice(0, 10);
+  };
+  const scheduled = tasks.map((task) => {
+    const prefix = startOffset.get(task.id) ?? 0;
+    const through = prefix + task.durationWorkdays + (tail.get(task.id) ?? 0);
+    const totalFloatWorkdays = duration - through;
+    const earliestStart = addWorkingDays(projectStart, prefix);
+    const earliestFinish = addWorkingDays(
+      earliestStart,
+      task.durationWorkdays - 1,
+    );
+    const latestStart = addWorkingDays(earliestStart, totalFloatWorkdays);
+    return {
+      taskId: task.id,
+      earliestStart,
+      earliestFinish,
+      latestStart,
+      latestFinish: addWorkingDays(latestStart, task.durationWorkdays - 1),
+      totalFloatWorkdays,
+      critical: totalFloatWorkdays === 0,
+      overdue:
+        task.status !== "complete" &&
+        task.status !== "cancelled" &&
+        Boolean(
+          task.dueDate && task.dueDate < new Date().toISOString().slice(0, 10),
+        ),
+    };
+  });
+  const projectFinish = addWorkingDays(projectStart, duration - 1);
+  const missionReadyDate = (
+    input?.project as { missionReadyDate?: string } | undefined
+  )?.missionReadyDate;
+  return {
+    tasks: scheduled,
+    projectStart,
+    projectFinish,
+    projectDurationWorkdays: duration,
+    missionReadyAtRisk: Boolean(
+      missionReadyDate && projectFinish > missionReadyDate,
+    ),
+  };
+}
 
 // Mutable `save_subscriptions` table mirror — TEST-ONLY.
 //
@@ -8781,6 +8912,9 @@ function sendToMockSocket(args: {
           KIND_BATTLE_RHYTHM_SOURCE,
           KIND_BATTLE_RHYTHM_EVENT,
           KIND_BATTLE_RHYTHM_REVISION,
+          KIND_PLANNING_PROJECT,
+          KIND_PLANNING_TASK,
+          KIND_MISSION_CONSTRAINT,
         ].includes(kind),
       )
     ) {
@@ -8895,6 +9029,9 @@ function sendToMockSocket(args: {
         KIND_BATTLE_RHYTHM_SOURCE,
         KIND_BATTLE_RHYTHM_EVENT,
         KIND_BATTLE_RHYTHM_REVISION,
+        KIND_PLANNING_PROJECT,
+        KIND_PLANNING_TASK,
+        KIND_MISSION_CONSTRAINT,
       ].includes(event.kind)
     ) {
       const dTag = event.tags.find((tag) => tag[0] === "d")?.[1];
@@ -9489,6 +9626,8 @@ export function maybeInstallE2eTauriMocks() {
       }
       case "recover_command_brief_publications":
         return 0;
+      case "calculate_plan_schedule":
+        return mockPlanningSchedule(payload);
       case "pick_battle_rhythm_document":
         if (activeConfig?.mock?.battleRhythmDocuments?.length) {
           const documents = activeConfig.mock.battleRhythmDocuments;

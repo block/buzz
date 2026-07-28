@@ -107,6 +107,25 @@ export function useAppNavigation() {
     [commitNavigation],
   );
 
+  const goPlans = React.useCallback(
+    (behavior?: NavigationBehavior) =>
+      commitNavigation({ to: "/plans" }, behavior),
+    [commitNavigation],
+  );
+
+  const goPlan = React.useCallback(
+    (planId: string, options?: NavigationBehavior & { taskId?: string }) =>
+      commitNavigation(
+        {
+          to: "/plans/$planId",
+          params: { planId },
+          search: options?.taskId ? { task: options.taskId } : {},
+        },
+        options,
+      ),
+    [commitNavigation],
+  );
+
   const goProject = React.useCallback(
     (
       projectId: string,
@@ -319,6 +338,8 @@ export function useAppNavigation() {
     goForumPost,
     goHome,
     goNewMessage,
+    goPlan,
+    goPlans,
     goProject,
     goProjects,
     goPulse,

@@ -104,6 +104,7 @@ type AppSidebarProps = {
     | "console"
     | "workflows"
     | "pulse"
+    | "plans"
     | "projects"
     | "battleRhythm";
   unreadChannelCounts: ReadonlyMap<string, number>;
@@ -145,6 +146,7 @@ type AppSidebarProps = {
   onSelectAgents: () => void;
   onSelectBattleRhythm: () => void;
   onSelectCommandConsole: () => void;
+  onSelectPlans: () => void;
   onSelectProjects: () => void;
   onSelectPulse: () => void;
   onSelectWorkflows: () => void;
@@ -214,6 +216,7 @@ export function AppSidebar({
   onSelectAgents,
   onSelectBattleRhythm,
   onSelectCommandConsole,
+  onSelectPlans,
   onSelectProjects,
   onSelectPulse,
   onSelectWorkflows,
@@ -603,6 +606,7 @@ export function AppSidebar({
                 onSelectBattleRhythm={onSelectBattleRhythm}
                 onSelectCommandConsole={onSelectCommandConsole}
                 onSelectHome={onSelectHome}
+                onSelectPlans={onSelectPlans}
                 onSelectProjects={onSelectProjects}
                 onSelectPulse={onSelectPulse}
                 onSelectWorkflows={onSelectWorkflows}

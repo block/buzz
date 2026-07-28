@@ -10,6 +10,7 @@ export type AppView =
   | "console"
   | "workflows"
   | "pulse"
+  | "plans"
   | "projects"
   | "battleRhythm";
 
@@ -142,6 +143,9 @@ export function deriveShellRoute(pathname: string): {
   }
   if (pathname === "/battle-rhythm") {
     return { selectedChannelId: null, selectedView: "battleRhythm" };
+  }
+  if (pathname === "/plans" || pathname.startsWith("/plans/")) {
+    return { selectedChannelId: null, selectedView: "plans" };
   }
 
   if (pathname === "/workflows" || pathname.startsWith("/workflows/")) {

@@ -128,6 +128,7 @@ export function AppShell() {
     goCommandConsole,
     goHome,
     goNewMessage,
+    goPlans,
     goProjects,
     goPulse,
     goSettings,
@@ -881,6 +882,7 @@ export function AppShell() {
                           searchChannels={channels}
                           searchFocusRequest={searchFocusRequest}
                           onSelectHome={() => void goHome()}
+                          onSelectPlans={() => void goPlans()}
                           onSelectProjects={() => void goProjects()}
                           onSelectPulse={() => void goPulse()}
                           onSelectSettings={handleOpenSettings}

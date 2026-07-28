@@ -74,3 +74,29 @@ test("goBattleRhythm navigates to the battle rhythm route", async () => {
   await appNavigation.goBattleRhythm();
   assert.equal(router.state.location.pathname, "/battle-rhythm");
 });
+
+test("goPlans navigates to the naval planning route", async () => {
+  let appNavigation = null;
+  function NavigationProbe() {
+    appNavigation = useAppNavigation();
+    return null;
+  }
+  const rootRoute = createRootRoute({ component: NavigationProbe });
+  const indexRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/",
+  });
+  const plansRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/plans",
+  });
+  const router = createRouter({
+    history: createMemoryHistory({ initialEntries: ["/"] }),
+    routeTree: rootRoute.addChildren([indexRoute, plansRoute]),
+  });
+  await router.load();
+  renderToStaticMarkup(React.createElement(RouterProvider, { router }));
+  assert.ok(appNavigation);
+  await appNavigation.goPlans();
+  assert.equal(router.state.location.pathname, "/plans");
+});
