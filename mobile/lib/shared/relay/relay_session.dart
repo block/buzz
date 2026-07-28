@@ -249,7 +249,9 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   Future<NostrEvent> publish(
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
-  }) {
+  }) async {
+    await _waitUntilConnected(timeout);
+
     final completer = Completer<NostrEvent>();
 
     final timer = Timer(timeout, () {
@@ -270,6 +272,31 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
     _socket?.send(['EVENT', event.toJson()]);
     return completer.future;
+  }
+
+  Future<void> _waitUntilConnected(Duration timeout) async {
+    if (state.status == SessionStatus.connected) return;
+    if (_paused) {
+      throw StateError('Cannot publish while the app is in the background');
+    }
+
+    if (state.status == SessionStatus.disconnected) {
+      final config = ref.read(relayConfigProvider);
+      unawaited(_connect(config));
+    }
+
+    final deadline = DateTime.now().add(timeout);
+    while (state.status != SessionStatus.connected) {
+      if (_disposed || _paused) {
+        throw StateError('Relay connection unavailable');
+      }
+      if (DateTime.now().isAfter(deadline)) {
+        throw TimeoutException(
+          'Relay did not reconnect within $timeout',
+        );
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    }
   }
 
   /// Send a raw message over the WebSocket without waiting for acknowledgement.
