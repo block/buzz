@@ -42,6 +42,79 @@ function activityTitle(item) {
   return formatToolTitle(item.buzzToolName ?? item.toolName, item.title);
 }
 
+test("buildTranscript surfaces mention receipt, SLA breach, and late relay acceptance", () => {
+  const mentionId = "a".repeat(64);
+  const channelId = "22222222-2222-2222-2222-222222222222";
+  const items = buildTranscript([
+    {
+      ...baseEvent,
+      seq: 1,
+      kind: "mention_received",
+      channelId: null,
+      payload: {
+        eventId: mentionId,
+        channelId,
+        dispatchState: "queued_behind_active_turn",
+        deadlineAt: "2026-06-18T00:01:00Z",
+      },
+    },
+    {
+      ...baseEvent,
+      seq: 2,
+      kind: "mention_response_sla",
+      channelId: null,
+      payload: {
+        eventId: mentionId,
+        channelId,
+        status: "breached",
+        reason: "no_relay_accepted_response",
+      },
+    },
+    {
+      ...baseEvent,
+      seq: 3,
+      kind: "first_response_accepted",
+      channelId: null,
+      payload: {
+        eventId: mentionId,
+        channelId,
+        status: "breached",
+        elapsedMs: 72_500,
+      },
+    },
+  ]);
+
+  assert.deepEqual(
+    items.map((item) => item.title),
+    ["Mention received", "Response SLA breached", "Late response accepted"],
+  );
+  assert.equal(items[0].channelId, channelId);
+  assert.match(items[0].text, /Queued behind the active turn/);
+  assert.equal(items[1].renderClass, "error");
+  assert.match(items[1].text, /within 60 seconds/);
+  assert.equal(items[2].renderClass, "error");
+  assert.match(items[2].text, /72\.5 seconds/);
+});
+
+test("buildTranscript distinguishes unknown response timing from a breach", () => {
+  const [item] = buildTranscript([
+    {
+      ...baseEvent,
+      kind: "mention_response_sla",
+      payload: {
+        eventId: "b".repeat(64),
+        channelId: baseEvent.channelId,
+        status: "unknown",
+        reason: "relay_disconnected_before_response",
+      },
+    },
+  ]);
+
+  assert.equal(item.title, "Response status unknown");
+  assert.equal(item.renderClass, "status");
+  assert.match(item.text, /relay disconnected/);
+});
+
 // --- stub-overflow vanish (pins the pre-existing degraded-frame behavior) ---
 
 test("buildTranscript drops a session/prompt turn whose frame was stubbed by the size trimmer", () => {

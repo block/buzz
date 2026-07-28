@@ -15,7 +15,7 @@ mod usage;
 pub use usage::TurnUsage;
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use acp::{AcpClient, EnvVar, McpServer};
@@ -27,6 +27,10 @@ use buzz_core::kind::{
 use buzz_core::observer::{
     decrypt_observer_payload, encrypt_observer_payload, OBSERVER_FRAME_TELEMETRY,
     OBSERVER_MAX_PLAINTEXT_LEN,
+};
+use buzz_core::presence::{
+    MANAGED_AGENT_RUNTIME_LEASE_INTERVAL_SECS, MANAGED_AGENT_RUNTIME_LEASE_TTL_SECS,
+    PRESENCE_HEARTBEAT_INTERVAL_SECS,
 };
 use clap::Parser;
 use config::{
@@ -90,14 +94,38 @@ async fn publish_presence(
     Ok(())
 }
 
+const MANAGED_AGENT_LAST_ERROR_MAX_BYTES: usize = 512;
+
+fn bounded_runtime_error(error: Option<&str>) -> Option<String> {
+    let error = error?;
+    if error.len() <= MANAGED_AGENT_LAST_ERROR_MAX_BYTES {
+        return Some(error.to_owned());
+    }
+    let end = error
+        .char_indices()
+        .take_while(|(index, _)| *index <= MANAGED_AGENT_LAST_ERROR_MAX_BYTES)
+        .map(|(index, _)| index)
+        .last()
+        .unwrap_or(0);
+    Some(error[..end].to_owned())
+}
+
 fn emit_runtime_lifecycle(
     observer: Option<&observer::ObserverHandle>,
+    lease_last_error: &Mutex<Option<String>>,
     start_nonce: &str,
     pubkey: &str,
     relay_url: &str,
     lifecycle: &str,
     error: Option<&str>,
 ) {
+    if let Ok(mut last_error) = lease_last_error.lock() {
+        if lifecycle == "failed" {
+            *last_error = bounded_runtime_error(error);
+        } else if matches!(lifecycle, "listening" | "ready") {
+            *last_error = None;
+        }
+    }
     if let Some(observer) = observer {
         observer.emit(
             "managed_agent_runtime_lifecycle",
@@ -110,6 +138,247 @@ fn emit_runtime_lifecycle(
                 "lifecycle": lifecycle,
                 "error": error,
             }),
+        );
+    }
+}
+
+async fn run_managed_agent_runtime_lease(
+    observer: Option<observer::ObserverHandle>,
+    start_nonce: String,
+    pubkey: String,
+    relay_url: String,
+    last_error: Arc<Mutex<Option<String>>>,
+    mut shutdown: watch::Receiver<()>,
+) {
+    let Some(observer) = observer else {
+        return;
+    };
+    if start_nonce.is_empty() {
+        return;
+    }
+
+    let interval = Duration::from_secs(MANAGED_AGENT_RUNTIME_LEASE_INTERVAL_SECS);
+    let mut ticker = tokio::time::interval_at(tokio::time::Instant::now(), interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            biased;
+            _ = shutdown.changed() => break,
+            _ = ticker.tick() => {
+                let source_timestamp = chrono::Utc::now();
+                let expires_at = source_timestamp
+                    + chrono::TimeDelta::seconds(MANAGED_AGENT_RUNTIME_LEASE_TTL_SECS as i64);
+                let last_error = last_error.lock().ok().and_then(|value| value.clone());
+                observer.emit(
+                    "managed_agent_runtime_lease",
+                    None,
+                    &observer::ObserverContext::default(),
+                    serde_json::json!({
+                        "pubkey": pubkey,
+                        "relayUrl": relay_url,
+                        "startNonce": start_nonce,
+                        "leaseEpoch": start_nonce,
+                        "sourceTimestamp": source_timestamp.to_rfc3339(),
+                        "expiresAt": expires_at.to_rfc3339(),
+                        "lastError": last_error,
+                    }),
+                );
+            }
+        }
+    }
+}
+
+const MENTION_RESPONSE_SLA_SECS: u64 = 60;
+const MAX_PENDING_MENTION_SLAS: usize = 1_000;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MentionSlaState {
+    Pending,
+    Breached,
+    Unknown,
+}
+
+#[derive(Debug)]
+struct PendingMentionSla {
+    event_id: String,
+    channel_id: Uuid,
+    thread_root_id: String,
+    received_at: std::time::Instant,
+    received_at_rfc3339: String,
+    deadline_at_rfc3339: String,
+    state: MentionSlaState,
+}
+
+struct MentionSlaEmission {
+    kind: &'static str,
+    payload: serde_json::Value,
+}
+
+#[derive(Default)]
+struct MentionSlaTracker {
+    pending: VecDeque<PendingMentionSla>,
+}
+
+impl MentionSlaTracker {
+    fn record(
+        &mut self,
+        event: &nostr::Event,
+        channel_id: Uuid,
+        dispatch_state: &str,
+        now: std::time::Instant,
+        wall_now: chrono::DateTime<chrono::Utc>,
+    ) -> Vec<MentionSlaEmission> {
+        let mut emissions = Vec::new();
+        if self
+            .pending
+            .iter()
+            .any(|pending| pending.event_id == event.id.to_hex())
+        {
+            return emissions;
+        }
+        if self.pending.len() >= MAX_PENDING_MENTION_SLAS {
+            if let Some(evicted) = self.pending.pop_front() {
+                emissions.push(MentionSlaEmission {
+                    kind: "mention_response_sla",
+                    payload: serde_json::json!({
+                        "eventId": evicted.event_id,
+                        "channelId": evicted.channel_id,
+                        "threadRootId": evicted.thread_root_id,
+                        "receivedAt": evicted.received_at_rfc3339,
+                        "deadlineAt": evicted.deadline_at_rfc3339,
+                        "status": "unknown",
+                        "reason": "pending_tracker_capacity_exceeded",
+                    }),
+                });
+            }
+        }
+
+        let event_id = event.id.to_hex();
+        let thread_root_id = queue::parse_thread_tags(event)
+            .root_event_id
+            .unwrap_or_else(|| event_id.clone());
+        let received_at_rfc3339 = wall_now.to_rfc3339();
+        let deadline_at_rfc3339 =
+            (wall_now + chrono::TimeDelta::seconds(MENTION_RESPONSE_SLA_SECS as i64)).to_rfc3339();
+        self.pending.push_back(PendingMentionSla {
+            event_id: event_id.clone(),
+            channel_id,
+            thread_root_id: thread_root_id.clone(),
+            received_at: now,
+            received_at_rfc3339: received_at_rfc3339.clone(),
+            deadline_at_rfc3339: deadline_at_rfc3339.clone(),
+            state: MentionSlaState::Pending,
+        });
+        emissions.push(MentionSlaEmission {
+            kind: "mention_received",
+            payload: serde_json::json!({
+                "eventId": event_id,
+                "channelId": channel_id,
+                "threadRootId": thread_root_id,
+                "receivedAt": received_at_rfc3339,
+                "deadlineAt": deadline_at_rfc3339,
+                "dispatchState": dispatch_state,
+                "status": "pending",
+            }),
+        });
+        emissions
+    }
+
+    fn accept_response(
+        &mut self,
+        response: &nostr::Event,
+        channel_id: Uuid,
+        now: std::time::Instant,
+        wall_now: chrono::DateTime<chrono::Utc>,
+    ) -> Option<MentionSlaEmission> {
+        let response_root = queue::parse_thread_tags(response).root_event_id?;
+        let position = self.pending.iter().position(|pending| {
+            pending.channel_id == channel_id && pending.thread_root_id == response_root
+        })?;
+        let pending = self.pending.remove(position)?;
+        let elapsed = now.saturating_duration_since(pending.received_at);
+        let status = match pending.state {
+            MentionSlaState::Pending if elapsed.as_secs() < MENTION_RESPONSE_SLA_SECS => "on_time",
+            MentionSlaState::Pending | MentionSlaState::Breached => "breached",
+            MentionSlaState::Unknown => "unknown",
+        };
+        Some(MentionSlaEmission {
+            kind: "first_response_accepted",
+            payload: serde_json::json!({
+                "eventId": pending.event_id,
+                "responseId": response.id.to_hex(),
+                "channelId": channel_id,
+                "threadRootId": pending.thread_root_id,
+                "receivedAt": pending.received_at_rfc3339,
+                "acceptedAt": wall_now.to_rfc3339(),
+                "elapsedMs": elapsed.as_millis().min(u128::from(u64::MAX)) as u64,
+                "status": status,
+            }),
+        })
+    }
+
+    fn poll_breaches(&mut self, now: std::time::Instant) -> Vec<MentionSlaEmission> {
+        let mut emissions = Vec::new();
+        for pending in &mut self.pending {
+            if pending.state == MentionSlaState::Pending
+                && now.saturating_duration_since(pending.received_at)
+                    >= Duration::from_secs(MENTION_RESPONSE_SLA_SECS)
+            {
+                pending.state = MentionSlaState::Breached;
+                emissions.push(MentionSlaEmission {
+                    kind: "mention_response_sla",
+                    payload: serde_json::json!({
+                        "eventId": pending.event_id,
+                        "channelId": pending.channel_id,
+                        "threadRootId": pending.thread_root_id,
+                        "receivedAt": pending.received_at_rfc3339,
+                        "deadlineAt": pending.deadline_at_rfc3339,
+                        "status": "breached",
+                        "reason": "no_relay_accepted_response",
+                    }),
+                });
+            }
+        }
+        emissions
+    }
+
+    fn mark_transport_unknown(&mut self) -> Vec<MentionSlaEmission> {
+        let mut emissions = Vec::new();
+        for pending in &mut self.pending {
+            if pending.state == MentionSlaState::Unknown {
+                continue;
+            }
+            pending.state = MentionSlaState::Unknown;
+            emissions.push(MentionSlaEmission {
+                kind: "mention_response_sla",
+                payload: serde_json::json!({
+                    "eventId": pending.event_id,
+                    "channelId": pending.channel_id,
+                    "threadRootId": pending.thread_root_id,
+                    "receivedAt": pending.received_at_rfc3339,
+                    "deadlineAt": pending.deadline_at_rfc3339,
+                    "status": "unknown",
+                    "reason": "relay_disconnected_before_response",
+                }),
+            });
+        }
+        emissions
+    }
+}
+
+fn emit_mention_sla(
+    observer: Option<&observer::ObserverHandle>,
+    emissions: impl IntoIterator<Item = MentionSlaEmission>,
+) {
+    let Some(observer) = observer else {
+        return;
+    };
+    for emission in emissions {
+        observer.emit(
+            emission.kind,
+            None,
+            &observer::ObserverContext::default(),
+            emission.payload,
         );
     }
 }
@@ -1501,6 +1770,7 @@ async fn tokio_main() -> Result<()> {
     }
 
     let runtime_start_nonce = std::env::var("BUZZ_MANAGED_AGENT_START_NONCE").unwrap_or_default();
+    let runtime_lease_last_error = Arc::new(Mutex::new(None));
     let dedup_mode = config.dedup_mode;
     let mut queue =
         EventQueue::new(dedup_mode).with_in_flight_deadline(config.max_turn_duration_secs);
@@ -1518,6 +1788,7 @@ async fn tokio_main() -> Result<()> {
     if config.lazy_pool {
         emit_runtime_lifecycle(
             observer.as_ref(),
+            &runtime_lease_last_error,
             &runtime_start_nonce,
             &pubkey_hex,
             &config.relay_url,
@@ -1582,7 +1853,7 @@ async fn tokio_main() -> Result<()> {
     let mut heartbeat_in_flight = false;
 
     let mut presence_heartbeat = if config.presence_enabled {
-        let interval = Duration::from_secs(60);
+        let interval = Duration::from_secs(PRESENCE_HEARTBEAT_INTERVAL_SECS);
         Some(tokio::time::interval_at(
             tokio::time::Instant::now() + interval,
             interval,
@@ -1602,6 +1873,9 @@ async fn tokio_main() -> Result<()> {
     };
     let mut typing_channels: HashMap<Uuid, ThreadTags> = HashMap::new();
     let mut presence_task: Option<tokio::task::JoinHandle<()>> = None;
+    let mut mention_sla_tracker = MentionSlaTracker::default();
+    let mut mention_sla_tick = tokio::time::interval(Duration::from_secs(1));
+    mention_sla_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     // Runs at the TOP of every loop iteration via Instant check — cannot be
     // starved by the biased select. Slot refill spawns background tasks so
@@ -1631,6 +1905,14 @@ async fn tokio_main() -> Result<()> {
 
     // ── Step 7: Shutdown signal ───────────────────────────────────────────────
     let (shutdown_tx, mut shutdown_rx) = watch::channel(());
+    let runtime_lease_task = tokio::spawn(run_managed_agent_runtime_lease(
+        observer.clone(),
+        runtime_start_nonce.clone(),
+        pubkey_hex.clone(),
+        config.relay_url.clone(),
+        Arc::clone(&runtime_lease_last_error),
+        shutdown_rx.clone(),
+    ));
 
     let tx = shutdown_tx.clone();
     tokio::spawn(async move {
@@ -1719,6 +2001,7 @@ async fn tokio_main() -> Result<()> {
             {
                 emit_runtime_lifecycle(
                     observer.as_ref(),
+                    &runtime_lease_last_error,
                     &runtime_start_nonce,
                     &pubkey_hex,
                     &config.relay_url,
@@ -1870,6 +2153,7 @@ async fn tokio_main() -> Result<()> {
                         ) {
                             emit_runtime_lifecycle(
                                 observer.as_ref(),
+                                &runtime_lease_last_error,
                                 &runtime_start_nonce,
                                 &pubkey_hex,
                                 &config.relay_url,
@@ -2025,7 +2309,20 @@ async fn tokio_main() -> Result<()> {
                                 continue;
                             }
 
-                            if config.ignore_self && buzz_event.event.pubkey.to_hex() == pubkey_hex {
+                            let is_self_authored =
+                                buzz_event.event.pubkey.to_hex() == pubkey_hex;
+                            if is_self_authored && kind_u32 == KIND_STREAM_MESSAGE {
+                                if let Some(emission) = mention_sla_tracker.accept_response(
+                                    &buzz_event.event,
+                                    buzz_event.channel_id,
+                                    std::time::Instant::now(),
+                                    chrono::Utc::now(),
+                                ) {
+                                    emit_mention_sla(observer.as_ref(), [emission]);
+                                }
+                            }
+
+                            if config.ignore_self && is_self_authored {
                                 tracing::debug!(channel_id = %buzz_event.channel_id, "dropping self-authored event");
                                 continue;
                             }
@@ -2195,6 +2492,8 @@ async fn tokio_main() -> Result<()> {
                             // first. `nostr::Event::clone` is cheap (Arc-
                             // backed payload) so the cost is negligible.
                             let event_for_steer = buzz_event.event.clone();
+                            let was_in_flight =
+                                queue.is_channel_in_flight(buzz_event.channel_id);
                             let prompt_tag_for_steer = prompt_tag.clone();
                             let accepted = queue.push(QueuedEvent {
                                 channel_id: buzz_event.channel_id,
@@ -2202,6 +2501,23 @@ async fn tokio_main() -> Result<()> {
                                 received_at: std::time::Instant::now(),
                                 prompt_tag,
                             });
+                            if accepted && event_mentions_agent(&event_for_steer, &pubkey_hex) {
+                                let dispatch_state = if !pool_ready {
+                                    "waiting_for_runtime"
+                                } else if was_in_flight {
+                                    "queued_behind_active_turn"
+                                } else {
+                                    "accepted_for_dispatch"
+                                };
+                                let emissions = mention_sla_tracker.record(
+                                    &event_for_steer,
+                                    buzz_event.channel_id,
+                                    dispatch_state,
+                                    std::time::Instant::now(),
+                                    chrono::Utc::now(),
+                                );
+                                emit_mention_sla(observer.as_ref(), emissions);
+                            }
                             // 👀 — immediate "seen" reaction, only if the event
                             // was actually queued (not dropped by DedupMode::Drop).
                             // Fire-and-forget: on rare fast-failure paths the
@@ -2268,6 +2584,10 @@ async fn tokio_main() -> Result<()> {
                         }
                         None => {
                             tracing::warn!("relay event stream ended — requesting reconnect");
+                            emit_mention_sla(
+                                observer.as_ref(),
+                                mention_sla_tracker.mark_transport_unknown(),
+                            );
                             if let Err(e) = relay.reconnect().await {
                                 tracing::error!("relay background task is gone: {e} — exiting");
                                 tokio::time::sleep(Duration::from_secs(1)).await;
@@ -2275,6 +2595,14 @@ async fn tokio_main() -> Result<()> {
                             }
                         }
                     }
+                    None
+                }
+                _ = mention_sla_tick.tick() => {
+                    let _ = result_rx;
+                    emit_mention_sla(
+                        observer.as_ref(),
+                        mention_sla_tracker.poll_breaches(std::time::Instant::now()),
+                    );
                     None
                 }
                 _ = async {
@@ -2550,6 +2878,7 @@ async fn tokio_main() -> Result<()> {
                         pool_ready = true;
                         emit_runtime_lifecycle(
                             observer.as_ref(),
+                            &runtime_lease_last_error,
                             &runtime_start_nonce,
                             &pubkey_hex,
                             &config.relay_url,
@@ -2566,6 +2895,7 @@ async fn tokio_main() -> Result<()> {
                         debug_assert_eq!(pool_lifecycle.failed_error(), Some(error.as_str()));
                         emit_runtime_lifecycle(
                             observer.as_ref(),
+                            &runtime_lease_last_error,
                             &runtime_start_nonce,
                             &pubkey_hex,
                             &config.relay_url,
@@ -2689,6 +3019,13 @@ async fn tokio_main() -> Result<()> {
             Ok(Err(e)) => tracing::warn!("failed to set offline presence: {e}"),
             Err(_) => tracing::warn!("offline presence timed out"),
         }
+    }
+
+    // Stop lease refreshes before tearing down the observer publisher. A
+    // missing terminal lease now expires to Unknown; only Desktop's explicit
+    // owner stop action is allowed to claim Stopped.
+    if let Err(error) = runtime_lease_task.await {
+        tracing::warn!("runtime lease task failed during shutdown: {error}");
     }
 
     if let Some(handle) = relay_observer_publisher_task.take() {
@@ -4225,6 +4562,139 @@ mod heartbeat_base_prompt_tests {
         let prompt = "[System: Heartbeat]\nrun feed get";
         let composed = pool::prepend_base_for_legacy(2, Some("you are a helpful agent"), prompt);
         assert_eq!(composed, prompt);
+    }
+}
+
+#[cfg(test)]
+mod mention_sla_tests {
+    use super::*;
+    use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    fn incoming_mention(keys: &Keys) -> nostr::Event {
+        EventBuilder::new(Kind::Custom(KIND_STREAM_MESSAGE as u16), "please respond")
+            .tags([Tag::parse(["p", &"ab".repeat(32)]).unwrap()])
+            .sign_with_keys(keys)
+            .unwrap()
+    }
+
+    fn reply(keys: &Keys, root: &str) -> nostr::Event {
+        EventBuilder::new(Kind::Custom(KIND_STREAM_MESSAGE as u16), "done")
+            .tags([Tag::parse(["e", root, "", "reply"]).unwrap()])
+            .sign_with_keys(keys)
+            .unwrap()
+    }
+
+    #[test]
+    fn receipt_then_relay_accepted_reply_clears_exactly_once() {
+        let mention_keys = Keys::generate();
+        let response_keys = Keys::generate();
+        let mention = incoming_mention(&mention_keys);
+        let channel_id = Uuid::new_v4();
+        let now = std::time::Instant::now();
+        let wall_now = chrono::Utc::now();
+        let mut tracker = MentionSlaTracker::default();
+
+        let received = tracker.record(&mention, channel_id, "accepted_for_dispatch", now, wall_now);
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0].kind, "mention_received");
+        assert_eq!(received[0].payload["status"], "pending");
+
+        let response = reply(&response_keys, &mention.id.to_hex());
+        let accepted = tracker
+            .accept_response(
+                &response,
+                channel_id,
+                now + Duration::from_secs(12),
+                wall_now + chrono::TimeDelta::seconds(12),
+            )
+            .unwrap();
+        assert_eq!(accepted.kind, "first_response_accepted");
+        assert_eq!(accepted.payload["eventId"], mention.id.to_hex());
+        assert_eq!(accepted.payload["responseId"], response.id.to_hex());
+        assert_eq!(accepted.payload["status"], "on_time");
+        assert!(tracker
+            .accept_response(
+                &response,
+                channel_id,
+                now + Duration::from_secs(13),
+                wall_now,
+            )
+            .is_none());
+    }
+
+    #[test]
+    fn reply_to_another_thread_does_not_clear_pending_mention() {
+        let mention = incoming_mention(&Keys::generate());
+        let channel_id = Uuid::new_v4();
+        let now = std::time::Instant::now();
+        let wall_now = chrono::Utc::now();
+        let mut tracker = MentionSlaTracker::default();
+        tracker.record(&mention, channel_id, "accepted_for_dispatch", now, wall_now);
+
+        let unrelated = reply(&Keys::generate(), &"cd".repeat(32));
+        assert!(tracker
+            .accept_response(
+                &unrelated,
+                channel_id,
+                now + Duration::from_secs(1),
+                wall_now,
+            )
+            .is_none());
+        assert_eq!(tracker.pending.len(), 1);
+    }
+
+    #[test]
+    fn no_response_breaches_at_sixty_seconds_and_late_reply_stays_breached() {
+        let mention = incoming_mention(&Keys::generate());
+        let channel_id = Uuid::new_v4();
+        let now = std::time::Instant::now();
+        let wall_now = chrono::Utc::now();
+        let mut tracker = MentionSlaTracker::default();
+        tracker.record(&mention, channel_id, "waiting_for_runtime", now, wall_now);
+
+        assert!(tracker
+            .poll_breaches(now + Duration::from_secs(59))
+            .is_empty());
+        let breach = tracker.poll_breaches(now + Duration::from_secs(60));
+        assert_eq!(breach.len(), 1);
+        assert_eq!(breach[0].payload["status"], "breached");
+        assert!(tracker
+            .poll_breaches(now + Duration::from_secs(61))
+            .is_empty());
+
+        let response = reply(&Keys::generate(), &mention.id.to_hex());
+        let accepted = tracker
+            .accept_response(
+                &response,
+                channel_id,
+                now + Duration::from_secs(65),
+                wall_now + chrono::TimeDelta::seconds(65),
+            )
+            .unwrap();
+        assert_eq!(accepted.payload["status"], "breached");
+    }
+
+    #[test]
+    fn relay_disconnect_projects_unknown_until_correlated_reply_arrives() {
+        let mention = incoming_mention(&Keys::generate());
+        let channel_id = Uuid::new_v4();
+        let now = std::time::Instant::now();
+        let wall_now = chrono::Utc::now();
+        let mut tracker = MentionSlaTracker::default();
+        tracker.record(&mention, channel_id, "accepted_for_dispatch", now, wall_now);
+
+        let unknown = tracker.mark_transport_unknown();
+        assert_eq!(unknown.len(), 1);
+        assert_eq!(unknown[0].payload["status"], "unknown");
+        assert!(tracker
+            .poll_breaches(now + Duration::from_secs(120))
+            .is_empty());
+
+        let response = reply(&Keys::generate(), &mention.id.to_hex());
+        let accepted = tracker
+            .accept_response(&response, channel_id, now, wall_now)
+            .unwrap();
+        assert_eq!(accepted.payload["status"], "unknown");
     }
 }
 

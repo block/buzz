@@ -6,6 +6,7 @@ import {
   agentCommunityStatusDetail,
   canonicalRelayUrl,
   findManagedAgentRuntime,
+  managedAgentPairAction,
   managedAgentRuntimeKey,
 } from "./managedAgentRuntimeStatus.ts";
 
@@ -17,11 +18,18 @@ const runtime = (overrides = {}) => ({
   pid: 1,
   error: null,
   logPath: null,
+  observerSequence: 1,
+  lastObservedAt: "2026-07-27T18:00:00Z",
+  leaseExpiresAt: "2026-07-27T18:00:45Z",
   ...overrides,
 });
 
-test("projects every backend lifecycle to the four product labels", () => {
+test("projects every backend lifecycle without conflating unknown and stopped", () => {
   assert.equal(agentCommunityAvailability(runtime()), "Here");
+  assert.equal(
+    agentCommunityAvailability(runtime({ lifecycle: "unknown" })),
+    "Unknown",
+  );
   for (const lifecycle of ["starting", "listening", "waking"]) {
     assert.equal(agentCommunityAvailability(runtime({ lifecycle })), "Waking");
   }
@@ -52,6 +60,19 @@ test("unavailable detail distinguishes stopped and failed", () => {
       runtime({ lifecycle: "failed", error: "Relay timed out" }),
     ),
     "Relay timed out",
+  );
+});
+
+test("unknown explains uncertainty and offers restart", () => {
+  assert.equal(
+    agentCommunityStatusDetail(
+      runtime({ lifecycle: "unknown", error: "Observer lease expired" }),
+    ),
+    "Observer lease expired",
+  );
+  assert.equal(
+    managedAgentPairAction(runtime({ lifecycle: "unknown" })),
+    "restart",
   );
 });
 

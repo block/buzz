@@ -4,7 +4,10 @@ import { subscribeToAgentObserverFrames } from "@/shared/api/observerRelay";
 import type { RelayEvent, ManagedAgent } from "@/shared/api/types";
 import type { ControlResultFrame } from "@/shared/api/types";
 import { putAgentSessionConfig } from "@/shared/api/tauri";
-import { putManagedAgentRuntimeLifecycle } from "@/shared/api/tauriManagedAgents";
+import {
+  putManagedAgentRuntimeLease,
+  putManagedAgentRuntimeLifecycle,
+} from "@/shared/api/tauriManagedAgents";
 import { getIdentity } from "@/shared/api/tauriIdentity";
 import { decryptObserverEvent } from "@/shared/api/tauriObserver";
 import {
@@ -404,11 +407,27 @@ async function handleRelayObserverEvent(
     } else if (parsed.kind === "control_result") {
       dispatchControlResult(agentPubkey, parsed.payload);
     } else if (parsed.kind === "managed_agent_runtime_lifecycle") {
-      void putManagedAgentRuntimeLifecycle(agentPubkey, parsed.payload).catch(
+      const payload =
+        typeof parsed.payload === "object" && parsed.payload !== null
+          ? {
+              ...parsed.payload,
+              observerSequence: parsed.seq,
+              sourceTimestamp: parsed.timestamp,
+            }
+          : parsed.payload;
+      void putManagedAgentRuntimeLifecycle(agentPubkey, payload).catch(
         (error) => {
           console.debug("Late/untracked lifecycle frame dropped:", error);
         },
       );
+    } else if (parsed.kind === "managed_agent_runtime_lease") {
+      const payload =
+        typeof parsed.payload === "object" && parsed.payload !== null
+          ? { ...parsed.payload, observerSequence: parsed.seq }
+          : parsed.payload;
+      void putManagedAgentRuntimeLease(agentPubkey, payload).catch((error) => {
+        console.debug("Stale/untracked runtime lease dropped:", error);
+      });
     }
   } catch (error) {
     if (activeGeneration !== generation) {

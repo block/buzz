@@ -3,6 +3,7 @@ import type { ManagedAgentRuntimeStatus } from "@/shared/api/types";
 export type AgentCommunityAvailability =
   | "Here"
   | "Waking"
+  | "Unknown"
   | "Needs setup on this device"
   | "Unavailable";
 
@@ -18,6 +19,8 @@ export function agentCommunityAvailability(
       return "Waking";
     case "ready":
       return "Here";
+    case "unknown":
+      return "Unknown";
     case "failed":
     case "stopped":
       return "Unavailable";
@@ -30,6 +33,10 @@ export function agentCommunityStatusDetail(
   if (!runtime.localSetup)
     return "Set up this agent on this device to start it.";
   if (runtime.lifecycle === "stopped") return "Stopped by you";
+  if (runtime.lifecycle === "unknown")
+    return (
+      runtime.error ?? "Connection lost; current state cannot be verified."
+    );
   if (runtime.lifecycle === "failed")
     return runtime.error ?? "Could not connect";
   return null;
@@ -49,7 +56,8 @@ export function managedAgentPairAction(
   runtime: ManagedAgentRuntimeStatus | undefined,
 ): ManagedAgentPairAction {
   if (!runtime || runtime.lifecycle === "stopped") return "start";
-  if (runtime.lifecycle === "failed") return "restart";
+  if (runtime.lifecycle === "failed" || runtime.lifecycle === "unknown")
+    return "restart";
   return "stop";
 }
 

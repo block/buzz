@@ -1,10 +1,11 @@
 //! Presence tracking — online/away status with TTL.
 //!
 //! Stored as `SET buzz:{community}:presence:{pubkey_hex} "online" EX 90`.
-//! TTL is 3x the 30s heartbeat interval so a single missed heartbeat doesn't
-//! cause presence flap. Clean disconnect deletes immediately.
+//! The TTL and refresh interval share one contract in `buzz-core`, so relay
+//! storage and connected clients cannot silently drift apart. Clean disconnect
+//! deletes immediately.
 
-use buzz_core::TenantContext;
+use buzz_core::{presence::PRESENCE_LEASE_TTL_SECS, TenantContext};
 use deadpool_redis::Pool;
 use nostr::PublicKey;
 use std::collections::HashMap;
@@ -12,8 +13,8 @@ use std::collections::HashMap;
 use crate::error::PubSubError;
 use crate::topic::BUZZ_PREFIX;
 
-/// 3x the 30s heartbeat — single missed heartbeat won't cause presence flap.
-pub const PRESENCE_TTL_SECS: u64 = 90;
+/// Presence lease lifetime, retained under the historical public name.
+pub const PRESENCE_TTL_SECS: u64 = PRESENCE_LEASE_TTL_SECS;
 
 /// Returns the Redis key for the presence entry of `pubkey` under `ctx`.
 pub fn presence_key(ctx: &TenantContext, pubkey: &PublicKey) -> String {

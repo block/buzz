@@ -3153,6 +3153,9 @@ async fn wait_for_reconnect(
 /// - `kinds` is included only when `filter.kinds` is `Some`; `None` = wildcard.
 /// - `#p` is included only when `filter.require_mention` is `true`.
 /// - `#h` is always included (channel-scoped subscription).
+/// - A second OR-filter receives this agent's own kind:9 messages. The main
+///   loop never prompts on those when `ignore_self` is enabled; it uses them
+///   only as relay-accepted evidence for mention-response SLA telemetry.
 /// - On first subscribe (`since` is `None`) adds `since=now` to avoid replaying
 ///   history. On reconnect (`since` is `Some`) subtracts [`SINCE_SKEW_SECS`].
 ///
@@ -3193,7 +3196,18 @@ async fn send_subscribe(
     };
     req_filter.insert("since".into(), json!(since_ts));
 
-    let req = json!(["REQ", sub_id, Value::Object(req_filter)]);
+    let response_monitor_filter = json!({
+        "kinds": [buzz_core::kind::KIND_STREAM_MESSAGE],
+        "authors": [agent_pubkey_hex],
+        "#h": [channel_id.to_string()],
+        "since": since_ts,
+    });
+    let req = json!([
+        "REQ",
+        sub_id,
+        Value::Object(req_filter),
+        response_monitor_filter
+    ]);
 
     match serde_json::to_string(&req) {
         Ok(text) => {
