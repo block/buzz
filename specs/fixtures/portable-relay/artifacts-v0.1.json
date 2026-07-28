@@ -1,0 +1,418 @@
+{
+  "_meta": {
+    "id": "portable-relay-artifacts-v0.1",
+    "type": "fixture",
+    "description": "Shared upload, reference-gated disclosure, and content-integrity expectations for portable relay artifact adapters and clients.",
+    "story": "specs/stories/sovereign-sync/retrieve-referenced-stream-artifacts.md",
+    "feature": "specs/features/portable-relay/artifact-conformance.feature",
+    "contract": "specs/contracts/openapi/sovereign-sync.yaml",
+    "scenario": "Authorize artifact custody through identity and accepted event references",
+    "known_failure_annotation": {
+      "field": "known_failures",
+      "meaning": "An optional array on a required check. Each entry names an adapter that is expected to fail the check today; it records an implementation gap and does not weaken the profile requirement."
+    }
+  },
+  "profile": "portable-relay-artifacts-v0.1",
+  "applies_to": [
+    "laptop-reference",
+    "cloudflare-reference",
+    "buzz-cli"
+  ],
+  "limits": {
+    "maximum_body_bytes": 16777216,
+    "empty_body_allowed": false
+  },
+  "authentication": {
+    "scheme": "Nostr",
+    "event_kind": 27235,
+    "required_tags": [
+      "u",
+      "method",
+      "payload",
+      "nonce"
+    ],
+    "u": "full request URL",
+    "post_method": "POST",
+    "post_payload": "lowercase SHA-256 of the exact request body",
+    "get_method": "GET",
+    "get_payload": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "head_proof_method": "GET",
+    "head_payload": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "roles": {
+    "owner": "configured custodian owner pubkey",
+    "admitted_peer": "verification key of a configured replication peer",
+    "reader": "verification key holding an active read grant",
+    "stranger": "authenticated pubkey that is neither owner nor admitted peer"
+  },
+  "streams": {
+    "referencing": {
+      "id": "shared/artifact-a",
+      "reader": "reader",
+      "selection": "contains the accepted referencing event"
+    },
+    "non_referencing": {
+      "id": "shared/artifact-b",
+      "reader": "reader",
+      "selection": "excludes the accepted referencing event"
+    }
+  },
+  "artifact_fixture": {
+    "body_utf8": "portable",
+    "size": 8,
+    "sha256": "01e782826ae5182220bd6158f883d01ceb1bce659dc020e7c511f802a9aa7737",
+    "url": "/artifacts/01e782826ae5182220bd6158f883d01ceb1bce659dc020e7c511f802a9aa7737",
+    "referencing_event_tags": [
+      [
+        "h",
+        "artifact-a"
+      ],
+      [
+        "x",
+        "01e782826ae5182220bd6158f883d01ceb1bce659dc020e7c511f802a9aa7737"
+      ]
+    ]
+  },
+  "checks": [
+    {
+      "id": "upload-owner-accepted",
+      "family": "upload_authorization",
+      "request": {
+        "method": "POST",
+        "path": "/artifacts",
+        "principal": "owner",
+        "body_fixture": "artifact_fixture"
+      },
+      "expected": {
+        "status": 200,
+        "stored": true
+      }
+    },
+    {
+      "id": "upload-admitted-peer-accepted",
+      "family": "upload_authorization",
+      "request": {
+        "method": "POST",
+        "path": "/artifacts",
+        "principal": "admitted_peer",
+        "body_fixture": "artifact_fixture"
+      },
+      "expected": {
+        "status": 200,
+        "stored": true
+      }
+    },
+    {
+      "id": "upload-stranger-denied",
+      "family": "upload_authorization",
+      "request": {
+        "method": "POST",
+        "path": "/artifacts",
+        "principal": "stranger",
+        "body_fixture": "artifact_fixture"
+      },
+      "expected": {
+        "status": 403,
+        "code": "scope_denied",
+        "stored": false
+      },
+      "known_failures": [
+        {
+          "adapter": "laptop-reference",
+          "observed": "artifact_upload authenticates the caller but does not restrict uploads to the owner or admitted peers"
+        }
+      ]
+    },
+    {
+      "id": "upload-unauthenticated-denied",
+      "family": "upload_authorization",
+      "request": {
+        "method": "POST",
+        "path": "/artifacts",
+        "principal": null,
+        "body_fixture": "artifact_fixture"
+      },
+      "expected": {
+        "status": 401,
+        "stored": false
+      }
+    },
+    {
+      "id": "upload-receipt-shape-and-content",
+      "family": "receipt_integrity",
+      "request": {
+        "method": "POST",
+        "path": "/artifacts",
+        "principal": "owner",
+        "body_fixture": "artifact_fixture"
+      },
+      "expected": {
+        "status": 200,
+        "exact_keys": [
+          "sha256",
+          "size",
+          "url"
+        ],
+        "sha256": "01e782826ae5182220bd6158f883d01ceb1bce659dc020e7c511f802a9aa7737",
+        "sha256_equals_body_sha256": true,
+        "size": 8,
+        "url": "/artifacts/01e782826ae5182220bd6158f883d01ceb1bce659dc020e7c511f802a9aa7737"
+      }
+    },
+    {
+      "id": "upload-empty-body-rejected",
+      "family": "body_validation",
+      "request": {
+        "method": "POST",
+        "path": "/artifacts",
+        "principal": "owner",
+        "body_size": 0
+      },
+      "expected": {
+        "success": false,
+        "stored": false
+      }
+    },
+    {
+      "id": "upload-oversized-body-rejected",
+      "family": "body_validation",
+      "request": {
+        "method": "POST",
+        "path": "/artifacts",
+        "principal": "owner",
+        "body_size": 16777217
+      },
+      "expected": {
+        "success": false,
+        "stored": false
+      }
+    },
+    {
+      "id": "get-owner-unreferenced-accepted",
+      "family": "fetch_authorization",
+      "precondition": "artifact bytes are stored and no accepted event references the digest",
+      "request": {
+        "method": "GET",
+        "path": "/artifacts/{sha256}",
+        "principal": "owner"
+      },
+      "expected": {
+        "status": 200,
+        "body_fixture": "artifact_fixture"
+      }
+    },
+    {
+      "id": "head-owner-unreferenced-accepted",
+      "family": "head_authorization",
+      "precondition": "artifact bytes are stored and no accepted event references the digest",
+      "request": {
+        "method": "HEAD",
+        "path": "/artifacts/{sha256}",
+        "principal": "owner",
+        "proof_method": "GET",
+        "proof_payload": "sha256(empty)"
+      },
+      "expected": {
+        "status": 200,
+        "body_size": 0
+      }
+    },
+    {
+      "id": "get-reader-referencing-stream-accepted",
+      "family": "fetch_authorization",
+      "precondition": "the reader has an active grant on streams.referencing and its accepted event references the digest",
+      "request": {
+        "method": "GET",
+        "path": "/artifacts/{sha256}",
+        "principal": "reader"
+      },
+      "expected": {
+        "status": 200,
+        "body_fixture": "artifact_fixture"
+      }
+    },
+    {
+      "id": "head-reader-referencing-stream-accepted",
+      "family": "head_authorization",
+      "precondition": "the reader has an active grant on streams.referencing and its accepted event references the digest",
+      "request": {
+        "method": "HEAD",
+        "path": "/artifacts/{sha256}",
+        "principal": "reader",
+        "proof_method": "GET",
+        "proof_payload": "sha256(empty)"
+      },
+      "expected": {
+        "status": 200,
+        "body_size": 0
+      }
+    },
+    {
+      "id": "get-reader-non-referencing-stream-denied",
+      "family": "fetch_authorization",
+      "precondition": "the digest is referenced only by streams.referencing while the reader has an active grant only on streams.non_referencing",
+      "request": {
+        "method": "GET",
+        "path": "/artifacts/{sha256}",
+        "principal": "reader"
+      },
+      "expected": {
+        "status": 403,
+        "code": "scope_denied",
+        "body_disclosed": false
+      },
+      "known_failures": [
+        {
+          "adapter": "laptop-reference",
+          "observed": "artifact_fetch serves stored bytes to any authenticated principal without checking stream grants or x-tag references"
+        }
+      ]
+    },
+    {
+      "id": "head-reader-non-referencing-stream-denied",
+      "family": "head_authorization",
+      "precondition": "the digest is referenced only by streams.referencing while the reader has an active grant only on streams.non_referencing",
+      "request": {
+        "method": "HEAD",
+        "path": "/artifacts/{sha256}",
+        "principal": "reader",
+        "proof_method": "GET",
+        "proof_payload": "sha256(empty)"
+      },
+      "expected": {
+        "status": 403,
+        "code": "scope_denied"
+      },
+      "known_failures": [
+        {
+          "adapter": "laptop-reference",
+          "observed": "artifact_head reports stored-byte presence to any authenticated principal without checking stream grants or x-tag references"
+        }
+      ]
+    },
+    {
+      "id": "get-reader-unreferenced-denied",
+      "family": "fetch_authorization",
+      "precondition": "artifact bytes are stored, the reader has an active stream grant, and no accepted event references the digest",
+      "request": {
+        "method": "GET",
+        "path": "/artifacts/{sha256}",
+        "principal": "reader"
+      },
+      "expected": {
+        "status": 403,
+        "code": "scope_denied",
+        "body_disclosed": false
+      },
+      "known_failures": [
+        {
+          "adapter": "laptop-reference",
+          "observed": "artifact_fetch has no reference index or stream-grant gate"
+        }
+      ]
+    },
+    {
+      "id": "head-reader-unreferenced-denied",
+      "family": "head_authorization",
+      "precondition": "artifact bytes are stored, the reader has an active stream grant, and no accepted event references the digest",
+      "request": {
+        "method": "HEAD",
+        "path": "/artifacts/{sha256}",
+        "principal": "reader",
+        "proof_method": "GET",
+        "proof_payload": "sha256(empty)"
+      },
+      "expected": {
+        "status": 403,
+        "code": "scope_denied"
+      },
+      "known_failures": [
+        {
+          "adapter": "laptop-reference",
+          "observed": "artifact_head has no reference index or stream-grant gate"
+        }
+      ]
+    },
+    {
+      "id": "get-unauthenticated-denied",
+      "family": "fetch_authorization",
+      "request": {
+        "method": "GET",
+        "path": "/artifacts/{sha256}",
+        "principal": null
+      },
+      "expected": {
+        "status": 401,
+        "body_disclosed": false
+      }
+    },
+    {
+      "id": "head-unauthenticated-denied",
+      "family": "head_authorization",
+      "request": {
+        "method": "HEAD",
+        "path": "/artifacts/{sha256}",
+        "principal": null
+      },
+      "expected": {
+        "status": 401
+      }
+    },
+    {
+      "id": "get-corrupt-storage-fails-closed",
+      "family": "disclosure_integrity",
+      "precondition": "the requested storage key contains bytes whose SHA-256 does not equal the requested digest and the principal is authorized",
+      "request": {
+        "method": "GET",
+        "path": "/artifacts/{sha256}"
+      },
+      "expected": {
+        "success": false,
+        "body_disclosed": false
+      }
+    },
+    {
+      "id": "head-uses-get-signed-empty-payload-proof",
+      "family": "authentication",
+      "request": {
+        "method": "HEAD",
+        "path": "/artifacts/{sha256}",
+        "proof_event_kind": 27235,
+        "proof_method": "GET",
+        "proof_payload": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "expected": {
+        "authorized": true
+      }
+    },
+    {
+      "id": "sha256-uppercase-argument-normalized",
+      "family": "sha256_validation",
+      "request": {
+        "sha256_argument": "01E782826AE5182220BD6158F883D01CEB1BCE659DC020E7C511F802A9AA7737",
+        "normalization": "before constructing the request URL and NIP-98 proof"
+      },
+      "expected": {
+        "normalized_sha256": "01e782826ae5182220bd6158f883d01ceb1bce659dc020e7c511f802a9aa7737",
+        "path": "/artifacts/01e782826ae5182220bd6158f883d01ceb1bce659dc020e7c511f802a9aa7737"
+      }
+    },
+    {
+      "id": "sha256-invalid-arguments-rejected",
+      "family": "sha256_validation",
+      "request": {
+        "sha256_arguments": [
+          "abcd",
+          "gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg",
+          "01e782826ae5182220bd6158f883d01ceb1bce659dc020e7c511f802a9aa77370"
+        ]
+      },
+      "expected": {
+        "accepted": false,
+        "adapter_status": 400,
+        "client_request_dispatched": false,
+        "rule": "exactly 64 ASCII hexadecimal characters"
+      }
+    }
+  ]
+}

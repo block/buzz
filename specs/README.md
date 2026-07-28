@@ -35,6 +35,8 @@ node.
 - [Adapter conformance behavior](features/portable-relay/adapter-conformance.feature)
 - [Core conformance vector](fixtures/portable-relay/core-v0.1.json)
 - [Replication conformance vector](fixtures/portable-relay/replication-v0.1.json)
+- [Artifact conformance behavior](features/portable-relay/artifact-conformance.feature)
+- [Artifact conformance vector](fixtures/portable-relay/artifacts-v0.1.json)
 - [Portable relay identity profile](architecture/portable-relay-identity-v0.1.md)
 - [Attributable access story](stories/portable-relay/control-attributable-access.md)
 - [Portable identity model](models/portable-relay/portable-relay-identity.model.yaml)

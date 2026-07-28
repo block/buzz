@@ -125,6 +125,36 @@ paths:
           description: Transport authentication failed.
         "403":
           description: The presenting transport principal lacks a current read grant.
+  /artifacts:
+    post:
+      operationId: uploadSovereignArtifact
+      summary: Store a content-addressed artifact as the owner or an admitted replication peer
+      x-story: specs/stories/sovereign-sync/retrieve-referenced-stream-artifacts.md
+      x-feature: specs/features/portable-relay/artifact-conformance.feature
+      x-journey: specs/journeys/fetch-referenced-stream-artifacts.md
+      requestBody:
+        required: true
+        description: Raw artifact bytes; the body must contain 1 through 16,777,216 bytes.
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+              minLength: 1
+              maxLength: 16777216
+      responses:
+        "200":
+          description: Content-derived artifact receipt.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ArtifactReceipt"
+        "400":
+          description: The artifact body is empty or exceeds 16 MiB.
+        "401":
+          description: Authentication evidence is absent or invalid.
+        "403":
+          description: The authenticated principal is neither the owner nor an admitted replication peer.
   /artifacts/{sha256}:
     parameters:
       - name: sha256
@@ -223,6 +253,20 @@ components:
           type: boolean
         message:
           type: string
+    ArtifactReceipt:
+      type: object
+      required: [sha256, size, url]
+      additionalProperties: false
+      properties:
+        sha256:
+          $ref: "#/components/schemas/Sha256"
+        size:
+          type: integer
+          minimum: 1
+          maximum: 16777216
+        url:
+          type: string
+          pattern: "^/artifacts/[0-9a-f]{64}$"
     ReplicationRecord:
       type: object
       required: [source, cursor, event]
