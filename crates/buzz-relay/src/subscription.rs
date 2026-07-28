@@ -164,15 +164,20 @@ impl SubscriptionRegistry {
         conn_id: ConnId,
         sub_id: &str,
     ) -> Option<RemovedSubscription> {
-        if let Some(mut conn_subs) = self.subs.get_mut(&conn_id) {
-            if let Some((filters, community_id, channel_id)) = conn_subs.remove(sub_id) {
-                self.remove_from_index(conn_id, sub_id, &filters, community_id, channel_id);
-                metrics::gauge!("buzz_subscriptions_active").decrement(1.0);
-                return Some(RemovedSubscription {
-                    community_id,
-                    channel_id,
-                });
-            }
+        // Never hold a `subs` shard while touching an index shard. Fan-out
+        // snapshots index entries for the same reason below.
+        let removed = {
+            let mut conn_subs = self.subs.get_mut(&conn_id)?;
+            conn_subs.remove(sub_id)
+        };
+
+        if let Some((filters, community_id, channel_id)) = removed {
+            self.remove_from_index(conn_id, sub_id, &filters, community_id, channel_id);
+            metrics::gauge!("buzz_subscriptions_active").decrement(1.0);
+            return Some(RemovedSubscription {
+                community_id,
+                channel_id,
+            });
         }
         None
     }
@@ -275,15 +280,23 @@ impl SubscriptionRegistry {
                 channel_id,
                 kind: event.event.kind,
             };
-            if let Some(candidates) = self.channel_kind_index.get(&(community_id, key)) {
-                for (conn_id, sub_id) in candidates.iter() {
-                    self.push_match(*conn_id, sub_id, event, &mut results, &mut seen);
+            if let Some(candidates) = self
+                .channel_kind_index
+                .get(&(community_id, key))
+                .map(|entry| entry.value().clone())
+            {
+                for (conn_id, sub_id) in candidates {
+                    self.push_match(conn_id, &sub_id, event, &mut results, &mut seen);
                 }
             }
             // Also check wildcard (channel-only, kindless) index.
-            if let Some(wildcards) = self.channel_wildcard_index.get(&(community_id, channel_id)) {
-                for (conn_id, sub_id) in wildcards.iter() {
-                    self.push_match(*conn_id, sub_id, event, &mut results, &mut seen);
+            if let Some(wildcards) = self
+                .channel_wildcard_index
+                .get(&(community_id, channel_id))
+                .map(|entry| entry.value().clone())
+            {
+                for (conn_id, sub_id) in wildcards {
+                    self.push_match(conn_id, &sub_id, event, &mut results, &mut seen);
                 }
             }
         } else {
@@ -296,24 +309,33 @@ impl SubscriptionRegistry {
                     kind: event.event.kind,
                     p,
                 };
-                if let Some(candidates) = self.global_p_kind_index.get(&key) {
-                    for (conn_id, sub_id) in candidates.iter() {
-                        self.push_match(*conn_id, sub_id, event, &mut results, &mut seen);
+                if let Some(candidates) = self
+                    .global_p_kind_index
+                    .get(&key)
+                    .map(|entry| entry.value().clone())
+                {
+                    for (conn_id, sub_id) in candidates {
+                        self.push_match(conn_id, &sub_id, event, &mut results, &mut seen);
                     }
                 }
             }
             if let Some(candidates) = self
                 .global_kind_index
                 .get(&(community_id, event.event.kind))
+                .map(|entry| entry.value().clone())
             {
-                for (conn_id, sub_id) in candidates.iter() {
-                    self.push_match(*conn_id, sub_id, event, &mut results, &mut seen);
+                for (conn_id, sub_id) in candidates {
+                    self.push_match(conn_id, &sub_id, event, &mut results, &mut seen);
                 }
             }
             // Also check global wildcard (kindless global subs).
-            if let Some(wildcards) = self.global_wildcard_index.get(&community_id) {
-                for (conn_id, sub_id) in wildcards.iter() {
-                    self.push_match(*conn_id, sub_id, event, &mut results, &mut seen);
+            if let Some(wildcards) = self
+                .global_wildcard_index
+                .get(&community_id)
+                .map(|entry| entry.value().clone())
+            {
+                for (conn_id, sub_id) in wildcards {
+                    self.push_match(conn_id, &sub_id, event, &mut results, &mut seen);
                 }
             }
         }
@@ -576,6 +598,8 @@ mod tests {
     use buzz_core::StoredEvent;
     use chrono::Utc;
     use nostr::{EventBuilder, Keys, Kind, Tag};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     fn make_stored_event(kind: Kind, channel_id: Option<Uuid>) -> StoredEvent {
         let keys = Keys::generate();
@@ -627,6 +651,41 @@ mod tests {
         let event = make_stored_event(Kind::TextNote, Some(channel_id));
         let matches = registry.fan_out(&event);
         assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn test_fan_out_concurrent_with_subscription_replacement_completes() {
+        let registry = Arc::new(SubscriptionRegistry::new());
+        let conn_id = Uuid::new_v4();
+        let channel_id = Uuid::new_v4();
+        let sub_id = "sub1".to_string();
+        let filters = vec![Filter::new().kind(Kind::TextNote)];
+        registry.register(conn_id, sub_id.clone(), filters.clone(), Some(channel_id));
+        let event = Arc::new(make_stored_event(Kind::TextNote, Some(channel_id)));
+        let deadline = Instant::now() + Duration::from_secs(2);
+
+        let fan_out_registry = Arc::clone(&registry);
+        let fan_out_event = Arc::clone(&event);
+        let fan_out = std::thread::spawn(move || {
+            while Instant::now() < deadline {
+                let _ = fan_out_registry.fan_out(&fan_out_event);
+            }
+        });
+
+        let replace_registry = Arc::clone(&registry);
+        let replace = std::thread::spawn(move || {
+            while Instant::now() < deadline {
+                replace_registry.register(
+                    conn_id,
+                    sub_id.clone(),
+                    filters.clone(),
+                    Some(channel_id),
+                );
+            }
+        });
+
+        fan_out.join().expect("fan-out thread completes");
+        replace.join().expect("replacement thread completes");
     }
 
     #[test]
