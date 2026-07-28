@@ -679,6 +679,11 @@ pub const fn is_command_kind(kind: u32) -> bool {
 
 /// Returns `true` if `kind` may only be authored by the relay.
 /// Client submission of these kinds must be rejected.
+///
+/// Includes:
+/// - Relay-computed overlays (membership lists, summaries, snapshots)
+/// - Relay-signed notifications (member added/removed, identity archive deltas)
+/// - Audit entries (relay-only hash-chain log)
 pub const fn is_relay_only_kind(kind: u32) -> bool {
     matches!(
         kind,
@@ -688,6 +693,11 @@ pub const fn is_relay_only_kind(kind: u32) -> bool {
             | KIND_DM_VISIBILITY
             | KIND_THREAD_SUMMARY
             | KIND_WINDOW_BOUNDS
+            | KIND_NIP43_MEMBER_ADDED
+            | KIND_NIP43_MEMBER_REMOVED
+            | KIND_IA_ARCHIVED
+            | KIND_IA_UNARCHIVED
+            | KIND_AUDIT_ENTRY
     )
 }
 
@@ -780,5 +790,30 @@ mod tests {
                 "kind {kind} is both replaceable and parameterized replaceable"
             );
         }
+    }
+
+    #[test]
+    fn relay_only_kinds_include_notifications_and_audit() {
+        // Overlays and snapshots
+        assert!(is_relay_only_kind(KIND_NIP43_MEMBERSHIP_LIST));
+        assert!(is_relay_only_kind(KIND_CHANNEL_SUMMARY));
+        assert!(is_relay_only_kind(KIND_PRESENCE_SNAPSHOT));
+        assert!(is_relay_only_kind(KIND_DM_VISIBILITY));
+        assert!(is_relay_only_kind(KIND_THREAD_SUMMARY));
+        assert!(is_relay_only_kind(KIND_WINDOW_BOUNDS));
+        // Relay-signed notifications
+        assert!(is_relay_only_kind(KIND_NIP43_MEMBER_ADDED));
+        assert!(is_relay_only_kind(KIND_NIP43_MEMBER_REMOVED));
+        assert!(is_relay_only_kind(KIND_IA_ARCHIVED));
+        assert!(is_relay_only_kind(KIND_IA_UNARCHIVED));
+        // Audit
+        assert!(is_relay_only_kind(KIND_AUDIT_ENTRY));
+    }
+
+    #[test]
+    fn client_kinds_are_not_relay_only() {
+        assert!(!is_relay_only_kind(KIND_STREAM_MESSAGE));
+        assert!(!is_relay_only_kind(KIND_REACTION));
+        assert!(!is_relay_only_kind(KIND_PROFILE));
     }
 }
