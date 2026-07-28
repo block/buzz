@@ -344,7 +344,9 @@ const overrides = new Map([
   // absent, so AdapterMissing replaces the misleading NotInstalled. Includes
   // the deliberate-divergence doc comments; net after the inline preset
   // entries.push block collapsed into the helper.
-  ["src-tauri/src/managed_agents/discovery.rs", 1835],
+  // +6: legacy Goose Windows install dir (%USERPROFILE%\goose) probed in
+  // common_binary_paths so pre-#2680 standalone installs are discoverable.
+  ["src-tauri/src/managed_agents/discovery.rs", 1841],
   // BYOH — save_custom_harness_to_dir (backup-swap atomic write) + save_and_warm /
   // delete_and_warm (persist-mutex serialization for concurrent-safe registry
   // refresh, B-6). Also: id/collision/load/registry tests (from the file base) +
@@ -627,7 +629,11 @@ const overrides = new Map([
   // return value so the frontend immediately has the updated env.
   // +1: rebase over main (#2680) — requires_external_cli: false added to
   // save_custom_harness catalog entry construction (new required field).
-  ["src-tauri/src/commands/agent_discovery.rs", 2167],
+  // -359: install command execution (spawn, output drain under timeout, retry
+  // with backoff, output truncation) extracted to agent_discovery/install_exec.rs
+  // alongside its tests, matching the managed_node.rs / post_install_verification.rs
+  // split. The entries above describe the file's history, not its current shape.
+  ["src-tauri/src/commands/agent_discovery.rs", 1808],
   // draft-persistence predicate: submit-time `loadDraft` check + inline comment
   // + deps-array entry in submitMessage closes the never-persisted-boundary
   // defect (Thufir Pass-3 finding). Load-bearing correctness fix; queued to

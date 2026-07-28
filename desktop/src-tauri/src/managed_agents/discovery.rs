@@ -58,6 +58,12 @@ fn common_binary_paths() -> &'static [PathBuf] {
                         .join("bin"),
                 );
             }
+            // Goose's legacy Windows installer (superseded by #2680) unpacked
+            // to %USERPROFILE%\goose\goose.exe, which is on no standard PATH —
+            // without this probe those installs stay permanently undiscovered.
+            if let Some(profile) = std::env::var_os("USERPROFILE") {
+                paths.push(PathBuf::from(profile).join("goose"));
+            }
         }
         paths
     })
