@@ -1,0 +1,25 @@
+[package]
+name = "buzz-command-sources"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+atomic-write-file = "0.3"
+chrono = { workspace = true }
+fs2 = "0.4.3"
+hex = { workspace = true }
+reqwest = { workspace = true, features = ["stream"] }
+serde = { workspace = true }
+serde_jcs = "0.2"
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+url = { workspace = true }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+axum = { workspace = true }
+tempfile = "3"
