@@ -198,9 +198,10 @@ class _CameraPlaceholder extends StatelessWidget {
         child: Padding(
           padding: const EdgeInsets.all(Grid.sm),
           child: isInitializing
-              ? const CircularProgressIndicator(
+              ? const BuzzLoadingIndicator(
+                  size: 44,
                   color: Colors.white,
-                  strokeWidth: 3,
+                  semanticLabel: 'Starting camera',
                 )
               : Column(
                   mainAxisSize: MainAxisSize.min,

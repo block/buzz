@@ -5,6 +5,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
+import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/filter_chip_bar.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
@@ -365,7 +366,12 @@ class _SearchBody extends ConsumerWidget {
         if (state.isLoading)
           const Padding(
             padding: EdgeInsets.all(Grid.sm),
-            child: Center(child: CircularProgressIndicator()),
+            child: Center(
+              child: BuzzLoadingIndicator(
+                size: 36,
+                semanticLabel: 'Loading more search results',
+              ),
+            ),
           ),
       ],
     );

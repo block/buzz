@@ -430,12 +430,10 @@ class _AttachmentStrip extends StatelessWidget {
                 child: Stack(
                   alignment: Alignment.center,
                   children: [
-                    SizedBox.square(
-                      dimension: 34,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 3,
-                        color: context.colors.primary,
-                      ),
+                    BuzzLoadingIndicator(
+                      size: 34,
+                      color: context.colors.primary,
+                      semanticLabel: label,
                     ),
                     if (uploadingCount > 1)
                       PositionedDirectional(
