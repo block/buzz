@@ -82,18 +82,23 @@ class _MessageList extends HookConsumerWidget {
       });
     }
 
+    bool latestIsAtBoundary() {
+      // In this reversed list, item 0's leading edge is the bottom boundary.
+      return itemPositionsListener.itemPositions.value.any(
+        (position) => position.index == 0 && position.itemLeadingEdge >= 0,
+      );
+    }
+
     useEffect(() {
       void onPositionsChanged() {
         final positions = itemPositionsListener.itemPositions.value;
         if (positions.isEmpty) return;
-        final nextIsAtLatest = positions.any(
-          (position) => position.index == 0 && position.itemLeadingEdge < 1,
-        );
+        final nextIsAtLatest = latestIsAtBoundary();
         if (nextIsAtLatest) {
           if (!isAtLatest.value) isAtLatest.value = true;
         } else if (followsLatest.value && !hasUserScrolled.value) {
           // The viewport can shrink when the composer or keyboard opens.
-          // Preserve auto-follow until the user actually drags the timeline.
+          // Preserve auto-follow until the user scrolls the timeline.
           if (!isAtLatest.value) isAtLatest.value = true;
           scheduleAutoScrollToLatest();
         } else if (isAtLatest.value) {
@@ -157,14 +162,9 @@ class _MessageList extends HookConsumerWidget {
       }
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!context.mounted || !itemScrollController.isAttached) return;
-        itemScrollController.jumpTo(index: targetIndex, alignment: 0.35);
-        // A deep link intentionally parks the viewport away from the newest
-        // message, so follow-latest must stay off after the jump. jumpTo can
-        // synchronously dispatch ScrollEndNotification, which would otherwise
-        // re-arm follow mode and auto-scroll straight back to index 0.
-        followsLatest.value = false;
         didJumpToInitialMessage.value = true;
         followsLatest.value = false;
+        hasUserScrolled.value = false;
         isAtLatest.value = false;
         itemScrollController.jumpTo(index: targetIndex, alignment: 0.35);
       });
@@ -228,14 +228,18 @@ class _MessageList extends HookConsumerWidget {
       children: [
         NotificationListener<ScrollNotification>(
           onNotification: (notification) {
-            if (notification is ScrollStartNotification &&
-                notification.dragDetails != null) {
+            if (notification is UserScrollNotification &&
+                notification.direction != ScrollDirection.idle) {
               hasUserScrolled.value = true;
               followsLatest.value = false;
             } else if (notification is ScrollEndNotification &&
-                isAtLatest.value) {
-              hasUserScrolled.value = false;
-              followsLatest.value = true;
+                hasUserScrolled.value) {
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (!context.mounted || !latestIsAtBoundary()) return;
+                hasUserScrolled.value = false;
+                followsLatest.value = true;
+                if (!isAtLatest.value) isAtLatest.value = true;
+              });
             }
             return false;
           },

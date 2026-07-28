@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show ScrollDirection;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -25,6 +26,7 @@ import 'package:buzz/features/profile/user_cache_provider.dart';
 import 'package:buzz/features/profile/user_profile.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
+import 'package:buzz/shared/widgets/skeleton.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 const _channelId = 'test-channel';
@@ -148,8 +150,11 @@ Widget _buildTestable({
   ReadStateNotifier? readStateNotifier,
   _FakeMessagesNotifier? messagesNotifier,
   String? canvasContent,
-  List<NostrEvent>? threadReplies,
+  String? initialMessageId,
+  String? initialThreadRootId,
+  Map<String, List<NostrEvent>> threadReplies = const {},
   TextScaler textScaler = TextScaler.noScaling,
+  RelaySessionNotifier? relaySessionNotifier,
 }) {
   final resolvedChannel = channel ?? _testChannel;
   final fakeChannelsNotifier =
@@ -192,6 +197,8 @@ Widget _buildTestable({
       relayClientProvider.overrideWithValue(
         RelayClient(baseUrl: 'http://localhost:3000'),
       ),
+      if (relaySessionNotifier != null)
+        relaySessionProvider.overrideWith(() => relaySessionNotifier),
       // Compose bar drafts persist through SharedPreferences.
       savedPrefsProvider.overrideWithValue(_testPrefs),
     ],
@@ -202,7 +209,11 @@ Widget _buildTestable({
         child: child!,
       ),
       navigatorObservers: navigatorObservers,
-      home: ChannelDetailPage(channel: resolvedChannel),
+      home: ChannelDetailPage(
+        channel: resolvedChannel,
+        initialMessageId: initialMessageId,
+        initialThreadRootId: initialThreadRootId,
+      ),
     ),
   );
 }
@@ -871,7 +882,7 @@ void main() {
 
       final messageList = find.byKey(const ValueKey('channel-message-list'));
       final messageListElement = tester.element(messageList);
-      ScrollStartNotification(
+      UserScrollNotification(
         metrics: FixedScrollMetrics(
           minScrollExtent: 0,
           maxScrollExtent: 100,
@@ -881,7 +892,7 @@ void main() {
           devicePixelRatio: 1,
         ),
         context: messageListElement,
-        dragDetails: DragStartDetails(),
+        direction: ScrollDirection.reverse,
       ).dispatch(messageListElement);
       final listView = tester.widget<ScrollablePositionedList>(messageList);
       listView.itemScrollController!.jumpTo(index: 39);
@@ -907,6 +918,124 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(findRichText('Newest live update'), findsOneWidget);
+    });
+
+    testWidgets(
+      'keeps follow mode off while a tall newest message stays visible',
+      (tester) async {
+        tester.view.physicalSize = const Size(400, 600);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        final tallMessage = List.generate(
+          12,
+          (index) => 'Newest message line $index',
+        ).join('\n');
+        final initialMessages = [
+          for (var i = 0; i < 12; i++)
+            _textMsg(
+              id: 'msg$i',
+              pubkey: i.isEven ? 'alice' : 'bob',
+              content: 'Message $i',
+              createdAt: 1000 + i * 1000,
+            ),
+          _textMsg(
+            id: 'tall-newest',
+            pubkey: 'alice',
+            content: tallMessage,
+            createdAt: 20_000,
+          ),
+        ];
+        final messagesNotifier = _FakeMessagesNotifier(initialMessages);
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: const [],
+            messagesNotifier: messagesNotifier,
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+              'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final messageList = find.byKey(const ValueKey('channel-message-list'));
+        await tester.drag(messageList, const Offset(0, 120));
+        await tester.pumpAndSettle();
+
+        expect(findRichText('Newest message line 0'), findsOneWidget);
+        expect(
+          find.byKey(const ValueKey('channel-jump-to-latest')),
+          findsOneWidget,
+        );
+
+        messagesNotifier.setMessages([
+          ...initialMessages,
+          _textMsg(
+            id: 'newest-live',
+            pubkey: 'alice',
+            content: 'Newest live update',
+            createdAt: 30_000,
+          ),
+        ]);
+        await tester.pumpAndSettle();
+
+        expect(findRichText('Newest live update'), findsNothing);
+        expect(
+          find.byKey(const ValueKey('channel-jump-to-latest')),
+          findsOneWidget,
+        );
+      },
+    );
+
+    testWidgets('preserves an initial message deep-link position', (
+      tester,
+    ) async {
+      final initialMessages = [
+        for (var i = 0; i < 40; i++)
+          _textMsg(
+            id: 'msg$i',
+            pubkey: 'alice',
+            content: 'Message $i',
+            createdAt: 1000 + i,
+          ),
+      ];
+      final messagesNotifier = _FakeMessagesNotifier(initialMessages);
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          messagesNotifier: messagesNotifier,
+          initialMessageId: 'msg5',
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(findRichText('Message 5'), findsOneWidget);
+      expect(findRichText('Message 39'), findsNothing);
+      expect(
+        find.byKey(const ValueKey('channel-jump-to-latest')),
+        findsOneWidget,
+      );
+
+      messagesNotifier.setMessages([
+        ...initialMessages,
+        _textMsg(
+          id: 'newest',
+          pubkey: 'alice',
+          content: 'Newest live update',
+          createdAt: 2000,
+        ),
+      ]);
+      await tester.pumpAndSettle();
+
+      expect(findRichText('Message 5'), findsOneWidget);
+      expect(findRichText('Newest live update'), findsNothing);
     });
 
     testWidgets(

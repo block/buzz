@@ -76,7 +76,10 @@ class SearchPage extends HookConsumerWidget {
       fontWeight: FontWeight.w600,
     );
     final searchFieldHeight = _searchFieldHeight(context);
-    final searchHeaderBottomHeight = searchFieldHeight + Grid.twelve;
+    final searchControlHeight = searchFieldHeight > Grid.xl
+        ? searchFieldHeight
+        : Grid.xl;
+    final searchHeaderBottomHeight = searchControlHeight + Grid.twelve;
 
     void runRecentSearch(String query) {
       textController.value = TextEditingValue(
@@ -194,7 +197,7 @@ class SearchPage extends HookConsumerWidget {
                           },
                           style: TextButton.styleFrom(
                             foregroundColor: context.colors.primary,
-                            minimumSize: Size.zero,
+                            minimumSize: Size(0, searchControlHeight),
                             padding: const EdgeInsets.symmetric(
                               horizontal: Grid.half,
                               vertical: Grid.xxs,
@@ -694,7 +697,7 @@ class _MessageTile extends StatelessWidget {
                     ),
                     decoration: BoxDecoration(
                       color: context.colors.surfaceContainerHighest,
-                      borderRadius: BorderRadius.circular(Grid.half),
+                      borderRadius: BorderRadius.circular(Radii.xs),
                     ),
                     child: Text(
                       '#$channelName',

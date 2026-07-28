@@ -28,44 +28,24 @@ class _FilterMenuButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return PopupMenuButton<InboxFilter>(
-      key: const ValueKey('activity-filter-menu'),
-      onSelected: onChanged,
-      itemBuilder: (context) => [
-        for (final entry in _filterLabels.entries)
-          PopupMenuItem(
-            value: entry.key,
-            child: Row(
-              children: [
-                SizedBox(
-                  width: Grid.sm,
-                  child: entry.key == filter
-                      ? Icon(
-                          LucideIcons.check,
-                          size: 16,
-                          color: context.colors.primary,
-                        )
-                      : null,
-                ),
-                Text(entry.value),
-                const Spacer(),
-                if (entry.key == InboxFilter.reminders && dueReminderCount > 0)
-                  _CountBadge(count: dueReminderCount)
-                else if (entry.key == InboxFilter.drafts && draftCount > 0)
-                  _CountBadge(count: draftCount),
-              ],
-            ),
-          ),
-      ],
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: Grid.xxs),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              _filterLabels[filter]!,
-              style: context.textTheme.labelLarge?.copyWith(
-                fontWeight: FontWeight.w600,
+    return Builder(
+      builder: (buttonContext) => InkWell(
+        key: const ValueKey('activity-filter-menu'),
+        borderRadius: BorderRadius.circular(Radii.md),
+        onTap: () async {
+          final selected = await _showActivityPopover<InboxFilter>(
+            context: buttonContext,
+            width: 240,
+            alignment: _ActivityPopoverAlignment.start,
+            offset: const Offset(0, Grid.half),
+            menuPadding: const EdgeInsets.symmetric(vertical: Grid.half),
+            color: context.colors.surface.withValues(alpha: 0.98),
+            elevation: 8,
+            shadowColor: context.colors.shadow.withValues(alpha: 0.18),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(Radii.card),
+              side: BorderSide(
+                color: context.colors.outlineVariant.withValues(alpha: 0.45),
               ),
             ),
             surfaceKey: const ValueKey('activity-filter-popover'),
@@ -193,45 +173,64 @@ class _InboxOptionsButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return PopupMenuButton<String>(
-      key: const ValueKey('activity-options-menu'),
-      icon: const Icon(LucideIcons.ellipsis, size: 20),
-      onSelected: (value) {
-        if (value == 'unread-only') onUnreadOnlyChanged(!unreadOnly);
-        if (value == 'mark-all-read') onMarkAllRead();
-      },
-      itemBuilder: (context) => [
-        PopupMenuItem(
-          value: 'unread-only',
-          child: Row(
-            children: [
-              Expanded(child: Text(unreadOnly ? 'Show all' : 'Show unread')),
-              if (unreadOnly)
-                Icon(
-                  LucideIcons.check,
-                  size: 16,
-                  color: context.colors.primary,
+    return Builder(
+      builder: (buttonContext) => IconButton(
+        key: const ValueKey('activity-options-menu'),
+        tooltip: 'Activity options',
+        icon: const Icon(LucideIcons.ellipsis, size: 20),
+        onPressed: () async {
+          final selected = await _showActivityPopover<String>(
+            context: buttonContext,
+            width: 216,
+            alignment: _ActivityPopoverAlignment.end,
+            color: context.colors.surface,
+            elevation: 4,
+            shadowColor: context.colors.shadow.withValues(alpha: 0.18),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(Radii.md),
+              side: BorderSide(color: context.colors.outline),
+            ),
+            surfaceKey: const ValueKey('activity-options-popover'),
+            items: [
+              PopupMenuItem(
+                value: 'unread-only',
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(unreadOnly ? 'Show all' : 'Show unread'),
+                    ),
+                    if (unreadOnly)
+                      Icon(
+                        LucideIcons.check,
+                        size: 16,
+                        color: context.colors.primary,
+                      ),
+                  ],
                 ),
-            ],
-          ),
-        ),
-        PopupMenuItem(
-          value: 'mark-all-read',
-          enabled: unreadCount > 0,
-          child: Row(
-            children: [
-              const Expanded(child: Text('Mark all as read')),
-              if (unreadCount > 0)
-                Text(
-                  '$unreadCount',
-                  style: context.textTheme.labelSmall?.copyWith(
-                    color: context.colors.onSurfaceVariant,
-                  ),
+              ),
+              PopupMenuItem(
+                value: 'mark-all-read',
+                enabled: unreadCount > 0,
+                child: Row(
+                  children: [
+                    const Expanded(child: Text('Mark all as read')),
+                    if (unreadCount > 0)
+                      Text(
+                        '$unreadCount',
+                        style: context.textTheme.labelSmall?.copyWith(
+                          color: context.colors.onSurfaceVariant,
+                        ),
+                      ),
+                  ],
                 ),
+              ),
             ],
-          ),
-        ),
-      ],
+          );
+          if (!buttonContext.mounted || selected == null) return;
+          if (selected == 'unread-only') onUnreadOnlyChanged(!unreadOnly);
+          if (selected == 'mark-all-read') onMarkAllRead();
+        },
+      ),
     );
   }
 }

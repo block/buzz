@@ -4,18 +4,40 @@ import '../theme/theme.dart';
 
 /// A consistent inline author row for message-oriented surfaces.
 class MessageAuthorMeta extends StatelessWidget {
+  /// Primary author name shown at the start of the row.
   final String displayName;
+
+  /// Optional secondary username, hidden when blank or equal to [displayName].
   final String? username;
+
+  /// Timestamp label shown after the author metadata.
   final String timestamp;
+
+  /// Color applied to [displayName].
   final Color nameColor;
+
+  /// Color applied to the username, separator, and [timestamp].
   final Color metadataColor;
+
+  /// Optional callback invoked when [displayName] is tapped.
   final VoidCallback? onAuthorTap;
+
+  /// Optional key assigned to the display-name text.
   final Key? displayNameKey;
+
+  /// Optional key assigned to the username text.
   final Key? usernameKey;
+
+  /// Optional key assigned to the timestamp text.
   final Key? timestampKey;
+
+  /// Base text style for [displayName], with [nameColor] applied.
   final TextStyle nameStyle;
+
+  /// Base text style for secondary metadata, with [metadataColor] applied.
   final TextStyle metadataStyle;
 
+  /// Creates an inline author row with optional username and tap handling.
   const MessageAuthorMeta({
     super.key,
     required this.displayName,

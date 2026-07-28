@@ -8,9 +8,6 @@ class Grid {
   /// Extra extra small spacing - 8 pixels
   static const double xxs = 8.0;
 
-  /// Ten spacing - 10 pixels
-  static const double ten = 10.0;
-
   /// Twelve spacing - 12 pixels
   static const double twelve = 12.0;
 

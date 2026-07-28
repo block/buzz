@@ -33,6 +33,7 @@ import 'reminders_provider.dart';
 part 'activity_page/header_actions.dart';
 part 'activity_page/inbox_row.dart';
 part 'activity_page/lists.dart';
+part 'activity_page/popover_menu.dart';
 part 'activity_page/status_views.dart';
 
 /// Conversation-oriented Activity inbox.
@@ -152,7 +153,7 @@ class ActivityPage extends HookConsumerWidget {
       final thread = threadReferenceOf(target.tags);
       final threadRootId = isBroadcastReply(target.tags)
           ? null
-          : (thread.rootId ?? thread.parentId);
+          : thread.parentId;
 
       Navigator.of(context).push(
         MaterialPageRoute<void>(
