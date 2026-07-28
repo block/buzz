@@ -2,6 +2,8 @@ import { expect, test } from "@playwright/test";
 
 import type { RelayEvent } from "@/shared/api/types";
 
+import { emojiAvatarDataUrl } from "@/features/profile/ui/ProfileAvatarEditor.utils";
+
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 
@@ -12,6 +14,7 @@ function createCatalogEvent(input: {
   systemPrompt: string;
   createdAt?: number;
   shared?: boolean;
+  avatarUrl?: string;
 }): RelayEvent {
   return {
     id: "1".repeat(64),
@@ -25,7 +28,7 @@ function createCatalogEvent(input: {
     content: JSON.stringify({
       display_name: input.displayName,
       system_prompt: input.systemPrompt,
-      avatar_url: null,
+      avatar_url: input.avatarUrl ?? null,
       runtime: null,
       model: null,
       provider: null,
@@ -1611,6 +1614,40 @@ test("a foreign reader does not receive an unshared kind 30175 persona", async (
     page.getByTestId(`persona-catalog-list-item-${remoteCatalogId}`),
   ).toHaveCount(0);
   await expect(page.getByTestId("persona-catalog-empty-state")).toBeVisible();
+});
+
+test("a catalog entry keeps the owner's emoji avatar", async ({ page }) => {
+  const personaId = "emoji-reviewer";
+  const remoteCatalogId = `catalog:${TEST_IDENTITIES.alice.pubkey}:${personaId}`;
+  // Emoji avatars persist as inline percent-encoded SVG rather than a hosted
+  // URL, so build the value with the same producer the editor uses — a
+  // hand-rolled data URL would pass even if the real shape stopped matching.
+  const avatarUrl = emojiAvatarDataUrl("🐝", "#FFCC00");
+  await installMockBridge(page, {
+    personaCatalogEvents: [
+      createCatalogEvent({
+        avatarUrl,
+        ownerPubkey: TEST_IDENTITIES.alice.pubkey,
+        sourcePersonaId: personaId,
+        displayName: "Alice’s Reviewer",
+        systemPrompt: "Review changes for the whole community.",
+      }),
+    ],
+  });
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+  await openPersonaCatalog(page);
+
+  // An `<img>` carrying the avatar — not the initials fallback — in both the
+  // list row and the detail header is what proves the projection kept it.
+  const remoteEntry = page.getByTestId(
+    `persona-catalog-list-item-${remoteCatalogId}`,
+  );
+  await expect(remoteEntry.locator("img")).toHaveAttribute("src", avatarUrl);
+  await remoteEntry.click();
+  await expect(
+    page.getByTestId("persona-catalog-detail-pane").locator("img").first(),
+  ).toHaveAttribute("src", avatarUrl);
 });
 
 test("a community member can discover and add another member's catalog agent", async ({
