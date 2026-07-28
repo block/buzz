@@ -246,7 +246,12 @@ export function useMentions(
       if (isArchivedDiscovery(pubkey)) {
         return;
       }
-      if (!isAgentIdentityInManagedList(candidate, managedAgentPubkeys)) {
+      // Relay-invocable agents are not in this Desktop's managed list, so let
+      // shouldHideAgentFromMentions below decide rather than dropping them here.
+      if (
+        !mentionableAgentPubkeys.has(pubkey) &&
+        !isAgentIdentityInManagedList(candidate, managedAgentPubkeys)
+      ) {
         return;
       }
       if (
