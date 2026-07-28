@@ -41,6 +41,46 @@ const TIMELINE_KINDS: [u32; 11] = [
     buzz_core_pkg::kind::KIND_HUDDLE_STARTED,
 ];
 
+/// Filter for the Inbox mentions section.
+///
+/// `feed_types` routes the query to the relay's bounded mentions feed —
+/// direct `p`-tag mentions UNION NIP-CM `@channel` notifications, membership-
+/// and visibility-scoped server-side. Without it the bridge treats this as a
+/// raw `#p` filter, and marker-only `@channel` events (which carry no `p`
+/// tag) never produce an Inbox row. The raw `kinds`/`#p` fields stay as a
+/// graceful fallback: the bridge ignores them when `feed_types` is present,
+/// while a relay that predates the extension drops the unknown field and
+/// still serves direct mentions.
+pub(crate) fn mentions_feed_filter(
+    my_pubkey: &str,
+    cap: u32,
+    since: Option<i64>,
+) -> serde_json::Value {
+    let mut filter = serde_json::json!({
+        "feed_types": ["mentions"],
+        "kinds": [
+            9,
+            40002,
+            1,
+            45001,
+            45003,
+            buzz_core_pkg::kind::KIND_GIT_PULL_REQUEST,
+            buzz_core_pkg::kind::KIND_GIT_PR_UPDATE,
+            buzz_core_pkg::kind::KIND_GIT_ISSUE,
+            buzz_core_pkg::kind::KIND_GIT_STATUS_OPEN,
+            buzz_core_pkg::kind::KIND_GIT_STATUS_MERGED,
+            buzz_core_pkg::kind::KIND_GIT_STATUS_CLOSED,
+            buzz_core_pkg::kind::KIND_GIT_STATUS_DRAFT,
+        ],
+        "#p": [my_pubkey],
+        "limit": cap,
+    });
+    if let Some(s) = since {
+        filter["since"] = serde_json::json!(s);
+    }
+    filter
+}
+
 #[tauri::command]
 pub async fn get_feed(
     since: Option<i64>,
@@ -66,28 +106,7 @@ pub async fn get_feed(
         keys.public_key().to_hex()
     };
 
-    // Mentions: messages that reference me via #p.
-    let mut mention_filter = serde_json::json!({
-        "kinds": [
-            9,
-            40002,
-            1,
-            45001,
-            45003,
-            buzz_core_pkg::kind::KIND_GIT_PULL_REQUEST,
-            buzz_core_pkg::kind::KIND_GIT_PR_UPDATE,
-            buzz_core_pkg::kind::KIND_GIT_ISSUE,
-            buzz_core_pkg::kind::KIND_GIT_STATUS_OPEN,
-            buzz_core_pkg::kind::KIND_GIT_STATUS_MERGED,
-            buzz_core_pkg::kind::KIND_GIT_STATUS_CLOSED,
-            buzz_core_pkg::kind::KIND_GIT_STATUS_DRAFT,
-        ],
-        "#p": [my_pubkey],
-        "limit": cap,
-    });
-    if let Some(s) = since {
-        mention_filter["since"] = serde_json::json!(s);
-    }
+    let mention_filter = mentions_feed_filter(&my_pubkey, cap, since);
     // Needs-action: workflow approval-request events sent to me.
     let mut approval_filter = serde_json::json!({
         "kinds": [46010, 46011, 46012],
