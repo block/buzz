@@ -7,6 +7,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/features/channels/channel_messages_provider.dart';
 import 'package:buzz/features/channels/pending_local_messages_provider.dart';
 import 'package:buzz/features/channels/thread_replies_provider.dart';
+import 'package:buzz/features/channels/timeline_message.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
 void main() {
@@ -241,6 +242,79 @@ void main() {
       ['history'],
     );
   });
+
+  test('live non-broadcast reply updates its parent thread summary', () async {
+    final relaySession = _RecordingRelaySessionNotifier(
+      queryResults: [
+        [_event(id: 'root', createdAt: 10), _bounds()],
+      ],
+    );
+    final container = _buildContainer(relaySession);
+    addTearDown(container.dispose);
+
+    container.read(channelMessagesProvider(_channelId));
+    await relaySession.subscribed;
+    await _pumpEventQueue();
+
+    relaySession.emit(
+      _event(
+        id: 'reply',
+        createdAt: 20,
+        extraTags: const [
+          ['e', 'root', '', 'reply'],
+        ],
+      ),
+    );
+    await _pumpEventQueue();
+
+    final notifier = container.read(
+      channelMessagesProvider(_channelId).notifier,
+    );
+    final events = container.read(channelMessagesProvider(_channelId)).value!;
+    final entries = buildMainTimelineEntries(
+      formatTimeline(events),
+      relaySummaries: notifier.threadSummaries,
+    );
+
+    expect(entries.single.summary?.replyCount, 1);
+  });
+
+  test(
+    'live non-broadcast reply stays out of the top-level timeline',
+    () async {
+      final relaySession = _RecordingRelaySessionNotifier(
+        queryResults: [
+          [_event(id: 'root', createdAt: 10), _bounds()],
+        ],
+      );
+      final container = _buildContainer(relaySession);
+      addTearDown(container.dispose);
+
+      container.read(channelMessagesProvider(_channelId));
+      await relaySession.subscribed;
+      await _pumpEventQueue();
+
+      relaySession.emit(
+        _event(
+          id: 'reply',
+          createdAt: 20,
+          extraTags: const [
+            ['e', 'root', '', 'reply'],
+          ],
+        ),
+      );
+      await _pumpEventQueue();
+
+      final events = container.read(channelMessagesProvider(_channelId)).value!;
+      expect(events.map((event) => event.id), ['root', 'reply']);
+      expect(
+        buildMainTimelineEntries(
+          formatTimeline(events),
+        ).map((entry) => entry.message.id),
+        ['root'],
+      );
+    },
+  );
 
   test('reconnect hydration cannot retain a rolled-back local row', () async {
     final relaySession = _RecordingRelaySessionNotifier(

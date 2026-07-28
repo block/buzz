@@ -220,7 +220,6 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
           ),
         );
       }
-      if (!_isBroadcastReply(event)) return false;
     }
     if (!isTimelineRow &&
         !EventKind.channelAuxEventKinds.contains(event.kind)) {
@@ -459,12 +458,6 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     });
     return true;
   }
-}
-
-bool _isBroadcastReply(NostrEvent event) {
-  return event.tags.any(
-    (tag) => tag.length >= 2 && tag[0] == 'broadcast' && tag[1] == '1',
-  );
 }
 
 int _currentUnixSeconds() => DateTime.now().millisecondsSinceEpoch ~/ 1000;
