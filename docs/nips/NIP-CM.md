@@ -13,17 +13,17 @@ Channel Mentions
 This NIP defines the **channel-wide mention**: a single marker tag on an ordinary channel message that asks the channel's *members* — not a listed set of pubkeys — to be notified.
 
 ```jsonc
-["notify", "channel"]   // every member of the channel; persistent
+["notify", "channel"]   // the channel's members as of admission; persistent
 ["notify", "here"]      // members who are online right now; live-only
 ```
 
-There is no per-member `p`-tag expansion. The event carries one two-element tag whose second element names *who*, and the relay resolves that to people at read time by joining the channel roster. The roster never enters the event, the notification never fans a `p` tag at an agent, and a client that does not implement this NIP sees a normal message carrying one unknown tag.
+There is no per-member `p`-tag expansion. The event carries one two-element tag whose second element names *who*, and the relay resolves that to people by joining the channel roster: current members who had already joined when the event was admitted. The roster never enters the event, the notification never fans a `p` tag at an agent, and a client that does not implement this NIP sees a normal message carrying one unknown tag.
 
 ## Motivation
 
-"Notify everyone in this channel" is the one notification intent that a `p`-tag list cannot express honestly. Expanding the roster into the event breaks on every axis at once: implementations cap mention counts (Buzz: 50 client-side), anti-hellthread gates drop high-`p`-count events outright (NIP-PL `suppress.p_tags_max`), each `p` tag is a wake signal that starts an AI agent turn, the mention index takes one write per member per message, and the full roster — including members a reader cannot otherwise enumerate — is published in the event body forever. The expansion is also a lie about time: the roster is frozen at send, so a member who joins a minute later is not mentioned and a member who left is.
+"Notify everyone in this channel" is the one notification intent that a `p`-tag list cannot express honestly. Expanding the roster into the event breaks on every axis at once: implementations cap mention counts (Buzz: 50 client-side), anti-hellthread gates drop high-`p`-count events outright (NIP-PL `suppress.p_tags_max`), each `p` tag is a wake signal that starts an AI agent turn, the mention index takes one write per member per message, and the full roster — including members a reader cannot otherwise enumerate — is published in the event body forever. The expansion is also a lie about time: the roster is frozen at send, so a member who has since left keeps being "mentioned" in the event body forever.
 
-A marker tag inverts all of that. It is O(1) on the wire and one row in storage regardless of channel size, it carries no identities so it cannot wake an agent or leak a roster, and because recipients are resolved when the feed is read, membership is always evaluated as of the read. `["broadcast","1"]` (NIP-CW) already established the shape in this relay: a channel-wide fact stated as a flag, not as a list.
+A marker tag inverts all of that. It is O(1) on the wire and one row in storage regardless of channel size, it carries no identities so it cannot wake an agent or leak a roster, and because recipients are resolved when the feed is read, a departure takes effect immediately — leaving a channel drops its `@channel` rows from the feed with no event rewrite. `["broadcast","1"]` (NIP-CW) already established the shape in this relay: a channel-wide fact stated as a flag, not as a list.
 
 ## Non-Goals
 
@@ -83,7 +83,7 @@ On any other kind a notify tag MUST be rejected. Silently ignoring it is the wor
 
 ### Mode Semantics
 
-**`channel`** — every current member of the channel. Persistent: it produces a stored feed row, so a member who was offline when it was sent still finds it on return, and it counts toward mention-tier unread state.
+**`channel`** — the members the channel has when the relay admits the event, for as long as they stay members. Persistent: it produces a stored feed row, so a member who was offline when it was sent still finds it on return, and it counts toward mention-tier unread state. Someone who joins afterwards can read the message like any other history but inherits no mention (see "Mentions Feed").
 
 **`here`** — members who are online at the moment of delivery. Live-only, by construction: **no notification is ever recorded** for it — no index row, no mentions-feed entry, no retroactive badge state. The event itself is an ordinary stored channel message like any other; it is the *mention* that has no persistent form. A reader who was offline, or who scrolls the message into view an hour later, gets nothing beyond a normal unread message. A reader who *is* online when the message first reaches them escalates whether it arrived live or in a catch-up fetch — see "`@here` Liveness" below. `@here` is a doorbell, not a letter.
 
@@ -122,13 +122,13 @@ Like the direct-mention index, this is a denormalized read index maintained alon
 The mentions feed is the union of two branches, deduplicated by event:
 
 1. direct `p`-tag mentions of the caller, via the mention index;
-2. `channel_notifications` rows whose `channel_id` the caller is **currently** a member of (`channel_members`, non-removed).
+2. `channel_notifications` rows whose `channel_id` the caller is **currently** a member of (`channel_members`, non-removed) **and had already joined when the relay admitted the event** (`joined_at <= received_at`).
 
 Both branches project identical event columns so `UNION` collapses an event that is both `p`-tagged at the caller *and* `@channel` into exactly one row. Both branches apply the caller's existing channel visibility scoping and the deleted-event filter, and the union is ordered by the event's own `created_at` under the same feed limit as before (Buzz: 100).
 
 Two consequences worth stating explicitly:
 
-- **Membership is evaluated at read time.** Someone who joins the channel after an `@channel` message sees it in their mentions feed; someone who has left does not. This is the behavior a frozen `p`-tag list cannot have.
+- **Departures are read-time; arrivals are not retroactive.** Someone who has left the channel stops seeing its `@channel` rows immediately — a frozen `p`-tag list cannot do that. Someone who joins after an `@channel` message can read the message like any other history, but does not inherit a retroactive mention: each row is bounded to members whose `joined_at` is no later than the relay's admission time (`received_at`) of the event. The bound uses `received_at` rather than the client-authored `created_at` because the latter is second-truncated and may skew within the relay's accepted window. (One deliberate coarseness: membership upserts preserve the original `joined_at`, so a member who leaves and rejoins sees rows from the absence window; exact absence accounting would require membership-interval history this relay does not keep.)
 - **The author is excluded.** Branch 2 omits events authored by the caller, so your own `@channel` announcement is not a mention *of you*. (Branch 1 keeps its pre-existing behavior.)
 
 `@here` is absent from both branches by construction — it writes no index row, so there is nothing to union.
@@ -199,7 +199,7 @@ A relay implementing this NIP MAY advertise it in its NIP-11 document; clients n
 
 **Bounded amplification.** Cost to the relay is O(1) per notifying event — one validation and at most one index row — regardless of channel size. Abuse is therefore a *social* problem (too many blasts) addressable by a permission rule, not a resource-exhaustion problem. Edits are excluded from re-notification for the same reason.
 
-**Mute is enforced client-side.** The relay files `@channel` events into the mentions feed for all members; the mute lives with the reader. A client that ignores the mute rung will over-notify a user who asked for silence. Implementations MUST apply the ladder above on every path that can raise a notification.
+**Mute is enforced client-side.** The relay files `@channel` events into the mentions feed for every member it resolves (see "Mentions Feed"); the mute lives with the reader. A client that ignores the mute rung will over-notify a user who asked for silence. Implementations MUST apply the ladder above on every path that can raise a notification.
 
 **Tenant isolation** is unchanged: the feed index is community-keyed and joins the community-scoped roster, and the union keeps the caller's existing channel visibility scoping. A channel a reader cannot see contributes no mention rows.
 
@@ -209,13 +209,14 @@ A relay implementing this NIP MAY advertise it in its NIP-11 document; clients n
 - **Both feed branches must project identical columns.** If one branch aliases its index's `event_created_at` into the select list, `UNION` compares a value two independent denormalized indexes have to keep byte-identical, and an event that is both `p`-tagged and `@channel` shows up twice. Project the event columns only, order on the event's own `created_at`.
 - **Join `channel_members`, not a cached roster helper.** Roster helpers may cap their result; the feed join must be the raw membership relation or large channels lose recipients.
 - **Duplicate-tag detection must precede the kind gate**, or a duplicate on a disallowed kind reports the wrong error and a client "fixes" the wrong thing.
+- **The join-time bound compares two clocks.** `joined_at` is a database transaction timestamp; `received_at` is stamped from the relay process clock at admission. Skew between them — or a membership transaction that waits on a roster lock before committing — can put a join landing within milliseconds of an admission on either side of the bound. That is acceptable: the bound exists to stop wholesale history backfill, not to adjudicate millisecond ties. Tests that assert on the bound must pin both timestamps to one clock.
 - **The `@here` predicate needs the reader's *own* presence**, which usually lives in UI state far from event handling. Read it through a small explicit seam and pass it as an argument in tests, so the predicate stays deterministic.
 - **Community-scoped caches** holding presence or notify state must be reset on community switch, like every other community-scoped singleton.
 
 ## Relation to Other NIPs
 
 - **NIP-01**: supplies the tag grammar and the unknown-tag tolerance that makes degradation free.
-- **NIP-29**: supplies the channel (`h` tag) and the membership relation that resolves recipients at read time.
+- **NIP-29**: supplies the channel (`h` tag) and the membership relation from which recipients are resolved — current members, bounded by join time.
 - **NIP-CW (`["broadcast","1"]`)**: the closest sibling and a distinct thing. `broadcast` is about **placement** — it lifts a depth-1 reply onto the channel timeline as a window row — and it says nothing about notification recipients. `notify` is about **recipients** and says nothing about placement. They are orthogonal and composable: a broadcast reply may also carry a notify tag. Notably `broadcast` pierces a channel mute and `notify` does not, because the mute is exactly the control for "stop telling me about this channel."
 - **Direct mentions (`["p", <pubkey>]`)**: the per-person mention, unchanged by this NIP. It names an identity, it is frozen at send time, it pierces a channel mute, and it can wake an agent. A notify tag does none of those. A message may carry both; each keeps its own semantics, and the mentions feed collapses the pair into a single row. `["mention", …]` reference-style tags, where used, are references — never a notification instruction.
 - **NIP-PL**: push leases match filters over stored events, and this NIP changes nothing there. A notify-tagged message is a stored channel message, so it matches a lease exactly as the same message without the tag would — for both modes. Push delivery therefore carries no channel-mention tier: an `@here` that matches a reader's `#h` lease pushes as an ordinary channel message, not as a mention, which is the conservative outcome (a push cannot know whether the reader is *here*). Because there is no roster expansion, channel-wide mentions never appear in a lease's `#p` match set and cannot trip its `suppress.p_tags_max` hellthread gate.

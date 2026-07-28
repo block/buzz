@@ -134,7 +134,8 @@ fn build_mentions_query(
         .push_bind(limit);
 
     // Branch 2 — NIP-CM `["notify", "channel"]` events in channels the caller
-    // is still a member of. `UNION` (not `UNION ALL`) collapses an event that
+    // is still a member of and had already joined when the relay admitted the
+    // event. `UNION` (not `UNION ALL`) collapses an event that
     // both p-tags the caller and notifies the channel into one feed row: both
     // branches project exactly `EVENT_COLS`, so identical event rows collapse.
     // `@here` is never stored, so it can never surface here.
@@ -152,6 +153,20 @@ fn build_mentions_query(
     qb.push(" AND cm.pubkey = ")
         .push_bind(pubkey_bytes.to_vec());
     qb.push(" AND cm.removed_at IS NULL");
+    // `@channel` addresses the members present at post time: joining later
+    // grants access to the message, not a retroactive mention. The bound is
+    // the relay's admission time (`received_at`), not the client-authored
+    // `created_at`, which is second-truncated and skewable within the
+    // accepted window. The two sides live on different clocks (`joined_at`
+    // is a Postgres transaction timestamp, `received_at` the relay process
+    // clock), so a join landing within clock-skew of an admission can fall
+    // on either side — tolerable, because the bound exists to stop wholesale
+    // history backfill, not to adjudicate millisecond ties. A member who
+    // leaves and rejoins keeps the original `joined_at` (membership upserts
+    // preserve it for roster ordering), so rows from an absence window
+    // reappear on rejoin — accepted trade-off; exact absence accounting
+    // would need membership-interval history.
+    qb.push(" AND cm.joined_at <= e.received_at");
     qb.push(" AND e.deleted_at IS NULL");
     // The caller's own announcement is not a mention of the caller.
     qb.push(" AND e.pubkey <> ")
@@ -176,12 +191,18 @@ fn build_mentions_query(
 /// Two sources, unioned and deduplicated by event id:
 /// - direct `["p", pubkey_hex]` mentions, via the `event_mentions` index;
 /// - NIP-CM `["notify", "channel"]` events (`channel_notifications`) in
-///   channels where the caller is a current member. `["notify", "here"]` is
+///   channels where the caller is a current member whose `joined_at` is no
+///   later than the event's `received_at` — joining a channel later never
+///   backfills older `@channel` rows into the feed. `["notify", "here"]` is
 ///   live-only and never persisted, so it never appears in this feed.
 ///
 /// **Performance**: community-leading indexed lookups on
 /// `(community_id, pubkey_hex, event_created_at DESC)` and
-/// `(community_id, channel_id, event_created_at DESC)`.
+/// `(community_id, channel_id, event_created_at DESC)`. The join-time bound
+/// is evaluated on the joined `events` row, so a reader who joined after most
+/// of a channel's `@channel` history walks and rejects those candidates
+/// before `LIMIT` is satisfied — bounded in practice by `@channel` volume,
+/// which is one row per broadcast, never per member.
 ///
 /// Only returns community-global events and events from `accessible_channel_ids`.
 /// `limit` is capped at [`FEED_MAX_LIMIT`] regardless of the value passed by the caller.
@@ -423,6 +444,56 @@ mod tests {
         .expect("insert channel member");
     }
 
+    /// Re-anchor a stored event's `received_at` one hour into the *database*
+    /// clock's past. The branch-2 join bound compares `cm.joined_at` (a DB
+    /// transaction timestamp) with `e.received_at` (the relay process clock),
+    /// so tests asserting on the bound must pin both sides to the DB clock —
+    /// otherwise app-vs-DB clock skew larger than the test's runtime flips
+    /// the assertions.
+    async fn rewind_received_at_one_hour(
+        pool: &PgPool,
+        community: CommunityId,
+        event_id: &nostr::EventId,
+    ) {
+        sqlx::query(
+            "UPDATE events SET received_at = NOW() - INTERVAL '1 hour' \
+             WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community.as_uuid())
+        .bind(event_id.as_bytes().as_slice())
+        .execute(pool)
+        .await
+        .expect("rewind event received_at");
+    }
+
+    /// Pin a member's `joined_at` relative to a stored event's `received_at`
+    /// (negative = joined before the relay admitted the event). Same clock
+    /// domain as [`rewind_received_at_one_hour`].
+    async fn pin_joined_at_relative_to_event(
+        pool: &PgPool,
+        community: CommunityId,
+        channel_id: Uuid,
+        pubkey: &[u8],
+        event_id: &nostr::EventId,
+        offset_hours: i32,
+    ) {
+        sqlx::query(
+            "UPDATE channel_members cm \
+             SET joined_at = e.received_at + ($5 * INTERVAL '1 hour') \
+             FROM events e \
+             WHERE e.community_id = $1 AND e.id = $4 \
+               AND cm.community_id = $1 AND cm.channel_id = $2 AND cm.pubkey = $3",
+        )
+        .bind(community.as_uuid())
+        .bind(channel_id)
+        .bind(pubkey)
+        .bind(event_id.as_bytes().as_slice())
+        .bind(offset_hours)
+        .execute(pool)
+        .await
+        .expect("pin member joined_at");
+    }
+
     fn notify_tag(mode: &str) -> Tag {
         Tag::parse(["notify", mode]).expect("notify tag")
     }
@@ -452,6 +523,9 @@ mod tests {
             vec![notify_tag("channel")],
         )
         .await;
+        rewind_received_at_one_hour(&pool, community, &event.id).await;
+        pin_joined_at_relative_to_event(&pool, community, channel, &member_bytes, &event.id, -1)
+            .await;
 
         let member_feed = query_mentions(&pool, community, &member_bytes, &[channel], None, 10)
             .await
@@ -467,6 +541,122 @@ mod tests {
         assert!(
             outsider_feed.iter().all(|row| row.event.id != event.id),
             "non-members must not see the @channel event"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_mention_is_not_backfilled_to_later_joiners() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let channel = insert_test_channel(&pool, community).await;
+        let author = Keys::generate();
+        let early_member = Keys::generate();
+        let late_joiner = Keys::generate();
+        let early_bytes = early_member.public_key().to_bytes().to_vec();
+        let late_bytes = late_joiner.public_key().to_bytes().to_vec();
+        add_channel_member(&pool, community, channel, &early_bytes).await;
+
+        let event = store_feed_event_as(
+            &pool,
+            community,
+            &author,
+            KIND_STREAM_MESSAGE,
+            "all hands @channel",
+            Some(channel),
+            vec![notify_tag("channel")],
+        )
+        .await;
+        rewind_received_at_one_hour(&pool, community, &event.id).await;
+        pin_joined_at_relative_to_event(&pool, community, channel, &early_bytes, &event.id, -1)
+            .await;
+
+        // Joins after the relay admitted the event: the fresh row's DB-clock
+        // `joined_at` (NOW()) postdates the rewound `received_at`
+        // (NOW() - 1 hour) in the same clock domain.
+        add_channel_member(&pool, community, channel, &late_bytes).await;
+
+        let early_feed = query_mentions(&pool, community, &early_bytes, &[channel], None, 10)
+            .await
+            .expect("early member mentions feed");
+        assert!(
+            early_feed.iter().any(|row| row.event.id == event.id),
+            "a member who had joined before the event must see the @channel row"
+        );
+
+        let late_feed = query_mentions(&pool, community, &late_bytes, &[channel], None, 10)
+            .await
+            .expect("late joiner mentions feed");
+        assert!(
+            late_feed.iter().all(|row| row.event.id != event.id),
+            "joining a channel must not backfill older @channel rows into the feed"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_mention_from_absence_window_reappears_after_rejoin() {
+        // Locks the documented trade-off: membership upserts preserve the
+        // original `joined_at` (it orders rosters), so a member who leaves
+        // and rejoins sees @channel rows posted during the absence. Exact
+        // absence accounting would need membership-interval history. The
+        // rejoin goes through the production `add_member` upsert: if that
+        // ever starts refreshing `joined_at`, the rejoined row lands at DB
+        // NOW(), after the rewound `received_at` (NOW() - 1 hour on the same
+        // clock), and this test fails — a deliberate semantics change that
+        // must update NIP-CM.md alongside it.
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let channel = insert_test_channel(&pool, community).await;
+        let author = Keys::generate();
+        let member = Keys::generate();
+        let member_bytes = member.public_key().to_bytes().to_vec();
+        add_channel_member(&pool, community, channel, &member_bytes).await;
+
+        sqlx::query(
+            "UPDATE channel_members SET removed_at = NOW() \
+             WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3",
+        )
+        .bind(community.as_uuid())
+        .bind(channel)
+        .bind(&member_bytes)
+        .execute(&pool)
+        .await
+        .expect("remove member");
+
+        let event = store_feed_event_as(
+            &pool,
+            community,
+            &author,
+            KIND_STREAM_MESSAGE,
+            "posted while away @channel",
+            Some(channel),
+            vec![notify_tag("channel")],
+        )
+        .await;
+        rewind_received_at_one_hour(&pool, community, &event.id).await;
+        pin_joined_at_relative_to_event(&pool, community, channel, &member_bytes, &event.id, -1)
+            .await;
+
+        // Rejoin through the production path: removed_at clears, joined_at
+        // keeps its original (pre-event) value.
+        crate::channel::add_member(
+            &pool,
+            community,
+            channel,
+            &member_bytes,
+            crate::channel::MemberRole::Member,
+            None,
+        )
+        .await
+        .expect("rejoin member through production add_member");
+
+        let feed = query_mentions(&pool, community, &member_bytes, &[channel], None, 10)
+            .await
+            .expect("rejoined member mentions feed");
+        assert!(
+            feed.iter().any(|row| row.event.id == event.id),
+            "rejoin keeps the original joined_at, so absence-window @channel rows reappear (documented trade-off)"
         );
     }
 
@@ -1126,6 +1316,10 @@ mod tests {
         assert!(
             sql.contains("AND cm.removed_at IS NULL"),
             "removed members must not receive channel mentions: {sql}"
+        );
+        assert!(
+            sql.contains("AND cm.joined_at <= e.received_at"),
+            "@channel rows must be bounded to members who joined before the relay admitted the event: {sql}"
         );
         assert!(
             sql.contains(") UNION (") && sql.contains(")) u ORDER BY created_at DESC LIMIT "),
