@@ -3,6 +3,7 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
     sync::Mutex,
+    time::{Duration, SystemTime},
 };
 
 #[cfg(unix)]
@@ -18,6 +19,8 @@ use crate::{
 };
 
 const AGENT_SNAPSHOT_HANDOFF_EVENT: &str = "agent-snapshot-import-available";
+const AGENT_SNAPSHOT_HANDOFF_MAX_AGE: Duration = Duration::from_secs(10 * 60);
+const AGENT_SNAPSHOT_HANDOFF_FUTURE_SKEW: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -110,6 +113,7 @@ fn agent_snapshot_handoff_dir() -> Result<PathBuf, String> {
 fn validate_agent_snapshot_handoff_metadata(
     metadata: &std::fs::Metadata,
     expected_uid: u32,
+    now: SystemTime,
 ) -> Result<(), String> {
     if !metadata.file_type().is_file() {
         return Err("handoff is not a regular file".to_string());
@@ -123,6 +127,36 @@ fn validate_agent_snapshot_handoff_metadata(
     if metadata.len() > MAX_SNAPSHOT_JSON_BYTES as u64 {
         return Err("handoff exceeds the agent JSON snapshot size limit".to_string());
     }
+    let modified = metadata
+        .modified()
+        .map_err(|error| format!("cannot inspect handoff age: {error}"))?;
+    match now.duration_since(modified) {
+        Ok(age) if age > AGENT_SNAPSHOT_HANDOFF_MAX_AGE => {
+            return Err("handoff has expired".to_string());
+        }
+        Ok(_) => {}
+        Err(error) if error.duration() > AGENT_SNAPSHOT_HANDOFF_FUTURE_SKEW => {
+            return Err("handoff modification time is too far in the future".to_string());
+        }
+        Err(_) => {}
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_agent_snapshot_handoff_directory_metadata(
+    metadata: &std::fs::Metadata,
+    expected_uid: u32,
+) -> Result<(), String> {
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err("handoff directory is not a real directory".to_string());
+    }
+    if metadata.uid() != expected_uid {
+        return Err("handoff directory is not owned by the current user".to_string());
+    }
+    if metadata.mode() & 0o077 != 0 {
+        return Err("handoff directory has group or world permissions".to_string());
+    }
     Ok(())
 }
 
@@ -134,11 +168,14 @@ fn read_agent_snapshot_handoff_from_dir(dir: &Path, handoff_id: &str) -> Result<
         return Err("handoff id is not a canonical lowercase UUID".to_string());
     }
 
+    let expected_uid = dirs::home_dir()
+        .ok_or_else(|| "cannot resolve the current user's home directory".to_string())?
+        .metadata()
+        .map_err(|error| format!("cannot inspect the current user's home directory: {error}"))?
+        .uid();
     let dir_metadata = std::fs::symlink_metadata(dir)
         .map_err(|error| format!("cannot inspect handoff directory: {error}"))?;
-    if dir_metadata.file_type().is_symlink() || !dir_metadata.is_dir() {
-        return Err("handoff directory is not a real directory".to_string());
-    }
+    validate_agent_snapshot_handoff_directory_metadata(&dir_metadata, expected_uid)?;
 
     let path = dir.join(format!("{handoff_id}.agent.json"));
     let mut file = std::fs::OpenOptions::new()
@@ -149,12 +186,7 @@ fn read_agent_snapshot_handoff_from_dir(dir: &Path, handoff_id: &str) -> Result<
     let opened_metadata = file
         .metadata()
         .map_err(|error| format!("cannot inspect open handoff: {error}"))?;
-    let expected_uid = dirs::home_dir()
-        .ok_or_else(|| "cannot resolve the current user's home directory".to_string())?
-        .metadata()
-        .map_err(|error| format!("cannot inspect the current user's home directory: {error}"))?
-        .uid();
-    validate_agent_snapshot_handoff_metadata(&opened_metadata, expected_uid)?;
+    validate_agent_snapshot_handoff_metadata(&opened_metadata, expected_uid, SystemTime::now())?;
 
     let mut bytes = Vec::with_capacity(opened_metadata.len() as usize);
     file.by_ref()

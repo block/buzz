@@ -2,14 +2,19 @@
 use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
 #[cfg(unix)]
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::time::{Duration, SystemTime};
 
 use url::Url;
 
-#[cfg(unix)]
-use super::validate_agent_snapshot_handoff_metadata;
 use super::{
     parse_agent_snapshot_handoff_id, read_agent_snapshot_handoff_from_dir,
     PendingAgentSnapshotImport, PendingAgentSnapshotImports,
+};
+#[cfg(unix)]
+use super::{
+    validate_agent_snapshot_handoff_directory_metadata, validate_agent_snapshot_handoff_metadata,
+    AGENT_SNAPSHOT_HANDOFF_MAX_AGE,
 };
 
 const HANDOFF_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
@@ -57,6 +62,7 @@ fn agent_snapshot_handoff_requires_one_canonical_lowercase_uuid() {
 
 #[cfg(unix)]
 fn stage_handoff(dir: &Path, bytes: &[u8], mode: u32) -> PathBuf {
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
     let path = dir.join(format!("{HANDOFF_ID}.agent.json"));
     std::fs::write(&path, bytes).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
@@ -125,7 +131,53 @@ fn secure_handoff_metadata_rejects_wrong_owner() {
     let dir = tempfile::tempdir().unwrap();
     let path = stage_handoff(dir.path(), &config_only_snapshot_bytes("hermes"), 0o600);
     let metadata = path.metadata().unwrap();
-    assert!(validate_agent_snapshot_handoff_metadata(&metadata, metadata.uid() + 1).is_err());
+    assert!(validate_agent_snapshot_handoff_metadata(
+        &metadata,
+        metadata.uid() + 1,
+        SystemTime::now()
+    )
+    .is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn secure_handoff_metadata_rejects_expired_and_far_future_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = stage_handoff(dir.path(), &config_only_snapshot_bytes("hermes"), 0o600);
+    let metadata = path.metadata().unwrap();
+    let modified = metadata.modified().unwrap();
+
+    assert!(validate_agent_snapshot_handoff_metadata(
+        &metadata,
+        metadata.uid(),
+        modified + AGENT_SNAPSHOT_HANDOFF_MAX_AGE + Duration::from_secs(1)
+    )
+    .is_err());
+    assert!(validate_agent_snapshot_handoff_metadata(
+        &metadata,
+        metadata.uid(),
+        modified - Duration::from_secs(61)
+    )
+    .is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn secure_handoff_directory_requires_owner_only_permissions() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let metadata = dir.path().metadata().unwrap();
+    assert!(validate_agent_snapshot_handoff_directory_metadata(&metadata, metadata.uid()).is_ok());
+
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let permissive = dir.path().metadata().unwrap();
+    assert!(
+        validate_agent_snapshot_handoff_directory_metadata(&permissive, permissive.uid()).is_err()
+    );
+    assert!(
+        validate_agent_snapshot_handoff_directory_metadata(&permissive, permissive.uid() + 1)
+            .is_err()
+    );
 }
 
 #[cfg(unix)]
