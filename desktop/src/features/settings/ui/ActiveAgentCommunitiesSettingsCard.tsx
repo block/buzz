@@ -50,7 +50,7 @@ export function ActiveAgentCommunitiesSettingsCard() {
               ? "start"
               : "restart",
         pubkey: runtime.pubkey,
-        relayUrl: runtime.relayUrl,
+        relayUrl: runtime.requestedRelayUrl ?? runtime.relayUrl,
       });
     } finally {
       setPendingRuntimeKey(null);
