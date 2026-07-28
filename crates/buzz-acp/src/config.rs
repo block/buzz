@@ -675,7 +675,9 @@ pub(crate) fn normalize_agent_command_identity(command: &str) -> String {
         "-x86-64-apple-darwin",
         "-aarch64-unknown-linux-gnu",
         "-x86-64-unknown-linux-gnu",
+        "-aarch64-pc-windows-msvc",
         "-x86-64-pc-windows-msvc",
+        "-universal-apple-darwin",
     ];
 
     let normalized = command.trim().replace('\\', "/");
@@ -1640,6 +1642,18 @@ mod tests {
         );
         assert_eq!(
             normalize_agent_command_identity("/opt/buzz/buzz-a2a-acp-aarch64-unknown-linux-gnu"),
+            "buzz-a2a-acp"
+        );
+        assert_eq!(
+            normalize_agent_command_identity(
+                r"C:\Program Files\Buzz\buzz-a2a-acp-aarch64-pc-windows-msvc.exe"
+            ),
+            "buzz-a2a-acp"
+        );
+        assert_eq!(
+            normalize_agent_command_identity(
+                "/Applications/Buzz.app/Contents/MacOS/buzz-a2a-acp-universal-apple-darwin"
+            ),
             "buzz-a2a-acp"
         );
     }

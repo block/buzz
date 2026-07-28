@@ -20,6 +20,7 @@ use crate::usage::{TurnUsage, UsageTracker};
 /// Lines exceeding this limit are rejected to prevent OOM from rogue agents.
 const MAX_LINE_SIZE: usize = 10_000_000; // 10 MB
 const MAX_AGENT_MESSAGE_BYTES: usize = 60 * 1024;
+const AGENT_MESSAGE_TRUNCATION_MARKER: &str = "\n[response truncated by Buzz]";
 
 /// Env var that tells a goose ACP child not to start its cron scheduler.
 /// Injected unconditionally by [`AcpClient::spawn`]; see the call site for why.
@@ -209,6 +210,38 @@ pub struct AcpClient {
     /// current prompt. Remote adapters can hand this buffer back to the host
     /// for proxy-signed publication without receiving the proxy private key.
     agent_message: String,
+    agent_message_truncated: bool,
+}
+
+fn append_agent_message_chunk(buffer: &mut String, truncated: &mut bool, text: &str) {
+    if *truncated {
+        return;
+    }
+
+    let remaining = MAX_AGENT_MESSAGE_BYTES.saturating_sub(buffer.len());
+    if text.len() <= remaining {
+        buffer.push_str(text);
+        return;
+    }
+
+    let content_capacity =
+        MAX_AGENT_MESSAGE_BYTES.saturating_sub(AGENT_MESSAGE_TRUNCATION_MARKER.len());
+    if buffer.len() > content_capacity {
+        let mut end = content_capacity;
+        while end > 0 && !buffer.is_char_boundary(end) {
+            end -= 1;
+        }
+        buffer.truncate(end);
+    }
+
+    let available = content_capacity.saturating_sub(buffer.len());
+    let mut end = available.min(text.len());
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    buffer.push_str(&text[..end]);
+    buffer.push_str(AGENT_MESSAGE_TRUNCATION_MARKER);
+    *truncated = true;
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -376,6 +409,35 @@ fn build_client_capabilities() -> serde_json::Value {
     })
 }
 
+fn configure_sensitive_spawn_environment(
+    cmd: &mut tokio::process::Command,
+    is_remote_a2a_adapter: bool,
+    extra_env: &[(String, String)],
+) {
+    // The A2A bearer token is adapter-only. Remove any ambient value from
+    // every subprocess, then restore only the explicitly scoped adapter value.
+    cmd.env_remove("BUZZ_A2A_BEARER_TOKEN");
+
+    if is_remote_a2a_adapter {
+        for key in [
+            "BUZZ_PRIVATE_KEY",
+            "NOSTR_PRIVATE_KEY",
+            "BUZZ_AUTH_TAG",
+            "BUZZ_API_TOKEN",
+            "BUZZ_ACP_PRIVATE_KEY",
+            "BUZZ_ACP_API_TOKEN",
+        ] {
+            cmd.env_remove(key);
+        }
+        if let Some((_, value)) = extra_env
+            .iter()
+            .find(|(key, _)| key == "BUZZ_A2A_BEARER_TOKEN")
+        {
+            cmd.env("BUZZ_A2A_BEARER_TOKEN", value);
+        }
+    }
+}
+
 impl AcpClient {
     /// Kill the agent subprocess and wait for it to exit (no zombies).
     ///
@@ -433,19 +495,7 @@ impl AcpClient {
             // Ensure the child is killed when the AcpClient is dropped (best-effort).
             // Callers MUST still call shutdown().await for guaranteed cleanup.
             .kill_on_drop(true);
-        if is_remote_a2a_adapter {
-            for key in [
-                "BUZZ_PRIVATE_KEY",
-                "NOSTR_PRIVATE_KEY",
-                "BUZZ_AUTH_TAG",
-                "BUZZ_API_TOKEN",
-                "BUZZ_ACP_PRIVATE_KEY",
-                "BUZZ_ACP_API_TOKEN",
-                "BUZZ_A2A_BEARER_TOKEN",
-            ] {
-                cmd.env_remove(key);
-            }
-        }
+        configure_sensitive_spawn_environment(&mut cmd, is_remote_a2a_adapter, extra_env);
 
         // Per-persona env vars (e.g., GOOSE_PROVIDER, BUZZ_AGENT_PROVIDER).
         // For most keys, operator precedence wins: skip injection if already set
@@ -476,8 +526,7 @@ impl AcpClient {
                 // Handled by build_codex_config_env; skip here to avoid double-setting.
                 continue;
             }
-            if is_remote_a2a_adapter && key == "BUZZ_A2A_BEARER_TOKEN" {
-                cmd.env(key, value);
+            if key == "BUZZ_A2A_BEARER_TOKEN" {
                 continue;
             }
             if std::env::var(key).is_err() {
@@ -535,6 +584,7 @@ impl AcpClient {
             steer_rx: None,
             goose_usage: UsageTracker::default(),
             agent_message: String::new(),
+            agent_message_truncated: false,
         })
     }
 
@@ -543,6 +593,15 @@ impl AcpClient {
         let message = std::mem::take(&mut self.agent_message);
         let message = message.trim();
         (!message.is_empty()).then(|| message.to_string())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn capture_agent_message_for_test(&mut self, text: &str) {
+        append_agent_message_chunk(
+            &mut self.agent_message,
+            &mut self.agent_message_truncated,
+            text,
+        );
     }
 
     /// Attach a local observer feed to this ACP client.
@@ -735,6 +794,7 @@ impl AcpClient {
         max_duration: std::time::Duration,
     ) -> Result<StopReason, AcpError> {
         self.agent_message.clear();
+        self.agent_message_truncated = false;
         let params = build_prompt_params(session_id, prompt_blocks);
         let hard_deadline = tokio::time::Instant::now() + max_duration;
         self.current_hard_deadline = Some(hard_deadline);
@@ -1590,14 +1650,18 @@ impl AcpClient {
             "agent_message_chunk" => {
                 if let Some(text) = update["content"]["text"].as_str() {
                     tracing::info!(target: "acp::stream", "{text}");
-                    let remaining =
-                        MAX_AGENT_MESSAGE_BYTES.saturating_sub(self.agent_message.len());
-                    if remaining > 0 {
-                        let mut end = remaining.min(text.len());
-                        while end > 0 && !text.is_char_boundary(end) {
-                            end -= 1;
-                        }
-                        self.agent_message.push_str(&text[..end]);
+                    let was_truncated = self.agent_message_truncated;
+                    append_agent_message_chunk(
+                        &mut self.agent_message,
+                        &mut self.agent_message_truncated,
+                        text,
+                    );
+                    if !was_truncated && self.agent_message_truncated {
+                        tracing::warn!(
+                            target: "acp::stream",
+                            cap_bytes = MAX_AGENT_MESSAGE_BYTES,
+                            "captured agent output exceeded publication cap and was truncated"
+                        );
                     }
                 }
                 false
@@ -3291,6 +3355,69 @@ mod tests {
             .expect("spawn cat as inert client")
     }
 
+    fn command_env_override(
+        command: &tokio::process::Command,
+        name: &str,
+    ) -> Option<Option<String>> {
+        command
+            .as_std()
+            .get_envs()
+            .find(|(key, _)| *key == std::ffi::OsStr::new(name))
+            .map(|(_, value)| value.map(|value| value.to_string_lossy().into_owned()))
+    }
+
+    #[test]
+    fn adapter_spawn_env_removes_host_credentials_and_scopes_bearer_token() {
+        let mut command = tokio::process::Command::new("buzz-a2a-acp");
+        let extra_env = vec![(
+            "BUZZ_A2A_BEARER_TOKEN".to_string(),
+            "adapter-token".to_string(),
+        )];
+
+        configure_sensitive_spawn_environment(&mut command, true, &extra_env);
+
+        for secret in [
+            "BUZZ_PRIVATE_KEY",
+            "NOSTR_PRIVATE_KEY",
+            "BUZZ_AUTH_TAG",
+            "BUZZ_API_TOKEN",
+            "BUZZ_ACP_PRIVATE_KEY",
+            "BUZZ_ACP_API_TOKEN",
+        ] {
+            assert_eq!(command_env_override(&command, secret), Some(None));
+        }
+        assert_eq!(
+            command_env_override(&command, "BUZZ_A2A_BEARER_TOKEN"),
+            Some(Some("adapter-token".to_string()))
+        );
+    }
+
+    #[test]
+    fn non_adapter_spawn_env_is_unchanged_except_for_adapter_bearer_token() {
+        let mut command = tokio::process::Command::new("ordinary-agent");
+        let extra_env = vec![(
+            "BUZZ_A2A_BEARER_TOKEN".to_string(),
+            "must-not-leak".to_string(),
+        )];
+
+        configure_sensitive_spawn_environment(&mut command, false, &extra_env);
+
+        for secret in [
+            "BUZZ_PRIVATE_KEY",
+            "NOSTR_PRIVATE_KEY",
+            "BUZZ_AUTH_TAG",
+            "BUZZ_API_TOKEN",
+            "BUZZ_ACP_PRIVATE_KEY",
+            "BUZZ_ACP_API_TOKEN",
+        ] {
+            assert_eq!(command_env_override(&command, secret), None);
+        }
+        assert_eq!(
+            command_env_override(&command, "BUZZ_A2A_BEARER_TOKEN"),
+            Some(None)
+        );
+    }
+
     #[tokio::test]
     async fn agent_message_chunks_are_collected_for_host_publication() {
         let mut client = spawn_inert_client().await;
@@ -3314,6 +3441,24 @@ mod tests {
             Some("hello from remote")
         );
         assert_eq!(client.take_agent_message(), None);
+    }
+
+    #[test]
+    fn agent_message_truncation_preserves_utf8_boundary_and_marks_output() {
+        let content_capacity = MAX_AGENT_MESSAGE_BYTES - AGENT_MESSAGE_TRUNCATION_MARKER.len();
+        let mut buffer = "a".repeat(content_capacity - 1);
+        let mut truncated = false;
+
+        append_agent_message_chunk(&mut buffer, &mut truncated, &"é".repeat(32));
+
+        assert!(truncated);
+        assert!(buffer.is_char_boundary(buffer.len()));
+        assert!(buffer.ends_with(AGENT_MESSAGE_TRUNCATION_MARKER));
+        assert!(buffer.len() <= MAX_AGENT_MESSAGE_BYTES);
+        assert_eq!(
+            buffer.len(),
+            content_capacity - 1 + AGENT_MESSAGE_TRUNCATION_MARKER.len()
+        );
     }
 
     /// Build a `session/update` JSON-RPC notification carrying a
