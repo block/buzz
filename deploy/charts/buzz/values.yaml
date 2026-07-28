@@ -185,8 +185,23 @@ relay:
     readOnlyRootFilesystem: false  # git writes need a writable repo path
   terminationGracePeriodSeconds: 60
 
+  # Optional image entrypoint/arguments overrides. Empty arrays preserve the
+  # relay image's defaults. Consumers own compatibility with the selected image.
+  command: []
+  args: []
+  # Appended to the chart-owned relay mounts. Names must match extraVolumes (or
+  # another volume supplied by the platform) and must not collide with built-ins.
+  extraVolumeMounts: []
+
   extraEnv: []
   extraEnvFrom: []
+
+# ── Pod extensions ──────────────────────────────────────────────────────────
+# Raw Kubernetes fragments appended to the relay Pod. They are rendered with
+# toYaml, not tpl. Init containers must define their own securityContext and
+# resources; names must not collide with chart-owned containers or volumes.
+extraInitContainers: []
+extraVolumes: []
 
 # ── Device pairing relay ─────────────────────────────────────────────────────
 # Optional, stateless NIP-AB relay. When enabled, the main relay advertises

@@ -418,16 +418,6 @@ pub fn run() {
                 .load(std::sync::atomic::Ordering::Acquire);
             let recovery_mode = identity_lost || keyring_locked;
 
-            // Snapshot owner keys after identity resolution; the best-effort
-            // event reconcile itself runs off the synchronous setup path below.
-            let owner_keys = match state.keys.lock() {
-                Ok(k) => k.clone(),
-                Err(e) => {
-                    eprintln!("buzz-desktop: fatal: owner keys lock poisoned: {e}");
-                    std::process::exit(1);
-                }
-            };
-
             // Backfill the pinned persona snapshot for any pre-existing agent
             // that predates the record-authoritative-spawn cutover (persona_id
             // set but no source_version). Must run before
@@ -547,15 +537,6 @@ pub fn run() {
 
             try_regenerate_nest(&app_handle);
 
-            // Sync team-dir edits and reconcile persona/team/agent events after
-            // setup can continue. It is best-effort retention backfill, unlike
-            // identity resolution above, so JSON/SQLite/signing work must not
-            // hold the boot path hostage. Skipped in recovery mode — the owner
-            // key is ephemeral.
-            if !recovery_mode {
-                event_sync::spawn_event_sync(app_handle.clone(), owner_keys);
-            }
-
             if let Some(mgr) = huddle::models::global_model_manager() {
                 mgr.start_stt_download(state.http_client.clone());
                 mgr.start_tts_download(state.http_client.clone());
@@ -638,17 +619,13 @@ pub fn run() {
                 tauri::async_runtime::spawn(async move {
                     use std::time::Duration;
                     use tauri::Manager;
-                    let Ok(db_path) = managed_agents::managed_agents_base_dir(&flush_handle)
-                        .map(|d| d.join("retention.db"))
-                    else {
-                        eprintln!("buzz-desktop: event-flush: cannot resolve retention db path");
-                        return;
-                    };
                     loop {
                         let state = flush_handle.state::<AppState>();
-                        if let Err(e) =
-                            managed_agents::persona_events::flush_pending_events(&db_path, &state)
-                                .await
+                        if let Err(e) = managed_agents::persona_events::flush_active_pending_events(
+                            &flush_handle,
+                            &state,
+                        )
+                        .await
                         {
                             eprintln!("buzz-desktop: event-flush: {e}");
                         }
@@ -826,8 +803,10 @@ pub fn run() {
             list_personas,
             create_persona,
             update_persona,
+            update_persona_and_publish,
             delete_persona,
             set_persona_active,
+            set_persona_shared,
             reconcile_inbound_persona_event,
             list_channel_templates,
             create_channel_template,

@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use buzz_core_pkg::kind::KIND_PERSONA;
+use buzz_core_pkg::kind::{persona_event_is_shared, KIND_PERSONA};
 use nostr::{EventBuilder, Kind, Tag};
 use serde::{Deserialize, Serialize};
 
@@ -138,7 +138,11 @@ pub fn build_persona_event(record: &AgentDefinition) -> Result<EventBuilder, Str
         .map_err(|e| format!("failed to serialize persona content: {e}"))?;
 
     let d_tag = persona_d_tag(record);
-    let tags = vec![Tag::parse(["d", d_tag.as_str()]).map_err(|e| format!("invalid d-tag: {e}"))?];
+    let mut tags =
+        vec![Tag::parse(["d", d_tag.as_str()]).map_err(|e| format!("invalid d-tag: {e}"))?];
+    if record.shared {
+        tags.push(Tag::parse(["shared", "true"]).map_err(|e| format!("invalid shared tag: {e}"))?);
+    }
 
     Ok(EventBuilder::new(Kind::Custom(KIND_PERSONA as u16), content_json).tags(tags))
 }
@@ -188,8 +192,10 @@ pub fn persona_from_event(event: &nostr::Event) -> Result<AgentDefinition, Strin
         name_pool: content.name_pool,
         is_builtin: false,
         is_active: true,
+        shared: persona_event_is_shared(event),
         source_team: None,
         source_team_persona_slug: Some(d_tag),
+        catalog_source: None,
         env_vars: BTreeMap::new(),
         respond_to: content.respond_to,
         respond_to_allowlist: content.respond_to_allowlist,
@@ -218,9 +224,34 @@ pub fn persona_from_event(event: &nostr::Event) -> Result<AgentDefinition, Strin
 /// Returns the number of events the relay accepted. Best-effort: a relay
 /// failure on one row leaves it pending for the next sweep and does not abort
 /// the remaining rows.
+#[cfg(test)]
 pub async fn flush_pending_events(
     db_path: &std::path::Path,
     state: &AppState,
+) -> Result<u32, String> {
+    let relay_url = crate::relay::relay_ws_url_with_override(state);
+    let owner_keys = state.signing_keys()?;
+    flush_pending_events_at(db_path, state, &relay_url, &owner_keys).await
+}
+
+/// Resolve and flush only the currently active `(relay, owner)` scope.
+///
+/// The scope snapshots its relay, owner keys, and database path together
+/// before network work starts. Switching communities during the flush cannot
+/// redirect rows from the old scope into the new relay.
+pub async fn flush_active_pending_events(
+    app: &tauri::AppHandle,
+    state: &AppState,
+) -> Result<u32, String> {
+    let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
+    flush_pending_events_at(&scope.db_path, state, &scope.relay_url, &scope.owner_keys).await
+}
+
+async fn flush_pending_events_at(
+    db_path: &std::path::Path,
+    state: &AppState,
+    relay_url: &str,
+    owner_keys: &nostr::Keys,
 ) -> Result<u32, String> {
     use crate::managed_agents::retention::{
         deferred_behind_failed_tombstone, get_pending_sync, get_retained_event, mark_synced,
@@ -228,6 +259,8 @@ pub async fn flush_pending_events(
     };
     use nostr::JsonUtil;
 
+    let owner_pubkey = owner_keys.public_key().to_hex();
+    let relay_api_base = crate::relay::relay_http_base_url(relay_url);
     let pending = {
         let conn = open_retention_db(db_path)?;
         get_pending_sync(&conn)?
@@ -237,6 +270,9 @@ pub async fn flush_pending_events(
     let mut failed_tombstones: std::collections::HashSet<(String, String)> =
         std::collections::HashSet::new();
     for row in pending {
+        if row.pubkey != owner_pubkey {
+            continue;
+        }
         if deferred_behind_failed_tombstone(row.kind, &row.pubkey, &row.d_tag, &failed_tombstones) {
             continue; // its tombstone failed this sweep; next sweep re-orders them
         }
@@ -270,9 +306,14 @@ pub async fn flush_pending_events(
             event
         };
 
-        if crate::relay::submit_signed_event(&event, state)
-            .await
-            .is_err()
+        if crate::relay::submit_signed_event_at_with_keys(
+            &event,
+            state,
+            &relay_api_base,
+            owner_keys,
+        )
+        .await
+        .is_err()
         {
             if current.kind == 5 {
                 failed_tombstones.insert((current.pubkey.clone(), current.d_tag.clone()));

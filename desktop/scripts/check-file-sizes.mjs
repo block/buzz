@@ -98,7 +98,6 @@ const overrides = new Map([
   // 3-phase (stage/stop/commit) + commit_cascade_agents injectable helper for
   // retry-safety. Load-bearing reviewer-required change; queued to split.
   // Consolidation removed the legacy persona-card import/export codecs.
-  ["src-tauri/src/commands/personas/mod.rs", 984],
   // #1418 read-path fix: get_thread_replies' blocker fix (shared TIMELINE_KINDS
   // const + build_thread_replies_filter helper, mirroring the channel sibling so
   // the two p-gate filters can't drift) plus two guard unit tests. The file was
@@ -257,7 +256,11 @@ const overrides = new Map([
   // (#2680) to indicate runtimes that need a separate CLI install.
   // +6: ManagedAgent.runtime record-level pin + JSDoc so the harness delete
   // confirmation can count referencing agents (review fix for #2773).
-  ["src/shared/api/types.ts", 1058],
+  // +21: CatalogSourceCoordinate + the `catalogSource` fields on AgentPersona
+  // and CreatePersonaInput. The coordinate is the only identifier a catalog
+  // copy keeps, so it is what stops the catalog re-offering "Add" for an
+  // already-added foreign entry. Queued to split.
+  ["src/shared/api/types.ts", 1079],
   // harness-persona-sync feature growth, queued to split in the resolver-unify
   // refactor followup. discovery.rs is dominated by the new test module
   // (the effective_agent_command / divergent / create-time override matrix);
@@ -344,7 +347,12 @@ const overrides = new Map([
   // absent, so AdapterMissing replaces the misleading NotInstalled. Includes
   // the deliberate-divergence doc comments; net after the inline preset
   // entries.push block collapsed into the helper.
-  ["src-tauri/src/managed_agents/discovery.rs", 1835],
+  // +6: legacy Goose Windows install dir (%USERPROFILE%\goose) probed in
+  // common_binary_paths so pre-#2680 standalone installs are discoverable.
+  // +19: codex-acp minimum-version gate — MIN_CODEX_ACP_VERSION plus the strict
+  // three-component parse in probe_codex_acp_version, so an outdated 1.x adapter
+  // is offered a reinstall instead of classifying as Available on major alone.
+  ["src-tauri/src/managed_agents/discovery.rs", 1860],
   // BYOH — save_custom_harness_to_dir (backup-swap atomic write) + save_and_warm /
   // delete_and_warm (persist-mutex serialization for concurrent-safe registry
   // refresh, B-6). Also: id/collision/load/registry tests (from the file base) +
@@ -389,7 +397,13 @@ const overrides = new Map([
   // Available both-present AND adapter-present/CLI-absent — the selectability
   // regression guard), bound to an injectable resolver so the tests stay
   // PATH-independent.
-  ["src-tauri/src/managed_agents/discovery/tests.rs", 1871],
+  // +51: codex-acp minimum-version gate — probe_codex_acp_version assertions carry
+  // the full (major, minor, patch) triple instead of a bare major, plus
+  // below-the-floor and uncomparable-version (partial / prerelease) classification
+  // regressions for the fail-closed parse.
+  // +2 (1922 -> 1924): the AgentDefinition and ManagedAgentRecord fixtures each
+  // set the new mandatory `catalog_source` field.
+  ["src-tauri/src/managed_agents/discovery/tests.rs", 1924],
   // identity-import-keyring: the identity resolution state machine's behavioral
   // matrix (46 tests over FakeIdentityStore — probe × marker × file cells,
   // adoption / read-back-corruption / marker-failure arms, recovery-mode
@@ -584,7 +598,9 @@ const overrides = new Map([
   // computing had_* so stale materialized snapshot bytes can never be tagged
   // BuzzExplicit and shadow the definition/global fallthrough; the dead
   // persona-model re-tag branch replaced; two new regression tests added.
-  ["src-tauri/src/commands/agent_config.rs", 1110],
+  // +2 (1110 -> 1112): the agent_record and persona_with_model test fixtures
+  // each set the new mandatory `catalog_source` field.
+  ["src-tauri/src/commands/agent_config.rs", 1112],
   // codex-install-auto-restart review-fixes: should_restart_after_install
   // takes pid_alive:bool (pure predicate, no OS-dependent call); 3 racy
   // cache tests replaced with 6 pure availability_drift predicate tests;
@@ -627,7 +643,13 @@ const overrides = new Map([
   // return value so the frontend immediately has the updated env.
   // +1: rebase over main (#2680) — requires_external_cli: false added to
   // save_custom_harness catalog entry construction (new required field).
-  ["src-tauri/src/commands/agent_discovery.rs", 2167],
+  // -359: install command execution (spawn, output drain under timeout, retry
+  // with backoff, output truncation) extracted to agent_discovery/install_exec.rs
+  // alongside its tests, matching the managed_node.rs / post_install_verification.rs
+  // split. The entries above describe the file's history, not its current shape.
+  // +27: codex-acp minimum-version gate — test_plan_adapter_install_updates_older_
+  // 1x_codex_binary pins that a 1.x adapter below the floor still plans a reinstall.
+  ["src-tauri/src/commands/agent_discovery.rs", 1835],
   // draft-persistence predicate: submit-time `loadDraft` check + inline comment
   // + deps-array entry in submitMessage closes the never-persisted-boundary
   // defect (Thufir Pass-3 finding). Load-bearing correctness fix; queued to
@@ -675,12 +697,18 @@ const overrides = new Map([
   // hidden-key projection keeps the top-level secret out of Advanced rows.
   // +6 (1195 -> 1201): rebase onto main — this PR's model-source label wiring
   // lands on top of main's dialog growth. Queued to split.
-  ["src/features/agents/ui/AgentInstanceEditDialog.tsx", 1201],
+  // +28 (1201 -> 1229): inline "Add custom harness…" entry — sentinel option,
+  // modal state, and the AddCustomHarnessDialog mount. The shared routing and
+  // deferred-selection logic lives in addCustomHarness.ts to keep this minimal.
+  ["src/features/agents/ui/AgentInstanceEditDialog.tsx", 1229],
   // AgentDefinitionDialog grew past 1000 with the following load-bearing fixes:
   // isRuntimeAutoSeededRef tracking for edit-mode seeding (Fizz shows models);
   // runtimeSupportsLlmProviderSelection guard on discovery provider (codex fix);
   // hideProviderIds computation for Databricks v1 gate. Queued to split.
-  ["src/features/agents/ui/AgentDefinitionDialog.tsx", 1035],
+  // +28 (1020 -> 1048): inline "Add custom harness…" entry — sentinel option,
+  // modal state, and the AddCustomHarnessDialog mount. The shared routing and
+  // deferred-selection logic lives in addCustomHarness.ts to keep this minimal.
+  ["src/features/agents/ui/AgentDefinitionDialog.tsx", 1048],
   // #2630 emoji picker search: the shadow-root search-input autofocus effect
   // (rAF retry loop) took this file 999 -> 1026 and landed without this entry,
   // so main's Desktop Core went red. Queued to split with the rest of this list.

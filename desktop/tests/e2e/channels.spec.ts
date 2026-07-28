@@ -2632,7 +2632,7 @@ test("Inbox All excludes generic channel traffic", async ({ page }) => {
   ).toHaveCount(0);
 });
 
-test("Inbox unread-only hides reminders and drafts from mixed All", async ({
+test("Inbox All never lists drafts and unread-only hides reminders", async ({
   page,
 }) => {
   const draftKey = `channel:${GENERAL_CHANNEL_ID}`;
@@ -2737,7 +2737,8 @@ test("Inbox unread-only hides reminders and drafts from mixed All", async ({
   const draftRow = page.getByTestId(`home-all-drafts-${draftKey}`);
   await expect(messageRow).toBeVisible();
   await expect(reminderRow).toBeVisible();
-  await expect(draftRow).toBeVisible();
+  // Drafts belong to the dedicated Drafts filter — never the mixed All view.
+  await expect(draftRow).toHaveCount(0);
 
   await page.getByTestId("inbox-options-trigger").click();
   await page.getByRole("switch", { name: "Show unread only" }).click();
@@ -2745,6 +2746,12 @@ test("Inbox unread-only hides reminders and drafts from mixed All", async ({
   await expect(messageRow).toBeVisible();
   await expect(reminderRow).toHaveCount(0);
   await expect(draftRow).toHaveCount(0);
+
+  // The draft is still reachable under the Drafts filter.
+  await page.keyboard.press("Escape");
+  await page.getByTestId("inbox-filter-trigger").click();
+  await page.getByRole("menuitemradio", { name: "Drafts" }).click();
+  await expect(page.getByTestId("home-inbox-drafts")).toBeVisible();
 });
 
 test("Inbox merges a due reminder into its represented conversation", async ({
