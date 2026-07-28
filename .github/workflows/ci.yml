@@ -48,15 +48,21 @@ jobs:
               - 'scripts/run-tests.sh'
               - 'justfile'
             desktop:
+              - 'scripts/check-file-sizes-core.mjs'
+              - 'scripts/check-file-sizes-core.test.mjs'
               - 'desktop/**'
               - '!desktop/src-tauri/**'
               - 'pnpm-lock.yaml'
             desktop-rust:
               - 'desktop/src-tauri/**'
             web:
+              - 'scripts/check-file-sizes-core.mjs'
+              - 'scripts/check-file-sizes-core.test.mjs'
               - 'web/**'
               - 'pnpm-lock.yaml'
             mobile:
+              - 'scripts/check-file-sizes-core.mjs'
+              - 'scripts/check-file-sizes-core.test.mjs'
               - 'mobile/**'
               - 'scripts/mobile-release.sh'
               - 'scripts/mobile-worktree-overrides.sh'
@@ -76,6 +82,8 @@ jobs:
           scripts/test-mobile-release-candidate-publisher.sh
       - name: Mobile worktree identity contract
         run: scripts/test-mobile-worktree-overrides.sh
+      - name: File size ratchet unit tests
+        run: node --test scripts/check-file-sizes-core.test.mjs
 
   rust-lint:
     name: Rust Lint
@@ -130,6 +138,8 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 2
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -751,6 +761,8 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 2
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       - name: Get pnpm store directory
         id: pnpm-cache
@@ -784,6 +796,8 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 2
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       - name: Compute Hermit cache key
         id: hermit-bin-hash
@@ -822,6 +836,8 @@ jobs:
         with:
           path: ~/.pub-cache
           key: pub-${{ runner.os }}-${{ hashFiles('mobile/pubspec.lock') }}
+      - name: File size ratchet
+        run: node mobile/scripts/check-file-sizes.mjs
       - name: Format check
         run: cd mobile && dart format --output=none --set-exit-if-changed .
       - name: Analyze
