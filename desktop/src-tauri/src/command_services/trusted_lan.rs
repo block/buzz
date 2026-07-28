@@ -79,6 +79,22 @@ impl CloudProviderConfig {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct WorldMonitorConfig {
+    endpoint: String,
+    keychain_key: String,
+}
+
+impl WorldMonitorConfig {
+    pub(crate) fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+
+    pub(crate) fn keychain_key(&self) -> &str {
+        &self.keychain_key
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct TrustedLanConfig {
     memory_url: TrustedLanEndpoint,
@@ -86,6 +102,7 @@ pub(crate) struct TrustedLanConfig {
     routing_preference: ModelRoutingPreference,
     litellm: CloudProviderConfig,
     openai: CloudProviderConfig,
+    world_monitor: WorldMonitorConfig,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -126,12 +143,14 @@ impl TrustedLanConfig {
         let rag_url = TrustedLanEndpoint::parse_rag(&raw.rag_url)?;
         let litellm = validate_cloud(raw.litellm, CloudKind::LiteLlm)?;
         let openai = validate_cloud(raw.openai, CloudKind::OpenAi)?;
+        let world_monitor = validate_world_monitor(raw.world_monitor)?;
         Ok(Self {
             memory_url,
             rag_url,
             routing_preference: raw.model_routing_preference,
             litellm,
             openai,
+            world_monitor,
         })
     }
 
@@ -140,7 +159,6 @@ impl TrustedLanConfig {
         &self.memory_url
     }
 
-    #[cfg(test)]
     pub(crate) fn rag_url(&self) -> &TrustedLanEndpoint {
         &self.rag_url
     }
@@ -153,13 +171,17 @@ impl TrustedLanConfig {
         &self.openai
     }
 
+    pub(crate) fn world_monitor(&self) -> &WorldMonitorConfig {
+        &self.world_monitor
+    }
+
     pub(crate) const fn routing_preference(&self) -> ModelRoutingPreference {
         self.routing_preference
     }
 
     pub(crate) fn configuration_identity(&self) -> String {
         let basis = format!(
-            "{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
+            "{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
             self.memory_url.as_str(),
             self.rag_url.as_str(),
             self.routing_preference.as_str(),
@@ -169,6 +191,8 @@ impl TrustedLanConfig {
             self.openai.enabled(),
             self.openai.endpoint(),
             self.openai.model(),
+            self.world_monitor.endpoint(),
+            self.world_monitor.keychain_key(),
         );
         hex::encode(Sha256::digest(basis.as_bytes()))
     }
@@ -482,6 +506,8 @@ struct RawTrustedLanConfig {
     model_routing_preference: ModelRoutingPreference,
     litellm: RawCloudProviderConfig,
     openai: RawCloudProviderConfig,
+    #[serde(default)]
+    world_monitor: RawWorldMonitorConfig,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -491,6 +517,36 @@ struct RawCloudProviderConfig {
     endpoint: String,
     model: String,
     keychain_key: String,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RawWorldMonitorConfig {
+    endpoint: String,
+    keychain_key: String,
+}
+
+impl Default for RawWorldMonitorConfig {
+    fn default() -> Self {
+        Self {
+            endpoint: buzz_command_sources_pkg::DEFAULT_WORLD_MONITOR_ENDPOINT.to_string(),
+            keychain_key: buzz_command_sources_pkg::WORLD_MONITOR_KEYCHAIN_KEY.to_string(),
+        }
+    }
+}
+
+fn validate_world_monitor(
+    raw: RawWorldMonitorConfig,
+) -> Result<WorldMonitorConfig, TrustedLanError> {
+    if raw.endpoint != buzz_command_sources_pkg::DEFAULT_WORLD_MONITOR_ENDPOINT
+        || raw.keychain_key != buzz_command_sources_pkg::WORLD_MONITOR_KEYCHAIN_KEY
+    {
+        return Err(TrustedLanError::InvalidConfig);
+    }
+    Ok(WorldMonitorConfig {
+        endpoint: raw.endpoint,
+        keychain_key: raw.keychain_key,
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

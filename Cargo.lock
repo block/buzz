@@ -1000,6 +1000,7 @@ dependencies = [
  "buzz-cli",
  "buzz-command-sources",
  "buzz-core",
+ "chrono",
  "git-credential-nostr",
  "git-sign-nostr",
  "ignore",
@@ -1018,6 +1019,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "url",
  "windows-sys 0.61.2",
  "zeroize",
 ]

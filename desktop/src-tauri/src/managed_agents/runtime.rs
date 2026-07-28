@@ -25,6 +25,7 @@ pub(crate) use lmstudio::trusted_lmstudio_runtime_facts;
 pub(crate) use lmstudio::{apply_runtime_security_env, runtime_inherited_env_keys_to_remove};
 
 mod env;
+use env::child_rust_log_filter;
 pub(crate) use env::runtime_metadata_env_vars;
 
 mod stop;
@@ -33,6 +34,8 @@ pub use stop::{stop_managed_agent_process, stop_managed_agent_workspace_pair};
 
 mod sweep;
 pub(crate) use sweep::sweep_untracked_bundle_harnesses;
+
+mod command_adviser;
 
 type RespondToEnv = (Vec<(&'static str, String)>, Vec<&'static str>);
 
@@ -2019,6 +2022,7 @@ pub fn spawn_agent_child(
             command.env("LM_STUDIO_API_TOKEN", token);
         }
     }
+    command_adviser::apply_source_env(&mut command, app, record.persona_id.as_deref());
     configure_runtime_cli(&mut command, runtime_meta);
 
     // Buzz shared compute is stored as a native provider; derive the OpenAI-compatible
@@ -2113,14 +2117,6 @@ pub fn spawn_agent_child(
         adapter_availability: spawned_adapter_availability,
         start_nonce,
     })
-}
-
-fn child_rust_log_filter() -> String {
-    match std::env::var("RUST_LOG") {
-        Ok(existing) if existing.contains("buzz_acp") => existing,
-        Ok(existing) if !existing.trim().is_empty() => format!("{existing},buzz_acp=info"),
-        _ => "buzz_acp=info".to_string(),
-    }
 }
 
 pub fn start_managed_agent_process(

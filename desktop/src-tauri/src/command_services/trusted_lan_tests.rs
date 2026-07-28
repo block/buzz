@@ -59,6 +59,14 @@ fn routing_preference_defaults_local_and_accepts_cloud_first() {
         legacy.configuration_identity(),
         parsed.configuration_identity()
     );
+    assert_eq!(
+        legacy.world_monitor().endpoint(),
+        "https://api.worldmonitor.app/mcp"
+    );
+    assert_eq!(
+        legacy.world_monitor().keychain_key(),
+        "command.world-monitor.api-key"
+    );
 }
 
 #[test]
@@ -97,6 +105,7 @@ fn routing_preference_save_is_atomic_protected_and_preserves_routes() {
         after.openai().keychain_key(),
         before.openai().keychain_key()
     );
+    assert_eq!(after.world_monitor(), before.world_monitor());
     assert_eq!(
         std::fs::metadata(&path)
             .expect("saved config metadata")

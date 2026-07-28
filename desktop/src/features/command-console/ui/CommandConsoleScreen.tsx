@@ -8,6 +8,7 @@ import { CommandAdviserHero } from "./CommandAdviserHero";
 import { CommandTeamStrip } from "./CommandTeamStrip";
 import { DailyCommandBrief } from "./DailyCommandBrief";
 import { ModelRoutingControls } from "./ModelRoutingControls";
+import { WorldMonitorConnectionCard } from "./WorldMonitorConnectionCard";
 
 const ACTIVE_BRIEF_STATES = new Set([
   "queued",
@@ -88,6 +89,8 @@ export function CommandConsoleScreen({
             </p>
           </div>
         </section>
+
+        <WorldMonitorConnectionCard />
 
         <DailyCommandBrief
           busy={commandBrief.busy}

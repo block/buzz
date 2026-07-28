@@ -26,6 +26,67 @@ export type CommandBriefScheduleUpdate = {
 
 export type ModelRoutingPreference = "cloud_first" | "local_first";
 
+export type WorldMonitorConnection = {
+  readonly endpoint: string;
+  readonly status:
+    | "not_configured"
+    | "configured"
+    | "connected"
+    | "unavailable"
+    | "unauthorised"
+    | "quota_limited";
+  readonly briefUsed: number;
+  readonly briefLimit: 25;
+  readonly directUsed: number;
+  readonly directLimit: 25;
+};
+
+const WORLD_MONITOR_STATUSES = new Set([
+  "not_configured",
+  "configured",
+  "connected",
+  "unavailable",
+  "unauthorised",
+  "quota_limited",
+]);
+
+export function parseWorldMonitorConnection(
+  value: unknown,
+): WorldMonitorConnection {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, [
+      "endpoint",
+      "status",
+      "briefUsed",
+      "briefLimit",
+      "directUsed",
+      "directLimit",
+    ]) ||
+    value.endpoint !== "https://api.worldmonitor.app/mcp" ||
+    typeof value.status !== "string" ||
+    !WORLD_MONITOR_STATUSES.has(value.status) ||
+    !Number.isSafeInteger(value.briefUsed) ||
+    (value.briefUsed as number) < 0 ||
+    (value.briefUsed as number) > 25 ||
+    value.briefLimit !== 25 ||
+    !Number.isSafeInteger(value.directUsed) ||
+    (value.directUsed as number) < 0 ||
+    (value.directUsed as number) > 25 ||
+    value.directLimit !== 25
+  ) {
+    return invalidResponse();
+  }
+  return Object.freeze({
+    endpoint: value.endpoint,
+    status: value.status as WorldMonitorConnection["status"],
+    briefUsed: value.briefUsed as number,
+    briefLimit: 25,
+    directUsed: value.directUsed as number,
+    directLimit: 25,
+  });
+}
+
 function parseModelRoutingPreference(value: unknown): ModelRoutingPreference {
   if (
     !isRecord(value) ||
@@ -138,5 +199,31 @@ export async function setModelRoutingPreference(
 ): Promise<ModelRoutingPreference> {
   return parseModelRoutingPreference(
     await invokeTauri<unknown>("set_model_routing_preference", { preference }),
+  );
+}
+
+export async function getWorldMonitorConnection(): Promise<WorldMonitorConnection> {
+  return parseWorldMonitorConnection(
+    await invokeTauri<unknown>("get_world_monitor_connection"),
+  );
+}
+
+export async function saveWorldMonitorApiKey(
+  apiKey: string,
+): Promise<WorldMonitorConnection> {
+  return parseWorldMonitorConnection(
+    await invokeTauri<unknown>("save_world_monitor_api_key", { apiKey }),
+  );
+}
+
+export async function removeWorldMonitorApiKey(): Promise<WorldMonitorConnection> {
+  return parseWorldMonitorConnection(
+    await invokeTauri<unknown>("remove_world_monitor_api_key"),
+  );
+}
+
+export async function testWorldMonitorConnection(): Promise<WorldMonitorConnection> {
+  return parseWorldMonitorConnection(
+    await invokeTauri<unknown>("test_world_monitor_connection"),
   );
 }

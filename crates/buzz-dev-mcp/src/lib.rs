@@ -10,6 +10,7 @@ use rmcp::{
 use std::path::Path;
 use std::sync::Arc;
 
+mod command_adviser;
 mod paths;
 mod read_file;
 mod rg;
@@ -25,15 +26,20 @@ struct DevMcp {
     state: Arc<shell::SharedState>,
     todos: Arc<todo::TodoState>,
     tool_router: ToolRouter<DevMcp>,
+    command_adviser: Option<command_adviser::CommandAdviserTools>,
 }
 
 #[tool_router]
 impl DevMcp {
-    fn new(state: Arc<shell::SharedState>) -> Self {
+    fn new(
+        state: Arc<shell::SharedState>,
+        command_adviser: Option<command_adviser::CommandAdviserTools>,
+    ) -> Self {
         Self {
             state,
             todos: Arc::new(todo::TodoState::new()),
             tool_router: Self::tool_router(),
+            command_adviser,
         }
     }
 
@@ -121,6 +127,165 @@ impl DevMcp {
     ) -> Result<CallToolResult, ErrorData> {
         todo::text_result(self.todos.post_compact())
     }
+
+    #[tool(
+        name = "search_command_doctrine",
+        description = "Search the ADF Doctrine collection for applicable guidance. Doctrine guides advice but a missing result must not prevent a reasoned assessment."
+    )]
+    async fn search_command_doctrine(
+        &self,
+        Parameters(params): Parameters<command_adviser::DoctrineParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        Ok(match &self.command_adviser {
+            Some(tools) => tools.search_doctrine(params).await,
+            None => CallToolResult::error(vec![rmcp::model::Content::text(
+                "Command knowledge is unavailable; continue with available evidence.",
+            )]),
+        })
+    }
+
+    #[tool(
+        name = "search_command_knowledge",
+        description = "Search selected Command Adviser knowledge collections after checking applicable doctrine."
+    )]
+    async fn search_command_knowledge(
+        &self,
+        Parameters(params): Parameters<command_adviser::KnowledgeParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        Ok(match &self.command_adviser {
+            Some(tools) => tools.search_knowledge(params).await,
+            None => CallToolResult::error(vec![rmcp::model::Content::text(
+                "Command knowledge is unavailable; continue with available evidence.",
+            )]),
+        })
+    }
+
+    #[tool(
+        name = "world_monitor_country_risk",
+        description = "Retrieve World Monitor country risk for the Maritime N2."
+    )]
+    async fn world_monitor_country_risk(
+        &self,
+        Parameters(params): Parameters<command_adviser::CountryParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        Ok(self
+            .world_monitor_call(
+                buzz_command_sources::world_monitor::WorldMonitorTool::CountryRisk,
+                command_adviser::country_arguments(params),
+            )
+            .await)
+    }
+
+    #[tool(
+        name = "world_monitor_conflict_events",
+        description = "Retrieve bounded conflict events for the Maritime N2."
+    )]
+    async fn world_monitor_conflict_events(
+        &self,
+        Parameters(params): Parameters<command_adviser::CountryListParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        Ok(self
+            .world_monitor_call(
+                buzz_command_sources::world_monitor::WorldMonitorTool::ConflictEvents,
+                command_adviser::country_list_arguments(params),
+            )
+            .await)
+    }
+
+    #[tool(
+        name = "world_monitor_military_posture",
+        description = "Retrieve military posture evidence for the Maritime N2."
+    )]
+    async fn world_monitor_military_posture(
+        &self,
+        Parameters(params): Parameters<command_adviser::RegionalParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        Ok(self
+            .world_monitor_call(
+                buzz_command_sources::world_monitor::WorldMonitorTool::MilitaryPosture,
+                command_adviser::regional_arguments(params),
+            )
+            .await)
+    }
+
+    #[tool(
+        name = "world_monitor_news_intelligence",
+        description = "Retrieve curated news intelligence for the Maritime N2."
+    )]
+    async fn world_monitor_news_intelligence(
+        &self,
+        Parameters(params): Parameters<command_adviser::NewsParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        Ok(self
+            .world_monitor_call(
+                buzz_command_sources::world_monitor::WorldMonitorTool::NewsIntelligence,
+                command_adviser::news_arguments(params),
+            )
+            .await)
+    }
+
+    #[tool(
+        name = "world_monitor_maritime_activity",
+        description = "Retrieve maritime activity evidence for the Maritime N2."
+    )]
+    async fn world_monitor_maritime_activity(
+        &self,
+        Parameters(params): Parameters<command_adviser::RegionalParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        Ok(self
+            .world_monitor_call(
+                buzz_command_sources::world_monitor::WorldMonitorTool::MaritimeActivity,
+                command_adviser::regional_arguments(params),
+            )
+            .await)
+    }
+
+    #[tool(
+        name = "world_monitor_chokepoint_status",
+        description = "Retrieve maritime chokepoint status for the Maritime N2."
+    )]
+    async fn world_monitor_chokepoint_status(
+        &self,
+        Parameters(params): Parameters<command_adviser::ChokepointParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        Ok(self
+            .world_monitor_call(
+                buzz_command_sources::world_monitor::WorldMonitorTool::ChokepointStatus,
+                command_adviser::chokepoint_arguments(params),
+            )
+            .await)
+    }
+
+    #[tool(
+        name = "world_monitor_supply_chain_data",
+        description = "Retrieve supply-chain evidence for the Maritime N2 and Logistics Adviser."
+    )]
+    async fn world_monitor_supply_chain_data(
+        &self,
+        Parameters(params): Parameters<command_adviser::RegionalParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        Ok(self
+            .world_monitor_call(
+                buzz_command_sources::world_monitor::WorldMonitorTool::SupplyChainData,
+                command_adviser::regional_arguments(params),
+            )
+            .await)
+    }
+}
+
+impl DevMcp {
+    async fn world_monitor_call(
+        &self,
+        tool: buzz_command_sources::world_monitor::WorldMonitorTool,
+        arguments: serde_json::Value,
+    ) -> CallToolResult {
+        match &self.command_adviser {
+            Some(tools) => tools.world_monitor(tool, arguments).await,
+            None => CallToolResult::error(vec![rmcp::model::Content::text(
+                "World Monitor is not configured; continue with available evidence.",
+            )]),
+        }
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -176,11 +341,12 @@ async fn async_main(cmd: String) -> Result<(), Box<dyn std::error::Error>> {
         .with_ansi(false)
         .init();
 
+    let command_adviser = command_adviser::CommandAdviserTools::from_env();
     let cwd = std::env::current_dir()?;
     let shim = shim::Shim::install()?;
     let state = Arc::new(shell::SharedState::new(cwd, shim)?);
 
-    let service = DevMcp::new(state).serve(stdio()).await?;
+    let service = DevMcp::new(state, command_adviser).serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
 }
