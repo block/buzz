@@ -66,7 +66,7 @@ test("open agent access explains the available access before save", async ({
   const warning = page.getByTestId("agent-access-warning");
   await expect(warning).toBeVisible();
   await expect(warning).toContainText(
-    "Anyone can use this agent to access the computer or server where it runs, including files, accounts, and tools available to the agent.",
+    "Anyone will be able to access the computer or server running this agent.",
   );
 
   await waitForAnimations(page);
@@ -132,7 +132,7 @@ test("persona-backed edit warns before saving open access", async ({
   );
   await choosePersonaAccess(page, "Anyone");
   await expect(dialog.getByTestId("agent-access-warning")).toContainText(
-    "Anyone can use this agent to access the computer or server where it runs, including files, accounts, and tools available to the agent",
+    "Anyone will be able to access the computer or server running this agent",
   );
 
   const commandsBeforeSave = await page.evaluate(

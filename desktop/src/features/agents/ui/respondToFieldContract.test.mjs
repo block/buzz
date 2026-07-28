@@ -27,7 +27,7 @@ test("open agent access always renders a persistent warning", () => {
   );
   assert.match(
     respondToFieldSource,
-    /Anyone can use this agent to access the computer or server where it[\s\S]*runs, including files,[\s\S]*accounts, and tools available to the agent\./,
+    /Anyone will be able to access the computer or server running this[\s\S]*agent\./,
   );
 });
 

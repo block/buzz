@@ -179,8 +179,8 @@ export function CreateAgentRespondToField({
             className="mt-0.5 h-4 w-4 shrink-0 text-warning"
           />
           <p aria-live="polite" className="text-xs leading-5 text-warning">
-            Anyone can use this agent to access the computer or server where it
-            runs, including files, accounts, and tools available to the agent.
+            Anyone will be able to access the computer or server running this
+            agent.
           </p>
         </div>
       ) : (
