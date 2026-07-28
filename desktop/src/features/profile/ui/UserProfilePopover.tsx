@@ -237,7 +237,8 @@ export function UserProfilePopover({
       relayAgentsQuery.isPending ||
       managedAgentsQuery.isPending ||
       usersBatchQuery.isPending);
-  const displayName = profile?.displayName ?? truncatePubkey(pubkey);
+  const displayName =
+    profile?.displayName ?? profile?.name ?? truncatePubkey(pubkey);
   // Owner signal mirrors UserProfilePanel: a declared NIP-OA owner whose agent
   // runs elsewhere holds no local seckey, so key custody (`isOwner`) alone
   // wrongly hides the affordance from them — and gating on bot-ness alone shows
@@ -431,6 +432,7 @@ export function UserProfilePopover({
         (await openDmMutation.mutateAsync({ pubkeys: [pubkey] }));
       const senderName =
         selfProfileQuery.data?.displayName?.trim() ||
+        selfProfileQuery.data?.name?.trim() ||
         identity.displayName.trim() ||
         truncatePubkey(identity.pubkey);
       const content = buildWaveMessageContent(senderName);
@@ -503,6 +505,7 @@ export function UserProfilePopover({
     pubkey,
     queryClient,
     selfProfileQuery.data?.displayName,
+    selfProfileQuery.data?.name,
     showHumanProfileActions,
     showProfileActions,
   ]);

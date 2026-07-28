@@ -19,7 +19,10 @@ type RawProfile = {
   has_profile_event?: boolean;
 };
 
-type RawUserProfileSummary = Omit<RawProfile, "pubkey" | "about"> & {
+type RawUserProfileSummary = Omit<
+  RawProfile,
+  "pubkey" | "name" | "about" | "has_profile_event"
+> & {
   name?: string | null;
   is_agent?: boolean;
 };

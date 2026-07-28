@@ -292,7 +292,6 @@ pub fn profile_info_from_event(event: &Event) -> Result<ProfileInfo, String> {
     let display_name = v
         .get("display_name")
         .and_then(Value::as_str)
-        .or(name.as_deref())
         .map(str::to_string);
     let avatar_url = v.get("picture").and_then(Value::as_str).map(str::to_string);
     let about = v.get("about").and_then(Value::as_str).map(str::to_string);
@@ -786,11 +785,11 @@ mod tests {
     }
 
     #[test]
-    fn profile_info_falls_back_to_name() {
+    fn profile_info_keeps_name_and_display_name_independent() {
         let e = ev(0, r#"{"name":"bob"}"#, vec![]);
         let p = profile_info_from_event(&e).unwrap();
         assert_eq!(p.name.as_deref(), Some("bob"));
-        assert_eq!(p.display_name.as_deref(), Some("bob"));
+        assert!(p.display_name.is_none());
     }
 
     #[test]

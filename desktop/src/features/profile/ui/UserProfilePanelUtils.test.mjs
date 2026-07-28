@@ -7,6 +7,8 @@ import {
   personaManagedAgentUpdate,
   profilePanelTabFromSearch,
   profilePanelViewFromSearch,
+  resolveOwnerHandle,
+  resolveProfileDisplayName,
 } from "./UserProfilePanelUtils.ts";
 
 function agent(overrides = {}) {
@@ -188,4 +190,27 @@ test("profilePanelTabFromSearch falls back to info for invalid values", () => {
   assert.equal(parseProfilePanelTab("missing"), null);
   assert.equal(profilePanelTabFromSearch("missing"), "info");
   assert.equal(profilePanelTabFromSearch(null), "info");
+});
+
+test("profile labels fall back to the independent Nostr name field", () => {
+  const profile = {
+    pubkey: "deadbeef".repeat(8),
+    name: "legacy-name",
+    displayName: null,
+    avatarUrl: null,
+    about: null,
+    nip05Handle: null,
+    ownerPubkey: null,
+    hasProfileEvent: true,
+  };
+
+  assert.equal(
+    resolveProfileDisplayName({
+      persona: undefined,
+      profile,
+      pubkey: profile.pubkey,
+    }),
+    "legacy-name",
+  );
+  assert.equal(resolveOwnerHandle(profile, profile.pubkey), "legacy-name");
 });

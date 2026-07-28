@@ -5839,7 +5839,7 @@ async function handleGetProfile(config: E2eConfig | undefined) {
   return {
     pubkey: identity.pubkey,
     name: content.name ?? null,
-    display_name: content.display_name ?? content.name ?? null,
+    display_name: content.display_name ?? null,
     about: content.about ?? null,
     avatar_url: content.picture ?? null,
     nip05_handle: content.nip05 ?? null,
@@ -5995,7 +5995,7 @@ async function handleGetUserProfile(
   return {
     pubkey: targetPubkey,
     name: content.name ?? null,
-    display_name: content.display_name ?? content.name ?? null,
+    display_name: content.display_name ?? null,
     about: content.about ?? null,
     avatar_url: content.picture ?? null,
     nip05_handle: content.nip05 ?? null,

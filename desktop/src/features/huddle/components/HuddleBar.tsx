@@ -390,6 +390,7 @@ export function HuddleBar({
     () =>
       clampReactionName(
         profileQuery.data?.displayName?.trim() ||
+          profileQuery.data?.name?.trim() ||
           identityQuery.data?.displayName?.trim() ||
           fallbackNameForPubkey(currentPubkey),
       ),
@@ -397,6 +398,7 @@ export function HuddleBar({
       currentPubkey,
       identityQuery.data?.displayName,
       profileQuery.data?.displayName,
+      profileQuery.data?.name,
     ],
   );
 

@@ -534,7 +534,7 @@ export function useUpdateProfileMutation() {
         await updateCachedChannelMemberDisplayName(
           queryClient,
           pubkey,
-          profile.displayName,
+          profile.displayName ?? profile.name,
         );
 
         // Own author labels/avatars render through the users-batch delta
