@@ -241,6 +241,45 @@ test("@ trigger prioritizes channel members before runnable personas and other m
   expect(fizzIndex).toBeLessThan(charlieIndex);
 });
 
+test("sending an exact agent mention at the end preserves its pubkey tag", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: TEST_IDENTITIES.charlie.pubkey,
+        name: "charlie",
+        status: "running",
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const input = page.getByTestId("message-input");
+  await input.fill("Can you check this @charlie");
+  await expect(autocomplete(page)).toBeVisible();
+  await page.getByTestId("send-message").click();
+
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const events = (
+          window as Window & {
+            __BUZZ_E2E_SIGNED_EVENTS__?: Array<{
+              content: string;
+              tags: string[][];
+            }>;
+          }
+        ).__BUZZ_E2E_SIGNED_EVENTS__;
+        return events?.find((event) => event.content.endsWith("@charlie"))
+          ?.tags;
+      }),
+    )
+    .toContainEqual(["p", TEST_IDENTITIES.charlie.pubkey]);
+});
+
 test("thread autocomplete keeps multiple long names readable in a narrow panel", async ({
   page,
 }) => {

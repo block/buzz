@@ -153,3 +153,16 @@ export function getMentionOffset(text: string, name: string): number | null {
 export function hasMention(text: string, name: string): boolean {
   return getMentionOffset(text, name) !== null;
 }
+
+export function hasUnambiguousMention(
+  text: string,
+  name: string,
+  knownNames: readonly string[],
+): boolean {
+  const normalizedName = name.trim().toLowerCase();
+  const matchingNames = knownNames.filter(
+    (candidate) => candidate.trim().toLowerCase() === normalizedName,
+  );
+
+  return matchingNames.length === 1 && hasMention(text, name);
+}
