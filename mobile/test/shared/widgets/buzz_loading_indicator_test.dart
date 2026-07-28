@@ -1,17 +1,20 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/buzz_loading_indicator.dart';
 
 Widget _testable({required bool disableAnimations}) {
-  return MaterialApp(
-    theme: AppTheme.light(),
-    home: MediaQuery(
-      data: const MediaQueryData().copyWith(
-        disableAnimations: disableAnimations,
-      ),
-      child: const Scaffold(
-        body: BuzzLoadingIndicator(semanticLabel: 'Loading photos'),
+  return ProviderScope(
+    child: MaterialApp(
+      theme: AppTheme.light(),
+      home: MediaQuery(
+        data: const MediaQueryData().copyWith(
+          disableAnimations: disableAnimations,
+        ),
+        child: const Scaffold(
+          body: BuzzLoadingIndicator(semanticLabel: 'Loading photos'),
+        ),
       ),
     ),
   );
