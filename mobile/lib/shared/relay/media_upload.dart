@@ -64,6 +64,9 @@ const _maxFileSizeBytes = 100 * 1024 * 1024; // 100MB
 const _mediaPolicyUploadMessage = "We couldn't prepare this image for upload.";
 
 typedef PickGalleryImage = Future<XFile?> Function();
+
+/// Selects multiple gallery images for upload in picker order.
+typedef PickGalleryImages = Future<List<XFile>> Function();
 typedef PickGalleryVideo = Future<XFile?> Function();
 typedef PickAttachmentFile = Future<XFile?> Function();
 typedef SanitizeImageBytes =
@@ -172,6 +175,7 @@ class MediaUploadService {
   final String _baseUrl;
   final String? _nsec;
   final PickGalleryImage _pickGalleryImage;
+  final PickGalleryImages _pickGalleryImages;
   final PickGalleryVideo _pickGalleryVideo;
   final PickAttachmentFile? _pickAttachmentFile;
   final SanitizeImageBytes _sanitizeImageBytes;
@@ -186,6 +190,7 @@ class MediaUploadService {
     required String baseUrl,
     required String? nsec,
     required PickGalleryImage pickGalleryImage,
+    PickGalleryImages? pickGalleryImages,
     required PickGalleryVideo pickGalleryVideo,
     PickAttachmentFile? pickAttachmentFile,
     SanitizeImageBytes? sanitizeImageBytes,
@@ -197,6 +202,12 @@ class MediaUploadService {
   }) : _baseUrl = baseUrl,
        _nsec = nsec,
        _pickGalleryImage = pickGalleryImage,
+       _pickGalleryImages =
+           pickGalleryImages ??
+           (() async {
+             final image = await pickGalleryImage();
+             return image == null ? const <XFile>[] : [image];
+           }),
        _pickGalleryVideo = pickGalleryVideo,
        _pickAttachmentFile = pickAttachmentFile,
        _sanitizeImageBytes = sanitizeImageBytes ?? _sanitizePickedImageBytes,
@@ -219,6 +230,9 @@ class MediaUploadService {
     if (pickedImage == null) return null;
     return uploadImage(pickedImage);
   }
+
+  /// Opens the system picker with multi-selection enabled.
+  Future<List<XFile>> pickGalleryImages() => _pickGalleryImages();
 
   Future<BlobDescriptor> uploadImage(XFile image) async {
     final preparedImage = await _prepareUploadImage(image);
@@ -243,9 +257,11 @@ class MediaUploadService {
     return uploadImage(XFile.fromData(bytes));
   }
 
-  Future<BlobDescriptor?> pickAndUploadVideo() async {
-    final pickedVideo = await _pickGalleryVideo();
-    if (pickedVideo == null) return null;
+  /// Opens the system gallery video picker.
+  Future<XFile?> pickGalleryVideo() => _pickGalleryVideo();
+
+  /// Sanitizes and uploads [pickedVideo] as an MP4 attachment.
+  Future<BlobDescriptor> uploadVideo(XFile pickedVideo) async {
     final length = await pickedVideo.length();
     if (length > _maxVideoSizeBytes) {
       throw Exception(
@@ -278,14 +294,23 @@ class MediaUploadService {
     }
   }
 
-  Future<BlobDescriptor?> pickAndUploadFile() async {
+  Future<BlobDescriptor?> pickAndUploadVideo() async {
+    final pickedVideo = await pickGalleryVideo();
+    if (pickedVideo == null) return null;
+    return uploadVideo(pickedVideo);
+  }
+
+  /// Opens the system document picker for a generic file attachment.
+  Future<XFile?> pickAttachmentFile() async {
     final pickAttachmentFile = _pickAttachmentFile;
     if (pickAttachmentFile == null) {
       throw Exception("File attachments aren't available on this device.");
     }
-    final pickedFile = await pickAttachmentFile();
-    if (pickedFile == null) return null;
+    return pickAttachmentFile();
+  }
 
+  /// Uploads [pickedFile] as a size-limited generic attachment.
+  Future<BlobDescriptor> uploadFile(XFile pickedFile) async {
     final length = await pickedFile.length();
     if (length == 0) {
       throw Exception('File is empty.');
@@ -302,6 +327,12 @@ class MediaUploadService {
       allowGenericFile: true,
     );
     return descriptor.withFilename(_safeAttachmentFilename(pickedFile.name));
+  }
+
+  Future<BlobDescriptor?> pickAndUploadFile() async {
+    final pickedFile = await pickAttachmentFile();
+    if (pickedFile == null) return null;
+    return uploadFile(pickedFile);
   }
 
   Future<BlobDescriptor> uploadBytes(
@@ -781,6 +812,7 @@ final mediaUploadServiceProvider = Provider<MediaUploadService>((ref) {
       source: ImageSource.gallery,
       requestFullMetadata: false,
     ),
+    pickGalleryImages: () => picker.pickMultiImage(requestFullMetadata: false),
     pickGalleryVideo: () => picker.pickVideo(source: ImageSource.gallery),
     pickAttachmentFile: file_selector.openFile,
   );

@@ -68,10 +68,12 @@ export function useHomePersonalInbox({
     viewportWidthPx,
   ]);
 
+  // Drafts are only listed (and selectable) under the dedicated Drafts
+  // filter — they never appear in the mixed All view.
   const drafts = useHomeDrafts({
     autoSelect: isDrafts,
     isNarrowHomeViewport,
-    selectionEnabled: isDrafts || allowMixedSelection,
+    selectionEnabled: isDrafts,
     viewportWidthPx,
   });
 

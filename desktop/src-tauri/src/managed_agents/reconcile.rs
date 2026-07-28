@@ -32,12 +32,16 @@ use nostr::JsonUtil;
 /// Reconcile `managed-agents.json` into kind:30177 events in the retention
 /// store. Boot-time entry point, called from `event_sync::run_event_sync`
 /// after the persona and team legs.
-pub(crate) fn reconcile_agents_to_events(app: &tauri::AppHandle, keys: &nostr::Keys) {
+pub(crate) fn reconcile_agents_to_events(
+    app: &tauri::AppHandle,
+    keys: &nostr::Keys,
+    db_path: &Path,
+) {
     let Ok(base_dir) = super::managed_agents_base_dir(app) else {
         return;
     };
 
-    match reconcile_agents_in_dir(&base_dir, keys) {
+    match reconcile_agents_in_dir_at(&base_dir, keys, db_path) {
         Ok(0) => {}
         Ok(reconciled) => {
             eprintln!(
@@ -61,7 +65,16 @@ pub(crate) fn reconcile_agents_to_events(app: &tauri::AppHandle, keys: &nostr::K
 /// never churns `pending_sync`.
 ///
 /// Returns the number of agents (re)written to the retention store.
+#[cfg(test)]
 pub(crate) fn reconcile_agents_in_dir(base_dir: &Path, keys: &nostr::Keys) -> Result<u32, String> {
+    reconcile_agents_in_dir_at(base_dir, keys, &base_dir.join("retention.db"))
+}
+
+fn reconcile_agents_in_dir_at(
+    base_dir: &Path,
+    keys: &nostr::Keys,
+    db_path: &Path,
+) -> Result<u32, String> {
     let store_path = base_dir.join("managed-agents.json");
     if !store_path.exists() {
         return Ok(0);
@@ -79,9 +92,8 @@ pub(crate) fn reconcile_agents_in_dir(base_dir: &Path, keys: &nostr::Keys) -> Re
         return Ok(0);
     }
 
-    let db_path = base_dir.join("retention.db");
     let conn =
-        open_retention_db(&db_path).map_err(|e| format!("failed to open retention db: {e}"))?;
+        open_retention_db(db_path).map_err(|e| format!("failed to open retention db: {e}"))?;
 
     let mut reconciled = 0u32;
 

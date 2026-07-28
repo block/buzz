@@ -4,6 +4,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
+import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
 import '../channels/message_content.dart';
@@ -76,10 +77,15 @@ class ComposeNotePage extends HookConsumerWidget {
                 shape: const StadiumBorder(),
               ),
               child: isSending.value
-                  ? const SizedBox(
+                  ? SizedBox(
                       width: 16,
                       height: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2),
+                      child: BuzzLoadingIndicator(
+                        size: 16,
+                        semanticLabel: _isReply
+                            ? 'Sending reply'
+                            : 'Publishing post',
+                      ),
                     )
                   : Text(_isReply ? 'Reply' : 'Post'),
             ),
