@@ -190,6 +190,26 @@ impl WorkflowDef {
                     step.id
                 )));
             }
+
+            // Temporary guard: reject actions that are not yet fully implemented.
+            // This surfaces the gap at definition time (YAML import / REST ingest)
+            // instead of failing at runtime with WorkflowError::NotImplemented.
+            // Each action is removed from this guard as it is completed.
+            match &step.action {
+                ActionDef::SendDm { .. } => {
+                    return Err(WorkflowError::InvalidDefinition(format!(
+                        "step '{}' uses 'send_dm' which is not yet implemented",
+                        step.id
+                    )));
+                }
+                ActionDef::SetChannelTopic { .. } => {
+                    return Err(WorkflowError::InvalidDefinition(format!(
+                        "step '{}' uses 'set_channel_topic' which is not yet implemented",
+                        step.id
+                    )));
+                }
+                _ => {}
+            }
         }
 
         if let TriggerDef::Schedule { cron, interval } = &self.trigger {
@@ -335,43 +355,40 @@ mod tests {
     fn parse_all_action_types() {
         // Avoid "# in YAML values (would close r# raw strings).
         // Use unquoted or single-quoted YAML values throughout.
+        // Note: send_dm and set_channel_topic are excluded here because validate()
+        // rejects them as not-yet-implemented. They have dedicated parse tests
+        // below (parse_send_dm_action, parse_set_channel_topic_action) that use
+        // serde_yaml directly to verify parsing without the validate() guard.
         let yaml = concat!(
             "name: All Actions\n",
             "trigger:\n  on: webhook\n",
             "steps:\n",
             "  - id: msg\n    action: send_message\n    text: Hello\n    channel: general\n",
-            "  - id: dm\n    action: send_dm\n    to: '{{trigger.author}}'\n    text: You triggered this\n",
-            "  - id: topic\n    action: set_channel_topic\n    topic: Status active\n",
             "  - id: react\n    action: add_reaction\n    emoji: white_check_mark\n",
             "  - id: hook\n    action: call_webhook\n    url: https://hooks.example.com/notify\n    method: POST\n",
             "  - id: approve\n    action: request_approval\n    from: '@manager'\n    message: Approve?\n    timeout: 4h\n",
             "  - id: wait\n    action: delay\n    duration: 5m\n",
         );
         let (def, _) = parse_yaml(yaml).expect("parse failed");
-        assert_eq!(def.steps.len(), 7);
+        assert_eq!(def.steps.len(), 5);
 
         assert!(matches!(
             &def.steps[0].action,
             ActionDef::SendMessage { .. }
         ));
-        assert!(matches!(&def.steps[1].action, ActionDef::SendDm { .. }));
         assert!(matches!(
-            &def.steps[2].action,
-            ActionDef::SetChannelTopic { .. }
-        ));
-        assert!(matches!(
-            &def.steps[3].action,
+            &def.steps[1].action,
             ActionDef::AddReaction { .. }
         ));
         assert!(matches!(
-            &def.steps[4].action,
+            &def.steps[2].action,
             ActionDef::CallWebhook { .. }
         ));
         assert!(matches!(
-            &def.steps[5].action,
+            &def.steps[3].action,
             ActionDef::RequestApproval { .. }
         ));
-        assert!(matches!(&def.steps[6].action, ActionDef::Delay { .. }));
+        assert!(matches!(&def.steps[4].action, ActionDef::Delay { .. }));
     }
 
     #[test]
@@ -389,6 +406,44 @@ mod tests {
         );
         let (def, _) = parse_yaml(yaml).expect("parse failed");
         assert_eq!(def.steps.len(), 3);
+    }
+
+    #[test]
+    fn validate_rejects_unimplemented_send_dm() {
+        let yaml = "name: DM Test\ntrigger:\n  on: webhook\nsteps:\n  - id: dm\n    action: send_dm\n    to: abc123\n    text: hi\n";
+        let err = parse_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("send_dm"),
+            "expected send_dm rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_unimplemented_set_channel_topic() {
+        let yaml = "name: Topic Test\ntrigger:\n  on: webhook\nsteps:\n  - id: topic\n    action: set_channel_topic\n    topic: new\n";
+        let err = parse_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("set_channel_topic"),
+            "expected set_channel_topic rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_send_dm_action_via_serde() {
+        // verify serde parsing works even though validate() rejects it
+        let yaml = "name: DM Parse\ntrigger:\n  on: webhook\nsteps:\n  - id: dm\n    action: send_dm\n    to: abc123\n    text: hi\n";
+        let def: WorkflowDef = serde_yaml::from_str(yaml).expect("serde parse");
+        assert!(matches!(def.steps[0].action, ActionDef::SendDm { .. }));
+    }
+
+    #[test]
+    fn parse_set_channel_topic_action_via_serde() {
+        let yaml = "name: Topic Parse\ntrigger:\n  on: webhook\nsteps:\n  - id: topic\n    action: set_channel_topic\n    topic: new\n";
+        let def: WorkflowDef = serde_yaml::from_str(yaml).expect("serde parse");
+        assert!(matches!(
+            def.steps[0].action,
+            ActionDef::SetChannelTopic { .. }
+        ));
     }
 
     #[test]
