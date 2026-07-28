@@ -44,7 +44,7 @@ class _IOSAttachmentPopoverCoordinator {
     required VoidCallback onFiles,
   }) async {
     if (defaultTargetPlatform != TargetPlatform.iOS) return false;
-    if (_activeOwner != null) return true;
+    if (_activeOwner != null) return _didPresent;
 
     _activeOwner = owner;
     _callbacks = _IOSAttachmentPopoverCallbacks(
@@ -102,6 +102,10 @@ class _IOSAttachmentPopoverCoordinator {
     try {
       await _channel.invokeMethod<void>('dismiss');
     } on PlatformException {
+      // The native bridge is unavailable, so there is nothing left to dismiss.
+    } on MissingPluginException {
+      // The native bridge is unavailable, so there is nothing left to dismiss.
+    } finally {
       _clearOwner(owner);
     }
   }
