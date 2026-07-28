@@ -231,6 +231,7 @@ export function resolveProfileDisplayName({
 }) {
   return (
     profile?.displayName ??
+    profile?.name ??
     persona?.displayName ??
     (pubkey ? truncatePubkey(pubkey) : "Agent")
   );
@@ -246,6 +247,7 @@ export function resolveOwnerHandle(
 
   return (
     profile?.nip05Handle?.trim() ||
+    profile?.name?.trim() ||
     profile?.displayName?.trim() ||
     truncatePubkey(currentPubkey)
   );

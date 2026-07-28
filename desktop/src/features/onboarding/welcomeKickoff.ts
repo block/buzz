@@ -667,7 +667,7 @@ export function useWelcomeKickoff(
         const owner = await getProfile()
           .then((profile) => ({
             pubkey: profile.pubkey,
-            displayName: profile.displayName,
+            displayName: profile.displayName ?? profile.name,
           }))
           .catch(() => null);
         const openerResult = await sendManagedAgentChannelMessage(

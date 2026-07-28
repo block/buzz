@@ -291,10 +291,9 @@ export function CommunityOnboardingFlow({
     transaction?.stage === "finalizing" ||
     transaction?.stage === "entering";
 
-  // Seed display name and avatar from the relay profile when the profile step
-  // is shown. This covers the case where the skip raced or was bypassed (e.g.,
-  // the user navigated Back). Only seeds fields that are still empty so that
-  // any user edits are preserved.
+  // Seed profile fields from the relay when this step is shown. This covers
+  // cases where the skip raced or was bypassed (for example, after navigating
+  // Back). Only untouched fields are seeded.
   React.useEffect(() => {
     if (!isProfileStage) return;
     void getProfile()

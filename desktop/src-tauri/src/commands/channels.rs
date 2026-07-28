@@ -435,7 +435,7 @@ pub async fn get_channel_members(
                 profile_map.insert(
                     pk,
                     (
-                        profile.display_name,
+                        profile.display_name.or(profile.name),
                         nostr_convert::profile_has_valid_oa_owner(ev),
                     ),
                 );

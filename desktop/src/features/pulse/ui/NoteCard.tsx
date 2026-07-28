@@ -67,6 +67,7 @@ function ReplyParentContext({
   const parentDisplayName = parentNote
     ? (cachedProfile?.displayName ??
       fetchedProfile?.displayName ??
+      fetchedProfile?.name ??
       truncatePubkey(parentNote.pubkey))
     : null;
   const parentAvatarUrl =

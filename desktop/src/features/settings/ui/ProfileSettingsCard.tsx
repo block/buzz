@@ -398,6 +398,7 @@ export function ProfileSettingsCard({
   const resolvedName =
     nextDisplayName ||
     profile?.displayName ||
+    profile?.name ||
     fallbackDisplayName ||
     "Your profile";
   const resolvedPubkey = profile?.pubkey ?? currentPubkey ?? "Unavailable";
