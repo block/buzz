@@ -62,8 +62,10 @@ pub trait ActionSink: Send + Sync {
     fn send_message(
         &self,
         community_id: CommunityId,
+        run_id: uuid::Uuid,
         channel_id: &str,
         text: &str,
         author_pubkey: &str,
+        idempotency_key: &str,
     ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>>;
 }

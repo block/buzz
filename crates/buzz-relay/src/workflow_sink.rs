@@ -173,13 +173,16 @@ impl ActionSink for RelayActionSink {
     fn send_message(
         &self,
         community_id: CommunityId,
+        run_id: Uuid,
         channel_id: &str,
         text: &str,
         author_pubkey: &str,
+        idempotency_key: &str,
     ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>> {
         let channel_id = channel_id.to_owned();
         let text = text.to_owned();
         let author_pubkey = author_pubkey.to_owned();
+        let idempotency_key = idempotency_key.to_owned();
 
         Box::pin(async move {
             // 0. Upgrade weak reference — fails only during shutdown.
@@ -187,6 +190,20 @@ impl ActionSink for RelayActionSink {
                 .state
                 .upgrade()
                 .ok_or_else(|| ActionSinkError::Database("relay is shutting down".into()))?;
+
+            let reserved = state
+                .db
+                .reserve_workflow_action_effect(community_id, run_id, &idempotency_key)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+            if let Some(event_id) = reserved.event_id {
+                return Ok(hex::encode(event_id));
+            }
+            if !reserved.newly_reserved {
+                return Err(ActionSinkError::Database(
+                    "workflow action effect is reserved without a published event; recovery required".into(),
+                ));
+            }
 
             // The run carries its owning community (`community_id`); the
             // relay-signed kind:9 message belongs to *that* community, never the
@@ -336,8 +353,10 @@ impl ActionSink for RelayActionSink {
 
             let (stored_event, was_inserted) = state
                 .db
-                .insert_event_with_thread_metadata(
+                .insert_workflow_action_event(
                     tenant.community(),
+                    run_id,
+                    &idempotency_key,
                     &event,
                     Some(channel_uuid),
                     thread_meta,
@@ -670,12 +689,37 @@ mod integration_tests {
             .expect("add agent member");
 
         let sink = RelayActionSink::new(&state);
+        let workflow_id = state
+            .db
+            .create_workflow(
+                community,
+                Some(channel.id),
+                &author.public_key().to_bytes(),
+                "workflow-action-test",
+                r#"{"trigger":{"on":"schedule","cron":"0 0 * * *"},"steps":[]}"#,
+                &[0u8; 32],
+            )
+            .await
+            .expect("create workflow");
+        let run_id = state
+            .db
+            .create_workflow_run(community, workflow_id, None, None)
+            .await
+            .expect("create workflow run");
+        let idempotency_key = "workflow-test-action";
+        state
+            .db
+            .reserve_workflow_action_effect(community, run_id, idempotency_key)
+            .await
+            .expect("reserve workflow action effect");
         let event_id_hex = sink
             .send_message(
                 community,
+                run_id,
                 &channel.id.to_string(),
                 "heads up @Robby — please take a look",
                 &author_hex,
+                idempotency_key,
             )
             .await
             .expect("send_message");

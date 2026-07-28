@@ -461,6 +461,11 @@ pub enum StepResult {
         /// Token used to resume or reject this approval gate.
         approval_token: String,
     },
+    /// Step completed its durable scheduling boundary and should resume later.
+    Deferred {
+        /// Earliest time the next step may be claimed.
+        available_at: chrono::DateTime<chrono::Utc>,
+    },
     /// Step was skipped due to `if:` condition being false.
     Skipped,
 }
@@ -518,6 +523,7 @@ fn resolve_send_message_channel(
 /// persist state and stop the execution loop.
 pub async fn dispatch_action(
     step_id: &str,
+    idempotency_key: &str,
     action: &ActionDef,
     engine: &WorkflowEngine,
     community_id: CommunityId,
@@ -567,7 +573,14 @@ pub async fn dispatch_action(
 
             let event_id = engine
                 .action_sink()?
-                .send_message(community_id, &channel_id, text, &owner_pubkey_hex)
+                .send_message(
+                    community_id,
+                    run_id,
+                    &channel_id,
+                    text,
+                    &owner_pubkey_hex,
+                    idempotency_key,
+                )
                 .await
                 .map_err(WorkflowError::from)?;
 
@@ -670,21 +683,10 @@ pub async fn dispatch_action(
 
         Delay { duration } => {
             let secs = parse_duration_secs(duration)?;
-            // Cap delay at 270 seconds (4.5 minutes) — must be less than default_timeout_secs (300s)
-            // to avoid non-deterministic StepTimeout. Long delays (hours/days)
-            // should use the scheduled resume pattern (future work: WF-09).
-            const MAX_DELAY_SECS: u64 = 270;
-            if secs > MAX_DELAY_SECS {
-                return Err(WorkflowError::InvalidDefinition(format!(
-                    "delay exceeds maximum of {MAX_DELAY_SECS} seconds (got {secs}s); \
-                     use the scheduled resume pattern for long delays"
-                )));
-            }
             info!(run_id = %run_id, step = step_id, "Delay {duration} ({secs}s)");
-            tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
-            Ok(StepResult::Completed(
-                serde_json::json!({ "slept_secs": secs }),
-            ))
+            Ok(StepResult::Deferred {
+                available_at: chrono::Utc::now() + chrono::Duration::seconds(secs as i64),
+            })
         }
     }
 }
@@ -949,6 +951,8 @@ pub struct ExecutionResult {
     pub step_outputs: HashMap<String, JsonValue>,
     /// Execution trace: one entry per completed/skipped step.
     pub trace: Vec<JsonValue>,
+    /// Set when the run has been durably deferred until a future timestamp.
+    pub reschedule_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Execute a workflow run sequentially.
@@ -974,7 +978,40 @@ pub async fn execute_run(
     def: &WorkflowDef,
     trigger_ctx: &TriggerContext,
 ) -> Result<ExecutionResult, (WorkflowError, crate::error::PartialProgress)> {
-    // Fail fast if all concurrency permits are in use — no queuing.
+    let lease = engine
+        .db
+        .claim_specific_workflow_run(community_id, run_id, &engine.worker_id, 300)
+        .await
+        .map_err(|e| {
+            (
+                WorkflowError::from(e),
+                crate::error::PartialProgress::default(),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                WorkflowError::InvalidDefinition(
+                    "workflow run is not claimable or is owned by another worker".into(),
+                ),
+                crate::error::PartialProgress::default(),
+            )
+        })?;
+    if lease.run_id != run_id {
+        return Err((
+            WorkflowError::InvalidDefinition(
+                "claimed workflow run did not match requested run".into(),
+            ),
+            crate::error::PartialProgress::default(),
+        ));
+    }
+    engine
+        .active_leases
+        .insert((community_id, run_id), lease.clone());
+    metrics::counter!("buzz_workflow_run_claims_total").increment(1);
+    engine.start_lease_heartbeat(lease);
+
+    // Claim before checking capacity so a capacity rejection still owns a
+    // fencing lease and can be durably rescheduled by finalize_run.
     let _permit = engine.run_semaphore.try_acquire().map_err(|_| {
         (
             WorkflowError::CapacityExceeded,
@@ -982,16 +1019,9 @@ pub async fn execute_run(
         )
     })?;
 
-    engine
+    let run = engine
         .db
-        .update_workflow_run(
-            community_id,
-            run_id,
-            buzz_db::workflow::RunStatus::Running,
-            0,
-            &serde_json::json!([]),
-            None,
-        )
+        .get_workflow_run(community_id, run_id)
         .await
         .map_err(|e| {
             (
@@ -999,8 +1029,20 @@ pub async fn execute_run(
                 crate::error::PartialProgress::default(),
             )
         })?;
-
-    execute_steps(engine, community_id, run_id, def, trigger_ctx, 0, None).await
+    let start_step = run.current_step.max(0) as usize;
+    let initial_trace = run.execution_trace.as_array().cloned().unwrap_or_default();
+    let initial_outputs = outputs_from_trace(&initial_trace);
+    execute_steps(
+        engine,
+        community_id,
+        run_id,
+        def,
+        trigger_ctx,
+        start_step,
+        Some(initial_outputs),
+        Some(initial_trace),
+    )
+    .await
 }
 
 /// Resume execution from a specific step index (used for approval resume).
@@ -1024,43 +1066,47 @@ pub async fn execute_from_step(
     start_index: usize,
     initial_outputs: Option<HashMap<String, JsonValue>>,
 ) -> Result<ExecutionResult, (WorkflowError, crate::error::PartialProgress)> {
-    // Fail fast if all concurrency permits are in use — no queuing.
-    let _permit = engine.run_semaphore.try_acquire().map_err(|_| {
-        (
-            WorkflowError::CapacityExceeded,
-            crate::error::PartialProgress::default(),
-        )
-    })?;
-
-    // Mark run as Running now that we have a permit (resume from approval).
-    // Preserve the existing execution trace from pre-approval steps.
-    let existing_trace = match engine.db.get_workflow_run(community_id, run_id).await {
-        Ok(r) => r.execution_trace,
-        Err(e) => {
-            warn!(
-                run_id = %run_id,
-                "Failed to read existing trace for resume — pre-approval trace will be lost: {e}"
-            );
-            serde_json::json!([])
-        }
-    };
-    engine
+    // Claim the waiting run with a fresh fencing token only after approval.
+    let lease = engine
         .db
-        .update_workflow_run(
-            community_id,
-            run_id,
-            buzz_db::workflow::RunStatus::Running,
-            start_index as i32,
-            &existing_trace,
-            None,
-        )
+        .claim_waiting_approval_workflow_run(community_id, run_id, &engine.worker_id, 300)
         .await
         .map_err(|e| {
             (
                 WorkflowError::from(e),
                 crate::error::PartialProgress::default(),
             )
+        })?
+        .ok_or_else(|| {
+            (
+                WorkflowError::InvalidDefinition(
+                    "workflow run is not claimable or is owned by another worker".into(),
+                ),
+                crate::error::PartialProgress::default(),
+            )
         })?;
+    if lease.run_id != run_id {
+        return Err((
+            WorkflowError::InvalidDefinition(
+                "claimed workflow run did not match requested run".into(),
+            ),
+            crate::error::PartialProgress::default(),
+        ));
+    }
+    engine
+        .active_leases
+        .insert((community_id, run_id), lease.clone());
+    metrics::counter!("buzz_workflow_run_claims_total").increment(1);
+    engine.start_lease_heartbeat(lease);
+
+    // As in execute_run, keep capacity failures lease-protected so they can
+    // be persisted as retryable rather than stranded in `running`.
+    let _permit = engine.run_semaphore.try_acquire().map_err(|_| {
+        (
+            WorkflowError::CapacityExceeded,
+            crate::error::PartialProgress::default(),
+        )
+    })?;
 
     execute_steps(
         engine,
@@ -1070,8 +1116,21 @@ pub async fn execute_from_step(
         trigger_ctx,
         start_index,
         initial_outputs,
+        None,
     )
     .await
+}
+
+fn outputs_from_trace(trace: &[JsonValue]) -> HashMap<String, JsonValue> {
+    trace
+        .iter()
+        .filter_map(|entry| {
+            Some((
+                entry.get("step_id")?.as_str()?.to_owned(),
+                entry.get("output")?.clone(),
+            ))
+        })
+        .collect()
 }
 
 /// Internal: execute workflow steps starting from `start_index`, without
@@ -1080,6 +1139,7 @@ pub async fn execute_from_step(
 ///
 /// On error, returns `(WorkflowError, PartialProgress)` so callers can persist
 /// the trace of steps completed before the failure.
+#[allow(clippy::too_many_arguments)]
 async fn execute_steps(
     engine: &WorkflowEngine,
     community_id: CommunityId,
@@ -1088,9 +1148,10 @@ async fn execute_steps(
     trigger_ctx: &TriggerContext,
     start_index: usize,
     initial_outputs: Option<HashMap<String, JsonValue>>,
+    initial_trace: Option<Vec<JsonValue>>,
 ) -> Result<ExecutionResult, (WorkflowError, crate::error::PartialProgress)> {
     let mut step_outputs: HashMap<String, JsonValue> = initial_outputs.unwrap_or_default();
-    let mut trace: Vec<JsonValue> = Vec::new();
+    let mut trace: Vec<JsonValue> = initial_trace.unwrap_or_default();
 
     for (i, step) in def.steps.iter().enumerate() {
         if i < start_index {
@@ -1136,10 +1197,24 @@ async fn execute_steps(
         let timeout_secs = step
             .timeout_secs
             .unwrap_or(engine.config.default_timeout_secs);
+        let attempt = engine
+            .db
+            .start_workflow_step_attempt(community_id, run_id, i as i32, &step.id)
+            .await
+            .map_err(|e| {
+                (
+                    WorkflowError::from(e),
+                    crate::error::PartialProgress {
+                        step_index: i,
+                        trace: trace.clone(),
+                    },
+                )
+            })?;
         let dispatch_result = tokio::time::timeout(
             std::time::Duration::from_secs(timeout_secs),
             dispatch_action(
                 &step.id,
+                &attempt.idempotency_key,
                 &resolved_action,
                 engine,
                 community_id,
@@ -1152,6 +1227,24 @@ async fn execute_steps(
         let result = match dispatch_result {
             Ok(Ok(r)) => r,
             Ok(Err(e)) => {
+                let recovery = if e.to_string().contains("recovery required") {
+                    "ambiguous"
+                } else {
+                    "unknown"
+                };
+                let _ = engine
+                    .db
+                    .complete_workflow_step_attempt(
+                        community_id,
+                        run_id,
+                        i as i32,
+                        attempt.attempt,
+                        "failed",
+                        None,
+                        Some(&e.to_string()),
+                        Some(recovery),
+                    )
+                    .await;
                 let progress = crate::error::PartialProgress {
                     step_index: i,
                     trace,
@@ -1159,6 +1252,20 @@ async fn execute_steps(
                 return Err((e, progress));
             }
             Err(_timeout) => {
+                let timeout_error = format!("step {} timed out after {timeout_secs}s", step.id);
+                let _ = engine
+                    .db
+                    .complete_workflow_step_attempt(
+                        community_id,
+                        run_id,
+                        i as i32,
+                        attempt.attempt,
+                        "failed",
+                        None,
+                        Some(&timeout_error),
+                        Some("unknown"),
+                    )
+                    .await;
                 let progress = crate::error::PartialProgress {
                     step_index: i,
                     trace,
@@ -1175,6 +1282,19 @@ async fn execute_steps(
 
         match result {
             StepResult::Completed(output) => {
+                let _ = engine
+                    .db
+                    .complete_workflow_step_attempt(
+                        community_id,
+                        run_id,
+                        i as i32,
+                        attempt.attempt,
+                        "completed",
+                        Some(&output),
+                        None,
+                        None,
+                    )
+                    .await;
                 debug!(run_id = %run_id, step = %step.id, "Step completed");
                 trace.push(serde_json::json!({
                     "step_id": step.id,
@@ -1184,6 +1304,19 @@ async fn execute_steps(
                 step_outputs.insert(step.id.clone(), output);
             }
             StepResult::Suspended { approval_token } => {
+                let _ = engine
+                    .db
+                    .complete_workflow_step_attempt(
+                        community_id,
+                        run_id,
+                        i as i32,
+                        attempt.attempt,
+                        "suspended",
+                        None,
+                        None,
+                        Some("ambiguous"),
+                    )
+                    .await;
                 info!(
                     run_id = %run_id, step = %step.id,
                     "Step suspended — awaiting approval (token: <redacted>)"
@@ -1195,9 +1328,50 @@ async fn execute_steps(
                     step_index: i,
                     step_outputs,
                     trace,
+                    reschedule_at: None,
+                });
+            }
+            StepResult::Deferred { available_at } => {
+                let _ = engine
+                    .db
+                    .complete_workflow_step_attempt(
+                        community_id,
+                        run_id,
+                        i as i32,
+                        attempt.attempt,
+                        "deferred",
+                        Some(&serde_json::json!({ "available_at": available_at })),
+                        None,
+                        Some("delayed"),
+                    )
+                    .await;
+                trace.push(serde_json::json!({
+                    "step_id": step.id,
+                    "status": "deferred",
+                    "available_at": available_at,
+                }));
+                return Ok(ExecutionResult {
+                    approval_token: None,
+                    step_index: i + 1,
+                    step_outputs,
+                    trace,
+                    reschedule_at: Some(available_at),
                 });
             }
             StepResult::Skipped => {
+                let _ = engine
+                    .db
+                    .complete_workflow_step_attempt(
+                        community_id,
+                        run_id,
+                        i as i32,
+                        attempt.attempt,
+                        "skipped",
+                        None,
+                        None,
+                        None,
+                    )
+                    .await;
                 debug!(run_id = %run_id, step = %step.id, "Step skipped");
                 trace.push(serde_json::json!({
                     "step_id": step.id,
@@ -1213,6 +1387,7 @@ async fn execute_steps(
         step_index: def.steps.len(),
         step_outputs,
         trace,
+        reschedule_at: None,
     })
 }
 
@@ -1799,6 +1974,17 @@ mod tests {
         assert_eq!(ctx.emoji, "");
         assert_eq!(ctx.message_id, "");
         assert!(ctx.webhook_fields.is_empty());
+    }
+
+    #[test]
+    fn recovery_trace_reconstructs_step_outputs() {
+        let trace = vec![
+            json!({"step_id": "fetch", "status": "completed", "output": {"value": 42}}),
+            json!({"step_id": "send", "status": "deferred"}),
+        ];
+        let outputs = outputs_from_trace(&trace);
+        assert_eq!(outputs.get("fetch"), Some(&json!({"value": 42})));
+        assert!(!outputs.contains_key("send"));
     }
 
     #[test]
