@@ -99,6 +99,7 @@ export default defineConfig({
         "**/inbox-reactions.spec.ts",
         "**/send-channel-binding.spec.ts",
         "**/project-commit-detail.spec.ts",
+        "**/project-issues-board.spec.ts",
         "**/project-inbox.spec.ts",
         "**/project-pr-review.spec.ts",
         "**/persona-model-combobox-screenshots.spec.ts",

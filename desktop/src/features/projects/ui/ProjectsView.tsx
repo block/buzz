@@ -27,6 +27,7 @@ import { CreateProjectIssueDialog } from "@/features/projects/ui/CreateProjectIs
 import { CreatePullRequestDialog } from "@/features/projects/ui/CreatePullRequestDialog";
 import { ProjectsCreateMenu } from "@/features/projects/ui/ProjectsCreateMenu";
 import { ProjectsIssuesList } from "@/features/projects/ui/ProjectsIssuesList";
+import { ProjectsIssuesBoard } from "@/features/projects/ui/ProjectsIssuesBoard";
 import { ProjectsOverviewPanel } from "@/features/projects/ui/ProjectsOverviewPanel";
 import { ProjectsOverviewRail } from "@/features/projects/ui/ProjectsOverviewRail";
 import { ProjectsPullRequestsList } from "@/features/projects/ui/ProjectsPullRequestsList";
@@ -35,6 +36,7 @@ import { ProjectsListScopeDropdown } from "@/features/projects/ui/ProjectsListSc
 import { PROJECT_LIST_CONTAINER_CLASS } from "@/features/projects/ui/projectListRowStyles";
 import {
   ProjectsToolbar,
+  ProjectsIssueViewModeToggle,
   ProjectsViewModeToggle,
 } from "@/features/projects/ui/ProjectsToolbar";
 import { hasLocalCheckout } from "@/features/projects/lib/projectLocalRepos";
@@ -46,12 +48,14 @@ import {
   projectOwnerIsUser,
   projectPeople,
   type ProjectsFilter,
+  type ProjectsIssueViewMode,
   type ProjectsRepositoryScope,
   type ProjectsSort,
   type ProjectsViewMode,
   type ProjectsWorkItemScope,
   readStoredFilter,
   readStoredIssueScope,
+  readStoredIssueViewMode,
   readStoredPullRequestScope,
   readStoredRepositoryScope,
   readStoredSort,
@@ -59,6 +63,7 @@ import {
   uniqueRepositories,
   writeStoredFilter,
   writeStoredIssueScope,
+  writeStoredIssueViewMode,
   writeStoredPullRequestScope,
   writeStoredRepositoryScope,
   writeStoredSort,
@@ -161,6 +166,8 @@ export function ProjectsView() {
   const [issueScope, setIssueScope] = React.useState<ProjectsWorkItemScope>(
     () => readStoredIssueScope(),
   );
+  const [issueViewMode, setIssueViewMode] =
+    React.useState<ProjectsIssueViewMode>(() => readStoredIssueViewMode());
   const projectsWorkItemsQuery = useProjectsWorkItemsQuery(
     filter === "all" || filter === "prs" || filter === "issues" ? projects : [],
   );
@@ -256,6 +263,14 @@ export function ProjectsView() {
     (scope: ProjectsWorkItemScope) => {
       setIssueScope(scope);
       writeStoredIssueScope(scope);
+    },
+    [],
+  );
+
+  const handleIssueViewModeChange = React.useCallback(
+    (nextViewMode: ProjectsIssueViewMode) => {
+      setIssueViewMode(nextViewMode);
+      writeStoredIssueViewMode(nextViewMode);
     },
     [],
   );
@@ -505,24 +520,37 @@ export function ProjectsView() {
 
   const listControls = (
     <div className="flex flex-wrap items-center gap-2 sm:justify-end">
-      <label className="flex items-center gap-2 text-xs text-muted-foreground">
-        <span className="sr-only">Sort projects</span>
-        <select
-          className="h-8 rounded-md bg-transparent px-2 text-xs text-foreground outline-hidden hover:bg-muted/50 focus:ring-1 focus:ring-ring"
-          onChange={(event) =>
-            handleSortChange(event.target.value as ProjectsSort)
-          }
-          value={sort}
-        >
-          <option value="updated">Recent activity</option>
-          <option value="created">Created date</option>
-          <option value="name">Name</option>
-        </select>
-      </label>
-      <ProjectsViewModeToggle
-        onViewModeChange={handleViewModeChange}
-        viewMode={viewMode}
-      />
+      {filter === "issues" && issueViewMode === "board" ? (
+        <span className="text-xs text-muted-foreground">
+          Most recently touched first
+        </span>
+      ) : (
+        <label className="flex items-center gap-2 text-xs text-muted-foreground">
+          <span className="sr-only">Sort projects</span>
+          <select
+            className="h-8 rounded-md bg-transparent px-2 text-xs text-foreground outline-hidden hover:bg-muted/50 focus:ring-1 focus:ring-ring"
+            onChange={(event) =>
+              handleSortChange(event.target.value as ProjectsSort)
+            }
+            value={sort}
+          >
+            <option value="updated">Recent activity</option>
+            <option value="created">Created date</option>
+            <option value="name">Name</option>
+          </select>
+        </label>
+      )}
+      {filter === "issues" ? (
+        <ProjectsIssueViewModeToggle
+          onViewModeChange={handleIssueViewModeChange}
+          viewMode={issueViewMode}
+        />
+      ) : (
+        <ProjectsViewModeToggle
+          onViewModeChange={handleViewModeChange}
+          viewMode={viewMode}
+        />
+      )}
     </div>
   );
 
@@ -714,6 +742,22 @@ export function ProjectsView() {
                       pullRequests={visiblePullRequests}
                       viewMode={viewMode}
                     />
+                  ) : filter === "issues" && issueViewMode === "board" ? (
+                    <ProjectsIssuesBoard
+                      error={projectsWorkItemsQuery.error}
+                      failedSections={
+                        projectsWorkItemsQuery.data?.issues.failedSections ?? []
+                      }
+                      isLoading={projectsWorkItemsQuery.isLoading}
+                      isRetrying={
+                        projectsWorkItemsQuery.isFetching &&
+                        !projectsWorkItemsQuery.isLoading
+                      }
+                      issues={visibleIssues}
+                      onOpen={handleOpenIssue}
+                      onRetry={() => void projectsWorkItemsQuery.refetch()}
+                      profiles={profiles}
+                    />
                   ) : filter === "issues" ? (
                     <ProjectsIssuesList
                       error={projectsWorkItemsQuery.error}
@@ -729,7 +773,7 @@ export function ProjectsView() {
                       onOpen={handleOpenIssue}
                       onRetry={() => void projectsWorkItemsQuery.refetch()}
                       profiles={profiles}
-                      viewMode={viewMode}
+                      viewMode={issueViewMode === "grid" ? "grid" : "list"}
                     />
                   ) : (
                     repositoryItems

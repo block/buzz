@@ -4956,6 +4956,7 @@ function buildMockProjectEvents(): RelayEvent[] {
   const daySeconds = 86_400;
   const now = Math.floor(Date.now() / 1000);
   const historyDays = 26 * 7;
+  let issueOrdinal = 0;
 
   for (const [projectIndex, seed] of MOCK_PROJECT_SEEDS.entries()) {
     const owner =
@@ -5034,6 +5035,15 @@ function buildMockProjectEvents(): RelayEvent[] {
         const tags = [
           ["a", repoAddress],
           ["subject", subject],
+          ...(kind === KIND_GIT_ISSUE && issueOrdinal % 6 === 0
+            ? [["t", "triage"]]
+            : []),
+          ...(kind === KIND_GIT_ISSUE && issueOrdinal % 6 === 2
+            ? [["t", "in-progress"]]
+            : []),
+          ...(kind === KIND_GIT_ISSUE && issueOrdinal % 6 === 3
+            ? [["t", "in-review"]]
+            : []),
           ...(kind === KIND_GIT_ISSUE ? [] : [["c", commitHash]]),
           ...(kind === KIND_GIT_PULL_REQUEST
             ? [
@@ -5047,7 +5057,40 @@ function buildMockProjectEvents(): RelayEvent[] {
             : []),
         ];
 
-        events.push(createMockEvent(kind, subject, tags, author, createdAt));
+        const rootEvent = createMockEvent(
+          kind,
+          subject,
+          tags,
+          author,
+          createdAt,
+        );
+        events.push(rootEvent);
+
+        if (kind === KIND_GIT_ISSUE) {
+          const statusKind = [
+            KIND_GIT_STATUS_DRAFT,
+            null,
+            null,
+            null,
+            KIND_GIT_STATUS_MERGED,
+            KIND_GIT_STATUS_CLOSED,
+          ][issueOrdinal % 6];
+          if (statusKind !== null) {
+            events.push(
+              createMockEvent(
+                statusKind,
+                "",
+                [
+                  ["a", repoAddress],
+                  ["e", rootEvent.id, "", "root"],
+                ],
+                author,
+                createdAt + 30,
+              ),
+            );
+          }
+          issueOrdinal += 1;
+        }
       }
     }
   }

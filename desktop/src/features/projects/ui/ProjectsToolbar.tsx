@@ -1,7 +1,8 @@
-import { LayoutGrid, List } from "lucide-react";
+import { Columns3, LayoutGrid, List } from "lucide-react";
 
 import type {
   ProjectsFilter,
+  ProjectsIssueViewMode,
   ProjectsViewMode,
 } from "@/features/projects/lib/projectsViewHelpers";
 import { cn } from "@/shared/lib/cn";
@@ -47,6 +48,43 @@ export function ProjectsViewModeToggle({
       >
         <List className="h-3.5 w-3.5" />
       </Button>
+    </fieldset>
+  );
+}
+
+export function ProjectsIssueViewModeToggle({
+  viewMode,
+  onViewModeChange,
+}: {
+  viewMode: ProjectsIssueViewMode;
+  onViewModeChange: (viewMode: ProjectsIssueViewMode) => void;
+}) {
+  const options = [
+    { icon: LayoutGrid, label: "Grid layout", value: "grid" },
+    { icon: List, label: "List layout", value: "list" },
+    { icon: Columns3, label: "Board layout", value: "board" },
+  ] as const;
+
+  return (
+    <fieldset className="flex items-center rounded-lg bg-muted/30 p-0.5">
+      <legend className="sr-only">Issue layout</legend>
+      {options.map((option) => {
+        const Icon = option.icon;
+        return (
+          <Button
+            aria-label={option.label}
+            aria-pressed={viewMode === option.value}
+            className="h-7 w-7 px-0"
+            key={option.value}
+            onClick={() => onViewModeChange(option.value)}
+            size="xs"
+            type="button"
+            variant={viewMode === option.value ? "secondary" : "ghost"}
+          >
+            <Icon className="h-3.5 w-3.5" />
+          </Button>
+        );
+      })}
     </fieldset>
   );
 }

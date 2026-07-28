@@ -6,6 +6,7 @@ import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
 export type ProjectsViewMode = "grid" | "list";
+export type ProjectsIssueViewMode = ProjectsViewMode | "board";
 export type ProjectsRepositoryScope = "all" | "mine" | "local";
 export type ProjectsWorkItemScope = "all" | "mine";
 export type ProjectsFilter =
@@ -20,6 +21,7 @@ export type ProjectsFilter =
 export type ProjectsSort = "updated" | "created" | "name";
 
 const PROJECTS_VIEW_MODE_STORAGE_KEY = "buzz.projects.viewMode";
+const PROJECTS_ISSUE_VIEW_MODE_STORAGE_KEY = "buzz.projects.issueViewMode";
 const PROJECTS_FILTER_STORAGE_KEY = "buzz.projects.filter";
 const PROJECTS_REPOSITORY_SCOPE_STORAGE_KEY = "buzz.projects.repositoryScope";
 const PROJECTS_PULL_REQUEST_SCOPE_STORAGE_KEY =
@@ -41,6 +43,28 @@ export function readStoredViewMode(): ProjectsViewMode | null {
 export function writeStoredViewMode(viewMode: ProjectsViewMode) {
   try {
     globalThis.localStorage?.setItem(PROJECTS_VIEW_MODE_STORAGE_KEY, viewMode);
+  } catch {
+    // Persistence is best-effort; the in-memory toggle still works.
+  }
+}
+
+export function readStoredIssueViewMode(): ProjectsIssueViewMode {
+  try {
+    const value = globalThis.localStorage?.getItem(
+      PROJECTS_ISSUE_VIEW_MODE_STORAGE_KEY,
+    );
+    return value === "grid" || value === "board" ? value : "list";
+  } catch {
+    return "list";
+  }
+}
+
+export function writeStoredIssueViewMode(viewMode: ProjectsIssueViewMode) {
+  try {
+    globalThis.localStorage?.setItem(
+      PROJECTS_ISSUE_VIEW_MODE_STORAGE_KEY,
+      viewMode,
+    );
   } catch {
     // Persistence is best-effort; the in-memory toggle still works.
   }

@@ -7,6 +7,15 @@ export const PROJECT_ISSUE_STATUS = {
   CLOSED: "Closed",
 };
 
+export const PROJECT_ISSUE_STATUS_ORDER = Object.freeze([
+  PROJECT_ISSUE_STATUS.TRIAGE,
+  PROJECT_ISSUE_STATUS.BACKLOG,
+  PROJECT_ISSUE_STATUS.IN_PROGRESS,
+  PROJECT_ISSUE_STATUS.IN_REVIEW,
+  PROJECT_ISSUE_STATUS.DONE,
+  PROJECT_ISSUE_STATUS.CLOSED,
+]);
+
 function isNonEmptyString(value) {
   return typeof value === "string" && value.length > 0;
 }

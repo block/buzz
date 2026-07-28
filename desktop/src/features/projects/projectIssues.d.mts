@@ -41,6 +41,8 @@ export const PROJECT_ISSUE_STATUS: {
   CLOSED: "Closed";
 };
 
+export const PROJECT_ISSUE_STATUS_ORDER: readonly ProjectIssueStatus[];
+
 export function getTag(event: RelayEvent, name: string): string | undefined;
 export function getAllTags(event: RelayEvent, name: string): string[];
 export function getImetaTags(event: RelayEvent): string[][];
