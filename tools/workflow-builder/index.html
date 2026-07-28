@@ -6,18 +6,18 @@
 <title>Buzz Workflow Builder</title>
 <style>
 :root{
-  --bg:#0a0e14;--bg2:#11161d;--bg3:#1a1f29;--bg4:#222934;
-  --border:#2a313c;--border2:#384049;
-  --text:#e6edf3;--text2:#7d8590;--text3:#565f6a;
-  --accent:#2f81f7;--accent2:#3fb950;--accent3:#bc8cff;
-  --red:#f85149;--amber:#d29922;--cyan:#39d0d8;
-  --radius:10px;--radius-sm:6px;
+  --bg:#24273a;--bg2:#1e2031;--bg3:#363a4f;--bg4:#494d64;
+  --border:#494d64;--border2:#5b6078;
+  --text:#cad3f5;--text2:#b8c0e0;--text3:#939ab3;
+  --accent:#c7a0f6;--accent2:#a6da95;--accent3:#8bd5ca;
+  --red:#ed8796;--amber:#eed49f;--cyan:#91d7e3;
+  --radius:0.625rem;--radius-sm:0.5rem;
   --shadow:0 2px 8px rgba(0,0,0,.3);--shadow-lg:0 8px 24px rgba(0,0,0,.4);
-  --gradient:linear-gradient(135deg,#2f81f7,#bc8cff);
+  --gradient:linear-gradient(135deg,#c7a0f6,#8bd5ca);
 }
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text);display:flex;height:100vh;overflow:hidden;font-size:14px;-webkit-font-smoothing:antialiased}
-::selection{background:rgba(47,129,247,.3)}
+::selection{background:rgba(199,160,246,.3)}
 ::-webkit-scrollbar{width:8px;height:8px}
 ::-webkit-scrollbar-track{background:transparent}
 ::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
@@ -31,7 +31,7 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 /* ── Sidebar Header ───────────────────────────────────── */
 .sidebar-header{padding:18px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;flex-shrink:0;background:linear-gradient(180deg,var(--bg3),var(--bg2))}
 .logo{display:flex;align-items:center;gap:10px}
-.logo-icon{width:32px;height:32px;border-radius:8px;background:var(--gradient);display:flex;align-items:center;justify-content:center;font-size:18px;box-shadow:0 2px 8px rgba(47,129,247,.3)}
+.logo-icon{width:32px;height:32px;border-radius:8px;background:var(--gradient);display:flex;align-items:center;justify-content:center;font-size:18px;box-shadow:0 2px 8px rgba(199,160,246,.3)}
 .logo-text{font-size:16px;font-weight:700;letter-spacing:-.3px}
 .logo-text span{background:var(--gradient);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
 
@@ -39,12 +39,12 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 .btn{padding:7px 14px;border-radius:var(--radius-sm);font-size:13px;font-weight:600;cursor:pointer;border:1px solid var(--border2);background:var(--bg3);color:var(--text);transition:all .15s;display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
 .btn:hover{background:var(--bg4);border-color:var(--text3)}
 .btn-primary{background:var(--accent);border-color:var(--accent);color:#fff}
-.btn-primary:hover{background:#4b91f9;box-shadow:0 2px 12px rgba(47,129,247,.3)}
+.btn-primary:hover{background:#d4b3f9;box-shadow:0 2px 12px rgba(199,160,246,.3)}
 .btn-ghost{background:transparent;border-color:transparent;color:var(--text2)}
 .btn-ghost:hover{background:var(--bg3);color:var(--text)}
 .btn-sm{padding:5px 10px;font-size:12px}
 .btn-danger{color:var(--red)}
-.btn-danger:hover{background:rgba(248,81,73,.1);border-color:var(--red)}
+.btn-danger:hover{background:rgba(237,135,150,.1);border-color:var(--red)}
 
 /* ── Config Area ──────────────────────────────────────── */
 .config-area{flex:1;overflow-y:auto;padding:16px}
@@ -56,7 +56,7 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 .field label{display:block;font-size:12px;color:var(--text2);margin-bottom:5px;font-weight:500}
 .field label .req{color:var(--red);margin-left:2px}
 .field input,.field select,.field textarea{width:100%;padding:9px 12px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);font-size:13px;font-family:inherit;transition:border-color .15s,box-shadow .15s}
-.field input:focus,.field select:focus,.field textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(47,129,247,.12)}
+.field input:focus,.field select:focus,.field textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(199,160,246,.12)}
 .field textarea{resize:vertical;min-height:64px;font-family:'SF Mono','JetBrains Mono',Consolas,monospace;font-size:12px;line-height:1.5}
 .hint{font-size:11px;color:var(--text3);margin-top:4px;line-height:1.4}
 
@@ -65,7 +65,7 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 .trigger-pill{display:flex;align-items:center;gap:8px;padding:10px 12px;border-radius:var(--radius-sm);font-size:13px;font-weight:500;cursor:pointer;border:1px solid var(--border);background:var(--bg);color:var(--text2);transition:all .15s;user-select:none}
 .trigger-pill .pill-emoji{font-size:16px}
 .trigger-pill:hover:not(.active){border-color:var(--border2);color:var(--text);background:var(--bg3)}
-.trigger-pill.active{background:rgba(47,129,247,.1);border-color:var(--accent);color:var(--text)}
+.trigger-pill.active{background:rgba(199,160,246,.1);border-color:var(--accent);color:var(--text)}
 .trigger-pill.active .pill-emoji{filter:saturate(1.3)}
 
 /* ── Steps Area ───────────────────────────────────────── */
@@ -77,27 +77,27 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 /* ── Step Card ────────────────────────────────────────── */
 .step-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:12px;overflow:hidden;transition:all .2s;position:relative}
 .step-card:hover{border-color:var(--border2);box-shadow:var(--shadow)}
-.step-card.error{border-color:rgba(248,81,73,.4)}
+.step-card.error{border-color:rgba(237,135,150,.4)}
 .step-card.has-error .step-header-bar{background:var(--red)}
 
 /* Colored left border by action type */
 .step-card::before{content:'';position:absolute;left:0;top:0;bottom:0;width:3px;border-radius:3px 0 0 3px}
-.step-card[data-action="send_message"]::before{background:#2f81f7}
-.step-card[data-action="send_dm"]::before{background:#bc8cff}
-.step-card[data-action="set_channel_topic"]::before{background:#3fb950}
-.step-card[data-action="add_reaction"]::before{background:#f85149}
-.step-card[data-action="call_webhook"]::before{background:#d29922}
-.step-card[data-action="request_approval"]::before{background:#bc8cff}
-.step-card[data-action="delay"]::before{background:#565f6a}
-.step-card[data-action="query_count"]::before{background:#3fb950}
-.step-card[data-action="query_messages"]::before{background:#2f81f7}
+.step-card[data-action="send_message"]::before{background:var(--accent)}
+.step-card[data-action="send_dm"]::before{background:var(--accent3)}
+.step-card[data-action="set_channel_topic"]::before{background:var(--accent2)}
+.step-card[data-action="add_reaction"]::before{background:var(--red)}
+.step-card[data-action="call_webhook"]::before{background:var(--amber)}
+.step-card[data-action="request_approval"]::before{background:var(--accent3)}
+.step-card[data-action="delay"]::before{background:var(--text3)}
+.step-card[data-action="query_count"]::before{background:var(--accent2)}
+.step-card[data-action="query_messages"]::before{background:var(--accent)}
 
 .step-header{display:flex;align-items:center;gap:10px;padding:12px 14px;cursor:grab;user-select:none}
 .step-header:active{cursor:grabbing}
 .step-num{width:26px;height:26px;border-radius:7px;background:var(--bg4);color:var(--text2);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex-shrink:0;transition:all .15s}
 .step-card:hover .step-num{background:var(--accent);color:#fff}
 .step-id{flex:1;font-size:13px;font-weight:600;outline:none;border-radius:4px;padding:2px 4px;margin:-2px -4px}
-.step-id:focus{background:var(--bg);box-shadow:0 0 0 2px rgba(47,129,247,.3)}
+.step-id:focus{background:var(--bg);box-shadow:0 0 0 2px rgba(199,160,246,.3)}
 .step-action-badge{display:flex;align-items:center;gap:5px;padding:4px 10px;border-radius:99px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;white-space:nowrap}
 .step-body{padding:0 14px 14px;animation:fadeIn .2s ease}
 @keyframes fadeIn{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
@@ -108,7 +108,7 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 .add-step-menu{padding:12px 20px;border-top:1px solid var(--border);flex-shrink:0;display:flex;flex-wrap:wrap;gap:6px;background:var(--bg2)}
 .add-step-label{font-size:11px;color:var(--text3);align-self:center;margin-right:2px;font-weight:600;text-transform:uppercase;letter-spacing:.5px}
 .add-step-btn{padding:6px 11px;border-radius:99px;font-size:12px;font-weight:500;cursor:pointer;border:1px solid var(--border);background:var(--bg);color:var(--text2);transition:all .15s}
-.add-step-btn:hover{border-color:var(--accent);color:var(--accent);background:rgba(47,129,247,.05);transform:translateY(-1px)}
+.add-step-btn:hover{border-color:var(--accent);color:var(--accent);background:rgba(199,160,246,.05);transform:translateY(-1px)}
 
 /* ── YAML Panel ───────────────────────────────────────── */
 .yaml-header{padding:14px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;flex-shrink:0;background:linear-gradient(180deg,var(--bg3),var(--bg2))}

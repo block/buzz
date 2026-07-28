@@ -6,14 +6,14 @@
 <title>Buzz Ops Dashboard</title>
 <style>
 :root{
-  --bg:#0a0e14;--bg2:#11161d;--bg3:#1a1f29;--bg4:#222934;
-  --border:#2a313c;--border2:#384049;
-  --text:#e6edf3;--text2:#7d8590;--text3:#565f6a;
-  --accent:#2f81f7;--accent2:#3fb950;--accent3:#bc8cff;
-  --red:#f85149;--amber:#d29922;--cyan:#39d0d8;
-  --radius:12px;--radius-sm:8px;
+  --bg:#24273a;--bg2:#1e2031;--bg3:#363a4f;--bg4:#494d64;
+  --border:#494d64;--border2:#5b6078;
+  --text:#cad3f5;--text2:#b8c0e0;--text3:#939ab3;
+  --accent:#c7a0f6;--accent2:#a6da95;--accent3:#8bd5ca;
+  --red:#ed8796;--amber:#eed49f;--cyan:#91d7e3;
+  --radius:0.625rem;--radius-sm:0.5rem;
   --shadow:0 2px 8px rgba(0,0,0,.3);
-  --gradient:linear-gradient(135deg,#2f81f7,#bc8cff);
+  --gradient:linear-gradient(135deg,#c7a0f6,#8bd5ca);
 }
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;-webkit-font-smoothing:antialiased}
@@ -24,15 +24,15 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 /* ── Top Bar ──────────────────────────── */
 .topbar{position:sticky;top:0;z-index:100;background:rgba(10,14,20,.9);backdrop-filter:blur(12px);border-bottom:1px solid var(--border);padding:14px 24px;display:flex;align-items:center;gap:16px}
 .topbar .logo{display:flex;align-items:center;gap:10px;font-size:18px;font-weight:800}
-.topbar .logo-icon{width:36px;height:36px;border-radius:10px;background:var(--gradient);display:flex;align-items:center;justify-content:center;font-size:20px;box-shadow:0 2px 12px rgba(47,129,247,.3)}
+.topbar .logo-icon{width:36px;height:36px;border-radius:10px;background:var(--gradient);display:flex;align-items:center;justify-content:center;font-size:20px;box-shadow:0 2px 12px rgba(199,160,246,.3)}
 .topbar .logo-text span{background:var(--gradient);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
 .url-bar{flex:1;display:flex;gap:8px;max-width:500px}
 .url-bar input{flex:1;padding:9px 14px;background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);font-size:13px;font-family:inherit;transition:border-color .15s}
-.url-bar input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(47,129,247,.12)}
+.url-bar input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(199,160,246,.12)}
 .btn{padding:9px 18px;border-radius:var(--radius-sm);font-size:13px;font-weight:600;cursor:pointer;border:1px solid var(--border2);background:var(--bg3);color:var(--text);transition:all .15s}
 .btn:hover{background:var(--bg4)}
 .btn-primary{background:var(--accent);border-color:var(--accent);color:#fff}
-.btn-primary:hover{background:#4b91f9;box-shadow:0 2px 12px rgba(47,129,247,.3)}
+.btn-primary:hover{background:#d4b3f9;box-shadow:0 2px 12px rgba(199,160,246,.3)}
 .refresh-indicator{font-size:12px;color:var(--text3);white-space:nowrap}
 .refresh-indicator .live-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--accent2);animation:pulse 2s infinite;margin-right:4px}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
@@ -74,8 +74,8 @@ tr:hover td{background:var(--bg3)}
 /* ── Status Badges ────────────────────── */
 .badge{display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:99px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.4px}
 .badge-completed{background:rgba(63,185,80,.12);color:var(--accent2)}
-.badge-running{background:rgba(47,129,247,.12);color:var(--accent)}
-.badge-failed{background:rgba(248,81,73,.12);color:var(--red)}
+.badge-running{background:rgba(199,160,246,.12);color:var(--accent)}
+.badge-failed{background:rgba(237,135,150,.12);color:var(--red)}
 .badge-waiting_approval{background:rgba(188,140,255,.12);color:var(--accent3)}
 .badge-pending{background:rgba(125,133,144,.12);color:var(--text2)}
 .badge-cancelled{background:rgba(125,133,144,.12);color:var(--text2)}
@@ -92,7 +92,7 @@ tr:hover td{background:var(--bg3)}
 .empty .emoji{font-size:48px;margin-bottom:12px}
 .empty h3{font-size:16px;font-weight:700;color:var(--text2);margin-bottom:6px}
 .empty p{font-size:13px;line-height:1.5}
-.error-box{background:rgba(248,81,73,.08);border:1px solid rgba(248,81,73,.3);border-radius:var(--radius-sm);padding:14px 16px;color:var(--red);font-size:13px;margin-bottom:16px;display:flex;align-items:flex-start;gap:8px}
+.error-box{background:rgba(237,135,150,.08);border:1px solid rgba(237,135,150,.3);border-radius:var(--radius-sm);padding:14px 16px;color:var(--red);font-size:13px;margin-bottom:16px;display:flex;align-items:flex-start;gap:8px}
 
 /* ── Loading ──────────────────────────── */
 .loading{display:flex;align-items:center;justify-content:center;padding:40px;color:var(--text3)}
@@ -137,7 +137,7 @@ tr:hover td{background:var(--bg3)}
   <div style="display:flex;gap:2px;margin-left:auto">
     <a href="../../landing/index.html" style="padding:6px 12px;font-size:11px;color:var(--text3);text-decoration:none;border-radius:6px;transition:all .12s" onmouseover="this.style.color='var(--accent)';this.style.background='var(--bg3)'" onmouseout="this.style.color='var(--text3)';this.style.background='transparent'">🐝 Home</a>
     <a href="../workflow-builder/index.html" style="padding:6px 12px;font-size:11px;color:var(--text3);text-decoration:none;border-radius:6px;transition:all .12s" onmouseover="this.style.color='var(--accent)';this.style.background='var(--bg3)'" onmouseout="this.style.color='var(--text3)';this.style.background='transparent'">⚙️ Builder</a>
-    <a href="#" style="padding:6px 12px;font-size:11px;color:var(--accent);text-decoration:none;font-weight:700;background:rgba(47,129,247,.1);border-radius:6px">📊 Dashboard</a>
+    <a href="#" style="padding:6px 12px;font-size:11px;color:var(--accent);text-decoration:none;font-weight:700;background:rgba(199,160,246,.1);border-radius:6px">📊 Dashboard</a>
     <a href="../dev-docs/index.html" style="padding:6px 12px;font-size:11px;color:var(--text3);text-decoration:none;border-radius:6px;transition:all .12s" onmouseover="this.style.color='var(--accent)';this.style.background='var(--bg3)'" onmouseout="this.style.color='var(--text3)';this.style.background='transparent'">📖 Docs</a>
   </div>
 </div>

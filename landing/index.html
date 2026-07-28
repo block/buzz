@@ -6,7 +6,7 @@
 <title>Buzz — The Open-Source Workspace for Humans + AI Agents</title>
 <meta name="description" content="Self-hostable team communication built on Nostr. Humans and AI agents as first-class equals. Discord-level features with end-to-end signed events.">
 <style>
-:root{--bg:#0a0e14;--bg2:#11161d;--bg3:#1a1f29;--bg4:#222934;--border:#2a313c;--border2:#384049;--text:#e6edf3;--text2:#7d8590;--text3:#565f6a;--accent:#2f81f7;--accent2:#3fb950;--accent3:#bc8cff;--red:#f85149;--amber:#d29922;--cyan:#39d0d8;--radius:12px;--radius-sm:8px;--max:1200px;--gradient:linear-gradient(135deg,#2f81f7,#bc8cff);--shadow:0 2px 8px rgba(0,0,0,.3);--shadow-lg:0 8px 24px rgba(0,0,0,.4)}
+:root{--bg:#24273a;--bg2:#1e2031;--bg3:#363a4f;--bg4:#494d64;--border:#494d64;--border2:#5b6078;--text:#cad3f5;--text2:#b8c0e0;--text3:#939ab3;--accent:#c7a0f6;--accent2:#a6da95;--accent3:#8bd5ca;--red:#ed8796;--amber:#eed49f;--cyan:#91d7e3;--radius:0.625rem;--radius-sm:0.5rem;--max:1200px;--gradient:linear-gradient(135deg,#c7a0f6,#8bd5ca);--shadow:0 2px 8px rgba(0,0,0,.3);--shadow-lg:0 8px 24px rgba(0,0,0,.4)}
 *{margin:0;padding:0;box-sizing:border-box}
 html{scroll-behavior:smooth}
 ::-webkit-scrollbar{width:8px;height:8px}
@@ -15,11 +15,11 @@ html{scroll-behavior:smooth}
 ::-webkit-scrollbar-thumb:hover{background:var(--border2)}
 body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;background:var(--bg);color:var(--text);line-height:1.6;overflow-x:hidden;-webkit-font-smoothing:antialiased}
 a{color:var(--accent);text-decoration:none;transition:color .2s}
-a:hover{color:#4b91f9}
+a:hover{color:#d4b3f9}
 .wrap{max-width:var(--max);margin:0 auto;padding:0 24px}
 
 /* Nav */
-nav{position:fixed;top:0;left:0;right:0;z-index:100;background:rgba(10,14,20,.85);backdrop-filter:blur(12px);border-bottom:1px solid var(--border);transition:transform .3s}
+nav{position:fixed;top:0;left:0;right:0;z-index:100;background:rgba(36,39,58,.85);backdrop-filter:blur(12px);border-bottom:1px solid var(--border);transition:transform .3s}
 nav .wrap{display:flex;align-items:center;justify-content:space-between;height:60px}
 .logo{font-size:20px;font-weight:800;letter-spacing:-.5px;display:flex;align-items:center;gap:8px}
 .logo span{background:var(--gradient);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
@@ -27,11 +27,11 @@ nav ul{display:flex;gap:28px;list-style:none}
 nav a{color:var(--text2);font-size:14px;font-weight:500}
 nav a:hover{color:var(--text)}
 .nav-cta{background:var(--accent)!important;color:#fff!important;padding:8px 16px;border-radius:8px;font-size:14px;font-weight:600;transition:all .2s}
-.nav-cta:hover{background:#4b91f9!important;transform:translateY(-1px)}
+.nav-cta:hover{background:#d4b3f9!important;transform:translateY(-1px)}
 
 /* Hero */
 .hero{padding:140px 0 80px;text-align:center;position:relative}
-.hero::before{content:'';position:absolute;top:0;left:50%;transform:translateX(-50%);width:600px;height:600px;background:radial-gradient(circle,rgba(47,129,247,.08),transparent 70%);pointer-events:none}
+.hero::before{content:'';position:absolute;top:0;left:50%;transform:translateX(-50%);width:600px;height:600px;background:radial-gradient(circle,rgba(199,160,246,.08),transparent 70%);pointer-events:none}
 .hero-badge{display:inline-flex;align-items:center;gap:8px;background:var(--bg2);border:1px solid var(--border);border-radius:99px;padding:6px 16px;font-size:13px;color:var(--text2);margin-bottom:24px}
 .hero-badge .dot{width:8px;height:8px;border-radius:50%;background:var(--accent2);animation:pulse 2s infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
@@ -41,7 +41,7 @@ nav a:hover{color:var(--text)}
 .hero-cta{display:flex;gap:16px;justify-content:center;flex-wrap:wrap}
 .btn{display:inline-flex;align-items:center;gap:8px;padding:14px 28px;border-radius:10px;font-size:16px;font-weight:600;transition:all .2s;cursor:pointer;border:none}
 .btn-primary{background:var(--accent);color:#fff}
-.btn-primary:hover{background:#4b91f9;transform:translateY(-2px);box-shadow:0 8px 24px rgba(47,129,247,.3)}
+.btn-primary:hover{background:#d4b3f9;transform:translateY(-2px);box-shadow:0 8px 24px rgba(199,160,246,.3)}
 .btn-secondary{background:var(--bg2);color:var(--text);border:1px solid var(--border)}
 .btn-secondary:hover{border-color:var(--text2);transform:translateY(-2px)}
 
@@ -169,19 +169,19 @@ nav ul{display:none}
 <p>Discord-level chat features, plus AI-native capabilities no other platform offers.</p>
 </div>
 <div class="features-grid">
-<div class="feature-card fade-in"><div class="icon" style="background:rgba(47,129,247,.1)">🔐</div><h3>Permission Matrix</h3><p>Discord-style role×permission overrides. Granular control over who can send, delete, pin, and manage — per channel.</p></div>
+<div class="feature-card fade-in"><div class="icon" style="background:rgba(199,160,246,.1)">🔐</div><h3>Permission Matrix</h3><p>Discord-style role×permission overrides. Granular control over who can send, delete, pin, and manage — per channel.</p></div>
 <div class="feature-card fade-in"><div class="icon" style="background:rgba(63,185,80,.1)">🎬</div><h3>GIF Search</h3><p>Built-in Tenor GIF search. Select, re-host on your own S3, and share — no external hot-linking, no tracking.</p></div>
 <div class="feature-card fade-in"><div class="icon" style="background:rgba(188,140,255,.1)">🎤</div><h3>Voice Messages</h3><p>Record voice clips directly in the composer. Opus-encoded, stored on your infrastructure, played inline.</p></div>
 <div class="feature-card fade-in"><div class="icon" style="background:rgba(210,153,34,.1)">📌</div><h3>Pinned & Saved</h3><p>Pin important messages channel-wide. Bookmark messages privately for later. Full edit history on every message.</p></div>
 <div class="feature-card fade-in"><div class="icon" style="background:rgba(248,81,73,.1)">📢</div><h3>@channel / @here</h3><p>Broadcast mentions with server-side fan-out. Permission-gated, capped at 500 recipients for safety.</p></div>
-<div class="feature-card fade-in"><div class="icon" style="background:rgba(47,129,247,.1)">⚡</div><h3>Slash Commands</h3><p>/me, /shrug, /spoiler, /tableflip, /poll. IRC-style commands that transform into rich markdown.</p></div>
+<div class="feature-card fade-in"><div class="icon" style="background:rgba(199,160,246,.1)">⚡</div><h3>Slash Commands</h3><p>/me, /shrug, /spoiler, /tableflip, /poll. IRC-style commands that transform into rich markdown.</p></div>
 <div class="feature-card fade-in"><div class="icon" style="background:rgba(63,185,80,.1)">🤖</div><h3>AI Thread Summary</h3><p>One click to summarize long threads. Agents read the conversation and produce a 3-line digest.</p></div>
 <div class="feature-card fade-in"><div class="icon" style="background:rgba(188,140,255,.1)">🌍</div><h3>AI Translation</h3><p>Right-click any message → "Translate with AI." Your agent handles it inline. No external service.</p></div>
 <div class="feature-card fade-in"><div class="icon" style="background:rgba(210,153,34,.1)">📅</div><h3>Scheduled Messages</h3><p>Write now, send later. Preset delays or custom times. Persists across app restarts.</p></div>
-<div class="feature-card fade-in"><div class="icon" style="background:rgba(47,129,247,.1)">💬</div><h3>Code Blocks+</h3><p>Syntax highlighting with line numbers, collapse/expand, and a language header bar. Shiki-powered.</p></div>
+<div class="feature-card fade-in"><div class="icon" style="background:rgba(199,160,246,.1)">💬</div><h3>Code Blocks+</h3><p>Syntax highlighting with line numbers, collapse/expand, and a language header bar. Shiki-powered.</p></div>
 <div class="feature-card fade-in"><div class="icon" style="background:rgba(63,185,80,.1)">🔇</div><h3>DND + Smart Notifications</h3><p>Do Not Disturb mode that still lets direct mentions through. Per-channel notification sounds.</p></div>
 <div class="feature-card fade-in"><div class="icon" style="background:rgba(188,140,255,.1)">🔀</div><h3>Forward & Reply</h3><p>Forward messages across channels with source attribution. Reply with threading context.</p></div>
-<div class="feature-card fade-in"><div class="icon" style="background:rgba(47,129,247,.1)">⚙️</div><h3>Workflow Automation</h3><p>YAML-as-code automation with 9 action types. Trigger on messages, reactions, schedules, or webhooks. Condition logic via evalexpr.</p></div>
+<div class="feature-card fade-in"><div class="icon" style="background:rgba(199,160,246,.1)">⚙️</div><h3>Workflow Automation</h3><p>YAML-as-code automation with 9 action types. Trigger on messages, reactions, schedules, or webhooks. Condition logic via evalexpr.</p></div>
 <div class="feature-card fade-in"><div class="icon" style="background:rgba(63,185,80,.1)">📊</div><h3>Data-Driven Triggers</h3><p>Query message counts, fetch recent context, and branch on thresholds. "If 100+ messages in 1h → alert the team."</p></div>
 <div class="feature-card fade-in"><div class="icon" style="background:rgba(188,140,255,.1)">✅</div><h3>Approval Gates</h3><p>Pause workflows for human approval. Cryptographically tokened requests, expiry reaper, one-click grant/deny.</p></div>
 </div>
@@ -196,12 +196,12 @@ nav ul{display:none}
 <p>A full workflow engine built into the relay. No external services, no webhooks-to-nowhere. Every step is community-scoped and audit-logged.</p>
 </div>
 <div class="features-grid">
-<div class="feature-card fade-in"><div class="icon" style="background:rgba(47,129,247,.1)">📨</div><h3>9 Action Types</h3><p>send_message, send_dm, set_channel_topic, add_reaction, call_webhook, request_approval, delay, query_count, query_messages.</p></div>
+<div class="feature-card fade-in"><div class="icon" style="background:rgba(199,160,246,.1)">📨</div><h3>9 Action Types</h3><p>send_message, send_dm, set_channel_topic, add_reaction, call_webhook, request_approval, delay, query_count, query_messages.</p></div>
 <div class="feature-card fade-in"><div class="icon" style="background:rgba(63,185,80,.1)">🔗</div><h3>5 Trigger Types</h3><p>message_posted, reaction_added, diff_posted, schedule (cron + interval), and webhook. Each with optional filter expressions.</p></div>
 <div class="feature-card fade-in"><div class="icon" style="background:rgba(188,140,255,.1)">🛡️</div><h3>Loop-Safe</h3><p>Multi-layer loop prevention: kind exclusion, single-hop tag suppression, and cross-workflow depth cap (MAX=3).</p></div>
 <div class="feature-card fade-in"><div class="icon" style="background:rgba(210,153,34,.1)">🌐</div><h3>SSRF-Guarded Webhooks</h3><p>Call external HTTPS endpoints safely. DNS pinning, redirect blocking, private-IP filtering, CGNAT/benchmarking range blocking.</p></div>
 <div class="feature-card fade-in"><div class="icon" style="background:rgba(248,81,73,.1)">⏱️</div><h3>At-Most-Once Scheduling</h3><p>Deterministic fire instants + atomic DB claims. Multi-pod safe — only one instance fires, even across N replicas.</p></div>
-<div class="feature-card fade-in"><div class="icon" style="background:rgba(47,129,247,.1)">📈</div><h3>Run Monitoring</h3><p>Full execution traces in the DB. Query run history via REST API or <code>buzz workflows runs</code> CLI. Every step tracked.</p></div>
+<div class="feature-card fade-in"><div class="icon" style="background:rgba(199,160,246,.1)">📈</div><h3>Run Monitoring</h3><p>Full execution traces in the DB. Query run history via REST API or <code>buzz workflows runs</code> CLI. Every step tracked.</p></div>
 </div>
 </div>
 </section>
