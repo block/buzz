@@ -9,3 +9,4 @@ export 'theme_catalog.dart';
 export 'theme_extensions.dart';
 export 'theme_pairs.dart';
 export 'theme_provider.dart';
+export 'text_theme.dart' show bodyExtraSmallTextStyle;

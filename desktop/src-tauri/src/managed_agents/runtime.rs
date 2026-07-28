@@ -21,7 +21,10 @@ pub(crate) use path::should_skip_claude_executable;
 pub(crate) use path::should_use_inherited;
 
 mod metadata;
-pub(crate) use metadata::{resolve_effective_prompt_model_provider, runtime_metadata_env_vars};
+pub(crate) use metadata::{
+    resolve_effective_prompt_model_provider, resolve_session_title, runtime_metadata_env_vars,
+    SESSION_TITLE_ENV_VAR,
+};
 
 mod stop;
 pub(crate) use stop::managed_agent_runtime_keys;
@@ -36,7 +39,7 @@ mod process;
 #[cfg(test)]
 use process::{
     buzz_marker_entry, name_matches_interpreter, name_matches_known_binary,
-    terminate_runtime_receipt_with,
+    terminate_runtime_receipt_with, valid_agent_runtime_receipt_with,
 };
 pub(crate) use process::{
     current_instance_id, process_belongs_to_us, process_has_buzz_marker, process_is_running,
@@ -63,6 +66,8 @@ use instance_reaper::{buffer_contains_identifier, is_desktop_binary};
 // Exact-path harness sweep lives in runtime/sweep.rs (re-exported above).
 
 mod lifecycle;
+#[cfg(test)]
+use lifecycle::kill_stale_tracked_processes_with;
 pub use lifecycle::{kill_stale_tracked_processes, sync_managed_agent_processes};
 
 /// Classify an agent's persona against the live catalog for the Agents-menu
@@ -130,6 +135,7 @@ pub fn build_managed_agent_summary(
     record: &ManagedAgentRecord,
     runtimes: &HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>,
     personas: &[crate::managed_agents::types::AgentDefinition],
+    global_config: &crate::managed_agents::GlobalAgentConfig,
 ) -> Result<ManagedAgentSummary, String> {
     use crate::managed_agents::BackendKind;
 
@@ -189,11 +195,36 @@ pub fn build_managed_agent_summary(
         }
     };
 
-    // Display contract: show the pinned record snapshot — what the agent
-    // actually runs — not the live persona. The drift flags below signal when
-    // the snapshot has fallen behind an edited persona; showing live values
-    // next to an "out of date" badge would contradict it.
     let (persona_out_of_date, persona_orphaned) = persona_drift_state(record, personas);
+
+    let global_for_summary =
+        crate::managed_agents::load_global_agent_config(app).unwrap_or_default();
+    let effective_cfg = crate::managed_agents::effective_config::resolve_effective_config(
+        record,
+        personas,
+        &global_for_summary,
+    );
+    let (effective_model, effective_provider, effective_prompt, model_source) = match effective_cfg
+    {
+        crate::managed_agents::effective_config::EffectiveConfigResult::Resolved(cfg) => {
+            let source = cfg.model.source.clone();
+            (
+                cfg.model.value,
+                cfg.provider.value,
+                cfg.system_prompt.value,
+                Some(source),
+            )
+        }
+        crate::managed_agents::effective_config::EffectiveConfigResult::OrphanedInstance {
+            record_pubkey,
+            missing_persona_id,
+        } => {
+            eprintln!(
+                "orphaned agent instance: pubkey={record_pubkey}, missing_persona_id={missing_persona_id}"
+            );
+            (None, None, None, None)
+        }
+    };
 
     // Restart badge: the running process stamped its effective spawn config
     // at launch; recompute from current disk state and flag drift. Only the
@@ -208,12 +239,15 @@ pub fn build_managed_agent_summary(
     // stamped at spawn.  This catches out-of-band adapter changes (manual
     // npm install/downgrade) that Phase-1 auto-restart doesn't cover.  The
     // cache is read-only here — no subprocess is spawned.
+    //
+    // Global config drives both the restart-drift hash and descriptor env
+    // layering below — the caller loads it once and passes it in, so
+    // list-style callers pay one disk read per call rather than one per record.
+
     let needs_restart = pair_key
         .as_ref()
         .and_then(|key| runtimes.get(key).map(|runtime| (key, runtime)))
         .is_some_and(|(key, runtime)| {
-            let global_for_hash =
-                crate::managed_agents::load_global_agent_config(app).unwrap_or_default();
             let teams_for_hash = crate::managed_agents::load_teams(app).unwrap_or_default();
             let hash_drift = runtime.spawn_config_hash
                 != crate::managed_agents::spawn_hash::spawn_config_hash(
@@ -221,20 +255,44 @@ pub fn build_managed_agent_summary(
                     personas,
                     &teams_for_hash,
                     &key.relay_url,
-                    &global_for_hash,
+                    global_config,
                 );
             let availability_drift = super::availability_drift(
                 runtime.adapter_availability.as_ref(),
                 super::adapter_availability_cached(),
             );
-            hash_drift || availability_drift
+            // An orphan can never be restarted successfully —
+            // `spawn_agent_child` refuses it before any process side effect —
+            // so `needs_restart` must never fire for one regardless of hash or
+            // availability drift. Surfacing "Restart required" here would offer
+            // an action guaranteed to fail; the UI shows `persona_orphaned`
+            // instead (see `ManagedAgentSummary::persona_orphaned`).
+            restart_eligible(persona_orphaned, hash_drift, availability_drift)
         });
 
-    // Resolve the effective harness the same way, then derive args/mcp from it,
-    // so the UI reflects the persona's current harness (or an explicit pin).
-    let effective_command = crate::managed_agents::record_agent_command(record, personas);
-    let effective_args = normalize_agent_args(&effective_command, record.agent_args.clone());
-    let effective_mcp_command = known_acp_runtime(&effective_command)
+    // Resolve the effective harness via the single typed descriptor — same resolver
+    // as spawn, so the UI reflects the persona's current harness (or explicit pin).
+    let descriptor = crate::managed_agents::resolve_effective_harness_descriptor(
+        record,
+        personas,
+        global_config,
+    )
+    .unwrap_or_else(|e| {
+        // Dangling harness — surface the missing id so the UI tells the same
+        // story as spawn (which refuses with a sentence), rather than silently
+        // showing the default-command fallback as if the agent were healthy.
+        let cmd = match crate::managed_agents::dangling_harness_id(&e) {
+            Some(id) => crate::managed_agents::dangling_harness_display(id),
+            None => crate::managed_agents::record_agent_command(record, personas),
+        };
+        let args = normalize_agent_args(&cmd, record.agent_args.clone());
+        crate::managed_agents::readiness::EffectiveHarnessDescriptor {
+            command: cmd,
+            args,
+            env: Default::default(),
+        }
+    });
+    let effective_mcp_command = known_acp_runtime(&descriptor.command)
         .and_then(|r| r.mcp_command)
         .unwrap_or("")
         .to_string();
@@ -243,21 +301,23 @@ pub fn build_managed_agent_summary(
         pubkey: record.pubkey.clone(),
         name: record.name.clone(),
         persona_id: record.persona_id.clone(),
+        runtime: record.runtime.clone(),
         team_id: record.team_id.clone(),
         relay_url: record.relay_url.clone(),
         acp_command: record.acp_command.clone(),
-        agent_command: effective_command,
+        agent_command: descriptor.command,
         agent_command_override: record.agent_command_override.clone(),
-        agent_args: effective_args,
+        agent_args: descriptor.args,
         mcp_command: effective_mcp_command,
         turn_timeout_seconds: record.turn_timeout_seconds,
         idle_timeout_seconds: record.idle_timeout_seconds,
         max_turn_duration_seconds: record.max_turn_duration_seconds,
         parallelism: record.parallelism,
-        system_prompt: record.system_prompt.clone(),
+        system_prompt: effective_prompt,
         avatar_url: record.avatar_url.clone(),
-        model: record.model.clone(),
-        provider: record.provider.clone(),
+        model: effective_model,
+        model_source,
+        provider: effective_provider,
         persona_out_of_date,
         persona_orphaned,
         needs_restart,
@@ -279,6 +339,19 @@ pub fn build_managed_agent_summary(
         respond_to: record.respond_to,
         respond_to_allowlist: record.respond_to_allowlist.clone(),
     })
+}
+
+/// Pure predicate: should the "Restart required" badge fire?
+///
+/// An orphaned linked instance (its persona/definition no longer exists)
+/// can never be restarted successfully — `spawn_agent_child` refuses to
+/// spawn it before any process side effect. Surfacing "Restart required"
+/// for one would offer an action guaranteed to fail, so this always
+/// returns `false` for an orphan regardless of drift. Extracted for unit
+/// testing without `AppHandle`/global state, following the
+/// `availability_drift` pattern in `discovery.rs`.
+fn restart_eligible(persona_orphaned: bool, hash_drift: bool, availability_drift: bool) -> bool {
+    !persona_orphaned && (hash_drift || availability_drift)
 }
 
 pub fn find_managed_agent_mut<'a>(
@@ -389,6 +462,51 @@ pub fn spawn_agent_child(
         return Err(error);
     }
     let runtime_key = ManagedAgentRuntimeKey::new(record.pubkey.clone(), relay_url)?;
+    // Resolve the effective harness (agent command) from the linked persona, so
+    // persona harness edits propagate on the next spawn; an explicit per-agent
+    // override wins. `agent_args` and `mcp_command` are pure derivations of the
+    // command, so we recompute them from the effective value rather than the
+    // frozen record snapshot. Mirrors the model resolution below.
+    let personas = super::load_personas(app).unwrap_or_default();
+    let teams = super::load_teams(app).unwrap_or_default();
+    // Load global config once; used for runtime_metadata_env_vars (model/provider fallback)
+    // and for the env-var merge at spawn time.
+    let global = crate::managed_agents::load_global_agent_config(app).unwrap_or_default();
+
+    // Resolve model/provider/prompt ONCE, here, at the shared spawn boundary —
+    // the single source both the env writes below and `spawn_config_hash`
+    // read from. Previously prompt was read from the record's own (possibly
+    // stale, Phase-A-snapshot) bytes while model/provider were resolved live
+    // from `personas`; a definition edit landing between a caller's snapshot
+    // apply and this spawn could hand a fresh model/provider to a stale
+    // prompt. This also folds in orphan refusal via `require_resolved`: every
+    // caller (interactive start, launch restore, `start_managed_agent_process`)
+    // inherits it — no caller can bypass this by reaching `spawn_agent_child`
+    // directly. Checked before any side effect (log marker, log file, process
+    // spawn) so a refused spawn leaves no trace.
+    let effective_cfg = crate::managed_agents::effective_config::resolve_effective_config(
+        record, &personas, &global,
+    )
+    .require_resolved()?;
+
+    // Single typed resolver: validates runtime id (dangling harness → Err), resolves
+    // command, args (instance wins over definition default), and the full env layer stack.
+    // This is the sole path for harness-definition lookup — spawn, hash, summary, and
+    // model probes all consume this descriptor rather than assembling values inline.
+    // Like the orphan refusal above, this runs before any side effect so a refused
+    // spawn leaves no trace.
+    let descriptor =
+        crate::managed_agents::resolve_effective_harness_descriptor(record, &personas, &global)
+            .map_err(|e| {
+                format!(
+                    "cannot spawn agent {}: {}",
+                    record.pubkey,
+                    crate::managed_agents::user_facing_harness_error(&e)
+                )
+            })?;
+    let effective_command = &descriptor.command;
+    let agent_args = &descriptor.args;
+
     let log_path = super::managed_agent_runtime_log_path(app, &runtime_key)?;
     append_log_marker(
         &log_path,
@@ -404,21 +522,9 @@ pub fn spawn_agent_child(
     let stderr = stdout
         .try_clone()
         .map_err(|error| format!("failed to clone log handle: {error}"))?;
-    // Resolve the effective harness (agent command) from the linked persona, so
-    // persona harness edits propagate on the next spawn; an explicit per-agent
-    // override wins. `agent_args` and `mcp_command` are pure derivations of the
-    // command, so we recompute them from the effective value rather than the
-    // frozen record snapshot. Mirrors the model resolution below.
-    let personas = super::load_personas(app).unwrap_or_default();
-    let teams = super::load_teams(app).unwrap_or_default();
-    // Load global config once; used for runtime_metadata_env_vars (model/provider fallback)
-    // and for the env-var merge at spawn time.
-    let global = crate::managed_agents::load_global_agent_config(app).unwrap_or_default();
-    let effective_command = super::record_agent_command(record, &personas);
-    let agent_args = normalize_agent_args(&effective_command, record.agent_args.clone());
     let resolved_acp_command = resolve_command(&record.acp_command)
         .ok_or_else(|| missing_command_message(&record.acp_command, "ACP harness command"))?;
-    let effective_mcp_command = known_acp_runtime(&effective_command)
+    let effective_mcp_command = known_acp_runtime(effective_command)
         .and_then(|r| r.mcp_command)
         .unwrap_or("");
     let resolved_mcp_command: Option<std::path::PathBuf> = if effective_mcp_command.is_empty() {
@@ -435,7 +541,7 @@ pub fn spawn_agent_child(
         }
     };
     // Resolve agent command to a full path (DMG launches have minimal PATH).
-    let resolved_agent_command = resolve_command(&effective_command)
+    let resolved_agent_command = resolve_command(effective_command)
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| effective_command.clone());
 
@@ -486,7 +592,7 @@ pub fn spawn_agent_child(
     }
     // Enable MCP hook tools (_Stop, _PostCompact) for agents that need them.
     // Uses "*" because build_mcp_servers() hard-codes the server name to "buzz-mcp".
-    let runtime_meta = known_acp_runtime(&effective_command);
+    let runtime_meta = known_acp_runtime(effective_command);
     if runtime_meta.is_some_and(|r| r.mcp_hooks) {
         command.env("MCP_HOOK_SERVERS", "*");
     }
@@ -512,11 +618,16 @@ pub fn spawn_agent_child(
     // stuck agents for auto-restart.
     let spawned_setup_mode;
     {
-        use crate::managed_agents::{
-            agent_readiness, resolve_effective_agent_env, AgentReadiness, Requirement,
-        };
+        use crate::managed_agents::readiness::EffectiveAgentEnv;
+        use crate::managed_agents::{agent_readiness, AgentReadiness, Requirement};
 
-        let effective = resolve_effective_agent_env(record, &personas, runtime_meta, &global);
+        // Construct EffectiveAgentEnv from the descriptor computed above — no second
+        // resolver call; the descriptor's env is already the fully layered result.
+        let effective = EffectiveAgentEnv {
+            env: descriptor.env.clone(),
+            config_file_path: runtime_meta.and_then(|r| r.config_file_path),
+            effective_command: descriptor.command.clone(),
+        };
         // Compute the optional payload before touching the command.
         let setup_payload_json =
             if let AgentReadiness::NotReady { requirements } = agent_readiness(&effective) {
@@ -553,6 +664,10 @@ pub fn spawn_agent_child(
                         }),
                         Requirement::GitBash => serde_json::json!({
                             "surface": "git_bash",
+                        }),
+                        Requirement::MissingBinary { command } => serde_json::json!({
+                            "surface": "missing_binary",
+                            "command": command,
                         }),
                     })
                     .collect();
@@ -628,37 +743,49 @@ pub fn spawn_agent_child(
         command.env_remove("BUZZ_ACP_TEAM_INSTRUCTIONS");
     }
 
-    // System prompt via the shared spawn-effective filter — the SAME function the
-    // config hash digests, so env write and badge cannot disagree (see
-    // `effective_spawn_prompt` for the Some("")/None collapse). Model and provider
-    // use the shared
-    // resolver: agent → persona → global → None, so a global-default-only agent
-    // spawns with the correct provider/model env.
-    let effective_prompt = super::spawn_hash::effective_spawn_prompt(record);
-    let (effective_model, effective_provider) =
-        crate::managed_agents::resolve_effective_model_provider(record, &personas, &global);
+    // Prompt, model, and provider all come from the single `effective_cfg`
+    // resolved at the top of this function — the SAME resolve `spawn_config_hash`
+    // performs below, so env write and restart badge cannot disagree. Linked
+    // instances never consult the record's own model/provider/prompt bytes;
+    // definition-less instances fall back to their own fields, then global.
+    //
+    // Derive the mesh decision BEFORE moving fields out — `relay_mesh_model_id`
+    // is the single authoritative gate; the mesh-llm block below MUST use it
+    // rather than re-deriving from `effective_provider` to keep preflight and
+    // spawn semantics in lock-step (see `EffectiveAgentConfig::relay_mesh_model_id`).
+    #[cfg(feature = "mesh-llm")]
+    let mesh_model_id = effective_cfg.relay_mesh_model_id();
+    let effective_prompt = effective_cfg.system_prompt.value;
+    let effective_model = effective_cfg.model.value;
+    let effective_provider = effective_cfg.provider.value;
 
     if let Some(prompt) = &effective_prompt {
         command.env("BUZZ_ACP_SYSTEM_PROMPT", prompt);
     } else {
         command.env_remove("BUZZ_ACP_SYSTEM_PROMPT");
     }
-    if let Some(model) = effective_model {
+    if let Some(model) = effective_model.as_deref() {
         command.env("BUZZ_ACP_MODEL", model);
     } else {
         command.env_remove("BUZZ_ACP_MODEL");
     }
-    // Baked-in provider defaults for internal builds (buzz-releases sets
-    // BUZZ_BUILD_BUZZ_AGENT_* at compile time; OSS builds bake nothing).
-    // Written FIRST so that record/persona metadata env vars below override them.
+    // Session title for the harness to pass out-of-band on `session/new`. The
+    // adapter names the session after it; it never reaches the prompt, so this
+    // is display metadata only. `spawn_config_hash` hashes the same resolve, so
+    // a rename raises the restart badge instead of leaving the process stale.
+    if let Some(title) = resolve_session_title(record.display_name.as_deref(), &record.name) {
+        command.env(SESSION_TITLE_ENV_VAR, title);
+    } else {
+        command.env_remove(SESSION_TITLE_ENV_VAR);
+    }
     build_buzz_agent_provider_defaults(&mut command);
     if let Some(meta) = runtime_meta {
         for (key, value) in runtime_metadata_env_vars(
             meta.model_env_var,
             meta.provider_env_var,
             meta.provider_locked,
-            effective_model,
-            effective_provider,
+            effective_model.as_deref(),
+            effective_provider.as_deref(),
         ) {
             command.env(key, value);
         }
@@ -708,7 +835,8 @@ pub fn spawn_agent_child(
             "GIT_CONFIG_KEY_0",
             format!("credential.{relay_http_url}/git.helper"),
         );
-        command.env("GIT_CONFIG_VALUE_0", cred_helper.display().to_string());
+        let helper = cred_helper.to_string_lossy().replace('\\', "/");
+        command.env("GIT_CONFIG_VALUE_0", helper);
         command.env(
             "GIT_CONFIG_KEY_1",
             format!("credential.{relay_http_url}/git.useHttpPath"),
@@ -721,38 +849,32 @@ pub fn spawn_agent_child(
         );
     }
 
-    // ── User env vars: live persona env under agent overrides ──────────
+    // ── User env vars: definition floor + global + live persona + agent overrides ──
     //
-    // The record's `env_vars` holds agent-level overrides only. The linked
-    // persona's env is read live and merged underneath (agent wins on
-    // collision), so persona credential edits reach the agent on the next
-    // spawn — same refresh semantics as prompt/model/provider above and the
-    // provider deploy path. Global env vars are the floor layer below persona.
-    // `merged_user_env` also applies the reserved-key / malformed-key / NUL
-    // filtering. Precedence: baked floor < Buzz-set env above < GLOBAL <
-    // PERSONA < per-agent.
-    //
-    // These writes go LAST so user-provided values win over every Buzz-set env
-    // above — EXCEPT reserved keys (BUZZ_PRIVATE_KEY, NOSTR_PRIVATE_KEY,
-    // BUZZ_AUTH_TAG, BUZZ_API_TOKEN, BUZZ_ACP_PRIVATE_KEY, BUZZ_ACP_API_TOKEN),
-    // which `merged_user_env` strips. Those carry Buzz's identity and must
-    // never be GUI-overridable.
-    // global < live persona < agent (last-wins on collision at each layer).
-    let persona_over_global = super::env_vars::merged_user_env(
-        &global.env_vars,
-        &super::env_vars::live_persona_env(&personas, record.persona_id.as_deref()),
-    );
-    for (key, value) in super::env_vars::merged_user_env(&persona_over_global, &record.env_vars) {
+    // `descriptor.env` is the fully-layered result from `resolve_effective_harness_descriptor`:
+    // baked floor → runtime metadata → definition env (harness author defaults) →
+    // global → live persona → per-agent, with reserved-key and malformed-key filtering
+    // applied. Writing it last lets user-provided values win over every Buzz-set env
+    // written above — reserved keys were already stripped from descriptor.env so they
+    // cannot clobber BUZZ_PRIVATE_KEY, NOSTR_PRIVATE_KEY, etc.
+    for (key, value) in &descriptor.env {
         command.env(key, value);
     }
     configure_runtime_cli(&mut command, runtime_meta);
 
     // Buzz shared compute is stored as a native provider; derive the OpenAI-compatible
     // transport at spawn time and scrub any unrelated ambient OpenAI key.
+    // Gate on `mesh_model_id` (derived from `effective_cfg.relay_mesh_model_id()`
+    // above) — not on `effective_provider` directly — so the mesh gate here
+    // uses the same trim semantics as the preflight callers.
     #[cfg(feature = "mesh-llm")]
-    if effective_provider == Some(super::RELAY_MESH_PROVIDER_ID) {
+    if let Some(ref mesh_model_id) = mesh_model_id {
         let mut mesh_env = std::collections::BTreeMap::new();
-        super::apply_relay_mesh_env(&mut mesh_env, effective_provider, effective_model);
+        super::apply_relay_mesh_env(
+            &mut mesh_env,
+            Some(super::RELAY_MESH_PROVIDER_ID),
+            Some(mesh_model_id.as_str()),
+        );
         command.env_remove("OPENAI_API_KEY");
         for (key, value) in mesh_env {
             command.env(key, value);

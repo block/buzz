@@ -61,6 +61,11 @@ const PASSTHROUGH_ENV: &[&str] = &[
     "BUZZ_PRIVATE_KEY",
     "BUZZ_RELAY_URL",
     "BUZZ_AUTH_TAG",
+    // Agent display name — dev-mcp uses it as the git author name. On the
+    // Desktop path this arrives via the wire `mcpServers[].env` declaration
+    // (which wins here anyway); the allowlist entry covers ACP clients that
+    // spawn buzz-agent without declaring it.
+    "BUZZ_ACP_DISPLAY_NAME",
 ];
 
 // Windows has no $TMPDIR/$HOME. TMP/TEMP/USERPROFILE are what

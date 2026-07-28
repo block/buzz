@@ -39,6 +39,8 @@ pub mod product_feedback;
 pub mod push;
 /// Reaction persistence.
 pub mod reaction;
+/// Use-limited relay invite persistence (v2 opaque tokens).
+pub mod relay_invite;
 /// Relay-level membership persistence (NIP-43).
 pub mod relay_members;
 /// Replica freshness fence for keyset-cursor read routing.
@@ -563,7 +565,7 @@ impl Db {
     pub async fn admin_get_report(
         &self,
         id: Uuid,
-    ) -> Result<Option<admin_moderation::AdminReport>> {
+    ) -> Result<Option<admin_moderation::AdminReportDetail>> {
         admin_moderation::get_report(&self.pool, id).await
     }
 
@@ -2639,6 +2641,23 @@ impl Db {
         workflow::set_workflow_enabled(&self.pool, community_id, id, enabled).await
     }
 
+    /// Disable all of an owner's workflows in a channel (SEC-006, on
+    /// membership loss). Returns the number of workflows disabled.
+    pub async fn disable_workflows_for_owner_in_channel(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        owner_pubkey: &[u8],
+    ) -> Result<u64> {
+        workflow::disable_workflows_for_owner_in_channel(
+            &self.pool,
+            community_id,
+            channel_id,
+            owner_pubkey,
+        )
+        .await
+    }
+
     /// Delete a workflow and all its runs/approvals.
     pub async fn delete_workflow(&self, community_id: CommunityId, id: Uuid) -> Result<()> {
         workflow::delete_workflow(&self.pool, community_id, id).await
@@ -3026,6 +3045,51 @@ impl Db {
     /// inserted, or 0 if the `pubkey_allowlist` table doesn't exist.
     pub async fn backfill_from_allowlist(&self, community: CommunityId) -> Result<u64> {
         relay_members::backfill_from_allowlist(&self.pool, community).await
+    }
+
+    /// Mints a v2 use-limited relay invite. The plaintext code is returned
+    /// exactly once; only its SHA-256 hash is persisted.
+    ///
+    /// `max_uses` is `None` for unlimited or `Some(1..=10000)`.
+    /// `ttl_secs` must be in the shared invite lifetime range.
+    pub async fn mint_relay_invite(
+        &self,
+        community: CommunityId,
+        created_by: &str,
+        ttl_secs: u64,
+        max_uses: Option<i32>,
+    ) -> Result<relay_invite::MintedInvite> {
+        relay_invite::mint_relay_invite(&self.pool, community, created_by, ttl_secs, max_uses).await
+    }
+
+    /// Delete one bounded batch of invites expired before `cutoff`.
+    pub async fn reap_expired_relay_invites(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64> {
+        relay_invite::reap_expired_relay_invites(&self.pool, cutoff).await
+    }
+
+    /// Atomically claims a v2 relay invite. The full redemption (membership
+    /// insert, policy evidence, use_count increment) runs in one PostgreSQL
+    /// transaction with `FOR UPDATE` on the invite row.
+    ///
+    /// `token_hash` is the SHA-256 of the presented v2 code (32 bytes).
+    pub async fn claim_relay_invite(
+        &self,
+        community: CommunityId,
+        token_hash: &[u8; 32],
+        claimer_pubkey: &str,
+        policy_version: Option<&str>,
+    ) -> Result<relay_invite::ClaimOutcome> {
+        relay_invite::claim_relay_invite(
+            &self.pool,
+            community,
+            token_hash,
+            claimer_pubkey,
+            policy_version,
+        )
+        .await
     }
 
     /// Sidecar an accepted product-feedback event, idempotent by event id.

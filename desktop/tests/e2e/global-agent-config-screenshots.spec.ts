@@ -701,7 +701,7 @@ test.describe("global agent config screenshots", () => {
         .locator("p")
         .filter({ hasText: "Buzz Agent is not installed." }),
     ).toContainText(
-      "Buzz Agent is not installed. Visit Settings > Agents to set it up.",
+      "Buzz Agent is not installed. Ships with the Buzz desktop app. Visit Settings > Agents to set it up.",
     );
     await expect(page.getByTestId("persona-dialog-submit")).toBeDisabled();
   });

@@ -33,7 +33,11 @@ pub(crate) fn sweep_orphaned_agent_processes(app: &AppHandle, skip_pids: &[u32])
             if skip_pids.contains(pid) {
                 return false;
             }
-            (process_is_running(*pid) && process_belongs_to_us(*pid)) || !process_is_running(*pid)
+            // Receipt/PID-file entries were written by this instance at spawn
+            // time — they are Buzz-owned by construction; no name gate needed.
+            // Kill live processes; dead ones fall through to receipt cleanup.
+            (process_is_running(*pid) && process_has_buzz_marker(*pid, &instance_id))
+                || !process_is_running(*pid)
         })
         .map(|pid| pid as i32)
         .collect();
@@ -47,7 +51,7 @@ pub(crate) fn sweep_orphaned_agent_processes(app: &AppHandle, skip_pids: &[u32])
         if skip_pids.contains(pid) {
             continue;
         }
-        if !process_is_running(*pid) || !process_belongs_to_us(*pid) {
+        if !process_is_running(*pid) || !process_has_buzz_marker(*pid, &instance_id) {
             super::super::remove_agent_pid_file(app, pubkey);
         }
     }
@@ -55,7 +59,7 @@ pub(crate) fn sweep_orphaned_agent_processes(app: &AppHandle, skip_pids: &[u32])
         if skip_pids.contains(&receipt.pid) {
             continue;
         }
-        if !process_is_running(receipt.pid) || !process_belongs_to_us(receipt.pid) {
+        if !process_is_running(receipt.pid) || !process_has_buzz_marker(receipt.pid, &instance_id) {
             super::super::remove_agent_runtime_receipt(app, &receipt.key);
         }
     }
@@ -103,6 +107,17 @@ const _: () = assert!(std::mem::size_of::<BSDInfo>() == 136);
 #[cfg(target_os = "macos")]
 pub(super) const PROC_PIDTBSDINFO: libc::c_int = 3;
 
+// ── Sweep ownership rule ──────────────────────────────────────────────────────
+//
+// The `BUZZ_MANAGED_AGENT` env marker is the SOLE authoritative ownership
+// proof for sweep/receipt decisions. Do NOT name-gate via
+// `process_belongs_to_us` here — custom harnesses use arbitrary binary names
+// and a name-gated predicate would silently leak their orphans (the old Linux
+// AND-gate bug). `process_belongs_to_us` remains in use only as a cheap
+// pre-check on paths that already know the binary (see runtime/stop.rs).
+// On Windows no `/proc`-based sweep runs, so `process_has_buzz_marker`
+// always returns `false`.
+
 /// Enumerate all processes on the system owned by the current user and kill any
 /// agent binary stamped with *this* instance's `BUZZ_MANAGED_AGENT` marker
 /// (`instance_id`) that isn't in `skip_pids`. This catches orphans that escaped
@@ -127,11 +142,7 @@ pub(crate) fn sweep_system_agent_processes(instance_id: &str, skip_pids: &[u32])
         if skip_pids.contains(&upid) || pid == my_pid {
             continue;
         }
-        // Check binary name first (cheap proc_name call) before UID lookup.
-        if !process_belongs_to_us(upid) {
-            continue;
-        }
-        // Verify UID and PPID via proc_pidinfo.
+        // Verify UID and PPID via proc_pidinfo before the more expensive env scan.
         let mut info = std::mem::MaybeUninit::<BSDInfo>::zeroed();
         let ret = unsafe {
             proc_pidinfo(
@@ -149,6 +160,8 @@ pub(crate) fn sweep_system_agent_processes(instance_id: &str, skip_pids: &[u32])
         if info.pbi_uid != my_uid {
             continue;
         }
+        // Custom harnesses don't match KNOWN_AGENT_BINARIES by name; the
+        // BUZZ_MANAGED_AGENT env marker is the authoritative ownership proof.
         if !process_has_buzz_marker(upid, instance_id) {
             continue;
         }
@@ -200,7 +213,9 @@ pub(crate) fn sweep_system_agent_processes(instance_id: &str, skip_pids: &[u32])
         if meta.uid() != my_uid {
             continue;
         }
-        if !process_belongs_to_us(upid) || !process_has_buzz_marker(upid, instance_id) {
+        // Same ownership rule as macOS: the marker is the authoritative gate.
+        // Fixes custom-harness orphan cleanup on Linux.
+        if !process_has_buzz_marker(upid, instance_id) {
             continue;
         }
         // Live descendants of a tracked harness are exempt — see sweep::is_live_descendant_*.
@@ -284,9 +299,6 @@ pub(crate) fn collect_same_instance_orphans(
         if skip_pids.contains(&upid) {
             continue;
         }
-        if !process_belongs_to_us(upid) {
-            continue;
-        }
         let mut info = std::mem::MaybeUninit::<BSDInfo>::zeroed();
         let ret = unsafe {
             proc_pidinfo(
@@ -304,6 +316,8 @@ pub(crate) fn collect_same_instance_orphans(
         if info.pbi_uid != my_uid {
             continue;
         }
+        // Custom harnesses don't match KNOWN_AGENT_BINARIES by name; the
+        // BUZZ_MANAGED_AGENT env marker is the authoritative ownership proof.
         if !process_has_buzz_marker(upid, instance_id) {
             continue;
         }
@@ -350,7 +364,9 @@ pub(crate) fn collect_same_instance_orphans(
         if meta.uid() != my_uid {
             continue;
         }
-        if !process_belongs_to_us(upid) || !process_has_buzz_marker(upid, instance_id) {
+        // Same ownership rule as macOS: the marker is the authoritative gate.
+        // Fixes custom-harness orphan cleanup on Linux.
+        if !process_has_buzz_marker(upid, instance_id) {
             continue;
         }
         // Live descendants of a tracked harness are exempt — see sweep::is_live_descendant_*.

@@ -59,6 +59,9 @@ RUN apt-get update \
         ca-certificates \
         git \
     && rm -rf /var/lib/apt/lists/*
+# Keep enough DWARF for native profilers to resolve optimized code to source
+# locations. The normal runtime strips it below; runtime-debug retains it.
+ENV CARGO_PROFILE_RELEASE_DEBUG=line-tables-only
 COPY --from=planner /build/recipe.json recipe.json
 # Cook the full workspace recipe — relay deps include workspace siblings, so
 # scoping to -p buzz-relay misses transitive deps and re-builds them later.
@@ -66,8 +69,12 @@ RUN cargo chef cook --release --recipe-path recipe.json
 COPY . .
 RUN cargo build --release --locked -p buzz-relay --bin buzz-relay \
                                    -p buzz-admin --bin buzz-admin \
-                                   -p buzz-pair-relay --bin buzz-pair-relay \
-    && strip target/release/buzz-relay \
+                                   -p buzz-pair-relay --bin buzz-pair-relay
+
+# Derive the normal release binaries from the same optimized ELF files as the
+# debug image so the two variants cannot drift at code-generation time.
+FROM builder AS stripped-binaries
+RUN strip target/release/buzz-relay \
     && strip target/release/buzz-admin \
     && strip target/release/buzz-pair-relay
 
@@ -111,8 +118,8 @@ COPY web/ web/
 COPY admin-web/ admin-web/
 RUN pnpm -C web build && pnpm -C admin-web build
 
-# ─── Stage 5: runtime ───────────────────────────────────────────────────────
-FROM debian:${DEBIAN_VERSION}-slim AS runtime
+# ─── Stage 5: shared runtime ────────────────────────────────────────────────
+FROM debian:${DEBIAN_VERSION}-slim AS runtime-base
 
 # OCI annotations: required for GHCR to auto-link the image to this repo and
 # inherit its visibility. org.opencontainers.image.source is the load-bearing
@@ -135,9 +142,6 @@ RUN apt-get update \
     && useradd  --system --uid 1000 --gid 1000 --home-dir /var/lib/buzz \
                 --create-home --shell /usr/sbin/nologin buzz
 
-COPY --from=builder    /build/target/release/buzz-relay /usr/local/bin/buzz-relay
-COPY --from=builder    /build/target/release/buzz-admin /usr/local/bin/buzz-admin
-COPY --from=builder    /build/target/release/buzz-pair-relay /usr/local/bin/buzz-pair-relay
 COPY --from=web-builder /build/web/dist                 /srv/buzz/web
 COPY --from=web-builder /build/admin-web/dist           /srv/buzz/admin-web
 
@@ -157,3 +161,18 @@ USER buzz:buzz
 WORKDIR /var/lib/buzz
 
 ENTRYPOINT ["/usr/local/bin/buzz-relay"]
+
+# Optimized binaries with line-table debug information for native profiling.
+# Published under debug-* tags; runtime behavior otherwise matches the normal
+# image exactly.
+FROM runtime-base AS runtime-debug
+COPY --from=builder /build/target/release/buzz-relay /usr/local/bin/buzz-relay
+COPY --from=builder /build/target/release/buzz-admin /usr/local/bin/buzz-admin
+COPY --from=builder /build/target/release/buzz-pair-relay /usr/local/bin/buzz-pair-relay
+
+# Keep the stripped runtime as the final/default Dockerfile target so existing
+# `docker build .` callers and release tags retain their current behavior.
+FROM runtime-base AS runtime
+COPY --from=stripped-binaries /build/target/release/buzz-relay /usr/local/bin/buzz-relay
+COPY --from=stripped-binaries /build/target/release/buzz-admin /usr/local/bin/buzz-admin
+COPY --from=stripped-binaries /build/target/release/buzz-pair-relay /usr/local/bin/buzz-pair-relay

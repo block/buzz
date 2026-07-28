@@ -25,8 +25,14 @@ import 'package:buzz/features/profile/user_cache_provider.dart';
 import 'package:buzz/features/profile/user_profile.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
+import 'package:buzz/shared/widgets/skeleton.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 const _channelId = 'test-channel';
+
+/// Shared mock prefs for providers that read [savedPrefsProvider]
+/// (e.g. the compose bar's draft store). Initialized in [main].
+late SharedPreferences _testPrefs;
 
 final _testChannel = Channel(
   id: _channelId,
@@ -143,7 +149,11 @@ Widget _buildTestable({
   ReadStateNotifier? readStateNotifier,
   _FakeMessagesNotifier? messagesNotifier,
   String? canvasContent,
-  List<NostrEvent>? threadReplies,
+  String? initialMessageId,
+  String? initialThreadRootId,
+  Map<String, List<NostrEvent>> threadReplies = const {},
+  TextScaler textScaler = TextScaler.noScaling,
+  RelaySessionNotifier? relaySessionNotifier,
 }) {
   final resolvedChannel = channel ?? _testChannel;
   final fakeChannelsNotifier =
@@ -178,19 +188,32 @@ Widget _buildTestable({
         channelActionsProvider.overrideWith(createChannelActions),
       if (readStateNotifier != null)
         readStateProvider.overrideWith(() => readStateNotifier),
-      if (threadReplies != null)
+      for (final entry in threadReplies.entries)
         threadRepliesProvider(
-          const ThreadRepliesArgs(channelId: _channelId, rootId: 'thread-root'),
-        ).overrideWith((ref) async => threadReplies),
+          ThreadRepliesArgs(channelId: _channelId, rootId: entry.key),
+        ).overrideWith((ref) async => entry.value),
       // Stub the relay client provider so preloadMembers doesn't crash.
       relayClientProvider.overrideWithValue(
         RelayClient(baseUrl: 'http://localhost:3000'),
       ),
+      if (relaySessionNotifier != null)
+        relaySessionProvider.overrideWith(() => relaySessionNotifier),
+      // Compose bar drafts persist through SharedPreferences.
+      savedPrefsProvider.overrideWithValue(_testPrefs),
     ],
     child: MaterialApp(
       theme: AppTheme.light(),
       navigatorObservers: navigatorObservers,
-      home: ChannelDetailPage(channel: resolvedChannel),
+      home: Builder(
+        builder: (context) => MediaQuery(
+          data: MediaQuery.of(context).copyWith(textScaler: textScaler),
+          child: ChannelDetailPage(
+            channel: resolvedChannel,
+            initialMessageId: initialMessageId,
+            initialThreadRootId: initialThreadRootId,
+          ),
+        ),
+      ),
     ),
   );
 }
@@ -222,7 +245,181 @@ double? effectiveFontSizeForText(
 }
 
 void main() {
+  setUp(() async {
+    SharedPreferences.setMockInitialValues({});
+    _testPrefs = await SharedPreferences.getInstance();
+  });
+
   group('ChannelDetailPage', () {
+    testWidgets('debounces same-slot reconnect skeletons before revealing', (
+      tester,
+    ) async {
+      final relaySession = _ReconnectingRelaySession();
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _textMsg(id: 'msg1', pubkey: 'alice', content: 'Existing message'),
+          ],
+          relaySessionNotifier: relaySession,
+          readStateNotifier: _SynchronousReadStateNotifier(
+            const ReadStateState(
+              isReady: false,
+              pubkey: 'self',
+              contexts: {},
+              version: 0,
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      expect(find.text('Existing message'), findsOneWidget);
+      expect(
+        tester.widget<SkeletonReveal>(find.byType(SkeletonReveal)).loading,
+        isFalse,
+      );
+
+      await tester.pump(const Duration(milliseconds: 1999));
+      expect(
+        tester.widget<SkeletonReveal>(find.byType(SkeletonReveal)).loading,
+        isFalse,
+      );
+
+      await tester.pump(const Duration(milliseconds: 1));
+      await tester.pump();
+      final skeleton = find.byKey(
+        const Key('channel-detail-connection-skeleton'),
+      );
+      expect(skeleton, findsOneWidget);
+      expect(
+        find.descendant(of: skeleton, matching: find.byType(SkeletonBar)),
+        findsWidgets,
+      );
+      expect(find.text('Existing message'), findsOneWidget);
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+      expect(
+        tester
+            .widget<Opacity>(
+              find.byKey(const Key('skeleton-reveal-placeholder')),
+            )
+            .opacity,
+        1,
+      );
+
+      relaySession.connect();
+      await tester.pump();
+      await tester.pump();
+      expect(
+        tester.widget<SkeletonReveal>(find.byType(SkeletonReveal)).loading,
+        isFalse,
+      );
+      await tester.pump(const Duration(milliseconds: 200));
+
+      expect(
+        tester
+            .widget<Opacity>(
+              find.byKey(const Key('skeleton-reveal-placeholder')),
+            )
+            .opacity,
+        closeTo(0.5, 0.01),
+      );
+      expect(
+        tester
+            .widget<Opacity>(find.byKey(const Key('skeleton-reveal-content')))
+            .opacity,
+        closeTo(0.5, 0.01),
+      );
+
+      await tester.pump(const Duration(milliseconds: 200));
+      expect(
+        tester
+            .widget<Opacity>(find.byKey(const Key('skeleton-reveal-content')))
+            .opacity,
+        1,
+      );
+    });
+
+    testWidgets('shows the first-load connection skeleton immediately', (
+      tester,
+    ) async {
+      final relaySession = _ReconnectingRelaySession();
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          messagesNotifier: _FakeMessagesNotifier(
+            const [],
+            hasLoadedMessages: false,
+          ),
+          relaySessionNotifier: relaySession,
+        ),
+      );
+      await tester.pump();
+
+      expect(
+        tester.widget<SkeletonReveal>(find.byType(SkeletonReveal)).loading,
+        isTrue,
+      );
+      expect(
+        tester
+            .widget<Opacity>(
+              find.byKey(const Key('skeleton-reveal-placeholder')),
+            )
+            .opacity,
+        1,
+      );
+      expect(
+        tester
+            .widget<Semantics>(
+              find.byKey(const Key('channel-detail-connection-skeleton')),
+            )
+            .properties
+            .label,
+        'Reconnecting',
+      );
+    });
+
+    testWidgets('keeps forum content visible with reconnect shimmer feedback', (
+      tester,
+    ) async {
+      final relaySession = _ReconnectingRelaySession();
+      final forumChannel = Channel(
+        id: _channelId,
+        name: 'design-forum',
+        channelType: 'forum',
+        visibility: 'open',
+        description: 'Talk through design changes',
+        createdBy: 'abc123',
+        createdAt: DateTime(2025),
+        memberCount: 5,
+        isMember: true,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          channel: forumChannel,
+          relaySessionNotifier: relaySession,
+        ),
+      );
+      await tester.pump();
+
+      expect(find.byType(SkeletonReveal), findsNothing);
+      expect(find.byKey(const Key('forum-connection-skeleton')), findsNothing);
+
+      await tester.pump(const Duration(milliseconds: 1999));
+      expect(find.byKey(const Key('forum-connection-skeleton')), findsNothing);
+
+      await tester.pump(const Duration(milliseconds: 1));
+      await tester.pump();
+      final skeleton = find.byKey(const Key('forum-connection-skeleton'));
+      expect(skeleton, findsOneWidget);
+      expect(
+        find.descendant(of: skeleton, matching: find.byType(SkeletonBar)),
+        findsWidgets,
+      );
+      expect(find.byType(SkeletonReveal), findsNothing);
+    });
+
     testWidgets('defers read-state mark until after build', (tester) async {
       final readState = _SynchronousReadStateNotifier(
         const ReadStateState(
@@ -1347,6 +1544,7 @@ void main() {
             relayClientProvider.overrideWithValue(
               RelayClient(baseUrl: 'http://localhost:3000'),
             ),
+            savedPrefsProvider.overrideWithValue(_testPrefs),
           ],
           child: MaterialApp(
             theme: AppTheme.light(),
@@ -1406,6 +1604,69 @@ void main() {
       expect(find.text('Bob'), findsNWidgets(2));
       expect(findRichText('joined the channel'), findsOneWidget);
       expect(findRichText('Thanks for the invite!'), findsOneWidget);
+    });
+  });
+
+  group('Deep-link navigation', () {
+    testWidgets('opens a nested reply in its direct-parent thread', (
+      tester,
+    ) async {
+      final root = _textMsg(
+        id: 'root',
+        pubkey: 'alice',
+        content: 'Outer root',
+        createdAt: 1000,
+      );
+      final parent = _textMsg(
+        id: 'parent',
+        pubkey: 'bob',
+        content: 'Nested thread head',
+        createdAt: 1100,
+        extraTags: const [
+          ['e', 'root', '', 'reply'],
+        ],
+      );
+      final target = _textMsg(
+        id: 'target',
+        pubkey: 'carol',
+        content: 'Deeply nested target',
+        createdAt: 1200,
+        extraTags: const [
+          ['e', 'root', '', 'root'],
+          ['e', 'parent', '', 'reply'],
+        ],
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [root, parent, target],
+          initialMessageId: 'target',
+          initialThreadRootId: 'parent',
+          threadReplies: {
+            // Relay subtree filtering is keyed by thread_metadata.root_event_id,
+            // so nested replies are returned by the outer-root query.
+            'root': [parent, target],
+          },
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+            'carol': UserProfile(pubkey: 'carol', displayName: 'Carol'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final threadPage = tester.widget<ThreadDetailPage>(
+        find.byType(ThreadDetailPage),
+      );
+      expect(threadPage.threadHead.id, 'parent');
+      expect(threadPage.initialMessageId, 'target');
+
+      final highlighted = tester.widget<DecoratedBox>(
+        find.byKey(const ValueKey('thread-message-target')),
+      );
+      final decoration = highlighted.decoration as BoxDecoration;
+      expect(decoration.color, isNot(Colors.transparent));
     });
   });
 
@@ -1563,7 +1824,7 @@ void main() {
       await tester.pumpWidget(
         _buildTestable(
           messages: [rootEvent],
-          threadReplies: replies,
+          threadReplies: {'thread-root': replies},
           users: {
             'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
             'bob': const UserProfile(pubkey: 'bob', displayName: 'Bob'),
@@ -1608,10 +1869,17 @@ Channel _channel({required String id, required String name}) => Channel(
 
 class _FakeMessagesNotifier extends ChannelMessagesNotifier {
   List<NostrEvent> _messages;
-  _FakeMessagesNotifier(this._messages) : super(_channelId);
+  bool _hasLoadedMessages;
+
+  _FakeMessagesNotifier(this._messages, {bool hasLoadedMessages = true})
+    : _hasLoadedMessages = hasLoadedMessages,
+      super(_channelId);
 
   @override
   AsyncValue<List<NostrEvent>> build() => AsyncData(_messages);
+
+  @override
+  bool get hasLoadedMessages => _hasLoadedMessages;
 
   @override
   bool get reachedOldest => true;
@@ -1621,6 +1889,7 @@ class _FakeMessagesNotifier extends ChannelMessagesNotifier {
 
   void setMessages(List<NostrEvent> messages) {
     _messages = messages;
+    _hasLoadedMessages = true;
     state = AsyncData(messages);
   }
 }
@@ -1631,6 +1900,22 @@ class _ErrorMessagesNotifier extends ChannelMessagesNotifier {
   @override
   AsyncValue<List<NostrEvent>> build() =>
       AsyncError('Connection failed', StackTrace.current);
+}
+
+class _ReconnectingRelaySession extends RelaySessionNotifier {
+  @override
+  SessionState build() =>
+      const SessionState(status: SessionStatus.reconnecting);
+
+  @override
+  Future<List<NostrEvent>> fetchHistory(
+    NostrFilter filter, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async => [];
+
+  void connect() {
+    state = const SessionState(status: SessionStatus.connected);
+  }
 }
 
 class _FakeTypingNotifier extends ChannelTypingNotifier {
@@ -1651,7 +1936,11 @@ class _SynchronousReadStateNotifier extends ReadStateNotifier {
   ReadStateState build() => _initialState;
 
   @override
-  void markContextRead(String contextId, int unixTimestamp) {
+  void markContextRead(
+    String contextId,
+    int unixTimestamp, {
+    bool clearForcedMessages = false,
+  }) {
     markedContexts[contextId] = unixTimestamp;
     state = state.copyWithContext(contextId, unixTimestamp);
   }

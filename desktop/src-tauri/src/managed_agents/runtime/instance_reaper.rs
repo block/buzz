@@ -249,10 +249,7 @@ pub(crate) fn reap_dead_instance_agents(our_instance_id: &str, skip_pids: &[u32]
         if skip_pids.contains(&upid) {
             continue;
         }
-        if !process_belongs_to_us(upid) {
-            continue;
-        }
-        // Verify UID.
+        // Verify UID and PPID via proc_pidinfo before the more expensive env scan.
         let mut info = std::mem::MaybeUninit::<BSDInfo>::zeroed();
         let ret = unsafe {
             proc_pidinfo(
@@ -271,6 +268,9 @@ pub(crate) fn reap_dead_instance_agents(our_instance_id: &str, skip_pids: &[u32]
             continue;
         }
         // Extract the instance ID from this agent's env.
+        // Do NOT name-gate via process_belongs_to_us — custom harnesses use
+        // arbitrary binary names and BUZZ_MANAGED_AGENT is the authoritative
+        // ownership proof.
         let Some(agent_instance_id) = extract_buzz_marker_value(upid) else {
             continue;
         };
@@ -328,9 +328,9 @@ pub(crate) fn reap_dead_instance_agents(our_instance_id: &str, skip_pids: &[u32]
         if meta.uid() != my_uid {
             continue;
         }
-        if !process_belongs_to_us(upid) {
-            continue;
-        }
+        // Do NOT name-gate via process_belongs_to_us — custom harnesses use
+        // arbitrary binary names and BUZZ_MANAGED_AGENT is the authoritative
+        // ownership proof.
         let Some(agent_instance_id) = extract_buzz_marker_value(upid) else {
             continue;
         };

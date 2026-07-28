@@ -1,4 +1,10 @@
-import { useId, useMemo, type ReactNode, type SVGProps } from "react";
+import {
+  useId,
+  useMemo,
+  type CSSProperties,
+  type ReactNode,
+  type SVGProps,
+} from "react";
 import { create } from "qrcode";
 
 const CELL_SPACING_RATIO = 0.2;
@@ -6,11 +12,16 @@ const FINDER_PATTERN_SIZE = 7;
 const QUIET_ZONE_SIZE = 4;
 const MAX_CENTER_OBSCURED_RATIO = 0.1;
 const CENTER_ICON_SIZE_RATIO = 0.8;
+const QR_REVEAL_DURATION_MS = 250;
+const QR_REVEAL_WAVE_SPREAD = 0.3;
+const QR_REVEAL_ROW_TRAVEL_MS =
+  QR_REVEAL_DURATION_MS / (1 + QR_REVEAL_WAVE_SPREAD);
 
 type StyledQrCodeProps = Omit<
   SVGProps<SVGSVGElement>,
   "children" | "height" | "title" | "width"
 > & {
+  animate?: boolean;
   backgroundColor?: string;
   centerImageSrc?: string;
   foregroundColor?: string;
@@ -76,6 +87,7 @@ function FinderPattern({
 }
 
 export function StyledQrCode({
+  animate = false,
   backgroundColor = "#ffffff",
   centerImageSrc,
   foregroundColor = "#000000",
@@ -118,11 +130,22 @@ export function StyledQrCode({
 
       cells.push(
         <circle
+          className={animate ? "buzz-qr-cell-reveal" : undefined}
           cx={column + 0.5}
           cy={row + 0.5}
+          data-qr-cell-row={row}
           fill={foregroundColor}
           key={`${row}-${column}`}
           r={dataCellRadius}
+          style={
+            animate
+              ? ({
+                  "--buzz-qr-reveal-delay": `${Math.round(
+                    (row / Math.max(matrix.size, 1)) * QR_REVEAL_ROW_TRAVEL_MS,
+                  )}ms`,
+                } as CSSProperties)
+              : undefined
+          }
         />,
       );
     }

@@ -63,6 +63,9 @@ class HomePage extends HookConsumerWidget {
     ];
 
     return Scaffold(
+      // Keep the floating navigation and Home quick actions anchored while the
+      // keyboard is visible on any tab.
+      resizeToAvoidBottomInset: false,
       extendBody: true,
       body: SizedBox.expand(
         child: Stack(

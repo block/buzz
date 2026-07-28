@@ -111,24 +111,15 @@ test("add community starts with create and join choices", async ({ page }) => {
 test("automatically shows community join requirements near the community URL", async ({
   page,
 }) => {
-  await installMockBridge(page, { applyCommunityDelayMs: 1_000 });
-  await page.route(
-    "https://policy.example.com/api/join-policy",
-    async (route) => {
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          policy: {
-            terms_markdown: "# Terms",
-            privacy_markdown: "# Privacy",
-            age_attestation_required: true,
-            version: "policy-v1",
-          },
-        }),
-      });
+  await installMockBridge(page, {
+    applyCommunityDelayMs: 1_000,
+    joinPolicy: {
+      terms_markdown: "# Terms",
+      privacy_markdown: "# Privacy",
+      age_attestation_required: true,
+      version: "policy-v1",
     },
-  );
+  });
   await page.goto("/");
 
   await openAddCommunityDialog(page);
@@ -180,12 +171,6 @@ test("supports API tokens without cluttering the default join form", async ({
   page,
 }) => {
   await installMockBridge(page, { applyCommunityDelayMs: 1_000 });
-  await page.route(
-    "https://token.example.com/api/join-policy",
-    async (route) => {
-      await route.fulfill({ status: 404 });
-    },
-  );
   await page.goto("/");
 
   await openAddCommunityDialog(page);

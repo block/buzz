@@ -29,6 +29,9 @@ pub(crate) use recovery::{
     MeshRuntimeRecovery,
 };
 
+mod usage;
+pub use usage::{serving_usage_from_payload, MeshServingUsage};
+
 mod transport_policy;
 #[cfg(test)]
 use transport_policy::iroh_relay_mode_from;
@@ -84,6 +87,15 @@ pub struct MeshServeTarget {
     pub model_id: String,
     pub model_name: Option<String>,
     pub endpoint_addr: String,
+    /// Buzz member that signed the discovery note containing this target.
+    /// Populated after signature/membership validation; never trusted from the
+    /// note payload itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reporter_pubkey: Option<String>,
+    /// Per-runtime MeshLLM owner identity verified by the signed Buzz status.
+    /// Distinguishes two devices logged into the same Buzz member account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_id: Option<String>,
     pub node_name: Option<String>,
     pub capacity: Option<MeshTargetCapacity>,
     #[serde(default)]
@@ -184,6 +196,10 @@ pub struct StartMeshNodeRequest {
     pub max_vram_gb: Option<u64>,
     #[serde(default)]
     pub join_token: Option<String>,
+    /// Stable, relay-scoped mesh name injected by the Buzz backend. It is not
+    /// accepted from the frontend and contains no relay address.
+    #[serde(default, skip_deserializing)]
+    pub mesh_name: Option<String>,
     /// Mesh owner ids admitted to this node (the member roster from
     /// member-signed discovery notes). `None` = caller did not resolve a roster
     /// (tests, direct invocations): the node runs without allowlist
@@ -212,81 +228,6 @@ pub struct MeshNodeStatus {
     pub device_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub device_name: Option<String>,
-}
-
-/// Host-side "who is using the compute I'm sharing" snapshot.
-///
-/// Read-only projection of the serving node's own runtime metrics (the same
-/// `routing_metrics` / `inflight_requests` the SDK already exposes on the local
-/// console). No new trust surface: it reads the node's own status payload.
-///
-/// The local/remote/endpoint attempt split is what distinguishes *my own*
-/// agent (local) from *another member consuming my compute* (remote/endpoint).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct MeshServingUsage {
-    /// Requests being served right now.
-    pub inflight: u64,
-    /// Highest concurrent in-flight seen this session.
-    pub peak_inflight: u64,
-    /// Total requests routed through this node.
-    pub requests_served: u64,
-    /// Completion tokens produced.
-    pub tokens_served: u64,
-    /// Recent decode throughput.
-    pub tokens_per_second: f64,
-    /// Requests served for this machine's own agents.
-    pub local_attempts: u64,
-    /// Requests served for a remote peer (someone else consuming my compute).
-    pub remote_attempts: u64,
-    /// Requests served via an advertised endpoint (also a remote consumer).
-    pub endpoint_attempts: u64,
-    /// Other nodes currently visible as peers.
-    pub peers: u64,
-}
-
-impl MeshServingUsage {
-    /// True when at least one request has been served for a non-local consumer.
-    #[cfg(test)]
-    pub fn has_remote_consumers(&self) -> bool {
-        self.remote_attempts > 0 || self.endpoint_attempts > 0
-    }
-}
-
-/// Pure extractor: project a raw SDK status payload into [`MeshServingUsage`].
-///
-/// Every field is read defensively (missing → 0) so an SDK shape change
-/// degrades to "no usage shown" rather than an error. Kept pure so it can be
-/// unit-tested against a captured payload without a live runtime.
-pub fn serving_usage_from_payload(payload: &serde_json::Value) -> MeshServingUsage {
-    let u64_at = |v: &serde_json::Value| v.as_u64().unwrap_or(0);
-    let rm = payload.get("routing_metrics");
-    let local = rm.and_then(|m| m.get("local_node"));
-    let get_u64 = |obj: Option<&serde_json::Value>, key: &str| {
-        obj.and_then(|o| o.get(key)).map(u64_at).unwrap_or(0)
-    };
-    MeshServingUsage {
-        inflight: local
-            .and_then(|l| l.get("current_inflight_requests"))
-            .map(u64_at)
-            .or_else(|| payload.get("inflight_requests").map(u64_at))
-            .unwrap_or(0),
-        peak_inflight: get_u64(local, "peak_inflight_requests"),
-        requests_served: get_u64(rm, "request_count"),
-        tokens_served: get_u64(rm, "completion_tokens_observed"),
-        tokens_per_second: rm
-            .and_then(|m| m.get("avg_tokens_per_second"))
-            .and_then(serde_json::Value::as_f64)
-            .unwrap_or(0.0),
-        local_attempts: get_u64(local, "local_attempt_count"),
-        remote_attempts: get_u64(local, "remote_attempt_count"),
-        endpoint_attempts: get_u64(local, "endpoint_attempt_count"),
-        peers: payload
-            .get("peers")
-            .and_then(serde_json::Value::as_array)
-            .map(|a| a.len() as u64)
-            .unwrap_or(0),
-    }
 }
 
 pub fn stopped_status() -> MeshNodeStatus {
@@ -423,6 +364,9 @@ impl DesktopMeshRuntime {
                     .discovery_mode(MeshDiscoveryMode::Nostr)
                     .startup_timeout(MESH_STARTUP_TIMEOUT)
                     .console_ui(true);
+                if let Some(mesh_name) = request.mesh_name.as_deref() {
+                    builder = builder.mesh_name(mesh_name);
+                }
                 builder = match iroh_relay_mode()? {
                     IrohRelayMode::Disabled => builder.disable_iroh_relays(true),
                     IrohRelayMode::Default => builder.disable_iroh_relays(false),
@@ -460,6 +404,9 @@ impl DesktopMeshRuntime {
                     .discovery_mode(MeshDiscoveryMode::Nostr)
                     .startup_timeout(MESH_CLIENT_MANAGEMENT_TIMEOUT)
                     .console_ui(true);
+                if let Some(mesh_name) = request.mesh_name.as_deref() {
+                    builder = builder.mesh_name(mesh_name);
+                }
                 builder = match iroh_relay_mode()? {
                     IrohRelayMode::Disabled => builder.disable_iroh_relays(true),
                     IrohRelayMode::Default => builder.disable_iroh_relays(false),
@@ -646,6 +593,8 @@ impl DesktopMeshRuntime {
                     model_id: model.id,
                     model_name: model.name,
                     endpoint_addr: endpoint_addr.clone(),
+                    reporter_pubkey: None,
+                    owner_id: None,
                     node_name: payload
                         .get("node_id")
                         .and_then(serde_json::Value::as_str)

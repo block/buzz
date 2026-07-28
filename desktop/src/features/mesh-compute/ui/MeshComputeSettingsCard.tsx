@@ -124,22 +124,21 @@ export function MeshComputeSettingsCard() {
     };
   }, []);
 
-  // Mirror the running node's modelId back into the field so the card shows
-  // what's ACTUALLY being served — not just on a fresh load (empty field) but
-  // whenever the served model differs from the field (e.g. the member switched
-  // models and the node restarted on the new one). This is safe from clobbering
-  // a mid-edit because the field is disabled whenever the slot is occupied
-  // (`controlsDisabled`), so the user can't be typing while a node is running.
+  // Mirror only a SERVE runtime's model into the field. A client reports the
+  // remote model it is consuming; copying that value here both loses the
+  // member's local sharing choice and can cause this machine to download the
+  // remote member's much larger model when sharing is enabled.
   React.useEffect(() => {
     if (
       status?.state === "running" &&
+      status.mode === "serve" &&
       status.modelId &&
       status.modelId !== modelInput
     ) {
       setModelInput(status.modelId);
       writeDraft(MODEL_DRAFT_STORAGE_KEY, status.modelId);
     }
-  }, [status?.state, status?.modelId, modelInput]);
+  }, [status?.state, status?.mode, status?.modelId, modelInput]);
 
   // The Share toggle reflects ONLY serve-mode occupancy. A client-mode runtime
   // (this machine consuming a peer's compute) shares the single runtime slot
@@ -151,14 +150,12 @@ export function MeshComputeSettingsCard() {
   // actively sharing (serve mode). Read-only; reads the node's own metrics.
   const servingUsage = useMeshServingUsage(isSharing);
   const servingIndicator = deriveServingIndicator(servingUsage, isSharing);
-  // Any occupying runtime (serve or client, healthy or failed) locks the model
-  // inputs and blocks a fresh start — stop it before reconfiguring.
-  const controlsDisabled = slotOccupied || actionInFlight;
+  // A consuming client may be intentionally replaced by a serve runtime, so
+  // keep the local model controls available in client mode. Serve and unknown
+  // occupants remain locked until stopped/recovered.
+  const controlsDisabled = actionInFlight || (slotOccupied && !isConsuming);
   const refClass = classifyModelRef(modelInput);
-  const canStart =
-    refClass.kind !== "unknown" &&
-    !actionInFlight &&
-    status?.state !== "starting";
+  const canStart = refClass.kind !== "unknown" && !actionInFlight;
 
   async function handleToggle(next: boolean) {
     // Never let the Share switch tear down a consume session. The switch is
@@ -260,13 +257,15 @@ export function MeshComputeSettingsCard() {
             checked={isSharing}
             data-testid="mesh-share-compute-toggle"
             disabled={
-              // When the slot is occupied, the switch is only actionable if
-              // WE are sharing (so it can stop a serve node — even a failed
-              // one). Any other occupant (consuming, or an unexpected
-              // modeless-running node) would make a fresh start throw "already
-              // running", so keep it disabled. When the slot is empty, gate on
-              // a valid model ref.
-              actionInFlight || (slotOccupied ? !isSharing : !canStart)
+              // A serve node can always be stopped. An off node or consuming
+              // client can start sharing once a valid local model is selected.
+              // Unknown occupants remain protected from replacement.
+              actionInFlight ||
+              (isSharing
+                ? false
+                : slotOccupied && !isConsuming
+                  ? true
+                  : !canStart)
             }
             id="mesh-share-compute-toggle"
             onCheckedChange={handleToggle}
@@ -563,14 +562,13 @@ function StatusLine({
     return <p className="text-sm text-muted-foreground">Stopping…</p>;
   }
   // A client-mode runtime owns the single slot: this machine is consuming a
-  // peer's compute, not sharing. Explain why Share is off + disabled instead
-  // of showing the misleading "Sharing … with relay members" serve copy. The
-  // client node is app-session-lived infra with no user stop control, so the
-  // copy states the fact rather than promising an action that doesn't exist.
+  // peer's compute, not sharing. The switch stays off, but remains available
+  // so the member can replace the client with a serving runtime.
   if (isConsuming) {
     return (
       <p className="text-sm text-muted-foreground">
-        This machine is currently using another member's shared compute.
+        This machine is currently using another member's shared compute. Turn on
+        sharing to switch to the selected local model; Buzz may briefly restart.
       </p>
     );
   }
