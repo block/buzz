@@ -15,6 +15,9 @@ use tokio_tungstenite::tungstenite::Error;
 use tokio_tungstenite::{client_async_tls, MaybeTlsStream, WebSocketStream};
 use tower_service::Service;
 
+#[cfg(any(windows, test))]
+mod windows;
+
 /// A WebSocket stream whose TCP connection may run through a configured proxy.
 pub type ProxyWebSocketStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -32,8 +35,20 @@ where
     R: IntoClientRequest + Unpin,
 {
     let request = request.into_client_request()?;
-    let matcher = Matcher::from_system();
+    let matcher = system_proxy_matcher();
     connect_websocket_with(&matcher, request).await
+}
+
+fn system_proxy_matcher() -> Matcher {
+    #[cfg(windows)]
+    {
+        windows::system_proxy_matcher()
+    }
+
+    #[cfg(not(windows))]
+    {
+        Matcher::from_system()
+    }
 }
 
 async fn connect_websocket_with(
@@ -275,7 +290,13 @@ mod tests {
             .into_client_request()
             .unwrap();
 
-        let (_websocket, response) = connect_websocket_with(&matcher, request).await.unwrap();
+        let (_websocket, response) = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            connect_websocket_with(&matcher, request),
+        )
+        .await
+        .expect("loopback connection must complete without waiting for the proxy")
+        .unwrap();
 
         assert_eq!(response.status(), 101);
         assert!(

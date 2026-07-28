@@ -17,3 +17,6 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 url = { workspace = true }
 tracing = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-registry = "0.6"
