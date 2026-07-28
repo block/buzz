@@ -31,6 +31,12 @@ futures-util = { workspace = true }
 chrono = { workspace = true }
 async-trait = "0.1"
 bollard = "0.21"
+# Explicit rustls dep with the ring provider, so the binary can install a
+# process-level CryptoProvider. The workspace unifies both ring and aws-lc-rs
+# features, leaving rustls unable to auto-select one; without an explicit
+# install every wss:// relay connection panics. Same rationale as buzz-cli,
+# buzz-acp, and buzz-admin.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
