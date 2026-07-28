@@ -2,6 +2,7 @@ import { relayClient } from "@/shared/api/relayClient";
 import type { RelayEvent } from "@/shared/api/types";
 import {
   KIND_BATTLE_RHYTHM_EVENT,
+  KIND_BATTLE_RHYTHM_REVISION,
   KIND_BATTLE_RHYTHM_SOURCE,
 } from "@/shared/constants/kinds";
 import {
@@ -10,6 +11,8 @@ import {
   buildSourceEvent,
   parseRelayCalendarEvent,
   parseRelaySourceEvent,
+  parseRelayRevisionChunk,
+  revisionManifestHash,
 } from "../domain/eventCodec";
 import {
   parseBattleRhythmEvent,
@@ -21,8 +24,23 @@ import {
 } from "../domain/contracts";
 
 export type BattleRhythmRange = Readonly<{ start: string; end: string }>;
-type Publisher = Pick<typeof relayClient, "publishEvent">;
+type Publisher = Pick<typeof relayClient, "publishEvent" | "fetchEvents">;
+type RelayReader = Pick<typeof relayClient, "fetchEvents">;
+function newest(events: RelayEvent[]): RelayEvent[] {
+  return Array.from(
+    events
+      .reduce((all, event) => {
+        const d = event.tags.find((tag) => tag[0] === "d")?.[1];
+        const key = `${event.kind}:${d ?? event.id}`;
+        const prior = all.get(key);
+        if (!prior || event.created_at > prior.created_at) all.set(key, event);
+        return all;
+      }, new Map<string, RelayEvent>())
+      .values(),
+  );
+}
 export type ImportRevisionInput = Readonly<{
+  ownerPubkey: string;
   source: BattleRhythmSource;
   revision: BattleRhythmRevision;
   events: readonly BattleRhythmEvent[];
@@ -42,40 +60,76 @@ async function publish(
 export async function fetchBattleRhythm(
   ownerPubkey: string,
   range: BattleRhythmRange,
+  reader: RelayReader = relayClient,
 ): Promise<
   Readonly<{
     sources: readonly BattleRhythmSource[];
     events: readonly BattleRhythmEvent[];
   }>
 > {
-  const [sourceEvents, calendarEvents] = await Promise.all([
-    relayClient.fetchEvents({
+  const [sourceEvents, calendarEvents, revisionEvents] = await Promise.all([
+    reader.fetchEvents({
       kinds: [KIND_BATTLE_RHYTHM_SOURCE],
       authors: [ownerPubkey],
       limit: 500,
     }),
-    relayClient.fetchEvents({
+    reader.fetchEvents({
       kinds: [KIND_BATTLE_RHYTHM_EVENT],
       authors: [ownerPubkey],
       limit: 2000,
     }),
+    reader.fetchEvents({
+      kinds: [KIND_BATTLE_RHYTHM_REVISION],
+      authors: [ownerPubkey],
+      limit: 5000,
+    }),
   ]);
-  const newest = (events: RelayEvent[]) =>
-    Array.from(
-      events
-        .reduce((all, event) => {
-          const d = event.tags.find((t) => t[0] === "d")?.[1];
-          const key = `${event.kind}:${d ?? event.id}`;
-          const prior = all.get(key);
-          if (!prior || event.created_at > prior.created_at)
-            all.set(key, event);
-          return all;
-        }, new Map<string, RelayEvent>())
-        .values(),
-    );
+  const chunks = revisionEvents
+    .map(parseRelayRevisionChunk)
+    .filter((chunk): chunk is NonNullable<typeof chunk> => chunk !== null);
+  const eligibleRevisionKeys = new Set<string>();
+  const chunkGroups = new Map<string, typeof chunks>();
+  for (const chunk of chunks) {
+    const group = chunkGroups.get(chunk.revisionId) ?? [];
+    group.push(chunk);
+    chunkGroups.set(chunk.revisionId, group);
+  }
+  for (const [revisionId, group] of chunkGroups) {
+    const first = group[0];
+    if (
+      !first ||
+      group.length !== first.chunkCount ||
+      group.some(
+        (chunk) =>
+          chunk.chunkCount !== first.chunkCount ||
+          chunk.sourceId !== first.sourceId ||
+          chunk.manifestHash !== first.manifestHash,
+      )
+    )
+      continue;
+    const ordered = [...group].sort((a, b) => a.chunkIndex - b.chunkIndex);
+    if (ordered.some((chunk, index) => chunk.chunkIndex !== index)) continue;
+    try {
+      const revision = parseBattleRhythmRevision({
+        schemaVersion: 1,
+        id: revisionId,
+        sourceId: first.sourceId,
+        priorRevisionId: first.priorRevisionId,
+        importedAt: first.importedAt,
+        changes: ordered.flatMap((chunk) => chunk.changes),
+      });
+      if ((await revisionManifestHash(revision)) === first.manifestHash)
+        eligibleRevisionKeys.add(`${first.sourceId}:${revisionId}`);
+    } catch {
+      /* invalid chunks are ineligible */
+    }
+  }
   const sources = newest(sourceEvents)
     .map(parseRelaySourceEvent)
-    .filter((x): x is BattleRhythmSource => x !== null);
+    .filter((x): x is BattleRhythmSource => x !== null)
+    .filter((source) =>
+      eligibleRevisionKeys.has(`${source.id}:${source.revisionId}`),
+    );
   const events = newest(calendarEvents)
     .map(parseRelayCalendarEvent)
     .filter((x): x is BattleRhythmEvent => x !== null)
@@ -116,6 +170,35 @@ export async function applyImportRevision(
       throw new Error(
         "Import may only replace events owned by its source revision",
       );
+  const existing = await publisher.fetchEvents({
+    kinds: [KIND_BATTLE_RHYTHM_EVENT],
+    authors: [input.ownerPubkey],
+    limit: 2000,
+  });
+  const existingById = new Map(
+    newest(existing)
+      .map((head) => ({
+        id: head.tags.find((tag) => tag[0] === "d")?.[1],
+        parsed: parseRelayCalendarEvent(head),
+      }))
+      .filter(
+        (head): head is { id: string; parsed: BattleRhythmEvent | null } =>
+          Boolean(head.id),
+      )
+      .map((head) => [head.id, head.parsed]),
+  );
+  for (const event of events) {
+    const prior = existingById.get(event.id);
+    if (
+      existingById.has(event.id) &&
+      (!prior ||
+        prior.ownership.kind === "manual" ||
+        prior.ownership.sourceId !== source.id)
+    )
+      throw new Error(
+        "Import may not replace a manual or other-source event head",
+      );
+  }
   const heads = await Promise.all(
     events.map((event) =>
       buildCalendarEvent(event, input.priorEventCreatedAt?.[event.id]),

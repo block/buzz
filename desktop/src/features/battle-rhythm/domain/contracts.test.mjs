@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -43,6 +44,12 @@ const event = {
   linkedMissionRequirementId: null,
   parentActivityId: null,
 };
+const fixture = JSON.parse(
+  readFileSync(
+    new URL("./fixtures/contracts-v1.json", import.meta.url),
+    "utf8",
+  ),
+);
 
 test("parsers accept exact immutable calendar contracts", () => {
   const parsed = parseBattleRhythmEvent(event);
@@ -50,6 +57,10 @@ test("parsers accept exact immutable calendar contracts", () => {
   assert.ok(Object.isFrozen(parsed));
   assert.ok(Object.isFrozen(parsed.participants));
   assert.equal(parseBattleRhythmSource(source).id, "fas-2026");
+});
+test("TypeScript consumes the shared v1 fixture", () => {
+  assert.equal(parseBattleRhythmSource(fixture.source).id, "fas-2026");
+  assert.equal(parseBattleRhythmEvent(fixture.event).id, "event-1");
 });
 
 test("manual event parser rejects source revision ownership", () => {
@@ -64,6 +75,9 @@ test("manual event parser rejects source revision ownership", () => {
 test("parsers reject unknown fields, non-ISO dates, unordered coverage, and invalid all-day values", () => {
   assert.throws(() => parseBattleRhythmEvent({ ...event, extra: true }));
   assert.throws(() => parseBattleRhythmEvent({ ...event, start: "tomorrow" }));
+  assert.throws(() =>
+    parseBattleRhythmEvent({ ...event, start: "2026-02-30T08:00:00+10:00" }),
+  );
   assert.throws(() => parseBattleRhythmEvent({ ...event, start: event.end }));
   assert.throws(() => parseBattleRhythmEvent({ ...event, allDay: "false" }));
   assert.throws(() =>

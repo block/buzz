@@ -51,3 +51,33 @@
   sources/revisions are rejected before publication.
 - The immutable revision payload itself is manifest-hashed and every finalized
   serialized chunk is bounded at 240 KiB before signing.
+
+## Review fix round 1
+
+- C1: import mutations now query the owner-filtered current event heads before
+  mutation. An incoming source revision cannot replace a matching manual head
+  or a head owned by another source; the regression proves no publish occurs.
+- C2: calendar reads fetch kind 46310 alongside source/event heads. Active
+  source pointers are retained only when their revision chunks have one unique
+  entry per contiguous index, consistent count/source/hash tags, and a
+  SHA-256 hash matching the canonical reconstructed full revision. Missing,
+  duplicate, altered, and hash-invalid chunk sets are ineligible.
+- I1/I2/I3: relay source/event decoding now cross-checks all ownership and
+  coverage tags; RFC3339 parsing validates real calendar components; and the
+  TypeScript contract suite reads the same JSON fixture as Rust.
+- I4/I5: expanded codec/service tests cover source coverage tags, changed and
+  removed before/after payloads, malformed tags, hash correctness, chunk
+  failure pointer safety, and bad chunk eligibility. `desktop/scripts/test.mjs`
+  converts an explicit directory argument to its test glob, so the mandated
+  `pnpm test -- src/features/battle-rhythm` command passes without reducing the
+  normal all-suite behavior.
+
+### Review-fix verification
+
+- `cd desktop && pnpm typecheck` — passed.
+- `cd desktop && node --import ./test-loader.mjs --experimental-strip-types
+  --test src/features/battle-rhythm/domain/contracts.test.mjs
+  src/features/battle-rhythm/domain/eventCodec.test.mjs
+  src/features/battle-rhythm/data/battleRhythmService.test.mjs` — passed,
+  15 tests.
+- `cd desktop && pnpm test -- src/features/battle-rhythm` — passed, 15 tests.

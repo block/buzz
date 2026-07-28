@@ -60,6 +60,8 @@ pub struct BattleRhythmRevisionChunkV1 {
     pub schema_version: u8,
     pub revision_id: String,
     pub source_id: String,
+    pub prior_revision_id: Option<String>,
+    pub imported_at: String,
     pub chunk_index: u32,
     pub chunk_count: u32,
     pub manifest_hash: String,

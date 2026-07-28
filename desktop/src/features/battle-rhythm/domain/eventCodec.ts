@@ -27,6 +27,8 @@ async function sha256(value: string): Promise<string> {
   ).join("");
 }
 const content = (value: unknown) => JSON.stringify(value);
+export const revisionManifestHash = (revision: BattleRhythmRevision) =>
+  sha256(content(revision));
 let eventSigner = signRelayEvent;
 /** Test seam for the native signer; production always uses the Tauri signer. */
 export function setBattleRhythmEventSignerForTests(
@@ -83,6 +85,8 @@ function baseChunk(
     schemaVersion: 1,
     revisionId: revision.id,
     sourceId: revision.sourceId,
+    priorRevisionId: revision.priorRevisionId,
+    importedAt: revision.importedAt,
     manifestHash,
     changes,
   };
@@ -91,7 +95,7 @@ export async function buildRevisionEvents(
   revisionInput: BattleRhythmRevision,
 ): Promise<readonly RelayEvent[]> {
   const revision = parseBattleRhythmRevision(revisionInput);
-  const manifestHash = await sha256(content(revision));
+  const manifestHash = await revisionManifestHash(revision);
   const groups: BattleRhythmRevision["changes"][] = [];
   let group: BattleRhythmRevision["changes"] = [];
   for (const item of revision.changes) {
@@ -155,9 +159,22 @@ export function parseRelayCalendarEvent(
     return null;
   try {
     const parsed = parseBattleRhythmEvent(JSON.parse(event.content));
+    if (
+      parsed.ownership.kind === "source" &&
+      (!tag(event, "source") || !tag(event, "revision"))
+    )
+      return null;
+    if (
+      parsed.ownership.kind === "manual" &&
+      (tag(event, "source") || tag(event, "revision"))
+    )
+      return null;
     return parsed.id === tag(event, "d") &&
       parsed.start === tag(event, "start") &&
-      parsed.end === tag(event, "end")
+      parsed.end === tag(event, "end") &&
+      (parsed.ownership.kind === "manual" ||
+        (parsed.ownership.sourceId === tag(event, "source") &&
+          parsed.ownership.revisionId === tag(event, "revision")))
       ? parsed
       : null;
   } catch {
@@ -170,14 +187,19 @@ export function parseRelaySourceEvent(
   if (
     event.kind !== KIND_BATTLE_RHYTHM_SOURCE ||
     !tag(event, "d") ||
-    !tag(event, "revision")
+    !tag(event, "source") ||
+    !tag(event, "revision") ||
+    !tag(event, "start") ||
+    !tag(event, "end")
   )
     return null;
   try {
     const parsed = parseBattleRhythmSource(JSON.parse(event.content));
     return parsed.id === tag(event, "d") &&
       parsed.id === tag(event, "source") &&
-      parsed.revisionId === tag(event, "revision")
+      parsed.revisionId === tag(event, "revision") &&
+      parsed.coverageStart === tag(event, "start") &&
+      parsed.coverageEnd === tag(event, "end")
       ? parsed
       : null;
   } catch {

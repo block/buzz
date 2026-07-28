@@ -61,6 +61,8 @@ export type BattleRhythmRevisionChunk = Readonly<{
   schemaVersion: 1;
   revisionId: string;
   sourceId: string;
+  priorRevisionId: string | null;
+  importedAt: string;
   chunkIndex: number;
   chunkCount: number;
   manifestHash: string;
@@ -68,7 +70,7 @@ export type BattleRhythmRevisionChunk = Readonly<{
 }>;
 
 const ISO =
-  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|([+-])(\d{2}):(\d{2}))$/;
 const statuses = new Set(["draft", "approved", "cancelled"]);
 const sourceTypes = new Set(["fas", "longcast", "shortcast", "other"]);
 const eventKeys = [
@@ -119,8 +121,22 @@ function nullableString(value: unknown, name: string): string | null {
 }
 function timestamp(value: unknown, name: string): string {
   const raw = string(value, name, 64);
-  if (!ISO.test(raw) || Number.isNaN(Date.parse(raw)))
-    fail(`${name} must be ISO-8601`);
+  const parts = ISO.exec(raw);
+  if (!parts || Number.isNaN(Date.parse(raw))) fail(`${name} must be ISO-8601`);
+  const [year, month, day, hour, minute, second] = parts
+    .slice(1, 7)
+    .map(Number);
+  const calendar = new Date(Date.UTC(year, month - 1, day));
+  if (
+    calendar.getUTCFullYear() !== year ||
+    calendar.getUTCMonth() !== month - 1 ||
+    calendar.getUTCDate() !== day ||
+    hour > 23 ||
+    minute > 59 ||
+    second > 59 ||
+    (parts[8] !== undefined && (Number(parts[8]) > 23 || Number(parts[9]) > 59))
+  )
+    fail(`${name} must be a real RFC3339 timestamp`);
   return raw;
 }
 function status(value: unknown): BattleRhythmStatus {
@@ -273,6 +289,8 @@ export function parseBattleRhythmRevisionChunk(
     "schemaVersion",
     "revisionId",
     "sourceId",
+    "priorRevisionId",
+    "importedAt",
     "chunkIndex",
     "chunkCount",
     "manifestHash",
@@ -295,6 +313,8 @@ export function parseBattleRhythmRevisionChunk(
     schemaVersion: one(o.schemaVersion),
     revisionId: string(o.revisionId, "revisionId", 256),
     sourceId: string(o.sourceId, "sourceId", 256),
+    priorRevisionId: nullableString(o.priorRevisionId, "priorRevisionId"),
+    importedAt: timestamp(o.importedAt, "importedAt"),
     chunkIndex: o.chunkIndex,
     chunkCount: o.chunkCount,
     manifestHash,
