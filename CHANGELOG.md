@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Backend (Rust)
+
+- **feat(workflow): complete all seven workflow actions** — `send_dm`, `set_channel_topic`, `add_reaction`, and `request_approval` were previously stubs (`NotImplemented`). All are now fully wired through the `ActionSink` trait backed by `RelayActionSink` (relay-keypair-signed, community-scoped events). `send_dm` uses the DM-channel pattern (`open_dm` + kind:9), not NIP-17 gift-wrap. `request_approval` persists a hashed-token `workflow_approvals` row and emits kind:46010 — the existing grant/deny handler (46030/46031) resumes the run.
+- **feat(workflow): cross-workflow trigger-chain depth cap** — `buzz:workflow` tag now carries a depth field (`["buzz:workflow","true","<depth>"]`); the engine suppresses triggering past `MAX_WORKFLOW_DEPTH` (3), catching transitive loops (A→B→A) that the single-hop tag check misses. Legacy two-element tags treated as depth 0 on read.
+- **feat(workflow): approval expiry reaper** — `expire_pending_approvals()` (atomic `UPDATE...RETURNING`, multi-pod safe) runs each cron tick, transitioning expired pending approvals to `expired` and their waiting runs to `Failed`. Prevents indefinite DB accumulation and runs stuck in `waiting_approval`.
+- **feat(workflow): GET /workflow-runs REST endpoint** — the `buzz workflows runs` CLI now reads the authoritative `workflow_runs` DB table via a NIP-98-authed REST endpoint instead of querying never-emitted kinds 46001–46003.
+- **feat(workflow): query_count and query_messages actions** — two new data-driven actions: `query_count` (count events matching a filter for threshold alerts) and `query_messages` (fetch recent channel messages for context gathering). Both query `engine.db` directly via community-scoped `EventQuery`.
+- **fix(workflow): send_dm recipient validation** — verifies the recipient is a member of the workflow's community (`is_relay_member`) before opening a DM channel, preventing workflows from creating DM channels to arbitrary pubkeys outside the community.
+- **fix(workflow): request_approval cleanup on publish failure** — if the kind:46010 event publication fails after the DB row was created, the approval is marked `Denied` (best-effort) so it doesn't linger as a phantom pending row.
+- **fix(workflow): approval-suspended runs now transition to WaitingApproval** — `finalize_run` previously contained stale stub logic that marked approval-suspended runs as `Failed` ("approval gates not yet implemented"). Now correctly transitions to `WaitingApproval` so the grant/deny handler can resume.
+- **refactor(workflow): extract resolve_state_and_tenant helper + remove probe-sign** — the weak-ref upgrade + community→tenant resolution was duplicated across 5 ActionSink methods (~75 lines); centralized into one helper. The double-signing workaround in `add_reaction` (probe-sign to extract SDK builder tags) replaced by inline tag construction. Net −66 lines.
+
 ## v0.4.23
 
 - fix(desktop): strip GIF metadata extensions before upload ([#2425](https://github.com/block/buzz/pull/2425)) ([`47d7eb698`](https://github.com/block/buzz/commit/47d7eb6982900920bcdbe7a2f5013baca37daeeb))

@@ -150,6 +150,33 @@ Filters and queries must scope to `h` tags when operating within a channel.
 [evalexpr](https://docs.rs/evalexpr) for condition evaluation. Keep expressions
 simple and testable.
 
+**Workflow actions**: All seven actions defined in `schema.rs` (`ActionDef`)
+are fully implemented through the `ActionSink` trait (`action_sink.rs`),
+backed by `RelayActionSink` in `buzz-relay/src/workflow_sink.rs`:
+
+- `send_message` — kind:9 stream message (relay keypair signed)
+- `send_dm` — opens/reuses a private DM channel via `open_dm`, posts kind:9
+- `set_channel_topic` — kind:9002 NIP-29 edit-metadata
+- `add_reaction` — kind:7 NIP-25 reaction
+- `call_webhook` — HTTP POST to external HTTPS endpoint (SSRF-guarded)
+- `request_approval` — persists `workflow_approvals` row + emits kind:46010
+- `delay` — bounded sleep (max 270s)
+
+**Workflow loop prevention** is multi-layered:
+1. Workflow execution kinds (46001–46012) are excluded from triggering.
+2. Relay-signed messages with a `buzz:workflow` tag suppress single-hop echo.
+3. **Cross-workflow depth cap** (`MAX_WORKFLOW_DEPTH = 3`): the tag carries
+   a depth field (`["buzz:workflow","true","<depth>"]`); the engine
+   suppresses triggering past the cap, catching transitive chains
+   (A→B→A) that the single-hop check misses.
+
+**Workflow approval lifecycle**: `request_approval` persists a DB row (token
+SHA-256 hashed) and emits kind:46010. The existing grant/deny handler
+(kind:46030/46031 in `command_executor.rs`) resumes the run via
+`execute_from_step`. Expired pending approvals are reaped each cron tick by
+`expire_pending_approvals` (atomic `UPDATE...RETURNING`, multi-pod safe) and
+their runs transitioned to `Failed`.
+
 **Thread counters**: `reply_count` and `descendant_count` are materialized on
 thread root events. Any code that inserts replies must update these counters —
 check existing reply handlers for the pattern.

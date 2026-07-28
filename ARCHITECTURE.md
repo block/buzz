@@ -241,7 +241,9 @@ Steps 10–12 are fire-and-forget. Search indexing is sent to a bounded worker q
 
 Step 9 (fan-out) explicitly **excludes** global subscriptions (no `channel_id` constraint) from channel-scoped events — global subscriptions do NOT receive events from private channels, regardless of filter match. This is a deliberate security boundary: only subscriptions scoped to an accessible `channel_id` receive those events.
 
-Workflow loop prevention: workflow execution kinds (46001–46012), relay-signed messages with `buzz:workflow` tag, and `KIND_GIFT_WRAP` are excluded from triggering workflows. All other stored events (including kind 9 stream messages) trigger workflow evaluation.
+Workflow loop prevention: workflow execution kinds (46001–46012), relay-signed messages with `buzz:workflow` tag, and `KIND_GIFT_WRAP` are excluded from triggering workflows. All other stored events (including kind 9 stream messages) trigger workflow evaluation. Loop prevention is multi-layered: (1) kind exclusion, (2) single-hop `buzz:workflow` tag suppression, and (3) a cross-workflow depth cap (`MAX_WORKFLOW_DEPTH = 3`) — the tag carries a depth field (`["buzz:workflow","true","<depth>"]`) and the engine suppresses triggering past the cap, catching transitive chains (A→B→A) that the single-hop check misses.
+
+Workflow actions: all seven `ActionDef` variants (`send_message`, `send_dm`, `set_channel_topic`, `add_reaction`, `call_webhook`, `request_approval`, `delay`) are implemented through the `ActionSink` trait, backed by `RelayActionSink`. Side effects are relay-keypair-signed Nostr events, community-scoped to the run's owning community via `resolve_state_and_tenant`. `send_dm` validates recipient community membership before opening a DM channel; `request_approval` persists a hashed-token approval row and emits kind:46010, which the existing grant/deny handler (46030/46031) resumes. Expired pending approvals are reaped each cron tick (atomic `UPDATE...RETURNING`) and their runs marked `Failed`.
 
 ### Ephemeral Sub-Pipeline (kinds 20000–29999)
 
