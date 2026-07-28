@@ -713,6 +713,240 @@ jobs:
           ARCHIVE_PATH: ${{ steps.linux-artifacts.outputs.archive }}
           SIG_PATH: ${{ steps.linux-artifacts.outputs.sig }}
 
+
+  # Build Linux ARM64 artefacts separately so x86_64 remains the only Linux
+  # updater target until the updater manifest has been validated for ARM64.
+  release-linux-arm64:
+    name: Release Linux (ARM64)
+    if: github.repository == 'block/buzz'
+    runs-on: ubuntu-24.04-arm
+    # Digest-pinned like the SHA-pinned actions below; Renovate keeps it fresh.
+    container: ubuntu:22.04@sha256:0e0a0fc6d18feda9db1590da249ac93e8d5abfea8f4c3c0c849ce512b5ef8982
+    needs: setup
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    env:
+      # AppImage tools (linuxdeploy, appimagetool) are themselves AppImages.
+      # Containers lack FUSE, so we must use the extract-and-run fallback.
+      APPIMAGE_EXTRACT_AND_RUN: "1"
+    # This job runs in a container where the default run shell is dash;
+    # the AppImage steps below use bash-only syntax ([[ ]], mapfile, arrays).
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install system dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          # Must run first: bare ubuntu:22.04 ships without curl, wget, git, or
+          # ca-certificates. activate-hermit bootstraps via curl+HTTPS (needs
+          # both), and actions/checkout falls back to a REST tarball without git.
+          # Running as root — no sudo needed.
+          apt-get update \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=30
+          apt-get install -y --no-install-recommends \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=30 \
+            -o DPkg::Lock::Timeout=120 \
+            build-essential \
+            ca-certificates \
+            curl \
+            desktop-file-utils \
+            file \
+            git \
+            libasound2-dev \
+            libayatana-appindicator3-dev \
+            libgtk-3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            patchelf \
+            pkg-config \
+            squashfs-tools \
+            wget \
+            xdg-utils
+          # Install GitHub CLI — preinstalled on runners but absent in containers.
+          # wget and ca-certificates are now available from the step above.
+          mkdir -p -m 755 /etc/apt/keyrings
+          wget -q --tries=3 --timeout=30 -O /usr/share/keyrings/githubcli-archive-keyring.gpg \
+            https://cli.github.com/packages/githubcli-archive-keyring.gpg
+          # Pin the keyring like appimagetool below. If GitHub rotates the
+          # keyring this fails loudly — recompute and update the hash.
+          echo "6084d5d7bd8e288441e0e94fc6275570895da18e6751f70f057485dc2d1a811b  /usr/share/keyrings/githubcli-archive-keyring.gpg" | sha256sum -c
+          chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+            > /etc/apt/sources.list.d/github-cli.list
+          apt-get update
+          apt-get install -y --no-install-recommends gh
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.setup.outputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Mark workspace safe for git (containerized job)
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Verify tag-bound release source
+        env:
+          VERSION: ${{ needs.setup.outputs.version }}
+        run: scripts/verify-release-ref.sh v "$VERSION"
+
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: desktop/src-tauri
+          lookup-only: true
+
+      - name: Install appimagetool
+        run: |
+          # Pin to an immutable release tag to avoid supply-chain drift from the
+          # mutable `continuous` tag. Tag: 1.9.1, asset: appimagetool-<arch>.AppImage
+          # (https://github.com/AppImage/appimagetool/releases/tag/1.9.1)
+          case "$(uname -m)" in
+            x86_64)  ARCH_SUFFIX="x86_64" ;;
+            aarch64) ARCH_SUFFIX="aarch64" ;;
+            *)
+              echo "::error::Unsupported architecture: $(uname -m)"
+              exit 1
+              ;;
+          esac
+          wget -q --tries=3 --timeout=30 -O /tmp/appimagetool \
+            "https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-${ARCH_SUFFIX}.AppImage"
+          # SHA256 integrity check. Refuse to run an unverified binary: if a new
+          # arch (e.g. aarch64) is enabled in CI, compute its hash and add it here.
+          case "$ARCH_SUFFIX" in
+            x86_64)
+              echo "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  /tmp/appimagetool" | sha256sum -c
+              ;;
+            aarch64)
+              echo "f0837e7448a0c1e4e650a93bb3e85802546e60654ef287576f46c71c126a9158  /tmp/appimagetool" | sha256sum -c
+              ;;
+          esac
+          install -m 755 /tmp/appimagetool /usr/local/bin/appimagetool
+          # appimagetool otherwise fetches the AppImage type2 runtime from the
+          # MUTABLE `continuous` tag at repack time — the runtime is the first
+          # code users execute, so pin it too. Tag: 20251108, hash is for the
+          # x86_64 asset (non-x86_64 already hard-fails above).
+          # (https://github.com/AppImage/type2-runtime/releases/tag/20251108)
+          wget -q --tries=3 --timeout=30 -O /tmp/appimage-runtime \
+            "https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-${ARCH_SUFFIX}"
+          case "$ARCH_SUFFIX" in
+            x86_64)
+              echo "2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d  /tmp/appimage-runtime" | sha256sum -c
+              ;;
+            aarch64)
+              echo "00cbdfcf917cc6c0ff6d3347d59e0ca1f7f45a6df1a428a0d6d8a78664d87444  /tmp/appimage-runtime" | sha256sum -c
+              ;;
+          esac
+          install -D -m 644 /tmp/appimage-runtime /usr/local/lib/appimage-runtime
+          echo "APPIMAGETOOL_RUNTIME_FILE=/usr/local/lib/appimage-runtime" >> "$GITHUB_ENV"
+
+      - name: Install desktop dependencies
+        run: just desktop-install-ci
+
+      - name: Patch version
+        env:
+          VERSION: ${{ needs.setup.outputs.version }}
+        run: |
+          cd desktop && node scripts/set-version-from-tag.mjs "$VERSION"
+          cd src-tauri && cargo update --workspace
+
+      - name: Build sidecars
+        run: |
+          cargo build --release -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p git-credential-nostr -p buzz-cli
+          ./scripts/bundle-sidecars.sh
+
+      - name: Generate release config
+        run: cd desktop && node scripts/build-release-config.mjs
+        env:
+          BUZZ_UPDATER_PUBLIC_KEY: ${{ secrets.BUZZ_UPDATER_PUBLIC_KEY || secrets.SPROUT_UPDATER_PUBLIC_KEY }}
+          BUZZ_UPDATER_ENDPOINT: https://github.com/block/buzz/releases/download/buzz-desktop-latest/latest.json
+
+      - name: Build Linux Tauri app
+        run: cd desktop && pnpm tauri build --verbose --ci --bundles deb,appimage --config src-tauri/tauri.release.conf.json
+        env:
+          BUZZ_UPDATER_PUBLIC_KEY: ${{ secrets.BUZZ_UPDATER_PUBLIC_KEY || secrets.SPROUT_UPDATER_PUBLIC_KEY }}
+          BUZZ_UPDATER_ENDPOINT: https://github.com/block/buzz/releases/download/buzz-desktop-latest/latest.json
+          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - name: Fix AppImage (remove infra libs, shim host GStreamer)
+        run: |
+          mapfile -t APPIMAGES < <(find desktop/src-tauri/target/release/bundle/appimage -name '*.AppImage' -type f)
+          if [[ ${#APPIMAGES[@]} -eq 0 ]]; then
+            echo "::error::No AppImage found to post-process"
+            exit 1
+          fi
+          if [[ ${#APPIMAGES[@]} -gt 1 ]]; then
+            echo "::error::Expected exactly one AppImage, found ${#APPIMAGES[@]}: ${APPIMAGES[*]}"
+            exit 1
+          fi
+          bash desktop/scripts/fix-appimage.sh "${APPIMAGES[0]}"
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - name: Locate Linux build artifacts
+        id: linux-artifacts
+        run: |
+          BUNDLE_DIR="desktop/src-tauri/target/release/bundle"
+
+          DEB=$(find "$BUNDLE_DIR/deb" -name '*.deb' -type f | head -1)
+          if [[ -z "$DEB" ]]; then
+            echo "::error::No DEB found in $BUNDLE_DIR/deb"
+            exit 1
+          fi
+          echo "deb=$DEB" >> "$GITHUB_OUTPUT"
+
+          APPIMAGE=$(find "$BUNDLE_DIR/appimage" -name '*.AppImage' -type f | head -1)
+          if [[ -z "$APPIMAGE" ]]; then
+            echo "::error::No AppImage found in $BUNDLE_DIR/appimage"
+            exit 1
+          fi
+          echo "appimage=$APPIMAGE" >> "$GITHUB_OUTPUT"
+
+          # Updater archive: Tauri 2.11+ with createUpdaterArtifacts signs the
+          # AppImage directly (*.AppImage + *.AppImage.sig). Earlier versions
+          # wrapped it in a tar.gz. Try the new format first, fall back to legacy.
+          ARCHIVE=$(find "$BUNDLE_DIR/appimage" -name '*.AppImage.tar.gz' ! -name '*.sig' -type f | head -1)
+          if [[ -n "$ARCHIVE" ]]; then
+            SIG="${ARCHIVE}.sig"
+          else
+            ARCHIVE="$APPIMAGE"
+            SIG="${APPIMAGE}.sig"
+          fi
+          if [[ -z "$ARCHIVE" || ! -f "$SIG" ]]; then
+            echo "::error::AppImage updater archive or signature not found in $BUNDLE_DIR/appimage"
+            exit 1
+          fi
+          echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
+          echo "archive_name=$(basename "$ARCHIVE")" >> "$GITHUB_OUTPUT"
+          echo "sig=$SIG" >> "$GITHUB_OUTPUT"
+
+
+      # NOTE: .deb is NOT auto-updatable (Tauri updater constraint — only AppImage supports it on Linux)
+      - name: Upload Linux ARM64 artifacts to versioned GitHub release
+        env:
+          VERSION: ${{ needs.setup.outputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEB_PATH: ${{ steps.linux-artifacts.outputs.deb }}
+          APPIMAGE_PATH: ${{ steps.linux-artifacts.outputs.appimage }}
+        run: |
+          gh release upload "v$VERSION" \
+            "$DEB_PATH" \
+            "$APPIMAGE_PATH" \
+            --clobber
+
   release-windows:
     name: Release Windows
     runs-on: windows-latest
