@@ -173,6 +173,9 @@ pub enum OutputFormat {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Manage this user's local Buzz Desktop personas and agent runtimes
+    #[command(subcommand)]
+    Admin(AdminCmd),
     /// Draft owner-reviewed agent creation and updates
     #[command(subcommand)]
     Agents(AgentsCmd),
@@ -236,6 +239,82 @@ enum Cmd {
     /// Community moderation — reports queue, bans, timeouts, audit trail
     #[command(subcommand)]
     Moderation(ModerationCmd),
+}
+
+#[derive(Subcommand)]
+pub enum AdminCmd {
+    /// Verify the authenticated local Desktop administration connection
+    Status,
+    /// Create, update, and inspect personas
+    Personas {
+        #[command(subcommand)]
+        command: AdminPersonasCmd,
+    },
+    /// Create, update, inspect, and control managed agents
+    Agents {
+        #[command(subcommand)]
+        command: AdminAgentsCmd,
+    },
+    /// Install skills into the Buzz nest
+    Skills {
+        #[command(subcommand)]
+        command: AdminSkillsCmd,
+    },
+    /// Apply local channel templates
+    Templates {
+        #[command(subcommand)]
+        command: AdminTemplatesCmd,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AdminPersonasCmd {
+    List,
+    /// Idempotently create or update a persona from a JSON object
+    Apply {
+        #[arg(long)]
+        file: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AdminAgentsCmd {
+    List,
+    Create {
+        #[arg(long)]
+        file: String,
+    },
+    Update {
+        #[arg(long)]
+        file: String,
+    },
+    Start {
+        pubkey: String,
+    },
+    Stop {
+        pubkey: String,
+    },
+    Restart {
+        pubkey: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AdminSkillsCmd {
+    Install {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        source: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AdminTemplatesCmd {
+    Apply {
+        #[arg(long)]
+        file: String,
+    },
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -1754,6 +1833,12 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         };
     }
 
+    // Local Desktop administration authenticates with a Keychain credential
+    // and never requires or accepts the owner's Nostr private key.
+    if let Cmd::Admin(sub) = cli.command {
+        return commands::admin::dispatch(sub).await;
+    }
+
     // Auth: private key is required for all relay operations.
     // The keypair IS the identity — no tokens, no other auth.
     let private_key_str = cli.private_key.ok_or_else(|| {
@@ -1782,6 +1867,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
 
     match cli.command {
         Cmd::Agents(sub) => commands::agents::dispatch(sub, &client).await,
+        Cmd::Admin(_) => unreachable!("handled above"),
         Cmd::Messages(sub) => commands::messages::dispatch(sub, &client, &cli.format).await,
         Cmd::Channels(sub) => commands::channels::dispatch(sub, &client, &cli.format).await,
         Cmd::Canvas(sub) => commands::channels::dispatch_canvas(sub, &client).await,
@@ -1843,6 +1929,7 @@ mod tests {
     #[test]
     fn command_inventory_is_stable() {
         let expected_groups: Vec<&str> = vec![
+            "admin",
             "agents",
             "canvas",
             "channels",

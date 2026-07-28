@@ -1,3 +1,4 @@
+pub mod admin;
 pub mod agents;
 pub mod channel_templates;
 pub mod channels;

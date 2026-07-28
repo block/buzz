@@ -23,7 +23,7 @@ clap = { version = "4", features = ["derive", "env"] }
 reqwest = { workspace = true, features = ["json"] }
 
 # Async runtime — tokio macros + multi-thread for reqwest
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "io-util"] }
 
 # Serialization — JSON body building and response passthrough
 serde = { workspace = true }
@@ -85,6 +85,12 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 
 # Random number generation — full jitter for exponential backoff in with_retry
 rand = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3.6.3", default-features = false, features = ["apple-native", "vendored"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3.6.3", default-features = false, features = ["sync-secret-service", "vendored"] }
 
 [dev-dependencies]
 # Scratch files for channel-templates.json fixtures in tests

@@ -7,6 +7,8 @@ mod deep_link;
 mod event_sync;
 mod events;
 mod huddle;
+#[cfg(unix)]
+mod local_admin;
 mod managed_agents;
 mod media_proxy;
 #[cfg(feature = "mesh-llm")]
@@ -536,6 +538,15 @@ pub fn run() {
             }
 
             try_regenerate_nest(&app_handle);
+
+            // Expose the owner-only local administration socket after identity,
+            // migrations, and the nest are ready. This is intentionally local
+            // IPC rather than a relay/HTTP API: it controls this installation's
+            // personas and managed runtimes and never crosses a machine boundary.
+            #[cfg(unix)]
+            if !recovery_mode {
+                local_admin::spawn(app_handle.clone());
+            }
 
             if let Some(mgr) = huddle::models::global_model_manager() {
                 mgr.start_stt_download(state.http_client.clone());
