@@ -160,6 +160,7 @@ export function getRelayAgentChannelIds(
 export function buildPersonaDraftProfile(persona: AgentPersona): Profile {
   return {
     pubkey: "",
+    name: null,
     displayName: persona.displayName,
     avatarUrl: persona.avatarUrl,
     about: null,

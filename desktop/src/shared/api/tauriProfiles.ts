@@ -10,6 +10,7 @@ import type {
 
 type RawProfile = {
   pubkey: string;
+  name: string | null;
   display_name: string | null;
   avatar_url: string | null;
   about: string | null;
@@ -38,6 +39,7 @@ type RawSearchUsersResponse = {
 function fromRawProfile(profile: RawProfile): Profile {
   return {
     pubkey: profile.pubkey,
+    name: profile.name ?? null,
     displayName: profile.display_name,
     avatarUrl: profile.avatar_url,
     about: profile.about,

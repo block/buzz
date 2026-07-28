@@ -39,6 +39,7 @@ pub async fn get_profile(state: State<'_, AppState>) -> Result<ProfileInfo, Stri
 #[tauri::command]
 pub async fn update_profile(
     display_name: Option<String>,
+    name: Option<String>,
     avatar_url: Option<String>,
     about: Option<String>,
     nip05_handle: Option<String>,
@@ -56,28 +57,17 @@ pub async fn update_profile(
     )
     .await?;
 
-    // Pull the current content as a JSON object so we can merge with
-    // the caller's overrides.
-    let current: Value = prior_events
-        .first()
-        .and_then(|ev| serde_json::from_str::<Value>(&ev.content).ok())
-        .unwrap_or(Value::Null);
-
-    let dn = display_name
-        .as_deref()
-        .or_else(|| current.get("display_name").and_then(Value::as_str));
-    let name = current.get("name").and_then(Value::as_str);
-    let picture = avatar_url
-        .as_deref()
-        .or_else(|| current.get("picture").and_then(Value::as_str));
-    let ab = about
-        .as_deref()
-        .or_else(|| current.get("about").and_then(Value::as_str));
-    let nip05 = nip05_handle
-        .as_deref()
-        .or_else(|| current.get("nip05").and_then(Value::as_str));
-
-    let builder = events::build_profile(dn, name, picture, ab, nip05)?;
+    let current = profile_metadata_from_prior(prior_events.first())?;
+    let builder = events::build_patched_profile(
+        current,
+        events::ProfileMetadataPatch {
+            display_name: display_name.as_deref(),
+            name: name.as_deref(),
+            picture: avatar_url.as_deref(),
+            about: about.as_deref(),
+            nip05: nip05_handle.as_deref(),
+        },
+    )?;
     submit_event(builder, &state).await?;
 
     // Re-fetch to return canonical profile.
@@ -123,9 +113,7 @@ pub async fn update_profile_at_relay(
     )
     .await?;
     let prior_event = prior_events.first();
-    let current: Value = prior_event
-        .and_then(|event| serde_json::from_str::<Value>(&event.content).ok())
-        .unwrap_or(Value::Null);
+    let current = profile_metadata_from_prior(prior_event)?;
     let current_avatar_url = current
         .get("picture")
         .and_then(Value::as_str)
@@ -148,21 +136,34 @@ pub async fn update_profile_at_relay(
 }
 
 fn build_deferred_profile_event(
-    current: &Value,
+    current: &serde_json::Map<String, Value>,
     avatar_url: &str,
     prior_event: Option<&nostr::Event>,
 ) -> Result<nostr::EventBuilder, String> {
-    let display_name = current.get("display_name").and_then(Value::as_str);
-    let name = current.get("name").and_then(Value::as_str);
-    let about = current.get("about").and_then(Value::as_str);
-    let nip05 = current.get("nip05").and_then(Value::as_str);
+    Ok(events::build_patched_profile(
+        current.clone(),
+        events::ProfileMetadataPatch {
+            picture: Some(avatar_url),
+            ..Default::default()
+        },
+    )?
+    .custom_created_at(monotonic_created_at(
+        prior_event.map(|event| event.created_at.as_secs() as i64),
+    )))
+}
 
-    Ok(
-        events::build_profile(display_name, name, Some(avatar_url), about, nip05)?
-            .custom_created_at(monotonic_created_at(
-                prior_event.map(|event| event.created_at.as_secs() as i64),
-            )),
-    )
+fn profile_metadata_from_prior(
+    prior_event: Option<&nostr::Event>,
+) -> Result<serde_json::Map<String, Value>, String> {
+    let Some(prior_event) = prior_event else {
+        return Ok(serde_json::Map::new());
+    };
+    let value: Value = serde_json::from_str(&prior_event.content)
+        .map_err(|error| format!("existing kind:0 content is not valid JSON: {error}"))?;
+    value
+        .as_object()
+        .cloned()
+        .ok_or_else(|| "existing kind:0 content must be a JSON object".to_string())
 }
 
 fn capture_expected_signer(state: &AppState, expected_pubkey: &str) -> Result<nostr::Keys, String> {
@@ -405,6 +406,7 @@ fn current_pubkey_hex_unwrap(state: &AppState) -> String {
 fn empty_profile_info(pubkey: &str) -> ProfileInfo {
     ProfileInfo {
         pubkey: pubkey.to_string(),
+        name: None,
         display_name: None,
         avatar_url: None,
         about: None,
@@ -452,7 +454,9 @@ mod tests {
         .expect("sign prior profile");
 
         let builder = build_deferred_profile_event(
-            &serde_json::json!({"display_name": "Larry"}),
+            serde_json::json!({"display_name": "Larry"})
+                .as_object()
+                .expect("metadata object"),
             "https://example.com/avatar.png",
             Some(&prior_event),
         )
@@ -466,6 +470,101 @@ mod tests {
             serde_json::from_str::<Value>(&event.content).unwrap()["picture"],
             "https://example.com/avatar.png"
         );
+    }
+
+    #[test]
+    fn profile_patch_preserves_unknown_fields_and_applies_name_semantics() {
+        let keys = nostr::Keys::generate();
+        let current = serde_json::json!({
+            "display_name": "Vitor Cepeda Lopes",
+            "name": "old",
+            "website": "https://vitorcepedalopes.com",
+            "banner": "https://example.com/banner.png",
+            "custom": {"nested": true}
+        })
+        .as_object()
+        .expect("metadata object")
+        .clone();
+
+        let event = events::build_patched_profile(
+            current,
+            events::ProfileMetadataPatch {
+                name: Some("  theangrypit  "),
+                ..Default::default()
+            },
+        )
+        .expect("build patched profile")
+        .sign_with_keys(&keys)
+        .expect("sign patched profile");
+        let content: Value = serde_json::from_str(&event.content).expect("profile JSON");
+
+        assert_eq!(content["name"], "theangrypit");
+        assert_eq!(content["display_name"], "Vitor Cepeda Lopes");
+        assert_eq!(content["website"], "https://vitorcepedalopes.com");
+        assert_eq!(content["banner"], "https://example.com/banner.png");
+        assert_eq!(content["custom"]["nested"], true);
+
+        let event = events::build_patched_profile(
+            content.as_object().expect("metadata object").clone(),
+            events::ProfileMetadataPatch {
+                name: Some("   "),
+                ..Default::default()
+            },
+        )
+        .expect("build profile without name")
+        .sign_with_keys(&keys)
+        .expect("sign profile without name");
+        let content: Value = serde_json::from_str(&event.content).expect("profile JSON");
+
+        assert!(content.get("name").is_none());
+        assert_eq!(content["website"], "https://vitorcepedalopes.com");
+    }
+
+    #[test]
+    fn deferred_avatar_patch_preserves_unknown_profile_fields() {
+        let keys = nostr::Keys::generate();
+        let current = serde_json::json!({
+            "display_name": "Vitor Cepeda Lopes",
+            "name": "theangrypit",
+            "website": "https://vitorcepedalopes.com",
+            "banner": "https://example.com/banner.png"
+        });
+        let event = build_deferred_profile_event(
+            current.as_object().expect("metadata object"),
+            "https://example.com/new-avatar.png",
+            None,
+        )
+        .expect("build deferred profile")
+        .sign_with_keys(&keys)
+        .expect("sign deferred profile");
+        let content: Value = serde_json::from_str(&event.content).expect("profile JSON");
+
+        assert_eq!(content["picture"], "https://example.com/new-avatar.png");
+        assert_eq!(content["name"], "theangrypit");
+        assert_eq!(content["website"], "https://vitorcepedalopes.com");
+        assert_eq!(content["banner"], "https://example.com/banner.png");
+    }
+
+    #[test]
+    fn invalid_or_non_object_prior_profile_fails_closed() {
+        let keys = nostr::Keys::generate();
+        let invalid = nostr::EventBuilder::new(nostr::Kind::Metadata, "not-json")
+            .sign_with_keys(&keys)
+            .expect("sign invalid profile");
+        let array = nostr::EventBuilder::new(nostr::Kind::Metadata, "[]")
+            .sign_with_keys(&keys)
+            .expect("sign array profile");
+
+        assert!(profile_metadata_from_prior(Some(&invalid))
+            .unwrap_err()
+            .starts_with("existing kind:0 content is not valid JSON:"));
+        assert_eq!(
+            profile_metadata_from_prior(Some(&array)).unwrap_err(),
+            "existing kind:0 content must be a JSON object"
+        );
+        assert!(profile_metadata_from_prior(None)
+            .expect("missing profile starts empty")
+            .is_empty());
     }
 
     #[test]

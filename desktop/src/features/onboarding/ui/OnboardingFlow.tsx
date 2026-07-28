@@ -108,6 +108,7 @@ function resolveSavedProfile({
   return {
     avatarUrl: profile?.avatarUrl ?? "",
     displayName: sanitizeDisplayName(profile?.displayName),
+    name: profile?.name ?? "",
   };
 }
 
@@ -119,10 +120,12 @@ function createProfileUpdatePayload({
   savedProfile: OnboardingProfileValues;
 }) {
   const nextDisplayName = draftProfile.displayName.trim();
+  const nextName = draftProfile.name.trim();
   const nextAvatarUrl = draftProfile.avatarUrl.trim();
   const updatePayload: {
     avatarUrl?: string;
     displayName?: string;
+    name?: string;
   } = {};
 
   if (
@@ -130,6 +133,10 @@ function createProfileUpdatePayload({
     nextDisplayName !== savedProfile.displayName
   ) {
     updatePayload.displayName = nextDisplayName;
+  }
+
+  if (nextName !== savedProfile.name) {
+    updatePayload.name = nextName;
   }
 
   if (nextAvatarUrl.length > 0 && nextAvatarUrl !== savedProfile.avatarUrl) {
@@ -331,6 +338,13 @@ export function OnboardingFlow({
     [updateProfileDraft],
   );
 
+  const updateNameDraft = React.useCallback(
+    (value: string) => {
+      updateProfileDraft({ name: value });
+    },
+    [updateProfileDraft],
+  );
+
   const updateAvatarUrlDraft = React.useCallback(
     (value: string) => {
       updateProfileDraft({ avatarUrl: value });
@@ -347,9 +361,15 @@ export function OnboardingFlow({
     setProfileDraft((current) => ({
       ...current,
       displayName: savedProfile.displayName,
+      name: savedProfile.name,
     }));
     showAvatarPage();
-  }, [profileUpdateMutation, savedProfile.displayName, showAvatarPage]);
+  }, [
+    profileUpdateMutation,
+    savedProfile.displayName,
+    savedProfile.name,
+    showAvatarPage,
+  ]);
 
   const saveErrorMessage =
     profileSaveError instanceof Error ? profileSaveError.message : null;
@@ -357,6 +377,10 @@ export function OnboardingFlow({
     avatar: {
       draftUrl: profileDraft.avatarUrl,
       savedUrl: savedProfile.avatarUrl,
+    },
+    handle: {
+      draftValue: profileDraft.name,
+      savedValue: savedProfile.name,
     },
     isUploadingAvatar,
     isSaving: isSavingProfile || isProfileAdvancePending,
@@ -558,6 +582,7 @@ export function OnboardingFlow({
                   },
                   updateAvatarUrl: updateAvatarUrlDraft,
                   updateDisplayName: updateDisplayNameDraft,
+                  updateName: updateNameDraft,
                 }}
                 direction={transitionDirection}
                 state={profileStepState}

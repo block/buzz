@@ -288,10 +288,11 @@ pub fn profile_info_from_event(event: &Event) -> Result<ProfileInfo, String> {
     let v: Value = serde_json::from_str(&event.content)
         .map_err(|e| format!("kind:0 content is not valid JSON: {e}"))?;
 
+    let name = v.get("name").and_then(Value::as_str).map(str::to_string);
     let display_name = v
         .get("display_name")
         .and_then(Value::as_str)
-        .or_else(|| v.get("name").and_then(Value::as_str))
+        .or(name.as_deref())
         .map(str::to_string);
     let avatar_url = v.get("picture").and_then(Value::as_str).map(str::to_string);
     let about = v.get("about").and_then(Value::as_str).map(str::to_string);
@@ -299,6 +300,7 @@ pub fn profile_info_from_event(event: &Event) -> Result<ProfileInfo, String> {
 
     Ok(ProfileInfo {
         pubkey: event.pubkey.to_hex(),
+        name,
         display_name,
         avatar_url,
         about,
@@ -766,6 +768,7 @@ mod tests {
             vec![],
         );
         let p = profile_info_from_event(&e).unwrap();
+        assert_eq!(p.name.as_deref(), Some("alice"));
         assert_eq!(p.display_name.as_deref(), Some("Alice"));
         assert_eq!(p.avatar_url.as_deref(), Some("http://x/a.png"));
         assert_eq!(p.about.as_deref(), Some("hi"));
@@ -786,6 +789,7 @@ mod tests {
     fn profile_info_falls_back_to_name() {
         let e = ev(0, r#"{"name":"bob"}"#, vec![]);
         let p = profile_info_from_event(&e).unwrap();
+        assert_eq!(p.name.as_deref(), Some("bob"));
         assert_eq!(p.display_name.as_deref(), Some("bob"));
     }
 
