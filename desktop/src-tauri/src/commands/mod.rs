@@ -24,6 +24,7 @@ mod identity_archive;
 mod join_policy;
 mod legacy_storage;
 mod link_preview;
+mod mcp_apps;
 pub(crate) mod media;
 mod media_animated;
 mod media_download;
@@ -82,6 +83,7 @@ pub use identity_archive::*;
 pub use join_policy::*;
 pub use legacy_storage::*;
 pub use link_preview::*;
+pub use mcp_apps::*;
 pub use media::*;
 pub use media_download::*;
 #[cfg(feature = "mesh-llm")]

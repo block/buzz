@@ -36,7 +36,7 @@
     ],
     "macOSPrivateApi": true,
     "security": {
-      "csp": null
+      "csp": "frame-src 'self' buzz-mcp-app:"
     }
   },
   "plugins": {

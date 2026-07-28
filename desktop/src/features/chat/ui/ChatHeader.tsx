@@ -30,6 +30,7 @@ type ChatHeaderProps = {
   channelType?: ChannelType;
   visibility?: ChannelVisibility;
   leadingContent?: React.ReactNode;
+  navigation?: React.ReactNode;
   mode?: "home" | "channel" | "agents" | "workflows" | "pulse" | "projects";
   overlaysContent?: boolean;
   statusBadge?: React.ReactNode;
@@ -93,6 +94,7 @@ export function ChatHeader({
   channelType,
   visibility,
   leadingContent,
+  navigation,
   mode = "channel",
   overlaysContent = false,
   statusBadge,
@@ -161,6 +163,8 @@ export function ChatHeader({
             ) : null}
           </div>
         </div>
+
+        {navigation ? <div className="min-w-0 shrink">{navigation}</div> : null}
 
         <div className="flex shrink-0 items-center gap-1">
           <UpdateIndicator />
