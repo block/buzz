@@ -12,7 +12,7 @@ use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Row};
+use sqlx::{PgConnection, PgPool, Row};
 use uuid::Uuid;
 
 use buzz_core::CommunityId;
@@ -220,6 +220,64 @@ pub struct WorkflowRunRecord {
     pub error_message: Option<String>,
     /// When the run record was created.
     pub created_at: DateTime<Utc>,
+    /// Current lease owner, when a worker owns this run.
+    pub lease_owner: Option<String>,
+    /// Current fencing token, when a worker owns this run.
+    pub lease_token: Option<Uuid>,
+    /// Lease expiry, if currently leased.
+    pub lease_expires_at: Option<DateTime<Utc>>,
+    /// Number of claim attempts.
+    pub attempt: i32,
+    /// Earliest time this run may be claimed.
+    pub available_at: DateTime<Utc>,
+    /// Whether a failure is eligible for retry or terminal.
+    pub recovery_classification: Option<String>,
+}
+
+/// A worker's durable lease and fencing token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowRunLease {
+    /// Run identity.
+    pub run_id: Uuid,
+    /// Community owning the run.
+    pub community_id: CommunityId,
+    /// Worker identity that owns the lease.
+    pub owner: String,
+    /// Current fencing token.
+    pub token: Uuid,
+    /// Attempt number assigned by the claim.
+    pub attempt: i32,
+    /// Lease expiry.
+    pub expires_at: DateTime<Utc>,
+}
+
+/// Durable identity assigned before a step side effect begins.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowStepAttempt {
+    /// Attempt number for this step.
+    pub attempt: i32,
+    /// Stable side-effect deduplication key.
+    pub idempotency_key: String,
+}
+
+/// Existing or newly reserved remote action effect.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowActionEffect {
+    /// Whether this caller created the reservation.
+    pub newly_reserved: bool,
+    /// Previously persisted remote event identity, if known.
+    pub event_id: Option<Vec<u8>>,
+}
+
+/// A claimed event-trigger handoff from the durable outbox.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowEventOutboxItem {
+    /// Owning tenant.
+    pub community_id: CommunityId,
+    /// Persisted event identity.
+    pub event_id: Vec<u8>,
+    /// Claim owner used for ack/release fencing.
+    pub claimed_by: String,
 }
 
 /// A winning scheduled workflow fire claim.
@@ -237,6 +295,16 @@ pub struct ScheduledWorkflowFireClaim {
     pub scheduled_for: DateTime<Utc>,
     /// Database timestamp for when this pod won the claim.
     pub claimed_at: DateTime<Utc>,
+}
+
+/// A scheduled fire claim whose workflow run was created and attached in the
+/// same database transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduledWorkflowRunClaim {
+    /// The durable fire identity that won the claim.
+    pub fire: ScheduledWorkflowFireClaim,
+    /// The run created for the claimed fire.
+    pub run_id: Uuid,
 }
 
 /// A pending or resolved approval gate for a workflow step.
@@ -587,6 +655,96 @@ pub async fn attach_scheduled_workflow_run(
     Ok(result.rows_affected() == 1)
 }
 
+/// Atomically claim a scheduled fire, create its pending run, and attach the
+/// run to the claim. A failed run insert or attach rolls back the fire claim,
+/// allowing a later scheduler tick to retry instead of leaving an orphaned
+/// at-most-once claim.
+pub async fn claim_and_create_scheduled_workflow_run(
+    pool: &PgPool,
+    community_id: CommunityId,
+    workflow_id: Uuid,
+    scheduled_for: DateTime<Utc>,
+    trigger_context: Option<&serde_json::Value>,
+) -> Result<Option<ScheduledWorkflowRunClaim>> {
+    let mut tx = pool.begin().await?;
+    let row = sqlx::query(
+        r#"
+        INSERT INTO scheduled_workflow_fires (community_id, workflow_id, scheduled_for)
+        SELECT w.community_id, w.id, $3
+        FROM workflows w
+        WHERE w.community_id = $1 AND w.id = $2
+        ON CONFLICT (community_id, workflow_id, scheduled_for) DO NOTHING
+        RETURNING community_id, workflow_id, scheduled_for, claimed_at
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(workflow_id)
+    .bind(scheduled_for)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    let Some(row) = row else {
+        tx.commit().await?;
+        return Ok(None);
+    };
+
+    let run_id = Uuid::new_v4();
+    let inserted = sqlx::query(
+        r#"
+        INSERT INTO workflow_runs
+            (community_id, id, workflow_id, definition_snapshot, definition_hash, status, trigger_event_id, current_step, execution_trace, trigger_context)
+        SELECT $1, $2, w.id, w.definition, w.definition_hash, 'pending', NULL, 0, '[]', $4
+        FROM workflows w WHERE w.community_id = $1 AND w.id = $3
+        ON CONFLICT (community_id, workflow_id, trigger_event_id)
+            WHERE trigger_event_id IS NOT NULL DO NOTHING
+        RETURNING id
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(run_id)
+    .bind(workflow_id)
+    .bind(trigger_context)
+    .execute(&mut *tx)
+    .await?;
+    if inserted.rows_affected() != 1 {
+        return Err(DbError::NotFound(format!("workflow {workflow_id}")));
+    }
+
+    let attached = sqlx::query(
+        r#"
+        UPDATE scheduled_workflow_fires
+        SET workflow_run_id = $4
+        WHERE community_id = $1
+          AND workflow_id = $2
+          AND scheduled_for = $3
+          AND workflow_run_id IS NULL
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(workflow_id)
+    .bind(scheduled_for)
+    .bind(run_id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if attached != 1 {
+        return Err(DbError::InvalidData(
+            "scheduled workflow run claim lost its attachment".into(),
+        ));
+    }
+
+    tx.commit().await?;
+    Ok(Some(ScheduledWorkflowRunClaim {
+        fire: ScheduledWorkflowFireClaim {
+            community_id: CommunityId::from_uuid(row.try_get("community_id")?),
+            workflow_id: row.try_get("workflow_id")?,
+            scheduled_for: row.try_get("scheduled_for")?,
+            claimed_at: row.try_get("claimed_at")?,
+        },
+        run_id,
+    }))
+}
+
 /// Delete old scheduled workflow fire claims for retention.
 ///
 /// Schedule claim rows are correctness metadata, but they grow with every fire.
@@ -803,11 +961,15 @@ pub async fn create_workflow_run(
 ) -> Result<Uuid> {
     let id = Uuid::new_v4();
 
-    sqlx::query(
+    let inserted = sqlx::query(
         r#"
         INSERT INTO workflow_runs
-            (community_id, id, workflow_id, status, trigger_event_id, current_step, execution_trace, trigger_context)
-        VALUES ($1, $2, $3, 'pending', $4, 0, '[]', $5)
+            (community_id, id, workflow_id, definition_snapshot, definition_hash, status, trigger_event_id, current_step, execution_trace, trigger_context)
+        SELECT $1, $2, w.id, w.definition, w.definition_hash, 'pending', $4, 0, '[]', $5
+        FROM workflows w WHERE w.community_id = $1 AND w.id = $3
+        ON CONFLICT (community_id, workflow_id, trigger_event_id)
+            WHERE trigger_event_id IS NOT NULL DO NOTHING
+        RETURNING id
         "#,
     )
     .bind(community_id.as_uuid())
@@ -815,10 +977,57 @@ pub async fn create_workflow_run(
     .bind(workflow_id)
     .bind(trigger_event_id)
     .bind(trigger_context)
-    .execute(pool)
+    .fetch_optional(pool)
     .await?;
 
-    Ok(id)
+    if let Some(row) = inserted {
+        return Ok(row.try_get("id")?);
+    }
+    sqlx::query_scalar(
+        "SELECT id FROM workflow_runs WHERE community_id = $1 AND workflow_id = $2 AND trigger_event_id = $3",
+    )
+    .bind(community_id.as_uuid())
+    .bind(workflow_id)
+    .bind(trigger_event_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| DbError::NotFound(format!("workflow {workflow_id}")))
+}
+
+/// Create a workflow run on the caller's open transaction. Used by command
+/// ingress so the trigger event and its run commit or roll back together.
+pub async fn create_workflow_run_on_connection(
+    conn: &mut PgConnection,
+    community_id: CommunityId,
+    workflow_id: Uuid,
+    trigger_event_id: Option<&[u8]>,
+    trigger_context: Option<&serde_json::Value>,
+) -> Result<Uuid> {
+    let id = Uuid::new_v4();
+    let inserted = sqlx::query(
+        r#"
+        INSERT INTO workflow_runs
+            (community_id, id, workflow_id, definition_snapshot, definition_hash, status, trigger_event_id, current_step, execution_trace, trigger_context)
+        SELECT $1, $2, w.id, w.definition, w.definition_hash, 'pending', $4, 0, '[]', $5
+        FROM workflows w WHERE w.community_id = $1 AND w.id = $3
+        ON CONFLICT (community_id, workflow_id, trigger_event_id)
+            WHERE trigger_event_id IS NOT NULL DO NOTHING
+        RETURNING id
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(id)
+    .bind(workflow_id)
+    .bind(trigger_event_id)
+    .bind(trigger_context)
+    .fetch_optional(&mut *conn)
+    .await?;
+    inserted
+        .map(|row| row.try_get("id"))
+        .transpose()?
+        .ok_or_else(|| {
+            DbError::InvalidData("workflow trigger already has a run or workflow is missing".into())
+        })
 }
 
 /// Fetch a single workflow run by ID, scoped to its community.
@@ -830,7 +1039,8 @@ pub async fn get_workflow_run(
     let row = sqlx::query(
         r#"
         SELECT community_id, id, workflow_id, status::text AS status, trigger_event_id, current_step,
-               execution_trace, trigger_context, started_at, completed_at, error_message, created_at
+               execution_trace, trigger_context, started_at, completed_at, error_message, created_at,
+               lease_owner, lease_token, lease_expires_at, attempt, available_at, recovery_classification
         FROM workflow_runs
         WHERE community_id = $1 AND id = $2
         "#,
@@ -855,7 +1065,8 @@ pub async fn list_workflow_runs(
     let rows = sqlx::query(
         r#"
         SELECT community_id, id, workflow_id, status::text AS status, trigger_event_id, current_step,
-               execution_trace, trigger_context, started_at, completed_at, error_message, created_at
+               execution_trace, trigger_context, started_at, completed_at, error_message, created_at,
+               lease_owner, lease_token, lease_expires_at, attempt, available_at, recovery_classification
         FROM workflow_runs
         WHERE community_id = $1 AND workflow_id = $2
         ORDER BY created_at DESC
@@ -917,6 +1128,466 @@ pub async fn update_workflow_run(
         return Err(DbError::NotFound(format!("workflow_run {id}")));
     }
     Ok(())
+}
+
+/// Claim the oldest runnable workflow run with a new fencing token.
+pub async fn claim_workflow_run(
+    pool: &PgPool,
+    community_id: CommunityId,
+    owner: &str,
+    lease_for_secs: i64,
+) -> Result<Option<WorkflowRunLease>> {
+    let row = sqlx::query(
+        r#"
+        WITH candidate AS (
+            SELECT id
+            FROM workflow_runs
+            WHERE community_id = $1
+              AND available_at <= NOW()
+              AND (
+                    status = 'pending'
+                 OR (status = 'failed' AND recovery_classification = 'retryable')
+                 OR (status = 'running' AND lease_expires_at < NOW())
+              )
+            ORDER BY available_at, created_at
+            FOR UPDATE SKIP LOCKED
+            LIMIT 1
+        )
+        UPDATE workflow_runs r
+        SET status = 'running',
+            lease_owner = $2,
+            lease_token = gen_random_uuid(),
+            lease_expires_at = NOW() + ($3 * INTERVAL '1 second'),
+            heartbeat_at = NOW(),
+            attempt = r.attempt + 1,
+            started_at = COALESCE(r.started_at, NOW()),
+            recovery_classification = NULL
+        FROM candidate c
+        WHERE r.community_id = $1 AND r.id = c.id
+        RETURNING r.id, r.community_id, r.lease_token, r.attempt, r.lease_expires_at
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(owner)
+    .bind(lease_for_secs)
+    .fetch_optional(pool)
+    .await?;
+
+    row.map(|row| {
+        Ok(WorkflowRunLease {
+            run_id: row.try_get("id")?,
+            community_id: CommunityId::from_uuid(row.try_get("community_id")?),
+            owner: owner.to_owned(),
+            token: row.try_get("lease_token")?,
+            attempt: row.try_get("attempt")?,
+            expires_at: row.try_get("lease_expires_at")?,
+        })
+    })
+    .transpose()
+}
+
+/// Claim a specific run when an ingress path has already selected its ID.
+pub async fn claim_specific_workflow_run(
+    pool: &PgPool,
+    community_id: CommunityId,
+    run_id: Uuid,
+    owner: &str,
+    lease_for_secs: i64,
+) -> Result<Option<WorkflowRunLease>> {
+    let row = sqlx::query(
+        r#"
+        UPDATE workflow_runs
+        SET status = 'running', lease_owner = $3, lease_token = gen_random_uuid(),
+            lease_expires_at = NOW() + ($4 * INTERVAL '1 second'), heartbeat_at = NOW(),
+            attempt = attempt + 1, started_at = COALESCE(started_at, NOW()),
+            recovery_classification = NULL
+        WHERE community_id = $1 AND id = $2 AND available_at <= NOW()
+          AND (status = 'pending'
+            OR (status = 'failed' AND recovery_classification = 'retryable')
+            OR (status = 'running' AND lease_expires_at < NOW()))
+        RETURNING id, community_id, lease_token, attempt, lease_expires_at
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(run_id)
+    .bind(owner)
+    .bind(lease_for_secs)
+    .fetch_optional(pool)
+    .await?;
+    row.map(|row| {
+        Ok(WorkflowRunLease {
+            run_id: row.try_get("id")?,
+            community_id: CommunityId::from_uuid(row.try_get("community_id")?),
+            owner: owner.to_owned(),
+            token: row.try_get("lease_token")?,
+            attempt: row.try_get("attempt")?,
+            expires_at: row.try_get("lease_expires_at")?,
+        })
+    })
+    .transpose()
+}
+
+/// Claim a run that is resuming after an explicitly granted approval.
+/// Generic scheduler claims intentionally exclude `waiting_approval` so a
+/// background reconciliation cannot bypass the approval gate.
+pub async fn claim_waiting_approval_workflow_run(
+    pool: &PgPool,
+    community_id: CommunityId,
+    run_id: Uuid,
+    owner: &str,
+    lease_for_secs: i64,
+) -> Result<Option<WorkflowRunLease>> {
+    let row = sqlx::query(
+        r#"
+        UPDATE workflow_runs
+        SET status = 'running', lease_owner = $3, lease_token = gen_random_uuid(),
+            lease_expires_at = NOW() + ($4 * INTERVAL '1 second'), heartbeat_at = NOW(),
+            attempt = attempt + 1, started_at = COALESCE(started_at, NOW()),
+            recovery_classification = NULL
+        WHERE community_id = $1 AND id = $2 AND status = 'waiting_approval'
+        RETURNING id, community_id, lease_token, attempt, lease_expires_at
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(run_id)
+    .bind(owner)
+    .bind(lease_for_secs)
+    .fetch_optional(pool)
+    .await?;
+    row.map(|row| {
+        Ok(WorkflowRunLease {
+            run_id: row.try_get("id")?,
+            community_id: CommunityId::from_uuid(row.try_get("community_id")?),
+            owner: owner.to_owned(),
+            token: row.try_get("lease_token")?,
+            attempt: row.try_get("attempt")?,
+            expires_at: row.try_get("lease_expires_at")?,
+        })
+    })
+    .transpose()
+}
+
+/// Extend a lease only when its owner and fencing token still match.
+pub async fn heartbeat_workflow_run(
+    pool: &PgPool,
+    lease: &WorkflowRunLease,
+    lease_for_secs: i64,
+) -> Result<bool> {
+    let result = sqlx::query(
+        "UPDATE workflow_runs SET lease_expires_at = NOW() + ($1 * INTERVAL '1 second'), heartbeat_at = NOW() \
+         WHERE community_id = $2 AND id = $3 AND status = 'running' \
+           AND lease_owner = $4 AND lease_token = $5 AND lease_expires_at > NOW()",
+    )
+    .bind(lease_for_secs)
+    .bind(lease.community_id.as_uuid())
+    .bind(lease.run_id)
+    .bind(&lease.owner)
+    .bind(lease.token)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+/// Finalize a run only if this worker still owns its fencing token.
+pub async fn finalize_workflow_run(
+    pool: &PgPool,
+    lease: &WorkflowRunLease,
+    status: RunStatus,
+    current_step: i32,
+    trace: &serde_json::Value,
+    error: Option<&str>,
+    recovery_classification: Option<&str>,
+) -> Result<bool> {
+    let status_str = status.to_string();
+    let result = sqlx::query(
+        r#"
+        UPDATE workflow_runs
+        SET status = $1::run_status,
+            current_step = $2,
+            execution_trace = $3,
+            error_message = $4,
+            recovery_classification = $5,
+            available_at = CASE WHEN $5 = 'retryable' THEN NOW() + INTERVAL '5 seconds' ELSE available_at END,
+            completed_at = CASE WHEN $1 IN ('completed','failed','cancelled') THEN NOW() ELSE completed_at END,
+            lease_owner = NULL,
+            lease_token = NULL,
+            lease_expires_at = NULL
+        WHERE community_id = $6 AND id = $7
+          AND status = 'running'
+          AND lease_owner = $8 AND lease_token = $9
+          AND lease_expires_at > NOW()
+        "#,
+    )
+    .bind(&status_str)
+    .bind(current_step)
+    .bind(trace)
+    .bind(error)
+    .bind(recovery_classification)
+    .bind(lease.community_id.as_uuid())
+    .bind(lease.run_id)
+    .bind(&lease.owner)
+    .bind(lease.token)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+/// Release a leased run for a durable delay without keeping a worker asleep.
+pub async fn defer_workflow_run(
+    pool: &PgPool,
+    lease: &WorkflowRunLease,
+    current_step: i32,
+    trace: &serde_json::Value,
+    available_at: DateTime<Utc>,
+) -> Result<bool> {
+    let result = sqlx::query(
+        r#"
+        UPDATE workflow_runs
+        SET status = 'pending', current_step = $1, execution_trace = $2,
+            available_at = $3, lease_owner = NULL, lease_token = NULL,
+            lease_expires_at = NULL, heartbeat_at = NULL,
+            recovery_classification = 'delayed'
+        WHERE community_id = $4 AND id = $5 AND status = 'running'
+          AND lease_owner = $6 AND lease_token = $7
+          AND lease_expires_at > NOW()
+        "#,
+    )
+    .bind(current_step)
+    .bind(trace)
+    .bind(available_at)
+    .bind(lease.community_id.as_uuid())
+    .bind(lease.run_id)
+    .bind(&lease.owner)
+    .bind(lease.token)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+/// Record the start of a step attempt before invoking its side effect.
+pub async fn start_workflow_step_attempt(
+    pool: &PgPool,
+    community_id: CommunityId,
+    run_id: Uuid,
+    step_index: i32,
+    step_id: &str,
+) -> Result<WorkflowStepAttempt> {
+    if let Some(existing) = sqlx::query(
+        "SELECT attempt, idempotency_key FROM workflow_step_attempts \
+         WHERE community_id = $1 AND run_id = $2 AND step_index = $3 \
+           AND status = 'running' ORDER BY attempt DESC LIMIT 1",
+    )
+    .bind(community_id.as_uuid())
+    .bind(run_id)
+    .bind(step_index)
+    .fetch_optional(pool)
+    .await?
+    {
+        return Ok(WorkflowStepAttempt {
+            attempt: existing.try_get("attempt")?,
+            idempotency_key: existing.try_get("idempotency_key")?,
+        });
+    }
+
+    let row = sqlx::query(
+        r#"
+        WITH next AS (
+            SELECT COALESCE(MAX(attempt), 0) + 1 AS attempt
+            FROM workflow_step_attempts
+            WHERE community_id = $1 AND run_id = $2 AND step_index = $3
+        )
+        INSERT INTO workflow_step_attempts
+            (community_id, run_id, step_index, step_id, attempt, idempotency_key, status)
+        SELECT $1, $2, $3, $4, attempt,
+               $2::text || ':' || $5::text || ':' || attempt::text,
+               'running'
+        FROM next
+        RETURNING attempt, idempotency_key
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(run_id)
+    .bind(step_index)
+    .bind(step_id)
+    .bind(step_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(WorkflowStepAttempt {
+        attempt: row.try_get("attempt")?,
+        idempotency_key: row.try_get("idempotency_key")?,
+    })
+}
+
+/// Persist the terminal result of a step attempt.
+#[allow(clippy::too_many_arguments)]
+pub async fn complete_workflow_step_attempt(
+    pool: &PgPool,
+    community_id: CommunityId,
+    run_id: Uuid,
+    step_index: i32,
+    attempt: i32,
+    status: &str,
+    result: Option<&serde_json::Value>,
+    error: Option<&str>,
+    recovery_classification: Option<&str>,
+) -> Result<bool> {
+    let changed = sqlx::query(
+        "UPDATE workflow_step_attempts SET status = $1, completed_at = NOW(), result = $2, \
+         error_message = $3, recovery_classification = $4 \
+         WHERE community_id = $5 AND run_id = $6 AND step_index = $7 AND attempt = $8 \
+           AND status = 'running'",
+    )
+    .bind(status)
+    .bind(result)
+    .bind(error)
+    .bind(recovery_classification)
+    .bind(community_id.as_uuid())
+    .bind(run_id)
+    .bind(step_index)
+    .bind(attempt)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    Ok(changed == 1)
+}
+
+/// Reserve a remote side effect before publication.
+pub async fn reserve_workflow_action_effect(
+    pool: &PgPool,
+    community_id: CommunityId,
+    run_id: Uuid,
+    idempotency_key: &str,
+) -> Result<WorkflowActionEffect> {
+    let row = sqlx::query(
+        r#"
+        INSERT INTO workflow_action_effects (community_id, run_id, idempotency_key)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (community_id, idempotency_key) DO UPDATE
+            SET idempotency_key = EXCLUDED.idempotency_key
+        RETURNING (xmax = 0) AS newly_reserved, event_id
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(run_id)
+    .bind(idempotency_key)
+    .fetch_one(pool)
+    .await?;
+    Ok(WorkflowActionEffect {
+        newly_reserved: row.try_get("newly_reserved")?,
+        event_id: row.try_get("event_id")?,
+    })
+}
+
+/// Persist the remote event identity after insertion.
+pub async fn complete_workflow_action_effect(
+    pool: &PgPool,
+    community_id: CommunityId,
+    idempotency_key: &str,
+    event_id: &[u8],
+) -> Result<bool> {
+    let result = sqlx::query(
+        "UPDATE workflow_action_effects SET event_id = $1, status = 'published' \
+         WHERE community_id = $2 AND idempotency_key = $3 AND event_id IS NULL",
+    )
+    .bind(event_id)
+    .bind(community_id.as_uuid())
+    .bind(idempotency_key)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+/// Persist an action's outbound event identity using the caller's transaction.
+pub async fn complete_workflow_action_effect_on_connection(
+    conn: &mut PgConnection,
+    community_id: CommunityId,
+    run_id: Uuid,
+    idempotency_key: &str,
+    event_id: &[u8],
+) -> Result<bool> {
+    let result = sqlx::query(
+        "UPDATE workflow_action_effects SET event_id = $1, status = 'published' \
+         WHERE community_id = $2 AND run_id = $3 AND idempotency_key = $4 AND event_id IS NULL",
+    )
+    .bind(event_id)
+    .bind(community_id.as_uuid())
+    .bind(run_id)
+    .bind(idempotency_key)
+    .execute(&mut *conn)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+/// Claim event-trigger handoffs durably; expired claims are reclaimable.
+pub async fn claim_workflow_event_outbox(
+    pool: &PgPool,
+    owner: &str,
+    limit: i64,
+) -> Result<Vec<WorkflowEventOutboxItem>> {
+    let rows = sqlx::query(
+        r#"
+        WITH candidates AS (
+            SELECT community_id, event_id
+            FROM workflow_event_outbox
+            WHERE available_at <= NOW()
+              AND (claimed_until IS NULL OR claimed_until < NOW())
+            ORDER BY available_at, created_at
+            FOR UPDATE SKIP LOCKED
+            LIMIT $2
+        )
+        UPDATE workflow_event_outbox o
+        SET claimed_by = $1, claimed_until = NOW() + INTERVAL '60 seconds', attempts = attempts + 1
+        FROM candidates c
+        WHERE o.community_id = c.community_id AND o.event_id = c.event_id
+        RETURNING o.community_id, o.event_id
+        "#,
+    )
+    .bind(owner)
+    .bind(limit.clamp(1, 1000))
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter()
+        .map(|row| {
+            Ok(WorkflowEventOutboxItem {
+                community_id: CommunityId::from_uuid(row.try_get("community_id")?),
+                event_id: row.try_get("event_id")?,
+                claimed_by: owner.to_owned(),
+            })
+        })
+        .collect()
+}
+
+/// Acknowledge a successfully processed event-trigger handoff.
+pub async fn ack_workflow_event_outbox(
+    pool: &PgPool,
+    item: &WorkflowEventOutboxItem,
+) -> Result<bool> {
+    let result = sqlx::query(
+        "DELETE FROM workflow_event_outbox WHERE community_id = $1 AND event_id = $2 AND claimed_by = $3",
+    )
+    .bind(item.community_id.as_uuid())
+    .bind(&item.event_id)
+    .bind(&item.claimed_by)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+/// Release a failed handoff with bounded retry delay.
+pub async fn release_workflow_event_outbox(
+    pool: &PgPool,
+    item: &WorkflowEventOutboxItem,
+) -> Result<bool> {
+    let result = sqlx::query(
+        "UPDATE workflow_event_outbox SET claimed_by = NULL, claimed_until = NULL, available_at = NOW() + INTERVAL '5 seconds' \
+         WHERE community_id = $1 AND event_id = $2 AND claimed_by = $3",
+    )
+    .bind(item.community_id.as_uuid())
+    .bind(&item.event_id)
+    .bind(&item.claimed_by)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() == 1)
 }
 
 // -- Approval CRUD ------------------------------------------------------------
@@ -1169,6 +1840,12 @@ fn row_to_run_record(row: sqlx::postgres::PgRow) -> Result<WorkflowRunRecord> {
         completed_at: row.try_get("completed_at")?,
         error_message: row.try_get("error_message")?,
         created_at: row.try_get("created_at")?,
+        lease_owner: row.try_get("lease_owner")?,
+        lease_token: row.try_get("lease_token")?,
+        lease_expires_at: row.try_get("lease_expires_at")?,
+        attempt: row.try_get("attempt")?,
+        available_at: row.try_get("available_at")?,
+        recovery_classification: row.try_get("recovery_classification")?,
     })
 }
 
@@ -1473,6 +2150,12 @@ mod tests {
             completed_at: None,
             error_message: None,
             created_at: now,
+            lease_owner: None,
+            lease_token: None,
+            lease_expires_at: None,
+            attempt: 0,
+            available_at: now,
+            recovery_classification: None,
         };
 
         assert_eq!(record.id, id);
@@ -1501,6 +2184,12 @@ mod tests {
             completed_at: None,
             error_message: None,
             created_at: now,
+            lease_owner: None,
+            lease_token: None,
+            lease_expires_at: None,
+            attempt: 0,
+            available_at: now,
+            recovery_classification: None,
         };
 
         assert!(record.trigger_event_id.is_none());
@@ -1524,6 +2213,12 @@ mod tests {
             completed_at: Some(now),
             error_message: Some("step timeout exceeded".to_owned()),
             created_at: now,
+            lease_owner: None,
+            lease_token: None,
+            lease_expires_at: None,
+            attempt: 0,
+            available_at: now,
+            recovery_classification: Some("non_retryable".to_owned()),
         };
 
         assert_eq!(record.status, RunStatus::Failed);
@@ -1555,6 +2250,12 @@ mod tests {
             completed_at: Some(now),
             error_message: None,
             created_at: now,
+            lease_owner: None,
+            lease_token: None,
+            lease_expires_at: None,
+            attempt: 0,
+            available_at: now,
+            recovery_classification: None,
         };
 
         assert!(record.execution_trace.is_array());
@@ -1577,6 +2278,12 @@ mod tests {
             completed_at: None,
             error_message: None,
             created_at: now,
+            lease_owner: None,
+            lease_token: None,
+            lease_expires_at: None,
+            attempt: 0,
+            available_at: now,
+            recovery_classification: None,
         };
 
         let mut cloned = record.clone();
@@ -1888,6 +2595,321 @@ mod tests {
         assert_eq!(
             winners, 1,
             "exactly one task must win the claim race for (workflow_id, scheduled_for)"
+        );
+    }
+
+    /// A live lease is exclusive, and an expired worker cannot fence in a
+    /// replacement worker or finalize its run.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn lease_fencing_rejects_stale_worker() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let (workflow_id, _) = make_workflow_in(&pool, community).await;
+        let trigger_id = Uuid::new_v4().as_bytes().to_vec();
+        let run_id = create_workflow_run(&pool, community, workflow_id, Some(&trigger_id), None)
+            .await
+            .expect("create run");
+
+        let first = claim_workflow_run(&pool, community, "worker-a", 1)
+            .await
+            .expect("first claim query")
+            .expect("first worker claims run");
+        assert_eq!(first.run_id, run_id);
+        assert!(claim_workflow_run(&pool, community, "worker-b", 1)
+            .await
+            .expect("second claim query")
+            .is_none());
+
+        tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+        assert!(!heartbeat_workflow_run(&pool, &first, 30)
+            .await
+            .expect("stale heartbeat query"));
+
+        let second = claim_workflow_run(&pool, community, "worker-b", 30)
+            .await
+            .expect("reclaim query")
+            .expect("expired run is reclaimable");
+        assert_ne!(first.token, second.token);
+        assert!(!finalize_workflow_run(
+            &pool,
+            &first,
+            RunStatus::Completed,
+            1,
+            &serde_json::json!([]),
+            None,
+            None,
+        )
+        .await
+        .expect("stale finalize query"));
+        assert!(finalize_workflow_run(
+            &pool,
+            &second,
+            RunStatus::Completed,
+            1,
+            &serde_json::json!([]),
+            None,
+            None,
+        )
+        .await
+        .expect("current finalize query"));
+        assert!(claim_workflow_run(&pool, community, "worker-c", 30)
+            .await
+            .expect("terminal claim query")
+            .is_none());
+    }
+
+    /// Step attempts and action reservations survive retries and never produce
+    /// a second outbound identity for the same idempotency key.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn step_attempts_and_action_effects_are_idempotent() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let (workflow_id, _) = make_workflow_in(&pool, community).await;
+        let trigger_id = Uuid::new_v4().as_bytes().to_vec();
+        let run_id = create_workflow_run(&pool, community, workflow_id, Some(&trigger_id), None)
+            .await
+            .expect("create run");
+
+        let first = start_workflow_step_attempt(&pool, community, run_id, 0, "send")
+            .await
+            .expect("start first step attempt");
+        assert_eq!(first.attempt, 1);
+        let recovered = start_workflow_step_attempt(&pool, community, run_id, 0, "send")
+            .await
+            .expect("recover in-flight step attempt");
+        assert_eq!(recovered, first, "recovery must reuse the in-flight key");
+        assert!(complete_workflow_step_attempt(
+            &pool,
+            community,
+            run_id,
+            0,
+            first.attempt,
+            "completed",
+            Some(&serde_json::json!({"event": "published"})),
+            None,
+            None,
+        )
+        .await
+        .expect("complete first step attempt"));
+
+        let second = start_workflow_step_attempt(&pool, community, run_id, 0, "send")
+            .await
+            .expect("start retry step attempt");
+        assert_eq!(second.attempt, 2);
+        assert_ne!(first.idempotency_key, second.idempotency_key);
+
+        let key = "run-step-action-1";
+        let reservation = reserve_workflow_action_effect(&pool, community, run_id, key)
+            .await
+            .expect("reserve action effect");
+        assert!(reservation.newly_reserved);
+        assert!(reservation.event_id.is_none());
+        let event_id = vec![0x42; 32];
+        assert!(
+            complete_workflow_action_effect(&pool, community, key, &event_id)
+                .await
+                .expect("persist event identity")
+        );
+
+        let duplicate = reserve_workflow_action_effect(&pool, community, run_id, key)
+            .await
+            .expect("reuse action effect");
+        assert!(!duplicate.newly_reserved);
+        assert_eq!(duplicate.event_id, Some(event_id));
+        assert!(!complete_workflow_step_attempt(
+            &pool,
+            community,
+            run_id,
+            0,
+            first.attempt,
+            "failed",
+            None,
+            Some("late duplicate completion"),
+            Some("ambiguous"),
+        )
+        .await
+        .expect("duplicate completion query"));
+    }
+
+    /// A delay releases the lease and is represented by `available_at`, so a
+    /// worker restart cannot lose it or keep a detached task asleep in memory.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn deferred_run_is_not_claimable_until_available() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let (workflow_id, _) = make_workflow_in(&pool, community).await;
+        let trigger_id = Uuid::new_v4().as_bytes().to_vec();
+        let run_id = create_workflow_run(&pool, community, workflow_id, Some(&trigger_id), None)
+            .await
+            .expect("create run");
+        let lease = claim_workflow_run(&pool, community, "delay-worker", 30)
+            .await
+            .expect("claim query")
+            .expect("claim run");
+        let available_at = Utc::now() + chrono::Duration::seconds(30);
+        assert!(defer_workflow_run(
+            &pool,
+            &lease,
+            1,
+            &serde_json::json!([{"status": "deferred"}]),
+            available_at,
+        )
+        .await
+        .expect("defer query"));
+
+        let run = get_workflow_run(&pool, community, run_id)
+            .await
+            .expect("read deferred run");
+        assert_eq!(run.status, RunStatus::Pending);
+        assert_eq!(run.current_step, 1);
+        assert!(run.available_at >= available_at - chrono::Duration::seconds(1));
+        assert!(claim_workflow_run(&pool, community, "restart-worker", 30)
+            .await
+            .expect("early reclaim query")
+            .is_none());
+    }
+
+    /// Event-trigger handoffs are durable: a failed consumer can release its
+    /// claim and a replacement consumer can reclaim it, while only the owner
+    /// may acknowledge the handoff.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn event_outbox_claim_release_and_ack_are_fenced() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let event_id = Uuid::new_v4().as_bytes().to_vec();
+        sqlx::query("INSERT INTO workflow_event_outbox (community_id, event_id) VALUES ($1, $2)")
+            .bind(community.as_uuid())
+            .bind(&event_id)
+            .execute(&pool)
+            .await
+            .expect("insert outbox item");
+
+        let claimed = claim_workflow_event_outbox(&pool, "consumer-a", 10)
+            .await
+            .expect("claim outbox")
+            .pop()
+            .expect("one outbox item");
+        assert!(!ack_workflow_event_outbox(
+            &pool,
+            &WorkflowEventOutboxItem {
+                claimed_by: "consumer-b".into(),
+                ..claimed.clone()
+            }
+        )
+        .await
+        .expect("wrong-owner ack query"));
+        assert!(release_workflow_event_outbox(&pool, &claimed)
+            .await
+            .expect("release outbox"));
+        sqlx::query(
+            "UPDATE workflow_event_outbox SET available_at = NOW() \
+             WHERE community_id = $1 AND event_id = $2",
+        )
+        .bind(community.as_uuid())
+        .bind(&event_id)
+        .execute(&pool)
+        .await
+        .expect("make released item immediately claimable");
+        let reclaimed = claim_workflow_event_outbox(&pool, "consumer-b", 10)
+            .await
+            .expect("reclaim outbox")
+            .pop()
+            .expect("released item is reclaimable");
+        assert!(ack_workflow_event_outbox(&pool, &reclaimed)
+            .await
+            .expect("owner ack outbox"));
+    }
+
+    /// Background reconciliation must not claim an approval-gated run; only
+    /// the explicit approval-resume path may transition it back to running.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn scheduler_cannot_bypass_waiting_approval() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let (workflow_id, _) = make_workflow_in(&pool, community).await;
+        let trigger_id = Uuid::new_v4().as_bytes().to_vec();
+        let run_id = create_workflow_run(&pool, community, workflow_id, Some(&trigger_id), None)
+            .await
+            .expect("create run");
+        sqlx::query("UPDATE workflow_runs SET status = 'waiting_approval' WHERE community_id = $1 AND id = $2")
+            .bind(community.as_uuid())
+            .bind(run_id)
+            .execute(&pool)
+            .await
+            .expect("set waiting approval");
+
+        assert!(claim_workflow_run(&pool, community, "scheduler", 30)
+            .await
+            .expect("scheduler claim query")
+            .is_none());
+        assert!(
+            claim_waiting_approval_workflow_run(&pool, community, run_id, "approver", 30)
+                .await
+                .expect("approval claim query")
+                .is_some()
+        );
+    }
+
+    /// The event outbox trigger is selective: ordinary channel traffic must
+    /// not create durable workflow handoffs when no active workflow exists.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn event_outbox_trigger_only_enqueues_workflow_channels() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let owner = vec![0xc3; 32];
+        ensure_user(&pool, community, &owner)
+            .await
+            .expect("ensure owner");
+        let ordinary_channel = make_channel(&pool, community, &owner).await;
+        let (workflow_id, workflow_community) = make_workflow_in(&pool, community).await;
+        let workflow = get_workflow(&pool, workflow_community, workflow_id)
+            .await
+            .expect("get workflow");
+        let workflow_channel = workflow.channel_id.expect("workflow channel");
+
+        async fn insert_channel_event(pool: &PgPool, community: CommunityId, channel: Uuid) {
+            sqlx::query(
+                "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, channel_id) \
+                 VALUES ($1, $2, $3, NOW(), 9, '[]', 'qa', $4, $5)",
+            )
+            .bind(community.as_uuid())
+            .bind(Uuid::new_v4().as_bytes().to_vec())
+            .bind(vec![0xd4u8; 32])
+            .bind(vec![0xe5u8; 64])
+            .bind(channel)
+            .execute(pool)
+            .await
+            .expect("insert event");
+        }
+
+        insert_channel_event(&pool, community, ordinary_channel).await;
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM workflow_event_outbox WHERE community_id = $1",
+            )
+            .bind(community.as_uuid())
+            .fetch_one(&pool)
+            .await
+            .expect("count ordinary outbox"),
+            0
+        );
+
+        insert_channel_event(&pool, community, workflow_channel).await;
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM workflow_event_outbox WHERE community_id = $1",
+            )
+            .bind(community.as_uuid())
+            .fetch_one(&pool)
+            .await
+            .expect("count workflow outbox"),
+            1
         );
     }
 

@@ -376,6 +376,8 @@ CREATE TABLE workflow_runs (
     community_id        UUID NOT NULL REFERENCES communities(id),
     id                  UUID NOT NULL DEFAULT gen_random_uuid(),
     workflow_id         UUID NOT NULL,
+    definition_snapshot JSONB,
+    definition_hash     BYTEA,
     status              run_status NOT NULL DEFAULT 'pending',
     trigger_event_id    BYTEA,
     current_step        INT NOT NULL DEFAULT 0,
@@ -384,6 +386,13 @@ CREATE TABLE workflow_runs (
     started_at          TIMESTAMPTZ,
     completed_at        TIMESTAMPTZ,
     error_message       TEXT,
+    lease_owner         TEXT,
+    lease_token         UUID,
+    lease_expires_at    TIMESTAMPTZ,
+    heartbeat_at        TIMESTAMPTZ,
+    attempt             INTEGER NOT NULL DEFAULT 0,
+    available_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    recovery_classification TEXT,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (community_id, id),
     FOREIGN KEY (community_id, workflow_id)
@@ -392,6 +401,57 @@ CREATE TABLE workflow_runs (
 
 CREATE INDEX idx_workflow_runs_workflow ON workflow_runs (community_id, workflow_id);
 CREATE INDEX idx_workflow_runs_status ON workflow_runs (community_id, status);
+CREATE INDEX idx_workflow_runs_claimable ON workflow_runs (community_id, available_at, created_at)
+    WHERE status IN ('pending', 'waiting_approval', 'failed', 'running');
+CREATE INDEX idx_workflow_runs_lease_expiry ON workflow_runs (lease_expires_at)
+    WHERE status = 'running';
+CREATE UNIQUE INDEX uq_workflow_runs_trigger_identity
+    ON workflow_runs (community_id, workflow_id, trigger_event_id)
+    WHERE trigger_event_id IS NOT NULL;
+
+CREATE TABLE workflow_step_attempts (
+    community_id       UUID NOT NULL,
+    run_id              UUID NOT NULL,
+    step_index          INTEGER NOT NULL,
+    step_id             VARCHAR(64) NOT NULL,
+    attempt             INTEGER NOT NULL,
+    idempotency_key     TEXT NOT NULL,
+    status              TEXT NOT NULL,
+    started_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at        TIMESTAMPTZ,
+    result              JSONB,
+    error_message       TEXT,
+    recovery_classification TEXT,
+    PRIMARY KEY (community_id, run_id, step_index, attempt),
+    UNIQUE (community_id, idempotency_key),
+    FOREIGN KEY (community_id, run_id)
+        REFERENCES workflow_runs (community_id, id) ON DELETE CASCADE
+);
+CREATE INDEX idx_workflow_step_attempts_recovery
+    ON workflow_step_attempts (community_id, status, started_at);
+CREATE TABLE workflow_event_outbox (
+    community_id   UUID NOT NULL,
+    event_id       BYTEA NOT NULL,
+    available_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    attempts       INTEGER NOT NULL DEFAULT 0,
+    claimed_by     TEXT,
+    claimed_until  TIMESTAMPTZ,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (community_id, event_id)
+);
+CREATE INDEX idx_workflow_event_outbox_claimable
+    ON workflow_event_outbox (available_at, claimed_until);
+CREATE TABLE workflow_action_effects (
+    community_id   UUID NOT NULL,
+    run_id         UUID NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    event_id       BYTEA,
+    status         TEXT NOT NULL DEFAULT 'reserved',
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (community_id, idempotency_key),
+    FOREIGN KEY (community_id, run_id)
+        REFERENCES workflow_runs (community_id, id) ON DELETE CASCADE
+);
 
 -- ── Workflow approvals ────────────────────────────────────────────────────────
 -- token-hash lookup scoped: approval token grants cannot act on another
@@ -934,6 +994,28 @@ CREATE CONSTRAINT TRIGGER events_refresh_channel_ttl
 AFTER INSERT ON events
 DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW EXECUTE FUNCTION refresh_channel_ttl_after_event_insert();
+
+CREATE OR REPLACE FUNCTION enqueue_workflow_event_outbox() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.channel_id IS NOT NULL AND EXISTS (
+        SELECT 1
+        FROM workflows w
+        WHERE w.community_id = NEW.community_id
+          AND w.channel_id = NEW.channel_id
+          AND w.status = 'active'
+          AND w.enabled
+    ) THEN
+        INSERT INTO workflow_event_outbox (community_id, event_id)
+        VALUES (NEW.community_id, NEW.id)
+        ON CONFLICT (community_id, event_id) DO NOTHING;
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER events_workflow_outbox
+AFTER INSERT ON events
+FOR EACH ROW EXECUTE FUNCTION enqueue_workflow_event_outbox();
 
 -- Replica-fence floor guard (keep in sync with migrations/0021). A deferred
 -- constraint trigger re-checks, inside COMMIT processing, that channel-bearing

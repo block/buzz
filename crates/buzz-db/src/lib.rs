@@ -1401,6 +1401,51 @@ impl Db {
         Ok(result)
     }
 
+    /// Atomically persist a workflow event and its action-effect receipt.
+    ///
+    /// This closes the crash window between event publication and recording
+    /// the event ID used for idempotent recovery.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert_workflow_action_event(
+        &self,
+        community_id: CommunityId,
+        run_id: Uuid,
+        idempotency_key: &str,
+        event: &nostr::Event,
+        channel_id: Option<Uuid>,
+        thread_meta: Option<event::ThreadMetadataParams<'_>>,
+    ) -> Result<(StoredEvent, bool)> {
+        let mut tx = self.pool.begin().await?;
+        let result = event::insert_event_with_thread_metadata_tx(
+            &mut tx,
+            community_id,
+            event,
+            channel_id,
+            thread_meta,
+        )
+        .await?;
+        let recorded = workflow::complete_workflow_action_effect_on_connection(
+            &mut tx,
+            community_id,
+            run_id,
+            idempotency_key,
+            event.id.as_bytes(),
+        )
+        .await?;
+        if !recorded {
+            return Err(DbError::InvalidData(
+                "workflow action effect reservation was lost before event commit".into(),
+            ));
+        }
+        tx.commit().await?;
+        if result.1 {
+            if let Err(e) = insert_mentions(&self.pool, community_id, event, channel_id).await {
+                tracing::warn!(event_id = %event.id, "Failed to insert mentions: {e}");
+            }
+        }
+        Ok(result)
+    }
+
     /// Atomically insert a kind:7 reaction event and its reaction row.
     #[allow(clippy::too_many_arguments)]
     pub async fn insert_reaction_event_with_thread_metadata(
@@ -2566,6 +2611,24 @@ impl Db {
         .await
     }
 
+    /// Atomically claim a scheduled fire and create/attach its workflow run.
+    pub async fn claim_and_create_scheduled_workflow_run(
+        &self,
+        community_id: CommunityId,
+        workflow_id: Uuid,
+        scheduled_for: chrono::DateTime<chrono::Utc>,
+        trigger_context: Option<&serde_json::Value>,
+    ) -> Result<Option<workflow::ScheduledWorkflowRunClaim>> {
+        workflow::claim_and_create_scheduled_workflow_run(
+            &self.pool,
+            community_id,
+            workflow_id,
+            scheduled_for,
+            trigger_context,
+        )
+        .await
+    }
+
     /// Fetch the latest claimed schedule instant for interval trigger anchoring.
     pub async fn latest_scheduled_workflow_fire(
         &self,
@@ -2742,6 +2805,185 @@ impl Db {
             error,
         )
         .await
+    }
+
+    /// Claim one runnable workflow run with a durable fencing lease.
+    pub async fn claim_workflow_run(
+        &self,
+        community_id: CommunityId,
+        owner: &str,
+        lease_for_secs: i64,
+    ) -> Result<Option<workflow::WorkflowRunLease>> {
+        workflow::claim_workflow_run(&self.pool, community_id, owner, lease_for_secs).await
+    }
+
+    /// Claim a specific workflow run with a fencing lease.
+    pub async fn claim_specific_workflow_run(
+        &self,
+        community_id: CommunityId,
+        run_id: Uuid,
+        owner: &str,
+        lease_for_secs: i64,
+    ) -> Result<Option<workflow::WorkflowRunLease>> {
+        workflow::claim_specific_workflow_run(
+            &self.pool,
+            community_id,
+            run_id,
+            owner,
+            lease_for_secs,
+        )
+        .await
+    }
+
+    /// Claim a run only after its approval gate has been explicitly granted.
+    pub async fn claim_waiting_approval_workflow_run(
+        &self,
+        community_id: CommunityId,
+        run_id: Uuid,
+        owner: &str,
+        lease_for_secs: i64,
+    ) -> Result<Option<workflow::WorkflowRunLease>> {
+        workflow::claim_waiting_approval_workflow_run(
+            &self.pool,
+            community_id,
+            run_id,
+            owner,
+            lease_for_secs,
+        )
+        .await
+    }
+
+    /// Heartbeat a workflow lease using owner and fencing token CAS.
+    pub async fn heartbeat_workflow_run(
+        &self,
+        lease: &workflow::WorkflowRunLease,
+        lease_for_secs: i64,
+    ) -> Result<bool> {
+        workflow::heartbeat_workflow_run(&self.pool, lease, lease_for_secs).await
+    }
+
+    /// Finalize a workflow run only while its fencing lease remains valid.
+    pub async fn finalize_workflow_run(
+        &self,
+        lease: &workflow::WorkflowRunLease,
+        status: workflow::RunStatus,
+        current_step: i32,
+        trace: &serde_json::Value,
+        error: Option<&str>,
+        recovery_classification: Option<&str>,
+    ) -> Result<bool> {
+        workflow::finalize_workflow_run(
+            &self.pool,
+            lease,
+            status,
+            current_step,
+            trace,
+            error,
+            recovery_classification,
+        )
+        .await
+    }
+
+    /// Release a workflow run until its durable delay deadline.
+    pub async fn defer_workflow_run(
+        &self,
+        lease: &workflow::WorkflowRunLease,
+        current_step: i32,
+        trace: &serde_json::Value,
+        available_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool> {
+        workflow::defer_workflow_run(&self.pool, lease, current_step, trace, available_at).await
+    }
+
+    /// Persist the start of a workflow step attempt.
+    pub async fn start_workflow_step_attempt(
+        &self,
+        community_id: CommunityId,
+        run_id: Uuid,
+        step_index: i32,
+        step_id: &str,
+    ) -> Result<workflow::WorkflowStepAttempt> {
+        workflow::start_workflow_step_attempt(&self.pool, community_id, run_id, step_index, step_id)
+            .await
+    }
+
+    /// Persist a terminal workflow step attempt result.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn complete_workflow_step_attempt(
+        &self,
+        community_id: CommunityId,
+        run_id: Uuid,
+        step_index: i32,
+        attempt: i32,
+        status: &str,
+        result: Option<&serde_json::Value>,
+        error: Option<&str>,
+        recovery_classification: Option<&str>,
+    ) -> Result<bool> {
+        workflow::complete_workflow_step_attempt(
+            &self.pool,
+            community_id,
+            run_id,
+            step_index,
+            attempt,
+            status,
+            result,
+            error,
+            recovery_classification,
+        )
+        .await
+    }
+
+    /// Reserve a workflow remote side effect by stable idempotency key.
+    pub async fn reserve_workflow_action_effect(
+        &self,
+        community_id: CommunityId,
+        run_id: Uuid,
+        idempotency_key: &str,
+    ) -> Result<workflow::WorkflowActionEffect> {
+        workflow::reserve_workflow_action_effect(&self.pool, community_id, run_id, idempotency_key)
+            .await
+    }
+
+    /// Persist the remote event identity for a reserved effect.
+    pub async fn complete_workflow_action_effect(
+        &self,
+        community_id: CommunityId,
+        idempotency_key: &str,
+        event_id: &[u8],
+    ) -> Result<bool> {
+        workflow::complete_workflow_action_effect(
+            &self.pool,
+            community_id,
+            idempotency_key,
+            event_id,
+        )
+        .await
+    }
+
+    /// Claim durable event-trigger handoffs.
+    pub async fn claim_workflow_event_outbox(
+        &self,
+        owner: &str,
+        limit: i64,
+    ) -> Result<Vec<workflow::WorkflowEventOutboxItem>> {
+        workflow::claim_workflow_event_outbox(&self.pool, owner, limit).await
+    }
+
+    /// Acknowledge a processed event-trigger handoff.
+    pub async fn ack_workflow_event_outbox(
+        &self,
+        item: &workflow::WorkflowEventOutboxItem,
+    ) -> Result<bool> {
+        workflow::ack_workflow_event_outbox(&self.pool, item).await
+    }
+
+    /// Release a failed event-trigger handoff for retry.
+    pub async fn release_workflow_event_outbox(
+        &self,
+        item: &workflow::WorkflowEventOutboxItem,
+    ) -> Result<bool> {
+        workflow::release_workflow_event_outbox(&self.pool, item).await
     }
 
     /// Create an approval request.

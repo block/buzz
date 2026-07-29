@@ -33,6 +33,7 @@
 pub mod action_sink;
 pub mod error;
 pub mod executor;
+pub mod recovery;
 pub mod schema;
 
 pub use action_sink::{ActionSink, ActionSinkError};
@@ -50,7 +51,7 @@ use buzz_db::workflow::RunStatus;
 use buzz_db::Db;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
-use tokio::sync::Semaphore;
+use tokio::sync::{Notify, Semaphore};
 use uuid::Uuid;
 
 /// Runtime configuration for the workflow engine.
@@ -102,6 +103,13 @@ pub struct WorkflowEngine {
     /// `buzz-relay`).
     pub(crate) workflow_cache:
         moka::sync::Cache<(CommunityId, Uuid), Arc<Vec<buzz_db::workflow::WorkflowRecord>>>,
+    /// Stable process identity used for lease ownership and fencing logs.
+    pub(crate) worker_id: String,
+    /// Leases claimed by this process, keyed by tenant and run.
+    pub(crate) active_leases:
+        Arc<DashMap<(CommunityId, Uuid), buzz_db::workflow::WorkflowRunLease>>,
+    /// Shutdown signal that stops new scheduler claims while existing tasks drain.
+    pub(crate) shutdown: Arc<Notify>,
 }
 
 impl WorkflowEngine {
@@ -119,6 +127,9 @@ impl WorkflowEngine {
                 .max_capacity(10_000)
                 .time_to_live(std::time::Duration::from_secs(10))
                 .build(),
+            worker_id: format!("buzz-workflow-{}", Uuid::new_v4()),
+            active_leases: Arc::new(DashMap::new()),
+            shutdown: Arc::new(Notify::new()),
         }
     }
 
@@ -194,6 +205,144 @@ impl WorkflowEngine {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
+    async fn persist_owned_run(
+        &self,
+        community_id: CommunityId,
+        run_id: Uuid,
+        status: RunStatus,
+        step: i32,
+        trace: &serde_json::Value,
+        error: Option<&str>,
+        recovery: Option<&str>,
+    ) {
+        if let Some((_, lease)) = self.active_leases.remove(&(community_id, run_id)) {
+            match self
+                .db
+                .finalize_workflow_run(&lease, status.clone(), step, trace, error, recovery)
+                .await
+            {
+                Ok(true) => {
+                    metrics::counter!("buzz_workflow_lease_finalizations_total", "status" => status.to_string()).increment(1);
+                    return;
+                }
+                Ok(false) => {
+                    metrics::counter!("buzz_workflow_stale_finalize_rejections_total").increment(1);
+                    tracing::warn!(run_id = %run_id, "stale workflow lease rejected finalization")
+                }
+                Err(e) => {
+                    metrics::counter!("buzz_workflow_lease_finalize_errors_total").increment(1);
+                    tracing::error!(run_id = %run_id, "lease-protected workflow finalization failed: {e}")
+                }
+            }
+            return;
+        }
+        tracing::warn!(
+            run_id = %run_id,
+            "workflow finalization skipped because the fencing lease is absent"
+        );
+    }
+
+    async fn defer_owned_run(
+        &self,
+        community_id: CommunityId,
+        run_id: Uuid,
+        step: i32,
+        trace: &serde_json::Value,
+        available_at: DateTime<Utc>,
+    ) {
+        if let Some((_, lease)) = self.active_leases.remove(&(community_id, run_id)) {
+            match self
+                .db
+                .defer_workflow_run(&lease, step, trace, available_at)
+                .await
+            {
+                Ok(true) => {
+                    metrics::counter!("buzz_workflow_run_deferrals_total").increment(1);
+                }
+                Ok(false) => {
+                    metrics::counter!("buzz_workflow_stale_defer_rejections_total").increment(1);
+                    tracing::warn!(run_id = %run_id, "stale workflow lease rejected delay deferral");
+                }
+                Err(e) => {
+                    metrics::counter!("buzz_workflow_defer_errors_total").increment(1);
+                    tracing::error!(run_id = %run_id, "durable workflow delay persistence failed: {e}");
+                }
+            }
+        } else {
+            tracing::warn!(run_id = %run_id, "workflow delay completion had no active lease");
+        }
+    }
+
+    /// Keep a claimed run alive while its executor is making progress. The
+    /// loop exits as soon as finalization removes the lease from the active set.
+    pub(crate) fn start_lease_heartbeat(&self, lease: buzz_db::workflow::WorkflowRunLease) {
+        let db = self.db.clone();
+        let active = Arc::clone(&self.active_leases);
+        tokio::spawn(async move {
+            let key = (lease.community_id, lease.run_id);
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                let Some(current) = active.get(&key).map(|entry| entry.clone()) else {
+                    break;
+                };
+                if !db
+                    .heartbeat_workflow_run(&current, 300)
+                    .await
+                    .unwrap_or(false)
+                {
+                    break;
+                }
+            }
+        });
+    }
+
+    /// Stop scheduling new work while leaving active runs reclaimable.
+    pub fn request_shutdown(&self) {
+        // `notify_one` retains a permit when the scheduler is between ticks,
+        // so a shutdown request cannot be lost while the run loop is doing DB
+        // work rather than currently waiting in `select!`.
+        self.shutdown.notify_one();
+    }
+
+    /// Drain durable event-trigger handoffs. The normal post-store hook still
+    /// provides low latency; this path closes the crash window between event
+    /// commit and handler execution.
+    async fn drain_event_outbox(self: &Arc<Self>) {
+        let items = match self
+            .db
+            .claim_workflow_event_outbox(&self.worker_id, 100)
+            .await
+        {
+            Ok(items) => items,
+            Err(e) => {
+                tracing::debug!("workflow event outbox unavailable: {e}");
+                return;
+            }
+        };
+        for item in items {
+            let processed = match self
+                .db
+                .get_event_by_id(item.community_id, &item.event_id)
+                .await
+            {
+                Ok(Some(event)) => self.on_event(item.community_id, &event).await.is_ok(),
+                Ok(None) => true,
+                Err(e) => {
+                    tracing::warn!(event_id = ?item.event_id, "workflow outbox event read failed: {e}");
+                    false
+                }
+            };
+            if processed {
+                metrics::counter!("buzz_workflow_event_outbox_acked_total").increment(1);
+                let _ = self.db.ack_workflow_event_outbox(&item).await;
+            } else {
+                metrics::counter!("buzz_workflow_event_outbox_retries_total").increment(1);
+                let _ = self.db.release_workflow_event_outbox(&item).await;
+            }
+        }
+    }
+
     /// Parse and validate a YAML workflow definition.
     ///
     /// Returns `(WorkflowDef, canonical_json)` on success. The canonical JSON
@@ -226,7 +375,16 @@ impl WorkflowEngine {
                 let trace_json = serde_json::Value::Array(full_trace);
                 let step_count = result.step_index as i32;
 
-                if result.approval_token.is_some() {
+                if let Some(available_at) = result.reschedule_at {
+                    self.defer_owned_run(
+                        community_id,
+                        run_id,
+                        step_count,
+                        &trace_json,
+                        available_at,
+                    )
+                    .await;
+                } else if result.approval_token.is_some() {
                     // Approval gates are not yet implemented (WF-08).
                     // Fail explicitly rather than creating unreachable WaitingApproval rows.
                     tracing::warn!(
@@ -234,42 +392,28 @@ impl WorkflowEngine {
                         step_index = result.step_index,
                         "Workflow hit approval gate — not yet implemented, marking as failed"
                     );
-                    if let Err(e) = self
-                        .db
-                        .update_workflow_run(
-                            community_id,
-                            run_id,
-                            RunStatus::Failed,
-                            step_count,
-                            &trace_json,
-                            Some("approval gates not yet implemented — see WF-08"),
-                        )
-                        .await
-                    {
-                        tracing::error!(
-                            run_id = %run_id,
-                            "Failed to update run to Failed (approval gate): {e}"
-                        );
-                    }
+                    self.persist_owned_run(
+                        community_id,
+                        run_id,
+                        RunStatus::Failed,
+                        step_count,
+                        &trace_json,
+                        Some("approval gates not yet implemented — see WF-08"),
+                        Some("non_retryable"),
+                    )
+                    .await;
                 } else {
                     tracing::info!(run_id = %run_id, "Workflow run completed");
-                    if let Err(e) = self
-                        .db
-                        .update_workflow_run(
-                            community_id,
-                            run_id,
-                            RunStatus::Completed,
-                            step_count,
-                            &trace_json,
-                            None,
-                        )
-                        .await
-                    {
-                        tracing::error!(
-                            run_id = %run_id,
-                            "Failed to update run to Completed: {e}"
-                        );
-                    }
+                    self.persist_owned_run(
+                        community_id,
+                        run_id,
+                        RunStatus::Completed,
+                        step_count,
+                        &trace_json,
+                        None,
+                        None,
+                    )
+                    .await;
                 }
             }
             Err((e, progress)) => {
@@ -277,23 +421,23 @@ impl WorkflowEngine {
                 let mut full_trace = prefix;
                 full_trace.extend(progress.trace);
                 let trace_json = serde_json::Value::Array(full_trace);
-                if let Err(db_err) = self
-                    .db
-                    .update_workflow_run(
-                        community_id,
-                        run_id,
-                        RunStatus::Failed,
-                        progress.step_index as i32,
-                        &trace_json,
-                        Some(&e.to_string()),
-                    )
-                    .await
-                {
-                    tracing::error!(
-                        run_id = %run_id,
-                        "Failed to update run to Failed: {db_err}"
-                    );
-                }
+                let classification = if matches!(e, WorkflowError::CapacityExceeded) {
+                    "retryable"
+                } else if e.to_string().contains("recovery required") {
+                    "ambiguous"
+                } else {
+                    "non_retryable"
+                };
+                self.persist_owned_run(
+                    community_id,
+                    run_id,
+                    RunStatus::Failed,
+                    progress.step_index as i32,
+                    &trace_json,
+                    Some(&e.to_string()),
+                    Some(classification),
+                )
+                .await;
             }
         }
     }
@@ -328,7 +472,13 @@ impl WorkflowEngine {
         let kind_u32 = event_kind_u32(&event.event);
 
         // Exclude workflow execution events to prevent infinite loops.
-        if is_workflow_execution_kind(kind_u32) {
+        if is_workflow_execution_kind(kind_u32)
+            || event.event.tags.iter().any(|tag| {
+                let parts = tag.as_slice();
+                parts.first().map(String::as_str) == Some("buzz:workflow")
+                    && parts.get(1).map(String::as_str) == Some("true")
+            })
+        {
             return Ok(());
         }
 
@@ -408,8 +558,8 @@ impl WorkflowEngine {
             {
                 Ok(id) => id,
                 Err(e) => {
-                    tracing::error!(workflow_id = %workflow.id, "Failed to create run: {e}");
-                    continue;
+                    tracing::error!(workflow_id = %workflow.id, "Failed to create run; retaining event outbox item for retry: {e}");
+                    return Err(WorkflowError::from(e));
                 }
             };
 
@@ -484,9 +634,17 @@ impl WorkflowEngine {
         tracing::info!("WorkflowEngine cron loop started (60s tick)");
 
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {}
+                _ = self.shutdown.notified() => {
+                    tracing::info!("WorkflowEngine scheduler stopping; active leases remain reclaimable");
+                    return;
+                }
+            }
 
             let now = Utc::now();
+
+            self.drain_event_outbox().await;
 
             let workflows = match self.db.list_all_enabled_workflows().await {
                 Ok(wf) => wf,
@@ -615,12 +773,35 @@ impl WorkflowEngine {
                 // input; the claim binds `(community_id, workflow_id,
                 // scheduled_for)` so a duplicate workflow UUID in another
                 // community claims independently.
-                match self
+                // Claim, create, and attach are one transaction. A failed run
+                // insert no longer strands a durable fire with no resumable run.
+                let trigger_ctx = executor::TriggerContext {
+                    channel_id: channel_id.to_string(),
+                    timestamp: now.timestamp().to_string(),
+                    ..Default::default()
+                };
+                let trigger_ctx_json = match serde_json::to_value(&trigger_ctx) {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        tracing::error!(
+                            workflow_id = %workflow.id,
+                            "Cron tick: failed to serialize trigger context: {e}"
+                        );
+                        continue;
+                    }
+                };
+
+                let run_claim = match self
                     .db
-                    .claim_scheduled_workflow_fire(community_id, workflow.id, scheduled_for)
+                    .claim_and_create_scheduled_workflow_run(
+                        community_id,
+                        workflow.id,
+                        scheduled_for,
+                        trigger_ctx_json.as_ref(),
+                    )
                     .await
                 {
-                    Ok(Some(_)) => {}
+                    Ok(Some(claim)) => claim,
                     Ok(None) => {
                         // Another pod (or an earlier tick this pod) already
                         // claimed this instant. Still advance the in-memory
@@ -638,64 +819,8 @@ impl WorkflowEngine {
                         );
                         continue;
                     }
-                }
-
-                // Fix 5: handle serialization errors explicitly rather than silently
-                // dropping the trigger context with .ok().
-                let trigger_ctx = executor::TriggerContext {
-                    channel_id: channel_id.to_string(),
-                    timestamp: now.timestamp().to_string(),
-                    ..Default::default()
                 };
-                let trigger_ctx_json = match serde_json::to_value(&trigger_ctx) {
-                    Ok(v) => Some(v),
-                    Err(e) => {
-                        tracing::error!(
-                            workflow_id = %workflow.id,
-                            "Cron tick: failed to serialize trigger context: {e}"
-                        );
-                        continue;
-                    }
-                };
-
-                let run_id = match self
-                    .db
-                    .create_workflow_run(
-                        community_id,
-                        workflow.id,
-                        None, // no trigger event for cron
-                        trigger_ctx_json.as_ref(),
-                    )
-                    .await
-                {
-                    Ok(id) => id,
-                    Err(e) => {
-                        tracing::error!(
-                            workflow_id = %workflow.id,
-                            "Cron tick: failed to create workflow run: {e}"
-                        );
-                        // The claim is held but the run failed to create. The
-                        // claim row intentionally stays (its `workflow_run_id`
-                        // NULL) so this instant is not re-fired: at-most-once is
-                        // preserved over exactly-once on transient run-insert
-                        // failures.
-                        continue;
-                    }
-                };
-
-                // Link the won claim to its run for ops/audit forensics. The
-                // claim row already guarantees dedupe; this is best-effort.
-                if let Err(e) = self
-                    .db
-                    .attach_scheduled_workflow_run(community_id, workflow.id, scheduled_for, run_id)
-                    .await
-                {
-                    tracing::warn!(
-                        workflow_id = %workflow.id,
-                        run_id = %run_id,
-                        "Cron tick: failed to attach run to scheduled-fire claim: {e}"
-                    );
-                }
+                let run_id = run_claim.run_id;
 
                 // Update last_fired AFTER a successful claim+insert so that a
                 // failure doesn't suppress the next tick for the full interval.
@@ -730,6 +855,58 @@ impl WorkflowEngine {
                         .finalize_run(community_id, run_id, result, None)
                         .await;
                 });
+            }
+
+            // Restart reconciliation: detached tasks disappear with the
+            // process, but their pending/retryable/expired rows remain. Scan
+            // durable runs and re-submit them; execute_run performs the final
+            // fenced claim so duplicate scheduler pods are harmless.
+            for workflow in &workflows {
+                let def: schema::WorkflowDef =
+                    match serde_json::from_value(workflow.definition.clone()) {
+                        Ok(def) => def,
+                        Err(_) => continue,
+                    };
+                let runs = match self
+                    .db
+                    .list_workflow_runs(workflow.community_id, workflow.id, 100)
+                    .await
+                {
+                    Ok(runs) => runs,
+                    Err(e) => {
+                        tracing::warn!(workflow_id = %workflow.id, "reconciliation run scan failed: {e}");
+                        continue;
+                    }
+                };
+                for run in runs {
+                    let claimable = matches!(run.status, RunStatus::Pending)
+                        || (matches!(run.status, RunStatus::Failed)
+                            && run.recovery_classification.as_deref() == Some("retryable"))
+                        || (matches!(run.status, RunStatus::Running)
+                            && run
+                                .lease_expires_at
+                                .map(|expires| expires <= now)
+                                .unwrap_or(false));
+                    if !claimable || run.available_at > now {
+                        continue;
+                    }
+                    let ctx = run
+                        .trigger_context
+                        .as_ref()
+                        .and_then(|value| serde_json::from_value(value.clone()).ok())
+                        .unwrap_or_default();
+                    let run_community = workflow.community_id;
+                    let engine = Arc::clone(self);
+                    let def_clone = def.clone();
+                    tokio::spawn(async move {
+                        let result =
+                            executor::execute_run(&engine, run_community, run.id, &def_clone, &ctx)
+                                .await;
+                        engine
+                            .finalize_run(run_community, run.id, result, None)
+                            .await;
+                    });
+                }
             }
 
             // Fix 1: prune stale last_fired entries for workflows that are no longer
