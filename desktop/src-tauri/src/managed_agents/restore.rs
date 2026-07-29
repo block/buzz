@@ -330,10 +330,14 @@ pub async fn restore_managed_agents_on_launch(
                                             // mid-turn session is not resumed by an
                                             // eager child — and silently reintroduces
                                             // N idle brains on every launch.
+                                            // Restore on the configured authority,
+                                            // not the canonicalized identity form —
+                                            // the relay derives the community from
+                                            // the host (block/buzz#2444).
                                             spawn_agent_child(
                                                 app,
                                                 record,
-                                                &key.relay_url,
+                                                &relay_url,
                                                 true,
                                                 owner_hex_ref,
                                             )
