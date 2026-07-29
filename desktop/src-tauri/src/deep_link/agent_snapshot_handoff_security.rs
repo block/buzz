@@ -1,4 +1,8 @@
-use std::{io::Read, path::{Path, PathBuf}, time::{Duration, SystemTime}};
+use std::{
+    io::Read,
+    path::{Path, PathBuf},
+    time::{Duration, SystemTime},
+};
 
 #[cfg(target_os = "macos")]
 use std::ffi::CString;
@@ -259,7 +263,10 @@ fn load_agent_snapshot_handoff_from_dir(
 }
 
 #[cfg(target_os = "macos")]
-pub(super) fn read_agent_snapshot_handoff_from_dir(dir: &Path, handoff_id: &str) -> Result<Vec<u8>, String> {
+pub(super) fn read_agent_snapshot_handoff_from_dir(
+    dir: &Path,
+    handoff_id: &str,
+) -> Result<Vec<u8>, String> {
     load_agent_snapshot_handoff_from_dir(dir, handoff_id, None)
 }
 
@@ -273,7 +280,10 @@ pub(super) fn consume_agent_snapshot_handoff_from_dir(
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(super) fn read_agent_snapshot_handoff_from_dir(_dir: &Path, _handoff_id: &str) -> Result<Vec<u8>, String> {
+pub(super) fn read_agent_snapshot_handoff_from_dir(
+    _dir: &Path,
+    _handoff_id: &str,
+) -> Result<Vec<u8>, String> {
     Err("agent snapshot handoffs currently require macOS file security".to_string())
 }
 
@@ -285,4 +295,3 @@ pub(super) fn consume_agent_snapshot_handoff_from_dir(
 ) -> Result<(), String> {
     Err("agent snapshot handoffs currently require macOS file security".to_string())
 }
-
