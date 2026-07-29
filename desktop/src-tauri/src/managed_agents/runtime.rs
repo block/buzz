@@ -827,7 +827,6 @@ pub fn spawn_agent_child(
     // NOSTR_PRIVATE_KEY mirrors BUZZ_PRIVATE_KEY — keep in sync.
     if let Some(cred_helper) = resolve_command("git-credential-nostr") {
         let relay_http_url = crate::relay::relay_http_base_url(&effective_relay_url);
-
         command.env("NOSTR_PRIVATE_KEY", &record.private_key_nsec);
         command.env("GIT_TERMINAL_PROMPT", "0");
         command.env("GIT_CONFIG_COUNT", "2");
@@ -835,7 +834,7 @@ pub fn spawn_agent_child(
             "GIT_CONFIG_KEY_0",
             format!("credential.{relay_http_url}/git.helper"),
         );
-        let helper = cred_helper.to_string_lossy().replace('\\', "/");
+        let helper = crate::commands::credential_helper_config_value(&cred_helper);
         command.env("GIT_CONFIG_VALUE_0", helper);
         command.env(
             "GIT_CONFIG_KEY_1",
