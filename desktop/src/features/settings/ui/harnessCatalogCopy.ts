@@ -43,6 +43,9 @@ const HARNESS_DESCRIPTIONS: Record<string, string> = {
   // Sources: https://github.com/openclaw/openclaw,
   // https://docs.openclaw.ai/start/getting-started
   openclaw: "A personal AI assistant that runs on your own devices.",
+  // Source: https://github.com/cline/cline — "The open source coding agent
+  // in your IDE and terminal."
+  cline: "An open-source coding agent for your IDE and terminal.",
 };
 
 /**
