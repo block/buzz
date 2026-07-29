@@ -1,8 +1,4 @@
 {
-  # App release version — bump on every release. Keep in sync with:
-  #   desktop/src-tauri/Cargo.toml, desktop/src-tauri/tauri.conf.json
-  buzzVersion = "0.5.0";
-
   # sherpa-onnx static library archive for huddle audio.
   # Per-platform archive URL and hash.
   # Regenerate hashes after version bump: run
@@ -17,11 +13,11 @@
       };
       "aarch64-linux" = {
         urlSuffix = "linux-aarch64-static-lib";
-        hash = "sha256-03xwig2hfcj88li5qk01i8h5x00gana9g3j3n7alkjbwg0b3dcr3";
+        hash = "sha256-I7M2Fnh8yUnVsUOOl5RVD4BeIIoBTFwiRUgyB8WLvA8=";
       };
       "aarch64-darwin" = {
         urlSuffix = "osx-arm64-static-lib";
-        hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+        hash = "sha256-V4Adsru3hqXTQ/UVo4/yELQBhCM4vcgE+gdTEtHNJAQ=";
       };
     };
   };
@@ -41,5 +37,5 @@
 
   # Hash for pnpm dependencies (desktop frontend).
   # Regenerate after package.json / pnpm-lock.yaml changes: remove and let nix build fetch.
-  pnpmHash = "sha256-Tboy+MG/VvdxUpJw7Xv0oubK58MIpvChvbU30uO4M4A=";
+  pnpmHash = "sha256-k5bRDcNSNN9a/xeBtcZYmtiW5d0NN+uDHl2LM+94F4A=";
 }
