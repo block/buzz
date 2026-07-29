@@ -58,6 +58,63 @@ class RunnerTests: XCTestCase {
     )
   }
 
+  func testAttachmentMenuKeepsKeyboardWhenMenuFitsAboveTrigger() {
+    XCTAssertEqual(
+      NativeAttachmentPopoverPresentationLayout.keyboardDismissalOffset(
+        sourceRect: CGRect(x: 320, y: 480, width: 44, height: 44),
+        containerBounds: CGRect(x: 0, y: 0, width: 390, height: 844),
+        safeAreaInsets: UIEdgeInsets(top: 59, left: 0, bottom: 34, right: 0),
+        keyboardLayoutFrame: CGRect(
+          x: 0,
+          y: 544,
+          width: 390,
+          height: 300
+        ),
+        menuHeight: NativeAttachmentMenuLayout.size.height
+      ),
+      0
+    )
+  }
+
+  func testAttachmentMenuDismissesKeyboardAndRepositionsInCompactHeight() {
+    let sourceRect = CGRect(x: 760, y: 168, width: 44, height: 44)
+    let keyboardDismissalOffset =
+      NativeAttachmentPopoverPresentationLayout.keyboardDismissalOffset(
+        sourceRect: sourceRect,
+        containerBounds: CGRect(x: 0, y: 0, width: 844, height: 390),
+        safeAreaInsets: UIEdgeInsets(top: 0, left: 59, bottom: 21, right: 59),
+        keyboardLayoutFrame: CGRect(
+          x: 0,
+          y: 228,
+          width: 844,
+          height: 162
+        ),
+        menuHeight: NativeAttachmentMenuLayout.size.height
+      )
+
+    XCTAssertEqual(keyboardDismissalOffset, 162)
+    XCTAssertEqual(
+      NativeAttachmentPopoverPresentationLayout.sourceRect(
+        sourceRect,
+        keyboardDismissalOffset: keyboardDismissalOffset
+      ),
+      sourceRect.offsetBy(dx: 0, dy: 162)
+    )
+  }
+
+  func testAttachmentMenuDoesNotMoveWithoutSoftwareKeyboard() {
+    XCTAssertEqual(
+      NativeAttachmentPopoverPresentationLayout.keyboardDismissalOffset(
+        sourceRect: CGRect(x: 760, y: 168, width: 44, height: 44),
+        containerBounds: CGRect(x: 0, y: 0, width: 844, height: 390),
+        safeAreaInsets: UIEdgeInsets(top: 0, left: 59, bottom: 21, right: 59),
+        keyboardLayoutFrame: CGRect(x: 0, y: 390, width: 844, height: 0),
+        menuHeight: NativeAttachmentMenuLayout.size.height
+      ),
+      0
+    )
+  }
+
   func testEmbeddedPhotoPickerAppliesOneZoomInStepWithoutAnimation() {
     var zoomInCalls = 0
     var animationsWereEnabled = true

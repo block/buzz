@@ -38,6 +38,34 @@ enum NativeAttachmentPopoverAnchorLayout {
   }
 }
 
+enum NativeAttachmentPopoverPresentationLayout {
+  static func keyboardDismissalOffset(
+    sourceRect: CGRect,
+    containerBounds: CGRect,
+    safeAreaInsets: UIEdgeInsets,
+    keyboardLayoutFrame: CGRect,
+    menuHeight: CGFloat
+  ) -> CGFloat {
+    let keyboardOverlap =
+      NativeAttachmentExpandedSurfaceBehavior.keyboardOverlap(
+        containerBounds: containerBounds,
+        keyboardLayoutFrame: keyboardLayoutFrame
+      )
+    guard keyboardOverlap > 0 else { return 0 }
+
+    let availableHeight =
+      sourceRect.minY - (containerBounds.minY + safeAreaInsets.top)
+    return availableHeight >= menuHeight ? 0 : keyboardOverlap
+  }
+
+  static func sourceRect(
+    _ sourceRect: CGRect,
+    keyboardDismissalOffset: CGFloat
+  ) -> CGRect {
+    sourceRect.offsetBy(dx: 0, dy: keyboardDismissalOffset)
+  }
+}
+
 final class NativeAttachmentPopoverCoordinator: NSObject {
   private let channel: FlutterMethodChannel
   private weak var parentViewController: UIViewController?
@@ -127,11 +155,32 @@ final class NativeAttachmentPopoverCoordinator: NSObject {
     }
 
     let sourceView = presenter.view
-    let convertedRect: CGRect
+    var convertedRect: CGRect
     if let window = sourceView?.window {
       convertedRect = sourceView?.convert(sourceRect, from: window) ?? sourceRect
     } else {
       convertedRect = sourceRect
+    }
+
+    if let sourceView {
+      let keyboardDismissalOffset =
+        NativeAttachmentPopoverPresentationLayout.keyboardDismissalOffset(
+          sourceRect: convertedRect,
+          containerBounds: sourceView.bounds,
+          safeAreaInsets: sourceView.safeAreaInsets,
+          keyboardLayoutFrame: sourceView.keyboardLayoutGuide.layoutFrame,
+          menuHeight: NativeAttachmentMenuLayout.size.height
+        )
+      if keyboardDismissalOffset > 0 {
+        NativeAttachmentExpandedSurfaceBehavior.dismissKeyboard(
+          in: sourceView.window
+        )
+        convertedRect =
+          NativeAttachmentPopoverPresentationLayout.sourceRect(
+            convertedRect,
+            keyboardDismissalOffset: keyboardDismissalOffset
+          )
+      }
     }
 
     let anchorView = makeSourceAnchor(frame: convertedRect)
