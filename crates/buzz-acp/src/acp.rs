@@ -112,6 +112,94 @@ pub enum AcpError {
     AgentError { code: i64, message: String },
 }
 
+/// Verification state for the directly spawned ACP adapter process.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DirectChildShutdownStatus {
+    /// The direct child exited and its status was reaped.
+    Reaped,
+    /// Waiting for the direct child returned an operating-system error.
+    WaitFailed {
+        /// Portable error category reported by the operating system.
+        kind: std::io::ErrorKind,
+        /// Operating-system error text. This never includes ACP wire content.
+        message: String,
+    },
+    /// The direct child did not produce an exit status within the bound.
+    TimedOut {
+        /// Maximum time spent waiting for this verification attempt.
+        timeout: std::time::Duration,
+    },
+}
+
+/// Verification state for the process group created for an ACP adapter.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProcessGroupShutdownStatus {
+    /// The original process group no longer exists (`killpg(..., 0)` returned `ESRCH`).
+    Absent,
+    /// The original process group still exists after the bounded probe window.
+    Present,
+    /// The operating system could not determine whether the group exists.
+    ProbeFailed {
+        /// Platform error number returned by the process-group probe.
+        errno: i32,
+    },
+    /// Process-group containment is unavailable on this platform.
+    ///
+    /// Direct-child termination alone is insufficient ownership proof.
+    #[cfg_attr(unix, allow(dead_code))]
+    Unavailable,
+}
+
+/// Typed evidence that an ACP adapter shutdown could not be fully verified.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "agent shutdown unverified for pid {process_id}: direct_child={direct_child:?}, \
+     process_group={process_group:?}"
+)]
+pub struct ShutdownError {
+    /// Process ID assigned to the adapter at spawn time.
+    pub process_id: u32,
+    /// Final direct-child termination evidence.
+    pub direct_child: DirectChildShutdownStatus,
+    /// Final process-group termination evidence.
+    pub process_group: ProcessGroupShutdownStatus,
+}
+
+fn classify_shutdown(
+    process_id: u32,
+    direct_child: DirectChildShutdownStatus,
+    process_group: ProcessGroupShutdownStatus,
+) -> Result<(), ShutdownError> {
+    let child_verified = direct_child == DirectChildShutdownStatus::Reaped;
+    let group_verified = match process_group {
+        ProcessGroupShutdownStatus::Absent => true,
+        ProcessGroupShutdownStatus::Unavailable
+        | ProcessGroupShutdownStatus::Present
+        | ProcessGroupShutdownStatus::ProbeFailed { .. } => false,
+    };
+    if child_verified && group_verified {
+        Ok(())
+    } else {
+        Err(ShutdownError {
+            process_id,
+            direct_child,
+            process_group,
+        })
+    }
+}
+
+impl AcpError {
+    /// Whether the adapter process must be replaced before another request.
+    ///
+    /// Every non-agent error means process ownership, stdio framing, or request
+    /// synchronization is uncertain. A JSON-RPC `AgentError` is the sole
+    /// application-class error: the adapter positively framed a response and
+    /// remains reusable unless a higher-level lifecycle boundary says otherwise.
+    pub fn requires_process_replacement(&self) -> bool {
+        !matches!(self, Self::AgentError { .. })
+    }
+}
+
 /// Build an [`AcpError::AgentError`] from a JSON-RPC error object,
 /// preserving the numeric code. When the `message` field is missing or
 /// non-string, fall back to the full JSON object so provider-specific
@@ -143,6 +231,23 @@ fn build_initialize_params() -> serde_json::Value {
 pub struct AcpClient {
     /// The agent child process (kept alive to prevent zombie).
     child: Child,
+    /// Process ID assigned to the direct child at spawn time.
+    ///
+    /// Stored independently because [`Child::id`] becomes `None` after the
+    /// process has been polled to completion, but shutdown evidence must still
+    /// identify the original process.
+    spawn_process_id: u32,
+    /// Original process-group ID created at spawn time on Unix.
+    ///
+    /// `None` on platforms without Unix process-group containment. Descendants
+    /// that deliberately escape via `setsid(2)` create a new session/group and
+    /// are outside what this stored group ID—and therefore [`Self::shutdown`]—
+    /// can prove.
+    process_group_id: Option<u32>,
+    /// Whether a prior [`Self::shutdown`] call verified every platform-supported
+    /// termination boundary. Prevents repeated shutdown or `Drop` from signaling
+    /// a process-group ID that the operating system may later reuse.
+    shutdown_verified: bool,
     /// Write end of the agent's stdin pipe.
     stdin: ChildStdin,
     /// Framed reader over the agent's stdout pipe (line-oriented, bounded).
@@ -215,6 +320,13 @@ pub struct AcpClient {
     /// deltas. Both goose and buzz-agent emit this notification; goose gates
     /// on client capability advertisement, buzz-agent emits unconditionally.
     goose_usage: UsageTracker,
+    /// Whether the initialize response advertised ACP `session/close`.
+    ///
+    /// Session close is optional. Callers use this bit to choose between an
+    /// explicit close and a deliberate process recycle; guessing support and
+    /// treating method-not-found as a crash would trip the circuit breaker for
+    /// otherwise healthy legacy adapters.
+    supports_session_close: bool,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -415,32 +527,86 @@ fn build_client_capabilities() -> serde_json::Value {
 }
 
 impl AcpClient {
-    /// Kill the agent subprocess and wait for it to exit (no zombies).
+    /// Kill the agent process group and verify bounded cleanup.
     ///
-    /// `Drop` only calls `start_kill()` (sends SIGKILL but doesn't reap).
-    /// Call this when you need guaranteed cleanup — e.g., in `run_models`
-    /// before process exit.
-    pub async fn shutdown(&mut self) {
-        // Kill the entire process group when possible. The child was spawned
-        // with process_group(0), so its PID == its PGID. Killing the group
-        // ensures subprocesses (MCP servers, tool processes) are cleaned up
-        // rather than orphaned to init.
-        //
-        // Falls back to start_kill() (direct child only) on non-Unix or if
-        // the child has been polled to completion (id() returns None).
-        match self.child.id() {
-            Some(pid) if kill_process_group(pid) => {}
-            _ => {
+    /// On Unix, success proves both that the direct child was reaped and that
+    /// the original spawn-time process group is absent. A direct-child kill is
+    /// attempted when group signaling fails and again when the first bounded
+    /// wait cannot verify exit. The group ID is retained independently of
+    /// [`Child::id`], so verification still runs after Tokio clears the live ID.
+    ///
+    /// On non-Unix platforms process-group containment is unavailable, so
+    /// shutdown fails closed after bounded direct-child termination. The
+    /// owning slot remains quarantined rather than treating possible
+    /// descendants as verified absent.
+    ///
+    /// Descendants that deliberately escape the original group with `setsid(2)`
+    /// are outside this API's containment and verification boundary.
+    pub async fn shutdown(&mut self) -> Result<(), ShutdownError> {
+        const SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+        if self.shutdown_verified {
+            return Ok(());
+        }
+
+        #[cfg(unix)]
+        {
+            let process_group_id = self.process_group_id;
+
+            // Signal the group only while Tokio still proves that the original
+            // direct child owns the spawn PID. Once Child::id() is cleared, the
+            // numeric PID/PGID may be reused; it remains safe to probe, never to
+            // signal. Direct-child fallback stays bounded by the Child handle.
+            if let Some(id) = process_group_signal_target(
+                self.spawn_process_id,
+                process_group_id,
+                self.child.id(),
+            ) {
+                if signal_process_group(id).is_err() {
+                    let _ = self.child.start_kill();
+                }
+            } else if self.child.id().is_some() {
                 let _ = self.child.start_kill();
             }
+
+            let mut direct_child = wait_for_direct_child(&mut self.child, SHUTDOWN_TIMEOUT).await;
+            if direct_child != DirectChildShutdownStatus::Reaped {
+                // A group signal that did not yield a reaped direct child is
+                // not enough. Retry through Tokio's direct-child handle.
+                let _ = self.child.start_kill();
+                direct_child = wait_for_direct_child(&mut self.child, SHUTDOWN_TIMEOUT).await;
+            }
+
+            let process_group = match process_group_id {
+                Some(id) => wait_for_process_group_absence(id, SHUTDOWN_TIMEOUT).await,
+                None => ProcessGroupShutdownStatus::Absent,
+            };
+            if process_group == ProcessGroupShutdownStatus::Absent {
+                // An absent ID can be reused by the OS. Never signal it again.
+                self.process_group_id = None;
+            }
+            let result = classify_shutdown(self.spawn_process_id, direct_child, process_group);
+            if result.is_ok() {
+                self.shutdown_verified = true;
+            }
+            result
         }
-        // Bounded wait: if the child doesn't exit within 5s after SIGKILL,
-        // give up and let Drop/OS handle it. An unbounded wait here would
-        // wedge the harness during respawn or shutdown if a child is stuck.
-        match tokio::time::timeout(std::time::Duration::from_secs(5), self.child.wait()).await {
-            Ok(Ok(_)) => {}
-            Ok(Err(e)) => tracing::debug!("child wait error after kill: {e}"),
-            Err(_) => tracing::warn!("child did not exit within 5s after SIGKILL — abandoning"),
+
+        #[cfg(not(unix))]
+        {
+            // No portable descendant process-group primitive is available.
+            // Verify the direct child only and report that group containment
+            // was unavailable in any typed failure.
+            let _ = self.child.start_kill();
+            let direct_child = wait_for_direct_child(&mut self.child, SHUTDOWN_TIMEOUT).await;
+            let result = classify_shutdown(
+                self.spawn_process_id,
+                direct_child,
+                ProcessGroupShutdownStatus::Unavailable,
+            );
+            if result.is_ok() {
+                self.shutdown_verified = true;
+            }
+            result
         }
     }
 
@@ -528,6 +694,13 @@ impl AcpClient {
         configure_no_window(&mut cmd);
 
         let mut child = cmd.spawn()?;
+        let spawn_process_id = child
+            .id()
+            .ok_or_else(|| AcpError::Protocol("spawned agent has no process id".into()))?;
+        #[cfg(unix)]
+        let process_group_id = Some(spawn_process_id);
+        #[cfg(not(unix))]
+        let process_group_id = None;
 
         let stdin = child
             .stdin
@@ -540,6 +713,9 @@ impl AcpClient {
 
         Ok(Self {
             child,
+            spawn_process_id,
+            process_group_id,
+            shutdown_verified: false,
             stdin,
             reader: FramedRead::new(stdout, LinesCodec::new_with_max_length(MAX_LINE_SIZE)),
             next_id: 0,
@@ -554,6 +730,7 @@ impl AcpClient {
             steering_supported: false,
             steer_rx: None,
             goose_usage: UsageTracker::default(),
+            supports_session_close: false,
         })
     }
 
@@ -590,6 +767,37 @@ impl AcpClient {
         }
     }
 
+    /// Parse one nonempty ACP NDJSON frame without retaining malformed content.
+    ///
+    /// A malformed frame makes stdout synchronization uncertain, so callers
+    /// must fail closed instead of skipping ahead to a later response. Error
+    /// evidence intentionally includes only the byte length and parser error;
+    /// agent output may contain prompt text, credentials, or tool results.
+    fn parse_ndjson_frame(&self, line: &str) -> Result<serde_json::Value, AcpError> {
+        match serde_json::from_str(line) {
+            Ok(msg) => {
+                tracing::debug!(target: "acp::wire", "← {line}");
+                Ok(msg)
+            }
+            Err(error) => {
+                self.observe(
+                    "acp_parse_error",
+                    serde_json::json!({
+                        "lineLength": line.len(),
+                        "error": error.to_string(),
+                    }),
+                );
+                tracing::warn!(
+                    target: "acp::wire",
+                    line_length = line.len(),
+                    error = %error,
+                    "failed to parse agent stdout as JSON"
+                );
+                Err(AcpError::Json(error))
+            }
+        }
+    }
+
     /// Send the `initialize` request and return the agent's response result value.
     ///
     /// Must be called exactly once, before any other ACP method.
@@ -608,8 +816,16 @@ impl AcpClient {
             .pointer("/_meta/steering/supported")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        self.supports_session_close = result
+            .pointer("/agentCapabilities/sessionCapabilities/close")
+            .is_some_and(serde_json::Value::is_object);
         tracing::debug!(target: "acp::init", "initialize response: {result}");
         Ok(result)
+    }
+
+    /// Whether the adapter explicitly advertised ACP `session/close`.
+    pub fn supports_session_close(&self) -> bool {
+        self.supports_session_close
     }
 
     /// Send the ACP `authenticate` request for an adapter-advertised method.
@@ -819,6 +1035,7 @@ impl AcpClient {
     /// that response.
     ///
     /// Note: async because writing to stdin requires async I/O.
+    #[allow(dead_code)] // Public ACP API; bounded cleanup uses its shared-deadline variant.
     pub async fn session_cancel(&mut self, session_id: &str) -> Result<(), AcpError> {
         let params = serde_json::json!({
             "sessionId": session_id,
@@ -1017,7 +1234,7 @@ impl AcpClient {
         if let Some(perm_id) = self.pending_permission_id.clone() {
             if !self.permission_responded {
                 let response = permission_response_cancelled(&perm_id);
-                self.write_ndjson(&response).await?;
+                self.write_ndjson_until(&response, hard_deadline).await?;
                 tracing::debug!(
                     target: "acp::cancel",
                     "responded cancelled to pending permission id={perm_id}"
@@ -1028,7 +1245,12 @@ impl AcpClient {
         }
 
         // Step 2: send session/cancel notification (no id)
-        self.session_cancel(session_id).await?;
+        let cancel = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/cancel",
+            "params": {"sessionId": session_id},
+        });
+        self.write_ndjson_until(&cancel, hard_deadline).await?;
         tracing::info!(target: "acp::cancel", "sent session/cancel for {session_id}");
         // Use a fixed 30s idle timeout during cleanup — the cancel notification
         // needs time to propagate and the agent may go silent while winding down.
@@ -1068,6 +1290,20 @@ impl AcpClient {
         .map_err(AcpError::Io)?;
         self.observe("acp_write", value.clone());
         Ok(())
+    }
+
+    /// Write within an existing operation deadline instead of starting a new
+    /// 30-second write budget that can outlive its caller's cleanup grace.
+    async fn write_ndjson_until(
+        &mut self,
+        value: &serde_json::Value,
+        deadline: tokio::time::Instant,
+    ) -> Result<(), AcpError> {
+        tokio::time::timeout_at(deadline, self.write_ndjson(value))
+            .await
+            .map_err(|_| AcpError::HardTimeout {
+                silence: std::time::Duration::ZERO,
+            })?
     }
 
     /// Default timeout for non-prompt RPCs (initialize, session/new, etc.).
@@ -1150,6 +1386,7 @@ impl AcpClient {
     ///
     /// Used for `session/cancel`. The absence of `id` is the JSON-RPC 2.0
     /// distinguisher between requests and notifications.
+    #[allow(dead_code)] // Used by the public notification API above.
     async fn send_notification(
         &mut self,
         method: &str,
@@ -1203,26 +1440,7 @@ impl AcpClient {
                 continue;
             }
 
-            // Only log and reset idle after we have a valid non-empty line.
-            tracing::debug!(target: "acp::wire", "← {trimmed}");
-
-            let msg: serde_json::Value = match serde_json::from_str(trimmed) {
-                Ok(v) => v,
-                Err(e) => {
-                    self.observe(
-                        "acp_parse_error",
-                        serde_json::json!({
-                            "line": trimmed,
-                            "error": e.to_string(),
-                        }),
-                    );
-                    tracing::warn!(
-                        target: "acp::wire",
-                        "failed to parse line as JSON: {e} — skipping"
-                    );
-                    continue;
-                }
-            };
+            let msg = self.parse_ndjson_frame(trimmed)?;
             self.observe("acp_read", msg.clone());
 
             // Check if this is a response to our expected request (has matching id
@@ -1532,23 +1750,13 @@ impl AcpClient {
                         continue;
                     }
 
-                    tracing::debug!(target: "acp::wire", "← {trimmed}");
-
-                    let msg: serde_json::Value = match serde_json::from_str(trimmed) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            self.observe(
-                                "acp_parse_error",
-                                serde_json::json!({
-                                    "line": trimmed,
-                                    "error": e.to_string(),
-                                }),
-                            );
-                            tracing::warn!(
-                                target: "acp::wire",
-                                "failed to parse line as JSON: {e} — skipping"
-                            );
-                            continue;
+                    let msg = match self.parse_ndjson_frame(trimmed) {
+                        Ok(msg) => msg,
+                        Err(error) => {
+                            if let Some((_, _, ack_tx)) = pending_steer.take() {
+                                let _ = ack_tx.send(crate::pool::SteerAck::PromptCompletedNeutral);
+                            }
+                            return Err(error);
                         }
                     };
                     self.observe("acp_read", msg.clone());
@@ -1580,6 +1788,12 @@ impl AcpClient {
                                         let message = error.to_string();
                                         crate::pool::SteerAck::Err(
                                             crate::pool::SteerError::AgentError { code, message },
+                                        )
+                                    } else if msg.get("result").is_none() {
+                                        crate::pool::SteerAck::Err(
+                                            crate::pool::SteerError::Transport(
+                                                "steer response missing result or error".into(),
+                                            ),
                                         )
                                     } else {
                                         // Success result. Whether it counts as
@@ -2191,16 +2405,43 @@ pub fn model_in_catalog(
 
 // ─── Drop: kill child process ─────────────────────────────────────────────────
 
+async fn wait_for_direct_child(
+    child: &mut Child,
+    timeout: std::time::Duration,
+) -> DirectChildShutdownStatus {
+    match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(Ok(_)) => DirectChildShutdownStatus::Reaped,
+        Ok(Err(error)) => DirectChildShutdownStatus::WaitFailed {
+            kind: error.kind(),
+            message: error.to_string(),
+        },
+        Err(_) => DirectChildShutdownStatus::TimedOut { timeout },
+    }
+}
+
 impl Drop for AcpClient {
     fn drop(&mut self) {
         // Best-effort SIGKILL + reap. We cannot `await` in Drop (sync context).
-        // Kill the process group when possible so subprocesses don't leak.
+        // Signal the stored process group when possible so cleanup does not
+        // depend on Child::id() remaining available.
         // Callers SHOULD still call `shutdown().await` for guaranteed reaping.
-        match self.child.id() {
-            Some(pid) if kill_process_group(pid) => {}
-            _ => {
+        #[cfg(unix)]
+        if !self.shutdown_verified {
+            if let Some(id) = process_group_signal_target(
+                self.spawn_process_id,
+                self.process_group_id,
+                self.child.id(),
+            ) {
+                if signal_process_group(id).is_err() {
+                    let _ = self.child.start_kill();
+                }
+            } else if self.child.id().is_some() {
                 let _ = self.child.start_kill();
             }
+        }
+        #[cfg(not(unix))]
+        if !self.shutdown_verified {
+            let _ = self.child.start_kill();
         }
         // Non-blocking reap attempt — prevents zombie accumulation in the
         // common case where SIGKILL takes effect before Drop returns.
@@ -2208,7 +2449,22 @@ impl Drop for AcpClient {
     }
 }
 
-/// Send SIGKILL to an entire process group. Returns `true` if the signal was sent.
+/// Return the only process-group ID that is safe to signal.
+///
+/// A stored numeric PGID is evidence for later absence probes, but after the
+/// live child ID disappears it may name an unrelated, reused process group.
+/// Signal only while both spawn-time and live identities still agree.
+#[cfg(unix)]
+fn process_group_signal_target(
+    spawn_process_id: u32,
+    process_group_id: Option<u32>,
+    live_child_id: Option<u32>,
+) -> Option<u32> {
+    (process_group_id == Some(spawn_process_id) && live_child_id == Some(spawn_process_id))
+        .then_some(spawn_process_id)
+}
+
+/// Send SIGKILL to the original process group.
 ///
 /// The child is spawned with `process_group(0)`, so its PID equals its PGID.
 /// Killing the group ensures subprocesses (MCP servers, tool processes) are
@@ -2217,19 +2473,58 @@ impl Drop for AcpClient {
 /// Uses `nix::sys::signal::killpg` — a safe wrapper around the POSIX `killpg`
 /// syscall — so the crate's `#![deny(unsafe_code)]` policy is preserved.
 #[cfg(unix)]
-fn kill_process_group(pid: u32) -> bool {
+fn signal_process_group(process_group_id: u32) -> Result<(), nix::errno::Errno> {
     use nix::sys::signal::{killpg, Signal};
     use nix::unistd::Pid;
 
-    // pid == pgid because the child was spawned with process_group(0).
-    killpg(Pid::from_raw(pid as i32), Signal::SIGKILL).is_ok()
+    killpg(Pid::from_raw(process_group_id as i32), Signal::SIGKILL)
 }
 
-/// Fallback for non-Unix: process-group kill not available.
-/// Returns `false` so the caller falls back to `child.start_kill()`.
-#[cfg(not(unix))]
-fn kill_process_group(_pid: u32) -> bool {
-    false
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProcessGroupProbe {
+    Absent,
+    Present,
+    Failed { errno: i32 },
+}
+
+/// Probe the original group without sending a signal.
+#[cfg(unix)]
+fn probe_process_group(process_group_id: u32) -> ProcessGroupProbe {
+    use nix::errno::Errno;
+    use nix::sys::signal::{killpg, Signal};
+    use nix::unistd::Pid;
+
+    match killpg(Pid::from_raw(process_group_id as i32), None::<Signal>) {
+        Ok(()) => ProcessGroupProbe::Present,
+        Err(Errno::ESRCH) => ProcessGroupProbe::Absent,
+        Err(error) => ProcessGroupProbe::Failed {
+            errno: error as i32,
+        },
+    }
+}
+
+#[cfg(unix)]
+async fn wait_for_process_group_absence(
+    process_group_id: u32,
+    timeout: std::time::Duration,
+) -> ProcessGroupShutdownStatus {
+    const PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        match probe_process_group(process_group_id) {
+            ProcessGroupProbe::Absent => return ProcessGroupShutdownStatus::Absent,
+            ProcessGroupProbe::Failed { errno } => {
+                return ProcessGroupShutdownStatus::ProbeFailed { errno };
+            }
+            ProcessGroupProbe::Present if tokio::time::Instant::now() >= deadline => {
+                return ProcessGroupShutdownStatus::Present;
+            }
+            ProcessGroupProbe::Present => {
+                tokio::time::sleep(PROBE_INTERVAL).await;
+            }
+        }
+    }
 }
 
 /// Suppress the console window that Windows otherwise allocates for every
@@ -2949,6 +3244,296 @@ mod tests {
         );
     }
 
+    #[test]
+    fn shutdown_classification_accepts_reaped_child_and_absent_group() {
+        assert!(classify_shutdown(
+            41,
+            DirectChildShutdownStatus::Reaped,
+            ProcessGroupShutdownStatus::Absent,
+        )
+        .is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_group_signal_requires_live_spawn_identity_match() {
+        assert_eq!(
+            process_group_signal_target(41, Some(41), Some(41)),
+            Some(41)
+        );
+        assert_eq!(process_group_signal_target(41, Some(41), None), None);
+        assert_eq!(process_group_signal_target(41, Some(41), Some(42)), None);
+        assert_eq!(process_group_signal_target(41, Some(42), Some(41)), None);
+    }
+
+    #[test]
+    fn shutdown_classification_rejects_present_process_group() {
+        let error = classify_shutdown(
+            41,
+            DirectChildShutdownStatus::Reaped,
+            ProcessGroupShutdownStatus::Present,
+        )
+        .expect_err("a present original process group is not verified shutdown");
+
+        assert_eq!(error.process_id, 41);
+        assert_eq!(error.direct_child, DirectChildShutdownStatus::Reaped);
+        assert_eq!(error.process_group, ProcessGroupShutdownStatus::Present);
+    }
+
+    #[test]
+    fn shutdown_classification_rejects_unreaped_child_even_when_group_is_absent() {
+        let timeout = std::time::Duration::from_secs(5);
+        let error = classify_shutdown(
+            41,
+            DirectChildShutdownStatus::TimedOut { timeout },
+            ProcessGroupShutdownStatus::Absent,
+        )
+        .expect_err("group absence does not substitute for reaping the direct child");
+
+        assert_eq!(
+            error.direct_child,
+            DirectChildShutdownStatus::TimedOut { timeout }
+        );
+        assert_eq!(error.process_group, ProcessGroupShutdownStatus::Absent);
+    }
+
+    #[test]
+    fn shutdown_classification_preserves_process_group_probe_failure() {
+        let error = classify_shutdown(
+            41,
+            DirectChildShutdownStatus::Reaped,
+            ProcessGroupShutdownStatus::ProbeFailed { errno: 1 },
+        )
+        .expect_err("an indeterminate process-group probe must fail closed");
+
+        assert_eq!(
+            error.process_group,
+            ProcessGroupShutdownStatus::ProbeFailed { errno: 1 }
+        );
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn shutdown_classification_quarantines_when_descendant_containment_is_unavailable() {
+        let error = classify_shutdown(
+            41,
+            DirectChildShutdownStatus::Reaped,
+            ProcessGroupShutdownStatus::Unavailable,
+        )
+        .expect_err("direct-child reaping cannot prove descendant absence");
+
+        assert_eq!(error.process_group, ProcessGroupShutdownStatus::Unavailable);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shutdown_classification_rejects_unavailable_group_proof_on_unix() {
+        let error = classify_shutdown(
+            41,
+            DirectChildShutdownStatus::Reaped,
+            ProcessGroupShutdownStatus::Unavailable,
+        )
+        .expect_err("Unix shutdown succeeds only with an absent original process group");
+
+        assert_eq!(error.process_group, ProcessGroupShutdownStatus::Unavailable);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shutdown_kills_and_verifies_original_process_group() {
+        // The background sleep inherits bash's process group. A verified
+        // shutdown therefore covers both the direct child and its descendant.
+        let mut client = spawn_script("sleep 60 & wait").await;
+        let process_group_id = client
+            .process_group_id
+            .expect("Unix spawns must retain their original process-group id");
+        assert_eq!(
+            probe_process_group(process_group_id),
+            ProcessGroupProbe::Present,
+            "the spawned process group must exist before shutdown"
+        );
+
+        client
+            .shutdown()
+            .await
+            .expect("shutdown must verify direct child and process group termination");
+
+        assert_eq!(
+            probe_process_group(process_group_id),
+            ProcessGroupProbe::Absent,
+            "shutdown must not return while the original process group exists"
+        );
+        client
+            .shutdown()
+            .await
+            .expect("verified shutdown must be safely idempotent");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shutdown_probes_but_never_signals_stored_group_after_child_id_is_cleared() {
+        let mut client = spawn_script("exit 0").await;
+        let process_group_id = client
+            .process_group_id
+            .expect("Unix spawns must retain their original process-group id");
+        client
+            .child
+            .wait()
+            .await
+            .expect("test process must be reaped");
+        assert!(
+            client.child.id().is_none(),
+            "Tokio must have cleared the live child id for this regression"
+        );
+        assert_eq!(
+            process_group_signal_target(
+                client.spawn_process_id,
+                client.process_group_id,
+                client.child.id(),
+            ),
+            None,
+            "a numeric PGID is not a safe signal target after the child identity is gone"
+        );
+
+        client
+            .shutdown()
+            .await
+            .expect("an already-absent stored group may still be verified by a read-only probe");
+        assert_eq!(
+            probe_process_group(process_group_id),
+            ProcessGroupProbe::Absent
+        );
+    }
+
+    #[tokio::test]
+    async fn send_request_rejects_malformed_ndjson_before_later_matching_response() {
+        const SECRET: &str = "TOP_SECRET_ORDINARY_PATH";
+        let script = r#"
+            read -r _request
+            echo ''
+            echo '   '
+            echo '{"jsonrpc":"2.0","id":0,"result":{"secret":"TOP_SECRET_ORDINARY_PATH"}'
+            echo '{"jsonrpc":"2.0","id":0,"result":{"accepted":true}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        let observer = ObserverHandle::in_process();
+        client.set_observer(Some(observer.clone()), 0);
+
+        let result = client
+            .send_request("test/malformed", serde_json::json!({}))
+            .await;
+
+        assert!(
+            matches!(result, Err(AcpError::Json(_))),
+            "malformed nonempty NDJSON must fail before a later matching response: {result:?}"
+        );
+        let events = observer.snapshot();
+        let parse_events: Vec<_> = events
+            .iter()
+            .filter(|event| event.kind == "acp_parse_error")
+            .collect();
+        assert_eq!(parse_events.len(), 1, "one parse failure must be observed");
+        assert_eq!(
+            parse_events[0].payload["lineLength"],
+            serde_json::json!(
+                r#"{"jsonrpc":"2.0","id":0,"result":{"secret":"TOP_SECRET_ORDINARY_PATH"}"#.len()
+            )
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| !event.payload.to_string().contains(SECRET)),
+            "observer evidence must not retain malformed wire content"
+        );
+        assert!(
+            parse_events[0].payload.get("line").is_none(),
+            "observer evidence must not expose the malformed line"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_prompt_rejects_malformed_ndjson_before_later_matching_response() {
+        const SECRET: &str = "TOP_SECRET_PROMPT_PATH";
+        let script = r#"
+            read -r _prompt
+            echo ''
+            echo '   '
+            echo '{"jsonrpc":"2.0","id":0,"result":{"secret":"TOP_SECRET_PROMPT_PATH"}'
+            echo '{"jsonrpc":"2.0","id":0,"result":{"stopReason":"end_turn"}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        let observer = ObserverHandle::in_process();
+        client.set_observer(Some(observer.clone()), 0);
+
+        let result = client
+            .session_prompt_with_idle_timeout(
+                "session-test",
+                "hello",
+                std::time::Duration::from_secs(2),
+                std::time::Duration::from_secs(5),
+            )
+            .await;
+
+        assert!(
+            matches!(result, Err(AcpError::Json(_))),
+            "malformed nonempty NDJSON must fail before a later prompt response: {result:?}"
+        );
+        let events = observer.snapshot();
+        let parse_events: Vec<_> = events
+            .iter()
+            .filter(|event| event.kind == "acp_parse_error")
+            .collect();
+        assert_eq!(parse_events.len(), 1, "one parse failure must be observed");
+        assert_eq!(
+            parse_events[0].payload["lineLength"],
+            serde_json::json!(
+                r#"{"jsonrpc":"2.0","id":0,"result":{"secret":"TOP_SECRET_PROMPT_PATH"}"#.len()
+            )
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| !event.payload.to_string().contains(SECRET)),
+            "observer evidence must not retain malformed wire content"
+        );
+        assert!(
+            parse_events[0].payload.get("line").is_none(),
+            "observer evidence must not expose the malformed line"
+        );
+    }
+
+    #[tokio::test]
+    async fn initialize_records_advertised_session_close_capability() {
+        let script = "read -r _initialize; \
+                      echo '{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{\"protocolVersion\":1,\"agentCapabilities\":{\"sessionCapabilities\":{\"close\":{}}}}}'; \
+                      sleep 10";
+        let mut client = spawn_script(script).await;
+
+        client.initialize().await.expect("initialize must succeed");
+
+        assert!(
+            client.supports_session_close(),
+            "an advertised ACP session close capability must be retained"
+        );
+    }
+
+    #[tokio::test]
+    async fn initialize_leaves_unadvertised_session_close_unsupported() {
+        let script = "read -r _initialize; \
+                      echo '{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{\"protocolVersion\":1,\"agentCapabilities\":{}}}'; \
+                      sleep 10";
+        let mut client = spawn_script(script).await;
+
+        client.initialize().await.expect("initialize must succeed");
+
+        assert!(
+            !client.supports_session_close(),
+            "absence of the optional capability must remain explicit"
+        );
+    }
+
     #[tokio::test]
     async fn session_close_rejects_matching_response_without_result_or_error() {
         let script = "read -r _close; \
@@ -3012,9 +3597,9 @@ mod tests {
     /// must not dead-letter a drain that simply ran past its grace window.
     #[tokio::test]
     async fn cancel_with_cleanup_grace_maps_expiry_to_cancel_drain_timeout() {
-        // Agent ignores `session/cancel` on stdin and keeps producing noise
-        // forever — never drains within the grace window.
-        let mut client = spawn_script("while true; do echo 'noise'; sleep 0.01; done").await;
+        // Agent ignores `session/cancel` on stdin and keeps producing valid
+        // JSON activity forever — never drains within the grace window.
+        let mut client = spawn_script("while true; do echo '{}'; sleep 0.01; done").await;
         client.last_prompt_id = Some(999);
         let grace = std::time::Duration::from_millis(200);
         let result = client
@@ -3023,6 +3608,30 @@ mod tests {
         assert!(
             matches!(result, Err(AcpError::CancelDrainTimeout(g)) if g == grace),
             "expected CancelDrainTimeout({grace:?}), got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_cleanup_writes_cannot_outlive_the_shared_grace_deadline() {
+        let mut client = spawn_script("sleep 10").await;
+        client.last_prompt_id = Some(999);
+        // A response this large fills the child stdin pipe when the child never
+        // reads. Before the shared write deadline, each cleanup write carried
+        // its own 30s timeout and could outlive the caller's 5s grace.
+        client.pending_permission_id = Some(serde_json::json!("x".repeat(2_000_000)));
+        client.permission_responded = false;
+
+        let grace = std::time::Duration::from_millis(50);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            client.cancel_with_cleanup_grace("test-session", grace),
+        )
+        .await
+        .expect("cleanup must obey the shared grace even under stdin backpressure");
+
+        assert!(
+            matches!(result, Err(AcpError::CancelDrainTimeout(g)) if g == grace),
+            "permission and cancel writes must share the caller's grace deadline: {result:?}"
         );
     }
 
@@ -3712,6 +4321,69 @@ mod tests {
         match ack {
             crate::pool::SteerAck::Success => {}
             other => panic!("expected SteerAck::Success, got {other:?}"),
+        }
+    }
+
+    /// A matching JSON-RPC frame without either `result` or `error` is not
+    /// evidence that the steer was applied. It must release the withheld event
+    /// through the transport-failure path instead of falsely acknowledging
+    /// delivery.
+    #[tokio::test]
+    async fn native_steer_matching_response_without_result_or_error_fails_closed() {
+        let script = "sleep 0.5; \
+                      echo '{\"jsonrpc\":\"2.0\",\"id\":0}'; \
+                      sleep 10";
+        let mut client = spawn_script(script).await;
+
+        let update = session_info_update_msg(Some(serde_json::json!("run-malformed")));
+        let _ = client.handle_session_update(&update);
+
+        let (steer_tx, steer_rx) = tokio::sync::mpsc::channel::<crate::pool::SteerRequest>(1);
+        client.install_steer_rx(steer_rx);
+
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<crate::pool::SteerAck>();
+        let send_task = tokio::spawn(async move {
+            steer_tx
+                .send(crate::pool::SteerRequest {
+                    prompt_blocks: vec!["steer body".into()],
+                    ack_tx,
+                })
+                .await
+                .expect("steer_tx send should succeed");
+        });
+
+        let idle = std::time::Duration::from_secs(2);
+        let max_dur = std::time::Duration::from_secs(10);
+        let hard_deadline = tokio::time::Instant::now() + max_dur;
+        let read_result = client
+            .read_until_response_with_idle_timeout(
+                "sess-malformed",
+                999,
+                idle,
+                hard_deadline,
+                max_dur,
+            )
+            .await;
+        send_task.await.expect("send_task should complete");
+        assert!(
+            matches!(
+                read_result,
+                Err(AcpError::IdleTimeout(_)) | Err(AcpError::AgentExited)
+            ),
+            "read loop should remain bounded after malformed steer response, got {read_result:?}"
+        );
+
+        let ack = ack_rx
+            .await
+            .expect("ack oneshot must receive a fail-closed outcome");
+        match ack {
+            crate::pool::SteerAck::Err(crate::pool::SteerError::Transport(message)) => {
+                assert!(
+                    message.contains("missing result or error"),
+                    "malformed response should be classified without raw payload: {message}"
+                );
+            }
+            other => panic!("expected transport failure, got {other:?}"),
         }
     }
 

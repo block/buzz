@@ -47,6 +47,13 @@ const RECENT_ACTIVITY_WINDOW: Duration = Duration::from_secs(60);
 // FlushBatch and BatchEvent derive Clone (added in queue.rs) so we can store
 // a recoverable copy in TaskMeta for panic recovery in Queue mode.
 
+/// An acknowledged owner control whose batch fate is "drop, never replay."
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AcceptedDropControl {
+    Cancel,
+    Rotate,
+}
+
 /// Metadata stored per in-flight task for panic recovery.
 pub struct TaskMeta {
     pub agent_index: usize,
@@ -55,8 +62,23 @@ pub struct TaskMeta {
     pub turn_id: String,
     /// Clone of batch for Queue mode panic recovery.
     pub recoverable_batch: Option<FlushBatch>,
-    /// Control signal for the in-flight prompt task.
-    /// `None` for heartbeat tasks (not controllable) and after signal is consumed.
+    /// Model intent owned by the checked-out slot at dispatch time. Updated
+    /// when a busy `SwitchModel` control lands so panic recovery cannot pin a
+    /// replay to a freshly spawned default-model process.
+    pub desired_model: Option<String>,
+    pub model_overridden: bool,
+    /// A `SwitchModel` command accepted by this task's oneshot but not yet
+    /// proven consumed by the task. The supervisor reconciles this intent
+    /// against the returned agent so a prompt/control simultaneous-ready race
+    /// cannot silently discard an acknowledged model change.
+    pub accepted_model_switch: Option<ModelSwitchRequest>,
+    /// An owner-requested drop control accepted by this task's oneshot but not
+    /// yet proven consumed. The supervisor owns this disposition so neither a
+    /// simultaneous-ready result nor a panic can replay explicitly dropped
+    /// work. `Rotate` also requires recycling an unretired source session.
+    pub accepted_drop_control: Option<AcceptedDropControl>,
+    /// Control signal for the in-flight prompt or heartbeat task.
+    /// `None` only after a signal is consumed.
     pub control_tx: Option<tokio::sync::oneshot::Sender<ControlSignal>>,
     /// Steer request channel for non-cancelling mid-turn delivery.
     /// Capacity-1; `try_send` from the main loop fails on `Full`/`Closed`,
@@ -153,13 +175,21 @@ pub struct OwnedAgent {
     pub state: SessionState,
     /// Model catalog from first session/new. None until first session created.
     pub model_capabilities: Option<AgentModelCapabilities>,
-    /// Desired model ID (from `Config.model`). Applied after every `session_new_full()`.
+    /// Desired model ID from configuration or a live switch. Applied after
+    /// every `session_new_full()`.
     pub desired_model: Option<String>,
     /// Whether `desired_model` was set by a live `SwitchModel` control signal
     /// (as opposed to being derived from config/persona at spawn). Used by the
     /// desktop reader to distinguish a genuine runtime override from a stale
-    /// session whose persona model was edited. Reset on spawn/restart.
+    /// session whose persona model was edited. Preserved across an in-process
+    /// replacement while a live switch is pending.
     pub model_overridden: bool,
+    /// Correlation ID for a live model-switch control awaiting its terminal
+    /// `control_result`. Configured model defaults never carry one.
+    pub model_switch_request_id: Option<String>,
+    /// Exact prior model intent to restore if the live switch is rejected by
+    /// the adapter. Nested state preserves a superseded pending switch too.
+    pub(crate) model_switch_rollback: Option<Box<ModelSwitchRollback>>,
     /// Normalized agent name from initialize (`agentInfo.name`/`serverInfo.name`).
     pub agent_name: String,
     /// Whether Goose accepted its custom system-prompt method. `None` probes on
@@ -226,6 +256,12 @@ pub struct PromptResult {
     pub outcome: PromptOutcome,
     /// Present on failure in Queue mode, for requeue.
     pub batch: Option<FlushBatch>,
+    /// Exact agent slot required when a busy `SwitchModel` turn is replayed.
+    ///
+    /// `None` for every other result. The supervisor persists this requirement
+    /// in `EventQueue` until the replay completes, including across process
+    /// recycling or cleanup-triggered replacement.
+    pub retry_agent_index: Option<usize>,
 }
 
 /// Whether the prompt came from a channel event or a heartbeat.
@@ -235,30 +271,35 @@ pub enum PromptSource {
     Heartbeat,
 }
 
-/// Apply state effects for Race 1, where a control signal arrives just after the
-/// prompt completed naturally. The prompt result has already been consumed by
-/// `select!`, so the harness must synthesize a successful result while still
-/// honoring any load-bearing control signal semantics.
-fn apply_completed_before_control_signal(
-    state: &mut SessionState,
-    source: &PromptSource,
-    control_signal: &ControlSignal,
-) {
-    // Rotate and SwitchModel both invalidate so the next turn creates a fresh
-    // session. For SwitchModel the caller has already set `desired_model`, so
-    // the fresh session applies the new model on its next creation.
-    if matches!(
-        control_signal,
-        ControlSignal::Rotate | ControlSignal::SwitchModel(_)
-    ) {
-        state.invalidate(source);
+/// Control signal for an in-flight channel turn.
+///
+/// A validated live model-switch request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModelSwitchRequest {
+    pub model_id: String,
+    pub request_id: String,
+}
+
+/// Transactional rollback state for a live model switch.
+#[derive(Clone, Debug)]
+pub(crate) struct ModelSwitchRollback {
+    pub desired_model: Option<String>,
+    pub model_overridden: bool,
+    pub request_id: Option<String>,
+    pub previous: Option<Box<ModelSwitchRollback>>,
+}
+
+impl ModelSwitchRequest {
+    pub fn new(model_id: impl Into<String>, request_id: impl Into<String>) -> Self {
+        Self {
+            model_id: model_id.into(),
+            request_id: request_id.into(),
+        }
     }
 }
 
-/// Control signal for an in-flight channel turn.
-///
-/// Not `Copy`: `SwitchModel` carries an owned `String`. Callers must clone when
-/// a value is needed after a move, or match by reference.
+/// Not `Copy`: `SwitchModel` carries owned request data. Callers must clone
+/// when a value is needed after a move, or match by reference.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ControlSignal {
     /// Stop the current turn and drop its triggering batch.
@@ -279,8 +320,8 @@ pub enum ControlSignal {
     /// re-runs on a fresh session under the new model. The model lands by
     /// setting `OwnedAgent::desired_model` before invalidation; the requeued
     /// turn re-creates the session and re-applies `desired_model`. Runtime-only
-    /// — never persisted, gone on restart/respawn.
-    SwitchModel(String),
+    /// — never persisted, gone on supervisor restart.
+    SwitchModel(ModelSwitchRequest),
 }
 
 /// Goose-native non-cancelling steer request, sent from the main loop to an
@@ -423,6 +464,11 @@ pub enum TimeoutKind {
 #[allow(dead_code)]
 pub enum PromptOutcome {
     Ok(StopReason),
+    /// The turn completed successfully and Buzz positively closed the session
+    /// before returning the healthy adapter. Distinct from `Ok` so the
+    /// supervisor can preserve exact-slot model affinity after local session
+    /// invalidation, including max-turn-count retirement with `EndTurn`.
+    SessionRetired(StopReason),
     Error(AcpError),
     AgentExited,
     Timeout(TimeoutKind),
@@ -439,6 +485,11 @@ pub enum PromptOutcome {
     /// `CancelReason` on the batch (steer/interrupt requeue, explicit cancel
     /// drops) rather than the hard-cap's unconditional dead-letter.
     CancelDrainTimeout(Duration),
+    /// A post-`session/cancel` response failed in a way that does not prove
+    /// remote prompt/session cleanup completed. Even application-class
+    /// JSON-RPC errors poison the adapter at this boundary: local invalidation
+    /// plus reuse would abandon remote ownership.
+    CancelCleanupFailed(AcpError),
     /// An adapter-owned session could not be closed after Buzz decided to
     /// retire it. Remote resource ownership is now uncertain, so the adapter
     /// must never be reused regardless of whether the underlying error looks
@@ -446,6 +497,25 @@ pub enum PromptOutcome {
     /// group, which is the only fail-closed cleanup available when close did
     /// not positively acknowledge.
     SessionCloseFailed(AcpError),
+    /// A remote session was created, later setup failed, and close did not
+    /// positively acknowledge. The process is poisoned, while the untouched
+    /// batch follows ordinary bounded retry policy.
+    SessionSetupCloseFailed(AcpError),
+    /// The adapter did not advertise optional ACP `session/close`.
+    ///
+    /// Buzz must replace the process group to release adapter-owned sessions,
+    /// but this negotiated compatibility path is not a crash and must not
+    /// consume circuit-breaker budget.
+    SessionRecycleRequired,
+    /// A remote session was created, later setup failed, and optional close was
+    /// not advertised. Process recycling is the only safe cleanup; the untouched
+    /// batch follows ordinary bounded retry policy.
+    SessionSetupRecycleRequired,
+    /// An owner control preempted an in-flight session setup request. The
+    /// adapter must be recycled because the dropped request can still complete
+    /// remotely, while the control-framed batch is preserved without consuming
+    /// retry or dead-letter budget.
+    ControlPreemptedSetup,
 }
 
 /// Immutable config subset shared (via `Arc`) by all spawned prompt tasks.
@@ -601,6 +671,14 @@ impl AgentPool {
         idx.map(|i| self.agents[i].take().unwrap())
     }
 
+    /// Claim one exact idle slot.
+    ///
+    /// Used for busy `SwitchModel` replay: falling back to a different slot
+    /// would run the preserved batch under that slot's default model.
+    pub fn try_claim_index(&mut self, index: usize) -> Option<OwnedAgent> {
+        self.agents.get_mut(index)?.take()
+    }
+
     /// Return an agent to its slot after a task completes.
     pub fn return_agent(&mut self, agent: OwnedAgent) {
         let idx = agent.index;
@@ -647,6 +725,24 @@ impl AgentPool {
 
     pub fn task_map_mut(&mut self) -> &mut HashMap<tokio::task::Id, TaskMeta> {
         &mut self.task_map
+    }
+
+    /// Cooperatively cancel every checked-out task while retaining its typed
+    /// [`OwnedAgent`] return path through `result_rx`.
+    ///
+    /// Shutdown must use this before joining tasks. Aborting a task would drop
+    /// the only typed process owner and make direct-child reaping and
+    /// process-group absence impossible to prove.
+    pub fn cancel_checked_out_for_shutdown(&mut self) -> usize {
+        let mut signalled = 0;
+        for meta in self.task_map.values_mut() {
+            if let Some(control_tx) = meta.control_tx.take() {
+                if control_tx.send(ControlSignal::Cancel).is_ok() {
+                    signalled += 1;
+                }
+            }
+        }
+        signalled
     }
 
     /// Try to send a goose-native steer request to the in-flight task for
@@ -724,29 +820,28 @@ impl AgentPool {
         &mut self.agents
     }
 
-    /// Remove the session for `channel_id` from all idle agents.
+    /// Remove every idle adapter that still owns a session for `channel_id`.
     ///
-    /// Called when the agent is removed from a channel — stale sessions
-    /// should not be reused. Checked-out agents (in-flight) are not
-    /// modified; their sessions will fail naturally on the next prompt
-    /// if the relay rejects the request.
-    ///
-    /// Returns the number of sessions invalidated.
-    pub fn invalidate_channel_sessions(&mut self, channel_id: Uuid) -> usize {
-        let mut count = 0;
-        for slot in &mut self.agents {
-            if let Some(agent) = slot.as_mut() {
-                if agent.state.invalidate_channel(&channel_id) {
-                    count += 1;
-                }
-            }
-        }
-        count
+    /// Callers must shut down/recycle each returned process before allowing its
+    /// slot back into service. Local-only invalidation is forbidden because it
+    /// would abandon remote subprocess ownership.
+    pub fn take_idle_agents_with_session(&mut self, channel_id: Uuid) -> Vec<OwnedAgent> {
+        self.agents
+            .iter_mut()
+            .filter_map(|slot| {
+                slot.as_ref()
+                    .is_some_and(|agent| agent.state.sessions.contains_key(&channel_id))
+                    .then(|| {
+                        slot.take()
+                            .expect("matching idle slot must contain an agent")
+                    })
+            })
+            .collect()
     }
 
-    /// Idle-path model switch: set `desired_model` on the idle agent for
-    /// `channel_id` and invalidate its session so the next turn re-creates the
-    /// session under the new model.
+    /// Idle-path model switch: validate the requested model, claim the adapter
+    /// that owns `channel_id`, and return it for process recycling. The next
+    /// process creates a fresh session under the preserved model intent.
     ///
     /// Pre-cancel guard: the desired model is validated against the agent's
     /// cached catalog *before* the session is invalidated, so an unsupported
@@ -761,18 +856,20 @@ impl AgentPool {
         &mut self,
         channel_id: Uuid,
         model_id: &str,
+        request_id: &str,
     ) -> IdleSwitchResult {
-        let Some(agent) = self
-            .agents
-            .iter_mut()
-            .flatten()
-            .find(|a| a.state.sessions.contains_key(&channel_id))
-        else {
+        let Some(position) = self.agents.iter().position(|slot| {
+            slot.as_ref()
+                .is_some_and(|agent| agent.state.sessions.contains_key(&channel_id))
+        }) else {
             return IdleSwitchResult::NoIdleAgent;
         };
 
         // Pre-cancel guard against the cached catalog. None = catalog not yet
         // populated (no session ever created); defer validation to apply time.
+        let agent = self.agents[position]
+            .as_ref()
+            .expect("matching idle slot must contain an agent");
         if let Some(caps) = agent.model_capabilities.as_ref() {
             if !model_in_catalog(
                 &caps.config_options_raw,
@@ -783,23 +880,85 @@ impl AgentPool {
             }
         }
 
-        agent.desired_model = Some(model_id.to_string());
-        agent.model_overridden = true;
-        agent.state.invalidate_channel(&channel_id);
-        IdleSwitchResult::Switched
+        let mut agent = self.agents[position]
+            .take()
+            .expect("matching idle slot must contain an agent");
+        begin_model_switch(&mut agent, &ModelSwitchRequest::new(model_id, request_id));
+        IdleSwitchResult::Recycle(Box::new(agent))
     }
 }
 
 /// Outcome of [`AgentPool::switch_idle_agent_model`].
-#[derive(Debug, PartialEq, Eq)]
 pub enum IdleSwitchResult {
-    /// `desired_model` set and the channel session invalidated.
-    Switched,
+    /// `desired_model` set; caller must recycle this still-owning adapter.
+    Recycle(Box<OwnedAgent>),
     /// Desired model is not in the agent's cached catalog — pick rejected,
     /// session untouched.
     UnsupportedModel,
     /// No idle agent available (all checked out / none spawned).
     NoIdleAgent,
+}
+
+/// Stage a busy model switch without losing the slot's last accepted intent.
+///
+/// A busy control is handled before its current session is retired, so this is
+/// the last ownership boundary that still has both the prior intent and the
+/// catalog that accepted it. Validate here before respawn preservation copies
+/// `desired_model`: a rejected request must leave the exact prior model and
+/// override provenance in place for the requeued turn.
+///
+/// Returns `true` when the new intent was accepted, or `false` after restoring
+/// the prior intent and emitting `unsupported_model`.
+fn begin_model_switch(agent: &mut OwnedAgent, request: &ModelSwitchRequest) {
+    agent.model_switch_rollback = Some(Box::new(ModelSwitchRollback {
+        desired_model: agent.desired_model.take(),
+        model_overridden: agent.model_overridden,
+        request_id: agent.model_switch_request_id.take(),
+        previous: agent.model_switch_rollback.take(),
+    }));
+    agent.desired_model = Some(request.model_id.clone());
+    agent.model_overridden = true;
+    agent.model_switch_request_id = Some(request.request_id.clone());
+}
+
+fn restore_previous_model_intent(agent: &mut OwnedAgent) {
+    let Some(rollback) = agent.model_switch_rollback.take() else {
+        agent.model_switch_request_id = None;
+        return;
+    };
+    agent.desired_model = rollback.desired_model;
+    agent.model_overridden = rollback.model_overridden;
+    agent.model_switch_request_id = rollback.request_id;
+    agent.model_switch_rollback = rollback.previous;
+}
+
+pub(crate) fn stage_busy_model_switch_intent(
+    agent: &mut OwnedAgent,
+    request: &ModelSwitchRequest,
+) -> bool {
+    begin_model_switch(agent, request);
+    let rejected = agent.model_capabilities.as_ref().is_some_and(|caps| {
+        !model_in_catalog(
+            &caps.config_options_raw,
+            caps.available_models_raw.as_ref(),
+            &request.model_id,
+        )
+    });
+    if !rejected {
+        return true;
+    }
+
+    restore_previous_model_intent(agent);
+    agent.acp.observe(
+        "control_result",
+        serde_json::json!({
+            "type": "switch_model",
+            "status": "unsupported_model",
+            "modelId": request.model_id,
+            "requestId": request.request_id,
+        }),
+    );
+    false
 }
 
 /// Timeout for a single pre-prompt context fetch attempt (thread/DM history).
@@ -866,19 +1025,63 @@ async fn resolve_new_session_channel_context(
     (is_dm, title_channel)
 }
 
-/// Create a new ACP session via `session_new_full()`, populate model capabilities
-/// on the agent (first session only), and apply `desired_model` if set.
-///
-/// On error from `session_new_full()`, returns the `AcpError` — caller handles
-/// error reporting. Model-switch failures are logged and gracefully ignored
-/// (the agent proceeds with its default model).
+enum SessionSetupError {
+    Agent(AcpError),
+    CloseFailed(AcpError),
+    RecycleRequired,
+}
+
+struct PreparedSession {
+    session_id: String,
+    session_config: serde_json::Value,
+    terminal_model_switch: Option<ModelSwitchRequest>,
+}
+
+impl From<AcpError> for SessionSetupError {
+    fn from(error: AcpError) -> Self {
+        Self::Agent(error)
+    }
+}
+
+async fn cleanup_failed_session_setup(
+    agent: &mut OwnedAgent,
+    session_id: &str,
+    setup_error: AcpError,
+) -> SessionSetupError {
+    // A transport/framing failure already poisons the stream. Sending another
+    // request cannot prove cleanup; the normal fatal-error path replaces it.
+    if setup_error.requires_process_replacement() {
+        return SessionSetupError::Agent(setup_error);
+    }
+    if !agent.acp.supports_session_close() {
+        return SessionSetupError::RecycleRequired;
+    }
+    match agent.acp.session_close(session_id).await {
+        Ok(_) => SessionSetupError::Agent(setup_error),
+        Err(close_error) => SessionSetupError::CloseFailed(close_error),
+    }
+}
+
+fn session_setup_outcome(error: SessionSetupError) -> PromptOutcome {
+    match error {
+        SessionSetupError::Agent(AcpError::AgentExited) => PromptOutcome::AgentExited,
+        SessionSetupError::Agent(error) => PromptOutcome::Error(error),
+        SessionSetupError::CloseFailed(error) => PromptOutcome::SessionSetupCloseFailed(error),
+        SessionSetupError::RecycleRequired => PromptOutcome::SessionSetupRecycleRequired,
+    }
+}
+
+/// Create a new ACP session, complete every required setup RPC, and return
+/// ownership only after setup succeeds. If an application-class setup error
+/// occurs after `session/new`, close the partial remote session before allowing
+/// adapter reuse; otherwise require process replacement.
 async fn create_session_and_apply_model(
     agent: &mut OwnedAgent,
     ctx: &PromptContext,
     agent_core: Option<&str>,
     agent_canvas: Option<&str>,
     channel_name: Option<&str>,
-) -> Result<String, AcpError> {
+) -> Result<PreparedSession, SessionSetupError> {
     // Build base_prompt + system_prompt + agent core + canvas metadata into a
     // single prompt. Standard protocol-v2 agents receive it in `session/new`;
     // Goose receives it through the custom request below. Legacy agents receive
@@ -914,7 +1117,8 @@ async fn create_session_and_apply_model(
             ),
             session_title.as_deref(),
         )
-        .await?;
+        .await
+        .map_err(SessionSetupError::Agent)?;
 
     if is_goose && agent.goose_system_prompt_supported != Some(false) {
         if let Some(prompt) = combined_system_prompt.as_deref() {
@@ -931,7 +1135,9 @@ async fn create_session_and_apply_model(
                         "Goose does not support its system-prompt extension; using user-message framing"
                     );
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    return Err(cleanup_failed_session_setup(agent, &resp.session_id, error).await)
+                }
             }
         }
     }
@@ -947,44 +1153,69 @@ async fn create_session_and_apply_model(
     // Apply desired_model if set, matching against the fresh session/new response.
     // Track whether the switch succeeded so session_config_captured reflects
     // the post-switch state (not the pre-switch desired state).
-    let switch_succeeded = if let Some(ref desired) = agent.desired_model {
-        match resolve_model_switch_method(&resp.raw, desired) {
+    let mut terminal_model_switch = None;
+    let mut switch_succeeded = false;
+    while let Some(desired) = agent.desired_model.clone() {
+        let switch_request_id = agent.model_switch_request_id.clone();
+        match resolve_model_switch_method(&resp.raw, &desired) {
             Some(method) => {
-                apply_model_switch(&mut agent.acp, &resp.session_id, desired, &method).await?;
-                true
+                if let Err(error) =
+                    apply_model_switch(&mut agent.acp, &resp.session_id, &desired, &method).await
+                {
+                    if let Some(request_id) = switch_request_id.as_deref() {
+                        agent.acp.observe(
+                            "control_result",
+                            serde_json::json!({
+                                "type": "switch_model",
+                                "status": "switch_failed",
+                                "modelId": desired,
+                                "requestId": request_id,
+                            }),
+                        );
+                        restore_previous_model_intent(agent);
+                    }
+                    return Err(cleanup_failed_session_setup(agent, &resp.session_id, error).await);
+                }
+                if let Some(request_id) = switch_request_id.as_deref() {
+                    terminal_model_switch =
+                        Some(ModelSwitchRequest::new(desired.clone(), request_id));
+                }
+                switch_succeeded = true;
+                break;
             }
             None => {
+                // Surface the miss so the desktop ModelPicker can reject a live
+                // pick rather than silently no-op. Restore and resolve the prior
+                // intent against this same fresh catalog before publishing the
+                // session: merely restoring its fields would otherwise commit an
+                // adapter-default session and strand any older request ID.
+                if let Some(request_id) = switch_request_id.as_deref() {
+                    agent.acp.observe(
+                        "control_result",
+                        serde_json::json!({
+                            "type": "switch_model",
+                            "status": "unsupported_model",
+                            "modelId": desired,
+                            "requestId": request_id,
+                        }),
+                    );
+                    restore_previous_model_intent(agent);
+                    continue;
+                }
                 tracing::warn!(
                     target: "pool::model",
-                    "desired model {desired} not found in agent's available models — proceeding with agent default"
+                    "configured model {desired} not found in agent's available models — proceeding with agent default"
                 );
-                // Surface the miss so the desktop ModelPicker can reject a live
-                // pick rather than silently no-op. On the busy path the turn has
-                // already been cancelled+requeued by the time we get here, so the
-                // turn restarts on the unchanged model and the user is told no.
-                agent.acp.observe(
-                    "control_result",
-                    serde_json::json!({
-                        "type": "switch_model",
-                        "status": "unsupported_model",
-                        "modelId": desired,
-                    }),
-                );
-                false
+                break;
             }
         }
-    } else {
-        false
-    };
+    }
 
-    // Emit session config for desktop consumption (config bridge tier 1b).
-    // Emitted AFTER desired_model resolution so the desktop caches the
-    // post-switch state. modelOverridden reflects whether the switch actually
-    // applied — false on the unsupported arm so the panel doesn't show a
-    // stale override badge.
-    agent.acp.observe(
-        "session_config_captured",
-        serde_json::json!({
+    // Prepare session config for desktop consumption (config bridge tier 1b).
+    // Published AFTER desired_model resolution so the desktop caches the
+    // post-switch state. modelOverridden reflects the intent that was actually
+    // applied, including a prior pending override restored after a catalog miss.
+    let session_config = serde_json::json!({
             "configOptions": resp.raw.get("configOptions").cloned().unwrap_or(serde_json::Value::Null),
             "modes": resp.raw.get("modes").cloned().unwrap_or(serde_json::Value::Null),
             "models": resp.raw.get("models").cloned().unwrap_or(serde_json::Value::Null),
@@ -992,8 +1223,7 @@ async fn create_session_and_apply_model(
             // Pair identity for the desktop session-config cache, which is
             // keyed by (agent, relay) like the lifecycle frames.
             "relayUrl": ctx.relay_url,
-        }),
-    );
+    });
 
     // Apply permission mode if not the agent's built-in default AND the agent
     // advertises the requested mode in session/new. Agents that don't support
@@ -1002,10 +1232,89 @@ async fn create_session_and_apply_model(
     if !ctx.permission_mode.is_default()
         && agent_supports_mode(&resp.raw, ctx.permission_mode.as_wire_str())
     {
-        apply_permission_mode(&mut agent.acp, &resp.session_id, &ctx.permission_mode).await?;
+        if let Err(error) =
+            apply_permission_mode(&mut agent.acp, &resp.session_id, &ctx.permission_mode).await
+        {
+            return Err(cleanup_failed_session_setup(agent, &resp.session_id, error).await);
+        }
     }
 
-    Ok(resp.session_id)
+    Ok(PreparedSession {
+        session_id: resp.session_id,
+        session_config,
+        terminal_model_switch,
+    })
+}
+
+/// Publish session-derived state only after the prepared remote session is
+/// durably addressable through the local routing state.
+///
+/// A failed invariant check leaves any live model-switch correlation pending so
+/// replacement/retry can either complete it or report a terminal failure.
+fn commit_prepared_session(
+    agent: &mut OwnedAgent,
+    source: &PromptSource,
+    prepared: &PreparedSession,
+) -> bool {
+    let session_is_inserted = match source {
+        PromptSource::Channel(channel_id) => agent
+            .state
+            .sessions
+            .get(channel_id)
+            .is_some_and(|session_id| session_id == &prepared.session_id),
+        PromptSource::Heartbeat => {
+            agent.state.heartbeat_session.as_deref() == Some(prepared.session_id.as_str())
+        }
+    };
+    if !session_is_inserted {
+        tracing::error!(
+            target: "pool::session",
+            session_id = %prepared.session_id,
+            "prepared session was not inserted before commit"
+        );
+        return false;
+    }
+
+    if let Some(request) = prepared.terminal_model_switch.as_ref() {
+        let switch_still_pending = agent.desired_model.as_deref()
+            == Some(request.model_id.as_str())
+            && agent.model_switch_request_id.as_deref() == Some(request.request_id.as_str());
+        if !switch_still_pending {
+            tracing::error!(
+                target: "pool::model",
+                session_id = %prepared.session_id,
+                request_id = %request.request_id,
+                "prepared model switch no longer matches pending agent state"
+            );
+            return false;
+        }
+    }
+
+    agent
+        .acp
+        .observe("session_config_captured", prepared.session_config.clone());
+
+    if let Some(request) = prepared.terminal_model_switch.as_ref() {
+        agent.acp.observe(
+            "control_result",
+            serde_json::json!({
+                "type": "switch_model",
+                "status": "switched",
+                "modelId": request.model_id,
+                "requestId": request.request_id,
+            }),
+        );
+        agent.model_switch_request_id = None;
+        agent.model_switch_rollback = None;
+    }
+
+    true
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionRetirement {
+    Closed,
+    RecycleRequired,
 }
 
 /// Close an adapter-owned session before forgetting its local routing state.
@@ -1016,18 +1325,21 @@ async fn retire_session(
     agent: &mut OwnedAgent,
     source: &PromptSource,
     session_id: &str,
-) -> Result<(), AcpError> {
+) -> Result<SessionRetirement, AcpError> {
+    if !agent.acp.supports_session_close() {
+        return Ok(SessionRetirement::RecycleRequired);
+    }
     agent.acp.session_close(session_id).await?;
     agent.state.invalidate(source);
-    Ok(())
+    Ok(SessionRetirement::Closed)
 }
 
 /// Send the appropriate ACP model-switch request with a timeout.
 ///
-/// On timeout or error, logs a warning and returns — the caller proceeds
-/// with the agent's default model. This is intentionally non-fatal: a stale
-/// response from a timed-out request is safely ignored by `read_until_response`
-/// (non-matching JSON-RPC IDs are skipped).
+/// Every rejected or unverified request is returned to the caller. A framed
+/// application error leaves the transport reusable, but it is still proof that
+/// the requested model was not applied; the caller must report terminal switch
+/// failure and retire the partially-created session before adapter reuse.
 async fn apply_model_switch(
     acp: &mut AcpClient,
     session_id: &str,
@@ -1066,23 +1378,21 @@ async fn apply_model_switch(
         }
         // Transport-class errors may have corrupted the stdio stream — propagate
         // so the caller can respawn the agent instead of reusing a poisoned one.
-        Ok(Err(e @ AcpError::Io(_)))
-        | Ok(Err(e @ AcpError::WriteTimeout(_)))
-        | Ok(Err(e @ AcpError::Timeout(_)))
-        | Ok(Err(e @ AcpError::Protocol(_)))
-        | Ok(Err(e @ AcpError::AgentExited)) => {
+        Ok(Err(e)) if e.requires_process_replacement() => {
             tracing::error!(
                 target: "pool::model",
                 "fatal error setting model {desired} via {method_label}: {e}"
             );
             return Err(e);
         }
-        // Application-level errors (Json, etc.) — agent is fine, just uses default model.
+        // A framed JSON-RPC application error leaves the transport reusable,
+        // but is still a terminal failure for this model-switch attempt.
         Ok(Err(e)) => {
             tracing::warn!(
                 target: "pool::model",
-                "failed to set model {desired} via {method_label}: {e} — proceeding with agent default"
+                "failed to set model {desired} via {method_label}: {e}"
             );
+            return Err(e);
         }
         Err(_) => {
             // Outer timeout fired — the inner send_request may have left the
@@ -1142,11 +1452,7 @@ async fn apply_permission_mode(
         }
         // Transport-class errors may have corrupted the stdio stream — propagate
         // so the caller can respawn the agent.
-        Ok(Err(e @ AcpError::Io(_)))
-        | Ok(Err(e @ AcpError::WriteTimeout(_)))
-        | Ok(Err(e @ AcpError::Timeout(_)))
-        | Ok(Err(e @ AcpError::Protocol(_)))
-        | Ok(Err(e @ AcpError::AgentExited)) => {
+        Ok(Err(e)) if e.requires_process_replacement() => {
             tracing::error!(
                 target: "pool::permission",
                 "fatal error setting permission mode {wire:?}: {e}"
@@ -1327,10 +1633,22 @@ fn with_canvas(prompt: Option<String>, canvas: Option<&str>) -> Option<String> {
 fn send_prompt_result(
     result_tx: &mpsc::UnboundedSender<PromptResult>,
     turn_id: &str,
+    agent: OwnedAgent,
+    source: PromptSource,
+    outcome: PromptOutcome,
+    batch: Option<FlushBatch>,
+) {
+    send_prompt_result_with_retry_agent(result_tx, turn_id, agent, source, outcome, batch, None);
+}
+
+fn send_prompt_result_with_retry_agent(
+    result_tx: &mpsc::UnboundedSender<PromptResult>,
+    turn_id: &str,
     mut agent: OwnedAgent,
     source: PromptSource,
     outcome: PromptOutcome,
     batch: Option<FlushBatch>,
+    retry_agent_index: Option<usize>,
 ) {
     agent.acp.clear_steer_rx();
     let _ = result_tx.send(PromptResult {
@@ -1339,6 +1657,7 @@ fn send_prompt_result(
         turn_id: turn_id.to_owned(),
         outcome,
         batch,
+        retry_agent_index,
     });
 }
 
@@ -1354,6 +1673,123 @@ fn send_prompt_result(
 ///
 /// The agent is ALWAYS returned — even on panic the `JoinSet` detects the
 /// abort and the caller uses `task_map` to recover the agent index.
+enum Preemptible<T> {
+    Completed(T),
+    Controlled(ControlSignal),
+}
+
+async fn await_with_control<F>(
+    control_rx: &mut Option<tokio::sync::oneshot::Receiver<ControlSignal>>,
+    future: F,
+) -> Preemptible<F::Output>
+where
+    F: std::future::Future,
+{
+    let Some(rx) = control_rx.as_mut() else {
+        return Preemptible::Completed(future.await);
+    };
+    tokio::pin!(future);
+    tokio::select! {
+        biased;
+        signal = rx => {
+            *control_rx = None;
+            Preemptible::Controlled(signal.unwrap_or(ControlSignal::Cancel))
+        }
+        result = &mut future => Preemptible::Completed(result),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_pre_prompt_control_result(
+    result_tx: &mpsc::UnboundedSender<PromptResult>,
+    turn_id: &str,
+    mut agent: OwnedAgent,
+    source: PromptSource,
+    signal: ControlSignal,
+    ctx: &PromptContext,
+    batch: Option<FlushBatch>,
+    session_id: Option<String>,
+    setup_request_in_flight: bool,
+    retire_idle_session: bool,
+) {
+    let retry_agent_index = matches!(&signal, ControlSignal::SwitchModel(_)).then_some(agent.index);
+    if let ControlSignal::SwitchModel(ref request) = signal {
+        stage_busy_model_switch_intent(&mut agent, request);
+    }
+    let retry_batch = requeue_cancelled_batch(ctx, signal.clone(), batch);
+
+    let outcome = if setup_request_in_flight {
+        // Dropping session/new or model-application leaves an ACP request
+        // whose remote completion can no longer be correlated safely. Keep
+        // ownership typed, but force bounded process recycling.
+        agent.state.invalidate_all();
+        PromptOutcome::ControlPreemptedSetup
+    } else if let Some(session_id) = session_id {
+        if agent.acp.has_in_flight_prompt() {
+            match agent
+                .acp
+                .cancel_with_cleanup_grace(&session_id, CONTROL_CANCEL_GRACE)
+                .await
+            {
+                Ok(stop_reason) => {
+                    log_stop_reason(&source, &stop_reason);
+                    match retire_session(&mut agent, &source, &session_id).await {
+                        Ok(SessionRetirement::Closed) => PromptOutcome::Cancelled,
+                        Ok(SessionRetirement::RecycleRequired) => {
+                            PromptOutcome::SessionRecycleRequired
+                        }
+                        Err(error) => PromptOutcome::SessionCloseFailed(error),
+                    }
+                }
+                Err(error) => {
+                    let failure =
+                        classify_control_cancel_failure(ctx, error, signal, retry_batch.clone());
+                    if failure.invalidate_all {
+                        agent.state.invalidate_all();
+                    } else {
+                        agent.state.invalidate(&source);
+                    }
+                    send_prompt_result_with_retry_agent(
+                        result_tx,
+                        turn_id,
+                        agent,
+                        source,
+                        failure.outcome,
+                        failure.retry_batch,
+                        retry_agent_index,
+                    );
+                    return;
+                }
+            }
+        } else if retire_idle_session
+            || matches!(
+                signal,
+                ControlSignal::Rotate | ControlSignal::SwitchModel(_)
+            )
+        {
+            match retire_session(&mut agent, &source, &session_id).await {
+                Ok(SessionRetirement::Closed) => PromptOutcome::Cancelled,
+                Ok(SessionRetirement::RecycleRequired) => PromptOutcome::SessionRecycleRequired,
+                Err(error) => PromptOutcome::SessionCloseFailed(error),
+            }
+        } else {
+            PromptOutcome::Cancelled
+        }
+    } else {
+        PromptOutcome::Cancelled
+    };
+
+    send_prompt_result_with_retry_agent(
+        result_tx,
+        turn_id,
+        agent,
+        source,
+        outcome,
+        retry_batch,
+        retry_agent_index,
+    );
+}
+
 pub async fn run_prompt_task(
     mut agent: OwnedAgent,
     batch: Option<FlushBatch>,
@@ -1363,6 +1799,7 @@ pub async fn run_prompt_task(
     control_rx: Option<tokio::sync::oneshot::Receiver<ControlSignal>>,
     turn_id: String,
 ) {
+    let mut control_rx = control_rx;
     // Is this a channel prompt or a heartbeat?
     let source = match &batch {
         Some(b) => PromptSource::Channel(b.channel_id),
@@ -1481,16 +1918,31 @@ pub async fn run_prompt_task(
                     &ctx.agent_keys,
                     owner_pk,
                 );
-                let section = match tokio::time::timeout(CORE_FETCH_TIMEOUT, fetch).await {
-                    Ok(s) => s,
-                    Err(_) => {
-                        tracing::warn!(
-                            target: "engram::core",
-                            channel = %cid,
-                            timeout_ms = CORE_FETCH_TIMEOUT.as_millis() as u64,
-                            "core fetch timed out — emitting no section"
-                        );
-                        None
+                let section = match await_with_control(
+                    &mut control_rx,
+                    tokio::time::timeout(CORE_FETCH_TIMEOUT, fetch),
+                )
+                .await
+                {
+                    Preemptible::Completed(result) => match result {
+                        Ok(s) => s,
+                        Err(_) => {
+                            tracing::warn!(
+                                target: "engram::core",
+                                channel = %cid,
+                                timeout_ms = CORE_FETCH_TIMEOUT.as_millis() as u64,
+                                "core fetch timed out — emitting no section"
+                            );
+                            None
+                        }
+                    },
+                    Preemptible::Controlled(signal) => {
+                        send_pre_prompt_control_result(
+                            &result_tx, &turn_id, agent, source, signal, &ctx, batch, None, false,
+                            false,
+                        )
+                        .await;
+                        return;
                     }
                 };
                 if let Some(rendered) = section {
@@ -1527,13 +1979,43 @@ pub async fn run_prompt_task(
         let needs_canvas = is_new_channel_session && !agent.state.canvas_sections.contains_key(cid);
         let needs_title = is_new_channel_session && ctx.session_title.is_some();
         if needs_canvas || needs_title {
-            let (is_dm, resolved_channel) =
-                resolve_new_session_channel_context(&ctx.channel_info, *cid).await;
+            let (is_dm, resolved_channel) = match await_with_control(
+                &mut control_rx,
+                resolve_new_session_channel_context(&ctx.channel_info, *cid),
+            )
+            .await
+            {
+                Preemptible::Completed(result) => result,
+                Preemptible::Controlled(signal) => {
+                    send_pre_prompt_control_result(
+                        &result_tx, &turn_id, agent, source, signal, &ctx, batch, None, false,
+                        false,
+                    )
+                    .await;
+                    return;
+                }
+            };
             title_channel = resolved_channel;
             // A confirmed DM never receives a canvas section; an undeterminable
             // channel type fails closed as a DM for the same reason.
             if needs_canvas && !is_dm {
-                if let Some(section) = fetch_canvas_section(*cid, &ctx.rest_client).await {
+                let section = match await_with_control(
+                    &mut control_rx,
+                    fetch_canvas_section(*cid, &ctx.rest_client),
+                )
+                .await
+                {
+                    Preemptible::Completed(section) => section,
+                    Preemptible::Controlled(signal) => {
+                        send_pre_prompt_control_result(
+                            &result_tx, &turn_id, agent, source, signal, &ctx, batch, None, false,
+                            false,
+                        )
+                        .await;
+                        return;
+                    }
+                };
+                if let Some(section) = section {
                     pending_canvas = Some((*cid, section));
                 }
             }
@@ -1568,52 +2050,59 @@ pub async fn run_prompt_task(
                 // agent in several channels doesn't produce identical session
                 // rows; `title_channel` comes from the single resolve above and
                 // is `None` for DM, unresolved, and unnamed channels.
-                match create_session_and_apply_model(
-                    &mut agent,
-                    &ctx,
-                    agent_core.as_deref(),
-                    agent_canvas.as_deref(),
-                    title_channel.as_deref(),
+                match await_with_control(
+                    &mut control_rx,
+                    create_session_and_apply_model(
+                        &mut agent,
+                        &ctx,
+                        agent_core.as_deref(),
+                        agent_canvas.as_deref(),
+                        title_channel.as_deref(),
+                    ),
                 )
                 .await
                 {
-                    Ok(sid) => {
-                        tracing::info!(
-                            target: "pool::session",
-                            "created session {sid} for channel {cid}"
-                        );
-                        agent.state.sessions.insert(*cid, sid.clone());
-                        // Commit canvas only after session creation succeeds (I3).
-                        if let Some((pending_cid, section)) = pending_canvas.take() {
-                            agent.state.canvas_sections.insert(pending_cid, section);
+                    Preemptible::Controlled(signal) => {
+                        send_pre_prompt_control_result(
+                            &result_tx, &turn_id, agent, source, signal, &ctx, batch, None, true,
+                            false,
+                        )
+                        .await;
+                        return;
+                    }
+                    Preemptible::Completed(result) => match result {
+                        Ok(prepared) => {
+                            let sid = prepared.session_id.clone();
+                            tracing::info!(
+                                target: "pool::session",
+                                "created session {sid} for channel {cid}"
+                            );
+                            agent.state.sessions.insert(*cid, sid.clone());
+                            // Commit canvas only after session creation succeeds (I3).
+                            if let Some((pending_cid, section)) = pending_canvas.take() {
+                                agent.state.canvas_sections.insert(pending_cid, section);
+                            }
+                            commit_prepared_session(&mut agent, &source, &prepared);
+                            (sid, true)
                         }
-                        (sid, true)
-                    }
-                    Err(AcpError::AgentExited) => {
-                        agent.state.invalidate_all();
-                        send_prompt_result(
-                            &result_tx,
-                            &turn_id,
-                            agent,
-                            source,
-                            PromptOutcome::AgentExited,
-                            requeue_batch_if_queue(&ctx, batch),
-                        );
-                        return;
-                    }
-                    Err(e) => {
-                        // Session creation failed; pending canvas was never committed,
-                        // so the next retry will re-fetch a fresh revision.
-                        send_prompt_result(
-                            &result_tx,
-                            &turn_id,
-                            agent,
-                            source,
-                            PromptOutcome::Error(e),
-                            requeue_batch_if_queue(&ctx, batch),
-                        );
-                        return;
-                    }
+                        Err(error) => {
+                            // Session creation failed; pending canvas was never committed,
+                            // so the next retry will re-fetch a fresh revision.
+                            let outcome = session_setup_outcome(error);
+                            if matches!(&outcome, PromptOutcome::AgentExited) {
+                                agent.state.invalidate_all();
+                            }
+                            send_prompt_result(
+                                &result_tx,
+                                &turn_id,
+                                agent,
+                                source,
+                                outcome,
+                                requeue_batch_if_queue(&ctx, batch),
+                            );
+                            return;
+                        }
+                    },
                 }
             }
         }
@@ -1621,39 +2110,41 @@ pub async fn run_prompt_task(
             if let Some(sid) = &agent.state.heartbeat_session {
                 (sid.clone(), false)
             } else {
-                match create_session_and_apply_model(&mut agent, &ctx, None, None, None).await {
-                    Ok(sid) => {
-                        tracing::info!(
-                            target: "pool::session",
-                            "created heartbeat session {sid} for agent {}",
-                            agent.index
-                        );
-                        agent.state.heartbeat_session = Some(sid.clone());
-                        (sid, true)
-                    }
-                    Err(AcpError::AgentExited) => {
-                        agent.state.invalidate_all();
-                        send_prompt_result(
-                            &result_tx,
-                            &turn_id,
-                            agent,
-                            source,
-                            PromptOutcome::AgentExited,
-                            None,
-                        );
+                match await_with_control(
+                    &mut control_rx,
+                    create_session_and_apply_model(&mut agent, &ctx, None, None, None),
+                )
+                .await
+                {
+                    Preemptible::Controlled(signal) => {
+                        send_pre_prompt_control_result(
+                            &result_tx, &turn_id, agent, source, signal, &ctx, batch, None, true,
+                            false,
+                        )
+                        .await;
                         return;
                     }
-                    Err(e) => {
-                        send_prompt_result(
-                            &result_tx,
-                            &turn_id,
-                            agent,
-                            source,
-                            PromptOutcome::Error(e),
-                            None,
-                        );
-                        return;
-                    }
+                    Preemptible::Completed(result) => match result {
+                        Ok(prepared) => {
+                            let sid = prepared.session_id.clone();
+                            tracing::info!(
+                                target: "pool::session",
+                                "created heartbeat session {sid} for agent {}",
+                                agent.index
+                            );
+                            agent.state.heartbeat_session = Some(sid.clone());
+                            commit_prepared_session(&mut agent, &source, &prepared);
+                            (sid, true)
+                        }
+                        Err(error) => {
+                            let outcome = session_setup_outcome(error);
+                            if matches!(&outcome, PromptOutcome::AgentExited) {
+                                agent.state.invalidate_all();
+                            }
+                            send_prompt_result(&result_tx, &turn_id, agent, source, outcome, None);
+                            return;
+                        }
+                    },
                 }
             }
         }
@@ -1706,15 +2197,35 @@ pub async fn run_prompt_task(
                 agent_canvas.as_deref(),
                 &init_msg,
             );
-            let init_result = agent
-                .acp
-                .session_prompt_with_idle_timeout(
+            let init_result = match await_with_control(
+                &mut control_rx,
+                agent.acp.session_prompt_with_idle_timeout(
                     &session_id,
                     &init_msg,
                     ctx.idle_timeout,
                     ctx.max_turn_duration,
-                )
-                .await;
+                ),
+            )
+            .await
+            {
+                Preemptible::Completed(result) => result,
+                Preemptible::Controlled(signal) => {
+                    send_pre_prompt_control_result(
+                        &result_tx,
+                        &turn_id,
+                        agent,
+                        source,
+                        signal,
+                        &ctx,
+                        batch,
+                        Some(session_id),
+                        false,
+                        true,
+                    )
+                    .await;
+                    return;
+                }
+            };
 
             match init_result {
                 Ok(stop_reason) => {
@@ -1800,15 +2311,25 @@ pub async fn run_prompt_task(
                 Err(e) => {
                     tracing::error!(
                         target: "pool::session",
-                        "initial_message failed for channel {cid}: {e} — invalidating session"
+                        "initial_message failed for channel {cid}: {e} — retiring partial session"
                     );
-                    agent.state.invalidate(&source);
+                    let outcome = if e.requires_process_replacement() {
+                        PromptOutcome::Error(e)
+                    } else {
+                        match retire_session(&mut agent, &source, &session_id).await {
+                            Ok(SessionRetirement::Closed) => PromptOutcome::Error(e),
+                            Ok(SessionRetirement::RecycleRequired) => {
+                                PromptOutcome::SessionSetupRecycleRequired
+                            }
+                            Err(close_error) => PromptOutcome::SessionSetupCloseFailed(close_error),
+                        }
+                    };
                     send_prompt_result(
                         &result_tx,
                         &turn_id,
                         agent,
                         source,
-                        PromptOutcome::Error(e),
+                        outcome,
                         requeue_batch_if_queue(&ctx, batch),
                     );
                     return;
@@ -1839,16 +2360,81 @@ pub async fn run_prompt_task(
     } else if let Some(ref b) = batch {
         // Build prompt from batch with context enrichment.
         // Try startup cache first; lazy-fetch via REST for dynamic channels.
-        let channel_info = ctx.channel_info.resolve(b.channel_id).await;
+        let channel_info =
+            match await_with_control(&mut control_rx, ctx.channel_info.resolve(b.channel_id)).await
+            {
+                Preemptible::Completed(result) => result,
+                Preemptible::Controlled(signal) => {
+                    send_pre_prompt_control_result(
+                        &result_tx,
+                        &turn_id,
+                        agent,
+                        source,
+                        signal,
+                        &ctx,
+                        batch,
+                        Some(session_id),
+                        false,
+                        false,
+                    )
+                    .await;
+                    return;
+                }
+            };
 
         let conversation_context = if ctx.context_message_limit > 0 {
-            fetch_conversation_context(b, &channel_info, &ctx).await
+            match await_with_control(
+                &mut control_rx,
+                fetch_conversation_context(b, &channel_info, &ctx),
+            )
+            .await
+            {
+                Preemptible::Completed(result) => result,
+                Preemptible::Controlled(signal) => {
+                    send_pre_prompt_control_result(
+                        &result_tx,
+                        &turn_id,
+                        agent,
+                        source,
+                        signal,
+                        &ctx,
+                        batch,
+                        Some(session_id),
+                        false,
+                        false,
+                    )
+                    .await;
+                    return;
+                }
+            }
         } else {
             None
         };
 
-        let profile_lookup =
-            fetch_prompt_profile_lookup(b, conversation_context.as_ref(), &ctx.rest_client).await;
+        let profile_lookup = match await_with_control(
+            &mut control_rx,
+            fetch_prompt_profile_lookup(b, conversation_context.as_ref(), &ctx.rest_client),
+        )
+        .await
+        {
+            Preemptible::Completed(result) => result,
+            Preemptible::Controlled(signal) => {
+                send_pre_prompt_control_result(
+                    &result_tx,
+                    &turn_id,
+                    agent,
+                    source,
+                    signal,
+                    &ctx,
+                    batch,
+                    Some(session_id),
+                    false,
+                    false,
+                )
+                .await;
+                return;
+            }
+        };
 
         let known_names: Vec<&str> = profile_lookup
             .iter()
@@ -1918,9 +2504,10 @@ pub async fn run_prompt_task(
         None => prompt_sections.iter().map(String::as_str).collect(),
     };
 
-    // When control_rx is Some (channel tasks), wrap the prompt in select! so
-    // the main loop can cancel, interrupt, or rotate it. Heartbeats
-    // (control_rx=None) take the simple await path — they are not controllable.
+    // Every supervisor-owned prompt, including heartbeats, supplies
+    // `control_rx` so graceful shutdown can recover the typed agent owner.
+    // `None` remains supported for direct callers that intentionally do not
+    // need cooperative cancellation.
     //
     let prompt_result = match control_rx {
         None => {
@@ -1946,13 +2533,17 @@ pub async fn run_prompt_task(
                 ) => result,
                 mode = rx => {
                     let control_signal = mode.unwrap_or(ControlSignal::Cancel);
-                    // Land the model switch before any cancel/requeue work: setting
-                    // `desired_model` here means the fresh session created by the
-                    // requeued turn (busy) or the next turn (already-completed)
-                    // applies the new model. Runtime-only — never persisted.
-                    if let ControlSignal::SwitchModel(ref model_id) = control_signal {
-                        agent.desired_model = Some(model_id.clone());
-                        agent.model_overridden = true;
+                    let retry_agent_index = matches!(
+                        &control_signal,
+                        ControlSignal::SwitchModel(_)
+                    )
+                    .then_some(agent.index);
+                    // Land an accepted model switch before any cancel/requeue
+                    // work. A catalog rejection restores the exact prior intent
+                    // before recycling can preserve it for the requeued turn.
+                    // Runtime-only — never persisted.
+                    if let ControlSignal::SwitchModel(ref request) = control_signal {
+                        stage_busy_model_switch_intent(&mut agent, request);
                     }
                     // Control signal received. Guard against Race 1: the turn may
                     // have completed naturally just as cancel fired.
@@ -1969,18 +2560,25 @@ pub async fn run_prompt_task(
                                     requeue_cancelled_batch(&ctx, control_signal, batch);
                                 let outcome =
                                     match retire_session(&mut agent, &source, &session_id).await {
-                                        Ok(()) => PromptOutcome::Cancelled,
+                                        Ok(SessionRetirement::Closed) => PromptOutcome::Cancelled,
+                                        Ok(SessionRetirement::RecycleRequired) => {
+                                            PromptOutcome::SessionRecycleRequired
+                                        }
                                         Err(error) => {
                                         tracing::error!(
                                             target: "pool::session",
-                                            "failed to close retired session {session_id}: {error}"
+                                            "failed to close retired session {session_id}"
                                         );
                                             PromptOutcome::SessionCloseFailed(error)
                                         }
                                     };
 
                                 let usage = agent.acp.take_turn_usage();
-                                let metric_stop = if matches!(&outcome, PromptOutcome::Cancelled) {
+                                let metric_stop = if matches!(
+                                    &outcome,
+                                    PromptOutcome::Cancelled
+                                        | PromptOutcome::SessionRecycleRequired
+                                ) {
                                     buzz_core::agent_turn_metric::StopReason::Cancelled
                                 } else {
                                     buzz_core::agent_turn_metric::StopReason::Error
@@ -1994,13 +2592,14 @@ pub async fn run_prompt_task(
                                     Some(metric_stop),
                                 )
                                 .await;
-                                send_prompt_result(
+                                send_prompt_result_with_retry_agent(
                                     &result_tx,
                                     &turn_id,
                                     agent,
                                     source,
                                     outcome,
                                     retry_batch,
+                                    retry_agent_index,
                                 );
                                 return;
                             }
@@ -2030,13 +2629,14 @@ pub async fn run_prompt_task(
                                     Some(buzz_core::agent_turn_metric::StopReason::Error),
                                 )
                                 .await;
-                                send_prompt_result(
+                                send_prompt_result_with_retry_agent(
                                     &result_tx,
                                     &turn_id,
                                     agent,
                                     source,
                                     failure.outcome,
                                     failure.retry_batch,
+                                    retry_agent_index,
                                 );
                                 return;
                             }
@@ -2056,25 +2656,37 @@ pub async fn run_prompt_task(
                         // and last_prompt_id was cleared by the success path.
                         //
                         // MUST send a PromptResult or the main loop deadlocks.
-                        if matches!(
+                        let retires_session = matches!(
                             control_signal,
                             ControlSignal::Rotate | ControlSignal::SwitchModel(_)
-                        ) {
+                        );
+                        let outcome = if retires_session {
                             tracing::debug!(
                                 target: "pool::prompt",
-                                "rotate/switch signal arrived but turn already completed — invalidating session"
+                                "rotate/switch signal arrived after turn completion — retiring session"
                             );
+                            match retire_session(&mut agent, &source, &session_id).await {
+                                Ok(SessionRetirement::Closed) => {
+                                    PromptOutcome::SessionRetired(StopReason::EndTurn)
+                                }
+                                Ok(SessionRetirement::RecycleRequired) => {
+                                    PromptOutcome::SessionRecycleRequired
+                                }
+                                Err(error) => PromptOutcome::SessionCloseFailed(error),
+                            }
                         } else {
                             tracing::debug!(
                                 target: "pool::prompt",
                                 "control signal arrived but turn already completed — treating as success"
                             );
-                        }
-                        apply_completed_before_control_signal(
-                            &mut agent.state,
-                            &source,
-                            &control_signal,
-                        );
+                            PromptOutcome::Ok(StopReason::EndTurn)
+                        };
+                        let metric_stop =
+                            if matches!(&outcome, PromptOutcome::SessionCloseFailed(_)) {
+                                buzz_core::agent_turn_metric::StopReason::Error
+                            } else {
+                                buzz_core::agent_turn_metric::StopReason::EndTurn
+                            };
                         let usage = agent.acp.take_turn_usage();
                         publish_agent_turn_metric(
                             &ctx,
@@ -2082,16 +2694,17 @@ pub async fn run_prompt_task(
                             observer_channel_id,
                             &session_id,
                             &turn_id,
-                            Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
+                            Some(metric_stop),
                         )
                         .await;
-                        send_prompt_result(
+                        send_prompt_result_with_retry_agent(
                             &result_tx,
                             &turn_id,
                             agent,
                             source,
-                            PromptOutcome::Ok(StopReason::EndTurn),
+                            outcome,
                             None, // turn succeeded — batch was processed, no requeue
+                            retry_agent_index,
                         );
                         return;
                     }
@@ -2128,17 +2741,18 @@ pub async fn run_prompt_task(
                 }
             };
 
-            let retirement_error = if should_rotate {
+            let retirement = if should_rotate {
                 tracing::info!(
                     target: "pool::session",
                     "rotating session for {source:?} after {stop_reason:?}",
                 );
-                retire_session(&mut agent, &source, &session_id).await.err()
+                Some(retire_session(&mut agent, &source, &session_id).await)
             } else {
                 None
             };
 
-            let core_stop = completed_turn_metric_stop(&stop_reason, retirement_error.is_some());
+            let retirement_failed = matches!(retirement, Some(Err(_)));
+            let core_stop = completed_turn_metric_stop(&stop_reason, retirement_failed);
             let usage = agent.acp.take_turn_usage();
             publish_agent_turn_metric(
                 &ctx,
@@ -2150,14 +2764,18 @@ pub async fn run_prompt_task(
             )
             .await;
 
-            let outcome = match retirement_error {
-                Some(error) => {
+            let outcome = match retirement {
+                Some(Err(error)) => {
                     tracing::error!(
                         target: "pool::session",
-                        "failed to close rotated session {session_id}: {error}"
+                        "failed to close rotated session {session_id}"
                     );
                     PromptOutcome::SessionCloseFailed(error)
                 }
+                Some(Ok(SessionRetirement::RecycleRequired)) => {
+                    PromptOutcome::SessionRecycleRequired
+                }
+                Some(Ok(SessionRetirement::Closed)) => PromptOutcome::SessionRetired(stop_reason),
                 None => PromptOutcome::Ok(stop_reason),
             };
             send_prompt_result(&result_tx, &turn_id, agent, source, outcome, None);
@@ -3163,7 +3781,7 @@ fn classify_control_cancel_failure(
             PromptOutcome::CancelDrainTimeout(CONTROL_CANCEL_GRACE),
             false,
         ),
-        other => (PromptOutcome::Error(other), false),
+        other => (PromptOutcome::CancelCleanupFailed(other), false),
     };
     ControlCancelFailure {
         outcome,
@@ -3782,6 +4400,12 @@ mod tests {
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
     use serde_json::json;
 
+    const TEST_MODEL_SWITCH_REQUEST_ID: &str = "0123456789abcdef0123456789abcdef";
+
+    fn model_switch_request(model_id: &str) -> ModelSwitchRequest {
+        ModelSwitchRequest::new(model_id, TEST_MODEL_SWITCH_REQUEST_ID)
+    }
+
     // These pin the initial_message dispatch path (run_prompt_task, ~line 855):
     // a legacy agent WITH a base_prompt must get [Base] prepended to the user
     // message. This is the exact regression that shipped in the round-2 bug.
@@ -4258,6 +4882,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            occurrence_ids: Default::default(),
         };
         let context = ConversationContext::Thread {
             messages: vec![ContextMessage {
@@ -4392,43 +5017,6 @@ mod tests {
     }
 
     #[test]
-    fn test_rotate_after_natural_completion_invalidates_channel_state() {
-        let (mut s, ch_a, ch_b) = make_state();
-
-        apply_completed_before_control_signal(
-            &mut s,
-            &PromptSource::Channel(ch_a),
-            &ControlSignal::Rotate,
-        );
-
-        assert!(!s.sessions.contains_key(&ch_a));
-        assert!(!s.turn_counts.contains_key(&ch_a));
-        assert!(!s.core_sections.contains_key(&ch_a));
-        assert!(!s.has_channel_state(&ch_a));
-        assert_eq!(s.sessions.get(&ch_b).unwrap(), "sess-b");
-        assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
-        assert_eq!(s.core_sections.get(&ch_b).unwrap(), "core-b");
-        assert_eq!(s.heartbeat_session.as_deref(), Some("sess-hb"));
-        assert_eq!(s.heartbeat_turn_count, 7);
-    }
-
-    #[test]
-    fn test_cancel_after_natural_completion_preserves_channel_state() {
-        let (mut s, ch_a, ch_b) = make_state();
-
-        apply_completed_before_control_signal(
-            &mut s,
-            &PromptSource::Channel(ch_a),
-            &ControlSignal::Cancel,
-        );
-
-        assert_eq!(s.sessions.get(&ch_a).unwrap(), "sess-a");
-        assert_eq!(*s.turn_counts.get(&ch_a).unwrap(), 5);
-        assert_eq!(s.core_sections.get(&ch_a).unwrap(), "core-a");
-        assert_eq!(s.sessions.get(&ch_b).unwrap(), "sess-b");
-    }
-
-    #[test]
     fn test_invalidate_channel_clears_session_and_turn_count() {
         let (mut s, ch_a, ch_b) = make_state();
         s.invalidate(&PromptSource::Channel(ch_a));
@@ -4542,24 +5130,86 @@ mod tests {
         assert_eq!(s.core_sections.get(&ch_b).unwrap(), "core-b");
     }
 
-    // ── ControlSignal::SwitchModel (Phase 3a, Option ii) ─────────────────────
+    async fn inert_owned_agent_with_session(index: usize, channel_id: Uuid) -> OwnedAgent {
+        let mut state = SessionState::default();
+        state
+            .sessions
+            .insert(channel_id, format!("session-{index}"));
+        OwnedAgent {
+            index,
+            acp: AcpClient::spawn("cat", &[], &[], false)
+                .await
+                .expect("spawn inert adapter"),
+            state,
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            model_switch_request_id: None,
+            model_switch_rollback: None,
+            agent_name: "inert".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 1,
+        }
+    }
 
-    #[test]
-    fn test_switch_model_after_natural_completion_invalidates_channel_state() {
-        let (mut s, ch_a, ch_b) = make_state();
+    #[tokio::test]
+    async fn taking_idle_channel_owner_preserves_session_until_process_recycle() {
+        let channel_id = Uuid::new_v4();
+        let agent = inert_owned_agent_with_session(0, channel_id).await;
+        let mut pool = AgentPool::from_slots(vec![Some(agent)]);
 
-        // SwitchModel must invalidate just like Rotate so the requeued turn
-        // re-creates a fresh session that re-applies the new desired_model.
-        apply_completed_before_control_signal(
-            &mut s,
-            &PromptSource::Channel(ch_a),
-            &ControlSignal::SwitchModel("gpt-5".into()),
+        let mut owners = pool.take_idle_agents_with_session(channel_id);
+
+        assert_eq!(pool.live_count(), 0);
+        assert_eq!(owners.len(), 1);
+        assert_eq!(
+            owners[0]
+                .state
+                .sessions
+                .get(&channel_id)
+                .map(String::as_str),
+            Some("session-0"),
+            "claiming for recycle must not locally forget remote ownership"
         );
+        owners[0]
+            .acp
+            .shutdown()
+            .await
+            .expect("idle session owner must shut down cleanly");
+    }
 
-        assert!(!s.has_channel_state(&ch_a));
-        // ch_b untouched — the switch is channel-scoped.
-        assert_eq!(s.sessions.get(&ch_b).unwrap(), "sess-b");
-        assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
+    #[tokio::test]
+    async fn idle_model_switch_claim_preserves_session_and_model_intent_for_recycle() {
+        let channel_id = Uuid::new_v4();
+        let agent = inert_owned_agent_with_session(0, channel_id).await;
+        let mut pool = AgentPool::from_slots(vec![Some(agent)]);
+
+        let mut claimed = match pool.switch_idle_agent_model(
+            channel_id,
+            "runtime-model",
+            TEST_MODEL_SWITCH_REQUEST_ID,
+        ) {
+            IdleSwitchResult::Recycle(agent) => *agent,
+            IdleSwitchResult::UnsupportedModel => panic!("model must be accepted without catalog"),
+            IdleSwitchResult::NoIdleAgent => panic!("idle session owner must be found"),
+        };
+
+        assert_eq!(pool.live_count(), 0);
+        assert_eq!(
+            claimed.state.sessions.get(&channel_id).map(String::as_str),
+            Some("session-0")
+        );
+        assert_eq!(claimed.desired_model.as_deref(), Some("runtime-model"));
+        assert!(claimed.model_overridden);
+        assert_eq!(
+            claimed.model_switch_request_id.as_deref(),
+            Some(TEST_MODEL_SWITCH_REQUEST_ID)
+        );
+        claimed
+            .acp
+            .shutdown()
+            .await
+            .expect("claimed agent must shut down cleanly");
     }
 
     // ── requeue_cancelled_batch ────────────────────────────────────────────
@@ -4584,6 +5234,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            occurrence_ids: Default::default(),
         }
     }
 
@@ -4616,18 +5267,21 @@ mod tests {
         let capture = capture_path("cancel-close");
         let script = r#"
             capture="$1"
+            IFS= read -r initialize
+            printf '%s\n' "$initialize" >> "$capture"
+            printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":2,"agentCapabilities":{"sessionCapabilities":{"close":{}}}}}'
             IFS= read -r prompt
             printf '%s\n' "$prompt" >> "$capture"
             IFS= read -r cancel
             printf '%s\n' "$cancel" >> "$capture"
-            printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"stopReason":"cancelled"}}'
+            printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"stopReason":"cancelled"}}'
             if IFS= read -r close; then
                 printf '%s\n' "$close" >> "$capture"
-                printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{}}'
+                printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{}}'
             fi
             sleep 10
         "#;
-        let acp = AcpClient::spawn(
+        let mut acp = AcpClient::spawn(
             "bash",
             &[
                 "-c".to_string(),
@@ -4640,6 +5294,10 @@ mod tests {
         )
         .await
         .expect("failed to spawn fake ACP adapter");
+        acp.initialize()
+            .await
+            .expect("fake adapter must advertise session/close");
+        assert!(acp.supports_session_close());
 
         let channel_id = Uuid::new_v4();
         let mut state = SessionState::default();
@@ -4651,6 +5309,8 @@ mod tests {
             model_capabilities: None,
             desired_model: None,
             model_overridden: false,
+            model_switch_request_id: None,
+            model_switch_rollback: None,
             agent_name: "claude-code-acp".into(),
             goose_system_prompt_supported: None,
             protocol_version: 2,
@@ -4669,7 +5329,7 @@ mod tests {
             "turn-cancel-close".into(),
         ));
 
-        let _ = wait_for_capture_lines(&capture, 1).await;
+        let _ = wait_for_capture_lines(&capture, 2).await;
         control_tx
             .send(ControlSignal::Steer)
             .expect("control receiver must still be live");
@@ -4693,18 +5353,540 @@ mod tests {
             "queue-mode steer must preserve the cancelled batch"
         );
 
-        let captured = wait_for_capture_lines(&capture, 3).await;
+        let captured = wait_for_capture_lines(&capture, 4).await;
         let messages: Vec<serde_json::Value> = captured
             .lines()
             .map(|line| serde_json::from_str(line).expect("captured line must be JSON"))
             .collect();
-        assert_eq!(messages[0]["method"], "session/prompt");
-        assert_eq!(messages[1]["method"], "session/cancel");
+        assert_eq!(messages[0]["method"], "initialize");
+        assert_eq!(messages[1]["method"], "session/prompt");
+        assert_eq!(messages[2]["method"], "session/cancel");
         assert_eq!(
-            messages[2]["method"], "session/close",
+            messages[3]["method"], "session/close",
             "the retired ACP session must be closed before the adapter is reused"
         );
-        assert_eq!(messages[2]["params"]["sessionId"], "session-old");
+        assert_eq!(messages[3]["params"]["sessionId"], "session-old");
+
+        let _ = std::fs::remove_file(capture);
+    }
+
+    #[tokio::test]
+    async fn shutdown_preempts_blocked_session_setup_and_returns_agent_owner() {
+        let capture = capture_path("shutdown-session-setup");
+        let script = r#"
+            capture="$1"
+            IFS= read -r initialize
+            printf '%s\n' "$initialize" >> "$capture"
+            printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":2,"agentCapabilities":{"sessionCapabilities":{}}}}'
+            IFS= read -r new_session
+            printf '%s\n' "$new_session" >> "$capture"
+            sleep 10
+        "#;
+        let mut acp = AcpClient::spawn(
+            "bash",
+            &[
+                "-c".to_string(),
+                script.to_string(),
+                "buzz-acp-shutdown-session-setup-test".to_string(),
+                capture.to_string_lossy().into_owned(),
+            ],
+            &[],
+            false,
+        )
+        .await
+        .expect("failed to spawn fake ACP adapter");
+        acp.initialize()
+            .await
+            .expect("fake adapter must initialize");
+
+        let agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            model_switch_request_id: None,
+            model_switch_rollback: None,
+            agent_name: "claude-code-acp".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 2,
+        };
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.dedup_mode = DedupMode::Queue;
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+        let (control_tx, control_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(run_prompt_task(
+            agent,
+            None,
+            Some("prompt".into()),
+            Arc::new(ctx),
+            result_tx,
+            Some(control_rx),
+            "turn-shutdown-session-setup".into(),
+        ));
+
+        let _ = wait_for_capture_lines(&capture, 1).await;
+        control_tx
+            .send(ControlSignal::Cancel)
+            .expect("setup task must retain its shutdown receiver");
+        let result = tokio::time::timeout(Duration::from_secs(1), result_rx.recv())
+            .await
+            .expect("shutdown must not wait for blocked session setup")
+            .expect("typed agent owner must be returned");
+        task.await.expect("setup task must not panic");
+
+        assert!(matches!(
+            result.outcome,
+            PromptOutcome::ControlPreemptedSetup
+        ));
+        assert!(result.batch.is_none(), "shutdown discards the active batch");
+        assert_eq!(result.agent.index, 0, "typed agent owner must be recovered");
+
+        let _ = std::fs::remove_file(capture);
+    }
+
+    #[tokio::test]
+    async fn shutdown_preempts_initial_message_and_closes_partial_session() {
+        let capture = capture_path("shutdown-initial-message");
+        let script = r#"
+            capture="$1"
+            IFS= read -r initialize
+            printf '%s\n' "$initialize" >> "$capture"
+            printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":2,"agentCapabilities":{"sessionCapabilities":{"close":{}}}}}'
+            IFS= read -r new_session
+            printf '%s\n' "$new_session" >> "$capture"
+            printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"session-created"}}'
+            IFS= read -r initial_prompt
+            printf '%s\n' "$initial_prompt" >> "$capture"
+            IFS= read -r cancel
+            printf '%s\n' "$cancel" >> "$capture"
+            printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"stopReason":"cancelled"}}'
+            IFS= read -r close
+            printf '%s\n' "$close" >> "$capture"
+            printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{}}'
+            sleep 10
+        "#;
+        let mut acp = AcpClient::spawn(
+            "bash",
+            &[
+                "-c".to_string(),
+                script.to_string(),
+                "buzz-acp-shutdown-initial-message-test".to_string(),
+                capture.to_string_lossy().into_owned(),
+            ],
+            &[],
+            false,
+        )
+        .await
+        .expect("failed to spawn fake ACP adapter");
+        acp.initialize()
+            .await
+            .expect("fake adapter must initialize");
+
+        let channel_id = Uuid::new_v4();
+        let agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            model_switch_request_id: None,
+            model_switch_rollback: None,
+            agent_name: "claude-code-acp".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 2,
+        };
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.initial_message = Some("initialize".into());
+        ctx.channel_info = ChannelInfoResolver::new(
+            std::collections::HashMap::from([(
+                channel_id,
+                crate::relay::ChannelInfo {
+                    name: "private".into(),
+                    channel_type: "dm".into(),
+                },
+            )]),
+            ctx.rest_client.clone(),
+        );
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+        let (control_tx, control_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(run_prompt_task(
+            agent,
+            Some(one_event_batch(channel_id)),
+            Some("prompt".into()),
+            Arc::new(ctx),
+            result_tx,
+            Some(control_rx),
+            "turn-shutdown-initial-message".into(),
+        ));
+
+        let _ = wait_for_capture_lines(&capture, 3).await;
+        control_tx
+            .send(ControlSignal::Cancel)
+            .expect("initial-message task must retain its shutdown receiver");
+        let result = tokio::time::timeout(Duration::from_secs(1), result_rx.recv())
+            .await
+            .expect("shutdown must preempt the initial message")
+            .expect("typed agent owner must be returned");
+        task.await.expect("initial-message task must not panic");
+
+        assert!(matches!(result.outcome, PromptOutcome::Cancelled));
+        assert!(!result.agent.state.sessions.contains_key(&channel_id));
+        let captured = wait_for_capture_lines(&capture, 5).await;
+        let messages: Vec<serde_json::Value> = captured
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("captured line must be JSON"))
+            .collect();
+        assert_eq!(messages[3]["method"], "session/cancel");
+        assert_eq!(messages[4]["method"], "session/close");
+
+        let _ = std::fs::remove_file(capture);
+    }
+
+    #[tokio::test]
+    async fn control_before_initial_prompt_poll_closes_newly_created_idle_session() {
+        let capture = capture_path("pre-initial-poll-control");
+        let script = r#"
+            capture="$1"
+            IFS= read -r initialize
+            printf '%s\n' "$initialize" >> "$capture"
+            printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":2,"agentCapabilities":{"sessionCapabilities":{"close":{}}}}}'
+            IFS= read -r close
+            printf '%s\n' "$close" >> "$capture"
+            printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{}}'
+            sleep 10
+        "#;
+        let mut acp = AcpClient::spawn(
+            "bash",
+            &[
+                "-c".to_string(),
+                script.to_string(),
+                "buzz-acp-pre-initial-poll-control-test".to_string(),
+                capture.to_string_lossy().into_owned(),
+            ],
+            &[],
+            false,
+        )
+        .await
+        .expect("failed to spawn fake ACP adapter");
+        acp.initialize()
+            .await
+            .expect("fake adapter must initialize");
+
+        let channel_id = Uuid::new_v4();
+        let mut state = SessionState::default();
+        state.sessions.insert(channel_id, "session-created".into());
+        let agent = OwnedAgent {
+            index: 0,
+            acp,
+            state,
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            model_switch_request_id: None,
+            model_switch_rollback: None,
+            agent_name: "claude-code-acp".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 2,
+        };
+        assert!(
+            !agent.acp.has_in_flight_prompt(),
+            "fixture must reproduce the ready-control race before initial prompt polling"
+        );
+
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+        send_pre_prompt_control_result(
+            &result_tx,
+            "turn-pre-initial-poll",
+            agent,
+            PromptSource::Channel(channel_id),
+            ControlSignal::Steer,
+            &make_prompt_context_no_owner(),
+            None,
+            Some("session-created".into()),
+            false,
+            true,
+        )
+        .await;
+
+        let result = result_rx.recv().await.expect("typed owner result");
+        assert!(matches!(result.outcome, PromptOutcome::Cancelled));
+        assert!(
+            !result.agent.state.sessions.contains_key(&channel_id),
+            "a control-ready partial session must not be reused without its initial message"
+        );
+        let captured = wait_for_capture_lines(&capture, 2).await;
+        let messages: Vec<serde_json::Value> = captured
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("captured line must be JSON"))
+            .collect();
+        assert_eq!(messages[1]["method"], "session/close");
+
+        let _ = std::fs::remove_file(capture);
+    }
+
+    #[tokio::test]
+    async fn rejected_busy_model_switch_restores_prior_intent_and_never_retries_rejected_model() {
+        let capture = capture_path("busy-model-rejection");
+        let script = r#"
+            capture="$1"
+            IFS= read -r initialize
+            printf '%s\n' "$initialize" >> "$capture"
+            printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":2,"agentCapabilities":{"sessionCapabilities":{"close":{}}}}}'
+            IFS= read -r first_prompt
+            printf '%s\n' "$first_prompt" >> "$capture"
+            IFS= read -r cancel
+            printf '%s\n' "$cancel" >> "$capture"
+            printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"stopReason":"cancelled"}}'
+            IFS= read -r close
+            printf '%s\n' "$close" >> "$capture"
+            printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{}}'
+            IFS= read -r new_session
+            printf '%s\n' "$new_session" >> "$capture"
+            printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"sessionId":"session-new","configOptions":[{"configId":"model","category":"model","options":[{"value":"model-a"}]}]}}'
+            IFS= read -r set_model
+            printf '%s\n' "$set_model" >> "$capture"
+            printf '%s\n' '{"jsonrpc":"2.0","id":4,"result":{}}'
+            IFS= read -r second_prompt
+            printf '%s\n' "$second_prompt" >> "$capture"
+            printf '%s\n' '{"jsonrpc":"2.0","id":5,"result":{"stopReason":"end_turn"}}'
+            sleep 10
+        "#;
+        let mut acp = AcpClient::spawn(
+            "bash",
+            &[
+                "-c".to_string(),
+                script.to_string(),
+                "buzz-acp-busy-model-rejection-test".to_string(),
+                capture.to_string_lossy().into_owned(),
+            ],
+            &[],
+            false,
+        )
+        .await
+        .expect("failed to spawn fake ACP adapter");
+        let observer = observer::ObserverHandle::in_process();
+        acp.set_observer(Some(observer.clone()), 0);
+        acp.initialize()
+            .await
+            .expect("fake adapter must advertise session/close");
+
+        let channel_id = Uuid::new_v4();
+        let mut state = SessionState::default();
+        state.sessions.insert(channel_id, "session-old".into());
+        let agent = OwnedAgent {
+            index: 0,
+            acp,
+            state,
+            model_capabilities: Some(AgentModelCapabilities {
+                config_options_raw: vec![serde_json::json!({
+                    "configId": "model",
+                    "category": "model",
+                    "options": [{"value": "model-a"}],
+                })],
+                available_models_raw: None,
+            }),
+            desired_model: Some("model-a".into()),
+            model_overridden: true,
+            model_switch_request_id: None,
+            model_switch_rollback: None,
+            agent_name: "claude-code-acp".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 2,
+        };
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.dedup_mode = DedupMode::Queue;
+        let ctx = Arc::new(ctx);
+        let (first_tx, mut first_rx) = mpsc::unbounded_channel();
+        let (control_tx, control_rx) = tokio::sync::oneshot::channel();
+        let first_task = tokio::spawn(run_prompt_task(
+            agent,
+            Some(one_event_batch(channel_id)),
+            Some("first prompt".into()),
+            Arc::clone(&ctx),
+            first_tx,
+            Some(control_rx),
+            "turn-model-rejection-first".into(),
+        ));
+
+        let _ = wait_for_capture_lines(&capture, 1).await;
+        control_tx
+            .send(ControlSignal::SwitchModel(model_switch_request("model-b")))
+            .expect("busy task must accept model control");
+        let first = tokio::time::timeout(Duration::from_secs(5), first_rx.recv())
+            .await
+            .expect("busy task must return")
+            .expect("result channel must stay open");
+        first_task.await.expect("busy task must not panic");
+
+        assert_eq!(
+            first.agent.desired_model.as_deref(),
+            Some("model-a"),
+            "rejecting model B must restore the exact prior desired model"
+        );
+        assert!(
+            first.agent.model_overridden,
+            "rejecting model B must restore the prior override provenance"
+        );
+        assert_eq!(
+            first.agent.model_switch_request_id, None,
+            "rejecting model B must restore the prior correlation state"
+        );
+
+        let retry_batch = first
+            .batch
+            .expect("busy switch must requeue the interrupted turn");
+        let (second_tx, mut second_rx) = mpsc::unbounded_channel();
+        run_prompt_task(
+            first.agent,
+            Some(retry_batch),
+            Some("second prompt".into()),
+            Arc::clone(&ctx),
+            second_tx,
+            None,
+            "turn-model-rejection-second".into(),
+        )
+        .await;
+        let second = second_rx.recv().await.expect("retry result must be sent");
+        assert!(matches!(
+            second.outcome,
+            PromptOutcome::Ok(StopReason::EndTurn)
+        ));
+        assert_eq!(second.agent.desired_model.as_deref(), Some("model-a"));
+        assert!(second.agent.model_overridden);
+
+        let captured = wait_for_capture_lines(&capture, 7).await;
+        let messages: Vec<serde_json::Value> = captured
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("captured line must be JSON"))
+            .collect();
+        let model_requests: Vec<&serde_json::Value> = messages
+            .iter()
+            .filter(|message| message["method"] == "session/set_config_option")
+            .collect();
+        assert_eq!(model_requests.len(), 1);
+        assert_eq!(model_requests[0]["params"]["value"], "model-a");
+        assert!(
+            !captured.contains("model-b"),
+            "the rejected model must never reach a future ACP session"
+        );
+        let control_results: Vec<_> = observer
+            .snapshot()
+            .into_iter()
+            .filter(|event| event.kind == "control_result")
+            .collect();
+        let channel_id_string = channel_id.to_string();
+        assert!(control_results.iter().any(|event| {
+            event.channel_id.as_deref() == Some(channel_id_string.as_str())
+                && event.payload["status"] == "unsupported_model"
+                && event.payload["modelId"] == "model-b"
+                && event.payload["requestId"] == TEST_MODEL_SWITCH_REQUEST_ID
+        }));
+        assert_eq!(
+            control_results.len(),
+            1,
+            "a configured or legacy desired model without requestId must not emit an ambiguous result"
+        );
+
+        let _ = std::fs::remove_file(capture);
+    }
+
+    #[tokio::test]
+    async fn unadvertised_session_close_recycles_without_sending_optional_rpc() {
+        let capture = capture_path("rotation-recycle");
+        let script = r#"
+            capture="$1"
+            IFS= read -r initialize
+            printf '%s\n' "$initialize" >> "$capture"
+            printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{}}}}'
+            IFS= read -r first_prompt
+            printf '%s\n' "$first_prompt" >> "$capture"
+            printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"stopReason":"max_tokens"}}'
+            if IFS= read -r -t 2 unexpected; then
+                printf '%s\n' "$unexpected" >> "$capture"
+                printf '%s\n' '{"jsonrpc":"2.0","id":2,"error":{"code":-32601,"message":"Method not found"}}'
+            fi
+            sleep 10
+        "#;
+        let mut acp = AcpClient::spawn(
+            "bash",
+            &[
+                "-c".to_string(),
+                script.to_string(),
+                "buzz-acp-recycle-test".to_string(),
+                capture.to_string_lossy().into_owned(),
+            ],
+            &[],
+            false,
+        )
+        .await
+        .expect("failed to spawn fake ACP adapter");
+        acp.initialize()
+            .await
+            .expect("fake adapter must complete capability negotiation");
+        assert!(!acp.supports_session_close());
+
+        let channel_id = Uuid::new_v4();
+        let mut state = SessionState::default();
+        state.sessions.insert(channel_id, "session-old".into());
+        let agent = OwnedAgent {
+            index: 0,
+            acp,
+            state,
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            model_switch_request_id: None,
+            model_switch_rollback: None,
+            agent_name: "legacy-acp".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 1,
+        };
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+
+        run_prompt_task(
+            agent,
+            Some(one_event_batch(channel_id)),
+            Some("first prompt".into()),
+            Arc::new(make_prompt_context_no_owner()),
+            result_tx,
+            None,
+            "turn-rotation-recycle".into(),
+        )
+        .await;
+        let result = result_rx
+            .recv()
+            .await
+            .expect("rotation result must be sent");
+
+        assert!(
+            matches!(result.outcome, PromptOutcome::SessionRecycleRequired),
+            "an adapter without advertised close support must be deliberately recycled"
+        );
+        assert_eq!(
+            result
+                .agent
+                .state
+                .sessions
+                .get(&channel_id)
+                .map(String::as_str),
+            Some("session-old"),
+            "local ownership must remain until process-group replacement"
+        );
+        let captured = wait_for_capture_lines(&capture, 2).await;
+        let messages: Vec<serde_json::Value> = captured
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("captured line must be JSON"))
+            .collect();
+        assert_eq!(messages[0]["method"], "initialize");
+        assert_eq!(messages[1]["method"], "session/prompt");
+        assert_eq!(
+            captured.lines().count(),
+            2,
+            "Buzz must not probe an optional method the adapter did not advertise"
+        );
 
         let _ = std::fs::remove_file(capture);
     }
@@ -4714,21 +5896,24 @@ mod tests {
         let capture = capture_path("rotation-close");
         let script = r#"
             capture="$1"
+            IFS= read -r initialize
+            printf '%s\n' "$initialize" >> "$capture"
+            printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":2,"agentCapabilities":{"sessionCapabilities":{"close":{}}}}}'
             IFS= read -r first_prompt
             printf '%s\n' "$first_prompt" >> "$capture"
-            printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"stopReason":"max_tokens"}}'
+            printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"stopReason":"max_tokens"}}'
             IFS= read -r close
             printf '%s\n' "$close" >> "$capture"
-            printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{}}'
+            printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{}}'
             IFS= read -r new_session
             printf '%s\n' "$new_session" >> "$capture"
-            printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"sessionId":"session-new"}}'
+            printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"sessionId":"session-new"}}'
             IFS= read -r second_prompt
             printf '%s\n' "$second_prompt" >> "$capture"
-            printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}'
+            printf '%s\n' '{"jsonrpc":"2.0","id":4,"result":{"stopReason":"end_turn"}}'
             sleep 10
         "#;
-        let acp = AcpClient::spawn(
+        let mut acp = AcpClient::spawn(
             "bash",
             &[
                 "-c".to_string(),
@@ -4741,6 +5926,10 @@ mod tests {
         )
         .await
         .expect("failed to spawn fake ACP adapter");
+        acp.initialize()
+            .await
+            .expect("fake adapter must advertise session/close");
+        assert!(acp.supports_session_close());
 
         let channel_id = Uuid::new_v4();
         let mut state = SessionState::default();
@@ -4752,6 +5941,8 @@ mod tests {
             model_capabilities: None,
             desired_model: None,
             model_overridden: false,
+            model_switch_request_id: None,
+            model_switch_rollback: None,
             agent_name: "claude-code-acp".into(),
             goose_system_prompt_supported: None,
             protocol_version: 2,
@@ -4782,8 +5973,11 @@ mod tests {
         .await;
         let first = first_rx.recv().await.expect("first result must be sent");
         assert!(
-            matches!(first.outcome, PromptOutcome::Ok(StopReason::MaxTokens)),
-            "the completed turn must preserve its max_tokens outcome"
+            matches!(
+                first.outcome,
+                PromptOutcome::SessionRetired(StopReason::MaxTokens)
+            ),
+            "the completed turn must record positive remote session retirement"
         );
         assert!(
             !first.agent.state.sessions.contains_key(&channel_id),
@@ -4816,22 +6010,785 @@ mod tests {
             Some("session-new")
         );
 
+        let captured = wait_for_capture_lines(&capture, 5).await;
+        let messages: Vec<serde_json::Value> = captured
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("captured line must be JSON"))
+            .collect();
+        assert_eq!(messages[0]["method"], "initialize");
+        assert_eq!(messages[1]["method"], "session/prompt");
+        assert_eq!(
+            messages[2]["method"], "session/close",
+            "the old session must close as part of rotation"
+        );
+        assert_eq!(messages[2]["params"]["sessionId"], "session-old");
+        assert_eq!(
+            messages[3]["method"], "session/new",
+            "a replacement session may be created only after close succeeds"
+        );
+        assert_eq!(messages[4]["method"], "session/prompt");
+
+        let _ = std::fs::remove_file(capture);
+    }
+
+    #[tokio::test]
+    async fn failed_goose_session_setup_closes_created_remote_session_before_reuse() {
+        let capture = capture_path("goose-setup-close");
+        let script = r#"
+            capture="$1"
+            IFS= read -r initialize
+            printf '%s\n' "$initialize" >> "$capture"
+            printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":2,"agentCapabilities":{"sessionCapabilities":{"close":{}}}}}'
+            IFS= read -r new_session
+            printf '%s\n' "$new_session" >> "$capture"
+            printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"session-created"}}'
+            IFS= read -r system_prompt
+            printf '%s\n' "$system_prompt" >> "$capture"
+            printf '%s\n' '{"jsonrpc":"2.0","id":2,"error":{"code":-32042,"message":"setup rejected"}}'
+            if IFS= read -r close; then
+                printf '%s\n' "$close" >> "$capture"
+                printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{}}'
+            fi
+            sleep 10
+        "#;
+        let mut acp = AcpClient::spawn(
+            "bash",
+            &[
+                "-c".to_string(),
+                script.to_string(),
+                "buzz-acp-goose-setup-close-test".to_string(),
+                capture.to_string_lossy().into_owned(),
+            ],
+            &[],
+            false,
+        )
+        .await
+        .expect("failed to spawn fake ACP adapter");
+        acp.initialize()
+            .await
+            .expect("fake adapter must advertise session/close");
+
+        let channel_id = Uuid::new_v4();
+        let agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            model_switch_request_id: None,
+            model_switch_rollback: None,
+            agent_name: "goose".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 2,
+        };
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.base_prompt = Some("setup prompt");
+        ctx.dedup_mode = DedupMode::Queue;
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+
+        run_prompt_task(
+            agent,
+            Some(one_event_batch(channel_id)),
+            Some("prompt".into()),
+            Arc::new(ctx),
+            result_tx,
+            None,
+            "turn-goose-setup-close".into(),
+        )
+        .await;
+        let result = result_rx
+            .recv()
+            .await
+            .expect("setup failure result must be sent");
+
+        assert!(matches!(
+            result.outcome,
+            PromptOutcome::Error(AcpError::AgentError { code: -32042, .. })
+        ));
+        assert!(
+            !result.agent.state.sessions.contains_key(&channel_id),
+            "a failed setup must never publish local ownership for the partial session"
+        );
         let captured = wait_for_capture_lines(&capture, 4).await;
         let messages: Vec<serde_json::Value> = captured
             .lines()
             .map(|line| serde_json::from_str(line).expect("captured line must be JSON"))
             .collect();
-        assert_eq!(messages[0]["method"], "session/prompt");
+        assert_eq!(messages[0]["method"], "initialize");
+        assert_eq!(messages[1]["method"], "session/new");
         assert_eq!(
-            messages[1]["method"], "session/close",
-            "the old session must close as part of rotation"
+            messages[2]["method"],
+            "_goose/unstable/session/system-prompt/set"
         );
-        assert_eq!(messages[1]["params"]["sessionId"], "session-old");
+        assert_eq!(messages[3]["method"], "session/close");
+        assert_eq!(messages[3]["params"]["sessionId"], "session-created");
+
+        let _ = std::fs::remove_file(capture);
+    }
+
+    #[tokio::test]
+    async fn fresh_session_switch_success_echoes_request_id_once() {
+        let capture = capture_path("model-switch-request-id-success");
+        let script = r#"
+            capture="$1"
+            IFS= read -r initialize
+            printf '%s\n' "$initialize" >> "$capture"
+            printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":2,"agentCapabilities":{"sessionCapabilities":{"close":{}}}}}'
+            IFS= read -r new_session
+            printf '%s\n' "$new_session" >> "$capture"
+            printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"session-created","configOptions":[{"configId":"model","category":"model","options":[{"value":"model-b"}]}]}}'
+            IFS= read -r set_model
+            printf '%s\n' "$set_model" >> "$capture"
+            printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{}}'
+            sleep 10
+        "#;
+        let mut acp = AcpClient::spawn(
+            "bash",
+            &[
+                "-c".to_string(),
+                script.to_string(),
+                "buzz-acp-model-switch-request-id-success-test".to_string(),
+                capture.to_string_lossy().into_owned(),
+            ],
+            &[],
+            false,
+        )
+        .await
+        .expect("failed to spawn fake ACP adapter");
+        let observer = observer::ObserverHandle::in_process();
+        acp.set_observer(Some(observer.clone()), 0);
+        acp.initialize()
+            .await
+            .expect("fake adapter must initialize");
+
+        let mut agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: Some("model-b".into()),
+            model_overridden: true,
+            model_switch_request_id: Some(TEST_MODEL_SWITCH_REQUEST_ID.into()),
+            model_switch_rollback: None,
+            agent_name: "claude-code-acp".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 2,
+        };
+        let ctx = make_prompt_context_no_owner();
+
+        let prepared =
+            match create_session_and_apply_model(&mut agent, &ctx, None, None, None).await {
+                Ok(prepared) => prepared,
+                Err(_) => panic!("fresh session model switch must succeed"),
+            };
+        assert_eq!(prepared.session_id, "session-created");
         assert_eq!(
-            messages[2]["method"], "session/new",
-            "a replacement session may be created only after close succeeds"
+            agent.model_switch_request_id.as_deref(),
+            Some(TEST_MODEL_SWITCH_REQUEST_ID),
+            "session setup alone must not consume the correlation ID"
         );
-        assert_eq!(messages[3]["method"], "session/prompt");
+
+        assert!(
+            observer
+                .snapshot()
+                .iter()
+                .all(|event| event.kind != "control_result"),
+            "session setup alone must not emit terminal switch success"
+        );
+
+        let channel_id = Uuid::new_v4();
+        let source = PromptSource::Channel(channel_id);
+        assert!(
+            !commit_prepared_session(&mut agent, &source, &prepared),
+            "terminal success must fail closed before local session insertion"
+        );
+        assert_eq!(
+            agent.model_switch_request_id.as_deref(),
+            Some(TEST_MODEL_SWITCH_REQUEST_ID)
+        );
+        agent
+            .state
+            .sessions
+            .insert(channel_id, prepared.session_id.clone());
+        assert!(commit_prepared_session(&mut agent, &source, &prepared));
+
+        let results: Vec<_> = observer
+            .snapshot()
+            .into_iter()
+            .filter(|event| event.kind == "control_result")
+            .collect();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].payload["status"], "switched");
+        assert_eq!(results[0].payload["modelId"], "model-b");
+        assert_eq!(
+            results[0].payload["requestId"],
+            TEST_MODEL_SWITCH_REQUEST_ID
+        );
+        assert_eq!(
+            agent.model_switch_request_id, None,
+            "committed terminal success must consume the correlation ID"
+        );
+
+        agent
+            .acp
+            .shutdown()
+            .await
+            .expect("fake adapter must shut down cleanly");
+        let _ = std::fs::remove_file(capture);
+    }
+
+    #[tokio::test]
+    async fn permission_setup_failure_keeps_switch_pending_without_terminal_success() {
+        let capture = capture_path("model-switch-permission-failure");
+        let script = r#"
+            capture="$1"
+            IFS= read -r initialize
+            printf '%s\n' "$initialize" >> "$capture"
+            printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":2,"agentCapabilities":{"sessionCapabilities":{"close":{}}}}}'
+            IFS= read -r new_session
+            printf '%s\n' "$new_session" >> "$capture"
+            printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"session-created","configOptions":[{"configId":"model","category":"model","options":[{"value":"model-b"}]}],"modes":{"availableModes":[{"id":"bypassPermissions"}]}}}'
+            IFS= read -r set_model
+            printf '%s\n' "$set_model" >> "$capture"
+            printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{}}'
+            IFS= read -r set_mode
+            printf '%s\n' "$set_mode" >> "$capture"
+            exit 0
+        "#;
+        let mut acp = AcpClient::spawn(
+            "bash",
+            &[
+                "-c".to_string(),
+                script.to_string(),
+                "buzz-acp-model-switch-permission-failure-test".to_string(),
+                capture.to_string_lossy().into_owned(),
+            ],
+            &[],
+            false,
+        )
+        .await
+        .expect("failed to spawn fake ACP adapter");
+        let observer = observer::ObserverHandle::in_process();
+        acp.set_observer(Some(observer.clone()), 0);
+        acp.initialize()
+            .await
+            .expect("fake adapter must initialize");
+
+        let mut agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: Some("model-a".into()),
+            model_overridden: false,
+            model_switch_request_id: None,
+            model_switch_rollback: None,
+            agent_name: "claude-code-acp".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 2,
+        };
+        assert!(stage_busy_model_switch_intent(
+            &mut agent,
+            &model_switch_request("model-b")
+        ));
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.permission_mode = PermissionMode::BypassPermissions;
+
+        let result = create_session_and_apply_model(&mut agent, &ctx, None, None, None).await;
+        assert!(matches!(
+            result,
+            Err(SessionSetupError::Agent(AcpError::AgentExited))
+        ));
+        assert!(
+            observer
+                .snapshot()
+                .iter()
+                .all(|event| event.kind != "control_result"),
+            "later setup failure must not leave a false terminal switched result"
+        );
+        assert_eq!(agent.desired_model.as_deref(), Some("model-b"));
+        assert!(agent.model_overridden);
+        assert_eq!(
+            agent.model_switch_request_id.as_deref(),
+            Some(TEST_MODEL_SWITCH_REQUEST_ID),
+            "later setup failure must preserve correlation for replacement/retry"
+        );
+        let rollback = agent
+            .model_switch_rollback
+            .as_ref()
+            .expect("pending switch must preserve prior intent");
+        assert_eq!(rollback.desired_model.as_deref(), Some("model-a"));
+        assert!(!rollback.model_overridden);
+
+        let captured = wait_for_capture_lines(&capture, 4).await;
+        let messages: Vec<serde_json::Value> = captured
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("captured line must be JSON"))
+            .collect();
+        assert_eq!(messages[2]["method"], "session/set_config_option");
+        assert_eq!(messages[2]["params"]["configId"], "model");
+        assert_eq!(messages[3]["method"], "session/set_config_option");
+        assert_eq!(messages[3]["params"]["configId"], "mode");
+        let _ = std::fs::remove_file(capture);
+    }
+
+    #[tokio::test]
+    async fn fresh_catalog_rejection_reapplies_restored_pending_model_before_session_commit() {
+        const PRIOR_REQUEST_ID: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+        let capture = capture_path("model-switch-fresh-catalog-rollback");
+        let script = r#"
+            capture="$1"
+            IFS= read -r initialize
+            printf '%s\n' "$initialize" >> "$capture"
+            printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":2,"agentCapabilities":{"sessionCapabilities":{"close":{}}}}}'
+            IFS= read -r new_session
+            printf '%s\n' "$new_session" >> "$capture"
+            printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"session-created","configOptions":[{"configId":"model","category":"model","options":[{"value":"model-a"}]}]}}'
+            IFS= read -r set_model
+            printf '%s\n' "$set_model" >> "$capture"
+            printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{}}'
+            sleep 10
+        "#;
+        let mut acp = AcpClient::spawn(
+            "bash",
+            &[
+                "-c".to_string(),
+                script.to_string(),
+                "buzz-acp-model-switch-fresh-catalog-rollback-test".to_string(),
+                capture.to_string_lossy().into_owned(),
+            ],
+            &[],
+            false,
+        )
+        .await
+        .expect("failed to spawn fake ACP adapter");
+        let observer = observer::ObserverHandle::in_process();
+        acp.set_observer(Some(observer.clone()), 0);
+        acp.initialize()
+            .await
+            .expect("fake adapter must initialize");
+
+        let mut agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: Some("model-a".into()),
+            model_overridden: true,
+            model_switch_request_id: Some(PRIOR_REQUEST_ID.into()),
+            model_switch_rollback: Some(Box::new(ModelSwitchRollback {
+                desired_model: Some("configured-default".into()),
+                model_overridden: false,
+                request_id: None,
+                previous: None,
+            })),
+            agent_name: "claude-code-acp".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 2,
+        };
+        assert!(stage_busy_model_switch_intent(
+            &mut agent,
+            &model_switch_request("model-b")
+        ));
+
+        let ctx = make_prompt_context_no_owner();
+        let prepared =
+            match create_session_and_apply_model(&mut agent, &ctx, None, None, None).await {
+                Ok(prepared) => prepared,
+                Err(_) => panic!("restored pending model must apply on the fresh session"),
+            };
+
+        let terminal = prepared
+            .terminal_model_switch
+            .as_ref()
+            .expect("the restored pending request must remain terminally correlated");
+        assert_eq!(terminal.model_id, "model-a");
+        assert_eq!(terminal.request_id, PRIOR_REQUEST_ID);
+        assert_eq!(
+            prepared.session_config["modelOverridden"],
+            serde_json::Value::Bool(true),
+            "session config must describe the model actually restored on this session"
+        );
+        assert_eq!(agent.desired_model.as_deref(), Some("model-a"));
+        assert_eq!(
+            agent.model_switch_request_id.as_deref(),
+            Some(PRIOR_REQUEST_ID)
+        );
+
+        let captured = wait_for_capture_lines(&capture, 3).await;
+        let messages: Vec<serde_json::Value> = captured
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("captured line must be JSON"))
+            .collect();
+        assert_eq!(messages[2]["method"], "session/set_config_option");
+        assert_eq!(messages[2]["params"]["value"], "model-a");
+
+        let before_commit: Vec<_> = observer
+            .snapshot()
+            .into_iter()
+            .filter(|event| event.kind == "control_result")
+            .collect();
+        assert!(before_commit.iter().any(|event| {
+            event.payload["status"] == "unsupported_model"
+                && event.payload["modelId"] == "model-b"
+                && event.payload["requestId"] == TEST_MODEL_SWITCH_REQUEST_ID
+        }));
+        assert!(
+            !before_commit
+                .iter()
+                .any(|event| event.payload["status"] == "switched"),
+            "restored request success must remain deferred until local commit"
+        );
+
+        let channel_id = Uuid::new_v4();
+        agent
+            .state
+            .sessions
+            .insert(channel_id, prepared.session_id.clone());
+        assert!(commit_prepared_session(
+            &mut agent,
+            &PromptSource::Channel(channel_id),
+            &prepared
+        ));
+        let after_commit: Vec<_> = observer
+            .snapshot()
+            .into_iter()
+            .filter(|event| event.kind == "control_result")
+            .collect();
+        assert!(after_commit.iter().any(|event| {
+            event.payload["status"] == "switched"
+                && event.payload["modelId"] == "model-a"
+                && event.payload["requestId"] == PRIOR_REQUEST_ID
+        }));
+        assert!(agent.model_switch_request_id.is_none());
+        assert!(agent.model_switch_rollback.is_none());
+
+        agent
+            .acp
+            .shutdown()
+            .await
+            .expect("fake adapter must shut down cleanly");
+        let _ = std::fs::remove_file(capture);
+    }
+
+    #[tokio::test]
+    async fn rejected_model_config_option_emits_failure_and_closes_partial_session() {
+        let capture = capture_path("model-config-rejection");
+        let script = r#"
+            capture="$1"
+            IFS= read -r initialize
+            printf '%s\n' "$initialize" >> "$capture"
+            printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":2,"agentCapabilities":{"sessionCapabilities":{"close":{}}}}}'
+            IFS= read -r new_session
+            printf '%s\n' "$new_session" >> "$capture"
+            printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"session-created","configOptions":[{"configId":"model","category":"model","options":[{"value":"model-b"}]}]}}'
+            IFS= read -r set_model
+            printf '%s\n' "$set_model" >> "$capture"
+            printf '%s\n' '{"jsonrpc":"2.0","id":2,"error":{"code":-32042,"message":"model rejected"}}'
+            IFS= read -r close
+            printf '%s\n' "$close" >> "$capture"
+            printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{}}'
+            IFS= read -r retry_session
+            printf '%s\n' "$retry_session" >> "$capture"
+            printf '%s\n' '{"jsonrpc":"2.0","id":4,"result":{"sessionId":"session-retry","configOptions":[{"configId":"model","category":"model","options":[{"value":"model-a"},{"value":"model-b"}]}]}}'
+            IFS= read -r retry_model
+            printf '%s\n' "$retry_model" >> "$capture"
+            printf '%s\n' '{"jsonrpc":"2.0","id":5,"result":{}}'
+            sleep 10
+        "#;
+        let mut acp = AcpClient::spawn(
+            "bash",
+            &[
+                "-c".to_string(),
+                script.to_string(),
+                "buzz-acp-model-config-rejection-test".to_string(),
+                capture.to_string_lossy().into_owned(),
+            ],
+            &[],
+            false,
+        )
+        .await
+        .expect("failed to spawn fake ACP adapter");
+        let observer = observer::ObserverHandle::in_process();
+        acp.set_observer(Some(observer.clone()), 0);
+        acp.initialize()
+            .await
+            .expect("fake adapter must advertise session/close");
+
+        let channel_id = Uuid::new_v4();
+        let mut agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: Some("model-a".into()),
+            model_overridden: false,
+            model_switch_request_id: None,
+            model_switch_rollback: None,
+            agent_name: "claude-code-acp".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 2,
+        };
+        assert!(stage_busy_model_switch_intent(
+            &mut agent,
+            &model_switch_request("model-b")
+        ));
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.dedup_mode = DedupMode::Queue;
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+
+        run_prompt_task(
+            agent,
+            Some(one_event_batch(channel_id)),
+            Some("prompt".into()),
+            Arc::new(ctx),
+            result_tx,
+            None,
+            "turn-model-config-rejection".into(),
+        )
+        .await;
+        let mut result = result_rx
+            .recv()
+            .await
+            .expect("model rejection result must be sent");
+
+        assert!(matches!(
+            &result.outcome,
+            PromptOutcome::Error(AcpError::AgentError { code: -32042, .. })
+        ));
+        assert!(
+            !result.agent.state.sessions.contains_key(&channel_id),
+            "a rejected model must never publish the partial session locally"
+        );
+        assert_eq!(
+            result.agent.desired_model.as_deref(),
+            Some("model-a"),
+            "adapter rejection must restore the prior desired model"
+        );
+        assert!(
+            !result.agent.model_overridden,
+            "adapter rejection must restore configured-model provenance"
+        );
+        assert_eq!(
+            result.agent.model_switch_request_id, None,
+            "the rejected request must not remain eligible for a silent retry"
+        );
+        assert!(
+            result.agent.model_switch_rollback.is_none(),
+            "restoring the prior intent must consume the rejected request's rollback frame"
+        );
+
+        let captured = wait_for_capture_lines(&capture, 4).await;
+        let messages: Vec<serde_json::Value> = captured
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("captured line must be JSON"))
+            .collect();
+        assert_eq!(messages[0]["method"], "initialize");
+        assert_eq!(messages[1]["method"], "session/new");
+        assert_eq!(messages[2]["method"], "session/set_config_option");
+        assert_eq!(
+            messages[3]["method"], "session/close",
+            "application rejection must close the partially-created session before reuse"
+        );
+        assert_eq!(messages[3]["params"]["sessionId"], "session-created");
+
+        let control_results: Vec<_> = observer
+            .snapshot()
+            .into_iter()
+            .filter(|event| event.kind == "control_result")
+            .collect();
+        assert!(control_results.iter().any(|event| {
+            event.payload["status"] == "switch_failed"
+                && event.payload["modelId"] == "model-b"
+                && event.payload["requestId"] == TEST_MODEL_SWITCH_REQUEST_ID
+        }));
+        assert!(
+            !control_results
+                .iter()
+                .any(|event| event.payload["status"] == "switched"),
+            "a framed model rejection must never become application proof"
+        );
+        assert!(
+            !observer.snapshot().iter().any(|event| {
+                event.kind == "session_config_captured"
+                    && event.payload["modelOverridden"] == serde_json::Value::Bool(true)
+            }),
+            "a rejected model must never be reported as an applied override"
+        );
+
+        let retry_ctx = make_prompt_context_no_owner();
+        let prepared =
+            match create_session_and_apply_model(&mut result.agent, &retry_ctx, None, None, None)
+                .await
+            {
+                Ok(prepared) => prepared,
+                Err(_) => panic!("retry with the restored model must succeed"),
+            };
+        result
+            .agent
+            .state
+            .sessions
+            .insert(channel_id, prepared.session_id.clone());
+        assert!(commit_prepared_session(
+            &mut result.agent,
+            &PromptSource::Channel(channel_id),
+            &prepared
+        ));
+
+        let captured = wait_for_capture_lines(&capture, 6).await;
+        let messages: Vec<serde_json::Value> = captured
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("captured line must be JSON"))
+            .collect();
+        assert_eq!(messages[4]["method"], "session/new");
+        assert_eq!(messages[5]["method"], "session/set_config_option");
+        assert_eq!(
+            messages[5]["params"]["value"], "model-a",
+            "the next session must apply the restored model, never retry the rejected model"
+        );
+
+        result
+            .agent
+            .acp
+            .shutdown()
+            .await
+            .expect("fake adapter must shut down cleanly");
+        let _ = std::fs::remove_file(capture);
+    }
+
+    #[tokio::test]
+    async fn rejected_session_set_model_is_returned_as_switch_failure() {
+        let capture = capture_path("set-model-rejection");
+        let script = r#"
+            capture="$1"
+            IFS= read -r set_model
+            printf '%s\n' "$set_model" >> "$capture"
+            printf '%s\n' '{"jsonrpc":"2.0","id":0,"error":{"code":-32043,"message":"set_model rejected"}}'
+            sleep 10
+        "#;
+        let mut acp = AcpClient::spawn(
+            "bash",
+            &[
+                "-c".to_string(),
+                script.to_string(),
+                "buzz-acp-set-model-rejection-test".to_string(),
+                capture.to_string_lossy().into_owned(),
+            ],
+            &[],
+            false,
+        )
+        .await
+        .expect("failed to spawn fake ACP adapter");
+
+        let result = apply_model_switch(
+            &mut acp,
+            "session-created",
+            "model-b",
+            &ModelSwitchMethod::SetModel {
+                model_id: "model-b".into(),
+            },
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(AcpError::AgentError { code: -32043, .. })
+        ));
+        let captured = wait_for_capture_lines(&capture, 1).await;
+        let request: serde_json::Value =
+            serde_json::from_str(captured.trim()).expect("captured request must be JSON");
+        assert_eq!(request["method"], "session/set_model");
+        assert_eq!(request["params"]["modelId"], "model-b");
+
+        acp.shutdown()
+            .await
+            .expect("fake adapter must shut down cleanly");
+        let _ = std::fs::remove_file(capture);
+    }
+
+    #[tokio::test]
+    async fn failed_goose_session_setup_without_close_support_requires_process_recycle() {
+        let capture = capture_path("goose-setup-recycle");
+        let script = r#"
+            capture="$1"
+            IFS= read -r initialize
+            printf '%s\n' "$initialize" >> "$capture"
+            printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":2,"agentCapabilities":{"sessionCapabilities":{}}}}'
+            IFS= read -r new_session
+            printf '%s\n' "$new_session" >> "$capture"
+            printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"session-created"}}'
+            IFS= read -r system_prompt
+            printf '%s\n' "$system_prompt" >> "$capture"
+            printf '%s\n' '{"jsonrpc":"2.0","id":2,"error":{"code":-32042,"message":"setup rejected"}}'
+            if IFS= read -r -t 1 unexpected; then
+                printf '%s\n' "$unexpected" >> "$capture"
+            fi
+            sleep 10
+        "#;
+        let mut acp = AcpClient::spawn(
+            "bash",
+            &[
+                "-c".to_string(),
+                script.to_string(),
+                "buzz-acp-goose-setup-recycle-test".to_string(),
+                capture.to_string_lossy().into_owned(),
+            ],
+            &[],
+            false,
+        )
+        .await
+        .expect("failed to spawn fake ACP adapter");
+        acp.initialize()
+            .await
+            .expect("fake adapter must complete capability negotiation");
+        assert!(!acp.supports_session_close());
+
+        let channel_id = Uuid::new_v4();
+        let agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            model_switch_request_id: None,
+            model_switch_rollback: None,
+            agent_name: "goose".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 2,
+        };
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.base_prompt = Some("setup prompt");
+        ctx.dedup_mode = DedupMode::Queue;
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+
+        run_prompt_task(
+            agent,
+            Some(one_event_batch(channel_id)),
+            Some("prompt".into()),
+            Arc::new(ctx),
+            result_tx,
+            None,
+            "turn-goose-setup-recycle".into(),
+        )
+        .await;
+        let result = result_rx
+            .recv()
+            .await
+            .expect("setup failure result must be sent");
+
+        assert!(matches!(
+            result.outcome,
+            PromptOutcome::SessionSetupRecycleRequired
+        ));
+        let captured = wait_for_capture_lines(&capture, 3).await;
+        assert_eq!(
+            captured.lines().count(),
+            3,
+            "an unadvertised optional close method must never be probed"
+        );
 
         let _ = std::fs::remove_file(capture);
     }
@@ -4842,7 +6799,7 @@ mod tests {
             (ControlSignal::Steer, Some(CancelReason::Steer)),
             (ControlSignal::Interrupt, Some(CancelReason::Interrupt)),
             (
-                ControlSignal::SwitchModel("gpt-5".into()),
+                ControlSignal::SwitchModel(model_switch_request("gpt-5")),
                 Some(CancelReason::Interrupt),
             ),
             (ControlSignal::Cancel, None),
@@ -4890,10 +6847,16 @@ mod tests {
             PromptOutcome::Timeout(TimeoutKind::Idle) => "Timeout(Idle)",
             PromptOutcome::Timeout(TimeoutKind::Hard { .. }) => "Timeout(Hard)",
             PromptOutcome::CancelDrainTimeout(_) => "CancelDrainTimeout",
+            PromptOutcome::CancelCleanupFailed(_) => "CancelCleanupFailed",
             PromptOutcome::SessionCloseFailed(_) => "SessionCloseFailed",
+            PromptOutcome::SessionRecycleRequired => "SessionRecycleRequired",
+            PromptOutcome::SessionSetupCloseFailed(_) => "SessionSetupCloseFailed",
+            PromptOutcome::SessionSetupRecycleRequired => "SessionSetupRecycleRequired",
+            PromptOutcome::ControlPreemptedSetup => "ControlPreemptedSetup",
             PromptOutcome::Error(_) => "Error",
             PromptOutcome::Cancelled => "Cancelled",
             PromptOutcome::Ok(_) => "Ok",
+            PromptOutcome::SessionRetired(_) => "SessionRetired",
         };
         assert_eq!(
             label, expected,
@@ -4959,7 +6922,7 @@ mod tests {
             Case {
                 name: "CancelDrainTimeout + SwitchModel preserves batch with Interrupt reason",
                 error: || AcpError::CancelDrainTimeout(CONTROL_CANCEL_GRACE),
-                signal: ControlSignal::SwitchModel("gpt-5".to_string()),
+                signal: ControlSignal::SwitchModel(model_switch_request("gpt-5")),
                 expected_outcome: "CancelDrainTimeout",
                 batch_preserved: true,
                 expected_reason: Some(CancelReason::Interrupt),
@@ -4999,6 +6962,18 @@ mod tests {
                 error: || AcpError::IdleTimeout(Duration::from_secs(30)),
                 signal: ControlSignal::Steer,
                 expected_outcome: "Timeout(Idle)",
+                batch_preserved: true,
+                expected_reason: Some(CancelReason::Steer),
+                invalidate_all: false,
+            },
+            Case {
+                name: "post-cancel AgentError poisons adapter and preserves Steer batch",
+                error: || AcpError::AgentError {
+                    code: -32000,
+                    message: "prompt rejected after cancel".into(),
+                },
+                signal: ControlSignal::Steer,
+                expected_outcome: "CancelCleanupFailed",
                 batch_preserved: true,
                 expected_reason: Some(CancelReason::Steer),
                 invalidate_all: false,
@@ -5377,6 +7352,8 @@ mod tests {
             model_capabilities: None,
             desired_model: None,
             model_overridden: false,
+            model_switch_request_id: None,
+            model_switch_rollback: None,
             agent_name: "unknown".into(),
             goose_system_prompt_supported: None,
             protocol_version: 2,
@@ -5435,6 +7412,8 @@ mod tests {
             model_capabilities: None,
             desired_model: None,
             model_overridden: false,
+            model_switch_request_id: None,
+            model_switch_rollback: None,
             agent_name: "unknown".into(),
             goose_system_prompt_supported: None,
             protocol_version: 2,

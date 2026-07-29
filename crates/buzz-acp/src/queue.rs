@@ -15,16 +15,17 @@
 
 use nostr::{Event, ToBech32};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use crate::config::DedupMode;
 
-/// Maximum events queued per channel before oldest events are dropped.
+/// Maximum retained ordinary plus cancelled events per channel.
 const MAX_PENDING_PER_CHANNEL: usize = 500;
 
 /// Maximum events drained into a single batch.
-const MAX_BATCH_EVENTS: usize = 50;
+pub(crate) const MAX_BATCH_EVENTS: usize = 50;
 
 /// Maximum retry attempts before a batch is dead-lettered.
 pub(crate) const MAX_RETRIES: u32 = 10;
@@ -41,6 +42,22 @@ const IN_FLIGHT_DEADLINE_BUFFER_SECS: u64 = 100;
 /// Default in-flight deadline: default max_turn (7200s) + 100s buffer.
 const DEFAULT_IN_FLIGHT_DEADLINE_SECS: u64 = 7300;
 
+/// Process-local total order for accepted queue occurrences.
+///
+/// `Instant` is monotonic but not unique. The ordinal is carried through
+/// every queue/retry transition so equal-timestamp events retain enqueue FIFO.
+static NEXT_OCCURRENCE_ORDER: AtomicU64 = AtomicU64::new(1);
+
+fn next_occurrence_order() -> u64 {
+    let order = NEXT_OCCURRENCE_ORDER.fetch_add(1, Ordering::Relaxed);
+    assert_ne!(
+        order,
+        u64::MAX,
+        "queue occurrence ordinal exhausted before process restart"
+    );
+    order
+}
+
 /// An event waiting in the queue.
 #[derive(Debug, Clone)]
 pub struct QueuedEvent {
@@ -51,12 +68,98 @@ pub struct QueuedEvent {
     pub prompt_tag: String,
 }
 
+/// Opaque identity for one accepted [`EventQueue::push`] occurrence.
+///
+/// This is intentionally unrelated to the signed Nostr event ID: relay replay
+/// may enqueue the same signed event more than once, and an asynchronous steer
+/// acknowledgement must affect only the occurrence that initiated it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct EnqueueOccurrenceId(Uuid);
+
 /// A single event inside a [`FlushBatch`].
 #[derive(Debug, Clone)]
 pub struct BatchEvent {
     pub event: Event,
     pub prompt_tag: String,
     pub received_at: Instant,
+}
+
+/// Queue-private identity carried alongside a value for one enqueue
+/// occurrence. Two deliveries of the same signed Nostr event intentionally
+/// receive different IDs.
+#[derive(Debug, Clone)]
+struct Occurrence<T> {
+    id: Uuid,
+    order: u64,
+    value: T,
+}
+
+impl<T> Occurrence<T> {
+    fn new(value: T) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            order: next_occurrence_order(),
+            value,
+        }
+    }
+
+    fn with_identity(id: Uuid, order: u64, value: T) -> Self {
+        Self { id, order, value }
+    }
+
+    fn map<U>(self, map: impl FnOnce(T) -> U) -> Occurrence<U> {
+        Occurrence {
+            id: self.id,
+            order: self.order,
+            value: map(self.value),
+        }
+    }
+}
+
+impl<T> std::ops::Deref for Occurrence<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.value
+    }
+}
+
+impl<T> std::ops::DerefMut for Occurrence<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.value
+    }
+}
+
+/// Exact occurrence identity aligned position-for-position with a
+/// [`FlushBatch`]'s two event vectors.
+///
+/// This is crate-private so callers cannot manufacture or reinterpret retry
+/// membership. Every queue transition validates exact lengths and uniqueness;
+/// missing or malformed identity fails closed.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct BatchOccurrenceIds {
+    events: Vec<Uuid>,
+    cancelled_events: Vec<Uuid>,
+    event_orders: Vec<u64>,
+    cancelled_event_orders: Vec<u64>,
+}
+
+#[cfg(test)]
+impl BatchOccurrenceIds {
+    /// Explicit identities for test-built batches that enter queue transitions.
+    ///
+    /// Formatting-only test batches can continue to use `Default`; production
+    /// transitions never infer missing occurrence identity.
+    pub(crate) fn for_test(event_count: usize, cancelled_event_count: usize) -> Self {
+        Self {
+            events: (0..event_count).map(|_| Uuid::new_v4()).collect(),
+            cancelled_events: (0..cancelled_event_count).map(|_| Uuid::new_v4()).collect(),
+            event_orders: (0..event_count).map(|_| next_occurrence_order()).collect(),
+            cancelled_event_orders: (0..cancelled_event_count)
+                .map(|_| next_occurrence_order())
+                .collect(),
+        }
+    }
 }
 
 /// Why a batch's prior turn was cancelled — controls how `format_prompt`
@@ -87,6 +190,21 @@ pub struct FlushBatch {
     /// [`Steer`](CancelReason::Steer) framing if a merge somehow lacks a reason
     /// (see [`MergeFraming::for_reason`]).
     pub cancel_reason: Option<CancelReason>,
+    /// Queue-private per-enqueue identity, aligned with `events` and
+    /// `cancelled_events`. External behavior continues to use the signed Nostr
+    /// event; retry bookkeeping uses these occurrence IDs.
+    pub(crate) occurrence_ids: BatchOccurrenceIds,
+}
+
+/// Immutable identity for one dispatched cohort.
+///
+/// The occurrence membership is captured when the cohort first leaves the
+/// queue. Same-channel arrivals after that point are intentionally excluded,
+/// so they can never inherit this cohort's retry count or dead-letter fate.
+#[derive(Debug)]
+struct ActiveBatchIdentity {
+    id: Uuid,
+    occurrence_ids: HashSet<Uuid>,
 }
 
 /// Per-channel event queue with per-channel in-flight enforcement.
@@ -95,30 +213,38 @@ pub struct FlushBatch {
 ///
 /// ```text
 /// State:
-///   queues:               Map<channel_id, VecDeque<QueuedEvent>>  (capped at MAX_PENDING_PER_CHANNEL)
+///   queues:               Map<channel_id, VecDeque<QueuedEvent>>
+///   cancelled_batches:    Map<channel_id, Vec<BatchEvent>>
+///                         (combined per-channel count capped at MAX_PENDING_PER_CHANNEL)
 ///   in_flight_channels:   HashSet<Uuid>
 ///   in_flight_deadlines:  Map<channel_id, Instant>                (auto-expire after in_flight_deadline)
-///   retry_after:          Map<channel_id, Instant>
-///   retry_counts:         Map<channel_id, u32>                    (dead-letter after MAX_RETRIES)
+///   active_batches:       Map<channel_id, { batch_id, occurrence_ids }>
+///   retry_after:          Map<batch_id, Instant>
+///   retry_counts:         Map<batch_id, u32>                      (dead-letter after MAX_RETRIES)
 ///   dedup_mode:           DedupMode
 ///
 /// Transitions:
 ///   push(event):
 ///     if dedup_mode == Drop AND in_flight_channels.contains(event.channel_id):
 ///       debug log + discard
-///     else if queues[channel].len() >= MAX_PENDING_PER_CHANNEL:
-///       drop oldest (pop_front), warn, push_back new event
 ///     else:
 ///       queues[event.channel_id].push_back(event)
+///       while queues[channel].len() + cancelled_batches[channel].len()
+///             > MAX_PENDING_PER_CHANNEL:
+///         drop the event with the oldest received_at across both stores
 ///
 ///   flush_next() → Option<FlushBatch>:
 ///     expire any stuck in-flight entries past their deadline
 ///     candidates = channels where queue non-empty
 ///                  AND NOT in in_flight_channels
-///                  AND (no retry_after OR retry_after[c] <= now)
+///                  AND (no active-batch retry_after OR deadline <= now)
 ///     if candidates empty: return None
 ///     channel = pick candidate with oldest head event (min received_at)
-///     events = drain up to MAX_BATCH_EVENTS from queues[channel]
+///     if channel has an active batch:
+///       events = remove only that batch's immutable occurrence membership
+///     else:
+///       events = drain up to MAX_BATCH_EVENTS from queues[channel]
+///       capture a fresh immutable batch identity
 ///     in_flight_channels.insert(channel)
 ///     in_flight_deadlines.insert(channel, now + in_flight_deadline)
 ///     return Some(FlushBatch { channel, events })
@@ -126,44 +252,64 @@ pub struct FlushBatch {
 ///   mark_complete(channel_id):
 ///     in_flight_channels.remove(channel_id)
 ///     in_flight_deadlines.remove(channel_id)
-///     retry_counts.remove(channel_id)
-///     clean up expired retry_after entry if present
+///     if no active backoff remains:
+///       remove active batch identity and its retry metadata
 ///
 ///   requeue(batch):
-///     increment retry_counts[channel]
-///     if retry_counts[channel] > MAX_RETRIES: dead-letter (log ERROR, return batch to caller)
+///     increment retry_counts[active batch ID]
+///     if count > MAX_RETRIES: dead-letter only that immutable cohort
 ///     else: push_front with original received_at, set exponential backoff retry_after with jitter
 /// ```
 pub struct EventQueue {
-    queues: HashMap<Uuid, VecDeque<QueuedEvent>>,
+    queues: HashMap<Uuid, VecDeque<Occurrence<QueuedEvent>>>,
     in_flight_channels: HashSet<Uuid>,
     /// Per-channel deadline for auto-expiring stuck in-flight entries.
     in_flight_deadlines: HashMap<Uuid, Instant>,
     /// Number of events in each in-flight batch (for expiry logging).
     in_flight_batch_sizes: HashMap<Uuid, usize>,
+    /// Retry deadline keyed by immutable batch identity, not channel.
     retry_after: HashMap<Uuid, Instant>,
-    /// Per-channel retry attempt counter for exponential backoff / dead-lettering.
+    /// Retry attempt counter keyed by immutable batch identity.
     retry_counts: HashMap<Uuid, u32>,
+    /// The one dispatched/requeued cohort currently owning each channel.
+    ///
+    /// A channel remains single-flight, so it can have at most one active
+    /// cohort. New arrivals are absent from `occurrence_ids` and remain queued
+    /// for a later, fresh identity after this cohort completes or dead-letters.
+    active_batches: HashMap<Uuid, ActiveBatchIdentity>,
     dedup_mode: DedupMode,
     /// Events from cancelled batches, keyed by channel. Merged into the next
     /// `FlushBatch` for that channel as `cancelled_events` so `format_prompt()`
     /// can produce annotated "[Previous request — interrupted]" sections.
-    cancelled_batches: HashMap<Uuid, Vec<BatchEvent>>,
+    cancelled_batches: HashMap<Uuid, Vec<Occurrence<BatchEvent>>>,
     /// Why each channel's cancelled batch was cancelled (steer vs interrupt).
     /// Set by `requeue_as_cancelled`, consumed by `flush_next` to set
     /// `FlushBatch::cancel_reason`. Keyed by channel, cleared on flush.
     cancel_reasons: HashMap<Uuid, CancelReason>,
+    /// Exact agent slot required for a model-switch replay.
+    ///
+    /// The requirement survives flush/requeue cycles until the pinned batch
+    /// completes or the channel is removed. This prevents a requeued
+    /// `SwitchModel` turn from being claimed by a different idle slot whose
+    /// process still carries the default model.
+    required_agents: HashMap<Uuid, usize>,
+    /// Required-agent channels whose exact slot is temporarily unavailable.
+    ///
+    /// They are excluded from `flush_next` so one recycling slot cannot
+    /// head-of-line block unrelated channels. `release_required_agent` wakes
+    /// them when that slot returns.
+    blocked_required_agents: HashSet<Uuid>,
     /// Events withheld from `queues` while a goose-native steer is in flight
     /// for that event. Invisible to `flush_next` / `has_flushable_work` /
     /// `drain` (the events have been moved out of `queues`), so the queue's
     /// no-double-deliver invariant holds without any change to the hot drain
     /// path. Populated by [`mark_native_steer_pending`]; drained back to the
-    /// queue front by [`release_native_steer`] (preserving original
-    /// `received_at` fairness, same discipline as `requeue_preserve_timestamps`
-    /// at line 453). Bulk recovery on in-flight deadline expiry is performed
+    /// queue by [`release_native_steer`] (preserving original `received_at`
+    /// plus enqueue-order fairness). Bulk recovery on in-flight deadline
+    /// expiry is performed
     /// by `flush_next` / `has_flushable_work` (recover, not log-and-drop —
     /// the events were never delivered to the agent).
-    withheld_native_steer: HashMap<Uuid, Vec<QueuedEvent>>,
+    withheld_native_steer: HashMap<Uuid, Vec<Occurrence<QueuedEvent>>>,
     /// Duration after which an in-flight channel is auto-expired as orphaned.
     /// Must be strictly greater than `max_turn_duration` so a turn running to
     /// the hard cap returns via `mark_complete` before the backstop fires.
@@ -184,9 +330,12 @@ impl EventQueue {
             in_flight_batch_sizes: HashMap::new(),
             retry_after: HashMap::new(),
             retry_counts: HashMap::new(),
+            active_batches: HashMap::new(),
             dedup_mode,
             cancelled_batches: HashMap::new(),
             cancel_reasons: HashMap::new(),
+            required_agents: HashMap::new(),
+            blocked_required_agents: HashSet::new(),
             withheld_native_steer: HashMap::new(),
             in_flight_deadline: Duration::from_secs(DEFAULT_IN_FLIGHT_DEADLINE_SECS),
         }
@@ -226,8 +375,9 @@ impl EventQueue {
     /// In [`DedupMode::Drop`], events for any currently in-flight channel are
     /// silently discarded (debug-logged).
     ///
-    /// Returns `true` if the event was accepted, `false` if dropped.
-    pub fn push(&mut self, event: QueuedEvent) -> bool {
+    /// Returns the queue-private occurrence identity when accepted, or `None`
+    /// when dropped.
+    pub(crate) fn push(&mut self, event: QueuedEvent) -> Option<EnqueueOccurrenceId> {
         if matches!(self.dedup_mode, DedupMode::Drop)
             && self.in_flight_channels.contains(&event.channel_id)
         {
@@ -235,28 +385,295 @@ impl EventQueue {
                 channel_id = %event.channel_id,
                 "dropping event for in-flight channel (drop mode)"
             );
-            return false;
+            return None;
         }
-        let queue = self.queues.entry(event.channel_id).or_default();
-        // Enforce per-channel depth cap: drop oldest to make room.
-        if queue.len() >= MAX_PENDING_PER_CHANNEL {
-            queue.pop_front();
+        let channel_id = event.channel_id;
+        let occurrence = Occurrence::new(event);
+        let occurrence_id = EnqueueOccurrenceId(occurrence.id);
+        self.queues
+            .entry(channel_id)
+            .or_default()
+            .push_back(occurrence);
+        self.enforce_pending_limit(channel_id, "push");
+        Some(occurrence_id)
+    }
+
+    /// Enforce the single per-channel retention budget shared by ordinary
+    /// queued events and cancelled-batch provenance.
+    ///
+    /// Eviction is chronological by the preserved `received_at` timestamp,
+    /// irrespective of which store owns the event. Ties evict cancelled
+    /// history before ordinary work. This keeps the newest retained context
+    /// while preserving FIFO/fairness timestamps for everything that remains.
+    /// If all cancelled history is evicted, its framing reason is removed too.
+    fn enforce_pending_limit(&mut self, channel_id: Uuid, mutation: &'static str) {
+        let mut dropped = 0usize;
+        loop {
+            let queued_len = self.queues.get(&channel_id).map_or(0, VecDeque::len);
+            let cancelled_len = self.cancelled_batches.get(&channel_id).map_or(0, Vec::len);
+            if queued_len + cancelled_len <= MAX_PENDING_PER_CHANNEL {
+                break;
+            }
+
+            let oldest_queued = self.queues.get(&channel_id).and_then(|events| {
+                events
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, event)| event.received_at)
+                    .map(|(index, event)| (index, event.received_at))
+            });
+            let oldest_cancelled = self.cancelled_batches.get(&channel_id).and_then(|events| {
+                events
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, event)| event.received_at)
+                    .map(|(index, event)| (index, event.received_at))
+            });
+
+            let dropped_occurrence_id = match (oldest_queued, oldest_cancelled) {
+                (Some((queued_index, queued_at)), Some((cancelled_index, cancelled_at))) => {
+                    if cancelled_at <= queued_at {
+                        self.cancelled_batches
+                            .get_mut(&channel_id)
+                            .map(|events| events.remove(cancelled_index).id)
+                    } else if let Some(events) = self.queues.get_mut(&channel_id) {
+                        events.remove(queued_index).map(|event| event.id)
+                    } else {
+                        None
+                    }
+                }
+                (Some((queued_index, _)), None) => self
+                    .queues
+                    .get_mut(&channel_id)
+                    .and_then(|events| events.remove(queued_index))
+                    .map(|event| event.id),
+                (None, Some((cancelled_index, _))) => self
+                    .cancelled_batches
+                    .get_mut(&channel_id)
+                    .map(|events| events.remove(cancelled_index).id),
+                (None, None) => None,
+            };
+            let Some(dropped_occurrence_id) = dropped_occurrence_id else {
+                break;
+            };
+            if let Some(active) = self.active_batches.get_mut(&channel_id) {
+                active.occurrence_ids.remove(&dropped_occurrence_id);
+            }
+            dropped += 1;
+        }
+
+        if self.queues.get(&channel_id).is_some_and(VecDeque::is_empty) {
+            self.queues.remove(&channel_id);
+        }
+        if self
+            .cancelled_batches
+            .get(&channel_id)
+            .is_some_and(Vec::is_empty)
+        {
+            self.cancelled_batches.remove(&channel_id);
+        }
+        if !self.cancelled_batches.contains_key(&channel_id) {
+            self.cancel_reasons.remove(&channel_id);
+        }
+        if dropped > 0 {
             tracing::warn!(
-                channel_id = %event.channel_id,
+                channel_id = %channel_id,
+                mutation,
+                dropped,
                 limit = MAX_PENDING_PER_CHANNEL,
-                "queue depth cap reached — dropped oldest event"
+                "combined pending cap reached — dropped oldest retained event(s)"
             );
         }
-        queue.push_back(event);
-        true
+    }
+
+    fn validate_batch_occurrence_ids(batch: &FlushBatch) -> bool {
+        let event_count_matches = batch.occurrence_ids.events.len() == batch.events.len();
+        let cancelled_count_matches =
+            batch.occurrence_ids.cancelled_events.len() == batch.cancelled_events.len();
+        let event_order_count_matches =
+            batch.occurrence_ids.event_orders.len() == batch.events.len();
+        let cancelled_order_count_matches =
+            batch.occurrence_ids.cancelled_event_orders.len() == batch.cancelled_events.len();
+        let expected_count = batch.events.len() + batch.cancelled_events.len();
+        let distinct_count = Self::batch_occurrence_membership(batch).len();
+        let distinct_order_count = batch
+            .occurrence_ids
+            .event_orders
+            .iter()
+            .chain(batch.occurrence_ids.cancelled_event_orders.iter())
+            .copied()
+            .collect::<HashSet<_>>()
+            .len();
+        let identities_are_unique = distinct_count == expected_count;
+        let orders_are_unique = distinct_order_count == expected_count;
+        if event_count_matches
+            && cancelled_count_matches
+            && event_order_count_matches
+            && cancelled_order_count_matches
+            && identities_are_unique
+            && orders_are_unique
+        {
+            return true;
+        }
+
+        tracing::error!(
+            channel_id = %batch.channel_id,
+            events = batch.events.len(),
+            event_occurrence_ids = batch.occurrence_ids.events.len(),
+            cancelled_events = batch.cancelled_events.len(),
+            cancelled_occurrence_ids = batch.occurrence_ids.cancelled_events.len(),
+            distinct_occurrence_ids = distinct_count,
+            event_occurrence_orders = batch.occurrence_ids.event_orders.len(),
+            cancelled_occurrence_orders = batch.occurrence_ids.cancelled_event_orders.len(),
+            distinct_occurrence_orders = distinct_order_count,
+            "batch occurrence identity invariant violated — refusing inferred retry membership"
+        );
+        false
+    }
+
+    fn batch_occurrence_membership(batch: &FlushBatch) -> HashSet<Uuid> {
+        batch
+            .occurrence_ids
+            .events
+            .iter()
+            .chain(batch.occurrence_ids.cancelled_events.iter())
+            .copied()
+            .collect()
+    }
+
+    fn activate_batch(&mut self, batch: &FlushBatch) -> Option<Uuid> {
+        if !Self::validate_batch_occurrence_ids(batch) {
+            return None;
+        }
+        let occurrence_ids = Self::batch_occurrence_membership(batch);
+        if let Some(active) = self.active_batches.get_mut(&batch.channel_id) {
+            // Test-built recovery batches can seed retry accounting before an
+            // identity has event members. Production batches always arrive
+            // here with the immutable membership captured by flush_next().
+            if active.occurrence_ids.is_empty() {
+                active.occurrence_ids = occurrence_ids;
+            } else if active.occurrence_ids != occurrence_ids {
+                tracing::error!(
+                    channel_id = %batch.channel_id,
+                    active_occurrences = active.occurrence_ids.len(),
+                    batch_occurrences = occurrence_ids.len(),
+                    "batch occurrence identity differs from active cohort — refusing inferred retry membership"
+                );
+                return None;
+            }
+            return Some(active.id);
+        }
+
+        let id = Uuid::new_v4();
+        self.active_batches
+            .insert(batch.channel_id, ActiveBatchIdentity { id, occurrence_ids });
+        Some(id)
+    }
+
+    fn clear_active_batch(&mut self, channel_id: Uuid) {
+        if let Some(active) = self.active_batches.remove(&channel_id) {
+            self.retry_after.remove(&active.id);
+            self.retry_counts.remove(&active.id);
+        }
+    }
+
+    fn active_batch_oldest_pending(&self, channel_id: Uuid) -> Option<Instant> {
+        let active = self.active_batches.get(&channel_id)?;
+        let ordinary = self.queues.get(&channel_id).and_then(|events| {
+            events
+                .iter()
+                .filter(|event| active.occurrence_ids.contains(&event.id))
+                .map(|event| event.received_at)
+                .min()
+        });
+        let cancelled = self.cancelled_batches.get(&channel_id).and_then(|events| {
+            events
+                .iter()
+                .filter(|event| active.occurrence_ids.contains(&event.id))
+                .map(|event| event.received_at)
+                .min()
+        });
+        match (ordinary, cancelled) {
+            (Some(left), Some(right)) => Some(left.min(right)),
+            (Some(value), None) | (None, Some(value)) => Some(value),
+            (None, None) => None,
+        }
+    }
+
+    fn channel_oldest_pending(&self, channel_id: Uuid) -> Option<Instant> {
+        if self.active_batches.contains_key(&channel_id) {
+            return self.active_batch_oldest_pending(channel_id);
+        }
+
+        let ordinary = self
+            .queues
+            .get(&channel_id)
+            .and_then(|events| events.front())
+            .map(|event| event.received_at);
+        let cancelled = self
+            .cancelled_batches
+            .get(&channel_id)
+            .and_then(|events| events.iter().map(|event| event.received_at).min());
+        match (ordinary, cancelled) {
+            (Some(left), Some(right)) => Some(left.min(right)),
+            (Some(value), None) | (None, Some(value)) => Some(value),
+            (None, None) => None,
+        }
+    }
+
+    fn prune_orphaned_active_batches(&mut self) {
+        let orphaned: Vec<Uuid> = self
+            .active_batches
+            .keys()
+            .copied()
+            .filter(|channel_id| {
+                !self.in_flight_channels.contains(channel_id)
+                    && self.active_batch_oldest_pending(*channel_id).is_none()
+            })
+            .collect();
+        for channel_id in orphaned {
+            self.clear_active_batch(channel_id);
+        }
+    }
+
+    fn oldest_ready_channel(&self, now: Instant) -> Option<Uuid> {
+        let channels: HashSet<Uuid> = self
+            .queues
+            .keys()
+            .chain(self.cancelled_batches.keys())
+            .copied()
+            .collect();
+
+        channels
+            .into_iter()
+            .filter(|channel_id| {
+                !self.in_flight_channels.contains(channel_id)
+                    && !self.blocked_required_agents.contains(channel_id)
+                    && self
+                        .active_batches
+                        .get(channel_id)
+                        .and_then(|active| self.retry_after.get(&active.id))
+                        .is_none_or(|deadline| *deadline <= now)
+            })
+            .filter_map(|channel_id| {
+                self.channel_oldest_pending(channel_id)
+                    .map(|received_at| (channel_id, received_at))
+            })
+            .min_by(|left, right| {
+                left.1
+                    .cmp(&right.1)
+                    .then_with(|| left.0.as_u128().cmp(&right.0.as_u128()))
+            })
+            .map(|(channel_id, _)| channel_id)
     }
 
     /// Try to flush the next batch.
     ///
     /// Returns `None` if all non-in-flight, non-throttled queues are empty.
     /// Otherwise picks the channel with the oldest pending event (FIFO fairness
-    /// across channels), drains ALL events for that channel into a single batch,
-    /// inserts into `in_flight_channels`, and returns the batch.
+    /// across channels), reconstructs an existing immutable retry/deferred
+    /// cohort or drains at most [`MAX_BATCH_EVENTS`] ordinary events into a
+    /// fresh cohort, inserts into `in_flight_channels`, and returns the batch.
     pub fn flush_next(&mut self) -> Option<FlushBatch> {
         let now = Instant::now();
 
@@ -278,6 +695,7 @@ impl EventQueue {
             );
             self.in_flight_channels.remove(&id);
             self.in_flight_deadlines.remove(&id);
+            self.clear_active_batch(id);
             // Recover any withheld goose-native steer events for the expired
             // channel back to the queue front so normal dispatch delivers
             // them. Unlike the in-flight batch above (already delivered to a
@@ -286,97 +704,139 @@ impl EventQueue {
             self.recover_withheld_for_expired_channel(id);
         }
 
-        // Find the channel whose head event has the oldest received_at,
-        // excluding in-flight channels and throttled channels.
-        let channel_id = self
-            .queues
-            .iter()
-            .filter(|(id, q)| {
-                !q.is_empty()
-                    && !self.in_flight_channels.contains(id)
-                    && self.retry_after.get(id).is_none_or(|&t| t <= now)
-            })
-            .min_by_key(|(_, q)| q.front().unwrap().received_at)
-            .map(|(id, _)| *id);
+        self.prune_orphaned_active_batches();
+        let channel_id = self.oldest_ready_channel(now)?;
+        let active_occurrence_ids = self
+            .active_batches
+            .get(&channel_id)
+            .map(|active| active.occurrence_ids.clone());
 
-        // Fallback: if no queued events are ready but a channel has cancelled
-        // events waiting (e.g., explicit !cancel with no new @mention), flush
-        // those as a regular batch (re-dispatch unchanged).
-        let channel_id = match channel_id {
-            Some(id) => id,
-            None => {
-                let cancelled_id = self
-                    .cancelled_batches
-                    .keys()
-                    .find(|id| !self.in_flight_channels.contains(id))
-                    .copied();
-                match cancelled_id {
-                    Some(id) => {
-                        // Move cancelled events into the regular events slot.
-                        // No new events to merge — re-dispatch the original batch.
-                        let cancelled = self.cancelled_batches.remove(&id).unwrap_or_default();
-                        let cancel_reason = self.cancel_reasons.remove(&id);
-                        self.in_flight_channels.insert(id);
-                        self.in_flight_deadlines
-                            .insert(id, now + self.in_flight_deadline);
-                        self.in_flight_batch_sizes.insert(id, cancelled.len());
-                        return Some(FlushBatch {
-                            channel_id: id,
-                            events: cancelled,
-                            cancelled_events: vec![],
-                            cancel_reason,
-                        });
+        let mut event_occurrences = Vec::new();
+        let mut cancelled_occurrences = Vec::new();
+        if let Some(active_occurrence_ids) = active_occurrence_ids {
+            // A retry/deferred cohort is reconstructed exclusively from its
+            // immutable occurrence membership. Fresh arrivals remain in their
+            // original stores for a later batch and a fresh retry budget.
+            if let Some(queue) = self.queues.get_mut(&channel_id) {
+                let mut retained = VecDeque::with_capacity(queue.len());
+                while let Some(event) = queue.pop_front() {
+                    if active_occurrence_ids.contains(&event.id) {
+                        event_occurrences.push(event.map(|event| BatchEvent {
+                            event: event.event,
+                            prompt_tag: event.prompt_tag,
+                            received_at: event.received_at,
+                        }));
+                    } else {
+                        retained.push_back(event);
                     }
-                    None => return None,
                 }
+                *queue = retained;
             }
-        };
+            if let Some(cancelled) = self.cancelled_batches.get_mut(&channel_id) {
+                let mut retained = Vec::with_capacity(cancelled.len());
+                for event in cancelled.drain(..) {
+                    if active_occurrence_ids.contains(&event.id) {
+                        cancelled_occurrences.push(event);
+                    } else {
+                        retained.push(event);
+                    }
+                }
+                *cancelled = retained;
+            }
+        } else {
+            // A fresh cohort preserves the historical merge behavior: up to
+            // 50 ordinary events plus all interrupted provenance currently
+            // waiting for this channel.
+            let queue = self.queues.entry(channel_id).or_default();
+            let drain_count = MAX_BATCH_EVENTS.min(queue.len());
+            event_occurrences = queue
+                .drain(..drain_count)
+                .map(|event| {
+                    event.map(|event| BatchEvent {
+                        event: event.event,
+                        prompt_tag: event.prompt_tag,
+                        received_at: event.received_at,
+                    })
+                })
+                .collect();
+            cancelled_occurrences = self
+                .cancelled_batches
+                .remove(&channel_id)
+                .unwrap_or_default();
+        }
 
-        // Drain up to MAX_BATCH_EVENTS; leave any remainder in the queue.
-        let queue = self.queues.entry(channel_id).or_default();
-        let drain_count = MAX_BATCH_EVENTS.min(queue.len());
-        let mut events: Vec<BatchEvent> = queue
-            .drain(..drain_count)
-            .map(|qe| BatchEvent {
-                event: qe.event,
-                prompt_tag: qe.prompt_tag,
-                received_at: qe.received_at,
-            })
-            .collect();
         // Relay replay delivers stored events newest-first (`ORDER BY
         // created_at DESC`), but batch consumers — `format_prompt` scope and
         // reply-anchor selection — require the LAST event to be the newest.
         // Stable sort: same-second events keep delivery order.
-        events.sort_by_key(|be| be.event.created_at);
+        event_occurrences.sort_by_key(|event| event.event.created_at);
 
         // Remove the queue entry if now empty.
         if self.queues.get(&channel_id).is_some_and(|q| q.is_empty()) {
             self.queues.remove(&channel_id);
         }
-
-        self.in_flight_channels.insert(channel_id);
-        self.in_flight_deadlines
-            .insert(channel_id, now + self.in_flight_deadline);
-        self.in_flight_batch_sizes.insert(channel_id, events.len());
-
-        // Merge any cancelled events stored by requeue_as_cancelled().
-        let cancelled_events = self
+        if self
             .cancelled_batches
-            .remove(&channel_id)
-            .unwrap_or_default();
-        let cancel_reason = if cancelled_events.is_empty() {
+            .get(&channel_id)
+            .is_some_and(Vec::is_empty)
+        {
+            self.cancelled_batches.remove(&channel_id);
+        }
+
+        let cancel_reason = if cancelled_occurrences.is_empty() {
             self.cancel_reasons.remove(&channel_id);
             None
+        } else if self.cancelled_batches.contains_key(&channel_id) {
+            self.cancel_reasons.get(&channel_id).copied()
         } else {
             self.cancel_reasons.remove(&channel_id)
         };
 
-        Some(FlushBatch {
+        // A cancelled-only fallback keeps the historical representation:
+        // provenance moves through `events` plus a cancel reason until a new
+        // ordinary request arrives and is merged.
+        if event_occurrences.is_empty() {
+            event_occurrences = std::mem::take(&mut cancelled_occurrences);
+        }
+
+        let occurrence_ids = BatchOccurrenceIds {
+            events: event_occurrences.iter().map(|event| event.id).collect(),
+            cancelled_events: cancelled_occurrences.iter().map(|event| event.id).collect(),
+            event_orders: event_occurrences.iter().map(|event| event.order).collect(),
+            cancelled_event_orders: cancelled_occurrences
+                .iter()
+                .map(|event| event.order)
+                .collect(),
+        };
+        let batch = FlushBatch {
             channel_id,
-            events,
-            cancelled_events,
+            events: event_occurrences
+                .into_iter()
+                .map(|event| event.value)
+                .collect(),
+            cancelled_events: cancelled_occurrences
+                .into_iter()
+                .map(|event| event.value)
+                .collect(),
             cancel_reason,
-        })
+            occurrence_ids,
+        };
+        if self.activate_batch(&batch).is_none() {
+            tracing::error!(
+                channel_id = %channel_id,
+                "dropping batch whose occurrence identity violated the active-cohort invariant"
+            );
+            self.clear_active_batch(channel_id);
+            return None;
+        }
+        self.in_flight_channels.insert(channel_id);
+        self.in_flight_deadlines
+            .insert(channel_id, now + self.in_flight_deadline);
+        self.in_flight_batch_sizes.insert(
+            channel_id,
+            batch.events.len() + batch.cancelled_events.len(),
+        );
+        Some(batch)
     }
 
     /// Mark the prompt for `channel_id` as complete.
@@ -384,9 +844,9 @@ impl EventQueue {
     /// Removes the channel from `in_flight_channels` and `in_flight_deadlines`.
     ///
     /// If the channel was NOT requeued (no active `retry_after` throttle), the
-    /// retry counter is reset — the channel is healthy and the next failure
-    /// starts fresh. If the channel WAS requeued, `retry_counts` is left intact
-    /// so the backoff sequence continues on the next attempt.
+    /// active batch identity and retry counter are reset — the next cohort
+    /// starts fresh. If the batch WAS requeued, its `retry_counts` entry is left
+    /// intact so the backoff sequence continues on the next attempt.
     ///
     /// Also cleans up any already-expired `retry_after` entry.
     pub fn mark_complete(&mut self, channel_id: Uuid) {
@@ -394,19 +854,31 @@ impl EventQueue {
         self.in_flight_deadlines.remove(&channel_id);
         self.in_flight_batch_sizes.remove(&channel_id);
         let now = Instant::now();
-        match self.retry_after.get(&channel_id) {
+        let active_batch_id = self.active_batches.get(&channel_id).map(|active| active.id);
+        match active_batch_id.and_then(|batch_id| {
+            self.retry_after
+                .get(&batch_id)
+                .copied()
+                .map(|deadline| (batch_id, deadline))
+        }) {
             // Active throttle → channel was requeued; keep retry_counts intact.
-            Some(&deadline) if deadline > now => {}
+            Some((_, deadline)) if deadline > now => {}
             // Expired or absent throttle → successful completion; reset counter
-            // and clean up the stale retry_after entry.
-            Some(_) => {
-                self.retry_after.remove(&channel_id);
-                self.retry_counts.remove(&channel_id);
-            }
-            None => {
-                self.retry_counts.remove(&channel_id);
-            }
+            // and release the active identity so later arrivals start fresh.
+            Some(_) | None => self.clear_active_batch(channel_id),
         }
+    }
+
+    /// Release an in-flight batch that was deferred before delivery.
+    ///
+    /// Unlike [`Self::mark_complete`], this preserves retry bookkeeping. A
+    /// temporary resource constraint such as an unavailable exact agent slot
+    /// is not a successful delivery and must not replenish a poison batch's
+    /// retry budget.
+    pub fn mark_deferred(&mut self, channel_id: Uuid) {
+        self.in_flight_channels.remove(&channel_id);
+        self.in_flight_deadlines.remove(&channel_id);
+        self.in_flight_batch_sizes.remove(&channel_id);
     }
 
     /// Re-queue a batch of events that failed to process.
@@ -426,10 +898,14 @@ impl EventQueue {
     ///
     /// Note: does NOT remove from `in_flight_channels` — caller must call
     /// `mark_complete` separately.
-    pub fn requeue(&mut self, batch: FlushBatch) -> Option<FlushBatch> {
+    pub fn requeue(&mut self, mut batch: FlushBatch) -> Option<FlushBatch> {
         let channel_id = batch.channel_id;
+        let Some(batch_id) = self.activate_batch(&batch) else {
+            self.clear_active_batch(channel_id);
+            return Some(batch);
+        };
         let attempt = {
-            let count = self.retry_counts.entry(channel_id).or_insert(0);
+            let count = self.retry_counts.entry(batch_id).or_insert(0);
             *count += 1;
             *count
         };
@@ -443,10 +919,7 @@ impl EventQueue {
                 MAX_RETRIES,
                 batch.events.len(),
             );
-            self.retry_counts.remove(&channel_id);
-            // Also clear retry_after so fresh traffic on this channel isn't
-            // throttled by stale backoff from the discarded poison batch.
-            self.retry_after.remove(&channel_id);
+            self.clear_active_batch(channel_id);
             return Some(batch);
         }
 
@@ -472,28 +945,62 @@ impl EventQueue {
             "requeueing failed batch with backoff"
         );
 
-        let queue = self.queues.entry(channel_id).or_default();
-        // Push to front in reverse order so original order is preserved.
-        for be in batch.events.into_iter().rev() {
-            queue.push_front(QueuedEvent {
-                channel_id,
-                event: be.event,
-                prompt_tag: be.prompt_tag,
-                received_at: be.received_at, // preserve original timestamp (#46)
-            });
+        let BatchOccurrenceIds {
+            events: event_occurrence_ids,
+            cancelled_events: cancelled_occurrence_ids,
+            event_orders,
+            cancelled_event_orders,
+        } = std::mem::take(&mut batch.occurrence_ids);
+        let FlushBatch {
+            events,
+            cancelled_events,
+            cancel_reason,
+            ..
+        } = batch;
+        let mut event_occurrences: Vec<Occurrence<BatchEvent>> = events
+            .into_iter()
+            .zip(event_occurrence_ids)
+            .zip(event_orders)
+            .map(|((event, id), order)| Occurrence::with_identity(id, order, event))
+            .collect();
+        let cancelled_occurrences_empty = cancelled_occurrence_ids.is_empty();
+        let cancelled_occurrences = cancelled_events
+            .into_iter()
+            .zip(cancelled_occurrence_ids)
+            .zip(cancelled_event_orders)
+            .map(|((event, id), order)| Occurrence::with_identity(id, order, event));
+        if cancel_reason.is_some() && cancelled_occurrences_empty {
+            // A cancelled-only fallback is represented by events + reason.
+            // Keep that provenance separate so a newer event that arrives
+            // while the exact agent is unavailable still gets merged with
+            // interrupted-work framing.
+            self.cancelled_batches
+                .entry(channel_id)
+                .or_default()
+                .append(&mut event_occurrences);
+        } else {
+            let queue = self.queues.entry(channel_id).or_default();
+            // Push to front in reverse order so original order is preserved.
+            for event in event_occurrences.into_iter().rev() {
+                queue.push_front(event.map(|event| QueuedEvent {
+                    channel_id,
+                    event: event.event,
+                    prompt_tag: event.prompt_tag,
+                    received_at: event.received_at, // preserve original timestamp (#46)
+                }));
+            }
         }
-        // Enforce per-channel cap: trim oldest (back) events if requeue pushed
-        // the queue over the limit. Without this, repeated requeue+push cycles
-        // can grow the queue unboundedly.
-        while queue.len() > MAX_PENDING_PER_CHANNEL {
-            queue.pop_back();
-            tracing::warn!(
-                channel_id = %channel_id,
-                limit = MAX_PENDING_PER_CHANNEL,
-                "requeue overflow — dropped oldest event to enforce cap"
-            );
+        if !cancelled_occurrences_empty {
+            self.cancelled_batches
+                .entry(channel_id)
+                .or_default()
+                .extend(cancelled_occurrences);
         }
-        self.retry_after.insert(channel_id, Instant::now() + delay);
+        if let Some(reason) = cancel_reason {
+            self.cancel_reasons.insert(channel_id, reason);
+        }
+        self.enforce_pending_limit(channel_id, "requeue");
+        self.retry_after.insert(batch_id, Instant::now() + delay);
         None
     }
 
@@ -505,27 +1012,62 @@ impl EventQueue {
     ///
     /// Does NOT set `retry_after`. Does NOT remove from `in_flight_channels` —
     /// caller must call `mark_complete` separately.
-    pub fn requeue_preserve_timestamps(&mut self, batch: FlushBatch) {
+    pub fn requeue_preserve_timestamps(&mut self, mut batch: FlushBatch) {
         let channel_id = batch.channel_id;
-        let queue = self.queues.entry(channel_id).or_default();
-        // Push to front in reverse order so original order is preserved.
-        for be in batch.events.into_iter().rev() {
-            queue.push_front(QueuedEvent {
-                channel_id,
-                event: be.event,
-                prompt_tag: be.prompt_tag,
-                received_at: be.received_at,
-            });
+        if self.activate_batch(&batch).is_none() {
+            self.clear_active_batch(channel_id);
+            return;
         }
-        // Enforce per-channel cap: trim newest (back) events if over limit.
-        while queue.len() > MAX_PENDING_PER_CHANNEL {
-            queue.pop_back();
-            tracing::warn!(
-                channel_id = %channel_id,
-                limit = MAX_PENDING_PER_CHANNEL,
-                "requeue_preserve overflow — dropped newest event to enforce cap"
-            );
+        let BatchOccurrenceIds {
+            events: event_occurrence_ids,
+            cancelled_events: cancelled_occurrence_ids,
+            event_orders,
+            cancelled_event_orders,
+        } = std::mem::take(&mut batch.occurrence_ids);
+        let FlushBatch {
+            events,
+            cancelled_events,
+            cancel_reason,
+            ..
+        } = batch;
+        let mut event_occurrences: Vec<Occurrence<BatchEvent>> = events
+            .into_iter()
+            .zip(event_occurrence_ids)
+            .zip(event_orders)
+            .map(|((event, id), order)| Occurrence::with_identity(id, order, event))
+            .collect();
+        let cancelled_occurrences = cancelled_events
+            .into_iter()
+            .zip(cancelled_occurrence_ids.iter().copied())
+            .zip(cancelled_event_orders)
+            .map(|((event, id), order)| Occurrence::with_identity(id, order, event));
+        if cancel_reason.is_some() && cancelled_occurrence_ids.is_empty() {
+            self.cancelled_batches
+                .entry(channel_id)
+                .or_default()
+                .append(&mut event_occurrences);
+        } else {
+            let queue = self.queues.entry(channel_id).or_default();
+            // Push to front in reverse order so original order is preserved.
+            for event in event_occurrences.into_iter().rev() {
+                queue.push_front(event.map(|event| QueuedEvent {
+                    channel_id,
+                    event: event.event,
+                    prompt_tag: event.prompt_tag,
+                    received_at: event.received_at,
+                }));
+            }
         }
+        if !cancelled_occurrence_ids.is_empty() {
+            self.cancelled_batches
+                .entry(channel_id)
+                .or_default()
+                .extend(cancelled_occurrences);
+        }
+        if let Some(reason) = cancel_reason {
+            self.cancel_reasons.insert(channel_id, reason);
+        }
+        self.enforce_pending_limit(channel_id, "requeue_preserve_timestamps");
     }
 
     /// Requeue a cancelled batch so its events appear as `cancelled_events`
@@ -539,12 +1081,38 @@ impl EventQueue {
     /// Unlike `requeue_preserve_timestamps`, events are NOT pushed back into
     /// the generic queue — they are stored separately and merged by
     /// `flush_next()`. No retry throttle, no backoff.
-    pub fn requeue_as_cancelled(&mut self, batch: FlushBatch, reason: CancelReason) {
-        let entry = self.cancelled_batches.entry(batch.channel_id).or_default();
+    pub fn requeue_as_cancelled(&mut self, mut batch: FlushBatch, reason: CancelReason) {
+        let channel_id = batch.channel_id;
+        if self.activate_batch(&batch).is_none() {
+            self.clear_active_batch(channel_id);
+            return;
+        }
+        let BatchOccurrenceIds {
+            events: event_occurrence_ids,
+            cancelled_events: cancelled_occurrence_ids,
+            event_orders,
+            cancelled_event_orders,
+        } = std::mem::take(&mut batch.occurrence_ids);
+        let entry = self.cancelled_batches.entry(channel_id).or_default();
         // Preserve any already-cancelled events from a prior cancel (double-cancel).
-        entry.extend(batch.cancelled_events);
-        entry.extend(batch.events);
-        self.cancel_reasons.insert(batch.channel_id, reason);
+        entry.extend(
+            batch
+                .cancelled_events
+                .into_iter()
+                .zip(cancelled_occurrence_ids)
+                .zip(cancelled_event_orders)
+                .map(|((event, id), order)| Occurrence::with_identity(id, order, event)),
+        );
+        entry.extend(
+            batch
+                .events
+                .into_iter()
+                .zip(event_occurrence_ids)
+                .zip(event_orders)
+                .map(|((event, id), order)| Occurrence::with_identity(id, order, event)),
+        );
+        self.cancel_reasons.insert(channel_id, reason);
+        self.enforce_pending_limit(channel_id, "requeue_as_cancelled");
     }
 
     /// Returns `true` if any channel has pending events that are not in-flight
@@ -574,20 +1142,15 @@ impl EventQueue {
             );
             self.in_flight_channels.remove(&id);
             self.in_flight_deadlines.remove(&id);
+            self.clear_active_batch(id);
             // Symmetric with the flush_next expiry block: recover withheld
             // goose-native steer events for the expired channel so they are
             // not permanently orphaned in the side table.
             self.recover_withheld_for_expired_channel(id);
         }
 
-        self.queues.iter().any(|(id, q)| {
-            !q.is_empty()
-                && !self.in_flight_channels.contains(id)
-                && self.retry_after.get(id).is_none_or(|&t| t <= now)
-        }) || self
-            .cancelled_batches
-            .keys()
-            .any(|id| !self.in_flight_channels.contains(id))
+        self.prune_orphaned_active_batches();
+        self.oldest_ready_channel(now).is_some()
     }
 
     /// Number of channels with pending events.
@@ -608,7 +1171,37 @@ impl EventQueue {
     /// `requeue()`'s dead-letter threshold directly.
     #[cfg(test)]
     pub fn set_retry_count_for_test(&mut self, channel_id: Uuid, count: u32) {
-        self.retry_counts.insert(channel_id, count);
+        let batch_id = self
+            .active_batches
+            .entry(channel_id)
+            .or_insert_with(|| ActiveBatchIdentity {
+                id: Uuid::new_v4(),
+                occurrence_ids: HashSet::new(),
+            })
+            .id;
+        self.retry_counts.insert(batch_id, count);
+    }
+
+    #[cfg(test)]
+    fn set_retry_deadline_for_test(&mut self, channel_id: Uuid, deadline: Instant) {
+        if let Some(active) = self.active_batches.get(&channel_id) {
+            self.retry_after.insert(active.id, deadline);
+        }
+    }
+
+    #[cfg(test)]
+    fn retry_count_for_test(&self, channel_id: Uuid) -> Option<u32> {
+        self.active_batches
+            .get(&channel_id)
+            .and_then(|active| self.retry_counts.get(&active.id))
+            .copied()
+    }
+
+    #[cfg(test)]
+    fn has_retry_deadline_for_test(&self, channel_id: Uuid) -> bool {
+        self.active_batches
+            .get(&channel_id)
+            .is_some_and(|active| self.retry_after.contains_key(&active.id))
     }
 
     /// Drop all queued (non-in-flight) events for a channel.
@@ -628,10 +1221,11 @@ impl EventQueue {
             .remove(&channel_id)
             .map(|q| q.into_iter().map(|e| e.event.id.to_hex()).collect())
             .unwrap_or_default();
-        self.retry_after.remove(&channel_id);
-        self.retry_counts.remove(&channel_id);
+        self.clear_active_batch(channel_id);
         self.cancelled_batches.remove(&channel_id);
         self.cancel_reasons.remove(&channel_id);
+        self.required_agents.remove(&channel_id);
+        self.blocked_required_agents.remove(&channel_id);
         self.withheld_native_steer.remove(&channel_id);
         // Preserve in_flight_channels AND in_flight_deadlines: the in-flight
         // task will eventually complete (calling mark_complete) or the deadline
@@ -646,6 +1240,69 @@ impl EventQueue {
         self.in_flight_channels.contains(&channel_id)
     }
 
+    /// Pin a channel's retry to one exact agent slot.
+    pub fn require_agent(&mut self, channel_id: Uuid, agent_index: usize) {
+        if let Some(previous) = self.required_agents.insert(channel_id, agent_index) {
+            if previous != agent_index {
+                tracing::warn!(
+                    channel_id = %channel_id,
+                    previous_agent = previous,
+                    agent = agent_index,
+                    "replacing conflicting required-agent affinity"
+                );
+            }
+        }
+        self.blocked_required_agents.remove(&channel_id);
+    }
+
+    /// Return the exact slot required by a channel, if any.
+    pub fn required_agent(&self, channel_id: Uuid) -> Option<usize> {
+        self.required_agents.get(&channel_id).copied()
+    }
+
+    /// Temporarily exclude a required-agent channel from fair queue selection.
+    pub fn block_required_agent(&mut self, channel_id: Uuid) {
+        if self.required_agents.contains_key(&channel_id) {
+            self.blocked_required_agents.insert(channel_id);
+        }
+    }
+
+    /// Wake every channel pinned to `agent_index`.
+    pub fn release_required_agent(&mut self, agent_index: usize) {
+        self.blocked_required_agents.retain(|channel_id| {
+            self.required_agents.get(channel_id).copied() != Some(agent_index)
+        });
+    }
+
+    /// Clear a completed or abandoned exact-slot replay requirement.
+    pub fn clear_required_agent(&mut self, channel_id: Uuid) {
+        self.required_agents.remove(&channel_id);
+        self.blocked_required_agents.remove(&channel_id);
+    }
+
+    /// Clear exact-slot affinity only after every dependent residue store is
+    /// drained. The currently completing/dead-lettered in-flight batch is not
+    /// counted; ordinary, cancelled, and native-steer-withheld residue is.
+    pub fn clear_required_agent_if_drained(&mut self, channel_id: Uuid) -> bool {
+        let has_residue = self
+            .queues
+            .get(&channel_id)
+            .is_some_and(|events| !events.is_empty())
+            || self
+                .cancelled_batches
+                .get(&channel_id)
+                .is_some_and(|events| !events.is_empty())
+            || self
+                .withheld_native_steer
+                .get(&channel_id)
+                .is_some_and(|events| !events.is_empty());
+        if has_residue {
+            return false;
+        }
+        self.clear_required_agent(channel_id);
+        true
+    }
+
     // ── Goose-native steer withhold (side table) ──────────────────────────
     //
     // While a goose-native `_goose/unstable/session/steer` write is in flight
@@ -655,8 +1312,8 @@ impl EventQueue {
     // between `mark_complete` (which clears `in_flight_channels`) and the
     // ack arriving on the main loop. On `Success` the event is consumed
     // (`remove_event`); on `Err` / `PromptCompletedNeutral` it is released
-    // back to the queue front (`release_native_steer`), preserving its
-    // original `received_at` for FIFO fairness.
+    // back into the queue (`release_native_steer`), preserving its original
+    // `received_at` plus enqueue ordinal for FIFO fairness.
 
     /// Move a queued event out of `queues[channel_id]` into the side table
     /// to withhold it from `flush_next` while a goose-native steer is in
@@ -670,11 +1327,15 @@ impl EventQueue {
     /// after `pool.send_steer` returns `Ok(())` and before any watcher task
     /// is spawned, so the withhold is established before `mark_complete` /
     /// any subsequent `flush_next` tick can run.
-    pub fn mark_native_steer_pending(&mut self, channel_id: Uuid, event_id: &str) -> bool {
+    pub fn mark_native_steer_pending(
+        &mut self,
+        channel_id: Uuid,
+        occurrence_id: EnqueueOccurrenceId,
+    ) -> bool {
         let Some(q) = self.queues.get_mut(&channel_id) else {
             return false;
         };
-        let Some(pos) = q.iter().position(|qe| qe.event.id.to_hex() == event_id) else {
+        let Some(pos) = q.iter().position(|qe| qe.id == occurrence_id.0) else {
             return false;
         };
         let qe = q
@@ -690,8 +1351,20 @@ impl EventQueue {
         true
     }
 
-    /// Release a single withheld event back to the front of
-    /// `queues[channel_id]`, preserving its original `received_at`.
+    fn insert_queued_occurrence_by_arrival(
+        queue: &mut VecDeque<Occurrence<QueuedEvent>>,
+        occurrence: Occurrence<QueuedEvent>,
+    ) {
+        let key = (occurrence.received_at, occurrence.order);
+        let insert_at = queue
+            .iter()
+            .position(|queued| (queued.received_at, queued.order) > key)
+            .unwrap_or(queue.len());
+        queue.insert(insert_at, occurrence);
+    }
+
+    /// Release a single withheld event back into `queues[channel_id]`,
+    /// preserving its original `received_at` and enqueue ordinal.
     ///
     /// Called on `SteerAck::Err(_)` and `SteerAck::PromptCompletedNeutral`
     /// (delivery unknown after prompt completion; restoring queued event
@@ -700,33 +1373,24 @@ impl EventQueue {
     ///
     /// Push-to-front matches the discipline of `requeue_preserve_timestamps`
     /// at line 453, preserving fairness across channels.
-    pub fn release_native_steer(&mut self, channel_id: Uuid, event_id: &str) {
+    pub fn release_native_steer(&mut self, channel_id: Uuid, occurrence_id: EnqueueOccurrenceId) {
         let Some(entries) = self.withheld_native_steer.get_mut(&channel_id) else {
             return;
         };
-        let Some(pos) = entries
-            .iter()
-            .position(|qe| qe.event.id.to_hex() == event_id)
-        else {
+        let Some(pos) = entries.iter().position(|qe| qe.id == occurrence_id.0) else {
             return;
         };
         let qe = entries.remove(pos);
         if entries.is_empty() {
             self.withheld_native_steer.remove(&channel_id);
         }
-        // Push to FRONT so original `received_at` keeps the event at the head
-        // of the channel's queue. Per-channel cap is enforced below in case
-        // a flood of events arrived during the ack window.
+        // Merge by the preserved arrival timestamp. Multiple steer
+        // acknowledgements can resolve independently, so repeated push_front
+        // would reverse their FIFO order and hide an older occurrence behind a
+        // newer one from cross-channel fairness selection.
         let queue = self.queues.entry(channel_id).or_default();
-        queue.push_front(qe);
-        while queue.len() > MAX_PENDING_PER_CHANNEL {
-            queue.pop_back();
-            tracing::warn!(
-                channel_id = %channel_id,
-                limit = MAX_PENDING_PER_CHANNEL,
-                "release_native_steer overflow — dropped newest event to enforce cap"
-            );
-        }
+        Self::insert_queued_occurrence_by_arrival(queue, qe);
+        self.enforce_pending_limit(channel_id, "release_native_steer");
     }
 
     /// Drop a specific event by id from both the side table and the main
@@ -735,17 +1399,37 @@ impl EventQueue {
     /// Called on `SteerAck::Success` — the agent received the steer, so the
     /// event has been "delivered" via the non-cancelling path and must not
     /// be redelivered via normal dispatch. Idempotent across both stores.
-    pub fn remove_event(&mut self, channel_id: Uuid, event_id: &str) {
+    pub fn remove_native_steer(&mut self, channel_id: Uuid, occurrence_id: EnqueueOccurrenceId) {
+        let mut removed = false;
         if let Some(entries) = self.withheld_native_steer.get_mut(&channel_id) {
-            entries.retain(|qe| qe.event.id.to_hex() != event_id);
+            entries.retain(|event| {
+                if event.id == occurrence_id.0 {
+                    removed = true;
+                    false
+                } else {
+                    true
+                }
+            });
             if entries.is_empty() {
                 self.withheld_native_steer.remove(&channel_id);
             }
         }
         if let Some(q) = self.queues.get_mut(&channel_id) {
-            q.retain(|qe| qe.event.id.to_hex() != event_id);
+            q.retain(|event| {
+                if event.id == occurrence_id.0 {
+                    removed = true;
+                    false
+                } else {
+                    true
+                }
+            });
             if q.is_empty() {
                 self.queues.remove(&channel_id);
+            }
+        }
+        if removed {
+            if let Some(active) = self.active_batches.get_mut(&channel_id) {
+                active.occurrence_ids.remove(&occurrence_id.0);
             }
         }
     }
@@ -760,26 +1444,21 @@ impl EventQueue {
     /// events were never delivered to the agent, so normal dispatch must
     /// have a chance to deliver them.
     ///
-    /// Iterates the stored entries in reverse so per-entry `push_front`
-    /// composes to original-FIFO order at the queue front (same discipline
-    /// as `requeue_preserve_timestamps` at line 453).
+    /// Each occurrence is merged by its `(received_at, enqueue ordinal)` key,
+    /// so arbitrary acknowledgement/recovery order cannot reverse equal-time
+    /// events or hide an older event behind a newer queue head.
     fn recover_withheld_for_expired_channel(&mut self, channel_id: Uuid) {
         let Some(entries) = self.withheld_native_steer.remove(&channel_id) else {
             return;
         };
         let n = entries.len();
-        let queue = self.queues.entry(channel_id).or_default();
-        for qe in entries.into_iter().rev() {
-            queue.push_front(qe);
+        {
+            let queue = self.queues.entry(channel_id).or_default();
+            for occurrence in entries {
+                Self::insert_queued_occurrence_by_arrival(queue, occurrence);
+            }
         }
-        while queue.len() > MAX_PENDING_PER_CHANNEL {
-            queue.pop_back();
-            tracing::warn!(
-                channel_id = %channel_id,
-                limit = MAX_PENDING_PER_CHANNEL,
-                "withheld-steer recovery overflow — dropped newest event to enforce cap"
-            );
-        }
+        self.enforce_pending_limit(channel_id, "recover_withheld_for_expired_channel");
         tracing::warn!(
             channel_id = %channel_id,
             recovered = n,
@@ -790,15 +1469,14 @@ impl EventQueue {
 
     /// Compact expired metadata entries to prevent unbounded map growth.
     ///
-    /// Removes `retry_after` entries whose deadline has already passed, and
-    /// cleans up orphaned `retry_counts` entries for channels that have no
-    /// queued events, no active throttle, and no in-flight prompt. Without
-    /// this, channels that completed their retry cycle but never received
-    /// fresh traffic would leak a `u32` entry in `retry_counts` indefinitely.
+    /// Removes `retry_after` entries whose deadline has already passed, prunes
+    /// active identities with no remaining members, and cleans up orphaned
+    /// `retry_counts` entries whose immutable batch no longer exists. Without
+    /// this, completed retry cycles could leak metadata indefinitely.
     ///
-    /// The in-flight guard is critical: a channel whose throttle expired and
-    /// whose queue is empty because it was flushed may still have a retry
-    /// attempt in flight. Removing its `retry_counts` would reset the
+    /// The in-flight guard is critical: a batch whose throttle expired and
+    /// whose queued members were flushed may still have a retry attempt in
+    /// flight. Removing its `retry_counts` would reset the
     /// backoff sequence if that attempt fails and requeues.
     ///
     /// Should be called periodically from the main event loop (e.g., every
@@ -807,13 +1485,14 @@ impl EventQueue {
     pub fn compact_expired_state(&mut self) {
         let now = Instant::now();
         self.retry_after.retain(|_, deadline| *deadline > now);
-        // Remove retry_counts for channels with no active throttle, no
-        // queued events, AND no in-flight prompt — they completed their
-        // retry cycle and are truly idle.
-        self.retry_counts.retain(|ch, _| {
-            self.retry_after.contains_key(ch)
-                || self.queues.get(ch).is_some_and(|q| !q.is_empty())
-                || self.in_flight_channels.contains(ch)
+        self.prune_orphaned_active_batches();
+        let active_batch_ids: HashSet<Uuid> = self
+            .active_batches
+            .values()
+            .map(|active| active.id)
+            .collect();
+        self.retry_counts.retain(|batch_id, _| {
+            self.retry_after.contains_key(batch_id) || active_batch_ids.contains(batch_id)
         });
     }
 }
@@ -1875,6 +2554,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            occurrence_ids: Default::default(),
         };
 
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
@@ -1909,6 +2589,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancel_reason: reason,
+            occurrence_ids: Default::default(),
         }
     }
 
@@ -2047,6 +2728,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancel_reason: Some(CancelReason::Steer),
+            occurrence_ids: Default::default(),
         };
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(prompt.contains("New messages — arrived while you were working — 2 events]"));
@@ -2097,6 +2779,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancel_reason: Some(CancelReason::Steer),
+            occurrence_ids: Default::default(),
         };
 
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
@@ -2136,8 +2819,8 @@ mod tests {
         queue.requeue(batch);
         queue.mark_complete(ch);
 
-        // retry_after is set, so manually clear it for this test.
-        queue.retry_after.remove(&ch);
+        // Expire the immutable batch throttle for this test.
+        queue.set_retry_deadline_for_test(ch, Instant::now());
 
         // Should be able to flush again and get the same events in order.
         let batch2 = queue.flush_next().unwrap();
@@ -2197,6 +2880,7 @@ mod tests {
             ],
             cancelled_events: vec![],
             cancel_reason: None,
+            occurrence_ids: Default::default(),
         };
 
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
@@ -2225,6 +2909,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            occurrence_ids: Default::default(),
         };
 
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
@@ -2248,6 +2933,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            occurrence_ids: Default::default(),
         };
         let core = "[Agent Memory — core]\nbe helpful";
         let prompt = format_prompt(
@@ -2280,6 +2966,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            occurrence_ids: Default::default(),
         };
         let prompt = format_prompt(
             &batch,
@@ -2310,6 +2997,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            occurrence_ids: Default::default(),
         };
         let core = "[Agent Memory — core]\nbe helpful";
         let prompt = format_prompt(
@@ -2337,6 +3025,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            occurrence_ids: Default::default(),
         };
 
         // format_prompt no longer accepts or emits base_prompt/system_prompt.
@@ -2361,6 +3050,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            occurrence_ids: Default::default(),
         };
 
         let core = "[Agent Memory — core]\nremember this";
@@ -2417,6 +3107,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            occurrence_ids: Default::default(),
         };
 
         let prompt = format_prompt(
@@ -2455,6 +3146,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            occurrence_ids: Default::default(),
         };
 
         let ctx = ConversationContext::Thread {
@@ -2706,9 +3398,223 @@ mod tests {
         q.requeue_preserve_timestamps(batch);
         q.mark_complete(ch);
 
-        // No retry_after — channel should be immediately flushable.
-        assert!(!q.retry_after.contains_key(&ch));
+        // No retry deadline — channel should be immediately flushable.
+        assert!(!q.has_retry_deadline_for_test(ch));
         assert!(q.flush_next().is_some());
+    }
+
+    #[test]
+    fn exact_slot_deferral_preserves_retry_budget() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let channel_id = Uuid::new_v4();
+        q.push(make_queued(channel_id, "retry-on-exact-slot"));
+        let batch = q.flush_next().expect("initial batch");
+
+        q.set_retry_count_for_test(channel_id, MAX_RETRIES);
+        q.set_retry_deadline_for_test(channel_id, Instant::now() - Duration::from_secs(1));
+        q.requeue_preserve_timestamps(batch);
+        q.mark_deferred(channel_id);
+
+        assert_eq!(
+            q.retry_count_for_test(channel_id),
+            Some(MAX_RETRIES),
+            "resource deferral must not reset the delivery retry budget"
+        );
+        let retried = q.flush_next().expect("deferred batch remains ready");
+        assert!(
+            q.requeue(retried).is_some(),
+            "the next delivery failure must exhaust the preserved budget"
+        );
+    }
+
+    #[test]
+    fn fresh_arrival_does_not_inherit_poison_batch_dead_letter() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let channel_id = Uuid::new_v4();
+        q.push(make_queued(channel_id, "poison"));
+        let poison = q.flush_next().expect("initial poison batch");
+        assert!(q.requeue(poison).is_none());
+        q.mark_complete(channel_id);
+
+        q.push(make_queued(channel_id, "fresh"));
+        q.set_retry_count_for_test(channel_id, MAX_RETRIES);
+        q.set_retry_deadline_for_test(channel_id, Instant::now());
+
+        let retry = q.flush_next().expect("poison retry after backoff");
+        assert_eq!(
+            retry.events.len(),
+            1,
+            "fresh same-channel traffic must not join the immutable retry batch"
+        );
+        assert_eq!(retry.events[0].event.content, "poison");
+        let dead = q
+            .requeue(retry)
+            .expect("poison batch should exhaust its retry budget");
+        assert_eq!(dead.events.len(), 1);
+        q.mark_complete(channel_id);
+
+        let fresh = q
+            .flush_next()
+            .expect("fresh arrival must survive poison disposal");
+        assert_eq!(fresh.events.len(), 1);
+        assert_eq!(fresh.events[0].event.content, "fresh");
+        assert!(
+            q.requeue(fresh).is_none(),
+            "fresh work must begin with a new retry budget"
+        );
+    }
+
+    #[test]
+    fn identical_event_id_fresh_occurrence_does_not_join_active_retry_cohort() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let channel_id = Uuid::new_v4();
+        let mut original = make_queued(channel_id, "same signed event");
+        original.prompt_tag = "original-occurrence-1".into();
+        let original_event_id = original.event.id;
+        let mut second_original = original.clone();
+        second_original.prompt_tag = "original-occurrence-2".into();
+        second_original.received_at = Instant::now();
+        let mut fresh_duplicate = original.clone();
+        fresh_duplicate.prompt_tag = "fresh-occurrence".into();
+        fresh_duplicate.received_at = Instant::now();
+
+        q.push(original);
+        q.push(second_original);
+        let poison = q.flush_next().expect("initial occurrences");
+        assert_eq!(poison.events.len(), 2);
+        assert_eq!(poison.events[0].event.id, original_event_id);
+        assert_eq!(poison.events[0].prompt_tag, "original-occurrence-1");
+        assert_eq!(poison.events[1].prompt_tag, "original-occurrence-2");
+        assert!(q.requeue(poison).is_none());
+        q.mark_complete(channel_id);
+
+        q.push(fresh_duplicate);
+        q.set_retry_count_for_test(channel_id, MAX_RETRIES);
+        q.set_retry_deadline_for_test(channel_id, Instant::now());
+
+        let retry = q.flush_next().expect("original occurrence retry");
+        assert_eq!(
+            retry.events.len(),
+            2,
+            "a fresh enqueue occurrence with the same signed event ID must not join the active cohort"
+        );
+        assert_eq!(retry.events[0].event.id, original_event_id);
+        assert_eq!(retry.events[1].event.id, original_event_id);
+        assert_eq!(retry.events[0].prompt_tag, "original-occurrence-1");
+        assert_eq!(retry.events[1].prompt_tag, "original-occurrence-2");
+        let dead = q
+            .requeue(retry)
+            .expect("the original occurrences should exhaust their retry budget");
+        assert_eq!(dead.events.len(), 2);
+        assert_eq!(dead.events[0].prompt_tag, "original-occurrence-1");
+        assert_eq!(dead.events[1].prompt_tag, "original-occurrence-2");
+        q.mark_complete(channel_id);
+
+        let fresh = q
+            .flush_next()
+            .expect("the fresh duplicate occurrence must survive");
+        assert_eq!(fresh.events.len(), 1);
+        assert_eq!(fresh.events[0].event.id, original_event_id);
+        assert_eq!(fresh.events[0].prompt_tag, "fresh-occurrence");
+        assert!(
+            q.requeue(fresh).is_none(),
+            "the fresh occurrence must start with a new retry budget"
+        );
+    }
+
+    #[test]
+    fn identical_event_id_fresh_occurrence_does_not_join_deferred_cancelled_provenance() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let channel_id = Uuid::new_v4();
+        let mut original = make_queued(channel_id, "same signed cancellation event");
+        original.prompt_tag = "original-cancelled-occurrence".into();
+        let original_event_id = original.event.id;
+        let mut fresh_duplicate = original.clone();
+        fresh_duplicate.prompt_tag = "fresh-after-cancel".into();
+        fresh_duplicate.received_at = Instant::now();
+
+        q.push(original);
+        let interrupted = q.flush_next().expect("initial interrupted occurrence");
+        q.requeue_as_cancelled(interrupted, CancelReason::Interrupt);
+        q.mark_complete(channel_id);
+
+        let fallback = q
+            .flush_next()
+            .expect("cancelled-only fallback must become its own cohort");
+        assert_eq!(fallback.events.len(), 1);
+        assert!(fallback.cancelled_events.is_empty());
+        assert_eq!(fallback.cancel_reason, Some(CancelReason::Interrupt));
+        q.requeue_preserve_timestamps(fallback);
+        q.mark_deferred(channel_id);
+
+        q.push(fresh_duplicate);
+        let resumed = q
+            .flush_next()
+            .expect("deferred cancelled provenance must resume");
+        assert_eq!(
+            resumed.events.len() + resumed.cancelled_events.len(),
+            1,
+            "a fresh duplicate occurrence must not join deferred cancellation provenance"
+        );
+        assert_eq!(resumed.events[0].event.id, original_event_id);
+        assert_eq!(
+            resumed.events[0].prompt_tag,
+            "original-cancelled-occurrence"
+        );
+        assert_eq!(resumed.cancel_reason, Some(CancelReason::Interrupt));
+        q.mark_complete(channel_id);
+
+        let fresh = q
+            .flush_next()
+            .expect("fresh duplicate must remain for a later cohort");
+        assert_eq!(fresh.events.len(), 1);
+        assert_eq!(fresh.events[0].event.id, original_event_id);
+        assert_eq!(fresh.events[0].prompt_tag, "fresh-after-cancel");
+    }
+
+    #[test]
+    fn missing_occurrence_identity_fails_closed_without_inference() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let channel_id = Uuid::new_v4();
+        q.push(make_queued(channel_id, "must-retain-original-identity"));
+        let mut batch = q.flush_next().expect("initial batch");
+
+        batch.occurrence_ids.events.clear();
+        let rejected = q
+            .requeue(batch)
+            .expect("identity-free batch must be returned instead of reconstructed");
+        assert_eq!(rejected.events.len(), 1);
+        assert_eq!(pending_count(&q), 0, "rejected work must not be replayed");
+        assert!(
+            !q.active_batches.contains_key(&channel_id),
+            "fail-closed rejection must clear stale retry identity"
+        );
+    }
+
+    #[test]
+    fn duplicate_occurrence_identity_fails_closed() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let channel_id = Uuid::new_v4();
+        q.push(make_queued(channel_id, "first"));
+        let mut batch = q.flush_next().expect("initial batch");
+
+        batch.events.push(BatchEvent {
+            event: make_event("second"),
+            prompt_tag: "synthetic-corruption".into(),
+            received_at: Instant::now(),
+        });
+        let duplicated_id = batch.occurrence_ids.events[0];
+        batch.occurrence_ids.events.push(duplicated_id);
+
+        let rejected = q
+            .requeue(batch)
+            .expect("duplicate occurrence identity must be returned, not replayed");
+        assert_eq!(rejected.events.len(), 2);
+        assert_eq!(pending_count(&q), 0, "rejected work must not be replayed");
+        assert!(
+            !q.active_batches.contains_key(&channel_id),
+            "fail-closed rejection must clear stale retry identity"
+        );
     }
 
     #[test]
@@ -2748,7 +3654,7 @@ mod tests {
     }
 
     #[test]
-    fn test_requeue_preserve_timestamps_overflow_keeps_requeued_events() {
+    fn test_requeue_preserve_timestamps_overflow_drops_oldest_events() {
         let mut q = EventQueue::new(DedupMode::Queue);
         let ch = Uuid::new_v4();
 
@@ -2757,7 +3663,7 @@ mod tests {
             q.push(make_queued(ch, &format!("original-{i}")));
         }
 
-        // Flush a batch — these are the "requeued" events we want to survive.
+        // Flush the oldest batch.
         let batch = q.flush_next().expect("should flush");
         let batch_size = batch.events.len();
 
@@ -2766,19 +3672,23 @@ mod tests {
             q.push(make_queued(ch, &format!("new-{i}")));
         }
 
-        // Capture the content of the first requeued event for verification.
-        let requeued_first_content = batch.events[0].event.content.to_string();
-
-        // Requeue — older events go to front, overflow trims from back (newest).
+        // Requeue with preserved timestamps. The shared retention policy drops
+        // the chronologically oldest entries, even when they came from the
+        // just-requeued batch, so newer work is not sacrificed.
         q.requeue_preserve_timestamps(batch);
         q.mark_complete(ch);
 
-        // The requeued events should be at the front of the queue.
+        assert!(
+            q.queues
+                .get(&ch)
+                .is_some_and(|events| events.iter().any(|event| event.event.content == "new-49")),
+            "newest queued work must survive oldest-first overflow"
+        );
         let batch2 = q.flush_next().expect("should flush after requeue");
         assert_eq!(
             batch2.events[0].event.content.to_string(),
-            requeued_first_content,
-            "requeued events should be at the front (oldest), not trimmed"
+            "original-50",
+            "the oldest requeued batch must be evicted before newer retained work"
         );
     }
 
@@ -2812,8 +3722,7 @@ mod tests {
         );
 
         // Manually expire the retry_after to simulate time passing.
-        q.retry_after
-            .insert(ch, Instant::now() - Duration::from_secs(1));
+        q.set_retry_deadline_for_test(ch, Instant::now() - Duration::from_secs(1));
         assert!(
             q.has_flushable_work(),
             "expired throttle should be flushable"
@@ -2827,8 +3736,7 @@ mod tests {
 
         q.push(make_queued(ch, "poison"));
         for attempt in 1..=MAX_RETRIES {
-            q.retry_after
-                .insert(ch, Instant::now() - Duration::from_secs(1));
+            q.set_retry_deadline_for_test(ch, Instant::now() - Duration::from_secs(1));
             let batch = q.flush_next().expect("flush");
             assert!(
                 q.requeue(batch).is_none(),
@@ -2838,16 +3746,15 @@ mod tests {
         }
 
         // The MAX_RETRIES+1'th failure dead-letters: batch is returned.
-        q.retry_after
-            .insert(ch, Instant::now() - Duration::from_secs(1));
+        q.set_retry_deadline_for_test(ch, Instant::now() - Duration::from_secs(1));
         let batch = q.flush_next().expect("flush");
         let dead = q.requeue(batch).expect("should dead-letter");
         assert_eq!(dead.channel_id, ch);
         assert_eq!(dead.events.len(), 1);
         q.mark_complete(ch);
         // Retry state is cleared so fresh traffic isn't throttled.
-        assert!(!q.retry_counts.contains_key(&ch));
-        assert!(!q.retry_after.contains_key(&ch));
+        assert_eq!(q.retry_count_for_test(ch), None);
+        assert!(!q.has_retry_deadline_for_test(ch));
     }
 
     #[test]
@@ -2872,8 +3779,7 @@ mod tests {
         assert_eq!(batch2.channel_id, ch2);
 
         // After retry_after expires, ch should be flushable again.
-        q.retry_after
-            .insert(ch, Instant::now() - Duration::from_secs(1));
+        q.set_retry_deadline_for_test(ch, Instant::now() - Duration::from_secs(1));
         q.mark_complete(ch2);
         let batch3 = q
             .flush_next()
@@ -2972,6 +3878,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            occurrence_ids: Default::default(),
         };
         let ci = PromptChannelInfo {
             name: "engineering".into(),
@@ -3003,6 +3910,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            occurrence_ids: Default::default(),
         };
         let ci = PromptChannelInfo {
             name: "DM".into(),
@@ -3041,6 +3949,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            occurrence_ids: Default::default(),
         };
 
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
@@ -3069,6 +3978,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            occurrence_ids: Default::default(),
         };
         let ctx = ConversationContext::Thread {
             messages: vec![
@@ -3113,6 +4023,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            occurrence_ids: Default::default(),
         };
         let ci = PromptChannelInfo {
             name: "DM".into(),
@@ -3162,6 +4073,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            occurrence_ids: Default::default(),
         };
         let ctx = ConversationContext::Thread {
             messages: vec![ContextMessage {
@@ -3369,6 +4281,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            occurrence_ids: Default::default(),
         };
         let ci = PromptChannelInfo {
             name: "DM".into(),
@@ -3426,6 +4339,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            occurrence_ids: Default::default(),
         };
         let ci = PromptChannelInfo {
             name: "DM".into(),
@@ -3466,6 +4380,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            occurrence_ids: Default::default(),
         };
 
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
@@ -3490,6 +4405,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            occurrence_ids: Default::default(),
         };
 
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
@@ -3513,6 +4429,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            occurrence_ids: Default::default(),
         };
 
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
@@ -3603,25 +4520,25 @@ mod tests {
         let batch = q.flush_next().unwrap();
         q.requeue(batch);
         q.mark_complete(ch);
-        assert!(q.retry_after.contains_key(&ch));
-        assert!(q.retry_counts.contains_key(&ch));
+        assert!(q.has_retry_deadline_for_test(ch));
+        assert_eq!(q.retry_count_for_test(ch), Some(1));
 
         // The requeued event is back in the queue. Flush it again so the
         // queue is empty (simulating a successful retry dispatch).
         // We need to wait for retry_after to expire first.
-        q.retry_after
-            .insert(ch, Instant::now() - Duration::from_secs(1));
+        q.set_retry_deadline_for_test(ch, Instant::now() - Duration::from_secs(1));
         let _batch2 = q.flush_next().unwrap();
         // Now mark_complete with no active throttle — clears retry_counts.
         q.mark_complete(ch);
-        assert!(!q.retry_counts.contains_key(&ch));
+        assert_eq!(q.retry_count_for_test(ch), None);
 
         // Re-create the orphan scenario: manually insert stale retry_counts
-        // with no queue, no throttle, and no in-flight.
-        q.retry_counts.insert(ch, 3);
+        // with no active identity, throttle, queue, or in-flight owner.
+        let stale_batch_id = Uuid::new_v4();
+        q.retry_counts.insert(stale_batch_id, 3);
         q.compact_expired_state();
         assert!(
-            !q.retry_counts.contains_key(&ch),
+            !q.retry_counts.contains_key(&stale_batch_id),
             "orphaned retry_counts should be removed"
         );
     }
@@ -3638,8 +4555,7 @@ mod tests {
         q.mark_complete(ch);
 
         // Expire the throttle so the requeued event can be flushed.
-        q.retry_after
-            .insert(ch, Instant::now() - Duration::from_secs(1));
+        q.set_retry_deadline_for_test(ch, Instant::now() - Duration::from_secs(1));
         let _batch2 = q.flush_next().unwrap();
         // Channel is now in-flight with empty queue and expired throttle.
         assert!(q.in_flight_channels.contains(&ch));
@@ -3649,7 +4565,7 @@ mod tests {
         // may fail and requeue, which needs the existing count.
         q.compact_expired_state();
         assert!(
-            q.retry_counts.contains_key(&ch),
+            q.retry_count_for_test(ch).is_some(),
             "retry_counts must survive while channel is in-flight"
         );
     }
@@ -3659,13 +4575,17 @@ mod tests {
         let mut q = EventQueue::new(DedupMode::Queue);
         let ch = Uuid::new_v4();
 
-        // Manually set up: retry_counts exists, queue is non-empty, no throttle.
+        // Set up an immutable deferred cohort with queued members and no
+        // throttle; maintenance must retain its retry budget.
         q.push(make_queued(ch, "msg1"));
-        q.retry_counts.insert(ch, 2);
+        let batch = q.flush_next().expect("active batch");
+        q.set_retry_count_for_test(ch, 2);
+        q.requeue_preserve_timestamps(batch);
+        q.mark_deferred(ch);
 
         q.compact_expired_state();
         assert!(
-            q.retry_counts.contains_key(&ch),
+            q.retry_count_for_test(ch).is_some(),
             "retry_counts should survive when queue is non-empty"
         );
     }
@@ -3801,6 +4721,64 @@ mod tests {
     }
 
     #[test]
+    fn cancelled_only_and_ordinary_work_share_oldest_fifo() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let cancelled_channel = Uuid::from_u128(1);
+        let ordinary_channel = Uuid::from_u128(2);
+
+        q.push(make_queued_at(
+            cancelled_channel,
+            "older-interrupted-work",
+            Duration::from_secs(20),
+        ));
+        let interrupted = q.flush_next().expect("interrupted batch");
+        q.requeue_as_cancelled(interrupted, CancelReason::Interrupt);
+        q.mark_complete(cancelled_channel);
+
+        q.push(make_queued_at(
+            ordinary_channel,
+            "newer-ordinary-work",
+            Duration::from_secs(1),
+        ));
+
+        let first = q.flush_next().expect("oldest ready work");
+        assert_eq!(
+            first.channel_id, cancelled_channel,
+            "cancelled-only work must compete in the same FIFO as ordinary work"
+        );
+    }
+
+    #[test]
+    fn mixed_store_fifo_breaks_timestamp_ties_by_channel_id() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let cancelled_channel = Uuid::from_u128(1);
+        let ordinary_channel = Uuid::from_u128(2);
+        let received_at = Instant::now() - Duration::from_secs(5);
+
+        q.push(QueuedEvent {
+            channel_id: cancelled_channel,
+            event: make_event("interrupted-at-tie"),
+            received_at,
+            prompt_tag: "test".into(),
+        });
+        let interrupted = q.flush_next().expect("interrupted batch");
+        q.requeue_as_cancelled(interrupted, CancelReason::Interrupt);
+        q.mark_complete(cancelled_channel);
+        q.push(QueuedEvent {
+            channel_id: ordinary_channel,
+            event: make_event("ordinary-at-tie"),
+            received_at,
+            prompt_tag: "test".into(),
+        });
+
+        assert_eq!(
+            q.flush_next().expect("tied work").channel_id,
+            cancelled_channel,
+            "equal timestamps must have a deterministic channel-id tie break"
+        );
+    }
+
+    #[test]
     fn test_drain_channel_clears_cancelled_batches() {
         let mut q = EventQueue::new(DedupMode::Queue);
         let ch = Uuid::new_v4();
@@ -3863,6 +4841,161 @@ mod tests {
     }
 
     #[test]
+    fn repeated_double_cancel_history_respects_combined_channel_cap() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+
+        q.push(make_queued(ch, "original"));
+        let original = q.flush_next().expect("original batch");
+        q.requeue_as_cancelled(original, CancelReason::Interrupt);
+        q.mark_complete(ch);
+
+        for i in 0..(MAX_PENDING_PER_CHANNEL + 25) {
+            q.push(make_queued(ch, &format!("new-{i}")));
+            let merged = q.flush_next().expect("merged cancellation replay");
+            q.requeue_as_cancelled(merged, CancelReason::Steer);
+            q.mark_complete(ch);
+        }
+
+        let ordinary = q.queues.get(&ch).map_or(0, VecDeque::len);
+        let cancelled = q.cancelled_batches.get(&ch).map_or(0, Vec::len);
+        assert_eq!(
+            ordinary + cancelled,
+            MAX_PENDING_PER_CHANNEL,
+            "ordinary and cancelled work must share one channel capacity"
+        );
+        assert!(
+            q.cancelled_batches
+                .get(&ch)
+                .is_some_and(|events| events.iter().any(|event| {
+                    event.event.content == format!("new-{}", MAX_PENDING_PER_CHANNEL + 24)
+                })),
+            "the newest cancelled work must survive oldest-first eviction"
+        );
+        assert_eq!(q.cancel_reasons.get(&ch), Some(&CancelReason::Steer));
+    }
+
+    #[test]
+    fn new_pushes_replace_old_cancelled_history_within_combined_cap() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        let cancelled_events = (0..MAX_PENDING_PER_CHANNEL)
+            .map(|i| {
+                let queued = make_queued(ch, &format!("cancelled-{i}"));
+                BatchEvent {
+                    event: queued.event,
+                    prompt_tag: queued.prompt_tag,
+                    received_at: queued.received_at,
+                }
+            })
+            .collect();
+        q.requeue_as_cancelled(
+            FlushBatch {
+                channel_id: ch,
+                events: cancelled_events,
+                cancelled_events: vec![],
+                cancel_reason: None,
+                occurrence_ids: BatchOccurrenceIds::for_test(MAX_PENDING_PER_CHANNEL, 0),
+            },
+            CancelReason::Interrupt,
+        );
+
+        q.push(make_queued(ch, "newest"));
+        let ordinary = q.queues.get(&ch).map_or(0, VecDeque::len);
+        let cancelled = q.cancelled_batches.get(&ch).map_or(0, Vec::len);
+        assert_eq!(
+            ordinary + cancelled,
+            MAX_PENDING_PER_CHANNEL,
+            "a new push must not add capacity beyond retained cancellation history"
+        );
+        assert!(
+            q.queues
+                .get(&ch)
+                .is_some_and(|events| events.iter().any(|event| event.event.content == "newest")),
+            "new work must survive oldest-first eviction"
+        );
+        assert!(
+            q.cancelled_batches.get(&ch).is_some_and(|events| events
+                .iter()
+                .all(|event| event.event.content != "cancelled-0")),
+            "the oldest cancelled history must be evicted first"
+        );
+
+        for i in 0..(MAX_PENDING_PER_CHANNEL - 1) {
+            q.push(make_queued(ch, &format!("replacement-{i}")));
+        }
+        let ordinary = q.queues.get(&ch).map_or(0, VecDeque::len);
+        let cancelled = q.cancelled_batches.get(&ch).map_or(0, Vec::len);
+        assert_eq!(ordinary + cancelled, MAX_PENDING_PER_CHANNEL);
+        assert!(
+            !q.cancelled_batches.contains_key(&ch),
+            "fully evicted cancellation history must remove its empty side-table entry"
+        );
+        assert!(
+            !q.cancel_reasons.contains_key(&ch),
+            "fully evicted cancellation history must remove its stale reason"
+        );
+    }
+
+    #[test]
+    fn retry_paths_bound_cancelled_provenance_with_ordinary_work() {
+        for preserve_timestamps in [false, true] {
+            let mut q = EventQueue::new(DedupMode::Queue);
+            let ch = Uuid::new_v4();
+            let old = make_queued_at(ch, "old-cancelled", Duration::from_secs(10));
+            let old_batch_event = BatchEvent {
+                event: old.event,
+                prompt_tag: old.prompt_tag,
+                received_at: old.received_at,
+            };
+            q.cancelled_batches.insert(
+                ch,
+                (0..MAX_PENDING_PER_CHANNEL - 1)
+                    .map(|_| Occurrence::new(old_batch_event.clone()))
+                    .collect(),
+            );
+            q.cancel_reasons.insert(ch, CancelReason::Interrupt);
+
+            let newest = make_queued(ch, "newest-retry");
+            let batch = FlushBatch {
+                channel_id: ch,
+                events: vec![BatchEvent {
+                    event: newest.event,
+                    prompt_tag: newest.prompt_tag,
+                    received_at: newest.received_at,
+                }],
+                cancelled_events: vec![old_batch_event],
+                cancel_reason: Some(CancelReason::Steer),
+                occurrence_ids: BatchOccurrenceIds::for_test(1, 1),
+            };
+            if preserve_timestamps {
+                q.requeue_preserve_timestamps(batch);
+            } else {
+                assert!(q.requeue(batch).is_none());
+            }
+
+            let ordinary = q.queues.get(&ch).map_or(0, VecDeque::len);
+            let cancelled = q.cancelled_batches.get(&ch).map_or(0, Vec::len);
+            assert_eq!(
+                ordinary + cancelled,
+                MAX_PENDING_PER_CHANNEL,
+                "retry path preserve_timestamps={preserve_timestamps} exceeded the shared cap"
+            );
+            assert!(
+                q.queues.get(&ch).is_some_and(|events| events
+                    .iter()
+                    .any(|event| event.event.content == "newest-retry")),
+                "retry path preserve_timestamps={preserve_timestamps} evicted newest work"
+            );
+            assert_eq!(
+                q.cancel_reasons.get(&ch),
+                Some(&CancelReason::Steer),
+                "retained cancellation history must retain the latest framing reason"
+            );
+        }
+    }
+
+    #[test]
     fn test_reply_instruction_present_for_channel_thread_reply() {
         let ch = Uuid::new_v4();
         let root_id = "a".repeat(64);
@@ -3879,6 +5012,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            occurrence_ids: Default::default(),
         };
 
         // No profile lookup → sender treated as human → human-facing thread
@@ -3921,6 +5055,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            occurrence_ids: Default::default(),
         };
         let ci = PromptChannelInfo {
             name: "DM".into(),
@@ -3955,6 +5090,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            occurrence_ids: Default::default(),
         };
 
         // Top-level human message (no lookup → human): the reply opens a new
@@ -3984,6 +5120,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            occurrence_ids: Default::default(),
         };
         let ci = PromptChannelInfo {
             name: "DM".into(),
@@ -4026,6 +5163,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            occurrence_ids: Default::default(),
         };
 
         // Human-facing (no lookup) deep reply: anchor to the thread ROOT to
@@ -4062,6 +5200,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            occurrence_ids: Default::default(),
         };
 
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
@@ -4104,6 +5243,7 @@ mod tests {
             ],
             cancelled_events: vec![],
             cancel_reason: None,
+            occurrence_ids: Default::default(),
         };
 
         // Scope derives from the last (threaded) event; human-facing → anchor
@@ -4141,6 +5281,7 @@ mod tests {
             ],
             cancelled_events: vec![],
             cancel_reason: None,
+            occurrence_ids: Default::default(),
         };
 
         // Last event is top-level and human-facing → opens a new thread
@@ -4167,6 +5308,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            occurrence_ids: Default::default(),
         }
     }
 
@@ -4280,10 +5422,9 @@ mod tests {
         let ch = Uuid::new_v4();
 
         let qe = make_queued(ch, "hello");
-        let event_id = qe.event.id.to_hex();
-        q.push(qe);
+        let occurrence_id = q.push(qe).expect("accepted occurrence");
 
-        assert!(q.mark_native_steer_pending(ch, &event_id));
+        assert!(q.mark_native_steer_pending(ch, occurrence_id));
 
         assert!(
             q.flush_next().is_none(),
@@ -4295,6 +5436,112 @@ mod tests {
         );
         assert_eq!(pending_count(&q), 0);
         assert_eq!(q.withheld_native_steer.get(&ch).map(|v| v.len()), Some(1));
+    }
+
+    #[test]
+    fn native_steer_success_removes_only_the_acknowledged_occurrence() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        let duplicate = make_queued(ch, "same signed delivery");
+
+        let first = q.push(duplicate.clone()).expect("first occurrence");
+        let second = q.push(duplicate).expect("second occurrence");
+        assert_ne!(first, second);
+
+        assert!(q.mark_native_steer_pending(ch, first));
+        q.remove_native_steer(ch, first);
+
+        let remaining = q.flush_next().expect("second occurrence remains queued");
+        assert_eq!(remaining.events.len(), 1);
+        assert_eq!(remaining.events[0].event.content, "same signed delivery");
+        assert_eq!(remaining.occurrence_ids.events, vec![second.0]);
+    }
+
+    #[test]
+    fn native_steer_failure_releases_only_the_acknowledged_occurrence() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        let duplicate = make_queued(ch, "same signed delivery");
+
+        let first = q.push(duplicate.clone()).expect("first occurrence");
+        let second = q.push(duplicate).expect("second occurrence");
+
+        assert!(q.mark_native_steer_pending(ch, first));
+        q.release_native_steer(ch, first);
+
+        let batch = q.flush_next().expect("both occurrences remain deliverable");
+        assert_eq!(batch.events.len(), 2);
+        let ids: HashSet<_> = batch.occurrence_ids.events.into_iter().collect();
+        assert_eq!(ids, HashSet::from([first.0, second.0]));
+    }
+
+    #[test]
+    fn native_steer_individual_releases_preserve_fifo_and_cross_channel_fairness() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let steer_channel = Uuid::new_v4();
+        let competing_channel = Uuid::new_v4();
+
+        let oldest = make_queued_at(steer_channel, "oldest", Duration::from_millis(30));
+        let oldest_id = oldest.event.id.to_hex();
+        let newest = make_queued_at(steer_channel, "newest", Duration::from_millis(10));
+        let newest_id = newest.event.id.to_hex();
+        let competitor = make_queued_at(competing_channel, "competitor", Duration::from_millis(20));
+
+        let oldest_occurrence = q.push(oldest).expect("accepted oldest steer");
+        let newest_occurrence = q.push(newest).expect("accepted newest steer");
+        q.push(competitor).expect("accepted competing event");
+        assert!(q.mark_native_steer_pending(steer_channel, oldest_occurrence));
+        assert!(q.mark_native_steer_pending(steer_channel, newest_occurrence));
+
+        q.release_native_steer(steer_channel, oldest_occurrence);
+        q.release_native_steer(steer_channel, newest_occurrence);
+
+        let batch = q
+            .flush_next()
+            .expect("the channel holding the oldest occurrence must dispatch first");
+        assert_eq!(batch.channel_id, steer_channel);
+        assert_eq!(
+            batch
+                .events
+                .iter()
+                .map(|event| event.event.id.to_hex())
+                .collect::<Vec<_>>(),
+            vec![oldest_id, newest_id],
+            "independent acknowledgements must not reverse withheld FIFO order"
+        );
+    }
+
+    #[test]
+    fn native_steer_reverse_ack_preserves_enqueue_order_when_instants_are_equal() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let channel = Uuid::new_v4();
+        let shared_received_at = Instant::now();
+        let mut first = make_queued(channel, "first");
+        first.received_at = shared_received_at;
+        let first_id = first.event.id.to_hex();
+        let mut second = make_queued(channel, "second");
+        second.received_at = shared_received_at;
+        let second_id = second.event.id.to_hex();
+
+        let first_occurrence = q.push(first).expect("accepted first occurrence");
+        let second_occurrence = q.push(second).expect("accepted second occurrence");
+        assert!(q.mark_native_steer_pending(channel, first_occurrence));
+        assert!(q.mark_native_steer_pending(channel, second_occurrence));
+
+        // Acknowledgements may arrive in the opposite order from enqueue.
+        q.release_native_steer(channel, second_occurrence);
+        q.release_native_steer(channel, first_occurrence);
+
+        let batch = q.flush_next().expect("released occurrences must dispatch");
+        assert_eq!(
+            batch
+                .events
+                .iter()
+                .map(|event| event.event.id.to_hex())
+                .collect::<Vec<_>>(),
+            vec![first_id, second_id],
+            "the enqueue ordinal must break equal-Instant ties"
+        );
     }
 
     /// Earlier events on the same channel must flush normally during the
@@ -4317,10 +5564,10 @@ mod tests {
         let e3_id = e3.event.id.to_hex();
         q.push(e1);
         q.push(e2);
-        q.push(e3);
+        let e3_occurrence = q.push(e3).expect("accepted e3");
 
         // Steer in flight for e3 — withhold it from normal dispatch.
-        assert!(q.mark_native_steer_pending(ch, &e3_id));
+        assert!(q.mark_native_steer_pending(ch, e3_occurrence));
 
         // Earlier events flush as a normal batch; e3 is invisible.
         let batch = q
@@ -4335,7 +5582,7 @@ mod tests {
         q.mark_complete(ch);
 
         // Ack arrives as Err or PromptCompletedNeutral → release e3.
-        q.release_native_steer(ch, &e3_id);
+        q.release_native_steer(ch, e3_occurrence);
 
         let next = q.flush_next().expect("released e3 should now flush");
         assert_eq!(next.channel_id, ch);
@@ -4358,14 +5605,14 @@ mod tests {
 
         let qe = make_queued(ch, "withheld event");
         let event_id = qe.event.id.to_hex();
-        q.push(qe);
+        let occurrence_id = q.push(qe).expect("accepted occurrence");
 
         // Simulate a prompt in flight for `ch`, then withhold the queued
         // event for an in-flight goose-native steer.
         q.in_flight_channels.insert(ch);
         q.in_flight_deadlines.insert(ch, Instant::now());
         q.in_flight_batch_sizes.insert(ch, 1);
-        assert!(q.mark_native_steer_pending(ch, &event_id));
+        assert!(q.mark_native_steer_pending(ch, occurrence_id));
 
         // Force the in-flight deadline to be in the past, simulating the
         // steer ack never arriving and the read loop hanging long enough
@@ -4395,8 +5642,8 @@ mod tests {
     }
 
     /// Bulk-release on expiry must preserve original FIFO. The
-    /// implementation iterates the side-table entries in reverse and
-    /// `push_front`s each — composing to original-FIFO at the queue front.
+    /// implementation merges every entry by its preserved receive timestamp
+    /// and enqueue ordinal.
     /// Test ≥2 withheld entries (3 here) with staggered `received_at`.
     #[test]
     fn test_native_steer_bulk_release_preserves_fifo() {
@@ -4410,19 +5657,18 @@ mod tests {
         let e1_id = e1.event.id.to_hex();
         let e2_id = e2.event.id.to_hex();
         let e3_id = e3.event.id.to_hex();
-        q.push(e1);
-        q.push(e2);
-        q.push(e3);
+        let e1_occurrence = q.push(e1).expect("accepted e1");
+        let e2_occurrence = q.push(e2).expect("accepted e2");
+        let e3_occurrence = q.push(e3).expect("accepted e3");
 
         // Withhold all three in FIFO arrival order (e1, e2, e3 → side table).
         // This simulates a pathological repeated-steer flow; the more
         // realistic case (one withhold at a time) is covered by the other
         // tests. What matters here is that the bulk-recovery path
-        // (reverse iter + push_front) composes to original FIFO at the
-        // queue front.
-        assert!(q.mark_native_steer_pending(ch, &e1_id));
-        assert!(q.mark_native_steer_pending(ch, &e2_id));
-        assert!(q.mark_native_steer_pending(ch, &e3_id));
+        // The arrival-key merge composes to original FIFO at the queue front.
+        assert!(q.mark_native_steer_pending(ch, e1_occurrence));
+        assert!(q.mark_native_steer_pending(ch, e2_occurrence));
+        assert!(q.mark_native_steer_pending(ch, e3_occurrence));
         assert_eq!(pending_count(&q), 0);
         assert_eq!(q.withheld_native_steer.get(&ch).map(|v| v.len()), Some(3));
 
@@ -4461,6 +5707,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            occurrence_ids: Default::default(),
         };
         let prompt = format_prompt(
             &batch,
@@ -4490,6 +5737,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            occurrence_ids: Default::default(),
         };
         let prompt = format_prompt(
             &batch,
@@ -4518,6 +5766,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            occurrence_ids: Default::default(),
         };
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(
@@ -4755,5 +6004,164 @@ mod tests {
             after_second >= after_first,
             "second extend must not move deadline backward (monotonic)"
         );
+    }
+
+    #[test]
+    fn required_agent_wait_does_not_block_other_channels() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let pinned = Uuid::new_v4();
+        let other = Uuid::new_v4();
+
+        q.push(make_queued(pinned, "switch-model-retry"));
+        q.push(make_queued(other, "independent-work"));
+        q.require_agent(pinned, 0);
+        q.block_required_agent(pinned);
+
+        let first = q
+            .flush_next()
+            .expect("unrelated work must remain dispatchable");
+        assert_eq!(first.channel_id, other);
+        q.mark_complete(other);
+        assert!(
+            q.flush_next().is_none(),
+            "the pinned channel must wait while its exact slot is unavailable"
+        );
+
+        q.release_required_agent(0);
+        let pinned_batch = q
+            .flush_next()
+            .expect("the pinned batch must wake when its slot returns");
+        assert_eq!(pinned_batch.channel_id, pinned);
+        assert_eq!(q.required_agent(pinned), Some(0));
+
+        q.clear_required_agent(pinned);
+        assert_eq!(q.required_agent(pinned), None);
+    }
+
+    #[test]
+    fn draining_removed_channel_clears_required_agent_wait() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let channel_id = Uuid::new_v4();
+        q.push(make_queued(channel_id, "stale-switch-model-retry"));
+        q.require_agent(channel_id, 1);
+        q.block_required_agent(channel_id);
+
+        let drained = q.drain_channel(channel_id);
+        assert_eq!(drained.len(), 1);
+        assert_eq!(q.required_agent(channel_id), None);
+
+        q.release_required_agent(1);
+        assert!(
+            q.flush_next().is_none(),
+            "membership removal must not resurrect affinity-held work"
+        );
+    }
+
+    #[test]
+    fn pool_exhaustion_requeue_preserves_cancelled_merge() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let channel_id = Uuid::new_v4();
+        q.push(make_queued(channel_id, "original"));
+        let original = q.flush_next().expect("original batch");
+        q.requeue_as_cancelled(original, CancelReason::Interrupt);
+        q.mark_complete(channel_id);
+        q.push(make_queued(channel_id, "new"));
+
+        let merged = q.flush_next().expect("merged batch");
+        assert_eq!(merged.events.len(), 1);
+        assert_eq!(merged.cancelled_events.len(), 1);
+        q.requeue_preserve_timestamps(merged);
+        q.mark_complete(channel_id);
+
+        let retried = q.flush_next().expect("preserved merged batch");
+        assert_eq!(retried.events.len(), 1);
+        assert_eq!(retried.cancelled_events.len(), 1);
+        assert_eq!(retried.cancel_reason, Some(CancelReason::Interrupt));
+    }
+
+    #[test]
+    fn blocked_cancelled_only_fallback_keeps_interrupt_framing() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let channel_id = Uuid::new_v4();
+        q.push(make_queued(channel_id, "interrupted"));
+        let original = q.flush_next().expect("original batch");
+        q.requeue_as_cancelled(original, CancelReason::Interrupt);
+        q.mark_complete(channel_id);
+
+        let fallback = q.flush_next().expect("cancelled-only fallback");
+        assert!(fallback.cancelled_events.is_empty());
+        assert_eq!(fallback.cancel_reason, Some(CancelReason::Interrupt));
+        q.requeue_preserve_timestamps(fallback);
+        q.mark_complete(channel_id);
+        q.push(make_queued(channel_id, "new-request"));
+
+        let merged = q.flush_next().expect("merged retry");
+        assert_eq!(merged.events.len(), 1);
+        assert_eq!(merged.cancelled_events.len(), 1);
+        assert_eq!(merged.cancel_reason, Some(CancelReason::Interrupt));
+    }
+
+    #[test]
+    fn failed_merged_batch_respects_retry_backoff_as_one_unit() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let channel_id = Uuid::new_v4();
+        q.push(make_queued(channel_id, "interrupted"));
+        let original = q.flush_next().expect("original batch");
+        q.requeue_as_cancelled(original, CancelReason::Interrupt);
+        q.mark_complete(channel_id);
+        q.push(make_queued(channel_id, "new-request"));
+        let merged = q.flush_next().expect("merged batch");
+
+        assert!(q.requeue(merged).is_none());
+        q.mark_complete(channel_id);
+        assert!(
+            q.flush_next().is_none(),
+            "neither half of a merged batch may bypass its retry throttle"
+        );
+
+        q.set_retry_deadline_for_test(channel_id, Instant::now());
+        let retried = q.flush_next().expect("retry after backoff");
+        assert_eq!(retried.events.len(), 1);
+        assert_eq!(retried.cancelled_events.len(), 1);
+        assert_eq!(retried.cancel_reason, Some(CancelReason::Interrupt));
+    }
+
+    #[test]
+    fn ordinary_failed_batch_does_not_create_empty_cancelled_fallback() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let channel_id = Uuid::new_v4();
+        q.push(make_queued(channel_id, "ordinary"));
+        let batch = q.flush_next().expect("ordinary batch");
+
+        assert!(q.requeue(batch).is_none());
+        q.mark_complete(channel_id);
+        assert!(!q.cancelled_batches.contains_key(&channel_id));
+        assert!(q.flush_next().is_none());
+    }
+
+    #[test]
+    fn compact_keeps_retry_budget_for_cancelled_only_fallback() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let channel_id = Uuid::new_v4();
+        q.push(make_queued(channel_id, "interrupted"));
+        let original = q.flush_next().expect("original");
+        q.requeue_as_cancelled(original, CancelReason::Interrupt);
+        q.mark_complete(channel_id);
+        let fallback = q.flush_next().expect("cancelled-only fallback");
+
+        assert!(q.requeue(fallback).is_none());
+        q.mark_complete(channel_id);
+        assert_eq!(q.retry_count_for_test(channel_id), Some(1));
+        q.set_retry_deadline_for_test(channel_id, Instant::now());
+        q.compact_expired_state();
+        assert_eq!(
+            q.retry_count_for_test(channel_id),
+            Some(1),
+            "maintenance must not reset the retry budget while cancelled work remains"
+        );
+
+        let retry = q.flush_next().expect("retry after expiry");
+        assert!(q.requeue(retry).is_none());
+        assert_eq!(q.retry_count_for_test(channel_id), Some(2));
     }
 }

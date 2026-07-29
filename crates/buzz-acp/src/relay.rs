@@ -22,6 +22,7 @@
 //! channel. `next_event()` reads from the event receiver.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 /// Default capacity of the event channel from background task to harness.
@@ -42,6 +43,23 @@ fn event_channel_capacity() -> usize {
 /// Maximum number of seen event IDs before the dedup set is rotated.
 /// Two-generation dedup: each generation holds up to SEEN_ID_LIMIT/2 entries.
 const SEEN_ID_LIMIT: usize = 12_000;
+/// Maximum accepted age for ordinary owner-control candidates.
+const PRIVILEGED_CONTROL_FRESHNESS_SECS: u64 = 300;
+/// Bound privileged-control replay memory without evicting still-fresh IDs.
+///
+/// On saturation, new controls fail closed until an entry expires. Legitimate
+/// control volume is expected to be several orders of magnitude below this.
+const PRIVILEGED_CONTROL_REPLAY_CAPACITY: usize = 1_024;
+/// Maximum accepted age for authenticated owner-to-agent observer controls.
+const OBSERVER_CONTROL_FRESHNESS_SECS: u64 = 300;
+/// Bound observer-control replay memory without evicting still-fresh IDs.
+const OBSERVER_CONTROL_REPLAY_CAPACITY: usize = 1_024;
+/// Bound authenticated observer controls waiting for downstream capacity.
+///
+/// This matches the non-evicting replay capacity: every still-fresh pending
+/// control retains a replay entry, so a newly admitted control always has a
+/// pending slot after expired entries are removed.
+const OBSERVER_CONTROL_PENDING_CAPACITY: usize = OBSERVER_CONTROL_REPLAY_CAPACITY;
 
 /// Interval between client-initiated WebSocket pings.
 const PING_INTERVAL: Duration = Duration::from_secs(30);
@@ -110,17 +128,28 @@ const DRAIN_BUDGET_PER_ITER: usize = 1;
 /// this covers ~40 s of gating; beyond that the oldest frames are dropped with
 /// visible accounting (`gated_observer_dropped`).
 const GATED_OBSERVER_QUEUE_CAP: usize = 256;
+/// Reserved relay-gate capacity for terminal observer control results.
+const GATED_OBSERVER_PRIORITY_CAP: usize = 64;
+/// Maximum time a terminal observer publisher waits for the relay's exact
+/// `OK accepted=true` admission proof.
+const TERMINAL_OBSERVER_ACK_TIMEOUT: Duration = Duration::from_secs(5);
+/// Cleartext marker added only to encrypted terminal control-result frames.
+pub(crate) const OBSERVER_PRIORITY_TAG: &str = "priority";
+pub(crate) const OBSERVER_CONTROL_RESULT_PRIORITY: &str = "control-result";
 
 use std::time::Instant;
 
 use buzz_core::kind::{
     KIND_AGENT_OBSERVER_FRAME, KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION,
-    KIND_TYPING_INDICATOR,
+    KIND_STREAM_MESSAGE, KIND_TYPING_INDICATOR,
 };
-use futures_util::{SinkExt, StreamExt};
+use buzz_core::observer::{
+    content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
+};
+use futures_util::{Sink, SinkExt, StreamExt};
 use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Tag};
 use serde_json::{json, Value};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 use tracing::{debug, info, warn};
@@ -256,6 +285,52 @@ fn unix_now_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+/// Resolve the only identity allowed to exercise privileged relay controls.
+///
+/// The relay-facing `auth` tag is parsed before `HarnessRelay::connect`, but
+/// parsing alone does not authenticate its embedded owner. Verify the NIP-OA
+/// signature against this agent key before retaining the owner identity. When
+/// the attestation is absent or invalid, revalidate the trusted configured
+/// owner fallback; if neither source is valid, privileged control is disabled.
+fn resolve_authorized_owner_pubkey(
+    auth_tag: Option<&nostr::Tag>,
+    agent_keys: &Keys,
+    configured_owner: Option<&str>,
+) -> Option<String> {
+    if let Some(auth_tag) = auth_tag {
+        match serde_json::to_string(auth_tag) {
+            Ok(auth_tag_json) => {
+                match buzz_sdk::nip_oa::verify_auth_tag(&auth_tag_json, &agent_keys.public_key()) {
+                    Ok(owner) => return Some(owner.to_hex()),
+                    Err(error) => {
+                        warn!(
+                            "NIP-OA owner attestation verification failed; using configured fallback when valid: {error}"
+                        );
+                    }
+                }
+            }
+            Err(error) => {
+                warn!(
+                    "could not serialize NIP-OA owner attestation; using configured fallback when valid: {error}"
+                );
+            }
+        }
+    }
+
+    let configured_owner = configured_owner?;
+    match nostr::PublicKey::from_hex(configured_owner.trim()) {
+        Ok(owner) if owner != agent_keys.public_key() => Some(owner.to_hex()),
+        Ok(_) => {
+            warn!("configured privileged owner matches the agent key; failing closed");
+            None
+        }
+        Err(error) => {
+            warn!("configured privileged owner is invalid; failing closed: {error}");
+            None
+        }
+    }
 }
 
 impl RestClient {
@@ -430,6 +505,11 @@ pub struct BuzzEvent {
     pub channel_id: Uuid,
     /// The underlying Nostr event.
     pub event: Event,
+    /// Relay-issued authority for harness-level owner control execution.
+    ///
+    /// Command-shaped events without this marker remain ordinary messages,
+    /// even when their signer matches a configured owner.
+    pub privileged_control_admitted: bool,
 }
 
 /// Errors from relay operations.
@@ -517,7 +597,10 @@ enum RelayCommand {
     /// Subscribe to encrypted observer control frames addressed to this agent.
     SubscribeObserverControls,
     /// Publish a signed event to the relay (for typing indicators, etc.).
-    PublishEvent { event: Box<Event> },
+    PublishEvent {
+        event: Box<Event>,
+        admission: Option<oneshot::Sender<Result<(), String>>>,
+    },
     /// Floor `since` for membership notification replay; events before startup are never re-delivered.
     SetStartupWatermark { ts: u64 },
 }
@@ -564,9 +647,52 @@ impl RelayEventPublisher {
         self.cmd_tx
             .send(RelayCommand::PublishEvent {
                 event: Box::new(event),
+                admission: None,
             })
             .await
             .map_err(|_| RelayError::ConnectionClosed)
+    }
+
+    /// Publish a terminal observer result only after the relay explicitly
+    /// acknowledges it with `OK accepted=true`.
+    pub async fn publish_terminal_event(&self, event: Event) -> Result<(), RelayError> {
+        self.publish_terminal_event_with_ack_timeout(event, TERMINAL_OBSERVER_ACK_TIMEOUT)
+            .await
+    }
+
+    async fn publish_terminal_event_with_ack_timeout(
+        &self,
+        event: Event,
+        ack_timeout: Duration,
+    ) -> Result<(), RelayError> {
+        let deadline = tokio::time::Instant::now() + ack_timeout;
+        let (admission_tx, admission_rx) = oneshot::channel();
+        match tokio::time::timeout_at(
+            deadline,
+            self.cmd_tx.send(RelayCommand::PublishEvent {
+                event: Box::new(event),
+                admission: Some(admission_tx),
+            }),
+        )
+        .await
+        {
+            Ok(result) => result.map_err(|_| RelayError::ConnectionClosed)?,
+            Err(_) => return Err(RelayError::Timeout),
+        }
+        match tokio::time::timeout_at(deadline, admission_rx).await {
+            Ok(result) => result
+                .map_err(|_| RelayError::ConnectionClosed)?
+                .map_err(RelayError::Http),
+            Err(_) => {
+                // Dropping `admission_rx` above closes only the sender owned by
+                // this exact publication attempt. That per-attempt sender is the
+                // authoritative cancellation token checked before every park,
+                // socket write, and reconnect drain. An event-ID-only cancellation
+                // would be ambiguous when a delayed duplicate shares the original
+                // signed event ID, so timeout cleanup never enqueues one.
+                Err(RelayError::Timeout)
+            }
+        }
     }
 
     /// Test-only publisher pair: published events are forwarded to the
@@ -577,9 +703,12 @@ impl RelayEventPublisher {
         let (event_tx, event_rx) = mpsc::channel(64);
         tokio::spawn(async move {
             while let Some(cmd) = cmd_rx.recv().await {
-                if let RelayCommand::PublishEvent { event } = cmd {
+                if let RelayCommand::PublishEvent { event, admission } = cmd {
                     if event_tx.send(*event).await.is_err() {
                         break;
+                    }
+                    if let Some(admission) = admission {
+                        let _ = admission.send(Ok(()));
                     }
                 }
             }
@@ -599,6 +728,21 @@ impl HarnessRelay {
         agent_pubkey_hex: &str,
         auth_tag: Option<nostr::Tag>,
     ) -> Result<Self, RelayError> {
+        Self::connect_with_owner(relay_url, keys, agent_pubkey_hex, auth_tag, None).await
+    }
+
+    /// Connect with the canonical owner resolved by the trusted harness config.
+    ///
+    /// A valid NIP-OA attestation remains authoritative. `configured_owner` is
+    /// used only when the attestation is absent or invalid, and is normalized
+    /// and revalidated before the background task classifies any event.
+    pub async fn connect_with_owner(
+        relay_url: &str,
+        keys: &Keys,
+        agent_pubkey_hex: &str,
+        auth_tag: Option<nostr::Tag>,
+        configured_owner: Option<String>,
+    ) -> Result<Self, RelayError> {
         // Perform the initial connection and auth handshake, retrying
         // transient failures (dropped handshake, timeout) with bounded
         // jittered backoff. A terminal error (bad URL, bad auth tag,
@@ -616,6 +760,7 @@ impl HarnessRelay {
         let bg_relay_url = relay_url.to_string();
         let bg_agent_pubkey_hex = agent_pubkey_hex.to_string();
         let bg_auth_tag = auth_tag.clone();
+        let bg_configured_owner = configured_owner;
 
         let bg_handle = tokio::spawn(async move {
             run_background_task(
@@ -628,6 +773,7 @@ impl HarnessRelay {
                 bg_relay_url,
                 bg_agent_pubkey_hex,
                 bg_auth_tag,
+                bg_configured_owner,
             )
             .await;
         });
@@ -822,6 +968,7 @@ impl HarnessRelay {
         self.cmd_tx
             .send(RelayCommand::PublishEvent {
                 event: Box::new(event),
+                admission: None,
             })
             .await
             .map_err(|_| RelayError::ConnectionClosed)
@@ -835,6 +982,7 @@ impl HarnessRelay {
         self.cmd_tx
             .try_send(RelayCommand::PublishEvent {
                 event: Box::new(event),
+                admission: None,
             })
             .map_err(|_| RelayError::ConnectionClosed)
     }
@@ -972,14 +1120,77 @@ impl TwoGenDedup {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum PrivilegedControlAdmission {
+    Admitted,
+    Replay,
+    Full,
+}
+
+/// Non-evicting replay memory for ordinary privileged control candidates.
+///
+/// Entries remain present for the event's entire freshness lifetime. Unlike
+/// [`TwoGenDedup`], capacity pressure never evicts a still-admissible control
+/// ID because doing so would reopen a replay path. Saturation fails closed.
+struct PrivilegedControlReplay {
+    expires_at: HashMap<String, u64>,
+    capacity: usize,
+}
+
+impl PrivilegedControlReplay {
+    fn new(capacity: usize) -> Self {
+        assert!(
+            capacity > 0,
+            "privileged control replay capacity must be positive"
+        );
+        Self {
+            expires_at: HashMap::with_capacity(capacity),
+            capacity,
+        }
+    }
+
+    fn admit(&mut self, event_id: String, expires_at: u64, now: u64) -> PrivilegedControlAdmission {
+        self.expires_at.retain(|_, expiry| *expiry >= now);
+        if self.expires_at.contains_key(&event_id) {
+            return PrivilegedControlAdmission::Replay;
+        }
+        if self.expires_at.len() >= self.capacity {
+            return PrivilegedControlAdmission::Full;
+        }
+        self.expires_at.insert(event_id, expires_at);
+        PrivilegedControlAdmission::Admitted
+    }
+
+    fn remove(&mut self, event_id: &str) {
+        self.expires_at.remove(event_id);
+    }
+}
+
 /// State maintained by the background WebSocket task.
 struct BgState {
     /// Active subscriptions: channel_id → subscription_id string.
     active_subscriptions: HashMap<Uuid, String>,
+    /// Successful REQ completion second for each currently live channel.
+    ///
+    /// Owner controls must strictly post-date this boundary. Intent recorded
+    /// while disconnected never populates it.
+    channel_subscribed_at: HashMap<Uuid, u64>,
     /// Most recent `created_at` timestamp seen per channel (for `since` filter).
     last_seen: HashMap<Uuid, u64>,
     /// Two-generation dedup set of event IDs seen.
     seen_ids: TwoGenDedup,
+    /// Supervisor-process start second for privileged control admission.
+    ///
+    /// Nostr timestamps have one-second precision, so controls at exactly this
+    /// boundary are rejected: they cannot be proven to post-date startup.
+    privileged_control_start_boundary: u64,
+    /// Owner identity authenticated by the agent's NIP-OA attestation.
+    ///
+    /// `None` disables privileged classification. Command-looking events from
+    /// any other signer remain ordinary channel messages.
+    authorized_owner_pubkey: Option<String>,
+    /// Replay IDs retained without eviction for their full freshness lifetime.
+    privileged_control_replay: PrivilegedControlReplay,
     /// Per-channel filter used on subscribe (for resubscribe after reconnect).
     active_filters: HashMap<Uuid, ChannelFilter>,
     /// Oldest timestamp of a membership notification that was dropped due to
@@ -993,6 +1204,19 @@ struct BgState {
     membership_sub_active: bool,
     /// Whether the observer control subscription is active.
     observer_control_sub_active: bool,
+    /// Start second of the exact observer-control REQ currently live on the socket.
+    ///
+    /// `None` means subscription intent exists but no REQ is currently proven
+    /// live. Equality is rejected because Nostr timestamps have one-second
+    /// precision and cannot prove that a control followed the REQ.
+    observer_control_subscribed_at: Option<u64>,
+    /// Authenticated observer-control IDs retained for their freshness lifetime.
+    observer_control_replay: PrivilegedControlReplay,
+    /// Authenticated controls waiting for capacity in the downstream channel.
+    ///
+    /// This FIFO is drained by its own `select!` arm so relay reads, pings,
+    /// reconnects, and shutdown commands never wait for downstream capacity.
+    observer_control_pending: VecDeque<Event>,
     /// Oldest dropped channel-event timestamp per channel, keyed by channel_id.
     /// Mirrors `membership_dropped_since` but for ordinary channel events.
     /// On reconnect resubscribe, `since` = min(last_seen, channel_dropped_since).
@@ -1039,13 +1263,25 @@ struct BgState {
     /// Bounded at `GATED_OBSERVER_QUEUE_CAP` (drop-oldest); drained by the
     /// main loop one frame per pacing tick once the gate clears.
     gated_observer_pending: VecDeque<Box<Event>>,
+    /// Protected terminal control-result frames. This FIFO is never displaced
+    /// by ordinary observer telemetry and drains first after a relay gate.
+    gated_observer_priority_pending: VecDeque<Box<Event>>,
     /// Observer frames written to the socket but not yet acknowledged. The
     /// relay's rate-limit NOTICE does not carry an event ID, so all unresolved
     /// observer writes are moved back ahead of the parked FIFO when one arrives.
     observer_in_flight: VecDeque<Box<Event>>,
+    /// Protected acknowledgement window for terminal control-result frames.
+    observer_priority_in_flight: VecDeque<Box<Event>>,
+    /// Terminal publisher completions keyed by relay event ID. A completion is
+    /// released only by an explicit relay `OK`, so local queue admission can
+    /// never be mistaken for externally durable proof.
+    observer_priority_confirmations: HashMap<String, oneshot::Sender<Result<(), String>>>,
     /// Frames evicted from the bounded pending/in-flight observer buffers since
     /// summary log. Makes overflow loss visible instead of silent.
     gated_observer_dropped: u64,
+    /// Observer publishes rejected by a terminal relay denial. These are not
+    /// retried, but the count and exact denial are logged for auditability.
+    observer_terminal_denied: u64,
     /// Channels whose REQ failed during `resubscribe_after_reconnect`.
     ///
     /// A single failed channel REQ is parked here instead of aborting the whole
@@ -1063,13 +1299,22 @@ impl BgState {
     fn new() -> Self {
         Self {
             active_subscriptions: HashMap::new(),
+            channel_subscribed_at: HashMap::new(),
             last_seen: HashMap::new(),
             seen_ids: TwoGenDedup::new(SEEN_ID_LIMIT),
+            privileged_control_start_boundary: unix_now_secs(),
+            authorized_owner_pubkey: None,
+            privileged_control_replay: PrivilegedControlReplay::new(
+                PRIVILEGED_CONTROL_REPLAY_CAPACITY,
+            ),
             active_filters: HashMap::new(),
             membership_dropped_since: None,
             membership_last_seen: None,
             membership_sub_active: false,
             observer_control_sub_active: false,
+            observer_control_subscribed_at: None,
+            observer_control_replay: PrivilegedControlReplay::new(OBSERVER_CONTROL_REPLAY_CAPACITY),
+            observer_control_pending: VecDeque::new(),
             channel_dropped_since: HashMap::new(),
             proactive_resubscribe_needed: false,
             startup_watermark: None,
@@ -1079,8 +1324,12 @@ impl BgState {
             membership_resub_needed: false,
             observer_resub_needed: false,
             gated_observer_pending: VecDeque::new(),
+            gated_observer_priority_pending: VecDeque::new(),
             observer_in_flight: VecDeque::new(),
+            observer_priority_in_flight: VecDeque::new(),
+            observer_priority_confirmations: HashMap::new(),
             gated_observer_dropped: 0,
+            observer_terminal_denied: 0,
             resubscribe_retry: HashSet::new(),
             backoff_step: 0,
         }
@@ -1131,6 +1380,7 @@ impl BgState {
     /// Prevents stale replay on re-subscribe and avoids unbounded state growth
     /// for channels that are removed and never re-added.
     fn clear_channel_state(&mut self, channel_id: &Uuid) {
+        self.channel_subscribed_at.remove(channel_id);
         self.last_seen.remove(channel_id);
         self.subscribe_since.remove(channel_id);
         self.channel_dropped_since.remove(channel_id);
@@ -1184,7 +1434,21 @@ impl BgState {
     ///
     /// Bounded drop-oldest queue: overflow evicts the oldest frame and counts
     /// it in `gated_observer_dropped` so the loss is visible, never silent.
-    fn park_gated_observer_frame(&mut self, event: Box<Event>) {
+    fn park_gated_observer_frame(&mut self, event: Box<Event>) -> bool {
+        if is_priority_observer_frame(&event) {
+            if self.gated_observer_priority_pending.len() + self.observer_priority_in_flight.len()
+                >= GATED_OBSERVER_PRIORITY_CAP
+            {
+                self.gated_observer_dropped += 1;
+                tracing::error!(
+                    dropped_total = self.gated_observer_dropped,
+                    "protected observer delivery state full — rejected newest terminal result"
+                );
+                return false;
+            }
+            self.gated_observer_priority_pending.push_back(event);
+            return true;
+        }
         if self.gated_observer_pending.len() >= GATED_OBSERVER_QUEUE_CAP {
             self.gated_observer_pending.pop_front();
             self.gated_observer_dropped += 1;
@@ -1194,12 +1458,17 @@ impl BgState {
             );
         }
         self.gated_observer_pending.push_back(event);
+        true
     }
 
     /// Restore unresolved observer writes ahead of frames parked after the
     /// gate armed. NOTICE has no event ID, so conservatively retry every frame
     /// without an OK; duplicate IDs are harmless at the relay.
     fn requeue_observer_in_flight(&mut self) {
+        self.prune_cancelled_terminal_admissions();
+        while let Some(event) = self.observer_priority_in_flight.pop_back() {
+            self.gated_observer_priority_pending.push_front(event);
+        }
         while let Some(event) = self.observer_in_flight.pop_back() {
             self.gated_observer_pending.push_front(event);
         }
@@ -1209,7 +1478,21 @@ impl BgState {
         }
     }
 
-    fn track_observer_in_flight(&mut self, event: Box<Event>) {
+    fn track_observer_in_flight(&mut self, event: Box<Event>) -> bool {
+        if is_priority_observer_frame(&event) {
+            if self.gated_observer_priority_pending.len() + self.observer_priority_in_flight.len()
+                >= GATED_OBSERVER_PRIORITY_CAP
+            {
+                self.gated_observer_dropped += 1;
+                tracing::error!(
+                    dropped_total = self.gated_observer_dropped,
+                    "protected observer acknowledgment state full — rejected newest terminal result"
+                );
+                return false;
+            }
+            self.observer_priority_in_flight.push_back(event);
+            return true;
+        }
         if self.observer_in_flight.len() >= GATED_OBSERVER_QUEUE_CAP {
             self.observer_in_flight.pop_front();
             self.gated_observer_dropped += 1;
@@ -1219,15 +1502,183 @@ impl BgState {
             );
         }
         self.observer_in_flight.push_back(event);
+        true
+    }
+
+    fn has_observer_priority_capacity(&self) -> bool {
+        self.gated_observer_priority_pending.len() + self.observer_priority_in_flight.len()
+            < GATED_OBSERVER_PRIORITY_CAP
+    }
+
+    fn contains_observer_priority_event(&self, event_id: &str) -> bool {
+        self.gated_observer_priority_pending
+            .iter()
+            .chain(self.observer_priority_in_flight.iter())
+            .any(|event| event.id.to_hex() == event_id)
+            || self.observer_priority_confirmations.contains_key(event_id)
+    }
+
+    fn reject_duplicate_observer_priority(
+        &self,
+        event_id: &str,
+        is_priority: bool,
+        admission: &mut Option<oneshot::Sender<Result<(), String>>>,
+    ) -> bool {
+        if !is_priority || !self.contains_observer_priority_event(event_id) {
+            return false;
+        }
+        tracing::error!(
+            event_id = %event_id,
+            "rejected duplicate terminal observer result before queue or socket write"
+        );
+        if let Some(admission) = admission.take() {
+            let _ = admission.send(Err(
+                "terminal observer event is already awaiting relay confirmation".to_string(),
+            ));
+        }
+        true
+    }
+
+    /// A timed-out publisher drops its oneshot receiver synchronously. Purge
+    /// every exact terminal event whose confirmation sender observes that close,
+    /// independent of command-channel capacity or reconnect command ordering.
+    fn prune_cancelled_terminal_admissions(&mut self) {
+        let cancelled: Vec<_> = self
+            .observer_priority_confirmations
+            .iter()
+            .filter(|(_, confirmation)| confirmation.is_closed())
+            .map(|(event_id, _)| event_id.clone())
+            .collect();
+        for event_id in cancelled {
+            self.cancel_terminal_admission(&event_id);
+        }
+    }
+
+    /// Remove one timed-out terminal publication from every relay-owned state
+    /// lane. Event IDs are signed-event identities, so matching the exact ID
+    /// cannot cancel a different queued terminal result.
+    fn cancel_terminal_admission(&mut self, event_id: &str) -> bool {
+        let pending_len = self.gated_observer_priority_pending.len();
+        self.gated_observer_priority_pending
+            .retain(|event| event.id.to_hex() != event_id);
+        let in_flight_len = self.observer_priority_in_flight.len();
+        self.observer_priority_in_flight
+            .retain(|event| event.id.to_hex() != event_id);
+        let confirmation_removed = self
+            .observer_priority_confirmations
+            .remove(event_id)
+            .is_some();
+        let removed = self.gated_observer_priority_pending.len() != pending_len
+            || self.observer_priority_in_flight.len() != in_flight_len
+            || confirmation_removed;
+        if removed {
+            warn!(
+                event_id,
+                "terminal observer relay acknowledgement timed out — cancelled exact delivery state"
+            );
+        } else {
+            debug!(
+                event_id,
+                "terminal observer timeout cancellation found no unresolved delivery state"
+            );
+        }
+        removed
     }
 
     fn acknowledge_observer_frame(&mut self, event_id: &str) {
+        if let Some(index) = self
+            .observer_priority_in_flight
+            .iter()
+            .position(|event| event.id.to_hex() == event_id)
+        {
+            self.observer_priority_in_flight.remove(index);
+            if let Some(confirmation) = self.observer_priority_confirmations.remove(event_id) {
+                let _ = confirmation.send(Ok(()));
+            }
+            return;
+        }
         if let Some(index) = self
             .observer_in_flight
             .iter()
             .position(|event| event.id.to_hex() == event_id)
         {
             self.observer_in_flight.remove(index);
+        }
+    }
+
+    /// Remove and return the exact unresolved observer write named by an OK.
+    fn take_observer_in_flight(&mut self, event_id: &str) -> Option<Box<Event>> {
+        if let Some(index) = self
+            .observer_priority_in_flight
+            .iter()
+            .position(|event| event.id.to_hex() == event_id)
+        {
+            return self.observer_priority_in_flight.remove(index);
+        }
+        let index = self
+            .observer_in_flight
+            .iter()
+            .position(|event| event.id.to_hex() == event_id)?;
+        self.observer_in_flight.remove(index)
+    }
+
+    /// Retry the exact rate-limited observer frame ahead of telemetry that was
+    /// parked after it was first written.
+    fn requeue_rate_limited_observer_frame(&mut self, event_id: &str) -> bool {
+        let Some(event) = self.take_observer_in_flight(event_id) else {
+            return false;
+        };
+        if is_priority_observer_frame(&event) {
+            self.gated_observer_priority_pending.push_front(event);
+        } else {
+            self.gated_observer_pending.push_front(event);
+            if self.gated_observer_pending.len() > GATED_OBSERVER_QUEUE_CAP {
+                self.gated_observer_pending.pop_back();
+                self.gated_observer_dropped += 1;
+            }
+        }
+        true
+    }
+
+    /// Retire a terminally denied observer frame without retrying it forever.
+    /// The caller logs the exact relay denial; the counter preserves a bounded
+    /// summary signal even after the frame leaves the acknowledgement window.
+    fn record_terminal_observer_denial(&mut self, event_id: &str, denial: &str) -> bool {
+        if self.take_observer_in_flight(event_id).is_none() {
+            return false;
+        }
+        if let Some(confirmation) = self.observer_priority_confirmations.remove(event_id) {
+            let _ = confirmation.send(Err(format!(
+                "relay denied terminal observer frame: {denial}"
+            )));
+        }
+        self.observer_terminal_denied = self.observer_terminal_denied.saturating_add(1);
+        true
+    }
+
+    fn record_observer_confirmation(
+        &mut self,
+        event_id: String,
+        is_priority: bool,
+        admission: Option<oneshot::Sender<Result<(), String>>>,
+        admitted: bool,
+    ) {
+        let Some(admission) = admission else {
+            return;
+        };
+        if admission.is_closed() {
+            if admitted {
+                self.cancel_terminal_admission(&event_id);
+            }
+        } else if !admitted {
+            let _ = admission.send(Err("terminal observer priority state is full".to_string()));
+        } else if !is_priority {
+            let _ = admission.send(Err(
+                "confirmed delivery is only valid for terminal observer frames".to_string(),
+            ));
+        } else {
+            self.observer_priority_confirmations
+                .insert(event_id, admission);
         }
     }
 }
@@ -1242,12 +1693,16 @@ impl BgState {
 /// Callers MUST handle `Shutdown` before calling — reaching the Shutdown
 /// arm here is a logic error.
 fn apply_command_to_state(state: &mut BgState, cmd: RelayCommand) {
+    state.prune_cancelled_terminal_admissions();
     match cmd {
         RelayCommand::Subscribe {
             channel_id,
             filter,
             replay_since,
         } => {
+            // Intent is not a live subscription. Any prior socket-bound
+            // authority stays disabled until a new REQ is written successfully.
+            state.channel_subscribed_at.remove(&channel_id);
             state
                 .active_subscriptions
                 .insert(channel_id, channel_sub_id(channel_id));
@@ -1270,6 +1725,7 @@ fn apply_command_to_state(state: &mut BgState, cmd: RelayCommand) {
         }
         RelayCommand::SubscribeObserverControls => {
             state.observer_control_sub_active = true;
+            state.observer_control_subscribed_at = None;
         }
         RelayCommand::SetStartupWatermark { ts } => {
             state.startup_watermark = Some(ts);
@@ -1281,9 +1737,30 @@ fn apply_command_to_state(state: &mut BgState, cmd: RelayCommand) {
         // overflow) so they are delivered by the post-reconnect drain. Other
         // ephemeral publishes (typing indicators) are meaningless while
         // disconnected and are dropped.
-        RelayCommand::PublishEvent { event } => {
+        RelayCommand::PublishEvent {
+            event,
+            mut admission,
+        } => {
+            if admission.as_ref().is_some_and(oneshot::Sender::is_closed) {
+                debug!(
+                    event_id = %event.id,
+                    "discarding terminal observer publish cancelled before disconnected admission"
+                );
+                return;
+            }
             if event.kind.as_u16() as u32 == KIND_AGENT_OBSERVER_FRAME {
-                state.park_gated_observer_frame(event);
+                let event_id = event.id.to_hex();
+                let is_priority = is_priority_observer_frame(&event);
+                if state.reject_duplicate_observer_priority(&event_id, is_priority, &mut admission)
+                {
+                    return;
+                }
+                let admitted = state.park_gated_observer_frame(event);
+                state.record_observer_confirmation(event_id, is_priority, admission, admitted);
+            } else if let Some(admission) = admission {
+                let _ = admission.send(Err(
+                    "confirmed delivery is only valid for observer frames".to_string()
+                ));
             }
         }
         // Already reconnecting — redundant.
@@ -1305,13 +1782,32 @@ fn apply_command_to_state(state: &mut BgState, cmd: RelayCommand) {
 /// discarded because replaying a typing indicator after reconnect is meaningless.
 /// `Shutdown` and `Reconnect` are handled by the caller.
 fn retain_failed_command_intent(state: &mut BgState, cmd: RelayCommand) {
+    state.prune_cancelled_terminal_admissions();
     match cmd {
-        RelayCommand::PublishEvent { event }
-            if event.kind.as_u16() as u32 == KIND_AGENT_OBSERVER_FRAME =>
-        {
-            state.park_gated_observer_frame(event);
+        RelayCommand::PublishEvent {
+            event,
+            mut admission,
+        } if event.kind.as_u16() as u32 == KIND_AGENT_OBSERVER_FRAME => {
+            if admission.as_ref().is_some_and(oneshot::Sender::is_closed) {
+                debug!(
+                    event_id = %event.id,
+                    "discarding terminal observer publish cancelled before failed-send retention"
+                );
+                return;
+            }
+            let event_id = event.id.to_hex();
+            let is_priority = is_priority_observer_frame(&event);
+            if state.reject_duplicate_observer_priority(&event_id, is_priority, &mut admission) {
+                return;
+            }
+            let admitted = state.park_gated_observer_frame(event);
+            state.record_observer_confirmation(event_id, is_priority, admission, admitted);
         }
-        RelayCommand::PublishEvent { .. } => {}
+        RelayCommand::PublishEvent { admission, .. } => {
+            if let Some(admission) = admission {
+                let _ = admission.send(Err("observer frame was not retained".to_string()));
+            }
+        }
         cmd => apply_command_to_state(state, cmd),
     }
 }
@@ -1349,6 +1845,7 @@ async fn execute_connected_command(
     agent_pubkey_hex: &str,
     cmd: RelayCommand,
 ) -> bool {
+    state.prune_cancelled_terminal_admissions();
     match cmd {
         RelayCommand::Subscribe {
             channel_id,
@@ -1450,13 +1947,15 @@ async fn execute_connected_command(
         }
         RelayCommand::SubscribeObserverControls => {
             state.observer_control_sub_active = true;
+            state.observer_control_subscribed_at = None;
             if state.check_rate_gate().is_some() {
                 debug!("rate-gated: deferring observer control subscription");
                 state.observer_resub_needed = true;
                 return true;
             }
-            let sent = send_observer_control_subscribe(ws, agent_pubkey_hex).await;
-            if sent {
+            if let Some(subscribed_at) = send_observer_control_subscribe(ws, agent_pubkey_hex).await
+            {
+                state.observer_control_subscribed_at = Some(subscribed_at);
                 state.observer_resub_needed = false;
                 true
             } else {
@@ -1465,20 +1964,39 @@ async fn execute_connected_command(
                 false
             }
         }
-        RelayCommand::PublishEvent { event } => {
+        RelayCommand::PublishEvent {
+            event,
+            mut admission,
+        } => {
+            if admission.as_ref().is_some_and(oneshot::Sender::is_closed) {
+                debug!(
+                    event_id = %event.id,
+                    "discarding terminal observer publish cancelled before socket admission"
+                );
+                return true;
+            }
+            let event_id = event.id.to_hex();
+            let is_priority = is_priority_observer_frame(&event);
+            if state.reject_duplicate_observer_priority(&event_id, is_priority, &mut admission) {
+                return true;
+            }
             // Observer telemetry frames (kind 24200) are durable telemetry, not
             // droppable ephemera: park them while the rate-limit gate is armed —
             // and while earlier parked frames are still draining, so relative
             // order is preserved — then let the main-loop drain deliver them
             // one per pacing tick once the gate clears.
             if event.kind.as_u16() as u32 == KIND_AGENT_OBSERVER_FRAME
-                && (state.check_rate_gate().is_some() || !state.gated_observer_pending.is_empty())
+                && (state.check_rate_gate().is_some()
+                    || !state.gated_observer_priority_pending.is_empty()
+                    || !state.gated_observer_pending.is_empty())
             {
                 debug!(
+                    priority_pending = state.gated_observer_priority_pending.len(),
                     pending = state.gated_observer_pending.len(),
                     "rate-gated: parking observer frame for paced drain"
                 );
-                state.park_gated_observer_frame(event);
+                let admitted = state.park_gated_observer_frame(event);
+                state.record_observer_confirmation(event_id, is_priority, admission, admitted);
                 return true;
             }
             // Drop remaining ephemeral publishes while rate-gated. Stale typing
@@ -1494,18 +2012,66 @@ async fn execute_connected_command(
                 debug!("rate-gated: dropping ephemeral PublishEvent (typing indicator)");
                 return true;
             }
-            // Best-effort: log a send failure but don't trigger reconnect — the
-            // next ping or read will detect the dead socket. A failed observer
-            // frame is parked so the post-reconnect drain redelivers it.
+            // A failed observer frame is parked so the post-reconnect drain
+            // redelivers it. If `start_send` already accepted bytes, any
+            // cancellation, timeout, or error taints the socket and forces
+            // reconnect before later traffic can flush those buffered bytes.
             let is_observer = event.kind.as_u16() as u32 == KIND_AGENT_OBSERVER_FRAME;
-            if send_publish_event_frame(ws, &event).await {
-                if is_observer {
-                    state.track_observer_in_flight(event);
-                }
-            } else if is_observer {
-                state.park_gated_observer_frame(event);
+            if is_priority && !state.has_observer_priority_capacity() {
+                state.gated_observer_dropped += 1;
+                tracing::error!(
+                    dropped_total = state.gated_observer_dropped,
+                    "protected observer acknowledgment state full — rejected newest terminal result before socket write"
+                );
+                state.record_observer_confirmation(event_id, true, admission, false);
+                return true;
             }
-            true
+            let outcome =
+                send_publish_event_frame_until_cancelled(ws, &event, admission.as_mut()).await;
+            match outcome {
+                PublishEventFrameOutcome::CancelledBeforeSend => {
+                    debug!(
+                        event_id,
+                        "terminal observer publish cancelled before socket write started"
+                    );
+                }
+                PublishEventFrameOutcome::SocketTainted => {
+                    warn!(
+                        event_id,
+                        "terminal observer publish cancelled after socket write started — retiring relay socket"
+                    );
+                }
+                PublishEventFrameOutcome::Sent => {
+                    if is_observer {
+                        let admitted = state.track_observer_in_flight(event);
+                        state.record_observer_confirmation(
+                            event_id,
+                            is_priority,
+                            admission,
+                            admitted,
+                        );
+                    } else if let Some(admission) = admission {
+                        let _ =
+                            admission
+                                .send(Err("confirmed delivery is only valid for observer frames"
+                                    .to_string()));
+                    }
+                }
+                PublishEventFrameOutcome::Failed
+                | PublishEventFrameOutcome::FailedSocketTainted
+                    if is_observer =>
+                {
+                    let admitted = state.park_gated_observer_frame(event);
+                    state.record_observer_confirmation(event_id, is_priority, admission, admitted);
+                }
+                PublishEventFrameOutcome::Failed
+                | PublishEventFrameOutcome::FailedSocketTainted => {
+                    if let Some(admission) = admission {
+                        let _ = admission.send(Err("relay publish failed".to_string()));
+                    }
+                }
+            }
+            !outcome.socket_tainted()
         }
         RelayCommand::SetStartupWatermark { ts } => {
             state.startup_watermark = Some(ts);
@@ -1541,8 +2107,11 @@ async fn run_background_task(
     relay_url: String,
     agent_pubkey_hex: String,
     auth_tag: Option<nostr::Tag>,
+    configured_owner: Option<String>,
 ) {
     let mut state = BgState::new();
+    state.authorized_owner_pubkey =
+        resolve_authorized_owner_pubkey(auth_tag.as_ref(), &keys, configured_owner.as_deref());
 
     let handshake_ok = process_handshake_buffer(
         &mut ws,
@@ -1574,14 +2143,7 @@ async fn run_background_task(
         )
         .await
         {
-            ReconnectOutcome::Ok => {
-                if matches!(
-                    drain_post_reconnect(&mut ws, &mut cmd_rx, &mut state, &agent_pubkey_hex).await,
-                    ReconnectOutcome::Shutdown
-                ) {
-                    return;
-                }
-            }
+            ReconnectOutcome::Ok => {}
             ReconnectOutcome::Shutdown => return,
             ReconnectOutcome::Failed => {
                 if matches!(
@@ -1657,20 +2219,7 @@ async fn run_background_task(
                     )
                     .await
                     {
-                        ReconnectOutcome::Ok => {
-                            if matches!(
-                                drain_post_reconnect(
-                                    &mut ws,
-                                    &mut cmd_rx,
-                                    &mut state,
-                                    &agent_pubkey_hex
-                                )
-                                .await,
-                                ReconnectOutcome::Shutdown
-                            ) {
-                                return;
-                            }
-                        }
+                        ReconnectOutcome::Ok => {}
                         ReconnectOutcome::Shutdown => return,
                         ReconnectOutcome::Failed => {
                             if matches!(
@@ -1731,7 +2280,11 @@ async fn run_background_task(
                     }
                 }
                 if state.observer_resub_needed && budget > 0 {
-                    if send_observer_control_subscribe(&mut ws, &agent_pubkey_hex).await {
+                    state.observer_control_subscribed_at = None;
+                    if let Some(subscribed_at) =
+                        send_observer_control_subscribe(&mut ws, &agent_pubkey_hex).await
+                    {
+                        state.observer_control_subscribed_at = Some(subscribed_at);
                         state.observer_resub_needed = false;
                         budget = budget.saturating_sub(1);
                         any_sent = true;
@@ -1762,16 +2315,54 @@ async fn run_background_task(
                 }
             }
 
-            if budget > 0 && !state.gated_observer_pending.is_empty() {
-                let sent = drain_gated_observer_pending(&mut ws, &mut state, budget).await;
-                if sent > 0 {
-                    any_sent = true;
+            if budget > 0
+                && (!state.gated_observer_priority_pending.is_empty()
+                    || !state.gated_observer_pending.is_empty())
+            {
+                match drain_gated_observer_pending(&mut ws, &mut state, budget).await {
+                    GatedObserverDrainOutcome::Sent(sent) => {
+                        if sent > 0 {
+                            any_sent = true;
+                        }
+                    }
+                    GatedObserverDrainOutcome::SocketTainted => {
+                        warn!(
+                            "terminal observer send was cancelled after start_send — reconnecting before later traffic"
+                        );
+                        let _ = event_tx.try_send(None);
+                        if matches!(
+                            wait_for_reconnect(
+                                &mut ws,
+                                &mut cmd_rx,
+                                &mut state,
+                                &keys,
+                                &relay_url,
+                                &agent_pubkey_hex,
+                                &event_tx,
+                                &observer_control_tx,
+                                true,
+                                auth_tag.as_ref(),
+                            )
+                            .await,
+                            ReconnectOutcome::Shutdown
+                        ) {
+                            return;
+                        }
+                        ping_sent = false;
+                        last_pong = Instant::now();
+                        connected_since = Instant::now();
+                        stable_logged = false;
+                        drain_pacing_next = None;
+                        continue;
+                    }
                 }
             }
 
             if any_sent {
                 drain_pacing_next = Some(tokio::time::Instant::now() + REQ_PACING_INTERVAL);
-            } else if !state.gated_observer_pending.is_empty() {
+            } else if !state.gated_observer_priority_pending.is_empty()
+                || !state.gated_observer_pending.is_empty()
+            {
                 // Nothing sent because the gate is still armed. Arm the pacing
                 // timer to the gate deadline so parked observer frames drain
                 // promptly even when no other traffic wakes the select loop.
@@ -1782,6 +2373,23 @@ async fn run_background_task(
         }
 
         tokio::select! {
+                   permit = observer_control_tx.reserve(),
+                       if !state.observer_control_pending.is_empty() =>
+                   {
+                       match permit {
+                           Ok(permit) => {
+                               deliver_next_pending_observer_control(&mut state, permit);
+                           }
+                           Err(_) => {
+                               warn!(
+                                   pending = state.observer_control_pending.len(),
+                                   "observer control receiver closed with pending controls"
+                               );
+                               return;
+                           }
+                       }
+                   }
+
                    raw = ws.next() => {
                        // Determine if the socket is lost.
                        let socket_lost = match raw {
@@ -1835,10 +2443,6 @@ async fn run_background_task(
                            match outcome {
                            ReconnectOutcome::Shutdown => return,
                            ReconnectOutcome::Ok => {
-                               if matches!(
-                                   drain_post_reconnect(&mut ws, &mut cmd_rx, &mut state, &agent_pubkey_hex).await,
-                                   ReconnectOutcome::Shutdown
-                               ) { return; }
                                // Reset ping state after reconnect.
                                ping_sent = false;
                                last_pong = Instant::now();
@@ -1908,12 +2512,7 @@ async fn run_background_task(
             auth_tag.as_ref(),
                                    ).await {
                                        ReconnectOutcome::Shutdown => return,
-                                       ReconnectOutcome::Ok => {
-                                           if matches!(
-                                               drain_post_reconnect(&mut ws, &mut cmd_rx, &mut state, &agent_pubkey_hex).await,
-                                               ReconnectOutcome::Shutdown
-                                           ) { return; }
-                                       }
+                                       ReconnectOutcome::Ok => {}
                                        ReconnectOutcome::Failed => {
                                            if matches!(
                                                wait_for_reconnect(
@@ -1947,12 +2546,7 @@ async fn run_background_task(
             auth_tag.as_ref(),
                            ).await {
                                ReconnectOutcome::Shutdown => return,
-                               ReconnectOutcome::Ok => {
-                                   if matches!(
-                                       drain_post_reconnect(&mut ws, &mut cmd_rx, &mut state, &agent_pubkey_hex).await,
-                                       ReconnectOutcome::Shutdown
-                                   ) { return; }
-                               }
+                               ReconnectOutcome::Ok => {}
                                ReconnectOutcome::Failed => {
                                    if matches!(
                                        wait_for_reconnect(
@@ -1980,12 +2574,7 @@ async fn run_background_task(
             auth_tag.as_ref(),
                                ).await {
                                    ReconnectOutcome::Shutdown => return,
-                                   ReconnectOutcome::Ok => {
-                                       if matches!(
-                                           drain_post_reconnect(&mut ws, &mut cmd_rx, &mut state, &agent_pubkey_hex).await,
-                                           ReconnectOutcome::Shutdown
-                                       ) { return; }
-                                   }
+                                   ReconnectOutcome::Ok => {}
                                    ReconnectOutcome::Failed => {
                                        if matches!(
                                            wait_for_reconnect(
@@ -2035,6 +2624,90 @@ async fn run_background_task(
     }
 }
 
+/// Queue one fully authenticated observer control without awaiting downstream
+/// capacity. Returns `false` only when the downstream receiver is closed.
+fn queue_admitted_observer_control(
+    state: &mut BgState,
+    observer_control_tx: &mpsc::Sender<Event>,
+    event: Event,
+) -> bool {
+    if state.observer_control_pending.is_empty() {
+        match observer_control_tx.try_send(event) {
+            Ok(()) => return true,
+            Err(mpsc::error::TrySendError::Full(event)) => {
+                state.observer_control_pending.push_back(event);
+                return true;
+            }
+            Err(mpsc::error::TrySendError::Closed(event)) => {
+                state.observer_control_replay.remove(&event.id.to_hex());
+                warn!(
+                    event_id = %event.id,
+                    "observer control receiver closed before delivery"
+                );
+                return false;
+            }
+        }
+    }
+
+    if state.observer_control_pending.len() >= OBSERVER_CONTROL_PENDING_CAPACITY {
+        let now = unix_now_secs();
+        let mut expired_ids = Vec::new();
+        state.observer_control_pending.retain(|pending| {
+            let ts = pending.created_at.as_secs();
+            let expired = now.saturating_sub(ts) > OBSERVER_CONTROL_FRESHNESS_SECS;
+            if expired {
+                expired_ids.push(pending.id.to_hex());
+                warn!(
+                    event_id = %pending.id,
+                    event_ts = ts,
+                    delivery_now = now,
+                    "dropping observer control that expired while awaiting downstream capacity"
+                );
+            }
+            !expired
+        });
+        for event_id in expired_ids {
+            state.observer_control_replay.remove(&event_id);
+        }
+    }
+
+    if state.observer_control_pending.len() >= OBSERVER_CONTROL_PENDING_CAPACITY {
+        state.observer_control_replay.remove(&event.id.to_hex());
+        warn!(
+            event_id = %event.id,
+            capacity = OBSERVER_CONTROL_PENDING_CAPACITY,
+            "observer control pending queue full — failing closed without eviction"
+        );
+        return true;
+    }
+
+    state.observer_control_pending.push_back(event);
+    true
+}
+
+/// Deliver the oldest pending observer control through a reserved downstream
+/// slot, discarding only controls whose bounded freshness window elapsed while
+/// they waited.
+fn deliver_next_pending_observer_control(state: &mut BgState, permit: mpsc::Permit<'_, Event>) {
+    let delivery_now = unix_now_secs();
+    while let Some(event) = state.observer_control_pending.pop_front() {
+        let event_id = event.id.to_hex();
+        let ts = event.created_at.as_secs();
+        if delivery_now.saturating_sub(ts) > OBSERVER_CONTROL_FRESHNESS_SECS {
+            state.observer_control_replay.remove(&event_id);
+            warn!(
+                event_id,
+                event_ts = ts,
+                delivery_now,
+                "dropping observer control that expired while awaiting downstream capacity"
+            );
+            continue;
+        }
+        permit.send(event);
+        return;
+    }
+}
+
 /// Handle a single WebSocket message in the background task.
 ///
 /// Returns `false` if the connection has been lost (Close frame or unrecoverable
@@ -2067,22 +2740,192 @@ async fn handle_ws_message(
                     event,
                 } => {
                     if subscription_id == OBSERVER_CONTROL_SUB_ID {
-                        match observer_control_tx.try_send(*event) {
-                            Ok(()) => {}
-                            Err(mpsc::error::TrySendError::Full(_)) => {
-                                warn!("observer control event dropped because control channel is full");
+                        let Some(subscription_started_at) = state.observer_control_subscribed_at
+                        else {
+                            warn!(
+                                event_id = %event.id,
+                                "dropping observer control for inactive subscription"
+                            );
+                            return true;
+                        };
+                        if !state.observer_control_sub_active {
+                            warn!(
+                                event_id = %event.id,
+                                "dropping observer control without subscription intent"
+                            );
+                            return true;
+                        }
+                        if !is_authorized_observer_control(
+                            &event,
+                            agent_pubkey_hex,
+                            state.authorized_owner_pubkey.as_deref(),
+                        ) {
+                            warn!(
+                                event_id = %event.id,
+                                "dropping observer frame outside the exact owner-control shape"
+                            );
+                            return true;
+                        }
+
+                        let ts = event.created_at.as_secs();
+                        let now = unix_now_secs();
+                        let admission_boundary = state
+                            .privileged_control_start_boundary
+                            .max(subscription_started_at);
+                        if ts <= admission_boundary {
+                            warn!(
+                                event_id = %event.id,
+                                event_ts = ts,
+                                admission_boundary,
+                                "dropping observer control that does not provably post-date startup and subscription"
+                            );
+                            return true;
+                        }
+                        if ts > now || now - ts > OBSERVER_CONTROL_FRESHNESS_SECS {
+                            warn!(
+                                event_id = %event.id,
+                                event_ts = ts,
+                                now,
+                                "dropping observer control outside the freshness window"
+                            );
+                            return true;
+                        }
+
+                        let event_for_verify = event.clone();
+                        match tokio::task::spawn_blocking(move || {
+                            buzz_core::verify_event(&event_for_verify)
+                        })
+                        .await
+                        {
+                            Ok(Ok(())) => {}
+                            Ok(Err(error)) => {
+                                warn!(
+                                    event_id = %event.id,
+                                    "dropping invalid observer control: {error}"
+                                );
+                                return true;
                             }
-                            Err(mpsc::error::TrySendError::Closed(_)) => return false,
+                            Err(error) => {
+                                warn!(
+                                    event_id = %event.id,
+                                    "observer control verification task failed: {error}"
+                                );
+                                return true;
+                            }
+                        }
+
+                        let event_id = event.id.to_hex();
+                        let expires_at = ts.saturating_add(OBSERVER_CONTROL_FRESHNESS_SECS);
+                        match state
+                            .observer_control_replay
+                            .admit(event_id, expires_at, now)
+                        {
+                            PrivilegedControlAdmission::Admitted => {}
+                            PrivilegedControlAdmission::Replay => {
+                                warn!(
+                                    event_id = %event.id,
+                                    "dropping replayed observer control"
+                                );
+                                return true;
+                            }
+                            PrivilegedControlAdmission::Full => {
+                                warn!(
+                                    event_id = %event.id,
+                                    capacity = OBSERVER_CONTROL_REPLAY_CAPACITY,
+                                    "observer control replay guard full — failing closed"
+                                );
+                                return true;
+                            }
+                        }
+
+                        if !queue_admitted_observer_control(state, observer_control_tx, *event) {
+                            return false;
                         }
                     } else if subscription_id == MEMBERSHIP_NOTIF_SUB_ID {
-                        // Membership notification — extract channel UUID from h tag.
+                        if !state.membership_sub_active {
+                            warn!(
+                                event_id = %event.id,
+                                "dropping membership notification for inactive subscription"
+                            );
+                            return true;
+                        }
+
+                        let kind = event.kind.as_u16() as u32;
+                        if !matches!(
+                            kind,
+                            KIND_MEMBER_ADDED_NOTIFICATION | KIND_MEMBER_REMOVED_NOTIFICATION
+                        ) {
+                            warn!(
+                                kind,
+                                event_id = %event.id,
+                                "dropping unexpected event kind on membership subscription"
+                            );
+                            return true;
+                        }
+
+                        if !event_has_tag_value(&event, "p", agent_pubkey_hex) {
+                            warn!(
+                                event_id = %event.id,
+                                "dropping membership notification targeting another agent"
+                            );
+                            return true;
+                        }
+
+                        // Membership notification — extract the one unambiguous
+                        // channel UUID from its h tag.
                         let channel_uuid = match extract_h_tag_uuid(&event) {
                             Some(uuid) => uuid,
                             None => {
-                                warn!("membership notification missing h tag — dropping");
+                                warn!(
+                                    event_id = %event.id,
+                                    "membership notification missing or ambiguous h tag — dropping"
+                                );
                                 return true;
                             }
                         };
+
+                        // Relays can replay stored events without authenticating
+                        // them. Verify before any dedup, watermark, or forwarding
+                        // mutation so a forged frame cannot reserve its claimed
+                        // ID and suppress a later authentic notification.
+                        let event_for_verify = event.clone();
+                        match tokio::task::spawn_blocking(move || {
+                            buzz_core::verify_event(&event_for_verify)
+                        })
+                        .await
+                        {
+                            Ok(Ok(())) => {}
+                            Ok(Err(error)) => {
+                                warn!(
+                                    channel_id = %channel_uuid,
+                                    event_id = %event.id,
+                                    "dropping invalid membership notification: {error}"
+                                );
+                                return true;
+                            }
+                            Err(error) => {
+                                warn!(
+                                    channel_id = %channel_uuid,
+                                    event_id = %event.id,
+                                    "membership verification task failed: {error}"
+                                );
+                                return true;
+                            }
+                        }
+
+                        let ts = event.created_at.as_secs();
+                        let now = unix_now_secs();
+                        if ts > now {
+                            warn!(
+                                channel_id = %channel_uuid,
+                                event_id = %event.id,
+                                event_ts = ts,
+                                now,
+                                "dropping future-dated membership notification"
+                            );
+                            return true;
+                        }
+
                         // Dedup membership notifications through TwoGenDedup.
                         // We use seen_ids directly instead of record_event()
                         // because record_event() also updates last_seen, which
@@ -2098,10 +2941,10 @@ async fn handle_ws_message(
                             );
                             return true;
                         }
-                        let ts = event.created_at.as_secs();
                         let buzz_event = BuzzEvent {
                             channel_id: channel_uuid,
                             event: *event,
+                            privileged_control_admitted: false,
                         };
                         let cap = event_tx.max_capacity();
                         let used = cap - event_tx.capacity();
@@ -2137,12 +2980,175 @@ async fn handle_ws_message(
                             Err(mpsc::error::TrySendError::Closed(_)) => return false,
                         }
                     } else if let Some(channel_id) = channel_id_from_sub_id(&subscription_id) {
+                        if state
+                            .active_subscriptions
+                            .get(&channel_id)
+                            .map(String::as_str)
+                            != Some(subscription_id.as_str())
+                        {
+                            warn!(
+                                channel_id = %channel_id,
+                                event_id = %event.id,
+                                "dropping event for inactive channel subscription"
+                            );
+                            return true;
+                        }
+
+                        if extract_h_tag_uuid(&event) != Some(channel_id) {
+                            warn!(
+                                channel_id = %channel_id,
+                                event_id = %event.id,
+                                "dropping event whose h tag does not match its subscription"
+                            );
+                            return true;
+                        }
+
+                        let Some(filter) = state.active_filters.get(&channel_id) else {
+                            warn!(
+                                channel_id = %channel_id,
+                                event_id = %event.id,
+                                "dropping event without a local subscription filter"
+                            );
+                            return true;
+                        };
+                        let kind = event.kind.as_u16() as u32;
+                        if filter
+                            .kinds
+                            .as_ref()
+                            .is_some_and(|kinds| !kinds.contains(&kind))
+                        {
+                            warn!(
+                                channel_id = %channel_id,
+                                event_id = %event.id,
+                                kind,
+                                "dropping event outside the local kind filter"
+                            );
+                            return true;
+                        }
+                        if filter.require_mention
+                            && !event_has_tag_value(&event, "p", agent_pubkey_hex)
+                        {
+                            warn!(
+                                channel_id = %channel_id,
+                                event_id = %event.id,
+                                "dropping event outside the local mention filter"
+                            );
+                            return true;
+                        }
+
+                        // Relays are not trusted to have verified stored or
+                        // replayed events. Verify before touching replay
+                        // watermarks or dedup state so a forged frame cannot
+                        // reserve the claimed ID and suppress a later authentic
+                        // event. Schnorr verification is CPU-bound.
+                        let event_for_verify = event.clone();
+                        match tokio::task::spawn_blocking(move || {
+                            buzz_core::verify_event(&event_for_verify)
+                        })
+                        .await
+                        {
+                            Ok(Ok(())) => {}
+                            Ok(Err(error)) => {
+                                warn!(
+                                    channel_id = %channel_id,
+                                    event_id = %event.id,
+                                    "dropping invalid channel event: {error}"
+                                );
+                                return true;
+                            }
+                            Err(error) => {
+                                warn!(
+                                    channel_id = %channel_id,
+                                    event_id = %event.id,
+                                    "channel event verification task failed: {error}"
+                                );
+                                return true;
+                            }
+                        }
                         let ts = event.created_at.as_secs();
                         let event_id_hex = event.id.to_hex();
+                        let now = unix_now_secs();
+                        if ts > now {
+                            warn!(
+                                channel_id = %channel_id,
+                                event_id = %event.id,
+                                event_ts = ts,
+                                now,
+                                "dropping future-dated channel event"
+                            );
+                            return true;
+                        }
+                        let is_privileged_control_candidate = is_privileged_channel_control(
+                            &event,
+                            agent_pubkey_hex,
+                            state.authorized_owner_pubkey.as_deref(),
+                        );
+                        let privileged_control_boundary =
+                            state.channel_subscribed_at.get(&channel_id).copied().map(
+                                |subscribed_at| {
+                                    subscribed_at.max(state.privileged_control_start_boundary)
+                                },
+                            );
+                        let privileged_control_admitted = if !is_privileged_control_candidate {
+                            false
+                        } else if privileged_control_boundary.is_none() {
+                            warn!(
+                                channel_id = %channel_id,
+                                event_id = %event.id,
+                                "owner control arrived without a successful live channel REQ — forwarding without execution authority"
+                            );
+                            false
+                        } else if privileged_control_boundary.is_some_and(|boundary| ts <= boundary)
+                        {
+                            warn!(
+                                channel_id = %channel_id,
+                                event_id = %event.id,
+                                event_ts = ts,
+                                admission_boundary = privileged_control_boundary,
+                                "owner control does not provably post-date supervisor/channel subscription startup — forwarding without execution authority; retry with a newly signed event after the boundary"
+                            );
+                            false
+                        } else if now - ts > PRIVILEGED_CONTROL_FRESHNESS_SECS {
+                            warn!(
+                                channel_id = %channel_id,
+                                event_id = %event.id,
+                                event_ts = ts,
+                                now,
+                                "stale owner control — forwarding without execution authority"
+                            );
+                            false
+                        } else {
+                            let expires_at = ts.saturating_add(PRIVILEGED_CONTROL_FRESHNESS_SECS);
+                            match state.privileged_control_replay.admit(
+                                event_id_hex.clone(),
+                                expires_at,
+                                now,
+                            ) {
+                                PrivilegedControlAdmission::Admitted => true,
+                                PrivilegedControlAdmission::Replay => {
+                                    warn!(
+                                        channel_id = %channel_id,
+                                        event_id = %event.id,
+                                        "replayed owner control — withholding execution authority"
+                                    );
+                                    false
+                                }
+                                PrivilegedControlAdmission::Full => {
+                                    warn!(
+                                        channel_id = %channel_id,
+                                        event_id = %event.id,
+                                        capacity = PRIVILEGED_CONTROL_REPLAY_CAPACITY,
+                                        "privileged control replay guard full — failing closed"
+                                    );
+                                    false
+                                }
+                            }
+                        };
                         if state.record_event(channel_id, &event) {
                             let buzz_event = BuzzEvent {
                                 channel_id,
                                 event: *event,
+                                privileged_control_admitted,
                             };
                             // Warn at 80% capacity.
                             let cap = event_tx.max_capacity();
@@ -2160,6 +3166,11 @@ async fn handle_ws_message(
                                     // Remove from dedup set so the replayed event
                                     // won't be rejected as a duplicate after reconnect.
                                     state.seen_ids.remove(&event_id_hex);
+                                    if privileged_control_admitted {
+                                        // The harness never received this control,
+                                        // so a reconnect replay must remain eligible.
+                                        state.privileged_control_replay.remove(&event_id_hex);
+                                    }
                                     // Track the oldest dropped timestamp so reconnect
                                     // replay starts early enough to re-deliver it.
                                     state
@@ -2211,6 +3222,12 @@ async fn handle_ws_message(
                     subscription_id,
                     message,
                 } => {
+                    if subscription_id == OBSERVER_CONTROL_SUB_ID {
+                        state.observer_control_subscribed_at = None;
+                    }
+                    if let Some(channel_id) = channel_id_from_sub_id(&subscription_id) {
+                        state.channel_subscribed_at.remove(&channel_id);
+                    }
                     // A per-channel membership denial means THIS channel is
                     // forbidden, not the whole connection. Drop just this
                     // channel's subscription and keep the socket — otherwise the
@@ -2269,9 +3286,11 @@ async fn handle_ws_message(
                     // resubscribe_after_reconnect() needs the subscription to
                     // still be in state so it can restore it.
                     if subscription_id == OBSERVER_CONTROL_SUB_ID {
-                        let sent = send_observer_control_subscribe(ws, agent_pubkey_hex).await;
-                        if sent {
+                        if let Some(subscribed_at) =
+                            send_observer_control_subscribe(ws, agent_pubkey_hex).await
+                        {
                             state.observer_control_sub_active = true;
+                            state.observer_control_subscribed_at = Some(subscribed_at);
                         } else {
                             warn!("observer control resubscribe failed after CLOSED — triggering reconnect");
                             return false;
@@ -2361,7 +3380,29 @@ async fn handle_ws_message(
                         warn!("mid-session AUTH rejected (event {event_id}): {message} — triggering reconnect");
                         return false;
                     }
-                    state.acknowledge_observer_frame(&event_id);
+                    if accepted {
+                        state.acknowledge_observer_frame(&event_id);
+                    } else if message.starts_with("rate-limited:") {
+                        let secs = parse_rate_limit_retry_secs(&message).unwrap_or(0);
+                        let deadline = state.set_rate_limit_gate(secs);
+                        if state.requeue_rate_limited_observer_frame(&event_id) {
+                            warn!(
+                                event_id,
+                                "observer publish rate-limited via OK false — exact frame requeued; gate armed until ~{:.1}s",
+                                deadline
+                                    .checked_duration_since(tokio::time::Instant::now())
+                                    .unwrap_or_default()
+                                    .as_secs_f64()
+                            );
+                        }
+                    } else if state.record_terminal_observer_denial(&event_id, &message) {
+                        warn!(
+                            event_id,
+                            denial = message,
+                            denied_total = state.observer_terminal_denied,
+                            "observer publish terminally denied — frame retired without retry"
+                        );
+                    }
                     debug!("OK for event {event_id}: accepted={accepted} message={message}");
                 }
             }
@@ -2581,6 +3622,7 @@ async fn resubscribe_after_reconnect(
     }
 
     if state.observer_control_sub_active {
+        state.observer_control_subscribed_at = None;
         if state.check_rate_gate().is_some() {
             debug!("rate-gated: parking observer control resubscribe after reconnect");
             state.observer_resub_needed = true;
@@ -2588,10 +3630,15 @@ async fn resubscribe_after_reconnect(
             if !pacing_sleep(cmd_rx, &mut deferred_commands, REQ_PACING_INTERVAL).await {
                 return ResubscribeResult::Shutdown;
             }
-            if !send_observer_control_subscribe(ws, agent_pubkey_hex).await {
-                warn!("failed to resubscribe observer controls after reconnect");
-                retain_deferred_command_intent(state, &mut deferred_commands);
-                return ResubscribeResult::RetryConnection;
+            match send_observer_control_subscribe(ws, agent_pubkey_hex).await {
+                Some(subscribed_at) => {
+                    state.observer_control_subscribed_at = Some(subscribed_at);
+                }
+                None => {
+                    warn!("failed to resubscribe observer controls after reconnect");
+                    retain_deferred_command_intent(state, &mut deferred_commands);
+                    return ResubscribeResult::RetryConnection;
+                }
             }
             state.observer_resub_needed = false;
         }
@@ -2604,20 +3651,160 @@ async fn resubscribe_after_reconnect(
     }
 }
 
-/// Send a signed EVENT frame on the live socket. Returns `false` on send failure.
+/// Sink adapter that records whether `SinkExt::send` reached `start_send`.
 ///
-/// Best-effort at the socket level: a failure is logged but does not trigger
-/// reconnect — the next ping or read will detect the dead socket.
-async fn send_publish_event_frame(ws: &mut WsStream, event: &Event) -> bool {
+/// Before that boundary cancellation is clean. After it, the sink may retain
+/// buffered bytes even when the send future is dropped, so the connection must
+/// be retired before any later frame is written.
+struct StartSendTrackedSink<'a, S> {
+    inner: &'a mut S,
+    started: &'a AtomicBool,
+}
+
+impl<S> Sink<Message> for StartSendTrackedSink<'_, S>
+where
+    S: Sink<Message> + Unpin,
+{
+    type Error = S::Error;
+
+    fn poll_ready(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        let this = self.get_mut();
+        std::pin::Pin::new(&mut *this.inner).poll_ready(cx)
+    }
+
+    fn start_send(self: std::pin::Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
+        let this = self.get_mut();
+        // Conservatively taint as soon as `start_send` is invoked. Some sinks,
+        // including tungstenite write-failure paths, may retain the frame even
+        // when this call returns an error.
+        this.started.store(true, Ordering::SeqCst);
+        std::pin::Pin::new(&mut *this.inner).start_send(item)
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        let this = self.get_mut();
+        std::pin::Pin::new(&mut *this.inner).poll_flush(cx)
+    }
+
+    fn poll_close(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        let this = self.get_mut();
+        std::pin::Pin::new(&mut *this.inner).poll_close(cx)
+    }
+}
+
+/// Send a signed EVENT frame on a sink. Returns `false` on send failure.
+async fn send_publish_event_frame<S>(ws: &mut S, event: &Event) -> bool
+where
+    S: Sink<Message> + Unpin,
+    S::Error: std::fmt::Display,
+{
     let msg = json!(["EVENT", event]);
     if let Ok(text) = serde_json::to_string(&msg) {
-        if let Err(e) = ws_send_timeout(ws, Message::Text(text.into()), WS_SEND_TIMEOUT_SECS).await
+        match tokio::time::timeout(
+            Duration::from_secs(WS_SEND_TIMEOUT_SECS),
+            ws.send(Message::Text(text.into())),
+        )
+        .await
         {
-            warn!("failed to publish event: {e}");
-            return false;
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                warn!("failed to publish event: {e}");
+                return false;
+            }
+            Err(_) => {
+                warn!("failed to publish event: socket send timed out");
+                return false;
+            }
         }
     }
     true
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PublishEventFrameOutcome {
+    Sent,
+    Failed,
+    CancelledBeforeSend,
+    /// Cancellation won after `start_send`; buffered bytes may remain.
+    SocketTainted,
+    /// The send failed or timed out after `start_send`; buffered bytes may remain.
+    FailedSocketTainted,
+}
+
+impl PublishEventFrameOutcome {
+    fn socket_tainted(self) -> bool {
+        matches!(self, Self::SocketTainted | Self::FailedSocketTainted)
+    }
+}
+
+/// Write an EVENT only while its terminal confirmation receiver remains open.
+///
+/// The publisher drops that receiver at its end-to-end deadline. Selecting on
+/// `closed()` prevents an expired command from reaching a reconnected socket
+/// even when its FIFO cancellation command has not yet been processed. If
+/// cancellation wins after `start_send`, the caller must retire the socket:
+/// dropping `SinkExt::send` does not retract bytes already buffered by the sink.
+async fn send_publish_event_frame_until_cancelled<S>(
+    ws: &mut S,
+    event: &Event,
+    admission: Option<&mut oneshot::Sender<Result<(), String>>>,
+) -> PublishEventFrameOutcome
+where
+    S: Sink<Message> + Unpin,
+    S::Error: std::fmt::Display,
+{
+    let send_started = AtomicBool::new(false);
+    let sent = if let Some(admission) = admission {
+        if admission.is_closed() {
+            return PublishEventFrameOutcome::CancelledBeforeSend;
+        }
+        let selected = {
+            let mut tracked = StartSendTrackedSink {
+                inner: ws,
+                started: &send_started,
+            };
+            tokio::select! {
+                biased;
+                _ = admission.closed() => None,
+                sent = send_publish_event_frame(&mut tracked, event) => Some(sent),
+            }
+        };
+        match selected {
+            Some(sent) => sent,
+            None if send_started.load(Ordering::SeqCst) => {
+                return PublishEventFrameOutcome::SocketTainted;
+            }
+            None => return PublishEventFrameOutcome::CancelledBeforeSend,
+        }
+    } else {
+        let mut tracked = StartSendTrackedSink {
+            inner: ws,
+            started: &send_started,
+        };
+        send_publish_event_frame(&mut tracked, event).await
+    };
+    if sent {
+        PublishEventFrameOutcome::Sent
+    } else if send_started.load(Ordering::SeqCst) {
+        PublishEventFrameOutcome::FailedSocketTainted
+    } else {
+        PublishEventFrameOutcome::Failed
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GatedObserverDrainOutcome {
+    Sent(usize),
+    SocketTainted,
 }
 
 /// Drain parked observer telemetry frames once the rate-limit gate clears.
@@ -2630,32 +3817,77 @@ async fn drain_gated_observer_pending(
     ws: &mut WsStream,
     state: &mut BgState,
     budget: usize,
-) -> usize {
+) -> GatedObserverDrainOutcome {
     let mut sent = 0;
     while sent < budget {
+        state.prune_cancelled_terminal_admissions();
         if state.check_rate_gate().is_some() {
             break;
         }
-        let Some(event) = state.gated_observer_pending.pop_front() else {
+        let event = state
+            .gated_observer_priority_pending
+            .pop_front()
+            .or_else(|| state.gated_observer_pending.pop_front());
+        let Some(event) = event else {
             break;
         };
-        if !send_publish_event_frame(ws, &event).await {
-            // Socket may be dead — re-park at the front so the frame survives
-            // reconnect (the post-reconnect drain will retry it in order).
-            state.gated_observer_pending.push_front(event);
-            break;
+        let event_id = event.id.to_hex();
+        let is_priority = is_priority_observer_frame(&event);
+        let mut confirmation = is_priority
+            .then(|| state.observer_priority_confirmations.remove(&event_id))
+            .flatten();
+        let outcome =
+            send_publish_event_frame_until_cancelled(ws, &event, confirmation.as_mut()).await;
+        match outcome {
+            PublishEventFrameOutcome::CancelledBeforeSend => continue,
+            PublishEventFrameOutcome::SocketTainted => {
+                return GatedObserverDrainOutcome::SocketTainted;
+            }
+            PublishEventFrameOutcome::Failed | PublishEventFrameOutcome::FailedSocketTainted => {
+                if confirmation
+                    .as_ref()
+                    .is_some_and(oneshot::Sender::is_closed)
+                {
+                    if outcome.socket_tainted() {
+                        return GatedObserverDrainOutcome::SocketTainted;
+                    }
+                    continue;
+                }
+                // Socket may be dead — re-park at the front so the frame survives
+                // reconnect (the post-reconnect drain will retry it in order).
+                if is_priority {
+                    state.gated_observer_priority_pending.push_front(event);
+                    if let Some(confirmation) = confirmation {
+                        state
+                            .observer_priority_confirmations
+                            .insert(event_id, confirmation);
+                    }
+                } else {
+                    state.gated_observer_pending.push_front(event);
+                }
+                if outcome.socket_tainted() {
+                    return GatedObserverDrainOutcome::SocketTainted;
+                }
+                break;
+            }
+            PublishEventFrameOutcome::Sent => {
+                let admitted = state.track_observer_in_flight(event);
+                state.record_observer_confirmation(event_id, is_priority, confirmation, admitted);
+                sent += 1;
+            }
         }
-        state.track_observer_in_flight(event);
-        sent += 1;
     }
-    if state.gated_observer_pending.is_empty() && state.gated_observer_dropped > 0 {
+    if state.gated_observer_priority_pending.is_empty()
+        && state.gated_observer_pending.is_empty()
+        && state.gated_observer_dropped > 0
+    {
         warn!(
             observer_frames_dropped = state.gated_observer_dropped,
             "observer frames lost to gated-queue overflow"
         );
         state.gated_observer_dropped = 0;
     }
-    sent
+    GatedObserverDrainOutcome::Sent(sent)
 }
 
 /// Drain `rate_limited_pending` channels whose retry deadline has passed.
@@ -2813,7 +4045,10 @@ async fn drain_commands(
         if send_failed {
             match cmd {
                 RelayCommand::Shutdown => {
-                    let _ = ws_send_timeout(ws, Message::Close(None), WS_SEND_TIMEOUT_SECS).await;
+                    // The failed send may have left bytes buffered after
+                    // `start_send`. Do not write even a Close frame through
+                    // this socket; returning drops or replaces it without a
+                    // later flush.
                     return ReconnectOutcome::Shutdown;
                 }
                 RelayCommand::Reconnect => {}
@@ -2902,6 +4137,8 @@ async fn try_autonomous_reconnect(
     auth_tag: Option<&nostr::Tag>,
 ) -> ReconnectOutcome {
     state.requeue_observer_in_flight();
+    state.observer_control_subscribed_at = None;
+    state.channel_subscribed_at.clear();
     // 5 attempts, up to 16s base backoff. Shares delay values with the
     // initial-connect retry in `HarnessRelay::connect()` (STARTUP_CONNECT_BACKOFFS) —
     // see its doc comment for how the two loops consume the array differently.
@@ -2949,7 +4186,23 @@ async fn try_autonomous_reconnect(
                     match resubscribe_after_reconnect(ws, cmd_rx, state, agent_pubkey_hex, true)
                         .await
                     {
-                        ResubscribeResult::Ok => return ReconnectOutcome::Ok,
+                        ResubscribeResult::Ok => {
+                            // Commands may arrive after the resubscribe helper's
+                            // own drain. Finish that window here, and never return
+                            // a socket whose final send failed or was tainted.
+                            match drain_post_reconnect(ws, cmd_rx, state, agent_pubkey_hex).await {
+                                ReconnectOutcome::Ok => return ReconnectOutcome::Ok,
+                                ReconnectOutcome::Shutdown => {
+                                    return ReconnectOutcome::Shutdown;
+                                }
+                                ReconnectOutcome::Failed => {
+                                    warn!(
+                                        "post-reconnect command drain tainted or lost the autonomous socket — treating as failed attempt"
+                                    );
+                                    // Fall through to backoff sleep and retry.
+                                }
+                            }
+                        }
                         ResubscribeResult::Shutdown => return ReconnectOutcome::Shutdown,
                         ResubscribeResult::RetryConnection => {
                             warn!("resubscribe failed after autonomous reconnect — treating as failed attempt");
@@ -3032,6 +4285,8 @@ async fn wait_for_reconnect(
     auth_tag: Option<&nostr::Tag>,
 ) -> ReconnectOutcome {
     state.requeue_observer_in_flight();
+    state.observer_control_subscribed_at = None;
+    state.channel_subscribed_at.clear();
     if !skip_drain {
         // Drain commands until we get Reconnect (or Shutdown).
         // Other commands update state so reconnect reflects latest intent.
@@ -3086,8 +4341,21 @@ async fn wait_for_reconnect(
                     {
                         ResubscribeResult::Ok => {
                             // Drain any commands that arrived during do_connect() +
-                            // resubscribe (which don't poll cmd_rx).
-                            return drain_post_reconnect(ws, cmd_rx, state, agent_pubkey_hex).await;
+                            // resubscribe (which don't poll cmd_rx). A failed
+                            // drain may have tainted this replacement socket, so
+                            // retry instead of returning it to the main loop.
+                            match drain_post_reconnect(ws, cmd_rx, state, agent_pubkey_hex).await {
+                                ReconnectOutcome::Ok => return ReconnectOutcome::Ok,
+                                ReconnectOutcome::Shutdown => {
+                                    return ReconnectOutcome::Shutdown;
+                                }
+                                ReconnectOutcome::Failed => {
+                                    warn!(
+                                        "post-reconnect command drain tainted or lost the replacement socket — retrying"
+                                    );
+                                    // Fall through to the backoff sleep below.
+                                }
+                            }
                         }
                         ResubscribeResult::Shutdown => return ReconnectOutcome::Shutdown,
                         ResubscribeResult::RetryConnection => {
@@ -3159,12 +4427,15 @@ async fn wait_for_reconnect(
 /// Returns `true` if the REQ was successfully written to the WebSocket.
 async fn send_subscribe(
     ws: &mut WsStream,
-    _state: &BgState,
+    state: &mut BgState,
     channel_id: Uuid,
     agent_pubkey_hex: &str,
     since: Option<u64>,
     filter: &ChannelFilter,
 ) -> bool {
+    // Clear before attempting the write so a failed or blocked replacement REQ
+    // can never inherit authority from the prior socket/subscription instance.
+    state.channel_subscribed_at.remove(&channel_id);
     let sub_id = channel_sub_id(channel_id);
 
     let mut req_filter = serde_json::Map::new();
@@ -3199,6 +4470,9 @@ async fn send_subscribe(
         Ok(text) => {
             match ws_send_timeout(ws, Message::Text(text.into()), WS_SEND_TIMEOUT_SECS).await {
                 Ok(()) => {
+                    state
+                        .channel_subscribed_at
+                        .insert(channel_id, unix_now_secs());
                     debug!(
                         "subscribed to channel {channel_id}{}",
                         if since.is_some() {
@@ -3270,17 +4544,18 @@ async fn send_membership_subscribe(
 }
 
 /// Send a NIP-01 REQ for owner-to-agent observer control frames.
-async fn send_observer_control_subscribe(ws: &mut WsStream, agent_pubkey_hex: &str) -> bool {
+///
+/// Returns the second after the REQ is written successfully. Callers retain it
+/// as the strict admission boundary for frames attributed to this subscription.
+async fn send_observer_control_subscribe(ws: &mut WsStream, agent_pubkey_hex: &str) -> Option<u64> {
+    let replay_since = unix_now_secs();
     let req = json!([
         "REQ",
         OBSERVER_CONTROL_SUB_ID,
         {
             "kinds": [KIND_AGENT_OBSERVER_FRAME],
             "#p": [agent_pubkey_hex],
-            "since": std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
+            "since": replay_since,
         }
     ]);
 
@@ -3289,17 +4564,17 @@ async fn send_observer_control_subscribe(ws: &mut WsStream, agent_pubkey_hex: &s
             match ws_send_timeout(ws, Message::Text(text.into()), WS_SEND_TIMEOUT_SECS).await {
                 Ok(()) => {
                     debug!("subscribed to observer control frames");
-                    true
+                    Some(unix_now_secs())
                 }
                 Err(e) => {
                     warn!("failed to send observer control REQ: {e}");
-                    false
+                    None
                 }
             }
         }
         Err(e) => {
             warn!("failed to serialize observer control REQ: {e}");
-            false
+            None
         }
     }
 }
@@ -3414,16 +4689,82 @@ async fn dns_flat_sleep(
     }
 }
 
-/// Extract a channel UUID from the h tag of a Nostr event.
+/// Extract the one unambiguous channel UUID from the h tag of a Nostr event.
+///
+/// Channel-scoped events must carry exactly one `h` tag. Accepting the first of
+/// multiple values would let a validly-signed event match one relay filter while
+/// being attributed to another channel locally.
 fn extract_h_tag_uuid(event: &nostr::Event) -> Option<Uuid> {
-    event.tags.iter().find_map(|tag| {
+    let mut h_tags = event.tags.iter().filter_map(|tag| {
         let tag_vec = tag.as_slice();
         if tag_vec.len() >= 2 && tag_vec[0] == "h" {
-            tag_vec[1].parse::<Uuid>().ok()
+            Some(tag_vec[1].as_str())
         } else {
             None
         }
+    });
+    let channel_id = h_tags.next()?.parse::<Uuid>().ok()?;
+    if h_tags.next().is_some() {
+        return None;
+    }
+    Some(channel_id)
+}
+
+fn event_has_tag_value(event: &nostr::Event, tag_name: &str, expected: &str) -> bool {
+    event.tags.iter().any(|tag| {
+        let tag_vec = tag.as_slice();
+        tag_vec.first().map(String::as_str) == Some(tag_name)
+            && tag_vec.get(1).map(String::as_str) == Some(expected)
     })
+}
+
+fn is_priority_observer_frame(event: &Event) -> bool {
+    event.kind.as_u16() as u32 == KIND_AGENT_OBSERVER_FRAME
+        && event_has_tag_value(
+            event,
+            OBSERVER_PRIORITY_TAG,
+            OBSERVER_CONTROL_RESULT_PRIORITY,
+        )
+}
+
+fn event_has_single_tag_value(event: &nostr::Event, tag_name: &str, expected: &str) -> bool {
+    let mut values = event.tags.iter().filter_map(|tag| {
+        let tag_vec = tag.as_slice();
+        (tag_vec.first().map(String::as_str) == Some(tag_name))
+            .then(|| tag_vec.get(1).map(String::as_str))
+            .flatten()
+    });
+    values.next() == Some(expected) && values.next().is_none()
+}
+
+fn is_authorized_observer_control(
+    event: &nostr::Event,
+    agent_pubkey_hex: &str,
+    authorized_owner_pubkey: Option<&str>,
+) -> bool {
+    let Some(authorized_owner_pubkey) = authorized_owner_pubkey else {
+        return false;
+    };
+    event.kind.as_u16() as u32 == KIND_AGENT_OBSERVER_FRAME
+        && event.pubkey.to_hex() == authorized_owner_pubkey
+        && event_has_single_tag_value(event, "p", agent_pubkey_hex)
+        && event_has_single_tag_value(event, OBSERVER_AGENT_TAG, agent_pubkey_hex)
+        && event_has_single_tag_value(event, OBSERVER_FRAME_TAG, OBSERVER_FRAME_CONTROL)
+        && content_looks_like_nip44(&event.content)
+}
+
+fn is_privileged_channel_control(
+    event: &nostr::Event,
+    agent_pubkey_hex: &str,
+    authorized_owner_pubkey: Option<&str>,
+) -> bool {
+    let Some(authorized_owner_pubkey) = authorized_owner_pubkey else {
+        return false;
+    };
+    event.pubkey.to_hex() == authorized_owner_pubkey
+        && event.kind.as_u16() as u32 == KIND_STREAM_MESSAGE
+        && matches!(event.content.trim(), "!shutdown" | "!cancel" | "!rotate")
+        && event_has_tag_value(event, "p", agent_pubkey_hex)
 }
 
 /// Build and send a NIP-42 AUTH response event.
@@ -4337,6 +5678,1147 @@ mod tests {
             .expect("signing should succeed")
     }
 
+    fn make_test_membership_event(
+        keys: &nostr::Keys,
+        channel_id: Uuid,
+        agent_pubkey_hex: &str,
+        created_at_secs: u64,
+    ) -> Event {
+        let channel_id = channel_id.to_string();
+        let tags = [
+            Tag::parse(["h", channel_id.as_str()]).expect("valid h tag"),
+            Tag::parse(["p", agent_pubkey_hex]).expect("valid p tag"),
+        ];
+        EventBuilder::new(
+            Kind::Custom(KIND_MEMBER_ADDED_NOTIFICATION as u16),
+            "membership added",
+        )
+        .tags(tags)
+        .custom_created_at(nostr::Timestamp::from(created_at_secs))
+        .sign_with_keys(keys)
+        .expect("membership event signing should succeed")
+    }
+
+    fn make_test_channel_event(
+        keys: &nostr::Keys,
+        channel_id: Uuid,
+        kind: u32,
+        content: &str,
+        mentioned_pubkey: Option<&str>,
+        created_at_secs: u64,
+    ) -> Event {
+        let channel_id = channel_id.to_string();
+        let mut tags = vec![Tag::parse(["h", channel_id.as_str()]).expect("valid h tag")];
+        if let Some(pubkey) = mentioned_pubkey {
+            tags.push(Tag::parse(["p", pubkey]).expect("valid p tag"));
+        }
+        EventBuilder::new(Kind::Custom(kind as u16), content)
+            .tags(tags)
+            .custom_created_at(nostr::Timestamp::from(created_at_secs))
+            .sign_with_keys(keys)
+            .expect("channel event signing should succeed")
+    }
+
+    #[tokio::test]
+    async fn membership_authentication_and_targeting_precede_dedup_and_forwarding() {
+        let (mut ws, _server) = test_ws_pair().await;
+        let (event_tx, mut event_rx) = mpsc::channel(4);
+        let (observer_control_tx, _observer_control_rx) = mpsc::channel(1);
+        let mut state = BgState::new();
+        let channel_id = Uuid::new_v4();
+        let agent_keys = Keys::generate();
+        let relay_keys = Keys::generate();
+        let agent_pubkey_hex = agent_keys.public_key().to_hex();
+        let valid =
+            make_test_membership_event(&relay_keys, channel_id, &agent_pubkey_hex, 1_700_000);
+        let claimed_id = valid.id.to_hex();
+
+        let unsolicited_frame = Message::Text(
+            serde_json::to_string(&json!(["EVENT", MEMBERSHIP_NOTIF_SUB_ID, valid.clone()]))
+                .expect("serialize unsolicited membership frame")
+                .into(),
+        );
+        assert!(
+            handle_ws_message(
+                unsolicited_frame,
+                &mut ws,
+                &event_tx,
+                &observer_control_tx,
+                &mut state,
+                &agent_keys,
+                "ws://localhost:3000",
+                &agent_pubkey_hex,
+                None,
+            )
+            .await
+        );
+        assert!(
+            !state.seen_ids.contains(&claimed_id),
+            "an inactive membership subscription must not admit or dedup events"
+        );
+        assert!(event_rx.try_recv().is_err());
+
+        state.membership_sub_active = true;
+
+        let mut tampered_json = serde_json::to_value(&valid).expect("serialize membership event");
+        tampered_json["content"] = Value::String("forged membership".to_string());
+        let tampered: Event =
+            serde_json::from_value(tampered_json).expect("parse forged membership event");
+        assert_eq!(tampered.id.to_hex(), claimed_id);
+        assert!(buzz_core::verify_event(&tampered).is_err());
+        let forged_frame = Message::Text(
+            serde_json::to_string(&json!(["EVENT", MEMBERSHIP_NOTIF_SUB_ID, tampered]))
+                .expect("serialize forged membership frame")
+                .into(),
+        );
+        assert!(
+            handle_ws_message(
+                forged_frame,
+                &mut ws,
+                &event_tx,
+                &observer_control_tx,
+                &mut state,
+                &agent_keys,
+                "ws://localhost:3000",
+                &agent_pubkey_hex,
+                None,
+            )
+            .await
+        );
+        assert!(
+            !state.seen_ids.contains(&claimed_id),
+            "a forged membership event must not poison dedup"
+        );
+        assert!(event_rx.try_recv().is_err());
+
+        let wrong_target =
+            make_test_membership_event(&relay_keys, channel_id, "wrong-agent", 1_700_001);
+        let wrong_target_id = wrong_target.id.to_hex();
+        let wrong_target_frame = Message::Text(
+            serde_json::to_string(&json!(["EVENT", MEMBERSHIP_NOTIF_SUB_ID, wrong_target]))
+                .expect("serialize wrong-target membership frame")
+                .into(),
+        );
+        assert!(
+            handle_ws_message(
+                wrong_target_frame,
+                &mut ws,
+                &event_tx,
+                &observer_control_tx,
+                &mut state,
+                &agent_keys,
+                "ws://localhost:3000",
+                &agent_pubkey_hex,
+                None,
+            )
+            .await
+        );
+        assert!(
+            !state.seen_ids.contains(&wrong_target_id),
+            "a membership event targeting another agent must not poison dedup"
+        );
+        assert!(event_rx.try_recv().is_err());
+
+        let valid_frame = Message::Text(
+            serde_json::to_string(&json!(["EVENT", MEMBERSHIP_NOTIF_SUB_ID, valid]))
+                .expect("serialize valid membership frame")
+                .into(),
+        );
+        assert!(
+            handle_ws_message(
+                valid_frame,
+                &mut ws,
+                &event_tx,
+                &observer_control_tx,
+                &mut state,
+                &agent_keys,
+                "ws://localhost:3000",
+                &agent_pubkey_hex,
+                None,
+            )
+            .await
+        );
+        let forwarded = event_rx
+            .try_recv()
+            .expect("authentic same-ID membership event remains admissible")
+            .expect("membership event payload");
+        assert_eq!(forwarded.channel_id, channel_id);
+        assert_eq!(forwarded.event.id.to_hex(), claimed_id);
+        assert!(state.seen_ids.contains(&claimed_id));
+    }
+
+    #[tokio::test]
+    async fn regular_event_verification_precedes_dedup_and_forwarding() {
+        let (mut ws, _server) = test_ws_pair().await;
+        let (event_tx, mut event_rx) = mpsc::channel(2);
+        let (observer_control_tx, _observer_control_rx) = mpsc::channel(1);
+        let mut state = BgState::new();
+        let channel_id = Uuid::new_v4();
+        let keys = Keys::generate();
+        seed_test_subscription(&mut state, channel_id);
+        let valid = make_test_channel_event(&keys, channel_id, 9, "test", None, 1_700_000);
+        let claimed_id = valid.id.to_hex();
+
+        // Retain the authentic event's claimed ID and signature while changing
+        // its content, making both the ID binding and signature invalid.
+        let mut tampered_json = serde_json::to_value(&valid).expect("serialize event");
+        tampered_json["content"] = Value::String("tampered".to_string());
+        let tampered: Event = serde_json::from_value(tampered_json).expect("parse tampered event");
+        assert_eq!(tampered.id.to_hex(), claimed_id);
+        assert!(buzz_core::verify_event(&tampered).is_err());
+
+        let invalid_frame = Message::Text(
+            serde_json::to_string(&json!(["EVENT", channel_sub_id(channel_id), tampered]))
+                .expect("serialize invalid frame")
+                .into(),
+        );
+        assert!(
+            handle_ws_message(
+                invalid_frame,
+                &mut ws,
+                &event_tx,
+                &observer_control_tx,
+                &mut state,
+                &keys,
+                "ws://localhost:3000",
+                &keys.public_key().to_hex(),
+                None,
+            )
+            .await
+        );
+        assert!(
+            !state.seen_ids.contains(&claimed_id),
+            "invalid event must not poison dedup"
+        );
+        assert!(
+            event_rx.try_recv().is_err(),
+            "invalid event must not be forwarded"
+        );
+
+        let valid_frame = Message::Text(
+            serde_json::to_string(&json!(["EVENT", channel_sub_id(channel_id), valid]))
+                .expect("serialize valid frame")
+                .into(),
+        );
+        assert!(
+            handle_ws_message(
+                valid_frame,
+                &mut ws,
+                &event_tx,
+                &observer_control_tx,
+                &mut state,
+                &keys,
+                "ws://localhost:3000",
+                &keys.public_key().to_hex(),
+                None,
+            )
+            .await
+        );
+        let forwarded = event_rx
+            .try_recv()
+            .expect("valid same-ID event remains admissible")
+            .expect("regular event payload");
+        assert_eq!(forwarded.event.id.to_hex(), claimed_id);
+        assert!(state.seen_ids.contains(&claimed_id));
+    }
+
+    #[tokio::test]
+    async fn regular_events_must_match_active_subscription_and_local_filter() {
+        let (mut ws, _server) = test_ws_pair().await;
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let (observer_control_tx, _observer_control_rx) = mpsc::channel(1);
+        let mut state = BgState::new();
+        let channel_a = Uuid::new_v4();
+        let channel_b = Uuid::new_v4();
+        let channel_inactive = Uuid::new_v4();
+        let agent_keys = Keys::generate();
+        let sender_keys = Keys::generate();
+        let agent_pubkey_hex = agent_keys.public_key().to_hex();
+        let mention_filter = ChannelFilter {
+            kinds: Some(vec![9]),
+            require_mention: true,
+        };
+        seed_test_subscription_with_filter(&mut state, channel_a, mention_filter.clone());
+        seed_test_subscription_with_filter(&mut state, channel_b, mention_filter);
+
+        let routed = make_test_channel_event(
+            &sender_keys,
+            channel_a,
+            9,
+            "routed",
+            Some(&agent_pubkey_hex),
+            1_700_000,
+        );
+        let routed_id = routed.id.to_hex();
+        let misrouted_frame = Message::Text(
+            serde_json::to_string(&json!(["EVENT", channel_sub_id(channel_b), routed.clone()]))
+                .expect("serialize misrouted channel frame")
+                .into(),
+        );
+        assert!(
+            handle_ws_message(
+                misrouted_frame,
+                &mut ws,
+                &event_tx,
+                &observer_control_tx,
+                &mut state,
+                &agent_keys,
+                "ws://localhost:3000",
+                &agent_pubkey_hex,
+                None,
+            )
+            .await
+        );
+        assert!(
+            !state.seen_ids.contains(&routed_id),
+            "an event delivered under the wrong active channel must not poison dedup"
+        );
+        assert!(!state.last_seen.contains_key(&channel_b));
+        assert!(event_rx.try_recv().is_err());
+
+        let correct_frame = Message::Text(
+            serde_json::to_string(&json!(["EVENT", channel_sub_id(channel_a), routed]))
+                .expect("serialize correctly routed channel frame")
+                .into(),
+        );
+        assert!(
+            handle_ws_message(
+                correct_frame,
+                &mut ws,
+                &event_tx,
+                &observer_control_tx,
+                &mut state,
+                &agent_keys,
+                "ws://localhost:3000",
+                &agent_pubkey_hex,
+                None,
+            )
+            .await
+        );
+        let forwarded = event_rx
+            .try_recv()
+            .expect("correctly routed same-ID event remains admissible")
+            .expect("channel event payload");
+        assert_eq!(forwarded.channel_id, channel_a);
+        assert_eq!(forwarded.event.id.to_hex(), routed_id);
+
+        let inactive = make_test_channel_event(
+            &sender_keys,
+            channel_inactive,
+            9,
+            "inactive",
+            Some(&agent_pubkey_hex),
+            1_700_001,
+        );
+        let inactive_id = inactive.id.to_hex();
+        let inactive_frame = Message::Text(
+            serde_json::to_string(&json!([
+                "EVENT",
+                channel_sub_id(channel_inactive),
+                inactive.clone()
+            ]))
+            .expect("serialize inactive channel frame")
+            .into(),
+        );
+        assert!(
+            handle_ws_message(
+                inactive_frame,
+                &mut ws,
+                &event_tx,
+                &observer_control_tx,
+                &mut state,
+                &agent_keys,
+                "ws://localhost:3000",
+                &agent_pubkey_hex,
+                None,
+            )
+            .await
+        );
+        assert!(
+            !state.seen_ids.contains(&inactive_id),
+            "an inactive subscription must not poison dedup"
+        );
+        assert!(event_rx.try_recv().is_err());
+
+        seed_test_subscription_with_filter(
+            &mut state,
+            channel_inactive,
+            ChannelFilter {
+                kinds: Some(vec![9]),
+                require_mention: true,
+            },
+        );
+        let active_frame = Message::Text(
+            serde_json::to_string(&json!([
+                "EVENT",
+                channel_sub_id(channel_inactive),
+                inactive
+            ]))
+            .expect("serialize newly active channel frame")
+            .into(),
+        );
+        assert!(
+            handle_ws_message(
+                active_frame,
+                &mut ws,
+                &event_tx,
+                &observer_control_tx,
+                &mut state,
+                &agent_keys,
+                "ws://localhost:3000",
+                &agent_pubkey_hex,
+                None,
+            )
+            .await
+        );
+        assert_eq!(
+            event_rx
+                .try_recv()
+                .expect("event is admissible after local subscription activates")
+                .expect("channel event payload")
+                .event
+                .id
+                .to_hex(),
+            inactive_id
+        );
+
+        let wrong_kind = make_test_channel_event(
+            &sender_keys,
+            channel_a,
+            1,
+            "wrong kind",
+            Some(&agent_pubkey_hex),
+            1_700_002,
+        );
+        let wrong_kind_id = wrong_kind.id.to_hex();
+        let wrong_kind_frame = Message::Text(
+            serde_json::to_string(&json!(["EVENT", channel_sub_id(channel_a), wrong_kind]))
+                .expect("serialize wrong-kind channel frame")
+                .into(),
+        );
+        assert!(
+            handle_ws_message(
+                wrong_kind_frame,
+                &mut ws,
+                &event_tx,
+                &observer_control_tx,
+                &mut state,
+                &agent_keys,
+                "ws://localhost:3000",
+                &agent_pubkey_hex,
+                None,
+            )
+            .await
+        );
+        assert!(!state.seen_ids.contains(&wrong_kind_id));
+        assert!(event_rx.try_recv().is_err());
+
+        let missing_mention =
+            make_test_channel_event(&sender_keys, channel_a, 9, "no mention", None, 1_700_003);
+        let missing_mention_id = missing_mention.id.to_hex();
+        let missing_mention_frame = Message::Text(
+            serde_json::to_string(&json!([
+                "EVENT",
+                channel_sub_id(channel_a),
+                missing_mention
+            ]))
+            .expect("serialize missing-mention channel frame")
+            .into(),
+        );
+        assert!(
+            handle_ws_message(
+                missing_mention_frame,
+                &mut ws,
+                &event_tx,
+                &observer_control_tx,
+                &mut state,
+                &agent_keys,
+                "ws://localhost:3000",
+                &agent_pubkey_hex,
+                None,
+            )
+            .await
+        );
+        assert!(!state.seen_ids.contains(&missing_mention_id));
+        assert!(event_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn future_ordinary_event_cannot_poison_reconnect_watermark() {
+        let (mut ws, _server) = test_ws_pair().await;
+        let (event_tx, mut event_rx) = mpsc::channel(2);
+        let (observer_control_tx, _observer_control_rx) = mpsc::channel(1);
+        let mut state = BgState::new();
+        let channel_id = Uuid::new_v4();
+        let agent_keys = Keys::generate();
+        let sender_keys = Keys::generate();
+        let agent_pubkey_hex = agent_keys.public_key().to_hex();
+        seed_test_subscription(&mut state, channel_id);
+        let now = unix_now_secs();
+        let future =
+            make_test_channel_event(&sender_keys, channel_id, 9, "future", None, now + 3_600);
+        let future_id = future.id.to_hex();
+        let future_frame = Message::Text(
+            serde_json::to_string(&json!(["EVENT", channel_sub_id(channel_id), future]))
+                .expect("serialize future ordinary event")
+                .into(),
+        );
+
+        assert!(
+            handle_ws_message(
+                future_frame,
+                &mut ws,
+                &event_tx,
+                &observer_control_tx,
+                &mut state,
+                &agent_keys,
+                "ws://localhost:3000",
+                &agent_pubkey_hex,
+                None,
+            )
+            .await
+        );
+        assert!(
+            !state.seen_ids.contains(&future_id),
+            "future event must not reserve its ID"
+        );
+        assert!(
+            !state.last_seen.contains_key(&channel_id),
+            "future event must not advance reconnect watermark"
+        );
+        assert!(event_rx.try_recv().is_err());
+
+        let current = make_test_channel_event(&sender_keys, channel_id, 9, "current", None, now);
+        let current_id = current.id.to_hex();
+        let current_frame = Message::Text(
+            serde_json::to_string(&json!(["EVENT", channel_sub_id(channel_id), current]))
+                .expect("serialize current ordinary event")
+                .into(),
+        );
+        assert!(
+            handle_ws_message(
+                current_frame,
+                &mut ws,
+                &event_tx,
+                &observer_control_tx,
+                &mut state,
+                &agent_keys,
+                "ws://localhost:3000",
+                &agent_pubkey_hex,
+                None,
+            )
+            .await
+        );
+        let forwarded = event_rx
+            .try_recv()
+            .expect("current event should remain deliverable")
+            .expect("ordinary event payload");
+        assert_eq!(forwarded.event.id.to_hex(), current_id);
+        assert_eq!(state.last_seen.get(&channel_id), Some(&now));
+    }
+
+    #[tokio::test]
+    async fn future_membership_event_cannot_poison_replay_state() {
+        let (mut ws, _server) = test_ws_pair().await;
+        let (event_tx, mut event_rx) = mpsc::channel(2);
+        let (observer_control_tx, _observer_control_rx) = mpsc::channel(1);
+        let mut state = BgState::new();
+        state.membership_sub_active = true;
+        let channel_id = Uuid::new_v4();
+        let agent_keys = Keys::generate();
+        let relay_keys = Keys::generate();
+        let agent_pubkey_hex = agent_keys.public_key().to_hex();
+        let now = unix_now_secs();
+        let future =
+            make_test_membership_event(&relay_keys, channel_id, &agent_pubkey_hex, now + 3_600);
+        let future_id = future.id.to_hex();
+        let future_frame = Message::Text(
+            serde_json::to_string(&json!(["EVENT", MEMBERSHIP_NOTIF_SUB_ID, future]))
+                .expect("serialize future membership event")
+                .into(),
+        );
+
+        assert!(
+            handle_ws_message(
+                future_frame,
+                &mut ws,
+                &event_tx,
+                &observer_control_tx,
+                &mut state,
+                &agent_keys,
+                "ws://localhost:3000",
+                &agent_pubkey_hex,
+                None,
+            )
+            .await
+        );
+        assert!(
+            !state.seen_ids.contains(&future_id),
+            "future membership event must not reserve its ID"
+        );
+        assert_eq!(
+            state.membership_last_seen, None,
+            "future membership event must not advance replay state"
+        );
+        assert!(event_rx.try_recv().is_err());
+
+        let current = make_test_membership_event(&relay_keys, channel_id, &agent_pubkey_hex, now);
+        let current_id = current.id.to_hex();
+        let current_frame = Message::Text(
+            serde_json::to_string(&json!(["EVENT", MEMBERSHIP_NOTIF_SUB_ID, current]))
+                .expect("serialize current membership event")
+                .into(),
+        );
+        assert!(
+            handle_ws_message(
+                current_frame,
+                &mut ws,
+                &event_tx,
+                &observer_control_tx,
+                &mut state,
+                &agent_keys,
+                "ws://localhost:3000",
+                &agent_pubkey_hex,
+                None,
+            )
+            .await
+        );
+        let forwarded = event_rx
+            .try_recv()
+            .expect("current membership event should remain deliverable")
+            .expect("membership event payload");
+        assert_eq!(forwarded.event.id.to_hex(), current_id);
+        assert_eq!(state.membership_last_seen, Some(now));
+    }
+
+    #[tokio::test]
+    async fn stale_privileged_channel_control_is_rejected_before_dedup() {
+        let (mut ws, _server) = test_ws_pair().await;
+        let (event_tx, mut event_rx) = mpsc::channel(2);
+        let (observer_control_tx, _observer_control_rx) = mpsc::channel(1);
+        let mut state = BgState::new();
+        let channel_id = Uuid::new_v4();
+        let agent_keys = Keys::generate();
+        let owner_keys = Keys::generate();
+        let agent_pubkey_hex = agent_keys.public_key().to_hex();
+        state.authorized_owner_pubkey = Some(owner_keys.public_key().to_hex());
+        seed_test_subscription_with_filter(
+            &mut state,
+            channel_id,
+            ChannelFilter {
+                kinds: Some(vec![9]),
+                require_mention: true,
+            },
+        );
+        let stale = make_test_channel_event(
+            &owner_keys,
+            channel_id,
+            9,
+            "!rotate",
+            Some(&agent_pubkey_hex),
+            unix_now_secs().saturating_sub(301),
+        );
+        let stale_id = stale.id.to_hex();
+        let stale_frame = Message::Text(
+            serde_json::to_string(&json!(["EVENT", channel_sub_id(channel_id), stale]))
+                .expect("serialize stale privileged control")
+                .into(),
+        );
+
+        assert!(
+            handle_ws_message(
+                stale_frame,
+                &mut ws,
+                &event_tx,
+                &observer_control_tx,
+                &mut state,
+                &agent_keys,
+                "ws://localhost:3000",
+                &agent_pubkey_hex,
+                None,
+            )
+            .await
+        );
+        assert!(
+            state.seen_ids.contains(&stale_id),
+            "stale owner control should follow ordinary-message dedup"
+        );
+        let forwarded = event_rx
+            .try_recv()
+            .expect("stale owner control should remain an ordinary message")
+            .expect("ordinary event payload");
+        assert_eq!(forwarded.event.id.to_hex(), stale_id);
+        assert!(
+            !forwarded.privileged_control_admitted,
+            "stale owner control must never carry relay execution authority"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_owner_command_shape_does_not_consume_privileged_replay_capacity() {
+        let (mut ws, _server) = test_ws_pair().await;
+        let (event_tx, mut event_rx) = mpsc::channel(2);
+        let (observer_control_tx, _observer_control_rx) = mpsc::channel(1);
+        let mut state = BgState::new();
+        let channel_id = Uuid::new_v4();
+        let agent_keys = Keys::generate();
+        let owner_keys = Keys::generate();
+        let non_owner_keys = Keys::generate();
+        let agent_pubkey_hex = agent_keys.public_key().to_hex();
+        let now = unix_now_secs();
+        state.authorized_owner_pubkey = Some(owner_keys.public_key().to_hex());
+        state.privileged_control_start_boundary = now.saturating_sub(1);
+        state.privileged_control_replay = PrivilegedControlReplay::new(1);
+        assert_eq!(
+            state.privileged_control_replay.admit(
+                "owner-capacity".into(),
+                now.saturating_add(300),
+                now
+            ),
+            PrivilegedControlAdmission::Admitted
+        );
+        seed_test_subscription_with_filter(
+            &mut state,
+            channel_id,
+            ChannelFilter {
+                kinds: Some(vec![9]),
+                require_mention: true,
+            },
+        );
+
+        let ordinary = make_test_channel_event(
+            &non_owner_keys,
+            channel_id,
+            9,
+            "!shutdown",
+            Some(&agent_pubkey_hex),
+            now,
+        );
+        let ordinary_id = ordinary.id.to_hex();
+        let frame = Message::Text(
+            serde_json::to_string(&json!(["EVENT", channel_sub_id(channel_id), ordinary]))
+                .expect("serialize non-owner command-shaped event")
+                .into(),
+        );
+
+        assert!(
+            handle_ws_message(
+                frame,
+                &mut ws,
+                &event_tx,
+                &observer_control_tx,
+                &mut state,
+                &agent_keys,
+                "ws://localhost:3000",
+                &agent_pubkey_hex,
+                None,
+            )
+            .await
+        );
+        let forwarded = event_rx
+            .try_recv()
+            .expect("non-owner command shape follows ordinary-message admission")
+            .expect("ordinary event payload");
+        assert_eq!(forwarded.event.id.to_hex(), ordinary_id);
+        assert!(
+            !forwarded.privileged_control_admitted,
+            "non-owner command shape must not carry relay execution authority"
+        );
+        assert_eq!(
+            state.privileged_control_replay.expires_at.len(),
+            1,
+            "non-owner traffic must not reserve privileged replay capacity"
+        );
+    }
+
+    #[tokio::test]
+    async fn owner_controls_require_live_channel_req_and_post_boundary_retry() {
+        let (mut ws, _server) = test_ws_pair().await;
+        let (event_tx, mut event_rx) = mpsc::channel(4);
+        let (observer_control_tx, _observer_control_rx) = mpsc::channel(1);
+        let mut state = BgState::new();
+        let channel_id = Uuid::new_v4();
+        let agent_keys = Keys::generate();
+        let owner_keys = Keys::generate();
+        let agent_pubkey_hex = agent_keys.public_key().to_hex();
+        let now = unix_now_secs();
+        state.authorized_owner_pubkey = Some(owner_keys.public_key().to_hex());
+        state.privileged_control_start_boundary = now.saturating_sub(10);
+        seed_test_subscription_with_filter(
+            &mut state,
+            channel_id,
+            ChannelFilter {
+                kinds: Some(vec![9]),
+                require_mention: true,
+            },
+        );
+
+        for (command, boundary, expected_admitted) in [
+            ("!shutdown", None, false),
+            ("!cancel", Some(now), false),
+            ("!rotate", Some(now.saturating_sub(1)), true),
+        ] {
+            match boundary {
+                Some(boundary) => {
+                    state.channel_subscribed_at.insert(channel_id, boundary);
+                }
+                None => {
+                    state.channel_subscribed_at.remove(&channel_id);
+                }
+            }
+            let event = make_test_channel_event(
+                &owner_keys,
+                channel_id,
+                KIND_STREAM_MESSAGE,
+                command,
+                Some(&agent_pubkey_hex),
+                now,
+            );
+            let frame = Message::Text(
+                serde_json::to_string(&json!(["EVENT", channel_sub_id(channel_id), event]))
+                    .expect("serialize owner control")
+                    .into(),
+            );
+
+            assert!(
+                handle_ws_message(
+                    frame,
+                    &mut ws,
+                    &event_tx,
+                    &observer_control_tx,
+                    &mut state,
+                    &agent_keys,
+                    "ws://localhost:3000",
+                    &agent_pubkey_hex,
+                    None,
+                )
+                .await
+            );
+            let forwarded = event_rx
+                .try_recv()
+                .expect("owner command-shaped text remains deliverable")
+                .expect("ordinary event payload");
+            assert_eq!(
+                forwarded.privileged_control_admitted, expected_admitted,
+                "{command} admission mismatch for boundary {boundary:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn channel_req_boundary_tracks_only_a_successful_live_send() {
+        let (mut client, mut server) = test_ws_pair().await;
+        let mut state = BgState::new();
+        let channel_id = Uuid::new_v4();
+        let filter = ChannelFilter {
+            kinds: Some(vec![KIND_STREAM_MESSAGE]),
+            require_mention: true,
+        };
+        state.channel_subscribed_at.insert(channel_id, 1);
+
+        apply_command_to_state(
+            &mut state,
+            RelayCommand::Subscribe {
+                channel_id,
+                filter: filter.clone(),
+                replay_since: Some(1_000),
+            },
+        );
+        assert!(
+            !state.channel_subscribed_at.contains_key(&channel_id),
+            "disconnected subscription intent must not retain a prior live REQ boundary"
+        );
+
+        let before_send = unix_now_secs();
+        assert!(
+            send_subscribe(
+                &mut client,
+                &mut state,
+                channel_id,
+                "agent-pubkey",
+                Some(1_000),
+                &filter,
+            )
+            .await
+        );
+        let after_send = unix_now_secs();
+        let boundary = state
+            .channel_subscribed_at
+            .get(&channel_id)
+            .copied()
+            .expect("successful live REQ records its completion boundary");
+        assert!((before_send..=after_send).contains(&boundary));
+        let frame = next_test_frame(&mut server).await;
+        assert_eq!(frame[0], "REQ");
+        assert_eq!(frame[1], channel_sub_id(channel_id));
+    }
+
+    #[test]
+    fn privileged_control_owner_requires_verified_nip_oa_attestation() {
+        let owner_keys = Keys::generate();
+        let agent_keys = Keys::generate();
+        let other_agent_keys = Keys::generate();
+        let configured_owner_keys = Keys::generate();
+        let configured_owner = configured_owner_keys.public_key().to_hex();
+        let auth_json =
+            buzz_sdk::nip_oa::compute_auth_tag(&owner_keys, &agent_keys.public_key(), "")
+                .expect("compute owner attestation");
+        let auth_tag =
+            buzz_sdk::nip_oa::parse_auth_tag(&auth_json).expect("parse owner attestation");
+        let wrong_agent_auth_json =
+            buzz_sdk::nip_oa::compute_auth_tag(&owner_keys, &other_agent_keys.public_key(), "")
+                .expect("compute wrong-agent owner attestation");
+        let wrong_agent_auth_tag = buzz_sdk::nip_oa::parse_auth_tag(&wrong_agent_auth_json)
+            .expect("parse wrong-agent owner attestation");
+
+        assert_eq!(
+            resolve_authorized_owner_pubkey(
+                Some(&auth_tag),
+                &agent_keys,
+                Some(configured_owner.as_str()),
+            ),
+            Some(owner_keys.public_key().to_hex()),
+            "a valid NIP-OA owner remains canonical over configured fallback"
+        );
+        assert_eq!(
+            resolve_authorized_owner_pubkey(
+                Some(&wrong_agent_auth_tag),
+                &agent_keys,
+                Some(configured_owner.as_str()),
+            ),
+            Some(configured_owner.clone()),
+            "an invalid attestation for this agent must fall back to trusted configuration"
+        );
+        assert_eq!(
+            resolve_authorized_owner_pubkey(None, &agent_keys, Some(configured_owner.as_str())),
+            Some(configured_owner),
+            "missing attestation must retain the trusted configured owner"
+        );
+        assert_eq!(
+            resolve_authorized_owner_pubkey(None, &agent_keys, Some("not-a-pubkey")),
+            None,
+            "malformed configured owner must fail closed"
+        );
+    }
+
+    #[test]
+    fn privileged_control_replay_guard_never_evicts_live_ids() {
+        let mut replay = PrivilegedControlReplay::new(2);
+
+        assert_eq!(
+            replay.admit("first".into(), 200, 100),
+            PrivilegedControlAdmission::Admitted
+        );
+        assert_eq!(
+            replay.admit("second".into(), 200, 100),
+            PrivilegedControlAdmission::Admitted
+        );
+        assert_eq!(
+            replay.admit("third".into(), 200, 100),
+            PrivilegedControlAdmission::Full,
+            "capacity pressure must fail closed instead of evicting a live ID"
+        );
+        assert_eq!(
+            replay.admit("first".into(), 200, 200),
+            PrivilegedControlAdmission::Replay,
+            "expiry is inclusive because the event remains freshness-admissible at that second"
+        );
+        assert_eq!(
+            replay.admit("third".into(), 300, 201),
+            PrivilegedControlAdmission::Admitted,
+            "expired IDs release bounded capacity"
+        );
+        assert_eq!(replay.expires_at.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn privileged_controls_require_strict_post_start_nonfuture_timestamps() {
+        let (mut ws, _server) = test_ws_pair().await;
+        let (event_tx, mut event_rx) = mpsc::channel(4);
+        let (observer_control_tx, _observer_control_rx) = mpsc::channel(1);
+        let mut state = BgState::new();
+        let channel_id = Uuid::new_v4();
+        let agent_keys = Keys::generate();
+        let owner_keys = Keys::generate();
+        let agent_pubkey_hex = agent_keys.public_key().to_hex();
+        let now = unix_now_secs();
+        state.authorized_owner_pubkey = Some(owner_keys.public_key().to_hex());
+        state.privileged_control_start_boundary = now.saturating_sub(1);
+        seed_test_subscription_with_filter(
+            &mut state,
+            channel_id,
+            ChannelFilter {
+                kinds: Some(vec![9]),
+                require_mention: true,
+            },
+        );
+
+        let boundary = make_test_channel_event(
+            &owner_keys,
+            channel_id,
+            9,
+            "!shutdown",
+            Some(&agent_pubkey_hex),
+            state.privileged_control_start_boundary,
+        );
+        let boundary_id = boundary.id.to_hex();
+        let boundary_frame = Message::Text(
+            serde_json::to_string(&json!(["EVENT", channel_sub_id(channel_id), boundary]))
+                .expect("serialize boundary control")
+                .into(),
+        );
+        assert!(
+            handle_ws_message(
+                boundary_frame,
+                &mut ws,
+                &event_tx,
+                &observer_control_tx,
+                &mut state,
+                &agent_keys,
+                "ws://localhost:3000",
+                &agent_pubkey_hex,
+                None,
+            )
+            .await
+        );
+        assert!(
+            state.seen_ids.contains(&boundary_id),
+            "same-second owner text should remain an ordinary message"
+        );
+        let boundary_forwarded = event_rx
+            .try_recv()
+            .expect("same-second owner text should be forwarded without authority")
+            .expect("ordinary event payload");
+        assert!(
+            !boundary_forwarded.privileged_control_admitted,
+            "second-granularity equality with startup must fail closed for execution"
+        );
+
+        let future = make_test_channel_event(
+            &owner_keys,
+            channel_id,
+            9,
+            "!cancel",
+            Some(&agent_pubkey_hex),
+            now.saturating_add(30),
+        );
+        let future_id = future.id.to_hex();
+        let future_frame = Message::Text(
+            serde_json::to_string(&json!(["EVENT", channel_sub_id(channel_id), future]))
+                .expect("serialize future control")
+                .into(),
+        );
+        assert!(
+            handle_ws_message(
+                future_frame,
+                &mut ws,
+                &event_tx,
+                &observer_control_tx,
+                &mut state,
+                &agent_keys,
+                "ws://localhost:3000",
+                &agent_pubkey_hex,
+                None,
+            )
+            .await
+        );
+        assert!(!state.seen_ids.contains(&future_id));
+        assert!(event_rx.try_recv().is_err());
+
+        let fresh = make_test_channel_event(
+            &owner_keys,
+            channel_id,
+            9,
+            "!rotate",
+            Some(&agent_pubkey_hex),
+            now,
+        );
+        let fresh_id = fresh.id.to_hex();
+        let fresh_json =
+            serde_json::to_string(&json!(["EVENT", channel_sub_id(channel_id), fresh]))
+                .expect("serialize fresh control");
+        assert!(
+            handle_ws_message(
+                Message::Text(fresh_json.clone().into()),
+                &mut ws,
+                &event_tx,
+                &observer_control_tx,
+                &mut state,
+                &agent_keys,
+                "ws://localhost:3000",
+                &agent_pubkey_hex,
+                None,
+            )
+            .await
+        );
+        let forwarded = event_rx
+            .try_recv()
+            .expect("fresh post-start control should be forwarded")
+            .expect("control payload");
+        assert_eq!(forwarded.event.id.to_hex(), fresh_id);
+        assert!(
+            forwarded.privileged_control_admitted,
+            "fresh exact-owner control must carry relay execution authority"
+        );
+        assert!(
+            handle_ws_message(
+                Message::Text(fresh_json.clone().into()),
+                &mut ws,
+                &event_tx,
+                &observer_control_tx,
+                &mut state,
+                &agent_keys,
+                "ws://localhost:3000",
+                &agent_pubkey_hex,
+                None,
+            )
+            .await
+        );
+        assert!(
+            event_rx.try_recv().is_err(),
+            "same-process replay must not be forwarded"
+        );
+
+        let mut restarted_state = BgState::new();
+        restarted_state.authorized_owner_pubkey = Some(owner_keys.public_key().to_hex());
+        restarted_state.privileged_control_start_boundary = now;
+        seed_test_subscription_with_filter(
+            &mut restarted_state,
+            channel_id,
+            ChannelFilter {
+                kinds: Some(vec![9]),
+                require_mention: true,
+            },
+        );
+        assert!(
+            handle_ws_message(
+                Message::Text(fresh_json.into()),
+                &mut ws,
+                &event_tx,
+                &observer_control_tx,
+                &mut restarted_state,
+                &agent_keys,
+                "ws://localhost:3000",
+                &agent_pubkey_hex,
+                None,
+            )
+            .await
+        );
+        assert!(
+            restarted_state.seen_ids.contains(&fresh_id),
+            "pre-start owner text should remain an ordinary message after restart"
+        );
+        let restarted_forwarded = event_rx
+            .try_recv()
+            .expect("pre-start owner text should be forwarded without authority")
+            .expect("ordinary event payload");
+        assert_eq!(restarted_forwarded.event.id.to_hex(), fresh_id);
+        assert!(
+            !restarted_forwarded.privileged_control_admitted,
+            "restart replay must never regain execution authority"
+        );
+    }
+
     async fn test_ws_pair() -> (WsStream, WebSocketStream<tokio::net::TcpStream>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -4374,14 +6856,25 @@ mod tests {
     }
 
     fn seed_test_subscription(state: &mut BgState, channel_id: Uuid) {
+        seed_test_subscription_with_filter(state, channel_id, test_channel_filter());
+    }
+
+    fn seed_test_subscription_with_filter(
+        state: &mut BgState,
+        channel_id: Uuid,
+        filter: ChannelFilter,
+    ) {
         apply_command_to_state(
             state,
             RelayCommand::Subscribe {
                 channel_id,
-                filter: test_channel_filter(),
+                filter,
                 replay_since: Some(1_000),
             },
         );
+        state
+            .channel_subscribed_at
+            .insert(channel_id, unix_now_secs().saturating_sub(1));
     }
 
     #[tokio::test]
@@ -4521,6 +7014,7 @@ mod tests {
         cmd_tx
             .send(RelayCommand::PublishEvent {
                 event: Box::new(event),
+                admission: None,
             })
             .await
             .expect("queue publish during pacing");
@@ -4552,6 +7046,7 @@ mod tests {
             },
             RelayCommand::PublishEvent {
                 event: Box::new(event),
+                admission: None,
             },
         ]);
 
@@ -5804,6 +8299,302 @@ mod tests {
         .expect("sign test observer frame")
     }
 
+    fn make_priority_observer_frame(keys: &Keys) -> Event {
+        let recipient = Keys::generate();
+        let encrypted = buzz_core::observer::encrypt_observer_payload(
+            keys,
+            &recipient.public_key(),
+            &json!({"kind": "control_result"}),
+        )
+        .expect("encrypt test priority observer payload");
+        buzz_sdk::build_agent_observer_frame(
+            &recipient.public_key().to_hex(),
+            &keys.public_key().to_hex(),
+            "telemetry",
+            &encrypted,
+        )
+        .expect("build test priority observer frame")
+        .tag(
+            Tag::parse([OBSERVER_PRIORITY_TAG, OBSERVER_CONTROL_RESULT_PRIORITY])
+                .expect("valid priority tag"),
+        )
+        .sign_with_keys(keys)
+        .expect("sign test priority observer frame")
+    }
+
+    fn make_observer_control_event(
+        owner_keys: &Keys,
+        agent_keys: &Keys,
+        created_at_secs: u64,
+    ) -> Event {
+        let agent_pubkey_hex = agent_keys.public_key().to_hex();
+        let encrypted = buzz_core::observer::encrypt_observer_payload(
+            owner_keys,
+            &agent_keys.public_key(),
+            &json!({"type": "cancel_turn", "channelId": Uuid::new_v4()}),
+        )
+        .expect("encrypt test observer control");
+        EventBuilder::new(Kind::Custom(KIND_AGENT_OBSERVER_FRAME as u16), encrypted)
+            .tags([
+                Tag::parse(["p", agent_pubkey_hex.as_str()]).expect("valid recipient tag"),
+                Tag::parse(["agent", agent_pubkey_hex.as_str()]).expect("valid agent tag"),
+                Tag::parse(["frame", "control"]).expect("valid frame tag"),
+            ])
+            .custom_created_at(nostr::Timestamp::from(created_at_secs))
+            .sign_with_keys(owner_keys)
+            .expect("sign test observer control")
+    }
+
+    #[tokio::test]
+    async fn observer_controls_require_live_strictly_post_start_subscription() {
+        let (mut ws, _server) = test_ws_pair().await;
+        let (event_tx, _event_rx) = mpsc::channel(1);
+        let (observer_control_tx, mut observer_control_rx) = mpsc::channel(2);
+        let mut state = BgState::new();
+        let agent_keys = Keys::generate();
+        let owner_keys = Keys::generate();
+        let agent_pubkey_hex = agent_keys.public_key().to_hex();
+        let now = unix_now_secs();
+        state.authorized_owner_pubkey = Some(owner_keys.public_key().to_hex());
+        state.privileged_control_start_boundary = now.saturating_sub(2);
+        let control = make_observer_control_event(&owner_keys, &agent_keys, now);
+        let control_json =
+            serde_json::to_string(&json!(["EVENT", OBSERVER_CONTROL_SUB_ID, control.clone()]))
+                .expect("serialize observer control");
+
+        assert!(
+            handle_ws_message(
+                Message::Text(control_json.clone().into()),
+                &mut ws,
+                &event_tx,
+                &observer_control_tx,
+                &mut state,
+                &agent_keys,
+                "ws://localhost:3000",
+                &agent_pubkey_hex,
+                None,
+            )
+            .await
+        );
+        assert!(
+            observer_control_rx.try_recv().is_err(),
+            "a matching subscription ID before the REQ is live must not admit controls"
+        );
+
+        state.observer_control_sub_active = true;
+        state.observer_control_subscribed_at = Some(now);
+        assert!(
+            handle_ws_message(
+                Message::Text(control_json.clone().into()),
+                &mut ws,
+                &event_tx,
+                &observer_control_tx,
+                &mut state,
+                &agent_keys,
+                "ws://localhost:3000",
+                &agent_pubkey_hex,
+                None,
+            )
+            .await
+        );
+        assert!(
+            observer_control_rx.try_recv().is_err(),
+            "same-second controls cannot be proven to post-date subscription startup"
+        );
+
+        state.observer_control_subscribed_at = Some(now.saturating_sub(1));
+        assert!(
+            handle_ws_message(
+                Message::Text(control_json.into()),
+                &mut ws,
+                &event_tx,
+                &observer_control_tx,
+                &mut state,
+                &agent_keys,
+                "ws://localhost:3000",
+                &agent_pubkey_hex,
+                None,
+            )
+            .await
+        );
+        assert_eq!(
+            observer_control_rx
+                .try_recv()
+                .expect("valid owner control after subscription should be delivered")
+                .id,
+            control.id
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_observer_flood_cannot_displace_valid_owner_control() {
+        let (mut ws, _server) = test_ws_pair().await;
+        let (event_tx, _event_rx) = mpsc::channel(1);
+        let (observer_control_tx, mut observer_control_rx) = mpsc::channel(1);
+        let mut state = BgState::new();
+        let agent_keys = Keys::generate();
+        let owner_keys = Keys::generate();
+        let non_owner_keys = Keys::generate();
+        let other_agent_keys = Keys::generate();
+        let agent_pubkey_hex = agent_keys.public_key().to_hex();
+        let now = unix_now_secs();
+        state.authorized_owner_pubkey = Some(owner_keys.public_key().to_hex());
+        state.privileged_control_start_boundary = now.saturating_sub(2);
+        state.observer_control_sub_active = true;
+        state.observer_control_subscribed_at = Some(now.saturating_sub(1));
+
+        let valid = make_observer_control_event(&owner_keys, &agent_keys, now);
+        let mut tampered_json = serde_json::to_value(&valid).expect("serialize valid control");
+        let original_content = tampered_json["content"]
+            .as_str()
+            .expect("observer ciphertext")
+            .to_string();
+        let replacement = if let Some(rest) = original_content.strip_prefix('A') {
+            format!("B{rest}")
+        } else {
+            let mut chars = original_content.chars();
+            let _ = chars.next();
+            format!("A{}", chars.as_str())
+        };
+        tampered_json["content"] = Value::String(replacement);
+        let tampered: Event =
+            serde_json::from_value(tampered_json).expect("parse tampered observer control");
+        assert!(buzz_core::verify_event(&tampered).is_err());
+
+        let non_owner = make_observer_control_event(&non_owner_keys, &agent_keys, now);
+        let wrong_target = make_observer_control_event(&owner_keys, &other_agent_keys, now);
+        let wrong_kind = make_test_channel_event(
+            &owner_keys,
+            Uuid::new_v4(),
+            KIND_STREAM_MESSAGE,
+            "not an observer control",
+            Some(&agent_pubkey_hex),
+            now,
+        );
+        for invalid in [tampered, non_owner, wrong_target, wrong_kind] {
+            for _ in 0..16 {
+                let frame = Message::Text(
+                    serde_json::to_string(&json!(["EVENT", OBSERVER_CONTROL_SUB_ID, invalid]))
+                        .expect("serialize invalid observer frame")
+                        .into(),
+                );
+                assert!(
+                    handle_ws_message(
+                        frame,
+                        &mut ws,
+                        &event_tx,
+                        &observer_control_tx,
+                        &mut state,
+                        &agent_keys,
+                        "ws://localhost:3000",
+                        &agent_pubkey_hex,
+                        None,
+                    )
+                    .await
+                );
+            }
+        }
+        assert!(
+            observer_control_rx.try_recv().is_err(),
+            "invalid controls must be filtered before they consume queue capacity"
+        );
+
+        let valid_frame = Message::Text(
+            serde_json::to_string(&json!(["EVENT", OBSERVER_CONTROL_SUB_ID, valid.clone()]))
+                .expect("serialize valid observer control")
+                .into(),
+        );
+        assert!(
+            handle_ws_message(
+                valid_frame,
+                &mut ws,
+                &event_tx,
+                &observer_control_tx,
+                &mut state,
+                &agent_keys,
+                "ws://localhost:3000",
+                &agent_pubkey_hex,
+                None,
+            )
+            .await
+        );
+        assert_eq!(
+            observer_control_rx
+                .try_recv()
+                .expect("valid owner control retains queue capacity")
+                .id,
+            valid.id
+        );
+    }
+
+    #[tokio::test]
+    async fn valid_owner_control_queues_without_blocking_and_delivers_after_recovery() {
+        let (mut ws, _server) = test_ws_pair().await;
+        let (event_tx, _event_rx) = mpsc::channel(1);
+        let (observer_control_tx, mut observer_control_rx) = mpsc::channel(1);
+        let mut state = BgState::new();
+        let agent_keys = Keys::generate();
+        let owner_keys = Keys::generate();
+        let agent_pubkey_hex = agent_keys.public_key().to_hex();
+        let now = unix_now_secs();
+        state.authorized_owner_pubkey = Some(owner_keys.public_key().to_hex());
+        state.privileged_control_start_boundary = now.saturating_sub(2);
+        state.observer_control_sub_active = true;
+        state.observer_control_subscribed_at = Some(now.saturating_sub(1));
+
+        let queued = make_observer_control_event(&owner_keys, &agent_keys, now);
+        observer_control_tx
+            .try_send(queued.clone())
+            .expect("prefill observer channel");
+        let waiting = make_observer_control_event(&owner_keys, &agent_keys, now);
+        let waiting_frame = Message::Text(
+            serde_json::to_string(&json!(["EVENT", OBSERVER_CONTROL_SUB_ID, waiting.clone()]))
+                .expect("serialize waiting observer control")
+                .into(),
+        );
+
+        let should_continue = timeout(
+            Duration::from_secs(1),
+            handle_ws_message(
+                waiting_frame,
+                &mut ws,
+                &event_tx,
+                &observer_control_tx,
+                &mut state,
+                &agent_keys,
+                "ws://localhost:3000",
+                &agent_pubkey_hex,
+                None,
+            ),
+        )
+        .await
+        .expect("full downstream queue must not block WebSocket message handling");
+
+        assert!(should_continue);
+        assert_eq!(
+            state.observer_control_pending.len(),
+            1,
+            "authenticated control should be retained in the bounded pending queue"
+        );
+        let first = observer_control_rx
+            .recv()
+            .await
+            .expect("prefilled control remains queued");
+        let permit = observer_control_tx
+            .reserve()
+            .await
+            .expect("observer control receiver remains open");
+        deliver_next_pending_observer_control(&mut state, permit);
+        let second = timeout(Duration::from_secs(1), observer_control_rx.recv())
+            .await
+            .expect("valid control should resume after queue capacity returns")
+            .expect("observer control channel remains open");
+
+        assert_eq!(first.id, queued.id);
+        assert_eq!(second.id, waiting.id);
+        assert!(state.observer_control_pending.is_empty());
+    }
+
     /// While the rate-limit gate is armed, an observer frame (kind 24200) is
     /// parked — not silently dropped — and delivered by the drain once the
     /// gate clears. A typing indicator in the same window stays dropped.
@@ -5822,6 +8613,7 @@ mod tests {
             "agent-pubkey",
             RelayCommand::PublishEvent {
                 event: Box::new(observer_frame.clone()),
+                admission: None,
             },
         )
         .await;
@@ -5843,6 +8635,7 @@ mod tests {
             "agent-pubkey",
             RelayCommand::PublishEvent {
                 event: Box::new(typing),
+                admission: None,
             },
         )
         .await;
@@ -5863,7 +8656,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(160)).await;
         assert_eq!(
             drain_gated_observer_pending(&mut client, &mut state, 1).await,
-            1
+            GatedObserverDrainOutcome::Sent(1)
         );
         assert!(state.gated_observer_pending.is_empty());
         let frame = next_test_frame(&mut server).await;
@@ -5895,6 +8688,7 @@ mod tests {
                 "agent-pubkey",
                 RelayCommand::PublishEvent {
                     event: Box::new(event.clone()),
+                    admission: None,
                 },
             )
             .await;
@@ -5912,6 +8706,7 @@ mod tests {
             "agent-pubkey",
             RelayCommand::PublishEvent {
                 event: Box::new(third.clone()),
+                admission: None,
             },
         )
         .await;
@@ -5925,7 +8720,7 @@ mod tests {
         for expected in [&first, &second, &third] {
             assert_eq!(
                 drain_gated_observer_pending(&mut client, &mut state, 1).await,
-                1
+                GatedObserverDrainOutcome::Sent(1)
             );
             let frame = next_test_frame(&mut server).await;
             assert_eq!(frame[1]["id"], expected.id.to_hex(), "order preserved");
@@ -5954,6 +8749,116 @@ mod tests {
             .collect();
         assert_eq!(ids, [rejected.id, later.id]);
         assert!(state.observer_in_flight.is_empty());
+    }
+
+    #[tokio::test]
+    async fn rate_limited_ok_false_requeues_exact_observer_frame_and_arms_gate() {
+        let (mut ws, _server) = test_ws_pair().await;
+        let (event_tx, _event_rx) = mpsc::channel(1);
+        let (observer_control_tx, _observer_control_rx) = mpsc::channel(1);
+        let mut state = BgState::new();
+        let keys = Keys::generate();
+        let first = make_observer_frame(&keys);
+        let rejected = make_observer_frame(&keys);
+        let later = make_observer_frame(&keys);
+        state.track_observer_in_flight(Box::new(first.clone()));
+        state.track_observer_in_flight(Box::new(rejected.clone()));
+        state.park_gated_observer_frame(Box::new(later.clone()));
+
+        let ok_false = Message::Text(
+            serde_json::to_string(&json!([
+                "OK",
+                rejected.id.to_hex(),
+                false,
+                "rate-limited: quota exceeded; retry in 5s"
+            ]))
+            .expect("serialize OK false")
+            .into(),
+        );
+        assert!(
+            handle_ws_message(
+                ok_false,
+                &mut ws,
+                &event_tx,
+                &observer_control_tx,
+                &mut state,
+                &keys,
+                "ws://localhost:3000",
+                &keys.public_key().to_hex(),
+                None,
+            )
+            .await
+        );
+
+        assert!(state.check_rate_gate().is_some(), "retry pacing must arm");
+        assert_eq!(
+            state
+                .gated_observer_pending
+                .iter()
+                .map(|event| event.id)
+                .collect::<Vec<_>>(),
+            [rejected.id, later.id],
+            "only the exact rejected frame is requeued ahead of later telemetry"
+        );
+        assert_eq!(
+            state
+                .observer_in_flight
+                .iter()
+                .map(|event| event.id)
+                .collect::<Vec<_>>(),
+            [first.id],
+            "unrelated in-flight frames stay pending their own OK"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_ok_false_does_not_ack_or_retry_observer_frame() {
+        let (mut ws, _server) = test_ws_pair().await;
+        let (event_tx, _event_rx) = mpsc::channel(1);
+        let (observer_control_tx, _observer_control_rx) = mpsc::channel(1);
+        let mut state = BgState::new();
+        let keys = Keys::generate();
+        let denied = make_observer_frame(&keys);
+        state.track_observer_in_flight(Box::new(denied.clone()));
+
+        let ok_false = Message::Text(
+            serde_json::to_string(&json!([
+                "OK",
+                denied.id.to_hex(),
+                false,
+                "blocked: policy denied"
+            ]))
+            .expect("serialize OK false")
+            .into(),
+        );
+        assert!(
+            handle_ws_message(
+                ok_false,
+                &mut ws,
+                &event_tx,
+                &observer_control_tx,
+                &mut state,
+                &keys,
+                "ws://localhost:3000",
+                &keys.public_key().to_hex(),
+                None,
+            )
+            .await
+        );
+
+        assert!(
+            state.observer_in_flight.is_empty(),
+            "terminal denial is retired instead of occupying the bounded ACK window forever"
+        );
+        assert_eq!(
+            state.observer_terminal_denied, 1,
+            "terminal denial must leave an auditable counter"
+        );
+        assert!(
+            state.gated_observer_pending.is_empty(),
+            "terminal denial must not enter an unbounded retry loop"
+        );
+        assert!(state.check_rate_gate().is_none());
     }
 
     /// The parked-frame queue is bounded: overflow evicts the oldest frame and
@@ -5989,6 +8894,742 @@ mod tests {
             state.gated_observer_pending.back().map(|e| e.id),
             Some(overflow.id),
             "newest frame must be retained"
+        );
+    }
+
+    #[tokio::test]
+    async fn protected_observer_queue_rejects_newest_without_evicting_terminal_proof() {
+        let mut state = BgState::new();
+        let keys = Keys::generate();
+        let first = make_priority_observer_frame(&keys);
+        assert!(state.park_gated_observer_frame(Box::new(first.clone())));
+        for _ in 1..GATED_OBSERVER_PRIORITY_CAP {
+            assert!(state.park_gated_observer_frame(Box::new(make_priority_observer_frame(&keys))));
+        }
+
+        let overflow = make_priority_observer_frame(&keys);
+        assert!(
+            !state.park_gated_observer_frame(Box::new(overflow.clone())),
+            "a saturated protected lane must reject admission"
+        );
+        assert_eq!(
+            state.gated_observer_priority_pending.len(),
+            GATED_OBSERVER_PRIORITY_CAP
+        );
+        assert_eq!(state.gated_observer_dropped, 1);
+        assert_eq!(
+            state
+                .gated_observer_priority_pending
+                .front()
+                .map(|event| event.id),
+            Some(first.id),
+            "an already-admitted terminal proof must never be evicted"
+        );
+        assert!(
+            !state
+                .gated_observer_priority_pending
+                .iter()
+                .any(|event| event.id == overflow.id),
+            "the rejected newest frame must not displace admitted proof"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_publisher_reports_rejected_priority_admission() {
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(1);
+        let publisher = RelayEventPublisher { cmd_tx };
+        let event = make_priority_observer_frame(&Keys::generate());
+        let publish = tokio::spawn(async move { publisher.publish_terminal_event(event).await });
+
+        let RelayCommand::PublishEvent {
+            admission: Some(admission),
+            ..
+        } = cmd_rx.recv().await.expect("terminal publish command")
+        else {
+            panic!("terminal publish must request confirmed priority admission");
+        };
+        admission
+            .send(Err("terminal observer priority state is full".into()))
+            .expect("publisher must still be waiting for admission");
+
+        assert!(matches!(
+            publish.await.expect("publisher task"),
+            Err(RelayError::Http(message))
+                if message == "terminal observer priority state is full"
+        ));
+    }
+
+    #[tokio::test]
+    async fn terminal_confirmation_waits_for_relay_ok_not_local_socket_write() {
+        let (mut client, mut server) = test_ws_pair().await;
+        let mut state = BgState::new();
+        let event = make_priority_observer_frame(&Keys::generate());
+        let event_id = event.id.to_hex();
+        let (confirmation_tx, mut confirmation_rx) = oneshot::channel();
+
+        assert!(
+            execute_connected_command(
+                &mut client,
+                &mut state,
+                "agent-pubkey",
+                RelayCommand::PublishEvent {
+                    event: Box::new(event),
+                    admission: Some(confirmation_tx),
+                },
+            )
+            .await
+        );
+        let frame = next_test_frame(&mut server).await;
+        assert_eq!(frame[0], "EVENT");
+        assert!(
+            confirmation_rx.try_recv().is_err(),
+            "a local socket write is not terminal delivery proof"
+        );
+
+        state.acknowledge_observer_frame(&event_id);
+        assert_eq!(
+            confirmation_rx.await.expect("relay OK confirmation"),
+            Ok(())
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_confirmation_timeout_cancels_exact_event_and_next_result_progresses() {
+        let (mut client, mut server) = test_ws_pair().await;
+        let mut state = BgState::new();
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(4);
+        let publisher = RelayEventPublisher { cmd_tx };
+        let test_ack_timeout = Duration::from_millis(250);
+
+        let first = make_priority_observer_frame(&Keys::generate());
+        let first_id = first.id.to_hex();
+        let first_publish = tokio::spawn({
+            let publisher = publisher.clone();
+            async move {
+                publisher
+                    .publish_terminal_event_with_ack_timeout(first, test_ack_timeout)
+                    .await
+            }
+        });
+        let first_command = cmd_rx.recv().await.expect("first terminal publish command");
+        assert!(
+            execute_connected_command(&mut client, &mut state, "agent-pubkey", first_command,)
+                .await
+        );
+        let first_frame = next_test_frame(&mut server).await;
+        assert_eq!(first_frame[0], "EVENT");
+
+        assert!(matches!(
+            first_publish.await.expect("first publisher task"),
+            Err(RelayError::Timeout)
+        ));
+
+        let second = make_priority_observer_frame(&Keys::generate());
+        let second_id = second.id.to_hex();
+        let second_publish = tokio::spawn({
+            let publisher = publisher.clone();
+            async move { publisher.publish_terminal_event(second).await }
+        });
+        let second_command = cmd_rx
+            .recv()
+            .await
+            .expect("second terminal publish command");
+        assert!(
+            execute_connected_command(&mut client, &mut state, "agent-pubkey", second_command,)
+                .await
+        );
+        assert!(
+            !state.contains_observer_priority_event(&first_id),
+            "the next command must prune only the expired attempt before admitting later work"
+        );
+        let second_frame = next_test_frame(&mut server).await;
+        assert_eq!(second_frame[0], "EVENT");
+
+        state.acknowledge_observer_frame(&second_id);
+        assert!(
+            second_publish.await.expect("second publisher task").is_ok(),
+            "a later terminal result must progress after exact timeout cleanup"
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_queued_terminal_publish_never_reaches_reconnected_socket() {
+        let (mut client, mut server) = test_ws_pair().await;
+        let mut state = BgState::new();
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(4);
+        let publisher = RelayEventPublisher { cmd_tx };
+        let event = make_priority_observer_frame(&Keys::generate());
+        let event_id = event.id.to_hex();
+
+        let publish_result = publisher
+            .publish_terminal_event_with_ack_timeout(event, Duration::from_millis(100))
+            .await;
+        assert!(matches!(publish_result, Err(RelayError::Timeout)));
+
+        let expired_publish = cmd_rx.recv().await.expect("expired publish remains queued");
+        assert!(
+            execute_connected_command(&mut client, &mut state, "agent-pubkey", expired_publish,)
+                .await
+        );
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "timeout cleanup must not enqueue an ambiguous event-ID cancellation"
+        );
+        assert!(
+            timeout(Duration::from_millis(100), server.next())
+                .await
+                .is_err(),
+            "an expired queued terminal result must not reach a reconnected relay"
+        );
+        assert!(
+            !state.contains_observer_priority_event(&event_id),
+            "expired reconnect work must leave no pending, in-flight, or confirmation owner"
+        );
+
+        let later = make_observer_frame(&Keys::generate());
+        let later_id = later.id;
+        assert!(
+            execute_connected_command(
+                &mut client,
+                &mut state,
+                "agent-pubkey",
+                RelayCommand::PublishEvent {
+                    event: Box::new(later),
+                    admission: None,
+                },
+            )
+            .await,
+            "clean pre-send cancellation must leave the socket reusable"
+        );
+        let later_frame = next_test_frame(&mut server).await;
+        assert_eq!(
+            later_frame[1]["id"],
+            later_id.to_hex(),
+            "later traffic must progress on the clean socket"
+        );
+    }
+
+    #[tokio::test]
+    async fn timed_out_queued_duplicate_preserves_original_confirmation_owner() {
+        let (mut client, mut server) = test_ws_pair().await;
+        let mut state = BgState::new();
+        let event = make_priority_observer_frame(&Keys::generate());
+        let event_id = event.id.to_hex();
+        let (original_tx, mut original_rx) = oneshot::channel();
+        assert!(
+            execute_connected_command(
+                &mut client,
+                &mut state,
+                "agent-pubkey",
+                RelayCommand::PublishEvent {
+                    event: Box::new(event.clone()),
+                    admission: Some(original_tx),
+                },
+            )
+            .await
+        );
+        let original_frame = next_test_frame(&mut server).await;
+        assert_eq!(original_frame[1]["id"], event_id);
+
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(4);
+        let duplicate_publisher = RelayEventPublisher { cmd_tx };
+        let duplicate_result = duplicate_publisher
+            .publish_terminal_event_with_ack_timeout(event, Duration::from_millis(100))
+            .await;
+        assert!(matches!(duplicate_result, Err(RelayError::Timeout)));
+
+        while let Ok(command) = cmd_rx.try_recv() {
+            assert!(
+                execute_connected_command(&mut client, &mut state, "agent-pubkey", command,).await
+            );
+        }
+        assert!(
+            timeout(Duration::from_millis(100), server.next())
+                .await
+                .is_err(),
+            "the expired duplicate attempt must never write a second frame"
+        );
+        assert!(
+            state.contains_observer_priority_event(&event_id),
+            "duplicate timeout cleanup must preserve the original confirmation owner"
+        );
+        assert!(matches!(
+            original_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+
+        state.acknowledge_observer_frame(&event_id);
+        assert_eq!(
+            original_rx
+                .await
+                .expect("original confirmation remains live"),
+            Ok(())
+        );
+    }
+
+    struct StallAfterStartSendSink {
+        started: Option<oneshot::Sender<()>>,
+        buffered: Vec<Message>,
+        flush_allowed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        flushed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl futures_util::Sink<Message> for StallAfterStartSendSink {
+        type Error = std::convert::Infallible;
+
+        fn poll_ready(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn start_send(
+            mut self: std::pin::Pin<&mut Self>,
+            item: Message,
+        ) -> Result<(), Self::Error> {
+            self.buffered.push(item);
+            if let Some(started) = self.started.take() {
+                let _ = started.send(());
+            }
+            Ok(())
+        }
+
+        fn poll_flush(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            if self.flush_allowed.load(std::sync::atomic::Ordering::SeqCst) {
+                if !self.buffered.is_empty() {
+                    self.flushed
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                    self.buffered.clear();
+                }
+                std::task::Poll::Ready(Ok(()))
+            } else {
+                std::task::Poll::Pending
+            }
+        }
+
+        fn poll_close(
+            self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            self.poll_flush(cx)
+        }
+    }
+
+    struct BufferThenStartSendErrorSink {
+        buffered: Vec<Message>,
+    }
+
+    impl futures_util::Sink<Message> for BufferThenStartSendErrorSink {
+        type Error = std::io::Error;
+
+        fn poll_ready(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn start_send(
+            mut self: std::pin::Pin<&mut Self>,
+            item: Message,
+        ) -> Result<(), Self::Error> {
+            self.buffered.push(item);
+            Err(std::io::Error::other(
+                "write failed after buffering the frame",
+            ))
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn start_send_error_after_buffering_taints_socket() {
+        let event = make_priority_observer_frame(&Keys::generate());
+        let mut socket = BufferThenStartSendErrorSink {
+            buffered: Vec::new(),
+        };
+
+        let outcome = send_publish_event_frame_until_cancelled(&mut socket, &event, None).await;
+
+        assert_eq!(
+            outcome,
+            PublishEventFrameOutcome::FailedSocketTainted,
+            "invoking start_send must conservatively taint the socket even when it returns an error"
+        );
+        assert!(outcome.socket_tainted());
+        assert_eq!(
+            socket.buffered.len(),
+            1,
+            "a start_send error may leave the EVENT buffered for later traffic"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_after_start_send_retires_socket_before_later_traffic() {
+        let event = make_priority_observer_frame(&Keys::generate());
+        let (mut confirmation_tx, confirmation_rx) = oneshot::channel();
+        let (started_tx, started_rx) = oneshot::channel();
+        let old_flush_allowed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let old_flushed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut old_socket = StallAfterStartSendSink {
+            started: Some(started_tx),
+            buffered: Vec::new(),
+            flush_allowed: old_flush_allowed,
+            flushed: old_flushed.clone(),
+        };
+        let close_attempt = tokio::spawn(async move {
+            started_rx.await.expect("EVENT reaches start_send");
+            drop(confirmation_rx);
+        });
+
+        let outcome = send_publish_event_frame_until_cancelled(
+            &mut old_socket,
+            &event,
+            Some(&mut confirmation_tx),
+        )
+        .await;
+        close_attempt.await.expect("close attempt task");
+
+        assert_eq!(outcome, PublishEventFrameOutcome::SocketTainted);
+        assert!(outcome.socket_tainted());
+        assert_eq!(
+            old_socket.buffered.len(),
+            1,
+            "the cancelled send may still be buffered after start_send"
+        );
+
+        // The supervisor must retire the tainted transport. Later traffic goes
+        // only to its replacement, so it cannot flush the cancelled EVENT.
+        drop(old_socket);
+        let replacement_flushed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut replacement = StallAfterStartSendSink {
+            started: None,
+            buffered: Vec::new(),
+            flush_allowed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            flushed: replacement_flushed.clone(),
+        };
+        replacement
+            .send(Message::Ping(Vec::new().into()))
+            .await
+            .expect("later traffic uses replacement transport");
+
+        assert!(
+            replacement_flushed.load(std::sync::atomic::Ordering::SeqCst),
+            "the later frame must be sent on the replacement transport"
+        );
+        assert!(
+            !old_flushed.load(std::sync::atomic::Ordering::SeqCst),
+            "later traffic must never flush the cancelled EVENT"
+        );
+    }
+
+    #[test]
+    fn receiver_close_purges_only_its_exact_terminal_admission() {
+        let mut state = BgState::new();
+        let keys = Keys::generate();
+        let cancelled = make_priority_observer_frame(&keys);
+        let cancelled_id = cancelled.id.to_hex();
+        let survivor = make_priority_observer_frame(&keys);
+        let survivor_id = survivor.id.to_hex();
+        let (cancelled_tx, cancelled_rx) = oneshot::channel();
+        let (survivor_tx, mut survivor_rx) = oneshot::channel();
+
+        assert!(state.park_gated_observer_frame(Box::new(cancelled)));
+        state.record_observer_confirmation(cancelled_id.clone(), true, Some(cancelled_tx), true);
+        assert!(state.park_gated_observer_frame(Box::new(survivor)));
+        state.record_observer_confirmation(survivor_id.clone(), true, Some(survivor_tx), true);
+
+        drop(cancelled_rx);
+        state.prune_cancelled_terminal_admissions();
+
+        assert!(!state.contains_observer_priority_event(&cancelled_id));
+        assert!(
+            state.contains_observer_priority_event(&survivor_id),
+            "receiver-close cleanup must preserve every other terminal owner"
+        );
+        assert!(matches!(
+            survivor_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn full_command_channel_cannot_extend_terminal_publish_deadline() {
+        let (cmd_tx, _cmd_rx) = mpsc::channel(1);
+        cmd_tx
+            .send(RelayCommand::Reconnect)
+            .await
+            .expect("seed full command channel");
+        let publisher = RelayEventPublisher { cmd_tx };
+        let event = make_priority_observer_frame(&Keys::generate());
+
+        let bounded = timeout(
+            Duration::from_secs(1),
+            publisher.publish_terminal_event_with_ack_timeout(event, Duration::from_millis(100)),
+        )
+        .await
+        .expect("publisher must return without command-channel capacity");
+        assert!(matches!(bounded, Err(RelayError::Timeout)));
+    }
+
+    #[tokio::test]
+    async fn duplicate_terminal_event_rejects_second_confirmation_before_socket_write() {
+        let (mut client, mut server) = test_ws_pair().await;
+        let mut state = BgState::new();
+        let keys = Keys::generate();
+        let terminal = make_priority_observer_frame(&keys);
+        let terminal_id = terminal.id.to_hex();
+        let (first_tx, first_rx) = oneshot::channel();
+        assert!(
+            execute_connected_command(
+                &mut client,
+                &mut state,
+                "agent-pubkey",
+                RelayCommand::PublishEvent {
+                    event: Box::new(terminal.clone()),
+                    admission: Some(first_tx),
+                },
+            )
+            .await
+        );
+        let first_frame = next_test_frame(&mut server).await;
+        assert_eq!(first_frame[1]["id"], terminal_id);
+
+        let (second_tx, second_rx) = oneshot::channel();
+        assert!(
+            execute_connected_command(
+                &mut client,
+                &mut state,
+                "agent-pubkey",
+                RelayCommand::PublishEvent {
+                    event: Box::new(terminal),
+                    admission: Some(second_tx),
+                },
+            )
+            .await
+        );
+        assert_eq!(
+            second_rx.await.expect("duplicate rejection result"),
+            Err("terminal observer event is already awaiting relay confirmation".to_string())
+        );
+
+        state.acknowledge_observer_frame(&terminal_id);
+        assert_eq!(
+            first_rx
+                .await
+                .expect("first relay confirmation remains live"),
+            Ok(())
+        );
+
+        let next = make_observer_frame(&keys);
+        let next_id = next.id;
+        assert!(
+            execute_connected_command(
+                &mut client,
+                &mut state,
+                "agent-pubkey",
+                RelayCommand::PublishEvent {
+                    event: Box::new(next),
+                    admission: None,
+                },
+            )
+            .await
+        );
+        let next_frame = next_test_frame(&mut server).await;
+        assert_eq!(
+            next_frame[1]["id"],
+            next_id.to_hex(),
+            "duplicate rejection must not emit a second terminal EVENT"
+        );
+    }
+
+    #[tokio::test]
+    async fn disconnected_duplicate_terminal_event_preserves_first_waiter_and_queue_entry() {
+        let mut state = BgState::new();
+        let terminal = make_priority_observer_frame(&Keys::generate());
+        let terminal_id = terminal.id.to_hex();
+        let (first_tx, mut first_rx) = oneshot::channel();
+        apply_command_to_state(
+            &mut state,
+            RelayCommand::PublishEvent {
+                event: Box::new(terminal.clone()),
+                admission: Some(first_tx),
+            },
+        );
+
+        let (second_tx, second_rx) = oneshot::channel();
+        apply_command_to_state(
+            &mut state,
+            RelayCommand::PublishEvent {
+                event: Box::new(terminal.clone()),
+                admission: Some(second_tx),
+            },
+        );
+        assert_eq!(
+            second_rx.await.expect("disconnected duplicate rejection"),
+            Err("terminal observer event is already awaiting relay confirmation".to_string())
+        );
+
+        let (replay_tx, replay_rx) = oneshot::channel();
+        retain_failed_command_intent(
+            &mut state,
+            RelayCommand::PublishEvent {
+                event: Box::new(terminal),
+                admission: Some(replay_tx),
+            },
+        );
+        assert_eq!(
+            replay_rx.await.expect("failed-replay duplicate rejection"),
+            Err("terminal observer event is already awaiting relay confirmation".to_string())
+        );
+        assert_eq!(state.gated_observer_priority_pending.len(), 1);
+        assert_eq!(
+            state
+                .gated_observer_priority_pending
+                .front()
+                .map(|event| event.id.to_hex()),
+            Some(terminal_id.clone())
+        );
+        assert!(
+            state
+                .observer_priority_confirmations
+                .contains_key(&terminal_id),
+            "the first publisher must retain confirmation ownership"
+        );
+        assert!(
+            matches!(
+                first_rx.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ),
+            "the first publisher must remain pending instead of observing replacement closure"
+        );
+    }
+
+    #[tokio::test]
+    async fn saturated_in_flight_priority_window_rejects_before_socket_write() {
+        let (mut client, mut server) = test_ws_pair().await;
+        let mut state = BgState::new();
+        let keys = Keys::generate();
+        for _ in 0..GATED_OBSERVER_PRIORITY_CAP {
+            assert!(state.track_observer_in_flight(Box::new(make_priority_observer_frame(&keys))));
+        }
+
+        let rejected = make_priority_observer_frame(&keys);
+        let rejected_id = rejected.id;
+        let (confirmation_tx, confirmation_rx) = oneshot::channel();
+        assert!(
+            execute_connected_command(
+                &mut client,
+                &mut state,
+                "agent-pubkey",
+                RelayCommand::PublishEvent {
+                    event: Box::new(rejected),
+                    admission: Some(confirmation_tx),
+                },
+            )
+            .await
+        );
+
+        assert_eq!(
+            confirmation_rx.await.expect("priority rejection result"),
+            Err("terminal observer priority state is full".to_string())
+        );
+        assert_eq!(
+            state.observer_priority_in_flight.len(),
+            GATED_OBSERVER_PRIORITY_CAP
+        );
+        assert!(
+            !state
+                .observer_priority_in_flight
+                .iter()
+                .any(|event| event.id == rejected_id),
+            "a rejected terminal result must not enter the acknowledgment window"
+        );
+
+        let next = make_observer_frame(&keys);
+        let next_id = next.id;
+        assert!(
+            execute_connected_command(
+                &mut client,
+                &mut state,
+                "agent-pubkey",
+                RelayCommand::PublishEvent {
+                    event: Box::new(next),
+                    admission: None,
+                },
+            )
+            .await
+        );
+        let frame = next_test_frame(&mut server).await;
+        assert_eq!(
+            frame[1]["id"],
+            next_id.to_hex(),
+            "the first socket write after rejection must be the later admitted frame"
+        );
+        assert_eq!(state.gated_observer_dropped, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn terminal_control_result_survives_telemetry_saturation_and_drains_within_eight_seconds()
+    {
+        let (mut client, mut server) = test_ws_pair().await;
+        let mut state = BgState::new();
+        let keys = Keys::generate();
+        for _ in 0..GATED_OBSERVER_QUEUE_CAP {
+            state.park_gated_observer_frame(Box::new(make_observer_frame(&keys)));
+        }
+        let terminal = make_priority_observer_frame(&keys);
+        state.park_gated_observer_frame(Box::new(terminal.clone()));
+        state.set_rate_limit_gate(5);
+        let saturated_at = tokio::time::Instant::now();
+
+        assert_eq!(state.gated_observer_pending.len(), GATED_OBSERVER_QUEUE_CAP);
+        assert_eq!(
+            state
+                .gated_observer_priority_pending
+                .front()
+                .map(|event| event.id),
+            Some(terminal.id),
+            "ordinary telemetry saturation cannot consume protected capacity"
+        );
+
+        tokio::time::advance(Duration::from_secs(7)).await;
+        assert_eq!(
+            drain_gated_observer_pending(&mut client, &mut state, 1).await,
+            GatedObserverDrainOutcome::Sent(1)
+        );
+        let message = server
+            .next()
+            .await
+            .expect("test websocket stays open")
+            .expect("read protected observer frame");
+        let frame: serde_json::Value =
+            serde_json::from_str(message.to_text().expect("protected frame is text"))
+                .expect("parse protected observer frame");
+        assert_eq!(
+            frame[1]["id"],
+            terminal.id.to_hex(),
+            "terminal result drains ahead of the saturated telemetry FIFO"
+        );
+        assert!(
+            tokio::time::Instant::now().duration_since(saturated_at) < Duration::from_secs(8),
+            "protected result must beat ModelPicker's eight-second expectation"
         );
     }
 

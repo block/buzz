@@ -108,26 +108,32 @@ export function ModelPicker({
   }, [configSurface]);
 
   // Send a live `switch_model` frame to each channel the agent is working in
-  // and wait for the harness to acknowledge. Any single `unsupported_model`
-  // result rejects the whole pick immediately; all other statuses must arrive
-  // from every channel before resolving success.
+  // and wait for channel-scoped application proof. Receipt and recycle frames
+  // remain pending; every channel must report `switched` before success.
   const sendLiveSwitch = React.useCallback(
     (modelId: string) => {
-      const channelIds = activeTurns.map((turn) => turn.channelId);
+      const channelIds = [
+        ...new Set(activeTurns.map((turn) => turn.channelId)),
+      ];
       return awaitLiveSwitchOutcome({
-        channelCount: channelIds.length,
+        channelIds,
         modelId,
         subscribe: (listener) =>
           subscribeControlResults(agent.pubkey, listener),
-        sendSwitches: async () => {
+        sendSwitches: async (requestId) => {
           await Promise.all(
             channelIds.map((channelId) =>
-              switchManagedAgentModel(agent.pubkey, channelId, modelId),
+              switchManagedAgentModel(
+                agent.pubkey,
+                channelId,
+                modelId,
+                requestId,
+              ),
             ),
           );
         },
-        // No reply in time: treat as sent. The override still rides the
-        // requeued/next session; we just can't confirm synchronously.
+        // No terminal proof in time remains visibly pending; it is never
+        // promoted to a successful switch merely because the request sent.
         scheduleTimeout: (onTimeout) => {
           const timeout = window.setTimeout(onTimeout, 8_000);
           return () => window.clearTimeout(timeout);
@@ -145,6 +151,14 @@ export function ModelPicker({
         const outcome = await sendLiveSwitch(modelId);
         if (outcome === "unsupported") {
           toast.error("That model isn't available for this agent.");
+          return;
+        }
+        if (outcome === "failed") {
+          toast.error("The model switch wasn't applied to every active turn.");
+          return;
+        }
+        if (outcome === "pending") {
+          toast.info("Model switch requested; confirmation is still pending.");
           return;
         }
         toast.success("Model switched for this session.");
