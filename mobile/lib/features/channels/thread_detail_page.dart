@@ -12,6 +12,7 @@ import '../profile/user_cache_provider.dart';
 import '../profile/user_profile.dart';
 import 'channel_link_navigation.dart';
 import 'channel_typing_provider.dart';
+import 'channel_typing_indicator.dart';
 import 'thread_replies_provider.dart';
 import 'channels_provider.dart';
 import 'compose_bar.dart';
@@ -280,8 +281,16 @@ class ThreadDetailPage extends HookConsumerWidget {
               },
             ),
           ),
-          if (threadTyping.isNotEmpty)
-            _ThreadTypingIndicator(entries: threadTyping),
+          AnimatedSize(
+            duration: MediaQuery.disableAnimationsOf(context)
+                ? Duration.zero
+                : const Duration(milliseconds: 180),
+            curve: Curves.easeOutCubic,
+            alignment: Alignment.bottomCenter,
+            child: threadTyping.isEmpty
+                ? const SizedBox.shrink()
+                : ChannelTypingIndicator(entries: threadTyping),
+          ),
           if (isMember && !isArchived)
             ComposeBar(
               channelId: channelId,
@@ -658,70 +667,6 @@ class _ThreadMessage extends ConsumerWidget {
             ),
           ),
         ),
-      ),
-    );
-  }
-}
-
-class _ThreadTypingIndicator extends ConsumerWidget {
-  final List<TypingEntry> entries;
-
-  const _ThreadTypingIndicator({required this.entries});
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final userCache = ref.watch(userCacheProvider);
-    final names = entries.map((e) {
-      final profile =
-          userCache[e.pubkey.toLowerCase()] ??
-          ref.read(userCacheProvider.notifier).get(e.pubkey.toLowerCase());
-      return profile?.label ?? shortPubkey(e.pubkey);
-    }).toList();
-    final text = switch (names.length) {
-      1 => '${names[0]} is typing...',
-      2 => '${names[0]} and ${names[1]} are typing...',
-      _ => '${names[0]} and ${names.length - 1} others are typing...',
-    };
-
-    final visibleEntries = entries.take(3).toList();
-    final avatarCount = visibleEntries.length;
-
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.symmetric(
-        horizontal: Grid.gutter,
-        vertical: Grid.quarter + 2,
-      ),
-      child: Row(
-        children: [
-          SizedBox(
-            width: 20.0 + (avatarCount - 1) * 12.0,
-            height: 20,
-            child: Stack(
-              children: [
-                for (var i = 0; i < avatarCount; i++)
-                  Positioned(
-                    left: i * 12.0,
-                    child: SmallAvatar(
-                      pubkey: visibleEntries[i].pubkey,
-                      userCache: userCache,
-                    ),
-                  ),
-              ],
-            ),
-          ),
-          const SizedBox(width: Grid.xxs),
-          Flexible(
-            child: Text(
-              text,
-              style: context.textTheme.labelSmall?.copyWith(
-                color: context.colors.outline,
-                fontStyle: FontStyle.italic,
-              ),
-              overflow: TextOverflow.ellipsis,
-            ),
-          ),
-        ],
       ),
     );
   }

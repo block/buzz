@@ -1808,6 +1808,25 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Alice is typing…'), findsOneWidget);
+
+      final indicator = tester.widget<Container>(
+        find.byKey(const ValueKey('channel-typing-indicator')),
+      );
+      final decoration = indicator.decoration! as BoxDecoration;
+      expect(
+        indicator.padding,
+        const EdgeInsets.symmetric(horizontal: Grid.xxs, vertical: Grid.xxs),
+      );
+      expect(
+        decoration.color,
+        AppTheme.light().colorScheme.surfaceContainerHighest,
+      );
+      expect(decoration.border, isA<Border>());
+      expect(
+        tester.widget<Text>(find.text('Alice is typing…')).style?.color,
+        AppTheme.light().colorScheme.primary,
+      );
+      expect(tester.widget<SmallAvatar>(find.byType(SmallAvatar)).size, 24);
     });
 
     testWidgets('shows two typers', (tester) async {

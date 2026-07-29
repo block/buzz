@@ -27,6 +27,7 @@ import 'agent_activity/working_bots_provider.dart';
 import 'channel_management_provider.dart';
 import 'channel_messages_provider.dart';
 import 'channel_typing_provider.dart';
+import 'channel_typing_indicator.dart';
 import 'channels_provider.dart';
 import 'compose_bar.dart';
 import 'date_formatters.dart';
@@ -368,8 +369,17 @@ class ChannelDetailPage extends HookConsumerWidget {
                     ),
                   ),
           ),
-          if (!resolvedChannel.isForum && typingEntries.isNotEmpty)
-            _TypingIndicator(entries: typingEntries),
+          if (!resolvedChannel.isForum)
+            AnimatedSize(
+              duration: MediaQuery.disableAnimationsOf(context)
+                  ? Duration.zero
+                  : const Duration(milliseconds: 180),
+              curve: Curves.easeOutCubic,
+              alignment: Alignment.bottomCenter,
+              child: typingEntries.isEmpty
+                  ? const SizedBox.shrink()
+                  : ChannelTypingIndicator(entries: typingEntries),
+            ),
           if (!resolvedChannel.isForum &&
               resolvedChannel.isMember &&
               !resolvedChannel.isArchived)
