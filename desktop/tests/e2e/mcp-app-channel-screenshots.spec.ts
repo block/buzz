@@ -196,6 +196,7 @@ async function installMcpAppCommandMocks(
 
 test("capture: MCP App channel lifecycle", async ({ page }) => {
   test.setTimeout(45_000);
+  await page.emulateMedia({ colorScheme: "dark" });
   await installMockBridge(page);
 
   const proxy = readFileSync(
