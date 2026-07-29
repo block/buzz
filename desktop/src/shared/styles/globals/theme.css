@@ -157,7 +157,11 @@
 
   body {
     @apply bg-background text-foreground antialiased;
-    font-family: "Inter Variable", Inter, "Avenir Next", "Segoe UI", sans-serif;
+    /* home_portal Raft: Space Grotesk for chrome + body (readable CJK fallbacks) */
+    font-family: "Space Grotesk", "Segoe UI", "PingFang SC", "Microsoft YaHei",
+      "Helvetica Neue", sans-serif;
+    font-weight: 500;
+    -webkit-font-smoothing: antialiased;
   }
 
   /*
@@ -803,4 +807,86 @@
 
 :root[data-buzz-translucent] .buzz-huddle-app-surface::after {
   background: transparent;
+}
+
+/*
+ * ---------------------------------------------------------------------------
+ * Raft / BC home_portal readability fix (Owner 2026-07-29)
+ *
+ * Problem: light Buzz mode painted cream gradient under the whole shell while
+ * --sidebar-foreground stayed near-white → left menu text unreadable.
+ *
+ * Fix: force solid charcoal sidebar + high-contrast light labels (home_portal
+ * side/side-text), keep cream paper for main content only.
+ * ---------------------------------------------------------------------------
+ */
+:root[data-buzz-sidebar]:not(.dark) {
+  --sidebar: 24 10% 16%;
+  --sidebar-background: 24 10% 16%;
+  --sidebar-foreground: 40 33% 98%;
+  --sidebar-primary: 43 96% 56%;
+  --sidebar-primary-foreground: 24 10% 10%;
+  --sidebar-active: 43 96% 56%;
+  --sidebar-active-foreground: 24 10% 10%;
+  --sidebar-accent: 24 8% 22%;
+  --sidebar-accent-foreground: 40 33% 98%;
+  --sidebar-border: 24 6% 28%;
+  --sidebar-ring: 43 96% 56%;
+  /* Chrome labels on dark rail (was black/40% on cream) */
+  --buzz-muted-foreground: rgb(250 250 249 / 78%);
+  --buzz-chrome-foreground: rgb(250 250 249 / 90%);
+  --buzz-nav-fg: rgb(250 250 249 / 92%);
+  --buzz-channel-fg: rgb(250 250 249 / 92%);
+  --buzz-dm-fg: rgb(250 250 249 / 92%);
+  --buzz-search-surface: rgb(255 255 255 / 8%);
+  --buzz-hover-surface: rgb(255 255 255 / 10%);
+  --buzz-sidebar-scrollbar-thumb: rgb(255 255 255 / 18%);
+  --buzz-active-fill: 43 96% 56%;
+  --buzz-active-surface: color-mix(in srgb, #fbbf24 28%, transparent);
+  --buzz-active-foreground: 24 10% 10%;
+}
+
+/* Solid dark rail — do not show cream gradient through sidebar chrome */
+:root[data-buzz-sidebar]:not(.dark) [data-testid="app-sidebar"],
+:root[data-buzz-sidebar]:not(.dark) [data-sidebar="sidebar"],
+:root[data-buzz-sidebar]:not(.dark) [data-sidebar="sidebar"][data-mobile="true"].bg-sidebar {
+  background-color: hsl(var(--sidebar-background));
+  background-image: none;
+  color: hsl(var(--sidebar-foreground));
+}
+
+/* Community rail column shares the dark side */
+:root[data-buzz-sidebar]:not(.dark) [data-testid="app-sidebar"] .bg-sidebar,
+:root[data-buzz-sidebar]:not(.dark) [data-testid="community-rail"],
+:root[data-buzz-sidebar]:not(.dark) [data-testid="app-sidebar"] > div.bg-sidebar {
+  background-color: hsl(var(--sidebar-background));
+  background-image: none;
+  color: hsl(var(--sidebar-foreground));
+}
+
+/* Bump weight so muted/70 labels still read on charcoal */
+:root[data-buzz-sidebar]:not(.dark) [data-testid="app-sidebar"] {
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+:root[data-buzz-sidebar]:not(.dark) [data-testid="app-sidebar"] [data-sidebar="menu-button"],
+:root[data-buzz-sidebar]:not(.dark) [data-testid="app-sidebar"] [data-sidebar="group-label"],
+:root[data-buzz-sidebar]:not(.dark) [data-testid="app-sidebar"] [data-sidebar="menu-sub-button"] {
+  color: hsl(var(--sidebar-foreground));
+  font-weight: 600;
+}
+:root[data-buzz-sidebar]:not(.dark) [data-testid="app-sidebar"] .text-sidebar-foreground\/70,
+:root[data-buzz-sidebar]:not(.dark) [data-testid="app-sidebar"] .text-sidebar-foreground\/80 {
+  color: rgb(250 250 249 / 88%) !important;
+}
+:root[data-buzz-sidebar]:not(.dark) [data-testid="app-sidebar"] .text-sidebar-foreground\/50,
+:root[data-buzz-sidebar]:not(.dark) [data-testid="app-sidebar"] .text-sidebar-foreground\/60 {
+  color: rgb(250 250 249 / 75%) !important;
+}
+
+/* Dark mode: keep high contrast stone + amber (already readable) */
+:root[data-buzz-sidebar].dark {
+  --buzz-muted-foreground: rgb(250 250 249 / 72%);
+  --buzz-chrome-foreground: rgb(250 250 249 / 88%);
+  --buzz-nav-fg: rgb(250 250 249 / 90%);
 }

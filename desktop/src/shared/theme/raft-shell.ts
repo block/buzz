@@ -34,16 +34,17 @@ const RAFT_LIGHT: RaftShellVars = {
   "--border": "24 10% 10%",
   "--input": "24 10% 10%",
   "--ring": "43 96% 56%",
-  "--sidebar": "24 10% 15%",
-  "--sidebar-background": "24 10% 15%",
-  "--sidebar-foreground": "60 9% 98%",
+  /* Charcoal rail + near-white labels (home_portal --side / --side-text) */
+  "--sidebar": "24 10% 16%",
+  "--sidebar-background": "24 10% 16%",
+  "--sidebar-foreground": "40 33% 98%",
   "--sidebar-primary": "43 96% 56%",
   "--sidebar-primary-foreground": "24 10% 10%",
   "--sidebar-active": "43 96% 56%",
   "--sidebar-active-foreground": "24 10% 10%",
-  "--sidebar-accent": "24 10% 20%",
-  "--sidebar-accent-foreground": "60 9% 98%",
-  "--sidebar-border": "24 6% 25%",
+  "--sidebar-accent": "24 8% 22%",
+  "--sidebar-accent-foreground": "40 33% 98%",
+  "--sidebar-border": "24 6% 28%",
   "--sidebar-ring": "43 96% 56%",
 };
 
