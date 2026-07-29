@@ -55,6 +55,13 @@ BUZZ_AGENT_PROVIDER=databricks \
 DATABRICKS_HOST=https://dbc-...cloud.databricks.com \
 DATABRICKS_MODEL=goose-claude-4-6-sonnet \
   ./target/release/buzz-agent
+
+# Or MiniMax (global endpoint; use minimax-cn for the mainland-China host).
+# MINIMAX_MODEL is optional and defaults to MiniMax-M3.
+BUZZ_AGENT_PROVIDER=minimax \
+MINIMAX_API_KEY=... \
+MINIMAX_MODEL=MiniMax-M3 \
+  ./target/release/buzz-agent
 ```
 
 That's the whole setup. The agent reads JSON-RPC frames from stdin, writes them to stdout, and logs to stderr.
@@ -129,7 +136,7 @@ Everything is environment variables. No flags, no config files. (We are a subpro
 
 | Variable | Default | Notes |
 |---|---|---|
-| `BUZZ_AGENT_PROVIDER` | — | Required. `anthropic`, `openai`, `databricks`, or `databricks_v2`. No implicit fallback — the agent errors at startup when this is unset. |
+| `BUZZ_AGENT_PROVIDER` | — | Required. `anthropic`, `openai`, `databricks`, `databricks_v2`, `minimax`, or `minimax-cn`. No implicit fallback — the agent errors at startup when this is unset. |
 | `ANTHROPIC_API_KEY` | — | Required when provider=anthropic. |
 | `ANTHROPIC_MODEL` | — | Required when provider=anthropic. |
 | `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | |
@@ -138,6 +145,9 @@ Everything is environment variables. No flags, no config files. (We are a subpro
 | `OPENAI_COMPAT_MODEL` | — | Required when provider=openai. |
 | `OPENAI_COMPAT_BASE_URL` | `https://api.openai.com/v1` | Point at vLLM, llama.cpp, OpenRouter, Ollama, etc. |
 | `OPENAI_COMPAT_API` | `auto` | `auto` \| `chat` \| `responses`. `auto` picks Responses for `*.openai.com`, Chat Completions everywhere else. |
+| `MINIMAX_API_KEY` | — | Required when provider=minimax or provider=minimax-cn. |
+| `MINIMAX_MODEL` | `MiniMax-M3` | Optional. Defaults to the current flagship; `BUZZ_AGENT_MODEL` overrides it. |
+| `MINIMAX_BASE_URL` | region default | Optional override. Defaults to `https://api.minimax.io/v1` for `minimax` and `https://api.minimaxi.com/v1` for `minimax-cn`. |
 | `DATABRICKS_HOST` | — | Required when provider=databricks or provider=databricks_v2. |
 | `DATABRICKS_MODEL` | — | Required when provider=databricks or provider=databricks_v2. |
 | `DATABRICKS_TOKEN` | — | Optional static bearer escape hatch. If unset, Databricks uses browser OAuth + refresh cache. |
@@ -171,8 +181,12 @@ Everything is environment variables. No flags, no config files. (We are a subpro
 | Block Gateway | `openai` | `POST {base}/chat/completions` | gpt-5, claude |
 | Databricks | `databricks` | `POST {host}/serving-endpoints/{model}/invocations` | goose-claude-4-6-sonnet |
 | Databricks AI Gateway v2 | `databricks_v2` | `POST {host}/ai-gateway/{provider}/v1/...` | databricks-gpt-5-5, databricks-claude-opus-4-7 |
+| MiniMax (global) | `minimax` | `POST {base}/chat/completions` | MiniMax-M3, MiniMax-M2.7 |
+| MiniMax (China) | `minimax-cn` | `POST {base}/chat/completions` | MiniMax-M3, MiniMax-M2.7 |
 
 If `BUZZ_AGENT_PROVIDER=anthropic` is selected without `ANTHROPIC_API_KEY`, or `BUZZ_AGENT_PROVIDER=openai` is selected without `OPENAI_COMPAT_API_KEY`, the agent returns an error — there is no implicit fallback to another provider.
+
+`minimax` and `minimax-cn` are the same OpenAI-compatible Chat Completions transport pointed at MiniMax's global (`api.minimax.io`) and mainland-China (`api.minimaxi.com`) hosts; the region is just the default base URL and is overridable with `MINIMAX_BASE_URL`. Both require `MINIMAX_API_KEY` (sent as a bearer token) and default to the `MiniMax-M3` model. MiniMax also publishes an Anthropic-compatible Messages endpoint — reach it with `BUZZ_AGENT_PROVIDER=anthropic` and `ANTHROPIC_BASE_URL=https://api.minimax.io/anthropic` (or the `api.minimaxi.com` host for China).
 
 `provider=openai` speaks two HTTP dialects: the [Responses API](https://platform.openai.com/docs/api-reference/responses) (`/v1/responses`, required for GPT-5 / o-series tool-calling on OpenAI's own service) and the [Chat Completions API](https://platform.openai.com/docs/api-reference/chat) (`/chat/completions`, the broadly-supported OpenAI-compatible wire format).
 

@@ -146,7 +146,7 @@ impl Llm {
                     .await?;
                 parse_anthropic(v)
             }
-            Provider::OpenAi | Provider::Databricks => {
+            Provider::OpenAi | Provider::Databricks | Provider::MiniMax => {
                 self.openai_request(
                     cfg,
                     effective_model,
@@ -248,7 +248,7 @@ impl Llm {
                 });
                 Ok(parse_anthropic(self.post_anthropic(cfg, &body).await?)?.text)
             }
-            Provider::OpenAi | Provider::Databricks => {
+            Provider::OpenAi | Provider::Databricks | Provider::MiniMax => {
                 let r = self
                     .openai_request(
                         cfg,
@@ -1678,13 +1678,14 @@ where
 ///   never read for Anthropic requests (those go through `post_anthropic` with
 ///   `x-api-key`), but Llm holds one to keep the field non-`Option`.
 /// - `Provider::OpenAi`: a static source over `OPENAI_COMPAT_API_KEY`.
+/// - `Provider::MiniMax`: a static source over `MINIMAX_API_KEY`.
 /// - `Provider::Databricks`: if `DATABRICKS_TOKEN` is set, a static source.
 ///   Otherwise a `PkceOAuthTokenSource` pointed at the workspace's OIDC
 ///   discovery URL. First request without a cached token triggers a browser
 ///   flow; subsequent requests use the cache + refresh transparently.
 pub(crate) fn build_token_source(cfg: &Config) -> Result<Arc<dyn TokenSource>, AgentError> {
     match cfg.provider {
-        Provider::Anthropic | Provider::OpenAi => {
+        Provider::Anthropic | Provider::OpenAi | Provider::MiniMax => {
             Ok(Arc::new(StaticTokenSource::new(cfg.api_key.clone())))
         }
         Provider::Databricks | Provider::DatabricksV2 => {
@@ -1977,6 +1978,31 @@ mod tests {
             .filter(|request| request.method == "POST")
             .filter_map(|request| request.body.as_ref()?.get("model")?.as_str())
             .collect()
+    }
+
+    #[tokio::test]
+    async fn minimax_routes_over_openai_chat_completions() {
+        // MiniMax reuses the OpenAI Chat Completions wire: a MiniMax config must
+        // POST to /v1/chat/completions (never /v1/responses), echo the
+        // configured model in the request body, and parse the OpenAI-shaped
+        // response. This pins the request path for the region-agnostic transport.
+        let (base_url, captured) =
+            spawn_sequence_stub(vec![StubHttpResponse::ok(chat_response("hi from minimax"))]).await;
+        let mut config = cfg(Provider::MiniMax);
+        config.base_url = base_url;
+        let llm = Llm::new(&config).unwrap();
+
+        let reply = complete_model(&llm, &config, "MiniMax-M3").await.unwrap();
+        assert_eq!(reply.text, "hi from minimax");
+
+        let requests = captured.lock().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, "POST");
+        assert_eq!(requests[0].path, "/v1/chat/completions");
+        assert_eq!(
+            requests[0].body.as_ref().and_then(|b| b["model"].as_str()),
+            Some("MiniMax-M3")
+        );
     }
 
     #[tokio::test]
