@@ -84,6 +84,7 @@ pub(crate) fn spawn_config_hash(
                     command: cmd,
                     args,
                     env: Default::default(),
+                    cwd: None,
                 }
             });
     let runtime_meta = known_acp_runtime(&descriptor.command);
@@ -94,6 +95,9 @@ pub(crate) fn spawn_config_hash(
     record.acp_command.hash(&mut hasher);
     descriptor.command.hash(&mut hasher);
     descriptor.args.hash(&mut hasher);
+    // Session cwd override: sent to the harness verbatim at session/new, so a
+    // definition-level cwd edit must trip the badge like a command/args edit.
+    descriptor.cwd.hash(&mut hasher);
     runtime_meta
         .and_then(|r| r.mcp_command)
         .unwrap_or("")

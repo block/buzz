@@ -261,6 +261,15 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_MCP_COMMAND", default_value = "")]
     pub mcp_command: String,
 
+    /// Overrides the `cwd` sent on ACP `session/new`. Normally that value is
+    /// this process's own working directory — meaningful only when the agent
+    /// runs on the same machine as `buzz-acp`. When the harness command
+    /// executes elsewhere (e.g. `ssh` to a remote host), this process's local
+    /// cwd has no meaning there; set this to a path that exists on the
+    /// harness's machine instead.
+    #[arg(long, env = "BUZZ_ACP_SESSION_CWD")]
+    pub session_cwd: Option<String>,
+
     /// Idle timeout: max seconds of silence before killing a turn.
     /// Resets on any agent stdout activity.
     #[arg(long, env = "BUZZ_ACP_IDLE_TIMEOUT")]
@@ -495,6 +504,10 @@ pub struct Config {
     pub agent_command: String,
     pub agent_args: Vec<String>,
     pub mcp_command: String,
+    /// Overrides the `cwd` sent on `session/new`. `None` keeps today's
+    /// behavior — this process's own working directory. See
+    /// `PromptContext.cwd` for where this is applied.
+    pub session_cwd: Option<String>,
     pub idle_timeout_secs: u64,
     pub max_turn_duration_secs: u64,
     pub agents: u32,
@@ -565,6 +578,13 @@ pub struct Config {
 
 /// Maximum length, in characters, of a session title sent to the adapter.
 const SESSION_TITLE_MAX_CHARS: usize = 80;
+
+/// Normalize a raw `--session-cwd` / `BUZZ_ACP_SESSION_CWD` value: trims
+/// whitespace, and empty/whitespace-only collapses to `None` (unset) rather
+/// than surfacing an empty-string override.
+fn normalize_session_cwd(raw: Option<String>) -> Option<String> {
+    raw.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
 
 /// Normalize a configured session title into something safe to hand an adapter.
 ///
@@ -1076,6 +1096,7 @@ impl Config {
             relay_observer: args.relay_observer,
             lazy_pool: args.lazy_pool,
             agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
+            session_cwd: normalize_session_cwd(args.session_cwd),
             no_base_prompt: args.no_base_prompt,
             base_prompt_content,
         };
@@ -1413,6 +1434,7 @@ mod tests {
             agent_command: "goose".into(),
             agent_args: vec!["acp".into()],
             mcp_command: "".into(),
+            session_cwd: None,
             idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
@@ -2111,6 +2133,28 @@ channels = "ALL"
     }
 
     #[test]
+    fn session_cwd_defaults_to_none() {
+        let key = "0".repeat(64);
+        assert_eq!(
+            CliArgs::parse_from(["buzz-acp", "--private-key", &key]).session_cwd,
+            None
+        );
+    }
+
+    #[test]
+    fn session_cwd_cli_flag_sets_value() {
+        let key = "0".repeat(64);
+        let args = CliArgs::parse_from([
+            "buzz-acp",
+            "--private-key",
+            &key,
+            "--session-cwd",
+            "/home/remote/buzz",
+        ]);
+        assert_eq!(args.session_cwd, Some("/home/remote/buzz".to_string()));
+    }
+
+    #[test]
     fn lazy_pool_defaults_off() {
         let key = "0".repeat(64);
         assert!(!CliArgs::parse_from(["buzz-acp", "--private-key", &key]).lazy_pool);
@@ -2781,6 +2825,21 @@ channels = "ALL"
         const {
             assert!(MAX_TURN_DURATION_CEILING_SECS < u64::MAX - 100);
         }
+    }
+
+    #[test]
+    fn normalize_session_cwd_trims_and_passes_through() {
+        assert_eq!(
+            normalize_session_cwd(Some("  /home/remote/buzz  ".to_string())),
+            Some("/home/remote/buzz".to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_session_cwd_collapses_empty_and_whitespace_to_none() {
+        assert_eq!(normalize_session_cwd(Some("".to_string())), None);
+        assert_eq!(normalize_session_cwd(Some("   ".to_string())), None);
+        assert_eq!(normalize_session_cwd(None), None);
     }
 
     #[test]

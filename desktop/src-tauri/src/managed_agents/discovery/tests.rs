@@ -1709,6 +1709,7 @@ fn deleted_harness_summary_display_and_spawn_sentence_agree() {
         env: Default::default(),
         install_instructions_url: String::new(),
         install_hint: String::new(),
+        cwd: None,
     };
     save_and_warm(dir.path(), &def, None).unwrap();
     let record = record_with(Some("doomed"), None, None);
@@ -1853,6 +1854,7 @@ fn harness_def(
         env: Default::default(),
         install_instructions_url: String::new(),
         install_hint: String::new(),
+        cwd: None,
     }
 }
 

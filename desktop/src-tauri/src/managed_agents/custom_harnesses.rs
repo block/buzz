@@ -67,6 +67,14 @@ pub(crate) struct HarnessDefinition {
     /// Human-readable install hint shown in Doctor.
     #[serde(default)]
     pub install_hint: String,
+    /// Session working directory sent verbatim as ACP `session/new`'s `cwd`,
+    /// bypassing the desktop's own workspace path. Needed for harnesses that
+    /// execute on a different machine than the one Desktop runs on (e.g. an
+    /// `ssh` harness command) — the desktop's local workspace path has no
+    /// meaning there. `None` (the default) keeps today's behavior: the cwd of
+    /// the spawned `buzz-acp` process itself.
+    #[serde(default)]
+    pub cwd: Option<String>,
 }
 
 /// Scan `dir` for `*.json` files and deserialize each into a `HarnessDefinition`.
@@ -199,6 +207,19 @@ fn validate_harness_definition(def: &HarnessDefinition) -> Result<(), String> {
                 "installInstructionsUrl must start with https:// or http://, got: {:?}",
                 url
             ));
+        }
+    }
+    // `cwd` travels to `buzz-acp` via a plain env var (BUZZ_ACP_SESSION_CWD),
+    // so — like env values — it must not contain NUL bytes (Command::env
+    // panics on interior NULs). Reject empty/whitespace-only rather than
+    // silently normalizing, so a stray `"cwd": ""` doesn't look like it did
+    // anything: the field should be omitted, not set to an empty string.
+    if let Some(cwd) = &def.cwd {
+        if cwd.contains('\0') {
+            return Err("cwd must not contain NUL bytes".into());
+        }
+        if cwd.trim().is_empty() {
+            return Err("cwd must not be empty — omit the field instead".into());
         }
     }
     Ok(())
@@ -748,6 +769,7 @@ mod tests {
             env: BTreeMap::new(),
             install_instructions_url: String::new(),
             install_hint: String::new(),
+            cwd: None,
         }
     }
 
@@ -888,6 +910,7 @@ mod tests {
             env,
             install_instructions_url: String::new(),
             install_hint: String::new(),
+            cwd: None,
         };
         let err = validate_harness_definition_pub(&def).unwrap_err();
         assert!(
@@ -917,6 +940,7 @@ mod tests {
             env,
             install_instructions_url: String::new(),
             install_hint: String::new(),
+            cwd: None,
         };
         let err = validate_harness_definition_pub(&def).unwrap_err();
         assert!(
@@ -938,6 +962,7 @@ mod tests {
             env,
             install_instructions_url: String::new(),
             install_hint: String::new(),
+            cwd: None,
         };
         let err = validate_harness_definition_pub(&def).unwrap_err();
         assert!(
@@ -959,6 +984,7 @@ mod tests {
             env,
             install_instructions_url: String::new(),
             install_hint: String::new(),
+            cwd: None,
         };
         let err = validate_harness_definition_pub(&def).unwrap_err();
         assert!(
@@ -981,6 +1007,7 @@ mod tests {
             env,
             install_instructions_url: String::new(),
             install_hint: String::new(),
+            cwd: None,
         };
         let err = validate_harness_definition_pub(&def).unwrap_err();
         assert!(
@@ -1002,6 +1029,7 @@ mod tests {
             env,
             install_instructions_url: String::new(),
             install_hint: String::new(),
+            cwd: None,
         };
         assert!(
             validate_harness_definition_pub(&def).is_ok(),

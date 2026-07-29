@@ -290,6 +290,7 @@ pub fn build_managed_agent_summary(
             command: cmd,
             args,
             env: Default::default(),
+            cwd: None,
         }
     });
     let effective_mcp_command = known_acp_runtime(&descriptor.command)
@@ -582,6 +583,14 @@ pub fn spawn_agent_child(
     command.env("BUZZ_ACP_LAZY_POOL", if lazy { "true" } else { "false" });
     command.env("BUZZ_ACP_AGENT_COMMAND", &resolved_agent_command);
     command.env("BUZZ_ACP_AGENT_ARGS", agent_args.join(","));
+    // Session cwd override (BYOH-over-SSH etc.): the string `buzz-acp` sends
+    // as ACP `session/new`'s `cwd`, independent of the process's own local
+    // working directory set via `current_dir()` above. Deliberately NOT
+    // `command.current_dir(cwd)` — that path is meaningful on the harness's
+    // machine, which may not be this one, and may not even exist locally.
+    if let Some(cwd) = &descriptor.cwd {
+        command.env("BUZZ_ACP_SESSION_CWD", cwd);
+    }
     match &resolved_mcp_command {
         Some(mcp_cmd) => {
             command.env("BUZZ_ACP_MCP_COMMAND", mcp_cmd);

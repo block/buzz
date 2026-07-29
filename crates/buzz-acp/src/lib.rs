@@ -1233,6 +1233,47 @@ pub fn run() -> Result<()> {
     tokio_main()
 }
 
+/// Resolve the `cwd` sent on ACP `session/new`.
+///
+/// `session_cwd` (from `BUZZ_ACP_SESSION_CWD` / `Config::session_cwd`) wins
+/// verbatim when set — this is the BYOH-over-SSH escape hatch: the harness
+/// may run on a different machine than this process, where this process's
+/// own working directory has no meaning. No validation happens here; the
+/// adapter on the harness end is the source of truth for whether the path
+/// is usable. Falls back to this process's own working directory otherwise,
+/// preserving pre-override behavior.
+fn resolve_session_cwd(session_cwd: Option<&str>) -> String {
+    if let Some(cwd) = session_cwd {
+        return cwd.to_string();
+    }
+    std::env::current_dir()
+        .unwrap_or_else(|_| std::path::PathBuf::from("/"))
+        .to_string_lossy()
+        .to_string()
+}
+
+#[cfg(test)]
+mod resolve_session_cwd_tests {
+    use super::resolve_session_cwd;
+
+    #[test]
+    fn override_wins_verbatim() {
+        assert_eq!(
+            resolve_session_cwd(Some("/home/remote-user/buzz")),
+            "/home/remote-user/buzz"
+        );
+    }
+
+    #[test]
+    fn none_falls_back_to_current_dir() {
+        let expected = std::env::current_dir()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        assert_eq!(resolve_session_cwd(None), expected);
+    }
+}
+
 #[tokio::main]
 async fn tokio_main() -> Result<()> {
     // Install the ring crypto provider for rustls (required for wss:// connections).
@@ -1543,10 +1584,7 @@ async fn tokio_main() -> Result<()> {
             Some(include_str!("base_prompt.md"))
         },
         heartbeat_prompt: config.heartbeat_prompt.clone(),
-        cwd: std::env::current_dir()
-            .unwrap_or_else(|_| std::path::PathBuf::from("/"))
-            .to_string_lossy()
-            .to_string(),
+        cwd: resolve_session_cwd(config.session_cwd.as_deref()),
         rest_client: relay.rest_client(),
         channel_info: pool::ChannelInfoResolver::new(channel_info_map, relay.rest_client()),
         context_message_limit: config.context_message_limit,
@@ -4984,6 +5022,7 @@ mod build_mcp_servers_tests {
             agent_command: "goose".into(),
             agent_args: vec!["acp".into()],
             mcp_command: "test-mcp-server".into(),
+            session_cwd: None,
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
@@ -5205,6 +5244,7 @@ mod error_outcome_emission_tests {
             agent_command: "true".into(),
             agent_args: vec![],
             mcp_command: "test-mcp-server".into(),
+            session_cwd: None,
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,

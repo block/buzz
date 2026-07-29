@@ -101,6 +101,10 @@ pub(crate) struct EffectiveHarnessDescriptor {
     /// The full layered process env: baked floor → runtime metadata → definition
     /// env → global → persona → agent.
     pub env: BTreeMap<String, String>,
+    /// `HarnessDefinition.cwd`, when the resolved harness definition sets one.
+    /// `None` means "no override" — spawn keeps today's behavior (the cwd of
+    /// the `buzz-acp` process itself).
+    pub cwd: Option<String>,
 }
 
 /// Resolve the complete harness descriptor from a record + context — the single
@@ -161,6 +165,10 @@ pub(crate) fn resolve_effective_harness_descriptor(
         }
     };
 
+    // Cwd override: taken from the harness definition only (no per-instance
+    // override yet). Grabbed before the move below.
+    let cwd = harness_def.as_ref().and_then(|def| def.cwd.clone());
+
     // Env: full layered resolution (same as resolve_effective_agent_env).
     // Pass harness_def directly to avoid a second lookup.
     let effective_env =
@@ -170,6 +178,7 @@ pub(crate) fn resolve_effective_harness_descriptor(
         command: effective_command,
         args,
         env: effective_env.env,
+        cwd,
     })
 }
 
