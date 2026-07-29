@@ -395,6 +395,7 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=simple
+NoNewPrivileges=true
 EnvironmentFile=%h/.config/buzz-acp/%i.env
 ExecStart=@BUZZ_ACP_BIN@
 Restart=always
@@ -407,6 +408,12 @@ WantedBy=default.target
 - `StartLimitIntervalSec=0` — a long-running agent must never be rate-limited into staying down. A
   unit held by the start limiter looks exactly like an agent that silently died, and only
   `systemctl reset-failed` clears it.
+- `NoNewPrivileges=true` — the agent runs arbitrary code by design, so the SSH user's own privileges
+  are the intended ceiling. Without this the harness can climb past them through any setuid/setgid
+  binary on the host, or through passwordless `sudo` granted to that user. It is deliberately the
+  whole hardening delta: `ProtectSystem`/`ProtectHome` belong here too, but an agent has no modeled
+  workspace yet (see Known limitations), so until writable paths are something the protocol states
+  those directives would be guessing at which of the user's home an agent legitimately needs.
 - `EnvironmentFile` — holds the minted nsec; systemd reads it as the owning user.
 - `ExecStart` is an absolute path, substituted at install time from the host's resolved `buzz-acp`.
   systemd does not expand environment variables in the program position, and the shell indirection

@@ -9,6 +9,19 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=simple
+# The agent runs arbitrary code by design, so the SSH user's own privileges are
+# the intended ceiling — but without this the harness can climb past them
+# through any setuid/setgid binary on the host, or through passwordless sudo
+# granted to that user. A VPS pilot exercised the harness, the Buzz CLI,
+# NIP-OA owner-reviewed draft creation and repository branch pushes with this
+# set; all remained functional.
+#
+# Deliberately the whole hardening delta. ProtectSystem/ProtectHome would also
+# apply here, but the agent has no modeled workspace yet (see the REPOS /
+# working-directory limitation in docs/remote-agents.md) — so until writable
+# paths are something the protocol states, those directives would be guessing
+# at which of the user's home an agent legitimately needs.
+NoNewPrivileges=true
 # Holds the agent's minted nsec. Written by the provider with umask 077 and
 # chmod 600; systemd reads it as the owning user.
 EnvironmentFile=%h/.config/buzz-acp/%i.env

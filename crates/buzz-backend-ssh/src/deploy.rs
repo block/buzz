@@ -1151,6 +1151,12 @@ mod tests {
         let script = deploy_script(&agent, &config(), UNIT_TEMPLATE, &Pushes::default()).unwrap();
         assert!(UNIT_TEMPLATE.contains("ExecStart=@BUZZ_ACP_BIN@"));
         assert!(UNIT_TEMPLATE.contains("EnvironmentFile=%h/.config/buzz-acp/%i.env"));
+        // The SSH user's own privileges are the intended ceiling for an agent
+        // that runs arbitrary code. Without this it can climb past them through
+        // a setuid binary or passwordless sudo granted to that user, and the
+        // unit — not the deploy script — is the only place that can say so.
+        assert!(UNIT_TEMPLATE.contains("\nNoNewPrivileges=true\n"));
+        assert!(script.contains("NoNewPrivileges=true"));
         // Substitution is parameter expansion, not `sed -i`: in-place editing
         // is a GNU extension that BSD and macOS hosts reject.
         assert!(!script.contains("sed -i"));
