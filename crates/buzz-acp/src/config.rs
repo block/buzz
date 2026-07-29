@@ -240,7 +240,7 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_RELAY_URL", default_value = "ws://localhost:3000")]
     pub relay_url: String,
 
-    #[arg(long, env = "BUZZ_PRIVATE_KEY")]
+    #[arg(long, env = "BUZZ_PRIVATE_KEY", hide_env_values = true)]
     pub private_key: String,
 
     /// Agent owner pubkey (64-char hex). Used for --respond-to=owner-only gate.
@@ -2897,5 +2897,35 @@ channels = "ALL"
     fn compose_session_title_drops_the_channel_when_the_agent_name_fills_the_cap() {
         let agent = "a".repeat(SESSION_TITLE_MAX_CHARS);
         assert_eq!(compose_session_title(&agent, Some("buzz-dev")), agent);
+    }
+
+    /// Every arg whose env var name contains KEY/SECRET/TOKEN/PASSWORD/CRED/AUTH
+    /// must set `hide_env_values = true` to prevent credential leakage in --help.
+    #[test]
+    fn secret_env_args_hide_their_values_in_help() {
+        use clap::CommandFactory;
+
+        const SECRET_PATTERNS: &[&str] = &["KEY", "SECRET", "TOKEN", "PASSWORD", "CRED", "AUTH"];
+
+        let cmd = CliArgs::command();
+        let violations: Vec<String> = cmd
+            .get_arguments()
+            .filter_map(|arg| {
+                let env_key = arg.get_env()?;
+                let env_name = env_key.to_string_lossy().to_uppercase();
+                let is_secret = SECRET_PATTERNS.iter().any(|pat| env_name.contains(pat));
+                if is_secret && !arg.is_hide_env_values_set() {
+                    Some(env_name)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        assert!(
+            violations.is_empty(),
+            "Found secret-bearing env args without hide_env_values=true. \
+             Add `hide_env_values = true` to each: {violations:?}"
+        );
     }
 }
