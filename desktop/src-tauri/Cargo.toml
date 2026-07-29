@@ -42,8 +42,6 @@ keyring = { version = "3.6.3", default-features = false, features = ["sync-secre
 notify-rust = "4"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-# Its response wait detects click/dismissal and removes per-notification pending
-# state on return; Buzz additionally caps concurrent response threads below.
 mac-notification-sys = "0.6.15"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSHapticFeedback"] }
 keyring = { version = "3.6.3", default-features = false, features = ["apple-native", "vendored"], optional = true }
