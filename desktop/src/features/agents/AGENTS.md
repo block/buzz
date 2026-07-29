@@ -114,6 +114,11 @@ with a TypeScript lookup table or an id comparison in a component.
     published or removed. A queued update must stay visibly queued, and the
     catalog itself must render only relay-confirmed publications — never an
     optimistic local persona.
+11. **Model IDs are runtime values; model labels are presentation.** Preserve
+    the exact discovered or configured ID when selecting and persisting a
+    model. Any user-facing Databricks gateway model name must go through
+    `lib/formatAgentModelLabel.ts` so its `databricks-` endpoint prefix is
+    removed consistently without changing the value sent to the runtime.
 
 ## The tests that enforce this
 

@@ -24,6 +24,7 @@ import {
 import { useIsManagedAgent } from "@/features/agent-memory/hooks";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { useAgentWorking } from "@/features/agents/agentWorkingSignal";
+import { formatModelDisplayName } from "@/features/agents/lib/formatAgentModelLabel";
 import {
   formatOwnerLabel,
   ownsAuthorAgent,
@@ -611,7 +612,9 @@ export function UserProfilePopover({
                 <InfoBadge>{runtimeLabel(relayAgent.agentType)}</InfoBadge>
               ) : null}
               {managedAgent?.model ? (
-                <InfoBadge>{managedAgent.model}</InfoBadge>
+                <InfoBadge>
+                  {formatModelDisplayName(managedAgent.model)}
+                </InfoBadge>
               ) : null}
               {managedAgent?.acpCommand ? (
                 <InfoBadge>ACP: {managedAgent.acpCommand}</InfoBadge>

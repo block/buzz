@@ -56,3 +56,21 @@ test("resolveAgentCardModelLabel — non-inherited agent with a blank resolved m
   });
   assert.equal(label, "Default model (claude-sonnet)");
 });
+
+test("resolveAgentCardModelLabel — Databricks endpoint IDs render without the gateway prefix", () => {
+  const label = resolveAgentCardModelLabel({
+    agent: { modelSource: "definition", model: "databricks-claude-opus-4-7" },
+    personaModel: null,
+    defaultModel: "databricks-gpt-5-5",
+  });
+  assert.equal(label, "Claude Opus 4.7");
+});
+
+test("resolveAgentCardModelLabel — inherited Databricks models render a clean name", () => {
+  const label = resolveAgentCardModelLabel({
+    agent: undefined,
+    personaModel: null,
+    defaultModel: "databricks-gpt-5-5",
+  });
+  assert.equal(label, "Default model (GPT-5.5)");
+});

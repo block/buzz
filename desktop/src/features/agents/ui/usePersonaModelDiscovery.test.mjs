@@ -61,6 +61,27 @@ test("default row shows the harness-reported current model when available", () =
   );
 });
 
+test("Databricks endpoint IDs keep their value while using a clean display label", () => {
+  const options = getDiscoveredPersonaModelOptions(
+    response({
+      agentDefaultModel: "databricks-gpt-5-5",
+      models: [
+        {
+          id: "databricks-claude-opus-4-7",
+          name: "databricks-claude-opus-4-7",
+          description: null,
+        },
+      ],
+    }),
+    "databricks_v2",
+  );
+
+  assert.deepEqual(options, [
+    { id: "", label: "Default model (GPT-5.5)" },
+    { id: "databricks-claude-opus-4-7", label: "Claude Opus 4.7" },
+  ]);
+});
+
 test("the 'default' id match is case-insensitive and trimmed", () => {
   const options = getDiscoveredPersonaModelOptions(
     response({

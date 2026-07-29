@@ -1,4 +1,7 @@
-import { formatAgentModelLabel } from "./formatAgentModelLabel";
+import {
+  formatAgentModelLabel,
+  formatModelDisplayName,
+} from "./formatAgentModelLabel";
 import type { ManagedAgent } from "@/shared/api/types";
 
 /**
@@ -39,6 +42,6 @@ export function resolveAgentCardModelLabel(input: {
 }
 
 export function formatDefaultModelLabel(defaultModel: string) {
-  const model = defaultModel.trim();
+  const model = formatModelDisplayName(defaultModel);
   return model ? `Default model (${model})` : "Default model";
 }

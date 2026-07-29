@@ -2,6 +2,7 @@ import type {
   AcpRuntimeCatalogEntry,
   GlobalAgentConfig,
 } from "@/shared/api/types";
+import { formatModelDisplayName } from "../lib/formatAgentModelLabel";
 import { BUZZ_AGENT_THINKING_EFFORT } from "./buzzAgentConfig";
 import type { RuntimeFileConfigSubset } from "@/shared/api/tauri";
 // Dialogs import getDefaultPersonaRuntime via this re-export; lib code imports
@@ -307,7 +308,7 @@ export function getDefaultLlmProviderLabel(
  * Otherwise falls back to the generic `"Default model"` placeholder.
  */
 export function getDefaultLlmModelLabel(globalModel?: string) {
-  const trimmedGlobal = (globalModel ?? "").trim();
+  const trimmedGlobal = formatModelDisplayName(globalModel);
   return trimmedGlobal
     ? `Use agent defaults (${trimmedGlobal})`
     : "Default model";

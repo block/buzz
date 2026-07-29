@@ -24,6 +24,7 @@ import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { AgentConfigPanel } from "./AgentConfigPanel";
 import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
+import { formatModelDisplayName } from "@/features/agents/lib/formatAgentModelLabel";
 import { ManagedAgentLogPanel } from "./ManagedAgentLogPanel";
 import { PubKey } from "@/shared/ui/PubKey";
 import { SubsectionLabel } from "@/shared/ui/PageHeader";
@@ -410,7 +411,9 @@ function RuntimeBlock({
       {runtimeSource || agent.model ? (
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
           {runtimeSource ? <span>{runtimeSource}</span> : null}
-          {agent.model ? <span>{agent.model}</span> : null}
+          {agent.model ? (
+            <span>{formatModelDisplayName(agent.model)}</span>
+          ) : null}
         </div>
       ) : null}
     </div>
