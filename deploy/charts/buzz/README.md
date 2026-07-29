@@ -121,13 +121,13 @@ an Ingress or HTTPRoute for the pairing Service; route the public hostname to
 
 ## HA (production)
 
-`replicaCount > 1` hard-requires Redis:
+The relay requires Redis at **any** replica count, not just HA:
 
-- Redis (`redis.enabled=true`, `externalRedis.url`, or `REDIS_URL` in `existingSecret`) — for `buzz-pubsub` fan-out
+- Redis (`redis.enabled=true`, `externalRedis.url`, or `REDIS_URL` in `existingSecret`) — for `buzz-pubsub` (presence, typing, rate limiting, cache invalidation) and the NIP-98 HTTP-auth replay guard, which fails closed without it
 
 It does **not** require ReadWriteMany git storage. Git ref/object state is object-store-backed (each request hydrates an ephemeral repo from S3-compatible storage; writer serialization is the object-store pointer CAS — see `docs/git-on-object-storage.md`), and repo-name uniqueness lives in Postgres. Each replica can use its own `ReadWriteOnce` volume; no shared filesystem is needed.
 
-The chart **template-fails** if the Redis invariant is broken at `replicaCount > 1`. No silent degradation.
+The chart **template-fails** if no Redis source is configured, at any `replicaCount`. No silent degradation — a missing Redis source used to render successfully at `replicaCount=1` and then sit at a permanent, unexplained `/_readiness` 503.
 
 ### Relay autoscaling
 

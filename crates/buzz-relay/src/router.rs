@@ -389,6 +389,11 @@ async fn readiness_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
     if pg_ok && redis_ok {
         (StatusCode::OK, Json(json!({"status": "ready"}))).into_response()
     } else {
+        tracing::warn!(
+            postgres_ok = pg_ok,
+            redis_ok = redis_ok,
+            "readiness probe failing — see which dependency is unreachable"
+        );
         (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({"status": "not_ready", "postgres": pg_ok, "redis": redis_ok})),

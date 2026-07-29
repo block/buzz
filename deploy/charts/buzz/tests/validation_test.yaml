@@ -29,15 +29,31 @@ tests:
       - failedTemplate:
           errorPattern: "ownerPubkey: Does not match pattern"
 
-  - it: fails when replicaCount>1 without Redis
+  - it: fails when Redis source is missing, even at replicaCount=1
     set:
       relayUrl: wss://buzz.example.com
       ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
       externalPostgresql.url: postgres://u:p@h:5432/d
+      s3.endpoint: http://minio:9000
+      s3.accessKey: a
+      s3.secretKey: s
+      replicaCount: 1
+    asserts:
+      - failedTemplate:
+          errorPattern: "Redis source missing"
+
+  - it: fails when Redis source is missing at replicaCount>1
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      s3.endpoint: http://minio:9000
+      s3.accessKey: a
+      s3.secretKey: s
       replicaCount: 3
     asserts:
       - failedTemplate:
-          errorPattern: "minimum replica count 3 requires Redis"
+          errorPattern: "Redis source missing"
 
   - it: fails when ingress and httproute both enabled
     set:
