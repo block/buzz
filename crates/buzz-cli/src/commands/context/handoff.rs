@@ -24,6 +24,7 @@ struct HandoffState {
     open_id: String,
     title: String,
     context: String,
+    opener_pubkey: String,
     opener_owner_pubkey: String,
     allowed_claimants: Vec<String>,
     created_at: u64,
@@ -34,6 +35,8 @@ struct HandoffState {
     claim_created_at: Option<u64>,
     return_id: Option<String>,
     return_created_at: Option<u64>,
+    close_id: Option<String>,
+    close_created_at: Option<u64>,
     #[serde(default)]
     conflicting_claims: Vec<String>,
     #[serde(default)]
