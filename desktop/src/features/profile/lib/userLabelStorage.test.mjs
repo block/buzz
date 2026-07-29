@@ -139,6 +139,7 @@ test("writes merge with existing labels and remain bounded", async () => {
   );
   assert.equal(Object.keys(stored.profiles).length, 1_000);
   assert.equal(stored.version, 1);
+  assert.equal(stored.updatedAt, undefined);
 });
 
 test("removes a stale label when the fresh profile clears all names", async () => {

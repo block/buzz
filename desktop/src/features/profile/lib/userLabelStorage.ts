@@ -17,7 +17,6 @@ type CachedUserLabel = {
 
 type UserLabelCache = {
   version: 1;
-  updatedAt: number;
   profiles: Record<string, CachedUserLabel>;
 };
 
@@ -81,11 +80,6 @@ function readCache(relayUrl: string): UserLabelCache | null {
     }
     return {
       version: 1,
-      updatedAt:
-        typeof payload.updatedAt === "number" &&
-        Number.isFinite(payload.updatedAt)
-          ? payload.updatedAt
-          : 0,
       profiles,
     };
   } catch {
@@ -165,7 +159,6 @@ export function writeCachedUserLabels(
       userLabelCacheKey(relayUrl),
       JSON.stringify({
         version: 1,
-        updatedAt: now,
         profiles: boundedProfiles,
       } satisfies UserLabelCache),
     );
