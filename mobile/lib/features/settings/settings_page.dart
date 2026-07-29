@@ -7,6 +7,7 @@ import 'package:package_info_plus/package_info_plus.dart';
 
 import '../../shared/auth/auth.dart';
 import '../../shared/clipboard_utils.dart';
+import '../../shared/preferences/show_join_leave_messages_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/app_list.dart';
@@ -18,6 +19,7 @@ import 'theme_picker_page.dart';
 
 part 'settings_page/appearance_section.dart';
 part 'settings_page/connection_section.dart';
+part 'settings_page/messages_section.dart';
 
 class SettingsPage extends HookConsumerWidget {
   const SettingsPage({super.key, required this.profileHeader});
@@ -42,6 +44,7 @@ class SettingsPage extends HookConsumerWidget {
               children: [
                 profileHeader,
                 const _AppearanceSection(),
+                const _MessagesSection(),
                 const _ConnectionSection(),
                 const _RemoveCommunitySection(),
               ],

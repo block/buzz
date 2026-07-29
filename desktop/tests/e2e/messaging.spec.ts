@@ -2,6 +2,7 @@ import { expect, test, type Locator } from "@playwright/test";
 
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 import { expectCornerRadiusPx, expectSmoothCorners } from "../helpers/css";
+import { enableJoinLeaveMessages } from "../helpers/joinLeaveMessages";
 import { openSettings } from "../helpers/settings";
 
 async function expectThreadReplyUnobscured(row: Locator) {
@@ -113,6 +114,7 @@ test.beforeEach(async ({ page }, testInfo) => {
 });
 
 test("agent owner label identifies the agent and owner", async ({ page }) => {
+  await enableJoinLeaveMessages(page);
   await page.goto("/");
   await page.getByTestId("channel-general").click();
 

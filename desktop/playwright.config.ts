@@ -33,6 +33,7 @@ export default defineConfig({
         "**/add-community-screenshots.spec.ts",
         "**/hosted-communities-settings-screenshots.spec.ts",
         "**/invites-settings-screenshots.spec.ts",
+        "**/join-leave-visibility-screenshots.spec.ts",
         "**/messaging.spec.ts",
         "**/custom-emoji.spec.ts",
         "**/profile-custom-emoji-status.spec.ts",
