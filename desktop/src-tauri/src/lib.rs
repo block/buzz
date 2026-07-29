@@ -7,6 +7,7 @@ mod deep_link;
 mod event_sync;
 mod events;
 mod huddle;
+mod linux_media;
 mod managed_agents;
 mod media_proxy;
 #[cfg(feature = "mesh-llm")]
@@ -194,6 +195,11 @@ pub fn run() {
                     if webview.label() != "main" {
                         return;
                     }
+
+                    // Linux/WebKitGTK needs media-stream settings and a
+                    // permission-request handler for getUserMedia; no-op
+                    // on macOS/Windows.
+                    linux_media::enable_media_capture(&webview);
 
                     // macOS applies the restored geometry asynchronously. Wait
                     // for several identical outer bounds and for React to

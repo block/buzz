@@ -22,6 +22,10 @@ mesh-llm = ["dep:iroh", "dep:mesh-llm-sdk", "dep:mesh-llm-host-runtime", "dep:me
 # OS keyring backing for desktop secret storage (nsec private keys). When
 # disabled, secrets fall back to 0o600 files. On by default for real builds.
 system-keyring = ["dep:keyring"]
+# WebRTC peer connections / getDisplayMedia in the Linux webview. Needs a
+# WebKitGTK built with -DENABLE_WEB_RTC=ON; off by default so builds against
+# stock WebKitGTK keep working. Plain getUserMedia does not require this.
+webkit_webrtc = ["webkit2gtk/v2_38"]
 
 [build-dependencies]
 base64 = "0.22"
@@ -40,6 +44,10 @@ keyring = { version = "3.6.3", default-features = false, features = ["sync-secre
 # connection is dropped, which the plugin does immediately. Default features
 # keep the pure-Rust zbus backend, matching the plugin (no libdbus needed).
 notify-rust = "4"
+# Enable getUserMedia in the WebKitGTK webview (see src/linux_media.rs). Pinned
+# to the exact version wry links so both resolve to one webkit2gtk-sys and we
+# don't get duplicate symbols; bump in lockstep with wry.
+webkit2gtk = { version = "=2.0.2", features = ["v2_22"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSHapticFeedback"] }
