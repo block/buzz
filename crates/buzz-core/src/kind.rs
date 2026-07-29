@@ -108,14 +108,15 @@ pub const KIND_SYNC_DECLARATION: u32 = 30700;
 /// witnessed chain, replication checkpoints, and the effective
 /// `KIND_SYNC_DECLARATION` agreement heads it applies. The ephemeral
 /// counterpart of 30700 — the durable agreement versus the witness of now.
-/// See `specs/architecture/beacon-pulse-v0.1-draft.md`.
+/// See `specs/architecture/beacon-pulse-v0.2-draft.md`.
 pub const KIND_BEACON_PULSE: u32 = 20700;
 
 /// Beacon pulse response (ephemeral).
 ///
 /// PROVISIONAL number pending upstream registry assignment. A peer's answer
 /// to a Beacon pulse, `e`-tagged to the pulse it answers, carrying a
-/// `stance`: recognize, advanced, conflict, diverged, or unsatisfied.
+/// `stance` (recognize, advanced, conflict, diverged, or unsatisfied) and
+/// the responder's own head. See `specs/architecture/beacon-pulse-v0.2-draft.md`.
 pub const KIND_BEACON_RESPONSE: u32 = 20701;
 
 /// NIP-ER: Event Reminder (parameterized replaceable, author-only).

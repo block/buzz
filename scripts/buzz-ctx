@@ -831,7 +831,7 @@ case "${1:-}" in
     # argument, witnesses both nodes of the pair (local sovereign + cloud
     # rendezvous) side by side; shared reality is visible exactly when
     # their heads and agreements are compatible.
-    # See specs/architecture/beacon-pulse-v0.1-draft.md.
+    # See specs/architecture/beacon-pulse-v0.2-draft.md.
     if [ -n "${2:-}" ]; then
       relays="$2"
     else
