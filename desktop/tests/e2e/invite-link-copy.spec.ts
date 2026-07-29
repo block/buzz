@@ -3,7 +3,10 @@ import { expect, test } from "@playwright/test";
 import { installMockBridge } from "../helpers/bridge";
 import { openSettings } from "../helpers/settings";
 
+let invitePayloads: Record<string, unknown>[];
+
 test.beforeEach(async ({ page }) => {
+  invitePayloads = [];
   await page.context().grantPermissions(["clipboard-read", "clipboard-write"], {
     origin: "http://127.0.0.1:4173",
   });
@@ -11,6 +14,7 @@ test.beforeEach(async ({ page }) => {
     relayRequiresMembership: true,
   });
   await page.route("**/api/invites", async (route) => {
+    invitePayloads.push(route.request().postDataJSON());
     await route.fulfill({
       contentType: "application/json",
       json: {
@@ -33,8 +37,12 @@ test("copies a freshly minted invite link without showing a URL or QR code", asy
   await page.getByTestId("community-invite-dialog-trigger").click();
   await expect(page.getByTestId("invite-link-url")).toHaveCount(0);
   await expect(page.getByTestId("invite-link-qr-code")).toHaveCount(0);
+  await expect(page.getByTestId("invite-link-max-uses-trigger")).toHaveText(
+    "No limit",
+  );
   await page.getByTestId("copy-invite-link").click();
   await expect(page.getByTestId("copy-invite-link")).toContainText("Copied");
+  expect(invitePayloads).toEqual([{ ttl_secs: 3 * 24 * 60 * 60 }]);
 
   const payload = await page.evaluate(() => {
     const log = (
@@ -52,4 +60,26 @@ test("copies a freshly minted invite link without showing a URL or QR code", asy
   expect(payload).toEqual({
     text: "buzz://join?relay=wss%3A%2F%2Frelay.example.com&code=qr-download-test",
   });
+});
+
+test("sets a selected invite-use limit", async ({ page }) => {
+  await page.goto("/");
+  await openSettings(page, "community-members");
+  await page.getByTestId("community-invite-dialog-trigger").click();
+
+  const maxUsesTrigger = page.getByTestId("invite-link-max-uses-trigger");
+  await maxUsesTrigger.click();
+  await expect(
+    page.getByRole("menuitemradio", { name: "No limit" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("menuitemradio", { name: "25 uses" }),
+  ).toBeVisible();
+  await page.getByTestId("invite-link-max-uses-10").click();
+  await expect(maxUsesTrigger).toHaveText("10 uses");
+  await page.getByTestId("copy-invite-link").click();
+  await expect(page.getByTestId("copy-invite-link")).toContainText("Copied");
+  expect(invitePayloads).toEqual([
+    { max_uses: 10, ttl_secs: 3 * 24 * 60 * 60 },
+  ]);
 });

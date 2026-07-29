@@ -78,15 +78,25 @@ test("capture: share-style community invite dialog", async ({ page }) => {
   await expect(page.getByTestId("community-invite-email-field")).toHaveCount(0);
   await expect(page.getByPlaceholder("Type an email address")).toHaveCount(0);
   await expect(
-    dialog.getByRole("heading", { name: "Share with a link" }),
+    dialog.getByText("Anyone with this link can join this community."),
   ).toBeVisible();
+  await expect(dialog.getByText("Expires after")).toBeVisible();
+  await expect(dialog.getByText("Limit number of uses")).toBeVisible();
+  await expect(page.getByTestId("invite-link-max-uses-trigger")).toHaveText(
+    "No limit",
+  );
   await expect(page.getByTestId("copy-invite-link")).toHaveText("Copy link");
   await expect(page.getByTestId("invite-link-qr-code")).toHaveCount(0);
   await expect(page.getByTestId("invite-link-url")).toHaveCount(0);
 
   const expiryTrigger = page.getByTestId("invite-link-ttl-trigger");
   await expect(expiryTrigger).toHaveText("3 days");
+  await expect(expiryTrigger).toHaveCSS("font-size", "14px");
+  await expect(
+    dialog.getByText("Limit number of uses", { exact: true }),
+  ).toHaveCSS("font-size", "14px");
   await expiryTrigger.click();
+  await expect(page.getByRole("menu")).not.toContainText("Expires after");
   await expect(
     page.getByRole("menuitemradio", { name: "1 day" }),
   ).toBeVisible();

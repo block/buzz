@@ -8,6 +8,8 @@ import 'package:hooks_riverpod/misc.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
+import 'package:buzz/features/channels/channel_sections/channel_sections_provider.dart';
+import 'package:buzz/features/channels/channel_sections/channel_sections_storage.dart';
 import 'package:buzz/features/channels/channels_page.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/read_state/read_state_provider.dart';
@@ -28,6 +30,7 @@ void main() {
     bool previewDirectory = false,
     double keyboardInset = 0,
     bool disableAnimations = false,
+    double bottomPadding = 0,
     Map<String, String?> communityIcons = const {},
     ValueChanged<String>? onCommunityIconLoad,
     TextScaler textScaler = TextScaler.noScaling,
@@ -52,6 +55,7 @@ void main() {
           data: MediaQuery.of(context).copyWith(
             disableAnimations: disableAnimations,
             textScaler: textScaler,
+            padding: EdgeInsets.only(bottom: bottomPadding),
             viewInsets: EdgeInsets.only(bottom: keyboardInset),
           ),
           child: child!,
@@ -140,6 +144,60 @@ void main() {
     final sectionTitle = tester.widget<Text>(find.text('Channels'));
     expect(sectionTitle.style?.fontSize, contentListTitleTextStyle.fontSize);
     expect(sectionTitle.style?.fontWeight, FontWeight.w600);
+  });
+
+  testWidgets('keeps the last channel above the floating tab bar', (
+    tester,
+  ) async {
+    const footerClearance = 102.0;
+    await tester.pumpWidget(
+      buildTestable(
+        bottomPadding: footerClearance,
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final padding = tester.widget<SliverPadding>(
+      find.descendant(
+        of: find.byType(CustomScrollView),
+        matching: find.byType(SliverPadding),
+      ),
+    );
+    expect((padding.padding as EdgeInsets).bottom, footerClearance);
+  });
+
+  testWidgets('truncates long custom section names beside the menu', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(320, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    const sectionName = 'A deliberately long custom section name for testing';
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+          channelSectionsProvider.overrideWith(
+            () => _FakeChannelSectionsNotifier(
+              const ChannelSectionStore(
+                sections: [
+                  ChannelSection(id: 'section-1', name: sectionName, order: 0),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final label = tester.widget<Text>(find.text(sectionName));
+    expect(label.maxLines, 1);
+    expect(label.overflow, TextOverflow.ellipsis);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('aligns the top, section, row, and skeleton label columns', (
@@ -1382,6 +1440,16 @@ class _FakeNotifier extends ChannelsNotifier {
   @override
   Map<String, Map<String, ObservedUnreadEvent>>
   get observedUnreadEventsByChannel => _observedEventsByChannel;
+}
+
+class _FakeChannelSectionsNotifier extends ChannelSectionsNotifier {
+  _FakeChannelSectionsNotifier(this._store);
+
+  final ChannelSectionStore _store;
+
+  @override
+  ChannelSectionsState build() =>
+      ChannelSectionsState(isReady: true, store: _store, version: 1);
 }
 
 class _FakeCommunityListNotifier extends CommunityListNotifier {
