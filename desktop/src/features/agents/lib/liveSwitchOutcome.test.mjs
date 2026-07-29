@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   awaitLiveSwitchOutcome,
   createTerminalClaimJournal,
+  resetLiveSwitchOutcomeClaims,
 } from "./liveSwitchOutcome.ts";
 
 const MODEL = "goose-claude-fable-5";
@@ -498,6 +499,24 @@ test("a duplicate relay ID and request pair cannot satisfy another request", asy
   second.push(frame("switched", { requestId, relayEventId }));
   second.fireTimeout();
   assert.equal(await second.outcome, "pending");
+});
+
+test("community reset replaces the relay-scoped terminal claim journal", async () => {
+  const requestId = "9".repeat(32);
+  const relayEventId = "8".repeat(64);
+  const first = harness([CHANNEL_A], requestId);
+  first.push(frame("switched", { requestId, relayEventId }));
+  assert.equal(await first.outcome, "ok");
+
+  resetLiveSwitchOutcomeClaims();
+
+  const afterCommunitySwitch = harness([CHANNEL_A], requestId);
+  afterCommunitySwitch.push(frame("switched", { requestId, relayEventId }));
+  assert.equal(
+    await afterCommunitySwitch.outcome,
+    "ok",
+    "claims from the outgoing relay must not suppress proof in the new community",
+  );
 });
 
 test("terminal claims expire after their whole freshness horizon", () => {

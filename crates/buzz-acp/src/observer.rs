@@ -29,6 +29,17 @@ const OBSERVER_CONTROL_RESULT_CAP: usize = 64;
 /// for this observer lifecycle; it never evicts an older accepted result.
 const OBSERVER_CONTROL_RESULT_LEDGER_CAP: usize = 1_024;
 
+pub(crate) fn is_terminal_control_result(event: &ObserverEvent) -> bool {
+    event.kind == "control_result"
+        && !matches!(
+            event
+                .payload
+                .get("status")
+                .and_then(serde_json::Value::as_str),
+            Some("sent" | "recycling")
+        )
+}
+
 /// Best-effort metadata attached to observer events.
 #[derive(Clone, Debug, Default)]
 pub struct ObserverContext {
@@ -412,7 +423,7 @@ impl ObserverHandle {
             payload,
         };
 
-        if event.kind == "control_result" {
+        if event.kind == "control_result" && is_terminal_control_result(&event) {
             let admitted = match self.inner.control_results.lock() {
                 Ok(mut results) => {
                     if results.len() >= OBSERVER_CONTROL_RESULT_LEDGER_CAP {
@@ -511,6 +522,51 @@ mod tests {
             None,
             &ObserverContext::default(),
             serde_json::json!({"marker": marker}),
+        );
+    }
+
+    fn emit_control_status(observer: &ObserverHandle, status: &str, marker: usize) {
+        observer.emit(
+            "control_result",
+            None,
+            &ObserverContext::default(),
+            serde_json::json!({"status": status, "marker": marker}),
+        );
+    }
+
+    #[tokio::test]
+    async fn non_terminal_control_statuses_remain_live_without_using_terminal_retention() {
+        let observer = ObserverHandle::in_process();
+        let mut rx = observer.subscribe();
+
+        emit_control_status(&observer, "sent", 1);
+        let sent = rx
+            .recv()
+            .await
+            .expect("sent status remains observable live");
+        assert_eq!(sent.payload["status"], "sent");
+
+        emit_control_status(&observer, "recycling", 2);
+        let recycling = rx
+            .recv()
+            .await
+            .expect("recycling status remains observable live");
+        assert_eq!(recycling.payload["status"], "recycling");
+
+        for marker in 0..=OBSERVER_CONTROL_RESULT_LEDGER_CAP {
+            emit_control_status(&observer, "sent", marker);
+        }
+        emit_control_status(&observer, "switched", 3);
+
+        assert!(
+            !rx.control_result_admission_failed(),
+            "non-terminal progress must not exhaust terminal-result admission"
+        );
+        assert!(
+            observer.snapshot().iter().any(|event| {
+                event.payload["status"] == "switched" && event.payload["marker"] == 3
+            }),
+            "the exact terminal result must remain retained for replay"
         );
     }
 

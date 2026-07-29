@@ -82,7 +82,18 @@ export function createTerminalClaimJournal({
   };
 }
 
-const claimControlResult = createTerminalClaimJournal();
+let claimControlResult = createTerminalClaimJournal();
+
+/**
+ * Replace the relay-scoped terminal-proof claim journal.
+ *
+ * Community switches call this after disconnecting the outgoing relay so a
+ * signed result claimed there cannot suppress an otherwise valid result from
+ * the newly active relay/community.
+ */
+export function resetLiveSwitchOutcomeClaims(): void {
+  claimControlResult = createTerminalClaimJournal();
+}
 
 function createControlRequestId(): string {
   const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));

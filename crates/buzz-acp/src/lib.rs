@@ -488,7 +488,7 @@ async fn run_relay_observer_publisher(
             result = rx.recv() => {
                 match result {
                     Ok(event) => {
-                        if event.kind == "control_result" {
+                        if observer::is_terminal_control_result(&event) {
                             // A terminal result returned by ObserverReceiver is
                             // still retained and unacknowledged. Publish it even
                             // when its sequence was captured in the snapshot:
@@ -843,8 +843,8 @@ async fn publish_relay_observer_event(
     pacer: &mut ObserverPublishPacer,
     event: observer::ObserverEvent,
 ) -> bool {
-    let is_control_result = event.kind == "control_result";
-    if is_control_result {
+    let is_terminal_control_result = observer::is_terminal_control_result(&event);
+    if is_terminal_control_result {
         pacer.wait_priority().await;
     } else {
         pacer.wait().await;
@@ -905,7 +905,7 @@ async fn publish_relay_observer_event_preemptible(
     rx: &mut observer::ObserverReceiver,
     event: observer::ObserverEvent,
 ) -> bool {
-    if event.kind == "control_result" {
+    if observer::is_terminal_control_result(&event) {
         return publish_relay_terminal_observer_event(
             publisher,
             keys,
@@ -991,7 +991,7 @@ async fn publish_relay_observer_event_now(
     owner_pubkey: &PublicKey,
     mut event: observer::ObserverEvent,
 ) -> bool {
-    let is_control_result = event.kind == "control_result";
+    let is_terminal_control_result = observer::is_terminal_control_result(&event);
     // Trim oversized frames to fit the plaintext cap rather than letting
     // encrypt_observer_payload reject and drop them whole (silent telemetry loss).
     fit_observer_event_to_budget(&mut event);
@@ -999,7 +999,7 @@ async fn publish_relay_observer_event_now(
         Ok(encrypted) => encrypted,
         Err(error) => {
             tracing::warn!("failed to encrypt relay observer event: {error}");
-            return !is_control_result;
+            return !is_terminal_control_result;
         }
     };
     let mut builder = match buzz_sdk::build_agent_observer_frame(
@@ -1011,10 +1011,10 @@ async fn publish_relay_observer_event_now(
         Ok(builder) => builder,
         Err(error) => {
             tracing::warn!("failed to build relay observer event: {error}");
-            return !is_control_result;
+            return !is_terminal_control_result;
         }
     };
-    if is_control_result {
+    if is_terminal_control_result {
         let priority_tag = match nostr::Tag::parse(["priority", "control-result"]) {
             Ok(tag) => tag,
             Err(error) => {
@@ -1028,17 +1028,17 @@ async fn publish_relay_observer_event_now(
         Ok(event) => event,
         Err(error) => {
             tracing::warn!("failed to sign relay observer event: {error}");
-            return !is_control_result;
+            return !is_terminal_control_result;
         }
     };
-    let publish_result = if is_control_result {
+    let publish_result = if is_terminal_control_result {
         publisher.publish_terminal_event(signed).await
     } else {
         publisher.publish_event(signed).await
     };
     if let Err(error) = publish_result {
         tracing::warn!("relay observer event dropped: {error}");
-        return !is_control_result;
+        return !is_terminal_control_result;
     }
     true
 }
@@ -7631,6 +7631,55 @@ mod observer_snapshot_race_tests {
             None,
             &observer::context_for(None, None, None),
             serde_json::json!({ "marker": marker }),
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn non_terminal_control_result_uses_the_ordinary_observer_publisher() {
+        let observer = observer::ObserverHandle::in_process();
+        let agent_keys = Keys::generate();
+        let owner_keys = Keys::generate();
+        let (publisher, mut published_rx) = RelayEventPublisher::test_pair();
+        let rx = observer.subscribe();
+        observer.emit(
+            "control_result",
+            None,
+            &observer::context_for(None, None, None),
+            serde_json::json!({ "status": "sent" }),
+        );
+        let snapshot = observer.snapshot();
+        drop(observer);
+
+        let task = tokio::spawn(run_relay_observer_publisher(
+            snapshot,
+            rx,
+            publisher,
+            agent_keys.clone(),
+            agent_keys.public_key().to_hex(),
+            owner_keys.public_key().to_hex(),
+            owner_keys.public_key(),
+        ));
+        tokio::time::advance(Duration::from_secs(2)).await;
+
+        let event = published_rx
+            .recv()
+            .await
+            .expect("non-terminal control progress must remain observable");
+        assert!(
+            !event.tags.iter().any(|tag| {
+                tag.as_slice().first().map(String::as_str) == Some("priority")
+                    && tag.as_slice().get(1).map(String::as_str) == Some("control-result")
+            }),
+            "non-terminal progress must not enter the protected terminal publisher"
+        );
+
+        assert!(
+            task.await.expect("publisher must drain cleanly"),
+            "ordinary control progress must not invalidate terminal delivery proof"
+        );
+        assert!(
+            published_rx.try_recv().is_err(),
+            "subscribe-before-snapshot overlap must publish progress exactly once"
         );
     }
 
