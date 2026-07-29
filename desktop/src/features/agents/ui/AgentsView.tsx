@@ -21,6 +21,7 @@ import { TeamDeleteDialog } from "./TeamDeleteDialog";
 import { TeamDialog } from "./TeamDialog";
 import { TeamsSection } from "./TeamsSection";
 import { UnifiedAgentsSection } from "./UnifiedAgentsSection";
+import { ExternalRelayAgentsSection } from "./ExternalRelayAgentsSection";
 import { useManagedAgentActions } from "./useManagedAgentActions";
 import { usePersonaActions } from "./usePersonaActions";
 import { useTeamActions } from "./useTeamActions";
@@ -199,6 +200,15 @@ export function AgentsView() {
               onDeletePersona={personas.openDelete}
               onImportSnapshotFile={(fileBytes, fileName) => {
                 void personas.handleImportSnapshotFile(fileBytes, fileName);
+              }}
+            />
+
+            <ExternalRelayAgentsSection
+              agents={agents.externalRelayAgents}
+              error={agents.externalRelayAgentsError}
+              isLoading={agents.isExternalRelayAgentsLoading}
+              onOpenProfile={(pubkey) => {
+                openProfilePanel?.(pubkey);
               }}
             />
 

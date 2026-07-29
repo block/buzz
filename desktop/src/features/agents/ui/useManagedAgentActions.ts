@@ -1,4 +1,5 @@
 import * as React from "react";
+import { useQueries } from "@tanstack/react-query";
 
 import {
   type AttachManagedAgentToChannelResult,
@@ -6,6 +7,7 @@ import {
   useCreateManagedAgentMutation,
   useManagedAgentLogQuery,
   useManagedAgentsQuery,
+  usePublicRelayAgentsQuery,
   useRelayAgentsQuery,
   useSetManagedAgentStartOnAppLaunchMutation,
   useStartManagedAgentMutation,
@@ -21,8 +23,14 @@ import type {
   CreateManagedAgentResponse,
   ManagedAgent,
 } from "@/shared/api/types";
-import { removeChannelMember } from "@/shared/api/tauri";
+import { useIdentityQuery } from "@/shared/api/hooks";
+import { getChannelMembers, removeChannelMember } from "@/shared/api/tauri";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import { getSharedChannelIds } from "../lib/agentAutocompleteEligibility";
+import {
+  buildChannelAgentFallbacks,
+  selectVisibleExternalRelayAgents,
+} from "../lib/externalRelayAgents";
 import {
   deleteManagedAgentWithRules,
   isManagedAgentActive,
@@ -38,7 +46,9 @@ import {
 
 export function useManagedAgentActions() {
   const { globalConfig } = useGlobalAgentConfig();
+  const identityQuery = useIdentityQuery();
   const relayAgentsQuery = useRelayAgentsQuery();
+  const publicRelayAgentsQuery = usePublicRelayAgentsQuery();
   const managedAgentsQuery = useManagedAgentsQuery();
   const [shouldLoadChannels, setShouldLoadChannels] = React.useState(false);
   const channelsQuery = useChannelsQuery({ enabled: shouldLoadChannels });
@@ -94,6 +104,108 @@ export function useManagedAgentActions() {
     () => new Set(managedAgents.map((agent) => agent.pubkey)),
     [managedAgents],
   );
+
+  const sharedChannelIds = React.useMemo(
+    () => getSharedChannelIds(channelsQuery.data),
+    [channelsQuery.data],
+  );
+
+  const sharedChannels = React.useMemo(
+    () =>
+      (channelsQuery.data ?? []).filter(
+        (channel) => channel.isMember && channel.archivedAt === null,
+      ),
+    [channelsQuery.data],
+  );
+
+  const channelMemberQueries = useQueries({
+    queries: sharedChannels.map((channel) => ({
+      queryKey: ["channels", channel.id, "members"] as const,
+      queryFn: () => getChannelMembers(channel.id),
+      staleTime: 30_000,
+    })),
+  });
+
+  const channelAgentPubkeys = React.useMemo(
+    () => [
+      ...new Set([
+        ...channelMemberQueries.flatMap((query) =>
+          (query.data ?? [])
+            .filter((member) => member.role === "bot" || member.isAgent)
+            .map((member) => normalizePubkey(member.pubkey)),
+        ),
+        ...(publicRelayAgentsQuery.data ?? [])
+          .filter(
+            (registration) =>
+              registration.enabled &&
+              (registration.state === "active" ||
+                registration.state === "failed") &&
+              registration.channelIds.some((channelId) =>
+                sharedChannelIds.has(channelId),
+              ),
+          )
+          .map((registration) => normalizePubkey(registration.pubkey)),
+      ]),
+    ],
+    [channelMemberQueries, publicRelayAgentsQuery.data, sharedChannelIds],
+  );
+
+  const externalPresenceQuery = usePresenceQuery(channelAgentPubkeys);
+
+  const channelAgents = React.useMemo(() => {
+    const membersByChannelId = Object.fromEntries(
+      sharedChannels.map((channel, index) => [
+        channel.id,
+        channelMemberQueries[index]?.data,
+      ]),
+    );
+    return buildChannelAgentFallbacks({
+      channels: sharedChannels,
+      membersByChannelId,
+      presence: externalPresenceQuery.data,
+      registrations: publicRelayAgentsQuery.data,
+    });
+  }, [
+    channelMemberQueries,
+    externalPresenceQuery.data,
+    publicRelayAgentsQuery.data,
+    sharedChannels,
+  ]);
+
+  const externalRelayAgents = React.useMemo(
+    () =>
+      selectVisibleExternalRelayAgents({
+        channelAgents,
+        currentPubkey: identityQuery.data?.pubkey,
+        managedAgentPubkeys: managedPubkeys,
+        relayAgents: relayAgentsQuery.data,
+        sharedChannelIds,
+      }),
+    [
+      channelAgents,
+      identityQuery.data?.pubkey,
+      managedPubkeys,
+      relayAgentsQuery.data,
+      sharedChannelIds,
+    ],
+  );
+
+  const externalRelayAgentsError =
+    externalRelayAgents.length === 0
+      ? ([
+          relayAgentsQuery.error,
+          publicRelayAgentsQuery.error,
+          channelsQuery.error,
+          ...channelMemberQueries.map((query) => query.error),
+        ].find((error): error is Error => error instanceof Error) ?? null)
+      : null;
+
+  const isExternalRelayAgentsLoading =
+    externalRelayAgents.length === 0 &&
+    (relayAgentsQuery.isLoading ||
+      publicRelayAgentsQuery.isLoading ||
+      channelsQuery.isLoading ||
+      channelMemberQueries.some((query) => query.isLoading));
 
   const managedPubkeyList = React.useMemo(
     () => managedAgents.map((agent) => agent.pubkey),
@@ -404,6 +516,9 @@ export function useManagedAgentActions() {
     managedPresenceQuery,
     managedAgents,
     managedPubkeys,
+    externalRelayAgents,
+    externalRelayAgentsError,
+    isExternalRelayAgentsLoading,
     channelIdToName,
     channelsByPubkey,
     isPending,
@@ -429,6 +544,9 @@ export function useManagedAgentActions() {
     handleAddedToChannel,
     handleBulkStopRunning,
     refetchManagedAgents: () => void managedAgentsQuery.refetch(),
-    refetchRelayAgents: () => void relayAgentsQuery.refetch(),
+    refetchRelayAgents: () => {
+      void relayAgentsQuery.refetch();
+      void publicRelayAgentsQuery.refetch();
+    },
   };
 }
