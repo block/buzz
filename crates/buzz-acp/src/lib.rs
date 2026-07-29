@@ -523,9 +523,9 @@ async fn run_relay_observer_publisher(
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
                         // Terminal-lane lag is recovered from the acknowledged
                         // sequence ledger inside ObserverReceiver, so only
-                        // telemetry overflow reaches this branch. Preserve the
-                        // conservative overall proof verdict for that loss.
-                        terminal_delivery_ok = false;
+                        // telemetry overflow reaches this branch. Log that
+                        // observability loss without tainting the independent
+                        // terminal-delivery proof used by graceful shutdown.
                         for event in coalescer.flush() {
                             terminal_delivery_ok &= publish_relay_observer_event_preemptible(
                                 &publisher, &keys, &agent_pubkey_hex,
@@ -7973,6 +7973,56 @@ mod observer_snapshot_race_tests {
         assert!(
             terminal_delivery_ok,
             "replayed and acknowledged terminal results preserve verified delivery"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn telemetry_broadcast_lag_does_not_taint_terminal_delivery_proof() {
+        let observer = observer::ObserverHandle::in_process();
+        let agent_keys = Keys::generate();
+        let owner_keys = Keys::generate();
+        let (publisher, mut published_rx) = RelayEventPublisher::test_pair();
+        let rx = observer.subscribe();
+
+        observer.emit(
+            "control_result",
+            None,
+            &observer::context_for(None, None, None),
+            serde_json::json!({ "status": "shutdown" }),
+        );
+        for marker in 0..=2_000 {
+            observer.emit(
+                "acp_read",
+                None,
+                &observer::context_for(None, None, None),
+                serde_json::json!({
+                    "params": {
+                        "update": {
+                            "sessionUpdate": "agent_message_chunk",
+                            "messageId": "lagged-telemetry",
+                            "content": {"type": "text", "text": marker.to_string()},
+                        },
+                    },
+                }),
+            );
+        }
+        drop(observer);
+
+        let publisher_task = tokio::spawn(run_relay_observer_publisher(
+            Vec::new(),
+            rx,
+            publisher,
+            agent_keys.clone(),
+            agent_keys.public_key().to_hex(),
+            owner_keys.public_key().to_hex(),
+            owner_keys.public_key(),
+        ));
+        tokio::time::advance(Duration::from_secs(2)).await;
+
+        while published_rx.recv().await.is_some() {}
+        assert!(
+            publisher_task.await.expect("publisher must not panic"),
+            "ordinary telemetry loss must not invalidate acknowledged terminal delivery"
         );
     }
 
