@@ -1,7 +1,9 @@
 use std::io::{BufReader, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::mpsc;
 use std::time::Duration;
+
+use super::provider_recovery::{ProviderFailure, ProviderRecovery};
 
 const STDERR_CAP: usize = 65536;
 /// Provider responses should be small JSON objects. Cap stdout to prevent a
@@ -20,7 +22,7 @@ pub fn invoke_provider(
     binary: &Path,
     request: &serde_json::Value,
     timeout: Duration,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, ProviderFailure> {
     let request_bytes = format!(
         "{}\n",
         serde_json::to_string(request).map_err(|e| e.to_string())?
@@ -98,7 +100,7 @@ pub fn invoke_provider(
     if let Err(e) = stdin_result {
         let _ = child.kill();
         let _ = child.wait();
-        return Err(format!("stdin write failed: {e}"));
+        return Err(format!("stdin write failed: {e}").into());
     }
 
     // Poll try_wait with a deadline, collecting stdout chunks and draining
@@ -132,14 +134,14 @@ pub fn invoke_provider(
                 if std::time::Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return Err(format!("provider timed out after {timeout_secs}s"));
+                    return Err(format!("provider timed out after {timeout_secs}s").into());
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
             Err(e) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(format!("wait error: {e}"));
+                return Err(format!("wait error: {e}").into());
             }
         }
     };
@@ -194,14 +196,15 @@ pub fn invoke_provider(
     // output would be worse than surfacing the failure.
     let exited_ok = exit_status.success();
     if !exited_ok {
-        let stderr_snippet = &stderr_redacted[..stderr_redacted.len().min(4096)];
-        if stderr_snippet.is_empty() {
-            return Err(format!("provider failed ({exit_info}, empty stderr)"));
-        } else {
-            return Err(format!(
-                "provider failed ({exit_info}). stderr: {stderr_snippet}"
-            ));
+        return Err(match provider_stderr_notice(&stderr_redacted) {
+            Some(stderr_snippet) => {
+                format!("provider failed ({exit_info}). stderr: {stderr_snippet}")
+            }
+            None => format!("provider failed ({exit_info}, empty stderr)"),
         }
+        // No recovery: the provider died without emitting a structured
+        // response, so there is nothing to have carried one.
+        .into());
     }
 
     // Incremental JSON parse: try each line, then try the entire buffer.
@@ -212,23 +215,55 @@ pub fn invoke_provider(
         .lines()
         .find_map(|line| serde_json::from_str(line).ok())
         .or_else(|| serde_json::from_str(stdout_str.trim()).ok())
-        .ok_or_else(|| {
-            let stderr_snippet = &stderr_redacted[..stderr_redacted.len().min(4096)];
-            if stderr_snippet.is_empty() {
+        .ok_or_else(|| match provider_stderr_notice(&stderr_redacted) {
+            Some(stderr_snippet) => format!(
+                "provider produced no JSON response ({exit_info}). stderr: {stderr_snippet}"
+            ),
+            None => {
                 format!("provider produced no JSON response ({exit_info}, empty stderr)")
-            } else {
-                format!(
-                    "provider produced no JSON response ({exit_info}). stderr: {stderr_snippet}"
-                )
             }
         })?;
 
     if response.get("ok").and_then(|v| v.as_bool()) == Some(false) {
         let error = response["error"].as_str().unwrap_or("unknown error");
-        return Err(redact_secrets_with(error, &env_secret_refs));
+        return Err(ProviderFailure {
+            message: redact_secrets_with(error, &env_secret_refs),
+            // The message stands alone whether or not this resolves: it names
+            // the problem and, for the Tailscale case, carries the URL as text.
+            // The recovery only adds a button.
+            recovery: ProviderRecovery::from_response(&response),
+        });
+    }
+
+    // A successful op's stderr is not an error, but it is not nothing either:
+    // providers write their non-fatal complaints there (today, deploy's
+    // "this host has no buzz CLI" WARNING). Without this the buffer is dropped
+    // on success and the warning is invisible. Log-only by design — the op
+    // succeeded, and a warning is not a result.
+    if let Some(notice) = provider_stderr_notice(&stderr_redacted) {
+        tracing::warn!("provider {}: {notice}", binary.display());
     }
 
     Ok(response)
+}
+
+/// The reportable form of a provider's stderr: `None` when it holds nothing
+/// but whitespace, otherwise the already-redacted text trimmed and capped at
+/// 4 KiB. The cap walks back to a char boundary so a multi-byte character
+/// straddling it cannot panic. Both the success path (which logs it) and the
+/// two failure paths (which fold it into the returned error) go through here,
+/// so the snippet a warning shows and the snippet an error reports are the
+/// same text under the same cap.
+fn provider_stderr_notice(stderr_redacted: &str) -> Option<&str> {
+    let trimmed = stderr_redacted.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let end = (0..=trimmed.len().min(4096))
+        .rev()
+        .find(|&i| trimmed.is_char_boundary(i))
+        .unwrap_or(0);
+    Some(&trimmed[..end])
 }
 
 /// Split a config key into lowercase words on `_`, `-`, `.`, and camelCase boundaries.
@@ -362,7 +397,7 @@ pub fn provider_deploy(
     binary: &Path,
     agent: &serde_json::Value,
     provider_config: &serde_json::Value,
-) -> Result<String, String> {
+) -> Result<String, ProviderFailure> {
     let request = serde_json::json!({
         "op": "deploy",
         "request_id": uuid::Uuid::new_v4().to_string(),
@@ -373,7 +408,7 @@ pub fn provider_deploy(
     resp["agent_id"]
         .as_str()
         .map(String::from)
-        .ok_or_else(|| "deploy response missing agent_id".to_string())
+        .ok_or_else(|| "deploy response missing agent_id".into())
 }
 
 /// Validate provider_config: flat object, scalar values, no secret-like keys.
@@ -409,123 +444,29 @@ pub fn validate_provider_config(config: &serde_json::Value) -> Result<(), String
     Ok(())
 }
 
-/// Enumerate PATH for buzz-backend-* executables. Returns (id, path) pairs.
-/// Only includes files that are executable. Does NOT execute any binaries.
-///
-/// On macOS, GUI apps inherit a minimal PATH from launchd (`/usr/bin:/bin:/usr/sbin:/sbin`)
-/// which excludes both the app bundle's `Contents/MacOS/` dir and `~/.local/bin`.
-/// We augment the search with those directories so bundled and user-installed providers
-/// are always discovered regardless of how the desktop was launched.
-pub fn discover_provider_candidates() -> Vec<(String, PathBuf)> {
-    let prefix = "buzz-backend-";
-    let mut seen = std::collections::HashSet::new();
-    let mut results = Vec::new();
-
-    let path_var = std::env::var_os("PATH").unwrap_or_default();
-    let mut dirs: Vec<PathBuf> = std::env::split_paths(&path_var).collect();
-
-    // Prepend the exe parent dir (Contents/MacOS/ in a .app bundle) so bundled
-    // providers are found even when the process PATH is minimal.
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            let parent_buf = parent.to_path_buf();
-            if !dirs.contains(&parent_buf) {
-                dirs.insert(0, parent_buf);
-            }
-        }
-    }
-
-    // Also include ~/.local/bin — the conventional location for user-installed
-    // provider binaries (symlinks created by install scripts).
-    if let Some(home) = dirs::home_dir() {
-        let local_bin = home.join(".local").join("bin");
-        if !dirs.contains(&local_bin) {
-            dirs.push(local_bin);
-        }
-    }
-
-    for dir in dirs {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if let Some(id) = name.strip_prefix(prefix) {
-                if !id.is_empty() && !seen.contains(&name) && is_executable(&entry.path()) {
-                    seen.insert(name.clone());
-                    results.push((id.to_string(), entry.path()));
-                }
-            }
-        }
-    }
-    results
-}
-
-/// Resolve a provider ID to a discovered, executable binary path.
-///
-/// This is the ONLY way to resolve provider binaries for execution. It:
-/// 1. Validates the ID against `^[a-z0-9][a-z0-9_-]*$` (no path traversal)
-/// 2. Looks up the ID in `discover_provider_candidates()` (PATH-discovered only)
-/// 3. Returns the canonical path of the discovered binary
-///
-/// All deploy, start, and create paths MUST use this instead of raw
-/// `resolve_command(format!("buzz-backend-{id}"))` to prevent a compromised
-/// frontend/IPC caller from steering execution to an arbitrary binary.
-pub fn resolve_provider_binary(provider_id: &str) -> Result<PathBuf, String> {
-    // Reject IDs that could be path components or shell metacharacters.
-    let valid_id = provider_id
-        .chars()
-        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
-        && !provider_id.is_empty()
-        && provider_id.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit());
-    if !valid_id {
-        return Err(format!(
-            "invalid provider ID '{provider_id}': must match [a-z0-9][a-z0-9_-]*"
-        ));
-    }
-
-    let candidates = discover_provider_candidates();
-    let found = candidates
-        .into_iter()
-        .find(|(id, _)| id == provider_id)
-        .map(|(_, path)| path);
-
-    match found {
-        Some(path) => path
-            .canonicalize()
-            .map_err(|e| format!("provider binary not accessible: {e}")),
-        None => Err(format!(
-            "provider 'buzz-backend-{provider_id}' not found on PATH"
-        )),
-    }
-}
-
-/// Check if a file is executable (Unix: mode bits; other platforms: always true).
-fn is_executable(path: &Path) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        path.metadata()
-            .map(|m| m.permissions().mode() & 0o111 != 0)
-            .unwrap_or(false)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-        true
-    }
-}
-
-#[derive(Debug, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BackendProviderInfo {
-    pub id: String,
-    pub binary_path: String,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_stderr_notice_skips_blank_and_keeps_warnings() {
+        // The success path only logs when the provider actually said
+        // something — a blank buffer must not produce an empty warn line.
+        assert_eq!(provider_stderr_notice(""), None);
+        assert_eq!(provider_stderr_notice("  \n\t "), None);
+        assert_eq!(
+            provider_stderr_notice("buzz-backend-ssh: WARNING: no buzz CLI\n"),
+            Some("buzz-backend-ssh: WARNING: no buzz CLI")
+        );
+    }
+
+    #[test]
+    fn provider_stderr_notice_caps_on_a_char_boundary() {
+        // A multi-byte char straddling the 4096-byte cap must not panic.
+        let long = format!("{}é", "a".repeat(4095));
+        let notice = provider_stderr_notice(&long).expect("non-empty");
+        assert_eq!(notice.len(), 4095);
+    }
 
     #[test]
     fn redact_secrets_replaces_nsec() {
@@ -669,35 +610,5 @@ mod tests {
         assert_eq!(split_config_key("apiKEY"), vec!["api", "key"]);
         assert_eq!(split_config_key("accessTOKEN"), vec!["access", "token"]);
         assert_eq!(split_config_key("MyAPIKey"), vec!["my", "api", "key"]);
-    }
-
-    #[test]
-    fn resolve_provider_binary_rejects_invalid_ids() {
-        // Path traversal
-        assert!(resolve_provider_binary("../evil").is_err());
-        // Empty
-        assert!(resolve_provider_binary("").is_err());
-        // Uppercase
-        assert!(resolve_provider_binary("MyProvider").is_err());
-        // Spaces
-        assert!(resolve_provider_binary("my provider").is_err());
-        // Shell metacharacters
-        assert!(resolve_provider_binary("foo;rm -rf /").is_err());
-        // Valid format but not on PATH — should fail with "not found"
-        assert!(resolve_provider_binary("nonexistent-test-id-12345").is_err());
-    }
-
-    #[test]
-    fn resolve_provider_binary_accepts_valid_id_format() {
-        // Valid ID format should pass validation. If the binary happens to
-        // exist on PATH, Ok is returned; otherwise Err contains "not found"
-        // (not "invalid provider ID"). Either outcome proves validation passed.
-        match resolve_provider_binary("zzz-nonexistent-test-provider") {
-            Ok(_) => {} // unlikely but fine — binary exists
-            Err(e) => assert!(
-                e.contains("not found"),
-                "expected 'not found' error, got: {e}"
-            ),
-        }
     }
 }

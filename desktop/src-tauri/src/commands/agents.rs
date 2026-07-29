@@ -504,10 +504,12 @@ async fn deploy_to_provider(
             rec.last_error = None;
         }
         Err(ref e) => {
-            rec.last_error = Some(e.clone());
+            // The message only: `last_error` is read back long after the deploy,
+            // and a recovery URL is a one-shot token that is stale by then.
+            rec.last_error = Some(e.message.clone());
             rec.updated_at = now_iso();
             save_managed_agents(app, &records)?;
-            return Err(e.clone());
+            return Err(e.message.clone());
         }
     }
     save_managed_agents(app, &records)?;

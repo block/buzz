@@ -43,4 +43,8 @@ pub async fn probe_backend_provider(binary_path: String) -> Result<serde_json::V
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
+    // `info` is a probe with no actionable failure, so the recovery a
+    // `ProviderFailure` may carry has nothing to offer here; the message alone
+    // is the whole result. The ops that can carry one keep the type.
+    .map_err(|e| e.message)
 }
