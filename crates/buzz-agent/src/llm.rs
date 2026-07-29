@@ -1019,31 +1019,53 @@ fn is_responses_required_error(body: &str) -> bool {
         || b.contains("use the responses api")
 }
 
-/// Substrings identifying an OpenAI-shaped model in a Databricks v2 catalog
-/// name. Covers the `gpt` family plus Databricks' GPT-5 launch code names
-/// (`sol`, `luna`, `terra`). Matched case-insensitively.
-const DATABRICKS_V2_OPENAI_MARKERS: &[&str] = &["gpt", "sol", "luna", "terra"];
+/// OpenAI-family code names that appear as their own segment in a Databricks v2
+/// endpoint name (the GPT-5 launch aliases). The `gpt` family itself is matched
+/// separately by segment prefix so `gpt`, `gpt5`, and the `gpt` of a split
+/// `gpt-5` all qualify.
+const DATABRICKS_V2_OPENAI_CODE_NAMES: &[&str] = &["sol", "luna", "terra"];
 
-/// Substrings identifying an Anthropic-shaped (Claude) model in a Databricks v2
-/// catalog name. Covers the `claude` prefix, the Claude family names (`opus`,
-/// `sonnet`, `haiku`), and the release code names (`mythos`, `fable`). Matched
-/// case-insensitively. Getting a Claude model onto this route is what lets it
-/// carry a `cache_control` breakpoint — an endpoint whose name matches none of
+/// Anthropic (Claude) family and release code names that appear as their own
+/// segment in a Databricks v2 endpoint name — the `claude` prefix, the family
+/// names (`opus`, `sonnet`, `haiku`), and the release code names (`mythos`,
+/// `fable`). Getting a Claude model onto the Anthropic Messages route is what
+/// lets it carry a `cache_control` breakpoint; an endpoint that matches none of
 /// these falls through to the MLflow (OpenAI-wire) path, where Anthropic prompt
-/// caching is structurally impossible, so the discount is silently lost.
-const DATABRICKS_V2_CLAUDE_MARKERS: &[&str] =
+/// caching is structurally impossible and the discount is silently lost.
+const DATABRICKS_V2_CLAUDE_NAMES: &[&str] =
     &["claude", "opus", "sonnet", "haiku", "mythos", "fable"];
 
+/// Split a Databricks v2 endpoint name into its lowercase alphanumeric segments,
+/// breaking on any non-alphanumeric delimiter (`-`, `_`, `.`, `/`, …). E.g.
+/// `Databricks-Claude-Opus-5` -> `["databricks", "claude", "opus", "5"]`.
+fn model_name_segments(model: &str) -> Vec<String> {
+    model
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect()
+}
+
 fn databricks_v2_route_for_model(model: &str) -> DatabricksV2Route {
-    // Databricks v2 catalog names identify the wire format only by these
-    // substrings — there is no explicit family field on the endpoint. OpenAI
-    // markers are checked first so a name carrying both resolves to the OpenAI
-    // wire (preserving the prior `gpt-5`-first behaviour).
-    let lower = model.to_ascii_lowercase();
-    let matches_any = |markers: &[&str]| markers.iter().any(|m| lower.contains(m));
-    if matches_any(DATABRICKS_V2_OPENAI_MARKERS) {
+    // The v2 catalog exposes no family field, so the wire format is inferred
+    // from the endpoint name. Discovery deliberately keeps arbitrary custom
+    // aliases, so we match whole name *segments* rather than raw substrings: a
+    // substring test would misroute unrelated names — `consolidated-llama`
+    // (`sol`), `terraform-coder` (`terra`), `corpus-reranker`/`octopus-model`
+    // (`opus`) — onto a wire whose request shape their backend can't parse,
+    // turning a caching optimization into a hard request/parse failure. Segment
+    // matching still accepts real prefixed names like `goose-opus-5`.
+    let segments = model_name_segments(model);
+    let has_named_segment =
+        |names: &[&str]| segments.iter().any(|seg| names.contains(&seg.as_str()));
+    // `gpt` family: any segment beginning with `gpt` — covers `gpt`, `gpt5`, and
+    // the `gpt` segment of a split `gpt-5`, without matching mid-word.
+    let is_gpt_family = segments.iter().any(|seg| seg.starts_with("gpt"));
+    // OpenAI is checked before Claude so a name carrying both markers resolves
+    // to the OpenAI wire (preserving the prior `gpt-5`-first precedence).
+    if is_gpt_family || has_named_segment(DATABRICKS_V2_OPENAI_CODE_NAMES) {
         DatabricksV2Route::OpenAiResponses
-    } else if matches_any(DATABRICKS_V2_CLAUDE_MARKERS) {
+    } else if has_named_segment(DATABRICKS_V2_CLAUDE_NAMES) {
         DatabricksV2Route::AnthropicMessages
     } else {
         DatabricksV2Route::MlflowChatCompletions
@@ -2606,6 +2628,8 @@ mod tests {
                 "/ai-gateway/openai/v1/responses",
             ),
             ("gpt-4o", OpenAiResponses, "/ai-gateway/openai/v1/responses"),
+            // The intentional dashless `gpt5` spelling still routes to OpenAI.
+            ("gpt5", OpenAiResponses, "/ai-gateway/openai/v1/responses"),
             (
                 "databricks-gpt-5-6-luna",
                 OpenAiResponses,
@@ -2668,6 +2692,31 @@ mod tests {
             ),
             (
                 "databricks-gemini-3-pro",
+                MlflowChatCompletions,
+                "/ai-gateway/mlflow/v1/chat/completions",
+            ),
+            // Collision guard: short code names must match only as whole
+            // segments, never as substrings of an unrelated custom alias.
+            // Each of these embeds a marker (`sol`, `terra`, `opus`) mid-word
+            // and must stay on the MLflow fallback, not adopt a wire its
+            // backend can't parse.
+            (
+                "consolidated-llama",
+                MlflowChatCompletions,
+                "/ai-gateway/mlflow/v1/chat/completions",
+            ),
+            (
+                "terraform-coder",
+                MlflowChatCompletions,
+                "/ai-gateway/mlflow/v1/chat/completions",
+            ),
+            (
+                "corpus-reranker",
+                MlflowChatCompletions,
+                "/ai-gateway/mlflow/v1/chat/completions",
+            ),
+            (
+                "octopus-model",
                 MlflowChatCompletions,
                 "/ai-gateway/mlflow/v1/chat/completions",
             ),
