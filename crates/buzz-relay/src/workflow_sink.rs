@@ -19,6 +19,28 @@ use uuid::Uuid;
 use crate::handlers::event::dispatch_persistent_event;
 use crate::state::AppState;
 
+/// Build the relay-signed workflow message tags that identify its human or
+/// agent owner and destination channel.
+///
+/// The first `p` tag is retained as the legacy author-attribution contract.
+/// `actor` is the unambiguous effective-author contract used by consumers that
+/// cryptographically verify the relay signature before trusting attribution.
+fn workflow_base_tags(
+    author_pubkey_hex: &str,
+    channel_id: &str,
+) -> Result<Vec<Tag>, ActionSinkError> {
+    Ok(vec![
+        Tag::parse(["p", author_pubkey_hex])
+            .map_err(|e| ActionSinkError::EventBuild(format!("p tag: {e}")))?,
+        Tag::parse(["actor", author_pubkey_hex])
+            .map_err(|e| ActionSinkError::EventBuild(format!("actor tag: {e}")))?,
+        Tag::parse(["h", channel_id])
+            .map_err(|e| ActionSinkError::EventBuild(format!("h tag: {e}")))?,
+        Tag::parse(["buzz:workflow", "true"])
+            .map_err(|e| ActionSinkError::EventBuild(format!("workflow tag: {e}")))?,
+    ])
+}
+
 /// Resolves `@Name` mentions in workflow message text to the pubkeys of the
 /// channel members they name, so the emitted kind:9 carries the `p` tags that
 /// ACP agent-wake (`event_mentions_agent`) is gated on.
@@ -253,18 +275,12 @@ impl ActionSink for RelayActionSink {
             // 3. Build kind:9 Nostr event
             //    - Signed by relay keypair (event.pubkey = relay pubkey)
             //    - `p` tag attributes the message to the workflow owner
+            //    - `actor` tag explicitly identifies the workflow owner
             //    - `h` tag scopes to the channel (NIP-29, canonical UUID)
             //    - `buzz:workflow` tag prevents recursive workflow triggering
             //    - one `p` tag per `@Name` that resolves to a channel member,
             //      so mentioned agents are woken (wake is `p`-tag gated)
-            let mut tags = vec![
-                Tag::parse(["p", &author_pubkey_hex])
-                    .map_err(|e| ActionSinkError::EventBuild(format!("p tag: {e}")))?,
-                Tag::parse(["h", &channel_id_canonical])
-                    .map_err(|e| ActionSinkError::EventBuild(format!("h tag: {e}")))?,
-                Tag::parse(["buzz:workflow", "true"])
-                    .map_err(|e| ActionSinkError::EventBuild(format!("workflow tag: {e}")))?,
-            ];
+            let mut tags = workflow_base_tags(&author_pubkey_hex, &channel_id_canonical)?;
 
             // Resolve `@Name` mentions to channel-member pubkeys and append a
             // `p` tag for each (skipping the author, already tagged above). A
@@ -375,6 +391,19 @@ mod tests {
     // A 64-char hex pubkey built from a single repeated nibble, for readable tests.
     fn pk(nibble: char) -> String {
         std::iter::repeat_n(nibble, 64).collect()
+    }
+
+    #[test]
+    fn workflow_base_tags_include_actor_and_legacy_attribution() {
+        let author = pk('a');
+        let channel = Uuid::new_v4().to_string();
+        let tags = workflow_base_tags(&author, &channel).expect("valid workflow base tags");
+        let slices: Vec<&[String]> = tags.iter().map(Tag::as_slice).collect();
+
+        assert_eq!(slices[0], ["p", author.as_str()]);
+        assert!(slices.contains(&["actor".to_string(), author.clone()].as_slice()));
+        assert!(slices.contains(&["h".to_string(), channel].as_slice()));
+        assert!(slices.contains(&["buzz:workflow".to_string(), "true".to_string()].as_slice()));
     }
 
     #[test]
@@ -706,6 +735,15 @@ mod integration_tests {
         assert!(
             p_tag_targets.contains(&agent_hex.as_str()),
             "mentioned member {agent_hex} must be p-tagged so it wakes; got {p_tag_targets:?}"
+        );
+        assert!(
+            stored.event.tags.iter().any(|t| {
+                let slice = t.as_slice();
+                slice.len() == 2
+                    && slice.first().map(String::as_str) == Some("actor")
+                    && slice.get(1).map(String::as_str) == Some(author_hex.as_str())
+            }),
+            "workflow owner must be explicitly attributed via actor tag"
         );
     }
 }

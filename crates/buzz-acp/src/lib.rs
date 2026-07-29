@@ -257,6 +257,60 @@ async fn author_allowed(
     }
 }
 
+/// Return the workflow owner represented by a relay-signed message.
+///
+/// Attribution is trusted only after verifying the NIP-11 relay signer, event
+/// signature, message kind, and exact single-value workflow/actor tags. Any
+/// ambiguity fails closed and falls back to the literal event signer.
+fn trusted_workflow_actor(
+    event: &nostr::Event,
+    trusted_relay_pubkey: Option<&str>,
+) -> Option<String> {
+    let trusted_relay_pubkey = trusted_relay_pubkey?;
+    if event.pubkey.to_hex() != trusted_relay_pubkey
+        || event.kind.as_u16() as u32 != KIND_STREAM_MESSAGE
+        || event.verify().is_err()
+    {
+        return None;
+    }
+
+    let workflow_tags: Vec<&[String]> = event
+        .tags
+        .iter()
+        .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("buzz:workflow"))
+        .map(nostr::Tag::as_slice)
+        .collect();
+    if workflow_tags.len() != 1
+        || workflow_tags[0].len() != 2
+        || workflow_tags[0].get(1).map(String::as_str) != Some("true")
+    {
+        return None;
+    }
+
+    let actor_tags: Vec<&[String]> = event
+        .tags
+        .iter()
+        .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("actor"))
+        .map(nostr::Tag::as_slice)
+        .collect();
+    if actor_tags.len() != 1 || actor_tags[0].len() != 2 {
+        return None;
+    }
+    let actor = actor_tags[0].get(1).map(String::as_str)?;
+    if actor.len() != 64 || !actor.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+
+    PublicKey::from_hex(actor)
+        .ok()
+        .map(|pubkey| pubkey.to_hex())
+}
+
+/// Resolve the identity used by the inbound author gate.
+fn effective_inbound_author(event: &nostr::Event, trusted_relay_pubkey: Option<&str>) -> String {
+    trusted_workflow_actor(event, trusted_relay_pubkey).unwrap_or_else(|| event.pubkey.to_hex())
+}
+
 /// Resolve whether `channel_id` is a DM, for the inbound author gate.
 ///
 /// Resolution order:
@@ -1353,6 +1407,20 @@ async fn tokio_main() -> Result<()> {
 
     tracing::info!("connected to relay at {}", config.relay_url);
 
+    let rest_client = relay.rest_client();
+    let trusted_relay_pubkey = match rest_client.relay_self_pubkey().await {
+        Ok(pubkey) => {
+            tracing::info!("trusted relay workflow signer: {pubkey}");
+            Some(pubkey)
+        }
+        Err(error) => {
+            tracing::warn!(
+                "failed to resolve trusted relay workflow signer; workflow attribution disabled: {error}"
+            );
+            None
+        }
+    };
+
     relay
         .subscribe_membership_notifications()
         .await
@@ -1547,8 +1615,8 @@ async fn tokio_main() -> Result<()> {
             .unwrap_or_else(|_| std::path::PathBuf::from("/"))
             .to_string_lossy()
             .to_string(),
-        rest_client: relay.rest_client(),
-        channel_info: pool::ChannelInfoResolver::new(channel_info_map, relay.rest_client()),
+        rest_client: rest_client.clone(),
+        channel_info: pool::ChannelInfoResolver::new(channel_info_map, rest_client),
         context_message_limit: config.context_message_limit,
         max_turns_per_session: config.max_turns_per_session,
         permission_mode: config.permission_mode,
@@ -2143,7 +2211,10 @@ async fn tokio_main() -> Result<()> {
                             // explicit pubkey list on top, for external people;
                             // it never revokes same-owner team bots.
                             {
-                                let author = buzz_event.event.pubkey.to_hex();
+                                let author = effective_inbound_author(
+                                    &buzz_event.event,
+                                    trusted_relay_pubkey.as_deref(),
+                                );
                                 // DM hardening: resolve channel type (fail-closed
                                 // to DM) so allowlist/anyone modes cannot be
                                 // exercised by non-owner authors inside DMs.
@@ -2161,7 +2232,8 @@ async fn tokio_main() -> Result<()> {
                                 if !allowed {
                                     tracing::debug!(
                                         channel_id = %buzz_event.channel_id,
-                                        author = %buzz_event.event.pubkey.to_hex(),
+                                        signer = %buzz_event.event.pubkey.to_hex(),
+                                        effective_author = %author,
                                         mode = %config.respond_to,
                                         is_dm,
                                         "inbound author gate — dropping event"
@@ -4768,6 +4840,156 @@ mod author_gate_tests {
         assert!(
             is_dm_channel(Uuid::new_v4(), &resolver(HashMap::new())).await,
             "an unresolvable channel type must be treated as a DM"
+        );
+    }
+}
+
+#[cfg(test)]
+mod workflow_author_tests {
+    use super::*;
+    use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    fn workflow_event(signer: &Keys, actor: &str, kind: u32, extra_tags: Vec<Tag>) -> nostr::Event {
+        let mut tags = vec![
+            Tag::parse(["buzz:workflow", "true"]).expect("workflow tag"),
+            Tag::parse(["actor", actor]).expect("actor tag"),
+        ];
+        tags.extend(extra_tags);
+        EventBuilder::new(Kind::Custom(kind as u16), "nightly work")
+            .tags(tags)
+            .sign_with_keys(signer)
+            .expect("signed workflow event")
+    }
+
+    #[test]
+    fn relay_signed_workflow_uses_verified_actor() {
+        let relay = Keys::generate();
+        let actor = Keys::generate();
+        let event = workflow_event(
+            &relay,
+            &actor.public_key().to_hex(),
+            KIND_STREAM_MESSAGE,
+            vec![],
+        );
+
+        assert_eq!(
+            trusted_workflow_actor(&event, Some(&relay.public_key().to_hex())),
+            Some(actor.public_key().to_hex())
+        );
+        assert_eq!(
+            effective_inbound_author(&event, Some(&relay.public_key().to_hex())),
+            actor.public_key().to_hex()
+        );
+    }
+
+    #[test]
+    fn forged_workflow_attribution_falls_back_to_literal_signer() {
+        let relay = Keys::generate();
+        let attacker = Keys::generate();
+        let actor = Keys::generate();
+        let event = workflow_event(
+            &attacker,
+            &actor.public_key().to_hex(),
+            KIND_STREAM_MESSAGE,
+            vec![],
+        );
+
+        assert_eq!(
+            trusted_workflow_actor(&event, Some(&relay.public_key().to_hex())),
+            None
+        );
+        assert_eq!(
+            effective_inbound_author(&event, Some(&relay.public_key().to_hex())),
+            attacker.public_key().to_hex()
+        );
+    }
+
+    #[test]
+    fn workflow_attribution_fails_closed_without_relay_identity_or_valid_signature() {
+        let relay = Keys::generate();
+        let actor = Keys::generate();
+        let event = workflow_event(
+            &relay,
+            &actor.public_key().to_hex(),
+            KIND_STREAM_MESSAGE,
+            vec![],
+        );
+        assert_eq!(trusted_workflow_actor(&event, None), None);
+
+        let mut tampered = event;
+        tampered.content = "tampered".into();
+        assert_eq!(
+            trusted_workflow_actor(&tampered, Some(&relay.public_key().to_hex())),
+            None
+        );
+    }
+
+    #[test]
+    fn workflow_attribution_rejects_wrong_kind_and_ambiguous_tags() {
+        let relay = Keys::generate();
+        let actor = Keys::generate();
+        let actor_hex = actor.public_key().to_hex();
+
+        let wrong_kind = workflow_event(&relay, &actor_hex, 1, vec![]);
+        assert_eq!(
+            trusted_workflow_actor(&wrong_kind, Some(&relay.public_key().to_hex())),
+            None
+        );
+
+        let duplicate_actor = workflow_event(
+            &relay,
+            &actor_hex,
+            KIND_STREAM_MESSAGE,
+            vec![Tag::parse(["actor", &actor_hex]).expect("duplicate actor tag")],
+        );
+        assert_eq!(
+            trusted_workflow_actor(&duplicate_actor, Some(&relay.public_key().to_hex())),
+            None
+        );
+
+        let duplicate_workflow = workflow_event(
+            &relay,
+            &actor_hex,
+            KIND_STREAM_MESSAGE,
+            vec![Tag::parse(["buzz:workflow", "true"]).expect("duplicate workflow tag")],
+        );
+        assert_eq!(
+            trusted_workflow_actor(&duplicate_workflow, Some(&relay.public_key().to_hex())),
+            None
+        );
+
+        let malformed_actor = workflow_event(&relay, "not-a-pubkey", KIND_STREAM_MESSAGE, vec![]);
+        assert_eq!(
+            trusted_workflow_actor(&malformed_actor, Some(&relay.public_key().to_hex())),
+            None
+        );
+
+        let malformed_duplicate_actor = workflow_event(
+            &relay,
+            &actor_hex,
+            KIND_STREAM_MESSAGE,
+            vec![Tag::parse(["actor", &actor_hex, "unexpected"]).expect("malformed actor tag")],
+        );
+        assert_eq!(
+            trusted_workflow_actor(
+                &malformed_duplicate_actor,
+                Some(&relay.public_key().to_hex())
+            ),
+            None
+        );
+
+        let malformed_duplicate_workflow = workflow_event(
+            &relay,
+            &actor_hex,
+            KIND_STREAM_MESSAGE,
+            vec![Tag::parse(["buzz:workflow", "false"]).expect("malformed workflow tag")],
+        );
+        assert_eq!(
+            trusted_workflow_actor(
+                &malformed_duplicate_workflow,
+                Some(&relay.public_key().to_hex())
+            ),
+            None
         );
     }
 }

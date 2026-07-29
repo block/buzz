@@ -118,7 +118,7 @@ use buzz_core::kind::{
     KIND_TYPING_INDICATOR,
 };
 use futures_util::{SinkExt, StreamExt};
-use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Tag};
+use nostr::{Event, EventBuilder, Keys, Kind, PublicKey, RelayUrl, Tag};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
@@ -259,6 +259,28 @@ fn unix_now_secs() -> u64 {
 }
 
 impl RestClient {
+    /// Fetch the relay's NIP-11 `self` pubkey from its public root document.
+    ///
+    /// This is intentionally unauthenticated metadata. Callers use it as the
+    /// expected signer for relay-authored events and must still verify each
+    /// event's id and signature locally.
+    pub async fn relay_self_pubkey(&self) -> Result<String, RelayError> {
+        let url = self.base_url.clone();
+        let response = self
+            .request_with_retry("GET", "/", || {
+                self.http
+                    .get(&url)
+                    .header("Accept", "application/nostr+json")
+                    .send()
+            })
+            .await?;
+        let document: Value = response
+            .json()
+            .await
+            .map_err(|e| RelayError::Http(format!("invalid NIP-11 document: {e}")))?;
+        normalize_relay_self_pubkey(&document)
+    }
+
     /// Sign a NIP-98 HTTP Auth event (kind:27235) for the given method/URL/body.
     ///
     /// Returns the `Authorization: Nostr <base64>` header value (without the
@@ -421,6 +443,22 @@ impl RestClient {
         }
         serde_json::from_str(&text).map_err(|e| RelayError::Http(e.to_string()))
     }
+}
+
+/// Validate and canonicalize the NIP-11 relay-info `self` pubkey.
+fn normalize_relay_self_pubkey(document: &Value) -> Result<String, RelayError> {
+    let self_hex = document
+        .get("self")
+        .and_then(Value::as_str)
+        .ok_or_else(|| RelayError::Http("NIP-11 document missing 'self' field".into()))?;
+    if self_hex.len() != 64 || !self_hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(RelayError::Http(format!(
+            "NIP-11 'self' field is not a valid 64-hex pubkey: {self_hex}"
+        )));
+    }
+    PublicKey::from_hex(self_hex)
+        .map(|pubkey| pubkey.to_hex())
+        .map_err(|e| RelayError::Http(format!("invalid NIP-11 'self' pubkey: {e}")))
 }
 
 /// Events the harness cares about.
@@ -3994,6 +4032,25 @@ async fn wait_for_any_ok(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalize_relay_self_pubkey_accepts_and_canonicalizes_hex() {
+        let keys = Keys::generate();
+        let upper = keys.public_key().to_hex().to_ascii_uppercase();
+        let document = serde_json::json!({"self": upper});
+
+        assert_eq!(
+            normalize_relay_self_pubkey(&document).expect("valid relay self pubkey"),
+            keys.public_key().to_hex()
+        );
+    }
+
+    #[test]
+    fn normalize_relay_self_pubkey_rejects_missing_or_invalid_values() {
+        assert!(normalize_relay_self_pubkey(&serde_json::json!({})).is_err());
+        assert!(normalize_relay_self_pubkey(&serde_json::json!({"self": "not-a-pubkey"})).is_err());
+        assert!(normalize_relay_self_pubkey(&serde_json::json!({"self": "z".repeat(64)})).is_err());
+    }
 
     #[test]
     fn relay_ws_to_http_plain() {
