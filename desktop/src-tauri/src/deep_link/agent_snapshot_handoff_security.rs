@@ -1,5 +1,5 @@
 use std::{
-    io::Read,
+    io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     time::{Duration, SystemTime},
 };
@@ -20,6 +20,74 @@ use crate::{
 
 pub(super) const AGENT_SNAPSHOT_HANDOFF_MAX_AGE: Duration = Duration::from_secs(10 * 60);
 pub(super) const AGENT_SNAPSHOT_HANDOFF_FUTURE_SKEW: Duration = Duration::from_secs(60);
+
+#[cfg(target_os = "macos")]
+#[derive(Debug)]
+pub(super) struct OpenAgentSnapshotHandoff {
+    file: std::fs::File,
+    bytes: Vec<u8>,
+}
+
+#[cfg(target_os = "macos")]
+impl OpenAgentSnapshotHandoff {
+    pub(super) fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub(super) fn erase_after_acceptance(&mut self, expected: &[u8]) -> Result<(), String> {
+        if self.bytes != expected {
+            return Err("handoff preview bytes do not match the queued source".to_string());
+        }
+        self.file
+            .seek(SeekFrom::Start(0))
+            .map_err(|error| format!("cannot rewind accepted handoff: {error}"))?;
+        let mut current = Vec::with_capacity(expected.len());
+        self.file
+            .by_ref()
+            .take(MAX_SNAPSHOT_JSON_BYTES as u64 + 1)
+            .read_to_end(&mut current)
+            .map_err(|error| format!("cannot re-read accepted handoff: {error}"))?;
+        if current != expected {
+            return Err("handoff contents changed before preview acknowledgement".to_string());
+        }
+
+        // macOS has no unlink-by-file-descriptor operation. Erase the exact
+        // validated inode through the retained descriptor instead of racing a
+        // pathname comparison against unlinkat. Any concurrent hard links are
+        // truncated with the same inode; a replacement pathname is untouched.
+        self.file
+            .set_len(0)
+            .map_err(|error| format!("cannot erase accepted handoff: {error}"))?;
+        self.file
+            .sync_all()
+            .map_err(|error| format!("cannot persist accepted handoff erasure: {error}"))?;
+        if self
+            .file
+            .metadata()
+            .map_err(|error| format!("cannot verify accepted handoff erasure: {error}"))?
+            .len()
+            != 0
+        {
+            return Err("accepted handoff erasure did not reach zero bytes".to_string());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+#[derive(Debug)]
+pub(super) struct OpenAgentSnapshotHandoff;
+
+#[cfg(not(target_os = "macos"))]
+impl OpenAgentSnapshotHandoff {
+    pub(super) fn bytes(&self) -> &[u8] {
+        &[]
+    }
+
+    pub(super) fn erase_after_acceptance(&mut self, _expected: &[u8]) -> Result<(), String> {
+        Err("agent snapshot handoffs currently require macOS file security".to_string())
+    }
+}
 
 pub(super) fn parse_agent_snapshot_handoff_id(url: &Url) -> Option<String> {
     if !url.username().is_empty()
@@ -144,11 +212,10 @@ fn validate_agent_snapshot_handoff_shape(bytes: &[u8]) -> Result<(), String> {
 }
 
 #[cfg(target_os = "macos")]
-fn load_agent_snapshot_handoff_from_dir(
+pub(super) fn open_agent_snapshot_handoff_from_dir(
     dir: &Path,
     handoff_id: &str,
-    consume_expected: Option<&[u8]>,
-) -> Result<Vec<u8>, String> {
+) -> Result<OpenAgentSnapshotHandoff, String> {
     let parsed =
         uuid::Uuid::parse_str(handoff_id).map_err(|_| "handoff id is not a UUID".to_string())?;
     if parsed.to_string() != handoff_id {
@@ -176,7 +243,7 @@ fn load_agent_snapshot_handoff_from_dir(
         libc::openat(
             directory.as_raw_fd(),
             file_name_c.as_ptr(),
-            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            libc::O_RDWR | libc::O_NOFOLLOW | libc::O_CLOEXEC,
         )
     };
     if file_fd < 0 {
@@ -224,62 +291,38 @@ fn load_agent_snapshot_handoff_from_dir(
         return Err("agent snapshot handoff must be config-only".to_string());
     }
 
-    let Some(expected) = consume_expected else {
-        return Ok(bytes);
-    };
-    if bytes != expected {
-        return Err("handoff contents changed before preview acknowledgement".to_string());
-    }
-
-    let mut current_metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
-    let stat_result = unsafe {
-        libc::fstatat(
-            directory.as_raw_fd(),
-            file_name_c.as_ptr(),
-            current_metadata.as_mut_ptr(),
-            libc::AT_SYMLINK_NOFOLLOW,
-        )
-    };
-    if stat_result != 0 {
-        return Err(format!(
-            "cannot re-inspect handoff before deletion: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-    let current_metadata = unsafe { current_metadata.assume_init() };
-    if current_metadata.st_dev != opened_metadata.dev() as libc::dev_t
-        || current_metadata.st_ino != opened_metadata.ino() as libc::ino_t
-    {
-        return Err("handoff changed while it was being read".to_string());
-    }
-    let unlink_result = unsafe { libc::unlinkat(directory.as_raw_fd(), file_name_c.as_ptr(), 0) };
-    if unlink_result != 0 {
-        return Err(format!(
-            "cannot delete accepted handoff: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-    Ok(bytes)
+    Ok(OpenAgentSnapshotHandoff { file, bytes })
 }
 
 #[cfg(target_os = "macos")]
+#[cfg(test)]
 pub(super) fn read_agent_snapshot_handoff_from_dir(
     dir: &Path,
     handoff_id: &str,
 ) -> Result<Vec<u8>, String> {
-    load_agent_snapshot_handoff_from_dir(dir, handoff_id, None)
+    Ok(open_agent_snapshot_handoff_from_dir(dir, handoff_id)?.bytes)
 }
 
 #[cfg(target_os = "macos")]
+#[cfg(test)]
 pub(super) fn consume_agent_snapshot_handoff_from_dir(
     dir: &Path,
     handoff_id: &str,
     expected: &[u8],
 ) -> Result<(), String> {
-    load_agent_snapshot_handoff_from_dir(dir, handoff_id, Some(expected)).map(|_| ())
+    open_agent_snapshot_handoff_from_dir(dir, handoff_id)?.erase_after_acceptance(expected)
 }
 
 #[cfg(not(target_os = "macos"))]
+pub(super) fn open_agent_snapshot_handoff_from_dir(
+    _dir: &Path,
+    _handoff_id: &str,
+) -> Result<OpenAgentSnapshotHandoff, String> {
+    Err("agent snapshot handoffs currently require macOS file security".to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+#[cfg(test)]
 pub(super) fn read_agent_snapshot_handoff_from_dir(
     _dir: &Path,
     _handoff_id: &str,
@@ -288,6 +331,7 @@ pub(super) fn read_agent_snapshot_handoff_from_dir(
 }
 
 #[cfg(not(target_os = "macos"))]
+#[cfg(test)]
 pub(super) fn consume_agent_snapshot_handoff_from_dir(
     _dir: &Path,
     _handoff_id: &str,

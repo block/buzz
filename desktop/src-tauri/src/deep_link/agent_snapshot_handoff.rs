@@ -9,8 +9,8 @@ use url::Url;
 
 use super::{
     agent_snapshot_handoff_url_exceeds_limit, consume_agent_snapshot_handoff_from_dir,
-    parse_agent_snapshot_handoff_id, read_agent_snapshot_handoff_from_dir,
-    PendingAgentSnapshotImport, PendingAgentSnapshotImports,
+    open_agent_snapshot_handoff_from_dir, parse_agent_snapshot_handoff_id,
+    read_agent_snapshot_handoff_from_dir, PendingAgentSnapshotImport, PendingAgentSnapshotImports,
 };
 #[cfg(target_os = "macos")]
 use super::{
@@ -93,7 +93,63 @@ fn secure_handoff_read_retains_source_until_preview_acknowledgement() {
     assert_eq!(bytes, expected);
     assert!(path.exists(), "source must remain until preview settles");
     consume_agent_snapshot_handoff_from_dir(dir.path(), HANDOFF_ID, &bytes).unwrap();
-    assert!(!path.exists(), "acknowledged source must be deleted");
+    assert!(path.exists(), "acknowledgement must not unlink by pathname");
+    assert_eq!(
+        path.metadata().unwrap().len(),
+        0,
+        "acknowledged payload must be erased through its verified descriptor"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn accepted_descriptor_erasure_does_not_touch_a_replacement_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let expected = config_only_snapshot_bytes("hermes");
+    let path = stage_handoff(dir.path(), &expected, 0o600);
+    let accepted_path = dir.path().join("accepted-original.agent.json");
+    let mut source = open_agent_snapshot_handoff_from_dir(dir.path(), HANDOFF_ID).unwrap();
+
+    std::fs::rename(&path, &accepted_path).unwrap();
+    let replacement = b"replacement must survive";
+    std::fs::write(&path, replacement).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    source.erase_after_acceptance(&expected).unwrap();
+
+    assert_eq!(std::fs::read(&path).unwrap(), replacement);
+    assert_eq!(accepted_path.metadata().unwrap().len(), 0);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn accepted_descriptor_erasure_clears_a_concurrent_hardlink() {
+    let dir = tempfile::tempdir().unwrap();
+    let expected = config_only_snapshot_bytes("hermes");
+    let path = stage_handoff(dir.path(), &expected, 0o600);
+    let alias = dir.path().join("late-hardlink.agent.json");
+    let mut source = open_agent_snapshot_handoff_from_dir(dir.path(), HANDOFF_ID).unwrap();
+
+    std::fs::hard_link(&path, &alias).unwrap();
+    source.erase_after_acceptance(&expected).unwrap();
+
+    assert_eq!(path.metadata().unwrap().len(), 0);
+    assert_eq!(alias.metadata().unwrap().len(), 0);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn accepted_descriptor_rejects_content_changed_after_preview() {
+    let dir = tempfile::tempdir().unwrap();
+    let expected = config_only_snapshot_bytes("hermes");
+    let changed = config_only_snapshot_bytes("other-runtime");
+    let path = stage_handoff(dir.path(), &expected, 0o600);
+    let mut source = open_agent_snapshot_handoff_from_dir(dir.path(), HANDOFF_ID).unwrap();
+
+    std::fs::write(&path, &changed).unwrap();
+
+    assert!(source.erase_after_acceptance(&expected).is_err());
+    assert_eq!(std::fs::read(path).unwrap(), changed);
 }
 
 #[cfg(target_os = "macos")]
@@ -286,25 +342,69 @@ fn secure_handoff_read_rejects_snapshot_with_memory() {
     assert!(path.exists());
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn pending_agent_snapshot_import_is_peeked_then_acknowledged() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = stage_handoff(dir.path(), &config_only_snapshot_bytes("hermes"), 0o600);
+    let source = open_agent_snapshot_handoff_from_dir(dir.path(), HANDOFF_ID).unwrap();
+    let duplicate_source = open_agent_snapshot_handoff_from_dir(dir.path(), HANDOFF_ID).unwrap();
+    let full_source = open_agent_snapshot_handoff_from_dir(dir.path(), HANDOFF_ID).unwrap();
     let queue = PendingAgentSnapshotImports::default();
-    assert!(queue.enqueue(PendingAgentSnapshotImport {
+    let pending = PendingAgentSnapshotImport {
         id: HANDOFF_ID.to_owned(),
-        file_bytes: vec![1, 2, 3],
+        file_bytes: config_only_snapshot_bytes("hermes"),
         file_name: format!("{HANDOFF_ID}.agent.json"),
         snapshot_kind: "agent".to_owned(),
-    }));
+    };
+    assert_eq!(queue.enqueue(pending.clone(), source), Ok(true));
+    assert_eq!(queue.enqueue(pending, duplicate_source), Ok(false));
 
-    assert!(!queue.enqueue(PendingAgentSnapshotImport {
-        id: "550e8400-e29b-41d4-a716-446655440001".to_owned(),
-        file_bytes: vec![4, 5, 6],
-        file_name: "second.agent.json".to_owned(),
-        snapshot_kind: "agent".to_owned(),
-    }));
+    assert_eq!(
+        queue.enqueue(
+            PendingAgentSnapshotImport {
+                id: "550e8400-e29b-41d4-a716-446655440001".to_owned(),
+                file_bytes: vec![4, 5, 6],
+                file_name: "second.agent.json".to_owned(),
+                snapshot_kind: "agent".to_owned(),
+            },
+            full_source,
+        ),
+        Err(())
+    );
 
-    assert_eq!(queue.first().unwrap().file_bytes, vec![1, 2, 3]);
-    assert!(!queue.acknowledge("other"));
-    assert!(queue.acknowledge(HANDOFF_ID));
+    assert_eq!(
+        queue.first().unwrap().file_bytes,
+        config_only_snapshot_bytes("hermes")
+    );
+    assert!(!queue.consume("other"));
+    assert!(queue.consume(HANDOFF_ID));
     assert!(queue.first().is_none());
+    assert_eq!(path.metadata().unwrap().len(), 0);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn rejected_pending_handoff_keeps_the_staged_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let expected = config_only_snapshot_bytes("hermes");
+    let path = stage_handoff(dir.path(), &expected, 0o600);
+    let source = open_agent_snapshot_handoff_from_dir(dir.path(), HANDOFF_ID).unwrap();
+    let queue = PendingAgentSnapshotImports::default();
+    assert_eq!(
+        queue.enqueue(
+            PendingAgentSnapshotImport {
+                id: HANDOFF_ID.to_owned(),
+                file_bytes: expected.clone(),
+                file_name: format!("{HANDOFF_ID}.agent.json"),
+                snapshot_kind: "agent".to_owned(),
+            },
+            source,
+        ),
+        Ok(true)
+    );
+
+    assert!(queue.discard(HANDOFF_ID));
+    assert!(queue.first().is_none());
+    assert_eq!(std::fs::read(path).unwrap(), expected);
 }
