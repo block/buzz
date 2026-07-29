@@ -4138,7 +4138,8 @@ mod tests {
     #[test]
     fn parse_anthropic_total_tokens_always_none() {
         // Anthropic reports only category counts; NIP-AM forbids deriving a total.
-        // total_tokens must always be None regardless of what the response contains.
+        // total_tokens must always be None regardless of what the response contains —
+        // including if a future Anthropic API version unexpectedly adds total_tokens.
         let v = serde_json::json!({
             "content": [{"type": "text", "text": "hi"}],
             "stop_reason": "end_turn",
@@ -4146,7 +4147,9 @@ mod tests {
                 "input_tokens": 100,
                 "cache_read_input_tokens": 50,
                 "cache_creation_input_tokens": 0,
-                "output_tokens": 30
+                "output_tokens": 30,
+                // Unexpected field: parse_anthropic must ignore this and return None.
+                "total_tokens": 180
             }
         });
         let r = parse_anthropic(v).unwrap();

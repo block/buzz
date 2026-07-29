@@ -747,25 +747,10 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
                 // Fold the per-turn total state into the session cumulative.
                 // Unknown poisons the session permanently; Exact adds to running sum;
                 // Unseen (turn emitted no usage) leaves the cumulative unchanged.
-                s.accumulated_total_state = match (s.accumulated_total_state, turn_total_state) {
-                    // Either side poisoned → session is poisoned.
-                    (crate::types::TurnTotalState::Unknown, _)
-                    | (_, crate::types::TurnTotalState::Unknown) => {
-                        crate::types::TurnTotalState::Unknown
-                    }
-                    // Turn had no usage-bearing responses → no change to cumulative.
-                    (acc, crate::types::TurnTotalState::Unseen) => acc,
-                    // First exact turn — adopt its value.
-                    (
-                        crate::types::TurnTotalState::Unseen,
-                        crate::types::TurnTotalState::Exact(n),
-                    ) => crate::types::TurnTotalState::Exact(n),
-                    // Add to running exact sum.
-                    (
-                        crate::types::TurnTotalState::Exact(acc),
-                        crate::types::TurnTotalState::Exact(n),
-                    ) => crate::types::TurnTotalState::Exact(acc.saturating_add(n)),
-                };
+                // Uses TurnTotalState::merge_session, which applies the same
+                // checked-add / overflow-poisons contract as the per-response fold.
+                s.accumulated_total_state =
+                    s.accumulated_total_state.merge_session(turn_total_state);
                 Some((
                     s.accumulated_input_tokens,
                     s.accumulated_output_tokens,

@@ -232,6 +232,10 @@ impl TurnTotalState {
     /// response; `None` when it was absent (e.g. Anthropic, or an OpenAI
     /// response that omits usage). Absence of a total on any usage-bearing
     /// response poisons the whole turn.
+    ///
+    /// Uses checked addition: overflow is treated the same as a missing total
+    /// (i.e. the state transitions to `Unknown`) because a saturated value
+    /// would not be a genuine provider-reported total.
     pub fn fold(self, total: Option<u64>) -> TurnTotalState {
         match (self, total) {
             // Already poisoned — stays Unknown regardless.
@@ -240,8 +244,37 @@ impl TurnTotalState {
             (_, None) => TurnTotalState::Unknown,
             // First response with a total.
             (TurnTotalState::Unseen, Some(n)) => TurnTotalState::Exact(n),
-            // Subsequent response — checked add to the running sum.
-            (TurnTotalState::Exact(acc), Some(n)) => TurnTotalState::Exact(acc.saturating_add(n)),
+            // Subsequent response — checked add; overflow poisons rather than saturates.
+            (TurnTotalState::Exact(acc), Some(n)) => match acc.checked_add(n) {
+                Some(sum) => TurnTotalState::Exact(sum),
+                None => TurnTotalState::Unknown,
+            },
+        }
+    }
+
+    /// Merge a completed turn's total state into the session-cumulative state.
+    ///
+    /// This is the turn→session boundary accumulation. It follows the same
+    /// checked-add / overflow-poisons contract as `fold()`:
+    /// - An `Unseen` turn (no usage-bearing responses) leaves the cumulative unchanged.
+    /// - Any `Unknown` side poisons the session permanently.
+    /// - Two `Exact` values are added with overflow → `Unknown`.
+    ///
+    /// Centralizing here ensures both the per-response fold and the turn→session
+    /// merge share one implementation of the exact-only invariant.
+    pub fn merge_session(self, turn: TurnTotalState) -> TurnTotalState {
+        match (self, turn) {
+            // Either side poisoned → session is poisoned.
+            (TurnTotalState::Unknown, _) | (_, TurnTotalState::Unknown) => TurnTotalState::Unknown,
+            // Turn had no usage-bearing responses → no change to cumulative.
+            (acc, TurnTotalState::Unseen) => acc,
+            // First exact turn — adopt its value.
+            (TurnTotalState::Unseen, TurnTotalState::Exact(n)) => TurnTotalState::Exact(n),
+            // Add to running exact sum; overflow poisons.
+            (TurnTotalState::Exact(acc), TurnTotalState::Exact(n)) => match acc.checked_add(n) {
+                Some(sum) => TurnTotalState::Exact(sum),
+                None => TurnTotalState::Unknown,
+            },
         }
     }
 
@@ -529,5 +562,77 @@ mod turn_total_state_tests {
     fn default_is_unseen() {
         let state: TurnTotalState = Default::default();
         assert_eq!(state, TurnTotalState::Unseen);
+    }
+
+    // ── overflow: fold ─────────────────────────────────────────────────────
+
+    #[test]
+    fn fold_overflow_poisons_turn_not_saturates() {
+        // u64::MAX + 1 would saturate; checked_add must poison instead.
+        let state = TurnTotalState::Exact(u64::MAX);
+        assert_eq!(
+            state.fold(Some(1)),
+            TurnTotalState::Unknown,
+            "overflow in fold() must produce Unknown, not Exact(u64::MAX)"
+        );
+    }
+
+    // ── TurnTotalState::merge_session ──────────────────────────────────────
+
+    #[test]
+    fn merge_session_unseen_turn_leaves_cumulative_unchanged() {
+        // An Unseen turn (no usage-bearing responses) must not alter the cumulative.
+        assert_eq!(
+            TurnTotalState::Exact(100).merge_session(TurnTotalState::Unseen),
+            TurnTotalState::Exact(100),
+        );
+        assert_eq!(
+            TurnTotalState::Unseen.merge_session(TurnTotalState::Unseen),
+            TurnTotalState::Unseen,
+        );
+    }
+
+    #[test]
+    fn merge_session_exact_turn_adds_to_exact_cumulative() {
+        assert_eq!(
+            TurnTotalState::Exact(100).merge_session(TurnTotalState::Exact(50)),
+            TurnTotalState::Exact(150),
+        );
+    }
+
+    #[test]
+    fn merge_session_first_exact_turn_from_unseen_adopts_value() {
+        assert_eq!(
+            TurnTotalState::Unseen.merge_session(TurnTotalState::Exact(200)),
+            TurnTotalState::Exact(200),
+        );
+    }
+
+    #[test]
+    fn merge_session_unknown_turn_poisons_cumulative_permanently() {
+        assert_eq!(
+            TurnTotalState::Exact(100).merge_session(TurnTotalState::Unknown),
+            TurnTotalState::Unknown,
+        );
+        // Poisoned session stays poisoned even with Unseen turn.
+        assert_eq!(
+            TurnTotalState::Unknown.merge_session(TurnTotalState::Unseen),
+            TurnTotalState::Unknown,
+        );
+        // Poisoned session stays poisoned even with another Exact turn.
+        assert_eq!(
+            TurnTotalState::Unknown.merge_session(TurnTotalState::Exact(999)),
+            TurnTotalState::Unknown,
+        );
+    }
+
+    #[test]
+    fn merge_session_overflow_poisons_not_saturates() {
+        // Overflow at the session boundary must also produce Unknown.
+        assert_eq!(
+            TurnTotalState::Exact(u64::MAX).merge_session(TurnTotalState::Exact(1)),
+            TurnTotalState::Unknown,
+            "overflow in merge_session() must produce Unknown, not Exact(u64::MAX)"
+        );
     }
 }
