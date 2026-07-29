@@ -23,6 +23,8 @@ import {
 import { useAttachmentEditing } from "@/features/messages/lib/useAttachmentEditing";
 import { useMediaUpload } from "@/features/messages/lib/useMediaUpload";
 import { useMentions } from "@/features/messages/lib/useMentions";
+import { useSlashCommandAutocomplete } from "@/features/messages/lib/useSlashCommandAutocomplete";
+import type { SlashCommandSuggestion } from "@/features/messages/lib/slashCommandAutocomplete";
 import { diffAddedMentionPubkeys } from "@/features/messages/lib/threading";
 import { getPersistentAgentAudienceScope } from "@/features/messages/lib/persistentAgentAudience";
 import { useIdentityQuery } from "@/shared/api/hooks";
@@ -50,6 +52,7 @@ import {
   type MentionSuggestion,
 } from "./MentionAutocomplete";
 import { ComposerDockToolbar } from "./ComposerDockToolbar";
+import { SlashCommandAutocomplete } from "./SlashCommandAutocomplete";
 import { NonMemberMentionDialog } from "./NonMemberMentionDialog";
 import { useMentionSendFlow } from "./useMentionSendFlow";
 import { usePersistentAgentMentionHydration } from "./usePersistentAgentMentionHydration";
@@ -133,6 +136,10 @@ function MessageComposerImpl({
   const mentions = useMentions(channelId, undefined, profiles, {
     channelType,
   });
+  const slashCommands = useSlashCommandAutocomplete({
+    channelId,
+    ownerPubkey,
+  });
   const channelLinks = useChannelLinks();
   const customEmoji = useCustomEmoji();
   const emojiAutocomplete = useEmojiAutocomplete(customEmoji);
@@ -178,6 +185,7 @@ function MessageComposerImpl({
     setIsEmojiPickerOpen(false);
     channelLinks.clearChannels();
     emojiAutocomplete.clearEmojis();
+    slashCommands.updateQuery("", 0);
   }, [effectiveDraftKey]);
 
   const disabledRef = React.useRef(disabled);
@@ -203,7 +211,8 @@ function MessageComposerImpl({
   isAutocompleteOpenRef.current =
     mentions.isMentionOpen ||
     channelLinks.isChannelOpen ||
-    emojiAutocomplete.isEmojiAutocompleteOpen;
+    emojiAutocomplete.isEmojiAutocompleteOpen ||
+    slashCommands.isOpen;
 
   const submitMessageRef = React.useRef<() => void>(() => {});
   const composerScrollRef = React.useRef<HTMLDivElement>(null);
@@ -259,6 +268,7 @@ function MessageComposerImpl({
       mentions.updateMentionQuery(text, cursor);
       channelLinks.updateChannelQuery(text, cursor);
       emojiAutocomplete.updateEmojiQuery(text, cursor);
+      slashCommands.updateQuery(text, cursor);
 
       persistentMentionHydrationRef.current?.reconcile(text);
 
@@ -434,6 +444,27 @@ function MessageComposerImpl({
       applyAutocompleteEdit,
       emojiAutocomplete.insertEmoji,
       richText.getPlainTextAndCursor,
+    ],
+  );
+
+  const applySlashCommandInsert = React.useCallback(
+    (suggestion: SlashCommandSuggestion) => {
+      const { cursor } = richText.getPlainTextAndCursor();
+      const edit = slashCommands.insertCommand(suggestion, cursor);
+      if (edit) {
+        mentions.registerMentionPubkey(
+          suggestion.agentDisplayName,
+          suggestion.agentPubkey,
+          { isAgent: true },
+        );
+        applyAutocompleteEdit(edit);
+      }
+    },
+    [
+      applyAutocompleteEdit,
+      mentions.registerMentionPubkey,
+      richText.getPlainTextAndCursor,
+      slashCommands.insertCommand,
     ],
   );
 
@@ -695,6 +726,14 @@ function MessageComposerImpl({
   const handleEditorKeyDown = React.useCallback(
     (event: React.KeyboardEvent<HTMLDivElement>) => {
       // Let autocomplete handle keys first
+      const slashCommandResult = slashCommands.handleKeyDown(event);
+      if (slashCommandResult.handled) {
+        if (slashCommandResult.suggestion) {
+          applySlashCommandInsert(slashCommandResult.suggestion);
+        }
+        return;
+      }
+
       const emojiResult = emojiAutocomplete.handleEmojiKeyDown(event);
       if (emojiResult.handled) {
         if (emojiResult.suggestion) {
@@ -735,6 +774,8 @@ function MessageComposerImpl({
       }
     },
     [
+      slashCommands.handleKeyDown,
+      applySlashCommandInsert,
       emojiAutocomplete.handleEmojiKeyDown,
       applyEmojiInsert,
       channelLinks.handleChannelKeyDown,
@@ -920,6 +961,11 @@ function MessageComposerImpl({
             }}
           >
             {ownsDropZone && media.isDragOver && <DropZoneOverlay />}
+            <SlashCommandAutocomplete
+              groups={slashCommands.isOpen ? slashCommands.groups : []}
+              onSelect={applySlashCommandInsert}
+              selectedIndex={slashCommands.selectedIndex}
+            />
             <EmojiAutocomplete
               onSelect={applyEmojiInsert}
               selectedIndex={emojiAutocomplete.emojiSelectedIndex}
