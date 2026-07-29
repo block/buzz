@@ -773,9 +773,9 @@ export function EncryptedBackupCreator({
           <AlertDialogHeader>
             <AlertDialogTitle>Create a new backup password?</AlertDialogTitle>
             <AlertDialogDescription>
-              Buzz no longer keeps the password for this backup. Starting over
-              creates a new backup; copies you already saved will keep working
-              with their original password.
+              Starting over lets you pick a new password and download a fresh
+              backup file. Backups you saved earlier will still work — just use
+              the password you created them with.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
