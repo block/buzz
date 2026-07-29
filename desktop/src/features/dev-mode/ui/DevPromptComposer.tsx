@@ -21,6 +21,12 @@ type DevPromptComposerProps = {
   busy: boolean;
   /** Whether this composer owns the keyboard (side chat may own it instead). */
   active: boolean;
+  /**
+   * When set the composer is drafting something other than a channel message
+   * (e.g. a new tab) — renders a highlighted banner so the redirect is
+   * unmissable, not just placeholder text.
+   */
+  draftLabel?: string | null;
   /** Increment to pull focus back here (e.g. after the palette closes). */
   focusSignal: number;
   /** Channel whose members rank first in `@` mention suggestions. */
@@ -52,6 +58,7 @@ export function DevPromptComposer({
   hint,
   busy,
   active,
+  draftLabel = null,
   focusSignal,
   channelId,
   selfPubkey,
@@ -159,6 +166,7 @@ export function DevPromptComposer({
       className={cn(
         "bg-background/80 font-mono transition-opacity",
         !active && "opacity-55",
+        draftLabel && "bg-primary/5",
       )}
     >
       <DevComposerResizeHandle
@@ -166,6 +174,15 @@ export function DevPromptComposer({
         testId="dev-mode-composer-resize"
         {...resizeHandleProps}
       />
+      {draftLabel ? (
+        <div
+          className="flex items-baseline gap-2 border-y border-primary/40 bg-primary/10 px-4 py-1 text-xs text-primary"
+          data-testid="dev-mode-draft-banner"
+        >
+          <span className="font-semibold">{draftLabel}</span>
+          <span className="text-primary/60">esc cancels</span>
+        </div>
+      ) : null}
       <DevComposerModeLine
         agentColor={agentColor}
         busy={busy}

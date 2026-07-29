@@ -6,9 +6,9 @@ import { cn } from "@/shared/lib/cn";
 
 /**
  * Tab strip across the top of an open channel: `main` plus one tab per
- * sub-channel the user can see. Parents can carry hundreds of subs, so the
- * strip scrolls horizontally instead of wrapping; the active tab scrolls
- * itself into view.
+ * sub-channel the user can see (surfaced to users as "tabs"). Parents can
+ * carry hundreds, so the strip scrolls horizontally instead of wrapping;
+ * the active tab scrolls itself into view. ⌘[/⌘] cycle through tabs.
  */
 export function DevChannelTabs({
   main,
@@ -78,13 +78,14 @@ export function DevChannelTabs({
         )}
       </div>
       <button
-        aria-label={`New sub-channel of # ${main.name}`}
+        aria-label={`New tab in # ${main.name}`}
         className="shrink-0 cursor-pointer px-2.5 py-1 text-xs text-muted-foreground/60 hover:text-foreground"
-        data-testid="dev-mode-new-sub-channel"
+        data-testid="dev-mode-new-tab"
         onClick={onNewSubChannel}
+        title="⌘⇧T"
         type="button"
       >
-        + sub
+        + tab
       </button>
     </div>
   );

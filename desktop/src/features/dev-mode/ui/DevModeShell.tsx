@@ -25,6 +25,7 @@ import {
   type DevComposerMode,
 } from "@/features/dev-mode/lib/useDevComposerModes";
 import { useDevSessionActions } from "@/features/dev-mode/lib/useDevSessionActions";
+import { useDevModeShortcuts } from "@/features/dev-mode/lib/useDevModeShortcuts";
 import { DevChannelMembers } from "@/features/dev-mode/ui/DevChannelMembers";
 import { DevChannelNavigator } from "@/features/dev-mode/ui/DevChannelNavigator";
 import { DevChannelTabs } from "@/features/dev-mode/ui/DevChannelTabs";
@@ -253,19 +254,6 @@ export function DevModeShell({
     setSubDraftParentId(null);
   }, [effectiveSessionId]);
 
-  // Ctrl+O opens the palette from anywhere in the shell.
-  React.useEffect(() => {
-    const handleWindowKeyDown = (event: KeyboardEvent) => {
-      if (event.ctrlKey && !event.metaKey && event.key.toLowerCase() === "o") {
-        event.preventDefault();
-        setPaletteInitialMode("root");
-        setPaletteOpen((current) => !current);
-      }
-    };
-    window.addEventListener("keydown", handleWindowKeyDown);
-    return () => window.removeEventListener("keydown", handleWindowKeyDown);
-  }, []);
-
   // Refocusing the window restores whichever text input last had the
   // keyboard (main composer, side-chat composer, palette search), falling
   // back to the composer if it unmounted meanwhile.
@@ -367,6 +355,18 @@ export function DevModeShell({
     [focusComposer, subIndex],
   );
 
+  // "+ tab" (tab strip, palette, or ⌘⇧T): the composer's next Enter spawns
+  // a new tab (sub-channel) of the open main instead of posting to the
+  // channel.
+  const startSubChannelDraft = React.useCallback(() => {
+    if (!activeMainId) return;
+    setSubDraftParentId(activeMainId);
+    setSelectedRootId(null);
+    setThreadOpen(false);
+    setActivePane("main");
+    focusComposer();
+  }, [activeMainId, focusComposer]);
+
   const goToFresh = React.useCallback(() => {
     setView("fresh");
     setActiveSessionId(null);
@@ -399,28 +399,32 @@ export function DevModeShell({
     [channelGroups, goToFresh, openChannel, subIndex],
   );
 
-  // ⌘N: new channel (fresh composer). ⌘T: draft side chat in the open
-  // channel — the pane opens with no thread yet; its first send posts a new
-  // message to the channel and attaches the pane to that thread.
-  React.useEffect(() => {
-    const handleWindowKeyDown = (event: KeyboardEvent) => {
-      if (!event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) {
-        return;
-      }
-      const key = event.key.toLowerCase();
-      if (key === "n") {
-        event.preventDefault();
-        goToFresh();
-      } else if (key === "t" && view === "channel" && activeSessionId) {
-        event.preventDefault();
-        setSelectedRootId(null);
-        setThreadOpen(true);
-        setActivePane("thread");
-      }
-    };
-    window.addEventListener("keydown", handleWindowKeyDown);
-    return () => window.removeEventListener("keydown", handleWindowKeyDown);
-  }, [activeSessionId, goToFresh, view]);
+  // ⌘T's draft side chat: the pane opens with no thread yet; its first send
+  // posts a new message to the channel and attaches the pane to that thread.
+  const draftSideChat = React.useCallback(() => {
+    setSelectedRootId(null);
+    setThreadOpen(true);
+    setActivePane("thread");
+  }, []);
+
+  const togglePalette = React.useCallback(() => {
+    setPaletteInitialMode("root");
+    setPaletteOpen((current) => !current);
+  }, []);
+
+  useDevModeShortcuts({
+    view,
+    activeChannel,
+    activeMainChannel,
+    activeSubChannels,
+    onTogglePalette: togglePalette,
+    onNewSession: goToFresh,
+    onDraftSideChat:
+      view === "channel" && activeSessionId ? draftSideChat : null,
+    onDraftTab:
+      view === "channel" && activeMainId ? startSubChannelDraft : null,
+    onOpenChannel: openChannel,
+  });
 
   const handleCycleMode = React.useCallback(
     (direction: 1 | -1) => {
@@ -595,17 +599,6 @@ export function DevModeShell({
     setActivePane("thread");
   }, []);
 
-  // "+ sub" (tab strip or palette): the composer's next Enter spawns a
-  // sub-channel of the open main instead of posting to the channel.
-  const startSubChannelDraft = React.useCallback(() => {
-    if (!activeMainId) return;
-    setSubDraftParentId(activeMainId);
-    setSelectedRootId(null);
-    setThreadOpen(false);
-    setActivePane("main");
-    focusComposer();
-  }, [activeMainId, focusComposer]);
-
   const handleSubmit = React.useCallback(
     (mentions: MentionRecord[] = []) => {
       const prompt = input.trim();
@@ -705,7 +698,7 @@ export function DevModeShell({
   );
 
   const placeholder = subDraftActive
-    ? `Prompt spawns a sub-channel of # ${activeMainChannel?.name ?? ""}…`
+    ? `Prompt spawns a new tab in # ${activeMainChannel?.name ?? ""}…`
     : activeChannel
       ? mode?.kind === "agent"
         ? `Message # ${activeChannel.name} and put ${devComposerModeLabel(mode)} to work…`
@@ -719,7 +712,7 @@ export function DevModeShell({
       ? "↑↓: preview channels · enter: open · esc: back · ⌃O: palette"
       : view === "channel"
         ? subDraftActive
-          ? "tab: target · enter: spawn sub-channel · esc: cancel"
+          ? "tab: target · enter: spawn new tab · esc: cancel"
           : threadOpen
             ? "←→: switch pane · tab: target · esc: close side chat"
             : selectedRootId
@@ -783,6 +776,9 @@ export function DevModeShell({
       active={composerActive}
       busy={busy}
       channelId={activeChannel?.id ?? null}
+      draftLabel={
+        subDraftActive ? `new tab in # ${activeMainChannel?.name ?? ""}` : null
+      }
       focusSignal={focusSignal}
       hint={hint}
       mode={mode}

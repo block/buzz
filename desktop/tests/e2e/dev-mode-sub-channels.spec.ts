@@ -2,10 +2,10 @@ import { expect, test } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
 
-// Sub-channels (`parent--sub`) in developer mode: only main channels render
-// in the left list; a parent's subs surface as tabs across the top of the
-// open channel, and "+ sub" drafts a prompt whose Enter spawns a new
-// sub-channel and announces it in the parent.
+// Sub-channels (`parent--sub`, surfaced to users as "tabs") in developer
+// mode: only main channels render in the left list; a parent's subs surface
+// as tabs across the top of the open channel, and "+ tab" drafts a prompt
+// whose Enter spawns a new sub-channel and announces it in the parent.
 
 async function openDevModeChannel(
   page: import("@playwright/test").Page,
@@ -84,17 +84,28 @@ test("subs hide from the left list and surface as tabs in the parent", async ({
   await expect(navigator.getByText("▸")).toBeVisible();
 });
 
-test("+ sub drafts a prompt that spawns and announces a sub-channel", async ({
+test("+ tab drafts a prompt that spawns and announces a sub-channel", async ({
   page,
 }) => {
   await openDevModeChannel(page, "general");
 
-  await page.getByTestId("dev-mode-new-sub-channel").click();
+  await page.getByTestId("dev-mode-new-tab").click();
   const composer = page.getByTestId("dev-mode-composer");
   await expect(composer).toHaveAttribute(
     "placeholder",
-    /spawns a sub-channel of # general/,
+    /spawns a new tab in # general/,
   );
+
+  // The draft state gets an unmissable highlight banner, and Escape drops
+  // both the banner and the draft.
+  const banner = page.getByTestId("dev-mode-draft-banner");
+  await expect(banner).toContainText("new tab in # general");
+  await page.keyboard.press("Escape");
+  await expect(banner).not.toBeVisible();
+
+  // ⌘⇧T re-enters the draft.
+  await page.keyboard.press("Meta+Shift+t");
+  await expect(banner).toBeVisible();
 
   await composer.pressSequentially("investigate the flaky deploy step");
   await page.keyboard.press("Enter");
@@ -115,22 +126,39 @@ test("+ sub drafts a prompt that spawns and announces a sub-channel", async ({
   ).toBeVisible();
 });
 
-test("palette offers a new sub-channel action inside a channel", async ({
-  page,
-}) => {
+test("palette offers a new tab action inside a channel", async ({ page }) => {
   await openDevModeChannel(page, "general");
 
   await page.keyboard.press("Control+o");
-  await page
-    .getByTestId("dev-mode-palette-input")
-    .pressSequentially("sub-channel");
+  await page.getByTestId("dev-mode-palette-input").pressSequentially("new tab");
   const entries = page.getByTestId("dev-mode-palette-entry");
-  await expect(entries.first()).toContainText("new sub-channel of # general");
+  await expect(entries.first()).toContainText("new tab in # general");
   await page.keyboard.press("Enter");
 
   await expect(page.getByTestId("dev-mode-palette")).not.toBeVisible();
   await expect(page.getByTestId("dev-mode-composer")).toHaveAttribute(
     "placeholder",
-    /spawns a sub-channel of # general/,
+    /spawns a new tab in # general/,
   );
+});
+
+test("⌘[ and ⌘] cycle through a channel's tabs", async ({ page }) => {
+  await openDevModeChannel(page, "general");
+  await createChannel(page, "general--flaky-ci");
+  await createChannel(page, "general--rollback-plan");
+
+  const tabs = page.getByTestId("dev-mode-channel-tab");
+  await expect(tabs).toHaveCount(3);
+  await expect(tabs.nth(0)).toHaveAttribute("data-active", "true");
+
+  await page.keyboard.press("Meta+]");
+  await expect(tabs.nth(1)).toHaveAttribute("data-active", "true");
+  await page.keyboard.press("Meta+]");
+  await expect(tabs.nth(2)).toHaveAttribute("data-active", "true");
+  // Wraps around past the last tab.
+  await page.keyboard.press("Meta+]");
+  await expect(tabs.nth(0)).toHaveAttribute("data-active", "true");
+  // ⌘[ goes the other way (wrapping back to the end).
+  await page.keyboard.press("Meta+[");
+  await expect(tabs.nth(2)).toHaveAttribute("data-active", "true");
 });

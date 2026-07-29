@@ -372,8 +372,8 @@ export function DevCommandPalette({
             ? [
                 {
                   id: "new-sub-channel",
-                  label: `new sub-channel of # ${parentOfActive?.name ?? activeChannel.name}`,
-                  detail: "spawn a focused agent session",
+                  label: `new tab in # ${parentOfActive?.name ?? activeChannel.name}`,
+                  detail: "spawn a focused agent session · ⌘⇧T",
                   run: () => {
                     onNewSubChannel();
                     onClose();
