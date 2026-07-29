@@ -1,16 +1,30 @@
-part of '../activity_page.dart';
+import 'dart:math' as math;
+import 'dart:ui' show SemanticsRole;
 
-const _activityPopoverEnterDuration = Duration(milliseconds: 150);
-const _activityPopoverExitDuration = Duration(milliseconds: 110);
-const _activityPopoverStartScale = 0.96;
+import 'package:flutter/material.dart';
 
-enum _ActivityPopoverAlignment { start, end }
+import '../theme/theme.dart';
 
-Future<T?> _showActivityPopover<T>({
+const _popoverEnterDuration = Duration(milliseconds: 150);
+const _popoverExitDuration = Duration(milliseconds: 110);
+const _popoverStartScale = 0.96;
+
+/// The horizontal edge a popover aligns to on its triggering control.
+enum AnchoredPopoverAlignment {
+  /// Aligns the popover's leading edge with the trigger's leading edge.
+  start,
+
+  /// Aligns the popover's trailing edge with the trigger's trailing edge.
+  end,
+}
+
+/// Shows an anchored, cross-platform popup menu with the Activity controls'
+/// sizing, motion, and safe-area placement.
+Future<T?> showAnchoredPopover<T>({
   required BuildContext context,
   required List<PopupMenuEntry<T>> items,
   required double width,
-  required _ActivityPopoverAlignment alignment,
+  required AnchoredPopoverAlignment alignment,
   required Color color,
   required ShapeBorder shape,
   required double elevation,
@@ -36,7 +50,7 @@ Future<T?> _showActivityPopover<T>({
   final mediaQuery = MediaQuery.of(context);
 
   return navigator.push<T>(
-    _ActivityPopoverRoute<T>(
+    _AnchoredPopoverRoute<T>(
       position: RelativeRect.fromRect(triggerRect, overlayRect),
       items: items,
       width: width,
@@ -61,11 +75,11 @@ Future<T?> _showActivityPopover<T>({
   );
 }
 
-class _ActivityPopoverRoute<T> extends PopupRoute<T> {
+class _AnchoredPopoverRoute<T> extends PopupRoute<T> {
   final RelativeRect position;
   final List<PopupMenuEntry<T>> items;
   final double width;
-  final _ActivityPopoverAlignment alignment;
+  final AnchoredPopoverAlignment alignment;
   final Offset offset;
   final Color color;
   final ShapeBorder shape;
@@ -78,7 +92,7 @@ class _ActivityPopoverRoute<T> extends PopupRoute<T> {
   final bool reducedMotion;
   final String _barrierLabel;
 
-  _ActivityPopoverRoute({
+  _AnchoredPopoverRoute({
     required this.position,
     required this.items,
     required this.width,
@@ -107,11 +121,11 @@ class _ActivityPopoverRoute<T> extends PopupRoute<T> {
 
   @override
   Duration get transitionDuration =>
-      reducedMotion ? Duration.zero : _activityPopoverEnterDuration;
+      reducedMotion ? Duration.zero : _popoverEnterDuration;
 
   @override
   Duration get reverseTransitionDuration =>
-      reducedMotion ? Duration.zero : _activityPopoverExitDuration;
+      reducedMotion ? Duration.zero : _popoverExitDuration;
 
   @override
   Widget buildPage(
@@ -123,16 +137,16 @@ class _ActivityPopoverRoute<T> extends PopupRoute<T> {
       CurveTween(curve: Curves.easeOutCubic),
     );
     final scaleAnimation = Tween<double>(
-      begin: _activityPopoverStartScale,
+      begin: _popoverStartScale,
       end: 1,
     ).animate(curvedAnimation);
     final transformOrigin = switch (alignment) {
-      _ActivityPopoverAlignment.start => Alignment.topLeft,
-      _ActivityPopoverAlignment.end => Alignment.topRight,
+      AnchoredPopoverAlignment.start => Alignment.topLeft,
+      AnchoredPopoverAlignment.end => Alignment.topRight,
     };
 
     return CustomSingleChildLayout(
-      delegate: _ActivityPopoverLayoutDelegate(
+      delegate: _AnchoredPopoverLayoutDelegate(
         position: position,
         alignment: alignment,
         offset: offset,
@@ -174,13 +188,13 @@ class _ActivityPopoverRoute<T> extends PopupRoute<T> {
   }
 }
 
-class _ActivityPopoverLayoutDelegate extends SingleChildLayoutDelegate {
+class _AnchoredPopoverLayoutDelegate extends SingleChildLayoutDelegate {
   final RelativeRect position;
-  final _ActivityPopoverAlignment alignment;
+  final AnchoredPopoverAlignment alignment;
   final Offset offset;
   final EdgeInsets screenPadding;
 
-  const _ActivityPopoverLayoutDelegate({
+  const _AnchoredPopoverLayoutDelegate({
     required this.position,
     required this.alignment,
     required this.offset,
@@ -201,8 +215,8 @@ class _ActivityPopoverLayoutDelegate extends SingleChildLayoutDelegate {
   Offset getPositionForChild(Size size, Size childSize) {
     final anchorBottom = size.height - position.bottom;
     final desiredX = switch (alignment) {
-      _ActivityPopoverAlignment.start => position.left + offset.dx,
-      _ActivityPopoverAlignment.end =>
+      AnchoredPopoverAlignment.start => position.left + offset.dx,
+      AnchoredPopoverAlignment.end =>
         size.width - position.right - childSize.width + offset.dx,
     };
     final minX = screenPadding.left;
@@ -222,7 +236,7 @@ class _ActivityPopoverLayoutDelegate extends SingleChildLayoutDelegate {
   }
 
   @override
-  bool shouldRelayout(_ActivityPopoverLayoutDelegate oldDelegate) {
+  bool shouldRelayout(_AnchoredPopoverLayoutDelegate oldDelegate) {
     return position != oldDelegate.position ||
         alignment != oldDelegate.alignment ||
         offset != oldDelegate.offset ||

@@ -1,5 +1,5 @@
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 /// Byte-equivalent charged to the handoff/context-pressure gate for a single
 /// image tool result. The gate maps bytes to tokens at 1 byte/token (see
@@ -93,6 +93,13 @@ impl HistoryItem {
                                 + serde_json::to_vec(&c.arguments)
                                     .map(|b| b.len())
                                     .unwrap_or(0)
+                                // `provider_extra` (e.g. a Gemini
+                                // `thoughtSignature`) is re-serialized into
+                                // every replayed call, so it counts toward the
+                                // request body and the context-pressure gate.
+                                + serde_json::to_vec(&c.provider_extra)
+                                    .map(|b| b.len())
+                                    .unwrap_or(0)
                         })
                         .sum::<usize>()
             }
@@ -108,6 +115,17 @@ pub struct ToolCall {
     pub provider_id: String,
     pub name: String,
     pub arguments: Value,
+    /// Fields the provider put on the tool call that we do not model, kept so
+    /// the assistant turn can be replayed the way it arrived.
+    ///
+    /// Gemini on the Databricks MLflow route returns a `thoughtSignature` per
+    /// call and *requires* it echoed back: replaying without it fails the whole
+    /// request with `Function call is missing a thought_signature in functionCall
+    /// parts`. For an agent loop that lands on the very first tool call, so the
+    /// model is unusable without this. Carrying whatever we did not model,
+    /// rather than naming that one field, means the next provider with an opaque
+    /// per-call token needs no change here.
+    pub provider_extra: Map<String, Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -139,6 +157,17 @@ pub struct LlmResponse {
     /// tokens, so reading it alone would undercount). Used to gate handoff on
     /// the real token budget rather than a byte estimate.
     pub input_tokens: Option<u64>,
+    /// The portion of `input_tokens` the provider served from its prompt cache,
+    /// or `None` when the response reported no cache split. Providers bill this
+    /// slice at a large discount (roughly 10x for both OpenAI and Anthropic),
+    /// so a consumer that prices all of `input_tokens` at the full rate
+    /// *overstates* cost — by a lot on an append-only agent loop, where most of
+    /// each request is a prefix the provider already has.
+    ///
+    /// This is a subset of `input_tokens`, never an addition to it: every
+    /// provider we speak to reports an inclusive input total, so adding this
+    /// would double-count.
+    pub cached_input_tokens: Option<u64>,
     /// Output tokens the provider reported for this request, or `None` if the
     /// response carried no usage. Used to accumulate per-turn output counts
     /// for NIP-AM metric publishing.
@@ -340,6 +369,39 @@ mod tests {
         );
         // The real wire size, by contrast, is still the full base64 payload.
         assert!(item.estimated_bytes() >= 3_118_884);
+    }
+
+    #[test]
+    fn assistant_size_counts_provider_extra() {
+        // A Gemini `thoughtSignature` rides the wire on every replayed call, so
+        // both size measures must see it — otherwise `truncate_history` and the
+        // handoff gate under-count and let the real request exceed the budget.
+        let mut extra = Map::new();
+        extra.insert("thoughtSignature".into(), Value::String("S".repeat(500)));
+        let with_extra = HistoryItem::Assistant {
+            text: String::new(),
+            tool_calls: vec![ToolCall {
+                provider_id: "id".into(),
+                name: "t".into(),
+                arguments: Value::Null,
+                provider_extra: extra,
+            }],
+        };
+        let without_extra = HistoryItem::Assistant {
+            text: String::new(),
+            tool_calls: vec![ToolCall {
+                provider_id: "id".into(),
+                name: "t".into(),
+                arguments: Value::Null,
+                provider_extra: Map::new(),
+            }],
+        };
+        assert!(with_extra.estimated_bytes() > without_extra.estimated_bytes() + 500);
+        assert_eq!(
+            with_extra.estimated_bytes(),
+            with_extra.context_pressure_bytes(),
+            "provider_extra is text, so both measures must agree"
+        );
     }
 
     #[test]

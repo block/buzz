@@ -52,6 +52,31 @@ const PASSTHROUGH_ENV: &[&str] = &[
     "GIT_ASKPASS",
     "GIT_SSH_COMMAND",
     "GIT_CONFIG_GLOBAL",
+    // Proxy — on a host whose only route out is a CONNECT proxy, dropping
+    // these does not degrade the tools, it blinds them: apt, curl, pip and git
+    // all connect directly instead, and the egress firewall resets the socket.
+    // The agent then reports "Connection reset by peer" and concludes the
+    // environment has no network, which is indistinguishable in the transcript
+    // from a task that is genuinely offline.
+    //
+    // Both cases are needed. curl and git read the lowercase spellings, most
+    // Go and Python tooling reads the uppercase ones, and libcurl deliberately
+    // ignores uppercase HTTP_PROXY (CGI ambiguity), so keeping only one form
+    // silently breaks half the toolchain.
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+    "all_proxy",
+    // TLS trust — a proxy that terminates TLS presents its own CA, and an
+    // image whose trust store does not carry it fails every https fetch with a
+    // verification error. Same class of failure as the proxy vars: the parent
+    // was configured correctly and the child could not see it.
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
     // Buzz identity — dev-mcp writes NOSTR_PRIVATE_KEY to a keyfile then
     // removes it from its own env (children never see it). BUZZ_PRIVATE_KEY
     // and BUZZ_RELAY_URL are kept for the buzz CLI. BUZZ_AUTH_TAG is a
@@ -1014,6 +1039,41 @@ mod content_tests {
     #[test]
     fn passthrough_includes_buzz_owner_attestation() {
         assert!(PASSTHROUGH_ENV.contains(&"BUZZ_AUTH_TAG"));
+    }
+
+    #[test]
+    fn passthrough_carries_proxy_configuration_to_tools() {
+        // On a proxy-only host this is the difference between an agent that can
+        // install a package and one that reports the network is down. Both
+        // spellings: libcurl ignores uppercase HTTP_PROXY, and Go/Python
+        // tooling largely ignores the lowercase set.
+        for var in [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "NO_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "no_proxy",
+            "all_proxy",
+        ] {
+            assert!(
+                PASSTHROUGH_ENV.contains(&var),
+                "{var} must survive env_clear() or every MCP tool loses the proxy"
+            );
+        }
+    }
+
+    #[test]
+    fn passthrough_carries_tls_trust_to_tools() {
+        // A TLS-terminating proxy presents its own CA; without these the child
+        // rejects every https fetch even though the proxy itself is reachable.
+        for var in ["SSL_CERT_FILE", "SSL_CERT_DIR"] {
+            assert!(
+                PASSTHROUGH_ENV.contains(&var),
+                "{var} must survive env_clear() or https fails inside tools"
+            );
+        }
     }
     use rmcp::model::Content;
 

@@ -164,6 +164,33 @@ fn parse_format_is_png(s: &str) -> Result<bool, String> {
     }
 }
 
+fn materialize_portable_runtime_defaults(
+    record: &mut ManagedAgentRecord,
+    global: &crate::managed_agents::GlobalAgentConfig,
+) {
+    if record
+        .model
+        .as_deref()
+        .is_none_or(|value| value.trim().is_empty())
+    {
+        record.model = global.model.clone();
+    }
+    if record
+        .provider
+        .as_deref()
+        .is_none_or(|value| value.trim().is_empty())
+    {
+        record.provider = global.provider.clone();
+    }
+    if record
+        .runtime
+        .as_deref()
+        .is_none_or(|value| value.trim().is_empty())
+    {
+        record.runtime = global.preferred_runtime.clone();
+    }
+}
+
 /// Shared production encoding path.
 ///
 /// Resolves the agent definition, validates inputs, fetches optional memory,
@@ -196,6 +223,13 @@ pub(crate) async fn materialize_snapshot_bytes(
         let definitions = load_agent_definitions(&app)?;
         let (def_record, is_definition) = resolve_from_lists(&id, &instances, &definitions)
             .map(|(r, is_def)| (r.clone(), is_def))?;
+        let mut def_record = def_record;
+        // A snapshot is a verbatim portable copy of the effective runtime,
+        // provider, and model configuration, not a pointer to the sender's
+        // machine-wide defaults. This does not translate or substitute values
+        // for a different recipient setup.
+        let global = crate::managed_agents::load_global_agent_config(&app).unwrap_or_default();
+        materialize_portable_runtime_defaults(&mut def_record, &global);
 
         let memory_pubkey = if memory_level != MemoryLevel::None {
             let mpk = memory_source_pubkey.as_deref().unwrap_or("");
@@ -400,6 +434,8 @@ pub async fn encode_agent_snapshot_for_send(
     })
 }
 
+#[cfg(test)]
+mod fidelity_tests;
 #[cfg(test)]
 mod tests;
 

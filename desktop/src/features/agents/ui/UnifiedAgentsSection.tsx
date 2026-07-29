@@ -58,6 +58,7 @@ type UnifiedAgentsSectionProps = {
   onSharePersona: (
     persona: AgentPersona,
     linkedAgent: ManagedAgent | undefined,
+    effectiveAvatarUrl: string | null,
   ) => void;
   onDeactivatePersona: (persona: AgentPersona) => void;
   onDeletePersona: (persona: AgentPersona) => void;
@@ -157,9 +158,11 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
               const profileAgent = pickProfileAgent(group.agents);
               return (
                 <AgentPersonaCard
-                  actions={
+                  actions={(effectiveAvatarUrl, isEffectiveAvatarLoading) => (
                     <PersonaActionsMenu
-                      isActionPending={isActionPending}
+                      isActionPending={
+                        isActionPending || isEffectiveAvatarLoading
+                      }
                       isPending={isPersonasPending}
                       persona={group.persona}
                       linkedAgent={profileAgent}
@@ -167,9 +170,11 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
                       onDelete={onDeletePersona}
                       onDuplicate={onDuplicatePersona}
                       onEdit={onEditPersona}
-                      onShare={onSharePersona}
+                      onShare={(persona, linkedAgent) =>
+                        onSharePersona(persona, linkedAgent, effectiveAvatarUrl)
+                      }
                     />
-                  }
+                  )}
                   agent={profileAgent}
                   defaultModel={defaultModel}
                   key={group.persona.id}
@@ -250,7 +255,10 @@ function AgentPersonaCard({
   onStartAgent,
   onStartPersona,
 }: {
-  actions?: React.ReactNode;
+  actions?: (
+    effectiveAvatarUrl: string | null,
+    isEffectiveAvatarLoading: boolean,
+  ) => React.ReactNode;
   agent: ManagedAgent | undefined;
   defaultModel: string;
   persona: AgentPersona;
@@ -282,7 +290,10 @@ function AgentPersonaCard({
 
   return (
     <AgentIdentityCard
-      actions={actions}
+      actions={actions?.(
+        avatarUrl,
+        Boolean(agent && !persona.avatarUrl && profileQuery.isPending),
+      )}
       ariaLabel={`${title} agent profile`}
       avatar={
         agent ? (

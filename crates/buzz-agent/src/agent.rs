@@ -60,6 +60,11 @@ pub struct RunCtx<'a> {
     /// Accumulated output tokens across all LLM rounds in this turn, for
     /// NIP-AM metric publishing. Reset to `None` at turn start in `run()`.
     pub turn_output_tokens: &'a mut Option<u64>,
+    /// The cache-served subset of `turn_input_tokens`, accumulated across all
+    /// LLM rounds in this turn. Reset to `None` at turn start in `run()`.
+    /// Consumers price this slice at the provider's cached rate; without it
+    /// every round of a growing conversation is billed at full price.
+    pub turn_cached_input_tokens: &'a mut Option<u64>,
 }
 
 impl RunCtx<'_> {
@@ -78,6 +83,7 @@ impl RunCtx<'_> {
         // Reset per-turn token accumulators for this prompt.
         *self.turn_input_tokens = None;
         *self.turn_output_tokens = None;
+        *self.turn_cached_input_tokens = None;
 
         let mut round = 0u32;
         // Per-prompt `_Stop` objection count. Bounded per prompt (not per
@@ -174,6 +180,17 @@ impl RunCtx<'_> {
             if let Some(out) = response.output_tokens {
                 *self.turn_output_tokens =
                     Some(self.turn_output_tokens.unwrap_or(0).saturating_add(out));
+            }
+            // Accumulate the cache-served subset of this turn's input. Tracked
+            // separately from `turn_input_tokens` rather than subtracted from
+            // it: the input total must stay inclusive for the handoff gate,
+            // which cares how much context was sent, not what it cost.
+            if let Some(cached) = response.cached_input_tokens {
+                *self.turn_cached_input_tokens = Some(
+                    self.turn_cached_input_tokens
+                        .unwrap_or(0)
+                        .saturating_add(cached),
+                );
             }
 
             if !response.reasoning.is_empty() {
@@ -679,6 +696,9 @@ pub(crate) fn push_hook_outputs_as_tool_results(
                 provider_id: provider_id.clone(),
                 name: tool_name,
                 arguments: serde_json::json!({}),
+                // Synthesised locally, so there is no provider wire form to
+                // preserve.
+                provider_extra: Default::default(),
             }],
         });
         history.push(HistoryItem::ToolResult(ToolResult {

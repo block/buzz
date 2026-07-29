@@ -220,7 +220,15 @@ pub(crate) fn decode_snapshot_from_bytes(
                 file_bytes.len() / (1024 * 1024)
             ));
         }
-        let snapshot = decode_snapshot_png(file_bytes)?;
+        let mut snapshot = decode_snapshot_png(file_bytes)?;
+        // The PNG image body is the portable avatar. It deliberately wins over
+        // manifest avatar fields, whose URL may only be reachable by the
+        // sender. A 1×1 export placeholder leaves the manifest fallback intact.
+        if let Some(avatar_data_url) =
+            crate::managed_agents::snapshot_avatar::snapshot_png_avatar_data_url(file_bytes)?
+        {
+            snapshot.profile.avatar_data_url = Some(avatar_data_url);
+        }
         if snapshot.memory.level == MemoryLevel::None && !snapshot.memory.entries.is_empty() {
             return Err(
                 "Snapshot is malformed: memory.level is 'none' but entries are present."

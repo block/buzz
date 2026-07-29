@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use reqwest::Client;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use tokio::sync::Mutex;
 use tokio::time::Instant;
 
@@ -720,6 +720,12 @@ fn anthropic_body(
         }
     }
     flush(&mut messages, &mut pending);
+    // Rolling cache breakpoint: mark the tail of the (append-only) conversation
+    // so the next turn re-reads this whole prefix from cache instead of paying
+    // full input price for it. See `stamp_rolling_cache_breakpoint`.
+    if cfg.prompt_caching {
+        stamp_rolling_cache_breakpoint(&mut messages);
+    }
     let tools_json: Vec<Value> = tools
         .iter()
         .map(|t| {
@@ -727,8 +733,19 @@ fn anthropic_body(
         "name": t.name, "description": t.description, "input_schema": t.input_schema })
         })
         .collect();
+    // Static prefix breakpoint: caching the `system` block caches the whole
+    // prefix up to and including it — and the prefix order is
+    // `tools -> system -> messages`, so this single marker caches tools +
+    // system together. Requires the structured (array) form of `system`; skip
+    // it for an empty prompt since Anthropic rejects empty text blocks.
+    let system_value = if cfg.prompt_caching && !system_prompt.is_empty() {
+        json!([{ "type": "text", "text": system_prompt,
+            "cache_control": { "type": "ephemeral" } }])
+    } else {
+        json!(system_prompt)
+    };
     let mut body = json!({ "model": effective_model, "max_tokens": cfg.max_output_tokens,
-        "system": system_prompt, "messages": messages });
+        "system": system_value, "messages": messages });
     if let Some(e) = effort {
         let (thinking, output_config) =
             crate::config::anthropic_thinking_config(effective_model, e, cfg.max_output_tokens);
@@ -743,6 +760,41 @@ fn anthropic_body(
         body["tools"] = Value::Array(tools_json);
     }
     body
+}
+
+/// Attach ephemeral `cache_control` markers to the tail of the conversation so
+/// the next turn re-reads the whole prior prefix from cache (~0.1x input price)
+/// rather than re-billing it as fresh input. Anthropic caches the prefix up to
+/// and including each marked block.
+///
+/// We mark the last content block of the last *two* messages, not just the
+/// final one. Each Anthropic breakpoint walks back at most 20 content blocks to
+/// find a prior cache entry, and one agentic turn can append ~17 blocks at the
+/// default `max_parallel_tools` (1 assistant text + N `tool_use` +
+/// N `tool_result`). With only a tail marker, consecutive breakpoints sit a
+/// full turn apart, which slips past the 20-block window as soon as parallelism
+/// rises or a turn carries extra blocks — and the miss is silent. Marking the
+/// last two messages halves the gap (to ~N+1 blocks), keeping a live cache
+/// entry comfortably within reach. Uses 2 of the 4 allowed breakpoints; the
+/// static `system` marker is the third.
+///
+/// A no-op for messages whose content is empty or whose tail block is not a
+/// JSON object.
+fn stamp_rolling_cache_breakpoint(messages: &mut [Value]) {
+    let n = messages.len();
+    // The two most-recently-appended messages (the current turn's tool results
+    // and the assistant turn before them). `checked_sub` + `flatten` skips the
+    // second index when there is only one message.
+    for idx in [n.checked_sub(1), n.checked_sub(2)].into_iter().flatten() {
+        if let Some(block) = messages[idx]
+            .get_mut("content")
+            .and_then(Value::as_array_mut)
+            .and_then(|c| c.last_mut())
+            .and_then(Value::as_object_mut)
+        {
+            block.insert("cache_control".into(), json!({ "type": "ephemeral" }));
+        }
+    }
 }
 
 fn anthropic_tool_result_content(content: &[ToolResultContent]) -> Vec<Value> {
@@ -796,11 +848,24 @@ fn openai_body(
                     let calls: Vec<Value> = tool_calls
                         .iter()
                         .map(|c| {
-                            json!({
-                        "id": c.provider_id, "type": "function",
-                        "function": { "name": c.name,
-                            "arguments": serde_json::to_string(&c.arguments)
-                                .unwrap_or_else(|_| "{}".into()) } })
+                            let mut call = serde_json::Map::new();
+                            call.insert("id".into(), json!(c.provider_id));
+                            call.insert("type".into(), json!("function"));
+                            // Provider-owned fields go back beside `function`,
+                            // which is where the provider put them. Position is
+                            // load-bearing, not cosmetic: Gemini rejects a
+                            // `thoughtSignature` nested inside `function{}` with
+                            // the same 400 it gives for one that is missing.
+                            for (k, v) in &c.provider_extra {
+                                call.insert(k.clone(), v.clone());
+                            }
+                            call.insert(
+                                "function".into(),
+                                json!({ "name": c.name,
+                                    "arguments": serde_json::to_string(&c.arguments)
+                                        .unwrap_or_else(|_| "{}".into()) }),
+                            );
+                            Value::Object(call)
                         })
                         .collect();
                     msg.insert("tool_calls".into(), Value::Array(calls));
@@ -967,13 +1032,53 @@ fn is_responses_required_error(body: &str) -> bool {
         || b.contains("use the responses api")
 }
 
+/// OpenAI-family code names that appear as their own segment in a Databricks v2
+/// endpoint name (the GPT-5 launch aliases). The `gpt` family itself is matched
+/// separately by segment prefix so `gpt`, `gpt5`, and the `gpt` of a split
+/// `gpt-5` all qualify.
+const DATABRICKS_V2_OPENAI_CODE_NAMES: &[&str] = &["sol", "luna", "terra"];
+
+/// Anthropic (Claude) family and release code names that appear as their own
+/// segment in a Databricks v2 endpoint name — the `claude` prefix, the family
+/// names (`opus`, `sonnet`, `haiku`), and the release code names (`mythos`,
+/// `fable`). Getting a Claude model onto the Anthropic Messages route is what
+/// lets it carry a `cache_control` breakpoint; an endpoint that matches none of
+/// these falls through to the MLflow (OpenAI-wire) path, where Anthropic prompt
+/// caching is structurally impossible and the discount is silently lost.
+const DATABRICKS_V2_CLAUDE_NAMES: &[&str] =
+    &["claude", "opus", "sonnet", "haiku", "mythos", "fable"];
+
+/// Split a Databricks v2 endpoint name into its lowercase alphanumeric segments,
+/// breaking on any non-alphanumeric delimiter (`-`, `_`, `.`, `/`, …). E.g.
+/// `Databricks-Claude-Opus-5` -> `["databricks", "claude", "opus", "5"]`.
+fn model_name_segments(model: &str) -> Vec<String> {
+    model
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect()
+}
+
 fn databricks_v2_route_for_model(model: &str) -> DatabricksV2Route {
-    // Databricks v2 catalog names currently identify OpenAI-shaped GPT-5
-    // models and Anthropic-shaped Claude models by these substrings.
-    let lower = model.to_ascii_lowercase();
-    if lower.contains("gpt-5") || lower.contains("gpt5") {
+    // The v2 catalog exposes no family field, so the wire format is inferred
+    // from the endpoint name. Discovery deliberately keeps arbitrary custom
+    // aliases, so we match whole name *segments* rather than raw substrings: a
+    // substring test would misroute unrelated names — `consolidated-llama`
+    // (`sol`), `terraform-coder` (`terra`), `corpus-reranker`/`octopus-model`
+    // (`opus`) — onto a wire whose request shape their backend can't parse,
+    // turning a caching optimization into a hard request/parse failure. Segment
+    // matching still accepts real prefixed names like `goose-opus-5`.
+    let segments = model_name_segments(model);
+    let has_named_segment =
+        |names: &[&str]| segments.iter().any(|seg| names.contains(&seg.as_str()));
+    // `gpt` family: any segment beginning with `gpt` — covers `gpt`, `gpt5`, and
+    // the `gpt` segment of a split `gpt-5`, without matching mid-word.
+    let is_gpt_family = segments.iter().any(|seg| seg.starts_with("gpt"));
+    // OpenAI is checked before Claude so a name carrying both markers resolves
+    // to the OpenAI wire (preserving the prior `gpt-5`-first precedence).
+    if is_gpt_family || has_named_segment(DATABRICKS_V2_OPENAI_CODE_NAMES) {
         DatabricksV2Route::OpenAiResponses
-    } else if lower.contains("claude") {
+    } else if has_named_segment(DATABRICKS_V2_CLAUDE_NAMES) {
         DatabricksV2Route::AnthropicMessages
     } else {
         DatabricksV2Route::MlflowChatCompletions
@@ -1028,10 +1133,15 @@ fn parse_responses(v: Value) -> Result<LlmResponse, AgentError> {
                 let args: Value = serde_json::from_str(raw).map_err(|e| {
                     AgentError::Llm(format!("function_call.arguments not valid JSON: {e}"))
                 })?;
+                // No passthrough on this route: `responses_body` replays a
+                // function call as `{call_id, name, arguments}` and the Responses
+                // API asks for nothing else, so an empty map keeps the request
+                // byte-identical to before.
                 tool_calls.push(make_tool_call(
                     str_field(item, "call_id"),
                     str_field(item, "name"),
                     args,
+                    Default::default(),
                 )?);
             }
             Some("reasoning") => {
@@ -1079,11 +1189,18 @@ fn parse_responses(v: Value) -> Result<LlmResponse, AgentError> {
     };
     let input_tokens = sum_usage(&v, &["input_tokens"]);
     let output_tokens = sum_usage(&v, &["output_tokens"]);
+    // The Responses API nests the cache split under `input_tokens_details`.
+    let cached_input_tokens = usage_first(
+        &v,
+        &["cache_read_input_tokens"],
+        &[("input_tokens_details", "cached_tokens")],
+    );
     Ok(LlmResponse {
         text,
         tool_calls,
         stop,
         input_tokens,
+        cached_input_tokens,
         output_tokens,
         reasoning,
     })
@@ -1131,24 +1248,145 @@ fn anthropic_input_tokens(v: &Value) -> Option<u64> {
     )
 }
 
-/// Input-token total for OpenAI Chat Completions and Databricks responses.
-/// OpenAI's `prompt_tokens` is already inclusive. Databricks uses the same
-/// `prompt_tokens` wire field but ALSO reports Anthropic-style cache fields
-/// alongside it, so we sum them; the cache fields are simply absent (and
-/// contribute 0) for vanilla OpenAI.
+/// Input-token total for OpenAI Chat Completions and Databricks MLflow-route
+/// responses. `prompt_tokens` is already the inclusive input total on both, so
+/// it is read alone and never summed with the cache fields.
+///
+/// Vanilla OpenAI nests the cache split under `prompt_tokens_details` and
+/// `prompt_tokens` includes it. The Databricks MLflow route reports the split
+/// with the flat Anthropic spelling (`cache_read_input_tokens`) *alongside* an
+/// already-inclusive `prompt_tokens` — so summing double-counts. Verified on
+/// `databricks-glm-5-2` (2026-07-28): `prompt_tokens 13320`,
+/// `cache_read_input_tokens 13312`, `completion_tokens 30`, `total_tokens
+/// 13350`; since `prompt_tokens + completion_tokens == total_tokens`, the 13312
+/// cached tokens are contained in the 13320, not additional to it. Summing gave
+/// 26632 — nearly double — inflating both the context-budget gate and cost.
+///
+/// This differs from Anthropic's native route (see [`anthropic_input_tokens`]),
+/// where `input_tokens` genuinely EXCLUDES the cache fields and must be summed.
+/// The two never collide here: the router sends `claude*` models to the
+/// Anthropic route, so `parse_openai` only ever sees inclusive `prompt_tokens`.
 fn openai_chat_input_tokens(v: &Value) -> Option<u64> {
-    sum_usage(
+    sum_usage(v, &["prompt_tokens"])
+}
+
+/// First present value among `usage.<field>` and `usage.<nested>.<leaf>` pairs.
+///
+/// Cache counts are the one usage figure providers do not agree on the shape of.
+/// Anthropic puts `cache_read_input_tokens` flat on `usage`; OpenAI nests the
+/// same quantity one level down, under `prompt_tokens_details` on
+/// `/chat/completions` and `input_tokens_details` on `/responses`. [`sum_usage`]
+/// only reads flat keys, which is why the OpenAI split was invisible for so
+/// long: `prompt_tokens` is already inclusive, so the *total* was right and
+/// nothing looked broken while the discount silently went unclaimed.
+///
+/// Returns the first candidate that resolves, not a sum — these are alternative
+/// spellings of one number, so adding them would double-count on Databricks,
+/// which reports both shapes.
+fn usage_first(v: &Value, flat: &[&str], nested: &[(&str, &str)]) -> Option<u64> {
+    let usage = v.get("usage")?;
+    for f in flat {
+        if let Some(n) = usage.get(*f).and_then(Value::as_u64) {
+            return Some(n);
+        }
+    }
+    for (outer, leaf) in nested {
+        if let Some(n) = usage
+            .get(*outer)
+            .and_then(|o| o.get(*leaf))
+            .and_then(Value::as_u64)
+        {
+            return Some(n);
+        }
+    }
+    None
+}
+
+/// Cache-read tokens for an OpenAI Chat Completions response.
+///
+/// `prompt_tokens_details.cached_tokens` is where vanilla OpenAI reports it.
+/// The flat Anthropic spelling is checked first for Databricks, which routes
+/// Anthropic models through an OpenAI-shaped envelope.
+fn openai_chat_cached_tokens(v: &Value) -> Option<u64> {
+    usage_first(
         v,
-        &[
-            "prompt_tokens",
-            "cache_read_input_tokens",
-            "cache_creation_input_tokens",
-        ],
+        &["cache_read_input_tokens"],
+        &[("prompt_tokens_details", "cached_tokens")],
     )
 }
 
 fn str_field(v: &Value, key: &str) -> String {
     v.get(key).and_then(Value::as_str).unwrap_or("").to_owned()
+}
+
+/// Append `part` to `buf` on its own line, ignoring empties.
+fn push_part(buf: &mut String, part: &str) {
+    if part.is_empty() {
+        return;
+    }
+    if !buf.is_empty() {
+        buf.push('\n');
+    }
+    buf.push_str(part);
+}
+
+/// Split an OpenAI-shaped `message.content` into `(text, reasoning)`.
+///
+/// Standard OpenAI sends a string. Several models on the Databricks MLflow route
+/// — Gemini, Qwen35, gpt-oss — send an array of typed blocks instead, and
+/// `as_str()` yields nothing for an array, so their entire answer was being
+/// discarded: no error, no warning, just a turn that looked like the model had
+/// said nothing. `parse_anthropic` already walks a block array; this gives
+/// `parse_openai` the same tolerance.
+fn openai_content_parts(content: Option<&Value>) -> (String, String) {
+    let mut text = String::new();
+    let mut reasoning = String::new();
+    match content {
+        Some(Value::String(s)) => text.push_str(s),
+        Some(Value::Array(blocks)) => {
+            for b in blocks {
+                match b.get("type").and_then(Value::as_str) {
+                    Some("text") => push_part(&mut text, &str_field(b, "text")),
+                    Some("reasoning") => match b.get("summary").and_then(Value::as_array) {
+                        // Gemini nests the prose one level down under `summary`.
+                        Some(summary) => {
+                            for s in summary {
+                                push_part(&mut reasoning, &str_field(s, "text"));
+                            }
+                        }
+                        None => push_part(&mut reasoning, &str_field(b, "text")),
+                    },
+                    // An untyped block carrying text is still the model talking;
+                    // treating it as text loses nothing and keeps one more
+                    // provider out of the silent-empty-answer failure mode.
+                    _ => push_part(&mut text, &str_field(b, "text")),
+                }
+            }
+        }
+        _ => {}
+    }
+    (text, reasoning)
+}
+
+/// Make `provider_id` unique across one assistant turn's tool calls.
+///
+/// Gemini returns the function name as the id, so two parallel calls to the same
+/// function arrive sharing one id — and that id is what pairs a `role:"tool"`
+/// result back to its call, leaving two results indistinguishable. Rewriting is
+/// safe because both halves of that pairing are re-emitted from this same value;
+/// the provider never sees its original id again.
+fn dedupe_provider_ids(calls: &mut [ToolCall]) {
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    for c in calls.iter_mut() {
+        if seen.contains(&c.provider_id) {
+            let mut n = 2;
+            while seen.contains(&format!("{}-{n}", c.provider_id)) {
+                n += 1;
+            }
+            c.provider_id = format!("{}-{n}", c.provider_id);
+        }
+        seen.insert(c.provider_id.clone());
+    }
 }
 
 fn parse_anthropic(v: Value) -> Result<LlmResponse, AgentError> {
@@ -1173,10 +1411,12 @@ fn parse_anthropic(v: Value) -> Result<LlmResponse, AgentError> {
                         reasoning.push_str(t);
                     }
                 }
+                // Anthropic's replay shape is fully modelled, so nothing to keep.
                 Some("tool_use") => tool_calls.push(make_tool_call(
                     str_field(b, "id"),
                     str_field(b, "name"),
                     b.get("input").cloned().unwrap_or(Value::Null),
+                    Default::default(),
                 )?),
                 _ => {}
             }
@@ -1184,11 +1424,15 @@ fn parse_anthropic(v: Value) -> Result<LlmResponse, AgentError> {
     }
     let input_tokens = anthropic_input_tokens(&v);
     let output_tokens = sum_usage(&v, &["output_tokens"]);
+    // Anthropic reports the cache split flat on `usage`. Note this is already
+    // part of `input_tokens` above, which sums it in deliberately.
+    let cached_input_tokens = usage_first(&v, &["cache_read_input_tokens"], &[]);
     Ok(LlmResponse {
         text,
         tool_calls,
         stop,
         input_tokens,
+        cached_input_tokens,
         output_tokens,
         reasoning,
     })
@@ -1204,15 +1448,21 @@ fn parse_openai(v: Value) -> Result<LlmResponse, AgentError> {
     let msg = choice
         .get("message")
         .ok_or_else(|| AgentError::Llm("missing message".into()))?;
-    let text = str_field(msg, "content");
+    let (text, block_reasoning) = openai_content_parts(msg.get("content"));
     // DeepSeek and vLLM-style OpenAI-compat hosts expose reasoning tokens on the
     // message object. Prefer `reasoning_content` (DeepSeek's field name); fall
-    // back to `reasoning` (some other providers). Both are absent for standard
-    // OpenAI responses, which leaves this empty without any special-casing.
+    // back to `reasoning` (some other providers), and last to reasoning blocks
+    // found inside `content`. All three are absent for standard OpenAI
+    // responses, which leaves this empty without any special-casing.
     let reasoning = {
         let rc = str_field(msg, "reasoning_content");
-        if rc.is_empty() {
+        let rc = if rc.is_empty() {
             str_field(msg, "reasoning")
+        } else {
+            rc
+        };
+        if rc.is_empty() {
+            block_reasoning
         } else {
             rc
         }
@@ -1226,26 +1476,45 @@ fn parse_openai(v: Value) -> Result<LlmResponse, AgentError> {
             let raw = f.get("arguments").and_then(Value::as_str).unwrap_or("{}");
             let args: Value = serde_json::from_str(raw)
                 .map_err(|e| AgentError::Llm(format!("tool_call.arguments not valid JSON: {e}")))?;
+            // Everything on the wire object we do not model, kept for replay.
+            let extra = tc
+                .as_object()
+                .map(|o| {
+                    o.iter()
+                        .filter(|(k, _)| !matches!(k.as_str(), "id" | "type" | "function"))
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect()
+                })
+                .unwrap_or_default();
             tool_calls.push(make_tool_call(
                 str_field(tc, "id"),
                 str_field(f, "name"),
                 args,
+                extra,
             )?);
         }
     }
+    dedupe_provider_ids(&mut tool_calls);
     let input_tokens = openai_chat_input_tokens(&v);
     let output_tokens = sum_usage(&v, &["completion_tokens"]);
+    let cached_input_tokens = openai_chat_cached_tokens(&v);
     Ok(LlmResponse {
         text,
         tool_calls,
         stop,
         input_tokens,
+        cached_input_tokens,
         output_tokens,
         reasoning,
     })
 }
 
-fn make_tool_call(id: String, name: String, args: Value) -> Result<ToolCall, AgentError> {
+fn make_tool_call(
+    id: String,
+    name: String,
+    args: Value,
+    provider_extra: Map<String, Value>,
+) -> Result<ToolCall, AgentError> {
     if id.is_empty() || name.is_empty() {
         return Err(AgentError::Llm("tool_call missing id or name".into()));
     }
@@ -1262,6 +1531,7 @@ fn make_tool_call(id: String, name: String, args: Value) -> Result<ToolCall, Age
         provider_id: id,
         name,
         arguments,
+        provider_extra,
     })
 }
 
@@ -1606,6 +1876,7 @@ mod tests {
             prefer_mesh_for_auto: false,
             hints_enabled: true,
             thinking_effort: None,
+            prompt_caching: true,
         }
     }
 
@@ -2208,6 +2479,7 @@ mod tests {
                     provider_id: "toolu_1".into(),
                     name: "dev__view_image".into(),
                     arguments: serde_json::json!({"source":"x.png"}),
+                    provider_extra: Default::default(),
                 }],
             },
             HistoryItem::ToolResult(ToolResult {
@@ -2257,6 +2529,7 @@ mod tests {
                     provider_id: "call_abc".into(),
                     name: "dev__shell".into(),
                     arguments: serde_json::json!({"command": "ls"}),
+                    provider_extra: Default::default(),
                 }],
             },
             HistoryItem::ToolResult(ToolResult {
@@ -2355,6 +2628,7 @@ mod tests {
                     provider_id: "call_x".into(),
                     name: "t".into(),
                     arguments: serde_json::json!({}),
+                    provider_extra: Default::default(),
                 }],
             },
         ];
@@ -2462,20 +2736,105 @@ mod tests {
 
     #[test]
     fn databricks_v2_routes_by_model_family() {
+        use DatabricksV2Route::{AnthropicMessages, MlflowChatCompletions, OpenAiResponses};
         for (model, route, path) in [
+            // OpenAI-shaped: the gpt family plus the GPT-5 code names.
             (
                 "databricks-gpt-5-5",
-                DatabricksV2Route::OpenAiResponses,
+                OpenAiResponses,
+                "/ai-gateway/openai/v1/responses",
+            ),
+            ("gpt-4o", OpenAiResponses, "/ai-gateway/openai/v1/responses"),
+            // The intentional dashless `gpt5` spelling still routes to OpenAI.
+            ("gpt5", OpenAiResponses, "/ai-gateway/openai/v1/responses"),
+            (
+                "databricks-gpt-5-6-luna",
+                OpenAiResponses,
                 "/ai-gateway/openai/v1/responses",
             ),
             (
+                "databricks-gpt-5-6-sol",
+                OpenAiResponses,
+                "/ai-gateway/openai/v1/responses",
+            ),
+            (
+                "databricks-terra",
+                OpenAiResponses,
+                "/ai-gateway/openai/v1/responses",
+            ),
+            // Anthropic-shaped: the claude prefix, the family names, and the
+            // release code names — each must reach the cache-capable route even
+            // when the endpoint name omits the literal "claude".
+            (
                 "databricks-claude-opus-4-7",
-                DatabricksV2Route::AnthropicMessages,
+                AnthropicMessages,
                 "/ai-gateway/anthropic/v1/messages",
             ),
             (
+                "goose-opus-5",
+                AnthropicMessages,
+                "/ai-gateway/anthropic/v1/messages",
+            ),
+            (
+                "databricks-sonnet-5",
+                AnthropicMessages,
+                "/ai-gateway/anthropic/v1/messages",
+            ),
+            (
+                "databricks-haiku-4-5",
+                AnthropicMessages,
+                "/ai-gateway/anthropic/v1/messages",
+            ),
+            (
+                "databricks-mythos-5",
+                AnthropicMessages,
+                "/ai-gateway/anthropic/v1/messages",
+            ),
+            (
+                "databricks-fable-5",
+                AnthropicMessages,
+                "/ai-gateway/anthropic/v1/messages",
+            ),
+            // Case-insensitive.
+            (
+                "Databricks-Claude-Opus-5",
+                AnthropicMessages,
+                "/ai-gateway/anthropic/v1/messages",
+            ),
+            // Unrecognised names still fall through to the MLflow chat route.
+            (
                 "custom-tool-model",
-                DatabricksV2Route::MlflowChatCompletions,
+                MlflowChatCompletions,
+                "/ai-gateway/mlflow/v1/chat/completions",
+            ),
+            (
+                "databricks-gemini-3-pro",
+                MlflowChatCompletions,
+                "/ai-gateway/mlflow/v1/chat/completions",
+            ),
+            // Collision guard: short code names must match only as whole
+            // segments, never as substrings of an unrelated custom alias.
+            // Each of these embeds a marker (`sol`, `terra`, `opus`) mid-word
+            // and must stay on the MLflow fallback, not adopt a wire its
+            // backend can't parse.
+            (
+                "consolidated-llama",
+                MlflowChatCompletions,
+                "/ai-gateway/mlflow/v1/chat/completions",
+            ),
+            (
+                "terraform-coder",
+                MlflowChatCompletions,
+                "/ai-gateway/mlflow/v1/chat/completions",
+            ),
+            (
+                "corpus-reranker",
+                MlflowChatCompletions,
+                "/ai-gateway/mlflow/v1/chat/completions",
+            ),
+            (
+                "octopus-model",
+                MlflowChatCompletions,
                 "/ai-gateway/mlflow/v1/chat/completions",
             ),
         ] {
@@ -2548,11 +2907,13 @@ mod tests {
                         provider_id: "toolu_a".into(),
                         name: "dev__view_image".into(),
                         arguments: serde_json::json!({"source": "a.png"}),
+                        provider_extra: Default::default(),
                     },
                     ToolCall {
                         provider_id: "toolu_b".into(),
                         name: "dev__view_image".into(),
                         arguments: serde_json::json!({"source": "b.png"}),
+                        provider_extra: Default::default(),
                     },
                 ],
             },
@@ -2602,6 +2963,100 @@ mod tests {
         assert_eq!(imgs.len(), 2);
         assert_eq!(imgs[0]["image_url"]["url"], "data:image/png;base64,aaa");
         assert_eq!(imgs[1]["image_url"]["url"], "data:image/png;base64,bbb");
+    }
+
+    // ---- prompt caching (cache_control) body-shape tests ----
+
+    #[test]
+    fn anthropic_body_stamps_cache_control_when_enabled() {
+        let body = anthropic_body(
+            &cfg(Provider::DatabricksV2),
+            "sys",
+            &[
+                HistoryItem::User("hello".into()),
+                HistoryItem::Assistant {
+                    text: "hi".into(),
+                    tool_calls: vec![],
+                },
+                HistoryItem::User("more".into()),
+            ],
+            &[],
+            "databricks-claude-opus-5",
+            None,
+        );
+        // Static prefix: system promoted to a structured block carrying the marker.
+        assert_eq!(body["system"][0]["type"], "text");
+        assert_eq!(body["system"][0]["text"], "sys");
+        assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
+        // Leapfrog: the last block of the last TWO messages is marked; earlier
+        // ones are not. Three distinct user/assistant/user turns → messages[1]
+        // and messages[2] marked, messages[0] clean.
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 3);
+        let tail_block = |m: &Value| m["content"].as_array().unwrap().last().unwrap().clone();
+        assert_eq!(tail_block(&msgs[2])["cache_control"]["type"], "ephemeral");
+        assert_eq!(tail_block(&msgs[1])["cache_control"]["type"], "ephemeral");
+        assert!(
+            tail_block(&msgs[0]).get("cache_control").is_none(),
+            "only the last two messages carry a breakpoint"
+        );
+    }
+
+    #[test]
+    fn anthropic_body_single_message_stamps_only_one_breakpoint() {
+        // With a single message there is no second turn to leapfrog to; the
+        // checked_sub(2) index is skipped rather than panicking.
+        let body = anthropic_body(
+            &cfg(Provider::DatabricksV2),
+            "sys",
+            &[HistoryItem::User("hello".into())],
+            &[],
+            "databricks-claude-opus-5",
+            None,
+        );
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(
+            msgs[0]["content"].as_array().unwrap().last().unwrap()["cache_control"]["type"],
+            "ephemeral"
+        );
+    }
+
+    #[test]
+    fn anthropic_body_no_cache_control_when_disabled() {
+        let mut c = cfg(Provider::DatabricksV2);
+        c.prompt_caching = false;
+        let body = anthropic_body(
+            &c,
+            "sys",
+            &[HistoryItem::User("hello".into())],
+            &[],
+            "databricks-claude-opus-5",
+            None,
+        );
+        // system stays a bare string; no marker anywhere.
+        assert_eq!(body["system"], "sys");
+        let last_block = &body["messages"][0]["content"][0];
+        assert!(last_block.get("cache_control").is_none());
+    }
+
+    #[test]
+    fn anthropic_body_empty_system_stays_string_even_when_caching() {
+        // An empty system prompt must not become an empty text block —
+        // Anthropic rejects those. Caching is still applied to the tail.
+        let body = anthropic_body(
+            &cfg(Provider::DatabricksV2),
+            "",
+            &[HistoryItem::User("hello".into())],
+            &[],
+            "databricks-claude-opus-5",
+            None,
+        );
+        assert_eq!(body["system"], "");
+        assert_eq!(
+            body["messages"][0]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
     }
 
     // ---- ThinkingEffort body-shape tests ----
@@ -3483,6 +3938,92 @@ mod tests {
         assert_eq!(parse_anthropic(v).unwrap().input_tokens, None);
     }
 
+    /// A Gemini reply as the Databricks MLflow route actually returns it:
+    /// block-array `content`, and a `thoughtSignature` beside `function`.
+    fn gemini_choice() -> Value {
+        json!({"choices": [{"finish_reason": "tool_calls", "message": {
+            "role": "assistant",
+            "content": [
+                {"type": "reasoning", "summary": [{"type": "summary_text", "text": "weighing it"}]},
+                {"type": "text", "text": "391"}
+            ],
+            "tool_calls": [{
+                "id": "get_weather", "type": "function", "thoughtSignature": "SIG-A",
+                "function": {"name": "get_weather", "arguments": "{\"city\":\"Paris\"}"}
+            }]
+        }}]})
+    }
+
+    #[test]
+    fn parse_openai_reads_text_out_of_a_block_array() {
+        // Before this, `as_str()` on the array yielded "" and the model's answer
+        // was discarded with no error at all.
+        let r = parse_openai(gemini_choice()).unwrap();
+        assert_eq!(r.text, "391");
+        assert_eq!(r.reasoning, "weighing it");
+    }
+
+    #[test]
+    fn parse_openai_still_reads_a_plain_string_content() {
+        let v = json!({"choices": [{"finish_reason": "stop", "message": {
+            "role": "assistant", "content": "plain"}}]});
+        let r = parse_openai(v).unwrap();
+        assert_eq!(r.text, "plain");
+        assert_eq!(r.reasoning, "");
+    }
+
+    #[test]
+    fn parse_openai_keeps_unmodelled_tool_call_fields() {
+        let r = parse_openai(gemini_choice()).unwrap();
+        let extra = &r.tool_calls[0].provider_extra;
+        assert_eq!(extra.get("thoughtSignature"), Some(&json!("SIG-A")));
+        // `id`/`type`/`function` are modelled, so they must not be duplicated
+        // into the passthrough — they would be re-emitted twice.
+        assert!(!extra.contains_key("id"));
+        assert!(!extra.contains_key("type"));
+        assert!(!extra.contains_key("function"));
+    }
+
+    #[test]
+    fn openai_body_replays_the_signature_beside_function_not_inside_it() {
+        // Position is what the gateway checks: nested inside `function{}` it is
+        // rejected with the same 400 as a missing signature.
+        let r = parse_openai(gemini_choice()).unwrap();
+        let history = vec![HistoryItem::Assistant {
+            text: r.text.clone(),
+            tool_calls: r.tool_calls.clone(),
+        }];
+        let body = openai_body(
+            &cfg(Provider::DatabricksV2),
+            "sys",
+            &history,
+            &[],
+            "databricks-gemini-3-6-flash",
+            None,
+        );
+        let call = &body["messages"][1]["tool_calls"][0];
+        assert_eq!(call["thoughtSignature"], json!("SIG-A"));
+        assert!(call["function"].get("thoughtSignature").is_none());
+        assert_eq!(call["function"]["name"], json!("get_weather"));
+    }
+
+    #[test]
+    fn parse_openai_makes_duplicate_tool_call_ids_unique() {
+        // Gemini returns the function name as the id, so parallel calls to one
+        // function collide and their results become indistinguishable.
+        let v = json!({"choices": [{"finish_reason": "tool_calls", "message": {
+        "role": "assistant", "content": "",
+        "tool_calls": [
+            {"id": "get_weather", "type": "function",
+             "function": {"name": "get_weather", "arguments": "{\"city\":\"Paris\"}"}},
+            {"id": "get_weather", "type": "function",
+             "function": {"name": "get_weather", "arguments": "{\"city\":\"Rome\"}"}}
+        ]}}]});
+        let r = parse_openai(v).unwrap();
+        assert_eq!(r.tool_calls[0].provider_id, "get_weather");
+        assert_eq!(r.tool_calls[1].provider_id, "get_weather-2");
+    }
+
     #[test]
     fn parse_openai_uses_prompt_tokens() {
         let v = serde_json::json!({
@@ -3493,20 +4034,34 @@ mod tests {
     }
 
     #[test]
-    fn parse_openai_databricks_sums_cache_fields() {
-        // Databricks uses the OpenAI chat wire format (prompt_tokens) but also
-        // reports Anthropic-style cache fields; the inclusive total sums them.
+    fn parse_openai_databricks_prompt_tokens_already_inclusive() {
+        // Databricks' MLflow route uses the OpenAI chat wire format
+        // (prompt_tokens) but ALSO reports the flat Anthropic-style
+        // cache_read_input_tokens. prompt_tokens is already inclusive of that
+        // slice, so the total is prompt_tokens alone — summing double-counts.
+        // Values are the live databricks-glm-5-2 response (2026-07-28), where
+        // prompt_tokens + completion_tokens == total_tokens proves inclusivity.
         let v = serde_json::json!({
             "choices": [{"finish_reason": "stop", "message": {"content": "hi"}}],
             "usage": {
-                "prompt_tokens": 200,
-                "completion_tokens": 4,
-                "total_tokens": 204,
-                "cache_read_input_tokens": 800,
-                "cache_creation_input_tokens": 0
+                "prompt_tokens": 13320,
+                "completion_tokens": 30,
+                "total_tokens": 13350,
+                "cache_read_input_tokens": 13312,
+                "prompt_tokens_details": {"cached_tokens": 13312}
             }
         });
-        assert_eq!(parse_openai(v).unwrap().input_tokens, Some(1000));
+        let r = parse_openai(v).unwrap();
+        assert_eq!(
+            r.input_tokens,
+            Some(13320),
+            "prompt_tokens is the inclusive total"
+        );
+        assert_eq!(r.cached_input_tokens, Some(13312));
+        assert!(
+            r.cached_input_tokens.unwrap() <= r.input_tokens.unwrap(),
+            "the cached slice is a subset of the input total"
+        );
     }
 
     #[test]
@@ -3515,6 +4070,115 @@ mod tests {
             "choices": [{"finish_reason": "stop", "message": {"content": "hi"}}]
         });
         assert_eq!(parse_openai(v).unwrap().input_tokens, None);
+    }
+
+    #[test]
+    fn parse_openai_reads_nested_cached_tokens() {
+        // The shape vanilla OpenAI actually returns, captured from a live
+        // /chat/completions probe on gpt-5.6-luna: `prompt_tokens` is already
+        // inclusive and the cache split is nested one level down. Reading only
+        // flat keys left the discount unclaimed while the total looked correct,
+        // which is why this went unnoticed.
+        let v = serde_json::json!({
+            "choices": [{"finish_reason": "stop", "message": {"content": "OK"}}],
+            "usage": {
+                "prompt_tokens": 5229,
+                "completion_tokens": 4,
+                "total_tokens": 5233,
+                "prompt_tokens_details": {"audio_tokens": 0, "cached_tokens": 5226,
+                                          "cache_write_tokens": 0}
+            }
+        });
+        let r = parse_openai(v).unwrap();
+        assert_eq!(r.input_tokens, Some(5229), "total must stay inclusive");
+        assert_eq!(r.cached_input_tokens, Some(5226));
+    }
+
+    #[test]
+    fn parse_openai_cache_write_round_reports_zero_cached() {
+        // First request of a cold prefix: the provider writes the cache and
+        // serves nothing from it. `Some(0)` not `None` — the split was reported,
+        // it was simply zero, and a consumer must be able to tell the two apart.
+        let v = serde_json::json!({
+            "choices": [{"finish_reason": "stop", "message": {"content": "OK"}}],
+            "usage": {
+                "prompt_tokens": 5229,
+                "completion_tokens": 4,
+                "prompt_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 5226}
+            }
+        });
+        assert_eq!(parse_openai(v).unwrap().cached_input_tokens, Some(0));
+    }
+
+    #[test]
+    fn parse_openai_no_cache_detail_is_none() {
+        let v = serde_json::json!({
+            "choices": [{"finish_reason": "stop", "message": {"content": "hi"}}],
+            "usage": {"prompt_tokens": 123, "completion_tokens": 4}
+        });
+        assert_eq!(parse_openai(v).unwrap().cached_input_tokens, None);
+    }
+
+    #[test]
+    fn parse_openai_prefers_flat_anthropic_spelling_over_nested() {
+        // Databricks reports both shapes for the same quantity. Take one, never
+        // the sum, or the cached slice double-counts. cache_read (800) is a
+        // subset of the inclusive prompt_tokens (1000), as it must be.
+        let v = serde_json::json!({
+            "choices": [{"finish_reason": "stop", "message": {"content": "hi"}}],
+            "usage": {
+                "prompt_tokens": 1000,
+                "completion_tokens": 4,
+                "cache_read_input_tokens": 800,
+                "prompt_tokens_details": {"cached_tokens": 800}
+            }
+        });
+        let r = parse_openai(v).unwrap();
+        assert_eq!(r.input_tokens, Some(1000));
+        assert_eq!(r.cached_input_tokens, Some(800));
+        assert!(r.cached_input_tokens.unwrap() <= r.input_tokens.unwrap());
+    }
+
+    #[test]
+    fn parse_anthropic_reports_cache_read_as_cached() {
+        // Anthropic's `input_tokens` EXCLUDES cached, so the inclusive total is
+        // a sum -- but the cached slice must still be a subset of that total.
+        let v = serde_json::json!({
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "hi"}],
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 7,
+                "cache_read_input_tokens": 900,
+                "cache_creation_input_tokens": 50
+            }
+        });
+        let r = parse_anthropic(v).unwrap();
+        assert_eq!(r.input_tokens, Some(1050));
+        assert_eq!(r.cached_input_tokens, Some(900));
+        assert!(r.cached_input_tokens.unwrap() <= r.input_tokens.unwrap());
+    }
+
+    #[test]
+    fn parse_responses_reads_nested_cached_tokens() {
+        // The Responses API nests the same figure under a different key than
+        // /chat/completions does.
+        let v = serde_json::json!({
+            "status": "completed",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "hi"}]
+            }],
+            "usage": {
+                "input_tokens": 4000,
+                "output_tokens": 9,
+                "input_tokens_details": {"cached_tokens": 3584}
+            }
+        });
+        let r = parse_responses(v).unwrap();
+        assert_eq!(r.input_tokens, Some(4000));
+        assert_eq!(r.cached_input_tokens, Some(3584));
     }
 
     #[test]
