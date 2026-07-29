@@ -26,6 +26,7 @@
 #   buzz-ctx agreement list             # all declaration heads
 #   buzz-ctx agreement migrate          # sweep config files into declarations
 #   buzz-ctx status [node-label]        # per-node governance view of the journal
+#   buzz-ctx graph [--format FORMAT]     # project the context graph (tree/json/dot/mermaid)
 #   buzz-ctx share <file|-> | -m <msg>  # post to the shared tooling/proposal space
 #
 # Environment (defaults for the sovereign laptop):
@@ -40,6 +41,7 @@ LOCAL_URL="${BUZZ_CTX_LOCAL:-http://127.0.0.1:7777}"
 CLOUD_URL="${BUZZ_CTX_CLOUD:-https://buzz-portable-relay.ted-slusser-a00.workers.dev}"
 AGENT="${BUZZ_CTX_AGENT:-unattributed}"
 CLIENT="$HOME_DIR/bin/sovereign-client"
+GRAPH="${BUZZ_CTX_GRAPH:-$HOME_DIR/bin/buzz-ctx-graph}"
 # Signing identity. On a solo node this is the node key (owner, transport,
 # and signer collapsed — legitimate for one-operator hosts). Hosts that
 # separate transport from application identity (e.g. enterprise nodes with
@@ -382,6 +384,33 @@ case "${1:-}" in
               "■ foreign halves (relationship state, never config)",
               (.[] | "  \(dtag(.))  \(st(.))  by \(.pubkey[0:12])…") end )
     '
+    ;;
+  graph)
+    [ -x "$GRAPH" ] || die "missing graph renderer at $GRAPH"
+    format="tree"
+    shift
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --format)
+          [ "$#" -ge 2 ] || die "--format requires tree, json, dot, or mermaid"
+          format="$2"
+          shift 2
+          ;;
+        -h | --help)
+          echo "usage: buzz-ctx graph [--format tree|json|dot|mermaid]"
+          exit 0
+          ;;
+        *)
+          die "unknown graph argument: $1"
+          ;;
+      esac
+    done
+    filters='[{"kinds":[1,7,9,1984,9000,9001,9002,9003,9004,9005,9006,9007,9008,9009,9010,9011,9012,9013,9014,9015,9016,9017,9018,9019,9020,30023,30174,30700,39000,39001,39002,39003,40100,45001,45003]}]'
+    local_events="$("$CLIENT" query "$KEY" "$(relay_for_read)" "$filters" | sed 's/^200 //')"
+    cloud_events="$("$CLIENT" query "$KEY" "$CLOUD_URL" "$filters" | sed 's/^200 //')"
+    jq -n --argjson local "$local_events" --argjson cloud "$cloud_events" \
+      '$local + $cloud | unique_by(.id)' |
+      "$GRAPH" --format "$format"
     ;;
   share)
     # Shared tooling/proposal space: plaintext kind-1 events tagged

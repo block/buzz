@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+# Render a deterministic context graph from a JSON array of accepted Nostr events.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MODEL_JQ="$SCRIPT_DIR/buzz-ctx-graph.jq"
+FORMAT="tree"
+
+usage() {
+  echo "usage: buzz-ctx-graph [--format tree|json|dot|mermaid]" >&2
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --format)
+      [ "$#" -ge 2 ] || {
+        usage
+        exit 1
+      }
+      FORMAT="$2"
+      shift 2
+      ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage
+      exit 1
+      ;;
+  esac
+done
+
+case "$FORMAT" in
+  tree | json | dot | mermaid) ;;
+  *)
+    usage
+    exit 1
+    ;;
+esac
+
+[ -r "$MODEL_JQ" ] || {
+  echo "buzz-ctx-graph: missing model at $MODEL_JQ" >&2
+  exit 1
+}
+
+MODEL="$(mktemp)"
+trap 'rm -f "$MODEL"' EXIT
+jq -f "$MODEL_JQ" > "$MODEL"
+
+case "$FORMAT" in
+  json)
+    jq -S . "$MODEL"
+    ;;
+  tree)
+    jq -r '
+      def section($title; $type):
+        "|\n|-- \($title)",
+        (.nodes
+         | map(select(.type == $type))
+         | if length == 0 then
+             "    `-- (none)"
+           else
+             .[]
+             | if $type == "stream" then
+                 "    |-- \(.label) [\(.status)]"
+               elif $type == "context" then
+                 "    |-- \(.label) [\(.visibility)]"
+               elif $type == "artifact" then
+                 "    |-- sha256:\(.sha256)"
+               else
+                 "    |-- \(.label)"
+               end
+           end);
+      "Buzz context graph",
+      section("Identities"; "identity"),
+      section("Nodes"; "node"),
+      "|\n|-- Namespaces and streams",
+      (. as $graph
+       | ($graph.nodes
+          | map(select(.type == "namespace" and (.label | contains("/") | not)))) as $roots
+       | if ($roots | length) == 0 then
+           "    `-- (none)"
+         else
+           $roots[] as $root
+           | "    |-- \($root.label)/",
+             ($graph.nodes
+              | map(select(
+                  .type == "stream"
+                  and (.label | startswith($root.label + "/"))
+                ))
+              | if length == 0 then
+                  "    |   `-- (empty)"
+                else
+                  .[]
+                  | "    |   |-- \(.label | ltrimstr($root.label + "/")) [\(.status)]"
+                end)
+         end),
+      section("Contexts"; "context"),
+      section("Heads"; "head"),
+      section("Artifacts"; "artifact"),
+      "|",
+      "`-- Warnings",
+      (.warnings
+       | if length == 0 then
+           "    `-- (none)"
+         else
+           .[] | "    |-- [\(.severity)] \(.message)"
+         end)
+    ' "$MODEL"
+    ;;
+  dot)
+    jq -r '
+      .nodes as $nodes
+      | def node_id($id): "n" + (($nodes | map(.id) | index($id)) | tostring);
+        def escape: gsub("\\\\"; "\\\\\\\\") | gsub("\""; "\\\"");
+        "digraph buzz_context {",
+        "  rankdir=LR;",
+        "  node [shape=box];",
+        ($nodes[]
+         | "  \(node_id(.id)) [label=\"\(.label | escape)\\n\(.type | escape)\"];"),
+        (.edges[]
+         | "  \(node_id(.from)) -> \(node_id(.to)) [label=\"\(.type | escape)\"];"),
+        "}"
+    ' "$MODEL"
+    ;;
+  mermaid)
+    jq -r '
+      .nodes as $nodes
+      | def node_id($id): "n" + (($nodes | map(.id) | index($id)) | tostring);
+        def escape: gsub("\""; "#quot;") | gsub("\\["; "&#91;") | gsub("\\]"; "&#93;");
+        "flowchart LR",
+        ($nodes[] | "  \(node_id(.id))[\"\(.label | escape)<br/><small>\(.type | escape)</small>\"]"),
+        (.edges[] | "  \(node_id(.from)) -->|\(.type | escape)| \(node_id(.to))")
+    ' "$MODEL"
+    ;;
+esac

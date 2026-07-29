@@ -1,0 +1,110 @@
+[
+  {
+    "id": "export-old",
+    "pubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "created_at": 100,
+    "kind": 30700,
+    "tags": [
+      ["d", "export/shared/buzz-evolution-v1"],
+      ["n", "source-node"],
+      ["p", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]
+    ],
+    "content": "{\"status\":\"active\",\"selection\":{\"mirror\":true},\"artifacts\":\"referenced\"}"
+  },
+  {
+    "id": "export-new",
+    "pubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "created_at": 200,
+    "kind": 30700,
+    "tags": [
+      ["d", "export/shared/buzz-evolution-v1"],
+      ["n", "source-node"],
+      ["p", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]
+    ],
+    "content": "{\"status\":\"active\",\"selection\":{\"filter\":[{\"kinds\":[1,9],\"#h\":[\"11111111-2222-4333-8444-555555555555\"]},{\"kinds\":[39000,39002],\"#d\":[\"11111111-2222-4333-8444-555555555555\"]}]},\"artifacts\":\"referenced\"}"
+  },
+  {
+    "id": "admit-new",
+    "pubkey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "created_at": 201,
+    "kind": 30700,
+    "tags": [
+      ["d", "admit/shared/buzz-evolution-v1"],
+      ["n", "destination-node"],
+      ["p", "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],
+      ["e", "export-new"]
+    ],
+    "content": "{\"status\":\"active\",\"principal\":\"did:buzz:destination\",\"retention\":{\"keep\":\"journal\"}}"
+  },
+  {
+    "id": "read-new",
+    "pubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "created_at": 201,
+    "kind": 30700,
+    "tags": [
+      ["d", "read/shared/buzz-evolution-v1"],
+      ["n", "source-node"],
+      ["p", "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],
+      ["e", "export-new"]
+    ],
+    "content": "{\"status\":\"active\",\"principal\":\"did:buzz:destination\"}"
+  },
+  {
+    "id": "b-metadata",
+    "pubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "created_at": 300,
+    "kind": 39000,
+    "tags": [
+      ["d", "11111111-2222-4333-8444-555555555555"],
+      ["name", "Stale Name"],
+      ["visibility", "private"]
+    ],
+    "content": ""
+  },
+  {
+    "id": "a-metadata",
+    "pubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "created_at": 300,
+    "kind": 39000,
+    "tags": [
+      ["d", "11111111-2222-4333-8444-555555555555"],
+      ["name", "Buzz Evolution"],
+      ["visibility", "private"]
+    ],
+    "content": ""
+  },
+  {
+    "id": "members",
+    "pubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "created_at": 301,
+    "kind": 39002,
+    "tags": [
+      ["d", "11111111-2222-4333-8444-555555555555"],
+      ["p", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+      ["p", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]
+    ],
+    "content": ""
+  },
+  {
+    "id": "opening-message",
+    "pubkey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "created_at": 302,
+    "kind": 9,
+    "tags": [
+      ["h", "11111111-2222-4333-8444-555555555555"],
+      ["x", "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"]
+    ],
+    "content": "Shared context opening message"
+  },
+  {
+    "id": "journal-head",
+    "pubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "created_at": 303,
+    "kind": 30023,
+    "tags": [
+      ["d", "design/context-graph"],
+      ["title", "Context Graph Design"]
+    ],
+    "content": "Design note"
+  }
+]
