@@ -9,12 +9,14 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use nostr::{Event, ToBech32};
+use nostr::Event;
 use serde_json::{json, Value};
 
 use crate::models::*;
 
+mod agent_discovery;
 mod user_search;
+pub use agent_discovery::{agents_from_events, owned_agent_profiles_from_events};
 pub use user_search::{
     list_user_search_results, rank_user_search_results, search_users_from_events,
     user_search_result_from_event,
@@ -436,65 +438,6 @@ pub fn search_response_from_events(events: &[Event]) -> SearchResponse {
     }
 }
 
-// ── kind:10100 (agent profiles) ─────────────────────────────────────────────
-
-/// Convert kind:10100 agent profile events to the agent discovery format.
-///
-/// Returns a JSON array of `{pubkey, name, ...}` objects parsed from each
-/// event's content.
-pub fn agents_from_events(events: &[Event]) -> Value {
-    let arr: Vec<Value> = events
-        .iter()
-        .map(|ev| {
-            let mut v: Value = serde_json::from_str(&ev.content).unwrap_or_else(|_| json!({}));
-            let pubkey = ev.pubkey.to_hex();
-            // Full npub fallback — truncated prefixes are grindable (see pubkey-display).
-            let npub = ev.pubkey.to_bech32().unwrap_or_else(|_| pubkey.clone());
-            // Always overwrite the pubkey with the event author — it's the
-            // authoritative source even if the content claims otherwise.
-            if let Some(obj) = v.as_object_mut() {
-                obj.insert("pubkey".to_string(), json!(pubkey.clone()));
-                let fallback_name = obj
-                    .get("display_name")
-                    .and_then(Value::as_str)
-                    .filter(|value| !value.trim().is_empty())
-                    .map(str::to_string)
-                    .unwrap_or_else(|| npub.clone());
-                if !obj.get("name").is_some_and(Value::is_string) {
-                    obj.insert("name".to_string(), json!(fallback_name));
-                }
-                if !obj.get("agent_type").is_some_and(Value::is_string) {
-                    obj.insert("agent_type".to_string(), json!("agent"));
-                }
-                if !obj.get("channels").is_some_and(Value::is_array) {
-                    obj.insert("channels".to_string(), json!([]));
-                }
-                if !obj.get("channel_ids").is_some_and(Value::is_array) {
-                    obj.insert("channel_ids".to_string(), json!([]));
-                }
-                if !obj.get("capabilities").is_some_and(Value::is_array) {
-                    obj.insert("capabilities".to_string(), json!([]));
-                }
-                if !obj.get("status").is_some_and(Value::is_string) {
-                    obj.insert("status".to_string(), json!("offline"));
-                }
-            } else {
-                v = json!({
-                    "pubkey": pubkey,
-                    "name": npub,
-                    "agent_type": "agent",
-                    "channels": [],
-                    "channel_ids": [],
-                    "capabilities": [],
-                    "status": "offline",
-                });
-            }
-            v
-        })
-        .collect();
-    json!({ "agents": arr })
-}
-
 // ── kind:13534 (relay membership list) ──────────────────────────────────────
 
 /// Convert a kind:13534 relay membership list to the relay members format.
@@ -880,87 +823,6 @@ mod tests {
         let r = search_response_from_events(&[e]);
         assert_eq!(r.hits.len(), 1);
         assert_eq!(r.hits[0].score, 1.0);
-    }
-
-    #[test]
-    fn agents_overwrites_pubkey_from_event_author() {
-        let e = ev(10100, r#"{"pubkey":"forged","name":"agent-1"}"#, vec![]);
-        let v = agents_from_events(std::slice::from_ref(&e));
-        let arr = v.get("agents").and_then(Value::as_array).unwrap();
-        assert_eq!(arr.len(), 1);
-        assert_eq!(
-            arr[0].get("pubkey").and_then(Value::as_str).unwrap(),
-            e.pubkey.to_hex()
-        );
-        assert_eq!(arr[0].get("name").and_then(Value::as_str), Some("agent-1"));
-    }
-
-    #[test]
-    fn agents_handles_invalid_content() {
-        let e = ev(10100, "not-json", vec![]);
-        let v = agents_from_events(std::slice::from_ref(&e));
-        let arr = v.get("agents").and_then(Value::as_array).unwrap();
-        assert_eq!(
-            arr[0].get("pubkey").and_then(Value::as_str).unwrap(),
-            e.pubkey.to_hex()
-        );
-    }
-
-    #[test]
-    fn agents_default_sparse_agent_profiles_for_directory_parse() {
-        let e = ev(
-            10100,
-            r#"{"channel_add_policy":"owner-only","display_name":"Scout"}"#,
-            vec![],
-        );
-        let v = agents_from_events(std::slice::from_ref(&e));
-        let agents = v.get("agents").cloned().unwrap();
-        let parsed: Vec<crate::managed_agents::RelayAgentInfo> =
-            serde_json::from_value(agents).unwrap();
-
-        assert_eq!(parsed.len(), 1);
-        assert_eq!(parsed[0].pubkey, e.pubkey.to_hex());
-        assert_eq!(parsed[0].name, "Scout");
-        assert_eq!(parsed[0].agent_type, "agent");
-        assert_eq!(parsed[0].channels, Vec::<String>::new());
-        assert_eq!(parsed[0].capabilities, Vec::<String>::new());
-        assert_eq!(parsed[0].status, "offline");
-        assert_eq!(parsed[0].respond_to, None);
-    }
-
-    #[test]
-    fn agents_preserves_public_respond_to_mode_for_directory_parse() {
-        let e = ev(10100, r#"{"name":"Scout","respond_to":"anyone"}"#, vec![]);
-        let v = agents_from_events(std::slice::from_ref(&e));
-        let agents = v.get("agents").cloned().unwrap();
-        let parsed: Vec<crate::managed_agents::RelayAgentInfo> =
-            serde_json::from_value(agents).unwrap();
-
-        assert_eq!(parsed.len(), 1);
-        assert_eq!(
-            parsed[0].respond_to,
-            Some(crate::managed_agents::RespondTo::Anyone)
-        );
-    }
-
-    #[test]
-    fn agents_preserves_allowlist_metadata_for_directory_parse() {
-        let e = ev(
-            10100,
-            r#"{"name":"Scout","respond_to":"allowlist","respond_to_allowlist":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]}"#,
-            vec![],
-        );
-        let v = agents_from_events(std::slice::from_ref(&e));
-        let agents = v.get("agents").cloned().unwrap();
-        let parsed: Vec<crate::managed_agents::RelayAgentInfo> =
-            serde_json::from_value(agents).unwrap();
-
-        assert_eq!(parsed.len(), 1);
-        assert_eq!(
-            parsed[0].respond_to,
-            Some(crate::managed_agents::RespondTo::Allowlist)
-        );
-        assert_eq!(parsed[0].respond_to_allowlist, vec!["a".repeat(64)]);
     }
 
     #[test]

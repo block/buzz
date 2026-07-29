@@ -31,6 +31,7 @@ import { useProfilePanel } from "@/shared/context/ProfilePanelContext";
 import { useBakedBuildEnvQuery } from "@/features/agents/hooks";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import { useGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
+import { useOwnedExternalAgents } from "@/features/agents/useOwnedExternalAgents";
 import { Button } from "@/shared/ui/button";
 import { PageHeader } from "@/shared/ui/PageHeader";
 import { getInheritedAgentDefaults } from "./bakedEnvHelpers";
@@ -41,6 +42,10 @@ export function AgentsView() {
   const { data: bakedEnv } = useBakedBuildEnvQuery({ enabled: true });
   const inheritedDefaults = getInheritedAgentDefaults(globalConfig, bakedEnv);
   const agents = useManagedAgentActions();
+  const externalAgents = useOwnedExternalAgents(
+    agents.managedAgents,
+    agents.relayAgentsQuery.data ?? [],
+  );
   const personas = usePersonaActions();
   const teamImportInputRef = React.useRef<HTMLInputElement | null>(null);
   const aiDefaultsTriggerRef = React.useRef<HTMLButtonElement>(null);
@@ -155,6 +160,8 @@ export function AgentsView() {
               actionErrorMessage={agents.actionErrorMessage}
               actionNoticeMessage={agents.actionNoticeMessage}
               agents={agents.managedAgents}
+              externalAgents={externalAgents.agents}
+              externalPresence={externalAgents.presenceQuery.data}
               agentsError={
                 agents.managedAgentsQuery.error instanceof Error
                   ? agents.managedAgentsQuery.error

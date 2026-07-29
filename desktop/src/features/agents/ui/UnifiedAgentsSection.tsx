@@ -10,7 +10,18 @@ import { resolveAgentCardModelLabel } from "@/features/agents/lib/agentCardModel
 import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import { useUserProfileQuery } from "@/features/profile/hooks";
-import type { AgentPersona, ManagedAgent } from "@/shared/api/types";
+import {
+  DEFAULT_HOVER_PROFILE_STATUS_GEOMETRY,
+  ProfileAvatarWithStatus,
+  scaleProfileAvatarStatusGeometry,
+} from "@/features/profile/ui/ProfileAvatarWithStatus";
+import type {
+  AgentPersona,
+  ManagedAgent,
+  PresenceLookup,
+} from "@/shared/api/types";
+import type { OwnedExternalAgent } from "@/features/agents/useOwnedExternalAgents";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 import type { ProfilePanelOpenOptions } from "@/shared/context/ProfilePanelContext";
 import { useFeedbackToasts } from "@/shared/hooks/useToastEffect";
 import { useFileImportZone } from "@/shared/hooks/useFileImportZone";
@@ -33,6 +44,8 @@ type UnifiedAgentsSectionProps = {
   actionErrorMessage: string | null;
   actionNoticeMessage: string | null;
   agents: ManagedAgent[];
+  externalAgents: OwnedExternalAgent[];
+  externalPresence: PresenceLookup | undefined;
   agentsError: Error | null;
   isActionPending: boolean;
   isAgentsLoading: boolean;
@@ -75,6 +88,8 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
     actionNoticeMessage,
     defaultModel,
     agents,
+    externalAgents,
+    externalPresence,
     agentsError,
     isActionPending,
     isAgentsLoading,
@@ -215,6 +230,13 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
               onToggle={toggle}
               onOpenAgentProfile={onOpenAgentProfile}
               onStartAgent={onStartAgent}
+            />
+          ) : null}
+          {externalAgents.length > 0 ? (
+            <ExternalAgentsGroup
+              agents={externalAgents}
+              presence={externalPresence}
+              onOpenAgentProfile={onOpenAgentProfile}
             />
           ) : null}
         </div>
@@ -415,6 +437,56 @@ function StandaloneAgentCard({
         ) : null
       }
     />
+  );
+}
+
+const EXTERNAL_AGENT_STATUS_GEOMETRY = scaleProfileAvatarStatusGeometry(
+  DEFAULT_HOVER_PROFILE_STATUS_GEOMETRY,
+  96,
+);
+
+function ExternalAgentsGroup({
+  agents,
+  presence,
+  onOpenAgentProfile,
+}: {
+  agents: OwnedExternalAgent[];
+  presence: PresenceLookup | undefined;
+  onOpenAgentProfile: (pubkey: string) => void;
+}) {
+  return (
+    <div className={`${AGENT_CARD_COLUMN_CLASS} space-y-2`}>
+      <div className="flex items-center gap-2 px-1 py-1">
+        <span className="text-sm font-medium">Externally managed agents</span>
+        <span className="text-xs text-muted-foreground">({agents.length})</span>
+      </div>
+      <div className={AGENT_CARD_GRID_CLASS}>
+        {agents.map((agent) => (
+          <AgentIdentityCard
+            ariaLabel={`${agent.name} agent profile`}
+            avatar={
+              <ProfileAvatarWithStatus
+                avatarClassName="border-[3px] border-background bg-muted shadow-none"
+                avatarUrl={agent.avatarUrl}
+                className="h-24 w-24"
+                geometry={EXTERNAL_AGENT_STATUS_GEOMETRY}
+                iconClassName="h-8 w-8"
+                label={agent.name}
+                size={96}
+                status={presence?.[normalizePubkey(agent.pubkey)]}
+                statusTestId={`external-agent-presence-${agent.pubkey}`}
+              />
+            }
+            avatarUrl={agent.avatarUrl}
+            dataTestId={`external-agent-${agent.pubkey}`}
+            key={agent.pubkey}
+            label={agent.name}
+            onClick={() => onOpenAgentProfile(agent.pubkey)}
+            statusBadge={<Badge variant="secondary">Externally managed</Badge>}
+          />
+        ))}
+      </div>
+    </div>
   );
 }
 
