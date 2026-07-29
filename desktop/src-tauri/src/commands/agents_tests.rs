@@ -435,6 +435,7 @@ fn deploy_payload_carries_the_full_behavioral_quad() {
         Some("gpt-x".to_string()),
         Some("openai".to_string()),
         None,
+        Some("Current team instructions".to_string()),
         std::collections::BTreeMap::new(),
     );
 
@@ -444,4 +445,6 @@ fn deploy_payload_carries_the_full_behavioral_quad() {
     assert_eq!(payload["model"], "gpt-x");
     assert_eq!(payload["provider"], "openai");
     assert_eq!(payload["relay_url"], "wss://relay.example");
+    assert_eq!(payload["team_instructions"], "Current team instructions");
+    assert!(payload.get("turn_timeout_seconds").is_none());
 }

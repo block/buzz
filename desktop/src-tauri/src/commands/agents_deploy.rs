@@ -88,6 +88,9 @@ pub(super) fn build_deploy_payload(
     let effective_model = cfg.model.value;
     let effective_provider = cfg.provider.value;
     let effective_prompt = cfg.system_prompt.value;
+    let teams = crate::managed_agents::load_teams(app).unwrap_or_default();
+    let team_instructions =
+        crate::managed_agents::spawn_hash::effective_team_instructions(record, &teams);
 
     Ok(deploy_payload_json(
         record,
@@ -98,6 +101,7 @@ pub(super) fn build_deploy_payload(
         effective_model,
         effective_provider,
         effective_prompt,
+        team_instructions,
         merged_env,
     ))
 }
@@ -111,6 +115,7 @@ pub(super) fn deploy_payload_json(
     effective_model: Option<String>,
     effective_provider: Option<String>,
     effective_prompt: Option<String>,
+    team_instructions: Option<String>,
     merged_env: std::collections::BTreeMap<String, String>,
 ) -> serde_json::Value {
     serde_json::json!({
@@ -121,9 +126,9 @@ pub(super) fn deploy_payload_json(
         "agent_command": &record.agent_command,
         "agent_args": &record.agent_args,
         "system_prompt": effective_prompt,
+        "team_instructions": team_instructions,
         "model": effective_model,
         "provider": effective_provider,
-        "turn_timeout_seconds": record.turn_timeout_seconds,
         "idle_timeout_seconds": record.idle_timeout_seconds,
         "max_turn_duration_seconds": record.max_turn_duration_seconds,
         "parallelism": record.parallelism,
