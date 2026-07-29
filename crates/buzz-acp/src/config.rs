@@ -691,10 +691,19 @@ pub(crate) fn normalize_agent_command_identity(command: &str) -> String {
 }
 
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
+    // Empty agent_args / clap's sole "acp" default must still launch Grok in
+    // ACP mode — bare `grok` opens the TUI and fails with ENXIO when Buzz has
+    // no controlling TTY (block/buzz#3457).
     match normalize_agent_command_identity(command).as_str() {
         "goose" => Some(vec!["acp".to_string()]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
+        // Grok Build: `grok agent --always-approve stdio`
+        "grok" => Some(vec![
+            "agent".to_string(),
+            "--always-approve".to_string(),
+            "stdio".to_string(),
+        ]),
         _ => None,
     }
 }
@@ -786,11 +795,10 @@ pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<Strin
         return default_args;
     }
 
-    // Older callers relied on the Goose-specific default even for runtimes like
-    // Codex and Claude. Treat that legacy fallback as "no args" for zero-arg
-    // providers so desktop- and env-based launches behave the same way.
-    if normalized.len() == 1 && normalized[0].eq_ignore_ascii_case("acp") && default_args.is_empty()
-    {
+    // Clap/env historically defaulted agent args to a sole `"acp"` (Goose's
+    // entrypoint). Treat that sentinel as omitted for known defaults so Grok
+    // gets `agent --always-approve stdio` rather than `grok acp` (#3457).
+    if normalized.len() == 1 && normalized[0].eq_ignore_ascii_case("acp") {
         return default_args;
     }
 
@@ -1591,6 +1599,28 @@ mod tests {
             Vec::<String>::new()
         );
     }
+
+    #[test]
+    fn normalizes_grok_empty_args_to_agent_stdio() {
+        assert_eq!(
+            normalize_agent_args("grok", Vec::new()),
+            vec!["agent", "--always-approve", "stdio"]
+        );
+        assert_eq!(
+            normalize_agent_args("/Users/test/.local/bin/grok", Vec::new()),
+            vec!["agent", "--always-approve", "stdio"]
+        );
+        // clap/env default is a sole "acp" when --agent-args is omitted
+        assert_eq!(
+            normalize_agent_args("grok", vec!["acp".into()]),
+            vec!["agent", "--always-approve", "stdio"]
+        );
+        assert_eq!(
+            normalize_agent_args("grok", vec!["agent".into(), "stdio".into()]),
+            vec!["agent", "stdio"]
+        );
+    }
+
 
     #[test]
     fn normalize_agent_command_identity_variants() {

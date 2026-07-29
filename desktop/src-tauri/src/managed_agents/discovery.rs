@@ -461,10 +461,20 @@ pub fn try_record_agent_command(
 }
 
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
+    // Empty `agent_args` on managed-agent records is intentional (see
+    // instanceInputForDefinition): spawn fills defaults from this table.
+    // Grok must be included or a command override alone launches bare `grok`
+    // (interactive TUI → ENXIO under the desktop, block/buzz#3457).
     match normalize_command_identity(command).as_str() {
         "goose" => Some(vec!["acp".to_string()]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
+        // Grok Build: `grok agent --always-approve stdio` (matches PRESET_HARNESSES).
+        "grok" => Some(vec![
+            "agent".to_string(),
+            "--always-approve".to_string(),
+            "stdio".to_string(),
+        ]),
         _ => None,
     }
 }
@@ -484,8 +494,10 @@ pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<Strin
         return default_args;
     }
 
-    if normalized.len() == 1 && normalized[0].eq_ignore_ascii_case("acp") && default_args.is_empty()
-    {
+    // Clap/env historically defaulted agent args to a sole `"acp"` (Goose's
+    // entrypoint). Treat that sentinel as omitted for known defaults so Grok
+    // gets `agent --always-approve stdio` rather than `grok acp` (#3457).
+    if normalized.len() == 1 && normalized[0].eq_ignore_ascii_case("acp") {
         return default_args;
     }
 
