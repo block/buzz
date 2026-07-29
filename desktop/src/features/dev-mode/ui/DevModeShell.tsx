@@ -668,7 +668,7 @@ export function DevModeShell({
     <DevChannelRefsProvider channels={channelRefs} openChannel={openChannel}>
       {/* biome-ignore lint/a11y/noStaticElementInteractions: handlers only guard focus (track last input, keep dead-space clicks from blurring it) — the div is not interactive */}
       <div
-        className="relative flex min-h-0 flex-1 flex-col bg-background"
+        className="relative flex min-h-0 min-w-0 flex-1 flex-col bg-background"
         data-testid="dev-mode-shell"
         onFocusCapture={handleFocusCapture}
         onMouseDown={handleShellMouseDown}
@@ -717,7 +717,7 @@ export function DevModeShell({
           </div>
         </div>
 
-        <div className="flex min-h-0 flex-1">
+        <div className="flex min-h-0 min-w-0 flex-1">
           <DevChannelNavigator
             dimmed={view === "channel"}
             groups={channelGroups}

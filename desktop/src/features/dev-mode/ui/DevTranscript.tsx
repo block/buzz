@@ -221,7 +221,7 @@ export function DevTranscript({
   return (
     <div
       ref={scrollRef}
-      className="min-h-0 flex-1 overflow-y-auto px-4 py-3 font-mono"
+      className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-4 py-3 font-mono"
       data-allow-text-selection
       data-testid="dev-mode-transcript"
       onScroll={handleScroll}
