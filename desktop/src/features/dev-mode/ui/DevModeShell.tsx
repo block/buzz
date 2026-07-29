@@ -71,11 +71,14 @@ type ShellView = "fresh" | "navigator" | "channel";
 export function DevModeShell({
   unreadChannelIds,
   topLevelUnreadChannelIds,
+  hasCommunityRail = false,
 }: {
   /** Channels with anything unread, including relevant thread replies. */
   unreadChannelIds: ReadonlySet<string>;
   /** Channels with unread channel-level posts only. */
   topLevelUnreadChannelIds: ReadonlySet<string>;
+  /** The community rail sits under the macOS traffic lights when present. */
+  hasCommunityRail?: boolean;
 }) {
   const identityQuery = useIdentityQuery();
   const channelsQuery = useChannelsQuery();
@@ -782,7 +785,9 @@ export function DevModeShell({
 
   // Fixed px clearance: the native macOS traffic lights overlay this strip
   // and ignore the app's text zoom, so rem-based padding would slide the
-  // title under them.
+  // title under them. With the community rail present the lights sit over
+  // the rail instead, so the title keeps its normal padding (but stays
+  // vertically aligned with the lights).
   const macChrome = isMacPlatform() && !isFullscreen;
 
   return (
@@ -798,7 +803,7 @@ export function DevModeShell({
         <div
           className={cn(
             "flex h-[40px] shrink-0 cursor-default select-none items-center justify-between border-b border-border/60 pr-4 font-mono text-xs text-muted-foreground",
-            macChrome ? "pl-[88px]" : "pl-4",
+            macChrome && !hasCommunityRail ? "pl-[88px]" : "pl-4",
           )}
           data-tauri-drag-region
         >
