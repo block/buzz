@@ -19,7 +19,9 @@ use std::sync::Arc;
 
 use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket};
-use axum::extract::{DefaultBodyLimit, Path as UrlPath, State, WebSocketUpgrade};
+use axum::extract::{
+    DefaultBodyLimit, FromRequestParts, Path as UrlPath, Request, State, WebSocketUpgrade,
+};
 use axum::http::{header::HOST, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -33,6 +35,10 @@ use buzz_core::identity::{
     Principal, ReadOperation, ReplicationPeerAuthenticator,
 };
 use buzz_core::ingest::{apply_effective_event, decide_event, is_ephemeral_kind, EventDecision};
+use buzz_core::kind::{
+    event_kind_u32, KIND_NIP29_CREATE_GROUP, KIND_NIP29_GROUP_ADMINS, KIND_NIP29_GROUP_MEMBERS,
+    KIND_NIP29_GROUP_METADATA,
+};
 use buzz_core::replication::{
     ReplicationBatch, ReplicationCursor, ReplicationIngestOutcome, ReplicationReceipt,
     ReplicationRecord, ReplicationSinkPort, ReplicationSourceId, ReplicationSourcePort,
@@ -44,7 +50,9 @@ use identity::{
     LocalAuthenticationEvidence, LocalIdentityAdapter, LocalIdentityError, LocalPeerEvidence,
 };
 use nostr::hashes::Hash as _;
-use nostr::{Alphabet, Event, Filter, PublicKey, SingleLetterTag, TagKind};
+use nostr::{
+    Alphabet, Event, EventBuilder, Filter, Keys, Kind, PublicKey, SingleLetterTag, Tag, TagKind,
+};
 use serde::Serialize;
 use serde_json::{json, Value};
 use thiserror::Error;
@@ -133,6 +141,17 @@ pub enum StoreError {
     /// A verified event could not be serialized for the log.
     #[error("event serialization failed: {0}")]
     Serialization(#[from] serde_json::Error),
+    /// Relay-authored state could not be materialized from an accepted command.
+    #[error("relay state materialization failed: {0}")]
+    Materialization(String),
+}
+
+#[derive(Debug, Error)]
+enum Nip29ProjectionError {
+    #[error("invalid kind:9007 create command: {0}")]
+    InvalidCommand(String),
+    #[error("failed to sign discovery state: {0}")]
+    Signing(String),
 }
 
 /// Query features intentionally not implemented by the local relay.
@@ -513,7 +532,9 @@ pub struct LocalRelay {
     /// adapter), the artifact store enforces upload admission (owner or
     /// admitted peers) and the reference rule on fetch/head. Absent anchors
     /// preserve the ungoverned legacy behavior.
-    governance: Option<(nostr::PublicKey, String)>,
+    governance: Option<(PublicKey, String)>,
+    /// Dedicated key used only for relay-authored discovery projections.
+    relay_keys: Option<Keys>,
 }
 
 impl LocalRelay {
@@ -585,7 +606,46 @@ impl LocalRelay {
         replication_policy: Arc<dyn ReplicationPolicy>,
         identity: Option<Arc<LocalIdentityAdapter>>,
         artifacts_dir: Option<PathBuf>,
-        governance: Option<(nostr::PublicKey, String)>,
+        governance: Option<(PublicKey, String)>,
+    ) -> Arc<Self> {
+        Self::open_governed_with_keys(
+            store,
+            replication_policy,
+            identity,
+            artifacts_dir,
+            governance,
+            None,
+        )
+    }
+
+    /// Builds a relay around an opened store and an optional dedicated key
+    /// used only for relay-authored state projections.
+    pub fn open_full_with_store_and_keys(
+        store: Arc<EventStore>,
+        replication_policy: Arc<dyn ReplicationPolicy>,
+        identity: Option<Arc<LocalIdentityAdapter>>,
+        artifacts_dir: Option<PathBuf>,
+        relay_keys: Option<Keys>,
+    ) -> Arc<Self> {
+        Self::open_governed_with_keys(
+            store,
+            replication_policy,
+            identity,
+            artifacts_dir,
+            None,
+            relay_keys,
+        )
+    }
+
+    /// Builds a relay with both declaration-governed artifact access and an
+    /// optional dedicated key for relay-authored state projections.
+    pub fn open_governed_with_keys(
+        store: Arc<EventStore>,
+        replication_policy: Arc<dyn ReplicationPolicy>,
+        identity: Option<Arc<LocalIdentityAdapter>>,
+        artifacts_dir: Option<PathBuf>,
+        governance: Option<(PublicKey, String)>,
+        relay_keys: Option<Keys>,
     ) -> Arc<Self> {
         let (live_events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         Arc::new(Self {
@@ -595,6 +655,7 @@ impl LocalRelay {
             identity,
             artifacts_dir,
             governance,
+            relay_keys,
         })
     }
 
@@ -604,11 +665,130 @@ impl LocalRelay {
     }
 
     async fn submit(&self, event: Event) -> Result<WriteResult, StoreError> {
+        let projected = if event_kind_u32(&event) == KIND_NIP29_CREATE_GROUP {
+            match self.project_group_create(&event) {
+                Ok(projected) => projected,
+                Err(Nip29ProjectionError::InvalidCommand(reason)) => {
+                    return Ok(WriteResult::rejected(&event, reason));
+                }
+                Err(Nip29ProjectionError::Signing(reason)) => {
+                    return Err(StoreError::Materialization(reason));
+                }
+            }
+        } else {
+            Vec::new()
+        };
         let result = self.store.accept(event.clone()).await?;
         if result.publish_live {
             let _ = self.live_events.send(event);
+            self.publish_projected_events(projected).await?;
         }
         Ok(result)
+    }
+
+    /// Backfills relay-authored discovery state for accepted create commands
+    /// already present in a durable journal.
+    pub async fn materialize_existing_nip29_state(&self) -> Result<(), StoreError> {
+        if self.relay_keys.is_none() {
+            return Ok(());
+        }
+        let creates = self
+            .store
+            .query(&[Filter::new().kind(Kind::Custom(KIND_NIP29_CREATE_GROUP as u16))])
+            .await
+            .map_err(|error| StoreError::Materialization(error.to_string()))?;
+        for create in creates {
+            let projected = match self.project_group_create(&create) {
+                Ok(projected) => projected,
+                Err(Nip29ProjectionError::InvalidCommand(reason)) => {
+                    tracing::warn!(event_id = %create.id, %reason, "skipping malformed historical group create");
+                    continue;
+                }
+                Err(Nip29ProjectionError::Signing(reason)) => {
+                    return Err(StoreError::Materialization(reason));
+                }
+            };
+            self.publish_projected_events(projected).await?;
+        }
+        Ok(())
+    }
+
+    fn project_group_create(&self, event: &Event) -> Result<Vec<Event>, Nip29ProjectionError> {
+        let Some(keys) = self.relay_keys.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let group_id = required_tag(event, "h")?;
+        Uuid::parse_str(group_id).map_err(|error| {
+            Nip29ProjectionError::InvalidCommand(format!("invalid h tag UUID: {error}"))
+        })?;
+        let name = required_tag(event, "name")?;
+        if name.trim().is_empty() {
+            return Err(Nip29ProjectionError::InvalidCommand(
+                "name tag cannot be empty".to_string(),
+            ));
+        }
+        let visibility = event_tag_value(event, "visibility").unwrap_or("open");
+        if !matches!(visibility, "open" | "private") {
+            return Err(Nip29ProjectionError::InvalidCommand(format!(
+                "unsupported visibility {visibility:?}"
+            )));
+        }
+        let channel_type = event_tag_value(event, "channel_type").unwrap_or("stream");
+        if !matches!(channel_type, "stream" | "forum" | "dm") {
+            return Err(Nip29ProjectionError::InvalidCommand(format!(
+                "unsupported channel_type {channel_type:?}"
+            )));
+        }
+
+        let mut metadata = vec![parse_tag(["d", group_id])?, parse_tag(["name", name])?];
+        if let Some(about) = event_tag_value(event, "about").filter(|value| !value.is_empty()) {
+            metadata.push(parse_tag(["about", about])?);
+        }
+        metadata.push(parse_tag([if visibility == "private" {
+            "private"
+        } else {
+            "public"
+        }])?);
+        metadata.push(parse_tag(["closed"])?);
+        metadata.push(parse_tag(["t", channel_type])?);
+        if let Some(ttl) = event_tag_value(event, "ttl").filter(|value| !value.is_empty()) {
+            metadata.push(parse_tag(["ttl", ttl])?);
+        }
+
+        let creator = event.pubkey.to_hex();
+        let admins = vec![
+            parse_tag(["d", group_id])?,
+            parse_tag(["p", creator.as_str(), "owner"])?,
+        ];
+        let members = vec![
+            parse_tag(["d", group_id])?,
+            parse_tag(["p", creator.as_str(), "", "owner"])?,
+        ];
+
+        [
+            (KIND_NIP29_GROUP_METADATA, metadata),
+            (KIND_NIP29_GROUP_ADMINS, admins),
+            (KIND_NIP29_GROUP_MEMBERS, members),
+        ]
+        .into_iter()
+        .map(|(kind, tags)| {
+            EventBuilder::new(Kind::Custom(kind as u16), "")
+                .tags(tags)
+                .custom_created_at(event.created_at)
+                .sign_with_keys(keys)
+                .map_err(|error| Nip29ProjectionError::Signing(error.to_string()))
+        })
+        .collect()
+    }
+
+    async fn publish_projected_events(&self, projected: Vec<Event>) -> Result<(), StoreError> {
+        for event in projected {
+            let result = self.store.accept(event.clone()).await?;
+            if result.publish_live {
+                let _ = self.live_events.send(event);
+            }
+        }
+        Ok(())
     }
 
     fn authorize_direct(
@@ -772,7 +952,7 @@ impl ReplicationSinkPort for LocalRelay {
 /// Builds the local relay HTTP and WebSocket router.
 pub fn router(relay: Arc<LocalRelay>) -> Router {
     Router::new()
-        .route("/", get(websocket_upgrade))
+        .route("/", get(relay_root))
         .route("/health", get(health))
         .route("/events", post(submit_event))
         .route("/query", post(query_events))
@@ -1128,23 +1308,55 @@ async fn artifact_fetch(
         .into_response())
 }
 
-async fn websocket_upgrade(
-    ws: WebSocketUpgrade,
-    State(relay): State<Arc<LocalRelay>>,
-    headers: HeaderMap,
-) -> Response {
-    let host = headers
-        .get(HOST)
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.is_empty());
-    if relay.identity.is_some() && host.is_none() {
-        return ApiError::Identity(LocalIdentityError::denied(
-            IdentityDenialCode::AudienceMismatch,
-        ))
-        .into_response();
+async fn relay_root(State(relay): State<Arc<LocalRelay>>, request: Request) -> Response {
+    let (mut parts, _) = request.into_parts();
+    if parts.headers.contains_key(axum::http::header::UPGRADE) {
+        let ws = match WebSocketUpgrade::from_request_parts(&mut parts, &relay).await {
+            Ok(ws) => ws,
+            Err(rejection) => return rejection.into_response(),
+        };
+        let host = parts
+            .headers
+            .get(HOST)
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| !value.is_empty());
+        if relay.identity.is_some() && host.is_none() {
+            return ApiError::Identity(LocalIdentityError::denied(
+                IdentityDenialCode::AudienceMismatch,
+            ))
+            .into_response();
+        }
+        let audience = host.map(|host| format!("ws://{host}/"));
+        return ws
+            .on_upgrade(move |socket| websocket_session(socket, relay, audience))
+            .into_response();
     }
-    let audience = host.map(|host| format!("ws://{host}/"));
-    ws.on_upgrade(move |socket| websocket_session(socket, relay, audience))
+
+    let supported_nips = if relay.identity.is_some() {
+        if relay.relay_keys.is_some() {
+            vec![1, 11, 29, 42, 98]
+        } else {
+            vec![1, 11, 42, 98]
+        }
+    } else if relay.relay_keys.is_some() {
+        vec![1, 11, 29]
+    } else {
+        vec![1, 11]
+    };
+    let mut document = json!({
+        "name": "Buzz local relay",
+        "description": "Durable single-process Buzz relay",
+        "software": "https://github.com/block/buzz",
+        "version": env!("CARGO_PKG_VERSION"),
+        "supported_nips": supported_nips,
+    });
+    if let Some(keys) = relay.relay_keys.as_ref() {
+        document["pubkey"] = Value::String(keys.public_key().to_hex());
+    }
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/nostr+json")],
+        Json(document),
+    )
         .into_response()
 }
 
@@ -1598,6 +1810,24 @@ fn stored_event(event: Event) -> StoredEvent {
     StoredEvent::with_received_at(event, Utc::now(), channel_id, true)
 }
 
+fn required_tag<'a>(event: &'a Event, name: &str) -> Result<&'a str, Nip29ProjectionError> {
+    event_tag_value(event, name)
+        .ok_or_else(|| Nip29ProjectionError::InvalidCommand(format!("missing required {name} tag")))
+}
+
+fn event_tag_value<'a>(event: &'a Event, name: &str) -> Option<&'a str> {
+    event.tags.iter().find_map(|tag| {
+        let values = tag.as_slice();
+        (values.first().map(String::as_str) == Some(name))
+            .then(|| values.get(1).map(String::as_str))
+            .flatten()
+    })
+}
+
+fn parse_tag<const N: usize>(values: [&str; N]) -> Result<Tag, Nip29ProjectionError> {
+    Tag::parse(values).map_err(|error| Nip29ProjectionError::InvalidCommand(error.to_string()))
+}
+
 fn validate_filters(filters: &[Filter]) -> Result<(), QueryError> {
     if filters.iter().any(|filter| filter.search.is_some()) {
         return Err(QueryError::SearchUnsupported);
@@ -1662,6 +1892,29 @@ mod tests {
         EventBuilder::new(Kind::Custom(kind), content)
             .sign_with_keys(&Keys::generate())
             .expect("test event signs")
+    }
+
+    fn signed_group_create(keys: &Keys, group_id: Uuid, created_at: Timestamp) -> Event {
+        EventBuilder::new(Kind::Custom(KIND_NIP29_CREATE_GROUP as u16), "")
+            .tags(vec![
+                Tag::parse(["h", &group_id.to_string()]).expect("h tag parses"),
+                Tag::parse(["name", "general"]).expect("name tag parses"),
+                Tag::parse(["visibility", "open"]).expect("visibility tag parses"),
+                Tag::parse(["channel_type", "stream"]).expect("type tag parses"),
+                Tag::parse(["about", "General discussion"]).expect("about tag parses"),
+            ])
+            .custom_created_at(created_at)
+            .sign_with_keys(keys)
+            .expect("group create signs")
+    }
+
+    fn group_filter(kind: u32, group_id: Uuid) -> Filter {
+        serde_json::from_value(json!({
+            "kinds": [kind],
+            "#d": [group_id.to_string()],
+            "limit": 1,
+        }))
+        .expect("group filter parses")
     }
 
     #[test]
@@ -1757,6 +2010,154 @@ mod tests {
             .await
             .expect("query succeeds");
         assert_eq!(results, vec![newer]);
+    }
+
+    #[tokio::test]
+    async fn group_create_materializes_relay_signed_discovery_state_idempotently() {
+        let store = Arc::new(
+            EventStore::open(StorageMode::Ephemeral)
+                .await
+                .expect("store opens"),
+        );
+        let relay_keys = Keys::generate();
+        let relay = LocalRelay::open_full_with_store_and_keys(
+            Arc::clone(&store),
+            Arc::new(ReplicationDisabled),
+            None,
+            None,
+            Some(relay_keys.clone()),
+        );
+        let creator = Keys::generate();
+        let group_id = Uuid::new_v4();
+        let create = signed_group_create(&creator, group_id, Timestamp::now());
+
+        let first = relay
+            .submit(create.clone())
+            .await
+            .expect("group create stores");
+        let duplicate = relay.submit(create).await.expect("retry is accepted");
+        assert_eq!(first.message, "stored");
+        assert_eq!(duplicate.message, "duplicate");
+
+        let metadata = store
+            .query(&[group_filter(KIND_NIP29_GROUP_METADATA, group_id)])
+            .await
+            .expect("metadata query succeeds");
+        assert_eq!(metadata.len(), 1);
+        assert_eq!(metadata[0].pubkey, relay_keys.public_key());
+        assert_eq!(event_tag_value(&metadata[0], "name"), Some("general"));
+        assert_eq!(
+            event_tag_value(&metadata[0], "about"),
+            Some("General discussion")
+        );
+        assert_eq!(event_tag_value(&metadata[0], "t"), Some("stream"));
+
+        let admins = store
+            .query(&[group_filter(KIND_NIP29_GROUP_ADMINS, group_id)])
+            .await
+            .expect("admins query succeeds");
+        let members = store
+            .query(&[group_filter(KIND_NIP29_GROUP_MEMBERS, group_id)])
+            .await
+            .expect("members query succeeds");
+        assert_eq!(admins.len(), 1);
+        assert_eq!(members.len(), 1);
+        let creator_hex = creator.public_key().to_hex();
+        assert!(admins[0].tags.iter().any(|tag| {
+            tag.as_slice() == ["p".to_string(), creator_hex.clone(), "owner".to_string()]
+        }));
+        assert!(members[0].tags.iter().any(|tag| {
+            tag.as_slice()
+                == [
+                    "p".to_string(),
+                    creator_hex.clone(),
+                    "".to_string(),
+                    "owner".to_string(),
+                ]
+        }));
+    }
+
+    #[tokio::test]
+    async fn historical_group_create_is_backfilled_once() {
+        let store = Arc::new(
+            EventStore::open(StorageMode::Ephemeral)
+                .await
+                .expect("store opens"),
+        );
+        let group_id = Uuid::new_v4();
+        let create = signed_group_create(&Keys::generate(), group_id, Timestamp::now());
+        store
+            .accept(create)
+            .await
+            .expect("historical create stores");
+        let relay = LocalRelay::open_full_with_store_and_keys(
+            Arc::clone(&store),
+            Arc::new(ReplicationDisabled),
+            None,
+            None,
+            Some(Keys::generate()),
+        );
+
+        relay
+            .materialize_existing_nip29_state()
+            .await
+            .expect("first backfill succeeds");
+        relay
+            .materialize_existing_nip29_state()
+            .await
+            .expect("second backfill succeeds");
+
+        let metadata = store
+            .query(&[group_filter(KIND_NIP29_GROUP_METADATA, group_id)])
+            .await
+            .expect("metadata query succeeds");
+        assert_eq!(metadata.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn nip11_document_advertises_relay_state_identity() {
+        let store = Arc::new(
+            EventStore::open(StorageMode::Ephemeral)
+                .await
+                .expect("store opens"),
+        );
+        let relay_keys = Keys::generate();
+        let relay = LocalRelay::open_full_with_store_and_keys(
+            store,
+            Arc::new(ReplicationDisabled),
+            None,
+            None,
+            Some(relay_keys.clone()),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener binds");
+        let address = listener.local_addr().expect("address available");
+        let server = tokio::spawn(serve(listener, relay));
+
+        let response = reqwest::Client::new()
+            .get(format!("http://{address}/"))
+            .send()
+            .await
+            .expect("NIP-11 request succeeds");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("application/nostr+json")
+        );
+        let document: Value = response.json().await.expect("NIP-11 JSON parses");
+        assert_eq!(
+            document["pubkey"],
+            Value::String(relay_keys.public_key().to_hex())
+        );
+        assert!(document["supported_nips"]
+            .as_array()
+            .expect("supported_nips is an array")
+            .contains(&json!(29)));
+        server.abort();
     }
 
     #[tokio::test]

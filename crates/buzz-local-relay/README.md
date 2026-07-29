@@ -22,6 +22,7 @@ Defaults:
 - WebSocket: `ws://127.0.0.1:3000/`
 - HTTP: `http://127.0.0.1:3000`
 - Event log: `.buzz-local/events.ndjson`
+- Relay-state key: `.buzz-local/events.ndjson.relay-key`
 
 Options:
 
@@ -42,6 +43,9 @@ intentional local-network experiment, not an internet deployment.
 - Buzz HTTP bridge `POST /events`, `POST /query`, and `POST /count`
 - `GET /health`
 - Event ID and Schnorr signature verification
+- NIP-11 relay information with a dedicated, persistent relay-state identity
+- Portable NIP-29 create projection (`9007` commands materialize relay-signed
+  `39000`, `39001`, and `39002` discovery heads)
 - NIP-01 regular, replaceable, parameterized replaceable, and ephemeral kinds
 - Append-before-acknowledgement NDJSON persistence
 - Strict verified replay on restart
@@ -71,7 +75,8 @@ no Postgres, Redis, MinIO, external identity provider, or DID resolver.
 
 ## Not implemented
 
-- NIP-29 membership policy, delegated append authority, or public-read grants
+- NIP-29 policy beyond create discovery projection (metadata edits, membership
+  commands, delegated append authority, and public-read grants)
 - dynamic DID resolution
 - Postgres FTS or indexed search filters
 - Redis or multi-node fan-out

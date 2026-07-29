@@ -1,5 +1,10 @@
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
+
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 
 use anyhow::{bail, Context};
 use buzz_core::replication::ReplicationSourceId;
@@ -8,7 +13,7 @@ use buzz_local_relay::identity::{LocalIdentityAdapter, RelayPeerTrust};
 use buzz_local_relay::{
     parse_bind_address, serve, EventStore, LocalRelay, ReplicationSourceAllowlist, StorageMode,
 };
-use nostr::PublicKey;
+use nostr::{Keys, PublicKey, SecretKey};
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 
@@ -21,6 +26,7 @@ struct Config {
     require_auth: bool,
     peer_trust: Option<PathBuf>,
     artifacts: Option<PathBuf>,
+    relay_key: Option<PathBuf>,
     owner: Option<PublicKey>,
     node_label: Option<String>,
 }
@@ -39,6 +45,9 @@ impl Config {
             .ok()
             .map(PathBuf::from);
         let mut artifacts = std::env::var("BUZZ_LOCAL_RELAY_ARTIFACTS")
+            .ok()
+            .map(PathBuf::from);
+        let mut relay_key = std::env::var("BUZZ_LOCAL_RELAY_RELAY_KEY")
             .ok()
             .map(PathBuf::from);
         let mut owner = std::env::var("BUZZ_LOCAL_RELAY_OWNER").ok();
@@ -66,6 +75,11 @@ impl Config {
                             .context("--artifacts requires a directory path")?,
                     ));
                 }
+                "--relay-key" => {
+                    relay_key = Some(PathBuf::from(
+                        args.next().context("--relay-key requires a file path")?,
+                    ));
+                }
                 "--owner" => {
                     owner = Some(args.next().context("--owner requires a pubkey (hex)")?);
                 }
@@ -80,6 +94,11 @@ impl Config {
             }
         }
 
+        if relay_key.is_none() && !ephemeral {
+            let mut path = event_log.clone().into_os_string();
+            path.push(".relay-key");
+            relay_key = Some(PathBuf::from(path));
+        }
         let storage = if ephemeral {
             StorageMode::Ephemeral
         } else {
@@ -99,6 +118,7 @@ impl Config {
             require_auth,
             peer_trust,
             artifacts,
+            relay_key,
             owner,
             node_label,
         })
@@ -142,6 +162,11 @@ async fn main() -> anyhow::Result<()> {
     // the file config is bootstrap-only (runtime evaluation policy in
     // specs/architecture/sovereign-sync-agreement-v0.1-draft.md).
     let store = Arc::new(EventStore::open(config.storage).await?);
+    let relay_keys = match config.relay_key.as_ref() {
+        Some(path) => load_or_create_relay_keys(path)?,
+        None => Keys::generate(),
+    };
+    let relay_pubkey = relay_keys.public_key();
     let peer_trust = match &config.owner {
         Some(owner) => {
             let node_label = config
@@ -194,22 +219,25 @@ async fn main() -> anyhow::Result<()> {
             proof_store,
         )
         .context("failed to open authentication proof store")?;
-        LocalRelay::open_governed(
+        LocalRelay::open_governed_with_keys(
             store,
             Arc::new(ReplicationSourceAllowlist::new(sources)),
             Some(Arc::new(adapter)),
             artifacts_dir,
             governance,
+            Some(relay_keys),
         )
     } else {
-        LocalRelay::open_governed(
+        LocalRelay::open_governed_with_keys(
             store,
             Arc::new(buzz_local_relay::ReplicationDisabled),
             None,
             artifacts_dir,
             governance,
+            Some(relay_keys),
         )
     };
+    relay.materialize_existing_nip29_state().await?;
     let listener = TcpListener::bind(address)
         .await
         .with_context(|| format!("failed to bind {address}"))?;
@@ -218,11 +246,57 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(
         websocket = %format!("ws://{bound}"),
         http = %format!("http://{bound}"),
+        relay_pubkey = %relay_pubkey,
         require_auth = config.require_auth,
         "Buzz local relay is ready"
     );
     serve(listener, relay).await?;
     Ok(())
+}
+
+fn load_or_create_relay_keys(path: &PathBuf) -> anyhow::Result<Keys> {
+    match std::fs::read_to_string(path) {
+        Ok(secret) => {
+            let secret = SecretKey::from_hex(secret.trim())
+                .with_context(|| format!("invalid relay key file {}", path.display()))?;
+            Ok(Keys::new(secret))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(parent) = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+            {
+                std::fs::create_dir_all(parent).with_context(|| {
+                    format!("failed to create relay key directory {}", parent.display())
+                })?;
+            }
+            let keys = Keys::generate();
+            let secret = keys.secret_key().to_secret_hex();
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            options.mode(0o600);
+            match options.open(path) {
+                Ok(mut file) => {
+                    file.write_all(secret.as_bytes())
+                        .with_context(|| format!("failed to write relay key {}", path.display()))?;
+                    file.write_all(b"\n")
+                        .with_context(|| format!("failed to write relay key {}", path.display()))?;
+                    file.sync_all()
+                        .with_context(|| format!("failed to sync relay key {}", path.display()))?;
+                    Ok(keys)
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    load_or_create_relay_keys(path)
+                }
+                Err(error) => Err(error)
+                    .with_context(|| format!("failed to create relay key {}", path.display())),
+            }
+        }
+        Err(error) => {
+            Err(error).with_context(|| format!("failed to read relay key {}", path.display()))
+        }
+    }
 }
 
 /// Parses destination-controlled peer trust:
@@ -269,7 +343,7 @@ buzz-local-relay — durable single-process Buzz relay
 
 Usage:
   buzz-local-relay [--bind IP:PORT] [--data PATH] [--ephemeral] [--require-auth]
-                   [--peer-trust PATH]
+                   [--peer-trust PATH] [--relay-key PATH]
 
 Options:
   --bind IP:PORT  Listener address (default: {DEFAULT_BIND_ADDRESS})
@@ -278,6 +352,7 @@ Options:
   --require-auth  Require NIP-42 WebSocket and NIP-98 HTTP authentication
   --peer-trust PATH  JSON trust config admitting replication peers (needs --require-auth)
   --artifacts DIR    Content-addressed artifact store (default: <data>.artifacts)
+  --relay-key PATH   Dedicated relay-state signing key (default: <data>.relay-key)
   --owner PUBKEY     Owner pubkey (hex); owner-signed admit declarations in the
                      journal then govern peer trust, and --peer-trust becomes
                      bootstrap-only (requires --node-label)
@@ -290,7 +365,36 @@ Environment:
   BUZZ_LOCAL_RELAY_REQUIRE_AUTH
   BUZZ_LOCAL_RELAY_PEER_TRUST
   BUZZ_LOCAL_RELAY_ARTIFACTS
+  BUZZ_LOCAL_RELAY_RELAY_KEY
   BUZZ_LOCAL_RELAY_OWNER
   BUZZ_LOCAL_RELAY_NODE_LABEL"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relay_state_key_is_persistent() {
+        let path = std::env::temp_dir().join(format!(
+            "buzz-local-relay-state-key-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let first = load_or_create_relay_keys(&path).expect("first key load succeeds");
+        let second = load_or_create_relay_keys(&path).expect("second key load succeeds");
+        assert_eq!(first.public_key(), second.public_key());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mode = std::fs::metadata(&path)
+                .expect("key metadata reads")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        std::fs::remove_file(path).expect("test key is removed");
+    }
 }
