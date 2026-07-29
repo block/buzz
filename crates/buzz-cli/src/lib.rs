@@ -85,6 +85,14 @@ struct Cli {
     #[arg(long, env = "BUZZ_PRIVATE_KEY")]
     private_key: Option<String>,
 
+    /// Path to a file containing the Nostr private key (hex or nsec).
+    ///
+    /// Alternative to `--private-key` / `BUZZ_PRIVATE_KEY` that avoids putting
+    /// the key in an environment variable (which child processes can read).
+    /// If both are set, `--keyfile` takes precedence.
+    #[arg(long, env = "BUZZ_KEYFILE")]
+    keyfile: Option<String>,
+
     /// NIP-OA auth tag JSON (owner attestation). Injected into every signed event.
     #[arg(long, env = "BUZZ_AUTH_TAG")]
     auth_tag: Option<String>,
@@ -1743,6 +1751,23 @@ pub enum ModerationCmd {
     },
 }
 
+/// Read a private key from a keyfile, trimming surrounding whitespace.
+///
+/// The file should contain the key as a single line (hex or nsec). This is
+/// the keyfile pattern used by `dev-mcp` to avoid passing the raw key through
+/// environment variables visible to child processes.
+fn read_keyfile(path: &str) -> Result<String, std::io::Error> {
+    let contents = std::fs::read_to_string(path)?;
+    let trimmed = contents.trim();
+    if trimmed.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "keyfile is empty",
+        ));
+    }
+    Ok(trimmed.to_owned())
+}
+
 async fn run(cli: Cli) -> Result<(), CliError> {
     let relay_url = client::normalize_relay_url(&cli.relay);
 
@@ -1756,11 +1781,21 @@ async fn run(cli: Cli) -> Result<(), CliError> {
 
     // Auth: private key is required for all relay operations.
     // The keypair IS the identity — no tokens, no other auth.
-    let private_key_str = cli.private_key.ok_or_else(|| {
-        CliError::Auth("BUZZ_PRIVATE_KEY is required (use --private-key or set env var)".into())
-    })?;
+    //
+    // Keyfile takes precedence over the env-var/flag form so that managed
+    // subprocess environments (dev-mcp shim) can avoid exposing the raw key.
+    let private_key_str = if let Some(ref path) = cli.keyfile {
+        read_keyfile(path).map_err(|e| CliError::Auth(format!("BUZZ_KEYFILE ({path}): {e}")))?
+    } else {
+        cli.private_key.ok_or_else(|| {
+            CliError::Auth(
+                "private key is required (use --private-key, --keyfile, or set BUZZ_PRIVATE_KEY)"
+                    .into(),
+            )
+        })?
+    };
     let keys = Keys::parse(&private_key_str)
-        .map_err(|e| CliError::Key(format!("invalid BUZZ_PRIVATE_KEY: {e}")))?;
+        .map_err(|e| CliError::Key(format!("invalid private key: {e}")))?;
 
     // NIP-OA: parse and verify the auth tag if provided.
     let (auth_tag, auth_tag_json) = match cli.auth_tag {

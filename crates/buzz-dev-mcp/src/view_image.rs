@@ -296,11 +296,18 @@ fn relay_media_get_auth(url: &reqwest::Url) -> Option<String> {
     if !is_relay_media_url(url, &relay) {
         return None;
     }
-    let key = std::env::var("BUZZ_PRIVATE_KEY").ok()?;
+    // Prefer the keyfile path (set by the shim) over the raw env var, so the
+    // key is never in the environment for child processes to read.
+    let key = std::env::var("BUZZ_KEYFILE")
+        .ok()
+        .and_then(|path| std::fs::read_to_string(&path).ok())
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("BUZZ_PRIVATE_KEY").ok())?;
     let keys = match nostr::Keys::parse(&key) {
         Ok(k) => k,
         Err(e) => {
-            tracing::warn!("BUZZ_PRIVATE_KEY invalid; fetching relay media unauthenticated: {e}");
+            tracing::warn!("private key invalid; fetching relay media unauthenticated: {e}");
             return None;
         }
     };

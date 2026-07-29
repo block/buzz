@@ -52,13 +52,11 @@ const PASSTHROUGH_ENV: &[&str] = &[
     "GIT_ASKPASS",
     "GIT_SSH_COMMAND",
     "GIT_CONFIG_GLOBAL",
-    // Buzz identity — dev-mcp writes NOSTR_PRIVATE_KEY to a keyfile then
-    // removes it from its own env (children never see it). BUZZ_PRIVATE_KEY
-    // and BUZZ_RELAY_URL are kept for the buzz CLI. BUZZ_AUTH_TAG is a
-    // non-secret signed ownership attestation needed by portable owner-scoped
-    // CLI operations; MCP subprocesses are trusted like the agent runtime.
-    "NOSTR_PRIVATE_KEY",
-    "BUZZ_PRIVATE_KEY",
+    // Buzz identity — dev-mcp writes both NOSTR_PRIVATE_KEY and
+    // BUZZ_PRIVATE_KEY to 0600 keyfiles, then removes them from its own env.
+    // Children receive BUZZ_KEYFILE (a path, not a secret) and BUZZ_RELAY_URL.
+    // Raw private keys are never passed through to MCP subprocesses.
+    "BUZZ_KEYFILE",
     "BUZZ_RELAY_URL",
     "BUZZ_AUTH_TAG",
     // Agent display name — dev-mcp uses it as the git author name. On the
