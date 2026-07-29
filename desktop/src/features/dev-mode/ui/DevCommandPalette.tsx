@@ -20,6 +20,10 @@ import {
 } from "@/features/dev-mode/lib/authorColors";
 import { setDisplayStyle } from "@/features/dev-mode/lib/displayStylePreference";
 import {
+  toggleChannelPinned,
+  usePinnedChannels,
+} from "@/features/dev-mode/lib/pinnedChannels";
+import {
   useFlattenedUserSearchResults,
   useInfiniteUserSearchQuery,
 } from "@/features/profile/hooks";
@@ -96,6 +100,7 @@ export function DevCommandPalette({
   }, []);
 
   const activeChannelId = activeChannel?.id ?? null;
+  const pinnedIds = usePinnedChannels();
   const addMembersMutation = useAddChannelMembersMutation(activeChannelId);
   const leaveMutation = useLeaveChannelMutation(activeChannelId);
   const archiveMutation = useArchiveChannelMutation(activeChannelId);
@@ -275,6 +280,19 @@ export function DevCommandPalette({
             },
           },
           {
+            id: "pin-channel",
+            label: pinnedIds.has(activeChannel.id)
+              ? `unpin # ${activeChannel.name}`
+              : `pin # ${activeChannel.name}`,
+            detail: pinnedIds.has(activeChannel.id)
+              ? "remove from pinned section"
+              : "keep at the top of the channel list",
+            run: () => {
+              toggleChannelPinned(activeChannel.id);
+              onClose();
+            },
+          },
+          {
             id: "leave-channel",
             label: `leave # ${activeChannel.name}`,
             detail: isLastHumanMember
@@ -353,6 +371,7 @@ export function DevCommandPalette({
     onNewSession,
     onOpenChannel,
     openSettings,
+    pinnedIds,
     query,
     userSearchResults,
   ]);
