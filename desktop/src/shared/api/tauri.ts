@@ -39,7 +39,6 @@ import type {
 } from "@/shared/api/types";
 
 export * from "@/shared/api/tauriChannels";
-export * from "@/shared/api/tauriMcpApps";
 
 type RawPresenceLookup = Record<string, PresenceStatus>;
 
