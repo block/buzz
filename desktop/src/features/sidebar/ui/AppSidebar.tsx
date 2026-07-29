@@ -485,7 +485,7 @@ export function AppSidebar({
       directMessages,
       enabled: shouldLoadDmMetadata,
       fallbackDisplayName,
-      profileDisplayName: profile?.displayName,
+      profileDisplayName: profile?.displayName ?? profile?.name,
     });
   const sortedDirectMessages = React.useMemo(
     () =>
@@ -506,6 +506,7 @@ export function AppSidebar({
   });
   const resolvedDisplayName =
     profile?.displayName?.trim() ||
+    profile?.name?.trim() ||
     fallbackDisplayName?.trim() ||
     "Current identity";
   const isCreatingAny =

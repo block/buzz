@@ -1,13 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { formatOwnerLabel, profileLookupsEqual } from "./identity.ts";
+import {
+  formatOwnerLabel,
+  mergeCurrentProfileIntoLookup,
+  profileLookupsEqual,
+  resolveUserLabel,
+} from "./identity.ts";
 
 const OWNER_PUBKEY =
   "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 const summary = (over = {}) => ({
   displayName: "Ada",
+  name: null,
   avatarUrl: "https://x/a.png",
   nip05Handle: "ada@x",
   ownerPubkey: null,
@@ -58,6 +64,7 @@ test("profileLookupsEqual: same count, different keys is not equal", () => {
 test("profileLookupsEqual: a changed field is not equal", () => {
   for (const field of [
     "displayName",
+    "name",
     "avatarUrl",
     "nip05Handle",
     "ownerPubkey",
@@ -76,6 +83,47 @@ test("profileLookupsEqual: a changed field is not equal", () => {
 
 test("profileLookupsEqual: two empty lookups are equal", () => {
   assert.equal(profileLookupsEqual({}, {}), true);
+});
+
+test("resolveUserLabel uses a legacy kind-0 name when display_name is absent", () => {
+  assert.equal(
+    resolveUserLabel({
+      pubkey: OWNER_PUBKEY,
+      profiles: {
+        [OWNER_PUBKEY]: summary({
+          displayName: null,
+          name: "legacy-name",
+          nip05Handle: null,
+        }),
+      },
+    }),
+    "legacy-name",
+  );
+});
+
+test("mergeCurrentProfileIntoLookup keeps the raw name available to label resolution", () => {
+  const profiles = mergeCurrentProfileIntoLookup(
+    {
+      [OWNER_PUBKEY]: summary({
+        displayName: "legacy-name",
+        name: "legacy-name",
+      }),
+    },
+    {
+      pubkey: OWNER_PUBKEY,
+      name: "legacy-name",
+      displayName: null,
+      avatarUrl: null,
+      nip05Handle: null,
+    },
+  );
+
+  assert.equal(profiles?.[OWNER_PUBKEY]?.displayName, null);
+  assert.equal(profiles?.[OWNER_PUBKEY]?.name, "legacy-name");
+  assert.equal(
+    resolveUserLabel({ pubkey: OWNER_PUBKEY, profiles }),
+    "legacy-name",
+  );
 });
 
 // Render-count proof for the Tier-1 typing-storm fix (#1533 discipline).

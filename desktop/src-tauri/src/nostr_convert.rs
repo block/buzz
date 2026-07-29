@@ -287,8 +287,6 @@ pub fn channel_members_from_event(event: &Event) -> Result<ChannelMembersRespons
 pub fn profile_info_from_event(event: &Event) -> Result<ProfileInfo, String> {
     let v: Value = serde_json::from_str(&event.content)
         .map_err(|e| format!("kind:0 content is not valid JSON: {e}"))?;
-
-    let name = v.get("name").and_then(Value::as_str).map(str::to_string);
     let display_name = v
         .get("display_name")
         .and_then(Value::as_str)
@@ -299,7 +297,7 @@ pub fn profile_info_from_event(event: &Event) -> Result<ProfileInfo, String> {
 
     Ok(ProfileInfo {
         pubkey: event.pubkey.to_hex(),
-        name,
+        name: v.get("name").and_then(Value::as_str).map(str::to_string),
         display_name,
         avatar_url,
         about,
@@ -786,10 +784,9 @@ mod tests {
 
     #[test]
     fn profile_info_keeps_name_and_display_name_independent() {
-        let e = ev(0, r#"{"name":"bob"}"#, vec![]);
-        let p = profile_info_from_event(&e).unwrap();
+        let p = profile_info_from_event(&ev(0, r#"{"name":"bob"}"#, vec![])).unwrap();
         assert_eq!(p.name.as_deref(), Some("bob"));
-        assert!(p.display_name.is_none());
+        assert_eq!(p.display_name, None);
     }
 
     #[test]
