@@ -411,9 +411,13 @@ WantedBy=default.target
 - `ExecStart` is an absolute path, substituted at install time from the host's resolved `buzz-acp`.
   systemd does not expand environment variables in the program position, and the shell indirection
   that would work around that is not worth adding to a unit whose environment carries a private key.
-  The substitution is shell parameter expansion, not `sed`: `sed -i` is a GNU extension that BSD and
-  macOS hosts reject. Resolution runs *first*; the install only fills an empty `$acp`, so a deploy
-  that installed `buzz-acp` writes the path of the copy it just installed, not a stale one.
+  The substitution is shell parameter expansion, not in-place editing: `sed -i` is a GNU extension
+  that BSD and macOS hosts reject. Resolution runs *first*; the install only fills an empty `$acp`,
+  so a deploy that installed `buzz-acp` writes the path of the copy it just installed, not a stale
+  one. The path is written **double-quoted, per systemd's command-line syntax** — `ExecStart=` splits
+  an unquoted value on whitespace, and `buzz_acp_path` may legitimately name a directory containing
+  some, which would otherwise make systemd run the first word with the rest as arguments. `\` and `"`
+  are escaped on the way in, since systemd unquotes C-style escapes inside double quotes.
 
 The instance name is the agent name made unit-safe — lowercased, non-alphanumerics collapsed to `-`,
 truncated to 32 characters — followed by the first 12 hex characters of the agent's `pubkey`. The
