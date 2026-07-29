@@ -339,10 +339,10 @@ See the [root TESTING.md](../../TESTING.md) for the full integration testing gui
 
 Apache-2.0
 
-## Always-on / remote Desktop
+## Always-on agents (any client)
 
-For the **laptop Desktop + server-side `buzz-acp`** layout (agents stay up when
-the laptop sleeps), see
+For **server-side `buzz-acp`** with Desktop, web, mobile, or CLI as thin clients
+(agents stay up when devices sleep or disconnect), see
 [docs/self-host-always-on-agents.md](../../docs/self-host-always-on-agents.md)
 and the systemd unit template under
 [deploy/systemd/](../../deploy/systemd/).
