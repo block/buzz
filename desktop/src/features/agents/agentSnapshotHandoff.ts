@@ -29,12 +29,8 @@ export async function drainPendingAgentSnapshotImport(
   deps.requestOpen({
     fileBytes: pending.fileBytes,
     fileName: pending.fileName,
-    onPreviewAccepted: async () => {
-      await deps.acknowledge(pending.id);
-    },
-    onPreviewRejected: async () => {
-      await deps.reject(pending.id);
-    },
+    onPreviewAccepted: () => deps.acknowledge(pending.id),
+    onPreviewRejected: () => deps.reject(pending.id),
     snapshotKind: "agent",
   });
   await deps.goAgents();

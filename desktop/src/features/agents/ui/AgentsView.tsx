@@ -97,7 +97,11 @@ export function AgentsView() {
           pending.fileName,
         )
       ) {
-        await pending.onPreviewAccepted?.();
+        const acknowledged = await pending.onPreviewAccepted?.();
+        if (acknowledged === false) {
+          personas.closeSnapshotImportDialog();
+          await pending.onPreviewRejected?.();
+        }
       } else {
         await pending.onPreviewRejected?.();
       }

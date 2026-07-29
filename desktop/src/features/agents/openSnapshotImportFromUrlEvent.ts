@@ -12,8 +12,8 @@
 export type PendingSnapshotImport = {
   fileBytes: number[];
   fileName: string;
-  onPreviewAccepted?: () => Promise<void>;
-  onPreviewRejected?: () => Promise<void>;
+  onPreviewAccepted?: () => Promise<boolean>;
+  onPreviewRejected?: () => Promise<boolean>;
   snapshotKind: "agent" | "team";
 };
 
