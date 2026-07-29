@@ -95,6 +95,8 @@ CREATE TABLE channels (
     participant_hash BYTEA,
     ttl_seconds     INT,
     ttl_deadline    TIMESTAMPTZ,
+    agent_response_policy TEXT NOT NULL DEFAULT 'mentions'
+        CHECK (agent_response_policy IN ('mentions', 'all')),
     PRIMARY KEY (community_id, id),
     CONSTRAINT chk_channels_id_not_nil CHECK (id <> '00000000-0000-0000-0000-000000000000'::uuid)
 );

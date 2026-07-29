@@ -13,7 +13,7 @@ use buzz_core_pkg::kind::{KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST};
 use nostr::{EventBuilder, EventId, Kind, Tag};
 use uuid::Uuid;
 
-// ── Constants ────────────────────────────────────────────────────────────────
+mod channel_policy;
 
 /// Maximum content size — matches buzz-sdk (64 KiB).
 const MAX_CONTENT_BYTES: usize = 64 * 1024;
@@ -179,19 +179,17 @@ pub fn build_leave(channel_id: Uuid) -> Result<EventBuilder, String> {
     Ok(EventBuilder::new(Kind::Custom(9022), "").tags(tags))
 }
 
-/// Kind 9002 — update channel name/description/visibility/ttl.
-///
-/// `ttl`: outer `None` leaves it unchanged; `Some(Some(secs))` sets the
-/// ephemeral timeout; `Some(None)` clears it (emits `["ttl", ""]`).
+/// Kind 9002 — update channel settings.
 pub fn build_update_channel(
     channel_id: Uuid,
     name: Option<&str>,
     about: Option<&str>,
     visibility: Option<&str>,
     ttl: Option<Option<i32>>,
+    agent_response: Option<&str>,
 ) -> Result<EventBuilder, String> {
-    if name.is_none() && about.is_none() && visibility.is_none() && ttl.is_none() {
-        return Err("at least one of name, about, visibility, or ttl must be provided".into());
+    if (name, about, visibility, ttl, agent_response) == (None, None, None, None, None) {
+        return Err("provide at least one channel setting".into());
     }
     if let Some(v) = visibility {
         if v != "open" && v != "private" {
@@ -218,6 +216,7 @@ pub fn build_update_channel(
             None => tags.push(tag(vec!["ttl", ""])?),
         }
     }
+    channel_policy::push_agent_response_tag(&mut tags, agent_response)?;
     Ok(EventBuilder::new(Kind::Custom(9002), "").tags(tags))
 }
 
@@ -854,7 +853,7 @@ mod tests {
     fn channel_builders_reject_hash_only_names() {
         let channel_id = Uuid::new_v4();
         assert!(build_create_channel(channel_id, "###", "open", "stream", None, None).is_err());
-        assert!(build_update_channel(channel_id, Some("###"), None, None, None).is_err());
+        assert!(build_update_channel(channel_id, Some("###"), None, None, None, None).is_err());
     }
     /// Builder layout regression for the NIP-IA owner-of-agent archive flow.
     /// Compares against `docs/nips/NIP-IA.md` §Vector 1.

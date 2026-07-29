@@ -114,6 +114,13 @@ with a TypeScript lookup table or an id comparison in a component.
     published or removed. A queued update must stay visibly queued, and the
     catalog itself must render only relay-confirmed publications — never an
     optimistic local persona.
+11. **Mention delivery can be channel-owned.** A channel's NIP-29 metadata may
+    carry `agent_response=mentions|all`, which authoritatively sets the ACP
+    mention filter for every agent member. This policy is edited with channel
+    settings and propagated by the relay; do not model it as a managed-agent
+    env override. Missing metadata preserves legacy local behavior for older
+    relays. Per-agent `RespondTo` author gates remain authoritative after
+    delivery and must never be weakened by a channel setting.
 
 ## The tests that enforce this
 

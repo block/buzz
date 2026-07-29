@@ -10,6 +10,10 @@ import {
 
 import type { Channel } from "@/shared/api/types";
 import {
+  agentResponseEmoji,
+  agentResponseLabel,
+} from "@/features/channels/lib/agentResponsePolicy";
+import {
   canonicalChannelName,
   channelNamesMatch,
 } from "@/features/channels/lib/canonicalChannelName";
@@ -794,6 +798,13 @@ function ChannelCard({
               #
             </span>
             <p className="min-w-0 truncate text-base font-medium tracking-tight">
+              <span
+                aria-label={`Agent replies: ${agentResponseLabel(channel.agentResponsePolicy)}`}
+                className="mr-1"
+                role="img"
+              >
+                {agentResponseEmoji(channel.agentResponsePolicy)}
+              </span>
               {channel.name}
             </p>
             {channel.archivedAt ? (

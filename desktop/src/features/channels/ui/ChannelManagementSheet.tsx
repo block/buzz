@@ -35,7 +35,7 @@ import {
   DEFAULT_EPHEMERAL_TTL_SECONDS,
   formatTtlDuration,
 } from "@/features/channels/lib/ephemeralChannel";
-import type { Channel } from "@/shared/api/types";
+import type { AgentResponsePolicy, Channel } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { useTheme } from "@/shared/theme/ThemeProvider";
 import { Button } from "@/shared/ui/button";
@@ -70,6 +70,7 @@ import {
 } from "./channelFormStyles";
 import { ChannelTypeSettings } from "./ChannelTypeSettings";
 import { ChannelPermissionsSettings } from "./ChannelPermissionsSettings";
+import { ChannelAgentResponseSettings } from "./ChannelAgentResponseSettings";
 import {
   ChannelHero,
   ChannelQuickAction,
@@ -165,6 +166,8 @@ export function ChannelManagementSheet({
   const [ttlSecondsDraft, setTtlSecondsDraft] = React.useState(
     DEFAULT_EPHEMERAL_TTL_SECONDS,
   );
+  const [agentResponseDraft, setAgentResponseDraft] =
+    React.useState<AgentResponsePolicy>("mentions");
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = React.useState(false);
   const [isEditDialogOpen, setIsEditDialogOpen] = React.useState(false);
   const [isConvertingVisibility, setIsConvertingVisibility] =
@@ -202,6 +205,7 @@ export function ChannelManagementSheet({
     setIsPrivateDraft(detail.visibility === "private");
     setIsEphemeralDraft(detail.ttlSeconds !== null);
     setTtlSecondsDraft(detail.ttlSeconds ?? DEFAULT_EPHEMERAL_TTL_SECONDS);
+    setAgentResponseDraft(detail.agentResponsePolicy);
     setHasUserEditedChannelDraft(false);
     setActiveView("summary");
   }, [detail, open]);
@@ -236,6 +240,8 @@ export function ChannelManagementSheet({
 
   const currentVisibility = detail?.visibility ?? channel.visibility;
   const currentTtlSeconds = detail?.ttlSeconds ?? null;
+  const currentAgentResponse =
+    detail?.agentResponsePolicy ?? channel.agentResponsePolicy;
   const nextVisibility: "open" | "private" = isPrivateDraft
     ? "private"
     : "open";
@@ -251,7 +257,9 @@ export function ChannelManagementSheet({
   const descriptionDirty =
     descriptionDraft.trim() !== resolvedChannel.description.trim();
   const isSavingChannelEdits = updateChannelDetailsMutation.isPending;
-  const hasChannelEditChanges = nameDirty || descriptionDirty || lifecycleDirty;
+  const agentResponseDirty = agentResponseDraft !== currentAgentResponse;
+  const hasChannelEditChanges =
+    nameDirty || descriptionDirty || lifecycleDirty || agentResponseDirty;
   const canSaveChannelEdits =
     nameDraft.trim().length > 0 &&
     hasUserEditedChannelDraft &&
@@ -270,6 +278,7 @@ export function ChannelManagementSheet({
       setDescriptionDraft(resolvedChannel.description);
       setIsEphemeralDraft(currentTtlSeconds !== null);
       setTtlSecondsDraft(currentTtlSeconds ?? DEFAULT_EPHEMERAL_TTL_SECONDS);
+      setAgentResponseDraft(currentAgentResponse);
       setHasUserEditedChannelDraft(false);
     }
 
@@ -278,7 +287,7 @@ export function ChannelManagementSheet({
 
   async function handleSaveChannelEdits() {
     try {
-      if (nameDirty || descriptionDirty || lifecycleDirty) {
+      if (hasChannelEditChanges) {
         await updateChannelDetailsMutation.mutateAsync({
           description: descriptionDirty ? descriptionDraft.trim() : undefined,
           name: nameDirty ? nameDraft.trim() : undefined,
@@ -288,6 +297,7 @@ export function ChannelManagementSheet({
             lifecycleDirty && nextVisibility !== currentVisibility
               ? nextVisibility
               : undefined,
+          agentResponse: agentResponseDirty ? agentResponseDraft : undefined,
         });
       }
 
@@ -531,6 +541,15 @@ export function ChannelManagementSheet({
                       }
                       testIdPrefix="channel-management"
                       visibility={isPrivateDraft ? "private" : "open"}
+                    />
+                    <ChannelAgentResponseSettings
+                      disabled={isSavingChannelEdits}
+                      onPolicyChange={(policy) => {
+                        setAgentResponseDraft(policy);
+                        setHasUserEditedChannelDraft(true);
+                      }}
+                      policy={agentResponseDraft}
+                      testIdPrefix="channel-management"
                     />
                   </div>
                 ) : null}

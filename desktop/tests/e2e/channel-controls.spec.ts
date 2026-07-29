@@ -345,4 +345,35 @@ test.describe("channel controls", () => {
       page.getByRole("dialog", { name: "Edit public channel" }),
     ).toBeVisible();
   });
+
+  test("11 — agent reply policy persists and updates the channel emoji", async ({
+    page,
+  }) => {
+    await installMockBridge(page);
+    await openManagementSheet(page);
+    await openEditDialog(page);
+
+    const policy = page.getByTestId("channel-management-agent-response");
+    await expect(policy).toHaveAccessibleName(
+      "Agent replies: 🏷️ Only @mentions",
+    );
+    await policy.click();
+    await page
+      .getByTestId("channel-management-agent-response-option-all")
+      .click();
+    await expect(policy).toHaveAccessibleName(
+      "Agent replies: 💬 Every message",
+    );
+    await page.getByTestId("channel-management-save-changes").click();
+
+    await expect(
+      page.getByRole("dialog", { name: /Edit (?:public|private) channel/ }),
+    ).toHaveCount(0);
+    await expect(page.getByTestId("channel-general")).toContainText("💬");
+
+    await openEditDialog(page);
+    await expect(
+      page.getByTestId("channel-management-agent-response"),
+    ).toHaveAccessibleName("Agent replies: 💬 Every message");
+  });
 });

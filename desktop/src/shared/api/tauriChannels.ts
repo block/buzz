@@ -30,6 +30,7 @@ export type RawChannel = {
   is_member?: boolean;
   ttl_seconds: number | null;
   ttl_deadline: string | null;
+  agent_response_policy?: "mentions" | "all";
 };
 
 type RawChannelDetail = RawChannel & {
@@ -76,6 +77,7 @@ export function fromRawChannel(channel: RawChannel): Channel {
     isMember: channel.is_member ?? true,
     ttlSeconds: channel.ttl_seconds,
     ttlDeadline: channel.ttl_deadline,
+    agentResponsePolicy: channel.agent_response_policy ?? "mentions",
   };
 }
 

@@ -469,6 +469,7 @@ impl ChannelInfoResolver {
                     PromptChannelInfo {
                         name: info.name,
                         channel_type: info.channel_type,
+                        agent_response_policy: info.agent_response_policy,
                     },
                 ))
             })
@@ -489,6 +490,18 @@ impl ChannelInfoResolver {
             return Some(info);
         }
 
+        let info = fetch_channel_info(channel_id, &self.rest_client).await?;
+        if let Ok(mut cache) = self.cache.write() {
+            cache.insert(channel_id, info.clone());
+        }
+        Some(info)
+    }
+
+    /// Refetch channel metadata and replace the cached value.
+    ///
+    /// Membership notifications use this after channel policy changes so a
+    /// running harness can replace its mention filter without restarting.
+    pub async fn refresh(&self, channel_id: Uuid) -> Option<PromptChannelInfo> {
         let info = fetch_channel_info(channel_id, &self.rest_client).await?;
         if let Ok(mut cache) = self.cache.write() {
             cache.insert(channel_id, info.clone());
@@ -2336,10 +2349,20 @@ pub(crate) async fn fetch_channel_info(
                 let ev = events.first()?;
                 let tags = ev.get("tags")?.as_array()?;
                 let mut name = None;
+                let mut agent_response_policy = None;
                 for tag in tags {
                     if let Some(arr) = tag.as_array() {
                         if arr.first().and_then(|v| v.as_str()) == Some("name") {
                             name = arr.get(1).and_then(|v| v.as_str());
+                        }
+                        if arr.first().and_then(|v| v.as_str()) == Some("agent_response") {
+                            agent_response_policy = match arr.get(1).and_then(|v| v.as_str()) {
+                                Some("mentions") => {
+                                    Some(buzz_core::channel::AgentResponsePolicy::Mentions)
+                                }
+                                Some("all") => Some(buzz_core::channel::AgentResponsePolicy::All),
+                                _ => None,
+                            };
                         }
                     }
                 }
@@ -2347,6 +2370,7 @@ pub(crate) async fn fetch_channel_info(
                 Some(PromptChannelInfo {
                     name: name.unwrap_or(UNKNOWN_CHANNEL_NAME).to_string(),
                     channel_type,
+                    agent_response_policy,
                 })
             }
             Ok(Err(e)) => {

@@ -555,6 +555,7 @@ type RawChannel = {
   participant_pubkeys: string[];
   ttl_seconds: number | null;
   ttl_deadline: string | null;
+  agent_response_policy: "mentions" | "all";
 };
 
 type RawChannelWithMembership = RawChannel & {
@@ -1345,6 +1346,7 @@ function toRawChannel(
     participant_pubkeys: [...channel.participant_pubkeys],
     ttl_seconds: channel.ttl_seconds ?? null,
     ttl_deadline: channel.ttl_deadline ?? null,
+    agent_response_policy: channel.agent_response_policy ?? "mentions",
     is_member: channel.members.some(
       (member) => member.pubkey.toLowerCase() === currentPubkey,
     ),
@@ -1395,6 +1397,7 @@ function createMockChannel(
     | "participants"
     | "ttl_seconds"
     | "ttl_deadline"
+    | "agent_response_policy"
   > & {
     created_minutes_ago: number;
     members: RawChannelMember[];
@@ -1402,6 +1405,7 @@ function createMockChannel(
     participants?: string[];
     ttl_seconds?: number | null;
     ttl_deadline?: string | null;
+    agent_response_policy?: "mentions" | "all";
     updated_minutes_ago?: number;
   },
 ): MockChannel {
@@ -1414,6 +1418,7 @@ function createMockChannel(
     participants: [...(seed.participants ?? [])],
     ttl_seconds: seed.ttl_seconds ?? null,
     ttl_deadline: seed.ttl_deadline ?? null,
+    agent_response_policy: seed.agent_response_policy ?? "mentions",
     updated_at: isoMinutesAgo(
       seed.updated_minutes_ago ?? seed.created_minutes_ago,
     ),
@@ -5368,6 +5373,8 @@ async function handleGetChannels(config: E2eConfig | undefined) {
         participant_pubkeys: pTags,
         ttl_seconds: getTag("ttl") ? Number(getTag("ttl")) : null,
         ttl_deadline: getTag("ttl_deadline") ?? null,
+        agent_response_policy:
+          getTag("agent_response") === "all" ? "all" : "mentions",
         is_member: memberSet.has(channelId),
       };
     })
@@ -5909,6 +5916,7 @@ async function handleCreateChannel(
     archived_at: null,
     ttl_seconds: args.ttlSeconds ?? null,
     ttl_deadline: ttlDeadline,
+    agent_response_policy: "mentions",
     created_at: ev.created_at
       ? new Date(ev.created_at * 1000).toISOString()
       : new Date().toISOString(),
@@ -6007,6 +6015,7 @@ async function handleOpenDm(
     archived_at: null,
     ttl_seconds: null,
     ttl_deadline: null,
+    agent_response_policy: "mentions",
     created_at: ev?.created_at
       ? new Date(ev.created_at * 1000).toISOString()
       : new Date().toISOString(),
@@ -6078,6 +6087,8 @@ async function handleGetChannelDetails(
       : null,
     ttl_seconds: getTag("ttl") ? Number(getTag("ttl")) : null,
     ttl_deadline: getTag("ttl_deadline") ?? null,
+    agent_response_policy:
+      getTag("agent_response") === "all" ? "all" : "mentions",
     created_at: ev?.created_at
       ? new Date(ev.created_at * 1000).toISOString()
       : new Date().toISOString(),
@@ -6131,6 +6142,7 @@ async function handleUpdateChannel(
     description?: string;
     visibility?: "open" | "private";
     ttlSeconds?: number | null;
+    agentResponse?: "mentions" | "all";
   },
   config: E2eConfig | undefined,
 ) {
@@ -6158,6 +6170,9 @@ async function handleUpdateChannel(
           ? null
           : new Date(Date.now() + args.ttlSeconds * 1000).toISOString();
     }
+    if (args.agentResponse !== undefined) {
+      channel.agent_response_policy = args.agentResponse;
+    }
     touchMockChannel(channel);
     return toRawChannelDetail(channel, config);
   }
@@ -6174,6 +6189,9 @@ async function handleUpdateChannel(
   }
   if (args.ttlSeconds !== undefined) {
     tags.push(["ttl", args.ttlSeconds === null ? "" : String(args.ttlSeconds)]);
+  }
+  if (args.agentResponse !== undefined) {
+    tags.push(["agent_response", args.agentResponse]);
   }
   await submitSignedEvent(config, { kind: 9002, content: "", tags });
 
@@ -6203,6 +6221,8 @@ async function handleUpdateChannel(
       ttlSeconds === null
         ? null
         : new Date(Date.now() + ttlSeconds * 1000).toISOString(),
+    agent_response_policy:
+      getTag("agent_response") === "all" ? "all" : "mentions",
     created_at: ev?.created_at
       ? new Date(ev.created_at * 1000).toISOString()
       : new Date().toISOString(),
