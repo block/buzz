@@ -369,6 +369,9 @@ pub enum MessagesCmd {
         /// Attach file(s) — uploads and includes as imeta tags
         #[arg(long = "file")]
         files: Vec<String>,
+        /// Pubkey to mention (hex or npub; repeatable). Supplying any explicit identity permits unresolved or ambiguous @Name text as presentation-only; uniquely resolved member names still notify.
+        #[arg(long = "mention")]
+        mentions: Vec<String>,
     },
     /// Send a code diff / patch to a channel
     SendDiff {

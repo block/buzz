@@ -476,7 +476,7 @@ jobs:
     if: github.repository == 'block/buzz'
     runs-on: ubuntu-latest
     # Digest-pinned like the SHA-pinned actions below; Renovate keeps it fresh.
-    container: ubuntu:22.04@sha256:0e0a0fc6d18feda9db1590da249ac93e8d5abfea8f4c3c0c849ce512b5ef8982
+    container: ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
     needs: setup
     timeout-minutes: 60
     permissions:
@@ -498,7 +498,7 @@ jobs:
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          # Must run first: bare ubuntu:22.04 ships without curl, wget, git, or
+          # Must run first: bare ubuntu:24.04 ships without curl, wget, git, or
           # ca-certificates. activate-hermit bootstraps via curl+HTTPS (needs
           # both), and actions/checkout falls back to a REST tarball without git.
           # Running as root — no sudo needed.
