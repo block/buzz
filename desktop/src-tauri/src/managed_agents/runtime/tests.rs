@@ -523,7 +523,6 @@ fn runtime_metadata_env_vars_injects_model_and_provider() {
 
 #[test]
 fn runtime_metadata_env_vars_skips_provider_when_locked() {
-    // Claude: model via ANTHROPIC_MODEL; provider stays locked (no provider env).
     let vars = runtime_metadata_env_vars(
         Some("ANTHROPIC_MODEL"),
         None,
