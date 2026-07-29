@@ -1733,6 +1733,20 @@ test("one share level selector drives both the link and send paths", async ({
 }) => {
   await page.emulateMedia({ reducedMotion: "no-preference" });
   const linkedAgentPubkey = TEST_IDENTITIES.alice.pubkey;
+  const profileAvatarUrl = "https://mock.relay/media/profile-only-avatar.png";
+  const profileAvatarBytes = Uint8Array.from(
+    atob(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+    ),
+    (character) => character.charCodeAt(0),
+  );
+  await page.route(profileAvatarUrl, async (route) => {
+    await route.fulfill({
+      body: Buffer.from(profileAvatarBytes),
+      contentType: "image/png",
+      status: 200,
+    });
+  });
   await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
   await installMockBridge(page, {
     personas: [
@@ -1751,6 +1765,12 @@ test("one share level selector drives both the link and send paths", async ({
       },
     ],
     searchProfiles: [
+      {
+        pubkey: linkedAgentPubkey,
+        displayName: "Animation Auditor",
+        avatarUrl: profileAvatarUrl,
+        isAgent: true,
+      },
       {
         pubkey: TEST_IDENTITIES.charlie.pubkey,
         displayName: "Charlie",
@@ -1999,6 +2019,9 @@ test("one share level selector drives both the link and send paths", async ({
       expect.objectContaining({
         memoryLevel: "core",
         memorySourcePubkey: linkedAgentPubkey,
+        avatarPngDataUrl: `data:image/png;base64,${Buffer.from(
+          profileAvatarBytes,
+        ).toString("base64")}`,
       }),
       expect.objectContaining({
         memoryLevel: "everything",
