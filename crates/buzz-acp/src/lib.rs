@@ -3630,6 +3630,10 @@ mod agent_draft_prompt_tests {
     fn shared_base_prompt_teaches_single_command_mentions_and_preflight() {
         let prompt = include_str!("base_prompt.md");
         assert!(prompt.contains("--mention <hex-or-npub>"));
+        assert!(prompt.contains("every presentation-only name that should notify"));
+        assert!(
+            prompt.contains("permits unresolved or ambiguous `@Name` text as presentation-only")
+        );
         assert!(prompt.contains("success JSON's `mention_pubkeys`"));
         assert!(prompt.contains("no follow-up verification command is needed"));
         assert!(prompt.contains("stops before sending"));

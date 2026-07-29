@@ -87,7 +87,7 @@ Write commands are unaffected. `--format json` (default) returns full fields.
 
 ## Communication Patterns
 
-**Mentions that notify:** Keep the readable `@Name` in message content and, when the intended pubkey is known, pass it in the same send with repeatable `--mention <hex-or-npub>`. The CLI emits those exact `p` tags and reports the signed event's `mention_pubkeys`; no follow-up verification command is needed. Without `--mention`, names resolve against current channel members. An unresolved/ambiguous name or non-member target stops before publishing. Add membership separately only when authorized, or retry with `--allow-non-member-mentions` to notify without adding; sending never changes membership automatically.
+**Mentions that notify:** Keep readable `@Name` text in message content and, when intended pubkeys are known, pass the identities in the same send with repeatable `--mention <hex-or-npub>`. Any explicit identity (`--mention` or `nostr:npub...`) permits unresolved or ambiguous `@Name` text as presentation-only; uniquely resolved member names still add recipients. Include a pubkey for every presentation-only name that should notify. The CLI reports the signed event's `mention_pubkeys`; no follow-up verification command is needed. Without explicit identities, names resolve against current channel members. An unresolved/ambiguous name or non-member target stops before publishing. Add membership separately only when authorized, or retry with `--allow-non-member-mentions` to notify without adding; sending never changes membership automatically.
 
 ```bash
 buzz messages send --channel <UUID> \

@@ -9,8 +9,7 @@ use crate::validate::{
     validate_content_size, validate_hex64, validate_uuid, MAX_DIFF_BYTES,
 };
 use buzz_sdk::mentions::{
-    extract_at_mentions_with_known, extract_nostr_uris, merge_mentions, strip_code_regions,
-    MENTION_CAP,
+    extract_at_mentions_with_known, extract_nostr_uris, strip_code_regions, MENTION_CAP,
 };
 
 /// Extract the thread root event ID from a Nostr tag array.
@@ -242,6 +241,29 @@ fn normalize_explicit_mentions(values: &[String]) -> Result<Vec<String>, CliErro
         )));
     }
     Ok(normalized)
+}
+
+fn merge_message_mentions(
+    explicit: &[String],
+    uri_pubkeys: &[String],
+    auto_resolved: &[String],
+) -> Result<Vec<String>, CliError> {
+    let mut mentions = Vec::new();
+    for pubkey in explicit
+        .iter()
+        .chain(uri_pubkeys.iter())
+        .chain(auto_resolved.iter())
+    {
+        if !mentions.contains(pubkey) {
+            mentions.push(pubkey.clone());
+        }
+    }
+    if mentions.len() > MENTION_CAP {
+        return Err(CliError::Usage(format!(
+            "too many unique message mentions (max {MENTION_CAP})"
+        )));
+    }
+    Ok(mentions)
 }
 
 fn missing_members(mentions: &[String], members: &[String]) -> Vec<String> {
@@ -565,14 +587,17 @@ pub async fn cmd_send_message(
     }
     let channel_uuid = parse_uuid(&p.channel_id)?;
 
-    let mut mention_pubkeys = normalize_explicit_mentions(&p.mentions)?;
+    let explicit_mentions = normalize_explicit_mentions(&p.mentions)?;
     let stripped = strip_code_regions(&p.content);
     let uri_pubkeys = extract_nostr_uris(&stripped);
-    let has_explicit_mentions = !mention_pubkeys.is_empty() || !uri_pubkeys.is_empty();
+    // Supplying any identity explicitly authorizes unresolved or ambiguous @Name text
+    // as presentation-only, matching Desktop's separate visible-label and p-tag model.
+    // Uniquely resolvable member names still add their own p-tags; callers must supply
+    // every intended identity whose visible label cannot be resolved uniquely.
+    let has_explicit_mentions = !explicit_mentions.is_empty() || !uri_pubkeys.is_empty();
     let (member_pubkeys, auto_resolved) =
         resolve_content_mentions(client, &p.channel_id, &p.content, has_explicit_mentions).await?;
-    merge_mentions(&mut mention_pubkeys, &uri_pubkeys, MENTION_CAP);
-    merge_mentions(&mut mention_pubkeys, &auto_resolved, MENTION_CAP);
+    let mention_pubkeys = merge_message_mentions(&explicit_mentions, &uri_pubkeys, &auto_resolved)?;
 
     let missing = missing_members(&mention_pubkeys, &member_pubkeys);
     if !missing.is_empty() && !p.allow_non_member_mentions {
@@ -971,8 +996,9 @@ pub async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::{
-        event_mention_pubkeys, find_root_from_tags, match_profiles_by_name, missing_members,
-        normalize_explicit_mentions, parse_member_pubkeys, resolve_names_to_pubkeys,
+        event_mention_pubkeys, find_root_from_tags, match_profiles_by_name, merge_message_mentions,
+        missing_members, normalize_explicit_mentions, parse_member_pubkeys,
+        resolve_names_to_pubkeys,
     };
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
@@ -1239,6 +1265,32 @@ mod tests {
         let error = resolve_names_to_pubkeys(&names, &profiles, false).unwrap_err();
         assert!(error.to_string().contains(PK_VALID_A));
         assert!(error.to_string().contains(PK_VALID_B));
+    }
+
+    #[test]
+    fn explicit_mentions_make_all_at_names_presentation_only() {
+        let names = vec!["alice".into(), "bob".into()];
+        let profiles = std::collections::HashMap::from([("alice".into(), vec![PK_VALID_A.into()])]);
+        assert_eq!(
+            resolve_names_to_pubkeys(&names, &profiles, true).unwrap(),
+            vec![PK_VALID_A]
+        );
+        assert!(resolve_names_to_pubkeys(&names, &profiles, false).is_err());
+    }
+
+    #[test]
+    fn combined_mention_union_errors_instead_of_truncating() {
+        let explicit: Vec<String> = (0..50).map(|i| format!("explicit-{i}")).collect();
+        assert!(merge_message_mentions(&explicit, &[], &["resolved-bob".into()]).is_err());
+
+        let mut with_duplicate = explicit.clone();
+        with_duplicate.push(explicit[0].clone());
+        assert_eq!(
+            merge_message_mentions(&with_duplicate, &[explicit[1].clone()], &[])
+                .unwrap()
+                .len(),
+            50
+        );
     }
 
     #[test]

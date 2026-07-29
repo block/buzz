@@ -369,7 +369,7 @@ pub enum MessagesCmd {
         /// Attach file(s) — uploads and includes as imeta tags
         #[arg(long = "file")]
         files: Vec<String>,
-        /// Pubkey to mention (hex or npub; repeatable)
+        /// Pubkey to mention (hex or npub; repeatable). Supplying any explicit identity makes all @Name text presentation-only.
         #[arg(long = "mention")]
         mentions: Vec<String>,
         /// Permit notifying pubkeys that are not current channel members
