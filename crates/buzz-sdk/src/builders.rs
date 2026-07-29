@@ -562,6 +562,12 @@ pub fn build_profile(
 }
 
 /// Build a NIP-29 add-member event (kind 9000).
+///
+/// `.allow_self_tagging()` is required: self-add is a first-class relay path
+/// (`side_effects.rs` — "Self-add: always allowed regardless of policy"), so
+/// `actor == target` and the `["p", target]` tag matches the signer. nostr
+/// 0.44 strips matching `p` tags by default, which would make a self-targeted
+/// add reach the relay with no target at all and fail as `missing p tag`.
 pub fn build_add_member(
     channel_id: Uuid,
     target_pubkey: &str,
@@ -575,10 +581,16 @@ pub fn build_add_member(
     if let Some(r) = role {
         tags.push(tag(&["role", r.as_str()])?);
     }
-    Ok(EventBuilder::new(Kind::Custom(9000), "").tags(tags))
+    Ok(EventBuilder::new(Kind::Custom(9000), "")
+        .tags(tags)
+        .allow_self_tagging())
 }
 
 /// Build a NIP-29 remove-member event (kind 9001).
+///
+/// Self-remove is a supported relay path (allowed unless the actor is the last
+/// owner), so this needs `.allow_self_tagging()` for the same reason as
+/// [`build_add_member`].
 pub fn build_remove_member(
     channel_id: Uuid,
     target_pubkey: &str,
@@ -588,7 +600,9 @@ pub fn build_remove_member(
         tag(&["h", &channel_id.to_string()])?,
         tag(&["p", &target_pubkey.to_ascii_lowercase()])?,
     ];
-    Ok(EventBuilder::new(Kind::Custom(9001), "").tags(tags))
+    Ok(EventBuilder::new(Kind::Custom(9001), "")
+        .tags(tags)
+        .allow_self_tagging())
 }
 
 /// Build a NIP-29 leave-request event (kind 9022).
@@ -2387,6 +2401,45 @@ mod tests {
         let ev = sign(build_add_member(cid, pubkey, None::<MemberRole>).unwrap());
         assert_eq!(ev.kind.as_u16(), 9000);
         assert!(tag_values(&ev, "role").is_empty());
+    }
+
+    /// Self-add is a supported relay path ("Self-add: always allowed
+    /// regardless of policy"), so the `p` tag must survive signing even when
+    /// it names the signer. Without `.allow_self_tagging()` nostr 0.44 strips
+    /// it and the relay rejects the event as `invalid: missing p tag`.
+    #[test]
+    fn add_member_self_targeted_keeps_p_tag() {
+        let keys = keys();
+        let self_hex = keys.public_key().to_hex();
+        let ev = build_add_member(uuid(), &self_hex, Some(MemberRole::Bot))
+            .unwrap()
+            .sign_with_keys(&keys)
+            .unwrap();
+        assert_eq!(ev.kind.as_u16(), 9000);
+        assert!(
+            has_tag(&ev, "p", &self_hex),
+            "self `p` tag was stripped at signing: {:?}",
+            ev.tags.iter().map(|t| t.as_slice()).collect::<Vec<_>>()
+        );
+        assert!(has_tag(&ev, "role", "bot"));
+    }
+
+    /// Self-remove is allowed unless the actor is the last owner — same
+    /// stripping hazard as [`add_member_self_targeted_keeps_p_tag`].
+    #[test]
+    fn remove_member_self_targeted_keeps_p_tag() {
+        let keys = keys();
+        let self_hex = keys.public_key().to_hex();
+        let ev = build_remove_member(uuid(), &self_hex)
+            .unwrap()
+            .sign_with_keys(&keys)
+            .unwrap();
+        assert_eq!(ev.kind.as_u16(), 9001);
+        assert!(
+            has_tag(&ev, "p", &self_hex),
+            "self `p` tag was stripped at signing: {:?}",
+            ev.tags.iter().map(|t| t.as_slice()).collect::<Vec<_>>()
+        );
     }
 
     #[test]
