@@ -2,13 +2,17 @@ import 'package:flutter/material.dart';
 
 import '../theme/theme.dart';
 
+/// Height of the floating mobile tab bar, excluding its bottom clearance.
 const mobileTabBarHeight = 56.0;
+
+/// Gap between the floating mobile tab bar and the bottom safe area.
 const mobileTabBarBottomGap = Grid.twelve;
 
+/// Returns the shared footer backdrop height, including the logical safe area.
 double mobileTabFooterBackdropHeight(BuildContext context) =>
     mobileTabBarHeight +
     mobileTabBarBottomGap +
-    View.of(context).padding.bottom +
+    MediaQuery.paddingOf(context).bottom +
     Grid.xl +
     Grid.gutter;
 

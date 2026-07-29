@@ -307,19 +307,14 @@ class ActivityPage extends HookConsumerWidget {
           ),
         ],
       ),
-      body: Stack(
-        children: [
-          SafeArea(
-            top: false,
-            bottom: false,
-            child: Padding(
-              padding: EdgeInsets.only(
-                top: frostedAppBarHeight(context, titleStyle: headerTitleStyle),
-              ),
-              child: body,
-            ),
+      body: SafeArea(
+        top: false,
+        child: Padding(
+          padding: EdgeInsets.only(
+            top: frostedAppBarHeight(context, titleStyle: headerTitleStyle),
           ),
-        ],
+          child: body,
+        ),
       ),
     );
   }
