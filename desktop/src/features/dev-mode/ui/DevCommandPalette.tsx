@@ -202,6 +202,19 @@ export function DevCommandPalette({
     onClose,
   ]);
 
+  const archiveChannel = React.useCallback(async () => {
+    setActionError(null);
+    try {
+      await archiveMutation.mutateAsync();
+      onClose();
+      onChannelLeft();
+    } catch (error) {
+      setActionError(
+        error instanceof Error ? error.message : "Failed to archive channel.",
+      );
+    }
+  }, [archiveMutation, onChannelLeft, onClose]);
+
   const entries = React.useMemo<PaletteEntry[]>(() => {
     const needle = query.trim().toLowerCase();
 
@@ -300,6 +313,12 @@ export function DevCommandPalette({
               : "remove yourself",
             run: () => void leaveChannel(),
           },
+          {
+            id: "archive-channel",
+            label: `archive # ${activeChannel.name}`,
+            detail: "hide from the channel list",
+            run: () => void archiveChannel(),
+          },
         ]
       : [];
 
@@ -361,6 +380,7 @@ export function DevCommandPalette({
   }, [
     activeChannel,
     addUserToChannel,
+    archiveChannel,
     channels,
     isLastHumanMember,
     leaveChannel,
