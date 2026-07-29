@@ -44,6 +44,20 @@ struct StatusInputs<'a> {
     global: &'a super::GlobalAgentConfig,
 }
 
+/// Build the runtime status for one record.
+///
+/// This table is a **local-process view by construction**: every caller is
+/// keyed off `state.managed_agent_processes`, `start_pair` refuses a non-local
+/// backend outright, and `reconcile_managed_agent_runtimes` filters to
+/// `BackendKind::Local`. A provider-backed record therefore never produces a
+/// row here, and its liveness comes from relay presence instead.
+///
+/// That matters because `local_setup` below is unfiltered: it asks whether
+/// *this* machine could run the agent. For a remote record the answer is
+/// meaningless, and the UI turns `local_setup == false` into the copy "Needs
+/// setup on this device" — which would describe a machine the agent will never
+/// run on. If you widen a caller to reach non-local records, gate `local_setup`
+/// on `record.backend == BackendKind::Local` first.
 fn status_for_with(
     app: &AppHandle,
     record: &super::ManagedAgentRecord,

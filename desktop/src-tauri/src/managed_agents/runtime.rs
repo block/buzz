@@ -65,6 +65,8 @@ use instance_reaper::{buffer_contains_identifier, is_desktop_binary};
 
 // Exact-path harness sweep lives in runtime/sweep.rs (re-exported above).
 
+mod setup_payload;
+
 mod lifecycle;
 #[cfg(test)]
 use lifecycle::kill_stale_tracked_processes_with;
@@ -619,7 +621,7 @@ pub fn spawn_agent_child(
     let spawned_setup_mode;
     {
         use crate::managed_agents::readiness::EffectiveAgentEnv;
-        use crate::managed_agents::{agent_readiness, AgentReadiness, Requirement};
+        use crate::managed_agents::{agent_readiness, AgentReadiness};
 
         // Construct EffectiveAgentEnv from the descriptor computed above — no second
         // resolver call; the descriptor's env is already the fully layered result.
@@ -631,61 +633,7 @@ pub fn spawn_agent_child(
         // Compute the optional payload before touching the command.
         let setup_payload_json =
             if let AgentReadiness::NotReady { requirements } = agent_readiness(&effective) {
-                let reqs: Vec<serde_json::Value> = requirements
-                    .into_iter()
-                    .map(|r| match r {
-                        Requirement::NormalizedField { field } => serde_json::json!({
-                            "surface": "normalized_field",
-                            "field": field,
-                        }),
-                        Requirement::EnvKey { key } => serde_json::json!({
-                            "surface": "env_key",
-                            "key": key,
-                        }),
-                        Requirement::CliLogin {
-                            probe_args,
-                            setup_copy,
-                            availability,
-                        } => serde_json::json!({
-                            "surface": "cli_login",
-                            "probe_args": probe_args,
-                            "setup_copy": setup_copy,
-                            "availability": availability,
-                        }),
-                        Requirement::CliConfigInvalid {
-                            probe_args,
-                            setup_copy,
-                            diagnostic,
-                        } => serde_json::json!({
-                            "surface": "cli_config_invalid",
-                            "probe_args": probe_args,
-                            "setup_copy": setup_copy,
-                            "diagnostic": diagnostic,
-                        }),
-                        Requirement::GitBash => serde_json::json!({
-                            "surface": "git_bash",
-                        }),
-                        Requirement::MissingBinary { command } => serde_json::json!({
-                            "surface": "missing_binary",
-                            "command": command,
-                        }),
-                    })
-                    .collect();
-                let payload = serde_json::json!({
-                    "agent_name": record.name,
-                    "agent_pubkey": record.pubkey,
-                    "requirements": reqs,
-                });
-                match serde_json::to_string(&payload) {
-                    Ok(json) => Some(json),
-                    Err(e) => {
-                        eprintln!(
-                            "buzz-desktop: failed to serialize setup payload for {}: {e}",
-                            record.name
-                        );
-                        None
-                    }
-                }
+                setup_payload::build_setup_payload_json(&record.name, &record.pubkey, requirements)
             } else {
                 None
             };
@@ -854,9 +802,14 @@ pub fn spawn_agent_child(
     // `descriptor.env` is the fully-layered result from `resolve_effective_harness_descriptor`:
     // baked floor → runtime metadata → definition env (harness author defaults) →
     // global → live persona → per-agent, with reserved-key and malformed-key filtering
-    // applied. Writing it last lets user-provided values win over every Buzz-set env
-    // written above — reserved keys were already stripped from descriptor.env so they
-    // cannot clobber BUZZ_PRIVATE_KEY, NOSTR_PRIVATE_KEY, etc.
+    // applied. The persona layer is read live, so persona credential edits reach the
+    // agent on the next spawn — same refresh semantics as prompt/model/provider above
+    // and the provider deploy path.
+    //
+    // Writing it last lets user-provided values win over every Buzz-set env written
+    // above — EXCEPT reserved keys (BUZZ_PRIVATE_KEY, NOSTR_PRIVATE_KEY, BUZZ_AUTH_TAG,
+    // BUZZ_API_TOKEN, BUZZ_ACP_PRIVATE_KEY, BUZZ_ACP_API_TOKEN), which were already
+    // stripped from `descriptor.env` so they cannot clobber Buzz's identity.
     for (key, value) in &descriptor.env {
         command.env(key, value);
     }

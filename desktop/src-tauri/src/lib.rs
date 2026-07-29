@@ -802,6 +802,8 @@ pub fn run() {
             update_managed_agent,
             discover_backend_providers,
             probe_backend_provider,
+            discover_provider_harnesses,
+            probe_provider_models,
             list_personas,
             create_persona,
             update_persona,

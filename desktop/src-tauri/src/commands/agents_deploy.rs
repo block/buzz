@@ -99,12 +99,55 @@ pub(super) fn build_deploy_payload(
         effective_provider,
         effective_prompt,
         merged_env,
+        BinariesToPush::from_env(),
     ))
+}
+
+/// The binaries this machine offers to install on a host that resolves none.
+///
+/// A pair rather than two loose arguments because they are resolved together
+/// and read together by the provider, and because passing them in at all is
+/// what keeps [`deploy_payload_json`] pure.
+#[derive(Default)]
+pub(super) struct BinariesToPush {
+    pub buzz_acp: Option<String>,
+    pub buzz_cli: Option<String>,
+}
+
+impl BinariesToPush {
+    /// The dogfood seams as this process's environment currently reports them.
+    ///
+    /// Each var names a Linux binary on THIS machine; `buzz-backend-ssh`
+    /// streams it to the host inside the deploy script and installs it to
+    /// `~/.local/bin` when the host resolves none. Read at deploy time rather
+    /// than captured at startup, so a developer can point one at a fresh build
+    /// without restarting the app.
+    ///
+    /// Two vars rather than one because the two binaries are separately
+    /// policed: a host with no `buzz-acp` cannot run an agent at all, while a
+    /// host with no CLI runs one that simply cannot reply with
+    /// `buzz messages send`.
+    ///
+    /// They are env vars and not settings because the durable answer is not a
+    /// path at all: the release build should resolve the artifact for the
+    /// host's platform by version, with no user-visible choice. Until that
+    /// lands this is the whole surface.
+    fn from_env() -> Self {
+        Self {
+            buzz_acp: binary_to_push("BUZZ_ACP_PUSH_BINARY"),
+            buzz_cli: binary_to_push("BUZZ_CLI_PUSH_BINARY"),
+        }
+    }
 }
 
 /// Pure serialization half of [`build_deploy_payload`] — every field the
 /// provider harness receives is deliberately listed here, so payload
 /// completeness is testable without an `AppHandle`.
+///
+/// The push seams arrive as a parameter rather than being read from the
+/// environment here: reading them inside would make this function's output a
+/// property of the developer's shell (the seams are env vars a dogfooding
+/// developer sets), which no test could pin down.
 pub(super) fn deploy_payload_json(
     record: &ManagedAgentRecord,
     relay_url: String,
@@ -112,6 +155,7 @@ pub(super) fn deploy_payload_json(
     effective_provider: Option<String>,
     effective_prompt: Option<String>,
     merged_env: std::collections::BTreeMap<String, String>,
+    binaries_to_push: BinariesToPush,
 ) -> serde_json::Value {
     serde_json::json!({
         "name": &record.name,
@@ -130,5 +174,26 @@ pub(super) fn deploy_payload_json(
         "respond_to": record.respond_to,
         "respond_to_allowlist": &record.respond_to_allowlist,
         "env_vars": merged_env,
+        // A path on THIS machine to a Linux `buzz-acp` the provider may install
+        // on the host when the host has none. Serialized as `null` when unset —
+        // a provider reading it with `as_str()` sees `None`, exactly as it does
+        // for an absent key, so behavior is unchanged by default.
+        "buzz_acp_binary": binaries_to_push.buzz_acp,
+        // The same, for the `buzz` CLI. A local agent gets the CLI because the
+        // desktop bundles it as a sidecar and prepends its directory to the
+        // spawned harness's PATH; a remote agent is told by the very same system
+        // prompt to reply with `buzz messages send`, so without this the remote
+        // half of that contract is missing. Unlike `buzz-acp` its absence is a
+        // warning on the provider side, never a failed deploy.
+        "buzz_cli_binary": binaries_to_push.buzz_cli,
     })
+}
+
+/// A push seam's value, or `None` when unset or blank — blank being a var the
+/// user cleared rather than a request to push an empty path.
+fn binary_to_push(var: &str) -> Option<String> {
+    std::env::var(var)
+        .ok()
+        .map(|path| path.trim().to_string())
+        .filter(|path| !path.is_empty())
 }

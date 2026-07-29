@@ -1,9 +1,11 @@
-//! The `agent_command_override` decision family: divergence comparison,
-//! create-time and update-time resolution, and the record apply. Child module
-//! of `discovery` (split under the desktop file-size cap) so the override
-//! decisions stay next to the resolution ladder they feed.
+//! The create/update harness-pin decision family: divergence comparison,
+//! create-time and update-time command resolution, the create-time args
+//! decision, and the record apply. Child module of `discovery` (split under
+//! the desktop file-size cap) so the pin decisions stay next to the resolution
+//! ladder they feed.
 
-use super::{effective_agent_command, known_acp_runtime};
+use super::{effective_agent_command, known_acp_runtime, normalize_agent_args};
+use crate::managed_agents::types::BackendKind;
 
 /// Decide whether a user-picked harness command is an explicit per-instance
 /// pin or merely the persona's own runtime restated. Returns the override to
@@ -150,4 +152,41 @@ pub fn create_time_agent_command_override(
     }
 
     divergent_agent_command_override(persona_id, personas, picked_command)
+}
+
+/// Decide the `agent_args` to persist at AGENT CREATE time.
+///
+/// A LOCAL create sends no args on purpose (spawn re-resolves them from the
+/// definition on every start), so [`normalize_agent_args`] supplies the
+/// runtime's defaults by looking the command up in the LOCAL catalog.
+///
+/// A PROVIDER create is the opposite on both counts. Its args come from the
+/// remote host's `discover_harnesses` catalog and are pinned verbatim, because
+/// the record never spawns locally and so nothing resolves them a second time.
+/// Normalizing them would compare a REMOTE command against LOCAL runtime
+/// identity, which is a category error with real consequences: the host's
+/// `/opt/foo/bin/goose` normalizes to the basename `goose`, so a pin of
+/// `["acp", "--profile", "prod"]` survives only by accident, and a host binary
+/// that merely shares a basename with a local runtime (`codex`, `buzz-agent`)
+/// silently has its explicitly-chosen args rewritten — or emptied — before
+/// they ever reach the deploy payload.
+///
+/// So: pin as sent for a provider backend, normalize for a local one. Blank
+/// args are still dropped in both cases — an empty string is never a real
+/// argument, only a serialization artifact.
+pub fn create_time_agent_args(
+    backend: &BackendKind,
+    agent_command: &str,
+    agent_args: &[String],
+) -> Vec<String> {
+    let trimmed = agent_args
+        .iter()
+        .map(|arg| arg.trim().to_string())
+        .filter(|arg| !arg.is_empty())
+        .collect::<Vec<_>>();
+
+    match backend {
+        BackendKind::Provider { .. } => trimmed,
+        BackendKind::Local => normalize_agent_args(agent_command, trimmed),
+    }
 }

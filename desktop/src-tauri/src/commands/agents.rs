@@ -4,15 +4,15 @@ use tauri::{AppHandle, State};
 use crate::{
     app_state::AppState,
     managed_agents::{
-        build_managed_agent_summary, current_instance_id, discover_provider_candidates,
-        ensure_persona_is_active, find_managed_agent_mut, load_managed_agents, load_personas,
-        load_teams, managed_agent_avatar_url, normalize_agent_args, provider_deploy,
+        build_managed_agent_summary, create_time_agent_args, current_instance_id,
+        discover_provider_candidates, ensure_persona_is_active, find_managed_agent_mut,
+        load_managed_agents, load_personas, load_teams, managed_agent_avatar_url, provider_deploy,
         resolve_provider_binary, save_managed_agents, start_managed_agent_process,
         stop_managed_agent_process, stop_managed_agent_workspace_pair,
         sync_managed_agent_processes, try_regenerate_nest, validate_provider_config, BackendKind,
         CreateManagedAgentRequest, CreateManagedAgentResponse, ManagedAgentRecord,
-        ManagedAgentSummary, RelayMeshConfig, DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM,
-        DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
+        ManagedAgentSummary, ProviderFailure, RelayMeshConfig, DEFAULT_ACP_COMMAND,
+        DEFAULT_AGENT_PARALLELISM, DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
     },
     relay::{relay_ws_url_with_override, sync_managed_agent_profile},
     util::now_iso,
@@ -454,8 +454,15 @@ pub(super) async fn start_local_agent_with_preflight(
 /// again. Providers are expected to handle this as an update-in-place or no-op —
 /// the protocol does not include an explicit `undeploy` operation (deferred to v2).
 ///
-/// Returns Ok(()) on success, Err(message) on failure. Either way the record is
+/// Returns Ok(()) on success, Err(failure) on failure. Either way the record is
 /// updated and saved before returning.
+///
+/// The error is a [`ProviderFailure`] so a deploy that fails on a tailnet
+/// asking for browser re-auth keeps its recovery for callers that can render
+/// one; each caller drops it explicitly where it cannot. The record's
+/// `last_error` stays a plain string either way — it is a human-readable
+/// post-mortem read long after the fact, and an auth URL is a one-shot token
+/// that is stale by the time anyone reads it back.
 async fn deploy_to_provider(
     app: &AppHandle,
     state: &AppState,
@@ -464,7 +471,7 @@ async fn deploy_to_provider(
     config: &serde_json::Value,
     agent_json: serde_json::Value,
     cached_binary_path: Option<&str>,
-) -> Result<(), String> {
+) -> Result<(), ProviderFailure> {
     // Resolve via discovered candidates only. Cached path must match BOTH
     // "is a discovered candidate" AND "belongs to this provider_id". A tampered
     // record cannot redirect deploys to a different provider's binary.
@@ -509,7 +516,7 @@ async fn deploy_to_provider(
             rec.last_error = Some(e.message.clone());
             rec.updated_at = now_iso();
             save_managed_agents(app, &records)?;
-            return Err(e.message.clone());
+            return Err(e.clone());
         }
     }
     save_managed_agents(app, &records)?;
@@ -739,15 +746,10 @@ pub async fn create_managed_agent(
             &personas,
             agent_command_override.as_deref(),
         );
-        let agent_args = normalize_agent_args(
-            &agent_command,
-            input
-                .agent_args
-                .iter()
-                .map(|arg| arg.trim().to_string())
-                .filter(|arg| !arg.is_empty())
-                .collect::<Vec<_>>(),
-        );
+        // Local args are normalized against the LOCAL runtime catalog; a
+        // provider create's are pinned from the remote host's catalog. See
+        // `create_time_agent_args` for why the two must not share a path.
+        let agent_args = create_time_agent_args(&input.backend, &agent_command, &input.agent_args);
 
         // Derive MCP command exclusively from the runtime catalog — the
         // per-record field is never read at spawn time so user-supplied input
@@ -1019,7 +1021,11 @@ pub async fn create_managed_agent(
             };
             match deploy_to_provider(&app, &state, &pubkey, id, config, agent_json, None).await {
                 Ok(()) => spawn_error,
-                Err(e) => Some(e),
+                // `spawn_error` is a reported field of a SUCCEEDING create, not
+                // the command's error, so it stays a string. The agent record
+                // exists either way; a failed first deploy is retried through
+                // `start_managed_agent`, which is where the recovery lands.
+                Err(e) => Some(e.message),
             }
         } else {
             spawn_error
@@ -1064,6 +1070,14 @@ pub async fn create_managed_agent(
 }
 
 /// Data needed for background profile reconciliation after agent start.
+///
+/// Returns `String` rather than [`ProviderFailure`]: every surface that starts
+/// an agent renders the failure as a toast, and a toast has no room for an
+/// action. The conversion is explicit at the one site below rather than an
+/// `impl From<ProviderFailure> for String`, which would let any future caller
+/// drop a recovery by accident. Nothing is lost to the user here — the message
+/// names the problem and carries the URL as text — but a button on this path
+/// needs the toast layer to grow an action first.
 #[tauri::command]
 pub async fn start_managed_agent(
     pubkey: String,
@@ -1155,7 +1169,12 @@ pub async fn start_managed_agent(
                 agent_json,
                 cached_binary_path.as_deref(),
             )
-            .await?;
+            .await
+            // The one place a recovery is deliberately dropped, named rather
+            // than implicit: this command's failures are rendered as toasts,
+            // which have no room for an action. The message still carries the
+            // URL as text. Give the toast layer an action before widening this.
+            .map_err(|failure| failure.message)?;
 
             // Return updated summary.
             let _store_guard = state
@@ -1362,9 +1381,9 @@ pub async fn delete_managed_agent(
 mod deploy;
 use deploy::build_deploy_payload;
 #[cfg(test)]
-use deploy::deploy_payload_json;
-#[cfg(test)]
 pub(crate) use deploy::resolve_deploy_model_provider;
+#[cfg(test)]
+use deploy::{deploy_payload_json, BinariesToPush};
 
 #[path = "agents_profile.rs"]
 mod profile;

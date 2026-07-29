@@ -753,6 +753,7 @@ fn apply_agent_command_update_concrete_pin_keeps_materialized_runtime() {
 
 // ── probe_codex_acp_version ───────────────────────────────────────────────────
 
+mod create_time_args;
 mod managed_path_resolution;
 
 #[cfg(unix)]

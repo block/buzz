@@ -136,6 +136,14 @@ fn is_reserved_recognises_full_list() {
 }
 
 #[test]
+fn reserved_keys_include_claude_code_executable() {
+    assert!(is_reserved_env_key("CLAUDE_CODE_EXECUTABLE"));
+    let agent = map(&[("CLAUDE_CODE_EXECUTABLE", "/tmp/untrusted-claude")]);
+    let merged = merged_user_env(&BTreeMap::new(), &agent);
+    assert!(merged.is_empty());
+}
+
+#[test]
 fn reserved_keys_include_agent_owner_for_legacy_records() {
     // Legacy records without auth_tag fall back to BUZZ_ACP_AGENT_OWNER
     // to enforce the respond-to gate. Must not be user-overridable.

@@ -436,6 +436,7 @@ fn deploy_payload_carries_the_full_behavioral_quad() {
         Some("openai".to_string()),
         None,
         std::collections::BTreeMap::new(),
+        BinariesToPush::default(),
     );
 
     assert_eq!(payload["parallelism"], 4);
@@ -444,4 +445,119 @@ fn deploy_payload_carries_the_full_behavioral_quad() {
     assert_eq!(payload["model"], "gpt-x");
     assert_eq!(payload["provider"], "openai");
     assert_eq!(payload["relay_url"], "wss://relay.example");
+    // Both push seams are opt-in: unresolved, the payload must carry no path,
+    // so a provider reading them sees the same `None` it saw before the seams
+    // existed.
+    assert!(payload["buzz_acp_binary"].is_null());
+    assert!(payload["buzz_cli_binary"].is_null());
+
+    // Resolved, each seam serializes as the path itself — the provider reads
+    // it with `as_str()` and streams that file to the host.
+    let pushed = deploy_payload_json(
+        &record,
+        "wss://relay.example".to_string(),
+        None,
+        None,
+        None,
+        std::collections::BTreeMap::new(),
+        BinariesToPush {
+            buzz_acp: Some("/tmp/buzz-acp".to_string()),
+            buzz_cli: Some("/tmp/buzz".to_string()),
+        },
+    );
+    assert_eq!(pushed["buzz_acp_binary"], "/tmp/buzz-acp");
+    assert_eq!(pushed["buzz_cli_binary"], "/tmp/buzz");
+}
+
+/// The whole point of routing an instance-dialog model edit through the
+/// DEFINITION for a provider-backed record: the edited model has to reach the
+/// host.
+///
+/// The desktop frontend saves the model onto the linked definition (see
+/// `instanceModelDefinitionWrite.ts`) because a linked record's own `model`
+/// column is never read — this resolver is what the deploy payload consults,
+/// and for a linked record it answers from the definition. This pins the
+/// provider-backed leg of that claim: a definition edit is visible to the
+/// next deploy even though the record still carries the pre-edit bytes.
+///
+/// It does NOT hot-swap a running remote agent. The payload is built per deploy
+/// call (`build_deploy_payload`, from create-with-spawn and
+/// `start_managed_agent`), so an already-deployed process keeps the model it
+/// launched with until the next deploy. That deploy does restart it — the SSH
+/// provider rewrites the systemd env file and unconditionally
+/// `systemctl --user restart`s the unit — so the redeploy applies the model;
+/// nothing short of one does.
+#[test]
+fn provider_backed_record_deploys_the_definition_model_after_an_edit() {
+    let mut record = bare_agent_record(Some("p1"), Some("pre-edit-model"), Some("anthropic"));
+    record.backend = BackendKind::Provider {
+        id: "ssh".to_string(),
+        config: serde_json::json!({ "host": "example" }),
+    };
+    // The definition as it stands after the instance dialog saved the edit.
+    let personas = vec![persona_record(
+        "p1",
+        Some("post-edit-model"),
+        Some("anthropic"),
+    )];
+    let global = crate::managed_agents::GlobalAgentConfig::default();
+
+    let (model, _provider) = resolve_deploy_model_provider(&record, &personas, &global);
+
+    assert_eq!(
+        model.as_deref(),
+        Some("post-edit-model"),
+        "the definition edit must reach the deploy payload; the record's own \
+         stale model column is never consulted for a linked instance"
+    );
+}
+
+/// The other half of the same guarantee: the SUMMARY the desktop reads back is
+/// resolved the same way, so the dialog reopens on the edited model rather than
+/// on the record's stale column.
+///
+/// This matters because nothing ever rewrites that column for a provider-backed
+/// record. `apply_persona_snapshot` would (its `record.model` assignment sits
+/// outside the local-only harness guard), but every live caller is
+/// local-gated — `start_local_agent_with_preflight` and the restart path both
+/// refuse a non-local record outright, and `restore_managed_agents_on_launch`
+/// filters to `BackendKind::Local`. The only unguarded caller is the
+/// `persona_source_version` backfill, a one-time legacy migration that skips any
+/// record already carrying a version (which every persona-linked create sets).
+///
+/// So the record column stays stale forever, and that is fine: it is never
+/// read. `resolve_effective_config` answers from the definition for a linked
+/// instance, and it is the single resolver behind BOTH the deploy payload and
+/// this summary.
+#[test]
+fn provider_backed_summary_resolves_the_definition_model_not_the_record() {
+    let mut record = bare_agent_record(Some("p1"), Some("pre-edit-model"), Some("anthropic"));
+    record.backend = BackendKind::Provider {
+        id: "ssh".to_string(),
+        config: serde_json::json!({ "host": "example" }),
+    };
+    let personas = vec![persona_record(
+        "p1",
+        Some("post-edit-model"),
+        Some("anthropic"),
+    )];
+    let global = crate::managed_agents::GlobalAgentConfig::default();
+
+    let resolved = crate::managed_agents::effective_config::resolve_effective_config(
+        &record, &personas, &global,
+    );
+    let cfg = match resolved {
+        crate::managed_agents::effective_config::EffectiveConfigResult::Resolved(cfg) => cfg,
+        _ => panic!("a linked record with a present definition must resolve"),
+    };
+
+    assert_eq!(
+        cfg.model.value.as_deref(),
+        Some("post-edit-model"),
+        "the summary's model is the definition's, so the record's stale \
+         `pre-edit-model` column is never surfaced to the dialog"
+    );
+    // The record itself is deliberately left untouched — proof that the fix
+    // does not depend on the record column ever being refreshed.
+    assert_eq!(record.model.as_deref(), Some("pre-edit-model"));
 }

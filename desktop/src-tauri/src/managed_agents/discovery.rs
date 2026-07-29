@@ -368,7 +368,9 @@ pub fn effective_agent_command(
 }
 
 mod overrides;
-pub use overrides::{apply_agent_command_update, create_time_agent_command_override};
+pub use overrides::{
+    apply_agent_command_update, create_time_agent_args, create_time_agent_command_override,
+};
 
 /// Prefix of the typed dangling-harness error produced by
 /// `try_record_agent_command` / `resolve_effective_harness_descriptor`.

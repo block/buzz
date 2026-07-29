@@ -411,6 +411,52 @@ pub fn provider_deploy(
         .ok_or_else(|| "deploy response missing agent_id".into())
 }
 
+/// Ask a provider which harnesses exist on the machine it deploys to.
+///
+/// This is the catalog the create dialog must pick from for a remote agent:
+/// the local `KNOWN_ACP_RUNTIMES` probe describes THIS computer, and what is
+/// installed here says nothing about what is installed there. The `command`
+/// on the chosen entry becomes the create-time `agentCommand` pin, which is
+/// the only channel by which the harness choice reaches the host (see
+/// `deploy_payload_json`).
+///
+/// The read is side-effect-free on the remote host, but it is a network round
+/// trip against a possibly distant machine, so the budget is generous.
+pub fn provider_discover_harnesses(
+    binary: &Path,
+    provider_config: &serde_json::Value,
+) -> Result<serde_json::Value, ProviderFailure> {
+    let request = serde_json::json!({
+        "op": "discover_harnesses",
+        "request_id": uuid::Uuid::new_v4().to_string(),
+        "provider_config": provider_config,
+    });
+    invoke_provider(binary, &request, Duration::from_secs(60))
+}
+
+/// Ask a provider for the model catalog of one remote harness.
+///
+/// `agent` carries the harness env (API keys) under `env_vars` — the same
+/// shape `deploy` uses — because that is the only key `invoke_provider`
+/// scrubs from error surfaces (`env_secrets_from_request`). Passing model env
+/// anywhere else would let a provider echo a credential back through an error
+/// string unredacted.
+pub fn provider_probe_models(
+    binary: &Path,
+    provider_config: &serde_json::Value,
+    harness: &serde_json::Value,
+    env_vars: &std::collections::BTreeMap<String, String>,
+) -> Result<serde_json::Value, ProviderFailure> {
+    let request = serde_json::json!({
+        "op": "probe_models",
+        "request_id": uuid::Uuid::new_v4().to_string(),
+        "provider_config": provider_config,
+        "harness": harness,
+        "agent": { "env_vars": env_vars },
+    });
+    invoke_provider(binary, &request, Duration::from_secs(150))
+}
+
 /// Validate provider_config: flat object, scalar values, no secret-like keys.
 pub fn validate_provider_config(config: &serde_json::Value) -> Result<(), String> {
     let obj = config
