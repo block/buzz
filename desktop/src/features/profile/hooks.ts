@@ -5,7 +5,6 @@ import type {
 } from "@tanstack/react-query";
 import * as React from "react";
 import {
-  keepPreviousData,
   useInfiniteQuery,
   useMutation,
   useQuery,
@@ -42,7 +41,7 @@ import {
   resolveAvatarDataUrl,
 } from "@/features/profile/lib/selfProfileStorage";
 import {
-  readCachedUserLabels,
+  resolveUserLabelPlaceholderData,
   writeCachedUserLabels,
 } from "@/features/profile/lib/userLabelStorage";
 import { useCommunities } from "@/features/communities/useCommunities";
@@ -376,11 +375,12 @@ export function useUsersBatchQuery(
     // Loading older messages grows the pubkey set, which changes this query's
     // key entirely. Without this, already-resolved authors would flash back
     // to their raw pubkey while the larger batch refetches.
-    placeholderData: keepPreviousData,
-    initialData: relayUrl
-      ? () => readCachedUserLabels(relayUrl, normalizedPubkeys)
-      : undefined,
-    initialDataUpdatedAt: 0,
+    placeholderData: (previousData) =>
+      resolveUserLabelPlaceholderData(
+        previousData,
+        relayUrl,
+        normalizedPubkeys,
+      ),
     staleTime: 60_000,
     gcTime: 5 * 60 * 1_000,
   });

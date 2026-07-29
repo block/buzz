@@ -119,6 +119,17 @@ export function readCachedUserLabels(
     : undefined;
 }
 
+export function resolveUserLabelPlaceholderData(
+  previousData: UsersBatchResponse | undefined,
+  relayUrl: string,
+  pubkeys: string[],
+): UsersBatchResponse | undefined {
+  return (
+    previousData ??
+    (relayUrl ? readCachedUserLabels(relayUrl, pubkeys) : undefined)
+  );
+}
+
 export function writeCachedUserLabels(
   relayUrl: string,
   profiles: Record<string, UserProfileSummary>,

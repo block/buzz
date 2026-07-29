@@ -63,6 +63,45 @@ test("reads cached labels as safe stale profile summaries", async () => {
   );
 });
 
+test("keeps previous full profiles ahead of persisted label placeholders", async () => {
+  const subject = await loadSubject();
+  assert.equal(typeof subject.resolveUserLabelPlaceholderData, "function");
+  installLocalStorage();
+  window.localStorage.setItem(
+    "buzz-user-labels.v1:wss://relay.example",
+    JSON.stringify({
+      version: 1,
+      profiles: {
+        abcdef: {
+          displayName: "Cached Alice",
+          name: "alice",
+          nip05Handle: null,
+          updatedAt: 100,
+        },
+      },
+    }),
+  );
+  const previous = {
+    profiles: {
+      abcdef: {
+        displayName: "Fresh Alice",
+        name: "alice",
+        avatarUrl: "https://relay.example/alice.png",
+        nip05Handle: null,
+        ownerPubkey: "owner",
+      },
+    },
+    missing: [],
+  };
+
+  assert.equal(
+    subject.resolveUserLabelPlaceholderData(previous, "wss://relay.example", [
+      "abcdef",
+    ]),
+    previous,
+  );
+});
+
 test("writes merge with existing labels and remain bounded", async () => {
   const subject = await loadSubject();
   assert.equal(typeof subject.writeCachedUserLabels, "function");
