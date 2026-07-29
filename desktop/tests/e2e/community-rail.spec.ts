@@ -69,6 +69,34 @@ test.describe("community rail", () => {
     await expect(page.getByTestId("community-rail-add")).toBeVisible();
   });
 
+  test("renders the flat developer variant in developer mode", async ({
+    page,
+  }) => {
+    await installMockBridge(page, undefined, { skipCommunitySeed: true });
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.addInitScript(() => {
+      localStorage.setItem("buzz.displayStyle", "developer");
+    });
+    await page.goto("/");
+
+    await page.getByTestId("dev-mode-composer").waitFor();
+    const rail = page.getByTestId("community-rail");
+    await expect(rail).toBeVisible();
+
+    // Developer mode squares off the tiles; standard mode rounds them.
+    const tile = page
+      .getByTestId(`community-rail-button-${COMMUNITY_A.id}`)
+      .locator(":scope > span")
+      .first();
+    await expect(tile).toHaveCSS("border-top-left-radius", "0px");
+
+    // Switching still works from the developer rail.
+    await page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`).click();
+    await expect(
+      page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`),
+    ).toHaveAttribute("aria-current", "true");
+  });
+
   test("restores pointer events after dismissing community settings", async ({
     page,
   }) => {

@@ -66,6 +66,50 @@ test("typed action verb outranks channel-name matches in the palette", async ({
   ).toBeVisible();
 });
 
+test("palette searches open channels the user hasn't joined and joins on enter", async ({
+  page,
+}) => {
+  await openDevModeChannel(page, "general");
+
+  // Seed a non-member open channel: create one, then leave it (the mock
+  // bridge drops membership without archiving).
+  await page.evaluate(async () => {
+    const w = window as Window & {
+      __TAURI_INTERNALS__?: {
+        invoke: (command: string, payload: unknown) => Promise<unknown>;
+      };
+      __BUZZ_E2E_INVALIDATE_CHANNELS__?: () => Promise<void>;
+    };
+    const created = (await w.__TAURI_INTERNALS__?.invoke("create_channel", {
+      name: "growth-experiments",
+      channelType: "stream",
+      visibility: "open",
+    })) as { id: string };
+    await w.__TAURI_INTERNALS__?.invoke("leave_channel", {
+      channelId: created.id,
+    });
+    await w.__BUZZ_E2E_INVALIDATE_CHANNELS__?.();
+  });
+
+  await page.keyboard.press("Control+o");
+  const palette = page.getByTestId("dev-mode-palette");
+  await expect(palette).toBeVisible();
+  await page.getByTestId("dev-mode-palette-input").pressSequentially("growth");
+
+  const entry = page
+    .getByTestId("dev-mode-palette-entry")
+    .filter({ hasText: "# growth-experiments" })
+    .first();
+  await expect(entry).toContainText("not joined");
+  await page.keyboard.press("Enter");
+
+  // Joined and opened: the palette closes and the channel is now current.
+  await expect(palette).not.toBeVisible();
+  await expect(page.getByTestId("dev-mode-topbar-channel")).toContainText(
+    "growth-experiments",
+  );
+});
+
 test("archiving a chat lands on the most recent non-pinned chat", async ({
   page,
 }) => {

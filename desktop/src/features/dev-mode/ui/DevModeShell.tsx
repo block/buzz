@@ -154,6 +154,20 @@ export function DevModeShell({
     [channelsQuery.data],
   );
 
+  // Open channels the user hasn't joined: the palette searches these and
+  // joins on enter, but they stay out of the left navigator until joined.
+  const discoverableChannels = React.useMemo(
+    () =>
+      (channelsQuery.data ?? []).filter(
+        (channel) =>
+          channel.channelType === "stream" &&
+          !channel.isMember &&
+          channel.visibility === "open" &&
+          channel.archivedAt === null,
+      ),
+    [channelsQuery.data],
+  );
+
   // `#channel` references: composers autocomplete these names and message
   // rows render matching tokens as clickable links to the channel.
   const channelRefs = React.useMemo<ChannelRef[]>(
@@ -933,6 +947,7 @@ export function DevModeShell({
           <DevCommandPalette
             activeChannel={topBarChannel}
             channels={[...sessions].reverse()}
+            discoverableChannels={discoverableChannels}
             initialMode={paletteInitialMode}
             myPubkey={identityQuery.data?.pubkey ?? null}
             onChannelLeft={handleChannelLeft}

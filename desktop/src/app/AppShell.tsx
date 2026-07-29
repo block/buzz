@@ -719,6 +719,11 @@ export function AppShell() {
                       onSwitchCommunity={handleSwitchCommunity}
                       onUpdateCommunity={communitiesHook.updateCommunity}
                       communities={communitiesHook.communities}
+                      variant={
+                        !settingsOpen && displayStyle === "developer"
+                          ? "developer"
+                          : "standard"
+                      }
                     />
                   ) : null}
                   <SidebarProvider className="min-h-0 flex-1 flex-col overflow-hidden">

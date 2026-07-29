@@ -29,12 +29,16 @@ import {
   sanitizeChannelName,
   uniqueChannelName,
 } from "@/features/dev-mode/lib/sessionNaming";
-import { subChannelName } from "@/features/dev-mode/lib/subChannels";
+import {
+  parseSubChannelName,
+  subChannelName,
+} from "@/features/dev-mode/lib/subChannels";
 import {
   useFlattenedUserSearchResults,
   useInfiniteUserSearchQuery,
 } from "@/features/profile/hooks";
 import type { SettingsSection } from "@/features/settings/ui/SettingsPanels";
+import { joinChannel } from "@/shared/api/tauriChannels";
 import type { Channel, UserSearchResult } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
@@ -83,6 +87,7 @@ const SETTINGS_ENTRIES: { section: SettingsSection; label: string }[] = [
  */
 export function DevCommandPalette({
   channels,
+  discoverableChannels,
   activeChannel,
   parentOfActive,
   myPubkey,
@@ -95,6 +100,8 @@ export function DevCommandPalette({
 }: {
   /** All session channels, newest first. */
   channels: Channel[];
+  /** Open channels the user has not joined; searchable, enter joins. */
+  discoverableChannels: Channel[];
   /** Channel that add-member/leave actions apply to (focused or previewed). */
   activeChannel: Channel | null;
   /** Set when the active channel is a `parent--sub` of an existing parent. */
@@ -271,6 +278,23 @@ export function DevCommandPalette({
       queryClient,
       updateChannelMutation,
     ],
+  );
+
+  const joinAndOpenChannel = React.useCallback(
+    async (channelId: string) => {
+      setActionError(null);
+      try {
+        await joinChannel(channelId);
+        await invalidateChannelState(queryClient, channelId);
+        onOpenChannel(channelId);
+        onClose();
+      } catch (error) {
+        setActionError(
+          error instanceof Error ? error.message : "Failed to join channel.",
+        );
+      }
+    },
+    [onClose, onOpenChannel, queryClient],
   );
 
   const archiveChannel = React.useCallback(async () => {
@@ -557,17 +581,39 @@ export function DevCommandPalette({
     }));
 
     if (!needle) return [...actions, ...channelEntries];
+
+    // Open channels the user hasn't joined only surface while searching —
+    // a relay can have hundreds and they'd drown the root list. Joining a
+    // `parent--sub` requires parent membership, so foreign subs are hidden.
+    const joinedNames = new Set(channels.map((channel) => channel.name));
+    const joinableEntries: PaletteEntry[] = discoverableChannels
+      .filter((channel) => {
+        const parsed = parseSubChannelName(channel.name);
+        return !parsed || joinedNames.has(parsed.parentName);
+      })
+      .map((channel) => ({
+        id: `join-${channel.id}`,
+        label: `# ${channel.name}`,
+        detail: "not joined · enter to join",
+        run: () => void joinAndOpenChannel(channel.id),
+      }));
+
     const matches = (entry: PaletteEntry) =>
       `${entry.label} ${entry.detail ?? ""}`.toLowerCase().includes(needle);
+    const matchesName = (entry: PaletteEntry) =>
+      entry.label.toLowerCase().includes(needle);
     // An action verb typed literally ("archive", "leave", "pin"…) beats
     // channel-name substring hits; otherwise a query is usually a channel
-    // lookup, so channels rank above incidental action matches.
+    // lookup, so channels rank above incidental action matches. Joined
+    // channels rank above joinable ones, which match on name only so
+    // typing "join" doesn't dump every discoverable channel.
     const matchedActions = actions.filter(matches);
     const startsWithNeedle = (entry: PaletteEntry) =>
       entry.label.toLowerCase().startsWith(needle);
     return [
       ...matchedActions.filter(startsWithNeedle),
       ...channelEntries.filter(matches),
+      ...joinableEntries.filter(matchesName),
       ...matchedActions.filter((entry) => !startsWithNeedle(entry)),
     ];
   }, [
@@ -575,7 +621,9 @@ export function DevCommandPalette({
     addUserToChannel,
     archiveChannel,
     channels,
+    discoverableChannels,
     isLastHumanMember,
+    joinAndOpenChannel,
     leaveChannel,
     membersQuery.data,
     mode,
