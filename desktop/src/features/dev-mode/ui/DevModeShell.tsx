@@ -11,6 +11,10 @@ import {
   groupSessionChannels,
   usePinnedChannels,
 } from "@/features/dev-mode/lib/pinnedChannels";
+import {
+  loadLastComposerModeKey,
+  storeLastComposerModeKey,
+} from "@/features/dev-mode/lib/composerModePreference";
 import type { MentionRecord } from "@/features/dev-mode/lib/mentionRecords";
 import {
   aggregateLastActivity,
@@ -90,7 +94,9 @@ export function DevModeShell({
 
   const [view, setView] = React.useState<ShellView>("fresh");
   const [input, setInput] = React.useState("");
-  const [modeKey, setModeKey] = React.useState<string | null>(null);
+  const [modeKey, setModeKey] = React.useState<string | null>(
+    loadLastComposerModeKey,
+  );
   const [activeSessionId, setActiveSessionId] = React.useState<string | null>(
     null,
   );
@@ -124,9 +130,10 @@ export function DevModeShell({
   const cardSelectionActive =
     view === "channel" && selectedRootId !== null && !threadOpen;
 
-  // Until the user Tab-cycles a selection, the composer targets the default
-  // agent — the first managed (local) agent, else the first agent; plain
-  // chat is only the default when no agents exist at all.
+  // The composer remembers the last target the user talked to (persisted
+  // across launches). Before any selection exists — or when the remembered
+  // agent vanishes — it falls back to the default: the first managed (local)
+  // agent, else the first agent; plain chat only when no agents exist.
   const defaultModeIndex = React.useMemo(() => {
     const managedIndex = modes.findIndex(
       (candidate) =>
@@ -407,7 +414,9 @@ export function DevModeShell({
     (direction: 1 | -1) => {
       if (modes.length === 0) return;
       const nextIndex = (modeIndex + direction + modes.length) % modes.length;
-      setModeKey(devComposerModeKey(modes[nextIndex]));
+      const nextKey = devComposerModeKey(modes[nextIndex]);
+      setModeKey(nextKey);
+      storeLastComposerModeKey(nextKey);
     },
     [modeIndex, modes],
   );
@@ -575,6 +584,7 @@ export function DevModeShell({
       }
       if (busy || !mode) return;
 
+      storeLastComposerModeKey(devComposerModeKey(mode));
       setBusy(true);
       setError(null);
       setInput("");
@@ -639,6 +649,7 @@ export function DevModeShell({
       if (!activeChannel || !mode) {
         throw new Error("Thread is no longer available.");
       }
+      storeLastComposerModeKey(devComposerModeKey(mode));
       if (selectedRoot) {
         await sendToSession(
           activeChannel,
