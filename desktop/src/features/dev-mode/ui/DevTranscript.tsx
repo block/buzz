@@ -33,24 +33,29 @@ import { useThreadReplies } from "@/features/messages/useThreadReplies";
 import type { Channel, RelayEvent } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 
-/** Newest prompt cards whose thread replies render inline without a click. */
-const AUTO_EXPAND_ROOT_COUNT = 3;
-
-/** Mounted only while expanded, so collapsed cards carry no query observer. */
-function ThreadReplies({
+/**
+ * The channel view always shows the first thread reply — the agent's
+ * response to the prompt — inline; every later reply lives in the side
+ * chat, collapsed here into a "… N more replies" affordance.
+ */
+function ThreadFirstReply({
   channel,
   rootId,
+  replyCount,
   currentPubkey,
   resolveName,
   resolveColor,
   resolveIsAgent,
+  onOpenThread,
 }: {
   channel: Channel;
   rootId: string;
+  replyCount: number;
   currentPubkey: string | null;
   resolveName: NameResolver;
   resolveColor: AuthorColorResolver;
   resolveIsAgent: AgentResolver;
+  onOpenThread: () => void;
 }) {
   const repliesQuery = useThreadReplies(channel, rootId);
   const replies = React.useMemo(
@@ -66,23 +71,27 @@ function ThreadReplies({
     [repliesQuery.data],
   );
 
-  // Replies sit on the same indent as the prompt that produced them.
+  const first = replies[0];
+  // The summary count can outrun the fetched subtree (live recounts) —
+  // trust whichever knows about more replies.
+  const moreCount = Math.max(replyCount, replies.length) - (first ? 1 : 0);
+
+  // The reply sits on the same indent as the prompt that produced it.
   return (
     <div className="mt-1">
-      {replies.map((reply) => (
+      {first ? (
         <DevMessageRow
-          key={reply.localKey ?? reply.id}
-          event={reply}
-          isSelf={reply.pubkey === currentPubkey}
-          reactions={reactions.get(reply.id)}
+          key={first.localKey ?? first.id}
+          event={first}
+          isSelf={first.pubkey === currentPubkey}
+          reactions={reactions.get(first.id)}
           resolveColor={resolveColor}
           resolveIsAgent={resolveIsAgent}
           resolveName={resolveName}
         />
-      ))}
-      {repliesQuery.isLoading ? (
+      ) : repliesQuery.isLoading ? (
         <div className="py-0.5 text-sm text-muted-foreground/60">
-          loading replies…
+          loading reply…
         </div>
       ) : null}
       {repliesQuery.isError ? (
@@ -92,6 +101,18 @@ function ThreadReplies({
           type="button"
         >
           failed to load replies — retry
+        </button>
+      ) : moreCount > 0 ? (
+        <button
+          className="mt-1 cursor-pointer py-0.5 text-sm text-muted-foreground hover:text-foreground"
+          data-testid="dev-mode-more-replies"
+          onClick={(event) => {
+            event.stopPropagation();
+            onOpenThread();
+          }}
+          type="button"
+        >
+          … {moreCount} more {moreCount === 1 ? "reply" : "replies"}
         </button>
       ) : null}
     </div>
@@ -139,7 +160,6 @@ function PromptCard({
   root,
   rootReactions,
   replyCount,
-  autoExpand,
   selected,
   currentPubkey,
   resolveName,
@@ -151,7 +171,6 @@ function PromptCard({
   root: RelayEvent;
   rootReactions: string[] | undefined;
   replyCount: number;
-  autoExpand: boolean;
   selected: boolean;
   currentPubkey: string | null;
   resolveName: NameResolver;
@@ -196,26 +215,17 @@ function PromptCard({
         resolveIsAgent={resolveIsAgent}
         resolveName={resolveName}
       />
-      {autoExpand && replyCount > 0 ? (
-        <ThreadReplies
+      {replyCount > 0 ? (
+        <ThreadFirstReply
           channel={channel}
           currentPubkey={currentPubkey}
+          onOpenThread={onOpenThread}
+          replyCount={replyCount}
           resolveColor={resolveColor}
           resolveIsAgent={resolveIsAgent}
           resolveName={resolveName}
           rootId={root.id}
         />
-      ) : replyCount > 0 ? (
-        <button
-          className="mt-1 cursor-pointer py-0.5 text-sm text-muted-foreground hover:text-foreground"
-          onClick={(event) => {
-            event.stopPropagation();
-            onOpenThread();
-          }}
-          type="button"
-        >
-          … {replyCount} {replyCount === 1 ? "reply" : "replies"}
-        </button>
       ) : null}
     </div>
   );
@@ -267,13 +277,12 @@ export function DevTranscript({
   // membership rows are narration only — ↑/↓ card navigation skips them.
   const items = React.useMemo(() => {
     const merged: Array<
-      | { type: "prompt"; root: RelayEvent; rootIndex: number }
+      | { type: "prompt"; root: RelayEvent }
       | { type: "membership"; change: MembershipChange }
     > = [
-      ...roots.map((root, rootIndex) => ({
+      ...roots.map((root) => ({
         type: "prompt" as const,
         root,
-        rootIndex,
       })),
       ...memberships.map((change) => ({
         type: "membership" as const,
@@ -334,9 +343,6 @@ export function DevTranscript({
           ) : (
             <PromptCard
               key={item.root.localKey ?? item.root.id}
-              autoExpand={
-                item.rootIndex >= roots.length - AUTO_EXPAND_ROOT_COUNT
-              }
               channel={channel}
               currentPubkey={currentPubkey}
               onOpenThread={() => onOpenThread(item.root.id)}
