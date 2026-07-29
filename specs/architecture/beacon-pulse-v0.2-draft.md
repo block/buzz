@@ -1,11 +1,11 @@
 # Beacon Pulse v0.2 (draft)
 
-Status: v0.1 (the pulse itself) is implemented in both portable relay
-adapters — the Cloudflare rendezvous (`cloudflare/portable-relay`) and the
-laptop node (`crates/buzz-local-relay`) — and deployed on the sovereign
-pair. v0.2 adds the response layer (kind 20701 semantics, the recognition
-tally, and the sessions observation) and is **specified but not yet
-implemented**. Kind numbers are in the shared registry
+Status: v0.2 is implemented in both portable relay adapters — the
+Cloudflare rendezvous (`cloudflare/portable-relay`) and the laptop node
+(`crates/buzz-local-relay`) — including response validation and ephemeral
+tallying, live authenticated-session observations, and the
+`buzz-pulse-watch` transition-driven responder — and deployed on the
+sovereign pair. Kind numbers are in the shared registry
 (`buzz-core/src/kind.rs`), PROVISIONAL pending upstream assignment.
 Companion to `sovereign-sync-agreement-v0.1-draft.md`: kind 30700 is the
 durable agreement, kind 20700 the ephemeral witness of now.
@@ -273,8 +273,10 @@ fold the tally into its next pulse:
 }
 ```
 
-- Latest stance per responder within the window wins; the tally resets when
-  the head advances.
+- Latest stance per responder for a pulse wins. Nodes retain concurrent
+  unexpired pulse rounds so a synthesized observation cannot invalidate a
+  response already in flight. The next pulse reports the newest answered
+  round for its current head; tallies cease to apply when the head advances.
 - The tally is the node's **observation of ephemeral traffic — a report,
   not a proof**. Responses cannot be audited after the fact (they were
   ephemeral); the honesty model is that any party with standing could have
@@ -309,9 +311,10 @@ The pulse is the question, responses are the roll, and the next pulse's
 local sovereign node and the cloud rendezvous — side by side; shared
 reality is visible exactly when their heads and agreements are compatible.
 `buzz-ctx pulse <relay-url>` targets one node. Any NIP-01 client can
-subscribe with `{"kinds": [20700]}`. Future: `buzz-ctx pulse --respond` to
-hold a subscription open and answer observed pulses with this machine's
-stance.
+subscribe with `{"kinds": [20700]}`. `buzz-drain --watch` runs
+`buzz-pulse-watch`, which holds an authenticated subscription open, drains
+declared streams when the rendezvous head advances, and answers each
+observed pulse with this machine's verified stance.
 
 ## Changelog
 
@@ -319,8 +322,9 @@ stance.
   procedure, freshness window, silence and non-durability rules);
   `coherence.sessions` (witnessed socket-layer presence, standing-gated);
   `coherence.recognition` (roll-call tally, report-not-proof); presence
-  prior-art positioning (upstream 20001/40902, NIP-38, NIP-53). Specified,
-  not yet implemented.
+  prior-art positioning (upstream 20001/40902, NIP-38, NIP-53);
+  transition-driven `buzz-pulse-watch` responder. Implemented in both
+  portable relay adapters.
 - **v0.1** — the pulse itself: kind 20700 shape, witness keys per adapter,
   synthesis-on-request + push-on-transition, standing rule, ephemeral
   guarantees. Implemented and deployed on both nodes of the sovereign pair.

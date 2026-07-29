@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# buzz-drain — the drain leg of the sharing protocol.
+#
+# With no arguments, pulls every rendezvous-custodied stream this node has
+# declared both halves for (read grant on cf-rendezvous + admit head on
+# ted-laptop) into the local sovereign journal. With --watch, holds one
+# authenticated Beacon subscription and runs that same cursor-safe drain after
+# each new signed rendezvous journal transition. One startup pulse guarantees
+# catch-up after downtime; identical heads are coalesced by buzz-pulse-watch.
+#
+# To add a stream: declare the read half (BUZZ_CTX_NODE=cf-rendezvous,
+# carrying existing grantees forward — read heads REPLACE), declare the admit
+# half, `buzz-ctx sync`, restart the local relay (admit trust loads at startup),
+# then add the stream ID below.
+set -uo pipefail
+
+HOME_DIR="${BUZZ_CTX_HOME:-$HOME/.buzz-local}"
+FROM="${BUZZ_CTX_CLOUD:-https://buzz-portable-relay.ted-slusser-a00.workers.dev}"
+TO="${BUZZ_CTX_LOCAL:-http://127.0.0.1:7777}"
+KEY="$HOME_DIR/node.key"
+
+STREAMS=(
+  shared/buzz-evolution-v1
+  shared/steward-reports
+  shared/tooling
+)
+
+if [ "${1:-}" = "--watch" ]; then
+  WITNESS="${BUZZ_PULSE_WITNESS:?BUZZ_PULSE_WITNESS must pin the rendezvous witness pubkey}"
+  exec "$HOME_DIR/bin/buzz-pulse-watch" \
+    --relay "$FROM" \
+    --local "$TO" \
+    --journal "$HOME_DIR/sovereign.ndjson" \
+    --key "$KEY" \
+    --witness "$WITNESS" \
+    --command "$0"
+fi
+
+if [ "$#" -ne 0 ]; then
+  echo "usage: buzz-drain [--watch]" >&2
+  exit 2
+fi
+
+status=0
+for stream in "${STREAMS[@]}"; do
+  cursor="$HOME_DIR/sovereign.ndjson.pull-cursor.${stream//\//-}"
+  if ! "$HOME_DIR/bin/buzz-relay-pull" \
+      --from "$FROM" --to "$TO" \
+      --source "$stream" --key "$KEY" \
+      --cursor-file "$cursor" 2>&1 | sed "s|^|[$stream] |"; then
+    echo "[$stream] drain failed" >&2
+    status=1
+  fi
+done
+exit "$status"

@@ -19,6 +19,7 @@ import {
 } from "./fixture";
 
 const KIND_HTTP_AUTH = 27_235;
+const KIND_RELAY_AUTH = 22_242;
 const KIND_SYNC_DECLARATION = 30_700;
 
 const OWNER_SECRET = hexToBytes(TEST_OWNER_SECRET_HEX);
@@ -101,6 +102,49 @@ async function queryPulses(
   return (await response.json()) as Event[];
 }
 
+function nextFrame(socket: WebSocket): Promise<unknown[]> {
+  return new Promise((resolve) => {
+    socket.addEventListener(
+      "message",
+      (message) => resolve(JSON.parse(String(message.data)) as unknown[]),
+      { once: true },
+    );
+  });
+}
+
+async function openAuthenticatedSocket(
+  secretKey: Uint8Array,
+  origin: string,
+): Promise<WebSocket> {
+  const response = await SELF.fetch(`${origin}/`, {
+    headers: { Upgrade: "websocket" },
+  });
+  const socket = response.webSocket;
+  if (socket === null) {
+    throw new Error("expected WebSocket upgrade response");
+  }
+  socket.accept();
+  const challengeFrame = await nextFrame(socket);
+  expect(challengeFrame[0]).toBe("AUTH");
+  const challenge = String(challengeFrame[1]);
+  const auth = finalizeEvent(
+    {
+      kind: KIND_RELAY_AUTH,
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [
+        ["relay", `${origin.replace(/^http/, "ws")}/`],
+        ["challenge", challenge],
+      ],
+      content: "",
+    },
+    secretKey,
+  );
+  const accepted = nextFrame(socket);
+  socket.send(JSON.stringify(["AUTH", auth]));
+  expect(await accepted).toEqual(["OK", auth.id, true, "authenticated"]);
+  return socket;
+}
+
 describe("Beacon pulse standing under required identity", () => {
   it("shows the owner the pulse with its agreement heads", async () => {
     const origin = "https://pulse-standing-owner.example";
@@ -148,5 +192,28 @@ describe("Beacon pulse standing under required identity", () => {
   it("denies the pulse to an authenticated stranger", async () => {
     const origin = "https://pulse-standing-stranger.example";
     expect(await queryPulses(generateSecretKey(), origin)).toEqual([]);
+  });
+
+  it("witnesses authenticated socket sessions without connection metadata", async () => {
+    const origin = "https://pulse-standing-sessions.example";
+    const ownerSocket = await openAuthenticatedSocket(OWNER_SECRET, origin);
+    const peerSocket = await openAuthenticatedSocket(PEER_SECRET, origin);
+
+    const pulse = (await queryPulses(OWNER_SECRET, origin))[0];
+    const content = JSON.parse(pulse.content) as {
+      coherence: {
+        sessions: { count: number; principals: string[] };
+      };
+    };
+    expect(content.coherence.sessions).toEqual({
+      count: 2,
+      principals: [
+        getPublicKey(OWNER_SECRET),
+        getPublicKey(PEER_SECRET),
+      ].sort(),
+    });
+
+    ownerSocket.close(1000, "done");
+    peerSocket.close(1000, "done");
   });
 });

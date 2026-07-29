@@ -11,11 +11,10 @@ pub mod declarations;
 /// Laptop NIP-42/NIP-98 authentication and authorization adapter.
 pub mod identity;
 
-use std::collections::HashMap;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 
 use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket};
@@ -36,8 +35,9 @@ use buzz_core::identity::{
 };
 use buzz_core::ingest::{apply_effective_event, decide_event, is_ephemeral_kind, EventDecision};
 use buzz_core::kind::{
-    event_kind_u32, KIND_BEACON_PULSE, KIND_NIP29_CREATE_GROUP, KIND_NIP29_GROUP_ADMINS,
-    KIND_NIP29_GROUP_MEMBERS, KIND_NIP29_GROUP_METADATA, KIND_SYNC_DECLARATION,
+    event_kind_u32, KIND_BEACON_PULSE, KIND_BEACON_RESPONSE, KIND_NIP29_CREATE_GROUP,
+    KIND_NIP29_GROUP_ADMINS, KIND_NIP29_GROUP_MEMBERS, KIND_NIP29_GROUP_METADATA,
+    KIND_SYNC_DECLARATION,
 };
 use buzz_core::replication::{
     ReplicationBatch, ReplicationCursor, ReplicationIngestOutcome, ReplicationReceipt,
@@ -75,6 +75,14 @@ const PULSE_ADAPTER_ID: &str = "portable-relay-laptop-v0.1";
 /// Role hint carried in Beacon pulse tags: the laptop node is the sovereign
 /// source of truth, where the Cloudflare custodian pulses as "rendezvous".
 const PULSE_ROLE_SOVEREIGN: &str = "sovereign";
+const DEFAULT_RECOGNITION_WINDOW_SECS: u64 = 300;
+const BEACON_STANCES: [&str; 5] = [
+    "recognize",
+    "advanced",
+    "conflict",
+    "diverged",
+    "unsatisfied",
+];
 
 /// Persistent or in-memory storage selection for a local relay.
 #[derive(Debug, Clone)]
@@ -526,6 +534,74 @@ impl ReplicationPolicy for ReplicationDisabled {
     }
 }
 
+#[derive(Default)]
+struct ActiveSessions {
+    counts: StdMutex<HashMap<PublicKey, usize>>,
+}
+
+impl ActiveSessions {
+    fn enter(self: &Arc<Self>, pubkey: PublicKey) -> SessionLease {
+        if let Ok(mut counts) = self.counts.lock() {
+            *counts.entry(pubkey).or_insert(0) += 1;
+        }
+        SessionLease {
+            sessions: Arc::clone(self),
+            pubkey,
+        }
+    }
+
+    fn snapshot(&self) -> (usize, Vec<String>) {
+        let Ok(counts) = self.counts.lock() else {
+            tracing::warn!("Beacon session registry lock poisoned");
+            return (0, Vec::new());
+        };
+        let count = counts.values().sum();
+        let mut principals: Vec<String> = counts.keys().map(PublicKey::to_hex).collect();
+        principals.sort();
+        (count, principals)
+    }
+}
+
+struct SessionLease {
+    sessions: Arc<ActiveSessions>,
+    pubkey: PublicKey,
+}
+
+#[derive(Default)]
+struct WebSocketIdentity {
+    principal: Option<AuthenticatedPrincipal>,
+    session_lease: Option<SessionLease>,
+}
+
+impl Drop for SessionLease {
+    fn drop(&mut self) {
+        let Ok(mut counts) = self.sessions.counts.lock() else {
+            tracing::warn!("Beacon session registry lock poisoned during disconnect");
+            return;
+        };
+        let Some(count) = counts.get_mut(&self.pubkey) else {
+            return;
+        };
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            counts.remove(&self.pubkey);
+        }
+    }
+}
+
+#[derive(Debug)]
+struct BeaconRound {
+    pulse_id: String,
+    head: String,
+    created_at: u64,
+    responses: BTreeMap<String, String>,
+}
+
+struct CurrentPulse {
+    event: Event,
+    head: Option<String>,
+}
+
 /// Shared state for the HTTP and WebSocket relay surfaces.
 pub struct LocalRelay {
     store: Arc<EventStore>,
@@ -540,6 +616,8 @@ pub struct LocalRelay {
     governance: Option<(PublicKey, String)>,
     /// Dedicated key used only for relay-authored discovery projections.
     relay_keys: Option<Keys>,
+    active_sessions: Arc<ActiveSessions>,
+    beacon_rounds: StdMutex<Vec<BeaconRound>>,
 }
 
 impl LocalRelay {
@@ -661,6 +739,8 @@ impl LocalRelay {
             artifacts_dir,
             governance,
             relay_keys,
+            active_sessions: Arc::new(ActiveSessions::default()),
+            beacon_rounds: StdMutex::new(Vec::new()),
         })
     }
 
@@ -670,6 +750,21 @@ impl LocalRelay {
     }
 
     async fn submit(&self, event: Event) -> Result<WriteResult, StoreError> {
+        self.submit_from(event, None).await
+    }
+
+    async fn submit_from(
+        &self,
+        event: Event,
+        principal: Option<&AuthenticatedPrincipal>,
+    ) -> Result<WriteResult, StoreError> {
+        let is_beacon_response = event_kind_u32(&event) == KIND_BEACON_RESPONSE;
+        if is_beacon_response && self.identity.is_some() && !self.pulse_visible_to(principal) {
+            return Ok(WriteResult::rejected(
+                &event,
+                "invalid: responder lacks Beacon standing",
+            ));
+        }
         let projected = if event_kind_u32(&event) == KIND_NIP29_CREATE_GROUP {
             match self.project_group_create(&event) {
                 Ok(projected) => projected,
@@ -684,6 +779,16 @@ impl LocalRelay {
             Vec::new()
         };
         let result = self.store.accept(event.clone()).await?;
+        if is_beacon_response
+            && result.accepted
+            && result.message == "ephemeral"
+            && !self.record_beacon_response(&event)
+        {
+            return Ok(WriteResult::rejected(
+                &event,
+                "invalid: response does not answer the active Beacon pulse",
+            ));
+        }
         if result.publish_live {
             let _ = self.live_events.send(event);
             self.publish_projected_events(projected).await?;
@@ -692,7 +797,8 @@ impl LocalRelay {
             // Ephemeral acceptances change no journal state and stay silent.
             if result.message == "stored" {
                 if let Some(pulse) = self.current_pulse().await {
-                    let _ = self.live_events.send(pulse);
+                    self.register_pulse(&pulse);
+                    let _ = self.live_events.send(pulse.event);
                 }
             }
         }
@@ -706,7 +812,7 @@ impl LocalRelay {
     /// stored state); `None` when the relay carries no dedicated key.
     /// Signed with the relay key: the node witnesses in its own voice,
     /// never the owner's.
-    async fn current_pulse(&self) -> Option<Event> {
+    async fn current_pulse(&self) -> Option<CurrentPulse> {
         let keys = self.relay_keys.as_ref()?;
         let (sequence, head, previous, agreements, admit_claimed) = {
             let inner = self.store.inner.lock().await;
@@ -738,38 +844,163 @@ impl LocalRelay {
             }
             (sequence, head, previous, agreements, admit_claimed)
         };
+        let recognition = self.pulse_recognition(head.as_deref());
         let label = self
             .governance
             .as_ref()
             .map(|(_, label)| label.clone())
             .unwrap_or_default();
+        let mut coherence = json!({
+            "governance": {
+                "peers": if admit_claimed { "journal" } else { "bootstrap" },
+            },
+        });
+        if self.identity.is_some() {
+            let (count, principals) = self.active_sessions.snapshot();
+            coherence["sessions"] = json!({
+                "count": count,
+                "principals": principals,
+            });
+        }
+        if let Some(recognition) = recognition {
+            coherence["recognition"] = recognition;
+        }
         let content = json!({
             "node": label,
             "label": label,
             "adapter": PULSE_ADAPTER_ID,
-            "journal": { "sequence": sequence, "head": head },
+            "journal": { "sequence": sequence, "head": head.clone() },
             "previous": previous,
             // The laptop is a push source: it holds no destination-side
             // replication checkpoints (the push cursor lives with the
             // pusher, not the relay).
             "checkpoints": {},
             "agreements": agreements,
-            "coherence": {
-                "governance": {
-                    "peers": if admit_claimed { "journal" } else { "bootstrap" },
-                },
-            },
+            "coherence": coherence,
         });
         let mut tags = Vec::new();
         if !label.is_empty() {
             tags.push(Tag::parse(["n", label.as_str()]).ok()?);
         }
         tags.push(Tag::parse(["role", PULSE_ROLE_SOVEREIGN]).ok()?);
-        EventBuilder::new(Kind::Custom(KIND_BEACON_PULSE as u16), content.to_string())
+        let event = EventBuilder::new(Kind::Custom(KIND_BEACON_PULSE as u16), content.to_string())
             .tags(tags)
             .sign_with_keys(keys)
             .inspect_err(|error| tracing::warn!(%error, "beacon pulse signing failed"))
-            .ok()
+            .ok()?;
+        Some(CurrentPulse { event, head })
+    }
+
+    fn register_session(&self, pubkey: PublicKey) -> SessionLease {
+        self.active_sessions.enter(pubkey)
+    }
+
+    fn pulse_recognition(&self, head: Option<&str>) -> Option<Value> {
+        let head = head?;
+        let now = Utc::now().timestamp().max(0) as u64;
+        let Ok(rounds) = self.beacon_rounds.lock() else {
+            tracing::warn!("Beacon recognition lock poisoned");
+            return None;
+        };
+        let round = rounds.iter().rev().find(|round| {
+            round.head == head
+                && now
+                    <= round
+                        .created_at
+                        .saturating_add(DEFAULT_RECOGNITION_WINDOW_SECS)
+                && !round.responses.is_empty()
+        })?;
+        Some(json!({
+            "head": round.head,
+            "pulse": round.pulse_id,
+            "responses": round.responses,
+            "window_secs": DEFAULT_RECOGNITION_WINDOW_SECS,
+        }))
+    }
+
+    fn register_pulse(&self, pulse: &CurrentPulse) {
+        let Ok(mut rounds) = self.beacon_rounds.lock() else {
+            tracing::warn!("Beacon recognition lock poisoned while opening a roll");
+            return;
+        };
+        let cutoff = pulse
+            .event
+            .created_at
+            .as_secs()
+            .saturating_sub(DEFAULT_RECOGNITION_WINDOW_SECS);
+        rounds.retain(|round| round.created_at >= cutoff);
+        if let Some(head) = pulse.head.as_ref() {
+            rounds.push(BeaconRound {
+                pulse_id: pulse.event.id.to_hex(),
+                head: head.clone(),
+                created_at: pulse.event.created_at.as_secs(),
+                responses: BTreeMap::new(),
+            });
+        }
+    }
+
+    fn record_beacon_response(&self, event: &Event) -> bool {
+        let Some(keys) = self.relay_keys.as_ref() else {
+            return false;
+        };
+        let Some(pulse_id) = event_tag_value(event, "e") else {
+            return false;
+        };
+        let Ok(mut rounds) = self.beacon_rounds.lock() else {
+            tracing::warn!("Beacon recognition lock poisoned while recording a response");
+            return false;
+        };
+        let Some(round) = rounds.iter_mut().find(|round| round.pulse_id == pulse_id) else {
+            return false;
+        };
+        let witness_pubkey = keys.public_key().to_hex();
+        let now = Utc::now().timestamp().max(0) as u64;
+        let created_at = event.created_at.as_secs();
+        if created_at < round.created_at
+            || created_at
+                > round
+                    .created_at
+                    .saturating_add(DEFAULT_RECOGNITION_WINDOW_SECS)
+            || now
+                > round
+                    .created_at
+                    .saturating_add(DEFAULT_RECOGNITION_WINDOW_SECS)
+            || event_tag_value(event, "p") != Some(witness_pubkey.as_str())
+        {
+            return false;
+        }
+        let Ok(content) = serde_json::from_str::<Value>(&event.content) else {
+            return false;
+        };
+        let Some(content) = content.as_object() else {
+            return false;
+        };
+        let Some(stance) = content.get("stance").and_then(Value::as_str) else {
+            return false;
+        };
+        if !BEACON_STANCES.contains(&stance)
+            || content.get("head").and_then(Value::as_str) != Some(round.head.as_str())
+        {
+            return false;
+        }
+        let Some(mine) = content.get("mine").and_then(Value::as_object) else {
+            return false;
+        };
+        if mine.get("sequence").and_then(Value::as_u64).is_none()
+            || !mine.get("head").is_some_and(|head| {
+                head.is_null() || head.as_str().is_some_and(is_lower_hex_event_id)
+            })
+            || !content
+                .get("observed")
+                .and_then(Value::as_object)
+                .is_some_and(|observed| valid_beacon_observed(stance, observed))
+        {
+            return false;
+        }
+        round
+            .responses
+            .insert(event.pubkey.to_hex(), stance.to_string());
+        true
     }
 
     /// Who may observe the pulse. It reveals journal metadata (head IDs and
@@ -965,9 +1196,10 @@ impl LocalRelay {
             .collect();
         if !pulse_filters.is_empty() && self.pulse_visible_to(principal) {
             if let Some(pulse) = self.current_pulse().await {
-                if filters_match(&pulse_filters, &stored_event(pulse.clone())) {
+                if filters_match(&pulse_filters, &stored_event(pulse.event.clone())) {
+                    self.register_pulse(&pulse);
                     // Newest-first ordering: the pulse is signed at "now".
-                    events.insert(0, pulse);
+                    events.insert(0, pulse.event);
                 }
             }
         }
@@ -1119,7 +1351,7 @@ async fn submit_event(
     let event: Event = serde_json::from_slice(&body)
         .map_err(|error| ApiError::BadRequest(format!("invalid event JSON: {error}")))?;
     relay.authorize_direct(principal.as_ref(), &event)?;
-    Ok(Json(relay.submit(event).await?))
+    Ok(Json(relay.submit_from(event, principal.as_ref()).await?))
 }
 
 async fn query_events(
@@ -1163,7 +1395,7 @@ async fn authenticate_http_method(
     path: &str,
     body: &[u8],
 ) -> Result<Option<AuthenticatedPrincipal>, ApiError> {
-    let Some(identity) = relay.identity.as_ref() else {
+    let Some(adapter) = relay.identity.as_ref() else {
         return Ok(None);
     };
     let host = headers
@@ -1182,7 +1414,7 @@ async fn authenticate_http_method(
         .map_err(|_| LocalIdentityError::denied(IdentityDenialCode::InvalidEvidence))?;
     let event_json = String::from_utf8(decoded)
         .map_err(|_| LocalIdentityError::denied(IdentityDenialCode::InvalidEvidence))?;
-    let principal = identity
+    let principal = adapter
         .authenticate(
             LocalAuthenticationEvidence::Nip98 {
                 event_json,
@@ -1500,7 +1732,7 @@ async fn websocket_session(socket: WebSocket, relay: Arc<LocalRelay>, audience: 
         .identity
         .as_ref()
         .map(|_| buzz_auth::generate_challenge());
-    let mut principal = None;
+    let mut identity = WebSocketIdentity::default();
 
     if let Some(challenge) = challenge.as_ref() {
         if send_json(&mut sender, json!(["AUTH", challenge]))
@@ -1524,7 +1756,7 @@ async fn websocket_session(socket: WebSocket, relay: Arc<LocalRelay>, audience: 
                     message,
                     &relay,
                     &mut subscriptions,
-                    &mut principal,
+                    &mut identity,
                     challenge.as_deref(),
                     audience.as_deref(),
                     &mut sender,
@@ -1544,11 +1776,15 @@ async fn websocket_session(socket: WebSocket, relay: Arc<LocalRelay>, audience: 
                             // Pulses carry their own standing rule: they are
                             // addressed to the parties of the node's
                             // agreements, not disclosed by kind policy.
-                            let visible = if event_kind_u32(&event) == KIND_BEACON_PULSE {
-                                relay.pulse_visible_to(principal.as_ref())
+                            let kind = event_kind_u32(&event);
+                            let visible = if matches!(
+                                kind,
+                                KIND_BEACON_PULSE | KIND_BEACON_RESPONSE
+                            ) {
+                                relay.pulse_visible_to(identity.principal.as_ref())
                             } else {
                                 relay.event_is_visible(
-                                    principal.as_ref(),
+                                    identity.principal.as_ref(),
                                     ReadOperation::LiveDelivery,
                                     &event,
                                 )
@@ -1587,7 +1823,7 @@ async fn handle_client_message<S>(
     message: Message,
     relay: &LocalRelay,
     subscriptions: &mut HashMap<String, Vec<Filter>>,
-    principal: &mut Option<AuthenticatedPrincipal>,
+    identity: &mut WebSocketIdentity,
     challenge: Option<&str>,
     audience: Option<&str>,
     sender: &mut S,
@@ -1613,11 +1849,20 @@ where
 
             match verb {
                 "AUTH" => {
-                    handle_ws_auth(&parsed, relay, principal, challenge, audience, sender).await
+                    handle_ws_auth(&parsed, relay, identity, challenge, audience, sender).await
                 }
-                "EVENT" => handle_ws_event(&parsed, relay, principal.as_ref(), sender).await,
+                "EVENT" => {
+                    handle_ws_event(&parsed, relay, identity.principal.as_ref(), sender).await
+                }
                 "REQ" => {
-                    handle_ws_req(&parsed, relay, subscriptions, principal.as_ref(), sender).await
+                    handle_ws_req(
+                        &parsed,
+                        relay,
+                        subscriptions,
+                        identity.principal.as_ref(),
+                        sender,
+                    )
+                    .await
                 }
                 "CLOSE" => {
                     if let Some(subscription_id) = parsed.get(1).and_then(Value::as_str) {
@@ -1640,7 +1885,7 @@ where
 async fn handle_ws_auth<S>(
     parts: &[Value],
     relay: &LocalRelay,
-    principal: &mut Option<AuthenticatedPrincipal>,
+    identity: &mut WebSocketIdentity,
     challenge: Option<&str>,
     audience: Option<&str>,
     sender: &mut S,
@@ -1657,7 +1902,7 @@ where
         }
     };
     let event_id = event.id.to_hex();
-    let Some(identity) = relay.identity.as_ref() else {
+    let Some(adapter) = relay.identity.as_ref() else {
         return send_json(
             sender,
             json!(["OK", event_id, false, "authentication_not_enabled"]),
@@ -1670,12 +1915,12 @@ where
             .await
             .is_ok();
     };
-    if principal.is_some() {
+    if identity.principal.is_some() {
         return send_json(sender, json!(["OK", event_id, false, "replay_detected"]))
             .await
             .is_ok();
     }
-    match identity
+    match adapter
         .authenticate(
             LocalAuthenticationEvidence::Nip42 {
                 event,
@@ -1686,7 +1931,9 @@ where
         .await
     {
         Ok(authenticated) => {
-            *principal = Some(authenticated);
+            identity.session_lease =
+                principal_pubkey(&authenticated).map(|pubkey| relay.register_session(pubkey));
+            identity.principal = Some(authenticated);
             send_json(sender, json!(["OK", event_id, true, "authenticated"]))
                 .await
                 .is_ok()
@@ -1726,7 +1973,7 @@ where
         .await
         .is_ok();
     }
-    let result = match relay.submit(event).await {
+    let result = match relay.submit_from(event, principal).await {
         Ok(result) => result,
         Err(error) => {
             tracing::error!(%error, "local event persistence failed");
@@ -1964,6 +2211,42 @@ fn event_tag_value<'a>(event: &'a Event, name: &str) -> Option<&'a str> {
             .then(|| values.get(1).map(String::as_str))
             .flatten()
     })
+}
+
+fn is_lower_hex_event_id(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn valid_beacon_observed(stance: &str, observed: &serde_json::Map<String, Value>) -> bool {
+    match stance {
+        "recognize" => true,
+        "advanced" => observed.get("since").and_then(Value::as_u64).is_some(),
+        "conflict" => ["claim", "mine"].into_iter().all(|field| {
+            observed
+                .get(field)
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.is_empty())
+        }),
+        "diverged" => {
+            matches!(
+                observed.get("measure").and_then(Value::as_str),
+                Some("head-unknown" | "agreements")
+            ) && observed
+                .get("detail")
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.is_empty())
+        }
+        "unsatisfied" => ["agreement", "reason"].into_iter().all(|field| {
+            observed
+                .get(field)
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.is_empty())
+        }),
+        _ => false,
+    }
 }
 
 fn parse_tag<const N: usize>(values: [&str; N]) -> Result<Tag, Nip29ProjectionError> {
@@ -2403,6 +2686,55 @@ mod tests {
         serde_json::from_str(&event.content).expect("pulse content is JSON")
     }
 
+    fn beacon_response(
+        responder: &Keys,
+        pulse: &Event,
+        head: &str,
+        mine_sequence: u64,
+        mine_head: &str,
+    ) -> Event {
+        beacon_response_with(
+            responder,
+            pulse,
+            head,
+            mine_sequence,
+            mine_head,
+            "recognize",
+            json!({}),
+        )
+    }
+
+    fn beacon_response_with(
+        responder: &Keys,
+        pulse: &Event,
+        head: &str,
+        mine_sequence: u64,
+        mine_head: &str,
+        stance: &str,
+        observed: Value,
+    ) -> Event {
+        EventBuilder::new(
+            Kind::Custom(KIND_BEACON_RESPONSE as u16),
+            json!({
+                "stance": stance,
+                "head": head,
+                "mine": {
+                    "sequence": mine_sequence,
+                    "head": mine_head,
+                },
+                "observed": observed,
+            })
+            .to_string(),
+        )
+        .tags(vec![
+            Tag::parse(["e", pulse.id.to_hex().as_str()]).expect("e tag parses"),
+            Tag::parse(["p", pulse.pubkey.to_hex().as_str()]).expect("p tag parses"),
+            Tag::parse(["role", "participant"]).expect("role tag parses"),
+        ])
+        .sign_with_keys(responder)
+        .expect("response signs")
+    }
+
     #[tokio::test]
     async fn beacon_pulse_is_synthesized_only_on_explicit_request() {
         let witness = Keys::generate();
@@ -2465,6 +2797,106 @@ mod tests {
         assert_eq!(content["journal"]["sequence"], 2);
         assert_eq!(content["journal"]["head"], second.id.to_hex());
         assert_eq!(content["previous"], first.id.to_hex());
+    }
+
+    #[tokio::test]
+    async fn beacon_responses_are_validated_and_folded_into_the_next_pulse() {
+        let witness = Keys::generate();
+        let responder = Keys::generate();
+        let relay = ephemeral_relay(Some(witness)).await;
+        let note = signed_event(1, "recognized head");
+        relay.submit(note.clone()).await.expect("note submits");
+        let pulse = relay
+            .query_for(None, ReadOperation::Query, &[pulse_filter()])
+            .await
+            .expect("pulse query succeeds")
+            .remove(0);
+
+        let response = beacon_response(&responder, &pulse, &note.id.to_hex(), 1, &note.id.to_hex());
+        let accepted = relay
+            .submit(response.clone())
+            .await
+            .expect("response submission completes");
+        assert!(accepted.accepted);
+        assert_eq!(accepted.message, "ephemeral");
+
+        let next = relay
+            .query_for(None, ReadOperation::Query, &[pulse_filter()])
+            .await
+            .expect("next pulse query succeeds")
+            .remove(0);
+        let responder_hex = responder.public_key().to_hex();
+        assert_eq!(
+            pulse_content(&next)["coherence"]["recognition"],
+            json!({
+                "head": note.id.to_hex(),
+                "pulse": pulse.id.to_hex(),
+                "responses": {
+                    (responder_hex): "recognize",
+                },
+                "window_secs": DEFAULT_RECOGNITION_WINDOW_SECS,
+            })
+        );
+
+        let stored_responses = relay
+            .store
+            .query(&[Filter::new().kind(Kind::Custom(KIND_BEACON_RESPONSE as u16))])
+            .await
+            .expect("response query succeeds");
+        assert!(stored_responses.is_empty());
+    }
+
+    #[tokio::test]
+    async fn beacon_response_must_restate_the_active_head() {
+        let witness = Keys::generate();
+        let responder = Keys::generate();
+        let relay = ephemeral_relay(Some(witness)).await;
+        let note = signed_event(1, "real head");
+        relay.submit(note.clone()).await.expect("note submits");
+        let pulse = relay
+            .query_for(None, ReadOperation::Query, &[pulse_filter()])
+            .await
+            .expect("pulse query succeeds")
+            .remove(0);
+        let wrong_head = "ab".repeat(32);
+        let response = beacon_response(&responder, &pulse, &wrong_head, 1, &note.id.to_hex());
+
+        let rejected = relay
+            .submit(response)
+            .await
+            .expect("response submission completes");
+        assert!(!rejected.accepted);
+        assert!(rejected.message.contains("active Beacon pulse"));
+    }
+
+    #[tokio::test]
+    async fn beacon_response_requires_stance_specific_evidence() {
+        let witness = Keys::generate();
+        let responder = Keys::generate();
+        let relay = ephemeral_relay(Some(witness)).await;
+        let note = signed_event(1, "real head");
+        relay.submit(note.clone()).await.expect("note submits");
+        let pulse = relay
+            .query_for(None, ReadOperation::Query, &[pulse_filter()])
+            .await
+            .expect("pulse query succeeds")
+            .remove(0);
+        let response = beacon_response_with(
+            &responder,
+            &pulse,
+            &note.id.to_hex(),
+            2,
+            &note.id.to_hex(),
+            "advanced",
+            json!({}),
+        );
+
+        let rejected = relay
+            .submit(response)
+            .await
+            .expect("response submission completes");
+        assert!(!rejected.accepted);
+        assert!(rejected.message.contains("active Beacon pulse"));
     }
 
     #[tokio::test]
@@ -2574,5 +3006,40 @@ mod tests {
         assert!(relay.pulse_visible_to(Some(&principal(peer.public_key()))));
         assert!(!relay.pulse_visible_to(Some(&principal(stranger.public_key()))));
         assert!(!relay.pulse_visible_to(None));
+
+        let _owner_session = relay.register_session(owner.public_key());
+        let _peer_session = relay.register_session(peer.public_key());
+        let duplicate_peer_session = relay.register_session(peer.public_key());
+        let owner_principal = principal(owner.public_key());
+        let mut session_principals = vec![owner.public_key().to_hex(), peer.public_key().to_hex()];
+        session_principals.sort();
+        let pulse = relay
+            .query_for(
+                Some(&owner_principal),
+                ReadOperation::Query,
+                &[pulse_filter()],
+            )
+            .await
+            .expect("owner pulse query succeeds")
+            .remove(0);
+        assert_eq!(
+            pulse_content(&pulse)["coherence"]["sessions"],
+            json!({
+                "count": 3,
+                "principals": session_principals,
+            })
+        );
+
+        drop(duplicate_peer_session);
+        let pulse = relay
+            .query_for(
+                Some(&owner_principal),
+                ReadOperation::Query,
+                &[pulse_filter()],
+            )
+            .await
+            .expect("owner pulse query succeeds")
+            .remove(0);
+        assert_eq!(pulse_content(&pulse)["coherence"]["sessions"]["count"], 2);
     }
 }

@@ -6,8 +6,12 @@ import {
   verifyEvent,
   type Event,
 } from "nostr-tools";
-import { describe, expect, it } from "vitest";
-import { KIND_BEACON_PULSE, ADAPTER_ID } from "../src/pulse";
+import { describe, expect, it, vi } from "vitest";
+import {
+  ADAPTER_ID,
+  KIND_BEACON_PULSE,
+  KIND_BEACON_RESPONSE,
+} from "../src/pulse";
 import { hexToBytes } from "./replication/peer-fixture";
 import { TEST_WITNESS_SECRET_HEX } from "./pulse/fixture";
 
@@ -21,7 +25,16 @@ interface PulseContent {
   previous: string | null;
   checkpoints: Record<string, string>;
   agreements: Record<string, string>;
-  coherence: { governance: Record<string, string> };
+  coherence: {
+    governance: Record<string, string>;
+    sessions?: { count: number; principals: string[] };
+    recognition?: {
+      head: string;
+      pulse: string;
+      responses: Record<string, string>;
+      window_secs: number;
+    };
+  };
 }
 
 function pulseContent(event: Event): PulseContent {
@@ -37,6 +50,36 @@ function signedNote(secretKey: Uint8Array, content: string): Event {
           created_at: Math.floor(Date.now() / 1000),
           tags: [],
           content,
+        },
+        secretKey,
+      ),
+    ),
+  ) as Event;
+}
+
+function signedResponse(
+  secretKey: Uint8Array,
+  pulse: Event,
+  head: string,
+  stance = "recognize",
+): Event {
+  return JSON.parse(
+    JSON.stringify(
+      finalizeEvent(
+        {
+          kind: KIND_BEACON_RESPONSE,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [
+            ["e", pulse.id],
+            ["p", pulse.pubkey],
+            ["role", "participant"],
+          ],
+          content: JSON.stringify({
+            stance,
+            head,
+            mine: { sequence: 1, head },
+            observed: {},
+          }),
         },
         secretKey,
       ),
@@ -113,6 +156,7 @@ describe("Beacon pulse on an open node", () => {
       readers: "bootstrap",
       streams: "bootstrap",
     });
+    expect(content.coherence.sessions).toBeUndefined();
 
     // A filter that does not name the pulse kind never surfaces it.
     expect(await queryEvents(origin, [{ kinds: [1] }])).toEqual([note]);
@@ -198,6 +242,108 @@ describe("Beacon pulse on an open node", () => {
     expect(pulseContent(pulses[0]).journal).toEqual({
       sequence: 0,
       head: null,
+    });
+  });
+
+  it("folds fresh, pulse-bound responses into the next pulse", async () => {
+    const origin = "https://pulse-recognition.example";
+    const responder = generateSecretKey();
+    const note = signedNote(responder, "shared head");
+    await postJson(`${origin}/events`, note);
+    const pulse = (
+      await queryEvents(origin, [{ kinds: [KIND_BEACON_PULSE] }])
+    )[0];
+
+    const response = signedResponse(responder, pulse, note.id);
+    const accepted = await postJson(`${origin}/events`, response);
+    expect(await accepted.json()).toMatchObject({
+      accepted: true,
+      message: "ephemeral",
+    });
+
+    const next = (
+      await queryEvents(origin, [{ kinds: [KIND_BEACON_PULSE] }])
+    )[0];
+    expect(pulseContent(next).coherence.recognition).toEqual({
+      head: note.id,
+      pulse: pulse.id,
+      responses: { [response.pubkey]: "recognize" },
+      window_secs: 300,
+    });
+    expect(
+      await queryEvents(origin, [{ kinds: [KIND_BEACON_RESPONSE] }]),
+    ).toEqual([]);
+  });
+
+  it("rejects responses that do not restate the active pulse head", async () => {
+    const origin = "https://pulse-response-invalid.example";
+    const responder = generateSecretKey();
+    const note = signedNote(responder, "real head");
+    await postJson(`${origin}/events`, note);
+    const pulse = (
+      await queryEvents(origin, [{ kinds: [KIND_BEACON_PULSE] }])
+    )[0];
+    const wrongHead = "ab".repeat(32);
+
+    const rejected = await postJson(
+      `${origin}/events`,
+      signedResponse(responder, pulse, wrongHead),
+    );
+    expect(await rejected.json()).toMatchObject({
+      accepted: false,
+      message: "invalid",
+    });
+  });
+
+  it("keeps concurrent pulse rolls answerable within the freshness window", async () => {
+    const origin = "https://pulse-concurrent-rolls.example";
+    const responder = generateSecretKey();
+    const note = signedNote(responder, "shared head");
+    await postJson(`${origin}/events`, note);
+    vi.useFakeTimers();
+    try {
+      const base = Date.now();
+      vi.setSystemTime(base);
+      const first = (
+        await queryEvents(origin, [{ kinds: [KIND_BEACON_PULSE] }])
+      )[0];
+      vi.setSystemTime(base + 1_000);
+      const second = (
+        await queryEvents(origin, [{ kinds: [KIND_BEACON_PULSE] }])
+      )[0];
+      expect(second.id).not.toBe(first.id);
+
+      const accepted = await postJson(
+        `${origin}/events`,
+        signedResponse(responder, first, note.id),
+      );
+      expect(await accepted.json()).toMatchObject({ accepted: true });
+
+      const next = (
+        await queryEvents(origin, [{ kinds: [KIND_BEACON_PULSE] }])
+      )[0];
+      expect(pulseContent(next).coherence.recognition?.pulse).toBe(first.id);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("requires stance-specific observed evidence", async () => {
+    const origin = "https://pulse-response-evidence.example";
+    const responder = generateSecretKey();
+    const note = signedNote(responder, "shared head");
+    await postJson(`${origin}/events`, note);
+    const pulse = (
+      await queryEvents(origin, [{ kinds: [KIND_BEACON_PULSE] }])
+    )[0];
+
+    const rejected = await postJson(
+      `${origin}/events`,
+      signedResponse(responder, pulse, note.id, "advanced"),
+    );
+    expect(await rejected.json()).toMatchObject({
+      accepted: false,
+      message: "invalid",
     });
   });
 });

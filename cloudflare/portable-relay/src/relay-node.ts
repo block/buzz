@@ -25,7 +25,14 @@ import {
 import {
   buildPulseEvent,
   KIND_BEACON_PULSE,
+  KIND_BEACON_RESPONSE,
+  parseBeaconResponse,
   witnessSecretFromEnv,
+  witnessPubkeyFromEnv,
+  DEFAULT_RECOGNITION_WINDOW_SECS,
+  type BeaconStance,
+  type PulseRecognition,
+  type PulseSessions,
 } from "./pulse";
 import {
   eventFromUnknown,
@@ -90,6 +97,17 @@ interface ConnectionRow extends Record<string, SqlStorageValue> {
   challenge: string;
   audience: string;
   principal_pubkey: string | null;
+}
+
+interface BeaconResponseRow extends Record<string, SqlStorageValue> {
+  responder_pubkey: string;
+  stance: BeaconStance;
+}
+
+interface BeaconRoundRow extends Record<string, SqlStorageValue> {
+  pulse_id: string;
+  head: string;
+  created_at: number;
 }
 
 /** NIP-98 evidence captured by the Worker for one HTTP request. */
@@ -177,6 +195,25 @@ export class RelayNode extends DurableObject<Env> {
         principal_pubkey TEXT
       ) WITHOUT ROWID, STRICT
     `);
+    this.#sql.exec(`
+      CREATE TABLE IF NOT EXISTS beacon_rounds (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        pulse_id TEXT NOT NULL UNIQUE,
+        head TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      ) STRICT
+    `);
+    this.#sql.exec(`
+      CREATE TABLE IF NOT EXISTS beacon_responses (
+        pulse_id TEXT NOT NULL,
+        responder_pubkey TEXT NOT NULL,
+        stance TEXT NOT NULL CHECK (
+          stance IN ('recognize', 'advanced', 'conflict', 'diverged', 'unsatisfied')
+        ),
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (pulse_id, responder_pubkey)
+      ) WITHOUT ROWID, STRICT
+    `);
     // Ingest provenance is adapter metadata for provenance-selected exports;
     // added later than the base schema, so the column is created lazily.
     try {
@@ -248,7 +285,7 @@ export class RelayNode extends DurableObject<Env> {
         return { denied: denial };
       }
     }
-    return { result: this.#applyEvent(event) };
+    return { result: this.#applyEvent(event, null, outcome.principal) };
   }
 
   /**
@@ -517,6 +554,8 @@ export class RelayNode extends DurableObject<Env> {
         agreements[dTag] = event.id;
       }
     }
+    const sessions = this.#pulseSessions();
+    const recognition = this.#pulseRecognition(head);
     const event = buildPulseEvent(
       {
         stableNodeKey: this.describeNode()?.stableNodeKey ?? "",
@@ -533,6 +572,8 @@ export class RelayNode extends DurableObject<Env> {
           readers: declarations.readers === null ? "bootstrap" : "journal",
           streams: declarations.streams === null ? "bootstrap" : "journal",
         },
+        ...(sessions === undefined ? {} : { sessions }),
+        ...(recognition === undefined ? {} : { recognition }),
       },
       secret,
       nowSecs(),
@@ -575,6 +616,7 @@ export class RelayNode extends DurableObject<Env> {
     if (pulse === null) {
       return;
     }
+    this.#registerPulse(pulse.event, pulse.head);
     this.#publishLive(pulse.event);
     const witnessedHead = this.#maintenanceValue("witnessed_head");
     if (pulse.head === null || pulse.head === witnessedHead) {
@@ -605,6 +647,135 @@ export class RelayNode extends DurableObject<Env> {
       key,
       value,
     );
+  }
+
+  #pulseSessions(): PulseSessions | undefined {
+    if (!this.#authRequired()) {
+      return undefined;
+    }
+    const principals = new Set<string>();
+    let count = 0;
+    for (const ws of this.ctx.getWebSockets()) {
+      const principal = this.#connectionRow(ws)?.principal_pubkey ?? null;
+      if (principal === null) {
+        continue;
+      }
+      count += 1;
+      principals.add(principal);
+    }
+    return {
+      count,
+      principals: Array.from(principals).sort(),
+    };
+  }
+
+  #pulseRecognition(head: string | null): PulseRecognition | undefined {
+    if (head === null) {
+      return undefined;
+    }
+    const round = Array.from(
+      this.#sql.exec<BeaconRoundRow>(
+        `SELECT pulse_id, head, created_at
+         FROM beacon_rounds
+         WHERE head = ?
+           AND created_at >= ?
+           AND EXISTS (
+             SELECT 1 FROM beacon_responses
+             WHERE beacon_responses.pulse_id = beacon_rounds.pulse_id
+           )
+         ORDER BY sequence DESC
+         LIMIT 1`,
+        head,
+        nowSecs() - DEFAULT_RECOGNITION_WINDOW_SECS,
+      ),
+    )[0];
+    if (round === undefined) {
+      return undefined;
+    }
+    const responses: Record<string, BeaconStance> = {};
+    for (const row of this.#sql.exec<BeaconResponseRow>(
+      `SELECT responder_pubkey, stance
+       FROM beacon_responses
+       WHERE pulse_id = ?
+       ORDER BY responder_pubkey`,
+      round.pulse_id,
+    )) {
+      responses[row.responder_pubkey] = row.stance;
+    }
+    return {
+      head,
+      pulse: round.pulse_id,
+      responses,
+      window_secs: DEFAULT_RECOGNITION_WINDOW_SECS,
+    };
+  }
+
+  #registerPulse(event: Event, head: string | null): void {
+    this.ctx.storage.transactionSync(() => {
+      const cutoff = nowSecs() - DEFAULT_RECOGNITION_WINDOW_SECS;
+      this.#sql.exec(
+        `DELETE FROM beacon_responses
+         WHERE pulse_id IN (
+           SELECT pulse_id FROM beacon_rounds WHERE created_at < ?
+         )`,
+        cutoff,
+      );
+      this.#sql.exec("DELETE FROM beacon_rounds WHERE created_at < ?", cutoff);
+      if (head !== null) {
+        this.#sql.exec(
+          `INSERT OR IGNORE INTO beacon_rounds (pulse_id, head, created_at)
+           VALUES (?, ?, ?)`,
+          event.id,
+          head,
+          event.created_at,
+        );
+      }
+    });
+  }
+
+  #recordBeaconResponse(event: Event): boolean {
+    const witnessPubkey = witnessPubkeyFromEnv(this.env.BUZZ_NODE_SECRET);
+    const pulseId = event.tags.find((tag) => tag[0] === "e")?.[1];
+    if (pulseId === undefined || witnessPubkey === null) {
+      return false;
+    }
+    const round = Array.from(
+      this.#sql.exec<BeaconRoundRow>(
+        `SELECT pulse_id, head, created_at
+         FROM beacon_rounds
+         WHERE pulse_id = ?`,
+        pulseId,
+      ),
+    )[0];
+    if (round === undefined) {
+      return false;
+    }
+    const parsed = parseBeaconResponse(
+      event,
+      {
+        pulseId: round.pulse_id,
+        pulseHead: round.head,
+        pulseCreatedAt: round.created_at,
+        witnessPubkey,
+        windowSecs: DEFAULT_RECOGNITION_WINDOW_SECS,
+      },
+      nowSecs(),
+    );
+    if (parsed === null) {
+      return false;
+    }
+    this.#sql.exec(
+      `INSERT INTO beacon_responses (
+         pulse_id, responder_pubkey, stance, created_at
+       ) VALUES (?, ?, ?, ?)
+       ON CONFLICT (pulse_id, responder_pubkey)
+       DO UPDATE SET stance = excluded.stance, created_at = excluded.created_at`,
+      pulseId,
+      event.pubkey,
+      parsed.stance,
+      event.created_at,
+    );
+    return true;
   }
 
   /**
@@ -871,7 +1042,11 @@ export class RelayNode extends DurableObject<Env> {
     return null;
   }
 
-  #applyEvent(event: Event, ingestSource: string | null = null): WriteResult {
+  #applyEvent(
+    event: Event,
+    ingestSource: string | null = null,
+    principal: string | null = null,
+  ): WriteResult {
     if (!verifySafely(event)) {
       return {
         event_id: event.id,
@@ -891,6 +1066,26 @@ export class RelayNode extends DurableObject<Env> {
         event_id: event.id,
         accepted: true,
         message: "duplicate",
+      };
+    }
+
+    if (event.kind === KIND_BEACON_RESPONSE) {
+      if (
+        (this.#authRequired() &&
+          (principal === null || !this.#pulseVisibleTo(principal))) ||
+        !this.#recordBeaconResponse(event)
+      ) {
+        return {
+          event_id: event.id,
+          accepted: false,
+          message: "invalid",
+        };
+      }
+      this.#publishLive(event);
+      return {
+        event_id: event.id,
+        accepted: true,
+        message: "ephemeral",
       };
     }
 
@@ -998,6 +1193,7 @@ export class RelayNode extends DurableObject<Env> {
         pulse !== null &&
         pulseFilters.some((filter) => matchFilter(filter, pulse.event))
       ) {
+        this.#registerPulse(pulse.event, pulse.head);
         selected.set(pulse.event.id, pulse.event);
       }
     }
@@ -1046,7 +1242,7 @@ export class RelayNode extends DurableObject<Env> {
     } satisfies ConnectionAttachment);
     if (this.#authRequired()) {
       const challenge = randomChallenge();
-      const audience = new URL(request.url).origin.replace(/^http/, "ws") + "/";
+      const audience = `${new URL(request.url).origin.replace(/^http/, "ws")}/`;
       this.#sql.exec(
         `INSERT INTO connections (connection_id, challenge, audience, principal_pubkey)
          VALUES (?, ?, ?, NULL)`,
@@ -1190,7 +1386,10 @@ export class RelayNode extends DurableObject<Env> {
           return;
         }
       }
-      const result = this.#applyEvent(event);
+      const principal = this.#authRequired()
+        ? (this.#connectionRow(ws)?.principal_pubkey ?? null)
+        : null;
+      const result = this.#applyEvent(event, null, principal);
       this.#send(ws, ["OK", result.event_id, result.accepted, result.message]);
     } catch (error) {
       const message =
@@ -1301,7 +1500,8 @@ export class RelayNode extends DurableObject<Env> {
       if (authRequired) {
         const reader = this.#connectionRow(ws)?.principal_pubkey ?? null;
         const visible =
-          event.kind === KIND_BEACON_PULSE
+          event.kind === KIND_BEACON_PULSE ||
+          event.kind === KIND_BEACON_RESPONSE
             ? this.#pulseVisibleTo(reader)
             : reader !== null && eventVisibleToReader(reader, event);
         if (!visible) {

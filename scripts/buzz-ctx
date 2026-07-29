@@ -102,6 +102,13 @@ render_pulse() { # $1 = query result JSON array holding one kind-20700 pulse
      then ($c.agreements | to_entries[] | "  agreement   \(.key)  \(.value[0:12])…")
      else "  agreement   (none)" end),
     "  governance  \($c.coherence.governance | to_entries | map("\(.key)=\(.value)") | join("  "))",
+    (if $c.coherence.sessions
+     then "  sessions    \($c.coherence.sessions.count) socket(s)  \($c.coherence.sessions.principals | map(.[0:12] + "…") | join("  "))"
+     else empty end),
+    (if $c.coherence.recognition
+     then "  recognition head \($c.coherence.recognition.head[0:12])…  pulse \($c.coherence.recognition.pulse[0:12])…",
+          ($c.coherence.recognition.responses | to_entries[] | "    \(.key[0:12])…  \(.value)")
+     else empty end),
     ""'
 }
 

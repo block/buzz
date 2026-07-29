@@ -17,12 +17,35 @@ import { finalizeEvent, getPublicKey, type Event } from "nostr-tools";
 export const KIND_BEACON_PULSE = 20700;
 
 /** PROVISIONAL kind for peer responses to a pulse (recognize / advanced /
- * conflict / diverged). The relay needs no special handling — ephemeral
- * fan-out carries responses like any other ephemeral event. */
+ * conflict / diverged). Responses remain ephemeral, while the relay
+ * validates and briefly tallies them for its next pulse. */
 export const KIND_BEACON_RESPONSE = 20701;
 
 export const PULSE_ROLE_RENDEZVOUS = "rendezvous";
 export const ADAPTER_ID = "portable-relay-cloudflare-v0.1";
+export const DEFAULT_RECOGNITION_WINDOW_SECS = 300;
+
+export const BEACON_STANCES = [
+  "recognize",
+  "advanced",
+  "conflict",
+  "diverged",
+  "unsatisfied",
+] as const;
+
+export type BeaconStance = (typeof BEACON_STANCES)[number];
+
+export interface PulseSessions {
+  count: number;
+  principals: string[];
+}
+
+export interface PulseRecognition {
+  head: string;
+  pulse: string;
+  responses: Record<string, BeaconStance>;
+  window_secs: number;
+}
 
 /** The state one pulse witnesses; assembled by the node, signed as one event. */
 export interface PulseState {
@@ -33,6 +56,8 @@ export interface PulseState {
   checkpoints: Record<string, string>;
   agreements: Record<string, string>;
   governance: Record<string, "journal" | "bootstrap">;
+  sessions?: PulseSessions;
+  recognition?: PulseRecognition;
 }
 
 const HEX_32_BYTE_SECRET = /^[0-9a-f]{64}$/i;
@@ -94,9 +119,145 @@ export function buildPulseEvent(
         previous: state.previous,
         checkpoints: state.checkpoints,
         agreements: state.agreements,
-        coherence: { governance: state.governance },
+        coherence: {
+          governance: state.governance,
+          ...(state.sessions === undefined ? {} : { sessions: state.sessions }),
+          ...(state.recognition === undefined
+            ? {}
+            : { recognition: state.recognition }),
+        },
       }),
     },
     secret,
   );
+}
+
+export interface ExpectedBeaconResponse {
+  pulseId: string;
+  pulseHead: string;
+  pulseCreatedAt: number;
+  witnessPubkey: string;
+  windowSecs?: number;
+}
+
+export interface ParsedBeaconResponse {
+  stance: BeaconStance;
+  mine: { sequence: number; head: string | null };
+  observed: Record<string, unknown>;
+}
+
+/**
+ * Validates the protocol shape and freshness of one kind-20701 answer to an
+ * active pulse. Signature and authenticated-author checks remain the relay
+ * ingest layer's responsibility; this function binds the response to the
+ * exact pulse, witness, and journal head whose roll is still open.
+ */
+export function parseBeaconResponse(
+  event: Event,
+  expected: ExpectedBeaconResponse,
+  nowSecs: number,
+): ParsedBeaconResponse | null {
+  if (event.kind !== KIND_BEACON_RESPONSE) {
+    return null;
+  }
+  if (
+    !event.tags.some((tag) => tag[0] === "e" && tag[1] === expected.pulseId) ||
+    !event.tags.some(
+      (tag) => tag[0] === "p" && tag[1] === expected.witnessPubkey,
+    )
+  ) {
+    return null;
+  }
+  const windowSecs = expected.windowSecs ?? DEFAULT_RECOGNITION_WINDOW_SECS;
+  if (
+    event.created_at < expected.pulseCreatedAt ||
+    event.created_at > expected.pulseCreatedAt + windowSecs ||
+    nowSecs > expected.pulseCreatedAt + windowSecs
+  ) {
+    return null;
+  }
+  let content: unknown;
+  try {
+    content = JSON.parse(event.content);
+  } catch {
+    return null;
+  }
+  if (!isRecord(content) || content.head !== expected.pulseHead) {
+    return null;
+  }
+  if (
+    typeof content.stance !== "string" ||
+    !BEACON_STANCES.some((stance) => stance === content.stance)
+  ) {
+    return null;
+  }
+  if (!isRecord(content.mine)) {
+    return null;
+  }
+  const sequence = content.mine.sequence;
+  const head = content.mine.head;
+  if (
+    typeof sequence !== "number" ||
+    !Number.isSafeInteger(sequence) ||
+    sequence < 0 ||
+    !(
+      head === null ||
+      (typeof head === "string" && /^[0-9a-f]{64}$/.test(head))
+    )
+  ) {
+    return null;
+  }
+  const observed = content.observed;
+  if (
+    !isRecord(observed) ||
+    !validObserved(content.stance as BeaconStance, observed)
+  ) {
+    return null;
+  }
+  return {
+    stance: content.stance as BeaconStance,
+    mine: { sequence, head },
+    observed,
+  };
+}
+
+function validObserved(
+  stance: BeaconStance,
+  observed: Record<string, unknown>,
+): boolean {
+  switch (stance) {
+    case "recognize":
+      return true;
+    case "advanced":
+      return (
+        typeof observed.since === "number" &&
+        Number.isSafeInteger(observed.since) &&
+        observed.since >= 0
+      );
+    case "conflict":
+      return (
+        typeof observed.claim === "string" &&
+        observed.claim !== "" &&
+        typeof observed.mine === "string" &&
+        observed.mine !== ""
+      );
+    case "diverged":
+      return (
+        (observed.measure === "head-unknown" ||
+          observed.measure === "agreements") &&
+        typeof observed.detail === "string" &&
+        observed.detail !== ""
+      );
+    case "unsatisfied":
+      return (
+        typeof observed.agreement === "string" &&
+        observed.agreement !== "" &&
+        typeof observed.reason === "string" &&
+        observed.reason !== ""
+      );
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
