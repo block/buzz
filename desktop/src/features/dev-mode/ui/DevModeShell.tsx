@@ -37,7 +37,7 @@ import { useIsFullscreen } from "@/shared/lib/useIsFullscreen";
 /**
  * Stable identity for the cycled mode. Selection is keyed rather than
  * indexed so agent list refreshes cannot silently retarget the next prompt
- * at a different agent; a vanished agent falls back to chat.
+ * at a different agent; a vanished agent falls back to the default agent.
  */
 function devComposerModeKey(mode: DevComposerMode): string {
   return mode.kind === "chat" ? "chat" : normalizePubkey(mode.target.pubkey);
@@ -73,7 +73,7 @@ export function DevModeShell({
 
   const [view, setView] = React.useState<ShellView>("fresh");
   const [input, setInput] = React.useState("");
-  const [modeKey, setModeKey] = React.useState("chat");
+  const [modeKey, setModeKey] = React.useState<string | null>(null);
   const [activeSessionId, setActiveSessionId] = React.useState<string | null>(
     null,
   );
@@ -98,10 +98,29 @@ export function DevModeShell({
   const cardSelectionActive =
     view === "channel" && selectedRootId !== null && !threadOpen;
 
-  const foundModeIndex = modes.findIndex(
-    (candidate) => devComposerModeKey(candidate) === modeKey,
-  );
-  const mode = modes[foundModeIndex === -1 ? 0 : foundModeIndex];
+  // Until the user Tab-cycles a selection, the composer targets the default
+  // agent — the first managed (local) agent, else the first agent; plain
+  // chat is only the default when no agents exist at all.
+  const defaultModeIndex = React.useMemo(() => {
+    const managedIndex = modes.findIndex(
+      (candidate) =>
+        candidate.kind === "agent" && candidate.target.source === "managed",
+    );
+    if (managedIndex !== -1) return managedIndex;
+    const agentIndex = modes.findIndex(
+      (candidate) => candidate.kind === "agent",
+    );
+    return agentIndex === -1 ? 0 : agentIndex;
+  }, [modes]);
+
+  const foundModeIndex =
+    modeKey === null
+      ? -1
+      : modes.findIndex(
+          (candidate) => devComposerModeKey(candidate) === modeKey,
+        );
+  const modeIndex = foundModeIndex === -1 ? defaultModeIndex : foundModeIndex;
+  const mode = modes[modeIndex];
 
   const sessions = React.useMemo(
     () =>
@@ -338,14 +357,10 @@ export function DevModeShell({
   const handleCycleMode = React.useCallback(
     (direction: 1 | -1) => {
       if (modes.length === 0) return;
-      const currentIndex = modes.findIndex(
-        (candidate) => devComposerModeKey(candidate) === modeKey,
-      );
-      const baseIndex = currentIndex === -1 ? 0 : currentIndex;
-      const nextIndex = (baseIndex + direction + modes.length) % modes.length;
+      const nextIndex = (modeIndex + direction + modes.length) % modes.length;
       setModeKey(devComposerModeKey(modes[nextIndex]));
     },
-    [modeKey, modes],
+    [modeIndex, modes],
   );
 
   const navigateChannels = React.useCallback(
