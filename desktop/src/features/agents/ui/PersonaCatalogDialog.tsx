@@ -2,6 +2,7 @@ import * as React from "react";
 
 import { isCatalogPersonaSelected } from "@/features/agents/lib/catalog";
 import { isCatalogPersona } from "@/features/agents/lib/personaCatalogRelay";
+import { useUsersBatchQuery } from "@/features/profile/hooks";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import type { AgentPersona } from "@/shared/api/types";
 import { useFeedbackToasts } from "@/shared/hooks/useToastEffect";
@@ -277,6 +278,25 @@ function PersonaCatalogChooser({
 }
 
 function PersonaCatalogDetail({ persona }: { persona: AgentPersona }) {
+  const isCommunityEntry =
+    isCatalogPersona(persona) && !persona.catalogSource.isOwn;
+  const ownerPubkey = isCommunityEntry
+    ? persona.catalogSource.ownerPubkey
+    : undefined;
+  const ownerBatchQuery = useUsersBatchQuery(ownerPubkey ? [ownerPubkey] : [], {
+    enabled: !!ownerPubkey,
+  });
+
+  let addedByLabel: string;
+  if (!isCommunityEntry) {
+    addedByLabel = "You";
+  } else {
+    const summary = ownerPubkey
+      ? ownerBatchQuery.data?.profiles[ownerPubkey.toLowerCase()]
+      : undefined;
+    addedByLabel = summary?.displayName ?? summary?.name ?? "Community member";
+  }
+
   return (
     <div className="w-full min-w-0 max-w-full space-y-6 overflow-x-hidden">
       <div className="flex items-center gap-3">
@@ -290,14 +310,7 @@ function PersonaCatalogDetail({ persona }: { persona: AgentPersona }) {
             {persona.displayName}
           </h3>
           {persona.isBuiltIn ? null : (
-            <PersonaAddedBy
-              className="mt-0.5"
-              label={
-                isCatalogPersona(persona) && !persona.catalogSource.isOwn
-                  ? "Community member"
-                  : "You"
-              }
-            />
+            <PersonaAddedBy className="mt-0.5" label={addedByLabel} />
           )}
         </div>
       </div>
