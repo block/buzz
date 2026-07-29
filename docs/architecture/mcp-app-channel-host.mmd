@@ -1,0 +1,68 @@
+%%{init: {"theme": "base", "themeVariables": {
+  "background": "#ffffff",
+  "primaryColor": "#eff6ff",
+  "primaryTextColor": "#172554",
+  "primaryBorderColor": "#2563eb",
+  "lineColor": "#52525b",
+  "actorBkg": "#f4f4f5",
+  "actorBorder": "#71717a",
+  "actorTextColor": "#18181b",
+  "signalColor": "#3f3f46",
+  "signalTextColor": "#18181b",
+  "noteBkgColor": "#fffbeb",
+  "noteBorderColor": "#d97706",
+  "noteTextColor": "#451a03",
+  "fontFamily": "Inter, ui-sans-serif, system-ui, sans-serif"
+}}}%%
+sequenceDiagram
+  autonumber
+  actor User
+  participant Shell as Channel shell
+  participant Host as Tauri MCP host
+  participant Server as MCP server
+  participant Proxy as Trusted outer proxy
+  participant App as Opaque-origin app
+  participant Relay as Buzz relay
+
+  rect rgb(239, 246, 255)
+    Note over User,Server: Install and consent
+    User->>Shell: Enter MCP endpoint
+    Shell->>Host: Connect
+    Host->>Server: tools/list
+    Server-->>Host: App tool and resource URI
+    Host->>Server: resources/read
+    Server-->>Host: HTML and resource policy
+    Host->>Host: Pin endpoint and sanitize Content Security Policy (CSP)
+    Host-->>Shell: Sanitized domains and requested permissions
+    Shell-->>User: Show install review
+    User->>Shell: Add channel tab
+    Shell->>Shell: Store approved policy envelope
+  end
+
+  rect rgb(240, 253, 244)
+    Note over Shell,App: Open the tab
+    Shell->>Host: Prepare app with approved policy
+    Host->>Server: resources/read
+    Server-->>Host: Current HTML and policy
+    Host->>Host: Confirm current policy is a subset of approved policy
+    Host-->>Proxy: Register CSP-bound view
+    Proxy-->>App: Load HTML with allow-scripts
+    Note over Proxy,App: The inner iframe has an opaque origin.<br/>The app does not receive Buzz credentials.
+  end
+
+  rect rgb(255, 247, 237)
+    Note over Shell,Server: Runtime interaction
+    App->>Shell: Validated postMessage
+    alt MCP tool call
+      Shell->>Host: tools/call as app
+      Host->>Server: tools/call
+      Server-->>Host: Tool result
+      Host-->>Shell: Tool result
+      Shell-->>App: Tool result through the bridge
+    else Channel post request
+      Shell-->>User: Show exact attributed message
+      User->>Shell: Approve post
+      Shell->>Relay: Publish with the Buzz signer
+      Note over Shell,Relay: The Nostr signing key stays in Buzz.
+    end
+  end
