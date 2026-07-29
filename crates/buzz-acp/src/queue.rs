@@ -49,6 +49,10 @@ pub struct QueuedEvent {
     pub received_at: Instant,
     /// Tag identifying which rule (or mode) matched this event.
     pub prompt_tag: String,
+    /// Rule-level default repo for Slack-parity targeting (if any).
+    pub target_repo: Option<String>,
+    /// Rule-level default environment for Slack-parity targeting (if any).
+    pub target_env: Option<String>,
 }
 
 /// A single event inside a [`FlushBatch`].
@@ -57,6 +61,10 @@ pub struct BatchEvent {
     pub event: Event,
     pub prompt_tag: String,
     pub received_at: Instant,
+    /// Rule-level default repo for Slack-parity targeting (if any).
+    pub target_repo: Option<String>,
+    /// Rule-level default environment for Slack-parity targeting (if any).
+    pub target_env: Option<String>,
 }
 
 /// Why a batch's prior turn was cancelled — controls how `format_prompt`
@@ -341,6 +349,8 @@ impl EventQueue {
                 event: qe.event,
                 prompt_tag: qe.prompt_tag,
                 received_at: qe.received_at,
+                target_repo: qe.target_repo,
+                target_env: qe.target_env,
             })
             .collect();
         // Relay replay delivers stored events newest-first (`ORDER BY
@@ -480,6 +490,8 @@ impl EventQueue {
                 event: be.event,
                 prompt_tag: be.prompt_tag,
                 received_at: be.received_at, // preserve original timestamp (#46)
+                target_repo: be.target_repo,
+                target_env: be.target_env,
             });
         }
         // Enforce per-channel cap: trim oldest (back) events if requeue pushed
@@ -515,6 +527,8 @@ impl EventQueue {
                 event: be.event,
                 prompt_tag: be.prompt_tag,
                 received_at: be.received_at,
+                target_repo: be.target_repo,
+                target_env: be.target_env,
             });
         }
         // Enforce per-channel cap: trim newest (back) events if over limit.
@@ -1372,6 +1386,15 @@ pub struct FormatPromptArgs<'a> {
     /// For legacy agents it rides in the user message on every turn of the
     /// session, alongside `[Base]`/`[System]`/`[Agent Memory — core]`.
     pub agent_canvas: Option<&'a str>,
+    /// Nest working directory used to resolve `REPOS/` paths and
+    /// `.buzz/environments.toml`.
+    pub nest_cwd: Option<&'a str>,
+    /// Rule-level default repo from the last batch event (overridden by
+    /// explicit inline options in the mention text).
+    pub rule_target_repo: Option<&'a str>,
+    /// Rule-level default environment from the last batch event (overridden
+    /// by explicit inline options in the mention text).
+    pub rule_target_env: Option<&'a str>,
 }
 
 /// Format the `[Base]` section for the base prompt.
@@ -1486,6 +1509,17 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
         args.conversation_context.is_some(),
         reply_anchor.as_deref(),
     ));
+
+    // 2b. Slack-parity run targeting (inline options + rule defaults).
+    let targeting = crate::options::resolve_run_targeting(
+        &last_event.event.content,
+        args.rule_target_repo,
+        args.rule_target_env,
+        args.nest_cwd,
+    );
+    if let Some(run_opts) = crate::options::format_run_options_section(&targeting) {
+        sections.push(run_opts);
+    }
 
     // 3. Conversation context (thread or DM).
     if let Some(ctx) = args.conversation_context {
@@ -1647,6 +1681,8 @@ mod tests {
             event: make_event(content),
             received_at: Instant::now(),
             prompt_tag: "test".into(),
+            target_repo: None,
+            target_env: None,
         }
     }
 
@@ -1657,6 +1693,8 @@ mod tests {
             event: make_event(content),
             received_at: Instant::now() - age,
             prompt_tag: "test".into(),
+            target_repo: None,
+            target_env: None,
         }
     }
 
@@ -1677,6 +1715,8 @@ mod tests {
             event,
             received_at: Instant::now(),
             prompt_tag: "test".into(),
+            target_repo: None,
+            target_env: None,
         }
     }
 
@@ -1872,6 +1912,8 @@ mod tests {
                 event,
                 prompt_tag: "@mention".into(),
                 received_at: Instant::now(),
+                target_repo: None,
+                target_env: None,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -1902,11 +1944,15 @@ mod tests {
                 event: make_event("the new message"),
                 prompt_tag: "@mention".into(),
                 received_at: Instant::now(),
+                target_repo: None,
+                target_env: None,
             }],
             cancelled_events: vec![BatchEvent {
                 event: make_event("the original task"),
                 prompt_tag: "@mention".into(),
                 received_at: Instant::now(),
+                target_repo: None,
+                target_env: None,
             }],
             cancel_reason: reason,
         }
@@ -2034,17 +2080,23 @@ mod tests {
                     event: make_event("new one"),
                     prompt_tag: "@mention".into(),
                     received_at: Instant::now(),
+                    target_repo: None,
+                    target_env: None,
                 },
                 BatchEvent {
                     event: make_event("new two"),
                     prompt_tag: "@mention".into(),
                     received_at: Instant::now(),
+                    target_repo: None,
+                    target_env: None,
                 },
             ],
             cancelled_events: vec![BatchEvent {
                 event: make_event("original"),
                 prompt_tag: "@mention".into(),
                 received_at: Instant::now(),
+                target_repo: None,
+                target_env: None,
             }],
             cancel_reason: Some(CancelReason::Steer),
         };
@@ -2090,11 +2142,15 @@ mod tests {
                 event: steering,
                 prompt_tag: "@mention".into(),
                 received_at: Instant::now(),
+                target_repo: None,
+                target_env: None,
             }],
             cancelled_events: vec![BatchEvent {
                 event: original,
                 prompt_tag: "@mention".into(),
                 received_at: Instant::now(),
+                target_repo: None,
+                target_env: None,
             }],
             cancel_reason: Some(CancelReason::Steer),
         };
@@ -2183,16 +2239,22 @@ mod tests {
                     event: e1,
                     prompt_tag: "tag-a".into(),
                     received_at: Instant::now(),
+                    target_repo: None,
+                    target_env: None,
                 },
                 BatchEvent {
                     event: e2,
                     prompt_tag: "tag-b".into(),
                     received_at: Instant::now(),
+                    target_repo: None,
+                    target_env: None,
                 },
                 BatchEvent {
                     event: e3,
                     prompt_tag: "tag-c".into(),
                     received_at: Instant::now(),
+                    target_repo: None,
+                    target_env: None,
                 },
             ],
             cancelled_events: vec![],
@@ -2222,6 +2284,8 @@ mod tests {
                 event,
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                target_repo: None,
+                target_env: None,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -2245,6 +2309,8 @@ mod tests {
                 event,
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                target_repo: None,
+                target_env: None,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -2277,6 +2343,8 @@ mod tests {
                 event,
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                target_repo: None,
+                target_env: None,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -2307,6 +2375,8 @@ mod tests {
                 event,
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                target_repo: None,
+                target_env: None,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -2334,6 +2404,8 @@ mod tests {
                 event,
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                target_repo: None,
+                target_env: None,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -2358,6 +2430,8 @@ mod tests {
                 event,
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                target_repo: None,
+                target_env: None,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -2414,6 +2488,8 @@ mod tests {
                 event,
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                target_repo: None,
+                target_env: None,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -2452,6 +2528,8 @@ mod tests {
                 event,
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                target_repo: None,
+                target_env: None,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -2681,6 +2759,8 @@ mod tests {
             event: make_event("old-msg"),
             received_at: old_time,
             prompt_tag: "test".into(),
+            target_repo: None,
+            target_env: None,
         });
 
         let batch = q.flush_next().expect("flush");
@@ -2969,6 +3049,8 @@ mod tests {
                 event,
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                target_repo: None,
+                target_env: None,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -3000,6 +3082,8 @@ mod tests {
                 event,
                 prompt_tag: "dm".into(),
                 received_at: Instant::now(),
+                target_repo: None,
+                target_env: None,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -3038,6 +3122,8 @@ mod tests {
                 event,
                 prompt_tag: "@mention".into(),
                 received_at: Instant::now(),
+                target_repo: None,
+                target_env: None,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -3066,6 +3152,8 @@ mod tests {
                 event,
                 prompt_tag: "@mention".into(),
                 received_at: Instant::now(),
+                target_repo: None,
+                target_env: None,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -3110,6 +3198,8 @@ mod tests {
                 event,
                 prompt_tag: "dm".into(),
                 received_at: Instant::now(),
+                target_repo: None,
+                target_env: None,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -3159,6 +3249,8 @@ mod tests {
                 event,
                 prompt_tag: "@mention".into(),
                 received_at: Instant::now(),
+                target_repo: None,
+                target_env: None,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -3366,6 +3458,8 @@ mod tests {
                 event,
                 prompt_tag: "dm".into(),
                 received_at: Instant::now(),
+                target_repo: None,
+                target_env: None,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -3423,6 +3517,8 @@ mod tests {
                 event,
                 prompt_tag: "dm".into(),
                 received_at: Instant::now(),
+                target_repo: None,
+                target_env: None,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -3463,6 +3559,8 @@ mod tests {
                 event,
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                target_repo: None,
+                target_env: None,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -3487,6 +3585,8 @@ mod tests {
                 event,
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                target_repo: None,
+                target_env: None,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -3510,6 +3610,8 @@ mod tests {
                 event,
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                target_repo: None,
+                target_env: None,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -3876,6 +3978,8 @@ mod tests {
                 event,
                 prompt_tag: "@mention".into(),
                 received_at: Instant::now(),
+                target_repo: None,
+                target_env: None,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -3918,6 +4022,8 @@ mod tests {
                 event,
                 prompt_tag: "@mention".into(),
                 received_at: Instant::now(),
+                target_repo: None,
+                target_env: None,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -3952,6 +4058,8 @@ mod tests {
                 event,
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                target_repo: None,
+                target_env: None,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -3981,6 +4089,8 @@ mod tests {
                 event,
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                target_repo: None,
+                target_env: None,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -4023,6 +4133,8 @@ mod tests {
                 event,
                 prompt_tag: "@mention".into(),
                 received_at: Instant::now(),
+                target_repo: None,
+                target_env: None,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -4059,6 +4171,8 @@ mod tests {
                 event,
                 prompt_tag: "@mention".into(),
                 received_at: Instant::now(),
+                target_repo: None,
+                target_env: None,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -4095,11 +4209,15 @@ mod tests {
                     event: plain,
                     prompt_tag: "test".into(),
                     received_at: Instant::now(),
+                    target_repo: None,
+                    target_env: None,
                 },
                 BatchEvent {
                     event: threaded,
                     prompt_tag: "@mention".into(),
                     received_at: Instant::now(),
+                    target_repo: None,
+                    target_env: None,
                 },
             ],
             cancelled_events: vec![],
@@ -4132,11 +4250,15 @@ mod tests {
                     event: threaded,
                     prompt_tag: "@mention".into(),
                     received_at: Instant::now(),
+                    target_repo: None,
+                    target_env: None,
                 },
                 BatchEvent {
                     event: plain,
                     prompt_tag: "test".into(),
                     received_at: Instant::now(),
+                    target_repo: None,
+                    target_env: None,
                 },
             ],
             cancelled_events: vec![],
@@ -4164,6 +4286,8 @@ mod tests {
                 event: make_event(content),
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                target_repo: None,
+                target_env: None,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -4241,6 +4365,8 @@ mod tests {
             event: make_event("another message"),
             prompt_tag: "test".into(),
             received_at: Instant::now(),
+            target_repo: None,
+            target_env: None,
         });
         assert_eq!(slash_command_for_batch(&multi, &[]), None);
 
@@ -4250,6 +4376,8 @@ mod tests {
             event: make_event("interrupted"),
             prompt_tag: "test".into(),
             received_at: Instant::now(),
+            target_repo: None,
+            target_env: None,
         });
         assert_eq!(slash_command_for_batch(&cancelled, &[]), None);
 
@@ -4458,6 +4586,8 @@ mod tests {
                 event: make_event("hi"),
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                target_repo: None,
+                target_env: None,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -4487,6 +4617,8 @@ mod tests {
                 event: make_event("hi"),
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                target_repo: None,
+                target_env: None,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -4515,6 +4647,8 @@ mod tests {
                 event: make_event("hi"),
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                target_repo: None,
+                target_env: None,
             }],
             cancelled_events: vec![],
             cancel_reason: None,

@@ -111,6 +111,14 @@ pub struct SubscriptionRule {
     /// disabled and `match_event` returns `None` (fail-closed).
     #[serde(skip)]
     pub consecutive_timeouts: Arc<AtomicU32>,
+    /// Optional default repo name for Slack-parity targeting (`REPOS/{name}`).
+    /// Overridden by explicit `repo=` / NL cues in the mention text.
+    #[serde(default)]
+    pub target_repo: Option<String>,
+    /// Optional default nest environment name (see `.buzz/environments.toml`).
+    /// Overridden by explicit `env=` / NL cues in the mention text.
+    #[serde(default)]
+    pub target_env: Option<String>,
 }
 
 impl Default for SubscriptionRule {
@@ -124,6 +132,8 @@ impl Default for SubscriptionRule {
             prompt_tag: None,
             compiled_filter: None,
             consecutive_timeouts: Arc::new(AtomicU32::new(0)),
+            target_repo: None,
+            target_env: None,
         }
     }
 }
@@ -141,6 +151,8 @@ impl Clone for SubscriptionRule {
             // Share the same counter across clones so all copies of a rule
             // agree on the timeout state.
             consecutive_timeouts: self.consecutive_timeouts.clone(),
+            target_repo: self.target_repo.clone(),
+            target_env: self.target_env.clone(),
         }
     }
 }
@@ -153,6 +165,10 @@ pub struct MatchedRule {
     pub rule_index: usize,
     /// Prompt tag to use (rule's `prompt_tag` or its `name`).
     pub prompt_tag: String,
+    /// Rule-level default repo (if any).
+    pub target_repo: Option<String>,
+    /// Rule-level default environment (if any).
+    pub target_env: Option<String>,
 }
 
 /// Maximum expression length accepted by `evaluate_filter`.
@@ -453,6 +469,8 @@ pub async fn match_event(
         return Some(MatchedRule {
             rule_index: index,
             prompt_tag,
+            target_repo: rule.target_repo.clone(),
+            target_env: rule.target_env.clone(),
         });
     }
 
@@ -505,6 +523,8 @@ mod tests {
             prompt_tag: prompt_tag.map(|s| s.into()),
             compiled_filter: None,
             consecutive_timeouts: Arc::new(AtomicU32::new(0)),
+            target_repo: None,
+            target_env: None,
         }
     }
 
