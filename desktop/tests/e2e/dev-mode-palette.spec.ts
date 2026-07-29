@@ -1,0 +1,86 @@
+import { expect, test } from "@playwright/test";
+
+import { installMockBridge } from "../helpers/bridge";
+
+// Command-palette ranking and post-archive navigation: typing an action
+// verb like "archive" ranks that action above channels whose names merely
+// contain it, and archiving/leaving a chat lands on the most recently
+// active non-pinned chat instead of the fresh composer.
+
+async function openDevModeChannel(
+  page: import("@playwright/test").Page,
+  channelName: string,
+) {
+  await installMockBridge(page);
+  await page.addInitScript(() => {
+    localStorage.setItem("buzz.displayStyle", "developer");
+  });
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+
+  const composer = page.getByTestId("dev-mode-composer");
+  await composer.waitFor();
+  await composer.focus();
+
+  const topBar = page.getByTestId("dev-mode-topbar-channel");
+  for (let step = 0; step < 20; step += 1) {
+    await page.keyboard.press("ArrowUp");
+    const previewed = (await topBar.innerText()).replace(/^#\s*/, "").trim();
+    if (previewed === channelName) break;
+  }
+  await expect(topBar).toContainText(channelName);
+  await page.keyboard.press("Enter");
+  await page.getByTestId("dev-mode-transcript").waitFor();
+}
+
+test("typed action verb outranks channel-name matches in the palette", async ({
+  page,
+}) => {
+  await openDevModeChannel(page, "general");
+
+  // A channel whose name contains the verb would otherwise outrank the
+  // action (channels normally rank first while typing).
+  await page.evaluate(async () => {
+    const w = window as Window & {
+      __TAURI_INTERNALS__?: {
+        invoke: (command: string, payload: unknown) => Promise<unknown>;
+      };
+      __BUZZ_E2E_INVALIDATE_CHANNELS__?: () => Promise<void>;
+    };
+    await w.__TAURI_INTERNALS__?.invoke("create_channel", {
+      name: "team-archives",
+      channelType: "stream",
+      visibility: "open",
+    });
+    await w.__BUZZ_E2E_INVALIDATE_CHANNELS__?.();
+  });
+
+  await page.keyboard.press("Control+o");
+  const palette = page.getByTestId("dev-mode-palette");
+  await expect(palette).toBeVisible();
+  await page.getByTestId("dev-mode-palette-input").pressSequentially("archiv");
+
+  const entries = page.getByTestId("dev-mode-palette-entry");
+  await expect(entries.first()).toContainText("archive # general");
+  await expect(
+    entries.filter({ hasText: "# team-archives" }).first(),
+  ).toBeVisible();
+});
+
+test("archiving a chat lands on the most recent non-pinned chat", async ({
+  page,
+}) => {
+  await openDevModeChannel(page, "general");
+
+  await page.keyboard.press("Control+o");
+  await page.getByTestId("dev-mode-palette-input").pressSequentially("archive");
+  const entries = page.getByTestId("dev-mode-palette-entry");
+  await expect(entries.first()).toContainText("archive # general");
+  await page.keyboard.press("Enter");
+
+  // Landed in another chat, not the fresh composer and not the archived one.
+  await expect(page.getByTestId("dev-mode-palette")).not.toBeVisible();
+  await page.getByTestId("dev-mode-transcript").waitFor();
+  const topBar = page.getByTestId("dev-mode-topbar-channel");
+  await expect(topBar).not.toContainText("general");
+  await expect(topBar).toContainText("#");
+});

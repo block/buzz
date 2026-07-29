@@ -84,7 +84,7 @@ export function DevCommandPalette({
   myPubkey: string | null;
   onOpenChannel: (channelId: string) => void;
   onNewSession: () => void;
-  onChannelLeft: () => void;
+  onChannelLeft: (channelId: string) => void;
   onClose: () => void;
 }) {
   const navigate = useNavigate();
@@ -180,6 +180,7 @@ export function DevCommandPalette({
   );
 
   const leaveChannel = React.useCallback(async () => {
+    if (!activeChannelId) return;
     setActionError(null);
     try {
       if (isLastHumanMember) {
@@ -188,13 +189,14 @@ export function DevCommandPalette({
         await leaveMutation.mutateAsync();
       }
       onClose();
-      onChannelLeft();
+      onChannelLeft(activeChannelId);
     } catch (error) {
       setActionError(
         error instanceof Error ? error.message : "Failed to leave channel.",
       );
     }
   }, [
+    activeChannelId,
     archiveMutation,
     isLastHumanMember,
     leaveMutation,
@@ -203,17 +205,18 @@ export function DevCommandPalette({
   ]);
 
   const archiveChannel = React.useCallback(async () => {
+    if (!activeChannelId) return;
     setActionError(null);
     try {
       await archiveMutation.mutateAsync();
       onClose();
-      onChannelLeft();
+      onChannelLeft(activeChannelId);
     } catch (error) {
       setActionError(
         error instanceof Error ? error.message : "Failed to archive channel.",
       );
     }
-  }, [archiveMutation, onChannelLeft, onClose]);
+  }, [activeChannelId, archiveMutation, onChannelLeft, onClose]);
 
   const entries = React.useMemo<PaletteEntry[]>(() => {
     const needle = query.trim().toLowerCase();
@@ -375,8 +378,17 @@ export function DevCommandPalette({
     if (!needle) return [...actions, ...channelEntries];
     const matches = (entry: PaletteEntry) =>
       `${entry.label} ${entry.detail ?? ""}`.toLowerCase().includes(needle);
-    // Channels first while typing: a query is usually a channel lookup.
-    return [...channelEntries.filter(matches), ...actions.filter(matches)];
+    // An action verb typed literally ("archive", "leave", "pin"…) beats
+    // channel-name substring hits; otherwise a query is usually a channel
+    // lookup, so channels rank above incidental action matches.
+    const matchedActions = actions.filter(matches);
+    const startsWithNeedle = (entry: PaletteEntry) =>
+      entry.label.toLowerCase().startsWith(needle);
+    return [
+      ...matchedActions.filter(startsWithNeedle),
+      ...channelEntries.filter(matches),
+      ...matchedActions.filter((entry) => !startsWithNeedle(entry)),
+    ];
   }, [
     activeChannel,
     addUserToChannel,
@@ -491,6 +503,7 @@ export function DevCommandPalette({
                   ? "bg-primary/15 text-foreground"
                   : "text-muted-foreground hover:bg-muted/40 hover:text-foreground",
               )}
+              data-testid="dev-mode-palette-entry"
               onClick={entry.run}
               onMouseMove={() => setSelectedIndex(index)}
               type="button"

@@ -295,6 +295,23 @@ export function DevModeShell({
     focusComposer();
   }, [focusComposer]);
 
+  // Leaving/archiving a chat lands on the most recently active non-pinned
+  // chat (the departed channel may still be in the cached list, so exclude
+  // it); with nowhere to go, fall back to the fresh composer.
+  const handleChannelLeft = React.useCallback(
+    (leftChannelId: string) => {
+      const next = channelGroups
+        .find((group) => !group.pinned)
+        ?.channels.find((channel) => channel.id !== leftChannelId);
+      if (next) {
+        openChannel(next.id);
+      } else {
+        goToFresh();
+      }
+    },
+    [channelGroups, goToFresh, openChannel],
+  );
+
   // ⌘N: new channel (fresh composer). ⌘T: draft side chat in the open
   // channel — the pane opens with no thread yet; its first send posts a new
   // message to the channel and attaches the pane to that thread.
@@ -829,7 +846,7 @@ export function DevModeShell({
             activeChannel={topBarChannel}
             channels={[...sessions].reverse()}
             myPubkey={identityQuery.data?.pubkey ?? null}
-            onChannelLeft={goToFresh}
+            onChannelLeft={handleChannelLeft}
             onClose={closePalette}
             onNewSession={goToFresh}
             onOpenChannel={openChannel}

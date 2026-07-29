@@ -184,7 +184,11 @@ export function useMentionAutocomplete({
       const caret = before.length + inserted.length;
       setCursor(caret);
       requestAnimationFrame(() => {
-        textareaRef.current?.setSelectionRange(caret, caret);
+        const textarea = textareaRef.current;
+        // Skip if the user already typed past the accept — repositioning
+        // now would drop their keystrokes into the middle of the text.
+        if (!textarea || textarea.value !== next) return;
+        textarea.setSelectionRange(caret, caret);
       });
     },
     [cursor, detection, onChange, textareaRef, value],
