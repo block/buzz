@@ -377,6 +377,33 @@ test("harness rows render bundled preset logos, not initials", async ({
   await expect(cursorLogo).not.toContainText("C");
 });
 
+// ── Remote servers gallery ────────────────────────────────────────────────────
+
+test.describe("remote servers", () => {
+  test("no provider installed settles on the teaching empty state", async ({
+    page,
+  }) => {
+    await installMockBridge(page, {
+      acpRuntimesCatalog: [HERMES_AVAILABLE, OPENCLAW_NOT_INSTALLED],
+    });
+    await openHarnessSettings(page);
+
+    // The bridge answers `discover_backend_providers` with `[]`, which is also
+    // the real common case: a provider is a separate binary nothing bundles,
+    // so the empty state is the copy most users will ever see here.
+    await expect(page.getByTestId("settings-remote-servers")).toBeVisible();
+    await expect(page.getByTestId("remote-server-empty")).toBeVisible();
+    await expect(page.getByTestId("remote-server-gallery")).not.toBeVisible();
+
+    // Settled, not merely rendered once: the loading branch is gone rather
+    // than racing the empty state. This does NOT prove the loading branch
+    // never flashed — by the time the empty state is visible it has already
+    // unmounted, and discovery here resolves in a frame. That the branch is
+    // text rather than a spinner is held by review, not by this assertion.
+    await expect(page.getByTestId("remote-server-loading")).toHaveCount(0);
+  });
+});
+
 // ── Custom harness add (via catalog) ─────────────────────────────────────────
 
 test.describe("add custom harness", () => {
