@@ -5,6 +5,7 @@ import { Check } from "lucide-react";
 import {
   useAcpAuthMethodsQuery,
   useAcpRuntimesQuery,
+  useBackendProvidersQuery,
   useConnectAcpRuntimeMutation,
   useInstallAcpRuntimeMutation,
 } from "@/features/agents/hooks";
@@ -23,6 +24,7 @@ import {
   runtimeIsReadyForOnboarding,
 } from "./onboardingRuntimeSelection";
 import { ONBOARDING_PRIMARY_CTA_CLASS } from "./OnboardingChrome";
+import { remoteRunNotice } from "./remoteRunNotice";
 import { RuntimeErrorTooltip } from "./RuntimeErrorTooltip";
 import { OnboardingFooter } from "./OnboardingFooter";
 import { getRuntimeDisplayLabel, RuntimeIcon } from "./RuntimeIcon";
@@ -569,6 +571,47 @@ function RuntimeCard({
   );
 }
 
+/**
+ * The step's statement about the OTHER place an agent can run.
+ *
+ * Sits directly under the intro, above the local harness cards, because "this
+ * computer or your own servers" is the frame the cards below are read inside —
+ * asking it after the detection list would make the local path look like the
+ * only path. It is copy, not a control: a server is chosen per-agent in the
+ * create dialog, so nothing here can block or slow the step.
+ *
+ * `discoverBackendProviders` is a PATH walk (no provider is spawned), so this
+ * costs one cheap invoke and never blocks the Next button.
+ */
+function RemoteRunNotice() {
+  const providersQuery = useBackendProvidersQuery();
+  const notice = remoteRunNotice({
+    isLoading: providersQuery.isLoading,
+    providers: providersQuery.data,
+  });
+
+  // The wrapper renders in all three states and reserves one line of height.
+  // The pending state says nothing on purpose, but returning nothing at all
+  // would let the card grid below jump up a line and back down again as
+  // discovery lands — on the first screen a new user ever sees.
+  return (
+    <div className="mt-3 min-h-5">
+      {notice.kind === "pending" ? null : (
+        <p
+          className="mx-auto max-w-[760px] text-xs leading-5 text-foreground/50"
+          data-testid={
+            notice.kind === "ready"
+              ? "onboarding-remote-run-ready"
+              : "onboarding-remote-run-hint"
+          }
+        >
+          {notice.message}
+        </p>
+      )}
+    </div>
+  );
+}
+
 function RuntimeProvidersLoadingState() {
   return (
     <div
@@ -605,12 +648,14 @@ function RuntimeProvidersSection({
     <section className="flex min-h-full w-full flex-col items-center">
       <div className="w-full max-w-[820px] text-center">
         <h1 className="text-title font-normal text-foreground">
-          Set up your agent harnesses
+          Where your agents run
         </h1>
         <p className="mx-auto mt-3 max-w-[760px] text-sm leading-6 text-foreground/90">
-          Buzz checks for command-line harnesses on this machine. Install the
-          CLI or sign in to at least one to continue.
+          Buzz agents run on this computer or on your own servers. Set up a
+          command-line harness here to continue — you pick the machine when you
+          create an agent.
         </p>
+        <RemoteRunNotice />
       </div>
 
       <div className="flex w-full flex-1 flex-col items-center justify-center gap-8 py-10">

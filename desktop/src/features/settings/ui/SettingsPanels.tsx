@@ -77,6 +77,7 @@ import { MobilePairingCard } from "./MobilePairingCard";
 import { ModerationQueueCard } from "./ModerationQueueCard";
 import { NotificationSettingsCard } from "./NotificationSettingsCard";
 import { PreventSleepSettingsCard } from "./PreventSleepSettingsCard";
+import { RemoteServersCard } from "./RemoteServersCard";
 import { AgentDefaultsSettingsCard } from "./AgentDefaultsSettingsCard";
 import { HostedCommunitiesSettingsCard } from "./HostedCommunitiesSettingsCard";
 import { SettingsOptionGroup, SettingsOptionRow } from "./SettingsOptionGroup";
@@ -814,6 +815,12 @@ export function renderSettingsSection(
         <div className="space-y-12">
           <PreventSleepSettingsCard />
           <HarnessesSettingsPanel />
+          {/*
+            Harnesses on this machine, then the machines that are not this one.
+            Remote servers lives under Agents rather than Compute because it is
+            about where an AGENT is hosted; Compute is about model serving.
+          */}
+          <RemoteServersCard />
           <AgentDefaultsSettingsCard />
         </div>
       );

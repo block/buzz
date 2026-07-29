@@ -7478,7 +7478,10 @@ function applyMockPersonaUpdate(input: MockUpdatePersonaInput): RawPersona {
   return persona;
 }
 
-async function handleDeletePersona(args: { id: string }): Promise<void> {
+async function handleDeletePersona(args: {
+  id: string;
+  forceRemoteDelete?: boolean | null;
+}): Promise<void> {
   const persona = mockPersonas.find((candidate) => candidate.id === args.id);
   if (!persona) {
     throw new Error(`agent ${args.id} not found`);
@@ -7489,6 +7492,23 @@ async function handleDeletePersona(args: { id: string }): Promise<void> {
   if (mockTeams.some((team) => team.persona_ids.includes(args.id))) {
     throw new Error(
       `${persona.display_name} is still referenced by a team. Remove it from those teams first.`,
+    );
+  }
+
+  // Model the backend pre-flight: a cascade containing provider-deployed
+  // instances is refused unless the caller acknowledged that their remote
+  // units keep running (the provider protocol has no undeploy).
+  const remoteDeployed = mockManagedAgents.filter(
+    (agent) =>
+      agent.persona_id === args.id &&
+      agent.backend.type === "provider" &&
+      agent.backend_agent_id != null,
+  );
+  if (remoteDeployed.length > 0 && !args.forceRemoteDelete) {
+    throw new Error(
+      `persona ${args.id} has provider-deployed agent instances (${remoteDeployed
+        .map((agent) => agent.name)
+        .join(", ")}); delete those agent instances first`,
     );
   }
 
@@ -10446,6 +10466,20 @@ export function maybeInstallE2eTauriMocks() {
         return [];
       case "probe_backend_provider":
         return { ok: false, error: "mock: no providers available" };
+      // Unreachable while discover_backend_providers returns [] (the UI cannot
+      // reach a provider op without a provider), but mocked so the default
+      // branch throws only on genuinely unhandled commands.
+      case "discover_provider_harnesses":
+        return { ok: true, buzz_acp: null, harnesses: [] };
+      case "probe_provider_models":
+        return {
+          agentName: "unknown",
+          agentVersion: "unknown",
+          models: [],
+          agentDefaultModel: null,
+          selectedModel: null,
+          supportsSwitching: false,
+        };
       case "discover_managed_agent_prereqs":
         return handleDiscoverManagedAgentPrereqs(
           payload as Parameters<typeof handleDiscoverManagedAgentPrereqs>[0],
