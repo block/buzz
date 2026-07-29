@@ -111,3 +111,117 @@ test("dev mode shows the first thread reply inline and collapses the rest", asyn
   await expect(threadPanel).toContainText(laterReplyText);
   await expect(threadPanel).toContainText(thirdReplyText);
 });
+
+// The whole leading run of agent replies renders inline — collapsing only
+// starts once a human responds in the thread.
+test("dev mode shows all agent replies inline until a human responds", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.addInitScript(() => {
+    localStorage.setItem("buzz.displayStyle", "developer");
+  });
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+
+  const composer = page.getByTestId("dev-mode-composer");
+  await composer.waitFor();
+
+  // The seeded "agents" channel has charlie as a bot member, so his
+  // replies resolve as agent-authored.
+  const channelName = "agents";
+  const rootText = "prompt: roll out the fix everywhere";
+  const agentReply1 = "agent: on it, tracking the rollout";
+  const agentReply2 = "agent: fleet is on the fixed build, verifying";
+  const humanReply = "human: thanks, looks good so far";
+  const agentReply3 = "agent: confirmed fixed on all hosts";
+
+  await page.evaluate(
+    ({
+      channel,
+      agent,
+      rootText,
+      agentReply1,
+      agentReply2,
+      humanReply,
+      agentReply3,
+    }) => {
+      const emit = window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+      if (!emit) throw new Error("mock bridge missing");
+      const now = Math.floor(Date.now() / 1000);
+      const root = emit({
+        channelName: channel,
+        content: rootText,
+        createdAt: now - 50,
+      });
+      emit({
+        channelName: channel,
+        content: agentReply1,
+        parentEventId: root.id,
+        pubkey: agent,
+        createdAt: now - 40,
+      });
+      emit({
+        channelName: channel,
+        content: agentReply2,
+        parentEventId: root.id,
+        pubkey: agent,
+        createdAt: now - 30,
+      });
+      emit({
+        channelName: channel,
+        content: humanReply,
+        parentEventId: root.id,
+        createdAt: now - 20,
+      });
+      emit({
+        channelName: channel,
+        content: agentReply3,
+        parentEventId: root.id,
+        pubkey: agent,
+        createdAt: now - 10,
+      });
+    },
+    {
+      channel: channelName,
+      agent: TEST_IDENTITIES.charlie.pubkey,
+      rootText,
+      agentReply1,
+      agentReply2,
+      humanReply,
+      agentReply3,
+    },
+  );
+
+  await composer.focus();
+  const topBar = page.getByTestId("dev-mode-topbar-channel");
+  for (let step = 0; step < 20; step += 1) {
+    await page.keyboard.press("ArrowUp");
+    const previewed = (await topBar.innerText()).replace(/^#\s*/, "").trim();
+    if (previewed === channelName) break;
+  }
+  await expect(topBar).toContainText(channelName);
+  await page.keyboard.press("Enter");
+  await page.getByTestId("dev-mode-transcript").waitFor();
+
+  const card = page
+    .getByTestId("dev-mode-prompt-card")
+    .filter({ hasText: rootText });
+  await expect(card).toBeVisible();
+
+  // Both leading agent replies render inline; the human reply and the
+  // agent reply after it stay collapsed.
+  await expect(card).toContainText(agentReply1);
+  await expect(card).toContainText(agentReply2);
+  await expect(card).not.toContainText(humanReply);
+  await expect(card).not.toContainText(agentReply3);
+
+  const more = card.getByTestId("dev-mode-more-replies");
+  await expect(more).toHaveText(/…\s*2 more replies/);
+
+  // The side chat still shows the complete conversation.
+  await more.click();
+  const threadPanel = page.getByTestId("dev-mode-thread-panel");
+  await expect(threadPanel).toBeVisible();
+  await expect(threadPanel).toContainText(humanReply);
+  await expect(threadPanel).toContainText(agentReply3);
+});

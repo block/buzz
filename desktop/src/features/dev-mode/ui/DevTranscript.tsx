@@ -40,11 +40,14 @@ import type { Channel, RelayEvent } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 
 /**
- * The channel view always shows the first thread reply — the agent's
- * response to the prompt — inline; every later reply lives in the side
- * chat, collapsed here into a "… N more replies" affordance.
+ * The channel view shows the leading run of agent replies — everything
+ * the agent said before a human responded — inline; once a human replies,
+ * that message and everything after it lives in the side chat, collapsed
+ * here into a "… N more replies" affordance. A thread whose first reply
+ * is human still shows that one reply inline so prompts never render
+ * without their first response.
  */
-function ThreadFirstReply({
+function ThreadInlineReplies({
   channel,
   rootId,
   replyCount,
@@ -82,45 +85,56 @@ function ThreadFirstReply({
     [repliesQuery.data],
   );
 
-  const first = replies[0];
+  const visible = React.useMemo(() => {
+    let end = 0;
+    while (end < replies.length && resolveIsAgent(replies[end].pubkey)) {
+      end += 1;
+    }
+    // A human-first thread still shows its first reply inline.
+    if (end === 0 && replies.length > 0) end = 1;
+    return replies.slice(0, end);
+  }, [replies, resolveIsAgent]);
   // The summary count can outrun the fetched subtree (live recounts) —
   // trust whichever knows about more replies.
-  const moreCount = Math.max(replyCount, replies.length) - (first ? 1 : 0);
+  const moreCount = Math.max(replyCount, replies.length) - visible.length;
 
-  // The inline first reply is on screen, so seeing the channel counts as
-  // reading it: advance the thread frontier to exactly that reply. Later
-  // (collapsed) replies stay unread until the side chat is opened.
+  // The inline replies are on screen, so seeing the channel counts as
+  // reading them: advance the thread frontier through the last visible
+  // reply. Later (collapsed) replies stay unread until the side chat is
+  // opened.
   const { getThreadReadAt, markThreadRead } = useAppShell();
-  const firstReplyAt = first?.created_at ?? null;
+  const lastVisibleAt = visible.at(-1)?.created_at ?? null;
   const channelId = channel.id;
   React.useEffect(() => {
-    if (!markRead || firstReplyAt === null) return;
+    if (!markRead || lastVisibleAt === null) return;
     const readAt = getThreadReadAt(rootId, channelId);
-    if (readAt === null || readAt < firstReplyAt) {
-      markThreadRead(rootId, firstReplyAt);
+    if (readAt === null || readAt < lastVisibleAt) {
+      markThreadRead(rootId, lastVisibleAt);
     }
   }, [
     channelId,
-    firstReplyAt,
+    lastVisibleAt,
     getThreadReadAt,
     markRead,
     markThreadRead,
     rootId,
   ]);
 
-  // The reply sits on the same indent as the prompt that produced it.
+  // The replies sit on the same indent as the prompt that produced them.
   return (
     <div className="mt-1">
-      {first ? (
-        <DevMessageRow
-          key={first.localKey ?? first.id}
-          event={first}
-          isSelf={first.pubkey === currentPubkey}
-          reactions={reactions.get(first.id)}
-          resolveColor={resolveColor}
-          resolveIsAgent={resolveIsAgent}
-          resolveName={resolveName}
-        />
+      {visible.length > 0 ? (
+        visible.map((reply) => (
+          <DevMessageRow
+            key={reply.localKey ?? reply.id}
+            event={reply}
+            isSelf={reply.pubkey === currentPubkey}
+            reactions={reactions.get(reply.id)}
+            resolveColor={resolveColor}
+            resolveIsAgent={resolveIsAgent}
+            resolveName={resolveName}
+          />
+        ))
       ) : repliesQuery.isLoading ? (
         <div className="py-0.5 text-sm text-muted-foreground/60">
           loading reply…
@@ -269,7 +283,7 @@ function PromptCard({
         resolveName={resolveName}
       />
       {replyCount > 0 ? (
-        <ThreadFirstReply
+        <ThreadInlineReplies
           channel={channel}
           currentPubkey={currentPubkey}
           markRead={markRead}
