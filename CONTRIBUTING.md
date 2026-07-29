@@ -43,7 +43,28 @@ Buzz is an agent platform, so AI-assisted PRs are welcome. No need to disclose t
 
 We squash-merge, so your PR title becomes the commit subject in `main`. Use [Conventional Commits](https://www.conventionalcommits.org/) format: `feat(mcp): add get_feed_actions tool`. The type prefix (`feat`, `fix`, `docs`, `refactor`, `test`, `chore`) is required. See the [Commit Messages](#commit-messages) section for the full reference.
 
-Every commit needs a Developer Certificate of Origin sign-off, so commit with `git commit -s` — it appends the `Signed-off-by` trailer that certifies you wrote the change and can contribute it. The required **DCO Check** blocks merge without it on every commit, and it's the most common reason new PRs stall. If you already pushed unsigned commits, run `git rebase --signoff main` and force-push. Running `just hooks` installs a `commit-msg` hook that adds the trailer to commits created by `git commit` and `git merge`; other flows need their own flag — `git rebase --signoff`, `git cherry-pick -s`.
+### Sign Your Commits
+
+```bash
+git commit -s
+```
+
+Every commit needs a Developer Certificate of Origin (DCO) sign-off. The `-s` flag appends a `Signed-off-by` trailer that certifies you wrote the change and can contribute it under the project license. The **DCO Check** will block your PR without it.
+
+#### Fix unsigned commits already pushed
+
+```bash
+git rebase --signoff main
+git push --force-with-lease
+```
+
+#### Auto-setup for future commits
+
+```bash
+just hooks
+```
+
+This installs a `commit-msg` hook that adds the sign-off trailer automatically for `git commit` and `git merge`. Other flows (`git rebase`, `git cherry-pick`) still need their own flag — `--signoff` and `-s` respectively.
 
 We review as capacity allows — focused PRs that follow this guide move fastest.
 
@@ -76,6 +97,37 @@ Hermit pins Rust, `just`, Node, pnpm, and other tools to the versions in
 (which `just setup` calls automatically) to pre-download all required tools
 upfront. If you don't use Hermit, ensure your toolchain meets the minimum
 versions in the table above.
+
+#### Linux: Tauri system libraries
+
+Hermit pins language toolchains, not system libraries. On Linux, the desktop
+app's Rust crates link against GTK and WebKitGTK, so `just ci` (and any
+`just desktop-tauri-*` recipe) needs these installed system-wide first. On
+Debian/Ubuntu:
+
+```bash
+sudo apt-get install -y --no-install-recommends \
+  build-essential curl file libasound2-dev libayatana-appindicator3-dev \
+  libgtk-3-dev librsvg2-dev libssl-dev libwebkit2gtk-4.1-dev libxdo-dev \
+  patchelf wget
+```
+
+This is the same list CI installs (see `.github/workflows/ci.yml`), so matching
+it locally keeps your results comparable to CI. Other distributions ship these
+under different package names — see the
+[Tauri prerequisites](https://tauri.app/start/prerequisites/) for the
+equivalents.
+
+Without them, `just ci` fails partway through `just check` with a pkg-config
+error such as:
+
+```
+The system library `gdk-pixbuf-2.0` required by crate `gdk-pixbuf-sys` was not found.
+```
+
+If you're only touching the relay, CLI, or other server-side crates, you can
+skip this and run the narrower recipes instead — `just fmt-check`, `just
+clippy`, `just test-unit`, and `just test` need no GTK.
 
 ### First-Time Setup
 

@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math' show min;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show ScrollDirection;
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -10,8 +11,10 @@ import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
+import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
+import '../../shared/widgets/message_author_meta.dart';
 import '../../shared/widgets/skeleton.dart';
 import '../profile/presence_cache_provider.dart';
 import '../profile/profile_provider.dart';
@@ -216,6 +219,7 @@ class ChannelDetailPage extends HookConsumerWidget {
       appBar: FrostedAppBar(
         iconColor: context.colors.primary,
         titleContentHeight: appBarTitleContentHeight,
+        titleStyle: channelTitleTextStyle,
         title: resolvedChannel.isDm
             ? _DmAppBarTitle(
                 channel: resolvedChannel,

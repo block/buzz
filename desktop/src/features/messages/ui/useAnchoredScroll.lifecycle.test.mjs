@@ -218,7 +218,8 @@ function makePinnedCenterNodes() {
     disconnect() {}
 
     observe(target) {
-      this.target = target;
+      this.targets ??= [];
+      this.targets.push(target);
     }
   };
 
@@ -243,6 +244,18 @@ function Harness({ channelId, onTargetSettled, refs }) {
     scrollContainerRef: refs.container,
     targetMessageId: "selected",
   });
+  return null;
+}
+
+function BottomStateHarness({ messages, onState, refs }) {
+  const anchored = useAnchoredScroll({
+    channelId: "conversation",
+    contentRef: refs.content,
+    isLoading: false,
+    messages,
+    scrollContainerRef: refs.container,
+  });
+  onState(anchored);
   return null;
 }
 
@@ -294,7 +307,10 @@ test("channel change attaches pinned-center observers after refs mount", async (
   });
 
   assert.equal(nodes.resizeObservers.length, 1);
-  assert.equal(nodes.resizeObservers[0].target, nodes.content);
+  assert.deepEqual(nodes.resizeObservers[0].targets, [
+    nodes.content,
+    nodes.container,
+  ]);
   assert.equal(nodes.container.listeners.get("wheel")?.length, 1);
 
   await act(async () => {
@@ -313,7 +329,47 @@ test("channel change attaches pinned-center observers after refs mount", async (
   });
 });
 
-test("pinned target settles only after resize correction and a paint frame", async () => {
+test("container resize clears a stale new-message state at the physical floor", async () => {
+  const refs = {
+    container: { current: null },
+    content: { current: null },
+  };
+  const root = createRoot(document.createElement("div"));
+  const nodes = makePinnedCenterNodes();
+  refs.container.current = nodes.container;
+  refs.content.current = nodes.content;
+  let state = null;
+  const render = (messages) =>
+    root.render(
+      React.createElement(BottomStateHarness, {
+        messages,
+        onState: (nextState) => {
+          state = nextState;
+        },
+        refs,
+      }),
+    );
+
+  await act(async () => render([{ id: "first" }]));
+  await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+  nodes.container.scrollTop = 100;
+  await act(async () => state.onScroll());
+  nodes.container.scrollTop = 100;
+  await act(async () => state.onScroll());
+  await act(async () => render([{ id: "first" }, { id: "second" }]));
+  assert.equal(state.isAtBottom, false);
+  assert.equal(state.newMessageCount, 1);
+
+  // A taller viewport reaches the floor without producing a native scroll.
+  nodes.container.clientHeight = 900;
+  await act(async () => nodes.resizeObservers[0].callback());
+
+  assert.equal(state.isAtBottom, true);
+  assert.equal(state.newMessageCount, 0);
+  await act(async () => root.unmount());
+});
+
+test("pinned target resize reconciles bottom state before retiring", async () => {
   const refs = {
     container: { current: null },
     content: { current: null },

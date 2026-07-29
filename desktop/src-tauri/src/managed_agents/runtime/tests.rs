@@ -53,8 +53,7 @@ fn identifier_exact_match_at_end_of_buffer() {
 
 #[test]
 fn longer_id_matches_when_short_prefix_also_present() {
-    // Searching for the longer ID finds it even when a shorter prefix token
-    // appears earlier — Thufir's "longer-of-prefix must match" case.
+    // The longer ID still matches when a shorter prefix token appears earlier.
     let mut buf = b"xyz.block.buzz.app".to_vec();
     buf.push(0);
     buf.extend_from_slice(br#""identifier":"xyz.block.buzz.app.dev""#);
@@ -72,8 +71,7 @@ fn identifier_empty_returns_false() {
 
 #[test]
 fn marker_entry_is_namespaced_by_instance_id() {
-    // The spawn stamp and the sweep matcher must produce identical bytes;
-    // both go through buzz_marker_entry, so this pins the on-the-wire
+    // The spawn stamp and sweep matcher both go through buzz_marker_entry, pinning the on-the-wire
     // format and guards against a dev build (`...app.dev`) matching a
     // release build's (`...app`) agents.
     assert_eq!(
@@ -175,8 +173,10 @@ fn fixture(
         name_pool: Vec::new(),
         is_builtin: false,
         is_active: true,
+        shared: false,
         source_team: None,
         source_team_persona_slug: None,
+        catalog_source: None,
         definition_respond_to: None,
         definition_respond_to_allowlist: Vec::new(),
         definition_parallelism: None,
@@ -294,8 +294,10 @@ fn persona_with_provider(
         name_pool: Vec::new(),
         is_builtin: false,
         is_active: true,
+        shared: false,
         source_team: None,
         source_team_persona_slug: None,
+        catalog_source: None,
         env_vars: std::collections::BTreeMap::new(),
         respond_to: None,
         respond_to_allowlist: Vec::new(),
