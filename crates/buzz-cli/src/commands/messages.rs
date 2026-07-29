@@ -2,7 +2,9 @@ use buzz_sdk::{DeleteMessageOptions, DiffMeta, ThreadRef, VoteDirection};
 use nostr::PublicKey;
 use uuid::Uuid;
 
-use crate::client::{normalize_events, normalize_write_response, BuzzClient};
+use crate::client::{
+    normalize_events, normalize_verified_events, normalize_write_response, BuzzClient,
+};
 use crate::error::CliError;
 use crate::validate::{
     infer_language, parse_event_id, parse_uuid, read_or_stdin, truncate_diff,
@@ -239,7 +241,17 @@ fn parse_member_pubkeys(event: &serde_json::Value) -> Vec<String> {
         .collect()
 }
 
-fn format_events(normalized: &str, format: &crate::OutputFormat) -> String {
+fn format_events(
+    normalized: &str,
+    format: &crate::OutputFormat,
+    include_signatures: bool,
+) -> String {
+    // A signature without pubkey/kind/tags/content/created_at cannot be
+    // verified. Preserve the complete envelope even when the global compact
+    // format was requested rather than emitting misleading partial proof.
+    if include_signatures {
+        return normalized.to_string();
+    }
     match format {
         crate::OutputFormat::Compact => {
             let events: Vec<serde_json::Value> =
@@ -260,6 +272,24 @@ fn format_events(normalized: &str, format: &crate::OutputFormat) -> String {
     }
 }
 
+fn render_events(
+    events: &[serde_json::Value],
+    format: &crate::OutputFormat,
+    include_signatures: bool,
+) -> Result<String, CliError> {
+    let normalized = if include_signatures {
+        normalize_verified_events(events)?
+    } else {
+        normalize_events(events)
+    };
+    Ok(format_events(&normalized, format, include_signatures))
+}
+
+pub struct MessageOutputOptions<'a> {
+    pub format: &'a crate::OutputFormat,
+    pub include_signatures: bool,
+}
+
 pub async fn cmd_get_messages(
     client: &BuzzClient,
     channel_id: &str,
@@ -267,7 +297,7 @@ pub async fn cmd_get_messages(
     before: Option<i64>,
     since: Option<i64>,
     kinds: Option<&str>,
-    format: &crate::OutputFormat,
+    output: MessageOutputOptions<'_>,
 ) -> Result<(), CliError> {
     validate_uuid(channel_id)?;
     let limit = limit.unwrap_or(50).min(200);
@@ -296,8 +326,10 @@ pub async fn cmd_get_messages(
     let resp = client.query(&filter).await?;
     let mut events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
     events.sort_by_key(|e| e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0));
-    let normalized = normalize_events(&events);
-    println!("{}", format_events(&normalized, format));
+    println!(
+        "{}",
+        render_events(&events, output.format, output.include_signatures)?
+    );
     Ok(())
 }
 
@@ -307,7 +339,7 @@ pub async fn cmd_get_thread(
     event_id: &str,
     limit: Option<u32>,
     depth_limit: Option<u32>,
-    format: &crate::OutputFormat,
+    output: MessageOutputOptions<'_>,
 ) -> Result<(), CliError> {
     validate_uuid(channel_id)?;
     validate_hex64(event_id)?;
@@ -332,8 +364,10 @@ pub async fn cmd_get_thread(
     let resp = client.query_multi(&[reply_filter, root_filter]).await?;
     let mut events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
     events.sort_by_key(|e| e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0));
-    let normalized = normalize_events(&events);
-    println!("{}", format_events(&normalized, format));
+    println!(
+        "{}",
+        render_events(&events, output.format, output.include_signatures)?
+    );
     Ok(())
 }
 
@@ -343,7 +377,7 @@ pub async fn cmd_search(
     author: Option<&str>,
     since: Option<i64>,
     limit: Option<u32>,
-    format: &crate::OutputFormat,
+    output: MessageOutputOptions<'_>,
 ) -> Result<(), CliError> {
     if query.is_none() && author.is_none() {
         return Err(CliError::Usage(
@@ -379,8 +413,10 @@ pub async fn cmd_search(
             std::cmp::Reverse(e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0))
         });
     }
-    let normalized = normalize_events(&events);
-    println!("{}", format_events(&normalized, format));
+    println!(
+        "{}",
+        render_events(&events, output.format, output.include_signatures)?
+    );
     Ok(())
 }
 
@@ -834,6 +870,7 @@ pub async fn dispatch(
             before,
             since,
             kinds,
+            include_signatures,
         } => {
             cmd_get_messages(
                 client,
@@ -842,7 +879,10 @@ pub async fn dispatch(
                 before,
                 since,
                 kinds.as_deref(),
-                format,
+                MessageOutputOptions {
+                    format,
+                    include_signatures,
+                },
             )
             .await
         }
@@ -851,12 +891,27 @@ pub async fn dispatch(
             event,
             limit,
             depth_limit,
-        } => cmd_get_thread(client, &channel, &event, limit, depth_limit, format).await,
+            include_signatures,
+        } => {
+            cmd_get_thread(
+                client,
+                &channel,
+                &event,
+                limit,
+                depth_limit,
+                MessageOutputOptions {
+                    format,
+                    include_signatures,
+                },
+            )
+            .await
+        }
         MessagesCmd::Search {
             query,
             author,
             since,
             limit,
+            include_signatures,
         } => {
             cmd_search(
                 client,
@@ -864,7 +919,10 @@ pub async fn dispatch(
                 author.as_deref(),
                 since,
                 limit,
-                format,
+                MessageOutputOptions {
+                    format,
+                    include_signatures,
+                },
             )
             .await
         }
@@ -876,10 +934,11 @@ pub async fn dispatch(
 
 #[cfg(test)]
 mod tests {
-    use super::{find_root_from_tags, match_profiles_by_name, parse_member_pubkeys};
+    use super::{find_root_from_tags, match_profiles_by_name, parse_member_pubkeys, render_events};
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
     };
+    use nostr::{EventBuilder, Keys, Kind};
     use serde_json::json;
 
     const ID_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -891,6 +950,64 @@ mod tests {
     const PK_VALID_A: &str = "35c18ae273fccfaf80d629e20e7f8721b90499379addff533054acc2504c12b4";
     const PK_VALID_B: &str = "c6237ef84fa537c78dcee78efd2d4e59f728859c7f194da42ac51ededfa0be05";
     const PK_VALID_C: &str = "f4a42a97e594b77bdbd8ee35191c8b28a94a4cb871d96f32921558275421fb68";
+
+    fn signed_message(content: &str) -> serde_json::Value {
+        let event = EventBuilder::new(Kind::TextNote, content)
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        serde_json::to_value(event).unwrap()
+    }
+
+    #[test]
+    fn default_message_output_remains_signature_stripped() {
+        let output = render_events(
+            &[signed_message("hello")],
+            &crate::OutputFormat::Json,
+            false,
+        )
+        .unwrap();
+        let events: Vec<serde_json::Value> = serde_json::from_str(&output).unwrap();
+
+        assert!(events[0].get("sig").is_none());
+        assert_eq!(events[0]["content"], "hello");
+    }
+
+    #[test]
+    fn signature_output_is_complete_verified_and_not_compacted() {
+        let mut raw = signed_message("owner says go");
+        raw["relay_projection_only"] = json!("not part of the signed envelope");
+
+        let output = render_events(&[raw], &crate::OutputFormat::Compact, true).unwrap();
+        let events: Vec<serde_json::Value> = serde_json::from_str(&output).unwrap();
+        let event = &events[0];
+
+        for field in [
+            "id",
+            "pubkey",
+            "kind",
+            "content",
+            "created_at",
+            "tags",
+            "sig",
+        ] {
+            assert!(event.get(field).is_some(), "missing signed field {field}");
+        }
+        assert!(event.get("relay_projection_only").is_none());
+
+        let typed: nostr::Event = serde_json::from_value(event.clone()).unwrap();
+        typed.verify().unwrap();
+    }
+
+    #[test]
+    fn signature_output_rejects_tampering_without_echoing_content() {
+        let mut raw = signed_message("original");
+        raw["content"] = json!("sensitive-tampered-content");
+
+        let error = render_events(&[raw], &crate::OutputFormat::Json, true).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("unverifiable signed event"));
+        assert!(!message.contains("sensitive-tampered-content"));
+    }
 
     #[test]
     fn root_marker_wins_over_reply_marker() {

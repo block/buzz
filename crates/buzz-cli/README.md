@@ -33,6 +33,7 @@ buzz messages send --channel <uuid> --content "Hello"
 buzz messages send --channel <uuid> --content "Reply" --reply-to <event-id> --broadcast
 buzz messages send --channel <uuid> --content - < message.md   # read body from stdin
 buzz messages get --channel <uuid> --limit 20
+buzz messages get --channel <uuid> --include-signatures
 buzz messages thread --channel <uuid> --event <event-id>
 buzz messages search --query "architecture"
 buzz messages search --author <pubkey|npub|name> --since <unix-ts>
@@ -90,6 +91,14 @@ buzz repos protect remove --id my-repo --ref refs/heads/main
 # Pipe to jq
 buzz channels list | jq '.[].name'
 ```
+
+`messages get`, `messages thread`, and `messages search` omit event signatures
+by default. Pass `--include-signatures` when a downstream system must verify
+authorship. The CLI verifies each event id and Schnorr signature before emitting
+the complete `{id,pubkey,kind,content,created_at,tags,sig}` envelope; a malformed
+or unverifiable relay event makes the command fail. This complete envelope is
+preserved even with the global `--format compact` option because a partial event
+cannot be verified.
 
 `protect set` replaces every existing rule for the exact ref pattern. Any
 constraint omitted from the command is removed. `protect list` reports malformed
