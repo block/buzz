@@ -1,4 +1,3 @@
-
 use super::{create_and_persist_backup_with_log_n, verify_ncryptsec_backup_inner};
 use crate::app_state::build_app_state;
 use nostr::Keys;
