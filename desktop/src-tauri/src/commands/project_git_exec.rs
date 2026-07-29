@@ -76,7 +76,7 @@ pub(crate) fn run_git(
     } else {
         LOCAL_GIT_TIMEOUT
     };
-    configure_git_auth(&mut command, auth, needs_credentials);
+    configure_git_auth(&mut command, auth, needs_credentials)?;
     command.stdin(Stdio::null());
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
@@ -122,13 +122,33 @@ pub(crate) fn run_git(
         return Err(if stderr.is_empty() {
             format!("git exited with status {status}")
         } else {
-            stderr
+            friendly_git_error(&stderr)
         });
     }
     Ok(stdout)
 }
 
-fn configure_git_auth(command: &mut Command, auth: &GitAuthConfig, needs_credentials: bool) {
+/// Rewrite git's own stderr into an actionable message for surfaces (like the
+/// PR merge dialog) that show it directly to the user. Git's genuine text —
+/// "terminal prompts disabled" — is accurate but meaningless to someone who
+/// never typed a git command; it always means the credential helper failed to
+/// answer, since `configure_git_auth` never lets a credentialed operation run
+/// without one (see the fail-fast check below).
+fn friendly_git_error(stderr: &str) -> String {
+    if stderr.contains("terminal prompts disabled") {
+        return format!(
+            "git-credential-nostr did not provide credentials for this operation ({stderr}). \
+             Reinstall or relink Buzz's git credential helper and try again."
+        );
+    }
+    stderr.to_string()
+}
+
+fn configure_git_auth(
+    command: &mut Command,
+    auth: &GitAuthConfig,
+    needs_credentials: bool,
+) -> Result<(), String> {
     command.env("GIT_TERMINAL_PROMPT", "0");
     command.env("GIT_CONFIG_NOSYSTEM", "1");
     for key in [
@@ -170,7 +190,23 @@ fn configure_git_auth(command: &mut Command, auth: &GitAuthConfig, needs_credent
     ];
     if needs_credentials {
         let Some(cred_helper) = &auth.credential_helper else {
-            return apply_git_config(command, &entries);
+            // `allow_file_transport` is only set for local-repo test fixtures
+            // (see `build_test_git_auth_config`), which never talk to a real
+            // relay and so never need real credentials even for push/fetch —
+            // let those through credential-less as before.
+            if auth.allow_file_transport {
+                apply_git_config(command, &entries);
+                return Ok(());
+            }
+            // Otherwise this is a real relay-hosted operation: running
+            // credential-less here would spawn git anyway and fail deep
+            // inside with git's own "terminal prompts disabled" — a message
+            // that means nothing without reading this source. Fail before
+            // the process even starts, with the actual cause.
+            return Err(
+                "git-credential-nostr not found — reinstall or relink Buzz's git credential helper"
+                    .to_string(),
+            );
         };
         command.env("NOSTR_PRIVATE_KEY", &auth.nsec);
         entries.push((
@@ -180,6 +216,7 @@ fn configure_git_auth(command: &mut Command, auth: &GitAuthConfig, needs_credent
         entries.push(("credential.useHttpPath", "true".to_string()));
     }
     apply_git_config(command, &entries);
+    Ok(())
 }
 
 /// Format a path for git `credential.helper`.
@@ -327,9 +364,77 @@ fn validate_clone_url_against_relay(clone_url: &str, relay_base: &str) -> Result
 #[cfg(test)]
 mod tests {
     use super::{
-        clean_branch, clean_target_ref, credential_helper_config_value, git_needs_credentials,
-        git_subcommand, validate_clone_url, validate_clone_url_against_relay,
+        clean_branch, clean_target_ref, configure_git_auth, credential_helper_config_value,
+        friendly_git_error, git_needs_credentials, git_subcommand, validate_clone_url,
+        validate_clone_url_against_relay, GitAuthConfig,
     };
+
+    fn auth_config(credential_helper: Option<std::path::PathBuf>) -> GitAuthConfig {
+        GitAuthConfig {
+            git_path: std::path::PathBuf::from("git"),
+            credential_helper,
+            nsec: "nsec1test".to_string(),
+            allow_file_transport: false,
+        }
+    }
+
+    #[test]
+    fn configure_git_auth_fails_fast_when_credential_helper_missing() {
+        let auth = auth_config(None);
+        let mut command = std::process::Command::new("git");
+        let result = configure_git_auth(&mut command, &auth, true);
+        let error = result.expect_err("missing credential helper must fail fast");
+        assert!(
+            error.contains("git-credential-nostr not found"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn configure_git_auth_ok_without_credential_helper_when_not_needed() {
+        // Local-only operations (e.g. rev-parse) never need credentials, so a
+        // missing helper must not block them.
+        let auth = auth_config(None);
+        let mut command = std::process::Command::new("git");
+        assert!(configure_git_auth(&mut command, &auth, false).is_ok());
+    }
+
+    #[test]
+    fn configure_git_auth_ok_when_credential_helper_present() {
+        let auth = auth_config(Some(std::path::PathBuf::from(
+            "/usr/local/bin/git-credential-nostr",
+        )));
+        let mut command = std::process::Command::new("git");
+        assert!(configure_git_auth(&mut command, &auth, true).is_ok());
+    }
+
+    #[test]
+    fn configure_git_auth_allows_missing_helper_under_file_transport() {
+        // `allow_file_transport` marks local-repo test fixtures, which never
+        // talk to a real relay — a missing helper there must not regress
+        // existing push/fetch tests against local bare repos.
+        let mut auth = auth_config(None);
+        auth.allow_file_transport = true;
+        let mut command = std::process::Command::new("git");
+        assert!(configure_git_auth(&mut command, &auth, true).is_ok());
+    }
+
+    #[test]
+    fn friendly_git_error_rewrites_terminal_prompts_disabled() {
+        let raw = "could not read Username for 'https://relay.example': terminal prompts disabled";
+        let friendly = friendly_git_error(raw);
+        assert!(friendly.contains("git-credential-nostr did not provide credentials"));
+        assert!(
+            friendly.contains(raw),
+            "must preserve the original git text for debugging"
+        );
+    }
+
+    #[test]
+    fn friendly_git_error_passes_through_unrelated_errors() {
+        let raw = "fatal: repository not found";
+        assert_eq!(friendly_git_error(raw), raw);
+    }
 
     #[test]
     fn credential_helper_config_value_uses_forward_slashes() {
