@@ -1,10 +1,18 @@
+import 'dart:async';
+import 'dart:io';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:photo_manager/photo_manager.dart';
+import 'package:share_plus/share_plus.dart';
 
 import '../../shared/clipboard_utils.dart';
 import '../../shared/deeplink/deep_link.dart';
+import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
@@ -165,6 +173,214 @@ void showMessageActions({
       ),
     ),
   );
+}
+
+/// Image-focused actions shown from the full-screen viewer.
+void showImageActions({
+  required BuildContext context,
+  required WidgetRef ref,
+  required TimelineMessage message,
+  required String channelId,
+  required String imageUrl,
+  required bool canManageMessage,
+  VoidCallback? onDeleted,
+}) {
+  showModalBottomSheet<void>(
+    context: context,
+    showDragHandle: true,
+    builder: (sheetContext) => SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(
+          Grid.gutter,
+          0,
+          Grid.gutter,
+          Grid.xs,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(LucideIcons.download),
+              title: const Text('Save image'),
+              onTap: () {
+                Navigator.of(sheetContext).pop();
+                unawaited(_saveImage(context, ref, imageUrl));
+              },
+            ),
+            ListTile(
+              leading: const Icon(LucideIcons.share2),
+              title: const Text('Share image'),
+              onTap: () {
+                final renderBox = context.findRenderObject() as RenderBox?;
+                final shareOrigin = renderBox == null
+                    ? null
+                    : renderBox.localToGlobal(Offset.zero) & renderBox.size;
+                Navigator.of(sheetContext).pop();
+                unawaited(
+                  _shareImage(context, ref, imageUrl, shareOrigin: shareOrigin),
+                );
+              },
+            ),
+            ListTile(
+              leading: const Icon(LucideIcons.link2),
+              title: const Text('Copy image link'),
+              onTap: () {
+                Navigator.of(sheetContext).pop();
+                copyToClipboard(
+                  context,
+                  imageUrl,
+                  message: 'Image link copied',
+                );
+              },
+            ),
+            if (canManageMessage) ...[
+              const SheetDivider(),
+              ListTile(
+                leading: Icon(
+                  LucideIcons.trash2,
+                  color: sheetContext.colors.error,
+                ),
+                title: Text(
+                  'Delete message',
+                  style: TextStyle(color: sheetContext.colors.error),
+                ),
+                onTap: () {
+                  Navigator.of(sheetContext).pop();
+                  _confirmDelete(
+                    context: context,
+                    ref: ref,
+                    channelId: channelId,
+                    messageId: message.id,
+                    onDeleted: onDeleted,
+                  );
+                },
+              ),
+            ],
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
+@immutable
+class _DownloadedImage {
+  final Uint8List bytes;
+  final String filename;
+
+  const _DownloadedImage({required this.bytes, required this.filename});
+}
+
+Future<_DownloadedImage> _downloadImage(WidgetRef ref, String imageUrl) async {
+  final response = await ref
+      .read(mediaHttpClientProvider)
+      .get(
+        Uri.parse(imageUrl),
+        headers: ref.read(mediaGetAuthServiceProvider).headersFor(imageUrl),
+      );
+  if (response.statusCode < 200 || response.statusCode >= 300) {
+    throw HttpException(
+      'Image download failed (${response.statusCode})',
+      uri: Uri.parse(imageUrl),
+    );
+  }
+  return _DownloadedImage(
+    bytes: response.bodyBytes,
+    filename: downloadedImageFilename(
+      imageUrl,
+      response.headers['content-type'],
+    ),
+  );
+}
+
+/// Returns a safe image filename while preserving supported image formats.
+@visibleForTesting
+String downloadedImageFilename(String imageUrl, String? contentType) {
+  final pathSegments = Uri.tryParse(imageUrl)?.pathSegments;
+  final rawName = pathSegments == null || pathSegments.isEmpty
+      ? ''
+      : pathSegments.last;
+  final safeName = rawName
+      .replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '-')
+      .replaceAll(RegExp(r'-+'), '-');
+  if (RegExp(
+    r'\.(avif|bmp|gif|heic|heif|jpe?g|png|webp)$',
+    caseSensitive: false,
+  ).hasMatch(safeName)) {
+    return safeName;
+  }
+  final extension = switch (contentType?.split(';').first.trim()) {
+    'image/avif' => '.avif',
+    'image/gif' => '.gif',
+    'image/heic' => '.heic',
+    'image/heif' => '.heif',
+    'image/png' => '.png',
+    'image/webp' => '.webp',
+    _ => '.jpg',
+  };
+  return 'buzz-${DateTime.now().millisecondsSinceEpoch}$extension';
+}
+
+Future<void> _saveImage(
+  BuildContext context,
+  WidgetRef ref,
+  String imageUrl,
+) async {
+  final messenger = ScaffoldMessenger.maybeOf(context);
+  try {
+    final needsPhotoLibraryPermission =
+        defaultTargetPlatform == TargetPlatform.iOS ||
+        await requiresLegacyMediaStoragePermission();
+    if (needsPhotoLibraryPermission) {
+      final permission = await PhotoManager.requestPermissionExtend(
+        requestOption: const PermissionRequestOption(
+          iosAccessLevel: IosAccessLevel.addOnly,
+          androidPermission: AndroidPermission(
+            type: RequestType.image,
+            mediaLocation: false,
+          ),
+        ),
+      );
+      if (!permission.isAuth) {
+        throw const FileSystemException(
+          'Photo library permission was not granted.',
+        );
+      }
+    }
+    final image = await _downloadImage(ref, imageUrl);
+    await PhotoManager.editor.saveImage(image.bytes, filename: image.filename);
+    messenger?.showSnackBar(
+      const SnackBar(content: Text('Image saved to Photos')),
+    );
+  } catch (_) {
+    messenger?.showSnackBar(
+      const SnackBar(content: Text('Could not save image')),
+    );
+  }
+}
+
+Future<void> _shareImage(
+  BuildContext context,
+  WidgetRef ref,
+  String imageUrl, {
+  Rect? shareOrigin,
+}) async {
+  final messenger = ScaffoldMessenger.maybeOf(context);
+  try {
+    final image = await _downloadImage(ref, imageUrl);
+    final directory = await getTemporaryDirectory();
+    final file = File(
+      '${directory.path}${Platform.pathSeparator}${image.filename}',
+    );
+    await file.writeAsBytes(image.bytes, flush: true);
+    await SharePlus.instance.share(
+      ShareParams(files: [XFile(file.path)], sharePositionOrigin: shareOrigin),
+    );
+  } catch (_) {
+    messenger?.showSnackBar(
+      const SnackBar(content: Text('Could not share image')),
+    );
+  }
 }
 
 /// Canonical `buzz://message` link for a timeline message, including thread
@@ -496,6 +712,7 @@ void _confirmDelete({
   required WidgetRef ref,
   required String channelId,
   required String messageId,
+  VoidCallback? onDeleted,
 }) {
   showDialog<void>(
     context: context,
@@ -508,17 +725,19 @@ void _confirmDelete({
           child: const Text('Cancel'),
         ),
         FilledButton(
-          onPressed: () {
+          onPressed: () async {
             Navigator.of(dialogContext).pop();
             final messenger = ScaffoldMessenger.of(context);
-            ref
-                .read(channelActionsProvider)
-                .deleteMessage(channelId: channelId, eventId: messageId)
-                .catchError((Object error) {
-                  messenger.showSnackBar(
-                    SnackBar(content: Text('Failed to delete message: $error')),
-                  );
-                });
+            try {
+              await ref
+                  .read(channelActionsProvider)
+                  .deleteMessage(channelId: channelId, eventId: messageId);
+              onDeleted?.call();
+            } catch (error) {
+              messenger.showSnackBar(
+                SnackBar(content: Text('Failed to delete message: $error')),
+              );
+            }
           },
           style: FilledButton.styleFrom(
             backgroundColor: dialogContext.colors.error,

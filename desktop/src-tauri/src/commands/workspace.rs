@@ -10,6 +10,31 @@ use crate::managed_agents::{
 };
 use crate::relay;
 
+/// Adopt the pre-scoping global retention database's pending rows into `scope`.
+///
+/// Best-effort: a failure is logged and the boot proceeds. The migration's own
+/// crash-safety guards make the next launch retry safely, and blocking the
+/// workspace apply on it would be worse than a delayed publish.
+fn migrate_legacy_retention_into(
+    app: &AppHandle,
+    scope: &crate::managed_agents::retention::RetentionScope,
+) {
+    let Ok(base_dir) = crate::managed_agents::managed_agents_base_dir(app) else {
+        return;
+    };
+    match crate::managed_agents::retention::migrate_legacy_retention_db(
+        &base_dir,
+        &scope.db_path,
+        &scope.owner_keys.public_key().to_hex(),
+    ) {
+        Ok(0) => {}
+        Ok(copied) => {
+            eprintln!("buzz-desktop: adopted {copied} legacy retained event(s) into this community")
+        }
+        Err(error) => eprintln!("buzz-desktop: legacy retention migration failed: {error}"),
+    }
+}
+
 #[derive(Deserialize)]
 struct RelayInfoIcon {
     #[serde(default)]
@@ -187,6 +212,27 @@ pub async fn apply_workspace(
     .map_err(|e| format!("spawn_blocking failed: {e}"))??;
 
     let state = restore_app.state::<AppState>();
+    // Backfill this exact relay+owner scope only after the workspace has been
+    // applied. Running at process boot would target the fallback relay and
+    // collapse every community into one pending-event store.
+    match crate::managed_agents::retention::active_retention_scope(&restore_app, &state) {
+        Ok(scope) => {
+            // Adopt whatever the pre-scoping release left queued in the global
+            // retention database BEFORE the scoped reconcile and flush run, so
+            // stranded tombstones and archive requests publish on this boot
+            // instead of being abandoned by the storage cutover.
+            migrate_legacy_retention_into(&restore_app, &scope);
+            crate::event_sync::spawn_event_sync(
+                restore_app.clone(),
+                scope.owner_keys,
+                scope.db_path,
+            )
+        }
+        Err(error) => {
+            eprintln!("buzz-desktop: scoped event-sync unavailable after workspace apply: {error}");
+        }
+    }
+
     let restore_pending = state
         .managed_agent_restore_pending
         .swap(false, Ordering::AcqRel);

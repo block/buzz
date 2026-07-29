@@ -8,22 +8,22 @@ pub struct SubmitEventResponse {
     pub message: String,
 }
 
-/// Sign with an explicit identity and POST the event to an explicit relay.
+/// POST an already-signed event to an explicit relay with an explicit owner.
 ///
-/// The caller owns the signer lifetime. This is important for deferred work:
-/// an in-process identity swap cannot retarget the event or its NIP-98 auth
-/// after the caller has validated which identity the operation belongs to.
-pub async fn submit_event_at_with_keys(
-    builder: nostr::EventBuilder,
+/// Deferred/scoped publication uses this form so a workspace or identity
+/// switch cannot retarget either the event or its NIP-98 authentication after
+/// the operation captured its `(relay, owner)` scope.
+pub async fn submit_signed_event_at_with_keys(
+    event: &nostr::Event,
     state: &AppState,
     api_base_url: &str,
     keys: &nostr::Keys,
 ) -> Result<SubmitEventResponse, String> {
+    if event.pubkey != keys.public_key() {
+        return Err("signed event does not match the publishing identity".to_string());
+    }
     crate::relay_admission::wait_for_rate_limit().await;
     let url = format!("{}/events", api_base_url.trim_end_matches('/'));
-    let event = builder
-        .sign_with_keys(keys)
-        .map_err(|e| format!("failed to sign event: {e}"))?;
     let body_bytes = event.as_json().into_bytes();
     let auth_header = build_nip98_auth_header_for_keys(keys, &Method::POST, &url, &body_bytes)?;
 
@@ -47,6 +47,23 @@ pub async fn submit_event_at_with_keys(
     }
 
     Ok(result)
+}
+
+/// Sign with an explicit identity and POST the event to an explicit relay.
+///
+/// The caller owns the signer lifetime. This is important for deferred work:
+/// an in-process identity swap cannot retarget the event or its NIP-98 auth
+/// after the caller has validated which identity the operation belongs to.
+pub async fn submit_event_at_with_keys(
+    builder: nostr::EventBuilder,
+    state: &AppState,
+    api_base_url: &str,
+    keys: &nostr::Keys,
+) -> Result<SubmitEventResponse, String> {
+    let event = builder
+        .sign_with_keys(keys)
+        .map_err(|e| format!("failed to sign event: {e}"))?;
+    submit_signed_event_at_with_keys(&event, state, api_base_url, keys).await
 }
 
 /// Build and submit an event to the currently active workspace relay.

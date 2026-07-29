@@ -29,6 +29,7 @@ dependencies:
   file_selector: ^1.1.0
   camera: ^0.12.0+2
   image_picker: ^1.1.2
+  photo_manager: ^3.11.0
   video_player: ^2.10.1
   package_info_plus: ^10.0.0
   app_badge_plus: ^1.2.10
@@ -36,6 +37,7 @@ dependencies:
   scrollable_positioned_list: ^0.3.8
   open_filex: ^4.7.0
   path_provider: ^2.1.6
+  share_plus: ^13.3.0
 
 dev_dependencies:
   flutter_test:

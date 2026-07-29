@@ -184,6 +184,7 @@ pub fn anthropic_thinking_config(
 fn anthropic_model_supports_xhigh(model: &str) -> bool {
     model.starts_with("claude-opus-4-7")
         || model.starts_with("claude-opus-4-8")
+        || model.starts_with("claude-opus-5")
         || model.starts_with("claude-sonnet-5")
         || model.starts_with("claude-fable-5")
         || model.starts_with("claude-mythos-5")
@@ -606,6 +607,7 @@ fn is_adaptive_thinking_model(model: &str) -> bool {
     model.starts_with("claude-opus-4-6")
         || model.starts_with("claude-opus-4-7")
         || model.starts_with("claude-opus-4-8")
+        || model.starts_with("claude-opus-5")
         // Sonnet 5.x (any patch/date suffix after "claude-sonnet-5").
         || model.starts_with("claude-sonnet-5")
         // Sonnet 4.6 exactly (not Sonnet 4.5 or earlier — not in the adaptive table).

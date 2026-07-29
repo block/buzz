@@ -662,6 +662,9 @@ test.describe("community rail", () => {
     const buttonBox = await firstButton.boundingBox();
     const railBox = await page.getByTestId("community-rail").boundingBox();
     const searchBox = await page.getByTestId("open-search").boundingBox();
+    const appSurfaceBox = await page
+      .locator(".buzz-huddle-app-surface")
+      .boundingBox();
     const contentBox = await page
       .locator("[data-buzz-content-surface]")
       .first()
@@ -669,11 +672,22 @@ test.describe("community rail", () => {
     expect(buttonBox).not.toBeNull();
     expect(railBox).not.toBeNull();
     expect(searchBox).not.toBeNull();
+    expect(appSurfaceBox).not.toBeNull();
     expect(contentBox).not.toBeNull();
     expect(buttonBox?.y ?? 0).toBeGreaterThanOrEqual(32);
-    expect(Math.abs((railBox?.y ?? 0) - (contentBox?.y ?? 0))).toBeLessThan(
+    expect(
+      Math.abs((buttonBox?.y ?? 0) - (contentBox?.y ?? 0) - 6),
+    ).toBeLessThan(0.5);
+    expect(Math.abs((railBox?.y ?? 0) - (appSurfaceBox?.y ?? 0))).toBeLessThan(
       0.5,
     );
+    expect(
+      Math.abs(
+        (railBox?.y ?? 0) +
+          (railBox?.height ?? 0) -
+          ((appSurfaceBox?.y ?? 0) + (appSurfaceBox?.height ?? 0)),
+      ),
+    ).toBeLessThan(0.5);
 
     const leftInset = (buttonBox?.x ?? 0) - (railBox?.x ?? 0);
     const rightInset =

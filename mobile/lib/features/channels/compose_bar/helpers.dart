@@ -1,6 +1,12 @@
 part of '../compose_bar.dart';
 
 const _typingThrottleMs = 3000;
+const _pastedImageMimeTypes = <String>[
+  'image/jpeg',
+  'image/jpg',
+  'image/png',
+  'image/webp',
+];
 
 /// Cap on ranked mention suggestions shown — matches desktop's
 /// `MENTION_SUGGESTION_LIMIT`.
