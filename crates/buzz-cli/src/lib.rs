@@ -348,7 +348,7 @@ buzz agents archived"
 pub enum MessagesCmd {
     /// Send a message to a channel
     #[command(
-        after_help = "Examples:\n  buzz messages send --channel <UUID> --content \"hello\"\n  buzz messages send --channel <UUID> --content \"@alice check this\"\n  echo \"hello from stdin\" | buzz messages send --channel <UUID> --content -"
+        after_help = "Examples:\n  buzz messages send --channel <UUID> --content \"hello\"\n  buzz messages send --channel <UUID> --content \"@alice check this\"\n  buzz messages send --channel <UUID> --content \"@alice\" --strict-mentions\n  echo \"hello from stdin\" | buzz messages send --channel <UUID> --content -"
     )]
     Send {
         /// Channel UUID (from 'buzz channels list')
@@ -369,6 +369,10 @@ pub enum MessagesCmd {
         /// Attach file(s) — uploads and includes as imeta tags
         #[arg(long = "file")]
         files: Vec<String>,
+        /// Fail (exit 1) if any @name in --content does not resolve to a channel member.
+        /// Default: warn on stderr and still send.
+        #[arg(long, default_value_t = false)]
+        strict_mentions: bool,
     },
     /// Send a code diff / patch to a channel
     SendDiff {

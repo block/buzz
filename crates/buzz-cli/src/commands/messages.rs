@@ -119,19 +119,80 @@ async fn resolve_channel_id(client: &BuzzClient, event_id: &str) -> Result<Uuid,
     )))
 }
 
+/// Result of resolving `@name` mentions against a channel's members.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ResolvedMentions {
+    /// Member pubkeys to attach as `p` tags.
+    pubkeys: Vec<String>,
+    /// Lowercased `@` tokens present in content that matched no channel member.
+    unresolved: Vec<String>,
+}
+
+/// Split extracted `@` tokens into resolved pubkeys and unresolved names.
+///
+/// Pure helper — unit-tested without network. `name_to_pubkeys` keys must be
+/// lowercased. Names with no map entry land in `unresolved` (first-seen order).
+fn partition_mentions(
+    names: &[String],
+    name_to_pubkeys: &std::collections::HashMap<String, Vec<String>>,
+) -> ResolvedMentions {
+    let mut pubkeys = Vec::new();
+    let mut unresolved = Vec::new();
+    for name in names {
+        match name_to_pubkeys.get(name) {
+            Some(pks) if !pks.is_empty() => pubkeys.extend(pks.iter().cloned()),
+            _ => unresolved.push(name.clone()),
+        }
+    }
+    ResolvedMentions {
+        pubkeys,
+        unresolved,
+    }
+}
+
+/// Emit one stderr warning per unresolved `@` token.
+///
+/// Used only for **non-strict** sends (exit 0). Strict mode must keep stderr
+/// as a single JSON error object — see [`strict_unresolved_mentions_error`].
+/// Format is fixed for greppability:
+/// `warning: '@token' matched no member of this channel, no mention tag added`
+fn warn_unresolved_mentions(unresolved: &[String]) {
+    for name in unresolved {
+        eprintln!("warning: '@{name}' matched no member of this channel, no mention tag added");
+    }
+}
+
+/// Build the usage error for `--strict-mentions` when names failed to resolve.
+///
+/// Returns only the structured error message — callers must **not** also print
+/// plaintext warnings, so stderr stays a single JSON object for agents.
+fn strict_unresolved_mentions_error(unresolved: &[String]) -> CliError {
+    let list = unresolved
+        .iter()
+        .map(|n| format!("@{n}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    CliError::Usage(format!("unresolved mentions (channel-scoped): {list}"))
+}
+
 /// Resolve `@name` mentions in `content` against this channel's members.
 ///
 /// Queries kind 39002 (channel members) then kind 0 (profiles), parses
 /// display names once, and feeds them to [`extract_at_mentions_with_known`]
-/// for multi-word matching. On any I/O or parse failure, returns an empty
-/// vec — auto-tagging is best-effort and must never block a send.
+/// for multi-word matching.
+///
+/// Returns:
+/// - `Ok` with resolved pubkeys and any tokens that matched no member after a
+///   **successful** relay lookup (empty membership counts as success).
+/// - `Err` on network/relay/query failures so strict mode can preserve exit
+///   code 2 (`retryable`) instead of mislabeling them as unresolved names.
 async fn resolve_content_mentions(
     client: &BuzzClient,
     channel_id: &str,
     content: &str,
-) -> Vec<String> {
+) -> Result<ResolvedMentions, CliError> {
     if !content.contains('@') {
-        return vec![];
+        return Ok(ResolvedMentions::default());
     }
 
     // 1. Membership list (kind 39002 is parameterized-replaceable, addressed by `d` tag).
@@ -140,10 +201,15 @@ async fn resolve_content_mentions(
         "#d": [channel_id],
         "limit": 1,
     });
-    let member_pubkeys = match fetch_member_pubkeys(client, &members_filter).await {
-        Some(pks) if !pks.is_empty() => pks,
-        _ => return vec![],
-    };
+    let member_pubkeys = fetch_member_pubkeys(client, &members_filter).await?;
+    if member_pubkeys.is_empty() {
+        // Successful lookup, no members: every @ token is genuinely unresolved.
+        let names = extract_at_mentions_with_known(content, &[]);
+        return Ok(ResolvedMentions {
+            pubkeys: vec![],
+            unresolved: names,
+        });
+    }
 
     // 2. Profiles for those members (kind 0).
     let profiles_filter = serde_json::json!({
@@ -151,10 +217,7 @@ async fn resolve_content_mentions(
         "authors": member_pubkeys,
         "limit": member_pubkeys.len(),
     });
-    let profile_events = match fetch_events(client, &profiles_filter).await {
-        Some(v) => v,
-        None => return vec![],
-    };
+    let profile_events = fetch_events(client, &profiles_filter).await?;
 
     // 3. Single parse: extract (pubkey, display_name) pairs from profile JSON.
     let mut name_to_pubkeys: std::collections::HashMap<String, Vec<String>> =
@@ -190,32 +253,34 @@ async fn resolve_content_mentions(
     let known_refs: Vec<&str> = display_names.iter().map(|s| s.as_str()).collect();
     let names = extract_at_mentions_with_known(content, &known_refs);
 
-    // 5. Look up matched names → pubkeys via the map we already built.
-    names
-        .iter()
-        .flat_map(|n| name_to_pubkeys.get(n).into_iter().flatten())
-        .cloned()
-        .collect()
+    // 5. Partition into resolved pubkeys vs unresolved tokens.
+    Ok(partition_mentions(&names, &name_to_pubkeys))
 }
 
 /// Fetch raw events for `filter` via the relay's `/query` endpoint.
-/// Returns `None` on any I/O or parse failure.
+///
+/// Propagates network/relay errors from [`BuzzClient::query`]. A successful
+/// response that is not a JSON array yields an empty vec (best-effort parse).
 async fn fetch_events(
     client: &BuzzClient,
     filter: &serde_json::Value,
-) -> Option<Vec<serde_json::Value>> {
-    let raw = client.query(filter).await.ok()?;
-    let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    parsed.as_array().cloned()
+) -> Result<Vec<serde_json::Value>, CliError> {
+    let raw = client.query(filter).await?;
+    let parsed: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| CliError::Other(format!("failed to parse query response: {e}")))?;
+    Ok(parsed.as_array().cloned().unwrap_or_default())
 }
 
 /// Extract member pubkeys (the `p` tag values) from a single 39002 event.
+///
+/// `Ok(vec![])` means the query succeeded but no membership event / no `p`
+/// tags — not a transport failure.
 async fn fetch_member_pubkeys(
     client: &BuzzClient,
     filter: &serde_json::Value,
-) -> Option<Vec<String>> {
+) -> Result<Vec<String>, CliError> {
     let events = fetch_events(client, filter).await?;
-    Some(parse_member_pubkeys(events.first()?))
+    Ok(events.first().map(parse_member_pubkeys).unwrap_or_default())
 }
 
 /// Parse member pubkeys from a kind 39002 event JSON value.
@@ -478,6 +543,10 @@ pub struct SendMessageParams {
     pub reply_to: Option<String>,
     pub broadcast: bool,
     pub files: Vec<String>,
+    /// When true, exit with a usage error if any `@name` in content fails to
+    /// resolve against the channel member list. Default is false: warn on
+    /// stderr and still send.
+    pub strict_mentions: bool,
 }
 
 pub async fn cmd_send_message(
@@ -494,6 +563,41 @@ pub async fn cmd_send_message(
         validate_hex64(r)?;
     }
     let channel_uuid = parse_uuid(&p.channel_id)?;
+
+    // Resolve @name mentions against the author-written body before any upload
+    // or submit side effects, so `--strict-mentions` fails cleanly with no
+    // orphaned media. Media markdown appended later cannot carry `@names`.
+    //
+    // Lookup transport errors are preserved under `--strict-mentions` (exit 2 /
+    // retryable). Non-strict treats lookup failure as best-effort: send without
+    // auto p-tags, without mislabeling tokens as "matched no member".
+    let mut auto_resolved = match resolve_content_mentions(client, &p.channel_id, &p.content).await
+    {
+        Ok(resolved) => {
+            if !resolved.unresolved.is_empty() {
+                if p.strict_mentions {
+                    // JSON-only stderr: do not emit plaintext warnings first.
+                    return Err(strict_unresolved_mentions_error(&resolved.unresolved));
+                }
+                warn_unresolved_mentions(&resolved.unresolved);
+            }
+            resolved.pubkeys
+        }
+        Err(e) if p.strict_mentions => return Err(e),
+        Err(_) => {
+            // Best-effort: do not block the send, but signal that auto-tagging
+            // was skipped so agents/humans can tell a silent miss from success.
+            eprintln!("warning: mention lookup failed, sending without @mention tags");
+            Vec::new()
+        }
+    };
+
+    // NIP-27: also extract nostr:npub1… inline references (skipping code regions)
+    let stripped = strip_code_regions(&p.content);
+    let uri_pubkeys = extract_nostr_uris(&stripped);
+    merge_mentions(&mut auto_resolved, &uri_pubkeys, MENTION_CAP);
+
+    let mention_refs: Vec<&str> = auto_resolved.iter().map(|s| s.as_str()).collect();
 
     // Upload files and build imeta tags
     let mut media_tags: Vec<Vec<String>> = Vec::new();
@@ -525,17 +629,6 @@ pub async fn cmd_send_message(
     } else {
         None
     };
-
-    // Resolve @name mentions in the author-written body only — not the media markdown we
-    // append above, which is derived from upload metadata and can't carry `@names`.
-    let mut auto_resolved = resolve_content_mentions(client, &p.channel_id, &p.content).await;
-
-    // NIP-27: also extract nostr:npub1… inline references (skipping code regions)
-    let stripped = strip_code_regions(&p.content);
-    let uri_pubkeys = extract_nostr_uris(&stripped);
-    merge_mentions(&mut auto_resolved, &uri_pubkeys, MENTION_CAP);
-
-    let mention_refs: Vec<&str> = auto_resolved.iter().map(|s| s.as_str()).collect();
 
     let builder = match p.kind {
         Some(45001) => {
@@ -765,6 +858,7 @@ pub async fn dispatch(
             reply_to,
             broadcast,
             files,
+            strict_mentions,
         } => {
             cmd_send_message(
                 client,
@@ -775,6 +869,7 @@ pub async fn dispatch(
                     reply_to,
                     broadcast,
                     files,
+                    strict_mentions,
                 },
             )
             .await
@@ -876,11 +971,16 @@ pub async fn dispatch(
 
 #[cfg(test)]
 mod tests {
-    use super::{find_root_from_tags, match_profiles_by_name, parse_member_pubkeys};
+    use super::{
+        find_root_from_tags, match_profiles_by_name, parse_member_pubkeys, partition_mentions,
+        strict_unresolved_mentions_error, ResolvedMentions,
+    };
+    use crate::error::{exit_code, CliError};
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
     };
     use serde_json::json;
+    use std::collections::HashMap;
 
     const ID_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const ID_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -1061,6 +1161,79 @@ mod tests {
         // Sanity: no `@names` in body → no profile match attempt needed.
         let names = extract_at_names("plain message, no mentions");
         assert!(names.is_empty());
+    }
+
+    /// Regression for #3015: unresolved `@` tokens must be separable from
+    /// resolved ones so the CLI can warn (and optionally fail) instead of
+    /// exiting 0 with no signal.
+    #[test]
+    fn partition_mentions_reports_unresolved_tokens() {
+        let mut map = HashMap::new();
+        map.insert(String::from("larry velez"), vec![PK_VALID_A.to_string()]);
+        map.insert(String::from("alice"), vec![PK_VALID_B.to_string()]);
+
+        let names = extract_at_mentions_with_known(
+            "isolation test: @Larry Velez is a member here, @shadow-buzz is not",
+            &["Larry Velez", "Alice"],
+        );
+        assert_eq!(names, vec!["larry velez", "shadow-buzz"]);
+
+        let result = partition_mentions(&names, &map);
+        assert_eq!(
+            result,
+            ResolvedMentions {
+                pubkeys: vec![PK_VALID_A.to_string()],
+                unresolved: vec![String::from("shadow-buzz")],
+            }
+        );
+    }
+
+    #[test]
+    fn partition_mentions_all_resolved() {
+        let mut map = HashMap::new();
+        map.insert(String::from("alice"), vec![PK_VALID_A.to_string()]);
+        let names = vec![String::from("alice")];
+        let result = partition_mentions(&names, &map);
+        assert_eq!(result.pubkeys, vec![PK_VALID_A.to_string()]);
+        assert!(result.unresolved.is_empty());
+    }
+
+    #[test]
+    fn partition_mentions_empty_map_marks_all_unresolved() {
+        // Empty membership after a successful lookup: every extracted token is unresolved.
+        let map = HashMap::new();
+        let names = extract_at_mentions_with_known("hey @Target hello", &[]);
+        let result = partition_mentions(&names, &map);
+        assert!(result.pubkeys.is_empty());
+        assert_eq!(result.unresolved, vec![String::from("target")]);
+    }
+
+    #[test]
+    fn strict_unresolved_error_is_usage_exit_1_with_token_list() {
+        // Codex P2: strict failures must be a single structured Usage error
+        // (exit 1), not plaintext warnings mixed with JSON.
+        let err = strict_unresolved_mentions_error(&[
+            String::from("shadow-buzz"),
+            String::from("target"),
+        ]);
+        assert!(matches!(err, CliError::Usage(_)));
+        assert_eq!(exit_code(&err), 1);
+        let msg = err.to_string();
+        assert!(msg.contains("@shadow-buzz"));
+        assert!(msg.contains("@target"));
+        assert!(msg.contains("unresolved mentions"));
+    }
+
+    #[test]
+    fn network_errors_keep_relay_exit_code_not_usage() {
+        // Codex P2: exhausted query retries must stay exit 2 so agents retry,
+        // not be rewritten as Usage/unresolved names.
+        let err = CliError::Relay {
+            status: 503,
+            body: "unavailable".into(),
+        };
+        assert_eq!(exit_code(&err), 2);
+        assert!(!matches!(err, CliError::Usage(_)));
     }
 
     #[test]
