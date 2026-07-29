@@ -72,6 +72,7 @@ evalexpr    = "11"
 cron        = "0.16"
 # Observability
 tracing                     = "0.1"
+tracing-appender            = "0.2"
 tracing-subscriber          = { version = "0.3", features = ["env-filter", "json"] }
 tracing-opentelemetry       = { version = "0.33" }
 opentelemetry               = { version = "0.32", features = ["trace"] }

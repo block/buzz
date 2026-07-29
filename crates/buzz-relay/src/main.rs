@@ -110,11 +110,20 @@ async fn main() -> anyhow::Result<()> {
         _ => None,
     };
 
+    // Stdout goes through a bounded lossy non-blocking writer so a stalled
+    // container-runtime log copier can never wedge the Tokio runtime (see
+    // crate::logging). The guard MUST stay bound to a named variable for the
+    // whole of main: binding it `_` drops the writer thread immediately and
+    // silently discards all subsequent logs.
+    let (log_writer, _log_guard) = buzz_relay::logging::non_blocking_stdout();
+    let log_error_counter = log_writer.error_counter();
+
     tracing_subscriber::registry()
         .with(
             fmt::layer()
                 .json()
                 .flatten_event(true)
+                .with_writer(log_writer)
                 .with_filter(log_env_filter(std::env::var("RUST_LOG").ok().as_deref())),
         )
         .with(otel_layer.map(|layer| {
@@ -149,6 +158,9 @@ async fn main() -> anyhow::Result<()> {
     let usage_idle_timeout_secs = usage_metrics_idle_timeout_secs(usage_interval_secs);
     relay_metrics::install(config.metrics_port, usage_idle_timeout_secs);
     metrics::gauge!("buzz_audit_enabled").set(if config.audit_enabled { 1.0 } else { 0.0 });
+    // Now that the metrics recorder is installed, start exporting log-line
+    // drops (nonzero rate = the stdout pipe stalled and lines were shed).
+    buzz_relay::logging::spawn_drop_counter_poller(log_error_counter);
     info!(
         port = config.metrics_port,
         idle_timeout_secs = usage_idle_timeout_secs,
