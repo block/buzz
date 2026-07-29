@@ -24,6 +24,7 @@ export const PRESET_LOGOS: Record<string, string> = {
   amp: "/harness-logos/amp.png",
   hermes: "/harness-logos/hermes.png",
   openclaw: "/harness-logos/openclaw.svg",
+  cybara: "/harness-logos/cybara.png",
 };
 
 function isBuzzRuntime(runtime: AcpRuntimeCatalogEntry): boolean {
