@@ -227,15 +227,6 @@ export function DevTranscript({
       onScroll={handleScroll}
     >
       <div ref={contentRef}>
-        <div className="pb-2 text-sm text-muted-foreground">
-          # {channel.name}
-          {channel.description ? (
-            <span className="text-muted-foreground/60">
-              {" "}
-              — {channel.description}
-            </span>
-          ) : null}
-        </div>
         {roots.map((root, index) => (
           <PromptCard
             key={root.localKey ?? root.id}
