@@ -13,6 +13,7 @@ import { useLiveHomeFeedActions } from "@/app/useLiveHomeFeedActions";
 import { useChannelBrowserDialog } from "@/app/useChannelBrowserDialog";
 import { useMarkAsReadShortcuts } from "@/app/useMarkAsReadShortcuts";
 import { useSettingsShortcuts } from "@/app/useSettingsShortcuts";
+import { useGlobalActionShortcuts } from "@/app/useGlobalActionShortcuts";
 import { useAppShellDesktopNotifications } from "@/app/useAppShellDesktopNotifications";
 import { useAppShellLifecycleEffects } from "@/app/useAppShellLifecycleEffects";
 import { useThreadActivityFeedItems } from "@/app/useThreadActivityFeedItems";
@@ -80,6 +81,7 @@ import {
 } from "@/features/communities/communityNavigationStorage";
 import { useAddCommunityDialogState } from "@/features/communities/addCommunityPrefill";
 import { useApplyTemplate } from "@/features/channel-templates/useApplyTemplate";
+import { useDisplayStyle } from "@/features/dev-mode/lib/displayStylePreference";
 import { relayClient } from "@/shared/api/relayClient";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { useRelayAutoHeal } from "@/shared/api/useRelayAutoHeal";
@@ -91,7 +93,6 @@ import { ChannelNavigationProvider } from "@/shared/context/ChannelNavigationCon
 import { MainInsetProvider } from "@/shared/layout/MainInsetContext";
 import { chromeCssVarDefaults } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
-import { hasPrimaryShortcutModifier } from "@/shared/lib/platform";
 import { useMessageDeepLinks } from "@/shared/useMessageDeepLinks";
 import { SidebarInset, SidebarProvider } from "@/shared/ui/sidebar";
 import { RelayConnectionOverlay } from "@/app/RelayConnectionOverlay";
@@ -102,10 +103,16 @@ const LazySettingsScreen = React.lazy(async () => {
   return { default: module.SettingsScreen };
 });
 
+const LazyDevModeShell = React.lazy(async () => {
+  const module = await import("@/features/dev-mode/ui/DevModeShell");
+  return { default: module.DevModeShell };
+});
+
 export function AppShell() {
   useWebviewZoomShortcuts();
   useTauriWindowDrag();
   useWebviewScrollBoundaryLock();
+  const displayStyle = useDisplayStyle();
   const communitiesHook = useCommunities();
   const hasCommunityRail = communitiesHook.communities.length > 1;
   const addCommunityDialog = useAddCommunityDialogState();
@@ -631,69 +638,15 @@ export function AppShell() {
     () => setIsCreateChannelOpen(true),
     [],
   );
-  React.useLayoutEffect(() => {
-    if (settingsOpen) {
-      return;
-    }
-
-    function handleKeyDown(event: KeyboardEvent) {
-      if (!hasPrimaryShortcutModifier(event) || event.altKey || event.repeat) {
-        return;
-      }
-
-      // A focused surface may claim the shortcut first — e.g. the composer
-      // consumes ⌘K to open the link editor when text is selected. Its
-      // element-level handler runs before this window-level bubble listener
-      // and calls `preventDefault()`; respect that instead of also opening
-      // the global dialog.
-      if (event.defaultPrevented) {
-        return;
-      }
-
-      const key = event.key.toLowerCase();
-      if (key === "k" && !event.shiftKey) {
-        event.preventDefault();
-        handleOpenSearch();
-        return;
-      }
-
-      if (key === "k" && event.shiftKey) {
-        event.preventDefault();
-        handleOpenNewDm();
-        return;
-      }
-
-      if (key === "n" && event.shiftKey) {
-        event.preventDefault();
-        handleOpenCreateChannel();
-        return;
-      }
-
-      if (key === "o" && event.shiftKey) {
-        event.preventDefault();
-        handleOpenBrowseChannels();
-        return;
-      }
-
-      if (key === "a" && event.shiftKey) {
-        event.preventDefault();
-        void goHome();
-        return;
-      }
-    }
-
-    window.addEventListener("keydown", handleKeyDown);
-    return () => {
-      window.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [
-    handleOpenBrowseChannels,
-    handleOpenNewDm,
-    handleOpenCreateChannel,
-    handleOpenSearch,
-    goHome,
+  const handleGoHomeShortcut = React.useCallback(() => void goHome(), [goHome]);
+  useGlobalActionShortcuts({
     settingsOpen,
-  ]);
+    onOpenSearch: handleOpenSearch,
+    onOpenNewDm: handleOpenNewDm,
+    onOpenCreateChannel: handleOpenCreateChannel,
+    onOpenBrowseChannels: handleOpenBrowseChannels,
+    onGoHome: handleGoHomeShortcut,
+  });
   useSettingsShortcuts({
     onClose: handleCloseSettings,
     onOpenSettings: handleOpenSettings,
@@ -817,6 +770,12 @@ export function AppShell() {
                             }
                             section={settingsSection}
                           />
+                        </React.Suspense>
+                      </div>
+                    ) : displayStyle === "developer" ? (
+                      <div className="flex min-h-0 flex-1 overflow-hidden">
+                        <React.Suspense fallback={null}>
+                          <LazyDevModeShell />
                         </React.Suspense>
                       </div>
                     ) : (
