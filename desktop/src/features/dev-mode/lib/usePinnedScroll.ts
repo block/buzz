@@ -38,6 +38,9 @@ export function usePinnedScroll(resetKey: string) {
       }
     });
     observer.observe(content);
+    // The scroller itself resizes when the composer grows (newlines, drag)
+    // or the split moves — a pinned view must stay glued to the bottom.
+    observer.observe(scroller);
     return () => observer.disconnect();
   }, []);
 

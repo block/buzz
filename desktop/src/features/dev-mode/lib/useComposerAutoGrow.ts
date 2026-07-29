@@ -41,6 +41,12 @@ export function useComposerAutoGrow(value: string, storageKey: string) {
   React.useLayoutEffect(() => {
     const el = textareaRef.current;
     if (!el) return;
+    // Freeze the wrapper during the 0px measurement: shrinking the textarea
+    // momentarily reflows the flex siblings, and that reflow clamps the
+    // transcript's scrollTop — every keystroke would scroll the chat up.
+    const wrapper = el.parentElement;
+    const wrapperHeight = wrapper?.style.height ?? "";
+    if (wrapper) wrapper.style.height = `${wrapper.offsetHeight}px`;
     el.style.height = "0px";
     const max = maxHeightPx();
     const target = Math.min(
@@ -49,6 +55,7 @@ export function useComposerAutoGrow(value: string, storageKey: string) {
     );
     el.style.height = `${target}px`;
     el.style.overflowY = el.scrollHeight > target ? "auto" : "hidden";
+    if (wrapper) wrapper.style.height = wrapperHeight;
   }, [value, floor]);
 
   const persistFloor = (next: number | null) => {
