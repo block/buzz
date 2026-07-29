@@ -1869,6 +1869,11 @@ impl AcpClient {
                         session_id = %notif.session_id,
                         input = payload.accumulated_input_tokens,
                         output = payload.accumulated_output_tokens,
+                        // A subset of `input`, logged so downstream accounting can
+                        // price it at the provider's cached rate. Always emitted,
+                        // including as 0, so a parser can tell "no cache hits"
+                        // apart from "this build predates the field".
+                        cached = payload.accumulated_cached_input_tokens,
                         "goose usage update"
                     );
                     self.goose_usage.record(&notif.session_id, payload);

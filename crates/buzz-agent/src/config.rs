@@ -738,6 +738,13 @@ pub struct Config {
     /// Thinking/reasoning effort level. `None` = use provider default (no
     /// thinking config sent). Set via `BUZZ_AGENT_THINKING_EFFORT`.
     pub thinking_effort: Option<ThinkingEffort>,
+    /// Emit Anthropic `cache_control` breakpoints on the stable prefix
+    /// (tools + system prompt) and the rolling conversation tail. Default on;
+    /// disable with `BUZZ_AGENT_PROMPT_CACHING=0`. Only consulted on Anthropic
+    /// Messages routes (first-party Anthropic and the DatabricksV2 Claude
+    /// route) — the Databricks gateway does not auto-cache, so without this the
+    /// surfaced `cache_read_input_tokens` is structurally always 0.
+    pub prompt_caching: bool,
 }
 
 impl Config {
@@ -833,6 +840,7 @@ impl Config {
             hook_servers: parse_hook_servers_env("MCP_HOOK_SERVERS"),
             hints_enabled: parse_env("BUZZ_AGENT_NO_HINTS", 0u8)? == 0,
             thinking_effort: parse_thinking_effort(env("BUZZ_AGENT_THINKING_EFFORT").as_deref())?,
+            prompt_caching: parse_env("BUZZ_AGENT_PROMPT_CACHING", 1u8)? != 0,
         };
         cfg.validate()?;
         Ok(cfg)
@@ -874,6 +882,7 @@ impl Config {
             hook_servers: HookServers::None,
             hints_enabled: false,
             thinking_effort: None,
+            prompt_caching: false,
         }
     }
 

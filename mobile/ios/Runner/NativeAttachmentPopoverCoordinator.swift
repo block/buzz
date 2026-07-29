@@ -1,6 +1,71 @@
 import Flutter
 import UIKit
 
+enum NativeAttachmentExpandedSurfaceBehavior {
+  @MainActor
+  static func dismissKeyboard(in window: UIWindow?) {
+    window?.endEditing(true)
+  }
+
+  static func keyboardOverlap(
+    containerBounds: CGRect,
+    keyboardLayoutFrame: CGRect
+  ) -> CGFloat {
+    guard
+      !keyboardLayoutFrame.isNull,
+      !keyboardLayoutFrame.isInfinite,
+      keyboardLayoutFrame.minY < containerBounds.maxY
+    else {
+      return 0
+    }
+    return max(0, containerBounds.maxY - keyboardLayoutFrame.minY)
+  }
+}
+
+enum NativeAttachmentPopoverAnchorLayout {
+  static let expandedVerticalOffset: CGFloat = 40
+
+  static func sourceRect(
+    anchorBounds: CGRect,
+    keyboardDismissalOffset: CGFloat,
+    isExpanded: Bool
+  ) -> CGRect {
+    anchorBounds.offsetBy(
+      dx: 0,
+      dy: keyboardDismissalOffset
+        + (isExpanded ? expandedVerticalOffset : 0)
+    )
+  }
+}
+
+enum NativeAttachmentPopoverPresentationLayout {
+  static func keyboardDismissalOffset(
+    sourceRect: CGRect,
+    containerBounds: CGRect,
+    safeAreaInsets: UIEdgeInsets,
+    keyboardLayoutFrame: CGRect,
+    menuHeight: CGFloat
+  ) -> CGFloat {
+    let keyboardOverlap =
+      NativeAttachmentExpandedSurfaceBehavior.keyboardOverlap(
+        containerBounds: containerBounds,
+        keyboardLayoutFrame: keyboardLayoutFrame
+      )
+    guard keyboardOverlap > 0 else { return 0 }
+
+    let availableHeight =
+      sourceRect.minY - (containerBounds.minY + safeAreaInsets.top)
+    return availableHeight >= menuHeight ? 0 : keyboardOverlap
+  }
+
+  static func sourceRect(
+    _ sourceRect: CGRect,
+    keyboardDismissalOffset: CGFloat
+  ) -> CGRect {
+    sourceRect.offsetBy(dx: 0, dy: keyboardDismissalOffset)
+  }
+}
+
 final class NativeAttachmentPopoverCoordinator: NSObject {
   private let channel: FlutterMethodChannel
   private weak var parentViewController: UIViewController?
@@ -90,11 +155,34 @@ final class NativeAttachmentPopoverCoordinator: NSObject {
     }
 
     let sourceView = presenter.view
-    let convertedRect: CGRect
+    var convertedRect: CGRect
     if let window = sourceView?.window {
       convertedRect = sourceView?.convert(sourceRect, from: window) ?? sourceRect
     } else {
       convertedRect = sourceRect
+    }
+
+    if let sourceView {
+      let keyboardDismissalOffset =
+        NativeAttachmentPopoverPresentationLayout.keyboardDismissalOffset(
+          sourceRect: convertedRect,
+          containerBounds: sourceView.bounds,
+          safeAreaInsets: sourceView.safeAreaInsets,
+          keyboardLayoutFrame: sourceView.keyboardLayoutGuide.layoutFrame,
+          menuHeight: NativeAttachmentMenuLayout.size(
+            compatibleWith: sourceView.traitCollection
+          ).height
+        )
+      if keyboardDismissalOffset > 0 {
+        NativeAttachmentExpandedSurfaceBehavior.dismissKeyboard(
+          in: sourceView.window
+        )
+        convertedRect =
+          NativeAttachmentPopoverPresentationLayout.sourceRect(
+            convertedRect,
+            keyboardDismissalOffset: keyboardDismissalOffset
+          )
+      }
     }
 
     let anchorView = makeSourceAnchor(frame: convertedRect)
@@ -175,6 +263,56 @@ final class NativeAttachmentPopoverCoordinator: NSObject {
   }
 }
 
+enum NativeAttachmentMenuLayout {
+  static let itemCount: CGFloat = 4
+  static let contentPadding: CGFloat = 16
+  static let minimumItemHeight: CGFloat = 52
+  static let itemSpacing: CGFloat = 8
+  static let itemVerticalPadding: CGFloat = 8
+  static let maximumHeight: CGFloat = 372
+  static let width: CGFloat = 216
+  static let labelTextStyle: UIFont.TextStyle = .title3
+
+  static func itemHeight(
+    compatibleWith traitCollection: UITraitCollection
+  ) -> CGFloat {
+    let labelHeight = UIFont.preferredFont(
+      forTextStyle: labelTextStyle,
+      compatibleWith: traitCollection
+    ).lineHeight
+    return max(
+      minimumItemHeight,
+      ceil(labelHeight + (itemVerticalPadding * 2))
+    )
+  }
+
+  static func itemsHeight(
+    compatibleWith traitCollection: UITraitCollection
+  ) -> CGFloat {
+    (itemHeight(compatibleWith: traitCollection) * itemCount)
+      + (itemSpacing * (itemCount - 1))
+  }
+
+  static func contentHeight(
+    compatibleWith traitCollection: UITraitCollection
+  ) -> CGFloat {
+    (contentPadding * 2) + itemsHeight(compatibleWith: traitCollection)
+  }
+
+  static func size(
+    compatibleWith traitCollection: UITraitCollection,
+    maximumHeight: CGFloat = NativeAttachmentMenuLayout.maximumHeight
+  ) -> CGSize {
+    CGSize(
+      width: width,
+      height: min(
+        contentHeight(compatibleWith: traitCollection),
+        maximumHeight
+      )
+    )
+  }
+}
+
 func makeNativeAttachmentMenuButton(
   title: String,
   symbol: String,
@@ -200,7 +338,9 @@ func makeNativeAttachmentMenuButton(
   let titleLabel = UILabel()
   titleLabel.text = title
   titleLabel.textColor = .label
-  titleLabel.font = .preferredFont(forTextStyle: .body)
+  titleLabel.font = .preferredFont(
+    forTextStyle: NativeAttachmentMenuLayout.labelTextStyle
+  )
   titleLabel.adjustsFontForContentSizeCategory = true
   titleLabel.textAlignment = .left
   titleLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -208,7 +348,10 @@ func makeNativeAttachmentMenuButton(
   button.addSubview(iconView)
   button.addSubview(titleLabel)
   NSLayoutConstraint.activate([
-    iconView.leadingAnchor.constraint(equalTo: button.leadingAnchor, constant: 14),
+    iconView.leadingAnchor.constraint(
+      equalTo: button.leadingAnchor,
+      constant: 8
+    ),
     iconView.centerYAnchor.constraint(equalTo: button.centerYAnchor),
     iconView.widthAnchor.constraint(equalToConstant: 26),
     titleLabel.leadingAnchor.constraint(
@@ -217,7 +360,7 @@ func makeNativeAttachmentMenuButton(
     ),
     titleLabel.trailingAnchor.constraint(
       equalTo: button.trailingAnchor,
-      constant: -14
+      constant: -8
     ),
     titleLabel.centerYAnchor.constraint(equalTo: button.centerYAnchor),
   ])
