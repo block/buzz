@@ -5,7 +5,7 @@
 //! MCP methods required by the Apps protocol.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -25,298 +25,33 @@ use url::Url;
 use uuid::Uuid;
 
 const MCP_APP_MIME_TYPE: &str = "text/html;profile=mcp-app";
+/// Legacy MCP revision: `initialize` handshake plus `mcp-session-id` sessions.
 const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
+/// Modern MCP revision: sessionless, handshake-free, header-routed requests.
+const MCP_MODERN_PROTOCOL_VERSION: &str = "2026-07-28";
+/// Error codes introduced by the modern (2026-07-28) revision. Used only to
+/// classify a server's era. Deliberately excludes the generic JSON-RPC
+/// `-32602` (Invalid params), which a legacy server may also return and which
+/// would otherwise misclassify it as modern and skip the handshake fallback.
+const MODERN_MCP_ERROR_CODES: [i64; 3] = [-32020, -32021, -32022];
 const MAX_MCP_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_MCP_ERROR_RESPONSE_BYTES: usize = 64 * 1024;
+const MAX_MCP_ERROR_MESSAGE_CHARS: usize = 256;
 const MAX_MCP_APP_HTML_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SERVERS: usize = 16;
 const MAX_VIEWS: usize = 32;
 const MAX_TOOLS: usize = 256;
 const MAX_RESOURCES: usize = 256;
 
-const SANDBOX_PROXY_HTML: &str = r#"<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <style>html,body{width:100%;height:100%;margin:0;overflow:hidden}iframe{width:100%;height:100%;border:0;display:block}</style>
-</head>
-<body>
-<script>
-(() => {
-  "use strict";
-  if (window.self === window.top) throw new Error("MCP App sandbox must be framed");
-  try {
-    window.top.location.href;
-    throw new Error("MCP App sandbox origin isolation failed");
-  } catch (error) {
-    if (error instanceof Error && error.message === "MCP App sandbox origin isolation failed") throw error;
-  }
+const SANDBOX_PROXY_HTML: &str = include_str!("mcp_apps_sandbox_proxy.html");
 
-  const allowedHostOrigins = new Set([
-    "tauri://localhost",
-    "http://tauri.localhost",
-    "https://tauri.localhost",
-    "http://localhost:1420",
-    "http://127.0.0.1:1420"
-  ]);
-  if (document.referrer) {
-    try { allowedHostOrigins.add(new URL(document.referrer).origin); } catch {}
-  }
-
-  const inner = document.createElement("iframe");
-  inner.setAttribute("sandbox", "allow-scripts");
-  document.body.appendChild(inner);
-  let hostOrigin = null;
-
-  const resourceReady = "ui/notifications/sandbox-resource-ready";
-  const proxyReady = "ui/notifications/sandbox-proxy-ready";
-
-  function permissionPolicy(permissions) {
-    const values = [];
-    if (permissions?.camera) values.push("camera");
-    if (permissions?.microphone) values.push("microphone");
-    if (permissions?.geolocation) values.push("geolocation");
-    if (permissions?.clipboardWrite) values.push("clipboard-write");
-    return values.join("; ");
-  }
-
-  window.addEventListener("message", (event) => {
-    if (event.source === window.parent) {
-      if (!allowedHostOrigins.has(event.origin)) return;
-      hostOrigin = event.origin;
-      if (event.data?.method === resourceReady) {
-        const { html, permissions } = event.data.params ?? {};
-        const allow = permissionPolicy(permissions);
-        if (allow) inner.setAttribute("allow", allow);
-        if (typeof html === "string") {
-          inner.srcdoc = html;
-        }
-        return;
-      }
-      inner.contentWindow?.postMessage(event.data, "*");
-      return;
-    }
-    if (event.source === inner.contentWindow && hostOrigin) {
-      window.parent.postMessage(event.data, hostOrigin);
-    }
-  });
-
-  window.parent.postMessage({
-    jsonrpc: "2.0",
-    method: proxyReady,
-    params: {}
-  }, "*");
-})();
-</script>
-</body>
-</html>"#;
-
-#[derive(Debug, Clone)]
-struct McpServerConnection {
-    endpoint: Url,
-    client: Client,
-    protocol_version: String,
-    session_id: Option<String>,
-    next_request_id: Arc<AtomicU64>,
-    tools: Vec<McpAppTool>,
-    resources: Vec<McpAppResource>,
-}
-
-#[derive(Debug, Clone)]
-struct ViewPolicy {
-    server_id: String,
-    csp: String,
-}
-
-/// Runtime state for reviewed MCP servers and isolated app views.
-pub struct McpAppHostState {
-    servers: AsyncMutex<HashMap<String, McpServerConnection>>,
-    views: Mutex<HashMap<String, ViewPolicy>>,
-}
-
-impl Default for McpAppHostState {
-    fn default() -> Self {
-        Self {
-            servers: AsyncMutex::new(HashMap::new()),
-            views: Mutex::new(HashMap::new()),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct McpAppTool {
-    name: String,
-    title: Option<String>,
-    description: Option<String>,
-    input_schema: Value,
-    output_schema: Option<Value>,
-    annotations: Option<Value>,
-    meta: Value,
-    ui_resource_uri: Option<String>,
-    visibility: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct McpAppResource {
-    uri: String,
-    name: Option<String>,
-    title: Option<String>,
-    description: Option<String>,
-    mime_type: Option<String>,
-    meta: Value,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct McpAppServerDescriptor {
-    server_id: String,
-    endpoint: String,
-    name: String,
-    version: Option<String>,
-    protocol_version: String,
-    tools: Vec<McpAppTool>,
-    resources: Vec<McpAppResource>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct McpAppResourceCsp {
-    #[serde(default)]
-    connect_domains: Vec<String>,
-    #[serde(default)]
-    resource_domains: Vec<String>,
-    #[serde(default)]
-    frame_domains: Vec<String>,
-    #[serde(default)]
-    base_uri_domains: Vec<String>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct McpAppResourcePermissions {
-    camera: Option<Value>,
-    microphone: Option<Value>,
-    geolocation: Option<Value>,
-    clipboard_write: Option<Value>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PreparedMcpAppView {
-    view_id: String,
-    sandbox_url: String,
-    html: String,
-    csp: McpAppResourceCsp,
-    /// Permissions are reported for review but not granted by this host layer.
-    requested_permissions: McpAppResourcePermissions,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum McpAppToolCaller {
-    Host,
-    App,
-}
-
-#[derive(Debug)]
-struct McpWireResponse {
-    value: Option<Value>,
-    session_id: Option<String>,
-}
-
-fn text(value: Option<&Value>) -> Option<String> {
-    value?
-        .as_str()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-}
-
-fn ui_resource_uri(meta: &Value) -> Option<String> {
-    let nested = meta
-        .get("ui")
-        .and_then(|ui| ui.get("resourceUri"))
-        .and_then(Value::as_str);
-    let legacy = meta.get("ui/resourceUri").and_then(Value::as_str);
-    nested
-        .or(legacy)
-        .filter(|uri| uri.starts_with("ui://"))
-        .map(ToOwned::to_owned)
-}
-
-fn tool_visibility(meta: &Value) -> Vec<String> {
-    let visibility = meta
-        .get("ui")
-        .and_then(|ui| ui.get("visibility"))
-        .and_then(Value::as_array)
-        .map(|values| {
-            values
-                .iter()
-                .filter_map(Value::as_str)
-                .filter(|value| matches!(*value, "model" | "app"))
-                .map(ToOwned::to_owned)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    if visibility.is_empty() {
-        vec!["model".to_string(), "app".to_string()]
-    } else {
-        visibility
-    }
-}
-
-fn parse_tools(value: &Value) -> Result<Vec<McpAppTool>, String> {
-    value
-        .pointer("/result/tools")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "MCP tools/list response is missing result.tools".to_string())?
-        .iter()
-        .take(MAX_TOOLS)
-        .map(|tool| {
-            let name = text(tool.get("name"))
-                .ok_or_else(|| "MCP tool is missing a valid name".to_string())?;
-            let meta = tool.get("_meta").cloned().unwrap_or_else(|| json!({}));
-            Ok(McpAppTool {
-                name,
-                title: text(tool.get("title")),
-                description: text(tool.get("description")),
-                input_schema: tool
-                    .get("inputSchema")
-                    .cloned()
-                    .unwrap_or_else(|| json!({"type": "object", "properties": {}})),
-                output_schema: tool.get("outputSchema").cloned(),
-                annotations: tool.get("annotations").cloned(),
-                ui_resource_uri: ui_resource_uri(&meta),
-                visibility: tool_visibility(&meta),
-                meta,
-            })
-        })
-        .collect()
-}
-
-fn parse_resources(value: &Value) -> Result<Vec<McpAppResource>, String> {
-    value
-        .pointer("/result/resources")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "MCP resources/list response is missing result.resources".to_string())?
-        .iter()
-        .take(MAX_RESOURCES)
-        .map(|resource| {
-            let uri = text(resource.get("uri"))
-                .ok_or_else(|| "MCP resource is missing a valid URI".to_string())?;
-            Ok(McpAppResource {
-                uri,
-                name: text(resource.get("name")),
-                title: text(resource.get("title")),
-                description: text(resource.get("description")),
-                mime_type: text(resource.get("mimeType")),
-                meta: resource.get("_meta").cloned().unwrap_or_else(|| json!({})),
-            })
-        })
-        .collect()
-}
+#[path = "mcp_apps_model.rs"]
+mod model;
+pub use model::{
+    McpAppHostState, McpAppResource, McpAppResourceCsp, McpAppResourcePermissions,
+    McpAppServerDescriptor, McpAppTool, McpAppToolCaller, PreparedMcpAppView,
+};
+use model::*;
 
 fn is_private_ipv4(ip: Ipv4Addr) -> bool {
     let octets = ip.octets();
@@ -369,7 +104,7 @@ fn validate_mcp_endpoint(raw: &str) -> Result<Url, String> {
             .parse::<IpAddr>()
             .is_ok_and(|address| address.is_loopback());
     match url.scheme() {
-        "https" if !loopback_host => {}
+        "https" => {}
         "http" if loopback_host => {}
         _ => {
             return Err(
@@ -423,27 +158,35 @@ async fn build_pinned_client(endpoint: &Url) -> Result<Client, String> {
         .map_err(|error| format!("failed to build MCP HTTP client: {error}"))
 }
 
-async fn read_capped_response(response: Response) -> Result<McpWireResponse, String> {
+async fn read_capped_reply(response: Response) -> Result<McpHttpReply, String> {
     let status = response.status();
+    let max_bytes = if status.is_success() {
+        MAX_MCP_RESPONSE_BYTES
+    } else {
+        MAX_MCP_ERROR_RESPONSE_BYTES
+    };
+    let limit_message = if status.is_success() {
+        "MCP response exceeds the 4 MiB limit"
+    } else {
+        "MCP error response exceeds the 64 KiB limit"
+    };
     let headers = response.headers().clone();
-    if !status.is_success() {
-        return Err(format!("MCP server returned HTTP {status}"));
-    }
     let session_id = headers
         .get("mcp-session-id")
         .and_then(|value| value.to_str().ok())
         .map(ToOwned::to_owned);
     if status == reqwest::StatusCode::ACCEPTED {
-        return Ok(McpWireResponse {
+        return Ok(McpHttpReply {
+            status,
             value: None,
             session_id,
         });
     }
     if response
         .content_length()
-        .is_some_and(|length| length > MAX_MCP_RESPONSE_BYTES as u64)
+        .is_some_and(|length| length > max_bytes as u64)
     {
-        return Err("MCP response exceeds the 4 MiB limit".to_string());
+        return Err(limit_message.to_string());
     }
     let content_type = headers
         .get(reqwest::header::CONTENT_TYPE)
@@ -454,40 +197,389 @@ async fn read_capped_response(response: Response) -> Result<McpWireResponse, Str
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|error| format!("failed to read MCP response: {error}"))?;
-        if bytes.len().saturating_add(chunk.len()) > MAX_MCP_RESPONSE_BYTES {
-            return Err("MCP response exceeds the 4 MiB limit".to_string());
+        if bytes.len().saturating_add(chunk.len()) > max_bytes {
+            return Err(limit_message.to_string());
         }
         bytes.extend_from_slice(&chunk);
     }
     let value = if content_type.starts_with("text/event-stream") {
-        let text = String::from_utf8(bytes)
-            .map_err(|_| "MCP event stream is not valid UTF-8".to_string())?;
-        text.lines()
+        let text = match String::from_utf8(bytes) {
+            Ok(text) => text,
+            Err(_) if status.is_success() => {
+                return Err("MCP event stream is not valid UTF-8".to_string())
+            }
+            Err(_) => String::new(),
+        };
+        let parsed = text
+            .lines()
             .filter_map(|line| line.strip_prefix("data:"))
             .map(str::trim)
             .filter(|line| !line.is_empty())
-            .find_map(|line| serde_json::from_str::<Value>(line).ok())
-            .ok_or_else(|| "MCP event stream did not contain a JSON response".to_string())?
+            .find_map(|line| serde_json::from_str::<Value>(line).ok());
+        if parsed.is_none() && status.is_success() {
+            return Err("MCP event stream did not contain a JSON response".to_string());
+        }
+        parsed
     } else {
-        serde_json::from_slice(&bytes)
-            .map_err(|error| format!("MCP response is not valid JSON: {error}"))?
+        match serde_json::from_slice::<Value>(&bytes) {
+            Ok(value) => Some(value),
+            Err(error) if status.is_success() => {
+                return Err(format!("MCP response is not valid JSON: {error}"))
+            }
+            Err(_) => None,
+        }
     };
-    if let Some(error) = value.get("error") {
-        return Err(format!("MCP request failed: {error}"));
-    }
-    Ok(McpWireResponse {
-        value: Some(value),
+    Ok(McpHttpReply {
+        status,
+        value,
         session_id,
     })
 }
 
-async fn post_mcp(
-    client: &Client,
-    endpoint: &Url,
+fn format_rpc_error(error: &Value) -> String {
+    let code = error
+        .get("code")
+        .and_then(Value::as_i64)
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("The server returned an MCP error.");
+    let mut truncated = message
+        .chars()
+        .take(MAX_MCP_ERROR_MESSAGE_CHARS)
+        .collect::<String>();
+    if message.chars().count() > MAX_MCP_ERROR_MESSAGE_CHARS {
+        truncated.push('…');
+    }
+    format!("code {code}: {truncated}")
+}
+
+/// Convert a raw reply into the success-only wire response, preserving the
+/// pre-dual-era error messages.
+fn wire_response(reply: McpHttpReply) -> Result<McpWireResponse, String> {
+    if !reply.status.is_success() {
+        return Err(format!("MCP server returned HTTP {}", reply.status));
+    }
+    if let Some(error) = reply.value.as_ref().and_then(|value| value.get("error")) {
+        return Err(format!("MCP request failed: {}", format_rpc_error(error)));
+    }
+    Ok(McpWireResponse {
+        value: reply.value,
+        session_id: reply.session_id,
+    })
+}
+
+/// The modern `_meta` block every modern-era request body must carry:
+/// protocol version (must match the `MCP-Protocol-Version` header), client
+/// capabilities with the Apps UI extension, and client info.
+fn modern_meta(protocol_version: &str) -> Value {
+    json!({
+        "io.modelcontextprotocol/protocolVersion": protocol_version,
+        "io.modelcontextprotocol/clientCapabilities": {
+            "extensions": {
+                "io.modelcontextprotocol/ui": {
+                    "mimeTypes": [MCP_APP_MIME_TYPE]
+                }
+            }
+        },
+        "io.modelcontextprotocol/clientInfo": {
+            "name": "Buzz Desktop",
+            "version": env!("CARGO_PKG_VERSION")
+        }
+    })
+}
+
+/// Inject the modern `_meta` block into a request's params, preserving any
+/// caller-provided `_meta` entries that do not collide with the required keys.
+fn inject_modern_meta(params: Value, protocol_version: &str) -> Value {
+    let meta = modern_meta(protocol_version);
+    let Value::Object(mut map) = params else {
+        return json!({ "_meta": meta });
+    };
+    let mut merged = match map.remove("_meta") {
+        Some(Value::Object(existing)) => existing,
+        _ => serde_json::Map::new(),
+    };
+    if let Value::Object(entries) = meta {
+        for (key, value) in entries {
+            merged.insert(key, value);
+        }
+    }
+    map.insert("_meta".to_string(), Value::Object(merged));
+    Value::Object(map)
+}
+
+/// Prepare request params for one era: modern requests carry the required
+/// `_meta` block, legacy requests pass through untouched.
+fn prepare_params(era: McpEra, params: Value, protocol_version: &str) -> Value {
+    match era {
+        McpEra::Modern => inject_modern_meta(params, protocol_version),
+        McpEra::Legacy => params,
+    }
+}
+
+/// The `Mcp-Name` value the modern revision requires for name-addressed
+/// methods; `None` for every other method.
+fn modern_mcp_name(method: &str, params: &Value) -> Option<String> {
+    match method {
+        "tools/call" | "prompts/get" => text(params.get("name")),
+        "resources/read" => text(params.get("uri")),
+        _ => None,
+    }
+}
+
+/// Encode an `Mcp-Name` header value. Plain visible-ASCII values pass through;
+/// anything else (non-ASCII, whitespace, or a value that could be mistaken for
+/// the sentinel itself) uses the spec's `=?base64?{value}?=` sentinel form.
+fn mcp_name_header_value(raw: &str) -> String {
+    let plain = !raw.is_empty()
+        && !raw.starts_with("=?")
+        && raw.bytes().all(|byte| (0x21..=0x7e).contains(&byte));
+    if plain {
+        raw.to_string()
+    } else {
+        format!(
+            "=?base64?{}?=",
+            base64::engine::general_purpose::STANDARD.encode(raw.as_bytes())
+        )
+    }
+}
+
+fn mcp_param_header_value(value: &Value) -> Result<Option<String>, String> {
+    let raw = match value {
+        Value::Null => return Ok(None),
+        Value::String(value) => value.clone(),
+        Value::Bool(value) => value.to_string(),
+        Value::Number(value) => {
+            const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
+            let integer = value
+                .as_i64()
+                .ok_or_else(|| "x-mcp-header parameter must be an integer".to_string())?;
+            if !(-MAX_SAFE_INTEGER..=MAX_SAFE_INTEGER).contains(&integer) {
+                return Err(
+                    "x-mcp-header integer exceeds the JavaScript safe integer range".to_string(),
+                );
+            }
+            integer.to_string()
+        }
+        _ => {
+            return Err(
+                "x-mcp-header parameter must be a string, integer, boolean, or null".to_string(),
+            )
+        }
+    };
+    let sentinel = raw.starts_with("=?base64?") && raw.ends_with("?=");
+    let edge_whitespace = raw
+        .as_bytes()
+        .first()
+        .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+        || raw
+            .as_bytes()
+            .last()
+            .is_some_and(|byte| matches!(byte, b' ' | b'\t'));
+    let plain = !sentinel
+        && !edge_whitespace
+        && raw
+            .bytes()
+            .all(|byte| (0x20..=0x7e).contains(&byte) && byte != b'\t');
+    if plain {
+        Ok(Some(raw))
+    } else {
+        Ok(Some(format!(
+            "=?base64?{}?=",
+            base64::engine::general_purpose::STANDARD.encode(raw.as_bytes())
+        )))
+    }
+}
+
+fn nested_value<'a>(root: &'a Value, path: &[String]) -> Option<&'a Value> {
+    path.iter()
+        .try_fold(root, |value, key| value.as_object()?.get(key))
+}
+
+fn tool_param_headers(
+    tools: &[McpAppTool],
+    method: &str,
+    params: &Value,
+) -> Result<Vec<(String, String)>, String> {
+    if method != "tools/call" {
+        return Ok(Vec::new());
+    }
+    let Some(tool_name) = params.get("name").and_then(Value::as_str) else {
+        return Ok(Vec::new());
+    };
+    let Some(tool) = tools.iter().find(|tool| tool.name == tool_name) else {
+        return Ok(Vec::new());
+    };
+    let arguments = params.get("arguments").unwrap_or(&Value::Null);
+    tool.param_headers
+        .iter()
+        .filter_map(|header| {
+            nested_value(arguments, &header.path).map(|value| {
+                mcp_param_header_value(value).map(|encoded| {
+                    encoded.map(|value| (format!("Mcp-Param-{}", header.name), value))
+                })
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(|values| values.into_iter().flatten().collect())
+}
+
+/// Build the per-request MCP headers for one era.
+///
+/// Legacy requests carry the negotiated `mcp-protocol-version` plus the
+/// server-issued `mcp-session-id`, exactly as before dual-era support. Modern
+/// requests instead carry `MCP-Protocol-Version`, `Mcp-Method`, and — for
+/// `tools/call`, `resources/read`, and `prompts/get` — `Mcp-Name`; a session
+/// header is never sent in the modern era.
+fn build_mcp_headers(
+    era: McpEra,
     protocol_version: Option<&str>,
     session_id: Option<&str>,
     payload: &Value,
-) -> Result<McpWireResponse, String> {
+    param_headers: &[(String, String)],
+) -> Vec<(String, String)> {
+    match era {
+        McpEra::Legacy => {
+            let mut headers = Vec::new();
+            if let Some(protocol_version) = protocol_version {
+                headers.push((
+                    "mcp-protocol-version".to_string(),
+                    protocol_version.to_string(),
+                ));
+            }
+            if let Some(session_id) = session_id {
+                headers.push(("mcp-session-id".to_string(), session_id.to_string()));
+            }
+            headers
+        }
+        McpEra::Modern => {
+            let mut headers = vec![(
+                "MCP-Protocol-Version".to_string(),
+                protocol_version
+                    .unwrap_or(MCP_MODERN_PROTOCOL_VERSION)
+                    .to_string(),
+            )];
+            if let Some(method) = payload.get("method").and_then(Value::as_str) {
+                headers.push(("Mcp-Method".to_string(), method.to_string()));
+                if let Some(name) = payload
+                    .get("params")
+                    .and_then(|params| modern_mcp_name(method, params))
+                {
+                    headers.push(("Mcp-Name".to_string(), mcp_name_header_value(&name)));
+                }
+            }
+            headers.extend(param_headers.iter().cloned());
+            headers
+        }
+    }
+}
+
+/// True when a JSON-RPC error means resource-not-found. The modern revision
+/// moved this code from `-32002` to `-32602`; both are accepted.
+fn is_resource_not_found(error: &Value) -> bool {
+    matches!(
+        error.get("code").and_then(Value::as_i64),
+        Some(-32002 | -32602)
+    )
+}
+
+/// Completion state of a JSON-RPC result. The modern revision may attach
+/// `resultType`; an absent value MUST be read as `"complete"`.
+fn result_completion(result: &Value) -> &str {
+    result
+        .get("resultType")
+        .and_then(Value::as_str)
+        .unwrap_or("complete")
+}
+
+/// Extract the JSON-RPC `result`, tolerating the modern advisory fields
+/// (`resultType`, `ttlMs`, `cacheScope`) rather than failing on them.
+fn extract_result(response: &Value, method: &str) -> Result<Value, String> {
+    let result = response
+        .get("result")
+        .ok_or_else(|| format!("MCP {method} response is missing result"))?;
+    if result_completion(result).is_empty() {
+        return Err(format!("MCP {method} result declared an empty resultType"));
+    }
+    Ok(result.clone())
+}
+
+fn recognized_modern_error(body: Option<&Value>) -> Option<&Value> {
+    let error = body?.get("error")?;
+    let code = error.get("code").and_then(Value::as_i64)?;
+    MODERN_MCP_ERROR_CODES.contains(&code).then_some(error)
+}
+
+fn advertised_supported_versions(error: &Value) -> Vec<String> {
+    error
+        .pointer("/data/supported")
+        .and_then(Value::as_array)
+        .map(|versions| {
+            versions
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Classification of the modern-first era probe.
+#[derive(Debug, PartialEq, Eq)]
+enum ProbeOutcome {
+    /// The server answered the modern request.
+    Modern,
+    /// The server is modern but rejected our protocol version (`-32022`);
+    /// retry with a mutually supported version from this list.
+    ModernRetry { supported: Vec<String> },
+    /// The server is modern and rejected the request for a non-version reason.
+    ModernError { message: String },
+    /// The server does not speak the modern revision; use the legacy handshake.
+    Legacy,
+}
+
+/// Classify a modern-probe response per the spec's Backward Compatibility
+/// rule: a recognized modern JSON-RPC error means the server speaks modern
+/// (retry or correct, never fall back); an empty or unrecognized `400` body
+/// and HTTP `404`/`405` mean the legacy handshake is required.
+fn classify_probe(status: reqwest::StatusCode, body: Option<&Value>) -> ProbeOutcome {
+    if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::METHOD_NOT_ALLOWED
+    {
+        return ProbeOutcome::Legacy;
+    }
+    if status.is_success() && body.is_some_and(|value| value.get("result").is_some()) {
+        return ProbeOutcome::Modern;
+    }
+    if let Some(error) = recognized_modern_error(body) {
+        if error.get("code").and_then(Value::as_i64) == Some(-32022) {
+            return ProbeOutcome::ModernRetry {
+                supported: advertised_supported_versions(error),
+            };
+        }
+        return ProbeOutcome::ModernError {
+            message: format!(
+                "MCP server rejected the modern request: {}",
+                format_rpc_error(error)
+            ),
+        };
+    }
+    ProbeOutcome::Legacy
+}
+
+/// POST one JSON-RPC payload with era-appropriate headers, preserving the
+/// HTTP status and leniently parsed body for era-probe inspection.
+async fn post_mcp_raw(
+    client: &Client,
+    endpoint: &Url,
+    era: McpEra,
+    protocol_version: Option<&str>,
+    session_id: Option<&str>,
+    payload: &Value,
+    param_headers: &[(String, String)],
+) -> Result<McpHttpReply, String> {
     let mut request = client
         .post(endpoint.clone())
         .header(reqwest::header::CONTENT_TYPE, "application/json")
@@ -496,17 +588,43 @@ async fn post_mcp(
             "application/json, text/event-stream",
         )
         .json(payload);
-    if let Some(protocol_version) = protocol_version {
-        request = request.header("mcp-protocol-version", protocol_version);
-    }
-    if let Some(session_id) = session_id {
-        request = request.header("mcp-session-id", session_id);
+    for (name, value) in build_mcp_headers(
+        era,
+        protocol_version,
+        session_id,
+        payload,
+        param_headers,
+    ) {
+        request = request.header(name.as_str(), value.as_str());
     }
     let response = request
         .send()
         .await
         .map_err(|error| format!("MCP request failed: {error}"))?;
-    read_capped_response(response).await
+    read_capped_reply(response).await
+}
+
+/// POST one JSON-RPC payload and require a successful, error-free response.
+async fn post_mcp(
+    client: &Client,
+    endpoint: &Url,
+    era: McpEra,
+    protocol_version: Option<&str>,
+    session_id: Option<&str>,
+    payload: &Value,
+) -> Result<McpWireResponse, String> {
+    wire_response(
+        post_mcp_raw(
+            client,
+            endpoint,
+            era,
+            protocol_version,
+            session_id,
+            payload,
+            &[],
+        )
+        .await?,
+    )
 }
 
 async fn request(
@@ -515,9 +633,16 @@ async fn request(
     params: Value,
 ) -> Result<Value, String> {
     let id = connection.next_request_id.fetch_add(1, Ordering::Relaxed);
-    let response = post_mcp(
+    let param_headers = if connection.era == McpEra::Modern {
+        tool_param_headers(&connection.tools, method, &params)?
+    } else {
+        Vec::new()
+    };
+    let params = prepare_params(connection.era, params, &connection.protocol_version);
+    let reply = post_mcp_raw(
         &connection.client,
         &connection.endpoint,
+        connection.era,
         Some(&connection.protocol_version),
         connection.session_id.as_deref(),
         &json!({
@@ -526,11 +651,111 @@ async fn request(
             "method": method,
             "params": params,
         }),
+        &param_headers,
     )
     .await?;
-    response
+    if !reply.status.is_success() {
+        return Err(format!("MCP server returned HTTP {}", reply.status));
+    }
+    if let Some(error) = reply.value.as_ref().and_then(|value| value.get("error")) {
+        if method == "resources/read" && is_resource_not_found(error) {
+            return Err(format!(
+                "MCP resource not found: {}",
+                format_rpc_error(error)
+            ));
+        }
+        return Err(format!("MCP request failed: {}", format_rpc_error(error)));
+    }
+    reply
         .value
         .ok_or_else(|| format!("MCP {method} returned no response"))
+}
+
+/// Result of the modern-first probe against a new origin.
+enum ModernProbe {
+    /// The origin speaks the modern revision; carries the probe's `tools/list`
+    /// JSON-RPC response and the negotiated protocol version.
+    Modern {
+        response: Value,
+        protocol_version: String,
+    },
+    /// The origin requires the legacy `initialize` handshake.
+    Legacy,
+}
+
+async fn modern_probe_once(
+    client: &Client,
+    endpoint: &Url,
+    protocol_version: &str,
+    id: u64,
+) -> Result<McpHttpReply, String> {
+    let payload = json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "tools/list",
+        "params": prepare_params(McpEra::Modern, json!({}), protocol_version),
+    });
+    post_mcp_raw(
+        client,
+        endpoint,
+        McpEra::Modern,
+        Some(protocol_version),
+        None,
+        &payload,
+        &[],
+    )
+    .await
+}
+
+/// Probe an origin with a modern `tools/list` request and decide its era. On
+/// `-32022` the probe retries once with a mutually supported version from the
+/// server's advertised `error.data.supported` list, and falls back to the
+/// legacy handshake when only the legacy version is mutually supported.
+async fn probe_modern(client: &Client, endpoint: &Url) -> Result<ModernProbe, String> {
+    let reply = modern_probe_once(client, endpoint, MCP_MODERN_PROTOCOL_VERSION, 1).await?;
+    match classify_probe(reply.status, reply.value.as_ref()) {
+        ProbeOutcome::Modern => Ok(ModernProbe::Modern {
+            response: reply
+                .value
+                .ok_or_else(|| "MCP modern probe returned no response".to_string())?,
+            protocol_version: MCP_MODERN_PROTOCOL_VERSION.to_string(),
+        }),
+        ProbeOutcome::Legacy => Ok(ModernProbe::Legacy),
+        ProbeOutcome::ModernError { message } => Err(message),
+        ProbeOutcome::ModernRetry { supported } => {
+            if supported
+                .iter()
+                .any(|version| version == MCP_MODERN_PROTOCOL_VERSION)
+            {
+                let retry =
+                    modern_probe_once(client, endpoint, MCP_MODERN_PROTOCOL_VERSION, 2).await?;
+                match classify_probe(retry.status, retry.value.as_ref()) {
+                    ProbeOutcome::Modern => Ok(ModernProbe::Modern {
+                        response: retry
+                            .value
+                            .ok_or_else(|| "MCP modern probe returned no response".to_string())?,
+                        protocol_version: MCP_MODERN_PROTOCOL_VERSION.to_string(),
+                    }),
+                    _ => Err("MCP server rejected the retried modern protocol version".to_string()),
+                }
+            } else if supported
+                .iter()
+                .any(|version| version == MCP_PROTOCOL_VERSION)
+            {
+                Ok(ModernProbe::Legacy)
+            } else if supported.is_empty() {
+                Err(
+                    "MCP server rejected the protocol version without advertising alternatives"
+                        .to_string(),
+                )
+            } else {
+                Err(format!(
+                    "MCP server supports no mutual protocol version (offered: {})",
+                    supported.join(", ")
+                ))
+            }
+        }
+    }
 }
 
 fn resource_meta(content: &Value, listing: Option<&McpAppResource>) -> Value {
@@ -577,8 +802,10 @@ fn parse_ui_resource(
     }
     let meta = resource_meta(content, listing);
     let ui = meta.get("ui").cloned().unwrap_or_else(|| json!({}));
-    let csp = serde_json::from_value(ui.get("csp").cloned().unwrap_or_else(|| json!({})))
-        .map_err(|error| format!("MCP App CSP metadata is invalid: {error}"))?;
+    let csp = sanitize_csp(
+        serde_json::from_value(ui.get("csp").cloned().unwrap_or_else(|| json!({})))
+            .map_err(|error| format!("MCP App CSP metadata is invalid: {error}"))?,
+    );
     let permissions =
         serde_json::from_value(ui.get("permissions").cloned().unwrap_or_else(|| json!({})))
             .map_err(|error| format!("MCP App permission metadata is invalid: {error}"))?;
@@ -587,7 +814,10 @@ fn parse_ui_resource(
 
 fn csp_origin(raw: &str) -> Option<String> {
     let raw = raw.trim();
-    if let Some(suffix) = raw.strip_prefix("https://*.") {
+    let wildcard_suffix = raw
+        .strip_prefix("https://*.")
+        .or_else(|| raw.strip_prefix("wss://*."));
+    if let Some(suffix) = wildcard_suffix {
         if !suffix.is_empty()
             && !suffix.contains('/')
             && suffix
@@ -599,8 +829,7 @@ fn csp_origin(raw: &str) -> Option<String> {
         return None;
     }
     let url = Url::parse(raw).ok()?;
-    if !matches!(url.scheme(), "https" | "http")
-        || !url.username().is_empty()
+    if !url.username().is_empty()
         || url.password().is_some()
         || url.query().is_some()
         || url.fragment().is_some()
@@ -608,7 +837,32 @@ fn csp_origin(raw: &str) -> Option<String> {
     {
         return None;
     }
+    let host = url.host_str()?;
+    let loopback = host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback());
+    if !(matches!(url.scheme(), "https" | "wss")
+        || matches!(url.scheme(), "http" | "ws") && loopback)
+    {
+        return None;
+    }
     Some(url.origin().ascii_serialization())
+}
+
+fn sanitize_csp(csp: McpAppResourceCsp) -> McpAppResourceCsp {
+    fn sanitize(values: Vec<String>) -> Vec<String> {
+        values
+            .into_iter()
+            .filter_map(|value| csp_origin(&value))
+            .collect()
+    }
+    McpAppResourceCsp {
+        connect_domains: sanitize(csp.connect_domains),
+        resource_domains: sanitize(csp.resource_domains),
+        frame_domains: sanitize(csp.frame_domains),
+        base_uri_domains: sanitize(csp.base_uri_domains),
+    }
 }
 
 fn sources(values: &[String], fallback: &str) -> String {
@@ -625,7 +879,7 @@ fn sandbox_csp(csp: &McpAppResourceCsp) -> String {
     let resources = sources(&csp.resource_domains, "");
     let connects = sources(&csp.connect_domains, "'none'");
     let frames = sources(&csp.frame_domains, "");
-    let bases = sources(&csp.base_uri_domains, "'none'");
+    let bases = sources(&csp.base_uri_domains, "'self'");
     format!(
         "default-src 'none'; script-src 'self' 'unsafe-inline' {resources}; \
          style-src 'self' 'unsafe-inline' {resources}; img-src 'self' data: blob: {resources}; \
@@ -635,330 +889,15 @@ fn sandbox_csp(csp: &McpAppResourceCsp) -> String {
     )
 }
 
-fn app_tool_allowed(tool: &McpAppTool, caller: McpAppToolCaller) -> bool {
-    match caller {
-        McpAppToolCaller::Host => tool.visibility.iter().any(|value| value == "model"),
-        McpAppToolCaller::App => tool.visibility.iter().any(|value| value == "app"),
-    }
-}
-
-/// Connect to a reviewed Streamable HTTP MCP server and discover its Apps.
-#[tauri::command]
-pub async fn connect_mcp_app_server(
-    endpoint: String,
-    state: State<'_, McpAppHostState>,
-) -> Result<McpAppServerDescriptor, String> {
-    let endpoint = validate_mcp_endpoint(&endpoint)?;
-    let client = build_pinned_client(&endpoint).await?;
-    let initialize = post_mcp(
-        &client,
-        &endpoint,
-        None,
-        None,
-        &json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": MCP_PROTOCOL_VERSION,
-                "capabilities": {
-                    "extensions": {
-                        "io.modelcontextprotocol/ui": {
-                            "mimeTypes": [MCP_APP_MIME_TYPE]
-                        }
-                    }
-                },
-                "clientInfo": {
-                    "name": "Buzz Desktop",
-                    "version": env!("CARGO_PKG_VERSION")
-                }
-            }
-        }),
-    )
-    .await?;
-    let value = initialize
-        .value
-        .ok_or_else(|| "MCP initialize returned no response".to_string())?;
-    let protocol_version = text(value.pointer("/result/protocolVersion"))
-        .ok_or_else(|| "MCP initialize response is missing protocolVersion".to_string())?;
-    let server_name =
-        text(value.pointer("/result/serverInfo/name")).unwrap_or_else(|| endpoint.to_string());
-    let server_version = text(value.pointer("/result/serverInfo/version"));
-    let connection = McpServerConnection {
-        endpoint: endpoint.clone(),
-        client,
-        protocol_version: protocol_version.clone(),
-        session_id: initialize.session_id,
-        next_request_id: Arc::new(AtomicU64::new(2)),
-        tools: Vec::new(),
-        resources: Vec::new(),
-    };
-    let _ = post_mcp(
-        &connection.client,
-        &connection.endpoint,
-        Some(&connection.protocol_version),
-        connection.session_id.as_deref(),
-        &json!({
-            "jsonrpc": "2.0",
-            "method": "notifications/initialized",
-            "params": {}
-        }),
-    )
-    .await?;
-    let tools = parse_tools(&request(&connection, "tools/list", json!({})).await?)?;
-    let resources = request(&connection, "resources/list", json!({}))
-        .await
-        .and_then(|value| parse_resources(&value))
-        .unwrap_or_default();
-    let server_id = Uuid::new_v4().to_string();
-    let connection = McpServerConnection {
-        tools: tools.clone(),
-        resources: resources.clone(),
-        ..connection
-    };
-    let mut servers = state.servers.lock().await;
-    if servers.len() >= MAX_SERVERS {
-        return Err("Too many MCP App servers are connected".to_string());
-    }
-    servers.insert(server_id.clone(), connection);
-    Ok(McpAppServerDescriptor {
-        server_id,
-        endpoint: endpoint.to_string(),
-        name: server_name,
-        version: server_version,
-        protocol_version,
-        tools,
-        resources,
-    })
-}
-
-/// List the reviewed tools for one connected MCP server.
-#[tauri::command]
-pub async fn list_mcp_app_tools(
-    server_id: String,
-    state: State<'_, McpAppHostState>,
-) -> Result<Vec<McpAppTool>, String> {
-    state
-        .servers
-        .lock()
-        .await
-        .get(&server_id)
-        .map(|connection| connection.tools.clone())
-        .ok_or_else(|| "MCP App server is not connected".to_string())
-}
-
-/// List the reviewed resources for one connected MCP server.
-#[tauri::command]
-pub async fn list_mcp_app_resources(
-    server_id: String,
-    state: State<'_, McpAppHostState>,
-) -> Result<Vec<McpAppResource>, String> {
-    state
-        .servers
-        .lock()
-        .await
-        .get(&server_id)
-        .map(|connection| connection.resources.clone())
-        .ok_or_else(|| "MCP App server is not connected".to_string())
-}
-
-/// Execute a reviewed MCP tool for the host or the isolated App.
-#[tauri::command]
-pub async fn call_mcp_app_tool(
-    server_id: String,
-    name: String,
-    arguments: Value,
-    caller: McpAppToolCaller,
-    state: State<'_, McpAppHostState>,
-) -> Result<Value, String> {
-    let connection = state
-        .servers
-        .lock()
-        .await
-        .get(&server_id)
-        .cloned()
-        .ok_or_else(|| "MCP App server is not connected".to_string())?;
-    let tool = connection
-        .tools
-        .iter()
-        .find(|tool| tool.name == name)
-        .ok_or_else(|| "MCP App requested an unknown tool".to_string())?;
-    if !app_tool_allowed(tool, caller) {
-        return Err("MCP App tool is not visible to this caller".to_string());
-    }
-    request(
-        &connection,
-        "tools/call",
-        json!({"name": name, "arguments": arguments}),
-    )
-    .await
-    .and_then(|value| {
-        value
-            .get("result")
-            .cloned()
-            .ok_or_else(|| "MCP tools/call response is missing result".to_string())
-    })
-}
-
-/// Read a resource for an initialized AppBridge request.
-#[tauri::command]
-pub async fn read_mcp_app_resource(
-    server_id: String,
-    uri: String,
-    state: State<'_, McpAppHostState>,
-) -> Result<Value, String> {
-    let connection = state
-        .servers
-        .lock()
-        .await
-        .get(&server_id)
-        .cloned()
-        .ok_or_else(|| "MCP App server is not connected".to_string())?;
-    if !connection
-        .resources
-        .iter()
-        .any(|resource| resource.uri == uri)
-    {
-        return Err("MCP App requested an undiscovered resource".to_string());
-    }
-    request(&connection, "resources/read", json!({"uri": uri}))
-        .await
-        .and_then(|value| {
-            value
-                .get("result")
-                .cloned()
-                .ok_or_else(|| "MCP resources/read response is missing result".to_string())
-        })
-}
-
-/// Read and validate one UI resource, then register its CSP-bound sandbox URL.
-#[tauri::command]
-pub async fn prepare_mcp_app_view(
-    server_id: String,
-    uri: String,
-    state: State<'_, McpAppHostState>,
-) -> Result<PreparedMcpAppView, String> {
-    let connection = state
-        .servers
-        .lock()
-        .await
-        .get(&server_id)
-        .cloned()
-        .ok_or_else(|| "MCP App server is not connected".to_string())?;
-    if !connection
-        .tools
-        .iter()
-        .any(|tool| tool.ui_resource_uri.as_deref() == Some(uri.as_str()))
-    {
-        return Err("MCP App resource is not declared by a reviewed tool".to_string());
-    }
-    let response = request(&connection, "resources/read", json!({"uri": uri})).await?;
-    let listing = connection
-        .resources
-        .iter()
-        .find(|resource| resource.uri == uri);
-    let (html, csp, requested_permissions) = parse_ui_resource(&response, &uri, listing)?;
-    let view_id = Uuid::new_v4().to_string();
-    let mut views = state
-        .views
-        .lock()
-        .map_err(|_| "MCP App view registry is unavailable".to_string())?;
-    if views.len() >= MAX_VIEWS {
-        return Err("Too many MCP App views are open".to_string());
-    }
-    views.insert(
-        view_id.clone(),
-        ViewPolicy {
-            server_id,
-            csp: sandbox_csp(&csp),
-        },
-    );
-    Ok(PreparedMcpAppView {
-        sandbox_url: format!("buzz-mcp-app://localhost/{view_id}"),
-        view_id,
-        html,
-        csp,
-        requested_permissions,
-    })
-}
-
-/// Release an isolated MCP App view and its CSP policy.
-#[tauri::command]
-pub fn release_mcp_app_view(
-    view_id: String,
-    state: State<'_, McpAppHostState>,
-) -> Result<(), String> {
-    state
-        .views
-        .lock()
-        .map_err(|_| "MCP App view registry is unavailable".to_string())?
-        .remove(&view_id);
-    Ok(())
-}
-
-/// Close an MCP server connection and release all views created from it.
-#[tauri::command]
-pub async fn disconnect_mcp_app_server(
-    server_id: String,
-    state: State<'_, McpAppHostState>,
-) -> Result<(), String> {
-    let connection = state.servers.lock().await.remove(&server_id);
-    if let Some((connection, session_id)) =
-        connection.and_then(|connection| connection.session_id.clone().map(|id| (connection, id)))
-    {
-        let _ = connection
-            .client
-            .delete(connection.endpoint)
-            .header("mcp-protocol-version", connection.protocol_version)
-            .header("mcp-session-id", session_id)
-            .send()
-            .await;
-    }
-    state
-        .views
-        .lock()
-        .map_err(|_| "MCP App view registry is unavailable".to_string())?
-        .retain(|_, view| view.server_id != server_id);
-    Ok(())
-}
-
-fn html_response(status: u16, body: &str, csp: Option<&str>) -> http::Response<Vec<u8>> {
-    let mut builder = http::Response::builder()
-        .status(status)
-        .header("content-type", "text/html; charset=utf-8")
-        .header("cache-control", "no-store")
-        .header("x-content-type-options", "nosniff")
-        .header(
-            "permissions-policy",
-            "camera=(), microphone=(), geolocation=(), clipboard-write=()",
-        );
-    if let Some(csp) = csp {
-        builder = builder.header("content-security-policy", csp);
-    }
-    builder
-        .body(body.as_bytes().to_vec())
-        .unwrap_or_else(|_| http::Response::new(Vec::new()))
-}
-
-/// Serve the trusted outer sandbox proxy from a Tauri-owned isolated origin.
-pub fn handle_mcp_app_protocol(
-    app: &AppHandle,
-    request: &http::Request<Vec<u8>>,
-) -> http::Response<Vec<u8>> {
-    let view_id = request.uri().path().trim_matches('/');
-    if Uuid::parse_str(view_id).is_err() {
-        return html_response(404, "not found", None);
-    }
-    let state = app.state::<McpAppHostState>();
-    let views = match state.views.lock() {
-        Ok(views) => views,
-        Err(_) => return html_response(503, "unavailable", None),
-    };
-    let Some(view) = views.get(view_id) else {
-        return html_response(404, "not found", None);
-    };
-    html_response(200, SANDBOX_PROXY_HTML, Some(&view.csp))
-}
+#[path = "mcp_apps_host.rs"]
+mod host;
+pub use host::{
+    call_mcp_app_tool, connect_mcp_app_server, disconnect_mcp_app_server,
+    handle_mcp_app_protocol, list_mcp_app_resources, list_mcp_app_tools, prepare_mcp_app_view,
+    read_mcp_app_resource, release_mcp_app_view,
+};
+#[cfg(test)]
+use host::{app_tool_allowed, sandbox_proxy_html};
 
 #[cfg(test)]
 #[path = "mcp_apps_tests.rs"]
