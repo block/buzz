@@ -937,14 +937,16 @@ by them with their key. An attestation alone does not attribute history, so an \
 admin cannot make someone appear to author messages they never wrote.\n\n\
 Re-running resumes from the state file — completed writes are skipped.\n\n\
 Examples:\n  \
-buzz import slack --export-dir ./export --dry-run\n  \
-buzz import slack --export-dir ./export\n  \
-buzz import slack --export-dir ./export --identity-map U060=npub1abc,U081=npub1def"
+buzz import slack --export-dir ./export --team-id T0266FRGM --dry-run\n  \
+buzz import slack --export-dir ./export --team-id T0266FRGM\n  \
+buzz import slack --export-dir ./export --team-id T0266FRGM --channel-map ./crosswalk.csv --dry-run\n  \
+buzz import slack --export-dir ./export --team-id T0266FRGM --identity-map U060=npub1abc,U081=npub1def"
     )]
     Slack {
-        /// Path to the unzipped Slack export directory
-        #[arg(long)]
-        export_dir: String,
+        /// Path to an unzipped Slack export directory. Repeat for separate
+        /// Slackdump public/private export roots.
+        #[arg(long = "export-dir", required = true, action = clap::ArgAction::Append)]
+        export_dirs: Vec<String>,
         /// Slack workspace id (team id, e.g. T0266FRGM). Namespaces identity
         /// bindings and channel UUIDs so ids never collide across workspaces.
         #[arg(long)]
@@ -952,7 +954,12 @@ buzz import slack --export-dir ./export --identity-map U060=npub1abc,U081=npub1d
         /// State file path (default: <export-dir>/buzz-import-state.json)
         #[arg(long)]
         state: Option<String>,
-        /// Only import these channel names (comma-separated)
+        /// CSV or JSON crosswalk from Slack channel ids to existing Buzz
+        /// channel UUIDs. Adopted archived channels are reopened for the
+        /// backfill and restored afterward.
+        #[arg(long)]
+        channel_map: Option<String>,
+        /// Only import these conversation names or Slack IDs (comma-separated)
         #[arg(long)]
         channels: Option<String>,
         /// Parse and report what would be imported without writing

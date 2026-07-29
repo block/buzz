@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::CliError;
 
-const CURRENT_STATE_VERSION: u32 = 1;
+const CURRENT_STATE_VERSION: u32 = 3;
 
 /// Per-channel state: the Buzz UUID minted for it and whether metadata
 /// (create + topic/purpose) has been published.
@@ -26,6 +26,18 @@ pub struct ChannelState {
     /// Whether an archived Slack channel was archived in Buzz.
     #[serde(default)]
     pub archived_done: bool,
+    /// Whether a private Slack conversation has been explicitly narrowed to
+    /// private visibility in Buzz. This repairs ledgers produced by an older
+    /// importer that created every `channels.json` record as open.
+    #[serde(default)]
+    pub private_visibility_done: bool,
+    /// Whether an adopted, pre-existing channel has been prepared for history
+    /// writes. Archived adopted channels are temporarily unarchived first.
+    #[serde(default)]
+    pub prepared_for_import: bool,
+    /// Buzz public keys already added from mapped Slack conversation members.
+    #[serde(default)]
+    pub members_added: HashSet<String>,
 }
 
 /// The whole state file.
@@ -105,6 +117,14 @@ impl ImportState {
                 )));
             }
         }
+        if state.version < 3 {
+            // Versions 1–2 could only contain channels created by this
+            // importer. They were therefore active when history writes began,
+            // unlike channels adopted through the v3 crosswalk path.
+            for channel in state.channels.values_mut() {
+                channel.prepared_for_import = true;
+            }
+        }
         state.version = CURRENT_STATE_VERSION;
         state.team_id = Some(team_id.to_string());
         Ok(state)
@@ -151,6 +171,9 @@ mod tests {
                 uuid: "u-u-i-d".into(),
                 metadata_done: true,
                 archived_done: true,
+                private_visibility_done: true,
+                prepared_for_import: true,
+                members_added: HashSet::from(["aa".repeat(32)]),
             },
         );
         state
@@ -163,6 +186,11 @@ mod tests {
         assert_eq!(loaded.channels["C1"].uuid, "u-u-i-d");
         assert!(loaded.channels["C1"].metadata_done);
         assert!(loaded.channels["C1"].archived_done);
+        assert!(loaded.channels["C1"].private_visibility_done);
+        assert!(loaded.channels["C1"].prepared_for_import);
+        assert!(loaded.channels["C1"]
+            .members_added
+            .contains(&"aa".repeat(32)));
         assert_eq!(loaded.messages["C1:1.000"], "ff".repeat(32));
         assert!(loaded.reactions.contains("C1:1.000:👍"));
 
@@ -207,6 +235,22 @@ mod tests {
 
         let error = ImportState::load_for_workspace(&path, "T1").expect_err("must reject");
         assert!(error.to_string().contains("predates workspace-scoped"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn upgrades_v2_importer_channels_as_already_prepared() {
+        let dir = std::env::temp_dir().join(format!("buzz-import-state-v2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("state.json");
+        std::fs::write(
+            &path,
+            r#"{"version":2,"team_id":"T1","channels":{"C1":{"uuid":"u-u-i-d"}}}"#,
+        )
+        .expect("write");
+
+        let state = ImportState::load_for_workspace(&path, "T1").expect("upgrade");
+        assert!(state.channels["C1"].prepared_for_import);
         std::fs::remove_dir_all(&dir).ok();
     }
 }

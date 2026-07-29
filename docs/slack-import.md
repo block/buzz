@@ -9,6 +9,14 @@ record from day one.
 ```bash
 buzz import slack --export-dir ./export --team-id T0266FRGM              # import history
 buzz import slack --export-dir ./export --team-id T0266FRGM --dry-run    # plan only
+# Merge separate Slackdump public/private passes:
+buzz import slack \
+  --export-dir ./public-export \
+  --export-dir ./private-export \
+  --team-id T0266FRGM --dry-run
+# Adopt channel shells that were mirrored before the history backfill:
+buzz import slack --export-dir ./export --team-id T0266FRGM \
+  --channel-map ./slack-buzz-crosswalk.csv --dry-run
 buzz import slack --export-dir ./export --team-id T0266FRGM \
   --identity-map U060=npub1abc,U081=npub1def                            # admin attests people
 buzz import bind --team-id T0266FRGM --slack-id U060 --pubkey npub1abc   # admin attests one, later
@@ -23,12 +31,47 @@ workspaces.
 
 | Slack | Buzz | Notes |
 |-------|------|-------|
-| Channels (`channels.json`) | kind `9007` create + `9002` topic/purpose | UUID generated per channel, recorded in the state file |
+| Public channels (`channels.json`) | open stream, kind `9007` create + `9002` topic/purpose | UUID generated per channel, recorded in the state file |
+| Private channels (`groups.json`, or Slackdump private records in `channels.json`) | **private** stream | Visibility is narrowed before any history write; never promoted to open |
+| DMs (`dms.json`) / MPIMs (`mpims.json`) | native Buzz DM (`41010` open; relay-confirmed `41001`) | The exact active-human participant set must be mapped before history can be written |
 | Messages (per-day JSON) | kind `9` stream message, `h`-tagged | `created_at` backdated to the original Slack `ts` |
 | Threads (`thread_ts`) | NIP-10 `e` reply tags | Slack threads are flat; every reply is a direct reply to the root |
 | Reactions | kind `7` | One bot-signed reaction per distinct emoji (per-reactor identity isn't reproduced) |
-| Files | Links appended to message content | Blobs are **not** downloaded/re-hosted (see Limitations) |
+| Classic attachments / Block Kit | Markdown text, fields, lists, quotes, links | Interactive app actions are not executable after migration |
+| Files | Links appended to message content | Downloaded blobs are not yet re-hosted (see Limitations) |
 | Custom emoji | — | Use `scripts/grab-emoji.sh` (separate tool, needs a Slack API token) |
+
+`--export-dir` is repeatable. This matters for Slackdump migrations where
+public and accessible-private conversations were exported in separate passes.
+The importer merges user and conversation indexes, deduplicates identical
+Slack timestamps across roots, and rejects conflicting conversation IDs or
+target names before connecting to the relay. `users.json` and Enterprise
+`org_users.json` are both supported.
+
+`--channel-map` adopts channels that already exist in Buzz instead of creating
+duplicates. The file can be CSV with `slack_channel_id` and `buzz_channel_id`
+columns (extra audit columns are ignored), or a JSON array of objects with
+those two fields. Every Slack id must exist in the loaded export, Buzz UUIDs
+must be unique, and a map cannot override a different UUID already recorded in
+the state file. DMs and MPIMs cannot be adopted through this path: they must be
+opened through Buzz's native DM command so the relay can enforce the exact
+participant set.
+
+Private Slack channels become private Buzz streams. `--identity-map` serves two
+purposes for them: it publishes the owner/admin half of identity attribution
+and adds each mapped Slack participant's Buzz public key as a channel member.
+Unmapped, deactivated, and bot identities are not replaced by some other
+account.
+
+DMs and MPIMs use Buzz's native DM-open command rather than ordinary channel
+creation. Because a Buzz DM's participant set is immutable, every active human
+Slack participant must have a mapping before that conversation is opened. The
+CLI identity must itself be the mapped key for one of those Slack participants;
+otherwise the importer would silently add the migration operator to private
+history. Buzz supports 2–9 total DM participants and one native DM per
+participant set; two separate Slack conversations that resolve to the same set
+are blocked rather than silently merged. A dry run lists each blocked DM/MPIM
+and its reason, and does not count its messages as ready to import.
 
 Every imported event carries provenance tags:
 
@@ -37,6 +80,9 @@ Every imported event carries provenance tags:
   author, workspace-scoped so it composes to the binding key `slack:<team>:<user>`
 - `["import_ts", "<slack ts>"]` — original microsecond-precision timestamp
   (Nostr `created_at` is seconds, so this preserves sub-second ordering data)
+- `["import_conversation", "<team id>:<conversation id>", "<class>"]` — the
+  workspace-scoped Slack conversation and whether it was a public channel,
+  private channel, DM, or MPIM
 
 ### Message subtypes
 
@@ -46,11 +92,18 @@ conservative — it imports genuine conversation and silently skips system noise
 | Slack subtype | Handling |
 |---|---|
 | *(none)* — a plain message | Imported |
-| `thread_broadcast` — a reply also broadcast to the channel | Imported (as a reply) |
-| `bot_message` and app/integration posts | Skipped |
+| `thread_broadcast` / `reply_broadcast` — a reply also broadcast to the channel | Imported (as a reply) |
+| `bot_message` and app/integration posts | Imported when text, files, classic attachments, or blocks are renderable |
+| `file_share`, `file_comment`, `me_message`, huddle/canvas sharing content | Imported when renderable |
 | `channel_join` / `channel_leave` / `channel_topic` / `channel_purpose` and other system notices | Skipped |
 | `message_changed` (edits) and `message_deleted` / tombstones | Skipped — only final, still-present text is imported; edit history is not reconstructed |
-| Any message whose top-level `text` is empty (e.g. Block Kit– or attachment-only posts) | Skipped (see Limitations) |
+| Message with empty top-level `text` | Block Kit rich text, classic attachment fallback/text/fields, and files are rendered; only genuinely contentless records are skipped |
+
+Unknown future subtypes are accepted when they carry renderable conversation
+content. Known channel lifecycle, membership, pin, bot-management, and edit
+audit records stay out of the Buzz message timeline. Dry-run output makes this
+auditable with raw record totals and separate system, mutation, contentless,
+and duplicate counts.
 
 Timestamps are read as the exact Slack `ts` **string** — integer seconds plus a
 microsecond fraction, never parsed as a float. `created_at` is the whole
@@ -312,14 +365,20 @@ The per-event admin exemption above covers the practical cases today.
 
 ## Ordering, threads, idempotency
 
-- Channels are imported one at a time; messages within a channel are sorted
+- Conversations are imported one at a time; messages within a conversation are sorted
   by Slack `ts`, so a thread root is always imported before its replies. If a
-  thread root is itself skipped (an empty `bot_message`, a Block Kit–only post),
+  thread root is itself skipped (a genuinely contentless or system record),
   its replies can't be `e`-tagged to it, so they are imported as ordinary
   top-level messages instead of being dropped — their real content is preserved,
   only the (contentless) thread linkage is lost. A warning is logged per reply.
+- An adopted archived channel is temporarily unarchived before its first
+  metadata, membership, message, or reaction write and restored to archived
+  after the backfill. If a later export adds messages, the state ledger causes
+  the same reopen/backfill/restore sequence. The relay rejects mutations on an
+  archived channel, so this is required for pre-created channel shells.
 - A state file (default `<export-dir>/buzz-import-state.json`) records
-  `slack channel id → Buzz channel UUID` and
+  `Slack conversation id → Buzz channel UUID` (including relay-assigned native
+  DM UUIDs), private-visibility repair, mapped membership writes, and
   `"<channel>:<ts>" → Nostr event id`. Re-running the import skips
   everything already recorded — interrupted imports resume where they
   stopped. The state file is saved incrementally during the run.
@@ -350,8 +409,14 @@ who was ever @-mentioned in Slack. Imported mentions render as plain
 - **Files are not re-hosted.** Slack file URLs (which require Slack auth)
   are appended as links. A future `--download-files` could fetch blobs with
   a Slack token and re-upload via Blossom, rewriting links.
-- **DMs and private channels are not imported.** Standard Slack exports
-  only contain public channels.
+- **Private coverage is export- and identity-bound.** The importer can migrate
+  private channels, DMs, and MPIMs present in `groups.json`, `dms.json`, and
+  `mpims.json` (or Slackdump's classified `channels.json` records). It cannot
+  recover conversations absent from the export. Private streams add only
+  explicitly mapped members; native DMs/MPIMs require the complete active-human
+  participant map and require the CLI key to represent one participant. Review
+  `private_memberships_unmapped`, `dm_conversations_blocked`, and
+  `dm_messages_blocked` in the dry run before writing.
 - **Per-reactor identity in reactions is not preserved.** Bot mode signs one
   reaction per distinct emoji — a single key can react to a target once *per
   emoji* (NIP-25), so N reactors of the same emoji collapse to one event and the
@@ -362,22 +427,20 @@ who was ever @-mentioned in Slack. Imported mentions render as plain
   get the same `created_at`; original ordering is preserved in `import_ts`.
 - **Edit history is not reconstructed** — the export contains only final
   text.
-- **Block Kit / attachment-only messages are dropped.** A message whose
-  top-level `text` is empty (rich content lives only in `blocks`/`attachments`)
-  carries no plain text to import and is skipped. Bot/app posts are skipped for
-  the same reason plus their `bot_message` subtype. Replies **to** such a skipped
-  root are not lost — they import as top-level messages (see Ordering, threads,
-  idempotency).
+- **Interactive Slack app actions do not survive.** Classic attachment text,
+  fallbacks, fields, links, and Block Kit rich text are converted to Markdown,
+  but buttons, menus, callbacks, and application execution cannot be replayed.
 - **Slack workflows are not translated** to `buzz-workflow` YAML.
 
 ## CLI reference
 
 ```
 buzz import slack
-  --export-dir <PATH>      unzipped Slack export directory (required)
+  --export-dir <PATH>      unzipped Slack export directory; repeat to merge roots
   --team-id <ID>           Slack workspace id (required, e.g. T0266FRGM)
   --state <PATH>           state file (default: <export-dir>/buzz-import-state.json)
-  --channels <a,b,c>       import only these channel names
+  --channel-map <PATH>     CSV/JSON map: Slack channel id → existing Buzz UUID
+  --channels <a,b,c>       import only these conversation names or Slack IDs
   --dry-run                parse and report what would be imported; no writes
   --skip-reactions         do not import reactions
   --identity-map <MAP>     SLACKID=npub-or-hex,… admin attestations (public keys only)
@@ -394,4 +457,8 @@ buzz import claim          # subject half: consent, run by the person with their
 
 Output follows CLI conventions: progress on stderr, a final JSON summary on
 stdout (`channels_created`, `messages_imported`, `reactions_imported`,
-`bindings_published`, `skipped`, `warnings`).
+`private_members_added`, `private_members_unmapped`, `bindings_published`,
+`skipped`, `warnings`). Dry runs also report conversation-class, visibility,
+raw record, intentionally skipped-record, reaction-use, private-membership,
+existing-channel adoption (`channels_to_adopt`), and blocked native-DM details
+without writing the state file or connecting to the relay.
