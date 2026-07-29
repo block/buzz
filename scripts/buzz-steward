@@ -13,6 +13,7 @@
 #     active head counts per domain)
 #   - agreement drift (open offers, stale admit pins, unscoped heads,
 #     foreign halves without a local matching export)
+#   - delegation state (stale opens/claims and returns awaiting verification)
 #   - custody-exposure notices (mirror-mode exports offered to readers)
 #
 # Reports are ordinary kind-1 events tagged t=steward:report into the
@@ -30,11 +31,14 @@ STEWARD_AUTH="$HOME_DIR/agents/steward.auth"
 STATE_DIR="$HOME_DIR/steward"
 OWNER_KEY="$HOME_DIR/node.key"
 MACHINE="$(hostname -s)"
+HANDOFF_AGE_HOURS="${BUZZ_STEWARD_HANDOFF_AGE_HOURS:-24}"
 
 die() { echo "buzz-steward: $*" >&2; exit 1; }
 [ -x "$CLIENT" ] || die "missing client at $CLIENT"
 [ -f "$STEWARD_KEY" ] || die "no steward key — commission first: buzz-ctx bind-agent steward"
 [ -f "$OWNER_KEY" ] || die "missing owner key at $OWNER_KEY (needed to identify the owner, never to sign)"
+[[ "$HANDOFF_AGE_HOURS" =~ ^[0-9]+$ ]] \
+  || die "BUZZ_STEWARD_HANDOFF_AGE_HOURS must be a non-negative integer"
 STEWARD_PUB="$("$CLIENT" pubkey "$STEWARD_KEY")"
 OWNER_PUB="$("$CLIENT" pubkey "$OWNER_KEY")"
 mkdir -p "$STATE_DIR"
@@ -46,6 +50,11 @@ mkdir -p "$STATE_DIR"
 query_heads() { # $1 = relay URL; empty output on failure
   "$CLIENT" query "$STEWARD_KEY" "$1" '[{"kinds":[30700]}]' 2>/dev/null \
     | sed 's/^200 //' || true
+}
+query_handoffs() { # $1 = relay URL; empty output on failure
+  "$CLIENT" query "$STEWARD_KEY" "$1" \
+    '[{"kinds":[1],"#t":["handoff:open","handoff:claim","handoff:return"]}]' \
+    2>/dev/null | sed 's/^200 //' || true
 }
 HEADS="$({ query_heads "$LOCAL_URL"; echo; query_heads "$CLOUD_URL"; } \
   | jq -cs 'map(select(type == "array")) | add
@@ -74,6 +83,11 @@ MAY_REPORT="$(printf '%s' "$MANDATE_HEADS" | jq -r '[.[] | select(.powers | inde
 CONTEXT_H="$(printf '%s' "$MANDATE_HEADS" | jq -r '[.[] | .h | select(. != null)][0] // empty')"
 
 # ── Observe ────────────────────────────────────────────────────────────────
+# Handoffs are append-only kind-1 events, not addressable heads. Merge both
+# journals by event id only so every lifecycle transition remains visible.
+HANDOFFS="$({ query_handoffs "$LOCAL_URL"; echo; query_handoffs "$CLOUD_URL"; } \
+  | jq -cs 'map(select(type == "array")) | add | unique_by(.id)')"
+
 health_line() { # $1 label, $2 url
   if curl -sf --max-time 4 "$2/health" >/dev/null; then
     echo "- $1: healthy"
@@ -88,14 +102,44 @@ FINDINGS="$(mktemp)"
   health_line "ted-laptop ($LOCAL_URL)" "$LOCAL_URL"
   health_line "cf-rendezvous" "$CLOUD_URL"
   echo
-  printf '%s' "$HEADS" | jq -r --arg owner "$OWNER_PUB" --argjson nodes "$MANDATES" '
+  printf '%s' "$HEADS" | jq -r --arg owner "$OWNER_PUB" \
+    --argjson nodes "$MANDATES" --argjson handoffs "$HANDOFFS" \
+    --argjson now "$(date +%s)" --argjson handoff_hours "$HANDOFF_AGE_HOURS" '
     def tag(e; k): [e.tags[] | select(.[0]==k) | .[1]][0];
     def st(e): ((e.content | fromjson).status // "active");
     def role(e): (tag(e;"d") // "") | split("/")[0];
     def stream(e): (tag(e;"d") // "") as $d | $d | ltrimstr(($d | split("/")[0]) + "/");
+    def body(e): try (e.content | fromjson) catch {};
+    def lifecycle(e): tag(e;"t");
+    def parent(e): tag(e;"e");
     [.[] | select(tag(.;"d") != null)] as $all
     | [$all[] | select(.pubkey == $owner)] as $mine
     | [$all[] | select(.pubkey != $owner)] as $foreign
+    | [$handoffs[] | select(lifecycle(.) == "handoff:open")] as $opens
+    | [$handoffs[] | select(lifecycle(.) == "handoff:claim")] as $claims
+    | [$handoffs[] | select(lifecycle(.) == "handoff:return")] as $returns
+    | [ $opens[]
+        | . as $open
+        | [$claims[] | select(parent(.) == $open.id)] as $mine_claims
+        | [$returns[] | select(parent(.) == $open.id)] as $mine_returns
+        | ($mine_claims | sort_by([.created_at, .id]) | last) as $claim
+        | ($mine_returns | sort_by([.created_at, .id]) | last) as $return
+        | {open: $open,
+           claim: $claim,
+           claimant:
+             (if $claim != null then
+                (body($claim).runner // tag($claim;"agent")
+                 // ($claim.pubkey[0:8] + "…"))
+              elif $return != null then
+                (tag($return;"agent") // ($return.pubkey[0:8] + "…"))
+              else "unknown"
+              end),
+           state:
+             (if ($mine_returns | length) > 0 then "RETURNED"
+              elif ($mine_claims | length) > 0 then "CLAIMED"
+              else "OPEN"
+              end)}
+      ] as $delegations
     | "## Governance",
       # Per-domain, per the adapters actual evaluation: a domain with no
       # owner-signed head for the node is unclaimed (bootstrap governs).
@@ -153,6 +197,25 @@ FINDINGS="$(mktemp)"
           | "- UNSCOPED: \(tag(.;"d")) governs no node (missing n tag)" ]
         | .[] ),
       "",
+      ( if ($handoffs | length) == 0 then empty else
+          "## Delegation",
+          ( [ $delegations[]
+              | select(.state == "OPEN")
+              | select(($now - .open.created_at) > ($handoff_hours * 3600))
+              | "- STALE OPEN: \(body(.open).title // "(untitled)") (\(.open.id[0:8])…) unclaimed >\($handoff_hours)h" ]
+            | .[] ),
+          ( [ $delegations[]
+              | select(.state == "CLAIMED")
+              | select(($now - .claim.created_at) > ($handoff_hours * 3600))
+              | "- STALE CLAIM: \(body(.open).title // "(untitled)") (\(.open.id[0:8])…) by \(.claimant) >\($handoff_hours)h without return" ]
+            | .[] ),
+          ( [ $delegations[]
+              | select(.state == "RETURNED")
+              | "- AWAITING VERIFY: \(body(.open).title // "(untitled)") (\(.open.id[0:8])…) returned by \(.claimant)" ]
+            | .[] ),
+          "- handoffs: \([$delegations[] | select(.state == "OPEN")] | length) open, \([$delegations[] | select(.state == "CLAIMED")] | length) claimed, \([$delegations[] | select(.state == "RETURNED")] | length) returned",
+          ""
+        end ),
       "## Custody exposure",
       ( [ $mine[]
           | select(role(.) == "export" and st(.) == "active")
