@@ -296,7 +296,11 @@ pub(crate) async fn fetch_archived_snapshot(client: &BuzzClient) -> Result<Vec<S
     }
 
     // State 2 or 3: verify then collect.
-    let raw_event = events.into_iter().next().unwrap();
+    // Safe: the empty case returned early above, so at least one event exists.
+    let raw_event = events
+        .into_iter()
+        .next()
+        .expect("events is non-empty; checked above");
     let event: nostr::Event = serde_json::from_value(raw_event)
         .map_err(|e| CliError::Other(format!("archived-identities event is malformed: {e}")))?;
     let archived = verify_archived_event(&event, &self_hex)?;

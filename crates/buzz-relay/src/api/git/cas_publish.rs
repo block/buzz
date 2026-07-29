@@ -406,8 +406,14 @@ async fn write_idx_sidecar(
         .await
         .map_err(|e| CasError::PackCapture(format!("write idx input pack {pack_digest}: {e}")))?;
 
+    let pack_path_str = pack_path.to_str().ok_or_else(|| {
+        CasError::PackCapture(format!(
+            "idx pack path is not valid UTF-8: {}",
+            pack_path.display()
+        ))
+    })?;
     let mut cmd = Command::new("git");
-    cmd.args(["index-pack", pack_path.to_str().unwrap()])
+    cmd.args(["index-pack", pack_path_str])
         .current_dir(tempdir.path());
     super::transport::harden_git_env(&mut cmd);
     let out = cmd
