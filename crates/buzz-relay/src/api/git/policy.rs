@@ -42,7 +42,10 @@ use tracing::{error, warn};
 use uuid::Uuid;
 
 use buzz_core::channel::MemberRole;
-use buzz_core::git_perms::{evaluate_push, parse_protection_tags, Denial, RefUpdate, UpdateKind};
+use buzz_core::git_perms::{
+    evaluate_push, parse_protection_tags, Denial, RefUpdate, UpdateKind,
+    GIT_NO_CHANNEL_BINDING_BODY,
+};
 use buzz_db::EventQuery;
 
 use crate::state::AppState;
@@ -297,12 +300,18 @@ pub async fn hook_policy_check(
         }
     };
 
-    // 6. Resolve channel and check archived state (applies to ALL pushers including owner).
-    let channel_id = tags
-        .iter()
-        .find(|t| t.first().map(|s| s.as_str()) == Some("buzz-channel"))
-        .and_then(|t| t.get(1))
-        .and_then(|id| Uuid::parse_str(id).ok());
+    // 6. Resolve channel binding via the shared resolver (same first-tag,
+    // fail-closed semantics as the read gate) and check archived state
+    // (applies to ALL pushers including owner). On the push side, NotBound
+    // and Broken collapse into the same bucket — both historically produced
+    // the "no channel binding" denial for non-owners, and a pusher is past
+    // NIP-98 auth so the body leaks nothing new. Only the read gate
+    // distinguishes them (author remediation is NotBound-only).
+    let channel_id = match crate::api::git::binding::resolve_repo_binding(&repo_event.event) {
+        crate::api::git::binding::RepoBinding::Bound(id) => Some(id),
+        crate::api::git::binding::RepoBinding::NotBound
+        | crate::api::git::binding::RepoBinding::Broken => None,
+    };
 
     if let Some(ch_id) = channel_id {
         match state.db.get_channel(community, ch_id).await {
@@ -350,7 +359,10 @@ pub async fn hook_policy_check(
         match channel_id {
             None => {
                 warn!(repo = %req.repo_id, "hook callback: no buzz-channel binding");
-                return (StatusCode::FORBIDDEN, "no channel binding").into_response();
+                // Declared cross-component contract — see the const docs in
+                // buzz-core::git_perms for who consumes the token and why
+                // the body also repeats the legacy phrase.
+                return (StatusCode::FORBIDDEN, GIT_NO_CHANNEL_BINDING_BODY).into_response();
             }
             Some(ch_id) => {
                 match state
@@ -480,6 +492,30 @@ mod tests {
         let mut req = make_request();
         sign_request(&mut req, b"correct-secret");
         assert!(!verify_hmac(b"wrong-secret", &req));
+    }
+
+    /// Deploy-skew guard for the unbound-repo deny body. The token
+    /// (`no_channel_binding`, underscores) and the legacy phrase
+    /// (`no channel binding`, spaces) do NOT contain each other, so the body
+    /// must carry both: the token for structured consumers (Desktop's merge
+    /// classifier and dialog matcher), the phrase for desktops already in
+    /// the field that prose-match it. Relay ships continuously and Desktop
+    /// on release cadence — dropping the phrase strands every old desktop
+    /// on a new relay. Asserted against the shared consts, not re-typed
+    /// literals, so the const and this test cannot drift apart separately.
+    #[test]
+    fn no_channel_binding_body_satisfies_old_and_new_matchers() {
+        assert!(
+            GIT_NO_CHANNEL_BINDING_BODY.starts_with(&format!(
+                "{}: ",
+                buzz_core::git_perms::GIT_NO_CHANNEL_BINDING_TOKEN
+            )),
+            "new structured consumers match the token prefix"
+        );
+        assert!(
+            GIT_NO_CHANNEL_BINDING_BODY.contains("no channel binding"),
+            "shipped desktops prose-match this exact phrase (spaces, not underscores)"
+        );
     }
 
     #[test]

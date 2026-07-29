@@ -83,27 +83,36 @@ fn build_protection_tag(
     Tag::parse(values).map_err(tag_error)
 }
 
-enum ProtectionChange {
-    Set(Box<Tag>),
-    Remove(String),
+enum RepoChange {
+    SetProtection(Box<Tag>),
+    RemoveProtection(String),
+    /// Bind (or rebind) the repo to a channel: replaces every existing
+    /// `buzz-channel` tag with exactly one carrying the validated UUID.
+    BindChannel(String),
 }
 
 fn build_updated_repo_announcement(
     existing: &Event,
-    change: ProtectionChange,
+    change: RepoChange,
 ) -> Result<EventBuilder, CliError> {
     let repo_id = repo_id_from_event(existing)?;
-    let (pattern, replacement) = match change {
-        ProtectionChange::Set(tag) => {
+    // What to strip beyond `auth` (always stripped), and what to append.
+    let (removed_pattern, removed_channel, replacement) = match change {
+        RepoChange::SetProtection(tag) => {
             let pattern = protection_pattern(&tag)
                 .ok_or_else(|| CliError::Other("replacement is not a protection tag".into()))?
                 .to_string();
-            (pattern, Some(*tag))
+            (Some(pattern), false, Some(*tag))
         }
-        ProtectionChange::Remove(pattern) => {
+        RepoChange::RemoveProtection(pattern) => {
             RefPattern::parse(&pattern)
                 .map_err(|error| CliError::Usage(format!("invalid ref pattern: {error}")))?;
-            (pattern, None)
+            (Some(pattern), false, None)
+        }
+        RepoChange::BindChannel(channel) => {
+            crate::validate::validate_uuid(&channel)?;
+            let tag = Tag::parse(["buzz-channel", channel.as_str()]).map_err(tag_error)?;
+            (None, true, Some(tag))
         }
     };
 
@@ -111,7 +120,13 @@ fn build_updated_repo_announcement(
         .tags
         .iter()
         .filter(|tag| {
-            !has_tag_name(tag, "auth") && protection_pattern(tag) != Some(pattern.as_str())
+            if has_tag_name(tag, "auth") {
+                return false;
+            }
+            if removed_channel && has_tag_name(tag, "buzz-channel") {
+                return false;
+            }
+            removed_pattern.is_none() || protection_pattern(tag) != removed_pattern.as_deref()
         })
         .cloned()
         .collect();
@@ -320,7 +335,8 @@ async fn cmd_protect_set(
         require_patch,
     )?;
     let event = current_repo(client, repo_id).await?;
-    let builder = build_updated_repo_announcement(&event, ProtectionChange::Set(Box::new(tag)))?;
+    let builder =
+        build_updated_repo_announcement(&event, RepoChange::SetProtection(Box::new(tag)))?;
     submit_repo_update(client, builder).await
 }
 
@@ -341,8 +357,27 @@ async fn cmd_protect_remove(
             "repository {repo_id:?} has no protection rule for {ref_pattern:?}"
         )));
     }
+    let builder = build_updated_repo_announcement(
+        &event,
+        RepoChange::RemoveProtection(ref_pattern.to_string()),
+    )?;
+    submit_repo_update(client, builder).await
+}
+
+/// Bind (or rebind) a repository to a channel — the fix path for issue
+/// #3527's permanently-404 repos. Publishes a read-modify-write update of
+/// the caller's own kind:30617 with exactly one `buzz-channel` tag; all
+/// other metadata (protections, name, description, future tags) is
+/// preserved by the same machinery `repos protect` uses.
+///
+/// The UUID is validated for *shape* only — deliberately. Channel existence
+/// and the caller's membership are the relay's authority at git-access
+/// time; a CLI-side network pre-check would just be TOCTOU with extra
+/// latency.
+async fn cmd_bind_repo(client: &BuzzClient, repo_id: &str, channel: &str) -> Result<(), CliError> {
+    let event = current_repo(client, repo_id).await?;
     let builder =
-        build_updated_repo_announcement(&event, ProtectionChange::Remove(ref_pattern.to_string()))?;
+        build_updated_repo_announcement(&event, RepoChange::BindChannel(channel.to_string()))?;
     submit_repo_update(client, builder).await
 }
 
@@ -370,6 +405,7 @@ pub async fn dispatch(cmd: crate::ReposCmd, client: &BuzzClient) -> Result<(), C
         }
         ReposCmd::Get { id, owner } => cmd_get_repo(client, &id, owner.as_deref()).await,
         ReposCmd::List { owner, limit } => cmd_list_repos(client, owner.as_deref(), limit).await,
+        ReposCmd::Bind { id, channel } => cmd_bind_repo(client, &id, &channel).await,
         ReposCmd::Protect(command) => match command {
             ReposProtectCmd::List { id } => cmd_protect_list(client, &id).await,
             ReposProtectCmd::Set {
@@ -404,7 +440,7 @@ mod tests {
 
     use super::{
         build_protection_tag, build_updated_repo_announcement, protection_rules_json,
-        validate_write_response, ProtectionChange,
+        validate_write_response, RepoChange,
     };
 
     fn signed_repo(tags: Vec<Tag>, content: &str, created_at: u64) -> nostr::Event {
@@ -439,7 +475,7 @@ mod tests {
 
         let updated = build_updated_repo_announcement(
             &existing,
-            ProtectionChange::Set(Box::new(replacement)),
+            RepoChange::SetProtection(Box::new(replacement)),
         )
         .expect("build update")
         .sign_with_keys(&Keys::generate())
@@ -501,7 +537,7 @@ mod tests {
 
         let updated = build_updated_repo_announcement(
             &existing,
-            ProtectionChange::Remove("refs/heads/main".into()),
+            RepoChange::RemoveProtection("refs/heads/main".into()),
         )
         .expect("build removal")
         .sign_with_keys(&Keys::generate())
@@ -538,7 +574,7 @@ mod tests {
 
         let error = build_updated_repo_announcement(
             &existing,
-            ProtectionChange::Set(Box::new(replacement)),
+            RepoChange::SetProtection(Box::new(replacement)),
         )
         .expect_err("malformed existing rule must fail closed");
 
@@ -564,7 +600,7 @@ mod tests {
 
         let error = build_updated_repo_announcement(
             &existing,
-            ProtectionChange::Set(Box::new(replacement)),
+            RepoChange::SetProtection(Box::new(replacement)),
         )
         .expect_err("the 51st rule must be rejected");
 
@@ -613,6 +649,87 @@ mod tests {
         assert!(json["validation_error"]
             .as_str()
             .is_some_and(|error| error.contains("needs pattern + at least one rule")));
+    }
+
+    #[test]
+    fn bind_channel_replaces_duplicates_and_preserves_everything_else() {
+        let channel = uuid::Uuid::new_v4().to_string();
+        let existing = signed_repo(
+            vec![
+                tag(&["d", "demo"]),
+                tag(&["name", "Demo"]),
+                // Two stale bindings — e.g. from a buggy or vanilla client.
+                tag(&["buzz-channel", "old-and-broken"]),
+                tag(&["buzz-channel", &uuid::Uuid::new_v4().to_string()]),
+                tag(&["auth", &"a".repeat(64), "kind=30617", &"b".repeat(128)]),
+                tag(&["buzz-protect", "refs/heads/main", "push:admin"]),
+                tag(&["future-metadata", "preserve-me"]),
+            ],
+            "repository content",
+            100,
+        );
+
+        let updated =
+            build_updated_repo_announcement(&existing, RepoChange::BindChannel(channel.clone()))
+                .expect("build bind update")
+                .sign_with_keys(&Keys::generate())
+                .expect("sign bind update");
+
+        assert_eq!(updated.content, "repository content");
+        assert_eq!(updated.created_at.as_secs(), 101);
+        // Exactly one binding remains, and it is the requested one.
+        let bindings: Vec<_> = updated
+            .tags
+            .iter()
+            .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("buzz-channel"))
+            .collect();
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].as_slice(), ["buzz-channel", channel.as_str()]);
+        // Auth stripped (relay re-stamps); everything else preserved.
+        assert!(!updated
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice().first().map(String::as_str) == Some("auth")));
+        assert!(updated
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["buzz-protect", "refs/heads/main", "push:admin"]));
+        assert!(updated
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["future-metadata", "preserve-me"]));
+        assert!(updated
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["name", "Demo"]));
+    }
+
+    #[test]
+    fn bind_channel_adds_binding_to_unbound_repo() {
+        let channel = uuid::Uuid::new_v4().to_string();
+        let existing = signed_repo(vec![tag(&["d", "demo"])], "", 10);
+
+        let updated =
+            build_updated_repo_announcement(&existing, RepoChange::BindChannel(channel.clone()))
+                .expect("build bind update")
+                .sign_with_keys(&Keys::generate())
+                .expect("sign bind update");
+
+        assert!(updated
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["buzz-channel", channel.as_str()]));
+    }
+
+    #[test]
+    fn bind_channel_rejects_malformed_uuid() {
+        let existing = signed_repo(vec![tag(&["d", "demo"])], "", 10);
+
+        let error =
+            build_updated_repo_announcement(&existing, RepoChange::BindChannel("nope".into()))
+                .expect_err("malformed channel id must not build an update");
+
+        assert!(matches!(error, crate::error::CliError::Usage(_)));
     }
 
     #[test]

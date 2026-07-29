@@ -1148,6 +1148,20 @@ pub enum ReposCmd {
         #[arg(long)]
         limit: Option<u32>,
     },
+    /// Bind (or rebind) one of your repositories to a channel.
+    ///
+    /// The `buzz-channel` tag on the announcement is the git ACL: the relay
+    /// authorizes clone/fetch/push by membership in the bound channel. A
+    /// repo announced without it (e.g. by a vanilla NIP-34 client) returns
+    /// 404 for everyone until its author binds it here.
+    Bind {
+        /// Repository identifier (d-tag).
+        #[arg(long)]
+        id: String,
+        /// Channel UUID to bind. Replaces any existing binding.
+        #[arg(long)]
+        channel: String,
+    },
     /// Manage branch and tag protection rules on one of your repositories.
     #[command(subcommand)]
     Protect(ReposProtectCmd),
@@ -1991,7 +2005,7 @@ mod tests {
         );
         assert_eq!(
             names(&cmd, "repos"),
-            vec!["create", "get", "list", "protect"]
+            vec!["bind", "create", "get", "list", "protect"]
         );
         let repos = cmd
             .get_subcommands()
@@ -2054,7 +2068,7 @@ mod tests {
             ("patches", 4),
             ("pr", 5),
             ("reactions", 3),
-            ("repos", 4),
+            ("repos", 5),
             ("social", 7),
             ("upload", 1),
             ("users", 5),

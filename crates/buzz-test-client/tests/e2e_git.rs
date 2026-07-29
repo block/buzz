@@ -61,6 +61,27 @@ async fn post_event(event: &nostr::Event) {
     );
 }
 
+/// Create a channel (kind:9007) owned by `keys` and return its UUID.
+///
+/// The git read gate (SEC-005) authorizes against membership in the channel
+/// named by the announcement's `buzz-channel` tag, so every repo these tests
+/// announce must be bound to a channel its owner belongs to — creating the
+/// channel makes the creator its owner-member.
+async fn create_test_channel(keys: &Keys) -> String {
+    let channel_uuid = uuid::Uuid::new_v4().to_string();
+    let event = EventBuilder::new(Kind::Custom(9007), "")
+        .tags(vec![
+            Tag::parse(["h", &channel_uuid]).unwrap(),
+            Tag::parse(["name", &format!("git-e2e-{channel_uuid}")]).unwrap(),
+            Tag::parse(["channel_type", "stream"]).unwrap(),
+            Tag::parse(["visibility", "open"]).unwrap(),
+        ])
+        .sign_with_keys(keys)
+        .unwrap();
+    post_event(&event).await;
+    channel_uuid
+}
+
 /// Run `git` with the Buzz credential helper and isolated config.
 fn git_status(args: &[&str], cwd: &Path, owner_nsec: &str) -> std::process::Output {
     let helper = credential_helper();
@@ -204,10 +225,15 @@ async fn git_clone_push_fetch_force_roundtrip() {
     let s3 = GitS3Probe::from_env();
 
     // Announce the repo (kind:30617) so the relay creates the bare repo + hook.
+    // The `buzz-channel` binding is the repo's ACL: without it the read gate
+    // 404s even for the owner (issue #3527), so bind to a channel the owner
+    // just created (and therefore belongs to).
+    let channel = create_test_channel(&owner).await;
     let announce = EventBuilder::new(Kind::from(30617), "")
         .tags(vec![
             Tag::parse(["d", &repo]).unwrap(),
             Tag::parse(["name", "e2e git repo"]).unwrap(),
+            Tag::parse(["buzz-channel", &channel]).unwrap(),
         ])
         .sign_with_keys(&owner)
         .unwrap();
@@ -341,10 +367,12 @@ async fn git_concurrent_push_one_wins_and_repo_recovers() {
     let repo = format!("e2e-git-concurrent-{}", std::process::id());
     let s3 = GitS3Probe::from_env();
 
+    let channel = create_test_channel(&owner).await;
     let announce = EventBuilder::new(Kind::from(30617), "")
         .tags(vec![
             Tag::parse(["d", &repo]).unwrap(),
             Tag::parse(["name", "e2e concurrent git repo"]).unwrap(),
+            Tag::parse(["buzz-channel", &channel]).unwrap(),
         ])
         .sign_with_keys(&owner)
         .unwrap();
