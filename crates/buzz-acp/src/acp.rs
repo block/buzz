@@ -644,6 +644,14 @@ impl AcpClient {
             cmd.env("CODEX_CONFIG", merged);
         }
 
+        // Publication fencing and managed CLI resolution are harness-owned
+        // invariants. Reapply them after all persona/runtime overlays so a
+        // reserved extra_env entry cannot replace either value.
+        cmd.env(PUBLICATION_FENCE_ENV, publication_fence.path());
+        if let Some(path) = managed_cli_path_env.as_deref() {
+            cmd.env("PATH", path);
+        }
+
         // Spawn the agent in its own process group so SIGKILL doesn't propagate
         // to the harness's own process group on Unix.
         // tokio::process::Command::process_group is a stable tokio API (no extra imports needed).
@@ -2603,9 +2611,25 @@ fn kill_process_group(pid: u32) -> bool {
     killpg(Pid::from_raw(pid as i32), Signal::SIGKILL).is_ok()
 }
 
-/// Fallback for non-Unix: process-group kill not available.
-/// Returns `false` so the caller falls back to `child.start_kill()`.
-#[cfg(not(unix))]
+/// Kill the Windows process tree rooted at `pid`. `taskkill /T /F` is the
+/// safe equivalent of Unix process-group termination and is already used by
+/// the desktop managed-agent lifecycle. A failure returns false so callers
+/// kill the direct child and, critically, fence settlement still fails closed
+/// if a descendant retains the publication lease.
+#[cfg(windows)]
+fn kill_process_group(pid: u32) -> bool {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    std::process::Command::new("taskkill")
+        .args(["/T", "/F", "/PID", &pid.to_string()])
+        .creation_flags(CREATE_NO_WINDOW)
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// Fallback for targets without Unix process groups or Windows `taskkill`.
+#[cfg(not(any(unix, windows)))]
 fn kill_process_group(_pid: u32) -> bool {
     false
 }
@@ -2867,15 +2891,39 @@ mod tests {
 
     #[test]
     fn publication_lock_holder_child() {
-        if std::env::var_os("BUZZ_TEST_HOLD_PUBLICATION_LEASE").is_none() {
+        const PARENT_ENV: &str = "BUZZ_TEST_HOLD_PUBLICATION_LEASE";
+        const GRANDCHILD_ENV: &str = "BUZZ_TEST_HOLD_PUBLICATION_LEASE_GRANDCHILD";
+        let is_parent = std::env::var_os(PARENT_ENV).is_some();
+        let is_grandchild = std::env::var_os(GRANDCHILD_ENV).is_some();
+        if !is_parent && !is_grandchild {
             return;
         }
         use std::io::{BufRead, Write};
 
-        let mut line = String::new();
-        std::io::BufReader::new(std::io::stdin())
-            .read_line(&mut line)
-            .expect("read parent signal");
+        if is_parent && !is_grandchild {
+            let mut line = String::new();
+            std::io::BufReader::new(std::io::stdin())
+                .read_line(&mut line)
+                .expect("read parent signal");
+            let executable = std::env::current_exe().expect("test executable");
+            let mut grandchild = std::process::Command::new(executable)
+                .args([
+                    "--exact",
+                    "acp::tests::publication_lock_holder_child",
+                    "--nocapture",
+                ])
+                .env(GRANDCHILD_ENV, "1")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::inherit())
+                .stderr(std::process::Stdio::inherit())
+                .spawn()
+                .expect("spawn publication-lease grandchild");
+            std::thread::sleep(std::time::Duration::from_secs(60));
+            let _ = grandchild.kill();
+            let _ = grandchild.wait();
+            return;
+        }
+
         let channel_id = uuid::Uuid::parse_str(
             &std::env::var("BUZZ_TEST_PUBLICATION_CHANNEL").expect("channel env"),
         )

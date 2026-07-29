@@ -749,6 +749,24 @@ pub async fn cmd_send_diff_message(client: &BuzzClient, p: SendDiffParams) -> Re
 
     let channel_uuid = parse_uuid(&p.channel_id)?;
 
+    // Match ordinary message publication: capture the managed generation before
+    // reading stdin or resolving thread context, then hold its lease across the
+    // final relay submission. Standalone CLI use has no fence env.
+    let publication_attempt = buzz_publication_fence::PublicationAttempt::capture_from_env(
+        channel_uuid,
+        p.reply_to.as_deref(),
+    )
+    .map_err(|error| CliError::Other(error.to_string()))?;
+
+    send_diff_message_with_attempt(client, p, channel_uuid, publication_attempt).await
+}
+
+async fn send_diff_message_with_attempt(
+    client: &BuzzClient,
+    p: SendDiffParams,
+    channel_uuid: uuid::Uuid,
+    publication_attempt: Option<buzz_publication_fence::PublicationAttempt>,
+) -> Result<(), CliError> {
     // Read diff from stdin if "--diff -"
     let diff_content = read_or_stdin(&p.diff)?;
 
@@ -800,7 +818,7 @@ pub async fn cmd_send_diff_message(client: &BuzzClient, p: SendDiffParams) -> Re
 
     let event = client.sign_event(builder)?;
 
-    let resp = client.submit_event(event).await?;
+    let resp = submit_fenced_message(client, event, publication_attempt).await?;
     println!("{}", normalize_write_response(&resp));
     Ok(())
 }
@@ -1019,8 +1037,9 @@ pub async fn dispatch(
 mod tests {
     use super::{
         event_mention_pubkeys, find_root_from_tags, match_profiles_by_name, merge_message_mentions,
-        missing_members, normalize_explicit_mentions, parse_member_pubkeys, resolve_names_to_pubkeys,
-        submit_fenced_message,
+        missing_members, normalize_explicit_mentions, parse_member_pubkeys,
+        resolve_names_to_pubkeys, send_diff_message_with_attempt, submit_fenced_message,
+        SendDiffParams,
     };
     use buzz_publication_fence::{PublicationAttempt, PublicationFence, PublicationScope};
     use buzz_sdk::mentions::{
@@ -1114,6 +1133,52 @@ mod tests {
             .await
             .expect_err("unreachable relay proves submit was attempted");
         assert!(!error.to_string().contains("publication rejected"));
+    }
+
+    #[tokio::test]
+    async fn terminal_fence_rejects_send_diff_at_final_submit_boundary() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("publication-fence.json");
+        let fence = PublicationFence::create(&path).expect("create fence");
+        let channel_id = uuid::Uuid::new_v4();
+        let generation = fence
+            .begin(PublicationScope {
+                turn_id: "turn-diff".to_string(),
+                channel_id: Some(channel_id),
+                reply_to: None,
+            })
+            .expect("begin turn");
+        let attempt = PublicationAttempt::capture(&path, channel_id, None)
+            .expect("capture active diff publication");
+        assert!(fence.terminate(generation).expect("terminate turn"));
+
+        let keys = nostr::Keys::generate();
+        let client =
+            crate::client::BuzzClient::new("http://127.0.0.1:1".to_string(), keys, None, None)
+                .expect("construct client");
+        let params = SendDiffParams {
+            channel_id: channel_id.to_string(),
+            diff: "@@ -1 +1 @@\n-old\n+new\n".to_string(),
+            repo_url: "https://example.invalid/repo".to_string(),
+            commit_sha: ID_A.to_string(),
+            file_path: Some("src/lib.rs".to_string()),
+            parent_commit_sha: None,
+            source_branch: None,
+            target_branch: None,
+            pr_number: None,
+            language: Some("rust".to_string()),
+            description: Some("fenced diff".to_string()),
+            reply_to: None,
+        };
+
+        let error = send_diff_message_with_attempt(&client, params, channel_id, Some(attempt))
+            .await
+            .expect_err("terminal fence must reject diff before network submit");
+        assert!(matches!(
+            error,
+            crate::error::CliError::Other(ref message)
+                if message.contains("terminal") && message.contains("rejected")
+        ));
     }
 
     #[test]
