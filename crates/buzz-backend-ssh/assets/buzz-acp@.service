@@ -13,9 +13,11 @@ Type=simple
 # chmod 600; systemd reads it as the owning user.
 EnvironmentFile=%h/.config/buzz-acp/%i.env
 # Absolute path, substituted at install time from the host's resolved
-# `buzz-acp`. systemd does not expand environment variables in the program
-# position, and the shell indirection that would work around that is not worth
-# adding to a unit whose environment carries a private key.
+# `buzz-acp` and double-quoted there — systemd splits an unquoted value on
+# whitespace, and the configurable `buzz-acp path on the server` may name a
+# directory that contains some. systemd does not expand environment variables
+# in the program position, and the shell indirection that would work around
+# that is not worth adding to a unit whose environment carries a private key.
 ExecStart=@BUZZ_ACP_BIN@
 Restart=always
 RestartSec=5

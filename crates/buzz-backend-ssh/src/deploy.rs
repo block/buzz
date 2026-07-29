@@ -580,14 +580,31 @@ fi
     // silently runs the old unit.
     //
     // `@BUZZ_ACP_BIN@` is substituted with parameter expansion rather than
-    // `sed`: `sed -i` is a GNU extension BSD and macOS hosts reject, and any
-    // `s///` would need a delimiter no resolved path can contain.
+    // `sed -i`, a GNU extension BSD and macOS hosts reject, and any in-place
+    // `s///` over the template would need a delimiter no resolved path can
+    // contain.
+    //
+    // The substituted value is quoted per systemd's own command-line syntax,
+    // which is not the shell's. `ExecStart=` splits an unquoted value on
+    // whitespace, so a `buzz-acp path on the server` pointing at
+    // `/opt/buzz tools/buzz-acp` would make systemd run `/opt/buzz` with
+    // `tools/buzz-acp` as an argument — the schema accepts such a path, and
+    // `quote()` already makes it safe as a *shell* argument, which is a
+    // different question. Inside double quotes systemd unquotes C-style
+    // escapes, so `\` and `"` are escaped first; a filtering `sed` is portable
+    // even where `sed -i` is not.
+    //
+    // The quotes are literals in `printf`'s single-quoted format rather than
+    // shell-escaped inside the value, so the three interpolations stay plain
+    // `%s` arguments — the unit template's own `%i`/`%h` specifiers ride
+    // through untouched for the same reason.
     script.push_str(&format!(
         r#"unit_file="$units/buzz-acp@.service"
+acp_unit=$(printf '%s' "$acp" | sed 's/[\\"]/\\&/g')
 template=$(cat <<'BUZZ_UNIT_EOF'
 {unit}BUZZ_UNIT_EOF
 )
-printf '%s\n' "${{template%%@BUZZ_ACP_BIN@*}}$acp${{template#*@BUZZ_ACP_BIN@}}" > "$unit_file.new"
+printf '%s"%s"%s\n' "${{template%%@BUZZ_ACP_BIN@*}}" "$acp_unit" "${{template#*@BUZZ_ACP_BIN@}}" > "$unit_file.new"
 if cmp -s "$unit_file.new" "$unit_file"; then
   rm -f "$unit_file.new"
 else
@@ -1134,10 +1151,12 @@ mod tests {
         let script = deploy_script(&agent, &config(), UNIT_TEMPLATE, &Pushes::default()).unwrap();
         assert!(UNIT_TEMPLATE.contains("ExecStart=@BUZZ_ACP_BIN@"));
         assert!(UNIT_TEMPLATE.contains("EnvironmentFile=%h/.config/buzz-acp/%i.env"));
-        // Substitution is parameter expansion, not `sed`: `sed -i` is a GNU
-        // extension that BSD and macOS hosts reject.
-        assert!(!script.contains("sed "));
-        assert!(script.contains("${template%%@BUZZ_ACP_BIN@*}$acp${template#*@BUZZ_ACP_BIN@}"));
+        // Substitution is parameter expansion, not `sed -i`: in-place editing
+        // is a GNU extension that BSD and macOS hosts reject.
+        assert!(!script.contains("sed -i"));
+        assert!(script.contains(
+            r#"printf '%s"%s"%s\n' "${template%%@BUZZ_ACP_BIN@*}" "$acp_unit" "${template#*@BUZZ_ACP_BIN@}""#
+        ));
         // Lingering, or the agent dies when this SSH session ends. It also
         // creates /run/user/$(id -u), so it must precede any bus traffic.
         let linger = script.find("loginctl enable-linger").unwrap();
@@ -1301,7 +1320,7 @@ mod tests {
         let unit =
             std::fs::read_to_string(root.join(".config/systemd/user/buzz-acp@.service")).unwrap();
         assert!(unit.contains(&format!(
-            "ExecStart={}",
+            "ExecStart=\"{}\"",
             root.join("bin/buzz-acp").display()
         )));
         assert!(!unit.contains("@BUZZ_ACP_BIN@"));
@@ -1517,10 +1536,11 @@ if [ -z "${{XDG_RUNTIME_DIR:-}}" ]; then
   export XDG_RUNTIME_DIR
 fi
 unit_file="$units/buzz-acp@.service"
+acp_unit=$(printf '%s' "$acp" | sed 's/[\\"]/\\&/g')
 template=$(cat <<'BUZZ_UNIT_EOF'
 {unit}BUZZ_UNIT_EOF
 )
-printf '%s\n' "${{template%%@BUZZ_ACP_BIN@*}}$acp${{template#*@BUZZ_ACP_BIN@}}" > "$unit_file.new"
+printf '%s"%s"%s\n' "${{template%%@BUZZ_ACP_BIN@*}}" "$acp_unit" "${{template#*@BUZZ_ACP_BIN@}}" > "$unit_file.new"
 if cmp -s "$unit_file.new" "$unit_file"; then
   rm -f "$unit_file.new"
 else
@@ -1600,7 +1620,7 @@ systemctl --user restart 'buzz-acp@{slug}.service'
         let unit =
             std::fs::read_to_string(root.join(".config/systemd/user/buzz-acp@.service")).unwrap();
         assert!(
-            unit.contains(&format!("ExecStart={}", installed.display())),
+            unit.contains(&format!("ExecStart=\"{}\"", installed.display())),
             "{unit}"
         );
     }
@@ -1679,7 +1699,7 @@ systemctl --user restart 'buzz-acp@{slug}.service'
         let unit =
             std::fs::read_to_string(root.join(".config/systemd/user/buzz-acp@.service")).unwrap();
         assert!(unit.contains(&format!(
-            "ExecStart={}",
+            "ExecStart=\"{}\"",
             root.join("bin/buzz-acp").display()
         )));
     }
@@ -1744,7 +1764,38 @@ systemctl --user restart 'buzz-acp@{slug}.service'
         let unit =
             std::fs::read_to_string(root.join(".config/systemd/user/buzz-acp@.service")).unwrap();
         assert!(
-            unit.contains(&format!("ExecStart={}", installed.display())),
+            unit.contains(&format!("ExecStart=\"{}\"", installed.display())),
+            "{unit}"
+        );
+    }
+
+    /// `ExecStart=` splits an unquoted value on whitespace, so a configured
+    /// `buzz-acp path on the server` inside a directory with a space in it
+    /// would make systemd run the first word and pass the rest as arguments.
+    /// The schema accepts such a path and `quote()` makes it a safe *shell*
+    /// argument, which is a different question from what systemd parses.
+    #[cfg(unix)]
+    #[test]
+    fn a_resolved_path_containing_whitespace_stays_one_word_in_exec_start() {
+        let root = sandbox_host("spaced-acp", HostAcp::Missing);
+        let acp = seed_stub(&root.join("buzz tools"), "buzz-acp", "#!/bin/sh\nexit 0\n");
+        let config = SshConfig {
+            buzz_acp_path: Some(acp.display().to_string()),
+            ..config()
+        };
+        let agent = Agent::from_request(&request()).unwrap();
+        let script = deploy_script(&agent, &config, UNIT_TEMPLATE, &Pushes::default()).unwrap();
+        let output = run_in_sandbox(&root, &script);
+        assert!(
+            output.status.success(),
+            "deploy failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let unit =
+            std::fs::read_to_string(root.join(".config/systemd/user/buzz-acp@.service")).unwrap();
+        assert!(
+            unit.contains(&format!("ExecStart=\"{}\"\n", acp.display())),
             "{unit}"
         );
     }
