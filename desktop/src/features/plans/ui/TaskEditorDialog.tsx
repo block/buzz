@@ -10,12 +10,21 @@ import {
   type PlanningTask,
   type TaskStatus,
 } from "../domain/contracts";
+import {
+  defaultTaskDetails,
+  parsePlanningTaskDetails,
+  type PlanningTaskDetailsV1,
+  type TaskExecutionMode,
+  type TaskOutputType,
+} from "../domain/extendedContracts";
+import { COMMAND_TEAM_PERSONAS } from "@/features/command-console/domain/commandTeam";
 
 export function TaskEditorDialog({
   open,
   onOpenChange,
   projectId,
   task,
+  taskDetails,
   tasks,
   defaultStart,
   defaultDue,
@@ -25,10 +34,11 @@ export function TaskEditorDialog({
   onOpenChange: (open: boolean) => void;
   projectId: string;
   task?: PlanningTask;
+  taskDetails?: PlanningTaskDetailsV1;
   tasks: readonly PlanningTask[];
   defaultStart: string;
   defaultDue: string;
-  onSave: (task: PlanningTask) => Promise<void>;
+  onSave: (task: PlanningTask, details: PlanningTaskDetailsV1) => Promise<void>;
 }) {
   const [title, setTitle] = React.useState("");
   const [wbs, setWbs] = React.useState("");
@@ -40,6 +50,16 @@ export function TaskEditorDialog({
   const [progress, setProgress] = React.useState(0);
   const [dependencies, setDependencies] = React.useState<string[]>([]);
   const [notes, setNotes] = React.useState("");
+  const [department, setDepartment] = React.useState("XO");
+  const [position, setPosition] = React.useState("Executive Officer");
+  const [individual, setIndividual] = React.useState("");
+  const [agentId, setAgentId] = React.useState("");
+  const [dueTime, setDueTime] = React.useState("16:00");
+  const [executionMode, setExecutionMode] =
+    React.useState<TaskExecutionMode>("manual");
+  const [outputType, setOutputType] =
+    React.useState<TaskOutputType>("response");
+  const [locked, setLocked] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
   React.useEffect(() => {
     if (!open) return;
@@ -53,36 +73,64 @@ export function TaskEditorDialog({
     setProgress(task?.percentComplete ?? 0);
     setDependencies([...(task?.dependencyIds ?? [])]);
     setNotes(task?.notes ?? "");
-  }, [defaultDue, defaultStart, open, task, tasks.length]);
+    const details =
+      taskDetails ?? (task ? defaultTaskDetails(task) : undefined);
+    setDepartment(details?.department ?? "XO");
+    setPosition(details?.position ?? "Executive Officer");
+    setIndividual(details?.individual ?? "");
+    setAgentId(details?.agentId ?? "");
+    setDueTime(details?.dueTime ?? "16:00");
+    setExecutionMode(details?.executionMode ?? "manual");
+    setOutputType(details?.outputType ?? "response");
+    setLocked(details?.locked ?? false);
+  }, [defaultDue, defaultStart, open, task, taskDetails, tasks.length]);
   async function save() {
     setBusy(true);
     try {
       const now = new Date().toISOString();
-      await onSave(
-        parsePlanningTask({
-          schemaVersion: 1,
-          id: task?.id ?? crypto.randomUUID(),
-          projectId,
-          wbs,
-          parentTaskId: task?.parentTaskId ?? null,
-          title,
-          owner,
-          status,
-          percentComplete: progress,
-          plannedStart: start,
-          dueDate: due,
-          durationWorkdays: duration,
-          dependencyIds: dependencies,
-          fixedStart: task?.fixedStart ?? null,
-          linkedCapabilityId: task?.linkedCapabilityId ?? null,
-          linkedMissionRequirementId: task?.linkedMissionRequirementId ?? null,
-          notes: notes.trim() || null,
-          sourceEvidence: task?.sourceEvidence ?? "Manual plan entry",
-          isSummary: false,
-          createdAt: task?.createdAt ?? now,
-          updatedAt: now,
-        }),
-      );
+      const taskId = task?.id ?? crypto.randomUUID();
+      const parsedTask = parsePlanningTask({
+        schemaVersion: 1,
+        id: taskId,
+        projectId,
+        wbs,
+        parentTaskId: task?.parentTaskId ?? null,
+        title,
+        owner: position.trim() || owner,
+        status,
+        percentComplete: progress,
+        plannedStart: start,
+        dueDate: due,
+        durationWorkdays: duration,
+        dependencyIds: dependencies,
+        fixedStart: task?.fixedStart ?? null,
+        linkedCapabilityId: task?.linkedCapabilityId ?? null,
+        linkedMissionRequirementId: task?.linkedMissionRequirementId ?? null,
+        notes: notes.trim() || null,
+        sourceEvidence: task?.sourceEvidence ?? "Manual plan entry",
+        isSummary: false,
+        createdAt: task?.createdAt ?? now,
+        updatedAt: now,
+      });
+      const parsedDetails = parsePlanningTaskDetails({
+        schemaVersion: 1,
+        id: taskDetails?.id ?? `details:${taskId}`,
+        projectId,
+        taskId,
+        department,
+        position,
+        individual: individual.trim() || null,
+        agentId: agentId || null,
+        dueTime: dueTime || null,
+        executionMode,
+        outputType,
+        playbookId: taskDetails?.playbookId ?? null,
+        playbookRevisionId: taskDetails?.playbookRevisionId ?? null,
+        locked,
+        createdAt: taskDetails?.createdAt ?? task?.createdAt ?? now,
+        updatedAt: now,
+      });
+      await onSave(parsedTask, parsedDetails);
       onOpenChange(false);
     } finally {
       setBusy(false);
@@ -114,12 +162,61 @@ export function TaskEditorDialog({
             />
           </label>
           <label className="grid gap-1 text-sm">
-            Owner
+            Department / HOD
             <input
               className="rounded border bg-background px-3 py-2"
-              onChange={(event) => setOwner(event.target.value)}
-              value={owner}
+              list="planning-departments"
+              onChange={(event) => {
+                setDepartment(event.target.value);
+                if (!position.trim()) setPosition(event.target.value);
+              }}
+              value={department}
             />
+            <datalist id="planning-departments">
+              <option value="XO">Executive Officer</option>
+              <option value="MEO">Marine Engineering Officer</option>
+              <option value="WEEO">
+                Weapons Electrical Engineering Officer
+              </option>
+              <option value="SO">Supply Officer</option>
+              <option value="Navigation">Navigation Department</option>
+              <option value="Operations">Operations Department</option>
+            </datalist>
+          </label>
+          <label className="grid gap-1 text-sm">
+            Responsible position
+            <input
+              className="rounded border bg-background px-3 py-2"
+              onChange={(event) => {
+                setPosition(event.target.value);
+                setOwner(event.target.value);
+              }}
+              value={position}
+            />
+          </label>
+          <label className="grid gap-1 text-sm">
+            Specific individual (optional)
+            <input
+              className="rounded border bg-background px-3 py-2"
+              onChange={(event) => setIndividual(event.target.value)}
+              placeholder="Name or billet"
+              value={individual}
+            />
+          </label>
+          <label className="grid gap-1 text-sm">
+            AI adviser (optional)
+            <select
+              className="rounded border bg-background px-3 py-2"
+              onChange={(event) => setAgentId(event.target.value)}
+              value={agentId}
+            >
+              <option value="">Ships company only</option>
+              {COMMAND_TEAM_PERSONAS.map((persona) => (
+                <option key={persona.personaId} value={persona.personaId}>
+                  {persona.label}
+                </option>
+              ))}
+            </select>
           </label>
           <label className="grid gap-1 text-sm">
             Start
@@ -137,6 +234,15 @@ export function TaskEditorDialog({
               onChange={(event) => setDue(event.target.value)}
               type="date"
               value={due}
+            />
+          </label>
+          <label className="grid gap-1 text-sm">
+            Due time (ship time)
+            <input
+              className="rounded border bg-background px-3 py-2"
+              onChange={(event) => setDueTime(event.target.value)}
+              type="time"
+              value={dueTime}
             />
           </label>
           <label className="grid gap-1 text-sm">
@@ -159,8 +265,39 @@ export function TaskEditorDialog({
               <option value="notStarted">Not started</option>
               <option value="inProgress">In progress</option>
               <option value="blocked">Blocked</option>
+              <option value="forReview">For review</option>
               <option value="complete">Complete</option>
               <option value="cancelled">Cancelled</option>
+            </select>
+          </label>
+          <label className="grid gap-1 text-sm">
+            AI execution
+            <select
+              className="rounded border bg-background px-3 py-2"
+              onChange={(event) =>
+                setExecutionMode(event.target.value as TaskExecutionMode)
+              }
+              value={executionMode}
+            >
+              <option value="manual">Manual start only</option>
+              <option value="scheduled">Start one hour before due</option>
+              <option value="hybrid">Manual or one hour before due</option>
+            </select>
+          </label>
+          <label className="grid gap-1 text-sm">
+            Required output
+            <select
+              className="rounded border bg-background px-3 py-2"
+              onChange={(event) =>
+                setOutputType(event.target.value as TaskOutputType)
+              }
+              value={outputType}
+            >
+              <option value="response">Response in Command Adviser</option>
+              <option value="docx">Word document</option>
+              <option value="pptx">PowerPoint presentation</option>
+              <option value="xlsx">Excel workbook</option>
+              <option value="pdf">PDF</option>
             </select>
           </label>
           <label className="grid gap-1 text-sm">
@@ -209,6 +346,14 @@ export function TaskEditorDialog({
               value={notes}
             />
           </label>
+          <label className="flex items-center gap-2 text-sm sm:col-span-2">
+            <input
+              checked={locked}
+              onChange={(event) => setLocked(event.target.checked)}
+              type="checkbox"
+            />
+            Lock this task against playbook rescheduling
+          </label>
         </div>
         <div className="flex justify-end gap-2">
           <button
@@ -224,7 +369,8 @@ export function TaskEditorDialog({
               busy ||
               !title.trim() ||
               !wbs.trim() ||
-              !owner.trim() ||
+              !department.trim() ||
+              !position.trim() ||
               !start ||
               !due ||
               duration < 1

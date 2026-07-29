@@ -77,16 +77,34 @@ async function addTask(
     wbs: string;
     duration: number;
     dependencies?: string[];
+    department?: string;
+    position?: string;
+    individual?: string;
+    adviser?: string;
+    outputType?: "response" | "docx" | "pptx" | "xlsx" | "pdf";
   },
 ) {
   const screen = page.getByTestId("plan-detail-screen");
   await screen.getByRole("button", { name: "Add task" }).click();
   const dialog = page.getByRole("dialog", { name: "New planning task" });
-  await dialog.getByLabel("Task").fill(input.title);
+  await dialog.getByLabel("Task", { exact: true }).fill(input.title);
   await dialog.getByLabel("WBS").fill(input.wbs);
-  await dialog.getByLabel("Owner").fill("Operations Officer");
+  await dialog.getByLabel("Department / HOD").fill(input.department ?? "XO");
+  await dialog
+    .getByLabel("Responsible position")
+    .fill(input.position ?? "Operations Officer");
+  if (input.individual)
+    await dialog
+      .getByLabel("Specific individual (optional)")
+      .fill(input.individual);
+  if (input.adviser)
+    await dialog.getByLabel("AI adviser (optional)").selectOption({
+      label: input.adviser,
+    });
+  if (input.outputType)
+    await dialog.getByLabel("Required output").selectOption(input.outputType);
   await dialog.getByLabel("Start", { exact: true }).fill("2026-08-03");
-  await dialog.getByLabel("Due").fill("2026-08-10");
+  await dialog.getByLabel("Due", { exact: true }).fill("2026-08-10");
   await dialog
     .getByLabel("Duration (working days)")
     .fill(String(input.duration));
@@ -236,6 +254,7 @@ test("Plans reviews and imports a deployment WBS from a planning document", asyn
   await review.getByRole("button", { name: "Import reviewed tasks" }).click();
 
   await expect(review).toHaveCount(0);
+  await detail.getByRole("button", { name: "Work breakdown" }).click();
   await expect(
     detail.getByRole("cell", { name: "Define support concept" }),
   ).toBeVisible();
@@ -245,4 +264,140 @@ test("Plans reviews and imports a deployment WBS from a planning document", asyn
   const gantt = detail.getByTestId("gantt-chart");
   await expect(gantt.getByText("6 working days")).toBeVisible();
   await expect(gantt.getByText("2 working days float")).toBeVisible();
+});
+
+test("Plans assigns HOD, individual and adviser work and moves it on the board", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await page.getByTestId("open-plans-view").click();
+  await page.getByRole("button", { name: "New Plan" }).click();
+  const create = page.getByRole("dialog", { name: "New operational plan" });
+  await create.getByLabel("Plan title").fill("Pre-sailing readiness");
+  await create
+    .getByLabel("Purpose")
+    .fill("Prepare HMAS Supply to sail on Monday.");
+  await create.getByLabel("Mission-ready date").fill("2026-08-10");
+  await create.getByRole("button", { name: "Create plan" }).click();
+
+  await addTask(page, {
+    title: "Embark mission-essential stores",
+    wbs: "1",
+    duration: 1,
+    department: "SO",
+    position: "Supply Officer",
+    individual: "Deputy Supply Officer",
+    adviser: "Logistics",
+  });
+
+  const board = page.getByTestId("kanban-board");
+  const card = board.getByTestId(/kanban-card-/);
+  await expect(card.getByText("SO", { exact: true })).toBeVisible();
+  await expect(
+    card.getByText("Individual: Deputy Supply Officer"),
+  ).toBeVisible();
+  await expect(card.getByText("AI assigned")).toBeVisible();
+  const target = board.getByTestId("kanban-column-inProgress");
+  await card
+    .getByLabel("Move Embark mission-essential stores to")
+    .selectOption("inProgress");
+  await expect(
+    target.getByText("Embark mission-essential stores"),
+  ).toBeVisible();
+
+  await page.getByRole("button", { name: "Work breakdown" }).click();
+  await expect(
+    page.getByRole("row", { name: /Embark mission-essential stores/ }),
+  ).toContainText("Supply Officer");
+});
+
+test("Plans creates a printable HOD pack and an adviser Word output", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await page.getByTestId("open-plans-view").click();
+  await page.getByRole("button", { name: "New Plan" }).click();
+  const create = page.getByRole("dialog", { name: "New operational plan" });
+  await create.getByLabel("Plan title").fill("HOD readiness sync");
+  await create
+    .getByLabel("Purpose")
+    .fill("Prepare the ship and review assigned logistics work.");
+  await create.getByLabel("Mission-ready date").fill("2026-08-10");
+  await create.getByRole("button", { name: "Create plan" }).click();
+
+  await addTask(page, {
+    title: "Confirm port services",
+    wbs: "1",
+    duration: 1,
+    department: "SO",
+    position: "Supply Officer",
+    adviser: "Logistics",
+    outputType: "docx",
+  });
+
+  await page.getByRole("button", { name: "HOD Sync Pack" }).click();
+  const syncPack = page.getByRole("dialog", { name: "HOD Sync Pack" });
+  await expect(syncPack.getByText("Confirm port services")).toBeVisible();
+  await syncPack.getByRole("button", { name: "Combined PDF" }).click();
+  await expect(
+    syncPack.getByText("Created Command-Adviser-HOD-Sync-Pack.pdf"),
+  ).toBeVisible();
+  await page.keyboard.press("Escape");
+
+  await page.getByRole("button", { name: "Run adviser" }).click();
+  const execution = page.getByRole("dialog", {
+    name: "AI task — Confirm port services",
+  });
+  await execution.getByRole("button", { name: "Run now" }).click();
+  await expect(
+    execution.getByText("Draft logistics output ready for review"),
+  ).toBeVisible();
+  await expect(execution.getByText("Port services confirmation")).toBeVisible();
+  await expect(
+    execution.getByText("planning-output.docx", { exact: true }),
+  ).toBeVisible();
+  await expect(execution.getByText(/Provider: LiteLLM/)).toBeVisible();
+});
+
+test("Plans previews and applies a routine-aware Pre-Departure playbook", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await page.getByTestId("open-plans-view").click();
+  await page.getByRole("button", { name: "New Plan" }).click();
+  const create = page.getByRole("dialog", { name: "New operational plan" });
+  await create.getByLabel("Plan title").fill("Monday sailing");
+  await create
+    .getByLabel("Purpose")
+    .fill("Schedule pre-departure work on working days.");
+  await create.getByLabel("Mission-ready date").fill("2026-08-10");
+  await create.getByRole("button", { name: "Create plan" }).click();
+
+  await page.getByRole("button", { name: "Playbooks" }).click();
+  const workspace = page.getByTestId("playbook-workspace");
+  await workspace.getByRole("button", { name: "Add Pre-Departure" }).click();
+  await expect(workspace.getByLabel("Playbook")).toContainText(
+    "Pre-Departure (8)",
+  );
+  await workspace.getByLabel("Anchor date").fill("2026-08-10");
+  await workspace.getByLabel("Anchor time (ship time)").fill("08:00");
+  await workspace.getByRole("button", { name: "Preview schedule" }).click();
+  await expect(
+    workspace.getByText("Securing for sea rounds complete"),
+  ).toBeVisible();
+  await expect(workspace.getByText(/Australia\/Sydney/).first()).toBeVisible();
+  await workspace
+    .getByRole("button", { name: "Apply scheduled tasks" })
+    .click();
+
+  await page.getByRole("button", { name: "Work breakdown" }).click();
+  await expect(
+    page.getByRole("cell", { name: "Navigation plan briefed" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("cell", { name: "Command readiness review" }),
+  ).toBeVisible();
 });

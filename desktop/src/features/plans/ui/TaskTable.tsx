@@ -1,13 +1,16 @@
 import type { ScheduledTask } from "@/shared/api/tauriPlans";
 import type { PlanningTask } from "../domain/contracts";
+import type { PlanningTaskDetailsV1 } from "../domain/extendedContracts";
 
 export function TaskTable({
   tasks,
   schedule,
+  details,
   onEdit,
 }: {
   tasks: readonly PlanningTask[];
   schedule: readonly ScheduledTask[];
+  details: readonly PlanningTaskDetailsV1[];
   onEdit: (task: PlanningTask) => void;
 }) {
   const calculated = new Map(schedule.map((item) => [item.taskId, item]));
@@ -31,6 +34,9 @@ export function TaskTable({
             )
             .map((task) => {
               const result = calculated.get(task.id);
+              const taskDetails = details.find(
+                (item) => item.taskId === task.id,
+              );
               return (
                 <tr
                   className="cursor-pointer border-t hover:bg-muted/40"
@@ -39,7 +45,16 @@ export function TaskTable({
                 >
                   <td className="px-3 py-2 font-mono text-xs">{task.wbs}</td>
                   <td className="px-3 py-2 font-medium">{task.title}</td>
-                  <td className="px-3 py-2">{task.owner}</td>
+                  <td className="px-3 py-2">
+                    <span className="block">
+                      {taskDetails?.department ?? task.owner}
+                    </span>
+                    <span className="block text-xs text-muted-foreground">
+                      {taskDetails?.individual ??
+                        taskDetails?.position ??
+                        task.owner}
+                    </span>
+                  </td>
                   <td className="px-3 py-2">{task.dueDate ?? "—"}</td>
                   <td className="px-3 py-2">{task.percentComplete}%</td>
                   <td className="px-3 py-2">

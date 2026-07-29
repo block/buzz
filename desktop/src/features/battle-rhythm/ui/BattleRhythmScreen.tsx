@@ -24,6 +24,7 @@ import {
 } from "../domain/deterministicChecks";
 import { expandRecurringEvents } from "../domain/occurrences";
 import type { BattleRhythmEvent } from "../domain/contracts";
+import { deriveShipRoutinePeriods, shipStateAt } from "../domain/shipRoutine";
 import { useBattleRhythmMutations, useBattleRhythmQuery } from "../hooks";
 import { DayShortcast } from "./DayShortcast";
 import { EventEditorDialog } from "./EventEditorDialog";
@@ -71,6 +72,17 @@ export function BattleRhythmScreen() {
     () => expandRecurringEvents(rhythm.data?.events ?? [], range),
     [range, rhythm.data?.events],
   );
+  const routinePeriods = React.useMemo(
+    () =>
+      deriveShipRoutinePeriods(
+        rhythm.data?.sources ?? [],
+        rhythm.data?.events ?? [],
+        range,
+      ),
+    [range, rhythm.data?.events, rhythm.data?.sources],
+  );
+  const shipState = shipStateAt(routinePeriods, `${day}T12:00:00Z`);
+  const effectiveTimeZone = shipState.timeZone;
   const planningFindings = React.useMemo(
     () =>
       evaluatePlanningChecks({
@@ -163,7 +175,9 @@ export function BattleRhythmScreen() {
           : "Retry Apple publication";
   const renderView = () => {
     if (view === "Year")
-      return <YearTimeline day={day} events={events} timeZone={TIME_ZONE} />;
+      return (
+        <YearTimeline day={day} events={events} timeZone={effectiveTimeZone} />
+      );
     if (view === "Month")
       return (
         <MonthCalendar
@@ -172,7 +186,7 @@ export function BattleRhythmScreen() {
           planMilestones={planMilestones}
           onEdit={openEditor}
           onOpenPlanMilestone={openPlanMilestone}
-          timeZone={TIME_ZONE}
+          timeZone={effectiveTimeZone}
         />
       );
     if (view === "Week")
@@ -183,15 +197,15 @@ export function BattleRhythmScreen() {
           planMilestones={planMilestones}
           onEdit={openEditor}
           onOpenPlanMilestone={openPlanMilestone}
-          timeZone={TIME_ZONE}
+          timeZone={effectiveTimeZone}
         />
       );
     return (
       <DayShortcast
         events={visibleEvents}
         planMilestones={dayPlanMilestones}
-        routineState="Alongside"
-        timeZone={TIME_ZONE}
+        routineState={shipState.routine === "atSea" ? "At Sea" : "Alongside"}
+        timeZone={effectiveTimeZone}
         onEdit={openEditor}
         onOpenPlanMilestone={openPlanMilestone}
       />
@@ -349,17 +363,21 @@ export function BattleRhythmScreen() {
             className="text-2xl font-semibold tracking-tight"
             data-testid="calendar-heading"
           >
-            {calendarHeading(view, day, TIME_ZONE)}
+            {calendarHeading(view, day, effectiveTimeZone)}
           </h2>
           <p
             className="mt-1 text-xs text-muted-foreground"
             data-testid="ship-time-zone"
           >
-            Ship Time: {TIME_ZONE}
+            Ship Time: {effectiveTimeZone}
           </p>
         </div>
         <p className="rounded-full border bg-muted/40 px-3 py-1 text-xs text-muted-foreground">
-          Routine: Alongside · 0800–1600
+          Routine:{" "}
+          {shipState.routine === "atSea"
+            ? "At Sea · 24 hours (Sunday from 1200)"
+            : "Alongside · 0800–1600"}
+          {shipState.assumed ? " · assumed" : ""}
         </p>
       </div>
       {rhythm.isLoading ? (
@@ -386,7 +404,7 @@ export function BattleRhythmScreen() {
         }}
         open={editorOpen}
         prefill={editorPrefill}
-        timeZone={TIME_ZONE}
+        timeZone={effectiveTimeZone}
       />
       <PlanningReviewPanel
         findings={planningFindings}

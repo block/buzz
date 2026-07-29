@@ -9656,6 +9656,45 @@ export function maybeInstallE2eTauriMocks() {
         return 0;
       case "calculate_plan_schedule":
         return mockPlanningSchedule(payload);
+      case "generate_hod_sync_pack":
+        return {
+          fileName: "Command-Adviser-HOD-Sync-Pack.pdf",
+          path: "/tmp/Command Adviser/Command-Adviser-HOD-Sync-Pack.pdf",
+          format: "pdf",
+          storageState: "icloud",
+          sha256:
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          sizeBytes: 1024,
+        };
+      case "generate_task_artifact": {
+        const format =
+          (payload as { input?: { format?: string } } | null)?.input?.format ??
+          "pdf";
+        return {
+          fileName: `planning-output.${format}`,
+          path: `/tmp/Command Adviser/planning-output.${format}`,
+          format,
+          storageState: "icloud",
+          sha256:
+            "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          sizeBytes: 2048,
+        };
+      }
+      case "execute_planning_task":
+        return {
+          summary: "Draft logistics output ready for review",
+          body: "The assigned adviser prepared a logistics readiness draft using the available planning context.",
+          missingInputs: ["Port services confirmation"],
+          assumptions: ["The current sailing date remains unchanged"],
+          provider: "LiteLLM",
+          model: "gpt-test",
+          outputType:
+            (
+              payload as {
+                input?: { outputType?: string };
+              } | null
+            )?.input?.outputType ?? "response",
+        };
       case "pick_battle_rhythm_document":
         if (activeConfig?.mock?.battleRhythmDocuments?.length) {
           const documents = activeConfig.mock.battleRhythmDocuments;

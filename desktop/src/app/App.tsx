@@ -65,6 +65,7 @@ import {
 import { cn } from "@/shared/lib/cn";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 import { CommandAdviserLoadingMark } from "./CommandAdviserLoadingMark";
+import { PlanningTaskScheduler } from "@/features/plans/usePlanningTaskScheduler";
 
 const LOADING_TEXT = "Setting up your community...";
 
@@ -232,6 +233,7 @@ function AppReady({
 
   return (
     <KnownAgentPubkeysProvider>
+      <PlanningTaskScheduler />
       <RouterProvider router={router} />
     </KnownAgentPubkeysProvider>
   );
