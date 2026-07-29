@@ -28,6 +28,8 @@ type DevPromptComposerProps = {
   onCycleMode: (direction: 1 | -1) => void;
   /** ArrowUp / ArrowDown while the input is empty — channels or prompt cards. */
   onNavigate: (direction: 1 | -1) => void;
+  /** ⌥ArrowUp / ⌥ArrowDown — switch channels without leaving the box. */
+  onStepChannel: (direction: 1 | -1) => void;
   /** ArrowLeft / ArrowRight while the input is empty — side-chat pane focus. */
   onSwitchPane: (pane: "main" | "thread") => void;
   /** `/` on an empty input. */
@@ -49,6 +51,7 @@ export function DevPromptComposer({
   onSubmit,
   onCycleMode,
   onNavigate,
+  onStepChannel,
   onSwitchPane,
   onOpenPalette,
   onEscape,
@@ -112,10 +115,19 @@ export function DevPromptComposer({
       return;
     }
 
-    if ((event.key === "ArrowUp" || event.key === "ArrowDown") && !value) {
-      event.preventDefault();
-      onNavigate(event.key === "ArrowUp" ? -1 : 1);
-      return;
+    if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+      // ⌥↑/⌥↓ steps through the channel list, draft or not, without the
+      // caret ever leaving the box.
+      if (event.altKey) {
+        event.preventDefault();
+        onStepChannel(event.key === "ArrowUp" ? -1 : 1);
+        return;
+      }
+      if (!value) {
+        event.preventDefault();
+        onNavigate(event.key === "ArrowUp" ? -1 : 1);
+        return;
+      }
     }
 
     if ((event.key === "ArrowLeft" || event.key === "ArrowRight") && !value) {

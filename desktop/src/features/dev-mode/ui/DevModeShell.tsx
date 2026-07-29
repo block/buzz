@@ -327,6 +327,32 @@ export function DevModeShell({
     [navigatorId, orderedChannels],
   );
 
+  // ⌥↑/⌥↓ from the composer: open the previous/next channel in the visible
+  // list directly — focus stays in the box the whole time.
+  const stepChannel = React.useCallback(
+    (direction: 1 | -1) => {
+      if (orderedChannels.length === 0) return;
+      const referenceId = view === "channel" ? activeSessionId : navigatorId;
+      const currentIndex = orderedChannels.findIndex(
+        (session) => session.id === referenceId,
+      );
+      if (currentIndex === -1) {
+        // Nothing open — ⌥↑ enters the list at the bottom (nearest channel).
+        if (direction === -1) {
+          openChannel(orderedChannels[orderedChannels.length - 1].id);
+        }
+        return;
+      }
+      const nextIndex = Math.min(
+        orderedChannels.length - 1,
+        Math.max(0, currentIndex + direction),
+      );
+      if (nextIndex === currentIndex) return;
+      openChannel(orderedChannels[nextIndex].id);
+    },
+    [activeSessionId, navigatorId, openChannel, orderedChannels, view],
+  );
+
   const navigateCards = React.useCallback(
     (direction: 1 | -1) => {
       if (roots.length === 0) return;
@@ -527,7 +553,7 @@ export function DevModeShell({
           ? "←→: switch pane · tab: target · esc: close side chat"
           : selectedRootId
             ? "↑↓: prompts · enter: side chat · esc: back"
-            : "tab: target · enter: send · ↑↓: prompts · esc: channels"
+            : "tab: target · enter: send · ↑↓: prompts · ⌥↑↓: channels · esc: channels"
         : "tab: target · enter: send · ↑: channels · /: palette";
 
   const composerActive =
@@ -593,6 +619,7 @@ export function DevModeShell({
       onEscape={handleEscape}
       onNavigate={handleNavigate}
       onOpenPalette={() => setPaletteOpen(true)}
+      onStepChannel={stepChannel}
       onReactivate={() => {
         if (cardSelectionActive) setSelectedRootId(null);
       }}

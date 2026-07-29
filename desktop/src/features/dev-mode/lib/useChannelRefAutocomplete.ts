@@ -92,6 +92,8 @@ export function useChannelRefAutocomplete({
   const handleKeyDown = React.useCallback(
     (event: React.KeyboardEvent<HTMLTextAreaElement>): boolean => {
       if (!open) return false;
+      // Modified keys belong to composer shortcuts (e.g. ⌥↑ channel step).
+      if (event.altKey || event.metaKey || event.ctrlKey) return false;
       if (event.key === "ArrowUp" || event.key === "ArrowDown") {
         event.preventDefault();
         const delta = event.key === "ArrowUp" ? -1 : 1;
