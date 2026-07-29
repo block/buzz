@@ -456,7 +456,7 @@ harness path, `git-credential-nostr`, `PATH` — are appended by the remote scri
 |---|---|
 | `BUZZ_ACP_AGENT_COMMAND` | the pinned harness, resolved on the host with `command -v` |
 | `CLAUDE_CODE_EXECUTABLE` | for a Claude ACP adapter, `~/.local/bin/claude` when executable, otherwise the host's `claude` launcher resolved from `PATH` |
-| `PATH` | `$HOME/.local/bin:$PATH`, **expanded by the host's shell at deploy time** — see below |
+| `PATH` | the deploy script's own `$PATH`, which already leads with `$HOME/.local/bin`; **expanded by the host's shell at deploy time** — see below |
 | `BUZZ_PRIVATE_KEY` | payload `private_key_nsec` |
 | `BUZZ_RELAY_URL`, `BUZZ_AUTH_TAG` | payload (auth tag omitted when absent) |
 | `BUZZ_ACP_AGENT_ARGS` | comma-joined |
@@ -483,11 +483,30 @@ unreachable.
 
 It is composed **by the host's shell during the deploy**, not written into the unit as
 `Environment=PATH=$HOME/.local/bin:$PATH`. systemd expands no variable in `Environment=` or in an
-`EnvironmentFile`, so that form would hand the harness the five literal characters `$PATH`. The right
-half is the non-interactive SSH shell's own `PATH`, captured at deploy time — which is the same
-`PATH` the install machinery just searched, so anything `command -v` found on the host stays findable
-for the agent. The harness passes its environment to its children unchanged, so this is what makes
-`buzz` a command a remote agent can actually run.
+`EnvironmentFile`, so that form would hand the harness the five literal characters `$PATH`. The value
+written is the deploy script's own `PATH`, captured at deploy time — which is the same `PATH` every
+`command -v` in that script searched, so anything it found on the host stays findable for the agent.
+The harness passes its environment to its children unchanged, so this is what makes `buzz` a command
+a remote agent can actually run.
+
+**Every remote script prepends `~/.local/bin` to its own `PATH` first** (`install::PATH_PREAMBLE`),
+which is why the captured value already leads with the install destination. A non-interactive
+`ssh host sh -s` reads no profile — on stock Debian the whole `PATH` is
+`/usr/local/bin:/usr/bin:/bin:/usr/games` — so without it `discover` reports a host's entire harness
+catalog as absent, and the deploy that follows refuses the pin with exit 91 on a host where every
+adapter is installed and runnable. `scripts/provision-buzz-host.sh` does the same, so its report and
+the deploy's behavior cannot disagree.
+
+**`BUZZ_ACP_RELAY_OBSERVER` is pinned `true`, but it only does anything once an owner resolves.**
+Observer frames are addressed and encrypted to the owner's pubkey, so `buzz-acp` resolves one at
+startup — from `BUZZ_AUTH_TAG` (the NIP-OA attestation, verified against the agent's own key) or
+from `--agent-owner` — and logs `relay observer requested but no agent owner was resolved at
+startup` and publishes nothing when it has neither. This is worth stating because dropping the
+NIP-OA identity is the current workaround for the cross-machine mention gate (#3277, #2987): a
+deploy with no `auth_tag` and `respond_to=allowlist` is a perfectly working agent that answers
+mentions and pushes to repositories, and the only thing quietly missing is its observer telemetry.
+Deploy does not warn, since a payload without an auth tag is a legitimate configuration; the
+harness's own log is the place that says so.
 
 The runtime model/provider pair is the remote half of `runtime_metadata_env_vars`. `BUZZ_ACP_MODEL`
 is what `buzz-acp` reads; these are what the harness underneath it reads, and local spawn writes
