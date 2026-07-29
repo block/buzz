@@ -32,8 +32,8 @@ export const SIGNOUT_CONFIRM_PHRASE = "wipe all my data";
  * dialog gates the delete button behind two explicit steps:
  *
  * 1. Confirm recovery — Settings offers a tested password-protected backup;
- *    the dialog also shows the raw nsec as a last-chance fallback. The
- *    checkbox unlocks only after the user reveals or copies that key.
+ *    the dialog also shows the raw nsec as a last-chance fallback, and the
+ *    user checks a box confirming they can restore their identity.
  * 2. Typed confirmation — the user must type the exact phrase
  *    "wipe all my data".
  *
@@ -47,7 +47,6 @@ export function SignOutSection() {
   const [nsec, setNsec] = React.useState<string | null>(null);
   const [nsecError, setNsecError] = React.useState<string | null>(null);
   const [isNsecLoading, setIsNsecLoading] = React.useState(false);
-  const [hasInteractedWithKey, setHasInteractedWithKey] = React.useState(false);
   const [hasConfirmedBackup, setHasConfirmedBackup] = React.useState(false);
   // Guards against a late-resolving getNsec() repopulating state after the
   // dialog closes.
@@ -58,20 +57,13 @@ export function SignOutSection() {
   const isPhraseConfirmed =
     confirmText.trim().toLowerCase() === SIGNOUT_CONFIRM_PHRASE;
 
-  // The backup checkbox unlocks after real interaction with the key
-  // (reveal or copy). If the key cannot be loaded at all there is nothing to
-  // interact with — let the user proceed past the backup step rather than
-  // locking them out of sign-out entirely.
-  const isBackupGateSatisfied = hasConfirmedBackup;
-  const canConfirmBackup = hasInteractedWithKey || nsecError !== null;
-  const canDelete = isBackupGateSatisfied && isPhraseConfirmed && !isPending;
+  const canDelete = hasConfirmedBackup && isPhraseConfirmed && !isPending;
 
   function resetDialogState() {
     fetchCancelledRef.current = true;
     setNsec(null);
     setNsecError(null);
     setIsNsecLoading(false);
-    setHasInteractedWithKey(false);
     setHasConfirmedBackup(false);
     setConfirmText("");
   }
@@ -188,10 +180,7 @@ export function SignOutSection() {
                 {nsecError}
               </p>
             ) : nsec ? (
-              <NsecMaskedDisplay
-                nsec={nsec}
-                onKeyInteraction={() => setHasInteractedWithKey(true)}
-              />
+              <NsecMaskedDisplay nsec={nsec} />
             ) : null}
             <label
               className="flex cursor-pointer items-start gap-2.5 text-sm has-[button:disabled]:cursor-not-allowed has-[button:disabled]:opacity-60"
@@ -202,7 +191,7 @@ export function SignOutSection() {
                 checked={hasConfirmedBackup}
                 className="mt-0.5"
                 data-testid="signout-backup-confirm"
-                disabled={!canConfirmBackup || isPending}
+                disabled={isPending}
                 id="signout-backup-confirm"
                 onCheckedChange={(checked) =>
                   setHasConfirmedBackup(checked === true)
@@ -211,11 +200,6 @@ export function SignOutSection() {
               <span>
                 I have tested a key backup or saved this private key somewhere
                 safe.
-                {!canConfirmBackup ? (
-                  <span className="block text-xs text-muted-foreground">
-                    Reveal or copy this last-chance private key first.
-                  </span>
-                ) : null}
               </span>
             </label>
           </div>
