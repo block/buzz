@@ -323,6 +323,12 @@ missing. It is a preflight, not an installer.
    otherwise emits a warning and provisions the agent anyway. Not a prerequisite — but a host that
    satisfies it gets noticeably better agents.
 
+   **`git-credential-nostr` is a third tool with a third policy: resolved, never installed.**
+   `deploy` writes the agent's `GIT_CONFIG_*` block only when the host already has the helper, and
+   nothing pushes it, so a remote agent on a host without it cannot push to a Buzz repository —
+   with no deploy-time warning, and no error until the agent tries. That is why the preflight
+   reports it as its own row rather than folding it into the `buzz` CLI check.
+
 4. **At least one harness CLI**, named exactly as `discover_harnesses` probes it. Most harnesses
    require only their ACP adapter: `codex-acp` for Codex, `goose` for Goose, `cursor-agent`, `omp`,
    `grok`, `opencode`, `kimi`, `amp-acp`, `hermes-acp`, `openclaw`, or `buzz-agent`. Claude is the
@@ -617,7 +623,20 @@ MagicDNS name typed into it will fail with `Could not resolve hostname`.
   harness whose id matches gets the LLM-provider selector; any other remote id does not, however
   the host's own catalog describes it.
 - `BUZZ_ACP_TEAM_INSTRUCTIONS` is not carried to the host — the deploy payload has no team field, so
-  a team-linked remote agent silently loses its team instructions.
+  a team-linked remote agent starts without its team's standing rules. No longer *silent*: the
+  create flow states it the moment "elsewhere" is the answer, and the edit dialog states it for a
+  record where it is already true (`remoteTeamInstructions.ts` owns both). Carrying the resolved
+  text needs a payload field.
+- **No project workspace is projected onto the host.** A local managed agent runs inside Desktop's
+  `REPOS` workspace; the unit here has no `WorkingDirectory` at all, so a remote agent starts in
+  whatever `systemd --user` gives it and has no Buzz-native project checkout. Buzz Git auth is
+  configured only when `git-credential-nostr` already happens to be on the host — the deploy
+  resolves the helper but never installs it, and writes no `GIT_CONFIG_*` block without it, so a
+  remote agent on a host that lacks it cannot push to a Buzz repository and finds out only when it
+  tries. `provision-buzz-host.sh` reports the helper as its own row for that reason. In practice
+  every long-running remote agent operates in a separately provisioned checkout. Closing this is a
+  protocol addition: a workspace field the desktop states, rather than the provider guessing which
+  project to clone.
 - `MCP_HOOK_SERVERS` is not emitted. `mcp_hooks` is local catalog metadata the provider cannot
   compute, so remote agents have no `_Stop`/`_PostCompact` hook tools.
 - `check` is implemented but has no desktop caller. `discover_harnesses` serves as the de facto

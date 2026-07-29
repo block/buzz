@@ -137,7 +137,24 @@ else
     "deploy will push it, or copy the release binary to ${LOCAL_BIN}/buzz"
 fi
 
-# ---- 6. Harness CLIs --------------------------------------------------------
+# ---- 6. git-credential-nostr ------------------------------------------------
+# Its own row, not folded into the `buzz` CLI check above: the two tools answer
+# different questions and fail differently. Deploy pushes the CLI when the
+# desktop supplies one; nothing pushes this helper. Deploy resolves it, and
+# writes the agent's Git credential block ONLY if the host already has it — so
+# without it a remote agent silently cannot push to a Buzz repository, with no
+# warning at deploy time and no error until the agent tries.
+#
+# Reported, never installed, and never mandatory: an agent that never touches
+# Git is unaffected, and blocking a whole preflight on it would be wrong.
+if command -v git-credential-nostr >/dev/null 2>&1; then
+  add_row "git-credential-nostr" "OK" "$(command -v git-credential-nostr)"
+else
+  add_row "git-credential-nostr" "MISSING" \
+    "no Buzz Git auth for agents here — copy the release binary to ${LOCAL_BIN}/git-credential-nostr"
+fi
+
+# ---- 7. Harness CLIs --------------------------------------------------------
 # `discover_harnesses` probes the ACP ADAPTER name, not the vendor CLI, and the
 # adapter is what the deploy pins — but the adapter is a shim over the vendor
 # CLI, which carries the authentication. Both must be present, so both are
@@ -167,7 +184,7 @@ check_harness "claude" "${CLAUDE_ACP_ADAPTER}" "claude" \
 check_harness "codex" "codex-acp" "codex" \
   "npm i -g @agentclientprotocol/codex-acp; curl -fsSL https://chatgpt.com/codex/install.sh | sh"
 
-# ---- 7. Tailscale (optional) ------------------------------------------------
+# ---- 8. Tailscale (optional) ------------------------------------------------
 # An enhancement, never a dependency: absence only costs the desktop's device
 # picker, and manual SSH is the unchanged fallback. So every branch here is a
 # note.
@@ -200,7 +217,7 @@ else
   add_row "tailscale" "NOTE" "not installed (optional; use plain SSH keys)"
 fi
 
-# ---- 8. systemd --user ------------------------------------------------------
+# ---- 9. systemd --user ------------------------------------------------------
 # The deploy's own workaround, mirrored: a non-interactive SSH command often
 # gets no XDG_RUNTIME_DIR, and without it every `systemctl --user` fails with
 # "Failed to connect to bus". Checking under the same assumption is the point —
