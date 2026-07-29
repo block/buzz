@@ -12,7 +12,9 @@ import {
   resultTestId,
   type SearchResult,
 } from "@/features/search/ui/SearchResultItem";
+import { SearchChannelActivityIndicator } from "@/features/search/ui/SearchChannelActivityIndicator";
 import { SearchPromptPlaceholder } from "@/features/search/ui/SearchPromptPlaceholder";
+import { useActiveWorkingChannelsById } from "@/features/sidebar/lib/useActiveWorkingChannelsById";
 import type { Channel, SearchHit, UserSearchResult } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
@@ -400,6 +402,7 @@ export function TopbarSearch({
   suggestionChannels,
   variant = "bar",
 }: TopbarSearchProps) {
+  const activeWorkingByChannelId = useActiveWorkingChannelsById();
   const [isOpen, setIsOpen] = React.useState(false);
   const [selectedMenuIndex, setSelectedMenuIndex] = React.useState(0);
   const triggerRef = React.useRef<HTMLButtonElement>(null);
@@ -663,6 +666,10 @@ export function TopbarSearch({
         : result.kind === "message"
           ? formatRelativeTime(result.hit.createdAt)
           : null;
+    const activeWorking =
+      result.kind === "channel"
+        ? activeWorkingByChannelId.get(result.channel.id)
+        : undefined;
 
     return (
       <button
@@ -746,10 +753,12 @@ export function TopbarSearch({
             </span>
           )}
         </span>
-        {result.kind !== "message" && trailingLabel ? (
-          <span className="shrink-0 text-2xs text-muted-foreground/75">
-            {trailingLabel}
-          </span>
+        {result.kind === "channel" ? (
+          <SearchChannelActivityIndicator
+            channelName={result.channel.name}
+            summary={activeWorking}
+            timestampLabel={trailingLabel}
+          />
         ) : null}
       </button>
     );

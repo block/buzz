@@ -121,10 +121,12 @@ export function formatWorkingTooltip(
 
 export function ChannelWorkingIndicator({
   channelName,
+  className,
   isActive,
   summary,
 }: {
   channelName: string;
+  className?: string;
   isActive: boolean;
   summary: ActiveChannelTurnSummary;
 }) {
@@ -138,6 +140,7 @@ export function ChannelWorkingIndicator({
         isActive
           ? "text-sidebar-active-foreground/65"
           : "text-sidebar-foreground/45",
+        className,
       )}
       data-testid={`channel-working-${channelName}`}
       role="status"
