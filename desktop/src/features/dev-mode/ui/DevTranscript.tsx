@@ -1,6 +1,10 @@
 import * as React from "react";
 
 import {
+  useAuthorColorResolver,
+  type AuthorColorResolver,
+} from "@/features/dev-mode/lib/authorColors";
+import {
   byCreatedAscending,
   DEV_MESSAGE_KINDS,
   selectRootEvents,
@@ -27,11 +31,13 @@ function ThreadReplies({
   rootId,
   currentPubkey,
   resolveName,
+  resolveColor,
 }: {
   channel: Channel;
   rootId: string;
   currentPubkey: string | null;
   resolveName: NameResolver;
+  resolveColor: AuthorColorResolver;
 }) {
   const repliesQuery = useThreadReplies(channel, rootId);
   const replies = React.useMemo(
@@ -49,6 +55,7 @@ function ThreadReplies({
           key={reply.localKey ?? reply.id}
           event={reply}
           isSelf={reply.pubkey === currentPubkey}
+          resolveColor={resolveColor}
           resolveName={resolveName}
         />
       ))}
@@ -78,6 +85,7 @@ function PromptCard({
   selected,
   currentPubkey,
   resolveName,
+  resolveColor,
   onSelect,
   onOpenThread,
 }: {
@@ -88,6 +96,7 @@ function PromptCard({
   selected: boolean;
   currentPubkey: string | null;
   resolveName: NameResolver;
+  resolveColor: AuthorColorResolver;
   onSelect: () => void;
   onOpenThread: () => void;
 }) {
@@ -108,7 +117,7 @@ function PromptCard({
       role="button"
       tabIndex={-1}
       className={cn(
-        "mb-2 cursor-pointer rounded-md border px-3 py-2",
+        "mb-2 cursor-pointer rounded-none border px-3 py-2",
         selected
           ? "border-primary/60 bg-primary/5"
           : "border-border/40 hover:border-border",
@@ -120,12 +129,14 @@ function PromptCard({
       <DevMessageRow
         event={root}
         isSelf={root.pubkey === currentPubkey}
+        resolveColor={resolveColor}
         resolveName={resolveName}
       />
       {autoExpand && replyCount > 0 ? (
         <ThreadReplies
           channel={channel}
           currentPubkey={currentPubkey}
+          resolveColor={resolveColor}
           resolveName={resolveName}
           rootId={root.id}
         />
@@ -169,6 +180,7 @@ export function DevTranscript({
 
   const { scrollRef, contentRef, handleScroll } = usePinnedScroll(channel.id);
   const resolveName = useMemberNameResolver(channel.id);
+  const resolveColor = useAuthorColorResolver();
 
   const roots = React.useMemo(
     () => selectRootEvents(messagesQuery.data),
@@ -218,6 +230,7 @@ export function DevTranscript({
               onSelectRoot(selectedRootId === root.id ? null : root.id)
             }
             replyCount={replyCounts.get(root.id) ?? 0}
+            resolveColor={resolveColor}
             resolveName={resolveName}
             root={root}
             selected={root.id === selectedRootId}

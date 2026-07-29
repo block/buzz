@@ -8,9 +8,14 @@ import {
 } from "@/features/channels/hooks";
 import { useSendMessageMutation } from "@/features/messages/hooks";
 import { addChannelMembers } from "@/shared/api/tauri";
+import { updateChannel } from "@/shared/api/tauriChannels";
 import type { Channel, Identity } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
-import { slugifyPrompt } from "@/features/dev-mode/lib/sessionNaming";
+import { generateChannelTitle } from "@/features/dev-mode/lib/channelNaming";
+import {
+  slugifyPrompt,
+  uniqueChannelName,
+} from "@/features/dev-mode/lib/sessionNaming";
 import type {
   DevAgentTarget,
   DevComposerMode,
@@ -56,12 +61,35 @@ export function useDevSessionActions(identity: Identity | undefined) {
         ),
       );
 
-      return createChannelMutation.mutateAsync({
+      const channel = await createChannelMutation.mutateAsync({
         name: slugifyPrompt(prompt, existingNames),
         channelType: "stream",
         visibility: "open",
         description: prompt.length > 140 ? `${prompt.slice(0, 139)}…` : prompt,
       });
+
+      // LLM naming is best-effort and never blocks the session: the channel
+      // opens under its slug name and is renamed when a title arrives.
+      void (async () => {
+        const title = await generateChannelTitle(prompt);
+        if (!title || title === channel.name) return;
+        const currentNames = new Set(
+          (queryClient.getQueryData<Channel[]>(channelsQueryKey) ?? [])
+            .filter((candidate) => candidate.id !== channel.id)
+            .map((candidate) => candidate.name),
+        );
+        try {
+          await updateChannel({
+            channelId: channel.id,
+            name: uniqueChannelName(title, currentNames),
+          });
+          await queryClient.invalidateQueries({ queryKey: channelsQueryKey });
+        } catch {
+          // Rename failing leaves the slug name, which is already valid.
+        }
+      })();
+
+      return channel;
     },
     [createChannelMutation, queryClient],
   );

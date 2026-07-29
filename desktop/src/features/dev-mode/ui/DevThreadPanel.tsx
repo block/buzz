@@ -1,5 +1,6 @@
 import * as React from "react";
 
+import { useAuthorColorResolver } from "@/features/dev-mode/lib/authorColors";
 import {
   byCreatedAscending,
   DEV_MESSAGE_KINDS,
@@ -25,7 +26,9 @@ export function DevThreadPanel({
   root,
   mode,
   currentPubkey,
+  active,
   onCycleMode,
+  onSwitchPane,
   onSend,
   onClose,
 }: {
@@ -33,12 +36,17 @@ export function DevThreadPanel({
   root: RelayEvent;
   mode: DevComposerMode;
   currentPubkey: string | null;
+  /** Whether this pane owns the keyboard (vs the main channel composer). */
+  active: boolean;
   onCycleMode: (direction: 1 | -1) => void;
+  /** ArrowLeft / ArrowRight while the input is empty. */
+  onSwitchPane: (pane: "main" | "thread") => void;
   onSend: (prompt: string) => Promise<void>;
   onClose: () => void;
 }) {
   const repliesQuery = useThreadReplies(channel, root.id);
   const resolveName = useMemberNameResolver(channel.id);
+  const resolveColor = useAuthorColorResolver();
   const { scrollRef, contentRef, handleScroll } = usePinnedScroll(root.id);
 
   const [input, setInput] = React.useState("");
@@ -47,8 +55,10 @@ export function DevThreadPanel({
   const textareaRef = React.useRef<HTMLTextAreaElement>(null);
 
   React.useEffect(() => {
-    textareaRef.current?.focus();
-  }, []);
+    if (active) {
+      textareaRef.current?.focus();
+    }
+  }, [active]);
 
   const replies = React.useMemo(
     () =>
@@ -94,6 +104,11 @@ export function DevThreadPanel({
     if (event.key === "Escape") {
       event.preventDefault();
       onClose();
+      return;
+    }
+    if ((event.key === "ArrowLeft" || event.key === "ArrowRight") && !input) {
+      event.preventDefault();
+      onSwitchPane(event.key === "ArrowLeft" ? "main" : "thread");
     }
   };
 
@@ -101,7 +116,7 @@ export function DevThreadPanel({
 
   return (
     <div
-      className="flex min-h-0 min-w-0 flex-1 flex-col border-l border-border/60 font-mono"
+      className="flex min-h-0 min-w-0 flex-1 flex-col font-mono"
       data-testid="dev-mode-thread-panel"
     >
       <div className="flex shrink-0 items-center justify-between border-b border-border/60 px-3 py-1.5 text-xs text-muted-foreground">
@@ -124,6 +139,7 @@ export function DevThreadPanel({
           <DevMessageRow
             event={root}
             isSelf={root.pubkey === currentPubkey}
+            resolveColor={resolveColor}
             resolveName={resolveName}
           />
           <div className="my-1 border-t border-border/40" />
@@ -132,6 +148,7 @@ export function DevThreadPanel({
               key={reply.localKey ?? reply.id}
               event={reply}
               isSelf={reply.pubkey === currentPubkey}
+              resolveColor={resolveColor}
               resolveName={resolveName}
             />
           ))}
@@ -174,6 +191,7 @@ export function DevThreadPanel({
             className="min-h-6 w-full resize-none bg-transparent text-sm leading-6 outline-none placeholder:text-muted-foreground/60"
             data-testid="dev-mode-thread-composer"
             onChange={(event) => setInput(event.target.value)}
+            onFocus={() => onSwitchPane("thread")}
             onKeyDown={handleKeyDown}
             placeholder={
               mode.kind === "agent"
@@ -188,7 +206,7 @@ export function DevThreadPanel({
         <div className="mt-1 flex items-center justify-between pl-6 text-xs text-muted-foreground">
           <span
             className={cn(
-              "rounded-sm border px-1.5 py-0.5 font-medium",
+              "rounded-none border px-1.5 py-0.5 font-medium",
               mode.kind === "agent"
                 ? "border-primary/50 text-primary"
                 : "border-border text-muted-foreground",
@@ -196,7 +214,9 @@ export function DevThreadPanel({
           >
             {busy ? "working…" : devComposerModeLabel(mode)}
           </span>
-          <span className="select-none">enter: reply · esc: close</span>
+          <span className="select-none">
+            enter: reply · ←: channel · esc: close
+          </span>
         </div>
       </div>
     </div>

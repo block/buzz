@@ -13,12 +13,20 @@ type DevPromptComposerProps = {
   /** Keybinding help line, contextual to the shell state. */
   hint: string;
   busy: boolean;
+  /** Whether this composer owns the keyboard (side chat may own it instead). */
+  active: boolean;
+  /** Increment to pull focus back here (e.g. after the palette closes). */
+  focusSignal: number;
   onChange: (value: string) => void;
   onSubmit: () => void;
   /** Tab / Shift+Tab. */
   onCycleMode: (direction: 1 | -1) => void;
-  /** ArrowUp / ArrowDown while the input is empty — sessions or prompt cards. */
+  /** ArrowUp / ArrowDown while the input is empty — channels or prompt cards. */
   onNavigate: (direction: 1 | -1) => void;
+  /** ArrowLeft / ArrowRight while the input is empty — side-chat pane focus. */
+  onSwitchPane: (pane: "main" | "thread") => void;
+  /** `/` on an empty input. */
+  onOpenPalette: () => void;
   onEscape: () => void;
 };
 
@@ -28,17 +36,24 @@ export function DevPromptComposer({
   placeholder,
   hint,
   busy,
+  active,
+  focusSignal,
   onChange,
   onSubmit,
   onCycleMode,
   onNavigate,
+  onSwitchPane,
+  onOpenPalette,
   onEscape,
 }: DevPromptComposerProps) {
   const textareaRef = React.useRef<HTMLTextAreaElement>(null);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: focusSignal is an intentional focus-pull trigger
   React.useEffect(() => {
-    textareaRef.current?.focus();
-  }, []);
+    if (active) {
+      textareaRef.current?.focus();
+    }
+  }, [active, focusSignal]);
 
   const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === "Tab") {
@@ -49,8 +64,9 @@ export function DevPromptComposer({
 
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
-      // Empty-input Enter is also meaningful (opens the selected card's side
-      // chat), so the shell decides; busy only blocks actual sends there.
+      // Empty-input Enter is also meaningful (opens the highlighted channel
+      // or the selected card's side chat), so the shell decides; busy only
+      // blocks actual sends there.
       onSubmit();
       return;
     }
@@ -61,16 +77,33 @@ export function DevPromptComposer({
       return;
     }
 
+    if (event.key === "/" && !value) {
+      event.preventDefault();
+      onOpenPalette();
+      return;
+    }
+
     if ((event.key === "ArrowUp" || event.key === "ArrowDown") && !value) {
       event.preventDefault();
       onNavigate(event.key === "ArrowUp" ? -1 : 1);
+      return;
+    }
+
+    if ((event.key === "ArrowLeft" || event.key === "ArrowRight") && !value) {
+      event.preventDefault();
+      onSwitchPane(event.key === "ArrowLeft" ? "main" : "thread");
     }
   };
 
   const rowCount = Math.min(value.split("\n").length, 8);
 
   return (
-    <div className="border-t border-border/60 bg-background/80 px-4 py-3 font-mono">
+    <div
+      className={cn(
+        "border-t border-border/60 bg-background/80 px-4 py-3 font-mono transition-opacity",
+        !active && "opacity-55",
+      )}
+    >
       <div className="flex items-start gap-2">
         <span
           aria-hidden
@@ -86,6 +119,7 @@ export function DevPromptComposer({
           className="min-h-6 w-full resize-none bg-transparent text-sm leading-6 outline-none placeholder:text-muted-foreground/60"
           data-testid="dev-mode-composer"
           onChange={(event) => onChange(event.target.value)}
+          onFocus={() => onSwitchPane("main")}
           onKeyDown={handleKeyDown}
           placeholder={placeholder}
           rows={rowCount}
@@ -96,7 +130,7 @@ export function DevPromptComposer({
       <div className="mt-2 flex items-center justify-between pl-6 text-xs text-muted-foreground">
         <span
           className={cn(
-            "rounded-sm border px-1.5 py-0.5 font-medium",
+            "rounded-none border px-1.5 py-0.5 font-medium",
             mode.kind === "agent"
               ? "border-primary/50 text-primary"
               : "border-border text-muted-foreground",
