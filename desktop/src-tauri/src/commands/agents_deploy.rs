@@ -165,6 +165,13 @@ pub(super) fn deploy_payload_json(
 ) -> serde_json::Value {
     serde_json::json!({
         "name": &record.name,
+        // The record's own primary key, and the only stable identifier a
+        // provider can key host-side names on. The SSH provider derives its
+        // systemd instance, env-file path and returned `backend_agent_id` from
+        // a fragment of it: two agents can legitimately share a display name on
+        // one host, and a name-keyed unit gave the second deploy the first
+        // agent's env file — overwriting its minted nsec.
+        "pubkey": &record.pubkey,
         "relay_url": relay_url,
         "private_key_nsec": &record.private_key_nsec,
         "auth_tag": &record.auth_tag,

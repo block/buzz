@@ -48,6 +48,9 @@ const RESERVED_ENV_KEYS: &[&str] = &[
 /// `Debug` would put provider credentials one `{:?}` away from a log line.
 pub struct Agent {
     pub name: String,
+    /// The agent's minted Nostr pubkey — the desktop record's own primary key,
+    /// and the only stable identifier in the payload. See [`Agent::slug`].
+    pub pubkey: String,
     pub relay_url: String,
     pub private_key_nsec: Secret,
     pub auth_tag: Option<String>,
@@ -120,8 +123,31 @@ impl Agent {
              reached the host (see instanceInputForDefinition provider branch)",
         )?;
 
+        // The one stable identifier in the payload, and what every host-side
+        // name is keyed on. Refused rather than defaulted for the same reason
+        // the minted key is: without it two agents that merely share a display
+        // name would share one unit, one env file and one `backend_agent_id`,
+        // and the second deploy would overwrite the first agent's identity.
+        //
+        // Validated to the shape the desktop always mints (`to_hex()` of a
+        // Nostr public key) because the fragment taken from it becomes a
+        // filename and a systemd instance name. Anything else is a payload bug,
+        // and sanitizing it would trade a loud failure for a silent collision.
+        let pubkey = string("pubkey").ok_or(
+            "deploy payload carries no 'pubkey': the remote unit would be keyed on the agent's \
+             display name, which two agents can share",
+        )?;
+        if pubkey.len() != 64 || !pubkey.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(format!(
+                "'pubkey' is not a 64-character hex Nostr public key: {} characters",
+                pubkey.len()
+            ));
+        }
+        let pubkey = pubkey.to_lowercase();
+
         Ok(Self {
             name: string("name").ok_or("'name' is required")?,
+            pubkey,
             relay_url: string("relay_url").ok_or("'relay_url' is required")?,
             private_key_nsec,
             auth_tag: string("auth_tag"),
@@ -166,10 +192,17 @@ impl Agent {
     /// `record.backend_agent_id`.
     ///
     /// It becomes both a filename and a unit instance name, so it follows the
-    /// desktop's own `util::slugify` rule. The hash suffix is not decoration:
-    /// the payload carries no stable agent identifier, and without it two
-    /// agents whose names differ only in punctuation would share one unit and
-    /// one env file.
+    /// desktop's own `util::slugify` rule. The name is the readable half; the
+    /// **pubkey fragment is the identity**, and it is what makes the name safe
+    /// to read: two agents may legitimately be called "Research Bot" on one SSH
+    /// account, and keying on the name alone gave them one unit, one env file
+    /// and one `backend_agent_id` — so the second deploy silently overwrote the
+    /// first agent's minted nsec, and starting either record then drove
+    /// whichever identity was written last.
+    ///
+    /// [`PUBKEY_FRAGMENT`] characters of a 256-bit key are far more than a
+    /// per-host unit namespace needs to stay collision-free, and short enough
+    /// to leave the name legible in `systemctl --user status`.
     pub fn slug(&self) -> String {
         let sanitized: String = self
             .name
@@ -182,7 +215,8 @@ impl Agent {
         let stem = &stem[..stem.len().min(32)];
         let stem = stem.trim_end_matches('-');
         let stem = if stem.is_empty() { "agent" } else { stem };
-        format!("{stem}-{}", short_hash(&self.name))
+        // Hex and lowercased by `from_request`, so this is already unit-safe.
+        format!("{stem}-{}", &self.pubkey[..PUBKEY_FRAGMENT])
     }
 
     pub fn agent_id(&self) -> String {
@@ -190,15 +224,8 @@ impl Agent {
     }
 }
 
-/// FNV-1a, truncated. Only ever used to keep distinct names on distinct units.
-fn short_hash(value: &str) -> String {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in value.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    format!("{:08x}", hash as u32)
-}
+/// How much of the agent's pubkey identifies its unit. See [`Agent::slug`].
+const PUBKEY_FRAGMENT: usize = 12;
 
 pub fn env_map(value: Option<&serde_json::Value>) -> BTreeMap<String, String> {
     value
@@ -663,6 +690,10 @@ mod tests {
     use super::*;
 
     const NSEC: &str = "nsec1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq";
+    /// A 64-hex Nostr pubkey, in the shape `record.pubkey` always carries.
+    const PUBKEY: &str = "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d";
+    /// The fragment of [`PUBKEY`] every host-side name is keyed on.
+    const PUBKEY_SLUG: &str = "3bf0c63fcb93";
 
     fn request() -> serde_json::Value {
         serde_json::json!({
@@ -670,6 +701,7 @@ mod tests {
             "provider_config": { "ssh_host": "vps", "ssh_user": "ubuntu" },
             "agent": {
                 "name": "Research Bot",
+                "pubkey": PUBKEY,
                 "relay_url": "wss://relay.example/ws",
                 "private_key_nsec": NSEC,
                 "auth_tag": "tag-abc",
@@ -1018,24 +1050,65 @@ mod tests {
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
             "{slug}"
         );
-        assert!(slug.starts_with("research-bot-"));
-        // Redeploy is the start path: the same name must yield the same unit
+        assert_eq!(slug, format!("research-bot-{PUBKEY_SLUG}"));
+        // Redeploy is the start path: the same agent must yield the same unit
         // and the same agent_id, or start would provision a duplicate.
         assert_eq!(slug, Agent::from_request(&request()).unwrap().slug());
         assert_eq!(agent.agent_id(), format!("buzz-acp@{slug}"));
     }
 
+    /// The collision this key exists to prevent: one SSH account, two agents a
+    /// user called the same thing. Keyed on the name they shared a unit, an env
+    /// file and an `agent_id`, so the second deploy overwrote the first's nsec.
     #[test]
-    fn names_that_sanitize_alike_still_get_distinct_units() {
-        let named = |name: &str| {
+    fn two_agents_with_one_name_get_distinct_units() {
+        let deployed = |pubkey: &str| {
             let mut request = request();
-            request["agent"]["name"] = serde_json::json!(name);
-            Agent::from_request(&request).unwrap().slug()
+            request["agent"]["pubkey"] = serde_json::json!(pubkey);
+            let agent = Agent::from_request(&request).unwrap();
+            (agent.slug(), agent.agent_id())
         };
-        assert_ne!(named("Bot!"), named("Bot?"));
-        // A name with nothing usable still produces a legal instance name.
-        let empty = named("!!!");
-        assert!(empty.starts_with("agent-"), "{empty}");
+        let other = "e88a691e98d9987c964521dff60025f60700378a4879180dcbbb4a5027850411";
+        let (first_slug, first_id) = deployed(PUBKEY);
+        let (second_slug, second_id) = deployed(other);
+        assert_ne!(first_slug, second_slug);
+        assert_ne!(first_id, second_id);
+        // Both still name the agent a human recognizes.
+        assert!(first_slug.starts_with("research-bot-"), "{first_slug}");
+        assert!(second_slug.starts_with("research-bot-"), "{second_slug}");
+    }
+
+    #[test]
+    fn a_name_with_nothing_usable_still_produces_a_legal_instance_name() {
+        let mut request = request();
+        request["agent"]["name"] = serde_json::json!("!!!");
+        let slug = Agent::from_request(&request).unwrap().slug();
+        assert_eq!(slug, format!("agent-{PUBKEY_SLUG}"));
+    }
+
+    /// The identity is refused rather than defaulted: a payload without it
+    /// would silently fall back to name-keyed units, which is the collision.
+    #[test]
+    fn deploy_refuses_a_payload_with_no_usable_agent_identity() {
+        let mut request = request();
+        request["agent"].as_object_mut().unwrap().remove("pubkey");
+        assert!(rejection(&request).contains("no 'pubkey'"));
+
+        for bad in ["", "abc123", &"z".repeat(64)] {
+            request["agent"]["pubkey"] = serde_json::json!(bad);
+            let error = rejection(&request);
+            assert!(
+                error.contains("pubkey"),
+                "accepted {bad:?} with error {error}"
+            );
+        }
+
+        // Case is normalized, so the same key never yields two units.
+        request["agent"]["pubkey"] = serde_json::json!(PUBKEY.to_uppercase());
+        assert_eq!(
+            Agent::from_request(&request).unwrap().slug(),
+            Agent::from_request(&self::request()).unwrap().slug()
+        );
     }
 
     #[test]

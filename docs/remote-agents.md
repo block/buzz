@@ -411,10 +411,13 @@ WantedBy=default.target
   macOS hosts reject. Resolution runs *first*; the install only fills an empty `$acp`, so a deploy
   that installed `buzz-acp` writes the path of the copy it just installed, not a stale one.
 
-The instance name is derived from the agent name: lowercased, non-alphanumerics collapsed to `-`,
-truncated to 32 characters, plus an 8-hex FNV-1a suffix of the original name. The suffix is not
-decoration — the payload carries no stable agent identifier, so without it two agents whose names
-differ only in punctuation would share one unit and one env file.
+The instance name is the agent name made unit-safe — lowercased, non-alphanumerics collapsed to `-`,
+truncated to 32 characters — followed by the first 12 hex characters of the agent's `pubkey`. The
+name is the readable half; **the pubkey fragment is the identity**. A display name is not unique:
+two agents called "Research Bot" on one SSH account keyed on the name alone shared one unit, one env
+file and one `agent_id`, so the second deploy overwrote the first agent's minted nsec and starting
+either record drove whichever identity was written last. `deploy` therefore refuses a payload whose
+`agent.pubkey` is absent or is not a 64-character hex key, rather than falling back to the name.
 
 ## Env file contract
 

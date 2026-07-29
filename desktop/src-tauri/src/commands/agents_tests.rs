@@ -440,6 +440,11 @@ fn deploy_payload_carries_the_full_behavioral_quad() {
     );
 
     assert_eq!(payload["parallelism"], 4);
+    // The record's own primary key. A provider keys host-side names on this —
+    // the SSH provider's systemd instance and env file both carry a fragment of
+    // it — because two agents can legitimately share a display name, and a
+    // name-keyed unit lets the second deploy overwrite the first agent's nsec.
+    assert_eq!(payload["pubkey"], "abcd1234");
     assert_eq!(payload["respond_to"], "allowlist");
     assert_eq!(payload["respond_to_allowlist"][0], "a".repeat(64));
     assert_eq!(payload["model"], "gpt-x");
