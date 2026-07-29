@@ -71,6 +71,7 @@ import {
 import { ChannelTypeSettings } from "./ChannelTypeSettings";
 import { ChannelPermissionsSettings } from "./ChannelPermissionsSettings";
 import { ChannelAgentResponseSettings } from "./ChannelAgentResponseSettings";
+import { ChannelAgentResponseSummaryRow } from "./ChannelAgentResponseSummaryRow";
 import {
   ChannelHero,
   ChannelQuickAction,
@@ -98,6 +99,20 @@ type ChannelManagementSheetProps = {
   open: boolean;
   transparentChrome?: boolean;
 };
+
+function agentResponseUpdateErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (
+    message.includes("must include at least one metadata tag") ||
+    (message.includes("agent_response") && message.includes("recognized"))
+  ) {
+    return "This relay does not support agent reply settings yet";
+  }
+  if (message.includes("not authorized")) {
+    return "Only channel owners and admins can change agent replies";
+  }
+  return `Could not update agent replies: ${message}`;
+}
 
 export function ChannelManagementSheet({
   animateSplitEnter = false,
@@ -327,6 +342,21 @@ export function ChannelManagementSheet({
     }
   }
 
+  async function handleAgentResponseChange(policy: AgentResponsePolicy) {
+    if (policy === currentAgentResponse) {
+      return;
+    }
+    try {
+      await updateChannelDetailsMutation.mutateAsync({ agentResponse: policy });
+      setAgentResponseDraft(policy);
+      toast.success(
+        `Agent replies: ${policy === "all" ? "every message" : "mentions only"}`,
+      );
+    } catch (error) {
+      toast.error(agentResponseUpdateErrorMessage(error));
+    }
+  }
+
   return (
     <DialogPrimitive.Root
       modal={!isSplitLayout}
@@ -366,6 +396,7 @@ export function ChannelManagementSheet({
             canLeave={canLeave}
             canManageChannel={canManageChannel}
             canOpenCanvas={canOpenCanvas}
+            isAgentResponsePending={updateChannelDetailsMutation.isPending}
             canvasPreview={canvasPreview}
             canvasQuery={canvasQuery}
             channelId={channelId}
@@ -385,6 +416,7 @@ export function ChannelManagementSheet({
             membersError={membersQuery.error}
             onOpenChange={handlePanelOpenChange}
             resolvedChannel={resolvedChannel}
+            onAgentResponseChange={handleAgentResponseChange}
             setActiveView={setActiveView}
             setIsEditDialogOpen={setIsEditDialogOpen}
             unarchiveChannelMutation={unarchiveChannelMutation}
@@ -412,6 +444,7 @@ export function ChannelManagementSheet({
               canLeave={canLeave}
               canManageChannel={canManageChannel}
               canOpenCanvas={canOpenCanvas}
+              isAgentResponsePending={updateChannelDetailsMutation.isPending}
               canvasPreview={canvasPreview}
               canvasQuery={canvasQuery}
               channelId={channelId}
@@ -431,6 +464,7 @@ export function ChannelManagementSheet({
               membersError={membersQuery.error}
               onOpenChange={handlePanelOpenChange}
               resolvedChannel={resolvedChannel}
+              onAgentResponseChange={handleAgentResponseChange}
               setActiveView={setActiveView}
               setIsEditDialogOpen={setIsEditDialogOpen}
               unarchiveChannelMutation={unarchiveChannelMutation}
@@ -602,6 +636,7 @@ type ChannelManagementPanelContentProps = {
   canLeave: boolean;
   canManageChannel: boolean;
   canOpenCanvas: boolean;
+  isAgentResponsePending: boolean;
   canvasPreview?: string;
   canvasQuery: { isLoading: boolean };
   channelId: string | null;
@@ -620,6 +655,7 @@ type ChannelManagementPanelContentProps = {
   memberCount: number;
   membersError: unknown;
   onOpenChange: (open: boolean) => void;
+  onAgentResponseChange: (policy: AgentResponsePolicy) => Promise<void>;
   resolvedChannel: Channel;
   setActiveView: React.Dispatch<React.SetStateAction<"summary" | "canvas">>;
   setIsEditDialogOpen: React.Dispatch<React.SetStateAction<boolean>>;
@@ -634,6 +670,7 @@ function ChannelManagementPanelContent({
   canLeave,
   canManageChannel,
   canOpenCanvas,
+  isAgentResponsePending,
   canvasPreview,
   canvasQuery,
   channelId,
@@ -652,6 +689,7 @@ function ChannelManagementPanelContent({
   memberCount,
   membersError,
   onOpenChange,
+  onAgentResponseChange,
   resolvedChannel,
   setActiveView,
   setIsEditDialogOpen,
@@ -860,6 +898,16 @@ function ChannelManagementPanelContent({
                 testId="channel-management-member-count"
                 value={`${memberCount}`}
               />
+              {resolvedChannel.channelType !== "dm" ? (
+                <ChannelAgentResponseSummaryRow
+                  canManage={canManageChannel}
+                  isPending={isAgentResponsePending}
+                  onPolicyChange={(policy) => {
+                    void onAgentResponseChange(policy);
+                  }}
+                  policy={resolvedChannel.agentResponsePolicy}
+                />
+              ) : null}
               {isArchived ? (
                 <InfoFieldRow
                   icon={Archive}

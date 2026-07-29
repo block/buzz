@@ -351,29 +351,26 @@ test.describe("channel controls", () => {
   }) => {
     await installMockBridge(page);
     await openManagementSheet(page);
-    await openEditDialog(page);
 
-    const policy = page.getByTestId("channel-management-agent-response");
-    await expect(policy).toHaveAccessibleName(
+    const summaryPolicy = page.getByTestId(
+      "channel-management-agent-response-summary",
+    );
+    await expect(summaryPolicy).toHaveAccessibleName(
       "Agent replies: 🏷️ Only @mentions",
     );
-    await policy.click();
+    await summaryPolicy.click();
     await page
-      .getByTestId("channel-management-agent-response-option-all")
+      .getByTestId("channel-management-agent-response-summary-option-all")
       .click();
-    await expect(policy).toHaveAccessibleName(
+    await expect(summaryPolicy).toHaveAccessibleName(
       "Agent replies: 💬 Every message",
     );
-    await page.getByTestId("channel-management-save-changes").click();
-
-    await expect(
-      page.getByRole("dialog", { name: /Edit (?:public|private) channel/ }),
-    ).toHaveCount(0);
     await expect(page.getByTestId("channel-general")).toContainText("💬");
 
     await openEditDialog(page);
-    await expect(
-      page.getByTestId("channel-management-agent-response"),
-    ).toHaveAccessibleName("Agent replies: 💬 Every message");
+    const policy = page.getByTestId("channel-management-agent-response");
+    await expect(policy).toHaveAccessibleName(
+      "Agent replies: 💬 Every message",
+    );
   });
 });
