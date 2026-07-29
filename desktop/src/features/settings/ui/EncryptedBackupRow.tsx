@@ -78,7 +78,6 @@ export function EncryptedBackupRow() {
           you saved before.
         </p>
       </ToolRow>
-      <div className="border-t border-border/60" />
       <ToolRow
         action="Test backup"
         description="Check a backup file and its password, and see which identity it unlocks."
