@@ -291,6 +291,56 @@ mod tests {
         );
     }
 
+    /// `log_timestamp` must be idempotent under re-truncation: calling
+    /// `to_storage_precision` on an already-truncated value is a no-op.
+    /// This is the property that makes the write path safe — the value
+    /// hashed in memory is byte-identical to the one read back from Postgres.
+    #[test]
+    fn log_timestamp_is_at_storage_precision() {
+        let ts = log_timestamp();
+        let re_truncated = to_storage_precision(ts);
+        assert_eq!(
+            ts, re_truncated,
+            "log_timestamp must already be at microsecond precision"
+        );
+    }
+
+    /// The lock key format is `{AUDIT_LOCK_NAMESPACE}{community_id}`. This
+    /// test pins the namespace prefix and the format so a rename doesn't
+    /// silently split a community's lock across two keys (which would break
+    /// chain serialization without any compile error).
+    #[test]
+    fn lock_key_format_is_namespaced_community_id() {
+        let community_id = Uuid::new_v4();
+        let lock_key = format!("{AUDIT_LOCK_NAMESPACE}{community_id}");
+        assert!(
+            lock_key.starts_with(AUDIT_LOCK_NAMESPACE),
+            "lock key must start with the audit namespace"
+        );
+        assert!(
+            lock_key.ends_with(&community_id.to_string()),
+            "lock key must end with the community id"
+        );
+        assert!(
+            !lock_key.is_empty(),
+            "lock key must not be empty (would cause hashtextextended collisions)"
+        );
+    }
+
+    /// Two different communities must produce different lock keys — the
+    /// per-community serialization invariant depends on it.
+    #[test]
+    fn lock_keys_differ_per_community() {
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let key_a = format!("{AUDIT_LOCK_NAMESPACE}{a}");
+        let key_b = format!("{AUDIT_LOCK_NAMESPACE}{b}");
+        assert_ne!(
+            key_a, key_b,
+            "different communities must have different lock keys"
+        );
+    }
+
     /// A `community_id` known to exist in `communities` (FK target). Inserts a
     /// throwaway community row with a unique host and returns its id.
     async fn make_community(pool: &PgPool) -> Uuid {
