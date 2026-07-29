@@ -14,6 +14,7 @@
 #   buzz-ctx log <project> <message>    # append a session record
 #   buzz-ctx sessions <project> [n]     # recent session records (default 10)
 #   buzz-ctx sync                       # push journal to the cloud replica
+#   buzz-ctx pulse [relay-url]          # witness the rendezvous custodian's pulse
 #   buzz-ctx bind-agent <name> [days]   # mint an agent key + NIP-OA binding
 #   buzz-ctx artifact <file>            # store an immutable content-addressed blob
 #   buzz-ctx announce <file> [message]  # store a blob + announce its manifest
@@ -806,6 +807,29 @@ case "${1:-}" in
       --to "$CLOUD_URL" \
       --source ted-laptop/sovereign \
       --key "$KEY"
+    ;;
+  pulse)
+    # The Beacon pulse (kind 20700, ephemeral): the custodian's signed
+    # witness statement of the state it currently holds. Synthesized on
+    # request — a query that explicitly names the kind receives a fresh
+    # pulse — so the plain HTTP query path observes it with no new surface.
+    # See specs/architecture/beacon-pulse-v0.1-draft.md.
+    relay="${2:-$CLOUD_URL}"
+    result="$("$CLIENT" query "$KEY" "$relay" '[{"kinds":[20700],"limit":1}]' \
+      | sed 's/^200 //')"
+    [ "$(printf '%s' "$result" | jq 'length' 2>/dev/null || echo 0)" -gt 0 ] \
+      || die "no pulse from $relay (no witness key configured, or no standing to observe it)"
+    printf '%s' "$result" | jq -r '.[0] | (.content | fromjson) as $c |
+      "pulse  \(.pubkey[0:12])…  node \(if $c.label == "" then "(unlabelled)" else $c.label end) (\($c.node))",
+      "  witnessed   \(.created_at | todate)",
+      "  journal     seq \($c.journal.sequence)  head \(($c.journal.head // "(empty)")[0:12])\(if $c.journal.head then "…" else "" end)  prev \(($c.previous // "(none)")[0:12])\(if $c.previous then "…" else "" end)",
+      (if ($c.checkpoints | length) > 0
+       then ($c.checkpoints | to_entries[] | "  checkpoint  \(.key)  \(.value)")
+       else "  checkpoint  (none)" end),
+      (if ($c.agreements | length) > 0
+       then ($c.agreements | to_entries[] | "  agreement   \(.key)  \(.value[0:12])…")
+       else "  agreement   (none)" end),
+      "  governance  \($c.coherence.governance | to_entries | map("\(.key)=\(.value)") | join("  "))"'
     ;;
   *)
     sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'

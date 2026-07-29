@@ -23,6 +23,11 @@ import {
   type DeclarationConfig,
 } from "./declarations";
 import {
+  buildPulseEvent,
+  KIND_BEACON_PULSE,
+  witnessSecretFromEnv,
+} from "./pulse";
+import {
   eventFromUnknown,
   filtersFromUnknown,
   ProtocolInputError,
@@ -423,8 +428,17 @@ export class RelayNode extends DurableObject<Env> {
     if (owner === "" || nodeLabel === "") {
       return { peers: null, readers: null, streams: null };
     }
+    return evaluateDeclarations(
+      this.#declarationHeadEvents(),
+      owner,
+      nodeLabel,
+    );
+  }
+
+  /** Effective journal events that may carry sync declarations. */
+  #declarationHeadEvents(): Event[] {
     // The LIKE clause is a coarse prefilter only (the kind number appears
-    // somewhere in the JSON); evaluateDeclarations re-checks kind and author.
+    // somewhere in the JSON); consumers re-check kind and author.
     const rows = Array.from(
       this.#sql.exec<{ event_json: string } & Record<string, SqlStorageValue>>(
         `SELECT event_json FROM event_journal
@@ -432,8 +446,7 @@ export class RelayNode extends DurableObject<Env> {
         `%${KIND_SYNC_DECLARATION}%`,
       ),
     );
-    const events = rows.map((row) => JSON.parse(row.event_json) as Event);
-    return evaluateDeclarations(events, owner, nodeLabel);
+    return rows.map((row) => JSON.parse(row.event_json) as Event);
   }
 
   #resolvedPeers(): Record<string, ReplicationPeerTrust> {
@@ -454,6 +467,143 @@ export class RelayNode extends DurableObject<Env> {
     return (
       this.#ownerDeclarations().streams ??
       parseStreamExports(this.env.BUZZ_REPLICATION_STREAMS)
+    );
+  }
+
+  /**
+   * The Beacon pulse: this node's signed witness statement of the state it
+   * currently holds — journal head, replication checkpoints, and the
+   * declaration heads it applies. Synthesized fresh on every call (a pulse
+   * is an answer, not stored state) and null when no witness key is
+   * configured. Returns the current head alongside the event so emission
+   * can advance the witnessed chain without re-reading the journal.
+   */
+  #currentPulse(): { event: Event; head: string | null } | null {
+    const secret = witnessSecretFromEnv(this.env.BUZZ_NODE_SECRET);
+    if (secret === null) {
+      return null;
+    }
+    const headRow = Array.from(
+      this.#sql.exec<
+        { sequence: number; event_id: string } & Record<string, SqlStorageValue>
+      >(
+        `SELECT sequence, event_id FROM event_journal
+         ORDER BY sequence DESC LIMIT 1`,
+      ),
+    )[0];
+    const head = headRow?.event_id ?? null;
+    const witnessedHead = this.#maintenanceValue("witnessed_head");
+    const witnessedPrev = this.#maintenanceValue("witnessed_prev");
+    const checkpoints: Record<string, string> = {};
+    for (const row of this.#sql.exec<
+      { source: string; cursor: string } & Record<string, SqlStorageValue>
+    >("SELECT source, cursor FROM source_checkpoints ORDER BY source")) {
+      checkpoints[row.source] = row.cursor;
+    }
+    const declarations = this.#ownerDeclarations();
+    const agreements: Record<string, string> = {};
+    const owner: string = this.env.BUZZ_OWNER_PUBKEY ?? "";
+    const nodeLabel: string = this.env.BUZZ_NODE_LABEL ?? "";
+    if (owner !== "" && nodeLabel !== "") {
+      for (const event of this.#declarationHeadEvents()) {
+        if (event.kind !== KIND_SYNC_DECLARATION || event.pubkey !== owner) {
+          continue;
+        }
+        const dTag = event.tags.find((tag) => tag[0] === "d")?.[1];
+        const nTag = event.tags.find((tag) => tag[0] === "n")?.[1];
+        if (dTag === undefined || nTag !== nodeLabel) {
+          continue;
+        }
+        agreements[dTag] = event.id;
+      }
+    }
+    const event = buildPulseEvent(
+      {
+        stableNodeKey: this.describeNode()?.stableNodeKey ?? "",
+        nodeLabel,
+        journal: { sequence: headRow?.sequence ?? 0, head },
+        // The witnessed chain: `previous` is the head recognized before the
+        // current one. Idle reads (head already witnessed) report the link
+        // one step back so the chain stays a chain, not a self-loop.
+        previous: head === witnessedHead ? witnessedPrev : witnessedHead,
+        checkpoints,
+        agreements,
+        governance: {
+          peers: declarations.peers === null ? "bootstrap" : "journal",
+          readers: declarations.readers === null ? "bootstrap" : "journal",
+          streams: declarations.streams === null ? "bootstrap" : "journal",
+        },
+      },
+      secret,
+      nowSecs(),
+    );
+    return { event, head };
+  }
+
+  /**
+   * Who may observe the pulse. It reveals journal metadata (head IDs,
+   * cursors, agreement heads), so under required identity it is addressed
+   * to the parties of this node's agreements: the owner and any declared
+   * peer or reader verification key. On an open node it is open.
+   */
+  #pulseVisibleTo(reader: string | null): boolean {
+    if (!this.#authRequired()) {
+      return true;
+    }
+    if (reader === null) {
+      return false;
+    }
+    const owner: string = this.env.BUZZ_OWNER_PUBKEY ?? "";
+    if (owner !== "" && reader === owner) {
+      return true;
+    }
+    const hasKey = (trust: ReplicationPeerTrust): boolean =>
+      trust.verification_keys.includes(reader);
+    return (
+      Object.values(this.#resolvedPeers()).some(hasKey) ||
+      Object.values(this.#resolvedReaders()).some(hasKey)
+    );
+  }
+
+  /**
+   * Publishes a fresh pulse to live subscribers after a journal transition
+   * and advances the witnessed chain. Emission is the only place the chain
+   * moves: synthesis on read observes, never transitions.
+   */
+  #emitPulse(): void {
+    const pulse = this.#currentPulse();
+    if (pulse === null) {
+      return;
+    }
+    this.#publishLive(pulse.event);
+    const witnessedHead = this.#maintenanceValue("witnessed_head");
+    if (pulse.head === null || pulse.head === witnessedHead) {
+      return;
+    }
+    this.ctx.storage.transactionSync(() => {
+      if (witnessedHead !== null) {
+        this.#setMaintenanceValue("witnessed_prev", witnessedHead);
+      }
+      this.#setMaintenanceValue("witnessed_head", pulse.head as string);
+    });
+  }
+
+  #maintenanceValue(key: string): string | null {
+    const row = Array.from(
+      this.#sql.exec<{ value: string } & Record<string, SqlStorageValue>>(
+        "SELECT value FROM maintenance WHERE key = ?",
+        key,
+      ),
+    )[0];
+    return row === undefined ? null : row.value;
+  }
+
+  #setMaintenanceValue(key: string, value: string): void {
+    this.#sql.exec(
+      `INSERT INTO maintenance (key, value) VALUES (?, ?)
+       ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
+      key,
+      value,
     );
   }
 
@@ -799,6 +949,8 @@ export class RelayNode extends DurableObject<Env> {
       this.#indexArtifactRefs(event.id, event.tags);
     });
     this.#publishLive(event);
+    // Every journal transition is witnessed: the pulse follows the event.
+    this.#emitPulse();
 
     return {
       event_id: event.id,
@@ -832,6 +984,21 @@ export class RelayNode extends DurableObject<Env> {
         if (matched >= limit) {
           break;
         }
+      }
+    }
+    // The pulse is synthesized, never stored: a filter that explicitly asks
+    // for the pulse kind receives a fresh witness statement. Open filters
+    // never surface it — witnessing happens on request, not by accident.
+    const pulseFilters = filters.filter(
+      (filter) => filter.kinds?.includes(KIND_BEACON_PULSE) ?? false,
+    );
+    if (pulseFilters.length > 0 && this.#pulseVisibleTo(reader)) {
+      const pulse = this.#currentPulse();
+      if (
+        pulse !== null &&
+        pulseFilters.some((filter) => matchFilter(filter, pulse.event))
+      ) {
+        selected.set(pulse.event.id, pulse.event);
       }
     }
     return sortEvents(Array.from(selected.values()));
@@ -1133,7 +1300,11 @@ export class RelayNode extends DurableObject<Env> {
       }
       if (authRequired) {
         const reader = this.#connectionRow(ws)?.principal_pubkey ?? null;
-        if (reader === null || !eventVisibleToReader(reader, event)) {
+        const visible =
+          event.kind === KIND_BEACON_PULSE
+            ? this.#pulseVisibleTo(reader)
+            : reader !== null && eventVisibleToReader(reader, event);
+        if (!visible) {
           continue;
         }
       }

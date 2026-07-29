@@ -1,4 +1,5 @@
 import { httpStatusForDenial, type DenialCode } from "./identity";
+import { ADAPTER_ID, witnessPubkeyFromEnv } from "./pulse";
 import {
   RelayNode,
   STABLE_NODE_KEY_HEADER,
@@ -36,8 +37,11 @@ export default {
     if (request.method === "GET" && url.pathname === "/health") {
       return json({
         status: "ok",
-        adapter: "portable-relay-cloudflare-v0.1",
+        adapter: ADAPTER_ID,
         implementation: "portable-core-candidate",
+        // The witness identity behind Beacon pulses (kind 20700), or null
+        // when this deployment carries no witness key.
+        witness: witnessPubkeyFromEnv(env.BUZZ_NODE_SECRET),
       });
     }
 

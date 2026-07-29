@@ -395,3 +395,15 @@ describe("secured WebSocket surface", () => {
     session.socket.close(1000, "done");
   });
 });
+
+describe("Beacon pulse without a witness key", () => {
+  it("yields no pulse even for an authenticated explicit request", async () => {
+    const origin = "https://id-pulse-absent.example";
+    const requester = generateSecretKey();
+    const response = await authedPost(requester, `${origin}/query`, [
+      { kinds: [20_700] },
+    ]);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual([]);
+  });
+});

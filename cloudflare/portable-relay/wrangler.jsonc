@@ -29,6 +29,12 @@
     // nodes coexist in every copy, and each node evaluates only its own.
     "BUZZ_NODE_LABEL": "cf-rendezvous"
   },
+  // The Beacon pulse witness key (BUZZ_NODE_SECRET, 32-byte hex) is a
+  // Worker secret, never a var:
+  //   wrangler secret put BUZZ_NODE_SECRET
+  // When absent the pulse capability (kind 20700) is off and /health
+  // reports witness: null. This key is the node's own identity — distinct
+  // from BUZZ_OWNER_PUBKEY: the node witnesses, the owner governs.
   // Content-addressed blob custody (artifact store). Create the bucket once:
   //   wrangler r2 bucket create buzz-portable-relay-artifacts
   "r2_buckets": [

@@ -1,7 +1,9 @@
 import { env } from "cloudflare:workers";
 import { evictDurableObject, SELF } from "cloudflare:test";
-import { finalizeEvent, generateSecretKey } from "nostr-tools";
+import { finalizeEvent, generateSecretKey, getPublicKey } from "nostr-tools";
 import { describe, expect, it } from "vitest";
+import { hexToBytes } from "./replication/peer-fixture";
+import { TEST_WITNESS_SECRET_HEX } from "./pulse/fixture";
 import coreFixture from "../../../specs/fixtures/portable-relay/core-v0.1.json";
 import signedEvent from "../../../specs/fixtures/local-relay/signed-message.json";
 
@@ -14,6 +16,7 @@ describe("portable relay Cloudflare boundary", () => {
       status: "ok",
       adapter: "portable-relay-cloudflare-v0.1",
       implementation: "portable-core-candidate",
+      witness: getPublicKey(hexToBytes(TEST_WITNESS_SECRET_HEX)),
     });
   });
 
