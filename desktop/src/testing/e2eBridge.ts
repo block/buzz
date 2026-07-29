@@ -9034,6 +9034,22 @@ function sendToMockSocket(args: {
         KIND_MISSION_CONSTRAINT,
       ].includes(event.kind)
     ) {
+      const rejectionIndex =
+        window.__BUZZ_E2E_REJECT_PROJECT_EVENT_KINDS__?.indexOf(event.kind) ??
+        -1;
+      if (rejectionIndex >= 0) {
+        window.__BUZZ_E2E_REJECT_PROJECT_EVENT_KINDS__?.splice(
+          rejectionIndex,
+          1,
+        );
+        sendWsText(socket.handler, [
+          "OK",
+          event.id,
+          false,
+          "mock project event rejection",
+        ]);
+        return;
+      }
       const dTag = event.tags.find((tag) => tag[0] === "d")?.[1];
       if (dTag) {
         const index = mockBattleRhythmEvents.findIndex(

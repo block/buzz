@@ -70,6 +70,34 @@ test("Battle Rhythm persists a manual weekly routine and honours an exclusion", 
   await expect(screen.getByText("Manual", { exact: true })).toBeVisible();
 });
 
+test("Battle Rhythm explains a rejected manual-event save and keeps the draft open", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    window.__BUZZ_E2E_REJECT_PROJECT_EVENT_KINDS__ = [30631];
+  });
+  await installMockBridge(page);
+  await page.goto("/");
+
+  await page.getByTestId("open-battle-rhythm-view").click();
+  await page
+    .getByTestId("battle-rhythm-screen")
+    .getByRole("button", { name: "New Event" })
+    .click();
+
+  const dialog = page.getByRole("dialog", { name: "New manual event" });
+  await dialog.getByLabel("Event").fill("Relay rejection canary");
+  await dialog.getByRole("button", { name: "Save event" }).click();
+
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByLabel("Event")).toHaveValue(
+    "Relay rejection canary",
+  );
+  await expect(
+    dialog.getByText("mock project event rejection", { exact: true }),
+  ).toBeVisible();
+});
+
 test("Battle Rhythm opens read-only plan milestones without duplicating them", async ({
   page,
 }) => {

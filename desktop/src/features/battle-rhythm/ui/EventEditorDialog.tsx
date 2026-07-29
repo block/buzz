@@ -50,6 +50,8 @@ export function EventEditorDialog({
   const [exclusions, setExclusions] = React.useState(
     event?.excludedOccurrenceStarts.join(", ") ?? "",
   );
+  const [saveError, setSaveError] = React.useState<string | null>(null);
+  const [saving, setSaving] = React.useState(false);
   React.useEffect(() => {
     if (!open) return;
     const nextDraft = event ?? prefill;
@@ -69,6 +71,8 @@ export function EventEditorDialog({
     setInterval(String(event?.recurrence?.interval ?? 1));
     setUntil(event?.recurrence?.until?.slice(0, 16) ?? "");
     setExclusions(event?.excludedOccurrenceStarts.join(", ") ?? "");
+    setSaveError(null);
+    setSaving(false);
   }, [event, open, prefill]);
   const submit = async (form: React.FormEvent) => {
     form.preventDefault();
@@ -82,32 +86,42 @@ export function EventEditorDialog({
             until: until ? localDateTimeToRfc3339(until, timeZone) : null,
             seriesId: event?.recurrence?.seriesId ?? crypto.randomUUID(),
           };
-    await onSave({
-      schemaVersion: 1,
-      id: event?.id ?? crypto.randomUUID(),
-      ownership: { kind: "manual" },
-      title: title.trim(),
-      description: null,
-      type: event?.type ?? prefill?.type ?? "activity",
-      start: localDateTimeToRfc3339(start, timeZone),
-      end: localDateTimeToRfc3339(end, timeZone),
-      allDay,
-      timeZone,
-      status: "approved",
-      location: location || null,
-      responsibleOwner: owner || null,
-      participants: [],
-      remarks: remarks || null,
-      linkedPlanId: null,
-      linkedTaskId: null,
-      linkedMissionRequirementId: null,
-      parentActivityId: null,
-      recurrence,
-      excludedOccurrenceStarts: exclusions
-        ? exclusions.split(/\s*,\s*/).filter(Boolean)
-        : [],
-    });
-    onOpenChange(false);
+    setSaveError(null);
+    setSaving(true);
+    try {
+      await onSave({
+        schemaVersion: 1,
+        id: event?.id ?? crypto.randomUUID(),
+        ownership: { kind: "manual" },
+        title: title.trim(),
+        description: null,
+        type: event?.type ?? prefill?.type ?? "activity",
+        start: localDateTimeToRfc3339(start, timeZone),
+        end: localDateTimeToRfc3339(end, timeZone),
+        allDay,
+        timeZone,
+        status: "approved",
+        location: location || null,
+        responsibleOwner: owner || null,
+        participants: [],
+        remarks: remarks || null,
+        linkedPlanId: null,
+        linkedTaskId: null,
+        linkedMissionRequirementId: null,
+        parentActivityId: null,
+        recurrence,
+        excludedOccurrenceStarts: exclusions
+          ? exclusions.split(/\s*,\s*/).filter(Boolean)
+          : [],
+      });
+      onOpenChange(false);
+    } catch (error) {
+      setSaveError(
+        error instanceof Error ? error.message : "Unable to save this event.",
+      );
+    } finally {
+      setSaving(false);
+    }
   };
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -232,11 +246,17 @@ export function EventEditorDialog({
             Time zone: {timeZone}. Exclusions must be sorted occurrence start
             timestamps.
           </p>
+          {saveError ? (
+            <p className="text-sm text-destructive" role="alert">
+              {saveError}
+            </p>
+          ) : null}
           <button
             className="rounded bg-primary px-3 py-2 text-sm text-primary-foreground"
+            disabled={saving}
             type="submit"
           >
-            Save event
+            {saving ? "Saving…" : "Save event"}
           </button>
         </form>
       </DialogContent>
