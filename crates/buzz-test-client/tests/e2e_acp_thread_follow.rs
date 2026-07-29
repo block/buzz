@@ -191,12 +191,16 @@ impl Drop for HarnessGuard {
 #[ignore]
 async fn thread_follow_admits_humans_and_suppresses_agents() {
     let human = Keys::generate();
+    let second_human = Keys::generate();
     let agent = Keys::generate();
     let other_agent = Keys::generate();
 
     let channel = create_test_channel(&human).await;
     add_member(&human, channel, &agent).await;
     add_member(&human, channel, &other_agent).await;
+    // A non-owner human member: classification must come from the relay's
+    // materialized kind:39002 member roles, not the configured-owner shortcut.
+    add_member(&human, channel, &second_human).await;
 
     // Publish a kind:0 with a cryptographically valid NIP-OA attestation for
     // the second agent. The default humans-only policy must suppress it.
@@ -286,7 +290,29 @@ async fn thread_follow_admits_humans_and_suppresses_agents() {
     .await;
     await_exact_turn_delta(&turn_log, before_follow_up, 1, Duration::from_secs(30)).await;
 
-    // 4. Untagged agent-authored reply in the followed thread → suppressed.
+    // 4. Untagged reply from a NON-OWNER human member → exactly one more
+    //    turn. This author is not the configured owner and has no attestation,
+    //    so the fail-closed classifier must positively resolve them through
+    //    the kind:39002 member role — the path a wrong tag-shape assumption
+    //    would silently break (suppressing every legitimate human member).
+    let before_member = turn_count(&turn_log);
+    send_channel_message(
+        &second_human,
+        channel,
+        "second human untagged reply",
+        None,
+        Some(&mention_id),
+        Some(&agent_reply_id),
+    )
+    .await;
+    await_exact_turn_delta(&turn_log, before_member, 1, Duration::from_secs(30)).await;
+
+    // Every admitting step is done; nothing below may add a turn. Anchor the
+    // remaining assertions to the observed count rather than a literal, so
+    // inserting a case above can't silently weaken them.
+    let admitted_turns = turn_count(&turn_log);
+
+    // 6. Untagged agent-authored reply in the followed thread → suppressed.
     //    respond-to=anyone admits the author, so the followed-thread author
     //    policy is the only gate exercised here.
     send_channel_message(
@@ -298,14 +324,14 @@ async fn thread_follow_admits_humans_and_suppresses_agents() {
         Some(&agent_reply_id),
     )
     .await;
-    assert_no_new_turns(&turn_log, 2, Duration::from_secs(10)).await;
+    assert_no_new_turns(&turn_log, admitted_turns, Duration::from_secs(10)).await;
     let log = std::fs::read_to_string(&harness_log).unwrap_or_default();
     assert!(
         log.contains("followed-thread admission suppressed for non-human author"),
         "expected suppression log line; harness log:\n{log}"
     );
 
-    // 5. Untagged top-level message → no turn (mention gate intact).
+    // 7. Untagged top-level message → no turn (mention gate intact).
     send_channel_message(&human, channel, "no mention here", None, None, None).await;
-    assert_no_new_turns(&turn_log, 2, Duration::from_secs(10)).await;
+    assert_no_new_turns(&turn_log, admitted_turns, Duration::from_secs(10)).await;
 }

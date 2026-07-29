@@ -155,8 +155,15 @@ struct OwnerCache {
     /// author_hex → is_sibling (true = same owner, false = not)
     siblings: std::sync::Mutex<HashMap<String, bool>>,
     /// Authors whose kind:0 contains a cryptographically valid NIP-OA
-    /// attestation. Negative/unknown results are never cached.
+    /// attestation. Identity-level and immutable, so this is global.
+    /// Negative/unknown results are never cached.
     verified_agents: std::sync::Mutex<HashSet<String>>,
+    /// (channel_id, author_hex) → class proven from that channel's member
+    /// roles. Roles are per-channel, so this key must stay channel-scoped —
+    /// an author may be a plain member in one channel and a `bot` in another.
+    /// `Unknown` is never cached: it means "not proven", and pinning it would
+    /// let one failed lookup suppress an author until the cache clears.
+    member_classes: std::sync::Mutex<HashMap<(Uuid, String), FollowAuthorClass>>,
 }
 
 impl OwnerCache {
@@ -165,6 +172,7 @@ impl OwnerCache {
             pubkey: initial,
             siblings: std::sync::Mutex::new(HashMap::new()),
             verified_agents: std::sync::Mutex::new(HashSet::new()),
+            member_classes: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -181,6 +189,26 @@ impl OwnerCache {
                 authors.clear();
             }
             authors.insert(author);
+        }
+    }
+
+    /// Membership-derived class for this author in this channel, if proven.
+    fn known_member_class(&self, channel_id: Uuid, author: &str) -> Option<FollowAuthorClass> {
+        self.member_classes
+            .lock()
+            .ok()
+            .and_then(|classes| classes.get(&(channel_id, author.to_string())).copied())
+    }
+
+    fn cache_member_class(&self, channel_id: Uuid, author: String, class: FollowAuthorClass) {
+        if class == FollowAuthorClass::Unknown {
+            return;
+        }
+        if let Ok(mut classes) = self.member_classes.lock() {
+            if classes.len() >= 256 {
+                classes.clear();
+            }
+            classes.insert((channel_id, author), class);
         }
     }
 
@@ -262,6 +290,12 @@ async fn classify_follow_author(
     if owner_cache.is_verified_agent(author) {
         return FollowAuthorClass::Agent;
     }
+    // Proven member role for this channel — skips both round-trips on the hot
+    // path (a human replying repeatedly in a followed thread is the common
+    // case this feature exists to serve).
+    if let Some(cached) = owner_cache.known_member_class(channel_id, author) {
+        return cached;
+    }
 
     let author_pk = match nostr::PublicKey::from_hex(author) {
         Ok(pk) => pk,
@@ -307,7 +341,7 @@ async fn classify_follow_author(
         _ => return FollowAuthorClass::Unknown,
     };
 
-    membership
+    let class = membership
         .as_array()
         .and_then(|events| events.first())
         .and_then(|event| member_role(event, author))
@@ -317,7 +351,9 @@ async fn classify_follow_author(
             } else {
                 FollowAuthorClass::Human
             }
-        })
+        });
+    owner_cache.cache_member_class(channel_id, author.to_string(), class);
+    class
 }
 
 fn profile_has_valid_agent_attestation(
@@ -4738,6 +4774,28 @@ mod follow_author_policy_tests {
             &malformed_profile,
             &agent.public_key()
         ));
+    }
+
+    #[test]
+    fn member_class_cache_is_channel_scoped_and_never_pins_unknown() {
+        let cache = OwnerCache::new(None);
+        let author = "aa".to_string();
+        let channel_a = Uuid::new_v4();
+        let channel_b = Uuid::new_v4();
+
+        cache.cache_member_class(channel_a, author.clone(), FollowAuthorClass::Human);
+        assert_eq!(
+            cache.known_member_class(channel_a, &author),
+            Some(FollowAuthorClass::Human)
+        );
+        // Roles are per-channel: a human member of A must not be assumed human
+        // in B, where the same identity may hold the `bot` role.
+        assert_eq!(cache.known_member_class(channel_b, &author), None);
+
+        // A failed lookup must stay unproven rather than suppressing the
+        // author for the life of the cache.
+        cache.cache_member_class(channel_b, author.clone(), FollowAuthorClass::Unknown);
+        assert_eq!(cache.known_member_class(channel_b, &author), None);
     }
 
     #[test]
