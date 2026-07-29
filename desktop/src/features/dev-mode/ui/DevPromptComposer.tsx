@@ -183,12 +183,14 @@ export function DevPromptComposer({
           <span className="text-primary/60">esc cancels</span>
         </div>
       ) : null}
-      <DevComposerModeLine
-        agentColor={agentColor}
-        busy={busy}
-        className="pt-2 pl-10"
-        mode={mode}
-      />
+      {/* Mirror the composer row's prefix so the mode line lines up exactly
+          with the textarea's left edge. */}
+      <div className="flex items-start gap-2 px-4 pt-2">
+        <span aria-hidden className="invisible select-none text-sm">
+          ⏵
+        </span>
+        <DevComposerModeLine agentColor={agentColor} busy={busy} mode={mode} />
+      </div>
       <div className="relative flex items-start gap-2 px-4 pt-1">
         {active && autocomplete.open ? (
           <DevChannelSuggestions
