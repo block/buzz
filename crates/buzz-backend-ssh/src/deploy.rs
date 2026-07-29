@@ -457,7 +457,14 @@ fn deploy_script(
     let resolve_cli =
         install::resolve_or_install(install::CLI, &quote(install::CLI.name), push.cli.as_ref());
 
+    // `install::PATH_PREAMBLE` before anything resolves: the harness pin below
+    // is looked up by name with `command -v`, and the adapters the operator
+    // installed to `~/.local/bin` are not on a non-interactive SSH `PATH`. It
+    // is also what makes the right half of the env file's own `PATH` line — the
+    // deploy shell's `$PATH`, captured further down — carry the install
+    // destination, so the two agree by construction.
     let mut script = String::from("set -eu\numask 077\n");
+    script.push_str(install::PATH_PREAMBLE);
     // The harness name is bound once and thereafter referenced only as
     // `"$harness_name"`. Interpolating it into the double-quoted error message
     // would be a command-injection hole: `quote()` makes a value inert as an
@@ -508,15 +515,15 @@ tmp="$env_file.new"
     // It is composed HERE, by the host's shell, and not written into the unit
     // as `Environment=PATH=$HOME/.local/bin:$PATH`: systemd expands no variable
     // in `Environment=` or an `EnvironmentFile`, so that form would hand the
-    // harness the five literal characters `$PATH`. `$PATH` on the right is the
-    // non-interactive SSH shell's, captured at deploy time, which is the same
-    // `PATH` `install::resolve` just searched — so anything `command -v` found
-    // stays findable for the agent.
+    // harness the five literal characters `$PATH`.
     //
-    // `install::resolve` can only land on this `PATH` or on `~/.local/bin`, so
-    // these two segments cover every copy either tool can resolve to; there is
-    // nothing further to add from `$acp` or `$cli`.
-    script.push_str("printf 'PATH=\"%s\"\\n' \"$HOME/.local/bin:$PATH\"\n");
+    // `$PATH` is this script's own, and it already leads with the install
+    // destination because `install::PATH_PREAMBLE` put it there before anything
+    // resolved. So the value written here is exactly the `PATH` every
+    // `command -v` above searched, with the install destination in the same
+    // position — one decision, made once, rather than a second prepend that
+    // would only duplicate an entry and could drift from the first.
+    script.push_str("printf 'PATH=\"%s\"\\n' \"$PATH\"\n");
     script.push_str("cat <<'BUZZ_ENV_EOF'\n");
     script.push_str(&env_file_body(agent)?);
     script.push_str("BUZZ_ENV_EOF\n");
@@ -1489,6 +1496,7 @@ mod tests {
         let expected = format!(
             r#"set -eu
 umask 077
+export PATH="${{HOME:-}}/.local/bin${{PATH:+:$PATH}}"
 harness_name='goose'
 acp=$(command -v 'buzz-acp' 2>/dev/null || true)
 if [ -z "$acp" ] && [ -x "$HOME/.local/bin/buzz-acp" ]; then acp="$HOME/.local/bin/buzz-acp"; fi
@@ -1516,7 +1524,7 @@ env_file="$conf/{slug}.env"
 tmp="$env_file.new"
 {{
 printf 'BUZZ_ACP_AGENT_COMMAND="%s"\n' "$harness"
-printf 'PATH="%s"\n' "$HOME/.local/bin:$PATH"
+printf 'PATH="%s"\n' "$PATH"
 cat <<'BUZZ_ENV_EOF'
 {env}BUZZ_ENV_EOF
 if [ -n "$claude_cli" ]; then
@@ -1714,11 +1722,12 @@ systemctl --user restart 'buzz-acp@{slug}.service'
     #[test]
     fn a_second_deploy_keeps_the_binary_the_first_one_installed() {
         // The install destination — `~/.local/bin` — is NOT on a
-        // non-interactive SSH PATH, which is exactly why the env file below
-        // pins `PATH="$HOME/.local/bin:$PATH"` itself. Resolution has to say so
-        // too: with a bare `command -v`, the probe answered "missing" forever
-        // and every deploy re-streamed and replaced the binary. Deploy is the
-        // start path, so that is every agent start, underneath a running fleet.
+        // non-interactive SSH PATH, which is exactly why every script prepends
+        // it. `install::probe_script` is the one round trip that carries no
+        // preamble, so its `-x` test has to say so too: with a bare
+        // `command -v`, the probe answered "missing" forever and every deploy
+        // re-streamed and replaced the binary. Deploy is the start path, so
+        // that is every agent start, underneath a running fleet.
         //
         // `an_existing_host_binary_is_never_replaced_by_the_pushed_one` cannot
         // see this: it seeds the stub into the sandbox's `bin`, which IS on the
@@ -2011,6 +2020,48 @@ systemctl --user restart 'buzz-acp@{slug}.service'
         // Not the five literal characters systemd would hand through verbatim.
         assert!(!written.contains("$PATH"));
         assert!(!written.contains("$HOME"));
+        // One prepend, not two: the value written here is the script's own
+        // `PATH`, which `install::PATH_PREAMBLE` already fixed up before
+        // anything resolved.
+        assert_eq!(path_line.matches("/.local/bin").count(), 1, "{path_line}");
+    }
+
+    /// The reported failure: a harness adapter installed to `~/.local/bin` on a
+    /// host whose non-interactive `PATH` does not contain it. Deploy resolves
+    /// the pin by name with `command -v`, so before the prepend this exited 91
+    /// — "harness codex-acp not found" — against a host that had it.
+    #[cfg(unix)]
+    #[test]
+    fn a_harness_installed_to_local_bin_satisfies_the_pin() {
+        let root = sandbox_host("local-bin-harness", HostAcp::Installed);
+        // Not in the sandbox's `bin`, which IS on its PATH — in the install
+        // destination, which is not, exactly as `pipx` and `npm` leave it.
+        seed_stub(&root.join(".local/bin"), "codex-acp", "#!/bin/sh\nexit 0\n");
+        let mut request = request();
+        request["agent"]["agent_command"] = serde_json::json!("codex-acp");
+        let agent = Agent::from_request(&request).unwrap();
+        let script = deploy_script(&agent, &config(), UNIT_TEMPLATE, &Pushes::default()).unwrap();
+
+        let output = run_in_sandbox(&root, &script);
+        assert!(
+            output.status.success(),
+            "deploy failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // Resolved, and pinned as the absolute path the unit re-reads on every
+        // restart — not merely "the script did not exit 91".
+        let written = std::fs::read_to_string(
+            root.join(".config/buzz-acp")
+                .join(format!("{}.env", agent.slug())),
+        )
+        .unwrap();
+        assert!(
+            written.contains(&format!(
+                "BUZZ_ACP_AGENT_COMMAND=\"{}\"",
+                root.join(".local/bin/codex-acp").display()
+            )),
+            "{written}"
+        );
     }
 
     #[cfg(unix)]

@@ -5,6 +5,12 @@
 # Usage:
 #   ./scripts/provision-buzz-host.sh     # run ON the host, as the agent user
 #
+# Runs correctly over a non-interactive `ssh host /path/to/provision-buzz-host.sh`
+# as well as in a login shell. A non-interactive SSH command reads no profile, so
+# this script prepends ~/.local/bin to its own PATH exactly as the deploy scripts
+# do — without that, every tool installed there would be reported MISSING on a
+# host that has it.
+#
 # Checks (and where it can, fixes) the host contract that `buzz-backend-ssh`
 # assumes: see docs/remote-agents.md, "Host prerequisites". Safe to re-run —
 # every action is idempotent, and a fully provisioned host is a no-op.
@@ -26,6 +32,21 @@ set -eu
 USER_NAME="$(id -un)"
 HOME_DIR="${HOME:-$(cd ~ && pwd)}"
 LOCAL_BIN="${HOME_DIR}/.local/bin"
+
+# The PATH this script was *given*, kept before the line below rewrites it.
+# Section 3 reports on this one: whether ~/.local/bin is on the login PATH is
+# the question, and a check that inspected a PATH the script itself fixed up
+# would answer yes on every host.
+INHERITED_PATH="${PATH:-}"
+
+# Everything else resolves against the same PATH the deploy does. `deploy` and
+# `discover` prepend the install destination to their own scripts for this
+# reason (`install::PATH_PREAMBLE`): a non-interactive `ssh host sh -s` reads no
+# profile, so on stock Debian PATH is `/usr/local/bin:/usr/bin:/bin:/usr/games`
+# and every adapter under ~/.local/bin is invisible. Reporting them MISSING here
+# while the deploy finds them would make this preflight lie in the direction
+# that costs the most: an operator chasing an install that is already there.
+export PATH="${LOCAL_BIN}${PATH:+:$PATH}"
 
 # Summary rows, one per line, `requirement|status|action`. POSIX sh has no
 # arrays, and a newline-delimited string prints back through one `read` loop.
@@ -94,7 +115,7 @@ fi
 # resolves the same binaries the unit will.
 mkdir -p "${LOCAL_BIN}"
 
-case ":${PATH}:" in
+case ":${INHERITED_PATH}:" in
   *":${LOCAL_BIN}:"*)
     add_row "local bin on PATH" "OK" "${LOCAL_BIN}" mandatory
     ;;
