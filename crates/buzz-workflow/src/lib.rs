@@ -952,6 +952,8 @@ async fn should_fire_workflow(
 /// - `emoji` — for `KIND_REACTION` events, the content is the emoji; otherwise empty
 /// - `message_id` — for reactions, the target message's event ID (from `e` tag);
 ///   for all other events, the event's own ID
+/// - `root_message_id` — thread root for replies, otherwise the event's own ID
+/// - `parent_message_id` — immediate parent for replies, otherwise empty
 pub fn build_trigger_context(event: &buzz_core::StoredEvent) -> executor::TriggerContext {
     let kind_u32 = event_kind_u32(&event.event);
     let content = event.event.content.clone();
@@ -1008,6 +1010,32 @@ pub fn build_trigger_context(event: &buzz_core::StoredEvent) -> executor::Trigge
         event.event.id.to_hex()
     };
 
+    let mut thread_root = None;
+    let mut thread_parent = None;
+    if kind_u32 != KIND_REACTION {
+        for tag in event.event.tags.iter() {
+            let parts = tag.as_slice();
+            if parts.first().map(String::as_str) != Some("e") || parts.len() < 4 {
+                continue;
+            }
+
+            let id = &parts[1];
+            if id.len() != 64 || !id.chars().all(|c| c.is_ascii_hexdigit()) {
+                continue;
+            }
+
+            match parts[3].as_str() {
+                "root" => thread_root = Some(id.clone()),
+                "reply" => thread_parent = Some(id.clone()),
+                _ => {}
+            }
+        }
+    }
+    let root_message_id = thread_root
+        .or_else(|| thread_parent.clone())
+        .unwrap_or_else(|| message_id.clone());
+    let parent_message_id = thread_parent.unwrap_or_default();
+
     executor::TriggerContext {
         text: content,
         author,
@@ -1018,6 +1046,8 @@ pub fn build_trigger_context(event: &buzz_core::StoredEvent) -> executor::Trigge
         timestamp: event.event.created_at.as_secs().to_string(),
         emoji,
         message_id,
+        root_message_id,
+        parent_message_id,
         webhook_fields: HashMap::new(),
     }
 }
@@ -1563,9 +1593,51 @@ steps:
         assert_eq!(ctx.channel_id, stored.channel_id.unwrap().to_string());
         assert_eq!(ctx.timestamp, stored.event.created_at.as_secs().to_string());
         assert_eq!(ctx.message_id, stored.event.id.to_hex());
+        assert_eq!(ctx.root_message_id, stored.event.id.to_hex());
+        assert_eq!(ctx.parent_message_id, "");
         // Non-reaction events have empty emoji.
         assert_eq!(ctx.emoji, "");
         assert!(ctx.webhook_fields.is_empty());
+    }
+
+    #[test]
+    fn build_trigger_context_direct_reply_uses_parent_as_root() {
+        use nostr::{EventBuilder, EventId, Keys, Kind, Tag};
+        use uuid::Uuid;
+
+        let parent_id = EventId::from_byte_array([0x31; 32]).to_hex();
+        let event = EventBuilder::new(Kind::Custom(9), "direct reply")
+            .tags([Tag::parse(["e", &parent_id, "", "reply"]).unwrap()])
+            .sign_with_keys(&Keys::generate())
+            .expect("sign");
+        let stored = buzz_core::StoredEvent::new(event, Some(Uuid::new_v4()));
+
+        let ctx = build_trigger_context(&stored);
+
+        assert_eq!(ctx.root_message_id, parent_id);
+        assert_eq!(ctx.parent_message_id, parent_id);
+    }
+
+    #[test]
+    fn build_trigger_context_nested_reply_preserves_root_and_parent() {
+        use nostr::{EventBuilder, EventId, Keys, Kind, Tag};
+        use uuid::Uuid;
+
+        let root_id = EventId::from_byte_array([0x41; 32]).to_hex();
+        let parent_id = EventId::from_byte_array([0x42; 32]).to_hex();
+        let event = EventBuilder::new(Kind::Custom(9), "nested reply")
+            .tags([
+                Tag::parse(["e", &root_id, "", "root"]).unwrap(),
+                Tag::parse(["e", &parent_id, "", "reply"]).unwrap(),
+            ])
+            .sign_with_keys(&Keys::generate())
+            .expect("sign");
+        let stored = buzz_core::StoredEvent::new(event, Some(Uuid::new_v4()));
+
+        let ctx = build_trigger_context(&stored);
+
+        assert_eq!(ctx.root_message_id, root_id);
+        assert_eq!(ctx.parent_message_id, parent_id);
     }
 
     #[test]

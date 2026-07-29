@@ -37,6 +37,10 @@ pub struct TriggerContext {
     pub emoji: String,
     /// Event ID of the triggering message (hex string).
     pub message_id: String,
+    /// Root event ID for a threaded message, or the message's own ID when top-level.
+    pub root_message_id: String,
+    /// Immediate parent event ID for a reply, empty when the message is top-level.
+    pub parent_message_id: String,
     /// Arbitrary webhook body fields (webhook trigger).
     pub webhook_fields: HashMap<String, String>,
 }
@@ -54,6 +58,8 @@ impl TriggerContext {
             "timestamp" => Some(&self.timestamp),
             "emoji" => Some(&self.emoji),
             "message_id" => Some(&self.message_id),
+            "root_message_id" => Some(&self.root_message_id),
+            "parent_message_id" => Some(&self.parent_message_id),
             other => self.webhook_fields.get(other).map(|s| s.as_str()),
         }
     }
@@ -65,6 +71,7 @@ impl TriggerContext {
 /// - `| truncate(N)` — truncate to N characters
 /// - `| npub` — encode a hex pubkey as its full bech32 `npub` (non-pubkey
 ///   values pass through unchanged); `truncate_pubkey` is a legacy alias
+/// - `| json` — encode a string as a JSON string literal
 ///
 /// Unknown `{{keys}}` are left as literal text (no error, no substitution).
 pub fn resolve_template(
@@ -195,6 +202,11 @@ fn apply_filter(value: String, filter: &str) -> Result<String, WorkflowError> {
         return Ok(value);
     }
 
+    if filter == "json" {
+        return serde_json::to_string(&value)
+            .map_err(|error| WorkflowError::TemplateError(error.to_string()));
+    }
+
     Err(WorkflowError::TemplateError(format!(
         "unknown filter: {filter}"
     )))
@@ -213,6 +225,8 @@ fn apply_filter(value: String, filter: &str) -> Result<String, WorkflowError> {
 /// | `trigger.timestamp`               | `trigger_timestamp`       |
 /// | `trigger.emoji`                   | `trigger_emoji`           |
 /// | `trigger.message_id`              | `trigger_message_id`      |
+/// | `trigger.root_message_id`         | `trigger_root_message_id` |
+/// | `trigger.parent_message_id`       | `trigger_parent_message_id` |
 /// | `steps.STEP_ID.output.FIELD`      | `steps_STEP_ID_output_FIELD` |
 ///
 /// Also registers string helper functions that the `cron` crate's `evalexpr` v11
@@ -293,6 +307,14 @@ pub fn build_eval_context(
         ("trigger_timestamp", trigger_ctx.timestamp.as_str()),
         ("trigger_emoji", trigger_ctx.emoji.as_str()),
         ("trigger_message_id", trigger_ctx.message_id.as_str()),
+        (
+            "trigger_root_message_id",
+            trigger_ctx.root_message_id.as_str(),
+        ),
+        (
+            "trigger_parent_message_id",
+            trigger_ctx.parent_message_id.as_str(),
+        ),
     ];
 
     for (name, val) in &trigger_fields {
@@ -1229,6 +1251,8 @@ mod tests {
             timestamp: "1700000000".to_owned(),
             emoji: "fire".to_owned(),
             message_id: "event-id-hex".to_owned(),
+            root_message_id: "root-event-id-hex".to_owned(),
+            parent_message_id: "parent-event-id-hex".to_owned(),
             webhook_fields: HashMap::new(),
         }
     }
@@ -1245,6 +1269,31 @@ mod tests {
         let ctx = make_trigger();
         let out = resolve_template("By {{trigger.author}}", &ctx, &HashMap::new()).unwrap();
         assert_eq!(out, "By abc123def456");
+    }
+
+    #[test]
+    fn resolve_trigger_thread_ids() {
+        let ctx = make_trigger();
+        let out = resolve_template(
+            "{{trigger.root_message_id}}/{{trigger.parent_message_id}}",
+            &ctx,
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(out, "root-event-id-hex/parent-event-id-hex");
+    }
+
+    #[test]
+    fn json_filter_escapes_human_text() {
+        let mut ctx = make_trigger();
+        ctx.text = "He said \"hello\"\nthen left.".to_owned();
+        let out = resolve_template(
+            "{\"message\":{{trigger.text | json}}}",
+            &ctx,
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(out, "{\"message\":\"He said \\\"hello\\\"\\nthen left.\"}");
     }
 
     #[test]
