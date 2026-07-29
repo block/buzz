@@ -5,7 +5,7 @@
 //! MCP methods required by the Apps protocol.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -50,8 +50,12 @@ mod model;
 use model::*;
 pub use model::{
     McpAppHostState, McpAppResource, McpAppResourceCsp, McpAppResourcePermissions,
-    McpAppServerDescriptor, McpAppTool, McpAppToolCaller, PreparedMcpAppView,
+    McpAppResourcePolicy, McpAppServerDescriptor, McpAppTool, McpAppToolCaller, PreparedMcpAppView,
 };
+
+#[path = "mcp_apps_policy.rs"]
+mod policy;
+use policy::*;
 
 fn is_private_ipv4(ip: Ipv4Addr) -> bool {
     let octets = ip.octets();
@@ -158,7 +162,63 @@ async fn build_pinned_client(endpoint: &Url) -> Result<Client, String> {
         .map_err(|error| format!("failed to build MCP HTTP client: {error}"))
 }
 
-async fn read_capped_reply(response: Response) -> Result<McpHttpReply, String> {
+fn sse_event_end(bytes: &[u8]) -> Option<(usize, usize)> {
+    let lf = bytes
+        .windows(2)
+        .position(|window| window == b"\n\n")
+        .map(|index| (index, index + 2));
+    let crlf = bytes
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|index| (index, index + 4));
+    match (lf, crlf) {
+        (Some(lf), Some(crlf)) => Some(if lf.0 <= crlf.0 { lf } else { crlf }),
+        (Some(found), None) | (None, Some(found)) => Some(found),
+        (None, None) => None,
+    }
+}
+
+fn sse_event_value(event: &[u8]) -> Result<Option<Value>, String> {
+    let text = std::str::from_utf8(event).map_err(|_| "MCP event stream is not valid UTF-8")?;
+    let data = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("data:"))
+        .map(|line| line.strip_prefix(' ').unwrap_or(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if data.is_empty() {
+        return Ok(None);
+    }
+    Ok(serde_json::from_str::<Value>(&data).ok())
+}
+
+fn response_matches_id(value: &Value, expected_id: u64) -> bool {
+    value.get("id").and_then(Value::as_u64) == Some(expected_id)
+}
+
+fn take_matching_sse_value(
+    pending: &mut Vec<u8>,
+    expected_id: Option<u64>,
+    require_match: bool,
+) -> Result<Option<Value>, String> {
+    while let Some((event_end, consumed)) = sse_event_end(pending) {
+        let event = pending.drain(..consumed).collect::<Vec<_>>();
+        let Some(value) = sse_event_value(&event[..event_end])? else {
+            continue;
+        };
+        if !require_match
+            || expected_id.is_none_or(|expected| response_matches_id(&value, expected))
+        {
+            return Ok(Some(value));
+        }
+    }
+    Ok(None)
+}
+
+async fn read_capped_reply(
+    response: Response,
+    expected_id: Option<u64>,
+) -> Result<McpHttpReply, String> {
     let status = response.status();
     let max_bytes = if status.is_success() {
         MAX_MCP_RESPONSE_BYTES
@@ -193,35 +253,56 @@ async fn read_capped_reply(response: Response) -> Result<McpHttpReply, String> {
         .and_then(|value| value.to_str().ok())
         .unwrap_or("")
         .to_ascii_lowercase();
-    let mut bytes = Vec::new();
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|error| format!("failed to read MCP response: {error}"))?;
-        if bytes.len().saturating_add(chunk.len()) > max_bytes {
-            return Err(limit_message.to_string());
-        }
-        bytes.extend_from_slice(&chunk);
-    }
     let value = if content_type.starts_with("text/event-stream") {
-        let text = match String::from_utf8(bytes) {
-            Ok(text) => text,
-            Err(_) if status.is_success() => {
-                return Err("MCP event stream is not valid UTF-8".to_string())
+        let mut received = 0usize;
+        let mut pending = Vec::new();
+        let mut stream = response.bytes_stream();
+        let mut matched = None;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|error| format!("failed to read MCP response: {error}"))?;
+            received = received.saturating_add(chunk.len());
+            if received > max_bytes {
+                return Err(limit_message.to_string());
             }
-            Err(_) => String::new(),
-        };
-        let parsed = text
-            .lines()
-            .filter_map(|line| line.strip_prefix("data:"))
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .find_map(|line| serde_json::from_str::<Value>(line).ok());
-        if parsed.is_none() && status.is_success() {
-            return Err("MCP event stream did not contain a JSON response".to_string());
+            pending.extend_from_slice(&chunk);
+            matched = take_matching_sse_value(&mut pending, expected_id, status.is_success())?;
+            if matched.is_some() {
+                break;
+            }
         }
-        parsed
+        if matched.is_none() && !pending.is_empty() {
+            if let Some(value) = sse_event_value(&pending)? {
+                if !status.is_success()
+                    || expected_id.is_none_or(|expected| response_matches_id(&value, expected))
+                {
+                    matched = Some(value);
+                }
+            }
+        }
+        if matched.is_none() && status.is_success() {
+            return Err(
+                "MCP event stream did not contain the matching JSON-RPC response".to_string(),
+            );
+        }
+        matched
     } else {
+        let mut bytes = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|error| format!("failed to read MCP response: {error}"))?;
+            if bytes.len().saturating_add(chunk.len()) > max_bytes {
+                return Err(limit_message.to_string());
+            }
+            bytes.extend_from_slice(&chunk);
+        }
         match serde_json::from_slice::<Value>(&bytes) {
+            Ok(value)
+                if status.is_success()
+                    && expected_id
+                        .is_some_and(|expected| !response_matches_id(&value, expected)) =>
+            {
+                return Err("MCP response JSON-RPC id does not match the request".to_string())
+            }
             Ok(value) => Some(value),
             Err(error) if status.is_success() => {
                 return Err(format!("MCP response is not valid JSON: {error}"))
@@ -597,7 +678,7 @@ async fn post_mcp_raw(
         .send()
         .await
         .map_err(|error| format!("MCP request failed: {error}"))?;
-    read_capped_reply(response).await
+    read_capped_reply(response, payload.get("id").and_then(Value::as_u64)).await
 }
 
 /// POST one JSON-RPC payload and require a successful, error-free response.
@@ -754,145 +835,14 @@ async fn probe_modern(client: &Client, endpoint: &Url) -> Result<ModernProbe, St
     }
 }
 
-fn resource_meta(content: &Value, listing: Option<&McpAppResource>) -> Value {
-    content
-        .get("_meta")
-        .or_else(|| content.get("meta"))
-        .cloned()
-        .or_else(|| listing.map(|resource| resource.meta.clone()))
-        .unwrap_or_else(|| json!({}))
-}
-
-fn parse_ui_resource(
-    response: &Value,
-    requested_uri: &str,
-    listing: Option<&McpAppResource>,
-) -> Result<(String, McpAppResourceCsp, McpAppResourcePermissions), String> {
-    let contents = response
-        .pointer("/result/contents")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "MCP resources/read response is missing result.contents".to_string())?;
-    if contents.len() != 1 {
-        return Err("MCP App resource must contain exactly one document".to_string());
-    }
-    let content = &contents[0];
-    if text(content.get("uri")).as_deref() != Some(requested_uri) {
-        return Err("MCP App resource URI does not match the request".to_string());
-    }
-    if text(content.get("mimeType")).as_deref() != Some(MCP_APP_MIME_TYPE) {
-        return Err(format!("MCP App resource must use {MCP_APP_MIME_TYPE}"));
-    }
-    let html = if let Some(text) = content.get("text").and_then(Value::as_str) {
-        text.to_string()
-    } else if let Some(blob) = content.get("blob").and_then(Value::as_str) {
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(blob)
-            .map_err(|_| "MCP App resource blob is not valid base64".to_string())?;
-        String::from_utf8(bytes)
-            .map_err(|_| "MCP App resource blob is not valid UTF-8".to_string())?
-    } else {
-        return Err("MCP App resource has no text or blob content".to_string());
-    };
-    if html.len() > MAX_MCP_APP_HTML_BYTES {
-        return Err("MCP App HTML exceeds the 4 MiB limit".to_string());
-    }
-    let meta = resource_meta(content, listing);
-    let ui = meta.get("ui").cloned().unwrap_or_else(|| json!({}));
-    let csp = sanitize_csp(
-        serde_json::from_value(ui.get("csp").cloned().unwrap_or_else(|| json!({})))
-            .map_err(|error| format!("MCP App CSP metadata is invalid: {error}"))?,
-    );
-    let permissions =
-        serde_json::from_value(ui.get("permissions").cloned().unwrap_or_else(|| json!({})))
-            .map_err(|error| format!("MCP App permission metadata is invalid: {error}"))?;
-    Ok((html, csp, permissions))
-}
-
-fn csp_origin(raw: &str) -> Option<String> {
-    let raw = raw.trim();
-    let wildcard_suffix = raw
-        .strip_prefix("https://*.")
-        .or_else(|| raw.strip_prefix("wss://*."));
-    if let Some(suffix) = wildcard_suffix {
-        if !suffix.is_empty()
-            && !suffix.contains('/')
-            && suffix
-                .chars()
-                .all(|value| value.is_ascii_alphanumeric() || matches!(value, '.' | '-'))
-        {
-            return Some(raw.to_string());
-        }
-        return None;
-    }
-    let url = Url::parse(raw).ok()?;
-    if !url.username().is_empty()
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-        || url.path() != "/"
-    {
-        return None;
-    }
-    let host = url.host_str()?;
-    let loopback = host.eq_ignore_ascii_case("localhost")
-        || host
-            .parse::<IpAddr>()
-            .is_ok_and(|address| address.is_loopback());
-    if !(matches!(url.scheme(), "https" | "wss")
-        || matches!(url.scheme(), "http" | "ws") && loopback)
-    {
-        return None;
-    }
-    Some(url.origin().ascii_serialization())
-}
-
-fn sanitize_csp(csp: McpAppResourceCsp) -> McpAppResourceCsp {
-    fn sanitize(values: Vec<String>) -> Vec<String> {
-        values
-            .into_iter()
-            .filter_map(|value| csp_origin(&value))
-            .collect()
-    }
-    McpAppResourceCsp {
-        connect_domains: sanitize(csp.connect_domains),
-        resource_domains: sanitize(csp.resource_domains),
-        frame_domains: sanitize(csp.frame_domains),
-        base_uri_domains: sanitize(csp.base_uri_domains),
-    }
-}
-
-fn sources(values: &[String], fallback: &str) -> String {
-    let values = values.iter().filter_map(|value| csp_origin(value));
-    let collected = values.collect::<Vec<_>>();
-    if collected.is_empty() {
-        fallback.to_string()
-    } else {
-        collected.join(" ")
-    }
-}
-
-fn sandbox_csp(csp: &McpAppResourceCsp) -> String {
-    let resources = sources(&csp.resource_domains, "");
-    let connects = sources(&csp.connect_domains, "'none'");
-    let frames = sources(&csp.frame_domains, "");
-    let bases = sources(&csp.base_uri_domains, "'self'");
-    format!(
-        "default-src 'none'; script-src 'self' 'unsafe-inline' {resources}; \
-         style-src 'self' 'unsafe-inline' {resources}; img-src 'self' data: blob: {resources}; \
-         font-src 'self' data: {resources}; media-src 'self' data: blob: {resources}; \
-         connect-src {connects}; frame-src 'self' {frames}; base-uri {bases}; \
-         object-src 'none'; form-action 'none'"
-    )
-}
-
 #[path = "mcp_apps_host.rs"]
 mod host;
 #[cfg(test)]
 use host::{app_tool_allowed, sandbox_proxy_html};
 pub use host::{
     call_mcp_app_tool, connect_mcp_app_server, disconnect_mcp_app_server, handle_mcp_app_protocol,
-    list_mcp_app_resources, list_mcp_app_tools, prepare_mcp_app_view, read_mcp_app_resource,
-    release_mcp_app_view,
+    inspect_mcp_app_resource, list_mcp_app_resources, list_mcp_app_tools, prepare_mcp_app_view,
+    read_mcp_app_resource, release_mcp_app_view,
 };
 
 #[cfg(test)]

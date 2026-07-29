@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::HashSet;
 
 /// Which MCP revision an origin speaks. Detected once by the modern-first
 /// probe in [`connect_mcp_app_server`] and cached on the connection: the era
@@ -109,6 +110,13 @@ pub struct McpAppResourcePermissions {
     pub(super) microphone: Option<Value>,
     pub(super) geolocation: Option<Value>,
     pub(super) clipboard_write: Option<Value>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpAppResourcePolicy {
+    pub(super) csp: McpAppResourceCsp,
+    pub(super) requested_permissions: McpAppResourcePermissions,
 }
 
 #[derive(Debug, Serialize)]

@@ -4,6 +4,8 @@ import test from "node:test";
 import {
   mcpAppAttributedMessage,
   MCP_APP_POST_MAX_CHARS,
+  MCP_APP_POST_MAX_LINES,
+  mcpAppDisplayLabel,
   mcpAppMessageText,
 } from "./mcpAppMessage.ts";
 
@@ -50,11 +52,36 @@ test("collapses excessive blank lines without flattening paragraphs", () => {
     "First paragraph.\n\nSecond paragraph.",
   );
   assert.equal(MCP_APP_POST_MAX_CHARS, 8_000);
+  assert.equal(MCP_APP_POST_MAX_LINES, 120);
 });
 
 test("adds durable visible MCP App attribution and sanitizes the title", () => {
   assert.equal(
     mcpAppAttributedMessage("Project\nBoard", "Moved task to Review."),
     "MCP App · Project Board\n\nMoved task to Review.",
+  );
+});
+
+test("normalizes line endings and removes spoofing controls", () => {
+  assert.equal(
+    mcpAppMessageText({
+      role: "user",
+      content: "First\r\nSecond\u2028Third\u202e\u0000",
+    }),
+    "First\nSecond\nThird",
+  );
+  assert.equal(
+    mcpAppDisplayLabel("Buzz\u202e Security", "app"),
+    "Buzz Security",
+  );
+});
+
+test("preserves joiners used by emoji and complex scripts", () => {
+  assert.equal(
+    mcpAppMessageText({
+      role: "user",
+      content: "👩‍💻",
+    }),
+    "👩‍💻",
   );
 });

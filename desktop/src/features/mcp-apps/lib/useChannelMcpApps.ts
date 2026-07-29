@@ -35,6 +35,11 @@ export function useChannelMcpApps({
   const activeApp =
     apps.find((installation) => installation.id === selectedAppId) ?? null;
   const activeAppId = activeApp?.id ?? null;
+  React.useEffect(() => {
+    if (selectedAppId && !activeApp) {
+      setSelection({ channelId, appId: null });
+    }
+  }, [activeApp, channelId, selectedAppId]);
 
   return {
     apps,

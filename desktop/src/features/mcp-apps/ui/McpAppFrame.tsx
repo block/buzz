@@ -5,6 +5,7 @@ import {
   prepareMcpAppView,
   releaseMcpAppView,
   type McpAppResourcePermissions,
+  type McpAppResourcePolicy,
 } from "@/shared/api/tauriMcpApps";
 import {
   connectMcpAppBridge,
@@ -60,6 +61,7 @@ export async function runInitialMcpAppTool(
 export type McpAppFrameProps = McpAppBridgeCallbacks & {
   serverId: string;
   resourceUri: string;
+  approvedPolicy: McpAppResourcePolicy;
   title: string;
   initialTool?: {
     name: string;
@@ -114,6 +116,7 @@ function waitForSandboxProxy(
 export function McpAppFrame({
   serverId,
   resourceUri,
+  approvedPolicy,
   title,
   initialTool,
   className,
@@ -123,7 +126,6 @@ export function McpAppFrame({
   onMessage,
   onModelContext,
   onOpenLink,
-  onDisplayMode,
   onSizeChange,
 }: McpAppFrameProps) {
   const iframeRef = React.useRef<HTMLIFrameElement>(null);
@@ -145,7 +147,11 @@ export function McpAppFrame({
     const start = async () => {
       try {
         setError(null);
-        const prepared = await prepareMcpAppView(serverId, resourceUri);
+        const prepared = await prepareMcpAppView(
+          serverId,
+          resourceUri,
+          approvedPolicy,
+        );
         if (abortController.signal.aborted) {
           await releaseMcpAppView(prepared.viewId).catch(() => undefined);
           return;
@@ -158,7 +164,6 @@ export function McpAppFrame({
           onMessage,
           onModelContext,
           onOpenLink,
-          onDisplayMode,
           onSizeChange,
         });
         await waitForSandboxProxy(
@@ -233,7 +238,7 @@ export function McpAppFrame({
     };
   }, [
     initialTool,
-    onDisplayMode,
+    approvedPolicy,
     onError,
     onMessage,
     onModelContext,

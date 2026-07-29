@@ -702,6 +702,7 @@ pub fn run() {
             list_mcp_app_resources,
             call_mcp_app_tool,
             read_mcp_app_resource,
+            inspect_mcp_app_resource,
             prepare_mcp_app_view,
             release_mcp_app_view,
             disconnect_mcp_app_server,

@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { pendingMcpAppPostInvalidationReason } from "./useChannelMcpAppExperience.tsx";
+import {
+  pendingMcpAppPostInvalidationReason,
+  pendingMcpAppRemovalReason,
+} from "./useChannelMcpAppExperience.tsx";
 import { runInitialMcpAppTool } from "../ui/McpAppFrame.tsx";
 
 function bridgeCalls() {
@@ -39,6 +42,14 @@ test("rejects a pending app post when channel access is revoked", () => {
     }),
     "The channel became read-only before the app post was approved.",
   );
+});
+
+test("rejects a pending app post when its installation is removed", () => {
+  assert.equal(
+    pendingMcpAppRemovalReason("board", ["calendar"]),
+    "The channel app was removed before the post was approved.",
+  );
+  assert.equal(pendingMcpAppRemovalReason("board", ["board"]), null);
 });
 
 test("sends one terminal result when the initial tool succeeds", async () => {

@@ -4,6 +4,7 @@ import type { ChannelMcpAppInstallation } from "@/features/mcp-apps/lib/channelM
 import {
   mcpAppAttributedMessage,
   MCP_APP_POST_MAX_CHARS,
+  MCP_APP_POST_MAX_LINES,
   mcpAppMessageText,
 } from "@/features/mcp-apps/lib/mcpAppMessage";
 import { useChannelMcpApps } from "@/features/mcp-apps/lib/useChannelMcpApps";
@@ -29,6 +30,7 @@ type SendChannelMessage = (
 ) => Promise<void>;
 
 type PendingChannelPost = {
+  appId: string;
   appKey: string;
   appTitle: string;
   channelId: string;
@@ -53,6 +55,16 @@ export function pendingMcpAppPostInvalidationReason(
   return null;
 }
 
+export function pendingMcpAppRemovalReason(
+  pendingAppId: string | null,
+  installedAppIds: readonly string[],
+): string | null {
+  if (pendingAppId && !installedAppIds.includes(pendingAppId)) {
+    return "The channel app was removed before the post was approved.";
+  }
+  return null;
+}
+
 export function useMcpAppUi(
   channel: Channel | null,
   pubkey: string | null | undefined,
@@ -63,15 +75,18 @@ export function useMcpAppUi(
     React.useState<PendingChannelPost | null>(null);
   const pendingPostRef = React.useRef<PendingChannelPost | null>(null);
   const promptedAtRef = React.useRef(new Map<string, number>());
-  const [mutedAppKeys, setMutedAppKeys] = React.useState<Set<string>>(
-    () => new Set(),
-  );
+  const mutedAppKeysRef = React.useRef(new Set<string>());
   const [isPosting, setIsPosting] = React.useState(false);
   const [postError, setPostError] = React.useState<string | null>(null);
   const apps = useChannelMcpApps({
     channelId: channel?.id ?? null,
     pubkey,
   });
+  const channelAppsAvailable =
+    channel?.channelType !== "forum" &&
+    channel?.isMember === true &&
+    !channel.archivedAt;
+  const activeApp = channelAppsAvailable ? apps.activeApp : null;
   const rejectPendingPost = React.useCallback((reason: string) => {
     const current = pendingPostRef.current;
     pendingPostRef.current = null;
@@ -93,6 +108,24 @@ export function useMcpAppUi(
       rejectPendingPost("The channel app closed before the post was approved."),
     [rejectPendingPost],
   );
+  React.useEffect(() => {
+    const current = pendingPostRef.current;
+    const reason = pendingMcpAppRemovalReason(
+      current?.appId ?? null,
+      apps.apps.map((installation) => installation.id),
+    );
+    if (reason) {
+      rejectPendingPost(reason);
+    }
+  }, [apps.apps, rejectPendingPost]);
+  React.useEffect(() => {
+    if (!channelAppsAvailable) {
+      setDialogOpen(false);
+      if (apps.activeAppId !== null) {
+        apps.showChat();
+      }
+    }
+  }, [apps.activeAppId, apps.showChat, channelAppsAvailable]);
   const handleMessage = React.useCallback(
     async (
       app: ChannelMcpAppInstallation,
@@ -102,7 +135,7 @@ export function useMcpAppUi(
         throw new Error("This channel is read-only.");
       }
       const appKey = `${channel.id}:${app.id}`;
-      if (mutedAppKeys.has(appKey)) {
+      if (mutedAppKeysRef.current.has(appKey)) {
         throw new Error("Channel post requests from this app are muted.");
       }
       const now = Date.now();
@@ -119,12 +152,18 @@ export function useMcpAppUi(
           `The app message exceeds the ${MCP_APP_POST_MAX_CHARS.toLocaleString()} character limit.`,
         );
       }
+      if (content.split("\n").length > MCP_APP_POST_MAX_LINES) {
+        throw new Error(
+          `The app message exceeds the ${MCP_APP_POST_MAX_LINES.toLocaleString()} line limit.`,
+        );
+      }
       if (pendingPostRef.current) {
         throw new Error("Another app post is waiting for approval.");
       }
       promptedAtRef.current.set(appKey, now);
       await new Promise<void>((resolve, reject) => {
         const next = {
+          appId: app.id,
           appKey,
           appTitle: app.title,
           channelId: channel.id,
@@ -137,12 +176,12 @@ export function useMcpAppUi(
         setPendingPost(next);
       });
     },
-    [channel?.archivedAt, channel?.id, channel?.isMember, mutedAppKeys],
+    [channel?.archivedAt, channel?.id, channel?.isMember],
   );
   const handleMuteAppPosts = React.useCallback(() => {
     const current = pendingPostRef.current;
     if (!current) return;
-    setMutedAppKeys((muted) => new Set(muted).add(current.appKey));
+    mutedAppKeysRef.current.add(current.appKey);
     rejectPendingPost("Channel post requests from this app are muted.");
   }, [rejectPendingPost]);
   const handleApprovePost = React.useCallback(async () => {
@@ -154,6 +193,14 @@ export function useMcpAppUi(
     );
     if (invalidationReason) {
       rejectPendingPost(invalidationReason);
+      return;
+    }
+    const removalReason = pendingMcpAppRemovalReason(
+      current.appId,
+      apps.apps.map((installation) => installation.id),
+    );
+    if (removalReason) {
+      rejectPendingPost(removalReason);
       return;
     }
     setIsPosting(true);
@@ -179,105 +226,120 @@ export function useMcpAppUi(
     } finally {
       setIsPosting(false);
     }
-  }, [channel, rejectPendingPost, sendMessage]);
-  const dialog =
-    channel && pubkey ? (
-      <ChannelMcpAppDialog
-        apps={apps.apps}
-        channelId={channel.id}
-        onOpenChange={setDialogOpen}
-        open={dialogOpen}
-        pubkey={pubkey}
-      />
-    ) : null;
-  const postApprovalDialog = channel ? (
-    <Dialog
-      modal={false}
-      onOpenChange={(open) => {
-        if (!open && !isPosting) {
-          rejectPendingPost("The channel post was not approved.");
-        }
-      }}
-      open={pendingPost !== null}
-    >
-      <DialogContent
-        className="max-w-lg"
-        overlayClassName="pointer-events-none"
-      >
-        <DialogHeader>
-          <DialogTitle>Post from {pendingPost?.appTitle ?? "app"}?</DialogTitle>
-          <DialogDescription>
-            Review this app request before it appears in #{channel.name}.
-          </DialogDescription>
-        </DialogHeader>
-        <pre className="max-h-64 overflow-auto whitespace-pre-wrap rounded-xl border border-border/60 bg-muted/30 p-3 font-sans text-sm text-foreground">
-          {pendingPost?.content}
-        </pre>
-        {postError ? (
-          <p className="text-sm text-destructive" role="alert">
-            {postError}
-          </p>
-        ) : null}
-        <DialogFooter>
-          <Button
-            disabled={isPosting}
-            onClick={() =>
-              rejectPendingPost("The channel post was not approved.")
-            }
-            type="button"
-            variant="ghost"
+  }, [apps.apps, channel, rejectPendingPost, sendMessage]);
+  const approvedPostPreview = pendingPost
+    ? mcpAppAttributedMessage(pendingPost.appTitle, pendingPost.content)
+    : "";
+  const navigation = React.useMemo(
+    () =>
+      channelAppsAvailable && channel && pubkey ? (
+        <>
+          <ChannelMcpAppTabs
+            activeAppId={apps.activeAppId}
+            apps={apps.apps}
+            onActivateApp={apps.activateApp}
+            onOpenApps={() => setDialogOpen(true)}
+            onShowChat={apps.showChat}
+          />
+          <ChannelMcpAppDialog
+            apps={apps.apps}
+            channelId={channel.id}
+            onOpenChange={setDialogOpen}
+            open={dialogOpen}
+            pubkey={pubkey}
+          />
+          <Dialog
+            modal={false}
+            onOpenChange={(open) => {
+              if (!open && !isPosting) {
+                rejectPendingPost("The channel post was not approved.");
+              }
+            }}
+            open={pendingPost !== null}
           >
-            Cancel
-          </Button>
-          <Button
-            disabled={isPosting}
-            onClick={handleMuteAppPosts}
-            type="button"
-            variant="outline"
-          >
-            Mute for now
-          </Button>
-          <Button
-            disabled={isPosting}
-            onClick={() => void handleApprovePost()}
-            type="button"
-          >
-            {isPosting ? "Posting…" : "Post to channel"}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  ) : null;
-  const navigation =
-    channel?.channelType !== "forum" &&
-    channel?.isMember &&
-    !channel.archivedAt ? (
-      <>
-        <ChannelMcpAppTabs
-          activeAppId={apps.activeAppId}
-          apps={apps.apps}
-          onActivateApp={apps.activateApp}
-          onOpenApps={() => setDialogOpen(true)}
-          onShowChat={apps.showChat}
-        />
-        {dialog}
-        {postApprovalDialog}
-      </>
-    ) : undefined;
+            <DialogContent
+              className="max-w-lg"
+              overlayClassName="pointer-events-none"
+            >
+              <DialogHeader>
+                <DialogTitle>Post requested by a channel app?</DialogTitle>
+                <DialogDescription>
+                  Review the exact message requested by “
+                  {pendingPost?.appTitle ?? "Channel app"}” before Buzz posts it
+                  in #{channel.name}.
+                </DialogDescription>
+              </DialogHeader>
+              <pre className="max-h-64 overflow-auto whitespace-pre-wrap rounded-xl border border-border/60 bg-muted/30 p-3 font-sans text-sm text-foreground">
+                {approvedPostPreview}
+              </pre>
+              {postError ? (
+                <p className="text-sm text-destructive" role="alert">
+                  {postError}
+                </p>
+              ) : null}
+              <DialogFooter>
+                <Button
+                  disabled={isPosting}
+                  onClick={() =>
+                    rejectPendingPost("The channel post was not approved.")
+                  }
+                  type="button"
+                  variant="ghost"
+                >
+                  Cancel
+                </Button>
+                <Button
+                  disabled={isPosting}
+                  onClick={handleMuteAppPosts}
+                  type="button"
+                  variant="outline"
+                >
+                  Mute for now
+                </Button>
+                <Button
+                  disabled={isPosting}
+                  onClick={() => void handleApprovePost()}
+                  type="button"
+                >
+                  {isPosting ? "Posting…" : "Post to channel"}
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+        </>
+      ) : undefined,
+    [
+      approvedPostPreview,
+      apps.activateApp,
+      apps.activeAppId,
+      apps.apps,
+      apps.showChat,
+      channel,
+      channelAppsAvailable,
+      dialogOpen,
+      handleApprovePost,
+      handleMuteAppPosts,
+      isPosting,
+      pendingPost,
+      postError,
+      pubkey,
+      rejectPendingPost,
+    ],
+  );
   const renderPane = React.useCallback(
     (header: React.ReactNode) =>
-      apps.activeApp ? (
+      activeApp ? (
         <ChannelMcpAppPane
-          app={apps.activeApp}
+          app={activeApp}
           header={header}
           onMessage={handleMessage}
         />
       ) : null,
-    [apps.activeApp, handleMessage],
+    [activeApp, handleMessage],
   );
 
   return {
-    active: apps.activeApp !== null,
+    active: activeApp !== null,
     navigation,
     renderPane,
   };

@@ -32,7 +32,7 @@ test("default host context identifies Buzz as a desktop host", () => {
   assert.equal(context.platform, "desktop");
   assert.equal(context.theme, "dark");
   assert.equal(context.locale, "en-US");
-  assert.deepEqual(context.availableDisplayModes, ["inline", "fullscreen"]);
+  assert.deepEqual(context.availableDisplayModes, ["inline"]);
 
   globalThis.document = originalDocument;
   Object.defineProperty(globalThis, "navigator", {

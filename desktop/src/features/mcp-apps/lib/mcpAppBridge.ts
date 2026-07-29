@@ -99,7 +99,6 @@ export type McpAppBridgeCallbacks = {
   onMessage?: (message: McpAppMessage) => Promise<void> | void;
   onModelContext?: (context: McpAppModelContext | null) => Promise<void> | void;
   onOpenLink?: (url: string) => Promise<boolean> | boolean;
-  onDisplayMode?: (mode: "inline" | "fullscreen") => void;
   onSizeChange?: (size: { width?: number; height?: number }) => void;
 };
 
@@ -123,7 +122,7 @@ export function defaultMcpAppHostContext(): McpUiHostContext {
     locale: navigator.language,
     timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     displayMode: "inline",
-    availableDisplayModes: ["inline", "fullscreen"],
+    availableDisplayModes: ["inline"],
     containerDimensions: { maxHeight: 6000 },
     deviceCapabilities: {
       touch: navigator.maxTouchPoints > 0,
@@ -188,12 +187,7 @@ export function createMcpAppBridge(
       isError: !(await callbacks.onOpenLink?.(url)),
     });
   }
-  bridge.onrequestdisplaymode = async ({ mode }) => {
-    const next = mode === "fullscreen" ? "fullscreen" : "inline";
-    callbacks.onDisplayMode?.(next);
-    await bridge.sendHostContextChange({ displayMode: next });
-    return { mode: next };
-  };
+  bridge.onrequestdisplaymode = async () => ({ mode: "inline" });
   bridge.onsizechange = callbacks.onSizeChange;
 
   return bridge;

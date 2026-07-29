@@ -1,4 +1,4 @@
-import type * as React from "react";
+import * as React from "react";
 
 import { useMcpAppUi } from "@/features/mcp-apps/lib/useChannelMcpAppExperience";
 import type { Channel } from "@/shared/api/types";
@@ -79,11 +79,14 @@ export function resolveChannelSurface(
 export function useChannelSurface(
   context: ChannelSurfaceContext,
 ): ChannelSurfacePresentation | null {
-  const mcpApps = useMcpAppUi(
+  const { active, navigation, renderPane } = useMcpAppUi(
     context.channel,
     context.pubkey,
     context.sendMessage,
   );
 
-  return resolveChannelSurface(mcpApps);
+  return React.useMemo(
+    () => resolveChannelSurface({ active, navigation, renderPane }),
+    [active, navigation, renderPane],
+  );
 }

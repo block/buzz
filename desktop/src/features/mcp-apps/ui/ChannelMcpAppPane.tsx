@@ -104,6 +104,7 @@ export function ChannelMcpAppPane({
       >
         {serverId ? (
           <McpAppFrame
+            approvedPolicy={app.approvedPolicy}
             className="min-h-0 flex-1"
             initialTool={initialTool}
             onMessage={handleMessage}

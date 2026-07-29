@@ -6,9 +6,12 @@ import {
   removeChannelMcpApp,
   type ChannelMcpAppInstallation,
 } from "@/features/mcp-apps/lib/channelMcpAppStorage";
+import { mcpAppDisplayLabel } from "@/features/mcp-apps/lib/mcpAppMessage";
 import {
   connectMcpAppServer,
   disconnectMcpAppServer,
+  inspectMcpAppResource,
+  type McpAppResourcePolicy,
   type McpAppServerDescriptor,
   type McpAppTool,
 } from "@/shared/api/tauriMcpApps";
@@ -71,24 +74,8 @@ function parseArguments(value: string): Record<string, unknown> | null {
   }
 }
 
-function advertisedDomains(
-  server: McpAppServerDescriptor | null,
-  tool: McpAppTool | null,
-): string[] {
-  if (!server || !tool?.uiResourceUri) return [];
-  const resource = server.resources.find(
-    (candidate) => candidate.uri === tool.uiResourceUri,
-  );
-  const ui =
-    resource?.meta.ui &&
-    typeof resource.meta.ui === "object" &&
-    !Array.isArray(resource.meta.ui)
-      ? (resource.meta.ui as Record<string, unknown>)
-      : null;
-  const csp =
-    ui?.csp && typeof ui.csp === "object" && !Array.isArray(ui.csp)
-      ? (ui.csp as Record<string, unknown>)
-      : null;
+function approvedDomains(policy: McpAppResourcePolicy | null): string[] {
+  const csp = policy?.csp;
   return [
     csp?.connectDomains,
     csp?.resourceDomains,
@@ -98,6 +85,17 @@ function advertisedDomains(
     .flatMap((value) => (Array.isArray(value) ? value : []))
     .filter((value): value is string => typeof value === "string")
     .filter((value, index, values) => values.indexOf(value) === index);
+}
+
+function requestedPermissions(policy: McpAppResourcePolicy | null): string[] {
+  const permissions = policy?.requestedPermissions;
+  if (!permissions) return [];
+  return [
+    permissions.camera ? "Camera" : null,
+    permissions.microphone ? "Microphone" : null,
+    permissions.geolocation ? "Location" : null,
+    permissions.clipboardWrite ? "Clipboard write" : null,
+  ].filter((value): value is string => value !== null);
 }
 
 export function ChannelMcpAppDialog({
@@ -116,9 +114,13 @@ export function ChannelMcpAppDialog({
   );
   const [argumentsJson, setArgumentsJson] = React.useState("{}");
   const [isConnecting, setIsConnecting] = React.useState(false);
+  const [isInspecting, setIsInspecting] = React.useState(false);
+  const [approvedPolicy, setApprovedPolicy] =
+    React.useState<McpAppResourcePolicy | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const serverRef = React.useRef<McpAppServerDescriptor | null>(null);
   const connectionAttemptRef = React.useRef(0);
+  const inspectionAttemptRef = React.useRef(0);
 
   const uiTools = React.useMemo(
     () => server?.tools.filter((tool) => tool.uiResourceUri) ?? [],
@@ -129,8 +131,12 @@ export function ChannelMcpAppDialog({
     [argumentsJson],
   );
   const selectedDomains = React.useMemo(
-    () => advertisedDomains(server, selectedTool),
-    [selectedTool, server],
+    () => approvedDomains(approvedPolicy),
+    [approvedPolicy],
+  );
+  const selectedPermissions = React.useMemo(
+    () => requestedPermissions(approvedPolicy),
+    [approvedPolicy],
   );
 
   const clearConnectedServer = React.useCallback(() => {
@@ -138,12 +144,48 @@ export function ChannelMcpAppDialog({
     serverRef.current = null;
     setServer(null);
     setSelectedTool(null);
+    setApprovedPolicy(null);
+    setIsInspecting(false);
     if (current) void disconnectMcpAppServer(current.serverId);
   }, []);
+
+  React.useEffect(() => {
+    const serverId = server?.serverId;
+    const resourceUri = selectedTool?.uiResourceUri;
+    inspectionAttemptRef.current += 1;
+    const attempt = inspectionAttemptRef.current;
+    setApprovedPolicy(null);
+    if (!serverId || !resourceUri) {
+      setIsInspecting(false);
+      return;
+    }
+    setIsInspecting(true);
+    setError(null);
+    void inspectMcpAppResource(serverId, resourceUri)
+      .then((policy) => {
+        if (inspectionAttemptRef.current === attempt) {
+          setApprovedPolicy(policy);
+        }
+      })
+      .catch((cause) => {
+        if (inspectionAttemptRef.current !== attempt) return;
+        setError(
+          cause instanceof Error
+            ? cause.message
+            : "Buzz could not inspect this MCP App resource.",
+        );
+      })
+      .finally(() => {
+        if (inspectionAttemptRef.current === attempt) {
+          setIsInspecting(false);
+        }
+      });
+  }, [selectedTool?.uiResourceUri, server?.serverId]);
 
   React.useEffect(
     () => () => {
       connectionAttemptRef.current += 1;
+      inspectionAttemptRef.current += 1;
       const current = serverRef.current;
       serverRef.current = null;
       if (current) void disconnectMcpAppServer(current.serverId);
@@ -205,15 +247,26 @@ export function ChannelMcpAppDialog({
   }
 
   function handleInstall() {
-    if (!server || !selectedTool?.uiResourceUri || !parsedArguments) return;
+    if (
+      !server ||
+      !selectedTool?.uiResourceUri ||
+      !parsedArguments ||
+      !approvedPolicy
+    ) {
+      return;
+    }
     const installed = installChannelMcpApp(pubkey, channelId, {
       id: installationId(server.endpoint, selectedTool.name),
       endpoint: server.endpoint,
-      serverName: server.name,
+      serverName: mcpAppDisplayLabel(server.name, server.endpoint, 120),
       toolName: selectedTool.name,
-      title: selectedTool.title || selectedTool.name,
+      title: mcpAppDisplayLabel(
+        selectedTool.title || selectedTool.name,
+        selectedTool.name,
+      ),
       resourceUri: selectedTool.uiResourceUri,
       arguments: parsedArguments,
+      approvedPolicy,
     });
     if (!installed) {
       setError("Buzz could not save this channel app.");
@@ -224,7 +277,10 @@ export function ChannelMcpAppDialog({
 
   return (
     <Dialog onOpenChange={handleOpenChange} open={open}>
-      <DialogContent className="max-h-[min(760px,calc(100vh-2rem))] max-w-xl overflow-y-auto">
+      <DialogContent
+        className="max-h-[min(760px,calc(100vh-2rem))] max-w-xl overflow-y-auto"
+        data-testid="channel-mcp-app-dialog"
+      >
         <DialogHeader>
           <DialogTitle>Channel apps</DialogTitle>
           <DialogDescription>
@@ -303,16 +359,17 @@ export function ChannelMcpAppDialog({
                 <button
                   aria-pressed={selectedTool?.name === tool.name}
                   className="rounded-xl border border-border/60 p-3 text-left transition-colors hover:bg-accent/50 aria-pressed:border-primary aria-pressed:bg-primary/5"
+                  data-testid="channel-mcp-app-tool"
                   key={tool.name}
                   onClick={() => handleSelectTool(tool)}
                   type="button"
                 >
                   <span className="block text-sm font-medium">
-                    {tool.title || tool.name}
+                    {mcpAppDisplayLabel(tool.title || tool.name, tool.name)}
                   </span>
                   {tool.description ? (
                     <span className="mt-1 line-clamp-2 block text-xs text-muted-foreground">
-                      {tool.description}
+                      {mcpAppDisplayLabel(tool.description, "", 240)}
                     </span>
                   ) : null}
                 </button>
@@ -324,9 +381,13 @@ export function ChannelMcpAppDialog({
             <>
               <div className="space-y-1.5 rounded-xl border border-border/60 bg-muted/20 p-3">
                 <p className="text-xs font-medium text-foreground">
-                  Advertised external domains
+                  Requested network access
                 </p>
-                {selectedDomains.length > 0 ? (
+                {isInspecting ? (
+                  <p className="text-xs text-muted-foreground">
+                    Reading the app resource…
+                  </p>
+                ) : selectedDomains.length > 0 ? (
                   <ul className="space-y-1 font-mono text-2xs text-muted-foreground">
                     {selectedDomains.map((domain) => (
                       <li className="break-all" key={domain}>
@@ -336,9 +397,20 @@ export function ChannelMcpAppDialog({
                   </ul>
                 ) : (
                   <p className="text-xs text-muted-foreground">
-                    None declared in the discovery metadata.
+                    No external domains.
                   </p>
                 )}
+                {selectedPermissions.length > 0 ? (
+                  <>
+                    <p className="pt-2 text-xs font-medium text-foreground">
+                      Requested browser permissions
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      {selectedPermissions.join(", ")}. Buzz does not grant
+                      these permissions in this version.
+                    </p>
+                  </>
+                ) : null}
               </div>
               <label
                 className="block space-y-1.5"
@@ -379,7 +451,14 @@ export function ChannelMcpAppDialog({
             Cancel
           </Button>
           <Button
-            disabled={!server || !selectedTool || !parsedArguments}
+            data-testid="channel-mcp-app-add-tab"
+            disabled={
+              !server ||
+              !selectedTool ||
+              !parsedArguments ||
+              !approvedPolicy ||
+              isInspecting
+            }
             onClick={handleInstall}
             type="button"
           >

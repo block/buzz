@@ -220,11 +220,57 @@ pub async fn read_mcp_app_resource(
         .and_then(|value| extract_result(&value, "resources/read"))
 }
 
+async fn resource_policy(
+    connection: &McpServerConnection,
+    uri: &str,
+) -> Result<(String, McpAppResourcePolicy), String> {
+    let response = request(connection, "resources/read", json!({"uri": uri})).await?;
+    let listing = connection
+        .resources
+        .iter()
+        .find(|resource| resource.uri == uri);
+    let (html, csp, requested_permissions) = parse_ui_resource(&response, uri, listing)?;
+    Ok((
+        html,
+        McpAppResourcePolicy {
+            csp,
+            requested_permissions,
+        },
+    ))
+}
+
+/// Read and sanitize the authoritative resource policy for user review.
+#[tauri::command]
+pub async fn inspect_mcp_app_resource(
+    server_id: String,
+    uri: String,
+    state: State<'_, McpAppHostState>,
+) -> Result<McpAppResourcePolicy, String> {
+    let connection = state
+        .servers
+        .lock()
+        .await
+        .get(&server_id)
+        .cloned()
+        .ok_or_else(|| "MCP App server is not connected".to_string())?;
+    if !connection
+        .tools
+        .iter()
+        .any(|tool| tool.ui_resource_uri.as_deref() == Some(uri.as_str()))
+    {
+        return Err("MCP App resource is not declared by a reviewed tool".to_string());
+    }
+    resource_policy(&connection, &uri)
+        .await
+        .map(|(_, policy)| policy)
+}
+
 /// Read and validate one UI resource, then register its CSP-bound sandbox URL.
 #[tauri::command]
 pub async fn prepare_mcp_app_view(
     server_id: String,
     uri: String,
+    approved_policy: McpAppResourcePolicy,
     state: State<'_, McpAppHostState>,
 ) -> Result<PreparedMcpAppView, String> {
     let connection = state
@@ -241,12 +287,13 @@ pub async fn prepare_mcp_app_view(
     {
         return Err("MCP App resource is not declared by a reviewed tool".to_string());
     }
-    let response = request(&connection, "resources/read", json!({"uri": uri})).await?;
-    let listing = connection
-        .resources
-        .iter()
-        .find(|resource| resource.uri == uri);
-    let (html, csp, requested_permissions) = parse_ui_resource(&response, &uri, listing)?;
+    let (html, policy) = resource_policy(&connection, &uri).await?;
+    if !policy_is_subset(&policy, &approved_policy) {
+        return Err(
+            "The MCP App requests capabilities that were not approved. Remove and add the channel app again to review the change."
+                .to_string(),
+        );
+    }
     let view_id = Uuid::new_v4().to_string();
     let mut views = state
         .views
@@ -259,15 +306,15 @@ pub async fn prepare_mcp_app_view(
         view_id.clone(),
         ViewPolicy {
             server_id,
-            csp: sandbox_csp(&csp),
+            csp: sandbox_csp(&policy.csp),
         },
     );
     Ok(PreparedMcpAppView {
         sandbox_url: format!("buzz-mcp-app://localhost/{view_id}"),
         view_id,
         html,
-        csp,
-        requested_permissions,
+        csp: policy.csp,
+        requested_permissions: policy.requested_permissions,
     })
 }
 

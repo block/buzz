@@ -1,3 +1,10 @@
+import { mcpAppDisplayLabel } from "@/features/mcp-apps/lib/mcpAppMessage";
+import type {
+  McpAppResourceCsp,
+  McpAppResourcePermissions,
+  McpAppResourcePolicy,
+} from "@/shared/api/tauriMcpApps";
+
 const STORAGE_KEY_PREFIX = "buzz-channel-mcp-apps.v1";
 
 export const CHANNEL_MCP_APPS_CHANGE_EVENT = "buzz:channel-mcp-apps-change";
@@ -10,6 +17,7 @@ export type ChannelMcpAppInstallation = {
   title: string;
   resourceUri: string;
   arguments: Record<string, unknown>;
+  approvedPolicy: McpAppResourcePolicy;
 };
 
 type ChannelMcpAppStore = {
@@ -21,6 +29,51 @@ const EMPTY_STORE: ChannelMcpAppStore = {
   version: 1,
   channels: {},
 };
+
+function stringList(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : [];
+}
+
+function normalizeCsp(value: unknown): McpAppResourceCsp {
+  const source =
+    value && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {};
+  return {
+    connectDomains: stringList(source.connectDomains),
+    resourceDomains: stringList(source.resourceDomains),
+    frameDomains: stringList(source.frameDomains),
+    baseUriDomains: stringList(source.baseUriDomains),
+  };
+}
+
+function normalizePermissions(value: unknown): McpAppResourcePermissions {
+  const source =
+    value && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {};
+  const requested = (name: string) =>
+    source[name] && typeof source[name] === "object" ? {} : undefined;
+  return {
+    camera: requested("camera"),
+    microphone: requested("microphone"),
+    geolocation: requested("geolocation"),
+    clipboardWrite: requested("clipboardWrite"),
+  };
+}
+
+function normalizePolicy(value: unknown): McpAppResourcePolicy {
+  const source =
+    value && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {};
+  return {
+    csp: normalizeCsp(source.csp),
+    requestedPermissions: normalizePermissions(source.requestedPermissions),
+  };
+}
 
 function storageKey(pubkey: string): string {
   return `${STORAGE_KEY_PREFIX}:${pubkey}`;
@@ -52,15 +105,16 @@ function normalizeInstallation(
     endpoint,
     serverName:
       typeof source.serverName === "string" && source.serverName.trim()
-        ? source.serverName.trim()
+        ? mcpAppDisplayLabel(source.serverName, endpoint, 120)
         : endpoint,
     toolName,
     title:
       typeof source.title === "string" && source.title.trim()
-        ? source.title.trim()
-        : toolName,
+        ? mcpAppDisplayLabel(source.title, toolName)
+        : mcpAppDisplayLabel(toolName, "Channel app"),
     resourceUri,
     arguments: argumentsValue,
+    approvedPolicy: normalizePolicy(source.approvedPolicy),
   };
 }
 

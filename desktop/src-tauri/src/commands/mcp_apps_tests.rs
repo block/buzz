@@ -91,6 +91,114 @@ fn csp_drops_invalid_sources_and_defaults_closed() {
 }
 
 #[test]
+fn csp_rejects_bare_wildcards_and_csp_delimiters() {
+    for source in [
+        "https://*",
+        "wss://*",
+        "https://evil.example;x",
+        "https://-bad.example",
+        "https://bad-.example",
+    ] {
+        assert!(csp_origin(source).is_none(), "{source} must be rejected");
+    }
+    assert_eq!(
+        csp_origin("https://*.example.com").as_deref(),
+        Some("https://*.example.com")
+    );
+    assert_eq!(
+        csp_origin("https://api.example.com").as_deref(),
+        Some("https://api.example.com")
+    );
+    assert_eq!(
+        csp_origin("http://[::1]:1337").as_deref(),
+        Some("http://[::1]:1337")
+    );
+}
+
+#[test]
+fn reviewed_policy_allows_only_equal_or_narrower_capabilities() {
+    let approved = McpAppResourcePolicy {
+        csp: McpAppResourceCsp {
+            connect_domains: vec![
+                "https://api.example.com".to_string(),
+                "https://events.example.com".to_string(),
+            ],
+            resource_domains: vec!["https://cdn.example.com".to_string()],
+            ..Default::default()
+        },
+        requested_permissions: McpAppResourcePermissions {
+            clipboard_write: Some(json!({})),
+            ..Default::default()
+        },
+    };
+    let narrower = McpAppResourcePolicy {
+        csp: McpAppResourceCsp {
+            connect_domains: vec!["https://api.example.com".to_string()],
+            ..Default::default()
+        },
+        requested_permissions: Default::default(),
+    };
+    assert!(policy_is_subset(&narrower, &approved));
+
+    let expanded_domain = McpAppResourcePolicy {
+        csp: McpAppResourceCsp {
+            connect_domains: vec!["https://unreviewed.example.com".to_string()],
+            ..Default::default()
+        },
+        requested_permissions: Default::default(),
+    };
+    assert!(!policy_is_subset(&expanded_domain, &approved));
+
+    let expanded_permission = McpAppResourcePolicy {
+        csp: Default::default(),
+        requested_permissions: McpAppResourcePermissions {
+            camera: Some(json!({})),
+            ..Default::default()
+        },
+    };
+    assert!(!policy_is_subset(&expanded_permission, &approved));
+}
+
+#[test]
+fn sse_parser_assembles_multiline_events_and_matches_request_id() {
+    let event =
+        b"event: message\r\ndata: {\"jsonrpc\":\"2.0\",\r\ndata: \"id\":7,\"result\":{}}\r\n";
+    assert_eq!(
+        sse_event_value(event).unwrap(),
+        Some(json!({"jsonrpc": "2.0", "id": 7, "result": {}}))
+    );
+    assert!(response_matches_id(
+        &sse_event_value(event).unwrap().unwrap(),
+        7
+    ));
+    assert!(!response_matches_id(
+        &json!({"jsonrpc": "2.0", "method": "notifications/progress"}),
+        7
+    ));
+}
+
+#[test]
+fn sse_parser_finds_lf_and_crlf_event_boundaries() {
+    assert_eq!(sse_event_end(b"data: {}\n\nnext"), Some((8, 10)));
+    assert_eq!(sse_event_end(b"data: {}\r\n\r\nnext"), Some((8, 12)));
+}
+
+#[test]
+fn sse_parser_skips_notifications_until_the_matching_response() {
+    let mut pending = br#"data: {"jsonrpc":"2.0","method":"notifications/progress"}
+
+data: {"jsonrpc":"2.0","id":9,"result":{"ok":true}}
+
+"#
+    .to_vec();
+    assert_eq!(
+        take_matching_sse_value(&mut pending, Some(9), true).unwrap(),
+        Some(json!({"jsonrpc": "2.0", "id": 9, "result": {"ok": true}}))
+    );
+    assert!(pending.is_empty());
+}
+
+#[test]
 fn inner_app_frame_uses_an_opaque_origin_and_fixed_sandbox() {
     assert!(SANDBOX_PROXY_HTML.contains(r#"inner.setAttribute("sandbox", "allow-scripts")"#));
     assert!(SANDBOX_PROXY_HTML.contains("inner.srcdoc = htmlWithCsp(html, csp)"));
@@ -131,6 +239,38 @@ fn parses_text_ui_resource_and_metadata() {
     assert_eq!(html, "<main>Board</main>");
     assert_eq!(csp.connect_domains, vec!["https://api.example.com"]);
     assert!(permissions.clipboard_write.is_some());
+}
+
+#[test]
+fn resource_read_policy_takes_precedence_over_listing_metadata() {
+    let listing = McpAppResource {
+        uri: "ui://board".to_string(),
+        name: None,
+        title: None,
+        description: None,
+        mime_type: Some(MCP_APP_MIME_TYPE.to_string()),
+        meta: json!({
+            "ui": {
+                "csp": {"connectDomains": ["https://listing.example.com"]}
+            }
+        }),
+    };
+    let response = json!({
+        "result": {
+            "contents": [{
+                "uri": "ui://board",
+                "mimeType": MCP_APP_MIME_TYPE,
+                "text": "<main>Board</main>",
+                "_meta": {
+                    "ui": {
+                        "csp": {"connectDomains": ["https://read.example.com"]}
+                    }
+                }
+            }]
+        }
+    });
+    let (_, csp, _) = parse_ui_resource(&response, "ui://board", Some(&listing)).unwrap();
+    assert_eq!(csp.connect_domains, vec!["https://read.example.com"]);
 }
 
 #[test]

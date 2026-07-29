@@ -47,6 +47,11 @@ export type McpAppResourcePermissions = {
   clipboardWrite?: Record<string, never>;
 };
 
+export type McpAppResourcePolicy = {
+  csp: McpAppResourceCsp;
+  requestedPermissions: McpAppResourcePermissions;
+};
+
 export type PreparedMcpAppView = {
   viewId: string;
   sandboxUrl: string;
@@ -92,11 +97,23 @@ export async function readMcpAppResource(
   return invokeTauri("read_mcp_app_resource", { serverId, uri });
 }
 
+export async function inspectMcpAppResource(
+  serverId: string,
+  uri: string,
+): Promise<McpAppResourcePolicy> {
+  return invokeTauri("inspect_mcp_app_resource", { serverId, uri });
+}
+
 export async function prepareMcpAppView(
   serverId: string,
   uri: string,
+  approvedPolicy: McpAppResourcePolicy,
 ): Promise<PreparedMcpAppView> {
-  return invokeTauri("prepare_mcp_app_view", { serverId, uri });
+  return invokeTauri("prepare_mcp_app_view", {
+    serverId,
+    uri,
+    approvedPolicy,
+  });
 }
 
 export async function releaseMcpAppView(viewId: string): Promise<void> {
