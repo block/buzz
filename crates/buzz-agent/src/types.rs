@@ -1,5 +1,5 @@
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 /// Byte-equivalent charged to the handoff/context-pressure gate for a single
 /// image tool result. The gate maps bytes to tokens at 1 byte/token (see
@@ -108,6 +108,17 @@ pub struct ToolCall {
     pub provider_id: String,
     pub name: String,
     pub arguments: Value,
+    /// Fields the provider put on the tool call that we do not model, kept so
+    /// the assistant turn can be replayed the way it arrived.
+    ///
+    /// Gemini on the Databricks MLflow route returns a `thoughtSignature` per
+    /// call and *requires* it echoed back: replaying without it fails the whole
+    /// request with `Function call is missing a thought_signature in functionCall
+    /// parts`. For an agent loop that lands on the very first tool call, so the
+    /// model is unusable without this. Carrying whatever we did not model,
+    /// rather than naming that one field, means the next provider with an opaque
+    /// per-call token needs no change here.
+    pub provider_extra: Map<String, Value>,
 }
 
 #[derive(Debug, Clone)]
