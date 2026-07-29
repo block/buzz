@@ -368,71 +368,77 @@ export function CommunityRail({
   };
 
   return (
-    <nav
-      aria-label="Communities"
-      className="relative z-20 mb-2 mt-[calc(var(--buzz-top-chrome-height,40px)+1px)] flex w-14 shrink-0 flex-col items-center gap-2 overflow-y-auto bg-sidebar px-2.5 pb-3 pt-1.5"
-      data-testid="community-rail"
+    <div
+      className="relative z-20 flex w-14 shrink-0 flex-col bg-sidebar"
+      data-testid="community-rail-surface"
     >
-      <DndContext
-        onDragEnd={handleDragEnd}
-        onDragStart={handleDragStart}
-        sensors={sensors}
+      <nav
+        aria-label="Communities"
+        className="mb-2 mt-[calc(var(--buzz-top-chrome-height,40px)+1px)] flex min-h-0 w-full flex-1 flex-col items-center gap-2 overflow-y-auto px-2.5 pb-3 pt-1.5"
+        data-testid="community-rail"
       >
-        <SortableContext
-          items={communityIds}
-          strategy={verticalListSortingStrategy}
+        <DndContext
+          onDragEnd={handleDragEnd}
+          onDragStart={handleDragStart}
+          sensors={sensors}
         >
-          {communities.map((community) => (
-            <SortableCommunityButton
-              key={community.id}
-              activeCommunityId={activeCommunityId}
-              canInvite={
-                community.id === activeCommunityId && canInviteToActiveCommunity
-              }
-              community={community}
-              iconsByCommunity={iconsByCommunity}
-              unreadByCommunity={unreadByCommunity}
-              onInvite={() => onOpenSettings?.("community-members")}
-              onMarkAllRead={handleMarkAllRead}
-              onSetEditingCommunity={setEditingCommunity}
-              onSwitchCommunity={onSwitchCommunity}
-            />
-          ))}
-        </SortableContext>
-        <DragOverlay>
-          {draggingCommunity ? (
-            <CommunityDragOverlay
-              community={draggingCommunity}
-              iconUrl={iconsByCommunity[draggingCommunity.id] ?? null}
-            />
-          ) : null}
-        </DragOverlay>
-      </DndContext>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <button
-            aria-label="Add community"
-            className="flex h-9 w-9 items-center justify-center rounded-2xl bg-sidebar-accent/60 text-sidebar-foreground/70 outline-hidden transition-all hover:rounded-xl hover:bg-primary/80 hover:text-primary-foreground focus:outline-none focus-visible:outline-none"
-            data-testid="community-rail-add"
-            onClick={onAddCommunity}
-            type="button"
+          <SortableContext
+            items={communityIds}
+            strategy={verticalListSortingStrategy}
           >
-            <Plus className="h-4 w-4" />
-          </button>
-        </TooltipTrigger>
-        <TooltipContent side="right">Add community</TooltipContent>
-      </Tooltip>
-      <EditCommunityDialog
-        canRemove={communities.length > 1}
-        onOpenChange={(open) => {
-          if (!open) setEditingCommunity(null);
-        }}
-        onRemove={onRemoveCommunity}
-        onSave={onUpdateCommunity}
-        open={editingCommunity !== null}
-        community={editingCommunity}
-        showIconEditor={editingCommunity?.id === activeCommunityId}
-      />
-    </nav>
+            {communities.map((community) => (
+              <SortableCommunityButton
+                key={community.id}
+                activeCommunityId={activeCommunityId}
+                canInvite={
+                  community.id === activeCommunityId &&
+                  canInviteToActiveCommunity
+                }
+                community={community}
+                iconsByCommunity={iconsByCommunity}
+                unreadByCommunity={unreadByCommunity}
+                onInvite={() => onOpenSettings?.("community-members")}
+                onMarkAllRead={handleMarkAllRead}
+                onSetEditingCommunity={setEditingCommunity}
+                onSwitchCommunity={onSwitchCommunity}
+              />
+            ))}
+          </SortableContext>
+          <DragOverlay>
+            {draggingCommunity ? (
+              <CommunityDragOverlay
+                community={draggingCommunity}
+                iconUrl={iconsByCommunity[draggingCommunity.id] ?? null}
+              />
+            ) : null}
+          </DragOverlay>
+        </DndContext>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              aria-label="Add community"
+              className="flex h-9 w-9 items-center justify-center rounded-2xl bg-sidebar-accent/60 text-sidebar-foreground/70 outline-hidden transition-all hover:rounded-xl hover:bg-primary/80 hover:text-primary-foreground focus:outline-none focus-visible:outline-none"
+              data-testid="community-rail-add"
+              onClick={onAddCommunity}
+              type="button"
+            >
+              <Plus className="h-4 w-4" />
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side="right">Add community</TooltipContent>
+        </Tooltip>
+        <EditCommunityDialog
+          canRemove={communities.length > 1}
+          onOpenChange={(open) => {
+            if (!open) setEditingCommunity(null);
+          }}
+          onRemove={onRemoveCommunity}
+          onSave={onUpdateCommunity}
+          open={editingCommunity !== null}
+          community={editingCommunity}
+          showIconEditor={editingCommunity?.id === activeCommunityId}
+        />
+      </nav>
+    </div>
   );
 }

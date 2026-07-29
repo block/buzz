@@ -648,6 +648,7 @@ test.describe("community rail", () => {
     // Spoof macOS so the rail applies its traffic-light top inset.
     await page.addInitScript(() => {
       Object.defineProperty(navigator, "platform", { get: () => "MacIntel" });
+      window.localStorage.setItem("buzz-theme", "dracula");
     });
     await installMockBridge(page, undefined, { skipCommunitySeed: true });
     await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
@@ -661,6 +662,12 @@ test.describe("community rail", () => {
     await expect(firstButton).toBeVisible();
     const buttonBox = await firstButton.boundingBox();
     const railBox = await page.getByTestId("community-rail").boundingBox();
+    const railSurfaceBox = await page
+      .getByTestId("community-rail-surface")
+      .boundingBox();
+    const appSurfaceBox = await page
+      .locator(".buzz-huddle-app-surface")
+      .boundingBox();
     const searchBox = await page.getByTestId("open-search").boundingBox();
     const contentBox = await page
       .locator("[data-buzz-content-surface]")
@@ -670,10 +677,58 @@ test.describe("community rail", () => {
     expect(railBox).not.toBeNull();
     expect(searchBox).not.toBeNull();
     expect(contentBox).not.toBeNull();
+    expect(railSurfaceBox).not.toBeNull();
+    expect(appSurfaceBox).not.toBeNull();
     expect(buttonBox?.y ?? 0).toBeGreaterThanOrEqual(32);
     expect(Math.abs((railBox?.y ?? 0) - (contentBox?.y ?? 0))).toBeLessThan(
       0.5,
     );
+    expect(
+      Math.abs((railSurfaceBox?.y ?? 0) - (appSurfaceBox?.y ?? 0)),
+    ).toBeLessThan(0.5);
+    expect(
+      Math.abs(
+        (railSurfaceBox?.y ?? 0) +
+          (railSurfaceBox?.height ?? 0) -
+          ((appSurfaceBox?.y ?? 0) + (appSurfaceBox?.height ?? 0)),
+      ),
+    ).toBeLessThan(0.5);
+
+    const gapPaint = await page.evaluate(() => {
+      const surface = document.querySelector<HTMLElement>(
+        '[data-testid="community-rail-surface"]',
+      );
+      const rail = document.querySelector<HTMLElement>(
+        '[data-testid="community-rail"]',
+      );
+      if (!surface || !rail) throw new Error("community rail is missing");
+
+      const surfaceBox = surface.getBoundingClientRect();
+      const railBox = rail.getBoundingClientRect();
+      const x = surfaceBox.left + surfaceBox.width / 2;
+      const bottomGapElement = document.elementFromPoint(
+        x,
+        railBox.bottom + (surfaceBox.bottom - railBox.bottom) / 2,
+      );
+      const topGapElement = document.elementFromPoint(
+        x,
+        surfaceBox.top + (railBox.top - surfaceBox.top) / 2,
+      );
+
+      return {
+        backgroundColor: getComputedStyle(surface).backgroundColor,
+        bottomOwned:
+          bottomGapElement?.closest(
+            '[data-testid="community-rail-surface"]',
+          ) === surface,
+        topOwned:
+          topGapElement?.closest('[data-testid="community-rail-surface"]') ===
+          surface,
+      };
+    });
+    expect(gapPaint.backgroundColor).not.toBe("rgba(0, 0, 0, 0)");
+    expect(gapPaint.topOwned).toBe(true);
+    expect(gapPaint.bottomOwned).toBe(true);
 
     const leftInset = (buttonBox?.x ?? 0) - (railBox?.x ?? 0);
     const rightInset =
