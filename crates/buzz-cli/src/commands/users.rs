@@ -282,8 +282,8 @@ fn owner_scoped_profiles(
         .collect()
 }
 
-/// Search for users by display name via NIP-50 full-text search on kind:0 profiles.
-/// Returns [] if the relay does not implement NIP-50 search.
+/// Search for users by display name. Owner-scoped searches resolve managed-agent records
+/// and verify their profiles; unscoped searches use NIP-50 and return [] if unsupported.
 async fn search_by_name(
     client: &BuzzClient,
     query: &str,
