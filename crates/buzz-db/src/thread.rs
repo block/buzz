@@ -570,6 +570,19 @@ pub async fn get_channel_window(
     cursor: Option<(DateTime<Utc>, Vec<u8>)>,
     kind_filter: Option<&[u32]>,
 ) -> Result<ChannelWindow> {
+    // A zero-limit window retains no rows, so there is no last-retained row to
+    // derive a cursor from. The `limit + 1` probe below also can't tell "no
+    // rows" from "more rows" at limit 0: it would report `has_more = true` with
+    // `next_cursor = None`, breaking the `Some` iff `has_more` invariant and
+    // stalling any caller that trusts it. Report an empty, exhausted page.
+    if limit == 0 {
+        return Ok(ChannelWindow {
+            rows: Vec::new(),
+            has_more: false,
+            next_cursor: None,
+        });
+    }
+
     let mut param_idx = 3u32; // $1 is community_id, $2 is channel_id
     let mut sql = String::from(
         r#"
@@ -1662,6 +1675,48 @@ mod tests {
             "exact-multiple final page must report exhausted despite rows == limit"
         );
         assert!(page2.next_cursor.is_none(), "no cursor past the last row");
+    }
+
+    /// A `limit == 0` request must return an empty, exhausted page rather than
+    /// `has_more = true` with `next_cursor = None`. Without the early guard the
+    /// `limit + 1` probe fetches one row, reports `has_more`, then truncates it
+    /// away — leaving no row to build a cursor from and breaking the `Some` iff
+    /// `has_more` invariant a paginating caller relies on.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_window_zero_limit_reports_empty_exhausted_page() {
+        let pool = setup_pool().await;
+        let author = Keys::generate();
+        let (channel, community) = create_test_channel(
+            &pool,
+            &format!("window-zero-{}", Uuid::new_v4()),
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            author.public_key().to_bytes().as_slice(),
+            None,
+        )
+        .await
+        .expect("create channel");
+
+        // Rows exist, but a zero-limit request asks for none of them.
+        for i in 0..3 {
+            let event = make_stream_event(&author, &format!("row-{i}"));
+            insert_root(&pool, community, channel.id, &event).await;
+        }
+
+        let window = get_channel_window(&pool, community, channel.id, 0, None, None)
+            .await
+            .expect("fetch zero-limit window");
+        assert!(window.rows.is_empty(), "zero-limit window retains no rows");
+        assert!(
+            !window.has_more,
+            "zero-limit window has no cursor, so it must not report has_more"
+        );
+        assert!(
+            window.next_cursor.is_none(),
+            "next_cursor is Some iff has_more"
+        );
     }
 
     /// Rows with replies carry a thread summary (counts + batched
