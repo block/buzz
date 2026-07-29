@@ -285,7 +285,7 @@ pub async fn save_ncryptsec_copy(
     let dest = match crate::commands::export_util::pick_save_path(
         &app_handle,
         crate::key_backup::BACKUP_FILE_NAME,
-        "Keycase",
+        "Password-protected key backup",
         &["ncryptsec"],
     )
     .await?

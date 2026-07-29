@@ -9631,7 +9631,7 @@ export function maybeInstallE2eTauriMocks() {
       case "save_ncryptsec_copy": {
         const blob = (payload as { ncryptsec?: string } | null)?.ncryptsec;
         if (!blob?.startsWith("ncryptsec1")) {
-          throw new Error("Not a valid Keycase.");
+          throw new Error("Not a valid key backup.");
         }
         // Production opens a native save dialog; the harness pretends the
         // user picked a path.
@@ -9667,7 +9667,7 @@ export function maybeInstallE2eTauriMocks() {
             input.trim() !== MOCK_NCRYPTSEC ||
             request?.password !== MOCK_BACKUP_PASSPHRASE
           ) {
-            throw new Error("Wrong Keycase password or damaged Keycase.");
+            throw new Error("Wrong backup password or damaged key backup.");
           }
           mockIdentityLostCleared = true;
           mockIdentityLockedCleared = true;

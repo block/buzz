@@ -31,9 +31,9 @@ export const SIGNOUT_CONFIRM_PHRASE = "wipe all my data";
  * Signing out wipes the identity key and all local data, so the confirm
  * dialog gates the delete button behind two explicit steps:
  *
- * 1. Back up the key — the nsec is shown inline (masked, with reveal/copy);
- *    the "I have saved my private key" checkbox unlocks only after the user
- *    actually reveals or copies the key.
+ * 1. Confirm recovery — Settings offers a tested password-protected backup;
+ *    the dialog also shows the raw nsec as a last-chance fallback. The
+ *    checkbox unlocks only after the user reveals or copies that key.
  * 2. Typed confirmation — the user must type the exact phrase
  *    "wipe all my data".
  *
@@ -137,7 +137,8 @@ export function SignOutSection() {
           <h2 className="text-lg font-semibold tracking-tight">Sign out</h2>
           <p className="text-sm text-muted-foreground">
             Removes your identity key and all local app data from this device.
-            Back up your private key (nsec) first — this cannot be undone.
+            Before signing out, create and test a password-protected key backup
+            above — this cannot be undone.
           </p>
         </div>
         <Button
@@ -175,7 +176,7 @@ export function SignOutSection() {
 
           <div className="space-y-3">
             <p className="text-sm font-medium">
-              1. Back up your private key (nsec)
+              1. Confirm you can restore your identity
             </p>
             {isNsecLoading ? (
               <p className="text-sm text-muted-foreground">Loading…</p>
@@ -208,10 +209,11 @@ export function SignOutSection() {
                 }
               />
               <span>
-                I have saved my private key somewhere safe.
+                I have tested a key backup or saved this private key somewhere
+                safe.
                 {!canConfirmBackup ? (
                   <span className="block text-xs text-muted-foreground">
-                    Reveal or copy the key above first.
+                    Reveal or copy this last-chance private key first.
                   </span>
                 ) : null}
               </span>

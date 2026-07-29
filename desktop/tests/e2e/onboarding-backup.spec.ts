@@ -172,7 +172,7 @@ test("download happy path: generated password, encrypt, native save, Next", asyn
   await page.getByTestId("backup-test-file-input").setInputFiles({
     name: "notes.txt",
     mimeType: "text/plain",
-    buffer: Buffer.from("not a keycase"),
+    buffer: Buffer.from("not a key backup"),
   });
   await expect(page.getByTestId("backup-test-file-error")).toBeVisible();
 

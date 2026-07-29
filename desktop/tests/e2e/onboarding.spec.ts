@@ -645,7 +645,7 @@ test("first-launch encrypted backup import asks for a passphrase and continues",
   await page.getByTestId("nostr-import-passphrase").fill("wrong passphrase");
   await page.getByTestId("nostr-import-submit").click();
   await expect(page.getByTestId("nostr-import-feedback")).toContainText(
-    /wrong Keycase password/i,
+    /wrong backup password/i,
   );
 
   await page
@@ -677,6 +677,15 @@ test("first-launch import accepts an .ncryptsec backup file", async ({
   await expect(fileInput).toHaveAttribute(
     "accept",
     ".key,.ncryptsec,text/plain",
+  );
+
+  await fileInput.setInputFiles({
+    buffer: Buffer.alloc(1_025, "x"),
+    mimeType: "text/plain",
+    name: "not-a-backup.txt",
+  });
+  await expect(page.getByTestId("nostr-import-feedback")).toContainText(
+    /too large to be a key backup/i,
   );
 
   // Spec-vector blob the mock bridge accepts with the mock passphrase.

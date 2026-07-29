@@ -63,3 +63,36 @@ test("reveal shows error when get_nsec fails", async ({ page }) => {
     "Keychain locked",
   );
 });
+
+test("settings creates and tests a password-protected key backup", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await openSettings(page, "profile");
+  await expandIdentity(page);
+
+  const row = page.getByTestId("profile-encrypted-backup-row");
+  await expect(row).toContainText("Password-protected key backup");
+  await page.getByTestId("profile-encrypted-backup-toggle").click();
+
+  await page
+    .getByTestId("backup-passphrase-input")
+    .fill("mock horse battery staple");
+  await page.getByTestId("encrypted-backup-create").click();
+  await expect(page.getByTestId("backup-test-dropzone")).toBeVisible();
+
+  await page.getByTestId("backup-test-file-input").setInputFiles({
+    name: "identity.ncryptsec",
+    mimeType: "text/plain",
+    buffer: Buffer.from(
+      "ncryptsec1qgg9947rlpvqu76pj5ecreduf9jxhselq2nae2kghhvd5g7dgjtcxfqtd67p9m0w57lspw8gsq6yphnm8623nsl8xn9j4jdzz84zm3frztj3z7s35vpzmqf6ksu8r89qk5z2zxfmu5gv8th8wclt0h4p",
+    ),
+  });
+  await page
+    .getByTestId("backup-test-password")
+    .fill("mock horse battery staple");
+  await expect(page.getByTestId("backup-test-success")).toContainText(
+    "Your backup works!",
+  );
+});

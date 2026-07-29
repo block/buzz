@@ -72,7 +72,7 @@ export function MachineOnboardingFlow({
   );
   const [readyRuntimeIds, setReadyRuntimeIds] = React.useState<string[]>([]);
   // Owned here (not by DownloadKeyStep) so Back navigation — which unmounts
-  // the step — keeps the created Keycase, entered password, and test progress.
+  // the step — keeps the created backup, entered password, and test progress.
   const backupSession = useEncryptedBackupSession();
   const handleReadyRuntimeIdsChange = React.useCallback(
     (runtimeIds: readonly string[]) => {

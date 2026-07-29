@@ -53,7 +53,7 @@ test("currentStep_falls_back_to_1_for_pages_outside_the_step_list", () => {
 });
 
 // ---------------------------------------------------------------------------
-// BackupStep gating: saving a Keycase is recommended, not required
+// BackupStep gating: saving a password-protected backup is recommended, not required
 // ---------------------------------------------------------------------------
 
 test("backup_next_is_always_enabled", () => {

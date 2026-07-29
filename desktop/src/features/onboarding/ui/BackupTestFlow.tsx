@@ -221,11 +221,11 @@ export function BackupTestFlow({
         }));
       } else if (trimmed.toLowerCase().startsWith("ncryptsec1")) {
         setFileError(
-          "That's a Keycase file, but not the one you just downloaded.",
+          "That's a key backup, but not the one you just downloaded.",
         );
       } else {
         setFileError(
-          "That doesn't look like your Keycase file. Drop the file you just downloaded.",
+          "That doesn't look like your key backup. Choose the file you just downloaded.",
         );
       }
     },

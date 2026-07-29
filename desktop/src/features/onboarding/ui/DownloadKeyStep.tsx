@@ -19,7 +19,7 @@ type DownloadKeyStepProps = {
   direction: OnboardingTransitionDirection;
   /**
    * Backup state owned by the parent flow so Back navigation (which unmounts
-   * this step) doesn't discard the created Keycase, the entered password, or
+   * this step) doesn't discard the created backup, the entered password, or
    * the backup-test progress.
    */
   session: EncryptedBackupSession;
@@ -29,7 +29,7 @@ type DownloadKeyStepProps = {
 
 /**
  * Onboarding download step — the password-first encrypted key download
- * (Keycase) flow, promoted to its own page in the machine onboarding flow.
+ * flow, promoted to its own page in the machine onboarding flow.
  * The raw key never enters this component: Rust builds the NIP-49 payload
  * locally and the native save dialog produces the user-owned file.
  */

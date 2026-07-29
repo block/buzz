@@ -96,7 +96,7 @@ export function NostrKeyImportForm({
 
     if (file.size > NOSTR_KEY_FILE_MAX_BYTES) {
       setImportError(
-        "That file is too large to be a Keycase or private key. Choose another file.",
+        "That file is too large to be a key backup or private key. Choose another file.",
       );
       return;
     }
@@ -126,7 +126,7 @@ export function NostrKeyImportForm({
     if (!isValid) {
       setImportError(
         isEncryptedInput
-          ? "Enter the password for this Keycase."
+          ? "Enter the password for this key backup."
           : "That doesn't look like a valid nsec. Paste an nsec1 key.",
       );
       return;
@@ -244,8 +244,8 @@ export function NostrKeyImportForm({
       </div>
 
       {/* Hidden file input shared by both variants: the default drop zone and
-          the spotlight "Use a Keycase" button both open it. Accepts the
-          .ncryptsec archives our own save flow emits alongside raw .key files. */}
+          the spotlight "Choose a backup file" button both open it. Accepts the
+          .ncryptsec backups our own save flow emits alongside raw .key files. */}
       <input
         accept=".key,.ncryptsec,text/plain"
         className="sr-only"
@@ -273,7 +273,7 @@ export function NostrKeyImportForm({
             type="button"
             variant="ghost"
           >
-            Use a Keycase
+            Choose a backup file
           </Button>
         </div>
       ) : (
@@ -358,7 +358,7 @@ export function NostrKeyImportForm({
             className="text-sm font-medium text-foreground"
             htmlFor="nostr-import-passphrase"
           >
-            Keycase password
+            Backup password
           </label>
           <Input
             autoComplete="off"
@@ -376,7 +376,7 @@ export function NostrKeyImportForm({
             value={passphrase}
           />
           <p className="text-xs leading-5 text-muted-foreground">
-            Your Keycase and password stay on this device.
+            Your backup file and password stay on this device.
           </p>
         </div>
       ) : null}
@@ -396,7 +396,8 @@ export function NostrKeyImportForm({
             data-testid="nostr-import-encrypted-badge"
           >
             <KeyRound aria-hidden="true" className="h-4 w-4 shrink-0" />
-            Keycase · Private — enter its password to restore
+            Password-protected key backup · Private — enter its password to
+            restore
           </p>
         ) : previewNpub ? (
           variant === "spotlight" ? (
