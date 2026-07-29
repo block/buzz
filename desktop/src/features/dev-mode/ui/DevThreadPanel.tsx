@@ -10,8 +10,10 @@ import {
   devComposerModeLabel,
   type DevComposerMode,
 } from "@/features/dev-mode/lib/useDevComposerModes";
+import { useComposerAutoGrow } from "@/features/dev-mode/lib/useComposerAutoGrow";
 import { useMemberNameResolver } from "@/features/dev-mode/lib/useMemberNameResolver";
 import { usePinnedScroll } from "@/features/dev-mode/lib/usePinnedScroll";
+import { DevComposerResizeHandle } from "@/features/dev-mode/ui/DevComposerResizeHandle";
 import { DevMessageRow } from "@/features/dev-mode/ui/DevMessageRow";
 import { useThreadReplies } from "@/features/messages/useThreadReplies";
 import type { Channel, RelayEvent } from "@/shared/api/types";
@@ -53,8 +55,12 @@ export function DevThreadPanel({
   const [input, setInput] = React.useState("");
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
-  const textareaRef = React.useRef<HTMLTextAreaElement>(null);
+  const { textareaRef, dragging, resizeHandleProps } = useComposerAutoGrow(
+    input,
+    "buzz.devMode.threadComposerHeight",
+  );
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: textareaRef is a stable ref from useComposerAutoGrow
   React.useEffect(() => {
     if (active) {
       textareaRef.current?.focus();
@@ -119,8 +125,6 @@ export function DevThreadPanel({
     }
   };
 
-  const rowCount = Math.min(input.split("\n").length, 6);
-
   return (
     <div
       className="flex min-h-0 min-w-0 flex-1 flex-col font-mono"
@@ -184,8 +188,13 @@ export function DevThreadPanel({
         </div>
       ) : null}
 
-      <div className="border-t border-border/60 px-3 py-2">
-        <div className="flex items-start gap-2">
+      <div>
+        <DevComposerResizeHandle
+          dragging={dragging}
+          testId="dev-mode-thread-composer-resize"
+          {...resizeHandleProps}
+        />
+        <div className="flex items-start gap-2 px-3 pt-1">
           <span
             aria-hidden
             className={cn(
@@ -208,12 +217,12 @@ export function DevThreadPanel({
                 ? `Ask ${devComposerModeLabel(mode)} about this thread…`
                 : "Reply in this thread…"
             }
-            rows={rowCount}
+            rows={1}
             spellCheck={false}
             value={input}
           />
         </div>
-        <div className="mt-1 flex items-center justify-between pl-6 text-xs text-muted-foreground">
+        <div className="mt-1 flex items-center justify-between pr-3 pb-2 pl-9 text-xs text-muted-foreground">
           <span
             className={cn(
               "rounded-none border px-1.5 py-0.5 font-medium",

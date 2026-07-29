@@ -2,10 +2,12 @@ import * as React from "react";
 
 import { useAuthorColorResolver } from "@/features/dev-mode/lib/authorColors";
 import { cn } from "@/shared/lib/cn";
+import { useComposerAutoGrow } from "@/features/dev-mode/lib/useComposerAutoGrow";
 import {
   devComposerModeLabel,
   type DevComposerMode,
 } from "@/features/dev-mode/lib/useDevComposerModes";
+import { DevComposerResizeHandle } from "@/features/dev-mode/ui/DevComposerResizeHandle";
 
 type DevPromptComposerProps = {
   value: string;
@@ -47,7 +49,10 @@ export function DevPromptComposer({
   onOpenPalette,
   onEscape,
 }: DevPromptComposerProps) {
-  const textareaRef = React.useRef<HTMLTextAreaElement>(null);
+  const { textareaRef, dragging, resizeHandleProps } = useComposerAutoGrow(
+    value,
+    "buzz.devMode.composerHeight",
+  );
   const resolveColor = useAuthorColorResolver();
   // The pill (and caret) wear the same color the agent's name has in chat.
   const agentColor =
@@ -100,16 +105,19 @@ export function DevPromptComposer({
     }
   };
 
-  const rowCount = Math.min(value.split("\n").length, 8);
-
   return (
     <div
       className={cn(
-        "border-t border-border/60 bg-background/80 px-4 py-3 font-mono transition-opacity",
+        "bg-background/80 font-mono transition-opacity",
         !active && "opacity-55",
       )}
     >
-      <div className="flex items-start gap-2">
+      <DevComposerResizeHandle
+        dragging={dragging}
+        testId="dev-mode-composer-resize"
+        {...resizeHandleProps}
+      />
+      <div className="flex items-start gap-2 px-4 pt-2">
         <span
           aria-hidden
           className={cn(
@@ -128,12 +136,12 @@ export function DevPromptComposer({
           onFocus={() => onSwitchPane("main")}
           onKeyDown={handleKeyDown}
           placeholder={placeholder}
-          rows={rowCount}
+          rows={1}
           spellCheck={false}
           value={value}
         />
       </div>
-      <div className="mt-2 flex items-center justify-between pl-6 text-xs text-muted-foreground">
+      <div className="mt-2 flex items-center justify-between pr-4 pb-3 pl-10 text-xs text-muted-foreground">
         <span
           className={cn(
             "rounded-none border px-1.5 py-0.5 font-medium",
