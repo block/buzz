@@ -22,35 +22,56 @@ use crate::manifest::{self, ManifestError};
 use crate::merge::{resolve_persona_config, HooksData, TriggersData};
 use crate::persona::{self, PersonaConfig};
 
+/// Errors returned while loading a persona pack.
 #[derive(Debug, thiserror::Error)]
 pub enum PackError {
+    /// The `.plugin/plugin.json` manifest was not found.
     #[error("manifest not found at {0}")]
     ManifestNotFound(PathBuf),
 
+    /// Failed to read a file from disk.
     #[error("failed to read {path}: {source}")]
     Io {
+        /// Path of the file that could not be read.
         path: PathBuf,
+        /// The underlying I/O error.
         #[source]
         source: std::io::Error,
     },
 
+    /// Failed to parse the pack manifest.
     #[error("failed to parse manifest: {0}")]
     ManifestParse(String),
 
+    /// A referenced persona file was not found.
     #[error("persona file not found: {0}")]
     PersonaNotFound(PathBuf),
 
+    /// A file failed to parse.
     #[error("invalid file {path}: {reason}")]
-    FileParse { path: PathBuf, reason: String },
+    FileParse {
+        /// Path of the file that failed to parse.
+        path: PathBuf,
+        /// Human-readable parse failure reason.
+        reason: String,
+    },
 
+    /// A path contained a `..` traversal component or absolute prefix.
     #[error("path traversal rejected: {0}")]
     PathTraversal(String),
 
+    /// A canonicalized path escaped the pack root.
     #[error("path escapes pack root: {0}")]
     PathEscape(PathBuf),
 
+    /// Failed to parse the shared `.mcp.json` config.
     #[error("failed to parse .mcp.json at {path}: {reason}")]
-    McpConfigParse { path: PathBuf, reason: String },
+    McpConfigParse {
+        /// Path to the `.mcp.json` file.
+        path: PathBuf,
+        /// Human-readable parse failure reason.
+        reason: String,
+    },
 }
 
 impl From<ManifestError> for PackError {
@@ -62,7 +83,9 @@ impl From<ManifestError> for PackError {
 /// A fully loaded persona pack.
 #[derive(Debug)]
 pub struct LoadedPack {
+    /// The parsed pack manifest data.
     pub manifest: PackManifestData,
+    /// Fully loaded personas with resolved config.
     pub personas: Vec<LoadedPersona>,
     /// Content of instructions.md, if present.
     pub pack_instructions: Option<String>,
@@ -75,23 +98,37 @@ pub struct LoadedPack {
 /// A persona with its resolved effective config.
 #[derive(Debug)]
 pub struct LoadedPersona {
+    /// Path to the source `.persona.md` file.
     pub source_path: PathBuf,
+    /// Machine name (slug).
     pub name: String,
+    /// Human-readable display name.
     pub display_name: String,
+    /// One-line description.
     pub description: String,
+    /// Pack-relative path to an avatar image, if any.
     pub avatar: Option<String>,
+    /// Model string in `"provider:model-id"` format, if set.
     pub model: Option<String>,
     /// Preferred ACP runtime ID from the persona config (e.g., 'goose', 'claude').
     pub runtime: Option<String>,
+    /// Sampling temperature, if set.
     pub temperature: Option<f64>,
+    /// Maximum context window in tokens, if set.
     pub max_context_tokens: Option<u64>,
+    /// Channels to monitor (empty if none).
     pub subscribe: Vec<String>,
+    /// Message-matching triggers, if any.
     pub triggers: Option<TriggersData>,
+    /// Whether replies go in-thread.
     pub thread_replies: bool,
+    /// Whether replies are broadcast to the channel.
     pub broadcast_replies: bool,
+    /// Pack-relative skill directories claimed by this persona.
     pub skills: Vec<String>,
     /// Raw MCP server configs.
     pub mcp_servers: Vec<serde_json::Value>,
+    /// Lifecycle hooks, if any.
     pub hooks: Option<HooksData>,
     /// The markdown body (system prompt).
     pub prompt: String,
@@ -100,13 +137,19 @@ pub struct LoadedPersona {
 /// Minimal manifest data needed by the pack loader.
 #[derive(Debug)]
 pub struct PackManifestData {
+    /// Unique pack identifier (slug).
     pub id: String,
+    /// Human-readable pack name.
     pub name: String,
+    /// Semver version string.
     pub version: String,
+    /// Optional short description of the pack.
     pub description: Option<String>,
     /// Relative paths to .persona.md files.
     pub personas: Vec<String>,
+    /// Path to the pack-level instructions file, if declared.
     pub pack_instructions: Option<String>,
+    /// Path to the shared `.mcp.json`, if declared.
     pub mcp_config: Option<String>,
     // hooks_config is intentionally omitted: hooks are a runtime concern loaded
     // separately by buzz-acp, not a pack-parsing concern.

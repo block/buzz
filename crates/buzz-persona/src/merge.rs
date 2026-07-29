@@ -1,37 +1,52 @@
-/// Precedence resolution for persona behavioral config.
-///
-/// Handles levels 3–5 of the 5-level precedence model:
-///   3. Per-persona frontmatter  (wins)
-///   4. Pack-level defaults      (from plugin.json `defaults`)
-///   5. Built-in defaults        (hardcoded fallbacks)
-///
-/// Levels 1–2 (operator env vars, desktop UI) are resolved at runtime.
+//! Precedence resolution for persona behavioral config.
+//!
+//! Handles levels 3–5 of the 5-level precedence model:
+//!   3. Per-persona frontmatter  (wins)
+//!   4. Pack-level defaults      (from plugin.json `defaults`)
+//!   5. Built-in defaults        (hardcoded fallbacks)
+//!
+//! Levels 1–2 (operator env vars, desktop UI) are resolved at runtime.
 
+/// Resolved message-matching triggers.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TriggersData {
+    /// Whether the persona responds when mentioned.
     pub mentions: bool,
+    /// Keywords that trigger a response.
     pub keywords: Vec<String>,
+    /// Whether the persona responds to every message in subscribed channels.
     pub all_messages: bool,
 }
 
+/// Resolved lifecycle hook paths (pack-relative).
 #[derive(Debug, Clone, PartialEq)]
 pub struct HooksData {
+    /// Hook invoked when the persona starts.
     pub on_start: Option<String>,
+    /// Hook invoked when the persona stops.
     pub on_stop: Option<String>,
+    /// Hook invoked on each incoming message.
     pub on_message: Option<String>,
 }
 
+/// The fully resolved behavioral config for a single persona.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedConfig {
+    /// Model string in `"provider:model-id"` format.
     pub model: Option<String>,
+    /// Sampling temperature.
     pub temperature: Option<f64>,
+    /// Maximum context window in tokens.
     pub max_context_tokens: Option<u64>,
     /// `None`       = absent (no persona or pack value) → caller uses its own default
     /// `Some([])`   = intentional "subscribe to nothing"
     /// `Some([..])` = explicit channel list
     pub subscribe: Option<Vec<String>>,
+    /// Message-matching triggers, if any.
     pub triggers: Option<TriggersData>,
+    /// Whether replies go in-thread.
     pub thread_replies: bool,
+    /// Whether replies are broadcast to the channel.
     pub broadcast_replies: bool,
 }
 

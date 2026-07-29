@@ -22,18 +22,25 @@ use crate::persona::split_model;
 #[derive(Debug, Clone)]
 pub struct ResolvedPersona {
     // Identity
+    /// Machine name (slug).
     pub name: String,
+    /// Human-readable display name.
     pub display_name: String,
+    /// One-line description.
     pub description: String,
+    /// Pack-relative path to an avatar image, if any.
     pub avatar: Option<String>,
+    /// Persona version (currently mirrors the pack version).
     pub version: String,
 
     // → Config.system_prompt (persona body only)
+    /// The persona prompt body (becomes `Config.system_prompt`).
     pub system_prompt: String,
     /// Pack-owned instructions kept separate for the team model migration.
     pub pack_instructions: Option<String>,
 
     // → Config.model (plain model ID, post-split)
+    /// Plain model ID after splitting off the provider prefix.
     pub model: Option<String>,
     /// LLM inference provider extracted from the model string colon prefix (e.g., 'databricks'
     /// from 'databricks:model-id'). Flows into harness-specific env vars (GOOSE_PROVIDER) only.
@@ -41,61 +48,86 @@ pub struct ResolvedPersona {
     /// Preferred ACP runtime ID from the persona config (e.g., 'goose', 'claude'). Maps to
     /// AgentDefinition.runtime during pack import.
     pub runtime: Option<String>,
+    /// Sampling temperature, if set.
     pub temperature: Option<f64>,
+    /// Maximum context window in tokens, if set.
     pub max_context_tokens: Option<u64>,
 
     // → Config.subscribe_mode + channels_override
+    /// Channels to monitor.
     pub subscribe: Vec<String>,
     // → mapped to ACP filter rules at startup
+    /// Message-matching triggers.
     pub triggers: ResolvedTriggers,
+    /// Whether replies go in-thread.
     pub thread_replies: bool,
+    /// Whether replies are broadcast to the channel.
     pub broadcast_replies: bool,
 
     // Effective MCP (pack shared + persona merged, literals preserved)
+    /// Effective MCP servers (pack shared plus per-persona, merged).
     pub mcp_servers: Vec<ResolvedMcpServer>,
 
     // Hooks (parsed, not executed — reserved for future use, not yet wired)
+    /// Lifecycle hooks (parsed, not executed — reserved for future use).
     pub hooks: Option<ResolvedHooks>,
 
     // Skills (bare names — reserved for future use, not yet wired)
+    /// Skill directory names (reserved for future use).
     pub skills: Vec<String>,
 
     // Env var projection for agent subprocess
+    /// Env vars projected from model/temperature/context config for the agent subprocess.
     pub runtime_env_vars: Vec<(String, String)>,
 }
 
 /// An MCP server with env values as literals (no interpolation in this PR).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedMcpServer {
+    /// Server identifier.
     pub name: String,
+    /// Executable command to launch the server.
     pub command: String,
+    /// Command-line arguments.
     pub args: Vec<String>,
+    /// Environment variables as literal key/value pairs.
     pub env: Vec<(String, String)>,
 }
 
 /// Lifecycle hooks (pack-relative paths).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedHooks {
+    /// Hook invoked when the persona starts.
     pub on_start: Option<String>,
+    /// Hook invoked when the persona stops.
     pub on_stop: Option<String>,
+    /// Hook invoked on each incoming message.
     pub on_message: Option<String>,
 }
 
 /// What triggers a response (renamed from respond_to per spec discussion).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedTriggers {
+    /// Whether the persona responds when mentioned.
     pub mentions: bool,
+    /// Keywords that trigger a response.
     pub keywords: Vec<String>,
+    /// Whether the persona responds to every message in subscribed channels.
     pub all_messages: bool,
 }
 
 /// A fully resolved pack.
 #[derive(Debug)]
 pub struct ResolvedPack {
+    /// Unique pack identifier (slug).
     pub id: String,
+    /// Human-readable pack name.
     pub name: String,
+    /// Semver version string.
     pub version: String,
+    /// Pack description (falls back to empty string if absent).
     pub description: String,
+    /// Fully resolved personas.
     pub personas: Vec<ResolvedPersona>,
 }
 

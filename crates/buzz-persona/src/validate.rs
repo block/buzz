@@ -17,7 +17,9 @@ use crate::pack;
 /// A single validation finding.
 #[derive(Debug, Clone)]
 pub enum ValidationDiagnostic {
+    /// A hard failure that makes the pack invalid.
     Error(String),
+    /// An advisory issue that does not block use of the pack.
     Warning(String),
 }
 
@@ -33,26 +35,31 @@ impl std::fmt::Display for ValidationDiagnostic {
 /// Result of validating a pack.
 #[derive(Debug, Default)]
 pub struct ValidationReport {
+    /// The list of diagnostics collected during validation.
     pub diagnostics: Vec<ValidationDiagnostic>,
 }
 
 impl ValidationReport {
+    /// Record a hard error.
     pub fn error(&mut self, msg: impl Into<String>) {
         self.diagnostics
             .push(ValidationDiagnostic::Error(msg.into()));
     }
 
+    /// Record an advisory warning.
     pub fn warn(&mut self, msg: impl Into<String>) {
         self.diagnostics
             .push(ValidationDiagnostic::Warning(msg.into()));
     }
 
+    /// Returns `true` if the report contains any errors.
     pub fn has_errors(&self) -> bool {
         self.diagnostics
             .iter()
             .any(|d| matches!(d, ValidationDiagnostic::Error(_)))
     }
 
+    /// Returns `true` if the report contains any warnings.
     pub fn has_warnings(&self) -> bool {
         self.diagnostics
             .iter()
