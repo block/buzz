@@ -198,6 +198,44 @@ fn claude_surface_uses_mcp_config_path_not_settings_path() {
 }
 
 #[test]
+fn claude_surface_honors_per_agent_config_dir_override() {
+    // An agent isolated via CLAUDE_CONFIG_DIR must read its own settings/MCP
+    // config from that directory, not the operator's ~/.claude — both for the
+    // extensions list and for the "From config file (…)" attribution path.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("settings.json"),
+        r#"{"model": "isolated-model"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join(".claude.json"),
+        r#"{"mcpServers": {"isolated-server": {"command": "foo"}}}"#,
+    )
+    .unwrap();
+
+    let mut record = test_record();
+    record.env_vars.insert(
+        "CLAUDE_CONFIG_DIR".to_string(),
+        dir.path().display().to_string(),
+    );
+    let runtime = &KnownAcpRuntime {
+        id: "claude",
+        config_file_path: Some("~/.claude/settings.json"),
+        ..*test_runtime()
+    };
+
+    let surface = read_config_surface(&record, Some(runtime), None, None);
+
+    assert_eq!(surface.extensions.len(), 1);
+    assert_eq!(surface.extensions[0].name, "isolated-server");
+    assert_eq!(
+        surface.sources.mcp_config_file_path.as_deref(),
+        Some(dir.path().join(".claude.json").to_string_lossy().as_ref())
+    );
+}
+
+#[test]
 fn record_model_overrides_file_model() {
     let mut record = test_record();
     record.model = Some("explicit-model".to_string());
