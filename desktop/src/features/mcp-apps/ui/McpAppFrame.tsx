@@ -16,6 +16,47 @@ import {
 
 const PROXY_READY_METHOD = "ui/notifications/sandbox-proxy-ready";
 
+type InitialToolBridge = Pick<
+  ReturnType<typeof createMcpAppBridge>,
+  "sendToolCancelled" | "sendToolInput" | "sendToolResult"
+>;
+
+export type InitialToolLifecycle = {
+  started: boolean;
+  terminalSent: boolean;
+};
+
+export async function runInitialMcpAppTool(
+  bridge: InitialToolBridge,
+  serverId: string,
+  initialTool: NonNullable<McpAppFrameProps["initialTool"]>,
+  lifecycle: InitialToolLifecycle,
+  callTool: typeof callMcpAppTool = callMcpAppTool,
+): Promise<void> {
+  lifecycle.started = true;
+  try {
+    await bridge.sendToolInput({ arguments: initialTool.arguments });
+    const result = await callTool(
+      serverId,
+      initialTool.name,
+      initialTool.arguments,
+      "host",
+    );
+    if (!lifecycle.terminalSent) {
+      lifecycle.terminalSent = true;
+      await bridge.sendToolResult(result);
+    }
+  } catch (cause) {
+    if (!lifecycle.terminalSent) {
+      lifecycle.terminalSent = true;
+      await bridge
+        .sendToolCancelled({ reason: "The initial MCP App tool call failed." })
+        .catch(() => undefined);
+    }
+    throw cause;
+  }
+}
+
 export type McpAppFrameProps = McpAppBridgeCallbacks & {
   serverId: string;
   resourceUri: string;
@@ -96,14 +137,19 @@ export function McpAppFrame({
     let bridge: ReturnType<typeof createMcpAppBridge> | null = null;
     let disposeContext: (() => void) | null = null;
     let viewId: string | null = null;
-    let initialToolStarted = false;
-    let initialToolFinished = false;
+    const initialToolLifecycle: InitialToolLifecycle = {
+      started: false,
+      terminalSent: false,
+    };
 
     const start = async () => {
       try {
         setError(null);
         const prepared = await prepareMcpAppView(serverId, resourceUri);
-        if (abortController.signal.aborted) return;
+        if (abortController.signal.aborted) {
+          await releaseMcpAppView(prepared.viewId).catch(() => undefined);
+          return;
+        }
         viewId = prepared.viewId;
         onPermissionsRequested?.(prepared.requestedPermissions);
         const sandboxOrigin = mcpAppSandboxOrigin(prepared.sandboxUrl);
@@ -140,20 +186,16 @@ export function McpAppFrame({
 
         disposeContext = observeMcpAppHostContext(bridge, iframe);
         if (initialTool) {
-          initialToolStarted = true;
-          await bridge.sendToolInput({ arguments: initialTool.arguments });
-          try {
-            const result = await callMcpAppTool(
-              serverId,
-              initialTool.name,
-              initialTool.arguments,
-              "host",
-            );
-            await bridge.sendToolResult(result);
-          } finally {
-            initialToolFinished = true;
-          }
+          await runInitialMcpAppTool(
+            bridge,
+            serverId,
+            initialTool,
+            initialToolLifecycle,
+            (serverId, name, argumentsValue, caller) =>
+              callMcpAppTool(serverId, name, argumentsValue, caller),
+          );
         }
+        if (abortController.signal.aborted) return;
         onReady?.();
       } catch (cause) {
         if (abortController.signal.aborted) return;
@@ -172,7 +214,11 @@ export function McpAppFrame({
       const closingViewId = viewId;
       void (async () => {
         if (closingBridge) {
-          if (initialToolStarted && !initialToolFinished) {
+          if (
+            initialToolLifecycle.started &&
+            !initialToolLifecycle.terminalSent
+          ) {
+            initialToolLifecycle.terminalSent = true;
             await closingBridge
               .sendToolCancelled({ reason: "The channel app was closed." })
               .catch(() => undefined);

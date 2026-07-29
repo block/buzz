@@ -6,7 +6,7 @@ import { getScreenLayout } from "./threadPanelLayout.ts";
 test("uses single-panel layout for requested auxiliary content on narrow channels", () => {
   assert.deepEqual(
     getScreenLayout({
-      appActive: false,
+      surfaceActive: false,
       auxiliaryPanelRequested: true,
       channelType: "stream",
       contentWidthPx: 500,
@@ -21,7 +21,7 @@ test("uses single-panel layout for requested auxiliary content on narrow channel
 test("gives an active channel app the full content layout", () => {
   assert.deepEqual(
     getScreenLayout({
-      appActive: true,
+      surfaceActive: true,
       auxiliaryPanelRequested: true,
       channelType: "stream",
       contentWidthPx: 700,

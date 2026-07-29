@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { MCP_APP_POST_MAX_CHARS, mcpAppMessageText } from "./mcpAppMessage.ts";
+import {
+  mcpAppAttributedMessage,
+  MCP_APP_POST_MAX_CHARS,
+  mcpAppMessageText,
+} from "./mcpAppMessage.ts";
 
 test("extracts text from standard MCP content blocks", () => {
   assert.equal(
@@ -46,4 +50,11 @@ test("collapses excessive blank lines without flattening paragraphs", () => {
     "First paragraph.\n\nSecond paragraph.",
   );
   assert.equal(MCP_APP_POST_MAX_CHARS, 8_000);
+});
+
+test("adds durable visible MCP App attribution and sanitizes the title", () => {
+  assert.equal(
+    mcpAppAttributedMessage("Project\nBoard", "Moved task to Review."),
+    "MCP App · Project Board\n\nMoved task to Review.",
+  );
 });

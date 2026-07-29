@@ -2,6 +2,7 @@ import * as React from "react";
 
 import type { ChannelMcpAppInstallation } from "@/features/mcp-apps/lib/channelMcpAppStorage";
 import {
+  mcpAppAttributedMessage,
   MCP_APP_POST_MAX_CHARS,
   mcpAppMessageText,
 } from "@/features/mcp-apps/lib/mcpAppMessage";
@@ -38,6 +39,20 @@ type PendingChannelPost = {
 
 const MCP_APP_POST_PROMPT_COOLDOWN_MS = 30_000;
 
+export function pendingMcpAppPostInvalidationReason(
+  pendingChannelId: string | null,
+  channel: Pick<Channel, "archivedAt" | "id" | "isMember"> | null,
+): string | null {
+  if (!pendingChannelId) return null;
+  if (pendingChannelId !== channel?.id) {
+    return "The channel changed before the app post was approved.";
+  }
+  if (!channel.isMember || channel.archivedAt) {
+    return "The channel became read-only before the app post was approved.";
+  }
+  return null;
+}
+
 export function useMcpAppUi(
   channel: Channel | null,
   pubkey: string | null | undefined,
@@ -65,15 +80,14 @@ export function useMcpAppUi(
     current?.reject(new Error(reason));
   }, []);
   React.useEffect(() => {
-    if (
-      pendingPostRef.current &&
-      pendingPostRef.current.channelId !== channel?.id
-    ) {
-      rejectPendingPost(
-        "The channel changed before the app post was approved.",
-      );
+    const reason = pendingMcpAppPostInvalidationReason(
+      pendingPostRef.current?.channelId ?? null,
+      channel,
+    );
+    if (reason) {
+      rejectPendingPost(reason);
     }
-  }, [channel?.id, rejectPendingPost]);
+  }, [channel, rejectPendingPost]);
   React.useEffect(
     () => () =>
       rejectPendingPost("The channel app closed before the post was approved."),
@@ -134,10 +148,23 @@ export function useMcpAppUi(
   const handleApprovePost = React.useCallback(async () => {
     const current = pendingPostRef.current;
     if (!current || !channel) return;
+    const invalidationReason = pendingMcpAppPostInvalidationReason(
+      current.channelId,
+      channel,
+    );
+    if (invalidationReason) {
+      rejectPendingPost(invalidationReason);
+      return;
+    }
     setIsPosting(true);
     setPostError(null);
     try {
-      await sendMessage(current.content, [], undefined, channel.id);
+      await sendMessage(
+        mcpAppAttributedMessage(current.appTitle, current.content),
+        [],
+        undefined,
+        channel.id,
+      );
       if (pendingPostRef.current === current) {
         pendingPostRef.current = null;
         setPendingPost(null);
@@ -152,7 +179,7 @@ export function useMcpAppUi(
     } finally {
       setIsPosting(false);
     }
-  }, [channel, sendMessage]);
+  }, [channel, rejectPendingPost, sendMessage]);
   const dialog =
     channel && pubkey ? (
       <ChannelMcpAppDialog
@@ -208,7 +235,7 @@ export function useMcpAppUi(
             type="button"
             variant="outline"
           >
-            Stop asking
+            Mute for now
           </Button>
           <Button
             disabled={isPosting}

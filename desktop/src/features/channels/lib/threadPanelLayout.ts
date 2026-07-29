@@ -23,19 +23,19 @@ type ThreadPanelLayoutOptions = {
 };
 
 type ChannelScreenPanelLayoutOptions = {
-  appActive: boolean;
+  surfaceActive: boolean;
   auxiliaryPanelRequested: boolean;
   channelType?: ChannelType;
   contentWidthPx: number;
 };
 
 export function getScreenLayout({
-  appActive,
+  surfaceActive,
   auxiliaryPanelRequested,
   channelType,
   contentWidthPx,
 }: ChannelScreenPanelLayoutOptions) {
-  const hasAuxiliaryPanel = !appActive && auxiliaryPanelRequested;
+  const hasAuxiliaryPanel = !surfaceActive && auxiliaryPanelRequested;
   const isNarrowPanelViewport =
     contentWidthPx > 0 &&
     contentWidthPx < AUXILIARY_PANEL_SINGLE_COLUMN_BREAKPOINT_PX;

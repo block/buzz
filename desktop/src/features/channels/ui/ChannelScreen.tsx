@@ -7,6 +7,7 @@ import { useChannelPaneHandlers } from "@/features/channels/useChannelPaneHandle
 import { useMessageEventProfilePubkeys } from "@/features/channels/useMessageEventProfilePubkeys";
 import { useMessageOwnerProfiles } from "@/features/channels/useMessageOwnerProfiles";
 import { useThreadTargetSync } from "@/features/channels/useThreadTargetSync";
+import { useChannelSurface } from "@/features/channels/lib/channelSurfaces";
 import { getScreenLayout } from "@/features/channels/lib/threadPanelLayout";
 import {
   useChannelMembersQuery,
@@ -33,7 +34,6 @@ import { pickWelcomeGuideAgent } from "@/features/onboarding/welcomeGuide";
 import { useWelcomeKickoffEntrance } from "@/features/onboarding/useWelcomeKickoffEntrance";
 import { useWelcomeKickoffStagePresence } from "@/features/onboarding/useWelcomeKickoffStagePresence";
 import { useWelcomeAgentCreate } from "@/features/channels/useWelcomeAgentCreate";
-import { useMcpAppUi } from "@/features/mcp-apps/lib/useChannelMcpAppExperience";
 import { useCommunities } from "@/features/communities/useCommunities";
 import {
   mergeMessages,
@@ -515,11 +515,12 @@ export function ChannelScreen({
     threadReplyTargetId,
     toggleReactionMutation,
   });
-  const channelApps = useMcpAppUi(
-    activeChannel,
-    currentPubkey,
-    handleSendMessage,
-  );
+  const channelSurface = useChannelSurface({
+    channel: activeChannel,
+    pubkey: currentPubkey,
+    sendMessage: handleSendMessage,
+  });
+  const renderSurfaceContent = channelSurface?.renderContent;
   const canPostToChannel =
     activeChannel?.isMember === true && !activeChannel.archivedAt;
   const effectiveToggleReaction = canPostToChannel
@@ -685,9 +686,8 @@ export function ChannelScreen({
     threadReplyTargetId,
     threadReplyTargetMessage,
   });
-
   const { isSinglePanelView, shouldCompactHeaderActions } = getScreenLayout({
-    appActive: channelApps.active,
+    surfaceActive: renderSurfaceContent !== undefined,
     auxiliaryPanelRequested: Boolean(
       effectiveOpenThreadHeadId ||
         openAgentSessionPubkey ||
@@ -759,7 +759,7 @@ export function ChannelScreen({
         currentPubkey={currentPubkey}
         isAddBotOpen={isAddBotOpen}
         isJoining={joinChannelMutation.isPending}
-        navigation={channelApps.navigation}
+        navigation={channelSurface?.navigation}
         onAddBotOpenChange={setIsAddBotOpen}
         onJoinChannel={joinChannelMutation.mutateAsync}
         onManageChannel={handleManageChannel}
@@ -779,7 +779,7 @@ export function ChannelScreen({
       channelHeaderChromeRef,
       currentPubkey,
       isAddBotOpen,
-      channelApps.navigation,
+      channelSurface?.navigation,
       joinChannelMutation.isPending,
       joinChannelMutation.mutateAsync,
       handleManageChannel,
@@ -826,8 +826,8 @@ export function ChannelScreen({
                 selectedPostId={selectedForumPostId}
                 targetReplyId={targetForumReplyId}
               />
-            ) : channelApps.active ? (
-              channelApps.renderPane(channelHeader)
+            ) : renderSurfaceContent ? (
+              renderSurfaceContent(channelHeader)
             ) : (
               <React.Suspense
                 fallback={<ViewLoadingFallback includeHeader kind="channel" />}
