@@ -26,6 +26,8 @@
 #
 # Exit 0 when the mandatory set is green (lingering, ~/.local/bin, systemd
 # --user); 1 otherwise. Everything else is reported as a note, never a failure.
+# The ~/.local/bin row asks whether a login shell is configured to find the
+# directory, not whether this process inherited it — see section 3.
 # =============================================================================
 set -eu
 
@@ -110,9 +112,19 @@ else
 fi
 
 # ---- 3. ~/.local/bin --------------------------------------------------------
-# Where `buzz-acp` and most harness CLIs install, and what the deploy prepends
-# to the unit's PATH. It has to exist and be on the login PATH so `command -v`
-# resolves the same binaries the unit will.
+# Where `buzz-acp`, the `buzz` CLI and most harness adapters install.
+#
+# What is mandatory is that the directory exists and that a shell on this host
+# is CONFIGURED to find it — not that this particular process inherited it.
+# ~/.profile is read by a login shell and not by the `ssh host sh -s` the deploy
+# uses, so a strict "must be on $PATH right now" rule could not pass over the
+# very transport the deploy runs on: a fully provisioned host would fail its own
+# preflight. It is not load-bearing either, because nothing in the deploy path
+# depends on the login PATH — the deploy composes the unit's PATH itself, and
+# both remote scripts prepend this directory before they resolve anything.
+#
+# So all three arms below are green, and the ACTION column carries the one thing
+# that differs: whether a re-login is still owed.
 mkdir -p "${LOCAL_BIN}"
 
 case ":${INHERITED_PATH}:" in
@@ -124,15 +136,15 @@ case ":${INHERITED_PATH}:" in
     # a file the user also edits by hand.
     if [ -f "${HOME_DIR}/.profile" ] &&
       grep -q '\.local/bin' "${HOME_DIR}/.profile"; then
-      add_row "local bin on PATH" "NOTE" \
-        "already in ~/.profile; re-login to pick it up" mandatory
+      add_row "local bin on PATH" "OK" \
+        "in ~/.profile; a login shell picks it up" mandatory
     else
       # Single quotes deliberately: $HOME and $PATH must reach .profile as
       # literals, to be expanded at each login rather than frozen now.
       # shellcheck disable=SC2016
       printf '\n# Added by provision-buzz-host.sh\nexport PATH="$HOME/.local/bin:$PATH"\n' \
         >>"${HOME_DIR}/.profile"
-      add_row "local bin on PATH" "NOTE" \
+      add_row "local bin on PATH" "OK" \
         "appended to ~/.profile; re-login to pick it up" mandatory
     fi
     ;;
