@@ -49,6 +49,13 @@ pub struct QueuedEvent {
     pub received_at: Instant,
     /// Tag identifying which rule (or mode) matched this event.
     pub prompt_tag: String,
+    /// When the relay handed this event to the harness main loop, before any
+    /// admission gates ran. `received_at - relay_received_at` is the
+    /// admission latency (dedup/author/rule gates) for turn-stage timing.
+    pub relay_received_at: Instant,
+    /// Wall-clock relay-accept lag captured at receipt (1s resolution):
+    /// unix seconds now minus the event's `created_at`, saturating at 0.
+    pub relay_lag_secs: u64,
 }
 
 /// A single event inside a [`FlushBatch`].
@@ -57,6 +64,10 @@ pub struct BatchEvent {
     pub event: Event,
     pub prompt_tag: String,
     pub received_at: Instant,
+    /// See [`QueuedEvent::relay_received_at`]; preserved across requeues.
+    pub relay_received_at: Instant,
+    /// See [`QueuedEvent::relay_lag_secs`]; preserved across requeues.
+    pub relay_lag_secs: u64,
 }
 
 /// Why a batch's prior turn was cancelled — controls how `format_prompt`
@@ -341,6 +352,8 @@ impl EventQueue {
                 event: qe.event,
                 prompt_tag: qe.prompt_tag,
                 received_at: qe.received_at,
+                relay_received_at: qe.relay_received_at,
+                relay_lag_secs: qe.relay_lag_secs,
             })
             .collect();
         // Relay replay delivers stored events newest-first (`ORDER BY
@@ -480,6 +493,8 @@ impl EventQueue {
                 event: be.event,
                 prompt_tag: be.prompt_tag,
                 received_at: be.received_at, // preserve original timestamp (#46)
+                relay_received_at: be.relay_received_at,
+                relay_lag_secs: be.relay_lag_secs,
             });
         }
         // Enforce per-channel cap: trim oldest (back) events if requeue pushed
@@ -515,6 +530,8 @@ impl EventQueue {
                 event: be.event,
                 prompt_tag: be.prompt_tag,
                 received_at: be.received_at,
+                relay_received_at: be.relay_received_at,
+                relay_lag_secs: be.relay_lag_secs,
             });
         }
         // Enforce per-channel cap: trim newest (back) events if over limit.
@@ -1647,6 +1664,8 @@ mod tests {
             event: make_event(content),
             received_at: Instant::now(),
             prompt_tag: "test".into(),
+            relay_received_at: Instant::now(),
+            relay_lag_secs: 0,
         }
     }
 
@@ -1657,6 +1676,8 @@ mod tests {
             event: make_event(content),
             received_at: Instant::now() - age,
             prompt_tag: "test".into(),
+            relay_received_at: Instant::now() - age,
+            relay_lag_secs: 0,
         }
     }
 
@@ -1677,6 +1698,8 @@ mod tests {
             event,
             received_at: Instant::now(),
             prompt_tag: "test".into(),
+            relay_received_at: Instant::now(),
+            relay_lag_secs: 0,
         }
     }
 
@@ -1872,6 +1895,8 @@ mod tests {
                 event,
                 prompt_tag: "@mention".into(),
                 received_at: Instant::now(),
+                relay_received_at: Instant::now(),
+                relay_lag_secs: 0,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -1902,11 +1927,15 @@ mod tests {
                 event: make_event("the new message"),
                 prompt_tag: "@mention".into(),
                 received_at: Instant::now(),
+                relay_received_at: Instant::now(),
+                relay_lag_secs: 0,
             }],
             cancelled_events: vec![BatchEvent {
                 event: make_event("the original task"),
                 prompt_tag: "@mention".into(),
                 received_at: Instant::now(),
+                relay_received_at: Instant::now(),
+                relay_lag_secs: 0,
             }],
             cancel_reason: reason,
         }
@@ -2034,17 +2063,23 @@ mod tests {
                     event: make_event("new one"),
                     prompt_tag: "@mention".into(),
                     received_at: Instant::now(),
+                    relay_received_at: Instant::now(),
+                    relay_lag_secs: 0,
                 },
                 BatchEvent {
                     event: make_event("new two"),
                     prompt_tag: "@mention".into(),
                     received_at: Instant::now(),
+                    relay_received_at: Instant::now(),
+                    relay_lag_secs: 0,
                 },
             ],
             cancelled_events: vec![BatchEvent {
                 event: make_event("original"),
                 prompt_tag: "@mention".into(),
                 received_at: Instant::now(),
+                relay_received_at: Instant::now(),
+                relay_lag_secs: 0,
             }],
             cancel_reason: Some(CancelReason::Steer),
         };
@@ -2090,11 +2125,15 @@ mod tests {
                 event: steering,
                 prompt_tag: "@mention".into(),
                 received_at: Instant::now(),
+                relay_received_at: Instant::now(),
+                relay_lag_secs: 0,
             }],
             cancelled_events: vec![BatchEvent {
                 event: original,
                 prompt_tag: "@mention".into(),
                 received_at: Instant::now(),
+                relay_received_at: Instant::now(),
+                relay_lag_secs: 0,
             }],
             cancel_reason: Some(CancelReason::Steer),
         };
@@ -2183,16 +2222,22 @@ mod tests {
                     event: e1,
                     prompt_tag: "tag-a".into(),
                     received_at: Instant::now(),
+                    relay_received_at: Instant::now(),
+                    relay_lag_secs: 0,
                 },
                 BatchEvent {
                     event: e2,
                     prompt_tag: "tag-b".into(),
                     received_at: Instant::now(),
+                    relay_received_at: Instant::now(),
+                    relay_lag_secs: 0,
                 },
                 BatchEvent {
                     event: e3,
                     prompt_tag: "tag-c".into(),
                     received_at: Instant::now(),
+                    relay_received_at: Instant::now(),
+                    relay_lag_secs: 0,
                 },
             ],
             cancelled_events: vec![],
@@ -2222,6 +2267,8 @@ mod tests {
                 event,
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                relay_received_at: Instant::now(),
+                relay_lag_secs: 0,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -2245,6 +2292,8 @@ mod tests {
                 event,
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                relay_received_at: Instant::now(),
+                relay_lag_secs: 0,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -2277,6 +2326,8 @@ mod tests {
                 event,
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                relay_received_at: Instant::now(),
+                relay_lag_secs: 0,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -2307,6 +2358,8 @@ mod tests {
                 event,
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                relay_received_at: Instant::now(),
+                relay_lag_secs: 0,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -2334,6 +2387,8 @@ mod tests {
                 event,
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                relay_received_at: Instant::now(),
+                relay_lag_secs: 0,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -2358,6 +2413,8 @@ mod tests {
                 event,
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                relay_received_at: Instant::now(),
+                relay_lag_secs: 0,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -2414,6 +2471,8 @@ mod tests {
                 event,
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                relay_received_at: Instant::now(),
+                relay_lag_secs: 0,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -2452,6 +2511,8 @@ mod tests {
                 event,
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                relay_received_at: Instant::now(),
+                relay_lag_secs: 0,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -2680,6 +2741,8 @@ mod tests {
             channel_id: ch,
             event: make_event("old-msg"),
             received_at: old_time,
+            relay_received_at: old_time,
+            relay_lag_secs: 0,
             prompt_tag: "test".into(),
         });
 
@@ -2693,6 +2756,47 @@ mod tests {
         // No retry_after set — should be immediately flushable.
         let batch2 = q.flush_next().expect("flush after requeue_preserve");
         assert_eq!(batch2.events[0].received_at, original_received_at);
+    }
+
+    /// Turn-stage timing fields (`relay_received_at`, `relay_lag_secs`) survive
+    /// push → flush, `requeue_preserve_timestamps` → flush, and `requeue`'s
+    /// push-front — the batch always carries the original receipt marks.
+    #[test]
+    fn test_relay_timing_fields_preserved_through_flush_and_requeue() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        let relay_time = Instant::now() - Duration::from_secs(30);
+
+        q.push(QueuedEvent {
+            channel_id: ch,
+            event: make_event("timed-msg"),
+            received_at: relay_time + Duration::from_millis(250),
+            prompt_tag: "test".into(),
+            relay_received_at: relay_time,
+            relay_lag_secs: 7,
+        });
+
+        let batch = q.flush_next().expect("flush");
+        assert_eq!(batch.events[0].relay_received_at, relay_time);
+        assert_eq!(batch.events[0].relay_lag_secs, 7);
+
+        // requeue_preserve_timestamps → flush: marks unchanged.
+        q.requeue_preserve_timestamps(batch);
+        q.mark_complete(ch);
+        let batch2 = q.flush_next().expect("flush after requeue_preserve");
+        assert_eq!(batch2.events[0].relay_received_at, relay_time);
+        assert_eq!(batch2.events[0].relay_lag_secs, 7);
+
+        // requeue (backoff path) pushes the event back with marks intact;
+        // inspect the queue directly since retry_after throttles the flush.
+        assert!(
+            q.requeue(batch2).is_none(),
+            "attempt 1 must be requeued, not dead-lettered"
+        );
+        q.mark_complete(ch);
+        let requeued = q.queues[&ch].front().expect("requeued event");
+        assert_eq!(requeued.relay_received_at, relay_time);
+        assert_eq!(requeued.relay_lag_secs, 7);
     }
 
     #[test]
@@ -2969,6 +3073,8 @@ mod tests {
                 event,
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                relay_received_at: Instant::now(),
+                relay_lag_secs: 0,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -3000,6 +3106,8 @@ mod tests {
                 event,
                 prompt_tag: "dm".into(),
                 received_at: Instant::now(),
+                relay_received_at: Instant::now(),
+                relay_lag_secs: 0,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -3038,6 +3146,8 @@ mod tests {
                 event,
                 prompt_tag: "@mention".into(),
                 received_at: Instant::now(),
+                relay_received_at: Instant::now(),
+                relay_lag_secs: 0,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -3066,6 +3176,8 @@ mod tests {
                 event,
                 prompt_tag: "@mention".into(),
                 received_at: Instant::now(),
+                relay_received_at: Instant::now(),
+                relay_lag_secs: 0,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -3110,6 +3222,8 @@ mod tests {
                 event,
                 prompt_tag: "dm".into(),
                 received_at: Instant::now(),
+                relay_received_at: Instant::now(),
+                relay_lag_secs: 0,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -3159,6 +3273,8 @@ mod tests {
                 event,
                 prompt_tag: "@mention".into(),
                 received_at: Instant::now(),
+                relay_received_at: Instant::now(),
+                relay_lag_secs: 0,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -3366,6 +3482,8 @@ mod tests {
                 event,
                 prompt_tag: "dm".into(),
                 received_at: Instant::now(),
+                relay_received_at: Instant::now(),
+                relay_lag_secs: 0,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -3423,6 +3541,8 @@ mod tests {
                 event,
                 prompt_tag: "dm".into(),
                 received_at: Instant::now(),
+                relay_received_at: Instant::now(),
+                relay_lag_secs: 0,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -3463,6 +3583,8 @@ mod tests {
                 event,
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                relay_received_at: Instant::now(),
+                relay_lag_secs: 0,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -3487,6 +3609,8 @@ mod tests {
                 event,
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                relay_received_at: Instant::now(),
+                relay_lag_secs: 0,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -3510,6 +3634,8 @@ mod tests {
                 event,
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                relay_received_at: Instant::now(),
+                relay_lag_secs: 0,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -3876,6 +4002,8 @@ mod tests {
                 event,
                 prompt_tag: "@mention".into(),
                 received_at: Instant::now(),
+                relay_received_at: Instant::now(),
+                relay_lag_secs: 0,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -3918,6 +4046,8 @@ mod tests {
                 event,
                 prompt_tag: "@mention".into(),
                 received_at: Instant::now(),
+                relay_received_at: Instant::now(),
+                relay_lag_secs: 0,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -3952,6 +4082,8 @@ mod tests {
                 event,
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                relay_received_at: Instant::now(),
+                relay_lag_secs: 0,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -3981,6 +4113,8 @@ mod tests {
                 event,
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                relay_received_at: Instant::now(),
+                relay_lag_secs: 0,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -4023,6 +4157,8 @@ mod tests {
                 event,
                 prompt_tag: "@mention".into(),
                 received_at: Instant::now(),
+                relay_received_at: Instant::now(),
+                relay_lag_secs: 0,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -4059,6 +4195,8 @@ mod tests {
                 event,
                 prompt_tag: "@mention".into(),
                 received_at: Instant::now(),
+                relay_received_at: Instant::now(),
+                relay_lag_secs: 0,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -4095,11 +4233,15 @@ mod tests {
                     event: plain,
                     prompt_tag: "test".into(),
                     received_at: Instant::now(),
+                    relay_received_at: Instant::now(),
+                    relay_lag_secs: 0,
                 },
                 BatchEvent {
                     event: threaded,
                     prompt_tag: "@mention".into(),
                     received_at: Instant::now(),
+                    relay_received_at: Instant::now(),
+                    relay_lag_secs: 0,
                 },
             ],
             cancelled_events: vec![],
@@ -4132,11 +4274,15 @@ mod tests {
                     event: threaded,
                     prompt_tag: "@mention".into(),
                     received_at: Instant::now(),
+                    relay_received_at: Instant::now(),
+                    relay_lag_secs: 0,
                 },
                 BatchEvent {
                     event: plain,
                     prompt_tag: "test".into(),
                     received_at: Instant::now(),
+                    relay_received_at: Instant::now(),
+                    relay_lag_secs: 0,
                 },
             ],
             cancelled_events: vec![],
@@ -4164,6 +4310,8 @@ mod tests {
                 event: make_event(content),
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                relay_received_at: Instant::now(),
+                relay_lag_secs: 0,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -4241,6 +4389,8 @@ mod tests {
             event: make_event("another message"),
             prompt_tag: "test".into(),
             received_at: Instant::now(),
+            relay_received_at: Instant::now(),
+            relay_lag_secs: 0,
         });
         assert_eq!(slash_command_for_batch(&multi, &[]), None);
 
@@ -4250,6 +4400,8 @@ mod tests {
             event: make_event("interrupted"),
             prompt_tag: "test".into(),
             received_at: Instant::now(),
+            relay_received_at: Instant::now(),
+            relay_lag_secs: 0,
         });
         assert_eq!(slash_command_for_batch(&cancelled, &[]), None);
 
@@ -4458,6 +4610,8 @@ mod tests {
                 event: make_event("hi"),
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                relay_received_at: Instant::now(),
+                relay_lag_secs: 0,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -4487,6 +4641,8 @@ mod tests {
                 event: make_event("hi"),
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                relay_received_at: Instant::now(),
+                relay_lag_secs: 0,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -4515,6 +4671,8 @@ mod tests {
                 event: make_event("hi"),
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                relay_received_at: Instant::now(),
+                relay_lag_secs: 0,
             }],
             cancelled_events: vec![],
             cancel_reason: None,

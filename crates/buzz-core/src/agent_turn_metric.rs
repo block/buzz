@@ -125,6 +125,43 @@ pub struct AgentTurnMetricPayload {
 
     /// Why the turn ended. Unrecognized values MUST be treated as `Unknown`.
     pub stop_reason: Option<StopReason>,
+
+    /// Wall-clock lag (whole seconds, 1s resolution) between the triggering
+    /// event's `created_at` and harness receipt — minimum over the batch.
+    /// Omitted when unknown (e.g. heartbeat turns with no triggering event).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relay_lag_secs: Option<u64>,
+
+    /// Milliseconds from harness receipt to queue admission for the batch's
+    /// oldest event (author gate, rule matching). Omitted when unknown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub admission_ms: Option<u64>,
+
+    /// Milliseconds from harness receipt of the batch's oldest event to
+    /// prompt-task start (queueing + dispatch wait). Omitted when unknown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queue_wait_ms: Option<u64>,
+
+    /// Milliseconds from prompt-task start to session resolution (reused or
+    /// freshly created). Omitted when unknown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_setup_ms: Option<u64>,
+
+    /// Milliseconds from the `session/prompt` write to the first
+    /// `agent_message_chunk`. Omitted when the agent streamed no message
+    /// (e.g. failed or cancelled before output).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_output_ms: Option<u64>,
+
+    /// Milliseconds from prompt-task start to turn completion (any outcome).
+    /// Omitted when unknown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_total_ms: Option<u64>,
+
+    /// `true` when the turn ran on an existing session, `false` when a new
+    /// session was created for it. Omitted when unknown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_reused: Option<bool>,
 }
 
 fn default_delta_reliable() -> bool {
@@ -223,6 +260,13 @@ mod tests {
             }),
             delta_reliable: true,
             stop_reason: Some(StopReason::EndTurn),
+            relay_lag_secs: Some(2),
+            admission_ms: Some(35),
+            queue_wait_ms: Some(120),
+            session_setup_ms: Some(950),
+            first_output_ms: Some(1800),
+            turn_total_ms: Some(15400),
+            session_reused: Some(false),
         }
     }
 
@@ -318,6 +362,51 @@ mod tests {
     }
 
     #[test]
+    fn turn_timing_fields_round_trip_and_skip_when_absent() {
+        // Known timings serialize as camelCase keys; None timings are omitted
+        // entirely (skip_serializing_if), and payloads written before the
+        // fields existed still parse with all timings None.
+        let payload = sample_payload();
+        let json = serde_json::to_string(&payload).unwrap();
+        assert!(json.contains("\"relayLagSecs\":2"));
+        assert!(json.contains("\"admissionMs\":35"));
+        assert!(json.contains("\"queueWaitMs\":120"));
+        assert!(json.contains("\"sessionSetupMs\":950"));
+        assert!(json.contains("\"firstOutputMs\":1800"));
+        assert!(json.contains("\"turnTotalMs\":15400"));
+        assert!(json.contains("\"sessionReused\":false"));
+        let back: AgentTurnMetricPayload = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, payload);
+
+        let mut sparse = sample_payload();
+        sparse.relay_lag_secs = None;
+        sparse.admission_ms = None;
+        sparse.queue_wait_ms = None;
+        sparse.session_setup_ms = None;
+        sparse.first_output_ms = None;
+        sparse.turn_total_ms = None;
+        sparse.session_reused = None;
+        let json = serde_json::to_string(&sparse).unwrap();
+        for key in [
+            "relayLagSecs",
+            "admissionMs",
+            "queueWaitMs",
+            "sessionSetupMs",
+            "firstOutputMs",
+            "turnTotalMs",
+            "sessionReused",
+        ] {
+            assert!(!json.contains(key), "{key} must be omitted when None");
+        }
+
+        // Pre-timing payloads (no timing keys at all) still deserialize.
+        let legacy = r#"{"harness":"goose","timestamp":"2026-07-01T20:11:03Z"}"#;
+        let parsed: AgentTurnMetricPayload = serde_json::from_str(legacy).expect("parse");
+        assert_eq!(parsed.turn_total_ms, None);
+        assert_eq!(parsed.session_reused, None);
+    }
+
+    #[test]
     fn unknown_stop_reason_maps_to_unknown_not_error() {
         // NIP-AM: consumers MUST treat unrecognized stopReason values as Unknown;
         // the token counts remain valid and the whole payload must not be rejected.
@@ -368,6 +457,13 @@ mod tests {
             cumulative: None,
             delta_reliable: true,
             stop_reason: None,
+            relay_lag_secs: None,
+            admission_ms: None,
+            queue_wait_ms: None,
+            session_setup_ms: None,
+            first_output_ms: None,
+            turn_total_ms: None,
+            session_reused: None,
         }
     }
 
@@ -391,6 +487,13 @@ mod tests {
             }),
             delta_reliable: true,
             stop_reason: None,
+            relay_lag_secs: None,
+            admission_ms: None,
+            queue_wait_ms: None,
+            session_setup_ms: None,
+            first_output_ms: None,
+            turn_total_ms: None,
+            session_reused: None,
         }
     }
 
