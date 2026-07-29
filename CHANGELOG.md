@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.5.1
+
+- perf(desktop): move observer-feed archive and decrypt commands off main thread ([#3415](https://github.com/block/buzz/pull/3415)) ([`294c8c821`](https://github.com/block/buzz/commit/294c8c821de51442a8c384c0bdb66b1a10224ca0))
+- fix(desktop): preserve shared agent fidelity ([#3553](https://github.com/block/buzz/pull/3553)) ([`f7a3988ba`](https://github.com/block/buzz/commit/f7a3988ba13b590d9a55a7e8413fc3fb5ffbef18))
+- feat(agent): route Claude/GPT model families to their native gateway wire ([#3538](https://github.com/block/buzz/pull/3538)) ([`6438dedf8`](https://github.com/block/buzz/commit/6438dedf83a9dbe1853e484326911bf6c7f1618c))
+- Refine community invite limits ([#3529](https://github.com/block/buzz/pull/3529)) ([`24d90d128`](https://github.com/block/buzz/commit/24d90d1280a9325c6cbcf8eea30ac54db5afd2cb))
+- feat(agent): fix Anthropic prompt caching with Databricks (+ MCP proxy/TLS passthrough) ([#3463](https://github.com/block/buzz/pull/3463)) ([`c405ad1d4`](https://github.com/block/buzz/commit/c405ad1d4b1da061c11b3d26761252d41dcc62d3))
+- feat: add explicit entry for claude-opus-5 in model config ([#2831](https://github.com/block/buzz/pull/2831)) ([`90e058ebf`](https://github.com/block/buzz/commit/90e058ebf68137e048a409aec6616519379ff726))
+- fix(desktop): clear stale thread new-message pill ([#3411](https://github.com/block/buzz/pull/3411)) ([`55a3ed7b9`](https://github.com/block/buzz/commit/55a3ed7b9217cee5b23e0a5441947dc929b2a38c))
+- fix(ci): ratchet file sizes against the base tree ([#3352](https://github.com/block/buzz/pull/3352)) ([`9227bdf58`](https://github.com/block/buzz/commit/9227bdf58ad6664ae3c1078888f2181ec19c4da4))
+- feat(desktop): apply WebKit rendering workarounds at startup on Linux ([#3271](https://github.com/block/buzz/pull/3271)) ([`3ece4461d`](https://github.com/block/buzz/commit/3ece4461df8a7b9663a8e68327483b8377d4086d))
+- fix(desktop): stabilize flaky DM expansion E2E ordering assertions ([#2004](https://github.com/block/buzz/pull/2004)) ([`913d564ce`](https://github.com/block/buzz/commit/913d564ce0f35924291bf3eeab6508517a6d8d1f))
+- fix(desktop): paint community rail full height ([#3382](https://github.com/block/buzz/pull/3382)) ([`1d3b810ad`](https://github.com/block/buzz/commit/1d3b810ad70d6325718ed91e723f32c4a376d5e1))
+- feat(desktop): add custom harness inline from agent dialogs ([#3252](https://github.com/block/buzz/pull/3252)) ([`b0503d80c`](https://github.com/block/buzz/commit/b0503d80c298b1ece3b0a43b41d316829a3379e7))
+- feat(desktop): refine agent catalog sharing ([#2439](https://github.com/block/buzz/pull/2439)) ([`a35771fc4`](https://github.com/block/buzz/commit/a35771fc441cdc3c6f517f419037206783b502d2))
+- fix(desktop): keep drafts out of the Inbox All view ([#3217](https://github.com/block/buzz/pull/3217)) ([`3afa129ee`](https://github.com/block/buzz/commit/3afa129ee785cc74d921d0ba969254a8255c4cc0))
+- fix(desktop): restore the inbox icon in the sidebar ([#3341](https://github.com/block/buzz/pull/3341)) ([`00ede2e7a`](https://github.com/block/buzz/commit/00ede2e7aa7eb95571b7db3ebbd163adbf6cf74e))
+- fix(desktop): gate codex-acp on a minimum supported version ([#3254](https://github.com/block/buzz/pull/3254)) ([`4e3998f36`](https://github.com/block/buzz/commit/4e3998f36e36d68b9a93dcbd85f0864450bb8f5f))
+- feat(cli): add users set-status command for NIP-38 profile status ([#3253](https://github.com/block/buzz/pull/3253)) ([`60158fce3`](https://github.com/block/buzz/commit/60158fce3e670f11bb35d42627857ccaea50ff06))
+- fix(composer): scope multiline block formatting ([#3246](https://github.com/block/buzz/pull/3246)) ([`5457c947a`](https://github.com/block/buzz/commit/5457c947a74f5ba4b979f9c6411aa7626a858387))
+
+
 ## v0.5.0
 
 - feat(invites): add use-limited invite links ([#3141](https://github.com/block/buzz/pull/3141)) ([`d500c2d5c`](https://github.com/block/buzz/commit/d500c2d5cf5d9aabe0ca4ebebfcafdbe5f5b7fd3))
