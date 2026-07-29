@@ -521,7 +521,11 @@ mod tests {
         assert!(fence.verified_through().is_none(), "must start closed");
         assert!(!fence.covers(Utc::now() - chrono::Duration::days(365)));
 
-        let ts = Utc::now();
+        // ReplicaFence stores Unix microseconds (fence_micros), so
+        // verified_through() returns a microsecond-truncated timestamp.
+        // Truncate ts to match the contract — the fence's unit IS micros.
+        let ts = DateTime::from_timestamp_micros(Utc::now().timestamp_micros())
+            .expect("valid microsecond timestamp");
         fence.advance(ts);
         assert_eq!(fence.verified_through(), Some(ts));
         assert!(fence.covers(ts - chrono::Duration::seconds(1)));
