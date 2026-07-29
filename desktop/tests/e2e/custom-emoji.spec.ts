@@ -1,6 +1,9 @@
 import { expect, test } from "@playwright/test";
+import * as fs from "node:fs";
+import * as path from "node:path";
 
 import { installMockBridge } from "../helpers/bridge";
+import { waitForAnimations } from "../helpers/animations";
 
 // Custom-emoji end-to-end guard.
 //
@@ -75,6 +78,55 @@ test("typing a known :shortcode: renders an inline emoji node in the composer", 
   await expect(node).toHaveAttribute("data-shortcode", SHORTCODE);
   // The raw text must NOT linger alongside the node.
   await expect(input).not.toContainText(`:${SHORTCODE}:`);
+});
+
+test("emoji autocomplete ranks an exact standard shortcode before a custom substring", async ({
+  page,
+}, testInfo) => {
+  await openGeneral(page);
+
+  const input = page.getByTestId("message-input");
+  await input.click();
+  await input.pressSequentially(":joy");
+
+  const autocomplete = page.getByTestId("emoji-autocomplete");
+  await expect(autocomplete).toBeVisible();
+  const labels = await autocomplete.locator("button").allTextContents();
+  expect(labels[0]).toContain(":joy:");
+  expect(
+    labels.findIndex((label) => label.includes(":bufo_joy:")),
+  ).toBeGreaterThan(0);
+
+  const screenshotDir = path.resolve(
+    "test-results/emoji-autocomplete-screenshots",
+  );
+  fs.mkdirSync(screenshotDir, { recursive: true });
+  const screenshotPath = path.join(
+    screenshotDir,
+    "joy-exact-before-custom-substring.png",
+  );
+  await waitForAnimations(page);
+  await autocomplete.screenshot({ path: screenshotPath });
+  await testInfo.attach("joy-exact-before-custom-substring", {
+    path: screenshotPath,
+    contentType: "image/png",
+  });
+});
+
+test("emoji autocomplete keeps semantic matches ahead of loose shortcode fallbacks", async ({
+  page,
+}) => {
+  await openGeneral(page);
+
+  const input = page.getByTestId("message-input");
+  await input.click();
+  await input.pressSequentially(":sad");
+
+  const autocomplete = page.getByTestId("emoji-autocomplete");
+  await expect(autocomplete).toBeVisible();
+  await expect(autocomplete.locator("button").first()).not.toContainText(
+    ":sandwich:",
+  );
 });
 
 test("custom emoji deletes as a single unit (like a built-in emoji)", async ({
