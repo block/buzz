@@ -96,12 +96,30 @@ describe("ChannelWorkingIndicator", () => {
     assert.match(html, /text-sidebar-foreground\/45/);
     assert.match(html, /aria-label="Ned working"/);
     assert.doesNotMatch(html, /tabular-nums/);
+    assert.doesNotMatch(html, /channel-working-count-agent-work/);
     assert.doesNotMatch(html, />0s</);
+  });
+
+  it("centers the active process count inside the spinner when multiple are working", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(ChannelWorkingIndicator, {
+        channelName: "agent-work",
+        isActive: false,
+        summary: summary(["Ned", "Bart", "Carl"]),
+      }),
+    );
+
+    assert.match(html, /lucide-loader-circle/);
+    assert.match(html, /data-testid="channel-working-count-agent-work"/);
+    assert.match(html, /aria-hidden="true"/);
+    assert.match(html, /text-3xs/);
+    assert.match(html, /tabular-nums/);
+    assert.match(html, />3</);
   });
 });
 
 describe("ChannelMenuButton", () => {
-  it("uses the spinner for every supported left-nav channel item type", () => {
+  it("uses the counted spinner for every supported left-nav channel item type", () => {
     const itemTypes = [
       channel("general", "stream"),
       channel("private-team", "stream", "private"),
@@ -115,7 +133,7 @@ describe("ChannelMenuButton", () => {
           SidebarProvider,
           null,
           React.createElement(ChannelMenuButton, {
-            activeWorking: summary(["Ned"]),
+            activeWorking: summary(["Ned", "Bart", "Carl"]),
             channel: item,
             hasUnread: false,
             isActive: false,
@@ -126,7 +144,13 @@ describe("ChannelMenuButton", () => {
 
       assert.match(html, /lucide-loader-circle/, item.name);
       assert.match(html, /motion-safe:animate-spin/, item.name);
-      assert.doesNotMatch(html, /tabular-nums/, item.name);
+      assert.match(
+        html,
+        new RegExp(`channel-working-count-${item.name}`),
+        item.name,
+      );
+      assert.match(html, /tabular-nums/, item.name);
+      assert.match(html, />3</, item.name);
       assert.doesNotMatch(html, />0s</, item.name);
     }
   });

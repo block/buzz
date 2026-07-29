@@ -128,6 +128,12 @@ test.describe("active turn badge resilience", () => {
     const engineeringBadge = page.getByTestId("channel-working-engineering");
     await expect(generalBadge).toBeVisible({ timeout: 5_000 });
     await expect(engineeringBadge).toBeVisible();
+    await expect(page.getByTestId("channel-working-count-general")).toHaveText(
+      "2",
+    );
+    await expect(
+      page.getByTestId("channel-working-count-engineering"),
+    ).toHaveCount(0);
 
     // Simulate the all-at-once relay drop: no further frames, advance the clock
     // past both thresholds. This fires several real prune ticks; shouldPausePrune

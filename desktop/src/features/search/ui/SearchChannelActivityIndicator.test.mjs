@@ -43,4 +43,23 @@ describe("SearchChannelActivityIndicator", () => {
     assert.match(html, />2m ago</);
     assert.doesNotMatch(html, /lucide-loader-circle/);
   });
+
+  it("shows the active process count inside the recent-channel spinner", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(SearchChannelActivityIndicator, {
+        channelName: "recent-channel",
+        summary: {
+          ...activeWorking,
+          agentCount: 3,
+          agentNames: ["Honey", "Fizz", "Bumble"],
+          agentPubkeys: ["honey-pubkey", "fizz-pubkey", "bumble-pubkey"],
+        },
+        timestampLabel: "2m ago",
+      }),
+    );
+
+    assert.match(html, /data-testid="channel-working-count-recent-channel"/);
+    assert.match(html, />3</);
+    assert.doesNotMatch(html, /2m ago/);
+  });
 });

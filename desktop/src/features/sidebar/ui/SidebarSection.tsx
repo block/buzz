@@ -136,7 +136,7 @@ export function ChannelWorkingIndicator({
     <span
       aria-label={title}
       className={cn(
-        "hidden size-5 shrink-0 items-center justify-center group-data-[collapsible=icon]:hidden sm:inline-flex",
+        "relative hidden size-5 shrink-0 items-center justify-center group-data-[collapsible=icon]:hidden sm:inline-flex",
         isActive
           ? "text-sidebar-active-foreground/65"
           : "text-sidebar-foreground/45",
@@ -150,6 +150,15 @@ export function ChannelWorkingIndicator({
         aria-hidden="true"
         className="size-3.5 motion-safe:animate-spin"
       />
+      {summary.agentCount > 1 ? (
+        <span
+          aria-hidden="true"
+          className="absolute inset-0 flex items-center justify-center text-3xs font-semibold leading-none tabular-nums"
+          data-testid={`channel-working-count-${channelName}`}
+        >
+          {summary.agentCount}
+        </span>
+      ) : null}
     </span>
   );
 }
