@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use reqwest::Client;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use tokio::sync::Mutex;
 use tokio::time::Instant;
 
@@ -848,11 +848,24 @@ fn openai_body(
                     let calls: Vec<Value> = tool_calls
                         .iter()
                         .map(|c| {
-                            json!({
-                        "id": c.provider_id, "type": "function",
-                        "function": { "name": c.name,
-                            "arguments": serde_json::to_string(&c.arguments)
-                                .unwrap_or_else(|_| "{}".into()) } })
+                            let mut call = serde_json::Map::new();
+                            call.insert("id".into(), json!(c.provider_id));
+                            call.insert("type".into(), json!("function"));
+                            // Provider-owned fields go back beside `function`,
+                            // which is where the provider put them. Position is
+                            // load-bearing, not cosmetic: Gemini rejects a
+                            // `thoughtSignature` nested inside `function{}` with
+                            // the same 400 it gives for one that is missing.
+                            for (k, v) in &c.provider_extra {
+                                call.insert(k.clone(), v.clone());
+                            }
+                            call.insert(
+                                "function".into(),
+                                json!({ "name": c.name,
+                                    "arguments": serde_json::to_string(&c.arguments)
+                                        .unwrap_or_else(|_| "{}".into()) }),
+                            );
+                            Value::Object(call)
                         })
                         .collect();
                     msg.insert("tool_calls".into(), Value::Array(calls));
@@ -1120,10 +1133,15 @@ fn parse_responses(v: Value) -> Result<LlmResponse, AgentError> {
                 let args: Value = serde_json::from_str(raw).map_err(|e| {
                     AgentError::Llm(format!("function_call.arguments not valid JSON: {e}"))
                 })?;
+                // No passthrough on this route: `responses_body` replays a
+                // function call as `{call_id, name, arguments}` and the Responses
+                // API asks for nothing else, so an empty map keeps the request
+                // byte-identical to before.
                 tool_calls.push(make_tool_call(
                     str_field(item, "call_id"),
                     str_field(item, "name"),
                     args,
+                    Default::default(),
                 )?);
             }
             Some("reasoning") => {
@@ -1301,6 +1319,76 @@ fn str_field(v: &Value, key: &str) -> String {
     v.get(key).and_then(Value::as_str).unwrap_or("").to_owned()
 }
 
+/// Append `part` to `buf` on its own line, ignoring empties.
+fn push_part(buf: &mut String, part: &str) {
+    if part.is_empty() {
+        return;
+    }
+    if !buf.is_empty() {
+        buf.push('\n');
+    }
+    buf.push_str(part);
+}
+
+/// Split an OpenAI-shaped `message.content` into `(text, reasoning)`.
+///
+/// Standard OpenAI sends a string. Several models on the Databricks MLflow route
+/// — Gemini, Qwen35, gpt-oss — send an array of typed blocks instead, and
+/// `as_str()` yields nothing for an array, so their entire answer was being
+/// discarded: no error, no warning, just a turn that looked like the model had
+/// said nothing. `parse_anthropic` already walks a block array; this gives
+/// `parse_openai` the same tolerance.
+fn openai_content_parts(content: Option<&Value>) -> (String, String) {
+    let mut text = String::new();
+    let mut reasoning = String::new();
+    match content {
+        Some(Value::String(s)) => text.push_str(s),
+        Some(Value::Array(blocks)) => {
+            for b in blocks {
+                match b.get("type").and_then(Value::as_str) {
+                    Some("text") => push_part(&mut text, &str_field(b, "text")),
+                    Some("reasoning") => match b.get("summary").and_then(Value::as_array) {
+                        // Gemini nests the prose one level down under `summary`.
+                        Some(summary) => {
+                            for s in summary {
+                                push_part(&mut reasoning, &str_field(s, "text"));
+                            }
+                        }
+                        None => push_part(&mut reasoning, &str_field(b, "text")),
+                    },
+                    // An untyped block carrying text is still the model talking;
+                    // treating it as text loses nothing and keeps one more
+                    // provider out of the silent-empty-answer failure mode.
+                    _ => push_part(&mut text, &str_field(b, "text")),
+                }
+            }
+        }
+        _ => {}
+    }
+    (text, reasoning)
+}
+
+/// Make `provider_id` unique across one assistant turn's tool calls.
+///
+/// Gemini returns the function name as the id, so two parallel calls to the same
+/// function arrive sharing one id — and that id is what pairs a `role:"tool"`
+/// result back to its call, leaving two results indistinguishable. Rewriting is
+/// safe because both halves of that pairing are re-emitted from this same value;
+/// the provider never sees its original id again.
+fn dedupe_provider_ids(calls: &mut [ToolCall]) {
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    for c in calls.iter_mut() {
+        if seen.contains(&c.provider_id) {
+            let mut n = 2;
+            while seen.contains(&format!("{}-{n}", c.provider_id)) {
+                n += 1;
+            }
+            c.provider_id = format!("{}-{n}", c.provider_id);
+        }
+        seen.insert(c.provider_id.clone());
+    }
+}
+
 fn parse_anthropic(v: Value) -> Result<LlmResponse, AgentError> {
     let stop = map_stop(v.get("stop_reason").and_then(Value::as_str));
     let mut tool_calls = Vec::new();
@@ -1323,10 +1411,12 @@ fn parse_anthropic(v: Value) -> Result<LlmResponse, AgentError> {
                         reasoning.push_str(t);
                     }
                 }
+                // Anthropic's replay shape is fully modelled, so nothing to keep.
                 Some("tool_use") => tool_calls.push(make_tool_call(
                     str_field(b, "id"),
                     str_field(b, "name"),
                     b.get("input").cloned().unwrap_or(Value::Null),
+                    Default::default(),
                 )?),
                 _ => {}
             }
@@ -1358,15 +1448,21 @@ fn parse_openai(v: Value) -> Result<LlmResponse, AgentError> {
     let msg = choice
         .get("message")
         .ok_or_else(|| AgentError::Llm("missing message".into()))?;
-    let text = str_field(msg, "content");
+    let (text, block_reasoning) = openai_content_parts(msg.get("content"));
     // DeepSeek and vLLM-style OpenAI-compat hosts expose reasoning tokens on the
     // message object. Prefer `reasoning_content` (DeepSeek's field name); fall
-    // back to `reasoning` (some other providers). Both are absent for standard
-    // OpenAI responses, which leaves this empty without any special-casing.
+    // back to `reasoning` (some other providers), and last to reasoning blocks
+    // found inside `content`. All three are absent for standard OpenAI
+    // responses, which leaves this empty without any special-casing.
     let reasoning = {
         let rc = str_field(msg, "reasoning_content");
-        if rc.is_empty() {
+        let rc = if rc.is_empty() {
             str_field(msg, "reasoning")
+        } else {
+            rc
+        };
+        if rc.is_empty() {
+            block_reasoning
         } else {
             rc
         }
@@ -1380,13 +1476,25 @@ fn parse_openai(v: Value) -> Result<LlmResponse, AgentError> {
             let raw = f.get("arguments").and_then(Value::as_str).unwrap_or("{}");
             let args: Value = serde_json::from_str(raw)
                 .map_err(|e| AgentError::Llm(format!("tool_call.arguments not valid JSON: {e}")))?;
+            // Everything on the wire object we do not model, kept for replay.
+            let extra = tc
+                .as_object()
+                .map(|o| {
+                    o.iter()
+                        .filter(|(k, _)| !matches!(k.as_str(), "id" | "type" | "function"))
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect()
+                })
+                .unwrap_or_default();
             tool_calls.push(make_tool_call(
                 str_field(tc, "id"),
                 str_field(f, "name"),
                 args,
+                extra,
             )?);
         }
     }
+    dedupe_provider_ids(&mut tool_calls);
     let input_tokens = openai_chat_input_tokens(&v);
     let output_tokens = sum_usage(&v, &["completion_tokens"]);
     let cached_input_tokens = openai_chat_cached_tokens(&v);
@@ -1401,7 +1509,12 @@ fn parse_openai(v: Value) -> Result<LlmResponse, AgentError> {
     })
 }
 
-fn make_tool_call(id: String, name: String, args: Value) -> Result<ToolCall, AgentError> {
+fn make_tool_call(
+    id: String,
+    name: String,
+    args: Value,
+    provider_extra: Map<String, Value>,
+) -> Result<ToolCall, AgentError> {
     if id.is_empty() || name.is_empty() {
         return Err(AgentError::Llm("tool_call missing id or name".into()));
     }
@@ -1418,6 +1531,7 @@ fn make_tool_call(id: String, name: String, args: Value) -> Result<ToolCall, Age
         provider_id: id,
         name,
         arguments,
+        provider_extra,
     })
 }
 
@@ -2365,6 +2479,7 @@ mod tests {
                     provider_id: "toolu_1".into(),
                     name: "dev__view_image".into(),
                     arguments: serde_json::json!({"source":"x.png"}),
+                    provider_extra: Default::default(),
                 }],
             },
             HistoryItem::ToolResult(ToolResult {
@@ -2414,6 +2529,7 @@ mod tests {
                     provider_id: "call_abc".into(),
                     name: "dev__shell".into(),
                     arguments: serde_json::json!({"command": "ls"}),
+                    provider_extra: Default::default(),
                 }],
             },
             HistoryItem::ToolResult(ToolResult {
@@ -2512,6 +2628,7 @@ mod tests {
                     provider_id: "call_x".into(),
                     name: "t".into(),
                     arguments: serde_json::json!({}),
+                    provider_extra: Default::default(),
                 }],
             },
         ];
@@ -2790,11 +2907,13 @@ mod tests {
                         provider_id: "toolu_a".into(),
                         name: "dev__view_image".into(),
                         arguments: serde_json::json!({"source": "a.png"}),
+                        provider_extra: Default::default(),
                     },
                     ToolCall {
                         provider_id: "toolu_b".into(),
                         name: "dev__view_image".into(),
                         arguments: serde_json::json!({"source": "b.png"}),
+                        provider_extra: Default::default(),
                     },
                 ],
             },
@@ -3817,6 +3936,92 @@ mod tests {
             "content": [{"type": "text", "text": "hi"}]
         });
         assert_eq!(parse_anthropic(v).unwrap().input_tokens, None);
+    }
+
+    /// A Gemini reply as the Databricks MLflow route actually returns it:
+    /// block-array `content`, and a `thoughtSignature` beside `function`.
+    fn gemini_choice() -> Value {
+        json!({"choices": [{"finish_reason": "tool_calls", "message": {
+            "role": "assistant",
+            "content": [
+                {"type": "reasoning", "summary": [{"type": "summary_text", "text": "weighing it"}]},
+                {"type": "text", "text": "391"}
+            ],
+            "tool_calls": [{
+                "id": "get_weather", "type": "function", "thoughtSignature": "SIG-A",
+                "function": {"name": "get_weather", "arguments": "{\"city\":\"Paris\"}"}
+            }]
+        }}]})
+    }
+
+    #[test]
+    fn parse_openai_reads_text_out_of_a_block_array() {
+        // Before this, `as_str()` on the array yielded "" and the model's answer
+        // was discarded with no error at all.
+        let r = parse_openai(gemini_choice()).unwrap();
+        assert_eq!(r.text, "391");
+        assert_eq!(r.reasoning, "weighing it");
+    }
+
+    #[test]
+    fn parse_openai_still_reads_a_plain_string_content() {
+        let v = json!({"choices": [{"finish_reason": "stop", "message": {
+            "role": "assistant", "content": "plain"}}]});
+        let r = parse_openai(v).unwrap();
+        assert_eq!(r.text, "plain");
+        assert_eq!(r.reasoning, "");
+    }
+
+    #[test]
+    fn parse_openai_keeps_unmodelled_tool_call_fields() {
+        let r = parse_openai(gemini_choice()).unwrap();
+        let extra = &r.tool_calls[0].provider_extra;
+        assert_eq!(extra.get("thoughtSignature"), Some(&json!("SIG-A")));
+        // `id`/`type`/`function` are modelled, so they must not be duplicated
+        // into the passthrough — they would be re-emitted twice.
+        assert!(!extra.contains_key("id"));
+        assert!(!extra.contains_key("type"));
+        assert!(!extra.contains_key("function"));
+    }
+
+    #[test]
+    fn openai_body_replays_the_signature_beside_function_not_inside_it() {
+        // Position is what the gateway checks: nested inside `function{}` it is
+        // rejected with the same 400 as a missing signature.
+        let r = parse_openai(gemini_choice()).unwrap();
+        let history = vec![HistoryItem::Assistant {
+            text: r.text.clone(),
+            tool_calls: r.tool_calls.clone(),
+        }];
+        let body = openai_body(
+            &cfg(Provider::DatabricksV2),
+            "sys",
+            &history,
+            &[],
+            "databricks-gemini-3-6-flash",
+            None,
+        );
+        let call = &body["messages"][1]["tool_calls"][0];
+        assert_eq!(call["thoughtSignature"], json!("SIG-A"));
+        assert!(call["function"].get("thoughtSignature").is_none());
+        assert_eq!(call["function"]["name"], json!("get_weather"));
+    }
+
+    #[test]
+    fn parse_openai_makes_duplicate_tool_call_ids_unique() {
+        // Gemini returns the function name as the id, so parallel calls to one
+        // function collide and their results become indistinguishable.
+        let v = json!({"choices": [{"finish_reason": "tool_calls", "message": {
+        "role": "assistant", "content": "",
+        "tool_calls": [
+            {"id": "get_weather", "type": "function",
+             "function": {"name": "get_weather", "arguments": "{\"city\":\"Paris\"}"}},
+            {"id": "get_weather", "type": "function",
+             "function": {"name": "get_weather", "arguments": "{\"city\":\"Rome\"}"}}
+        ]}}]});
+        let r = parse_openai(v).unwrap();
+        assert_eq!(r.tool_calls[0].provider_id, "get_weather");
+        assert_eq!(r.tool_calls[1].provider_id, "get_weather-2");
     }
 
     #[test]
