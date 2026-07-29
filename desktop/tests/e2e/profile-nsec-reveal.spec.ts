@@ -5,6 +5,7 @@
 import { expect, test } from "@playwright/test";
 import { installMockBridge } from "../helpers/bridge";
 import { openSettings } from "../helpers/settings";
+import { endWindowFileDrag, startWindowFileDrag } from "../helpers/fileDrag";
 
 /** Expand the identity details section if it is not already open. */
 async function expandIdentity(page: import("@playwright/test").Page) {
@@ -81,6 +82,14 @@ test("settings creates and tests a password-protected key backup", async ({
     .fill("mock horse battery staple");
   await page.getByTestId("encrypted-backup-create").click();
   await expect(page.getByTestId("backup-test-dropzone")).toBeVisible();
+
+  // A file drag over the window swaps in a drop overlay covering the backup
+  // row (composer-style takeover); leaving restores the select button.
+  const dropOverlay = page.getByTestId("backup-test-drop-overlay");
+  await startWindowFileDrag(page);
+  await expect(dropOverlay).toBeVisible();
+  await endWindowFileDrag(page);
+  await expect(dropOverlay).toHaveCount(0);
 
   await page.getByTestId("backup-test-file-input").setInputFiles({
     name: "identity.ncryptsec",

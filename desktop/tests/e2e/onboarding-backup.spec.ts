@@ -1,6 +1,11 @@
 import { expect, test } from "@playwright/test";
 import { installMockBridge } from "../helpers/bridge";
 import { waitForAnimations } from "../helpers/animations";
+import {
+  dropFileOnTestId,
+  endWindowFileDrag,
+  startWindowFileDrag,
+} from "../helpers/fileDrag";
 
 async function enterMachineBackup(page: import("@playwright/test").Page) {
   await installMockBridge(page, undefined, {
@@ -149,8 +154,9 @@ test("download happy path: generated password, encrypt, native save, Next", asyn
   await page.getByTestId("encrypted-backup-create").click();
 
   // Only a successful save (the mock "picks" a path) advances to the
-  // "Now, test your backup" flow: a select-file button (dropzone while
-  // dragging) for the saved file, then the password to unlock it.
+  // "Now, test your backup" flow: a select-file button for the saved file
+  // (a composer-style drop overlay takes over the card while a file drag is
+  // over the window), then the password to unlock it.
   await expect(
     page.getByRole("heading", { name: "Now, test your backup" }),
   ).toBeVisible();
@@ -176,14 +182,24 @@ test("download happy path: generated password, encrypt, native save, Next", asyn
   });
   await expect(page.getByTestId("backup-test-file-error")).toBeVisible();
 
-  // The freshly downloaded file advances to the password check.
-  await page.getByTestId("backup-test-file-input").setInputFiles({
-    name: "identity.ncryptsec",
-    mimeType: "text/plain",
-    buffer: Buffer.from(MOCK_NCRYPTSEC),
-  });
+  // A file drag over the window swaps in the drop overlay; leaving without
+  // dropping restores the select button.
+  const dropOverlay = page.getByTestId("backup-test-drop-overlay");
+  await startWindowFileDrag(page);
+  await expect(dropOverlay).toBeVisible();
+  await waitForAnimations(page);
+  await page.screenshot({ path: `${SHOTS}/04b-backup-test-drop-overlay.png` });
+  await endWindowFileDrag(page);
+  await expect(dropOverlay).toHaveCount(0);
+
+  // Dropping the freshly downloaded file on the overlay advances to the
+  // password check.
+  await startWindowFileDrag(page);
+  await expect(dropOverlay).toBeVisible();
+  await dropFileOnTestId(page, "backup-test-drop-overlay", MOCK_NCRYPTSEC);
   const password = page.getByTestId("backup-test-password");
   await expect(password).toBeVisible();
+  await expect(dropOverlay).toHaveCount(0);
 
   await waitForAnimations(page);
   await page.screenshot({ path: `${SHOTS}/05-backup-test-password.png` });

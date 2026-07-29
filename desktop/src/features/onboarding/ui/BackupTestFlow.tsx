@@ -142,9 +142,8 @@ export function BackupTestFlow({
 }: BackupTestFlowProps) {
   const reduceMotion = useReducedMotion() ?? false;
   const { stage, fileName, attempt } = progress;
-  const [isDragActive, setIsDragActive] = React.useState(false);
-  // True while a file drag is anywhere over the window — the select button
-  // renders as a dropzone only for the duration of the drag.
+  // True while a file drag is anywhere over the window — the drop overlay
+  // takes over the host surface only for the duration of the drag.
   const [isWindowDragging, setIsWindowDragging] = React.useState(false);
   const dragDepthRef = React.useRef(0);
 
@@ -322,63 +321,50 @@ export function BackupTestFlow({
           />
           <button
             className={cn(
-              "flex flex-col items-center justify-center gap-2 text-center transition-all",
-              isWindowDragging
-                ? cn(
-                    "w-full rounded-2xl border-2 border-dashed px-6",
-                    isSpotlight ? "h-44" : "h-32",
-                    isDragActive
-                      ? "border-primary bg-primary/10"
-                      : "border-foreground/25 bg-background/40",
-                  )
-                : cn(
-                    "mx-auto rounded-full bg-primary shadow hover:bg-primary/90",
-                    // The CTA-label variable only exists inside the onboarding
-                    // theme; elsewhere fall back to the standard primary pair.
-                    isSpotlight
-                      ? "h-14 px-12 text-(--buzz-onboarding-cta-label)"
-                      : "h-9 px-6 text-primary-foreground",
-                  ),
+              "mx-auto flex items-center justify-center rounded-full bg-primary text-center shadow transition-colors hover:bg-primary/90",
+              // The CTA-label variable only exists inside the onboarding
+              // theme; elsewhere fall back to the standard primary pair.
+              isSpotlight
+                ? "h-14 px-12 text-(--buzz-onboarding-cta-label)"
+                : "h-9 px-6 text-primary-foreground",
             )}
             data-testid="backup-test-dropzone"
             onClick={() => fileInputRef.current?.click()}
-            onDragLeave={() => setIsDragActive(false)}
-            onDragOver={(event) => {
-              event.preventDefault();
-              setIsDragActive(true);
-            }}
-            onDrop={(event) => {
-              event.preventDefault();
-              setIsDragActive(false);
-              const file = event.dataTransfer.files?.[0];
-              if (file) void handleFile(file);
-            }}
             type="button"
           >
-            {isWindowDragging ? (
-              <>
-                <FileUp
-                  aria-hidden="true"
-                  className={cn(
-                    "h-8 w-8 transition-colors",
-                    isDragActive ? "text-primary" : "text-muted-foreground",
-                  )}
-                />
-                <span className="text-sm font-medium text-foreground">
-                  Drop your backup file here
-                </span>
-              </>
-            ) : (
-              <span
-                className={cn(
-                  "font-medium",
-                  isSpotlight ? "text-base" : "text-sm",
-                )}
-              >
-                Select your backup file
-              </span>
-            )}
+            <span
+              className={cn(
+                "font-medium",
+                isSpotlight ? "text-base" : "text-sm",
+              )}
+            >
+              Select your backup file
+            </span>
           </button>
+          {isWindowDragging ? (
+            /*
+             * Composer-style takeover: fills the nearest positioned host
+             * surface (the onboarding card / the settings backup row) and is
+             * itself the drop target, so anywhere on that surface accepts
+             * the file.
+             */
+            // biome-ignore lint/a11y/noStaticElementInteractions: pointer-only drop target; the select button is the keyboard-accessible path
+            <div
+              className="absolute inset-2 z-10 mt-0! flex items-center justify-center rounded-2xl border-2 border-dashed border-primary bg-primary/10 backdrop-blur-sm"
+              data-testid="backup-test-drop-overlay"
+              onDragOver={(event) => event.preventDefault()}
+              onDrop={(event) => {
+                event.preventDefault();
+                const file = event.dataTransfer.files?.[0];
+                if (file) void handleFile(file);
+              }}
+            >
+              <span className="flex items-center gap-2 rounded-full bg-foreground px-4 py-2 text-sm font-semibold text-background shadow-sm ring-1 ring-background/15">
+                <FileUp aria-hidden="true" className="size-4" />
+                <span>Drop your backup file here</span>
+              </span>
+            </div>
+          ) : null}
           {fileError ? (
             <p
               className="text-center text-sm text-destructive"
