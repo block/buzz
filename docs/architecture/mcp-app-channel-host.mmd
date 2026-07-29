@@ -52,13 +52,15 @@ sequenceDiagram
 
   rect rgb(255, 247, 237)
     Note over Shell,Server: Runtime interaction
-    App->>Shell: Validated postMessage
+    App->>Proxy: postMessage from the opaque frame
+    Proxy->>Shell: Relay validated message
     alt MCP tool call
       Shell->>Host: tools/call as app
       Host->>Server: tools/call
       Server-->>Host: Tool result
       Host-->>Shell: Tool result
-      Shell-->>App: Tool result through the bridge
+      Shell-->>Proxy: Tool result through the bridge
+      Proxy-->>App: Relay tool result
     else Channel post request
       Shell-->>User: Show exact attributed message
       User->>Shell: Approve post
