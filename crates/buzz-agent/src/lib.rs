@@ -100,6 +100,11 @@ struct Session {
     accumulated_input_tokens: u64,
     /// Session-cumulative output tokens across all turns.
     accumulated_output_tokens: u64,
+    /// Session-cumulative cache-served input tokens across all turns — a subset
+    /// of `accumulated_input_tokens`, not an addition to it. Emitted alongside
+    /// it so a consumer can price the cached slice at the provider's discounted
+    /// rate instead of assuming every input token cost full price.
+    accumulated_cached_input_tokens: u64,
 }
 
 fn die(msg: String) -> ! {
@@ -426,6 +431,7 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
             effective_model: None,
             accumulated_input_tokens: 0,
             accumulated_output_tokens: 0,
+            accumulated_cached_input_tokens: 0,
         },
     );
     drop(sessions);
@@ -672,6 +678,7 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
         .unwrap_or(&app.cfg.model);
     let mut turn_input_tokens: Option<u64> = None;
     let mut turn_output_tokens: Option<u64> = None;
+    let mut turn_cached_input_tokens: Option<u64> = None;
     let mut ctx = RunCtx {
         cfg: &app.cfg,
         effective_model: effective_model_str,
@@ -690,6 +697,7 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
         last_request_history_bytes: &mut last_request_history_bytes,
         turn_input_tokens: &mut turn_input_tokens,
         turn_output_tokens: &mut turn_output_tokens,
+        turn_cached_input_tokens: &mut turn_cached_input_tokens,
     };
     let result = ctx.run(p.prompt).await;
     if let Some(s) = app.sessions.lock().await.get_mut(&sid) {
@@ -722,14 +730,21 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
                 s.accumulated_output_tokens = s
                     .accumulated_output_tokens
                     .saturating_add(turn_output_tokens.unwrap_or(0));
-                Some((s.accumulated_input_tokens, s.accumulated_output_tokens))
+                s.accumulated_cached_input_tokens = s
+                    .accumulated_cached_input_tokens
+                    .saturating_add(turn_cached_input_tokens.unwrap_or(0));
+                Some((
+                    s.accumulated_input_tokens,
+                    s.accumulated_output_tokens,
+                    s.accumulated_cached_input_tokens,
+                ))
             } else {
                 // Session is gone — the accumulated baseline no longer exists, so
                 // there is nothing correct to emit. Skip the usage notification.
                 None
             }
         };
-        if let Some((accumulated_in, accumulated_out)) = accumulated {
+        if let Some((accumulated_in, accumulated_out, accumulated_cached)) = accumulated {
             wire::send(
                 &wire_tx,
                 goose_session_update(
@@ -742,6 +757,11 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
                         "contextLimit": 0u64,
                         "accumulatedInputTokens": accumulated_in,
                         "accumulatedOutputTokens": accumulated_out,
+                        // A subset of accumulatedInputTokens, not an addition to
+                        // it. Extends goose's usage_update shape; a consumer that
+                        // does not know the field ignores it and prices exactly as
+                        // it did before.
+                        "accumulatedCachedInputTokens": accumulated_cached,
                         "model": effective_model_str,
                     }),
                 ),
