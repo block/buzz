@@ -6,8 +6,6 @@ import {
 import type {
   AddChannelMembersInput,
   AddChannelMembersResult,
-  BackendProviderCandidate,
-  BackendProviderProbeResult,
   CanvasResponse,
   GetHomeFeedInput,
   HomeFeedResponse,
@@ -38,6 +36,7 @@ import type {
   RuntimeConfigSurface,
 } from "@/shared/api/types";
 
+export * from "@/shared/api/tauriBackendProviders";
 export * from "@/shared/api/tauriChannels";
 
 type RawPresenceLookup = Record<string, PresenceStatus>;
@@ -1125,22 +1124,6 @@ export async function updateManagedAgent(
     agent: fromRawManagedAgent(response.agent),
     profileSyncError: response.profile_sync_error,
   };
-}
-
-// ── Backend provider discovery ────────────────────────────────────────────────
-
-export async function discoverBackendProviders(): Promise<
-  BackendProviderCandidate[]
-> {
-  return invokeTauri<BackendProviderCandidate[]>("discover_backend_providers");
-}
-
-export async function probeBackendProvider(
-  binaryPath: string,
-): Promise<BackendProviderProbeResult> {
-  return invokeTauri<BackendProviderProbeResult>("probe_backend_provider", {
-    binaryPath,
-  });
 }
 
 // ── NIP-44 encrypt-to-self ───────────────────────────────────────────────────

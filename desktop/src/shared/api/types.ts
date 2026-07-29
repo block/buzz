@@ -407,18 +407,13 @@ export type ManagedAgent = {
  */
 export type RespondToMode = "owner-only" | "allowlist" | "anyone";
 
-export type BackendProviderCandidate = {
-  id: string;
-  binaryPath: string;
-};
-
-export type BackendProviderProbeResult = {
-  ok: boolean;
-  name?: string;
-  version?: string;
-  description?: string;
-  config_schema?: Record<string, unknown>;
-};
+// Backend-provider vocabulary (remote machines) lives in its own module.
+export type {
+  BackendProviderCandidate,
+  BackendProviderProbeResult,
+  RemoteHarness,
+  RemoteHarnessCatalog,
+} from "./backendProviderTypes";
 
 export type RelayMeshConfig = {
   modelRef: string;
