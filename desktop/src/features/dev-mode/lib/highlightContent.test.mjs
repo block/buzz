@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { renderHighlightedContent } from "./highlightContent.tsx";
+import {
+  matchLeadingMention,
+  renderHighlightedContent,
+} from "./highlightContent.tsx";
 
 const channels = [
   { id: "c1", name: "fix login bug" },
@@ -76,4 +79,35 @@ test("channelRef_requiresBoundaryAfterName", () => {
   // "#deploysX" is not the known channel "deploys".
   const nodes = renderHighlightedContent("see #deploysX", [], channelRefOpts());
   assert.equal(buttons(nodes).length, 0);
+});
+
+const ampMention = { name: "amp (local)", color: "#00bcd4" };
+
+test("leadingMention_knownName_matchesPastTrailingSpace", () => {
+  const directed = matchLeadingMention("@amp (local) open a PR", [ampMention]);
+  assert.ok(directed);
+  assert.equal(directed.mention.name, "amp (local)");
+  assert.equal("@amp (local) open a PR".slice(directed.end), "open a PR");
+});
+
+test("leadingMention_matchesEntireMessage", () => {
+  const directed = matchLeadingMention("@amp (local)", [ampMention]);
+  assert.ok(directed);
+  assert.equal("@amp (local)".slice(directed.end), "");
+});
+
+test("leadingMention_midMessageMention_doesNotMatch", () => {
+  assert.equal(
+    matchLeadingMention("ask @amp (local) later", [ampMention]),
+    null,
+  );
+});
+
+test("leadingMention_unknownName_doesNotMatch", () => {
+  assert.equal(matchLeadingMention("@stranger hello", [ampMention]), null);
+});
+
+test("leadingMention_requiresBoundaryAfterName", () => {
+  // "@amp (local)x" is not the known mention "amp (local)".
+  assert.equal(matchLeadingMention("@amp (local)x hi", [ampMention]), null);
 });

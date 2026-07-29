@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import { useAuthorColorResolver } from "@/features/dev-mode/lib/authorColors";
+import { matchLeadingMention } from "@/features/dev-mode/lib/highlightContent";
 import { collectReactions } from "@/features/dev-mode/lib/messageReactions";
 import {
   byCreatedAscending,
@@ -12,7 +13,10 @@ import {
 } from "@/features/dev-mode/lib/useDevComposerModes";
 import { useChannelRefAutocomplete } from "@/features/dev-mode/lib/useChannelRefAutocomplete";
 import { useComposerAutoGrow } from "@/features/dev-mode/lib/useComposerAutoGrow";
-import { useMemberNameResolver } from "@/features/dev-mode/lib/useMemberNameResolver";
+import {
+  useMemberNameResolver,
+  type NameResolver,
+} from "@/features/dev-mode/lib/useMemberNameResolver";
 import { usePinnedScroll } from "@/features/dev-mode/lib/usePinnedScroll";
 import { DevChannelSuggestions } from "@/features/dev-mode/ui/DevChannelSuggestions";
 import { DevComposerResizeHandle } from "@/features/dev-mode/ui/DevComposerResizeHandle";
@@ -20,6 +24,15 @@ import { DevMessageRow } from "@/features/dev-mode/ui/DevMessageRow";
 import { useThreadReplies } from "@/features/messages/useThreadReplies";
 import type { Channel, RelayEvent } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
+
+/** Header preview of the root prompt, minus any leading `@Name` direction. */
+function rootPreview(root: RelayEvent, resolveName: NameResolver): string {
+  const mentions = root.tags
+    .filter((tag) => tag[0] === "p" && tag[1])
+    .map((tag) => ({ name: resolveName(tag[1]), color: "" }));
+  const directed = matchLeadingMention(root.content, mentions);
+  return directed ? root.content.slice(directed.end) : root.content;
+}
 
 /**
  * Split-screen side chat for one prompt card: the root prompt, its thread,
@@ -148,7 +161,7 @@ export function DevThreadPanel({
     >
       <div className="flex shrink-0 items-center justify-between border-b border-border/60 px-3 py-1.5 text-xs text-muted-foreground">
         <span className="min-w-0 truncate">
-          side chat · {root ? root.content : "new thread"}
+          side chat · {root ? rootPreview(root, resolveName) : "new thread"}
         </span>
         <button
           className="ml-2 shrink-0 cursor-pointer hover:text-foreground"

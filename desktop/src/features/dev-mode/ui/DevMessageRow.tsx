@@ -1,6 +1,7 @@
 import type { AuthorColorResolver } from "@/features/dev-mode/lib/authorColors";
 import { useChannelRefs } from "@/features/dev-mode/lib/channelRefs";
 import {
+  matchLeadingMention,
   renderHighlightedContent,
   type MentionStyle,
 } from "@/features/dev-mode/lib/highlightContent";
@@ -66,6 +67,13 @@ export function DevMessageRow({
     mentionStyles.push({ name, color: resolveColor(tag[1]) });
   }
 
+  // A leading `@Name` mention is direction, not prose: it renders as a
+  // "to Name" line under the author instead of inside the message body.
+  const directed = matchLeadingMention(event.content, mentionStyles);
+  const bodyContent = directed
+    ? event.content.slice(directed.end)
+    : event.content;
+
   return (
     <div className="min-w-0 py-1 text-sm leading-6">
       <div className="flex min-w-0 items-baseline gap-2">
@@ -85,13 +93,21 @@ export function DevMessageRow({
           <ReactionChips reactions={reactions} />
         ) : null}
       </div>
+      {directed ? (
+        <div className="select-none text-xs leading-4 text-muted-foreground/60">
+          to{" "}
+          <span style={{ color: directed.mention.color }}>
+            {directed.mention.name}
+          </span>
+        </div>
+      ) : null}
       <div
         className={cn(
           "min-w-0 whitespace-pre-wrap break-words [overflow-wrap:anywhere]",
           event.pending && "text-muted-foreground",
         )}
       >
-        {renderHighlightedContent(event.content, mentionStyles, {
+        {renderHighlightedContent(bodyContent, mentionStyles, {
           channels,
           onOpen: openChannel,
         })}

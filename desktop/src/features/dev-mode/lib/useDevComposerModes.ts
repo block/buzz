@@ -30,7 +30,7 @@ export type DevComposerMode =
   | { kind: "agent"; target: DevAgentTarget };
 
 export function devComposerModeLabel(mode: DevComposerMode): string {
-  return mode.kind === "chat" ? "chat" : `@${mode.target.name}`;
+  return mode.kind === "chat" ? "chat" : mode.target.name;
 }
 
 /**

@@ -21,8 +21,10 @@ import type {
 
 /**
  * Everyone in the channel sees which agent a prompt is directed at: the
- * message text carries a visible `@Name` prefix (matching the standard
- * composer's mention-text convention) unless the user already typed one.
+ * message text carries a `@Name` prefix (matching the standard composer's
+ * mention-text convention) unless the user already typed one. Dev mode lifts
+ * the prefix out of the body at render time and shows it as a "to Name" line
+ * under the author; the standard UI still shows the literal mention text.
  */
 export function withAgentMention(prompt: string, name: string): string {
   const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

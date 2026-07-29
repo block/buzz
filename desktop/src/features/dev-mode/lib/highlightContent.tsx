@@ -69,6 +69,23 @@ function matchKnownMention(
   return best;
 }
 
+/**
+ * A known mention the message text opens with (`@Name …`). Dev mode lifts it
+ * out of the body and renders it as a "to Name" line under the author name;
+ * `end` is the content offset just past the mention and its trailing space.
+ */
+export function matchLeadingMention(
+  content: string,
+  mentions: MentionStyle[],
+): { mention: MentionStyle; end: number } | null {
+  if (!content.startsWith("@")) return null;
+  const known = matchKnownMention(content, 0, mentions);
+  if (!known) return null;
+  let end = 1 + known.name.length;
+  while (end < content.length && /\s/.test(content[end])) end += 1;
+  return { mention: known, end };
+}
+
 export function renderHighlightedContent(
   content: string,
   mentions: MentionStyle[] = [],
