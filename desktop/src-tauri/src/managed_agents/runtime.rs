@@ -445,9 +445,35 @@ pub(crate) fn configure_runtime_cli(
     }
 }
 
+/// Relay URL for the spawned harness's `BUZZ_RELAY_URL` and git-credential
+/// scope: always the caller's *configured* URL, never the canonical
+/// runtime-key form. Relay tenancy is derived from the HTTP Host header, so
+/// the canonical loopback rewrite (`ws://localhost:3000` →
+/// `ws://127.0.0.1:3000`) names a different — empty — community than the one
+/// the desktop wrote the agent's channel memberships into; a harness handed
+/// the canonical form discovers 0 channels and never sees a mention. The
+/// canonical form stays correct for identity only: runtime-map keys,
+/// receipts, log paths, and the spawn-config hash (which `status_for`
+/// recomputes from `key.relay_url`).
+pub(crate) fn child_connect_relay_url<'a>(
+    configured: &'a str,
+    key: &ManagedAgentRuntimeKey,
+) -> &'a str {
+    debug_assert!(
+        buzz_core_pkg::relay::normalize_relay_url(configured)
+            .is_ok_and(|canonical| canonical == key.relay_url),
+        "configured relay URL must canonicalize to the runtime key's relay"
+    );
+    configured
+}
+
 /// Spawn an agent process without holding any locks on records or runtimes.
 /// Returns the child process and log path on success. The caller is responsible
 /// for updating `ManagedAgentRecord` fields and inserting into the runtimes map.
+///
+/// `relay_url`: the *configured* pair relay (workspace override / start
+/// request), not a canonical runtime-key round-trip — see
+/// `child_connect_relay_url`.
 ///
 /// `owner_hex`: the workspace owner's pubkey, used as a fallback for legacy
 /// records that have no NIP-OA `auth_tag`. See `build_respond_to_env`.
@@ -545,9 +571,11 @@ pub fn spawn_agent_child(
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| effective_command.clone());
 
-    // The caller supplies the explicit canonical pair relay. This is the only
-    // relay this child may connect to, regardless of the record/workspace default.
-    let effective_relay_url = runtime_key.relay_url.clone();
+    // The caller supplies the explicit pair relay. This is the only relay this
+    // child may connect to, regardless of the record/workspace default — in the
+    // configured spelling, because the Host header decides which community the
+    // child lands in (see `child_connect_relay_url`).
+    let child_relay_url = child_connect_relay_url(relay_url, &runtime_key);
 
     // Augment PATH for DMG launches so child processes can find:
     //   - bundled CLI via ~/.local/bin symlink
@@ -578,7 +606,7 @@ pub fn spawn_agent_child(
     }
     command.env("RUST_LOG", child_rust_log_filter());
     command.env("BUZZ_PRIVATE_KEY", &record.private_key_nsec);
-    command.env("BUZZ_RELAY_URL", &effective_relay_url);
+    command.env("BUZZ_RELAY_URL", child_relay_url);
     command.env("BUZZ_ACP_LAZY_POOL", if lazy { "true" } else { "false" });
     command.env("BUZZ_ACP_AGENT_COMMAND", &resolved_agent_command);
     command.env("BUZZ_ACP_AGENT_ARGS", agent_args.join(","));
@@ -826,7 +854,7 @@ pub fn spawn_agent_child(
     //
     // NOSTR_PRIVATE_KEY mirrors BUZZ_PRIVATE_KEY — keep in sync.
     if let Some(cred_helper) = resolve_command("git-credential-nostr") {
-        let relay_http_url = crate::relay::relay_http_base_url(&effective_relay_url);
+        let relay_http_url = crate::relay::relay_http_base_url(child_relay_url);
 
         command.env("NOSTR_PRIVATE_KEY", &record.private_key_nsec);
         command.env("GIT_TERMINAL_PROMPT", "0");
@@ -914,13 +942,14 @@ pub fn spawn_agent_child(
 
     // Stamp the effective spawn config so the summary builder can flag
     // needs_restart when disk state drifts from what this process runs.
-    // `effective_relay_url` is already resolved, and resolution is idempotent,
-    // so it serves as the workspace-relay input here.
+    // Hash the *canonical* relay form: `status_for` recomputes this hash from
+    // `key.relay_url`, so hashing the configured spelling here would read as
+    // permanent drift and flag a spurious restart on every status pass.
     let spawn_config_hash = super::spawn_hash::spawn_config_hash(
         record,
         &personas,
         &teams,
-        &effective_relay_url,
+        &runtime_key.relay_url,
         &global,
     );
 
@@ -1003,7 +1032,9 @@ pub fn start_managed_agent_process(
     // Scalar PIDs are migration-only and never establish pair liveness.
     record.runtime_pid = None;
 
-    let mut process = spawn_agent_child(app, record, &key.relay_url, false, owner_hex)?;
+    // Configured spelling, not `key.relay_url` — Host-derived tenancy (see
+    // `child_connect_relay_url`).
+    let mut process = spawn_agent_child(app, record, &relay_url, false, owner_hex)?;
     let now = now_iso();
     let receipt = super::ManagedAgentRuntimeReceipt {
         key: key.clone(),

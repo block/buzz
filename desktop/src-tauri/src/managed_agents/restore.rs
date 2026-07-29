@@ -330,10 +330,14 @@ pub async fn restore_managed_agents_on_launch(
                                             // mid-turn session is not resumed by an
                                             // eager child — and silently reintroduces
                                             // N idle brains on every launch.
+                                            // Configured spelling, not
+                                            // `key.relay_url` — Host-derived
+                                            // tenancy (see
+                                            // `child_connect_relay_url`).
                                             spawn_agent_child(
                                                 app,
                                                 record,
-                                                &key.relay_url,
+                                                &relay_url,
                                                 true,
                                                 owner_hex_ref,
                                             )
