@@ -188,19 +188,47 @@ export function DevModeShell() {
 
   // Clicks on non-interactive chrome must not blur the active input — this
   // also covers the click that refocuses the window landing on dead space.
+  // Transcript areas opt out (data-allow-text-selection) so message text
+  // stays drag-selectable; handleShellMouseUp restores focus afterwards.
   const handleShellMouseDown = React.useCallback(
     (event: React.MouseEvent<HTMLDivElement>) => {
       const target = event.target;
       if (
         target instanceof HTMLElement &&
         !target.closest(
-          "button, a, input, textarea, select, [role='button'], [role='separator'], [contenteditable='true']",
+          "button, a, input, textarea, select, [role='button'], [role='separator'], [contenteditable='true'], [data-allow-text-selection]",
         )
       ) {
         event.preventDefault();
       }
     },
     [],
+  );
+
+  // A click in a transcript that ends without selecting text returns focus
+  // to the last-focused composer, so clicking a message never strands focus.
+  const handleShellMouseUp = React.useCallback(
+    (event: React.MouseEvent<HTMLDivElement>) => {
+      const target = event.target;
+      if (
+        !(target instanceof HTMLElement) ||
+        !target.closest("[data-allow-text-selection]") ||
+        target.closest("button, a, input, textarea, [contenteditable='true']")
+      ) {
+        return;
+      }
+      requestAnimationFrame(() => {
+        const selection = window.getSelection();
+        if (selection && !selection.isCollapsed) return;
+        const last = lastFocusedRef.current;
+        if (last?.isConnected) {
+          last.focus();
+        } else {
+          focusComposer();
+        }
+      });
+    },
+    [focusComposer],
   );
 
   const closePalette = React.useCallback(() => {
@@ -463,7 +491,6 @@ export function DevModeShell() {
       channel={channel}
       currentPubkey={identityQuery.data?.pubkey ?? null}
       onOpenThread={handleOpenThread}
-      onSelectRoot={setSelectedRootId}
       selectedRootId={view === "channel" ? selectedRootId : null}
     />
   );
@@ -509,6 +536,7 @@ export function DevModeShell() {
       data-testid="dev-mode-shell"
       onFocusCapture={handleFocusCapture}
       onMouseDown={handleShellMouseDown}
+      onMouseUp={handleShellMouseUp}
     >
       <div
         className={cn(

@@ -95,7 +95,6 @@ function PromptCard({
   currentPubkey,
   resolveName,
   resolveColor,
-  onSelect,
   onOpenThread,
 }: {
   channel: Channel;
@@ -107,7 +106,6 @@ function PromptCard({
   currentPubkey: string | null;
   resolveName: NameResolver;
   resolveColor: AuthorColorResolver;
-  onSelect: () => void;
   onOpenThread: () => void;
 }) {
   // Callback ref mounts only on the selected card, so keyboard navigation
@@ -120,21 +118,15 @@ function PromptCard({
   );
 
   return (
-    // biome-ignore lint/a11y/useKeyWithClickEvents: keyboard selection is handled globally by the composer (↑↓ + Enter)
-    // biome-ignore lint/a11y/useSemanticElements: a <button> card would nest the interactive replies <button>, which is invalid HTML
+    // Selection is keyboard-only (↑/↓ + Enter on the composer); clicks land
+    // here only for text selection and never move focus or selection.
     <div
       ref={selected ? scrollSelectedIntoView : undefined}
-      role="button"
-      tabIndex={-1}
       className={cn(
-        "relative mb-2 cursor-pointer rounded-none border px-3 py-2",
-        selected
-          ? "border-primary/60 bg-primary/5"
-          : "border-border/40 hover:border-border",
+        "relative mb-2 rounded-none border px-3 py-2",
+        selected ? "border-primary/60 bg-primary/5" : "border-border/40",
       )}
       data-testid="dev-mode-prompt-card"
-      onClick={onSelect}
-      onDoubleClick={onOpenThread}
     >
       {/* Absolute so selecting a card never changes its height (no layout
           shift while ↑/↓ walk the prompts). */}
@@ -178,13 +170,11 @@ export function DevTranscript({
   channel,
   currentPubkey,
   selectedRootId,
-  onSelectRoot,
   onOpenThread,
 }: {
   channel: Channel;
   currentPubkey: string | null;
   selectedRootId: string | null;
-  onSelectRoot: (rootId: string | null) => void;
   onOpenThread: (rootId: string) => void;
 }) {
   const messagesQuery = useChannelMessagesQuery(channel);
@@ -230,6 +220,7 @@ export function DevTranscript({
     <div
       ref={scrollRef}
       className="min-h-0 flex-1 overflow-y-auto px-4 py-3 font-mono"
+      data-allow-text-selection
       data-testid="dev-mode-transcript"
       onScroll={handleScroll}
     >
@@ -250,9 +241,6 @@ export function DevTranscript({
             channel={channel}
             currentPubkey={currentPubkey}
             onOpenThread={() => onOpenThread(root.id)}
-            onSelect={() =>
-              onSelectRoot(selectedRootId === root.id ? null : root.id)
-            }
             replyCount={replyCounts.get(root.id) ?? 0}
             resolveColor={resolveColor}
             resolveName={resolveName}
