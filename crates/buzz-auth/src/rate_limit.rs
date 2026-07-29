@@ -1,10 +1,9 @@
 //! Rate limiting types and interface.
 //!
 //! Defines the [`RateLimiter`] trait. The Redis-backed implementation lives in
-//! `buzz-relay` / `buzz-pubsub`. Fixed-window counter algorithm.
-//!
-//! ⚠️ Fixed windows allow up to 2× burst at boundaries. Upgrade to sliding
-//! window or token bucket for strict limiting.
+//! `buzz-pubsub` and uses a sliding-window log algorithm (Sorted Set). At most
+//! `limit` requests are allowed in *any* trailing `window_secs` interval —
+//! there is no burst amplification at window boundaries.
 
 use std::net::IpAddr;
 
@@ -23,7 +22,8 @@ pub struct RateLimitResult {
     pub current: u64,
     /// The configured limit for this window.
     pub limit: u64,
-    /// Seconds until the current window resets.
+    /// Seconds until the oldest request in the current sliding window expires,
+    /// at which point capacity is freed for a new request.
     pub reset_in_secs: u64,
 }
 
@@ -145,8 +145,9 @@ impl Default for RateLimitConfig {
 
 /// Async rate-limiting interface.
 ///
-/// The Redis-backed production implementation lives in `buzz-relay` / `buzz-pubsub`.
-/// A no-op `AlwaysAllowRateLimiter` is provided for unit tests.
+/// The Redis-backed production implementation lives in `buzz-pubsub` and uses a
+/// sliding-window log algorithm (Sorted Set). A no-op `AlwaysAllowRateLimiter`
+/// is provided for unit tests.
 ///
 /// ## Tenant scoping
 ///
@@ -161,10 +162,6 @@ impl Default for RateLimitConfig {
 /// through the connection-rate fence would invert the order of operations. If
 /// per-(community, IP) caps are ever needed as a tenant-fairness signal, that
 /// belongs in an additive `LimitType` keyed on `(community, ip)`, not in this trait.
-///
-/// ⚠️ The fixed-window algorithm used by the Redis implementation allows up to 2×
-/// burst at window boundaries. Upgrade to a sliding window or token bucket if strict
-/// per-second limiting is required.
 pub trait RateLimiter: Send + Sync {
     /// Increment the per-(community, pubkey) counter for `limit_type` and return
     /// whether the request is within `limit` for the given `window_secs`.
