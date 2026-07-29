@@ -57,6 +57,30 @@ test("backup step shows masked nsec from mock bridge", async ({ page }) => {
   });
 });
 
+test("backup step downloads the private key through the native save command", async ({
+  page,
+}) => {
+  await enterMachineBackup(page);
+
+  const download = page.getByRole("button", {
+    name: "Download private key",
+  });
+  await expect(download).toBeVisible();
+  await download.click();
+
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          window.__BUZZ_E2E_COMMANDS__?.filter(
+            (command) => command === "save_identity_backup",
+          ).length ?? 0,
+      ),
+    )
+    .toBe(1);
+  await expect(page.getByText("Private key saved")).toBeVisible();
+});
+
 test("backup step Next is enabled once the key is shown", async ({ page }) => {
   await enterMachineBackup(page);
 
