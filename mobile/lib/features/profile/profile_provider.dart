@@ -1,10 +1,16 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:math';
 
 import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../shared/crypto/nip_oa.dart';
 import '../../shared/relay/relay.dart';
+import 'user_cache_provider.dart';
 import 'user_profile.dart';
+
+const maxProfileDisplayNameLength = 255;
 
 /// The current user's profile (kind:0 metadata) loaded over the relay
 /// WebSocket. Returns null when no nsec is configured or when the user has
@@ -31,12 +37,104 @@ class ProfileNotifier extends AsyncNotifier<UserProfile?> {
       avatarUrl: data.avatarUrl,
       about: data.about,
       nip05Handle: data.nip05,
+      ownerPubkey: verifiedOaOwnerPubkey(events.first.tags, data.pubkey),
     );
   }
 
   Future<void> refresh() async {
     state = await AsyncValue.guard(_fetch);
   }
+
+  /// Publish a replacement kind-0 event while preserving the current metadata.
+  Future<void> updateDisplayName(String displayName) async {
+    final trimmedName = displayName.trim();
+    if (trimmedName.isEmpty) {
+      throw ArgumentError.value(
+        displayName,
+        'displayName',
+        'must not be blank',
+      );
+    }
+    if (trimmedName.runes.length > maxProfileDisplayNameLength) {
+      throw ArgumentError.value(
+        displayName,
+        'displayName',
+        'must be $maxProfileDisplayNameLength characters or fewer',
+      );
+    }
+
+    final operationConfig = ref.read(relayConfigProvider);
+    final myPk = ref.read(myPubkeyProvider);
+    if (myPk == null) {
+      throw StateError('Cannot update profile without a signing key');
+    }
+
+    final session = ref.read(relaySessionProvider.notifier);
+    final events = await session.fetchHistory(NostrFilters.profile(myPk));
+    _ensureRelayScope(operationConfig, myPk);
+    final currentEvent = events.firstOrNull;
+    final metadata = _metadataFrom(currentEvent);
+    metadata['display_name'] = trimmedName;
+    final createdAt = max(
+      DateTime.now().millisecondsSinceEpoch ~/ 1000,
+      (currentEvent?.createdAt ?? -1) + 1,
+    );
+
+    NostrEvent? submittedEvent;
+    await SignedEventRelay(session: session, nsec: operationConfig.nsec).submit(
+      kind: EventKind.profileMetadata,
+      content: jsonEncode(metadata),
+      tags: currentEvent?.tags ?? const [],
+      createdAt: createdAt,
+      onSigned: (event) => submittedEvent = event,
+    );
+    _ensureRelayScope(operationConfig, myPk);
+    final confirmedEvents = await session.fetchHistory(
+      NostrFilters.profile(myPk),
+    );
+    _ensureRelayScope(operationConfig, myPk);
+    if (confirmedEvents.firstOrNull?.id != submittedEvent?.id) {
+      throw StateError('Profile update was superseded by another event');
+    }
+
+    final updated = UserProfile(
+      pubkey: myPk.toLowerCase(),
+      displayName: trimmedName,
+      avatarUrl: _stringValue(metadata, 'picture'),
+      about: _stringValue(metadata, 'about'),
+      nip05Handle: _stringValue(metadata, 'nip05'),
+      ownerPubkey: verifiedOaOwnerPubkey(currentEvent?.tags ?? const [], myPk),
+    );
+    state = AsyncData(updated);
+    ref.read(userCacheProvider.notifier).updateProfile(updated);
+  }
+
+  void _ensureRelayScope(RelayConfig operationConfig, String pubkey) {
+    final currentConfig = ref.read(relayConfigProvider);
+    if (currentConfig.baseUrl != operationConfig.baseUrl ||
+        currentConfig.nsec != operationConfig.nsec ||
+        ref.read(myPubkeyProvider) != pubkey) {
+      throw StateError('Active community changed during profile update');
+    }
+  }
+}
+
+Map<String, dynamic> _metadataFrom(NostrEvent? event) {
+  if (event == null) return {};
+
+  try {
+    final decoded = jsonDecode(event.content);
+    return decoded is Map<String, dynamic>
+        ? Map<String, dynamic>.from(decoded)
+        : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+String? _stringValue(Map<String, dynamic> metadata, String key) {
+  final value = metadata[key];
+  return value is String && value.isNotEmpty ? value : null;
 }
 
 final profileProvider = AsyncNotifierProvider<ProfileNotifier, UserProfile?>(

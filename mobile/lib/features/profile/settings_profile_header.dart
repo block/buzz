@@ -7,6 +7,7 @@ import '../../shared/custom_emoji/custom_emoji_render.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/masked_avatar_badge.dart';
+import 'edit_profile_sheet.dart';
 import 'profile_provider.dart';
 import 'set_status_sheet.dart';
 import 'user_status_provider.dart';
@@ -54,10 +55,26 @@ class SettingsProfileHeader extends ConsumerWidget {
             ),
           ),
           const SizedBox(height: Grid.twelve),
-          Text(
-            profile?.label ?? 'Your profile',
-            style: context.textTheme.titleMedium,
-            textAlign: TextAlign.center,
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Flexible(
+                child: Text(
+                  profile?.label ?? 'Your profile',
+                  style: context.textTheme.titleMedium,
+                  textAlign: TextAlign.center,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              IconButton(
+                onPressed: () =>
+                    showEditProfileSheet(context, currentProfile: profile),
+                tooltip: 'Edit profile',
+                visualDensity: VisualDensity.compact,
+                icon: const Icon(LucideIcons.pencil, size: 18),
+              ),
+            ],
           ),
           // No placeholder copy — the badge is the affordance, so this line
           // appears only once there is an actual status to show.
