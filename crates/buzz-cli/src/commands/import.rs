@@ -23,10 +23,15 @@
 //! claim). See `docs/slack-import.md` for the residual trust in a colluding
 //! admin + subject.
 
+mod channel_state;
+mod dm;
 mod export;
 mod importer;
 mod mapping;
+mod model;
 mod mrkdwn;
+mod render;
+mod report;
 mod state;
 
 use std::collections::{HashMap, HashSet};
@@ -36,11 +41,11 @@ use nostr::PublicKey;
 
 use crate::client::BuzzClient;
 use crate::error::CliError;
-use export::{SlackChannel, SlackConversationKind, SlackExport, SlackMessage};
-use importer::{
-    emoji_for_shortcode, mapped_dm_participants, publish_binding, submit, Importer, ImporterOptions,
-};
+use dm::dm_import_blockers;
+use export::{SlackChannel, SlackConversationKind, SlackExport};
+use importer::{publish_binding, submit, Importer, ImporterOptions};
 use mapping::load_channel_map;
+use report::dry_run_report;
 use state::{ChannelState, ImportState};
 
 /// Parameters for `buzz import slack`.
@@ -375,198 +380,6 @@ fn seed_channel_map(state: &mut ImportState, channel_map: &HashMap<String, Strin
     }
 }
 
-fn dm_import_blockers(
-    export: &SlackExport,
-    selected: &[&SlackChannel],
-    state: &ImportState,
-    bindings: &HashMap<String, String>,
-    importer_pubkey: &str,
-) -> HashMap<String, String> {
-    let mut blockers = HashMap::new();
-    let mut participant_sets: HashMap<String, Vec<(String, bool)>> = HashMap::new();
-    for conversation in selected.iter().copied().filter(|conversation| {
-        matches!(
-            conversation.kind,
-            SlackConversationKind::DirectMessage | SlackConversationKind::GroupDirectMessage
-        )
-    }) {
-        let is_new = !state.channels.contains_key(&conversation.id);
-        match mapped_dm_participants(export, conversation, bindings, importer_pubkey) {
-            Ok(participants) => {
-                participant_sets
-                    .entry(participants.join(":"))
-                    .or_default()
-                    .push((conversation.id.clone(), is_new));
-            }
-            Err(error) if is_new => {
-                blockers.insert(conversation.id.clone(), error.to_string());
-            }
-            Err(_) => {}
-        }
-    }
-
-    for conversations in participant_sets.values() {
-        if conversations.len() < 2 || !conversations.iter().any(|(_, is_new)| *is_new) {
-            continue;
-        }
-        let mut ids: Vec<&str> = conversations.iter().map(|(id, _)| id.as_str()).collect();
-        ids.sort_unstable();
-        let reason = format!(
-            "Slack conversations {} map to the same Buzz DM participant set; Buzz has one \
-             native DM per participant set, so importing them would merge separate histories",
-            ids.join(", ")
-        );
-        for (id, is_new) in conversations {
-            if *is_new {
-                blockers.insert(id.clone(), reason.clone());
-            }
-        }
-    }
-    blockers
-}
-
-fn dry_run_report(
-    export: &SlackExport,
-    selected: &[&SlackChannel],
-    st: &ImportState,
-    channel_map: &HashMap<String, String>,
-    bindings: &HashMap<String, String>,
-    dm_blockers: &HashMap<String, String>,
-    skip_reactions: bool,
-) -> Result<(), CliError> {
-    let mut channels_to_create = 0u64;
-    let mut channels_to_adopt = 0u64;
-    let mut channels_already_in_state = 0u64;
-    let mut messages = 0u64;
-    let mut reaction_groups = 0u64;
-    let mut reaction_uses = 0u64;
-    let mut public_channels = 0u64;
-    let mut private_channels = 0u64;
-    let mut direct_messages = 0u64;
-    let mut group_direct_messages = 0u64;
-    let mut archived = 0u64;
-    let mut private_members = 0u64;
-    let mut mappable_private_members = 0u64;
-    let mut mapped_private_members = 0u64;
-    let mut message_records_seen = 0u64;
-    let mut non_message_records = 0u64;
-    let mut system_records = 0u64;
-    let mut mutation_records = 0u64;
-    let mut contentless_records = 0u64;
-    let mut duplicate_records = 0u64;
-    let mut dm_conversations_blocked = Vec::new();
-    let mut dm_messages_blocked = 0u64;
-    let mapped: HashSet<&str> = bindings.keys().map(String::as_str).collect();
-    for channel in selected {
-        match channel.kind {
-            SlackConversationKind::PublicChannel => public_channels += 1,
-            SlackConversationKind::PrivateChannel => private_channels += 1,
-            SlackConversationKind::DirectMessage => direct_messages += 1,
-            SlackConversationKind::GroupDirectMessage => group_direct_messages += 1,
-        }
-        if channel.is_archived {
-            archived += 1;
-        }
-        if channel.kind.is_private() {
-            private_members += channel.members.len() as u64;
-            let mappable: Vec<&String> = channel
-                .members
-                .iter()
-                .filter(|id| export.is_mappable_member(id))
-                .collect();
-            mappable_private_members += mappable.len() as u64;
-            mapped_private_members += mappable
-                .into_iter()
-                .filter(|id| mapped.contains(id.as_str()))
-                .count() as u64;
-        }
-        let already_in_state = st.channels.contains_key(&channel.id);
-        let mapped_existing_channel = channel_map.contains_key(&channel.id);
-        let dm_blocker = dm_blockers.get(&channel.id);
-        if let Some(reason) = &dm_blocker {
-            dm_conversations_blocked.push(serde_json::json!({
-                "conversation_id": channel.id,
-                "conversation_name": channel.name,
-                "kind": channel.kind.as_str(),
-                "reason": reason,
-            }));
-        } else if already_in_state {
-            channels_already_in_state += 1;
-        } else if mapped_existing_channel {
-            channels_to_adopt += 1;
-        } else {
-            channels_to_create += 1;
-        }
-        let scan = export.channel_message_scan(channel)?;
-        message_records_seen += scan.records_seen;
-        non_message_records += scan.non_message_records;
-        system_records += scan.system_records;
-        mutation_records += scan.mutation_records;
-        contentless_records += scan.contentless_records;
-        duplicate_records += scan.duplicate_records;
-        for msg in scan.messages {
-            let message_key = ImportState::message_key(&channel.id, &msg.ts);
-            if !st.messages.contains_key(&message_key) {
-                if dm_blocker.is_some() {
-                    dm_messages_blocked += 1;
-                } else {
-                    messages += 1;
-                }
-            }
-            if !skip_reactions && dm_blocker.is_none() {
-                reaction_groups += pending_reaction_count(st, &message_key, &msg) as u64;
-                reaction_uses += msg
-                    .reactions
-                    .iter()
-                    .map(|reaction| {
-                        reaction
-                            .count
-                            .max(u64::try_from(reaction.users.len()).unwrap_or(u64::MAX))
-                    })
-                    .sum::<u64>();
-            }
-        }
-    }
-    print_json(&serde_json::json!({
-        "dry_run": true,
-        "conversations_selected": selected.len(),
-        "public_channels_selected": public_channels,
-        "private_channels_selected": private_channels,
-        "direct_messages_selected": direct_messages,
-        "group_direct_messages_selected": group_direct_messages,
-        "archived_conversations_selected": archived,
-        "channels_to_create": channels_to_create,
-        "channels_to_adopt": channels_to_adopt,
-        "channels_already_in_state": channels_already_in_state,
-        "dm_conversations_blocked": dm_conversations_blocked,
-        "dm_messages_blocked": dm_messages_blocked,
-        "message_records_seen": message_records_seen,
-        "messages_to_import": messages,
-        "non_message_records_skipped": non_message_records,
-        "system_records_skipped": system_records,
-        "mutation_records_skipped": mutation_records,
-        "contentless_records_skipped": contentless_records,
-        "duplicate_records_collapsed": duplicate_records,
-        "reaction_groups_to_import": reaction_groups,
-        "reaction_uses_in_export": reaction_uses,
-        "private_memberships_in_export": private_members,
-        "private_memberships_mappable": mappable_private_members,
-        "private_memberships_mapped": mapped_private_members,
-        "private_memberships_unmapped": mappable_private_members.saturating_sub(mapped_private_members),
-        "bindings_to_publish": bindings.len(),
-    }))
-}
-
-/// Number of distinct bot-signed reactions that still need publishing.
-fn pending_reaction_count(st: &ImportState, message_key: &str, msg: &SlackMessage) -> usize {
-    msg.reactions
-        .iter()
-        .map(|reaction| emoji_for_shortcode(&reaction.name))
-        .filter(|emoji| !st.reactions.contains(&format!("{message_key}:{emoji}")))
-        .collect::<HashSet<_>>()
-        .len()
-}
-
 /// Serialize `value` to compact JSON on stdout.
 fn print_json(value: &serde_json::Value) -> Result<(), CliError> {
     let rendered = serde_json::to_string(value)
@@ -616,11 +429,17 @@ pub async fn dispatch(cmd: crate::ImportCmd, client: &BuzzClient) -> Result<(), 
 
 #[cfg(test)]
 mod tests {
-    use super::importer::{
-        author_display, author_id, build_import_dm_open, build_imported_message, channel_uuid,
-        ensure_dm_uuid_unclaimed, is_already_unarchived, mapped_dm_participants, provenance_tags,
-        render_attachment, render_slack_blocks, response_payload, thread_root_key,
+    use super::channel_state::metadata_archived_state;
+    use super::dm::{
+        build_import_dm_open, ensure_dm_uuid_unclaimed, mapped_dm_participants, response_payload,
     };
+    use super::export::SlackMessage;
+    use super::importer::{
+        author_display, author_id, build_imported_message, channel_uuid, provenance_tags,
+        thread_root_key,
+    };
+    use super::render::{emoji_for_shortcode, render_attachment, render_slack_blocks};
+    use super::report::pending_reaction_count;
     use super::*;
     use nostr::{EventId, Keys};
     use uuid::Uuid;
@@ -830,17 +649,36 @@ mod tests {
     }
 
     #[test]
-    fn active_channel_unarchive_rejection_is_the_only_accepted_no_op() {
-        assert!(is_already_unarchived(&CliError::Other(
-            "relay rejected event: channel is not archived".into()
-        )));
-        assert!(is_already_unarchived(&CliError::Relay {
-            status: 409,
-            body: "channel is not archived".into(),
-        }));
-        assert!(!is_already_unarchived(&CliError::Other(
-            "channel does not exist".into()
-        )));
+    fn channel_metadata_readback_reports_archived_state() {
+        let channel_id = Uuid::new_v4();
+        let active = serde_json::json!([{
+            "kind": 39000,
+            "tags": [["d", channel_id], ["name", "general"]],
+        }])
+        .to_string();
+        let archived = serde_json::json!([{
+            "kind": 39000,
+            "tags": [["d", channel_id], ["name", "general"], ["archived", "true"]],
+        }])
+        .to_string();
+        let unrelated = serde_json::json!([{
+            "kind": 39000,
+            "tags": [["d", Uuid::new_v4()], ["archived", "true"]],
+        }])
+        .to_string();
+
+        assert_eq!(
+            metadata_archived_state(&active, channel_id).expect("active metadata"),
+            Some(false)
+        );
+        assert_eq!(
+            metadata_archived_state(&archived, channel_id).expect("archived metadata"),
+            Some(true)
+        );
+        assert_eq!(
+            metadata_archived_state(&unrelated, channel_id).expect("unrelated metadata"),
+            None
+        );
     }
 
     #[test]

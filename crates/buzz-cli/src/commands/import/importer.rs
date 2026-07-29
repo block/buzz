@@ -8,12 +8,17 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use nostr::{EventBuilder, EventId, Tag, Timestamp};
+use nostr::{EventBuilder, EventId, Timestamp};
 use uuid::Uuid;
 
-use super::export::{ts_seconds, SlackAttachment, SlackChannel, SlackExport, SlackMessage};
+use super::channel_state::require_unarchived;
+use super::dm::{
+    build_import_dm_open, ensure_dm_uuid_unclaimed, mapped_dm_participants, response_payload,
+};
+use super::export::{ts_seconds, SlackChannel, SlackExport, SlackMessage};
 use super::mrkdwn;
 use super::print_json;
+use super::render::{emoji_for_shortcode, render_attachment, render_slack_blocks};
 use super::state::{ChannelState, ImportState};
 use crate::client::BuzzClient;
 use crate::error::CliError;
@@ -202,18 +207,18 @@ impl<'a> Importer<'a> {
             // The crosswalk says which channel to adopt, but not whether that
             // Buzz channel is currently archived. Attempt the transition on
             // every first adoption, even when Slack says the source is active.
-            // The relay's "not archived" rejection is the successful no-op
-            // case; every other failure must stop the import before writes.
+            // Kind:9002 side effects are best-effort at the relay, so its
+            // accepted response cannot prove the channel is active. Read the
+            // relay-generated channel metadata back before any history write.
             let builder = buzz_sdk::build_unarchive(uuid)
                 .map_err(|e| CliError::Other(format!("build_unarchive failed: {e}")))?;
-            if let Err(error) = submit(self.client, builder).await {
-                if !is_already_unarchived(&error) {
-                    return Err(CliError::Other(format!(
-                        "could not prepare conversation {} for history import: {error}",
-                        channel.id
-                    )));
-                }
-            }
+            submit(self.client, builder).await.map_err(|error| {
+                CliError::Other(format!(
+                    "could not prepare conversation {} for history import: {error}",
+                    channel.id
+                ))
+            })?;
+            require_unarchived(self.client, uuid, &channel.id).await?;
             if let Some(state) = self.state.channels.get_mut(&channel.id) {
                 state.prepared_for_import = true;
                 state.archived_done = false;
@@ -841,135 +846,6 @@ async fn submit_with_response(
     Ok((event_id, resp))
 }
 
-pub(super) fn response_payload(response: &str) -> Option<serde_json::Value> {
-    let parsed: serde_json::Value = serde_json::from_str(response).ok()?;
-    let message = parsed.get("message")?.as_str()?;
-    serde_json::from_str(message.strip_prefix("response:")?).ok()
-}
-
-pub(super) fn mapped_dm_participants(
-    export: &SlackExport,
-    channel: &SlackChannel,
-    bindings: &HashMap<String, String>,
-    importer_pubkey: &str,
-) -> Result<Vec<String>, CliError> {
-    let mappable_ids: Vec<&str> = channel
-        .members
-        .iter()
-        .map(String::as_str)
-        .filter(|id| export.is_mappable_member(id))
-        .collect();
-    let missing = mappable_ids
-        .iter()
-        .filter(|id| !bindings.contains_key(**id))
-        .count();
-    if missing > 0 {
-        return Err(CliError::Usage(format!(
-            "Slack {} {} has {missing} unmapped active participant(s); provide every mapping \
-             with --identity-map before importing DM history",
-            channel.kind.as_str(),
-            channel.id
-        )));
-    }
-
-    let participant_pubkeys: std::collections::BTreeSet<String> = mappable_ids
-        .into_iter()
-        .filter_map(|id| bindings.get(id).cloned())
-        .collect();
-    if !participant_pubkeys.contains(importer_pubkey) {
-        return Err(CliError::Usage(format!(
-            "Slack {} {} does not map any participant to the importer public key; refusing \
-             to add the migration operator as an extra DM member",
-            channel.kind.as_str(),
-            channel.id
-        )));
-    }
-    if participant_pubkeys.len() < 2 {
-        return Err(CliError::Usage(format!(
-            "Slack {} {} has fewer than two mappable human participants",
-            channel.kind.as_str(),
-            channel.id
-        )));
-    }
-    if participant_pubkeys.len() > 9 {
-        return Err(CliError::Usage(format!(
-            "Slack {} {} has {} mapped participants; Buzz DMs support at most 9",
-            channel.kind.as_str(),
-            channel.id,
-            participant_pubkeys.len()
-        )));
-    }
-    Ok(participant_pubkeys.into_iter().collect())
-}
-
-pub(super) fn build_import_dm_open(
-    channel: &SlackChannel,
-    team_id: &str,
-    participant_pubkeys: &[String],
-    importer_pubkey: &str,
-) -> Result<EventBuilder, CliError> {
-    let participant_refs: Vec<&str> = participant_pubkeys
-        .iter()
-        .filter(|pubkey| pubkey.as_str() != importer_pubkey)
-        .map(String::as_str)
-        .collect();
-    let mut tags = Vec::new();
-    let import_id = format!("slack:{team_id}:{}", channel.id);
-    tags.push(
-        Tag::parse(["d", import_id.as_str()])
-            .map_err(|e| CliError::Other(format!("invalid DM import d-tag: {e}")))?,
-    );
-    tags.push(
-        Tag::parse(["import", "slack"])
-            .map_err(|e| CliError::Other(format!("invalid import tag: {e}")))?,
-    );
-    let foreign_id = format!("{team_id}:{}", channel.id);
-    tags.push(
-        Tag::parse([
-            "import_conversation",
-            foreign_id.as_str(),
-            channel.kind.as_str(),
-        ])
-        .map_err(|e| CliError::Other(format!("invalid conversation provenance tag: {e}")))?,
-    );
-    buzz_sdk::build_dm_open(&participant_refs)
-        .map_err(|e| CliError::Other(format!("build_dm_open failed: {e}")))
-        .map(|builder| builder.tags(tags))
-}
-
-/// Reject a relay-assigned native DM UUID that is already owned by another
-/// Slack conversation in the resume ledger. Buzz intentionally reuses a DM
-/// for the same participant set, whereas Slack exports may contain multiple
-/// distinct D/MPIM ids for that set; merging their histories is never safe.
-pub(super) fn ensure_dm_uuid_unclaimed(
-    state: &ImportState,
-    channel: &SlackChannel,
-    uuid: Uuid,
-) -> Result<(), CliError> {
-    let uuid = uuid.to_string();
-    if let Some((other, _)) = state
-        .channels
-        .iter()
-        .find(|(id, saved)| id.as_str() != channel.id && saved.uuid == uuid)
-    {
-        return Err(CliError::Usage(format!(
-            "Slack {} {} resolves to the Buzz DM already imported for {other}; \
-             refusing to merge separate histories",
-            channel.kind.as_str(),
-            channel.id
-        )));
-    }
-    Ok(())
-}
-
-pub(super) fn is_already_unarchived(error: &CliError) -> bool {
-    match error {
-        CliError::Other(message) => message.contains("channel is not archived"),
-        CliError::Relay { body, .. } => body.contains("channel is not archived"),
-        _ => false,
-    }
-}
-
 /// Deterministic Buzz channel UUID for a Slack channel, derived from the
 /// workspace + Slack channel id. Making it a pure function of stable Slack ids
 /// means a re-run after a crash between the channel-create relay write and the
@@ -1032,317 +908,6 @@ pub(super) fn author_display(msg: &SlackMessage, names: &HashMap<String, String>
         }
     }
     author_id(msg).unwrap_or_else(|| "unknown".to_string())
-}
-
-/// Render a classic Slack attachment to readable Markdown. Interactive
-/// buttons/actions are intentionally omitted; their visible label and context
-/// are retained through the attachment fallback or fields.
-pub(super) fn render_attachment(
-    attachment: &SlackAttachment,
-    names: &HashMap<String, String>,
-) -> String {
-    let mut parts = Vec::new();
-    push_unique(
-        &mut parts,
-        mrkdwn::convert(attachment.pretext.trim(), names),
-    );
-
-    if !attachment.author_name.trim().is_empty() {
-        let author = if attachment.author_link.trim().is_empty() {
-            attachment.author_name.trim().to_string()
-        } else {
-            format!(
-                "[{}]({})",
-                attachment.author_name.trim(),
-                attachment.author_link.trim()
-            )
-        };
-        push_unique(&mut parts, author);
-    }
-
-    if !attachment.title.trim().is_empty() {
-        let title = if attachment.title_link.trim().is_empty() {
-            format!("**{}**", attachment.title.trim())
-        } else {
-            format!(
-                "**[{}]({})**",
-                attachment.title.trim(),
-                attachment.title_link.trim()
-            )
-        };
-        push_unique(&mut parts, title);
-    }
-    push_unique(&mut parts, mrkdwn::convert(attachment.text.trim(), names));
-
-    for field in &attachment.fields {
-        let title = field.title.trim();
-        let value = mrkdwn::convert(field.value.trim(), names);
-        let rendered = match (title.is_empty(), value.is_empty()) {
-            (false, false) => format!("**{title}:** {value}"),
-            (false, true) => format!("**{title}**"),
-            (true, false) => value,
-            (true, true) => continue,
-        };
-        push_unique(&mut parts, rendered);
-    }
-
-    if parts.is_empty() {
-        push_unique(
-            &mut parts,
-            mrkdwn::convert(attachment.fallback.trim(), names),
-        );
-    }
-    if parts.is_empty() {
-        push_unique(&mut parts, render_slack_blocks(&attachment.blocks, names));
-    }
-
-    let media_url = [
-        attachment.image_url.trim(),
-        attachment.original_url.trim(),
-        attachment.from_url.trim(),
-    ]
-    .into_iter()
-    .find(|value| !value.is_empty());
-    if let Some(url) = media_url {
-        let label = if attachment.title.trim().is_empty() {
-            "Slack attachment"
-        } else {
-            attachment.title.trim()
-        };
-        let link = format!("[{label}]({url})");
-        if !parts.iter().any(|part| part.contains(url)) {
-            parts.push(link);
-        }
-    }
-
-    parts.join("\n")
-}
-
-fn push_unique(parts: &mut Vec<String>, value: String) {
-    let value = value.trim();
-    if !value.is_empty() && !parts.iter().any(|existing| existing == value) {
-        parts.push(value.to_string());
-    }
-}
-
-/// Tolerant renderer for the non-interactive subset of Slack rich-text and
-/// Block Kit structures. Unknown container blocks still recurse through their
-/// `elements`, so newer Slack block wrappers do not silently erase their text.
-pub(super) fn render_slack_blocks(
-    blocks: &[serde_json::Value],
-    names: &HashMap<String, String>,
-) -> String {
-    blocks
-        .iter()
-        .map(|block| render_slack_block(block, names))
-        .filter(|rendered| !rendered.trim().is_empty())
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn render_slack_block(value: &serde_json::Value, names: &HashMap<String, String>) -> String {
-    let Some(object) = value.as_object() else {
-        return String::new();
-    };
-    let block_type = object
-        .get("type")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
-
-    let rendered = match block_type {
-        "text" | "plain_text" | "mrkdwn" => object
-            .get("text")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string)
-            .unwrap_or_default(),
-        "link" => {
-            let url = object
-                .get("url")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default();
-            let label = object
-                .get("text")
-                .and_then(serde_json::Value::as_str)
-                .filter(|text| !text.is_empty())
-                .unwrap_or(url);
-            if url.is_empty() {
-                label.to_string()
-            } else {
-                format!("[{label}]({url})")
-            }
-        }
-        "user" => {
-            let id = object
-                .get("user_id")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default();
-            format!("@{}", names.get(id).map(String::as_str).unwrap_or(id))
-        }
-        "channel" => object
-            .get("channel_id")
-            .and_then(serde_json::Value::as_str)
-            .map(|id| format!("#{id}"))
-            .unwrap_or_default(),
-        "emoji" => object
-            .get("name")
-            .and_then(serde_json::Value::as_str)
-            .map(|name| format!(":{name}:"))
-            .unwrap_or_default(),
-        "broadcast" => object
-            .get("range")
-            .and_then(serde_json::Value::as_str)
-            .map(|range| format!("@{range}"))
-            .unwrap_or_default(),
-        "rich_text_list" => {
-            let ordered =
-                object.get("style").and_then(serde_json::Value::as_str) == Some("ordered");
-            child_elements(object)
-                .iter()
-                .enumerate()
-                .map(|(index, child)| {
-                    let body = render_slack_block(child, names);
-                    if ordered {
-                        format!("{}. {body}", index + 1)
-                    } else {
-                        format!("- {body}")
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        }
-        "rich_text_quote" => child_elements(object)
-            .iter()
-            .map(|child| render_slack_block(child, names))
-            .collect::<String>()
-            .lines()
-            .map(|line| format!("> {line}"))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        "rich_text_preformatted" => {
-            let body = child_elements(object)
-                .iter()
-                .map(|child| render_slack_block(child, names))
-                .collect::<String>();
-            format!("```\n{body}\n```")
-        }
-        "divider" => "---".to_string(),
-        _ => {
-            if let Some(text) = object.get("text") {
-                text.as_str()
-                    .map(str::to_string)
-                    .unwrap_or_else(|| render_slack_block(text, names))
-            } else {
-                let children = child_elements(object);
-                let separator = if matches!(block_type, "rich_text" | "section") {
-                    "\n"
-                } else {
-                    ""
-                };
-                children
-                    .iter()
-                    .map(|child| render_slack_block(child, names))
-                    .collect::<Vec<_>>()
-                    .join(separator)
-            }
-        }
-    };
-
-    apply_block_style(rendered, object.get("style"))
-}
-
-fn child_elements(object: &serde_json::Map<String, serde_json::Value>) -> &[serde_json::Value] {
-    object
-        .get("elements")
-        .and_then(serde_json::Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or(&[])
-}
-
-fn apply_block_style(mut text: String, style: Option<&serde_json::Value>) -> String {
-    let Some(style) = style.and_then(serde_json::Value::as_object) else {
-        return text;
-    };
-    if style
-        .get("code")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
-    {
-        text = format!("`{text}`");
-    }
-    if style
-        .get("bold")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
-    {
-        text = format!("**{text}**");
-    }
-    if style
-        .get("italic")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
-    {
-        text = format!("_{text}_");
-    }
-    if style
-        .get("strike")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
-    {
-        text = format!("~~{text}~~");
-    }
-    text
-}
-
-/// Map common Slack reaction shortcodes to Unicode; anything unknown keeps
-/// the `:shortcode:` form (rendered when the custom emoji is registered).
-/// Skin-tone suffixes (`::skin-tone-N`) are dropped.
-pub(super) fn emoji_for_shortcode(name: &str) -> String {
-    let base = name.split("::").next().unwrap_or(name);
-    let mapped = match base {
-        "+1" | "thumbsup" => "👍",
-        "-1" | "thumbsdown" => "👎",
-        "heart" => "❤️",
-        "joy" => "😂",
-        "smile" => "😄",
-        "grin" => "😁",
-        "laughing" => "😆",
-        "sweat_smile" => "😅",
-        "sob" => "😭",
-        "cry" => "😢",
-        "tada" => "🎉",
-        "eyes" => "👀",
-        "fire" => "🔥",
-        "rocket" => "🚀",
-        "pray" => "🙏",
-        "clap" => "👏",
-        "wave" => "👋",
-        "raised_hands" => "🙌",
-        "ok_hand" => "👌",
-        "muscle" => "💪",
-        "100" => "💯",
-        "thinking_face" => "🤔",
-        "white_check_mark" => "✅",
-        "heavy_check_mark" => "✔️",
-        "x" => "❌",
-        "heart_eyes" => "😍",
-        "sunglasses" => "😎",
-        "sparkles" => "✨",
-        "star" => "⭐",
-        "zap" => "⚡",
-        "warning" => "⚠️",
-        "question" => "❓",
-        "exclamation" => "❗",
-        "bulb" => "💡",
-        "memo" => "📝",
-        "bug" => "🐛",
-        "wink" => "😉",
-        "point_up" => "☝️",
-        "point_down" => "👇",
-        "seedling" => "🌱",
-        "bee" | "honeybee" => "🐝",
-        _ => return format!(":{base}:"),
-    };
-    mapped.to_string()
 }
 
 /// `Some(state key of the thread root)` when `msg` is a reply (its
