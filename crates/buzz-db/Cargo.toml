@@ -25,3 +25,4 @@ metrics     = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
+metrics-util = { workspace = true }

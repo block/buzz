@@ -950,6 +950,7 @@ dependencies = [
  "chrono",
  "hex",
  "metrics",
+ "metrics-util",
  "nostr",
  "rand 0.10.1",
  "serde",

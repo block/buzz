@@ -742,8 +742,9 @@ impl Db {
     /// ([`Db::reader_aurora_identity`]) on the connection it already holds,
     /// so the first routed read doesn't spend a second acquire (up to
     /// another [`Db::READER_ACQUIRE_TIMEOUT`]) inside
-    /// [`Db::reader_aurora_capability`]. Prime failure is fine: the inline
-    /// probe remains as the retry path.
+    /// [`Db::reader_aurora_capability_on`]. Prime failure is fine: the routed
+    /// path re-probes on the connection it already holds, so a failed prime
+    /// costs a round trip rather than a second acquire budget.
     pub fn spawn_read_pool_boot_ping(&self) {
         let Some(read_pool) = self.read_pool.clone() else {
             return;
@@ -886,10 +887,32 @@ impl Db {
         ),
         &'static str,
     > {
-        let aurora = self.reader_aurora_capability(read_pool).await;
-        let mut tx = match read_pool
-            .begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ, READ ONLY")
-            .await
+        // One checkout per routed read. The Aurora capability probe and the
+        // read-only transaction share a single `acquire()` so the request path
+        // spends exactly one READER_ACQUIRE_TIMEOUT budget. Probing through
+        // `read_pool` separately would spend a second budget whenever the
+        // capability is uncached — i.e. after a failed boot ping, which is
+        // precisely the reader-unavailable case the bound must hold for.
+        let conn = match read_pool.acquire().await {
+            Ok(conn) => conn,
+            Err(sqlx::Error::PoolTimedOut) => {
+                tracing::warn!("reader pool acquire timed out; routing to writer");
+                return Err("reader_acquire_timeout");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "reader connection acquire failed; routing to writer");
+                return Err("reader_validation_error");
+            }
+        };
+        let mut conn = conn;
+        let aurora = self.reader_aurora_capability_on(&mut conn).await;
+        let mut tx = match sqlx::Transaction::begin(
+            conn,
+            Some(sqlx::SqlStr::from_static(
+                "BEGIN ISOLATION LEVEL REPEATABLE READ, READ ONLY",
+            )),
+        )
+        .await
         {
             Ok(tx) => tx,
             // The acquire miss gets its own reason code: the reader pool's
@@ -955,14 +978,16 @@ impl Db {
     /// it. Probe failure (acquire or transient) degrades to the plain
     /// identity tuple for THIS request without caching, so a later request
     /// retries; identity is evidence, never a routing gate.
-    async fn reader_aurora_capability(&self, read_pool: &PgPool) -> bool {
+    /// Aurora capability on a connection the caller already holds, so the
+    /// routed path never spends a second acquire budget.
+    async fn reader_aurora_capability_on(
+        &self,
+        conn: &mut sqlx::pool::PoolConnection<sqlx::Postgres>,
+    ) -> bool {
         if let Some(cached) = self.reader_aurora_identity.get() {
             return *cached;
         }
-        let Ok(mut conn) = read_pool.acquire().await else {
-            return false;
-        };
-        match replica_fence::reader_supports_aurora_identity(&mut conn).await {
+        match replica_fence::reader_supports_aurora_identity(conn).await {
             Ok(supported) => *self.reader_aurora_identity.get_or_init(|| supported),
             Err(e) => {
                 tracing::debug!(error = %e, "aurora identity probe failed; will retry");
@@ -7308,6 +7333,150 @@ mod tests {
     /// the replica (not the writer) served the read. Every assertion
     /// requests A and demands B's rows never appear, including B's
     /// `replica-only` row, which is the one a leaky predicate would surface.
+    /// The routed fallback must cost ONE reader acquire budget, even when the
+    /// Aurora capability cache is cold.
+    ///
+    /// Regression test for a stacked-budget bug found at `9fa3c9c0b`: the
+    /// capability probe used to `acquire()` from the pool itself and return
+    /// `false` *uncached* on `PoolTimedOut`, so the routed read then spent a
+    /// SECOND `READER_ACQUIRE_TIMEOUT` inside `begin`. Measured 302ms against
+    /// a ~150ms documented bound. Boot priming
+    /// ([`Db::spawn_read_pool_boot_ping`]) hid it only when the boot ping
+    /// SUCCEEDED — and a reader that is unavailable at boot is exactly the
+    /// case the bound is specified for, so the two failures are correlated.
+    ///
+    /// The fixture reproduces that state deliberately: a size-1 reader whose
+    /// sole connection is established and then HELD (so every further acquire
+    /// must time out), with `reader_aurora_identity` asserted cold. It routes
+    /// through `count_events_routed` rather than calling `proved_reader`
+    /// directly, because `buzz_db_route_decision` is emitted by `route_read`
+    /// — a direct call would prove the timing but never emit the label.
+    ///
+    /// Timing uses an upper bound of 2x the budget minus a margin: it must
+    /// fail for two stacked budgets (~300ms) while tolerating scheduler
+    /// jitter on one (~150ms). Asserting a lower bound too would pin the
+    /// budget's own value, which `reader_acquire_timeout_is_the_documented_budget`
+    /// already covers.
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires Postgres"]
+    async fn routed_fallback_spends_one_acquire_budget_when_aurora_cache_is_cold() {
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (seed, wname) = create_scratch_db(&admin, "one_budget").await;
+        seed.close().await;
+        let base = admin_url().await;
+        let scratch_url = {
+            let idx = base.rfind('/').expect("db url has a path segment");
+            format!("{}/{}", &base[..idx], wname)
+        };
+
+        // `Db::new` so the writer arms the floor guard and the reader is the
+        // real lazy `connect_read_pool` pool (min_connections=0, 150ms
+        // acquire timeout). Reader is sized 1 so holding one connection
+        // saturates it.
+        let mut db = Db::new(&DbConfig {
+            database_url: scratch_url.clone(),
+            read_database_url: Some(scratch_url),
+            max_connections: 4,
+            read_max_connections: Some(1),
+            ..DbConfig::default()
+        })
+        .await
+        .expect("connect armed Db with size-1 lazy reader");
+        db.fence().force_open_for_tests(chrono::Utc::now());
+        db.set_replica_read_max_age_for_tests(Some(Duration::from_secs(5)));
+
+        let read_pool = db.read_pool.clone().expect("reader pool configured");
+        // Establish and hold the reader's only connection: saturated.
+        let held = read_pool
+            .acquire()
+            .await
+            .expect("establish the reader's sole connection");
+        assert_eq!(
+            db.read_max_connections, 1,
+            "reader max must report 1 for this fixture to test saturation"
+        );
+        assert_eq!(
+            read_pool.size(),
+            1,
+            "the sole reader connection is established and held"
+        );
+        // The bug is only observable with the capability cache cold; if a
+        // future change primes it here, this fixture would silently stop
+        // discriminating.
+        assert!(
+            db.reader_aurora_identity.get().is_none(),
+            "Aurora capability must be UNPRIMED (post-boot-ping-failure state)"
+        );
+
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let query = EventQuery::for_community(CommunityId::from_uuid(Uuid::new_v4()));
+
+        // The recorder is installed thread-locally, so it must stay installed
+        // across the `.await` — hence the guard form rather than
+        // `with_local_recorder`, whose closure cannot host an await. The
+        // `current_thread` flavor keeps the route decision on this thread; on
+        // a multi-thread runtime the emit could land on a worker where no
+        // local recorder is installed and the label assertions would vacuously
+        // see an empty snapshot.
+        let start = std::time::Instant::now();
+        let count = {
+            let _guard = metrics::set_default_local_recorder(&recorder);
+            db.count_events_routed("one_budget_probe", &query).await
+        }
+        .expect("writer fallback still answers the read");
+        let elapsed = start.elapsed();
+
+        assert_eq!(count, 0, "writer answered on an empty scratch database");
+        assert!(
+            elapsed < Duration::from_millis(250),
+            "routed fallback must spend ONE {}ms acquire budget, not two; took {}ms",
+            Db::READER_ACQUIRE_TIMEOUT.as_millis(),
+            elapsed.as_millis()
+        );
+
+        let reasons: std::collections::HashMap<(String, String), u64> = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter(|(key, ..)| key.key().name() == "buzz_db_route_decision")
+            .map(|(key, _, _, value)| {
+                let metrics_util::debugging::DebugValue::Counter(n) = value else {
+                    panic!("buzz_db_route_decision must be a counter");
+                };
+                let labels: Vec<_> = key.key().labels().collect();
+                let get = |name: &str| {
+                    labels
+                        .iter()
+                        .find(|l| l.key() == name)
+                        .map(|l| l.value().to_owned())
+                        .unwrap_or_default()
+                };
+                ((get("decision"), get("reason")), n)
+            })
+            .collect();
+
+        assert_eq!(
+            reasons.get(&("writer".to_owned(), "reader_acquire_timeout".to_owned())),
+            Some(&1),
+            "saturated reader must fall back as writer/reader_acquire_timeout; got {reasons:?}"
+        );
+        // `reader_validation_error` would mean we misclassified a timeout as a
+        // broken reader, and `pool_busy` is the retired name — neither may
+        // appear in ANY emitted label.
+        assert!(
+            !reasons
+                .keys()
+                .any(|(_, reason)| reason == "reader_validation_error" || reason == "pool_busy"),
+            "no reader_validation_error or retired pool_busy label may be emitted; got {reasons:?}"
+        );
+
+        drop(held);
+        drop_scratch_db(&admin, db.pool.clone(), &wname).await;
+    }
+
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn routed_reads_are_confined_to_the_requested_community() {
