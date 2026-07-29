@@ -429,10 +429,15 @@ pub fn resolve_step_templates(
             text,
             channel,
             thread_root,
+            mentions,
         } => Ok(SendMessage {
             text: t(text)?,
             channel: t_opt(channel)?,
             thread_root: t_opt(thread_root)?,
+            mentions: mentions
+                .iter()
+                .map(|mention| t(mention))
+                .collect::<Result<Vec<_>, _>>()?,
         }),
         SendDm { to, text } => Ok(SendDm {
             to: t(to)?,
@@ -558,6 +563,7 @@ pub async fn dispatch_action(
             text,
             channel,
             thread_root,
+            mentions,
         } => {
             // Look up workflow metadata for destination validation and
             // attribution, scoped to the run's community — the same run/workflow
@@ -604,6 +610,7 @@ pub async fn dispatch_action(
                     text,
                     &owner_pubkey_hex,
                     thread_root.as_deref(),
+                    mentions,
                 )
                 .await
                 .map_err(WorkflowError::from)?;
@@ -1309,6 +1316,7 @@ mod tests {
                 text: "{{trigger.text}}".to_owned(),
                 channel: None,
                 thread_root: Some("{{trigger.root_message_id}}".to_owned()),
+                mentions: vec!["{{trigger.author}}".to_owned()],
             },
         };
 
@@ -1316,10 +1324,14 @@ mod tests {
 
         match resolved {
             ActionDef::SendMessage {
-                text, thread_root, ..
+                text,
+                thread_root,
+                mentions,
+                ..
             } => {
                 assert_eq!(text, "P1 incident in production");
                 assert_eq!(thread_root.as_deref(), Some("root-event-id-hex"));
+                assert_eq!(mentions, vec!["abc123def456"]);
             }
             other => panic!("unexpected action: {other:?}"),
         }

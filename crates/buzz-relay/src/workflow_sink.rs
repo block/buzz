@@ -177,11 +177,13 @@ impl ActionSink for RelayActionSink {
         text: &str,
         author_pubkey: &str,
         thread_root: Option<&str>,
+        mention_pubkeys: &[String],
     ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>> {
         let channel_id = channel_id.to_owned();
         let text = text.to_owned();
         let author_pubkey = author_pubkey.to_owned();
         let thread_root = thread_root.map(str::to_owned);
+        let mention_pubkeys = mention_pubkeys.to_owned();
 
         Box::pin(async move {
             // 0. Upgrade weak reference — fails only during shutdown.
@@ -314,6 +316,27 @@ impl ActionSink for RelayActionSink {
                 );
             }
 
+            let mut tagged_pubkeys = std::collections::HashSet::from([author_pubkey_hex.clone()]);
+            for mentioned in mention_pubkeys
+                .iter()
+                .filter(|value| !value.trim().is_empty())
+            {
+                let mentioned = nostr::PublicKey::from_hex(mentioned).map_err(|error| {
+                    ActionSinkError::InvalidInput(format!(
+                        "invalid explicit mention pubkey: {error}"
+                    ))
+                })?;
+                let mentioned = mentioned.to_hex();
+                if tagged_pubkeys.len() > buzz_sdk::mentions::MENTION_CAP {
+                    break;
+                }
+                if tagged_pubkeys.insert(mentioned.clone()) {
+                    tags.push(Tag::parse(["p", &mentioned]).map_err(|error| {
+                        ActionSinkError::EventBuild(format!("mention p tag: {error}"))
+                    })?);
+                }
+            }
+
             // Resolve `@Name` mentions to channel-member pubkeys and append a
             // `p` tag for each (skipping the author, already tagged above). A
             // resolution failure must not drop the message, so log and proceed
@@ -337,7 +360,10 @@ impl ActionSink for RelayActionSink {
                 })
                 .collect();
             for mentioned in resolve_mention_pubkeys(&text, &named_members) {
-                if mentioned == author_pubkey_hex {
+                if tagged_pubkeys.len() > buzz_sdk::mentions::MENTION_CAP {
+                    break;
+                }
+                if !tagged_pubkeys.insert(mentioned.clone()) {
                     continue;
                 }
                 tags.push(
@@ -668,6 +694,8 @@ mod integration_tests {
         let agent = nostr::Keys::generate();
         let agent_hex = agent.public_key().to_hex();
         let agent_bytes = agent.public_key().to_bytes().to_vec();
+        let external = nostr::Keys::generate();
+        let external_hex = external.public_key().to_hex();
 
         let host = format!("wf-ptag-{}.example", uuid::Uuid::new_v4().simple());
         let community = match state
@@ -726,6 +754,7 @@ mod integration_tests {
                 "heads up @Robby — please take a look",
                 &author_hex,
                 None,
+                std::slice::from_ref(&external_hex),
             )
             .await
             .expect("send_message");
@@ -756,6 +785,10 @@ mod integration_tests {
         assert!(
             p_tag_targets.contains(&agent_hex.as_str()),
             "mentioned member {agent_hex} must be p-tagged so it wakes; got {p_tag_targets:?}"
+        );
+        assert!(
+            p_tag_targets.contains(&external_hex.as_str()),
+            "explicit non-member {external_hex} must be p-tagged; got {p_tag_targets:?}"
         );
     }
 }

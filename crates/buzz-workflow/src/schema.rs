@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::WorkflowError;
 
+const MAX_EXPLICIT_MENTIONS: usize = 50;
+
 /// Top-level workflow definition, authored in YAML and stored as canonical JSON.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowDef {
@@ -100,6 +102,9 @@ pub enum ActionDef {
         /// Optional top-level event ID. When set, post directly into that thread.
         #[serde(default)]
         thread_root: Option<String>,
+        /// Explicit pubkeys to mention after template resolution.
+        #[serde(default)]
+        mentions: Vec<String>,
     },
     /// Send a direct message to a user.
     SendDm {
@@ -206,6 +211,14 @@ impl WorkflowDef {
                     step.id
                 )));
             }
+            if let ActionDef::SendMessage { mentions, .. } = &step.action {
+                if mentions.len() > MAX_EXPLICIT_MENTIONS {
+                    return Err(WorkflowError::InvalidDefinition(format!(
+                        "send_message mentions cannot exceed {} entries",
+                        MAX_EXPLICIT_MENTIONS
+                    )));
+                }
+            }
         }
 
         if let TriggerDef::Schedule { cron, interval } = &self.trigger {
@@ -303,12 +316,17 @@ mod tests {
 
     #[test]
     fn parse_send_message_thread_root() {
-        let yaml = "name: Thread reply\ntrigger:\n  on: webhook\nsteps:\n  - id: reply\n    action: send_message\n    text: '{{trigger.message}}'\n    thread_root: '{{trigger.root_message_id}}'\n";
+        let yaml = "name: Thread reply\ntrigger:\n  on: webhook\nsteps:\n  - id: reply\n    action: send_message\n    text: '{{trigger.message}}'\n    thread_root: '{{trigger.root_message_id}}'\n    mentions:\n      - '{{trigger.user_pubkey}}'\n";
         let (def, _) = parse_yaml(yaml).expect("parse failed");
 
         match &def.steps[0].action {
-            ActionDef::SendMessage { thread_root, .. } => {
+            ActionDef::SendMessage {
+                thread_root,
+                mentions,
+                ..
+            } => {
                 assert_eq!(thread_root.as_deref(), Some("{{trigger.root_message_id}}"));
+                assert_eq!(mentions, &["{{trigger.user_pubkey}}"]);
             }
             other => panic!("unexpected action: {other:?}"),
         }

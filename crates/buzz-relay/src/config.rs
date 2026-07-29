@@ -46,6 +46,15 @@ pub struct JoinPolicyConfig {
     pub version: String,
 }
 
+/// Provisioning configuration for N2-managed staff identities.
+#[derive(Debug, Clone)]
+pub struct N2IdentitySyncConfig {
+    /// Shared secret accepted by the N2 identity-sync endpoint.
+    pub sync_secret: String,
+    /// HMAC key used to derive stable server-managed Nostr identities.
+    pub derivation_key: String,
+}
+
 /// Relay runtime configuration, loaded from environment variables.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -182,6 +191,9 @@ pub struct Config {
     ///
     /// Default: `false`. Set via `BUZZ_ALLOW_NIP_OA_AUTH=true`.
     pub allow_nip_oa_auth: bool,
+
+    /// Optional N2 staff identity provisioning integration.
+    pub n2_identity_sync: Option<N2IdentitySyncConfig>,
 
     /// Media storage configuration (S3/MinIO).
     pub media: buzz_media::MediaConfig,
@@ -791,6 +803,32 @@ impl Config {
         let privacy_markdown = read_policy_markdown("BUZZ_PRIVACY_POLICY_MARKDOWN")?;
         let age_attestation_required = parse_optional_bool("BUZZ_AGE_ATTESTATION_REQUIRED")?;
         let audit_enabled = parse_bool("BUZZ_AUDIT_ENABLED", true)?;
+        let n2_identity_sync = match (
+            std::env::var("BUZZ_N2_IDENTITY_SYNC_SECRET").ok(),
+            std::env::var("BUZZ_N2_IDENTITY_DERIVATION_KEY").ok(),
+        ) {
+            (None, None) => None,
+            (Some(sync_secret), Some(derivation_key))
+                if sync_secret.len() >= 32 && derivation_key.len() >= 32 =>
+            {
+                Some(N2IdentitySyncConfig {
+                    sync_secret,
+                    derivation_key,
+                })
+            }
+            (Some(_), Some(_)) => {
+                return Err(ConfigError::InvalidValue(
+                    "BUZZ_N2_IDENTITY_SYNC_SECRET and BUZZ_N2_IDENTITY_DERIVATION_KEY must each be at least 32 characters"
+                        .to_string(),
+                ));
+            }
+            _ => {
+                return Err(ConfigError::InvalidValue(
+                    "BUZZ_N2_IDENTITY_SYNC_SECRET and BUZZ_N2_IDENTITY_DERIVATION_KEY must be configured together"
+                        .to_string(),
+                ));
+            }
+        };
         let join_policy = if terms_markdown.is_none()
             && privacy_markdown.is_none()
             && !age_attestation_required
@@ -898,6 +936,7 @@ impl Config {
             relay_operator_api_origin,
             relay_operator_pubkeys,
             allow_nip_oa_auth,
+            n2_identity_sync,
             media,
             media_max_concurrent_uploads,
             media_max_concurrent_uploads_per_pubkey,
@@ -1068,6 +1107,43 @@ mod tests {
             Err(ConfigError::InvalidValue(ref message))
                 if message.contains("BUZZ_AUDIT_ENABLED")
         ));
+    }
+
+    #[test]
+    fn n2_identity_sync_requires_two_strong_values() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::remove_var("BUZZ_N2_IDENTITY_SYNC_SECRET");
+        std::env::remove_var("BUZZ_N2_IDENTITY_DERIVATION_KEY");
+
+        std::env::set_var("BUZZ_N2_IDENTITY_SYNC_SECRET", "s".repeat(32));
+        let incomplete = Config::from_env();
+
+        std::env::set_var("BUZZ_N2_IDENTITY_DERIVATION_KEY", "too-short");
+        let weak = Config::from_env();
+
+        std::env::set_var("BUZZ_N2_IDENTITY_DERIVATION_KEY", "k".repeat(32));
+        let configured = Config::from_env().expect("configured N2 identity sync");
+
+        std::env::remove_var("BUZZ_N2_IDENTITY_SYNC_SECRET");
+        std::env::remove_var("BUZZ_N2_IDENTITY_DERIVATION_KEY");
+
+        assert!(matches!(
+            incomplete,
+            Err(ConfigError::InvalidValue(ref message))
+                if message.contains("must be configured together")
+        ));
+        assert!(matches!(
+            weak,
+            Err(ConfigError::InvalidValue(ref message))
+                if message.contains("at least 32 characters")
+        ));
+        assert_eq!(
+            configured
+                .n2_identity_sync
+                .expect("N2 identity sync")
+                .derivation_key,
+            "k".repeat(32)
+        );
     }
 
     #[test]

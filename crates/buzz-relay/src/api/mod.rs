@@ -7,6 +7,7 @@ pub mod git;
 pub mod invites;
 pub mod media;
 pub mod mesh_demo;
+pub mod n2_identity;
 pub mod nip05;
 pub mod operator;
 
