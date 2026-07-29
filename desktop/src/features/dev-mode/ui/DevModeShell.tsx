@@ -259,6 +259,29 @@ export function DevModeShell({
     focusComposer();
   }, [focusComposer]);
 
+  // ⌘N: new channel (fresh composer). ⌘T: draft side chat in the open
+  // channel — the pane opens with no thread yet; its first send posts a new
+  // message to the channel and attaches the pane to that thread.
+  React.useEffect(() => {
+    const handleWindowKeyDown = (event: KeyboardEvent) => {
+      if (!event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) {
+        return;
+      }
+      const key = event.key.toLowerCase();
+      if (key === "n") {
+        event.preventDefault();
+        goToFresh();
+      } else if (key === "t" && view === "channel" && activeSessionId) {
+        event.preventDefault();
+        setSelectedRootId(null);
+        setThreadOpen(true);
+        setActivePane("thread");
+      }
+    };
+    window.addEventListener("keydown", handleWindowKeyDown);
+    return () => window.removeEventListener("keydown", handleWindowKeyDown);
+  }, [activeSessionId, goToFresh, view]);
+
   const handleCycleMode = React.useCallback(
     (direction: 1 | -1) => {
       if (modes.length === 0) return;
@@ -461,10 +484,18 @@ export function DevModeShell({
 
   const handleThreadSend = React.useCallback(
     async (prompt: string) => {
-      if (!activeChannel || !selectedRoot || !mode) {
+      if (!activeChannel || !mode) {
         throw new Error("Thread is no longer available.");
       }
-      await sendToSession(activeChannel, prompt, mode, selectedRoot.id);
+      if (selectedRoot) {
+        await sendToSession(activeChannel, prompt, mode, selectedRoot.id);
+        return;
+      }
+      // Draft side chat (⌘T): the first send posts a root message to the
+      // channel exactly like the main composer, then the pane attaches to
+      // that new thread.
+      const newRoot = await sendToSession(activeChannel, prompt, mode);
+      setSelectedRootId(newRoot.id);
     },
     [activeChannel, mode, selectedRoot, sendToSession],
   );
@@ -536,7 +567,7 @@ export function DevModeShell({
   );
 
   const sideChatOpen = Boolean(
-    view === "channel" && activeChannel && threadOpen && selectedRoot && mode,
+    view === "channel" && activeChannel && threadOpen && mode,
   );
 
   const composer = mode ? (
@@ -643,7 +674,7 @@ export function DevModeShell({
               {transcriptFor(previewChannel)}
             </div>
           ) : view === "channel" && activeChannel ? (
-            threadOpen && selectedRoot && mode ? (
+            threadOpen && mode ? (
               <DevSplitPane
                 activePane={activePane}
                 main={

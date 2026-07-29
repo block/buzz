@@ -164,7 +164,7 @@ export function useDevSessionActions(identity: Identity | undefined) {
         }
       }
 
-      await sendMessageMutation.mutateAsync({
+      return await sendMessageMutation.mutateAsync({
         targetChannel: channel,
         content:
           mode.kind === "agent"

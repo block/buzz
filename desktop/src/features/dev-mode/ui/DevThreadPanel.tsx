@@ -22,7 +22,9 @@ import { cn } from "@/shared/lib/cn";
 /**
  * Split-screen side chat for one prompt card: the root prompt, its thread,
  * and a composer that replies inside the thread so an agent picks the
- * conversation up with that context.
+ * conversation up with that context. A null root is a draft side chat
+ * (⌘T): the first send posts a new message to the channel — exactly like
+ * the channel composer — and the pane attaches to that new thread.
  */
 export function DevThreadPanel({
   channel,
@@ -36,7 +38,7 @@ export function DevThreadPanel({
   onClose,
 }: {
   channel: Channel;
-  root: RelayEvent;
+  root: RelayEvent | null;
   mode: DevComposerMode;
   currentPubkey: string | null;
   /** Whether this pane owns the keyboard (vs the main channel composer). */
@@ -47,10 +49,12 @@ export function DevThreadPanel({
   onSend: (prompt: string) => Promise<void>;
   onClose: () => void;
 }) {
-  const repliesQuery = useThreadReplies(channel, root.id);
+  const repliesQuery = useThreadReplies(channel, root?.id ?? null);
   const resolveName = useMemberNameResolver(channel.id);
   const resolveColor = useAuthorColorResolver();
-  const { scrollRef, contentRef, handleScroll } = usePinnedScroll(root.id);
+  const { scrollRef, contentRef, handleScroll } = usePinnedScroll(
+    root?.id ?? "draft",
+  );
 
   const [input, setInput] = React.useState("");
   const [busy, setBusy] = React.useState(false);
@@ -131,7 +135,9 @@ export function DevThreadPanel({
       data-testid="dev-mode-thread-panel"
     >
       <div className="flex shrink-0 items-center justify-between border-b border-border/60 px-3 py-1.5 text-xs text-muted-foreground">
-        <span className="min-w-0 truncate">side chat · {root.content}</span>
+        <span className="min-w-0 truncate">
+          side chat · {root ? root.content : "new thread"}
+        </span>
         <button
           className="ml-2 shrink-0 cursor-pointer hover:text-foreground"
           onClick={onClose}
@@ -148,14 +154,23 @@ export function DevThreadPanel({
         onScroll={handleScroll}
       >
         <div ref={contentRef}>
-          <DevMessageRow
-            event={root}
-            isSelf={root.pubkey === currentPubkey}
-            reactions={reactions.get(root.id)}
-            resolveColor={resolveColor}
-            resolveName={resolveName}
-          />
-          <div className="my-1 border-t border-border/40" />
+          {root ? (
+            <>
+              <DevMessageRow
+                event={root}
+                isSelf={root.pubkey === currentPubkey}
+                reactions={reactions.get(root.id)}
+                resolveColor={resolveColor}
+                resolveName={resolveName}
+              />
+              <div className="my-1 border-t border-border/40" />
+            </>
+          ) : (
+            <div className="py-0.5 text-sm text-muted-foreground/60">
+              new thread — your message posts to # {channel.name} and starts a
+              thread here
+            </div>
+          )}
           {replies.map((reply) => (
             <DevMessageRow
               key={reply.localKey ?? reply.id}
@@ -214,9 +229,13 @@ export function DevThreadPanel({
             onFocus={() => onSwitchPane("thread")}
             onKeyDown={handleKeyDown}
             placeholder={
-              mode.kind === "agent"
-                ? `Ask ${devComposerModeLabel(mode)} about this thread…`
-                : "Reply in this thread…"
+              root
+                ? mode.kind === "agent"
+                  ? `Ask ${devComposerModeLabel(mode)} about this thread…`
+                  : "Reply in this thread…"
+                : mode.kind === "agent"
+                  ? `Prompt ${devComposerModeLabel(mode)} — starts a new thread in # ${channel.name}…`
+                  : `Start a new thread in # ${channel.name}…`
             }
             rows={1}
             spellCheck={false}
@@ -238,7 +257,8 @@ export function DevThreadPanel({
             {busy ? "working…" : devComposerModeLabel(mode)}
           </span>
           <span className="select-none">
-            enter: reply · ←: channel · esc: close
+            {root ? "enter: reply" : "enter: start thread"} · ←: channel · esc:
+            close
           </span>
         </div>
       </div>
