@@ -9,7 +9,10 @@ import {
   selectMembershipEvents,
   type MembershipChange,
 } from "@/features/dev-mode/lib/membershipEvents";
-import { collectReactions } from "@/features/dev-mode/lib/messageReactions";
+import {
+  collectReactions,
+  type MessageReaction,
+} from "@/features/dev-mode/lib/messageReactions";
 import {
   byCreatedAscending,
   DEV_MESSAGE_KINDS,
@@ -224,7 +227,7 @@ function PromptCard({
 }: {
   channel: Channel;
   root: RelayEvent;
-  rootReactions: string[] | undefined;
+  rootReactions: MessageReaction[] | undefined;
   replyCount: number;
   unread: boolean;
   markRead: boolean;
@@ -401,7 +404,7 @@ export function DevTranscript({
   // react while working, so these double as a per-prompt activity signal.
   const rootReactions = React.useMemo(() => {
     const store = windowQuery.data;
-    if (!store) return new Map<string, string[]>();
+    if (!store) return new Map<string, MessageReaction[]>();
     return collectReactions([
       ...store.pages.flatMap((page) => page.aux),
       ...store.liveAux,

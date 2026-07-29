@@ -18,25 +18,32 @@ function reactionTargetId(tags: string[][]): string | null {
   return null;
 }
 
+export type MessageReaction = {
+  emoji: string;
+  /** Who reacted — names the reactor in the chip's hover tooltip. */
+  pubkey: string;
+};
+
 /**
  * Aggregate kind-7 reaction events by target message. Agents react to a
  * prompt while working on it, so these chips double as the loading state.
  */
 export function collectReactions(
   events: RelayEvent[] | undefined,
-): Map<string, string[]> {
-  const byTarget = new Map<string, string[]>();
+): Map<string, MessageReaction[]> {
+  const byTarget = new Map<string, MessageReaction[]>();
   for (const event of events ?? []) {
     if (event.kind !== KIND_REACTION) continue;
     const targetId = reactionTargetId(event.tags);
     if (!targetId) continue;
     const raw = event.content.trim();
     const emoji = raw === "" || raw === "+" ? "👍" : raw;
+    const reaction = { emoji, pubkey: event.pubkey };
     const bucket = byTarget.get(targetId);
     if (bucket) {
-      bucket.push(emoji);
+      bucket.push(reaction);
     } else {
-      byTarget.set(targetId, [emoji]);
+      byTarget.set(targetId, [reaction]);
     }
   }
   return byTarget;

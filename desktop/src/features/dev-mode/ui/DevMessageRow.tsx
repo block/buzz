@@ -5,6 +5,7 @@ import {
   matchLeadingMention,
   type MentionStyle,
 } from "@/features/dev-mode/lib/highlightContent";
+import type { MessageReaction } from "@/features/dev-mode/lib/messageReactions";
 import type {
   AgentResolver,
   NameResolver,
@@ -20,20 +21,32 @@ function formatTime(createdAt: number) {
   });
 }
 
-function ReactionChips({ reactions }: { reactions: string[] }) {
-  const counts = new Map<string, number>();
-  for (const emoji of reactions) {
-    counts.set(emoji, (counts.get(emoji) ?? 0) + 1);
+function ReactionChips({
+  reactions,
+  resolveName,
+}: {
+  reactions: MessageReaction[];
+  resolveName: NameResolver;
+}) {
+  const byEmoji = new Map<string, string[]>();
+  for (const { emoji, pubkey } of reactions) {
+    const bucket = byEmoji.get(emoji);
+    if (bucket) {
+      bucket.push(pubkey);
+    } else {
+      byEmoji.set(emoji, [pubkey]);
+    }
   }
   return (
     <span className="flex shrink-0 select-none items-baseline gap-1 self-start">
-      {[...counts.entries()].map(([emoji, count]) => (
+      {[...byEmoji.entries()].map(([emoji, pubkeys]) => (
         <span
           key={emoji}
-          className="rounded-none border border-border/50 bg-muted/40 px-1 text-xs text-muted-foreground"
+          className="text-xs text-muted-foreground"
+          title={[...new Set(pubkeys.map(resolveName))].join(", ")}
         >
           {emoji}
-          {count > 1 ? ` ${count}` : ""}
+          {pubkeys.length > 1 ? ` ${pubkeys.length}` : ""}
         </span>
       ))}
     </span>
@@ -51,7 +64,7 @@ export function DevMessageRow({
   event: RelayEvent;
   isSelf: boolean;
   /** Emoji reacted onto this message — agents react while working, so this doubles as the loading state. */
-  reactions?: string[];
+  reactions?: MessageReaction[];
   resolveName: NameResolver;
   resolveColor: AuthorColorResolver;
   resolveIsAgent: AgentResolver;
@@ -94,21 +107,21 @@ export function DevMessageRow({
         >
           {resolveName(event.pubkey)}
         </span>
+        {directed ? (
+          <span className="shrink-0 select-none text-xs text-muted-foreground/60">
+            to{" "}
+            <span style={{ color: directed.mention.color }}>
+              {directed.mention.name}
+            </span>
+          </span>
+        ) : null}
         <span className="shrink-0 select-none text-xs text-muted-foreground/50">
           {formatTime(event.created_at)}
         </span>
         {reactions && reactions.length > 0 ? (
-          <ReactionChips reactions={reactions} />
+          <ReactionChips reactions={reactions} resolveName={resolveName} />
         ) : null}
       </div>
-      {directed ? (
-        <div className="select-none text-xs leading-4 text-muted-foreground/60">
-          to{" "}
-          <span style={{ color: directed.mention.color }}>
-            {directed.mention.name}
-          </span>
-        </div>
-      ) : null}
       <div
         className={cn(
           "min-w-0 space-y-1 break-words [overflow-wrap:anywhere]",
