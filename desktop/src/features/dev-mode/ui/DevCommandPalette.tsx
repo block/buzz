@@ -11,6 +11,7 @@ import {
   useArchiveChannelMutation,
   useChannelMembersQuery,
   useLeaveChannelMutation,
+  useUpdateChannelMutation,
 } from "@/features/channels/hooks";
 import {
   AUTHOR_COLOR_PALETTE,
@@ -24,6 +25,11 @@ import {
   toggleChannelPinned,
   usePinnedChannels,
 } from "@/features/dev-mode/lib/pinnedChannels";
+import {
+  sanitizeChannelName,
+  uniqueChannelName,
+} from "@/features/dev-mode/lib/sessionNaming";
+import { subChannelName } from "@/features/dev-mode/lib/subChannels";
 import {
   useFlattenedUserSearchResults,
   useInfiniteUserSearchQuery,
@@ -42,7 +48,7 @@ type PaletteEntry = {
   run: () => void;
 };
 
-type PaletteMode = "root" | "color" | "add-member" | "members";
+type PaletteMode = "root" | "color" | "add-member" | "members" | "rename";
 
 /**
  * Channels can have 1000+ members; the browser renders at most this many
@@ -120,6 +126,7 @@ export function DevCommandPalette({
   const addMembersMutation = useAddChannelMembersMutation(activeChannelId);
   const leaveMutation = useLeaveChannelMutation(activeChannelId);
   const archiveMutation = useArchiveChannelMutation(activeChannelId);
+  const updateChannelMutation = useUpdateChannelMutation(activeChannelId);
   const membersQuery = useChannelMembersQuery(activeChannelId);
   const resolveColor = useAuthorColorResolver();
 
@@ -221,6 +228,51 @@ export function DevCommandPalette({
     onClose,
   ]);
 
+  // Renaming a sub-channel only edits its suffix (the `parent--` prefix is
+  // the parent link); renaming a main cascades to its subs inside
+  // useUpdateChannelMutation.
+  const renameChannel = React.useCallback(
+    async (rawName: string) => {
+      if (!activeChannel) return;
+      const slug = sanitizeChannelName(rawName);
+      if (!slug) return;
+      const base = parentOfActive
+        ? subChannelName(parentOfActive.name, slug)
+        : slug;
+      const otherNames = new Set(
+        channels
+          .filter((channel) => channel.id !== activeChannel.id)
+          .map((channel) => channel.name),
+      );
+      const newName = uniqueChannelName(base, otherNames);
+      if (newName === activeChannel.name) {
+        onClose();
+        return;
+      }
+      setActionError(null);
+      try {
+        await updateChannelMutation.mutateAsync({ name: newName });
+        // The mutation invalidates with refetchType "none"; the mounted
+        // channel list must refetch now or cascaded sub renames stay stale
+        // and the family's tabs fall apart.
+        await invalidateChannelState(queryClient, activeChannel.id);
+        onClose();
+      } catch (error) {
+        setActionError(
+          error instanceof Error ? error.message : "Failed to rename channel.",
+        );
+      }
+    },
+    [
+      activeChannel,
+      channels,
+      onClose,
+      parentOfActive,
+      queryClient,
+      updateChannelMutation,
+    ],
+  );
+
   const archiveChannel = React.useCallback(async () => {
     if (!activeChannelId) return;
     setActionError(null);
@@ -276,6 +328,32 @@ export function DevCommandPalette({
         : colorEntries.filter((entry) =>
             entry.label.toLowerCase().includes(needle),
           );
+    }
+
+    if (mode === "rename") {
+      if (!activeChannel) return [];
+      const slug = sanitizeChannelName(needle);
+      if (!slug) {
+        return [
+          {
+            id: "rename-hint",
+            label: "type a new name…",
+            detail: `renaming # ${activeChannel.name}`,
+            run: () => {},
+          },
+        ];
+      }
+      const preview = parentOfActive
+        ? subChannelName(parentOfActive.name, slug)
+        : slug;
+      return [
+        {
+          id: "rename-apply",
+          label: `rename to # ${preview}`,
+          detail: `was # ${activeChannel.name}`,
+          run: () => void renameChannel(needle),
+        },
+      ];
     }
 
     if (mode === "members") {
@@ -381,6 +459,18 @@ export function DevCommandPalette({
                 } satisfies PaletteEntry,
               ]
             : []),
+          {
+            id: "rename-channel",
+            label: `rename # ${activeChannel.name}`,
+            detail: parentOfActive
+              ? "rename this tab"
+              : "its tabs are renamed with it",
+            run: () => {
+              setMode("rename");
+              setQuery("");
+              setSelectedIndex(0);
+            },
+          },
           // Subs never appear in the left list, so pinning one is meaningless.
           ...(parentOfActive
             ? []
@@ -498,6 +588,7 @@ export function DevCommandPalette({
     parentOfActive,
     pinnedIds,
     query,
+    renameChannel,
     resolveColor,
     userSearchResults,
   ]);
@@ -567,7 +658,9 @@ export function DevCommandPalette({
                 ? `search people & agents to add to # ${activeChannel?.name ?? ""}…`
                 : mode === "members"
                   ? `search members of # ${activeChannel?.name ?? ""}…`
-                  : "search channels and commands…"
+                  : mode === "rename"
+                    ? `new name for # ${activeChannel?.name ?? ""}…`
+                    : "search channels and commands…"
           }
           spellCheck={false}
           value={query}

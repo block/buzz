@@ -162,3 +162,41 @@ test("⌘[ and ⌘] cycle through a channel's tabs", async ({ page }) => {
   await page.keyboard.press("Meta+[");
   await expect(tabs.nth(2)).toHaveAttribute("data-active", "true");
 });
+
+test("palette rename edits a tab's suffix and cascades from the parent", async ({
+  page,
+}) => {
+  await openDevModeChannel(page, "general");
+  await createChannel(page, "general--flaky-ci");
+
+  // Renaming a tab only edits its suffix — the parent prefix is the link.
+  const tabs = page.getByTestId("dev-mode-channel-tab");
+  await tabs.nth(1).click();
+  await page.keyboard.press("Control+o");
+  const input = page.getByTestId("dev-mode-palette-input");
+  await input.pressSequentially("rename");
+  const entries = page.getByTestId("dev-mode-palette-entry");
+  await expect(entries.first()).toContainText("rename # general--flaky-ci");
+  await page.keyboard.press("Enter");
+  await input.pressSequentially("Flaky CI Hunt");
+  await expect(entries.first()).toContainText(
+    "rename to # general--flaky-ci-hunt",
+  );
+  await page.keyboard.press("Enter");
+  const topBar = page.getByTestId("dev-mode-topbar-channel");
+  await expect(topBar).toContainText("general--flaky-ci-hunt");
+  await expect(tabs.nth(1)).toHaveText("flaky-ci-hunt");
+
+  // Renaming the parent cascades: the sub follows and stays a tab.
+  await tabs.nth(0).click();
+  await page.keyboard.press("Control+o");
+  await input.pressSequentially("rename");
+  await expect(entries.first()).toContainText("rename # general");
+  await page.keyboard.press("Enter");
+  await input.pressSequentially("war room");
+  await expect(entries.first()).toContainText("rename to # war-room");
+  await page.keyboard.press("Enter");
+  await expect(topBar).toContainText("war-room");
+  await expect(tabs).toHaveCount(2);
+  await expect(tabs.nth(1)).toHaveText("flaky-ci-hunt");
+});
