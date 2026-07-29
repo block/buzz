@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { programEventTone, weekAllDayPlacement } from "./eventPresentation.ts";
+import {
+  programEventTone,
+  strongestProgramEventTone,
+  weekAllDayPlacement,
+} from "./eventPresentation.ts";
 
 function event(overrides = {}) {
   return {
@@ -102,4 +106,22 @@ test("Week placement rejects timed and non-overlapping events", () => {
     ),
     null,
   );
+});
+
+test("a calendar cell preserves the most operationally significant program tone", () => {
+  assert.equal(
+    strongestProgramEventTone([
+      event({ allDay: false, location: "Sea" }),
+      event({ allDay: true, location: "FBE" }),
+    ]),
+    "port",
+  );
+  assert.equal(
+    strongestProgramEventTone([
+      event({ allDay: true, location: "FBE" }),
+      event({ allDay: true, location: "Sea" }),
+    ]),
+    "sea",
+  );
+  assert.equal(strongestProgramEventTone([]), "neutral");
 });

@@ -1,6 +1,8 @@
 import type { PlanTaskCalendarProjection } from "@/features/plans/domain/calendarProjection";
 import type { BattleRhythmEvent } from "../domain/contracts";
 import { getMonthCells, overlapsCalendarDay } from "../domain/dateRange";
+import { programEventTone } from "../domain/eventPresentation";
+import { programEventClasses } from "./programEventStyles";
 export function MonthCalendar({
   day,
   events,
@@ -68,7 +70,8 @@ export function MonthCalendar({
                 )
                 .map((event) => (
                   <button
-                    className="block w-full truncate rounded bg-primary/10 px-1 text-left text-2xs text-primary"
+                    className={`block w-full truncate rounded border px-1 text-left text-2xs ${programEventClasses(event)}`}
+                    data-program-tone={programEventTone(event)}
                     key={event.id}
                     onClick={() => onEdit?.(event)}
                     title={event.title}

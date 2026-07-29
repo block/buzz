@@ -1,6 +1,8 @@
 import type { PlanTaskCalendarProjection } from "@/features/plans/domain/calendarProjection";
 import type { BattleRhythmEvent } from "../domain/contracts";
 import { formatShipTime } from "../domain/calendarPresentation";
+import { programEventTone } from "../domain/eventPresentation";
+import { programEventClasses } from "./programEventStyles";
 
 export function DayShortcast({
   events,
@@ -60,7 +62,12 @@ export function DayShortcast({
                     : formatShipTime(event.start, timeZone)}
                 </td>
                 <td>
-                  <button onClick={() => onEdit?.(event)} type="button">
+                  <button
+                    className={`rounded border px-2 py-1 ${programEventClasses(event)}`}
+                    data-program-tone={programEventTone(event)}
+                    onClick={() => onEdit?.(event)}
+                    type="button"
+                  >
                     {event.title}
                   </button>
                   <span className="ml-2 text-2xs text-muted-foreground">

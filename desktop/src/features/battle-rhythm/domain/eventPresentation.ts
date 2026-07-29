@@ -12,6 +12,18 @@ export function programEventTone(
   return /\bsea\b/i.test(location) ? "sea" : "port";
 }
 
+export function strongestProgramEventTone(
+  events: readonly Pick<BattleRhythmEvent, "allDay" | "location">[],
+): ProgramEventTone {
+  let strongest: ProgramEventTone = "neutral";
+  for (const event of events) {
+    const tone = programEventTone(event);
+    if (tone === "sea") return tone;
+    if (tone === "port") strongest = tone;
+  }
+  return strongest;
+}
+
 export function weekAllDayPlacement(
   event: Pick<BattleRhythmEvent, "allDay" | "start" | "end">,
   range: DateRange,

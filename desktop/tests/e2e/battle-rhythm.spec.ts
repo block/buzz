@@ -151,6 +151,7 @@ test("manual events use ship-time controls and span every selected calendar day"
   await expect(dialog.getByLabel("End time (24 hour)")).toHaveValue("09:00");
   await dialog.getByLabel("End date").fill("2026-08-02");
   await dialog.getByLabel("All day").check();
+  await dialog.getByLabel("Location").fill("FBE");
 
   await dialog.getByLabel("Recurrence").selectOption("weekly");
   const untilDate = dialog.getByLabel("Until date");
@@ -167,13 +168,32 @@ test("manual events use ship-time controls and span every selected calendar day"
   await dialog.getByLabel("Recurrence").selectOption("none");
   await dialog.getByRole("button", { name: "Save event" }).click();
 
-  await expect(screen.getByRole("button", { name: "All day SMP" })).toHaveCount(
-    7,
-  );
+  const weekProgram = screen
+    .getByTestId("week-all-day-lane")
+    .getByRole("button", { name: "All day SMP" });
+  await expect(weekProgram).toHaveCount(1);
+  await expect(weekProgram).toHaveAttribute("data-program-tone", "port");
+  await expect(weekProgram).toHaveCSS("grid-column-start", "1");
+  await expect(weekProgram).toHaveCSS("grid-column-end", "span 7");
+  await expect(
+    screen
+      .getByTestId("week-timed-columns")
+      .getByRole("button", { name: "All day SMP" }),
+  ).toHaveCount(0);
   await screen.getByLabel("Calendar view").selectOption("Month");
   await expect(screen.getByText("SMP", { exact: true })).toHaveCount(7);
+  await expect(
+    screen.getByRole("button", { name: "SMP" }).first(),
+  ).toHaveAttribute("data-program-tone", "port");
   await screen.getByLabel("Calendar view").selectOption("Day");
-  await expect(screen.getByText("SMP", { exact: true })).toBeVisible();
+  await expect(screen.getByRole("button", { name: "SMP" })).toHaveAttribute(
+    "data-program-tone",
+    "port",
+  );
+  await screen.getByLabel("Calendar view").selectOption("Year");
+  await expect(
+    screen.locator('[data-program-tone="port"][title="SMP"]').first(),
+  ).toBeVisible();
 });
 
 test("Battle Rhythm opens read-only plan milestones without duplicating them", async ({

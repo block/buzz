@@ -1,6 +1,11 @@
 import type { BattleRhythmEvent } from "../domain/contracts";
 import { monthGrid } from "../domain/calendarPresentation";
 import { overlapsCalendarDay } from "../domain/dateRange";
+import {
+  strongestProgramEventTone,
+  type ProgramEventTone,
+} from "../domain/eventPresentation";
+import { programEventToneClasses } from "./programEventStyles";
 
 export function YearTimeline({
   day,
@@ -32,30 +37,24 @@ export function YearTimeline({
           </div>
           <div className="grid grid-cols-7 gap-y-1 text-center text-xs">
             {month.cells.map((cell) => {
-              const hasEvents = events.some((event) =>
+              const dayEvents = events.filter((event) =>
                 overlapsCalendarDay(event.start, event.end, cell, timeZone),
               );
+              const tone: ProgramEventTone =
+                strongestProgramEventTone(dayEvents);
+              const hasEvents = dayEvents.length > 0;
               return (
                 <span
                   className={`relative rounded py-1 ${
                     cell.slice(5, 7) === String(month.month).padStart(2, "0")
                       ? "text-foreground"
                       : "text-muted-foreground/40"
-                  } ${hasEvents ? "bg-primary/15 font-semibold text-primary" : ""}`}
+                  } ${hasEvents ? `border font-semibold ${programEventToneClasses(tone)}` : ""}`}
+                  data-program-tone={hasEvents ? tone : undefined}
                   key={cell}
                   title={
                     hasEvents
-                      ? events
-                          .filter((event) =>
-                            overlapsCalendarDay(
-                              event.start,
-                              event.end,
-                              cell,
-                              timeZone,
-                            ),
-                          )
-                          .map((event) => event.title)
-                          .join(", ")
+                      ? dayEvents.map((event) => event.title).join(", ")
                       : undefined
                   }
                 >

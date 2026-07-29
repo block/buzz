@@ -2,16 +2,16 @@ import type { PlanTaskCalendarProjection } from "@/features/plans/domain/calenda
 import type { BattleRhythmEvent } from "../domain/contracts";
 import { formatShipTime, weekDayHeading } from "../domain/calendarPresentation";
 import {
+  programEventTone,
+  weekAllDayPlacement,
+} from "../domain/eventPresentation";
+import {
+  addDays,
   getWeekRange,
   overlapsCalendarDay,
   overlapsRange,
 } from "../domain/dateRange";
-
-function addDays(day: string, amount: number): string {
-  const date = new Date(`${day}T12:00:00Z`);
-  date.setUTCDate(date.getUTCDate() + amount);
-  return date.toISOString().slice(0, 10);
-}
+import { programEventClasses } from "./programEventStyles";
 
 export function WeekCalendar({
   day,
@@ -32,12 +32,46 @@ export function WeekCalendar({
   const shown = events.filter((event) =>
     overlapsRange(event.start, event.end, range),
   );
+  const allDayEvents = shown.filter((event) => event.allDay);
+  const timedEvents = shown.filter((event) => !event.allDay);
   return (
     <div>
-      <div className="mb-2 rounded border border-dashed p-2 text-2xs text-muted-foreground">
-        All-day activities
+      <div
+        className="mb-2 rounded border border-dashed p-2"
+        data-testid="week-all-day-lane"
+      >
+        <div className="mb-2 text-2xs font-medium uppercase tracking-wide text-muted-foreground">
+          All-day activities
+        </div>
+        <div className="grid gap-1">
+          {allDayEvents.map((event) => {
+            const placement = weekAllDayPlacement(event, range, timeZone);
+            if (!placement) return null;
+            return (
+              <div className="grid grid-cols-7 gap-2" key={event.id}>
+                <button
+                  aria-label={`All day ${event.title}`}
+                  className={`w-full rounded border px-2 py-1 text-left text-xs ${programEventClasses(event)}`}
+                  data-program-tone={programEventTone(event)}
+                  onClick={() => onEdit?.(event)}
+                  style={{
+                    gridColumn: `${placement.startColumn} / span ${placement.span}`,
+                  }}
+                  title={
+                    event.location
+                      ? `${event.title} · ${event.location}`
+                      : event.title
+                  }
+                  type="button"
+                >
+                  {event.title}
+                </button>
+              </div>
+            );
+          })}
+        </div>
       </div>
-      <div className="grid grid-cols-7 gap-2">
+      <div className="grid grid-cols-7 gap-2" data-testid="week-timed-columns">
         {Array.from({ length: 7 }, (_, offset) => {
           const dateKey = addDays(range.start.slice(0, 10), offset);
           return (
@@ -65,7 +99,7 @@ export function WeekCalendar({
                       {milestone.title}
                     </button>
                   ))}
-                {shown
+                {timedEvents
                   .filter((event) =>
                     overlapsCalendarDay(
                       event.start,
@@ -76,7 +110,8 @@ export function WeekCalendar({
                   )
                   .map((event) => (
                     <button
-                      className="mb-2 rounded bg-primary/10 p-2 text-xs"
+                      className={`mb-2 rounded border p-2 text-xs ${programEventClasses(event)}`}
+                      data-program-tone={programEventTone(event)}
                       key={event.id}
                       onClick={() => onEdit?.(event)}
                       type="button"
