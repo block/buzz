@@ -2,8 +2,8 @@ use super::import::decode_snapshot_from_bytes;
 use super::*;
 use crate::managed_agents::{
     agent_snapshot::{
-        decode_avatar_data_url, encode_snapshot_png, AgentSnapshot, AgentSnapshotDefinition,
-        AgentSnapshotMemory, AgentSnapshotProfile, FORMAT_DISCRIMINATOR, FORMAT_VERSION,
+        AgentSnapshot, AgentSnapshotDefinition, AgentSnapshotMemory, AgentSnapshotProfile,
+        FORMAT_DISCRIMINATOR, FORMAT_VERSION,
     },
     BackendKind, ManagedAgentRecord, RespondTo,
 };
