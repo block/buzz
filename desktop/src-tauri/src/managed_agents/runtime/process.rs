@@ -17,6 +17,8 @@ pub(crate) const KNOWN_AGENT_BINARIES: &[&str] = &[
     "codex-acp",
     "codex_acp",
     "goose",
+    "nano-core",
+    "nano_core",
     // buzz-dev-mcp's multicall personalities (rg, tree, buzz,
     // git-credential-nostr, git-sign-nostr) are short-lived per-tool-call
     // invocations — not listed here.
@@ -466,4 +468,12 @@ pub(crate) fn terminate_untracked_pair_runtime(
         process_is_running,
         super::super::remove_agent_runtime_receipt_path,
     )
+}
+
+#[cfg(test)]
+mod nano_core_tests {
+    #[test]
+    fn nano_core_is_a_known_agent_binary() {
+        assert!(super::KNOWN_AGENT_BINARIES.contains(&"nano-core"));
+    }
 }

@@ -692,7 +692,9 @@ pub(crate) fn normalize_agent_command_identity(command: &str) -> String {
 
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_agent_command_identity(command).as_str() {
-        "goose" => Some(vec!["acp".to_string()]),
+        // nano-core's ACP entrypoint is a subcommand of its own CLI
+        // (`nano-core acp`), not a bare stdio binary — same shape as Goose.
+        "goose" | "nano-core" => Some(vec!["acp".to_string()]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
         _ => None,
@@ -1538,6 +1540,20 @@ mod tests {
     fn normalizes_goose_args_to_acp() {
         assert_eq!(normalize_agent_args("goose", Vec::new()), vec!["acp"]);
         assert_eq!(normalize_agent_args("goose", vec!["".into()]), vec!["acp"]);
+    }
+
+    /// nano-core reaches ACP through `nano-core acp`, so — unlike the zero-arg
+    /// native entrypoints — the `acp` subcommand must survive normalization
+    /// rather than be scrubbed as a legacy Goose-shaped fallback.
+    #[test]
+    fn normalizes_nano_core_args_to_acp_subcommand() {
+        assert_eq!(normalize_agent_args("nano-core", Vec::new()), vec!["acp"]);
+        assert_eq!(
+            normalize_agent_args("nano-core", vec!["acp".into()]),
+            vec!["acp"]
+        );
+        // The upstream spelling normalizes to the same identity.
+        assert_eq!(normalize_agent_args("nano_core", Vec::new()), vec!["acp"]);
     }
 
     #[test]
