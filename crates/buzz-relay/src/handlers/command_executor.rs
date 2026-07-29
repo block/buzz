@@ -84,6 +84,32 @@ enum PersistResult {
     Inserted(sqlx::Transaction<'static, sqlx::Postgres>),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CoordinateWrite {
+    Duplicate,
+    Stale,
+    Replaces,
+}
+
+fn command_uses_parameterized_replacement(kind: u32, d_tag: Option<&str>) -> bool {
+    d_tag.is_some() && is_parameterized_replaceable(kind)
+}
+
+fn evaluate_coordinate_write(
+    created_at: chrono::DateTime<chrono::Utc>,
+    incoming_id: &[u8],
+    existing_ts: chrono::DateTime<chrono::Utc>,
+    existing_id: &[u8],
+) -> CoordinateWrite {
+    if incoming_id == existing_id {
+        CoordinateWrite::Duplicate
+    } else if created_at < existing_ts || (created_at == existing_ts && incoming_id > existing_id) {
+        CoordinateWrite::Stale
+    } else {
+        CoordinateWrite::Replaces
+    }
+}
+
 /// Persist a command event inside a transaction. Returns the OPEN transaction
 /// as an idempotency guard — if the event was already stored, `Duplicate` is
 /// returned and the handler skips execution.
@@ -124,7 +150,10 @@ async fn persist_command_event(
     })?;
     let received_at = chrono::Utc::now();
 
-    // Extract d_tag for parameterized replaceable kinds (NIP-33).
+    // Extract d_tag for storage/querying. Only NIP-33 parameterized
+    // replaceable kinds use it for coordinate replacement; non-replaceable
+    // commands such as workflow triggers and approvals intentionally retain
+    // append-only/event-id idempotency semantics even though they carry `d`.
     let d_tag = buzz_db::event::extract_d_tag(event);
     if let Some(ref d_tag) = d_tag {
         if d_tag.len() > buzz_db::event::D_TAG_MAX_LEN {
@@ -134,39 +163,42 @@ async fn persist_command_event(
                 buzz_db::event::D_TAG_MAX_LEN,
             )));
         }
+    }
 
-        // Command kinds normally use plain insert semantics, but workflow
-        // definitions are NIP-33 events. Serialize writers for the same
-        // coordinate and reject stale writes before executing the domain
-        // mutation, otherwise old updates can overwrite newer workflow state.
-        let lock_key = {
-            let mut h: u64 = 0xcbf29ce484222325;
-            for b in tenant.community().as_uuid().as_bytes() {
-                h ^= *b as u64;
-                h = h.wrapping_mul(0x100000001b3);
-            }
-            for b in kind_i32.to_le_bytes() {
-                h ^= b as u64;
-                h = h.wrapping_mul(0x100000001b3);
-            }
-            for b in pubkey_bytes.as_slice() {
-                h ^= *b as u64;
-                h = h.wrapping_mul(0x100000001b3);
-            }
-            for b in d_tag.as_bytes() {
-                h ^= *b as u64;
-                h = h.wrapping_mul(0x100000001b3);
-            }
-            h as i64
-        };
+    if let Some(ref d_tag) = d_tag {
+        if command_uses_parameterized_replacement(kind_i32 as u32, Some(d_tag.as_str())) {
+            // Command kinds normally use plain insert semantics, but workflow
+            // definitions are NIP-33 events. Serialize writers for the same
+            // coordinate and reject stale writes before executing the domain
+            // mutation, otherwise old updates can overwrite newer workflow state.
+            let lock_key = {
+                let mut h: u64 = 0xcbf29ce484222325;
+                for b in tenant.community().as_uuid().as_bytes() {
+                    h ^= *b as u64;
+                    h = h.wrapping_mul(0x100000001b3);
+                }
+                for b in kind_i32.to_le_bytes() {
+                    h ^= b as u64;
+                    h = h.wrapping_mul(0x100000001b3);
+                }
+                for b in pubkey_bytes.as_slice() {
+                    h ^= *b as u64;
+                    h = h.wrapping_mul(0x100000001b3);
+                }
+                for b in d_tag.as_bytes() {
+                    h ^= *b as u64;
+                    h = h.wrapping_mul(0x100000001b3);
+                }
+                h as i64
+            };
 
-        sqlx::query("SELECT pg_advisory_xact_lock($1)")
-            .bind(lock_key)
-            .execute(tx.as_mut())
-            .await
-            .map_err(|e| IngestError::Internal(format!("error: lock event coordinate: {e}")))?;
+            sqlx::query("SELECT pg_advisory_xact_lock($1)")
+                .bind(lock_key)
+                .execute(tx.as_mut())
+                .await
+                .map_err(|e| IngestError::Internal(format!("error: lock event coordinate: {e}")))?;
 
-        let existing: Option<(chrono::DateTime<chrono::Utc>, Vec<u8>)> = sqlx::query_as(
+            let existing: Option<(chrono::DateTime<chrono::Utc>, Vec<u8>)> = sqlx::query_as(
             "SELECT created_at, id FROM events \
              WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL \
              ORDER BY created_at DESC, id ASC LIMIT 1",
@@ -179,15 +211,24 @@ async fn persist_command_event(
         .await
         .map_err(|e| IngestError::Internal(format!("error: query event coordinate: {e}")))?;
 
-        let incoming_id = event.id.as_bytes().as_slice();
-        if let Some((existing_ts, existing_id)) = existing {
-            let dominated = created_at < existing_ts
-                || (created_at == existing_ts && incoming_id >= existing_id.as_slice());
-            if dominated {
-                return Ok(PersistResult::Duplicate);
-            }
+            let incoming_id = event.id.as_bytes().as_slice();
+            if let Some((existing_ts, existing_id)) = existing {
+                match evaluate_coordinate_write(
+                    created_at,
+                    incoming_id,
+                    existing_ts,
+                    existing_id.as_slice(),
+                ) {
+                    CoordinateWrite::Duplicate => return Ok(PersistResult::Duplicate),
+                    CoordinateWrite::Stale => {
+                        return Err(IngestError::Rejected(format!(
+                        "blocked: stale replaceable command event for coordinate kind:{kind_i32} d:{d_tag}"
+                    )));
+                    }
+                    CoordinateWrite::Replaces => {}
+                }
 
-            sqlx::query(
+                sqlx::query(
                 "UPDATE events SET deleted_at = NOW() \
                  WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL",
             )
@@ -198,6 +239,7 @@ async fn persist_command_event(
             .execute(tx.as_mut())
             .await
             .map_err(|e| IngestError::Internal(format!("error: replace old event: {e}")))?;
+            }
         }
     }
 
@@ -1367,4 +1409,75 @@ async fn resume_workflow_after_approval(
     engine
         .finalize_run(community_id, run_id, result, existing_trace)
         .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ts(secs: i64) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::from_timestamp(secs, 0).expect("valid timestamp")
+    }
+
+    #[test]
+    fn coordinate_replacement_only_applies_to_parameterized_replaceable_commands() {
+        assert!(command_uses_parameterized_replacement(
+            KIND_WORKFLOW_DEF,
+            Some("workflow-id")
+        ));
+
+        assert!(!command_uses_parameterized_replacement(
+            KIND_WORKFLOW_TRIGGER,
+            Some("workflow-id")
+        ));
+        assert!(!command_uses_parameterized_replacement(
+            KIND_APPROVAL_GRANT,
+            Some("approval-token")
+        ));
+        assert!(!command_uses_parameterized_replacement(
+            KIND_APPROVAL_DENY,
+            Some("approval-token")
+        ));
+        assert!(!command_uses_parameterized_replacement(
+            KIND_WORKFLOW_DEF,
+            None
+        ));
+    }
+
+    #[test]
+    fn coordinate_write_distinguishes_replay_from_stale_same_second_tie() {
+        let created_at = ts(1_725_000_000);
+        let existing_id = [0x20; 32];
+        let same_id = existing_id;
+        let higher_id = [0x30; 32];
+        let lower_id = [0x10; 32];
+
+        assert_eq!(
+            evaluate_coordinate_write(created_at, &same_id, created_at, &existing_id),
+            CoordinateWrite::Duplicate
+        );
+        assert_eq!(
+            evaluate_coordinate_write(created_at, &higher_id, created_at, &existing_id),
+            CoordinateWrite::Stale
+        );
+        assert_eq!(
+            evaluate_coordinate_write(created_at, &lower_id, created_at, &existing_id),
+            CoordinateWrite::Replaces
+        );
+    }
+
+    #[test]
+    fn coordinate_write_rejects_older_timestamp_and_accepts_newer_timestamp() {
+        let existing_id = [0x20; 32];
+        let incoming_id = [0x10; 32];
+
+        assert_eq!(
+            evaluate_coordinate_write(ts(99), &incoming_id, ts(100), &existing_id),
+            CoordinateWrite::Stale
+        );
+        assert_eq!(
+            evaluate_coordinate_write(ts(101), &incoming_id, ts(100), &existing_id),
+            CoordinateWrite::Replaces
+        );
+    }
 }
