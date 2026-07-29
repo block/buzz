@@ -182,6 +182,18 @@ void main() {
     expect(find.byTooltip('Back'), findsNothing);
   });
 
+  testWidgets('keeps bottom clearance for the floating tab bar', (
+    tester,
+  ) async {
+    await tester.pumpWidget(await buildTestable());
+    await tester.pumpAndSettle();
+
+    final safeAreas = tester.widgetList<SafeArea>(find.byType(SafeArea));
+    expect(safeAreas, hasLength(1));
+    expect(safeAreas.single.top, isFalse);
+    expect(safeAreas.single.bottom, isTrue);
+  });
+
   testWidgets('shows error view with retry button', (tester) async {
     await tester.pumpWidget(
       await buildTestable(activityNotifier: _ErrorActivityNotifier.new),
