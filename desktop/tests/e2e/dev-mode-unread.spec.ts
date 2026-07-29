@@ -142,7 +142,7 @@ function navigatorRow(
     .first();
 }
 
-test("unread thread reply in a tab routes the parent open to its side chat", async ({
+test("collapsed unread replies in a tab route the parent open to the side chat", async ({
   page,
 }) => {
   await openDevMode(page);
@@ -175,12 +175,19 @@ test("unread thread reply in a tab routes the parent open to its side chat", asy
   await page.keyboard.press("Escape");
   await page.keyboard.press("Escape");
 
-  // An external agent reply lands in the tab's thread while we are away.
-  // The self-mention clears the notify gate exactly like an agent replying
-  // to the user's prompt.
-  await emitMockMessage(page, "general--flaky-ci", "agent: found the cause", {
+  // Two external human replies land while we are away: the first renders
+  // inline (human-first fallback), the second is collapsed behind the
+  // "… more replies" affordance — reading it requires the side chat. The
+  // self-mentions clear the notify gate exactly like replies to the
+  // user's prompt.
+  await emitMockMessage(page, "general--flaky-ci", "human: found the cause", {
     parentEventId: root.id,
     createdAt: unreadTimestamp(),
+    mentionPubkeys: [SELF_PUBKEY],
+  });
+  await emitMockMessage(page, "general--flaky-ci", "human: fix is up", {
+    parentEventId: root.id,
+    createdAt: unreadTimestamp() + 1,
     mentionPubkeys: [SELF_PUBKEY],
   });
 
@@ -190,7 +197,7 @@ test("unread thread reply in a tab routes the parent open to its side chat", asy
   ).toBeVisible();
 
   // Opening the parent routes to the unread tab and opens the side chat on
-  // the unread thread.
+  // the unread thread, because part of it is not visible inline.
   await openChannelFromNavigator(page, "general");
   await expect(topBar).toContainText("general--flaky-ci");
   await expect(tabs.filter({ hasText: "flaky-ci" }).first()).toHaveAttribute(
@@ -199,12 +206,72 @@ test("unread thread reply in a tab routes the parent open to its side chat", asy
   );
   const threadPanel = page.getByTestId("dev-mode-thread-panel");
   await expect(threadPanel).toBeVisible();
-  await expect(threadPanel).toContainText("agent: found the cause");
+  await expect(threadPanel).toContainText("human: fix is up");
 
   // Reading the thread clears the contextual indicators.
   await expect(
     navigatorRow(page, "general").getByTestId("dev-mode-unread-dot"),
   ).toHaveCount(0);
+});
+
+test("inline agent replies are read by viewing the channel, with no side chat", async ({
+  page,
+}) => {
+  await openDevMode(page);
+
+  // Visit the seeded "agents" channel (charlie is a bot member) to
+  // establish the live subscription and a read frontier.
+  await openChannelFromNavigator(page, "agents");
+  await page.getByTestId("dev-mode-transcript").waitFor();
+  await waitForMockLiveSubscription(page, "agents");
+
+  const root = await emitMockMessage(
+    page,
+    "agents",
+    "prompt: roll out the fix",
+    { pubkey: SELF_PUBKEY, createdAt: Math.floor(Date.now() / 1000) - 40 },
+  );
+  await expect(
+    page.getByTestId("dev-mode-prompt-card").filter({
+      hasText: "prompt: roll out the fix",
+    }),
+  ).toBeVisible();
+
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Escape");
+
+  // A run of agent replies lands while we are away. All of them render
+  // inline in the main chat view (no human responded), so no side chat
+  // should be needed to read them.
+  await emitMockMessage(page, "agents", "agent: on it", {
+    parentEventId: root.id,
+    pubkey: TEST_IDENTITIES.charlie.pubkey,
+    createdAt: unreadTimestamp(),
+    mentionPubkeys: [SELF_PUBKEY],
+  });
+  await emitMockMessage(page, "agents", "agent: rollout complete", {
+    parentEventId: root.id,
+    pubkey: TEST_IDENTITIES.charlie.pubkey,
+    createdAt: unreadTimestamp() + 1,
+    mentionPubkeys: [SELF_PUBKEY],
+  });
+
+  await expect(
+    navigatorRow(page, "agents").getByTestId("dev-mode-unread-dot"),
+  ).toBeVisible();
+
+  // Opening the channel shows the whole agent run inline and marks it
+  // read — the side chat stays closed.
+  await openChannelFromNavigator(page, "agents");
+  const card = page.getByTestId("dev-mode-prompt-card").filter({
+    hasText: "prompt: roll out the fix",
+  });
+  await expect(card).toContainText("agent: on it");
+  await expect(card).toContainText("agent: rollout complete");
+  await expect(
+    navigatorRow(page, "agents").getByTestId("dev-mode-unread-dot"),
+  ).toHaveCount(0);
+  await expect(page.getByTestId("dev-mode-thread-panel")).toHaveCount(0);
 });
 
 test("unread top-level post routes to its tab without opening a side chat", async ({

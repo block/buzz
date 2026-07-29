@@ -23,7 +23,12 @@ export function selectUnreadThreadRoots(
 
 export type UnreadFamilyTarget = {
   channelId: string;
-  /** Thread to open in the side chat, or null for a top-level unread. */
+  /**
+   * The unread thread needing attention, or null for a top-level unread.
+   * Routing opens its side chat only when the unread replies are collapsed
+   * in the main view (see useUnreadRouting) — inline unread replies are
+   * read just by looking at the channel.
+   */
   rootId: string | null;
 };
 

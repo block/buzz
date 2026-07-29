@@ -16,6 +16,7 @@ import {
 import {
   byCreatedAscending,
   DEV_MESSAGE_KINDS,
+  selectInlineVisibleCount,
   selectRootEvents,
 } from "@/features/dev-mode/lib/transcriptRoots";
 import type {
@@ -88,15 +89,10 @@ function ThreadInlineReplies({
     [repliesQuery.data],
   );
 
-  const visible = React.useMemo(() => {
-    let end = 0;
-    while (end < replies.length && resolveIsAgent(replies[end].pubkey)) {
-      end += 1;
-    }
-    // A human-first thread still shows its first reply inline.
-    if (end === 0 && replies.length > 0) end = 1;
-    return replies.slice(0, end);
-  }, [replies, resolveIsAgent]);
+  const visible = React.useMemo(
+    () => replies.slice(0, selectInlineVisibleCount(replies, resolveIsAgent)),
+    [replies, resolveIsAgent],
+  );
   // The summary count can outrun the fetched subtree (live recounts) —
   // trust whichever knows about more replies.
   const moreCount = Math.max(replyCount, replies.length) - visible.length;

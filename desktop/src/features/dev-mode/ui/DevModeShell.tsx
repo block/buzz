@@ -298,7 +298,7 @@ export function DevModeShell({
     subIndex,
     unreadChannelIds,
     topLevelUnreadChannelIds,
-    activeChannelId: effectiveSessionId,
+    activeChannel,
     roots,
     openChannel,
     openThread: handleOpenThread,
