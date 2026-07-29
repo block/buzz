@@ -30,6 +30,8 @@ mod shutdown;
 mod templates;
 mod util;
 #[cfg(target_os = "linux")]
+mod webkit_permissions;
+#[cfg(target_os = "linux")]
 pub mod webkit_rendering;
 use app_state::{build_app_state, resolve_persisted_identity, AppState};
 use builderlab::*;
@@ -193,6 +195,13 @@ pub fn run() {
                 .on_webview_ready(|webview| {
                     if webview.label() != "main" {
                         return;
+                    }
+
+                    #[cfg(target_os = "linux")]
+                    if let Err(error) = webkit_permissions::install(&webview) {
+                        eprintln!(
+                            "buzz-desktop: failed to install WebKit media permissions: {error}"
+                        );
                     }
 
                     // macOS applies the restored geometry asynchronously. Wait
