@@ -22,10 +22,12 @@ export async function switchManagedAgentModel(
   pubkey: string,
   channelId: string,
   modelId: string,
+  requestId: string,
 ): Promise<void> {
   await sendAgentObserverControl(pubkey, {
     type: "switch_model",
     channelId,
     modelId,
+    requestId,
   });
 }

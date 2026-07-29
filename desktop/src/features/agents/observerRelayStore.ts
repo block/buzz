@@ -193,7 +193,7 @@ function observerTag(event: RelayEvent, tagName: string) {
   return event.tags.find((tag) => tag[0] === tagName)?.[1] ?? null;
 }
 
-function appendAgentEvent(agentPubkey: string, event: ObserverEvent) {
+function appendAgentEvent(agentPubkey: string, event: ObserverEvent): boolean {
   const key = normalizePubkey(agentPubkey);
   const current = eventsByAgent.get(key) ?? [];
   if (
@@ -202,7 +202,7 @@ function appendAgentEvent(agentPubkey: string, event: ObserverEvent) {
         existing.seq === event.seq && existing.timestamp === event.timestamp,
     )
   ) {
-    return;
+    return false;
   }
 
   const sorted = [...current, event].sort(compareObserverEvents);
@@ -231,6 +231,7 @@ function appendAgentEvent(agentPubkey: string, event: ObserverEvent) {
   invalidateSnapshot(key);
 
   notifyListeners();
+  return true;
 }
 
 /**
@@ -391,7 +392,7 @@ async function handleRelayObserverEvent(
         });
       }
     }
-    appendAgentEvent(agentPubkey, parsed);
+    const eventAdded = appendAgentEvent(agentPubkey, parsed);
     const managementRequest = parseAgentManagementRequest(parsed.payload);
     if (managementRequest) {
       for (const listener of agentManagementListeners) {
@@ -402,7 +403,9 @@ async function handleRelayObserverEvent(
       void putAgentSessionConfig(agentPubkey, parsed.payload);
       onSessionConfigCaptured?.(agentPubkey);
     } else if (parsed.kind === "control_result") {
-      dispatchControlResult(agentPubkey, parsed.payload);
+      if (eventAdded) {
+        dispatchControlResult(agentPubkey, parsed, event);
+      }
     } else if (parsed.kind === "managed_agent_runtime_lifecycle") {
       void putManagedAgentRuntimeLifecycle(agentPubkey, parsed.payload).catch(
         (error) => {
@@ -495,7 +498,12 @@ function isControlResultFrame(payload: unknown): payload is ControlResultFrame {
   );
 }
 
-function dispatchControlResult(agentPubkey: string, payload: unknown) {
+function dispatchControlResult(
+  agentPubkey: string,
+  observerEvent: ObserverEvent,
+  relayEvent: RelayEvent,
+) {
+  const payload = observerEvent.payload;
   if (!isControlResultFrame(payload)) {
     return;
   }
@@ -503,8 +511,16 @@ function dispatchControlResult(agentPubkey: string, payload: unknown) {
   if (!subscribers) {
     return;
   }
+  const frame = {
+    ...payload,
+    channelId: observerEvent.channelId ?? payload.channelId ?? undefined,
+    relayEventId: relayEvent.id,
+    relayCreatedAt: relayEvent.created_at,
+    observerTimestamp: observerEvent.timestamp,
+    observerSeq: observerEvent.seq,
+  };
   for (const subscriber of subscribers) {
-    subscriber(payload);
+    subscriber(frame);
   }
 }
 
@@ -540,6 +556,21 @@ export function subscribeControlResults(
       controlResultListeners.delete(key);
     }
   };
+}
+
+/**
+ * Test-only seam for the decoded live `control_result` ingestion path.
+ * Exercises the same `(seq, timestamp)` replay dedup and signed-envelope
+ * metadata enrichment used after production decryption.
+ */
+export function _testIngestControlResult(
+  agentPubkey: string,
+  relayEvent: RelayEvent,
+  observerEvent: ObserverEvent,
+): void {
+  if (appendAgentEvent(agentPubkey, observerEvent)) {
+    dispatchControlResult(agentPubkey, observerEvent, relayEvent);
+  }
 }
 
 export function getAgentObserverSnapshot(
@@ -749,6 +780,7 @@ export function resetAgentObserverStore() {
   knownAgentsBySubscription.clear();
   pendingUnknownAgentFrames.length = 0;
   latestLiveSessionByAgentChannel.clear();
+  controlResultListeners.clear();
   agentManagementListeners.clear();
   onSessionConfigCaptured = null;
   connectionState = "idle";

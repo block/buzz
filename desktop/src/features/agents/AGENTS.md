@@ -114,6 +114,16 @@ with a TypeScript lookup table or an id comparison in a component.
     published or removed. A queued update must stay visibly queued, and the
     catalog itself must render only relay-confirmed publications — never an
     optimistic local persona.
+11. **Live model-switch success requires request-correlated, per-channel
+    application proof.** Every switch operation generates an unpredictable
+    request ID and accepts only signed, fresh `control_result` frames carrying
+    that exact request ID and model. `sent` and `recycling` are progress only;
+    each target channel must independently report `switched`, while explicit
+    terminal failures fail fast. A timeout is `pending`, never success. The
+    terminal-proof claim journal is relay/community-scoped process state:
+    `resetCommunityState()` must replace it on every community switch so a
+    claim observed on the outgoing relay cannot suppress proof on the incoming
+    relay.
 
 ## The tests that enforce this
 
@@ -128,6 +138,9 @@ with a TypeScript lookup table or an id comparison in a component.
   `isCacheableDiscoveryResponse`, `deriveModelDiscoveryPending`,
   `isSuccessfulEmptyDiscovery`. If the "reopen to retry" copy becomes inert
   again, these tests will catch it.
+- `lib/liveSwitchOutcome.test.mjs` — exact request correlation, signed
+  freshness, per-channel `switched` proof, pending-on-timeout behavior, replay
+  claims, and community-reset replacement.
 - `desktop/tests/e2e/onboarding-agent-defaults.spec.ts` — onboarding behavior
   acceptance coverage for readiness, failure states, defaults, navigation,
   successful-empty vs failed optional-model discovery, and persistence races.
