@@ -263,7 +263,7 @@ function StatusPill({ status }: { status: string }) {
   );
 }
 
-export function EmptyState() {
+export function EmptyState({ onCreate }: { onCreate: () => void }) {
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-3 px-4 py-16 text-center">
       <FolderGit2 className="h-10 w-10 text-muted-foreground/40" />
@@ -273,6 +273,9 @@ export function EmptyState() {
           Projects published to this relay will appear here.
         </p>
       </div>
+      <Button onClick={onCreate} type="button">
+        Create repository
+      </Button>
     </div>
   );
 }

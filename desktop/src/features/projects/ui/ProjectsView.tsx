@@ -447,10 +447,6 @@ export function ProjectsView() {
     );
   }
 
-  if (projects.length === 0) {
-    return <EmptyState />;
-  }
-
   const repositoryItems =
     visibleProjects.length === 0 ? (
       <EmptyFilteredState />
@@ -646,7 +642,9 @@ export function ProjectsView() {
           </div>
           <div className="mx-auto w-full max-w-6xl">
             <div className="w-full min-w-0 pb-4 pt-4">
-              {filter === "all" ? (
+              {projects.length === 0 ? (
+                <EmptyState onCreate={() => setCreateProjectOpen(true)} />
+              ) : filter === "all" ? (
                 <ProjectsOverviewPanel
                   localRepositoryCount={localProjectCount}
                   metadata={

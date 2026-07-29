@@ -132,6 +132,8 @@ export type MockAgentMemoryListing = {
 };
 
 type MockBridgeOptions = {
+  /** Start the mock relay without seeded NIP-34 repositories. */
+  emptyProjects?: boolean;
   /** Advertised HEAD for the first mock project without adding that branch. */
   projectHeadBranch?: string;
   /** Relay NIP-11 identity used to sign authoritative repository state. */

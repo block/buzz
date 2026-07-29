@@ -146,6 +146,8 @@ type MockSearchProfileSeed = {
 type E2eConfig = {
   mode?: "mock" | "relay";
   mock?: {
+    /** Start the mock relay without seeded NIP-34 repositories. */
+    emptyProjects?: boolean;
     /** Advertised HEAD for the first mock project without adding that branch. */
     projectHeadBranch?: string;
     /** Builderlab account returned by hosted-community onboarding. Null/omitted = signed out. */
@@ -4992,8 +4994,11 @@ function buildMockProjectEvents(): RelayEvent[] {
   const daySeconds = 86_400;
   const now = Math.floor(Date.now() / 1000);
   const historyDays = 26 * 7;
+  const projectSeeds = getConfig()?.mock?.emptyProjects
+    ? []
+    : MOCK_PROJECT_SEEDS;
 
-  for (const [projectIndex, seed] of MOCK_PROJECT_SEEDS.entries()) {
+  for (const [projectIndex, seed] of projectSeeds.entries()) {
     const owner =
       projectIndex === 0
         ? (window.__BUZZ_E2E_PROJECT_OWNER_OVERRIDE__ ?? seed.owner)
@@ -5096,10 +5101,13 @@ function getMockProjectEventStore(): RelayEvent[] {
   return mockProjectEventStore;
 }
 
-/** Project-scoped publishes (PR/issue comments, NIP-34 status events) carry
- * a repo-address `a` tag instead of a channel `h` tag — store them with the
- * seeded project events so refetches see them. */
+/** Repository announcements and project-scoped publishes belong in the mock
+ * project store so refetches see newly-created repositories and work items. */
 function isMockProjectScopedEvent(event: RelayEvent): boolean {
+  if (event.kind === KIND_REPO_ANNOUNCEMENT) {
+    return true;
+  }
+
   const hasRepoAddressTag = event.tags.some(
     (tag) => tag[0] === "a" && (tag[1] ?? "").startsWith("30617:"),
   );
