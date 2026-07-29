@@ -764,13 +764,26 @@ pub(crate) fn count_fallback_exceeded(candidate_count: usize) -> bool {
 /// in SQL by `filter_to_query_params` — meaning `count_events()` will produce
 /// an exact count without post-filtering.
 ///
-/// Pushed constraints: kinds, authors (single or multi), ids, since, until,
-/// channel_id (#h single), #p (single), #d (single, NIP-33-only kinds), #e (any),
-/// channel_ids (injected by caller).
+/// Pushed constraints: kinds, authors (single or multi, non-empty), ids
+/// (non-empty), since, until, channel_id (#h single, UUID-valued), #p
+/// (single), #d (single, NIP-33-only kinds), #e (any), channel_ids (injected
+/// by caller).
 ///
-/// Anything else (multi-#p, #t, #a, search, multi-#h, #d on non-NIP-33)
-/// requires post-filtering and cannot use the fast COUNT path.
+/// Anything else — multi-#p, #t, #a, search, multi-#h, a non-UUID single #h,
+/// #d on non-NIP-33 kinds, or any constraint present with zero candidate
+/// values (`authors: []`, `#t: []`, etc.) — requires post-filtering and
+/// cannot use the fast COUNT path. A present-but-empty constraint matches
+/// nothing under `filters_match`, but `filter_to_query_params` drops it
+/// instead of emitting a match-nothing predicate, so treating it as pushable
+/// would overcount.
 pub fn filter_fully_pushable(filter: &Filter) -> bool {
+    if filter.authors.as_ref().is_some_and(|a| a.is_empty()) {
+        return false;
+    }
+    if filter.ids.as_ref().is_some_and(|ids| ids.is_empty()) {
+        return false;
+    }
+
     // Check if filter exclusively targets NIP-33 kinds (needed for #d pushability).
     let is_nip33_only = filter.kinds.as_ref().is_some_and(|ks| {
         !ks.is_empty()
@@ -780,11 +793,25 @@ pub fn filter_fully_pushable(filter: &Filter) -> bool {
     });
 
     for (tag_key, tag_values) in filter.generic_tags.iter() {
+        if tag_values.is_empty() {
+            return false;
+        }
         let key = tag_key.to_string();
         match key.as_str() {
             "h" => {
-                // Single #h is pushed as channel_id; multi-#h is not.
+                // Single #h is pushed as channel_id only when it parses as a
+                // channel UUID; multi-#h and a non-UUID single #h (e.g. a
+                // bare NIP-29 group id) are not pushed and need
+                // post-filtering, since an event can legitimately carry a
+                // non-UUID h tag and match it.
                 if tag_values.len() > 1 {
+                    return false;
+                }
+                if tag_values
+                    .iter()
+                    .next()
+                    .is_some_and(|v| v.parse::<uuid::Uuid>().is_err())
+                {
                     return false;
                 }
             }
@@ -795,9 +822,9 @@ pub fn filter_fully_pushable(filter: &Filter) -> bool {
                 }
             }
             "d" => {
-                // #d is pushed (single or multi) ONLY for NIP-33-only kind filters.
-                // Otherwise it's silently ignored by SQL → overcount.
-                if !tag_values.is_empty() && !is_nip33_only {
+                // #d is pushed ONLY for NIP-33-only kind filters. Otherwise
+                // it's silently ignored by SQL → overcount.
+                if !is_nip33_only {
                     return false;
                 }
             }
@@ -806,9 +833,7 @@ pub fn filter_fully_pushable(filter: &Filter) -> bool {
             }
             _ => {
                 // Any other generic tag (#t, #a, etc.) is not pushed.
-                if !tag_values.is_empty() {
-                    return false;
-                }
+                return false;
             }
         }
     }
@@ -1691,6 +1716,80 @@ mod tests {
             buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::nil()),
         );
         assert_eq!(q5.d_tag, None);
+    }
+
+    #[test]
+    fn fully_pushable_single_h_channel_uuid() {
+        let h_tag = SingleLetterTag::lowercase(Alphabet::H);
+        let channel = uuid::Uuid::new_v4();
+        let filter = Filter::new()
+            .kind(nostr::Kind::Custom(9))
+            .custom_tags(h_tag, [channel.to_string()]);
+        assert!(filter_fully_pushable(&filter));
+    }
+
+    #[test]
+    fn fully_pushable_rejects_single_h_non_uuid() {
+        // A bare NIP-29 group id (not a channel UUID) can't be pushed as
+        // channel_id, and an event may legitimately carry it as a literal
+        // h-tag value — the fast COUNT path would overcount every event in
+        // every accessible channel instead of matching the literal tag.
+        let h_tag = SingleLetterTag::lowercase(Alphabet::H);
+        let filter = Filter::new()
+            .kind(nostr::Kind::Custom(9))
+            .custom_tags(h_tag, ["general"]);
+        assert!(!filter_fully_pushable(&filter));
+    }
+
+    #[test]
+    fn fully_pushable_rejects_multi_h() {
+        let h_tag = SingleLetterTag::lowercase(Alphabet::H);
+        let filter = Filter::new().kind(nostr::Kind::Custom(9)).custom_tags(
+            h_tag,
+            [
+                uuid::Uuid::new_v4().to_string(),
+                uuid::Uuid::new_v4().to_string(),
+            ],
+        );
+        assert!(!filter_fully_pushable(&filter));
+    }
+
+    #[test]
+    fn fully_pushable_rejects_empty_value_constraints() {
+        // A present-but-empty constraint (authors, ids, or any generic tag)
+        // matches nothing under `filters_match`, but `filter_to_query_params`
+        // drops it rather than pushing a match-nothing predicate — treating
+        // it as pushable would overcount instead of returning zero.
+        let t_tag = SingleLetterTag::lowercase(Alphabet::T);
+        let empty_t: [&str; 0] = [];
+
+        let empty_authors = Filter::new().kind(nostr::Kind::Custom(9)).authors([]);
+        assert!(!filter_fully_pushable(&empty_authors));
+
+        let empty_ids = Filter::new().kind(nostr::Kind::Custom(9)).ids([]);
+        assert!(!filter_fully_pushable(&empty_ids));
+
+        let empty_generic_tag = Filter::new()
+            .kind(nostr::Kind::Custom(9))
+            .custom_tags(t_tag, empty_t);
+        assert!(!filter_fully_pushable(&empty_generic_tag));
+    }
+
+    #[test]
+    fn fully_pushable_rejects_nonempty_other_generic_tags() {
+        let t_tag = SingleLetterTag::lowercase(Alphabet::T);
+        let filter = Filter::new()
+            .kind(nostr::Kind::Custom(9))
+            .custom_tags(t_tag, ["topic"]);
+        assert!(!filter_fully_pushable(&filter));
+    }
+
+    #[test]
+    fn fully_pushable_accepts_plain_kind_author_filter() {
+        let filter = Filter::new()
+            .kind(nostr::Kind::Custom(9))
+            .author(nostr::Keys::generate().public_key());
+        assert!(filter_fully_pushable(&filter));
     }
 
     #[test]
