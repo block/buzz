@@ -523,9 +523,20 @@ mod tests {
 
         let ts = Utc::now();
         fence.advance(ts);
-        assert_eq!(fence.verified_through(), Some(ts));
+        // advance() normalizes to Postgres timestamptz resolution (micros);
+        // compare at that resolution so the assertion is clock-precision
+        // portable (Utc::now() yields nanos on Linux, micros elsewhere).
+        assert_eq!(
+            fence.verified_through(),
+            DateTime::from_timestamp_micros(ts.timestamp_micros())
+        );
         assert!(fence.covers(ts - chrono::Duration::seconds(1)));
-        assert!(fence.covers(ts), "boundary is inclusive");
+        // Inclusive boundary at the fence's resolution: the exact micros
+        // watermark is covered (raw nanos `ts` is strictly past it).
+        assert!(
+            fence.covers(DateTime::from_timestamp_micros(ts.timestamp_micros()).unwrap()),
+            "boundary is inclusive"
+        );
         assert!(!fence.covers(ts + chrono::Duration::seconds(1)));
 
         fence.close();
