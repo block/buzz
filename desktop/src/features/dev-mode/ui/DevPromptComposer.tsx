@@ -174,22 +174,29 @@ export function DevPromptComposer({
         testId="dev-mode-composer-resize"
         {...resizeHandleProps}
       />
-      {draftLabel ? (
-        <div
-          className="flex items-baseline gap-2 border-y border-primary/40 bg-primary/10 px-4 py-1 text-xs text-primary"
-          data-testid="dev-mode-draft-banner"
-        >
-          <span className="font-semibold">{draftLabel}</span>
-          <span className="text-primary/60">esc cancels</span>
-        </div>
-      ) : null}
       {/* Mirror the composer row's prefix so the mode line lines up exactly
-          with the textarea's left edge. */}
+          with the textarea's left edge. A tab draft swaps the mode line for
+          the highlighted draft label in the same row, so entering and
+          leaving the draft never shifts the layout. */}
       <div className="flex items-start gap-2 px-4 pt-2">
         <span aria-hidden className="invisible select-none text-sm">
           ⏵
         </span>
-        <DevComposerModeLine agentColor={agentColor} busy={busy} mode={mode} />
+        {draftLabel ? (
+          <span
+            className="flex select-none items-baseline gap-2 text-xs leading-4 text-primary"
+            data-testid="dev-mode-draft-banner"
+          >
+            <span className="font-semibold">{draftLabel}</span>
+            <span className="text-primary/60">esc cancels</span>
+          </span>
+        ) : (
+          <DevComposerModeLine
+            agentColor={agentColor}
+            busy={busy}
+            mode={mode}
+          />
+        )}
       </div>
       <div className="relative flex items-start gap-2 px-4 pt-1">
         {active && autocomplete.open ? (
