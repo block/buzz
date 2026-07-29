@@ -2736,6 +2736,30 @@ fn event_mentions_agent(event: &nostr::Event, agent_pubkey_hex: &str) -> bool {
     })
 }
 
+fn control_command_content_matches(content: &str, command: &str) -> bool {
+    let content = content.trim();
+    if content == command {
+        return true;
+    }
+
+    // The desktop composer keeps a selected mention in visible content so it
+    // can derive the event's `p` tag. When the toolbar inserts that mention at
+    // the end of an already-authored command, it serializes as
+    // `<command> @<display name>`. Accept only that single-line suffix form;
+    // author and exact-agent `p`-tag checks remain separate hard gates.
+    let Some(mention) = content
+        .strip_prefix(command)
+        .and_then(|suffix| suffix.strip_prefix(' '))
+    else {
+        return false;
+    };
+
+    mention.starts_with('@')
+        && mention.len() > 1
+        && !mention[1..].contains('@')
+        && !mention.contains(['\r', '\n'])
+}
+
 fn is_owner_control_command(
     event: &nostr::Event,
     kind_u32: u32,
@@ -2743,7 +2767,7 @@ fn is_owner_control_command(
     agent_pubkey_hex: &str,
 ) -> bool {
     kind_u32 == KIND_STREAM_MESSAGE
-        && event.content.trim() == command
+        && control_command_content_matches(&event.content, command)
         && event_mentions_agent(event, agent_pubkey_hex)
 }
 
@@ -4311,6 +4335,59 @@ mod owner_control_command_tests {
             &no_mention,
             KIND_STREAM_MESSAGE,
             "!rotate",
+            &agent
+        ));
+    }
+
+    #[test]
+    fn owner_control_command_accepts_ui_suffix_mention() {
+        let agent = "ab".repeat(32);
+        let event = make_event(
+            KIND_STREAM_MESSAGE,
+            "!cancel @Unitus SEO OS Representative",
+            Some(&agent),
+        );
+
+        assert!(is_owner_control_command(
+            &event,
+            KIND_STREAM_MESSAGE,
+            "!cancel",
+            &agent
+        ));
+    }
+
+    #[test]
+    fn owner_control_command_rejects_non_ui_content_shapes() {
+        let agent = "ab".repeat(32);
+        for content in [
+            "please !cancel @Agent",
+            "!cancel please @Agent",
+            "@Agent !cancel",
+            "!cancel  @Agent",
+            "!cancel @Agent @Other",
+            "!cancel @Agent\nmore",
+        ] {
+            let event = make_event(KIND_STREAM_MESSAGE, content, Some(&agent));
+            assert!(
+                !is_owner_control_command(&event, KIND_STREAM_MESSAGE, "!cancel", &agent),
+                "unexpected match for {content:?}"
+            );
+        }
+
+        let no_mention_tag = make_event(KIND_STREAM_MESSAGE, "!cancel @Agent", None);
+        assert!(!is_owner_control_command(
+            &no_mention_tag,
+            KIND_STREAM_MESSAGE,
+            "!cancel",
+            &agent
+        ));
+
+        let other_agent = "cd".repeat(32);
+        let wrong_agent_tag = make_event(KIND_STREAM_MESSAGE, "!cancel @Agent", Some(&other_agent));
+        assert!(!is_owner_control_command(
+            &wrong_agent_tag,
+            KIND_STREAM_MESSAGE,
+            "!cancel",
             &agent
         ));
     }
