@@ -607,6 +607,14 @@ pub(crate) fn row_to_stored_event(row: sqlx::postgres::PgRow) -> Result<Option<S
 ///
 /// Uses the same filter logic as `query_events` but returns only the count.
 pub async fn count_events(pool: &PgPool, q: &EventQuery) -> Result<i64> {
+    let mut conn = pool.acquire().await?;
+    count_events_on(&mut conn, q).await
+}
+
+/// [`count_events`] on a specific session — the replica-routing path runs
+/// the count on the exact reader connection whose heartbeat observation
+/// proved its predicate.
+pub(crate) async fn count_events_on(conn: &mut sqlx::PgConnection, q: &EventQuery) -> Result<i64> {
     // Empty list means "match nothing" — return 0 immediately.
     if q.kinds.as_deref().is_some_and(|k| k.is_empty()) {
         return Ok(0);
@@ -741,7 +749,7 @@ pub async fn count_events(pool: &PgPool, q: &EventQuery) -> Result<i64> {
         }
     }
 
-    let row = qb.build().fetch_one(pool).await?;
+    let row = qb.build().fetch_one(&mut *conn).await?;
     let cnt: i64 = row.try_get("cnt")?;
 
     Ok(cnt)
@@ -1005,6 +1013,21 @@ pub async fn get_events_by_ids(
     if ids.is_empty() {
         return Ok(vec![]);
     }
+    let mut conn = pool.acquire().await?;
+    get_events_by_ids_on(&mut conn, community_id, ids).await
+}
+
+/// [`get_events_by_ids`] on a specific session — the replica-routing path
+/// runs the query on the exact reader connection whose heartbeat
+/// observation proved its predicate.
+pub(crate) async fn get_events_by_ids_on(
+    conn: &mut sqlx::PgConnection,
+    community_id: CommunityId,
+    ids: &[&[u8]],
+) -> Result<Vec<StoredEvent>> {
+    if ids.is_empty() {
+        return Ok(vec![]);
+    }
     debug_assert!(ids.len() <= 500, "batch fetch should be bounded by caller");
 
     let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
@@ -1019,7 +1042,7 @@ pub async fn get_events_by_ids(
     }
     qb.push(")");
 
-    let rows = qb.build().fetch_all(pool).await?;
+    let rows = qb.build().fetch_all(&mut *conn).await?;
 
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {

@@ -158,8 +158,9 @@ async fn main() -> anyhow::Result<()> {
     let db_config = DbConfig {
         database_url: config.database_url.clone(),
         read_database_url: config.read_database_url.clone(),
-        replica_head_max_age_secs: config.replica_head_max_age_secs,
+        replica_read_max_age_ms: config.replica_read_max_age_ms,
         max_connections: config.db_pool_size,
+        read_max_connections: config.db_read_pool_size,
         ..DbConfig::default()
     };
     let db = Db::new(&db_config).await.map_err(|e| {
@@ -167,7 +168,11 @@ async fn main() -> anyhow::Result<()> {
         anyhow::anyhow!("DB connection failed: {e}")
     })?;
     if db.has_read_pool() {
-        info!("Postgres connected (writer + read replica)");
+        info!("Postgres connected (writer + lazy read replica pool)");
+        // Reader-down at boot must not crash or block the relay; this warn-only
+        // ping is the sole boot-time visibility that the replica is unreachable
+        // (the lazy pool with min_connections=0 dials nothing until first use).
+        db.spawn_read_pool_boot_ping();
     } else {
         info!("Postgres connected");
     }

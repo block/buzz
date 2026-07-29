@@ -1087,7 +1087,8 @@ async fn query_events_authed(
             let type_events = match canonical {
                 "mentions" => state
                     .db
-                    .query_feed_mentions(
+                    .query_feed_mentions_routed(
+                        "bridge_feed",
                         tenant.community(),
                         &pubkey_bytes,
                         &accessible_channels,
@@ -1098,7 +1099,8 @@ async fn query_events_authed(
                     .map_err(|e| internal_error(&format!("feed mentions error: {e}")))?,
                 "needs_action" => state
                     .db
-                    .query_feed_needs_action(
+                    .query_feed_needs_action_routed(
+                        "bridge_feed",
                         tenant.community(),
                         &pubkey_bytes,
                         &accessible_channels,
@@ -1109,7 +1111,13 @@ async fn query_events_authed(
                     .map_err(|e| internal_error(&format!("feed needs_action error: {e}")))?,
                 "activity" => state
                     .db
-                    .query_feed_activity(tenant.community(), &accessible_channels, since, remaining)
+                    .query_feed_activity_routed(
+                        "bridge_feed",
+                        tenant.community(),
+                        &accessible_channels,
+                        since,
+                        remaining,
+                    )
                     .await
                     .map_err(|e| internal_error(&format!("feed activity error: {e}")))?,
                 _ => continue,
@@ -1275,7 +1283,7 @@ async fn query_events_authed(
     let db = state.db.clone();
     let mut catchall_results = stream::iter(catchall_queries.into_iter().map(|(idx, query)| {
         let db = db.clone();
-        async move { (idx, db.query_events(&query).await) }
+        async move { (idx, db.query_events_routed("bridge_query", &query).await) }
     }))
     .buffered(crate::handlers::req::FILTER_QUERY_CONCURRENCY);
 
@@ -1480,7 +1488,7 @@ async fn count_events_authed(
                 && !needs_result_gated_filtering
                 && !needs_persona_filtering
             {
-                match state.db.count_events(&query).await {
+                match state.db.count_events_routed("bridge_count", &query).await {
                     Ok(n) => total += n as u64,
                     Err(e) => {
                         return Err(internal_error(&format!("count error: {e}")));
@@ -1490,7 +1498,11 @@ async fn count_events_authed(
                 // Fallback: query + post-filter for non-pushable constraints.
                 let mut q = query;
                 crate::handlers::req::apply_count_fallback_limit(&mut q);
-                match state.db.query_events(&q).await {
+                match state
+                    .db
+                    .query_events_routed_bounded("bridge_count_fallback", &q)
+                    .await
+                {
                     Ok(stored_events) => {
                         if crate::handlers::req::count_fallback_exceeded(stored_events.len()) {
                             metrics::counter!("buzz_count_fallback_rejections_total").increment(1);
@@ -1547,7 +1559,7 @@ async fn count_events_authed(
                 && !needs_persona_filtering
             {
                 query.limit = None;
-                match state.db.count_events(&query).await {
+                match state.db.count_events_routed("bridge_count", &query).await {
                     Ok(n) => total += n as u64,
                     Err(e) => {
                         return Err(internal_error(&format!("count error: {e}")));
@@ -1556,7 +1568,11 @@ async fn count_events_authed(
             } else {
                 // Fallback: query a bounded candidate set + post-filter.
                 crate::handlers::req::apply_count_fallback_limit(&mut query);
-                match state.db.query_events(&query).await {
+                match state
+                    .db
+                    .query_events_routed_bounded("bridge_count_fallback", &query)
+                    .await
+                {
                     Ok(stored_events) => {
                         if crate::handlers::req::count_fallback_exceeded(stored_events.len()) {
                             metrics::counter!("buzz_count_fallback_rejections_total").increment(1);
@@ -1729,7 +1745,7 @@ async fn handle_bridge_search(
         let id_refs: Vec<&[u8]> = hit_ids.iter().map(|b| b.as_slice()).collect();
         let stored_events = state
             .db
-            .get_events_by_ids(tenant.community(), &id_refs)
+            .get_events_by_ids_routed("bridge_search_hydrate", tenant.community(), &id_refs)
             .await
             .map_err(|e| internal_error(&format!("search fetch error: {e}")))?;
 

@@ -81,11 +81,12 @@ pub const FENCE_CLOCK_MARGIN_SECS: i64 = 5;
 
 /// How often the probe samples the writer and commits a heartbeat token.
 ///
-/// Rev 2 sets ~1s: the head-routing predicate (`covered_age <= B`, B
-/// defaulting to 5s) needs the cadence well under the budget, or eligibility
-/// flaps between beats. Cost is one single-row UPDATE tuple of WAL per beat
-/// per pod.
-pub const PROBE_INTERVAL: Duration = Duration::from_secs(1);
+/// 500ms keeps the cadence at least 2x under the smallest sensible bounded
+/// budget (`BUZZ_REPLICA_READ_MAX_AGE_MS`, deploy plan 1000ms) so
+/// eligibility doesn't flap between beats. Cost is one single-row UPDATE
+/// tuple of WAL per beat per pod — ~20 beats/s fleet-wide, <0.1% of the
+/// writer.
+pub const PROBE_INTERVAL: Duration = Duration::from_millis(500);
 
 /// A fence whose newest entry is older than this is stale: the probe has
 /// stopped committing tokens and routing eligibility closes until a new
@@ -98,12 +99,22 @@ pub const PROBE_INTERVAL: Duration = Duration::from_secs(1);
 pub const FENCE_STALENESS: Duration = Duration::from_secs(30);
 
 /// How many `(token, fence_wall)` entries the fence retains. At one probe
-/// per [`PROBE_INTERVAL`] this is ~2 minutes of history — a reader session
-/// lagging further than that behind the newest token fails closed
+/// per [`PROBE_INTERVAL`] (500ms) this is ~60 seconds of history — a reader
+/// session lagging further than that behind the newest token fails closed
 /// (routes to the writer) rather than proving from thin air. Aurora reader
 /// lag is typically tens of milliseconds; a reader minutes behind is a
 /// fault, not a routing candidate.
 const RING_CAPACITY: usize = 120;
+
+// The retained window must outlast the staleness gate: if the ring held
+// less than FENCE_STALENESS of history, a non-stale newest entry could
+// coexist with proved-but-evicted older entries, failing sessions closed
+// for capacity rather than lag. Compile-checked so a future cadence or
+// capacity tweak can't silently shrink the window below the gate.
+const _: () = assert!(
+    RING_CAPACITY as u64 * PROBE_INTERVAL.as_millis() as u64 > FENCE_STALENESS.as_millis() as u64,
+    "fence ring must retain more history than the staleness gate"
+);
 
 /// One retained heartbeat observation: proof material for reader sessions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

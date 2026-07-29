@@ -181,6 +181,13 @@ pub struct Db {
     /// route here (see [`Db::read`]); locks, transactions, and anything
     /// consistency-critical stays on `pool`.
     pub(crate) read_pool: Option<PgPool>,
+    /// Maximum connections configured for the read-replica pool (from
+    /// [`DbConfig::read_max_connections`], defaulting to the writer's
+    /// sizing). Kept separately from `max_connections` so
+    /// [`Db::read_pool_stats`] reports the reader's own ceiling — a
+    /// utilisation gauge derived from the writer's max would understate
+    /// reader saturation by exactly the ratio of the two pool sizes.
+    pub(crate) read_max_connections: u32,
     /// Freshness fence gating cursor-page routing to the replica.
     ///
     /// Starts closed; a background probe ([`replica_fence::run_probe`])
@@ -188,12 +195,13 @@ pub struct Db {
     /// coverage per request on the serving reader session; when the ring is
     /// empty or stale, every routed read stays on the writer.
     pub(crate) fence: std::sync::Arc<replica_fence::ReplicaFence>,
-    /// Head-fetch routing budget (Predicate A): a head page may be served
-    /// from a proved replica session only when the proved heartbeat entry is
-    /// at most this old. `None` disables head routing entirely (the rollout
-    /// default) — bounded-stale head semantics are a product decision, not
-    /// an invariant, so the gate ships off.
-    pub(crate) replica_head_max_age: Option<Duration>,
+    /// Bounded-staleness routing budget `B`: a read routed under
+    /// [`RoutePredicate::Bounded`] may be served from a proved replica
+    /// session only when the proved heartbeat entry is at most this old.
+    /// `None` disables the bounded arm entirely (the rollout default) —
+    /// bounded-stale read semantics are a product decision, not an
+    /// invariant, so the gate ships off.
+    pub(crate) replica_read_max_age: Option<Duration>,
     /// Whether the reader endpoint supports the Aurora PostgreSQL identity
     /// function ([`replica_fence::AURORA_IDENTITY_FN`]) — probed
     /// once per process on the first routed read (on a plain autocommit
@@ -294,38 +302,167 @@ enum RouteDecision {
     Writer,
 }
 
+/// The ONLY place [`route_proof::ChannelScoped`] can be constructed. A
+/// crate-root tuple struct would be mintable via `ChannelScoped(())` from
+/// every descendant module — tuple-struct field privacy is module-scoped —
+/// so the token lives in its own module and E0423 enforces the invariant.
+mod route_proof {
+    use uuid::Uuid;
+
+    /// Proof that a query/page can only return rows with
+    /// `channel_id IS NOT NULL` — the domain of the commit-time floor guard
+    /// (migration 0021). `channel_ids` (retains channel-NULL rows) and
+    /// `global_only = false` are explicitly NOT proofs.
+    ///
+    /// Each constructor keys off *how* its path proves channel-bearing-ness:
+    /// a pinned query filter, a bare `Uuid` argument, or a `NOT NULL` column
+    /// reached through an inner join. Do not add a universal constructor
+    /// callers reshape their inputs to fit, and never fabricate a throwaway
+    /// `EventQuery` purely to mint a token — the proof must be the SQL's
+    /// shape, not "someone assembled a struct".
+    #[derive(Clone, Copy)]
+    pub(crate) struct ChannelScoped(());
+
+    impl ChannelScoped {
+        /// Constructor 1: the query pins a single channel
+        /// (`EventQuery.channel_id = Some(_)`, compiled to a
+        /// `channel_id = $n` predicate). This proof covers BOTH query
+        /// builders — the SELECT builder (`event::query_events_on`) and the
+        /// COUNT builder (`event::count_events`) pin identically; if the
+        /// two ever drift, this comment is a lie and the routed COUNT seam
+        /// is unsound.
+        /// Sound under conjunction: any additional clause (e.g.
+        /// `channel_ids`, which alone retains channel-NULL rows) is ANDed,
+        /// and `channel_id = <uuid>` never matches NULL — the pin strictly
+        /// narrows and cannot be widened back out to global rows.
+        pub(crate) fn from_pinned_channel(q: &crate::event::EventQuery) -> Option<Self> {
+            q.channel_id.map(|_| ChannelScoped(()))
+        }
+
+        /// Constructor 2 (thread pages): the page is an inner JOIN from
+        /// `thread_metadata` to `events`, and `thread_metadata.channel_id`
+        /// is `UUID NOT NULL` — every writer that creates a row passes a
+        /// concrete channel (`ThreadMetadataParams.channel_id: Uuid`,
+        /// non-Option). Channel-bearing by construction of the join, not by
+        /// query predicate.
+        pub(crate) fn from_thread_metadata_join() -> Self {
+            ChannelScoped(())
+        }
+
+        /// Constructor 3 (channel windows): the channel arrives as a bare
+        /// `Uuid` argument and the SQL binds it unconditionally
+        /// (`e.channel_id = $2` in `get_channel_window_on`); every served
+        /// row is channel-bearing. No `EventQuery` exists on this path.
+        pub(crate) fn from_channel_id(_channel_id: Uuid) -> Self {
+            ChannelScoped(())
+        }
+    }
+}
+use route_proof::ChannelScoped;
+
 /// The predicate one routed read must satisfy (see [`Db::route_read`]).
+///
+/// Discipline: no `Default`, no `Deserialize`, stays non-`pub` — any of
+/// those re-opens the [`ChannelScoped`] mint.
 enum RoutePredicate {
-    /// Predicate A — head fetch, bounded staleness: the proved entry must
-    /// be within the configured head budget (default off).
-    Head,
-    /// Predicate B — cursor page, completeness: the proved wall must cover
-    /// the cursor timestamp. `None` means the caller could not derive an
-    /// upper bound from its cursor (forward-walking thread pages) and
-    /// post-verifies the served rows against the proved wall itself.
-    Cursor(Option<DateTime<Utc>>),
+    /// Bounded staleness: the proved entry must be within the configured
+    /// read budget `B` (default off). Bounds TIME — the page misses at most
+    /// the freshest `B` of writes. Sound for ANY query shape, including
+    /// global (channel-NULL) rows: it relies only on heartbeat commit order,
+    /// not the floor guard.
+    Bounded,
+    /// Completeness: the proved wall must cover the page's upper bound.
+    /// Bounds CONTENT — every row at/below `upper` is present, meaningful
+    /// even when the cursor is hours old, where `B`-freshness says nothing.
+    /// Sound ONLY on the floor guard's domain (channel-bearing rows), hence
+    /// the proof token. `upper` is non-optional: the no-upper-bound
+    /// post-verifying case is [`RoutePredicate::CoveredPostVerified`].
+    ///
+    /// Bounds INSERT-completeness only — "no missing rows", not "no extra
+    /// rows". Soft deletes are `UPDATE .. SET deleted_at` commits outside
+    /// the floor guard and never touch `created_at`, so a covered page can
+    /// briefly serve a row the writer already excludes; deletion visibility
+    /// is bounded by replication lag under `FENCE_STALENESS` (30s), not by
+    /// `upper` or `B`. Do not extend the covered arm to a surface that
+    /// cannot absorb extra rows (this is why the routed COUNT seam is
+    /// bounded-only).
+    Covered {
+        upper: DateTime<Utc>,
+        /// Never read — the field exists so constructing this variant
+        /// requires minting the token through `route_proof`.
+        #[allow(dead_code)]
+        proof: ChannelScoped,
+    },
+    /// Forward-walking thread pages: no upper bound is derivable from the
+    /// cursor; the caller post-verifies the served rows against the proved
+    /// wall (full page + tail at/below the wall, else re-run on the writer).
+    /// Only the thread path constructs this — a general routed caller does
+    /// no post-verification and must never self-certify.
+    CoveredPostVerified {
+        #[allow(dead_code)]
+        proof: ChannelScoped,
+    },
+    /// Either arm admits, covered tried first (it has no budget dependence).
+    /// For general routed reads that are channel-pinned AND carry an
+    /// `until` upper bound.
+    BoundedOrCovered {
+        upper: DateTime<Utc>,
+        /// Never read — see [`RoutePredicate::Covered::proof`].
+        #[allow(dead_code)]
+        proof: ChannelScoped,
+    },
 }
 
 impl RoutePredicate {
-    /// A channel-window request: cursor pages are bounded above by the
-    /// cursor timestamp (Predicate B); a head fetch is Predicate A.
-    fn from_channel_cursor(cursor: &Option<(DateTime<Utc>, Vec<u8>)>) -> Self {
+    /// A channel-window request: cursor pages are covered-only — for deep
+    /// keyset pages only coverage answers "have all rows below the cursor
+    /// replayed?" — and a head fetch is bounded. The channel id is the
+    /// bare-`Uuid` proof that the window SQL pins a channel.
+    fn from_channel_cursor(channel_id: Uuid, cursor: &Option<(DateTime<Utc>, Vec<u8>)>) -> Self {
         match cursor {
-            Some((ts, _)) => RoutePredicate::Cursor(Some(*ts)),
-            None => RoutePredicate::Head,
+            Some((ts, _)) => RoutePredicate::Covered {
+                upper: *ts,
+                proof: ChannelScoped::from_channel_id(channel_id),
+            },
+            None => RoutePredicate::Bounded,
+        }
+    }
+
+    /// General entry point for the routed query seams: derives the strongest
+    /// sound predicate from the query shape. Never produces a covered arm
+    /// without both a channel-scope proof AND a real upper bound.
+    ///
+    /// `routing_enabled` is whether `BUZZ_REPLICA_READ_MAX_AGE_MS` is set
+    /// (non-zero). When it is NOT, this returns `Bounded` — which the zero
+    /// budget then fails closed — so the new seams are genuinely dark at
+    /// the deploy default even for channel-pinned queries carrying `until`.
+    /// Without this gate, `BoundedOrCovered` would take the covered arm
+    /// (which has no budget dependence) and route on day one with no env
+    /// var set and no kill switch short of removing the replica URL
+    /// (Dawn's covered-at-zero-budget catch). The pre-existing cursor
+    /// paths (`Covered`/`CoveredPostVerified` from channel windows and
+    /// thread pages) intentionally still route at B=0 — status quo,
+    /// unchanged.
+    fn for_query(q: &event::EventQuery, routing_enabled: bool) -> Self {
+        if !routing_enabled {
+            return RoutePredicate::Bounded;
+        }
+        match (ChannelScoped::from_pinned_channel(q), q.until) {
+            (Some(proof), Some(upper)) => RoutePredicate::BoundedOrCovered { upper, proof },
+            _ => RoutePredicate::Bounded,
         }
     }
 }
 
-/// Map the configured head budget (`BUZZ_REPLICA_HEAD_MAX_AGE_SECS`) to the
-/// runtime gate: `0` disables head routing; anything above the fence
-/// staleness gate is clamped to it (an entry older than the staleness gate
-/// never routes anyway, so a larger budget would only misrepresent the
+/// Map the configured read budget (`BUZZ_REPLICA_READ_MAX_AGE_MS`) to the
+/// runtime gate: `0` disables bounded-staleness routing; anything above the
+/// fence staleness gate is clamped to it (an entry older than the staleness
+/// gate never routes anyway, so a larger budget would only misrepresent the
 /// config).
-fn head_budget_from_secs(secs: u64) -> Option<Duration> {
-    match secs {
+fn read_budget_from_ms(ms: u64) -> Option<Duration> {
+    match ms {
         0 => None,
-        secs => Some(Duration::from_secs(secs).min(replica_fence::FENCE_STALENESS)),
+        ms => Some(Duration::from_millis(ms).min(replica_fence::FENCE_STALENESS)),
     }
 }
 
@@ -372,6 +509,9 @@ pub struct DbConfig {
     pub read_database_url: Option<String>,
     /// Maximum number of connections in the pool.
     pub max_connections: u32,
+    /// Maximum connections in the read-replica pool (env
+    /// `BUZZ_DB_READ_POOL_SIZE`). `None` inherits [`Self::max_connections`].
+    pub read_max_connections: Option<u32>,
     /// Minimum number of idle connections to maintain.
     pub min_connections: u32,
     /// Seconds to wait when acquiring a connection before timing out.
@@ -380,12 +520,13 @@ pub struct DbConfig {
     pub max_lifetime_secs: u64,
     /// Seconds a connection may sit idle before being closed.
     pub idle_timeout_secs: u64,
-    /// Head-fetch replica budget `B` in seconds (Predicate A, env
-    /// `BUZZ_REPLICA_HEAD_MAX_AGE_SECS`). `0` disables head routing — the
-    /// rollout default. Values above [`replica_fence::FENCE_STALENESS`] are
-    /// clamped to it: an entry older than the staleness gate never routes
-    /// anyway, so a larger budget would only misrepresent the config.
-    pub replica_head_max_age_secs: u64,
+    /// Replica read budget `B` in milliseconds (bounded arm, env
+    /// `BUZZ_REPLICA_READ_MAX_AGE_MS`). `0` disables bounded-staleness
+    /// routing — the rollout default. Values above
+    /// [`replica_fence::FENCE_STALENESS`] are clamped to it: an entry older
+    /// than the staleness gate never routes anyway, so a larger budget
+    /// would only misrepresent the config.
+    pub replica_read_max_age_ms: u64,
 }
 
 impl Default for DbConfig {
@@ -397,11 +538,12 @@ impl Default for DbConfig {
             database_url: "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string(), // sadscan:disable np.postgres.1
             read_database_url: None,
             max_connections: 20,
+            read_max_connections: None,
             min_connections: 2,
             acquire_timeout_secs: 3,
             max_lifetime_secs: 1800,
             idle_timeout_secs: 600,
-            replica_head_max_age_secs: 0,
+            replica_read_max_age_ms: 0,
         }
     }
 }
@@ -508,17 +650,21 @@ impl Db {
     /// proof hold for every insert path that goes through this pool.
     pub async fn new(config: &DbConfig) -> Result<Self> {
         let pool = Self::connect_pool(config, &config.database_url, true).await?;
+        let read_max_connections = config
+            .read_max_connections
+            .unwrap_or(config.max_connections);
         let read_pool = match &config.read_database_url {
-            Some(url) => Some(Self::connect_pool(config, url, false).await?),
+            Some(url) => Some(Self::connect_read_pool(config, url, read_max_connections)?),
             None => None,
         };
-        let replica_head_max_age = head_budget_from_secs(config.replica_head_max_age_secs);
+        let replica_read_max_age = read_budget_from_ms(config.replica_read_max_age_ms);
         Ok(Self {
             pool,
             max_connections: config.max_connections,
             read_pool,
+            read_max_connections,
             fence: std::sync::Arc::new(replica_fence::ReplicaFence::new()),
-            replica_head_max_age,
+            replica_read_max_age,
             reader_aurora_identity: std::sync::Arc::new(std::sync::OnceLock::new()),
         })
     }
@@ -551,14 +697,88 @@ impl Db {
         Ok(options.connect(url).await?)
     }
 
+    /// Reader acquire timeout — deliberately far below the writer's
+    /// (seconds-denominated) timeout. Failing closed to the writer must be
+    /// fast: a saturated reader pool that made routed reads wait the full
+    /// writer-style timeout would add dead latency during exactly the load
+    /// spike the offload exists for. A miss here surfaces as
+    /// `writer/reader_acquire_timeout` (see [`Db::proved_reader`] for why
+    /// the reason names the mechanism rather than a diagnosis).
+    const READER_ACQUIRE_TIMEOUT: Duration = Duration::from_millis(150);
+
+    /// Connect the read-replica pool **lazily** — no connection is
+    /// attempted at construction, so a reader that is down at boot cannot
+    /// crash the relay (it starts all-writer with the fence closed and
+    /// recovers when the replica returns).
+    ///
+    /// `min_connections` is pinned to 0 explicitly: sqlx's lazy pool still
+    /// spawns an eager background connect task to satisfy a nonzero
+    /// minimum, which would reintroduce boot-time reader dial attempts (and
+    /// their log noise) that "lazy" is meant to avoid. With 0, connections
+    /// are dialed only on first acquire; the ~10-minute reaper never tops
+    /// the pool back up, which is fine — routed reads re-fill it on demand.
+    ///
+    /// No floor guard: replica sessions are read-only, the trigger never
+    /// fires there (see [`Db::connect_pool`]).
+    fn connect_read_pool(config: &DbConfig, url: &str, max_connections: u32) -> Result<PgPool> {
+        Ok(PgPoolOptions::new()
+            .max_connections(max_connections)
+            .min_connections(0)
+            .acquire_timeout(Self::READER_ACQUIRE_TIMEOUT)
+            .max_lifetime(Duration::from_secs(config.max_lifetime_secs))
+            .idle_timeout(Duration::from_secs(config.idle_timeout_secs))
+            .connect_lazy(url)?)
+    }
+
+    /// Spawn a one-shot reader reachability probe that only WARNs.
+    ///
+    /// With a lazy pool and `min_connections(0)`, nothing dials the replica
+    /// until the first routed read — so a misconfigured `READ_DATABASE_URL`
+    /// would otherwise be invisible until traffic arrives and quietly falls
+    /// back to the writer. This ping is the only boot-time reader-down
+    /// visibility; it must never gate startup or [`Db::spawn_fence_probe`].
+    ///
+    /// On success it also primes the Aurora identity capability cache
+    /// ([`Db::reader_aurora_identity`]) on the connection it already holds,
+    /// so the first routed read doesn't spend a second acquire (up to
+    /// another [`Db::READER_ACQUIRE_TIMEOUT`]) inside
+    /// [`Db::reader_aurora_capability`]. Prime failure is fine: the inline
+    /// probe remains as the retry path.
+    pub fn spawn_read_pool_boot_ping(&self) {
+        let Some(read_pool) = self.read_pool.clone() else {
+            return;
+        };
+        let aurora_identity = self.reader_aurora_identity.clone();
+        tokio::spawn(async move {
+            match read_pool.acquire().await {
+                Ok(mut conn) => {
+                    tracing::info!("read replica reachable at boot");
+                    match replica_fence::reader_supports_aurora_identity(&mut conn).await {
+                        Ok(supported) => {
+                            let _ = aurora_identity.set(supported);
+                        }
+                        Err(e) => tracing::debug!(
+                            error = %e,
+                            "aurora identity boot prime failed; first routed read will probe"
+                        ),
+                    }
+                }
+                Err(e) => tracing::warn!(
+                    "read replica unreachable at boot; serving all-writer until it recovers: {e}"
+                ),
+            }
+        });
+    }
+
     /// Creates a `Db` from an existing `PgPool` (useful in tests).
     pub fn from_pool(pool: PgPool) -> Self {
         Self {
             max_connections: pool.options().get_max_connections(),
+            read_max_connections: pool.options().get_max_connections(),
             pool,
             read_pool: None,
             fence: std::sync::Arc::new(replica_fence::ReplicaFence::new()),
-            replica_head_max_age: None,
+            replica_read_max_age: None,
             reader_aurora_identity: std::sync::Arc::new(std::sync::OnceLock::new()),
         }
     }
@@ -573,18 +793,19 @@ impl Db {
     pub fn from_pools(pool: PgPool, read_pool: PgPool) -> Self {
         Self {
             max_connections: pool.options().get_max_connections(),
+            read_max_connections: read_pool.options().get_max_connections(),
             pool,
             read_pool: Some(read_pool),
             fence: std::sync::Arc::new(replica_fence::ReplicaFence::new()),
-            replica_head_max_age: None,
+            replica_read_max_age: None,
             reader_aurora_identity: std::sync::Arc::new(std::sync::OnceLock::new()),
         }
     }
 
     /// Test hook: set the head-fetch routing budget (Predicate A), which
     /// [`Db::from_pools`] leaves disabled.
-    pub fn set_replica_head_max_age_for_tests(&mut self, budget: Option<Duration>) {
-        self.replica_head_max_age = budget;
+    pub fn set_replica_read_max_age_for_tests(&mut self, budget: Option<Duration>) {
+        self.replica_read_max_age = budget;
     }
 
     /// The freshness fence gating replica routing (see [`replica_fence`]).
@@ -671,6 +892,33 @@ impl Db {
             .await
         {
             Ok(tx) => tx,
+            // The acquire miss gets its own reason code: the reader pool's
+            // short acquire timeout (READER_ACQUIRE_TIMEOUT) makes this the
+            // fast fail-closed path under load, and
+            // `buzz_db_route_decision{decision="writer",reason="reader_acquire_timeout"}`
+            // is the operator's alert signal for a struggling reader pool.
+            //
+            // The reason deliberately names the mechanism, not a diagnosis:
+            // `PoolTimedOut` proves only that no connection was handed out
+            // within the 150ms budget. That budget includes cold connect
+            // (TCP+TLS+auth), and sqlx's `size` counts in-flight dials, so
+            // this fires for slow connection establishment as well as for
+            // established-connection contention — and neither `size == 0`
+            // nor `size >= max` recovers the missing causal bit (in-flight
+            // dials hold a size slot, and a cold burst can push
+            // `active = size - idle` toward max with zero busy connections).
+            // Runbook: correlate with `buzz_db_read_pool_active` / `_max`
+            // and reader connection health/latency; high active suggests
+            // contention, but this metric alone does not distinguish
+            // contention from slow connects. Note the gauge is a coarse
+            // sample (BUZZ_POOL_METRICS_INTERVAL_SECS, default 10s) while
+            // the event it explains lasts ~150ms — a short burst may fall
+            // between samples entirely, so absence of elevated active is
+            // NOT evidence of a cold connect.
+            Err(sqlx::Error::PoolTimedOut) => {
+                tracing::warn!("reader pool acquire timed out; routing to writer");
+                return Err("reader_acquire_timeout");
+            }
             Err(e) => {
                 tracing::warn!(error = %e, "reader transaction begin failed; routing to writer");
                 return Err("reader_validation_error");
@@ -759,11 +1007,18 @@ impl Db {
     }
 
     /// Pool utilisation stats for the read-replica pool, when configured.
+    ///
+    /// `max` is the **reader's** ceiling ([`Db::read_max_connections`]), not
+    /// the writer's: `buzz_db_read_pool_active / buzz_db_read_pool_max` is
+    /// the operator's utilisation signal for tuning `BUZZ_DB_READ_POOL_SIZE`,
+    /// and deriving it from the writer's max would misreport saturation by
+    /// exactly the ratio of the two pool sizes — in the direction that hides
+    /// the problem.
     pub fn read_pool_stats(&self) -> Option<DbPoolStats> {
         self.read_pool.as_ref().map(|p| DbPoolStats {
             size: p.size(),
             idle: p.num_idle() as u32,
-            max: self.max_connections,
+            max: self.read_max_connections,
         })
     }
 
@@ -1351,13 +1606,124 @@ impl Db {
     }
 
     /// Queries events matching the given filter parameters.
+    ///
+    /// Always reads from the WRITER pool. If the result influences a write
+    /// or a permission decision, this is the method to call. Display-path
+    /// callers that tolerate bounded staleness should use
+    /// [`Db::query_events_routed`] instead — converting a caller is an
+    /// explicit, per-callsite decision, never a change to this method.
     pub async fn query_events(&self, q: &EventQuery) -> Result<Vec<StoredEvent>> {
         event::query_events(&self.pool, q).await
     }
 
+    /// [`Db::query_events`] with replica routing — the opt-in fast path for
+    /// display reads.
+    ///
+    /// Rule of thumb: **if the result influences a write or a permission,
+    /// it reads from the writer** — do not convert such a caller to this
+    /// method. Every new caller must be added to the caller-classification
+    /// table in `PLANS/REPLICA_FULL_READ_ROUTING_DESIGN.md`.
+    ///
+    /// Routing derives the strongest sound predicate from the query shape
+    /// ([`RoutePredicate::for_query`]): a channel-pinned query with an
+    /// `until` upper bound may be served covered (provably complete below
+    /// the fence wall); anything else is bounded-staleness only. The whole
+    /// seam is gated on `BUZZ_REPLICA_READ_MAX_AGE_MS` (default off): when
+    /// unset, even covered-eligible queries stay on the writer, so merging
+    /// this seam is a true no-op until the budget is configured. Every
+    /// failure fails closed to the writer.
+    pub async fn query_events_routed(
+        &self,
+        path: &'static str,
+        q: &EventQuery,
+    ) -> Result<Vec<StoredEvent>> {
+        let predicate = RoutePredicate::for_query(q, self.replica_read_max_age.is_some());
+        match self.route_read(path, predicate).await {
+            RouteDecision::Replica(mut tx, _entry, reason) => {
+                match event::query_events_on(&mut tx, q).await {
+                    Ok(events) => {
+                        Self::record_route(path, "replica", reason);
+                        Ok(events)
+                    }
+                    Err(e) => {
+                        // Mid-query replica failure: fail closed to the
+                        // writer rather than surfacing a routed error.
+                        tracing::warn!(path, "replica read failed; re-running on writer: {e}");
+                        Self::record_route(path, "writer", "replica_error");
+                        event::query_events(&self.pool, q).await
+                    }
+                }
+            }
+            RouteDecision::Writer => event::query_events(&self.pool, q).await,
+        }
+    }
+
+    /// [`Db::query_events_routed`] restricted to the BOUNDED arm — for
+    /// reads whose result feeds a COUNT rather than a displayed page.
+    ///
+    /// The covered arm bounds insert-completeness only; stale deletions can
+    /// briefly inflate the result set (see [`RoutePredicate::Covered`]). A
+    /// display page absorbs that per-row; a number derived from the rows
+    /// does not. Same classification-table requirement as
+    /// [`Db::query_events_routed`].
+    pub async fn query_events_routed_bounded(
+        &self,
+        path: &'static str,
+        q: &EventQuery,
+    ) -> Result<Vec<StoredEvent>> {
+        match self.route_read(path, RoutePredicate::Bounded).await {
+            RouteDecision::Replica(mut tx, _entry, reason) => {
+                match event::query_events_on(&mut tx, q).await {
+                    Ok(events) => {
+                        Self::record_route(path, "replica", reason);
+                        Ok(events)
+                    }
+                    Err(e) => {
+                        tracing::warn!(path, "replica read failed; re-running on writer: {e}");
+                        Self::record_route(path, "writer", "replica_error");
+                        event::query_events(&self.pool, q).await
+                    }
+                }
+            }
+            RouteDecision::Writer => event::query_events(&self.pool, q).await,
+        }
+    }
+
     /// Count events matching the given query (NIP-45 COUNT support).
+    ///
+    /// Always reads from the WRITER pool — see [`Db::query_events`] for the
+    /// writer-vs-routed rule.
     pub async fn count_events(&self, q: &EventQuery) -> Result<i64> {
         event::count_events(&self.pool, q).await
+    }
+
+    /// [`Db::count_events`] with replica routing — same contract, rules,
+    /// and classification-table requirement as [`Db::query_events_routed`].
+    ///
+    /// Counts route on the BOUNDED arm only, never covered: the covered
+    /// arm bounds insert-completeness but not deletion visibility (soft
+    /// deletes are UPDATEs outside the floor guard), and a count has no
+    /// downstream per-row re-filter to absorb extra rows — a silently
+    /// inflated number for up to `FENCE_STALENESS` is a different product
+    /// statement than a page briefly showing a deleted row. `Bounded` ties
+    /// the error to the accepted budget `B`.
+    pub async fn count_events_routed(&self, path: &'static str, q: &EventQuery) -> Result<i64> {
+        match self.route_read(path, RoutePredicate::Bounded).await {
+            RouteDecision::Replica(mut tx, _entry, reason) => {
+                match event::count_events_on(&mut tx, q).await {
+                    Ok(count) => {
+                        Self::record_route(path, "replica", reason);
+                        Ok(count)
+                    }
+                    Err(e) => {
+                        tracing::warn!(path, "replica count failed; re-running on writer: {e}");
+                        Self::record_route(path, "writer", "replica_error");
+                        event::count_events(&self.pool, q).await
+                    }
+                }
+            }
+            RouteDecision::Writer => event::count_events(&self.pool, q).await,
+        }
     }
 
     /// Return whether a creator-signed huddle-start event links a parent
@@ -1477,6 +1843,37 @@ impl Db {
         ids: &[&[u8]],
     ) -> Result<Vec<StoredEvent>> {
         event::get_events_by_ids(&self.pool, community_id, ids).await
+    }
+
+    /// [`Db::get_events_by_ids`] with replica routing — same contract and
+    /// classification-table requirement as [`Db::query_events_routed`].
+    ///
+    /// By-id fetches route on the BOUNDED arm only: an id list carries no
+    /// channel pin, so no fence floor can prove insert-completeness — the
+    /// covered arm is structurally unavailable. Used for FTS hit hydration,
+    /// where a missing row degrades to a skipped search hit downstream.
+    pub async fn get_events_by_ids_routed(
+        &self,
+        path: &'static str,
+        community_id: CommunityId,
+        ids: &[&[u8]],
+    ) -> Result<Vec<StoredEvent>> {
+        match self.route_read(path, RoutePredicate::Bounded).await {
+            RouteDecision::Replica(mut tx, _entry, reason) => {
+                match event::get_events_by_ids_on(&mut tx, community_id, ids).await {
+                    Ok(events) => {
+                        Self::record_route(path, "replica", reason);
+                        Ok(events)
+                    }
+                    Err(e) => {
+                        tracing::warn!(path, "replica read failed; re-running on writer: {e}");
+                        Self::record_route(path, "writer", "replica_error");
+                        event::get_events_by_ids(&self.pool, community_id, ids).await
+                    }
+                }
+            }
+            RouteDecision::Writer => event::get_events_by_ids(&self.pool, community_id, ids).await,
+        }
     }
 
     /// Exclusively claim a batch of due matcher jobs from one community.
@@ -2275,8 +2672,13 @@ impl Db {
         cursor: Option<&[u8]>,
     ) -> Result<Vec<thread::ThreadReply>> {
         let (path, predicate): (&'static str, RoutePredicate) = match cursor {
-            Some(_) => ("thread_cursor", RoutePredicate::Cursor(None)),
-            None => ("thread_head", RoutePredicate::Head),
+            Some(_) => (
+                "thread_cursor",
+                RoutePredicate::CoveredPostVerified {
+                    proof: ChannelScoped::from_thread_metadata_join(),
+                },
+            ),
+            None => ("thread_head", RoutePredicate::Bounded),
         };
         if let RouteDecision::Replica(mut tx, entry, reason) =
             self.route_read(path, predicate).await
@@ -2375,7 +2777,7 @@ impl Db {
     ///   resolved against the fence's retained ring ([`replica_fence`]).
     /// - **Head fetch** (Predicate A — bounded staleness): served by a
     ///   proved replica session only when the head gate is configured
-    ///   ([`DbConfig::replica_head_max_age_secs`], default off) and the
+    ///   ([`DbConfig::replica_read_max_age_ms`], default off) and the
     ///   proved entry is within the budget. This trades a bounded staleness
     ///   window (budget plus probe cadence) on the GET leg for writer
     ///   offload. NOTE: enabling the budget also breaks read-your-own-writes
@@ -2400,7 +2802,10 @@ impl Db {
             "channel_head"
         };
         match self
-            .route_read(path, RoutePredicate::from_channel_cursor(&cursor))
+            .route_read(
+                path,
+                RoutePredicate::from_channel_cursor(channel_id, &cursor),
+            )
             .await
         {
             RouteDecision::Replica(mut tx, _entry, reason) => {
@@ -2475,50 +2880,69 @@ impl Db {
             Self::record_route(path, "writer", "uninitialized");
             return RouteDecision::Writer;
         };
-        match &predicate {
-            // Predicate B precheck: the newest wall must cover the cursor
-            // (when the caller has an upper bound at all).
-            RoutePredicate::Cursor(Some(ts)) => {
-                if *ts > newest.fence_wall {
-                    Self::record_route(path, "writer", "stale");
-                    return RouteDecision::Writer;
+        // Precheck helpers against the newest shared entry: if the newest
+        // cannot satisfy an arm, no proved (older-or-equal) entry can.
+        let bounded_precheck =
+            |budget: &Option<Duration>| -> std::result::Result<(), &'static str> {
+                match budget {
+                    Some(budget) if newest.committed_at.elapsed() <= *budget => Ok(()),
+                    Some(_) => Err("stale"),
+                    None => Err("disabled"),
                 }
+            };
+        let covered_precheck = |upper: &DateTime<Utc>| -> std::result::Result<(), &'static str> {
+            if *upper <= newest.fence_wall {
+                Ok(())
+            } else {
+                Err("stale")
             }
-            RoutePredicate::Cursor(None) => {}
-            // Predicate A precheck: head routing must be enabled, and the
-            // newest entry within budget (else no proved entry can be).
-            RoutePredicate::Head => match self.replica_head_max_age {
-                Some(budget) if newest.committed_at.elapsed() <= budget => {}
-                Some(_) => {
-                    Self::record_route(path, "writer", "stale");
-                    return RouteDecision::Writer;
-                }
-                None => {
-                    Self::record_route(path, "writer", "disabled");
-                    return RouteDecision::Writer;
-                }
-            },
+        };
+        let precheck = match &predicate {
+            RoutePredicate::Bounded => bounded_precheck(&self.replica_read_max_age),
+            RoutePredicate::Covered { upper, .. } => covered_precheck(upper),
+            // No upper bound: the caller post-verifies served rows.
+            RoutePredicate::CoveredPostVerified { .. } => Ok(()),
+            // Covered first (no budget dependence), else bounded.
+            RoutePredicate::BoundedOrCovered { upper, .. } => {
+                covered_precheck(upper).or_else(|_| bounded_precheck(&self.replica_read_max_age))
+            }
+        };
+        if let Err(reason) = precheck {
+            Self::record_route(path, "writer", reason);
+            return RouteDecision::Writer;
         }
         match self.proved_reader(read_pool).await {
             Ok((tx, entry)) => {
-                let (holds, reason): (bool, &'static str) = match &predicate {
-                    RoutePredicate::Cursor(Some(ts)) => (*ts <= entry.fence_wall, "covered"),
+                // Re-evaluate against the entry the session actually proved
+                // (it may be older than the shared newest).
+                let bounded_holds = || {
+                    self.replica_read_max_age
+                        .is_some_and(|budget| entry.committed_at.elapsed() <= budget)
+                };
+                let verdict: Option<&'static str> = match &predicate {
+                    RoutePredicate::Bounded => bounded_holds().then_some("fresh"),
+                    RoutePredicate::Covered { upper, .. } => {
+                        (*upper <= entry.fence_wall).then_some("covered")
+                    }
                     // No upper bound: the caller post-verifies the served
                     // rows against the proved wall.
-                    RoutePredicate::Cursor(None) => (true, "covered"),
-                    RoutePredicate::Head => (
-                        self.replica_head_max_age
-                            .is_some_and(|budget| entry.committed_at.elapsed() <= budget),
-                        "fresh",
-                    ),
+                    RoutePredicate::CoveredPostVerified { .. } => Some("covered"),
+                    RoutePredicate::BoundedOrCovered { upper, .. } => {
+                        if *upper <= entry.fence_wall {
+                            Some("covered")
+                        } else {
+                            bounded_holds().then_some("fresh")
+                        }
+                    }
                 };
-                if holds {
-                    RouteDecision::Replica(tx, entry, reason)
-                } else {
-                    // The session proves an older entry than the predicate
-                    // needs (replication lag) — fail closed.
-                    Self::record_route(path, "writer", "stale");
-                    RouteDecision::Writer
+                match verdict {
+                    Some(reason) => RouteDecision::Replica(tx, entry, reason),
+                    None => {
+                        // The session proves an older entry than the
+                        // predicate needs (replication lag) — fail closed.
+                        Self::record_route(path, "writer", "stale");
+                        RouteDecision::Writer
+                    }
                 }
             }
             Err(reason) => {
@@ -2690,6 +3114,67 @@ impl Db {
         .await
     }
 
+    /// [`Db::query_feed_mentions`] with replica routing — same contract and
+    /// classification-table requirement as [`Db::query_events_routed`].
+    ///
+    /// Feed queries route on the BOUNDED arm only: the `accessible_channel_ids`
+    /// parameter admits community-global rows alongside channel rows, so no
+    /// single channel's fence floor can prove completeness — the covered arm
+    /// is structurally unavailable, not merely unchosen.
+    pub async fn query_feed_mentions_routed(
+        &self,
+        path: &'static str,
+        community: CommunityId,
+        pubkey_bytes: &[u8],
+        accessible_channel_ids: &[Uuid],
+        since: Option<DateTime<Utc>>,
+        limit: i64,
+    ) -> Result<Vec<StoredEvent>> {
+        match self.route_read(path, RoutePredicate::Bounded).await {
+            RouteDecision::Replica(mut tx, _entry, reason) => {
+                match feed::query_mentions_on(
+                    &mut tx,
+                    community,
+                    pubkey_bytes,
+                    accessible_channel_ids,
+                    since,
+                    limit,
+                )
+                .await
+                {
+                    Ok(events) => {
+                        Self::record_route(path, "replica", reason);
+                        Ok(events)
+                    }
+                    Err(e) => {
+                        tracing::warn!(path, "replica read failed; re-running on writer: {e}");
+                        Self::record_route(path, "writer", "replica_error");
+                        feed::query_mentions(
+                            &self.pool,
+                            community,
+                            pubkey_bytes,
+                            accessible_channel_ids,
+                            since,
+                            limit,
+                        )
+                        .await
+                    }
+                }
+            }
+            RouteDecision::Writer => {
+                feed::query_mentions(
+                    &self.pool,
+                    community,
+                    pubkey_bytes,
+                    accessible_channel_ids,
+                    since,
+                    limit,
+                )
+                .await
+            }
+        }
+    }
+
     /// Find events that require action from the given pubkey.
     pub async fn query_feed_needs_action(
         &self,
@@ -2710,6 +3195,63 @@ impl Db {
         .await
     }
 
+    /// [`Db::query_feed_needs_action`] with replica routing — BOUNDED arm
+    /// only; see [`Db::query_feed_mentions_routed`] for why the covered arm
+    /// is structurally unavailable to feed queries.
+    pub async fn query_feed_needs_action_routed(
+        &self,
+        path: &'static str,
+        community: CommunityId,
+        pubkey_bytes: &[u8],
+        accessible_channel_ids: &[Uuid],
+        since: Option<DateTime<Utc>>,
+        limit: i64,
+    ) -> Result<Vec<StoredEvent>> {
+        match self.route_read(path, RoutePredicate::Bounded).await {
+            RouteDecision::Replica(mut tx, _entry, reason) => {
+                match feed::query_needs_action_on(
+                    &mut tx,
+                    community,
+                    pubkey_bytes,
+                    accessible_channel_ids,
+                    since,
+                    limit,
+                )
+                .await
+                {
+                    Ok(events) => {
+                        Self::record_route(path, "replica", reason);
+                        Ok(events)
+                    }
+                    Err(e) => {
+                        tracing::warn!(path, "replica read failed; re-running on writer: {e}");
+                        Self::record_route(path, "writer", "replica_error");
+                        feed::query_needs_action(
+                            &self.pool,
+                            community,
+                            pubkey_bytes,
+                            accessible_channel_ids,
+                            since,
+                            limit,
+                        )
+                        .await
+                    }
+                }
+            }
+            RouteDecision::Writer => {
+                feed::query_needs_action(
+                    &self.pool,
+                    community,
+                    pubkey_bytes,
+                    accessible_channel_ids,
+                    since,
+                    limit,
+                )
+                .await
+            }
+        }
+    }
+
     /// Find recent activity across accessible channels.
     pub async fn query_feed_activity(
         &self,
@@ -2719,6 +3261,53 @@ impl Db {
         limit: i64,
     ) -> Result<Vec<StoredEvent>> {
         feed::query_activity(&self.pool, community, accessible_channel_ids, since, limit).await
+    }
+
+    /// [`Db::query_feed_activity`] with replica routing — BOUNDED arm only;
+    /// see [`Db::query_feed_mentions_routed`] for why the covered arm is
+    /// structurally unavailable to feed queries.
+    pub async fn query_feed_activity_routed(
+        &self,
+        path: &'static str,
+        community: CommunityId,
+        accessible_channel_ids: &[Uuid],
+        since: Option<DateTime<Utc>>,
+        limit: i64,
+    ) -> Result<Vec<StoredEvent>> {
+        match self.route_read(path, RoutePredicate::Bounded).await {
+            RouteDecision::Replica(mut tx, _entry, reason) => {
+                match feed::query_activity_on(
+                    &mut tx,
+                    community,
+                    accessible_channel_ids,
+                    since,
+                    limit,
+                )
+                .await
+                {
+                    Ok(events) => {
+                        Self::record_route(path, "replica", reason);
+                        Ok(events)
+                    }
+                    Err(e) => {
+                        tracing::warn!(path, "replica read failed; re-running on writer: {e}");
+                        Self::record_route(path, "writer", "replica_error");
+                        feed::query_activity(
+                            &self.pool,
+                            community,
+                            accessible_channel_ids,
+                            since,
+                            limit,
+                        )
+                        .await
+                    }
+                }
+            }
+            RouteDecision::Writer => {
+                feed::query_activity(&self.pool, community, accessible_channel_ids, since, limit)
+                    .await
+            }
+        }
     }
 
     /// Create a new API token record.
@@ -5888,16 +6477,159 @@ mod tests {
     }
 
     #[test]
-    fn head_budget_zero_disables_and_large_values_clamp_to_staleness() {
-        assert_eq!(head_budget_from_secs(0), None, "0 = head routing off");
+    fn read_budget_zero_disables_and_large_values_clamp_to_staleness() {
+        assert_eq!(read_budget_from_ms(0), None, "0 = bounded routing off");
         assert_eq!(
-            head_budget_from_secs(5),
-            Some(std::time::Duration::from_secs(5))
+            read_budget_from_ms(1000),
+            Some(std::time::Duration::from_millis(1000))
         );
         assert_eq!(
-            head_budget_from_secs(10_000),
+            read_budget_from_ms(10_000_000),
             Some(replica_fence::FENCE_STALENESS),
             "budgets above the staleness gate clamp to it"
+        );
+    }
+
+    /// Truth table for [`RoutePredicate::for_query`]: the strongest sound
+    /// predicate per query shape, and — the deploy-day default row — that
+    /// `routing_enabled = false` (BUZZ_REPLICA_READ_MAX_AGE_MS unset)
+    /// forces `Bounded` even for covered-eligible shapes, so the zero
+    /// budget fails the new seams closed (Dawn's covered-at-zero-budget
+    /// catch, design doc rev 5).
+    #[test]
+    fn for_query_predicate_truth_table() {
+        let community = CommunityId::from_uuid(Uuid::new_v4());
+        let channel = Uuid::new_v4();
+        let until = chrono::Utc::now();
+
+        let pinned_with_until = {
+            let mut q = event::EventQuery::for_community(community);
+            q.channel_id = Some(channel);
+            q.until = Some(until);
+            q
+        };
+        let pinned_no_until = {
+            let mut q = event::EventQuery::for_community(community);
+            q.channel_id = Some(channel);
+            q
+        };
+        let unpinned_with_until = {
+            let mut q = event::EventQuery::for_community(community);
+            q.until = Some(until);
+            q
+        };
+        let global_only = {
+            let mut q = event::EventQuery::for_community(community);
+            q.global_only = true;
+            q.until = Some(until);
+            q
+        };
+
+        // Deploy-day default: budget unset ⇒ Bounded regardless of shape.
+        // The zero budget then fails Bounded closed, so the new seams
+        // record writer/disabled — merging with no env var set is a no-op.
+        assert!(
+            matches!(
+                RoutePredicate::for_query(&pinned_with_until, false),
+                RoutePredicate::Bounded
+            ),
+            "budget unset must not reach the covered arm even when eligible"
+        );
+
+        // Budget set + channel pin + until ⇒ the strongest predicate.
+        assert!(matches!(
+            RoutePredicate::for_query(&pinned_with_until, true),
+            RoutePredicate::BoundedOrCovered { .. }
+        ));
+
+        // Missing either covered precondition ⇒ Bounded.
+        assert!(matches!(
+            RoutePredicate::for_query(&pinned_no_until, true),
+            RoutePredicate::Bounded
+        ));
+        assert!(matches!(
+            RoutePredicate::for_query(&unpinned_with_until, true),
+            RoutePredicate::Bounded
+        ));
+        // global_only implies `channel_id = None`, so the channel-pin
+        // precondition fails and no covered arm is possible — `for_query`
+        // never inspects `global_only` itself; the row holds because
+        // constructor 1 (channel pin) returns None for an unpinned query.
+        assert!(matches!(
+            RoutePredicate::for_query(&global_only, true),
+            RoutePredicate::Bounded
+        ));
+    }
+
+    /// The pre-existing cursor paths are NOT budget-gated: a channel-window
+    /// cursor page still derives `Covered` with no `routing_enabled` input
+    /// at all — at B=0 today it routes covered, and that status quo is
+    /// intentionally unchanged by the `for_query` gate (Max's matrix row:
+    /// old paths route at budget-unset; only the new seams go dark).
+    #[test]
+    fn channel_cursor_predicate_is_not_budget_gated() {
+        let channel = Uuid::new_v4();
+        let cursor = Some((chrono::Utc::now(), vec![1u8; 32]));
+        assert!(matches!(
+            RoutePredicate::from_channel_cursor(channel, &cursor),
+            RoutePredicate::Covered { .. }
+        ));
+        // Head fetch (no cursor) is bounded — gated by the budget.
+        assert!(matches!(
+            RoutePredicate::from_channel_cursor(channel, &None),
+            RoutePredicate::Bounded
+        ));
+    }
+
+    /// D5 wiring: `read_pool_stats().max` must be the READER pool's own
+    /// ceiling, not the writer's — `buzz_db_read_pool_active / _max` is the
+    /// operator's utilisation signal and inheriting the writer's max hides
+    /// reader saturation by exactly the sizing ratio. Pure wiring test:
+    /// `connect_lazy` never touches the network, but it does spawn the
+    /// pool reaper task, which needs a Tokio runtime — hence
+    /// `#[tokio::test]` despite the test body itself never awaiting.
+    #[tokio::test]
+    async fn read_pool_stats_reports_reader_ceiling_not_writer() {
+        let writer = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(20)
+            .connect_lazy(TEST_DB_URL)
+            .expect("lazy writer pool");
+        let reader = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(40)
+            .connect_lazy(TEST_DB_URL)
+            .expect("lazy reader pool");
+        let db = Db::from_pools(writer, reader);
+        assert_eq!(db.pool_stats().max, 20);
+        assert_eq!(
+            db.read_pool_stats().expect("read pool configured").max,
+            40,
+            "reader gauge must report the reader's own ceiling"
+        );
+    }
+
+    /// D4 wiring: the reader pool is built lazily with `min_connections(0)`
+    /// and the short reader acquire timeout — construction must succeed
+    /// with no replica listening (reader-down at boot must not crash the
+    /// relay), and `read_max_connections` must honour
+    /// `DbConfig::read_max_connections` over the writer sizing.
+    /// `#[tokio::test]` because `connect_lazy` spawns the pool reaper task,
+    /// which needs a Tokio runtime even though nothing is dialed.
+    #[tokio::test]
+    async fn connect_read_pool_is_lazy_and_independently_sized() {
+        let config = DbConfig {
+            max_connections: 20,
+            read_max_connections: Some(7),
+            ..DbConfig::default()
+        };
+        // Unroutable per RFC 5737 TEST-NET-1: proves nothing is dialed at
+        // construction time.
+        let pool = Db::connect_read_pool(&config, "postgres://user:pw@192.0.2.1:5432/none", 7)
+            .expect("lazy construction must not dial the replica");
+        assert_eq!(pool.options().get_max_connections(), 7);
+        assert_eq!(pool.options().get_min_connections(), 0);
+        assert_eq!(
+            pool.options().get_acquire_timeout(),
+            Db::READER_ACQUIRE_TIMEOUT
         );
     }
 
@@ -6372,7 +7104,7 @@ mod tests {
         );
 
         // Budget set, entry fresh (just recorded): head → replica.
-        db.set_replica_head_max_age_for_tests(Some(std::time::Duration::from_secs(5)));
+        db.set_replica_read_max_age_for_tests(Some(std::time::Duration::from_secs(5)));
         let head = db
             .get_channel_window(cid, channel, 2, None, None)
             .await
@@ -6401,6 +7133,421 @@ mod tests {
 
         drop_scratch_db(&admin, replica, &rname).await;
         drop_scratch_db(&admin, writer, &wname).await;
+    }
+
+    /// End-to-end deploy-default proof for the NEW routed seams: with the
+    /// budget unset, a covered-eligible query (channel-pinned + `until`)
+    /// through [`Db::query_events_routed`] is served by the WRITER — the
+    /// `for_query` gate keeps the covered arm dark (rev 5). With the budget
+    /// set and a fresh proved entry, the same query routes to the replica.
+    /// Divergent fixtures prove which pool served each read.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn query_events_routed_defaults_dark_and_routes_covered_when_enabled() {
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (writer, wname) = create_scratch_db(&admin, "qer_w").await;
+        let (replica, rname) = create_scratch_db(&admin, "qer_r").await;
+
+        let author = nostr::Keys::generate();
+        let community = Uuid::new_v4();
+        let channel = Uuid::new_v4();
+        seed_community_channel(&writer, community, channel, &author).await;
+        seed_community_channel(&replica, community, channel, &author).await;
+
+        let base = 1_700_000_000u64;
+        let shared = signed_event_at(&author, "shared", base);
+        for pool in [&writer, &replica] {
+            insert_top_level(pool, community, channel, &shared).await;
+        }
+        let writer_only = signed_event_at(&author, "writer-only", base + 10);
+        insert_top_level(&writer, community, channel, &writer_only).await;
+        let replica_only = signed_event_at(&author, "replica-only", base + 20);
+        insert_top_level(&replica, community, channel, &replica_only).await;
+
+        let mut db = Db::from_pools(writer.clone(), replica.clone());
+        db.fence().force_open_for_tests(chrono::Utc::now());
+        let cid = CommunityId::from_uuid(community);
+
+        // Covered-eligible shape: channel-pinned with an `until` upper
+        // bound below the (now) fence wall.
+        let q = {
+            let mut q = EventQuery::for_community(cid);
+            q.channel_id = Some(channel);
+            q.until = chrono::DateTime::from_timestamp((base + 60) as i64, 0);
+            q
+        };
+        let contents = |evs: &[StoredEvent]| -> std::collections::BTreeSet<String> {
+            evs.iter().map(|e| e.event.content.clone()).collect()
+        };
+
+        // Deploy default: budget unset ⇒ writer, even though the shape is
+        // covered-eligible and the fence is open.
+        let rows = db
+            .query_events_routed("test_routed", &q)
+            .await
+            .expect("routed query, gate off");
+        assert!(
+            contents(&rows).contains("writer-only"),
+            "budget unset must serve the writer"
+        );
+        assert!(
+            !contents(&rows).contains("replica-only"),
+            "budget unset must not reach the replica via the covered arm"
+        );
+
+        // Budget set ⇒ the covered arm serves it from the replica.
+        db.set_replica_read_max_age_for_tests(Some(std::time::Duration::from_secs(5)));
+        let rows = db
+            .query_events_routed("test_routed", &q)
+            .await
+            .expect("routed query, gate on");
+        assert!(
+            contents(&rows).contains("replica-only"),
+            "budget set + covered-eligible must route to the replica"
+        );
+        assert!(!contents(&rows).contains("writer-only"));
+
+        drop_scratch_db(&admin, replica, &rname).await;
+        drop_scratch_db(&admin, writer, &wname).await;
+    }
+
+    /// COUNT is bounded-only (rev 5 deletion-visibility rule): a
+    /// covered-eligible shape must NOT let a count take the covered arm.
+    /// With the budget unset the count reads the WRITER even with an open
+    /// fence; with the budget set and a fresh entry it reads the replica
+    /// under the bounded arm. Divergent row counts prove the serving pool.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn count_events_routed_is_bounded_only() {
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (writer, wname) = create_scratch_db(&admin, "cnt_w").await;
+        let (replica, rname) = create_scratch_db(&admin, "cnt_r").await;
+
+        let author = nostr::Keys::generate();
+        let community = Uuid::new_v4();
+        let channel = Uuid::new_v4();
+        seed_community_channel(&writer, community, channel, &author).await;
+        seed_community_channel(&replica, community, channel, &author).await;
+
+        let base = 1_700_000_000u64;
+        // Writer: 2 rows. Replica: 1 row.
+        for (i, content) in ["a", "b"].iter().enumerate() {
+            let ev = signed_event_at(&author, content, base + i as u64);
+            insert_top_level(&writer, community, channel, &ev).await;
+        }
+        let ev = signed_event_at(&author, "c", base);
+        insert_top_level(&replica, community, channel, &ev).await;
+
+        let mut db = Db::from_pools(writer.clone(), replica.clone());
+        db.fence().force_open_for_tests(chrono::Utc::now());
+        let cid = CommunityId::from_uuid(community);
+
+        // Covered-eligible shape on purpose: pinned + until. A count must
+        // ignore that eligibility.
+        let q = {
+            let mut q = EventQuery::for_community(cid);
+            q.channel_id = Some(channel);
+            q.until = chrono::DateTime::from_timestamp((base + 60) as i64, 0);
+            q
+        };
+
+        // Budget unset ⇒ bounded arm disabled ⇒ writer.
+        let n = db
+            .count_events_routed("test_count", &q)
+            .await
+            .expect("count, gate off");
+        assert_eq!(n, 2, "budget unset must count on the writer");
+
+        // Budget set + fresh entry ⇒ bounded arm ⇒ replica.
+        db.set_replica_read_max_age_for_tests(Some(std::time::Duration::from_secs(5)));
+        let n = db
+            .count_events_routed("test_count", &q)
+            .await
+            .expect("count, gate on");
+        assert_eq!(n, 1, "budget set must count on the replica (bounded)");
+
+        // Entry older than the budget ⇒ bounded fails ⇒ writer. Covered
+        // would still hold here (upper <= wall) — proving count never
+        // consults it.
+        db.fence().close();
+        db.fence().force_open_for_tests_at(
+            chrono::Utc::now(),
+            std::time::Instant::now() - std::time::Duration::from_secs(10),
+        );
+        let n = db
+            .count_events_routed("test_count", &q)
+            .await
+            .expect("count, entry too old");
+        assert_eq!(
+            n, 2,
+            "an over-budget entry must fail the count closed to the writer, \
+             even when the covered arm would admit the shape"
+        );
+
+        drop_scratch_db(&admin, replica, &rname).await;
+        drop_scratch_db(&admin, writer, &wname).await;
+    }
+
+    /// Community separation across every routed seam, verified on
+    /// REPLICA-SERVED reads.
+    ///
+    /// The pre-existing feed/event scoping tests prove the shared SQL
+    /// builders confine rows to one community, but they exercise those
+    /// builders through the WRITER wrapper. `_on` variants are
+    /// executor-only refactors, so scoping *should* be identical — this
+    /// test refuses to take that on faith and re-proves it through the
+    /// routed executor, on a snapshot the replica actually served.
+    ///
+    /// Construction: two communities A and B exist in BOTH databases with
+    /// the same ids. The replica additionally holds a `replica-only` row in
+    /// each — divergent fixtures, so any row bearing that content proves
+    /// the replica (not the writer) served the read. Every assertion
+    /// requests A and demands B's rows never appear, including B's
+    /// `replica-only` row, which is the one a leaky predicate would surface.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn routed_reads_are_confined_to_the_requested_community() {
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (writer, wname) = create_scratch_db(&admin, "sep_w").await;
+        let (replica, rname) = create_scratch_db(&admin, "sep_r").await;
+
+        let author = nostr::Keys::generate();
+        let (comm_a, chan_a) = (Uuid::new_v4(), Uuid::new_v4());
+        let (comm_b, chan_b) = (Uuid::new_v4(), Uuid::new_v4());
+        for pool in [&writer, &replica] {
+            seed_community_channel(pool, comm_a, chan_a, &author).await;
+            seed_community_channel(pool, comm_b, chan_b, &author).await;
+        }
+
+        // A p-tag mention is what makes a row eligible for the mentions and
+        // needs-action feeds. Kind 9 satisfies mentions + activity;
+        // needs-action admits only approval/reminder kinds, so each
+        // community also gets a kind-46010 row.
+        let mentioned = nostr::Keys::generate();
+        let mentioned_hex = mentioned.public_key().to_hex();
+        let mentioned_bytes = mentioned.public_key().to_bytes();
+        let tagged_kind = |kind: u16, content: &str, secs: u64| {
+            nostr::EventBuilder::new(nostr::Kind::Custom(kind), content)
+                .tags([nostr::Tag::parse(["p", mentioned_hex.as_str()]).expect("p tag")])
+                .custom_created_at(nostr::Timestamp::from(secs))
+                .sign_with_keys(&author)
+                .expect("sign event")
+        };
+        let tagged = |content: &str, secs: u64| tagged_kind(9, content, secs);
+
+        let base = 1_700_000_000u64;
+        // Shared rows (both DBs) + replica-only rows (divergence) per community.
+        let a_shared = tagged("a-shared", base);
+        let b_shared = tagged("b-shared", base + 1);
+        for pool in [&writer, &replica] {
+            insert_top_level(pool, comm_a, chan_a, &a_shared).await;
+            insert_mentions(
+                pool,
+                CommunityId::from_uuid(comm_a),
+                &a_shared,
+                Some(chan_a),
+            )
+            .await
+            .expect("mentions a-shared");
+            insert_top_level(pool, comm_b, chan_b, &b_shared).await;
+            insert_mentions(
+                pool,
+                CommunityId::from_uuid(comm_b),
+                &b_shared,
+                Some(chan_b),
+            )
+            .await
+            .expect("mentions b-shared");
+        }
+        let a_replica_only = tagged("a-replica-only", base + 10);
+        let b_replica_only = tagged("b-replica-only", base + 11);
+        insert_top_level(&replica, comm_a, chan_a, &a_replica_only).await;
+        insert_mentions(
+            &replica,
+            CommunityId::from_uuid(comm_a),
+            &a_replica_only,
+            Some(chan_a),
+        )
+        .await
+        .expect("mentions a-replica-only");
+        insert_top_level(&replica, comm_b, chan_b, &b_replica_only).await;
+        insert_mentions(
+            &replica,
+            CommunityId::from_uuid(comm_b),
+            &b_replica_only,
+            Some(chan_b),
+        )
+        .await
+        .expect("mentions b-replica-only");
+
+        // Needs-action fixtures: approval kind, replica-only in BOTH
+        // communities, so the assertion below is replica-served on A and
+        // must still not see B's.
+        let a_approval = tagged_kind(46010, "a-approval-replica-only", base + 20);
+        let b_approval = tagged_kind(46010, "b-approval-replica-only", base + 21);
+        insert_top_level(&replica, comm_a, chan_a, &a_approval).await;
+        insert_mentions(
+            &replica,
+            CommunityId::from_uuid(comm_a),
+            &a_approval,
+            Some(chan_a),
+        )
+        .await
+        .expect("mentions a-approval");
+        insert_top_level(&replica, comm_b, chan_b, &b_approval).await;
+        insert_mentions(
+            &replica,
+            CommunityId::from_uuid(comm_b),
+            &b_approval,
+            Some(chan_b),
+        )
+        .await
+        .expect("mentions b-approval");
+
+        let mut db = Db::from_pools(writer.clone(), replica.clone());
+        db.fence().force_open_for_tests(chrono::Utc::now());
+        db.set_replica_read_max_age_for_tests(Some(std::time::Duration::from_secs(5)));
+        let cid_a = CommunityId::from_uuid(comm_a);
+
+        let contents = |evs: &[StoredEvent]| -> std::collections::BTreeSet<String> {
+            evs.iter().map(|e| e.event.content.clone()).collect()
+        };
+        // Every routed seam must (a) have been served by the replica —
+        // proven by a divergent row absent from the writer — and (b) contain
+        // no row belonging to community B. All B fixtures are named `b-*`,
+        // so the leak check is a single prefix scan.
+        let assert_a_only = |rows: &[StoredEvent], marker: &str, seam: &str| {
+            let got = contents(rows);
+            assert!(
+                got.contains(marker),
+                "{seam}: must be replica-served (divergent row `{marker}` absent from writer); got {got:?}"
+            );
+            assert!(
+                !got.iter().any(|c| c.starts_with("b-")),
+                "{seam}: community B rows leaked into a community A read; got {got:?}"
+            );
+        };
+
+        // 1. Generic query — covered arm (channel-pinned + `until`).
+        let mut q = EventQuery::for_community(cid_a);
+        q.channel_id = Some(chan_a);
+        q.until = chrono::DateTime::from_timestamp((base + 60) as i64, 0);
+        let rows = db
+            .query_events_routed("sep_query", &q)
+            .await
+            .expect("routed query");
+        assert_a_only(&rows, "a-replica-only", "query_events_routed");
+
+        // 2. Generic query — bounded arm (no channel pin at all, so a
+        //    missing community predicate could not be masked by the pin).
+        let unpinned = EventQuery::for_community(cid_a);
+        let rows = db
+            .query_events_routed_bounded("sep_query_bounded", &unpinned)
+            .await
+            .expect("routed bounded query");
+        assert_a_only(&rows, "a-replica-only", "query_events_routed_bounded");
+
+        // 3. COUNT — bounded-only. Community A holds 3 rows on the replica
+        //    (shared + replica-only + approval) but only 1 on the writer,
+        //    and 3 more exist in community B. Exactly 3 proves the read was
+        //    both replica-served and community-confined.
+        let count = db
+            .count_events_routed("sep_count", &unpinned)
+            .await
+            .expect("routed count");
+        assert_eq!(
+            count, 3,
+            "count must see A's three replica rows only — not B's, not the writer's one"
+        );
+
+        // 4. By-ID hydration — ids carry no channel pin, and B's ids are
+        //    requested alongside A's. Only A's may hydrate.
+        let ids: Vec<&[u8]> = vec![
+            a_shared.id.as_bytes(),
+            a_replica_only.id.as_bytes(),
+            b_shared.id.as_bytes(),
+            b_replica_only.id.as_bytes(),
+        ];
+        let rows = db
+            .get_events_by_ids_routed("sep_by_ids", cid_a, &ids)
+            .await
+            .expect("routed by-ids");
+        assert_a_only(&rows, "a-replica-only", "get_events_by_ids_routed");
+
+        // 5-7. All three feed builders, each given BOTH channels as
+        //      accessible — so only the community predicate can exclude B.
+        let both = [chan_a, chan_b];
+        let rows = db
+            .query_feed_mentions_routed("sep_feed", cid_a, &mentioned_bytes, &both, None, 50)
+            .await
+            .expect("routed mentions");
+        assert_a_only(&rows, "a-replica-only", "query_feed_mentions_routed");
+
+        let rows = db
+            .query_feed_needs_action_routed("sep_feed", cid_a, &mentioned_bytes, &both, None, 50)
+            .await
+            .expect("routed needs action");
+        assert_a_only(
+            &rows,
+            "a-approval-replica-only",
+            "query_feed_needs_action_routed",
+        );
+
+        let rows = db
+            .query_feed_activity_routed("sep_feed", cid_a, &both, None, 50)
+            .await
+            .expect("routed activity");
+        assert_a_only(&rows, "a-replica-only", "query_feed_activity_routed");
+
+        drop_scratch_db(&admin, replica, &rname).await;
+        drop_scratch_db(&admin, writer, &wname).await;
+    }
+
+    /// D4: a LAZY reader pool (connect_lazy, min_connections=0, never yet
+    /// used) must still let [`Db::spawn_fence_probe`] verify the writer's
+    /// floor guard and spawn — reader-down or reader-idle at boot must not
+    /// disable fence probing.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn lazy_reader_pool_still_spawns_fence_probe() {
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (seed, wname) = create_scratch_db(&admin, "lazy_w").await;
+        seed.close().await;
+
+        let writer_url = {
+            let base = admin_url().await;
+            let idx = base.rfind('/').expect("db url has a path segment");
+            format!("{}/{}", &base[..idx], wname)
+        };
+        // `Db::new` (not `from_pools`) so the WRITER pool arms the
+        // `buzz.created_at_floor` GUC — `spawn_fence_probe` verifies the
+        // floor guard on a writer connection, and `create_scratch_db`'s
+        // plain `PgPool::connect` never arms it. The reader is still the
+        // lazy `connect_read_pool` pool this test is about.
+        let db = Db::new(&DbConfig {
+            database_url: writer_url.clone(),
+            read_database_url: Some(writer_url),
+            max_connections: 2,
+            ..DbConfig::default()
+        })
+        .await
+        .expect("connect armed Db with lazy reader");
+
+        let spawned = db
+            .spawn_fence_probe()
+            .await
+            .expect("floor-guard verification must pass on the migrated writer");
+        assert!(spawned, "a configured (lazy) reader must spawn the probe");
+
+        drop_scratch_db(&admin, db.pool.clone(), &wname).await;
     }
 
     /// Thread replies: head fetch reads the writer; a FULL cursor page is
