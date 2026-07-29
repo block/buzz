@@ -461,10 +461,9 @@ Future<void> _confirmRemoveCommunity(
   }
 }
 
-class _CommunityIndicator extends ConsumerWidget {
-  final VoidCallback onTap;
-
-  const _CommunityIndicator({required this.onTap});
+/// Community identity button shared by the phone header and tablet sidebar.
+class CommunitySwitcherButton extends ConsumerWidget {
+  const CommunitySwitcherButton({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -474,7 +473,14 @@ class _CommunityIndicator extends ConsumerWidget {
     final name = activeCommunity?.name;
 
     return GestureDetector(
-      onTap: onTap,
+      onTap: () {
+        ref.invalidate(communityIconProvider);
+        showModalBottomSheet<void>(
+          context: context,
+          showDragHandle: true,
+          builder: (_) => const _CommunitySwitcherSheet(),
+        );
+      },
       behavior: HitTestBehavior.opaque,
       child: Row(
         mainAxisSize: MainAxisSize.min,

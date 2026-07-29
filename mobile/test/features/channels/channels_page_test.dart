@@ -34,6 +34,7 @@ void main() {
     Map<String, String?> communityIcons = const {},
     ValueChanged<String>? onCommunityIconLoad,
     TextScaler textScaler = TextScaler.noScaling,
+    Widget? home,
   }) {
     return ProviderScope(
       overrides: [
@@ -60,21 +61,27 @@ void main() {
           ),
           child: child!,
         ),
-        home: const Stack(
-          children: [
-            ChannelsPage(settingsPageBuilder: _buildSettingsPage),
-            Positioned.fill(
-              child: ChannelQuickActionsLauncher(
-                visible: true,
-                navigationBarHeight: 60,
-                navigationBarBottomGap: 12,
-                navigationBarWidth: 218,
-                systemBottomInset: 0,
-                rightInset: 16,
-              ),
+        home:
+            home ??
+            Stack(
+              children: [
+                const ChannelsPage(settingsPageBuilder: _buildSettingsPage),
+                Positioned.fill(
+                  child: ChannelQuickActionsLauncher(
+                    visible: true,
+                    placement:
+                        ChannelQuickActionsPlacement.besideBottomNavigation(
+                          screenWidth: 800,
+                          navigationBarHeight: 60,
+                          navigationBarBottomGap: 12,
+                          navigationBarWidth: 218,
+                          systemBottomInset: 0,
+                          rightInset: 16,
+                        ),
+                  ),
+                ),
+              ],
             ),
-          ],
-        ),
       ),
     );
   }
@@ -144,6 +151,47 @@ void main() {
     final sectionTitle = tester.widget<Text>(find.text('Channels'));
     expect(sectionTitle.style?.fontSize, contentListTitleTextStyle.fontSize);
     expect(sectionTitle.style?.fontWeight, FontWeight.w600);
+  });
+
+  testWidgets('highlights a selected tablet channel without shifting labels', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+        ],
+        home: Material(
+          child: CustomScrollView(
+            slivers: [
+              ChannelDirectorySliver(
+                channels: testChannels,
+                currentPubkey: 'aabb',
+                selectedChannelId: '1',
+                directMessagesLabel: 'Direct Messages',
+                onSelectChannel: (_) async {},
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final selectedTile = tester.widget<Ink>(
+      find.byKey(const ValueKey('channel-tile-1')),
+    );
+    final context = tester.element(
+      find.byKey(const ValueKey('channel-tile-1')),
+    );
+    expect(
+      (selectedTile.decoration as BoxDecoration).color,
+      Theme.of(context).colorScheme.primaryContainer,
+    );
+    expect(
+      tester.getTopLeft(find.text('general')).dx,
+      closeTo(tester.getTopLeft(find.text('Alice')).dx, 0.01),
+    );
   });
 
   testWidgets('keeps the last channel above the floating tab bar', (
@@ -655,11 +703,15 @@ void main() {
               Positioned.fill(
                 child: ChannelQuickActionsLauncher(
                   visible: visible,
-                  navigationBarHeight: 60,
-                  navigationBarBottomGap: 12,
-                  navigationBarWidth: 218,
-                  systemBottomInset: 0,
-                  rightInset: 16,
+                  placement:
+                      ChannelQuickActionsPlacement.besideBottomNavigation(
+                        screenWidth: 800,
+                        navigationBarHeight: 60,
+                        navigationBarBottomGap: 12,
+                        navigationBarWidth: 218,
+                        systemBottomInset: 0,
+                        rightInset: 16,
+                      ),
                 ),
               ),
             ],

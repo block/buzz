@@ -44,7 +44,9 @@ part 'activity_page/status_views.dart';
 /// navigation. Row taps deep-link to the represented message (oldest unread
 /// for grouped conversations) rather than just opening the channel.
 class ActivityPage extends HookConsumerWidget {
-  const ActivityPage({super.key});
+  const ActivityPage({super.key, this.title = 'Activity'});
+
+  final String title;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -286,7 +288,7 @@ class ActivityPage extends HookConsumerWidget {
       appBar: FrostedAppBar(
         gradient: context.appColors.topSectionGradient,
         automaticallyImplyLeading: false,
-        title: const Text('Activity'),
+        title: Text(title),
         titleStyle: headerTitleStyle,
         actions: [
           _FilterMenuButton(

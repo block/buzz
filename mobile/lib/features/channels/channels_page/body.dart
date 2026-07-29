@@ -40,7 +40,7 @@ class _ChannelsBody extends StatelessWidget {
             child: CustomScrollView(
               slivers: [
                 SliverToBoxAdapter(child: SizedBox(height: barHeight)),
-                _SliverChannelsList(
+                ChannelDirectorySliver(
                   channels: loadedChannels,
                   currentPubkey: currentPubkey,
                   onSelectChannel: onSelectChannel,
@@ -62,15 +62,21 @@ class _ChannelsBody extends StatelessWidget {
   }
 }
 
-class _SliverChannelsList extends HookConsumerWidget {
+/// Collapsible channel and direct-message sections shared by phone and iPad.
+class ChannelDirectorySliver extends HookConsumerWidget {
   final List<Channel> channels;
   final String? currentPubkey;
   final Future<void> Function(Channel channel) onSelectChannel;
+  final String directMessagesLabel;
+  final String? selectedChannelId;
 
-  const _SliverChannelsList({
+  const ChannelDirectorySliver({
+    super.key,
     required this.channels,
     required this.currentPubkey,
     required this.onSelectChannel,
+    this.directMessagesLabel = 'DMs',
+    this.selectedChannelId,
   });
 
   @override
@@ -212,6 +218,7 @@ class _SliverChannelsList extends HookConsumerWidget {
                 mutedChannelIds: mutedChannelIds,
                 currentPubkey: currentPubkey,
                 emptyLabel: '',
+                selectedChannelId: selectedChannelId,
                 onSelectChannel: onSelectChannel,
               ),
             // User-defined sections for stream channels, in user-defined order.
@@ -286,6 +293,7 @@ class _SliverChannelsList extends HookConsumerWidget {
                 onMoveDown: () => ref
                     .read(channelSectionsProvider.notifier)
                     .moveSectionDown(section.id),
+                selectedChannelId: selectedChannelId,
                 onSelectChannel: onSelectChannel,
                 onMarkChannelRead: (channel) {
                   final ts = dateTimeToUnixSeconds(channel.lastMessageAt);
@@ -316,10 +324,11 @@ class _SliverChannelsList extends HookConsumerWidget {
               mutedChannelIds: mutedChannelIds,
               currentPubkey: currentPubkey,
               emptyLabel: 'No stream channels yet',
+              selectedChannelId: selectedChannelId,
               onSelectChannel: onSelectChannel,
             ),
             _ChannelSection(
-              title: 'DMs',
+              title: directMessagesLabel,
               icon: LucideIcons.messagesSquare,
               showTopDivider: true,
               expanded: dmsExpanded.value,
@@ -330,6 +339,7 @@ class _SliverChannelsList extends HookConsumerWidget {
               mutedChannelIds: mutedChannelIds,
               currentPubkey: currentPubkey,
               emptyLabel: 'No direct messages yet',
+              selectedChannelId: selectedChannelId,
               onSelectChannel: onSelectChannel,
             ),
           ],

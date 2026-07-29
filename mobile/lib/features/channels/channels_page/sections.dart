@@ -11,6 +11,7 @@ class _CustomChannelSection extends StatelessWidget {
   final bool isFirst;
   final bool isLast;
   final bool showTopDivider;
+  final String? selectedChannelId;
   final VoidCallback onToggle;
   final VoidCallback onRename;
   final VoidCallback onDelete;
@@ -30,6 +31,7 @@ class _CustomChannelSection extends StatelessWidget {
     required this.isFirst,
     required this.isLast,
     required this.showTopDivider,
+    required this.selectedChannelId,
     required this.onToggle,
     required this.onRename,
     required this.onDelete,
@@ -68,6 +70,7 @@ class _CustomChannelSection extends StatelessWidget {
                   isUnread: unreadChannelIds.contains(channel.id),
                   isMuted: mutedChannelIds.contains(channel.id),
                   currentPubkey: currentPubkey,
+                  selected: channel.id == selectedChannelId,
                   onTap: () => onSelectChannel(channel),
                   onMarkRead: () => onMarkChannelRead(channel),
                   sectionId: section.id,
@@ -290,6 +293,7 @@ class _ChannelSection extends StatelessWidget {
   final Set<String> mutedChannelIds;
   final String? currentPubkey;
   final String emptyLabel;
+  final String? selectedChannelId;
   final Future<void> Function(Channel channel) onSelectChannel;
 
   const _ChannelSection({
@@ -304,6 +308,7 @@ class _ChannelSection extends StatelessWidget {
     required this.mutedChannelIds,
     required this.currentPubkey,
     required this.emptyLabel,
+    required this.selectedChannelId,
     required this.onSelectChannel,
   });
 
@@ -347,6 +352,7 @@ class _ChannelSection extends StatelessWidget {
                     isUnread: unreadChannelIds.contains(channel.id),
                     isMuted: mutedChannelIds.contains(channel.id),
                     currentPubkey: currentPubkey,
+                    selected: channel.id == selectedChannelId,
                     onTap: () => onSelectChannel(channel),
                     onMarkRead: null,
                     sectionId: null,
@@ -444,14 +450,17 @@ class _SectionHeader extends StatelessWidget {
               ),
             ),
             const SizedBox(width: _kChannelLabelGap),
-            Text(
-              label,
-              style: contentListTitleTextStyle.copyWith(
-                color: sectionColor,
-                fontWeight: FontWeight.w600,
+            Expanded(
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: contentListTitleTextStyle.copyWith(
+                  color: sectionColor,
+                  fontWeight: FontWeight.w600,
+                ),
               ),
             ),
-            const Spacer(),
             _SectionChevron(expanded: expanded, color: sectionColor),
           ],
         ),
