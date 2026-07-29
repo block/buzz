@@ -429,6 +429,22 @@ dev *ARGS: bootstrap _ensure-sidecar-stubs _ensure-migrations
         done
     fi
     cargo build -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr -p buzz-relay
+    # Replace the empty placeholders left by _ensure-sidecar-stubs with the
+    # binaries just built. Tauri copies externalBin next to the dev executable,
+    # and the in-app auth helper resolves buzz-acp as a sibling of current_exe()
+    # (commands/agent_auth.rs) filtering only on .exists() — so a 0-byte
+    # placeholder is selected and sign-in fails with
+    # "failed to run buzz-acp auth helper: Permission denied (os error 13)".
+    # The placeholders exist only to satisfy Tauri's compile-time externalBin
+    # validation, which runs before this build step, so they cannot simply be
+    # dropped. desktop-standalone already stages the real binaries this way.
+    SIDECAR_TARGET=$(rustc -vV | sed -n 's|host: ||p')
+    for bin in buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz; do
+        if [[ -s "./target/debug/${bin}" ]]; then
+            cp -f "./target/debug/${bin}" "desktop/src-tauri/binaries/${bin}-${SIDECAR_TARGET}"
+            chmod +x "desktop/src-tauri/binaries/${bin}-${SIDECAR_TARGET}"
+        fi
+    done
     if [[ -n "{{mesh}}" ]]; then
         export MESH_LLM_NATIVE_RUNTIME_CACHE_DIR="$(./scripts/ensure-mesh-native-runtime.sh)"
     fi
