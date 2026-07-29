@@ -21,6 +21,20 @@ import type {
   DevComposerMode,
 } from "@/features/dev-mode/lib/useDevComposerModes";
 
+/**
+ * Everyone in the channel sees which agent a prompt is directed at: the
+ * message text carries a visible `@Name` prefix (matching the standard
+ * composer's mention-text convention) unless the user already typed one.
+ */
+export function withAgentMention(prompt: string, name: string): string {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const alreadyMentioned = new RegExp(
+    `(^|\\s)@${escaped}(?=$|[\\s,.;:!?)\\]])`,
+    "i",
+  ).test(prompt);
+  return alreadyMentioned ? prompt : `@${name} ${prompt}`;
+}
+
 async function ensureAgentInChannel(channelId: string, target: DevAgentTarget) {
   if (target.source === "managed" && target.managedAgent) {
     await attachManagedAgentToChannel(channelId, {
@@ -120,7 +134,10 @@ export function useDevSessionActions(identity: Identity | undefined) {
 
       await sendMessageMutation.mutateAsync({
         targetChannel: channel,
-        content: prompt,
+        content:
+          mode.kind === "agent"
+            ? withAgentMention(prompt, mode.target.name)
+            : prompt,
         mentionPubkeys:
           mode.kind === "agent" ? [mode.target.pubkey] : undefined,
         parentEventId: parentEventId ?? null,

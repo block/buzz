@@ -1,6 +1,10 @@
 import * as React from "react";
 
 import { useChannelsQuery } from "@/features/channels/hooks";
+import {
+  groupSessionChannels,
+  useChannelCategories,
+} from "@/features/dev-mode/lib/channelCategories";
 import { setDisplayStyle } from "@/features/dev-mode/lib/displayStylePreference";
 import { selectRootEvents } from "@/features/dev-mode/lib/transcriptRoots";
 import {
@@ -17,7 +21,10 @@ import { DevThreadPanel } from "@/features/dev-mode/ui/DevThreadPanel";
 import { DevTranscript } from "@/features/dev-mode/ui/DevTranscript";
 import { useChannelMessagesQuery } from "@/features/messages/hooks";
 import { useIdentityQuery } from "@/shared/api/hooks";
+import { cn } from "@/shared/lib/cn";
+import { isMacPlatform } from "@/shared/lib/platform";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import { useIsFullscreen } from "@/shared/lib/useIsFullscreen";
 
 /**
  * Stable identity for the cycled mode. Selection is keyed rather than
@@ -46,6 +53,7 @@ type ShellView = "fresh" | "navigator" | "channel";
 export function DevModeShell() {
   const identityQuery = useIdentityQuery();
   const channelsQuery = useChannelsQuery();
+  const isFullscreen = useIsFullscreen();
   const modes = useDevComposerModes();
   const { createSessionChannel, sendToSession } = useDevSessionActions(
     identityQuery.data,
@@ -91,6 +99,19 @@ export function DevModeShell() {
     return streams;
   }, [channelsQuery.data]);
 
+  const categories = useChannelCategories();
+  // Categories at the top, uncategorized (incl. new sessions) below; `flat`
+  // matches the navigator's render order so ↑/↓ walk what is on screen.
+  const { groups: channelGroups, flat: orderedChannels } = React.useMemo(
+    () => groupSessionChannels(sessions, categories),
+    [categories, sessions],
+  );
+
+  const channelCategory = React.useCallback(
+    (channelId: string) => categories.assignments[channelId] ?? null,
+    [categories],
+  );
+
   const findChannel = React.useCallback(
     (channelId: string | null) =>
       (channelsQuery.data ?? []).find((channel) => channel.id === channelId) ??
@@ -133,6 +154,54 @@ export function DevModeShell() {
     return () => window.removeEventListener("keydown", handleWindowKeyDown);
   }, []);
 
+  // Refocusing the window restores whichever text input last had the
+  // keyboard (main composer, side-chat composer, palette search), falling
+  // back to the composer if it unmounted meanwhile.
+  const lastFocusedRef = React.useRef<HTMLElement | null>(null);
+
+  const handleFocusCapture = React.useCallback(
+    (event: React.FocusEvent<HTMLDivElement>) => {
+      const target = event.target;
+      if (
+        target instanceof HTMLElement &&
+        target.matches("textarea, input, [contenteditable='true']")
+      ) {
+        lastFocusedRef.current = target;
+      }
+    },
+    [],
+  );
+
+  React.useEffect(() => {
+    const handleWindowFocus = () => {
+      const last = lastFocusedRef.current;
+      if (last?.isConnected) {
+        last.focus();
+      } else {
+        focusComposer();
+      }
+    };
+    window.addEventListener("focus", handleWindowFocus);
+    return () => window.removeEventListener("focus", handleWindowFocus);
+  }, [focusComposer]);
+
+  // Clicks on non-interactive chrome must not blur the active input — this
+  // also covers the click that refocuses the window landing on dead space.
+  const handleShellMouseDown = React.useCallback(
+    (event: React.MouseEvent<HTMLDivElement>) => {
+      const target = event.target;
+      if (
+        target instanceof HTMLElement &&
+        !target.closest(
+          "button, a, input, textarea, select, [role='button'], [role='separator'], [contenteditable='true']",
+        )
+      ) {
+        event.preventDefault();
+      }
+    },
+    [],
+  );
+
   const closePalette = React.useCallback(() => {
     setPaletteOpen(false);
     focusComposer();
@@ -171,23 +240,23 @@ export function DevModeShell() {
 
   const navigateChannels = React.useCallback(
     (direction: 1 | -1) => {
-      if (sessions.length === 0) return;
-      const currentIndex = sessions.findIndex(
+      if (orderedChannels.length === 0) return;
+      const currentIndex = orderedChannels.findIndex(
         (session) => session.id === navigatorId,
       );
       if (currentIndex === -1) {
-        setNavigatorId(sessions[sessions.length - 1].id);
+        setNavigatorId(orderedChannels[orderedChannels.length - 1].id);
         return;
       }
-      // ↑ walks toward older channels; ↓ toward newer. The navigator stays
-      // open at the ends — only Enter or Escape leave it.
+      // ↑ walks up the visible list; ↓ back down. The navigator stays
+      // highlighted at the ends — only Enter or Escape leave it.
       const nextIndex = Math.min(
-        sessions.length - 1,
+        orderedChannels.length - 1,
         Math.max(0, currentIndex + direction),
       );
-      setNavigatorId(sessions[nextIndex].id);
+      setNavigatorId(orderedChannels[nextIndex].id);
     },
-    [navigatorId, sessions],
+    [navigatorId, orderedChannels],
   );
 
   const navigateCards = React.useCallback(
@@ -225,14 +294,32 @@ export function DevModeShell() {
         if (direction === -1) {
           setView("navigator");
           setNavigatorId(
-            sessions.length > 0 ? sessions[sessions.length - 1].id : null,
+            orderedChannels.length > 0
+              ? orderedChannels[orderedChannels.length - 1].id
+              : null,
           );
         }
         return;
       }
       navigateChannels(direction);
     },
-    [navigateChannels, navigateCards, sessions, view],
+    [navigateChannels, navigateCards, orderedChannels, view],
+  );
+
+  /**
+   * Mouse highlight from the always-visible list: in the fresh state it also
+   * enters the navigator; with a channel already open it switches directly.
+   */
+  const handleHighlight = React.useCallback(
+    (channelId: string) => {
+      if (view === "channel") {
+        openChannel(channelId);
+        return;
+      }
+      setNavigatorId(channelId);
+      if (view === "fresh") setView("navigator");
+    },
+    [openChannel, view],
   );
 
   const handleEscape = React.useCallback(() => {
@@ -403,13 +490,33 @@ export function DevModeShell() {
     />
   ) : null;
 
+  const errorBar = error ? (
+    <div className="border-t border-destructive/40 bg-destructive/10 px-4 py-1.5 font-mono text-xs text-destructive">
+      {error}
+    </div>
+  ) : null;
+
+  // Fixed px clearance: the native macOS traffic lights overlay this strip
+  // and ignore the app's text zoom, so rem-based padding would slide the
+  // title under them.
+  const macChrome = isMacPlatform() && !isFullscreen;
+
   return (
+    // biome-ignore lint/a11y/noStaticElementInteractions: handlers only guard focus (track last input, keep dead-space clicks from blurring it) — the div is not interactive
     <div
       className="relative flex min-h-0 flex-1 flex-col bg-background"
       data-testid="dev-mode-shell"
+      onFocusCapture={handleFocusCapture}
+      onMouseDown={handleShellMouseDown}
     >
-      <div className="flex shrink-0 items-center justify-between border-b border-border/60 px-4 py-1.5 font-mono text-xs text-muted-foreground">
-        <span>buzz · developer mode</span>
+      <div
+        className={cn(
+          "flex h-[40px] shrink-0 cursor-default select-none items-center justify-between border-b border-border/60 pr-4 font-mono text-xs text-muted-foreground",
+          macChrome ? "pl-[80px]" : "pl-4",
+        )}
+        data-tauri-drag-region
+      >
+        <span className="pointer-events-none">buzz · developer mode</span>
         <div className="flex items-center gap-3">
           <button
             className="cursor-pointer hover:text-foreground"
@@ -429,77 +536,87 @@ export function DevModeShell() {
       </div>
 
       <div className="flex min-h-0 flex-1">
-        {view === "navigator" ? (
-          <DevChannelNavigator
-            channels={sessions}
-            highlightedId={navigatorId}
-            onHighlight={setNavigatorId}
-            onOpen={openChannel}
-          />
-        ) : null}
+        <DevChannelNavigator
+          categoryOrder={categories.order}
+          channelCategory={channelCategory}
+          dimmed={view === "channel"}
+          groups={channelGroups}
+          highlightedId={view === "fresh" ? null : navigatorId}
+          onHighlight={handleHighlight}
+          onOpen={openChannel}
+        />
 
-        {view === "navigator" && previewChannel ? (
-          <div className="pointer-events-none flex min-h-0 min-w-0 flex-1 flex-col opacity-70">
-            <div className="shrink-0 border-b border-border/60 px-4 py-1 font-mono text-xs text-muted-foreground/60">
-              preview — enter to open
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+          {view === "navigator" && previewChannel ? (
+            <div className="pointer-events-none flex min-h-0 min-w-0 flex-1 flex-col opacity-70">
+              <div className="shrink-0 border-b border-border/60 px-4 py-1 font-mono text-xs text-muted-foreground/60">
+                preview — enter to open
+              </div>
+              {transcriptFor(previewChannel)}
             </div>
-            {transcriptFor(previewChannel)}
-          </div>
-        ) : view === "channel" && activeChannel ? (
-          threadOpen && selectedRoot && mode ? (
-            <DevSplitPane
-              activePane={activePane}
-              main={
-                <>
-                  {transcriptFor(activeChannel)}
-                  {composer}
-                </>
-              }
-              side={
-                <DevThreadPanel
-                  active={activePane === "thread"}
-                  channel={activeChannel}
-                  currentPubkey={identityQuery.data?.pubkey ?? null}
-                  mode={mode}
-                  onClose={() => {
-                    setThreadOpen(false);
-                    setActivePane("main");
-                    focusComposer();
-                  }}
-                  onCycleMode={handleCycleMode}
-                  onSend={handleThreadSend}
-                  onSwitchPane={handleSwitchPane}
-                  root={selectedRoot}
-                />
-              }
-            />
+          ) : view === "channel" && activeChannel ? (
+            threadOpen && selectedRoot && mode ? (
+              <DevSplitPane
+                activePane={activePane}
+                main={
+                  <>
+                    {transcriptFor(activeChannel)}
+                    {composer}
+                  </>
+                }
+                side={
+                  <DevThreadPanel
+                    active={activePane === "thread"}
+                    channel={activeChannel}
+                    currentPubkey={identityQuery.data?.pubkey ?? null}
+                    mode={mode}
+                    onClose={() => {
+                      setThreadOpen(false);
+                      setActivePane("main");
+                      focusComposer();
+                    }}
+                    onCycleMode={handleCycleMode}
+                    onSend={handleThreadSend}
+                    onSwitchPane={handleSwitchPane}
+                    root={selectedRoot}
+                  />
+                }
+              />
+            ) : (
+              transcriptFor(activeChannel)
+            )
           ) : (
-            <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-              {transcriptFor(activeChannel)}
-            </div>
-          )
-        ) : (
-          <div className="flex min-h-0 flex-1 items-center justify-center px-8 font-mono text-sm text-muted-foreground">
-            <div className="max-w-lg space-y-2">
-              <div className="text-foreground">new session</div>
-              <div>
-                Type a prompt and hit enter — it spawns a channel and puts the
-                selected target to work. Tab cycles between chat and{" "}
-                {modes.length - 1} agent{modes.length === 2 ? "" : "s"}. Press
-                ⌃O for the command palette.
+            <div className="flex min-h-0 flex-1 items-center justify-center px-8 font-mono text-sm text-muted-foreground">
+              <div className="max-w-lg space-y-2">
+                <div className="text-foreground">new session</div>
+                <div>
+                  Type a prompt and hit enter — it spawns a channel and puts the
+                  selected target to work. Tab cycles between chat and{" "}
+                  {modes.length - 1} agent{modes.length === 2 ? "" : "s"}. Press
+                  ⌃O for the command palette.
+                </div>
               </div>
             </div>
-          </div>
-        )}
+          )}
+
+          {/* Inside a channel (or preview) the composer covers only this
+              pane; the fresh state's composer below spans the full shell. */}
+          {view !== "fresh" && !sideChatOpen ? (
+            <>
+              {errorBar}
+              {composer}
+            </>
+          ) : null}
+          {sideChatOpen ? errorBar : null}
+        </div>
       </div>
 
-      {error ? (
-        <div className="border-t border-destructive/40 bg-destructive/10 px-4 py-1.5 font-mono text-xs text-destructive">
-          {error}
-        </div>
+      {view === "fresh" ? (
+        <>
+          {errorBar}
+          {composer}
+        </>
       ) : null}
-
-      {sideChatOpen ? null : composer}
 
       {paletteOpen ? (
         <DevCommandPalette

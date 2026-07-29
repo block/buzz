@@ -1,5 +1,6 @@
 import * as React from "react";
 
+import { useAuthorColorResolver } from "@/features/dev-mode/lib/authorColors";
 import { cn } from "@/shared/lib/cn";
 import {
   devComposerModeLabel,
@@ -47,6 +48,10 @@ export function DevPromptComposer({
   onEscape,
 }: DevPromptComposerProps) {
   const textareaRef = React.useRef<HTMLTextAreaElement>(null);
+  const resolveColor = useAuthorColorResolver();
+  // The pill (and caret) wear the same color the agent's name has in chat.
+  const agentColor =
+    mode.kind === "agent" ? resolveColor(mode.target.pubkey) : null;
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: focusSignal is an intentional focus-pull trigger
   React.useEffect(() => {
@@ -109,8 +114,9 @@ export function DevPromptComposer({
           aria-hidden
           className={cn(
             "select-none pt-[3px] text-sm",
-            mode.kind === "agent" ? "text-primary" : "text-muted-foreground",
+            !agentColor && "text-muted-foreground",
           )}
+          style={agentColor ? { color: agentColor } : undefined}
         >
           ⏵
         </span>
@@ -131,11 +137,14 @@ export function DevPromptComposer({
         <span
           className={cn(
             "rounded-none border px-1.5 py-0.5 font-medium",
-            mode.kind === "agent"
-              ? "border-primary/50 text-primary"
-              : "border-border text-muted-foreground",
+            !agentColor && "border-border text-muted-foreground",
           )}
           data-testid="dev-mode-pill"
+          style={
+            agentColor
+              ? { color: agentColor, borderColor: `${agentColor}80` }
+              : undefined
+          }
         >
           {busy ? "working…" : devComposerModeLabel(mode)}
         </span>

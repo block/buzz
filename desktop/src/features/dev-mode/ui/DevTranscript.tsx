@@ -4,6 +4,7 @@ import {
   useAuthorColorResolver,
   type AuthorColorResolver,
 } from "@/features/dev-mode/lib/authorColors";
+import { collectReactions } from "@/features/dev-mode/lib/messageReactions";
 import {
   byCreatedAscending,
   DEV_MESSAGE_KINDS,
@@ -47,14 +48,21 @@ function ThreadReplies({
         .sort(byCreatedAscending),
     [repliesQuery.data],
   );
+  // Thread fetches include their reaction aux events (see useThreadReplies).
+  const reactions = React.useMemo(
+    () => collectReactions(repliesQuery.data),
+    [repliesQuery.data],
+  );
 
+  // Replies sit on the same indent as the prompt that produced them.
   return (
-    <div className="mt-1 border-l border-border/60 pl-3">
+    <div className="mt-1">
       {replies.map((reply) => (
         <DevMessageRow
           key={reply.localKey ?? reply.id}
           event={reply}
           isSelf={reply.pubkey === currentPubkey}
+          reactions={reactions.get(reply.id)}
           resolveColor={resolveColor}
           resolveName={resolveName}
         />
@@ -80,6 +88,7 @@ function ThreadReplies({
 function PromptCard({
   channel,
   root,
+  rootReactions,
   replyCount,
   autoExpand,
   selected,
@@ -91,6 +100,7 @@ function PromptCard({
 }: {
   channel: Channel;
   root: RelayEvent;
+  rootReactions: string[] | undefined;
   replyCount: number;
   autoExpand: boolean;
   selected: boolean;
@@ -117,7 +127,7 @@ function PromptCard({
       role="button"
       tabIndex={-1}
       className={cn(
-        "mb-2 cursor-pointer rounded-none border px-3 py-2",
+        "relative mb-2 cursor-pointer rounded-none border px-3 py-2",
         selected
           ? "border-primary/60 bg-primary/5"
           : "border-border/40 hover:border-border",
@@ -126,9 +136,17 @@ function PromptCard({
       onClick={onSelect}
       onDoubleClick={onOpenThread}
     >
+      {/* Absolute so selecting a card never changes its height (no layout
+          shift while ↑/↓ walk the prompts). */}
+      {selected ? (
+        <div className="pointer-events-none absolute right-1 top-1 select-none bg-background/90 px-1 text-xs text-primary/80">
+          ⏎ side chat
+        </div>
+      ) : null}
       <DevMessageRow
         event={root}
         isSelf={root.pubkey === currentPubkey}
+        reactions={rootReactions}
         resolveColor={resolveColor}
         resolveName={resolveName}
       />
@@ -142,7 +160,7 @@ function PromptCard({
         />
       ) : replyCount > 0 ? (
         <button
-          className="mt-1 cursor-pointer border-l border-border/60 py-0.5 pl-3 text-sm text-muted-foreground hover:text-foreground"
+          className="mt-1 cursor-pointer py-0.5 text-sm text-muted-foreground hover:text-foreground"
           onClick={(event) => {
             event.stopPropagation();
             onOpenThread();
@@ -151,11 +169,6 @@ function PromptCard({
         >
           … {replyCount} {replyCount === 1 ? "reply" : "replies"}
         </button>
-      ) : null}
-      {selected ? (
-        <div className="mt-1 select-none text-right text-xs text-primary/80">
-          ⏎ side chat
-        </div>
       ) : null}
     </div>
   );
@@ -202,6 +215,17 @@ export function DevTranscript({
     return counts;
   }, [windowQuery.data]);
 
+  // Kind-7 reactions ride along as window aux events (pages + live); agents
+  // react while working, so these double as a per-prompt activity signal.
+  const rootReactions = React.useMemo(() => {
+    const store = windowQuery.data;
+    if (!store) return new Map<string, string[]>();
+    return collectReactions([
+      ...store.pages.flatMap((page) => page.aux),
+      ...store.liveAux,
+    ]);
+  }, [windowQuery.data]);
+
   return (
     <div
       ref={scrollRef}
@@ -233,6 +257,7 @@ export function DevTranscript({
             resolveColor={resolveColor}
             resolveName={resolveName}
             root={root}
+            rootReactions={rootReactions.get(root.id)}
             selected={root.id === selectedRootId}
           />
         ))}

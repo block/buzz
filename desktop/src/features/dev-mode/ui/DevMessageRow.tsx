@@ -12,14 +12,37 @@ function formatTime(createdAt: number) {
   });
 }
 
+function ReactionChips({ reactions }: { reactions: string[] }) {
+  const counts = new Map<string, number>();
+  for (const emoji of reactions) {
+    counts.set(emoji, (counts.get(emoji) ?? 0) + 1);
+  }
+  return (
+    <span className="flex shrink-0 select-none items-baseline gap-1 self-start">
+      {[...counts.entries()].map(([emoji, count]) => (
+        <span
+          key={emoji}
+          className="rounded-none border border-border/50 bg-muted/40 px-1 text-xs text-muted-foreground"
+        >
+          {emoji}
+          {count > 1 ? ` ${count}` : ""}
+        </span>
+      ))}
+    </span>
+  );
+}
+
 export function DevMessageRow({
   event,
   isSelf,
+  reactions,
   resolveName,
   resolveColor,
 }: {
   event: RelayEvent;
   isSelf: boolean;
+  /** Emoji reacted onto this message — agents react while working, so this doubles as the loading state. */
+  reactions?: string[];
   resolveName: NameResolver;
   resolveColor: AuthorColorResolver;
 }) {
@@ -49,6 +72,9 @@ export function DevMessageRow({
       >
         {renderHighlightedContent(event.content)}
       </span>
+      {reactions && reactions.length > 0 ? (
+        <ReactionChips reactions={reactions} />
+      ) : null}
     </div>
   );
 }

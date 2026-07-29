@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import { useAuthorColorResolver } from "@/features/dev-mode/lib/authorColors";
+import { collectReactions } from "@/features/dev-mode/lib/messageReactions";
 import {
   byCreatedAscending,
   DEV_MESSAGE_KINDS,
@@ -67,6 +68,12 @@ export function DevThreadPanel({
         .sort(byCreatedAscending),
     [repliesQuery.data],
   );
+  const reactions = React.useMemo(
+    () => collectReactions(repliesQuery.data),
+    [repliesQuery.data],
+  );
+  const agentColor =
+    mode.kind === "agent" ? resolveColor(mode.target.pubkey) : null;
 
   const handleSubmit = () => {
     const prompt = input.trim();
@@ -139,6 +146,7 @@ export function DevThreadPanel({
           <DevMessageRow
             event={root}
             isSelf={root.pubkey === currentPubkey}
+            reactions={reactions.get(root.id)}
             resolveColor={resolveColor}
             resolveName={resolveName}
           />
@@ -148,6 +156,7 @@ export function DevThreadPanel({
               key={reply.localKey ?? reply.id}
               event={reply}
               isSelf={reply.pubkey === currentPubkey}
+              reactions={reactions.get(reply.id)}
               resolveColor={resolveColor}
               resolveName={resolveName}
             />
@@ -181,8 +190,9 @@ export function DevThreadPanel({
             aria-hidden
             className={cn(
               "select-none pt-[3px] text-sm",
-              mode.kind === "agent" ? "text-primary" : "text-muted-foreground",
+              !agentColor && "text-muted-foreground",
             )}
+            style={agentColor ? { color: agentColor } : undefined}
           >
             ⏵
           </span>
@@ -207,10 +217,13 @@ export function DevThreadPanel({
           <span
             className={cn(
               "rounded-none border px-1.5 py-0.5 font-medium",
-              mode.kind === "agent"
-                ? "border-primary/50 text-primary"
-                : "border-border text-muted-foreground",
+              !agentColor && "border-border text-muted-foreground",
             )}
+            style={
+              agentColor
+                ? { color: agentColor, borderColor: `${agentColor}80` }
+                : undefined
+            }
           >
             {busy ? "working…" : devComposerModeLabel(mode)}
           </span>

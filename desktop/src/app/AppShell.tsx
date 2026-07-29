@@ -721,7 +721,7 @@ export function AppShell() {
                     />
                   ) : null}
                   <SidebarProvider className="min-h-0 flex-1 flex-col overflow-hidden">
-                    {!settingsOpen ? (
+                    {!settingsOpen && displayStyle !== "developer" ? (
                       <AppTopChrome
                         canGoBack={canGoBack}
                         canGoForward={canGoForward}
