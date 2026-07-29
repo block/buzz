@@ -42,13 +42,19 @@ pub fn apply_relay_mesh_env(
         RELAY_MESH_PREFER_MESH_FOR_AUTO_ENV.to_string(),
         "1".to_string(),
     );
-    // Keep the requested response inside smaller local-model context windows,
-    // and spend that budget on an answer/tool call instead of hidden reasoning.
+    // Keep the requested response inside smaller local-model context windows.
     // These are defaults, not policy: the effective agent/persona/global env
-    // may deliberately choose a smaller cap or enable thinking. This function
+    // may deliberately choose a smaller cap or a different effort. This function
     // runs after those layers during readiness, so never clobber their values.
     insert_default_if_unset(env, "BUZZ_AGENT_MAX_OUTPUT_TOKENS", "4096");
-    insert_default_if_unset(env, "BUZZ_AGENT_THINKING_EFFORT", "none");
+    // `none` suppresses tool calling outright on local models: llama.cpp's
+    // Gemma grammar is lazy under `tool_choice: auto`, and `reasoning_effort:
+    // "none"` keeps the model on its prose path so it never emits the tool-call
+    // token. Measured with the real prompt and toolset, gemma-4-E4B delivered a
+    // reply 0/8 times at `none` and 8/8 at `low`; `minimal` was 3/4. `low` buys
+    // just enough deliberation to pick a tool without spending the output
+    // budget on hidden reasoning.
+    insert_default_if_unset(env, "BUZZ_AGENT_THINKING_EFFORT", "low");
 }
 
 #[cfg(feature = "mesh-llm")]
@@ -89,7 +95,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn native_provider_uses_context_safe_non_reasoning_budget() {
+    fn native_provider_uses_context_safe_tool_calling_budget() {
         let mut env = BTreeMap::new();
         apply_relay_mesh_env(
             &mut env,
@@ -101,9 +107,11 @@ mod tests {
             env.get("BUZZ_AGENT_MAX_OUTPUT_TOKENS").map(String::as_str),
             Some("4096")
         );
+        // Must not be "none": that suppresses tool calling on local models, so
+        // the agent answers in prose and the reply is never published.
         assert_eq!(
             env.get("BUZZ_AGENT_THINKING_EFFORT").map(String::as_str),
-            Some("none")
+            Some("low")
         );
         assert_eq!(
             env.get(RELAY_MESH_PREFER_MESH_FOR_AUTO_ENV)
@@ -119,7 +127,9 @@ mod tests {
                 "BUZZ_AGENT_MAX_OUTPUT_TOKENS".to_string(),
                 "2048".to_string(),
             ),
-            ("BUZZ_AGENT_THINKING_EFFORT".to_string(), "low".to_string()),
+            // Deliberately not the default ("low"), so this asserts
+            // preservation rather than coinciding with the default.
+            ("BUZZ_AGENT_THINKING_EFFORT".to_string(), "high".to_string()),
         ]);
         apply_relay_mesh_env(
             &mut env,
@@ -133,7 +143,7 @@ mod tests {
         );
         assert_eq!(
             env.get("BUZZ_AGENT_THINKING_EFFORT").map(String::as_str),
-            Some("low")
+            Some("high")
         );
     }
 
