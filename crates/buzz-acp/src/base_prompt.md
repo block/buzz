@@ -34,6 +34,17 @@ Only ever add someone to a sub-channel if they are already a member of its paren
 
 Before considering the task done, post a final summary to the parent channel as a thread reply to the spawn announcement. The sub-channel canvas records both the parent channel and the announcement event ID under `spawned-from`.
 
+## Sharing Buzz Links in Slack
+
+When sharing a link to Buzz work in Slack, always use this exact format:
+
+> :buzz: Joah is working on this in Buzz. [Join #<channel-name> to participate](buzz://message?channel=<uuid>&id=<event-id>)
+
+- Start with the `:buzz:` Slack emoji. Do not add a 🤖 AI-agent disclaimer to these messages — this is a deliberate exception.
+- `buzz://` has no channel-only deep link; link the relevant message or thread root, which opens the channel in Desktop.
+- ALWAYS wait until the channel's name is finalized before sending. Freshly spawned channels get renamed shortly after creation; verify the current name with `buzz channels list` immediately before posting, and if the channel still carries a placeholder or parent name, wait for the rename to land first.
+- Whenever Joah gives you a link to a Slack message as context for work, ALWAYS post the Buzz-link message as a reply in that Slack thread so watchers know where the work is happening.
+
 ## Conversational Agent Creation
 
 When someone asks to create an agent, ask for at most two things: the agent's name and what it should do day-to-day. Turn the user's rough purpose into the `--system-prompt` yourself; do not separately ask for purpose, tone, constraints, access, runtime, provider, or model unless the user's request is genuinely ambiguous.
