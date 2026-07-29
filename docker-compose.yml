@@ -61,11 +61,14 @@ services:
     image: valkey/valkey:8-alpine
     container_name: buzz-valkey
     profiles: ["valkey"]
-    command: ["valkey-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?set REDIS_PASSWORD}"]
+    # Default rather than `:?` — compose interpolates the whole file even when
+    # starting unrelated services, so a required-variable check here would break
+    # `docker compose up postgres redis ...` for anyone without REDIS_PASSWORD set.
+    command: ["valkey-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:-buzz_dev}"]
     ports:
       - "6380:6379"
     environment:
-      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-buzz_dev}
     networks:
       - buzz-net
     healthcheck:
