@@ -18,6 +18,10 @@
 #   buzz-ctx artifact <file>            # store an immutable content-addressed blob
 #   buzz-ctx announce <file> [message]  # store a blob + announce its manifest
 #   buzz-ctx fetch <sha256> [out]       # fetch + verify an artifact
+#   buzz-ctx handoff open <spec-file|->  # open a journal-native hand-off
+#   buzz-ctx handoff claim <event-id> [note]  # claim an open hand-off
+#   buzz-ctx handoff return <event-id> <spec-file|->  # return results
+#   buzz-ctx handoff list                # list hand-offs and lifecycle state
 #   buzz-ctx agreement export <stream> <reader-pubkey>...  # declare (offer)
 #   buzz-ctx agreement admit <source> <principal> <pubkey>...  # sink trust half
 #   buzz-ctx agreement read <stream> <principal> <pubkey>...   # reader grant
@@ -163,6 +167,248 @@ case "${1:-}" in
     echo "sha256: $receipt_sha"
     echo "manifest accepted: $acceptance"
     echo "context: $CONTEXT"
+    ;;
+  handoff)
+    sub="${2:?usage: buzz-ctx handoff open|claim|return|list ...}"
+    CONTEXT="${BUZZ_CTX_CONTEXT:-5b2ab726-c2b0-4bce-bcb9-bf5f7f883f0b}"
+    case "$sub" in
+      open)
+        spec_file="${3:?usage: buzz-ctx handoff open <spec-file|->}"
+        if [ "$spec_file" = "-" ]; then
+          content="$(cat)" || die "could not read handoff open spec from stdin"
+        else
+          content="$(cat "$spec_file")" \
+            || die "could not read handoff open spec from $spec_file"
+        fi
+        printf '%s' "$content" | jq -e 'type == "object"' >/dev/null \
+          || die "handoff open spec must be a JSON object"
+        for field in title scope base_commit acceptance embodiment; do
+          printf '%s' "$content" | jq -e --arg field "$field" \
+            'has($field) and .[$field] != null' >/dev/null \
+            || die "handoff open spec missing required field: $field"
+        done
+        printf '%s' "$content" | jq -e \
+          '.embodiment | type == "object"' >/dev/null \
+          || die "handoff open field embodiment must be a JSON object"
+        for field in stdin network trust tooling; do
+          printf '%s' "$content" | jq -e --arg field "$field" \
+            '.embodiment | has($field) and .[$field] != null' >/dev/null \
+            || die "handoff open spec missing required field: embodiment.$field"
+        done
+        artifacts="$(printf '%s' "$content" | jq -e \
+          '(if has("artifacts") then .artifacts else [] end) |
+           select(type == "array" and
+                  all(.[]; type == "string" and test("^[0-9a-fA-F]{64}$")))')" \
+          || die "handoff open artifacts must be an array of 64-hex sha256 strings"
+        x_tags="$(printf '%s' "$artifacts" | jq 'map(["x", .])')" \
+          || die "could not build handoff open artifact tags"
+        signer_key="$KEY"
+        signer_pub="$PUBKEY"
+        auth_tag="null"
+        if [ -f "$HOME_DIR/agents/$AGENT.key" ]; then
+          signer_key="$HOME_DIR/agents/$AGENT.key"
+          signer_pub="$("$CLIENT" pubkey "$signer_key")"
+          auth_tag="$(cat "$HOME_DIR/agents/$AGENT.auth" 2>/dev/null || echo null)"
+        fi
+        event="$(jq -n --arg pk "$signer_pub" --arg c "$content" \
+          --arg context "$CONTEXT" --arg agent "$AGENT" \
+          --arg machine "$MACHINE" --arg ts "$(date +%s)" \
+          --argjson x_tags "$x_tags" --argjson auth "$auth_tag" \
+          '{pubkey:$pk, created_at:($ts|tonumber), kind:1,
+            tags:([["t","handoff:open"],["h",$context],
+                   ["agent",$agent],["machine",$machine]]
+                  + $x_tags
+                  + (if $auth == null then [] else [$auth] end)),
+            content:$c}')" \
+          || die "could not build handoff open event"
+        relay="$(relay_for_write)"
+        tmp="$(mktemp)" || die "could not create temporary handoff event file"
+        printf '%s' "$event" > "$tmp" \
+          || { rm -f "$tmp"; die "could not write temporary handoff event file"; }
+        post_result="$("$CLIENT" post "$signer_key" "$relay" "$tmp")" \
+          || { rm -f "$tmp"; die "handoff open event post failed"; }
+        rm -f "$tmp"
+        # The post receipt is two lines: `200 {json}` then `event_id=…`; only
+        # the first line is the JSON acceptance.
+        acceptance="$(printf '%s' "$post_result" | head -n 1 | sed 's/^200 //' \
+          | jq -er 'select(.accepted | type == "boolean") | "\(.accepted) (\(.message // "no message"))"')" \
+          || die "handoff open event post returned an invalid acceptance receipt"
+        case "$acceptance" in
+          true\ *) ;;
+          *) die "handoff open event rejected: $acceptance" ;;
+        esac
+        event_id="$(printf '%s' "$post_result" | sed -n 's/^event_id=//p' | head -n 1)"
+        [[ "$event_id" =~ ^[0-9a-fA-F]{64}$ ]] \
+          || die "handoff open event post returned an invalid event id"
+        echo "handoff opened: $event_id"
+        echo "accepted: $acceptance"
+        echo "context: $CONTEXT"
+        ;;
+      claim)
+        open_event_id="${3:?usage: buzz-ctx handoff claim <open-event-id> [note]}"
+        [[ "$open_event_id" =~ ^[0-9a-fA-F]{64}$ ]] \
+          || die "open event id must be 64 hex characters"
+        note="${4:-}"
+        content="$(jq -n --arg runner "$AGENT" --arg host "$MACHINE" \
+          --arg note "$note" \
+          '{runner:$runner, host:$host}
+           + (if $note == "" then {} else {note:$note} end)')" \
+          || die "could not build handoff claim content"
+        signer_key="$KEY"
+        signer_pub="$PUBKEY"
+        auth_tag="null"
+        if [ -f "$HOME_DIR/agents/$AGENT.key" ]; then
+          signer_key="$HOME_DIR/agents/$AGENT.key"
+          signer_pub="$("$CLIENT" pubkey "$signer_key")"
+          auth_tag="$(cat "$HOME_DIR/agents/$AGENT.auth" 2>/dev/null || echo null)"
+        fi
+        event="$(jq -n --arg pk "$signer_pub" --arg c "$content" \
+          --arg context "$CONTEXT" --arg open "$open_event_id" \
+          --arg agent "$AGENT" --arg machine "$MACHINE" \
+          --arg ts "$(date +%s)" --argjson auth "$auth_tag" \
+          '{pubkey:$pk, created_at:($ts|tonumber), kind:1,
+            tags:([["t","handoff:claim"],["h",$context],
+                   ["agent",$agent],["machine",$machine],["e",$open]]
+                  + (if $auth == null then [] else [$auth] end)),
+            content:$c}')" \
+          || die "could not build handoff claim event"
+        relay="$(relay_for_write)"
+        tmp="$(mktemp)" || die "could not create temporary handoff event file"
+        printf '%s' "$event" > "$tmp" \
+          || { rm -f "$tmp"; die "could not write temporary handoff event file"; }
+        post_result="$("$CLIENT" post "$signer_key" "$relay" "$tmp")" \
+          || { rm -f "$tmp"; die "handoff claim event post failed"; }
+        rm -f "$tmp"
+        # The post receipt is two lines: `200 {json}` then `event_id=…`; only
+        # the first line is the JSON acceptance.
+        acceptance="$(printf '%s' "$post_result" | head -n 1 | sed 's/^200 //' \
+          | jq -er 'select(.accepted | type == "boolean") | "\(.accepted) (\(.message // "no message"))"')" \
+          || die "handoff claim event post returned an invalid acceptance receipt"
+        case "$acceptance" in
+          true\ *) ;;
+          *) die "handoff claim event rejected: $acceptance" ;;
+        esac
+        event_id="$(printf '%s' "$post_result" | sed -n 's/^event_id=//p' | head -n 1)"
+        [[ "$event_id" =~ ^[0-9a-fA-F]{64}$ ]] \
+          || die "handoff claim event post returned an invalid event id"
+        echo "handoff claimed: ${open_event_id:0:12}… by $AGENT@$MACHINE"
+        echo "claim event: $event_id"
+        echo "accepted: $acceptance"
+        ;;
+      return)
+        open_event_id="${3:?usage: buzz-ctx handoff return <open-event-id> <spec-file|->}"
+        [[ "$open_event_id" =~ ^[0-9a-fA-F]{64}$ ]] \
+          || die "open event id must be 64 hex characters"
+        spec_file="${4:?usage: buzz-ctx handoff return <open-event-id> <spec-file|->}"
+        if [ "$spec_file" = "-" ]; then
+          content="$(cat)" || die "could not read handoff return spec from stdin"
+        else
+          content="$(cat "$spec_file")" \
+            || die "could not read handoff return spec from $spec_file"
+        fi
+        printf '%s' "$content" | jq -e 'type == "object"' >/dev/null \
+          || die "handoff return spec must be a JSON object"
+        printf '%s' "$content" | jq -e \
+          'has("status") and .status != null' >/dev/null \
+          || die "handoff return spec missing required field: status"
+        printf '%s' "$content" | jq -e \
+          '.status == "done" or .status == "failed"' >/dev/null \
+          || die "handoff return status must be done or failed"
+        printf '%s' "$content" | jq -e \
+          'has("evidence") and .evidence != null' >/dev/null \
+          || die "handoff return spec missing required field: evidence"
+        artifacts="$(printf '%s' "$content" | jq -e \
+          '(if has("artifacts") then .artifacts else [] end) |
+           select(type == "array" and
+                  all(.[]; type == "string" and test("^[0-9a-fA-F]{64}$")))')" \
+          || die "handoff return artifacts must be an array of 64-hex sha256 strings"
+        x_tags="$(printf '%s' "$artifacts" | jq 'map(["x", .])')" \
+          || die "could not build handoff return artifact tags"
+        signer_key="$KEY"
+        signer_pub="$PUBKEY"
+        auth_tag="null"
+        if [ -f "$HOME_DIR/agents/$AGENT.key" ]; then
+          signer_key="$HOME_DIR/agents/$AGENT.key"
+          signer_pub="$("$CLIENT" pubkey "$signer_key")"
+          auth_tag="$(cat "$HOME_DIR/agents/$AGENT.auth" 2>/dev/null || echo null)"
+        fi
+        event="$(jq -n --arg pk "$signer_pub" --arg c "$content" \
+          --arg context "$CONTEXT" --arg open "$open_event_id" \
+          --arg agent "$AGENT" --arg machine "$MACHINE" \
+          --arg ts "$(date +%s)" --argjson x_tags "$x_tags" \
+          --argjson auth "$auth_tag" \
+          '{pubkey:$pk, created_at:($ts|tonumber), kind:1,
+            tags:([["t","handoff:return"],["h",$context],
+                   ["agent",$agent],["machine",$machine],["e",$open]]
+                  + $x_tags
+                  + (if $auth == null then [] else [$auth] end)),
+            content:$c}')" \
+          || die "could not build handoff return event"
+        relay="$(relay_for_write)"
+        tmp="$(mktemp)" || die "could not create temporary handoff event file"
+        printf '%s' "$event" > "$tmp" \
+          || { rm -f "$tmp"; die "could not write temporary handoff event file"; }
+        post_result="$("$CLIENT" post "$signer_key" "$relay" "$tmp")" \
+          || { rm -f "$tmp"; die "handoff return event post failed"; }
+        rm -f "$tmp"
+        # The post receipt is two lines: `200 {json}` then `event_id=…`; only
+        # the first line is the JSON acceptance.
+        acceptance="$(printf '%s' "$post_result" | head -n 1 | sed 's/^200 //' \
+          | jq -er 'select(.accepted | type == "boolean") | "\(.accepted) (\(.message // "no message"))"')" \
+          || die "handoff return event post returned an invalid acceptance receipt"
+        case "$acceptance" in
+          true\ *) ;;
+          *) die "handoff return event rejected: $acceptance" ;;
+        esac
+        event_id="$(printf '%s' "$post_result" | sed -n 's/^event_id=//p' | head -n 1)"
+        [[ "$event_id" =~ ^[0-9a-fA-F]{64}$ ]] \
+          || die "handoff return event post returned an invalid event id"
+        status="$(printf '%s' "$content" | jq -r '.status')"
+        echo "handoff returned: ${open_event_id:0:12}… ($status)"
+        echo "return event: $event_id"
+        echo "accepted: $acceptance"
+        ;;
+      list)
+        relay="$(relay_for_read)"
+        result="$("$CLIENT" query "$KEY" "$relay" \
+          '[{"kinds":[1],"#t":["handoff:open","handoff:claim","handoff:return"]}]')" \
+          || die "handoff lifecycle query failed"
+        printf '%s' "$result" | sed 's/^200 //' \
+          | jq -r --argjson now "$(date +%s)" '
+            def tag(e; name):
+              [e.tags[] | select(.[0] == name) | .[1]][0];
+            def lifecycle(e): tag(e; "t");
+            def parent(e): tag(e; "e");
+            def body(e): try (e.content | fromjson) catch {};
+            def age(created):
+              ([0, ($now - created)] | max) as $seconds
+              | if $seconds < 60 then "\($seconds)s ago"
+                elif $seconds < 3600 then "\(($seconds / 60) | floor)m ago"
+                elif $seconds < 86400 then "\(($seconds / 3600) | floor)h ago"
+                else "\(($seconds / 86400) | floor)d ago"
+                end;
+            [.[] | select(lifecycle(.) == "handoff:open")] as $opens
+            | [.[] | select(lifecycle(.) == "handoff:claim")] as $claims
+            | [.[] | select(lifecycle(.) == "handoff:return")] as $returns
+            | $opens
+            | sort_by(.created_at)
+            | reverse[]
+            | . as $open
+            | [$claims[] | select(parent(.) == $open.id)] as $mine_claims
+            | [$returns[] | select(parent(.) == $open.id)] as $mine_returns
+            | ([$open] + $mine_claims + $mine_returns
+               | max_by(.created_at)) as $latest
+            | ($mine_claims | sort_by(.created_at) | last | body(.).runner) as $claimant
+            | (if ($mine_returns | length) > 0 then "RETURNED"
+               elif ($mine_claims | length) > 0 then "CLAIMED"
+               else "OPEN"
+               end) as $state
+            | "\($state)  \(age($latest.created_at))  \(body($open).title // "(untitled)")  \($open.id[0:12])…\(if $claimant == null then "" else "  \($claimant)" end)"
+          ' \
+          || die "handoff lifecycle query returned invalid event data"
+        ;;
+      *) die "unknown handoff subcommand: $sub" ;;
+    esac
     ;;
   fetch)
     sha="${2:?usage: buzz-ctx fetch <sha256> [out]}"
