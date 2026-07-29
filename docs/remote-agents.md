@@ -15,9 +15,13 @@ shows. Install it to `~/.local/bin`, which is already on the discovery path.
 ## Provider protocol
 
 The desktop enumerates PATH (plus the executable's own directory and `~/.local/bin`) for files
-named `buzz-backend-<id>`, and resolves `<id>` against `^[a-z0-9][a-z0-9_-]*$`. It spawns the
-binary, writes one JSON request to stdin, closes it, and reads one JSON response from stdout. One
-process per op; no daemon, no state, no version negotiation.
+named `buzz-backend-<id>`, and resolves `<id>` against `^[a-z0-9][a-z0-9_-]*$`. A trailing
+executable extension (`.exe`, `.com`, `.cmd`, `.bat`) is not part of the id — Cargo installs the
+provider as `buzz-backend-ssh.exe` on Windows, and reading that filename literally derives `ssh.exe`,
+which the id rule rejects for the dot. Discovery deduplicates on the id, so a host carrying both
+spellings offers one provider. It spawns the binary, writes one JSON request to stdin, closes it,
+and reads one JSON response from stdout. One process per op; no daemon, no state, no version
+negotiation.
 
 `buzz-backend-ssh` implements five ops.
 

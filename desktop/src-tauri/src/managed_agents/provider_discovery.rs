@@ -7,6 +7,43 @@
 
 use std::path::{Path, PathBuf};
 
+/// The filename prefix that makes an executable a provider.
+const PROVIDER_PREFIX: &str = "buzz-backend-";
+
+/// Extensions that name the *same* program on Windows, and therefore carry no
+/// information about which provider a file is.
+///
+/// Cargo installs `buzz-backend-ssh` as `buzz-backend-ssh.exe` there, and a
+/// literal read of that filename derives the id `ssh.exe` — which
+/// [`resolve_provider_binary`]'s `[a-z0-9][a-z0-9_-]*` rule rejects for the
+/// dot, making a provider that ships Windows support unusable on Windows.
+///
+/// Stripping is unconditional rather than `cfg(windows)`: the id a file name
+/// means must not depend on which machine is reading it, and a rule that only
+/// compiles on one platform is a rule most CI never exercises.
+const EXECUTABLE_EXTENSIONS: &[&str] = &["exe", "com", "cmd", "bat"];
+
+/// The provider id a filename names, or `None` when it names no provider.
+///
+/// The one owner of "what id is this file?", so discovery and deduplication
+/// cannot disagree — a host carrying both `buzz-backend-ssh` and
+/// `buzz-backend-ssh.exe` must offer one `ssh`, not two entries the desktop
+/// then treats as different providers.
+fn provider_id_from_file_name(name: &str) -> Option<String> {
+    let id = name.strip_prefix(PROVIDER_PREFIX)?;
+    let id = match id.rsplit_once('.') {
+        Some((stem, extension))
+            if EXECUTABLE_EXTENSIONS
+                .iter()
+                .any(|candidate| extension.eq_ignore_ascii_case(candidate)) =>
+        {
+            stem
+        }
+        _ => id,
+    };
+    (!id.is_empty()).then(|| id.to_string())
+}
+
 /// Enumerate PATH for buzz-backend-* executables. Returns (id, path) pairs.
 /// Only includes files that are executable. Does NOT execute any binaries.
 ///
@@ -15,7 +52,6 @@ use std::path::{Path, PathBuf};
 /// We augment the search with those directories so bundled and user-installed providers
 /// are always discovered regardless of how the desktop was launched.
 pub fn discover_provider_candidates() -> Vec<(String, PathBuf)> {
-    let prefix = "buzz-backend-";
     let mut seen = std::collections::HashSet::new();
     let mut results = Vec::new();
 
@@ -48,10 +84,13 @@ pub fn discover_provider_candidates() -> Vec<(String, PathBuf)> {
         };
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
-            if let Some(id) = name.strip_prefix(prefix) {
-                if !id.is_empty() && !seen.contains(&name) && is_executable(&entry.path()) {
-                    seen.insert(name.clone());
-                    results.push((id.to_string(), entry.path()));
+            // Deduplicated on the ID rather than the filename, so a host
+            // carrying both spellings of one provider offers it once. First
+            // match wins, which is PATH precedence.
+            if let Some(id) = provider_id_from_file_name(&name) {
+                if !seen.contains(&id) && is_executable(&entry.path()) {
+                    seen.insert(id.clone());
+                    results.push((id, entry.path()));
                 }
             }
         }
@@ -139,6 +178,51 @@ mod tests {
         assert!(resolve_provider_binary("foo;rm -rf /").is_err());
         // Valid format but not on PATH — should fail with "not found"
         assert!(resolve_provider_binary("nonexistent-test-id-12345").is_err());
+    }
+
+    /// The Windows regression: Cargo installs the provider as
+    /// `buzz-backend-ssh.exe`, and a literal read of that filename derives
+    /// `ssh.exe` — an id `resolve_provider_binary` rejects for the dot, so the
+    /// SSH provider was unusable on the one platform where that spelling is
+    /// the only one.
+    #[test]
+    fn executable_extensions_are_not_part_of_a_provider_id() {
+        for name in [
+            "buzz-backend-ssh",
+            "buzz-backend-ssh.exe",
+            "buzz-backend-ssh.EXE",
+            "buzz-backend-ssh.com",
+            "buzz-backend-ssh.cmd",
+            "buzz-backend-ssh.bat",
+        ] {
+            assert_eq!(
+                provider_id_from_file_name(name).as_deref(),
+                Some("ssh"),
+                "{name}"
+            );
+        }
+        // And every derived id survives the resolver's own validation, which is
+        // the check the `.exe` spelling used to fail.
+        for name in ["buzz-backend-ssh", "buzz-backend-ssh.exe"] {
+            let id = provider_id_from_file_name(name).unwrap();
+            let error = resolve_provider_binary(&id).unwrap_err();
+            assert!(!error.contains("invalid provider ID"), "{id}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_dot_that_is_not_an_executable_extension_stays_in_the_id() {
+        // Only the extensions that name the same program are dropped. A
+        // provider whose name genuinely contains a dot keeps it — and is then
+        // rejected by the resolver, exactly as it was before.
+        assert_eq!(
+            provider_id_from_file_name("buzz-backend-ssh.v2").as_deref(),
+            Some("ssh.v2")
+        );
+        // Nothing before the extension is not an id at all.
+        assert_eq!(provider_id_from_file_name("buzz-backend-.exe"), None);
+        assert_eq!(provider_id_from_file_name("buzz-backend-"), None);
+        assert_eq!(provider_id_from_file_name("buzz-frontend-ssh"), None);
     }
 
     #[test]
