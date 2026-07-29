@@ -8,4 +8,6 @@ services:
     image: valkey/valkey:8-alpine
     command: ["valkey-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?set REDIS_PASSWORD}"]
     healthcheck:
-      test: ["CMD-SHELL", "valkey-cli -a \"$${REDIS_PASSWORD}\" ping | grep -q PONG"]
+      # REDISCLI_AUTH, not -a: keeps the password out of the process table.
+      # Valkey kept the Redis-compatible variable name (VALKEYCLI_AUTH is unused).
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$${REDIS_PASSWORD}\" valkey-cli ping | grep -q PONG"]
