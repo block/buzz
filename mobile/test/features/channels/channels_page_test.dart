@@ -131,6 +131,15 @@ void main() {
     expect(find.text('DMs'), findsOneWidget);
     expect(find.text('Community'), findsOneWidget);
     expect(find.byTooltip('Create or start conversation'), findsOneWidget);
+
+    for (final label in ['general', 'Alice']) {
+      final text = tester.widget<Text>(find.text(label));
+      expect(text.style?.fontSize, contentListTitleTextStyle.fontSize);
+      expect(text.style?.height, contentListTitleTextStyle.height);
+    }
+    final sectionTitle = tester.widget<Text>(find.text('Channels'));
+    expect(sectionTitle.style?.fontSize, contentListTitleTextStyle.fontSize);
+    expect(sectionTitle.style?.fontWeight, FontWeight.w600);
   });
 
   testWidgets('aligns the top, section, row, and skeleton label columns', (

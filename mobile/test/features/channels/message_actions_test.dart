@@ -149,6 +149,37 @@ Future<void> _pumpSheet(
   await tester.pumpAndSettle();
 }
 
+Future<void> _pumpImageSheet(
+  WidgetTester tester, {
+  required TimelineMessage message,
+  bool canManageMessage = false,
+}) async {
+  await tester.pumpWidget(
+    ProviderScope(
+      child: MaterialApp(
+        theme: AppTheme.light(),
+        home: Scaffold(
+          body: Consumer(
+            builder: (context, ref, _) => TextButton(
+              onPressed: () => showImageActions(
+                context: context,
+                ref: ref,
+                message: message,
+                channelId: _channelId,
+                imageUrl: 'https://example.com/photo.png',
+                canManageMessage: canManageMessage,
+              ),
+              child: const Text('open image actions'),
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+  await tester.tap(find.text('open image actions'));
+  await tester.pumpAndSettle();
+}
+
 void main() {
   group('showMessageActions', () {
     testWidgets('shows parity actions for a regular message', (tester) async {
@@ -364,6 +395,40 @@ void main() {
       await tester.tap(find.text('Unfollow thread'));
       await tester.pumpAndSettle();
       expect(container.read(threadFollowsProvider).followedRootIds, isEmpty);
+    });
+  });
+
+  group('showImageActions', () {
+    testWidgets('labels the destructive action as deleting the message', (
+      tester,
+    ) async {
+      await _pumpImageSheet(
+        tester,
+        message: _message(),
+        canManageMessage: true,
+      );
+
+      expect(find.text('Delete message'), findsOneWidget);
+      expect(find.text('Delete upload'), findsNothing);
+    });
+  });
+
+  group('downloadedImageFilename', () {
+    test('preserves gif file extensions', () {
+      expect(
+        downloadedImageFilename('https://example.com/animation.gif', null),
+        'animation.gif',
+      );
+    });
+
+    test('uses gif extension for gif content types', () {
+      expect(
+        downloadedImageFilename(
+          'https://example.com/download',
+          'image/gif; charset=binary',
+        ),
+        matches(RegExp(r'^buzz-\d+\.gif$')),
+      );
     });
   });
 

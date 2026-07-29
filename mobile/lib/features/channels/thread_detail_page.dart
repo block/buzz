@@ -7,6 +7,7 @@ import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
+import '../../shared/widgets/message_author_meta.dart';
 import '../profile/user_cache_provider.dart';
 import '../profile/user_profile.dart';
 import 'channel_link_navigation.dart';
@@ -153,11 +154,15 @@ class ThreadDetailPage extends HookConsumerWidget {
     });
 
     return FrostedScaffold(
-      appBar: const FrostedAppBar(title: Text('Thread')),
+      appBar: const FrostedAppBar(
+        title: Text('Thread'),
+        titleStyle: channelTitleTextStyle,
+      ),
       body: Column(
         children: [
           Expanded(
             child: ScrollablePositionedList.builder(
+              key: const ValueKey('thread-message-list'),
               itemScrollController: itemScrollController,
               // Reversed so the list opens pinned to the newest reply,
               // matching the channel message list.
@@ -166,48 +171,54 @@ class ThreadDetailPage extends HookConsumerWidget {
                 left: Grid.gutter,
                 right: Grid.gutter,
                 top: frostedAppBarHeight(context),
-                bottom: Grid.xxs,
+                bottom: 0,
               ),
               itemCount: replies.length + 1, // +1 for thread head
               itemBuilder: (context, index) {
                 if (index == replies.length) {
                   // Thread head.
-                  return Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      DayDivider(label: formatDayHeading(liveHead.createdAt)),
-                      _ThreadMessage(
-                        message: liveHead,
-                        channelNames: channelNamesMap,
-                        channelId: channelId,
-                        currentPubkey: currentPubkey,
-                        showAuthor: true,
-                        isHighlighted: liveHead.id == initialMessageId,
-                        allMessages: allMsgs,
-                        isMember: isMember,
-                        isArchived: isArchived,
-                      ),
-                      Padding(
-                        padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
-                        child: Row(
-                          children: [
-                            Text(
-                              '${replies.length} ${replies.length == 1 ? 'reply' : 'replies'}',
-                              style: context.textTheme.labelMedium?.copyWith(
-                                color: context.colors.onSurfaceVariant,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                            const SizedBox(width: Grid.xxs),
-                            Expanded(
-                              child: Divider(
-                                color: context.colors.outlineVariant,
-                              ),
-                            ),
-                          ],
+                  return Padding(
+                    key: ValueKey('thread-message-group-${liveHead.id}'),
+                    padding: EdgeInsets.only(bottom: index == 0 ? Grid.xs : 0),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        DayDivider(label: formatDayHeading(liveHead.createdAt)),
+                        _ThreadMessage(
+                          message: liveHead,
+                          channelNames: channelNamesMap,
+                          channelId: channelId,
+                          currentPubkey: currentPubkey,
+                          showAuthor: true,
+                          isHighlighted: liveHead.id == initialMessageId,
+                          allMessages: allMsgs,
+                          isMember: isMember,
+                          isArchived: isArchived,
                         ),
-                      ),
-                    ],
+                        Padding(
+                          padding: const EdgeInsets.symmetric(
+                            vertical: Grid.xxs,
+                          ),
+                          child: Row(
+                            children: [
+                              Text(
+                                '${replies.length} ${replies.length == 1 ? 'reply' : 'replies'}',
+                                style: context.textTheme.labelMedium?.copyWith(
+                                  color: context.colors.onSurfaceVariant,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                              const SizedBox(width: Grid.xxs),
+                              Expanded(
+                                child: Divider(
+                                  color: context.colors.outlineVariant,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
                   );
                 }
 
@@ -234,33 +245,37 @@ class ThreadDetailPage extends HookConsumerWidget {
                     ? _buildNestedSummary(reply.id, nestedChildren)
                     : null;
 
-                return Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    if (showDayDivider)
-                      DayDivider(label: formatDayHeading(reply.createdAt)),
-                    _ThreadMessage(
-                      message: reply,
-                      channelNames: channelNamesMap,
-                      channelId: channelId,
-                      currentPubkey: currentPubkey,
-                      showAuthor: showAuthor,
-                      isHighlighted: reply.id == initialMessageId,
-                      allMessages: allMsgs,
-                      isMember: isMember,
-                      isArchived: isArchived,
-                    ),
-                    if (nestedSummary != null)
-                      _NestedThreadSummaryRow(
-                        summary: nestedSummary,
-                        replyMessage: reply,
-                        allMessages: allMsgs,
+                return Padding(
+                  key: ValueKey('thread-message-group-${reply.id}'),
+                  padding: EdgeInsets.only(bottom: index == 0 ? Grid.xs : 0),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      if (showDayDivider)
+                        DayDivider(label: formatDayHeading(reply.createdAt)),
+                      _ThreadMessage(
+                        message: reply,
+                        channelNames: channelNamesMap,
                         channelId: channelId,
                         currentPubkey: currentPubkey,
+                        showAuthor: showAuthor,
+                        isHighlighted: reply.id == initialMessageId,
+                        allMessages: allMsgs,
                         isMember: isMember,
                         isArchived: isArchived,
                       ),
-                  ],
+                      if (nestedSummary != null)
+                        _NestedThreadSummaryRow(
+                          summary: nestedSummary,
+                          replyMessage: reply,
+                          allMessages: allMsgs,
+                          channelId: channelId,
+                          currentPubkey: currentPubkey,
+                          isMember: isMember,
+                          isArchived: isArchived,
+                        ),
+                    ],
+                  ),
                 );
               },
             ),
@@ -357,10 +372,11 @@ class _NestedThreadSummaryRow extends ConsumerWidget {
         );
       },
       child: Padding(
+        key: ValueKey('nested-thread-summary-${replyMessage.id}'),
         padding: const EdgeInsets.only(
-          left: 36 + Grid.xxs,
+          left: messageAvatarSize + messageAvatarContentGap,
           top: Grid.half,
-          bottom: Grid.half,
+          bottom: Grid.xs,
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
@@ -386,36 +402,38 @@ class _NestedThreadSummaryRow extends ConsumerWidget {
               ),
             ),
             const SizedBox(width: Grid.xxs),
-            Text.rich(
-              TextSpan(
-                children: [
-                  TextSpan(
-                    text:
-                        '${summary.replyCount} ${summary.replyCount == 1 ? 'reply' : 'replies'}',
-                    style: context.textTheme.labelMedium?.copyWith(
-                      color: context.colors.primary,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                  if (summary.lastReplyAt case final lastReplyAt?) ...[
-                    TextSpan(
-                      text: ' · ',
-                      style: context.textTheme.labelMedium?.copyWith(
-                        color: context.colors.onSurfaceVariant.withValues(
-                          alpha: 0.5,
-                        ),
-                      ),
-                    ),
+            Flexible(
+              child: Text.rich(
+                TextSpan(
+                  children: [
                     TextSpan(
                       text:
-                          'last reply ${formatThreadSummaryLastReplyTime(lastReplyAt)}',
-                      style: context.textTheme.labelMedium?.copyWith(
-                        color: context.colors.onSurfaceVariant,
-                        fontWeight: FontWeight.w400,
+                          '${summary.replyCount} ${summary.replyCount == 1 ? 'reply' : 'replies'}',
+                      style: replyPreviewTextStyle.copyWith(
+                        color: context.colors.primary,
                       ),
                     ),
+                    if (summary.lastReplyAt case final lastReplyAt?) ...[
+                      TextSpan(
+                        text: ' · ',
+                        style: replyPreviewTextStyle.copyWith(
+                          color: context.colors.onSurfaceVariant.withValues(
+                            alpha: 0.5,
+                          ),
+                        ),
+                      ),
+                      TextSpan(
+                        text:
+                            'last reply ${formatThreadSummaryLastReplyTime(lastReplyAt)}',
+                        style: replyPreviewTextStyle.copyWith(
+                          color: context.colors.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
                   ],
-                ],
+                ),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
               ),
             ),
           ],
@@ -455,6 +473,10 @@ class _ThreadMessage extends ConsumerWidget {
         ref.watch(userCacheProvider.select((cache) => cache[pk])) ??
         ref.read(userCacheProvider.notifier).get(pk);
     final displayName = profile?.label ?? shortPubkey(message.pubkey);
+    final canManageMessage =
+        currentPubkey?.toLowerCase() == pk ||
+        (profile?.ownerPubkey != null &&
+            profile?.ownerPubkey == currentPubkey?.toLowerCase());
 
     final userCache = ref.watch(userCacheProvider);
     final knownAgentPubkeys = ref.watch(mentionAgentPubkeysProvider(channelId));
@@ -471,125 +493,166 @@ class _ThreadMessage extends ConsumerWidget {
       }
     }
 
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onLongPress: () => showMessageActions(
-        context: context,
-        ref: ref,
-        message: message,
-        channelId: channelId,
-        canManageMessage:
-            currentPubkey?.toLowerCase() == pk ||
-            (profile?.ownerPubkey != null &&
-                profile?.ownerPubkey == currentPubkey?.toLowerCase()),
-        allMessages: allMessages,
-        currentPubkey: currentPubkey,
-        isMember: isMember,
-        isArchived: isArchived,
+    return DecoratedBox(
+      key: ValueKey('thread-message-${message.id}'),
+      decoration: BoxDecoration(
+        color: isHighlighted
+            ? context.colors.primary.withValues(alpha: 0.12)
+            : Colors.transparent,
+        borderRadius: BorderRadius.circular(Radii.md),
       ),
-      child: DecoratedBox(
-        key: ValueKey('thread-message-${message.id}'),
-        decoration: BoxDecoration(
-          color: isHighlighted
-              ? context.colors.primary.withValues(alpha: 0.12)
-              : Colors.transparent,
-          borderRadius: BorderRadius.circular(Grid.half),
-        ),
-        child: Padding(
-          padding: EdgeInsets.only(top: showAuthor ? Grid.xs : Grid.quarter),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              if (showAuthor)
-                GestureDetector(
-                  onTap: () => showUserProfileSheet(context, message.pubkey),
-                  child: _Avatar(profile: profile, pubkey: message.pubkey),
-                )
-              else
-                const SizedBox(width: 36),
-              const SizedBox(width: Grid.xxs),
-              Expanded(
-                child: Transform.translate(
-                  offset: Offset(0, showAuthor ? -Grid.quarter : 0),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      if (showAuthor)
-                        Padding(
-                          padding: const EdgeInsets.only(bottom: Grid.quarter),
-                          child: Row(
-                            crossAxisAlignment: CrossAxisAlignment.center,
-                            children: [
-                              GestureDetector(
-                                onTap: () => showUserProfileSheet(
-                                  context,
-                                  message.pubkey,
-                                ),
-                                child: Text(
-                                  displayName,
-                                  style: context.textTheme.titleSmall?.copyWith(
-                                    fontWeight: FontWeight.w600,
-                                    color: context.colors.onSurface,
+      child: Material(
+        color: Colors.transparent,
+        borderRadius: BorderRadius.circular(Radii.md),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          key: ValueKey('thread-message-row-${message.id}'),
+          borderRadius: BorderRadius.circular(Radii.md),
+          highlightColor: context.colors.primary.withValues(alpha: 0.1),
+          onLongPress: () => showMessageActions(
+            context: context,
+            ref: ref,
+            message: message,
+            channelId: channelId,
+            canManageMessage: canManageMessage,
+            allMessages: allMessages,
+            currentPubkey: currentPubkey,
+            isMember: isMember,
+            isArchived: isArchived,
+          ),
+          child: Padding(
+            padding: EdgeInsets.only(
+              top: showAuthor ? Grid.xs : Grid.xxs,
+              bottom: showAuthor ? 0 : Grid.xxs,
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (showAuthor)
+                  GestureDetector(
+                    onTap: () => showUserProfileSheet(context, message.pubkey),
+                    child: _Avatar(profile: profile, pubkey: message.pubkey),
+                  )
+                else
+                  const SizedBox(width: messageAvatarSize),
+                const SizedBox(width: messageAvatarContentGap),
+                Expanded(
+                  child: Transform.translate(
+                    offset: Offset(0, showAuthor ? -Grid.quarter : 0),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        if (showAuthor)
+                          Padding(
+                            padding: const EdgeInsets.only(
+                              bottom: Grid.quarter,
+                            ),
+                            child: Row(
+                              children: [
+                                Expanded(
+                                  child: MessageAuthorMeta(
+                                    displayName: displayName,
+                                    username: messageUsernameLabel(profile),
+                                    timestamp: formatMessageTime(
+                                      message.createdAt,
+                                    ),
+                                    nameColor: context.colors.onSurface,
+                                    metadataColor:
+                                        context.colors.onSurfaceVariant,
+                                    onAuthorTap: () => showUserProfileSheet(
+                                      context,
+                                      message.pubkey,
+                                    ),
+                                    displayNameKey: ValueKey(
+                                      'thread-message-author-${message.id}',
+                                    ),
+                                    usernameKey: ValueKey(
+                                      'thread-message-username-${message.id}',
+                                    ),
+                                    timestampKey: ValueKey(
+                                      'thread-message-timestamp-${message.id}',
+                                    ),
                                   ),
                                 ),
-                              ),
-                              const SizedBox(width: Grid.xxs),
-                              Text(
-                                formatMessageTime(message.createdAt),
-                                style: context.textTheme.labelSmall?.copyWith(
-                                  fontSize: 14,
-                                  height: 22 / 14,
-                                  letterSpacing: context
-                                      .textTheme
-                                      .titleSmall
-                                      ?.letterSpacing,
-                                  color: context.colors.onSurfaceVariant,
-                                ),
-                              ),
-                              if (message.edited) ...[
-                                const SizedBox(width: Grid.half),
-                                Text(
-                                  '(edited)',
-                                  style: context.textTheme.labelSmall?.copyWith(
-                                    color: context.colors.onSurfaceVariant,
-                                    fontStyle: FontStyle.italic,
+                                if (message.edited) ...[
+                                  const SizedBox(width: Grid.half),
+                                  Text(
+                                    '(edited)',
+                                    style: context.textTheme.labelSmall
+                                        ?.copyWith(
+                                          color:
+                                              context.colors.onSurfaceVariant,
+                                          fontStyle: FontStyle.italic,
+                                        ),
                                   ),
-                                ),
+                                ],
                               ],
-                            ],
+                            ),
                           ),
+                        MessageContent(
+                          content: message.content,
+                          mentionNames: mentionNames,
+                          agentMentionPubkeys: agentMentionPubkeys,
+                          channelNames: channelNames,
+                          tags: message.tags,
+                          baseStyle: messageBodyTextStyle.copyWith(
+                            color: context.colors.onSurface,
+                          ),
+                          mediaCarouselTrailingOverflow: Grid.gutter,
+                          onMediaReply: allMessages == null
+                              ? null
+                              : () {
+                                  if (!context.mounted) return;
+                                  Navigator.of(context).push(
+                                    MaterialPageRoute<void>(
+                                      builder: (_) => ThreadDetailPage(
+                                        threadHead: message,
+                                        allMessages: allMessages!,
+                                        channelId: channelId,
+                                        currentPubkey: currentPubkey,
+                                        isMember: isMember,
+                                        isArchived: isArchived,
+                                      ),
+                                    ),
+                                  );
+                                },
+                          onMediaMore: (viewerContext, imageUrl) =>
+                              showImageActions(
+                                context: viewerContext,
+                                ref: ref,
+                                message: message,
+                                channelId: channelId,
+                                imageUrl: imageUrl,
+                                canManageMessage: canManageMessage,
+                                onDeleted: () {
+                                  if (viewerContext.mounted) {
+                                    Navigator.of(viewerContext).maybePop();
+                                  }
+                                },
+                              ),
+                          onChannelTap: (targetChannelId) {
+                            openChannelLink(
+                              context: context,
+                              ref: ref,
+                              channelId: targetChannelId,
+                              currentChannelId: channelId,
+                            );
+                          },
+                          onMentionTap: (pubkey) =>
+                              showUserProfileSheet(context, pubkey),
                         ),
-                      MessageContent(
-                        content: message.content,
-                        mentionNames: mentionNames,
-                        agentMentionPubkeys: agentMentionPubkeys,
-                        channelNames: channelNames,
-                        tags: message.tags,
-                        baseStyle: context.textTheme.bodyLarge?.copyWith(
-                          color: context.colors.onSurface,
-                        ),
-                        onChannelTap: (targetChannelId) {
-                          openChannelLink(
-                            context: context,
-                            ref: ref,
-                            channelId: targetChannelId,
-                            currentChannelId: channelId,
-                          );
-                        },
-                        onMentionTap: (pubkey) =>
-                            showUserProfileSheet(context, pubkey),
-                      ),
-                      if (message.reactions.isNotEmpty)
-                        ReactionRow(
-                          reactions: message.reactions,
-                          onToggle: (emoji) =>
-                              toggleReaction(ref, message, emoji),
-                        ),
-                    ],
+                        if (message.reactions.isNotEmpty)
+                          ReactionRow(
+                            reactions: message.reactions,
+                            onToggle: (emoji) =>
+                                toggleReaction(ref, message, emoji),
+                          ),
+                      ],
+                    ),
                   ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
@@ -675,7 +738,7 @@ class _Avatar extends StatelessWidget {
 
     return AvatarImage(
       imageUrl: avatarUrl,
-      radius: 18,
+      radius: messageAvatarSize / 2,
       backgroundColor: context.colors.primaryContainer,
       fallback: Text(
         initial,

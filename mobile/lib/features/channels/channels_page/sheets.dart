@@ -642,10 +642,11 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
                                               ),
                                               child: SizedBox.square(
                                                 dimension: 16,
-                                                child:
-                                                    CircularProgressIndicator(
-                                                      strokeWidth: 2,
-                                                    ),
+                                                child: BuzzLoadingIndicator(
+                                                  size: 16,
+                                                  semanticLabel:
+                                                      'Creating conversation',
+                                                ),
                                               ),
                                             )
                                           : null,
@@ -686,7 +687,12 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
                       isSearchTransitionPending) {
                     return const SizedBox(
                       height: 280,
-                      child: Center(child: CircularProgressIndicator()),
+                      child: Center(
+                        child: BuzzLoadingIndicator(
+                          size: 44,
+                          semanticLabel: 'Loading people',
+                        ),
+                      ),
                     );
                   }
                   if (directoryAsync.hasError) {

@@ -1,4 +1,4 @@
-import { Activity, Bell, Bot, FolderGit2, Zap } from "lucide-react";
+import { Activity, Bot, FolderGit2, Inbox, Zap } from "lucide-react";
 
 import { TopbarSearch } from "@/features/search/ui/TopbarSearch";
 import { FeatureGate } from "@/shared/features";
@@ -105,7 +105,7 @@ export function AppSidebarPrimaryMenu({
             tooltip={t("nav.inbox")}
             type="button"
           >
-            <Bell className="h-4 w-4" />
+            <Inbox className="h-4 w-4" />
             <SidebarMenuLabel>{t("nav.inbox")}</SidebarMenuLabel>
           </SidebarMenuButton>
           {homeBadgeCount > 0 ? (
