@@ -45,8 +45,8 @@ test("handoff drain routes accepted bytes through the existing preview flow", as
     ],
     ["navigate"],
   ]);
-  assert.equal(typeof routedPayload.onPreviewSettled, "function");
-  await routedPayload.onPreviewSettled();
+  assert.equal(typeof routedPayload.onPreviewAccepted, "function");
+  await routedPayload.onPreviewAccepted();
   assert.deepEqual(calls.at(-1), ["ack", pending.id]);
 });
 

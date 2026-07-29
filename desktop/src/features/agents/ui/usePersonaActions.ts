@@ -371,12 +371,14 @@ export function usePersonaActions() {
       setSnapshotImportState({ fileBytes, fileName, preview });
       setSnapshotImportResult(null);
       setSnapshotImportConfirmError(null);
+      return true;
     } catch (err) {
       setPersonaErrorMessage(
         err instanceof Error
           ? err.message
           : "Failed to read agent snapshot file.",
       );
+      return false;
     }
   }
 

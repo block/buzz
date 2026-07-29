@@ -85,20 +85,19 @@ export function AgentsView() {
   // biome-ignore lint/correctness/useExhaustiveDependencies: mount-only; personas.handleImportSnapshotFile and teamActions.handleImportTeamSnapshotFile are stable
   React.useEffect(() => {
     const openPendingSnapshot = async (pending: PendingSnapshotImport) => {
-      try {
-        if (pending.snapshotKind === "team") {
-          await teamActions.handleImportTeamSnapshotFile(
-            pending.fileBytes,
-            pending.fileName,
-          );
-        } else {
-          await personas.handleImportSnapshotFile(
-            pending.fileBytes,
-            pending.fileName,
-          );
-        }
-      } finally {
-        await pending.onPreviewSettled?.();
+      if (pending.snapshotKind === "team") {
+        await teamActions.handleImportTeamSnapshotFile(
+          pending.fileBytes,
+          pending.fileName,
+        );
+        await pending.onPreviewAccepted?.();
+      } else if (
+        await personas.handleImportSnapshotFile(
+          pending.fileBytes,
+          pending.fileName,
+        )
+      ) {
+        await pending.onPreviewAccepted?.();
       }
     };
     // Consume a snapshot import that was enqueued before navigation (e.g. from
