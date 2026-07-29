@@ -500,7 +500,7 @@ async fn cmd_create_sub_channel(
     let create_response = client.submit_event(client.sign_event(builder)?).await?;
     let task = description.unwrap_or(&final_name);
 
-    let announcement = format!("→ spawned #{final_name} — {task}");
+    let announcement = format!("→ spawned #{final_name}");
     let announcement_result: Result<String, CliError> = async {
         let builder = buzz_sdk::build_message(parent_uuid, &announcement, None, &[], false, &[])
             .map_err(|e| CliError::Other(format!("build_message failed: {e}")))?;

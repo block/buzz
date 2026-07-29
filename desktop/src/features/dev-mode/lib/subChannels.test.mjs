@@ -113,10 +113,7 @@ test("aggregateLastActivity_usesLatestSubTimestamp", () => {
 });
 
 test("subChannelAnnouncement_matchesCliFormat", () => {
-  assert.equal(
-    subChannelAnnouncement("work--api", "Build the API\nwith details"),
-    "→ spawned #work--api — Build the API",
-  );
+  assert.equal(subChannelAnnouncement("work--api"), "→ spawned #work--api");
 });
 
 test("subChannelCanvasDoc_recordsParentAndReportBackContract", () => {

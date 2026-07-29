@@ -237,7 +237,7 @@ export function useDevSessionActions(identity: Identity | undefined) {
         try {
           const announcement = await sendMessageMutation.mutateAsync({
             targetChannel: parent,
-            content: subChannelAnnouncement(finalName, prompt),
+            content: subChannelAnnouncement(finalName),
           });
           await setCanvas({
             channelId: channel.id,

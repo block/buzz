@@ -120,8 +120,8 @@ export function subChannelTaskLine(task: string): string {
   return firstLine.length > 140 ? `${firstLine.slice(0, 139)}…` : firstLine;
 }
 
-export function subChannelAnnouncement(subName: string, task: string): string {
-  return `→ spawned #${subName} — ${subChannelTaskLine(task)}`;
+export function subChannelAnnouncement(subName: string): string {
+  return `→ spawned #${subName}`;
 }
 
 /**
