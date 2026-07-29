@@ -946,6 +946,24 @@ pub enum FeedCmd {
         #[arg(long)]
         types: Option<String>,
     },
+    /// Stream activity feed entries as they arrive (NDJSON, one event per line)
+    #[command(
+        after_help = "Examples:\n  buzz feed watch\n  buzz feed watch --types mentions\n  buzz feed watch --since 1783497600 | jq -r '.content'"
+    )]
+    Watch {
+        /// Comma-separated feed types to include: mentions, needs_action, activity, agent_activity
+        #[arg(long)]
+        types: Option<String>,
+        /// Unix timestamp — replay entries after this time before going live
+        #[arg(long)]
+        since: Option<i64>,
+        /// Channel UUID — restrict the stream to one channel
+        #[arg(long)]
+        channel: Option<String>,
+        /// Exit if no event arrives for this many seconds (0 = never)
+        #[arg(long, default_value_t = 0)]
+        idle_timeout: u64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1973,7 +1991,7 @@ mod tests {
             names(&cmd, "workflows"),
             vec!["approve", "create", "delete", "get", "list", "runs", "trigger", "update"]
         );
-        assert_eq!(names(&cmd, "feed"), vec!["get"]);
+        assert_eq!(names(&cmd, "feed"), vec!["get", "watch"]);
         assert_eq!(
             names(&cmd, "social"),
             vec![
@@ -2043,7 +2061,7 @@ mod tests {
             ("channels", 16),
             ("dms", 4),
             ("emoji", 5),
-            ("feed", 1),
+            ("feed", 2),
             ("issues", 4),
             ("media", 1),
             ("messages", 8),

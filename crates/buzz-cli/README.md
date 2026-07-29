@@ -91,7 +91,18 @@ buzz repos protect remove --id my-repo --ref refs/heads/main
 
 # Pipe to jq
 buzz channels list | jq '.[].name'
+
+# Activity feed
+buzz feed get --limit 20
+buzz feed watch                                  # stream NDJSON until Ctrl-C
+buzz feed watch --types mentions | jq -r '.content'
+buzz feed watch --since 1783497600               # replay backfill, then stay live
 ```
+
+`feed watch` writes one JSON event per line and flushes immediately, so it
+composes with `jq --unbuffered` and other line-oriented consumers. Relay
+notices and subscription closures go to stderr, leaving stdout pure NDJSON.
+`feed get` keeps its JSON-array output unchanged.
 
 `protect set` replaces every existing rule for the exact ref pattern. Any
 constraint omitted from the command is removed. `protect list` reports malformed
@@ -145,6 +156,7 @@ stored rules in `validation_error` so an owner can remove and repair them.
 | | `runs` | Get workflow run history |
 | | `approve` | Approve/deny a workflow step |
 | `feed` | `get` | Get your activity feed |
+| | `watch` | Stream the activity feed as NDJSON until Ctrl-C |
 | `social` | `publish` | Publish a NIP-01 note |
 | | `set-contacts` | Set NIP-02 contact list |
 | | `event` | Get a Nostr event |
