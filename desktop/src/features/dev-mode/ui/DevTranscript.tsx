@@ -123,8 +123,10 @@ function PromptCard({
     <div
       ref={selected ? scrollSelectedIntoView : undefined}
       className={cn(
+        // The border is transparent until keyboard focus so nothing shifts
+        // when ↑/↓ start walking the prompts.
         "relative mb-2 rounded-none border px-3 py-2",
-        selected ? "border-primary/60 bg-primary/5" : "border-border/40",
+        selected ? "border-primary/60 bg-primary/5" : "border-transparent",
       )}
       data-testid="dev-mode-prompt-card"
     >
