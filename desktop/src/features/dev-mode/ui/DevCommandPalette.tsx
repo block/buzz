@@ -10,6 +10,7 @@ import {
   useAddChannelMembersMutation,
   useArchiveChannelMutation,
   useChannelMembersQuery,
+  useJoinChannelMutation,
   useLeaveChannelMutation,
   useUpdateChannelMutation,
 } from "@/features/channels/hooks";
@@ -38,7 +39,6 @@ import {
   useInfiniteUserSearchQuery,
 } from "@/features/profile/hooks";
 import type { SettingsSection } from "@/features/settings/ui/SettingsPanels";
-import { joinChannel } from "@/shared/api/tauriChannels";
 import type { Channel, UserSearchResult } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
@@ -134,6 +134,7 @@ export function DevCommandPalette({
   const pinnedIds = usePinnedChannels();
   const addMembersMutation = useAddChannelMembersMutation(activeChannelId);
   const leaveMutation = useLeaveChannelMutation(activeChannelId);
+  const joinMutation = useJoinChannelMutation(null);
   const archiveMutation = useArchiveChannelMutation(activeChannelId);
   const updateChannelMutation = useUpdateChannelMutation(activeChannelId);
   const membersQuery = useChannelMembersQuery(activeChannelId);
@@ -169,39 +170,46 @@ export function DevCommandPalette({
     [navigate, onClose],
   );
 
+  // Close immediately and let the mutations run in the background — the
+  // channel hooks apply optimistic cache updates and roll back on failure,
+  // so the palette never blocks on a relay round trip.
   const addUserToChannel = React.useCallback(
-    async (user: UserSearchResult) => {
+    (user: UserSearchResult) => {
       if (!activeChannelId) return;
       setActionError(null);
-      try {
-        // Local managed agents need a running harness pair, not just channel
-        // membership (see MembersSidebar) — route them through attach.
-        const managedAgent = (managedAgentsQuery.data ?? []).find(
-          (agent) =>
-            normalizePubkey(agent.pubkey) === normalizePubkey(user.pubkey),
-        );
-        if (managedAgent?.backend.type === "local") {
-          await attachManagedAgentToChannel(activeChannelId, {
-            agent: managedAgent,
-            ensureRunning: true,
+      // Local managed agents need a running harness pair, not just channel
+      // membership (see MembersSidebar) — route them through attach.
+      const managedAgent = (managedAgentsQuery.data ?? []).find(
+        (agent) =>
+          normalizePubkey(agent.pubkey) === normalizePubkey(user.pubkey),
+      );
+      if (managedAgent?.backend.type === "local") {
+        void attachManagedAgentToChannel(activeChannelId, {
+          agent: managedAgent,
+          ensureRunning: true,
+        })
+          .catch((error) => {
+            console.error("Failed to attach managed agent:", error);
+          })
+          .finally(() => {
+            void invalidateChannelState(queryClient, activeChannelId);
           });
-          await invalidateChannelState(queryClient, activeChannelId);
-        } else {
-          const result = await addMembersMutation.mutateAsync({
+      } else {
+        addMembersMutation.mutate(
+          {
             pubkeys: [user.pubkey],
             role: user.isAgent ? "bot" : "member",
-          });
-          if (result.errors.length > 0) {
-            setActionError(result.errors[0]?.error ?? "Failed to add member.");
-            return;
-          }
-        }
-        onClose();
-      } catch (error) {
-        setActionError(
-          error instanceof Error ? error.message : "Failed to add member.",
+          },
+          {
+            onSuccess: (result) => {
+              if (result.errors.length > 0) {
+                console.error("Failed to add member:", result.errors[0]?.error);
+              }
+            },
+          },
         );
       }
+      onClose();
     },
     [
       activeChannelId,
@@ -212,22 +220,16 @@ export function DevCommandPalette({
     ],
   );
 
-  const leaveChannel = React.useCallback(async () => {
+  const leaveChannel = React.useCallback(() => {
     if (!activeChannelId) return;
     setActionError(null);
-    try {
-      if (isLastHumanMember) {
-        await archiveMutation.mutateAsync();
-      } else {
-        await leaveMutation.mutateAsync();
-      }
-      onClose();
-      onChannelLeft(activeChannelId);
-    } catch (error) {
-      setActionError(
-        error instanceof Error ? error.message : "Failed to leave channel.",
-      );
+    if (isLastHumanMember) {
+      archiveMutation.mutate();
+    } else {
+      leaveMutation.mutate();
     }
+    onClose();
+    onChannelLeft(activeChannelId);
   }, [
     activeChannelId,
     archiveMutation,
@@ -283,34 +285,21 @@ export function DevCommandPalette({
   );
 
   const joinAndOpenChannel = React.useCallback(
-    async (channelId: string) => {
+    (channelId: string) => {
       setActionError(null);
-      try {
-        await joinChannel(channelId);
-        await invalidateChannelState(queryClient, channelId);
-        onOpenChannel(channelId);
-        onClose();
-      } catch (error) {
-        setActionError(
-          error instanceof Error ? error.message : "Failed to join channel.",
-        );
-      }
+      joinMutation.mutate({ channelId });
+      onOpenChannel(channelId);
+      onClose();
     },
-    [onClose, onOpenChannel, queryClient],
+    [joinMutation, onClose, onOpenChannel],
   );
 
-  const archiveChannel = React.useCallback(async () => {
+  const archiveChannel = React.useCallback(() => {
     if (!activeChannelId) return;
     setActionError(null);
-    try {
-      await archiveMutation.mutateAsync();
-      onClose();
-      onChannelLeft(activeChannelId);
-    } catch (error) {
-      setActionError(
-        error instanceof Error ? error.message : "Failed to archive channel.",
-      );
-    }
+    archiveMutation.mutate();
+    onClose();
+    onChannelLeft(activeChannelId);
   }, [activeChannelId, archiveMutation, onChannelLeft, onClose]);
 
   const entries = React.useMemo<PaletteEntry[]>(() => {
@@ -442,7 +431,7 @@ export function DevCommandPalette({
           detail: user.isAgent
             ? "agent"
             : (user.nip05Handle ?? truncatePubkey(user.pubkey)),
-          run: () => void addUserToChannel(user),
+          run: () => addUserToChannel(user),
         }));
     }
 
@@ -521,13 +510,13 @@ export function DevCommandPalette({
             detail: isLastHumanMember
               ? "archives — you're the last member"
               : "remove yourself",
-            run: () => void leaveChannel(),
+            run: () => leaveChannel(),
           },
           {
             id: "archive-channel",
             label: `archive # ${activeChannel.name}`,
             detail: "hide from the channel list",
-            run: () => void archiveChannel(),
+            run: () => archiveChannel(),
           },
         ]
       : [];
@@ -605,7 +594,7 @@ export function DevCommandPalette({
         id: `join-${channel.id}`,
         label: `# ${channel.name}`,
         detail: "not joined · enter to join",
-        run: () => void joinAndOpenChannel(channel.id),
+        run: () => joinAndOpenChannel(channel.id),
       }));
 
     const matches = (entry: PaletteEntry) =>

@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { installMockBridge } from "../helpers/bridge";
+import { installMockBridge, type MockBridgeOptions } from "../helpers/bridge";
 
 // Command-palette ranking and post-archive navigation: typing an action
 // verb like "archive" ranks that action above channels whose names merely
@@ -10,8 +10,9 @@ import { installMockBridge } from "../helpers/bridge";
 async function openDevModeChannel(
   page: import("@playwright/test").Page,
   channelName: string,
+  mock?: MockBridgeOptions,
 ) {
-  await installMockBridge(page);
+  await installMockBridge(page, mock);
   await page.addInitScript(() => {
     localStorage.setItem("buzz.displayStyle", "developer");
   });
@@ -127,4 +128,26 @@ test("archiving a chat lands on the most recent non-pinned chat", async ({
   const topBar = page.getByTestId("dev-mode-topbar-channel");
   await expect(topBar).not.toContainText("general");
   await expect(topBar).toContainText("#");
+});
+
+test("archive updates the UI optimistically, before the relay resolves", async ({
+  page,
+}) => {
+  // The mock relay sleeps 5s before acknowledging the archive; the palette
+  // must close and navigation must land elsewhere well before that.
+  await openDevModeChannel(page, "general", { archiveChannelDelayMs: 5_000 });
+
+  await page.keyboard.press("Meta+k");
+  await page.getByTestId("dev-mode-palette-input").pressSequentially("archive");
+  const entries = page.getByTestId("dev-mode-palette-entry");
+  await expect(entries.first()).toContainText("archive # general");
+
+  const start = Date.now();
+  await page.keyboard.press("Enter");
+
+  await expect(page.getByTestId("dev-mode-palette")).not.toBeVisible();
+  const topBar = page.getByTestId("dev-mode-topbar-channel");
+  await expect(topBar).not.toContainText("general");
+  await expect(topBar).toContainText("#");
+  expect(Date.now() - start).toBeLessThan(4_000);
 });
