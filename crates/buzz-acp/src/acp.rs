@@ -498,12 +498,22 @@ impl AcpClient {
         // entry falls through to the standard operator-wins treatment below.
         let codex_merge_active = codex_config_value.is_some();
 
+        // Per-runtime environment defaults (e.g. Hermes MCP-startup isolation).
+        // Applied first so both persona `extra_env` (below, via `Command::env`
+        // key replacement) and inherited parent env (via the parent-presence
+        // check) override them.
+        for &(key, value) in crate::config::default_agent_env(command) {
+            if std::env::var_os(key).is_none() {
+                cmd.env(key, value);
+            }
+        }
+
         for (key, value) in extra_env {
             if key == "CODEX_CONFIG" && codex_merge_active {
                 // Handled by build_codex_config_env; skip here to avoid double-setting.
                 continue;
             }
-            if std::env::var(key).is_err() {
+            if std::env::var_os(key).is_none() {
                 cmd.env(key, value);
             }
         }
@@ -2909,6 +2919,78 @@ mod tests {
             observed,
             vec!["true"],
             "{GOOSE_SCHEDULER_DISABLED_ENV} must be injected into every spawn"
+        );
+    }
+
+    /// Spawn a probe script whose file name carries a runtime identity (e.g.
+    /// `hermes-acp`) and return the value of `var` as the child observed it.
+    /// `<unset>` means the child did not receive the var.
+    #[cfg(unix)]
+    async fn spawn_named_and_read_child_env(
+        file_name: &str,
+        var: &str,
+        extra_env: &[(String, String)],
+    ) -> String {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("buzz-acp-env-probe-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create env probe dir");
+        let path = dir.join(file_name);
+        std::fs::write(
+            &path,
+            format!("#!/bin/sh\nprintf '%s\\n' \"${{{var}:-<unset>}}\"\n"),
+        )
+        .expect("write env probe script");
+        let mut permissions = std::fs::metadata(&path).expect("stat probe").permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&path, permissions).expect("chmod probe");
+
+        let mut client = AcpClient::spawn(
+            path.to_str().expect("probe path is UTF-8"),
+            &[],
+            extra_env,
+            false,
+        )
+        .await
+        .expect("spawn env probe script");
+        let observed = client
+            .reader
+            .next()
+            .await
+            .unwrap_or_else(|| panic!("child produced no output for {var}"))
+            .expect("child stdout was not readable");
+        client.shutdown().await;
+        std::fs::remove_dir_all(&dir).expect("remove env probe dir");
+        observed
+    }
+
+    /// Buzz-owned Hermes processes get the configured-MCP isolation default,
+    /// and an explicit persona entry still overrides it (defaults are applied
+    /// before `extra_env`, so the later `Command::env` write wins).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_applies_runtime_env_defaults_with_extra_env_precedence() {
+        const VAR: &str = "HERMES_ACP_SKIP_CONFIGURED_MCP";
+        if std::env::var_os(VAR).is_some() {
+            // Inherited parent values win over both layers; the default and
+            // override behavior below is unobservable in such an environment.
+            return;
+        }
+
+        assert_eq!(
+            spawn_named_and_read_child_env("hermes-acp", VAR, &[]).await,
+            "1",
+            "Hermes spawns must default {VAR}=1"
+        );
+        assert_eq!(
+            spawn_named_and_read_child_env("hermes-acp", VAR, &[(VAR.into(), "0".into())]).await,
+            "0",
+            "an explicit extra_env entry must override the runtime default"
+        );
+        assert_eq!(
+            spawn_named_and_read_child_env("other-agent", VAR, &[]).await,
+            "<unset>",
+            "non-Hermes spawns must not receive Hermes defaults"
         );
     }
 
