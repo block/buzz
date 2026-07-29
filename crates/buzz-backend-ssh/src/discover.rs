@@ -117,19 +117,28 @@ const CANDIDATES: &[Candidate] = &[
     },
 ];
 
-/// Preamble shared by every remote script.
+/// The first two lines of both scripts this module generates: `set -u`, then
+/// the `~/.local/bin` prepend every op needs before it resolves anything by
+/// name ([`crate::install::PATH_PREAMBLE`]).
+fn script_preamble() -> String {
+    format!("set -u\n{}", crate::install::PATH_PREAMBLE)
+}
+
+/// The `probe` helper, shared by every candidate in the discover script.
 ///
-/// `probe` writes one tab-separated record per resolved command, rather than
-/// JSON assembled in `sh`: quoting arbitrary `--version` output into valid JSON
-/// from a POSIX shell is a bug farm, and the parsing belongs on the Rust side
-/// where it is testable.
+/// It writes one tab-separated record per resolved command, rather than JSON
+/// assembled in `sh`: quoting arbitrary `--version` output into valid JSON from
+/// a POSIX shell is a bug farm, and the parsing belongs on the Rust side where
+/// it is testable.
 ///
 /// Two details are load-bearing. `</dev/null` on every probed child, because
 /// the script itself arrives on the remote shell's stdin and a child that reads
 /// stdin would swallow the rest of it. And `timeout` where the host has it, so
 /// a harness whose `--version` opens a REPL cannot hold the budget.
-const PROBE_PREAMBLE: &str = r#"set -u
-if command -v timeout >/dev/null 2>&1; then _t="timeout 5"; else _t=""; fi
+///
+/// `set -u` and [`crate::install::PATH_PREAMBLE`] precede this rather than living in
+/// it, because [`models_script`] needs those two lines and not this function.
+const PROBE_PREAMBLE: &str = r#"if command -v timeout >/dev/null 2>&1; then _t="timeout 5"; else _t=""; fi
 probe() {
   _p=$(command -v "$2" 2>/dev/null) || return 0
   [ -n "$_p" ] || return 0
@@ -227,7 +236,8 @@ fi
 /// The one probe script: `buzz-acp`, every harness candidate, and — only where
 /// `hermes` resolves — that host's Hermes profiles.
 fn discover_script(config: &SshConfig) -> String {
-    let mut script = String::from(PROBE_PREAMBLE);
+    let mut script = script_preamble();
+    script.push_str(PROBE_PREAMBLE);
     let acp = config.buzz_acp_path.as_deref().unwrap_or("buzz-acp");
     script.push_str(&format!("probe 'buzz-acp' {}\n", quote(acp)));
     for candidate in CANDIDATES {
@@ -538,7 +548,10 @@ fn models_script(request: &serde_json::Value, config: &SshConfig) -> Result<Stri
         .and_then(|agent| agent.get("env_vars"))
         .or_else(|| request.get("model_env"));
 
-    let mut script = String::from("set -u\n");
+    // The same preamble the discover script carries: this one `exec`s
+    // `buzz-acp`, which spawns the pinned harness by name, so both lookups need
+    // the install destination on `PATH`.
+    let mut script = script_preamble();
     // Model-probe env carries provider API keys, set inside the
     // stdin-delivered script so they never appear in the remote argv.
     //
@@ -603,6 +616,38 @@ mod tests {
         }
         // Children must not read the script off the shell's own stdin.
         assert!(script.contains("</dev/null"));
+    }
+
+    /// A host's harness catalog is mostly installed to `~/.local/bin`, and a
+    /// non-interactive `ssh host sh -s` reads no profile — on stock Debian the
+    /// whole `PATH` is `/usr/local/bin:/usr/bin:/bin:/usr/games`. Without the
+    /// prepend, every candidate on such a host answered `available: false` and
+    /// the deploy that followed refused the pin with "harness not found",
+    /// against a host where all twelve were present.
+    ///
+    /// Both scripts, and in each one before the lookup it exists to affect: a
+    /// prepend that trails what it is supposed to decide decides nothing.
+    /// `models_script` needs it too — it `exec`s `buzz-acp` by name, which then
+    /// spawns the pinned harness by name.
+    #[test]
+    fn both_scripts_resolve_names_from_local_bin() {
+        let models_request =
+            serde_json::json!({ "harness": { "command": "goose", "args": ["acp"] } });
+        for (script, lookup) in [
+            (discover_script(&config()), "command -v"),
+            (
+                models_script(&models_request, &config()).unwrap(),
+                "exec 'buzz-acp'",
+            ),
+        ] {
+            let prepend = script
+                .find(crate::install::PATH_PREAMBLE.trim_end())
+                .unwrap_or_else(|| panic!("no ~/.local/bin prepend in:\n{script}"));
+            let first_lookup = script
+                .find(lookup)
+                .unwrap_or_else(|| panic!("no {lookup} in:\n{script}"));
+            assert!(prepend < first_lookup, "{script}");
+        }
     }
 
     #[test]
@@ -961,6 +1006,48 @@ mod tests {
         assert!(script.contains(r#"printf 'hermes-profile\t%s\n' "$_hn""#));
         // The shell-side cap tracks the Rust constant.
         assert!(script.contains(&format!(r#"[ "$_hc" -lt {MAX_HERMES_PROFILES} ] || break"#)));
+    }
+
+    /// The reported bug, end to end: an adapter installed to `~/.local/bin` on
+    /// a host whose `PATH` is the stock non-interactive Debian one.
+    ///
+    /// Substring assertions cannot see this. The prepend has to run, resolve
+    /// `$HOME` on the *host*, and take effect before `probe` — and the payoff
+    /// is the resolved absolute path in the record, which is what the desktop
+    /// shows and what `deploy` later pins.
+    #[cfg(unix)]
+    #[test]
+    fn an_adapter_installed_to_local_bin_is_discovered() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!("buzz-local-bin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let local_bin = root.join(".local/bin");
+        std::fs::create_dir_all(&local_bin).unwrap();
+        let adapter = local_bin.join("codex-acp");
+        std::fs::write(&adapter, "#!/bin/sh\necho 'codex-acp 0.4.2'\n").unwrap();
+        std::fs::set_permissions(&adapter, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // Stock Debian's non-interactive PATH, verbatim. `/bin` is on it, so
+        // the script's own `sh` builtins and `head`/`tr` still resolve.
+        let output = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(discover_script(&config()))
+            .env_clear()
+            .env("HOME", &root)
+            .env("PATH", "/usr/local/bin:/usr/bin:/bin:/usr/games")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+
+        let probe = parse_probes(&stdout)
+            .into_iter()
+            .find(|probe| probe.key == "codex")
+            .unwrap_or_else(|| panic!("codex-acp went undiscovered:\n{stdout}"));
+        assert_eq!(probe.path, adapter.to_str().unwrap());
+        assert_eq!(probe.version, "codex-acp 0.4.2");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Run the real generated script through `/bin/sh` against a fake host

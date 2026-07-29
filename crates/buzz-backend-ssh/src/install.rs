@@ -17,7 +17,7 @@
 //! filesystem for a command that is not there. [`CLI`] closes that gap: same
 //! probe, same base64 transport, same sha256-before-`mv` rule, installed to
 //! `~/.local/bin/buzz`, resolvable at runtime because the unit's env file pins
-//! `PATH="$HOME/.local/bin:$PATH"` (`deploy::deploy_script`).
+//! a `PATH` that leads with `~/.local/bin` (`deploy::deploy_script`).
 //!
 //! **The two tools differ on exactly one axis: what "the host has none, and the
 //! desktop pushed none" means.** `buzz-acp` *is* the agent — no binary, no
@@ -46,12 +46,14 @@
 //!
 //! **Resolution is `PATH` *or* `~/.local/bin/<tool>`,** never `PATH` alone.
 //! A non-interactive SSH command reads no profile, so the install destination
-//! is not on the ambient `PATH` — which is precisely why the unit's env file
-//! pins `PATH="$HOME/.local/bin:$PATH"` itself. A `command -v`-only rule would
-//! therefore never find the copy a previous deploy installed, and because
-//! deploy is the start path, every start would re-stream the binary and swap it
-//! underneath a running fleet. [`resolve`] is that rule, and the probe asks the
-//! same question so the two can never disagree.
+//! is not on the ambient `PATH` — which is why every generated script prepends
+//! it ([`PATH_PREAMBLE`]) and why the unit's env file pins a `PATH` that leads
+//! with it. A `command -v`-only rule would therefore never find the copy a
+//! previous deploy installed, and because deploy is the start path, every start
+//! would re-stream the binary and swap it underneath a running fleet.
+//! [`resolve`] is that rule, and the probe asks the same question so the two
+//! can never disagree. The explicit `-x` test is what makes [`probe_script`]
+//! correct on its own: it is a separate round trip that carries no preamble.
 //!
 //! **Staleness rule: push-when-missing only.** A host that already resolves a
 //! tool keeps the copy it has, whatever its version. Deploy is also the start
@@ -80,6 +82,29 @@ const LINE_WIDTH: usize = 76;
 /// script and expanded by the *host's* shell, whose `$HOME` is the only one
 /// that matters.
 const INSTALL_DIR: &str = "$HOME/.local/bin";
+
+/// The first statement of every generated script, so a bare `command -v` on the
+/// host searches the install destination too.
+///
+/// A non-interactive `ssh host sh -s` reads no profile: on stock Debian the
+/// whole `PATH` is `/usr/local/bin:/usr/bin:/bin:/usr/games`, and `~/.local/bin`
+/// — where every Buzz tool installs, where `pipx` and `npm --prefix=~/.local`
+/// put harness adapters, and what the unit's own env file already pins — is not
+/// on it. Without this line, `discover` reports a host's whole harness catalog
+/// as absent and `deploy` then refuses the pin the operator picked, on a host
+/// where every one of those binaries is present and runnable.
+///
+/// [`resolve`] does not depend on it: that rule tests `-x ~/.local/bin/<tool>`
+/// explicitly, because it also has to answer for an absolute configured path.
+/// This covers everything resolved by *name* — the harness adapters, the vendor
+/// CLIs, `git-credential-nostr` — which is most of what a script looks up.
+///
+/// Written to survive `set -u` and a hostile environment, because it is the
+/// first line of the script and everything after it depends on the shell
+/// getting past it. `${HOME:-}` for a host with no `HOME`, `${PATH:+:$PATH}` so
+/// an unset `PATH` yields no empty element — an empty element means the current
+/// directory, which is the one `PATH` value worth refusing to write.
+pub const PATH_PREAMBLE: &str = "export PATH=\"${HOME:-}/.local/bin${PATH:+:$PATH}\"\n";
 
 /// The marker every non-fatal host-side complaint carries, so `deploy` can
 /// forward exactly those lines and nothing else from a successful run's stderr
@@ -166,11 +191,13 @@ pub const CLI: Tool = Tool {
 /// Where an install of `tool` lands, and the second half of the resolution rule
 /// — `~/.local/bin` is the documented convention and the destination below, but
 /// it is **not** on a non-interactive SSH `PATH`: the remote shell reads no
-/// profile, which is exactly why the unit's env file has to pin
-/// `PATH="$HOME/.local/bin:$PATH"` itself. Resolving by `PATH` alone would
-/// therefore never see the copy the previous deploy installed, and since deploy
-/// is the start path, every agent start would re-stream tens of megabytes and
-/// swap the binary underneath a running fleet.
+/// profile, which is exactly why every generated script prepends it
+/// ([`PATH_PREAMBLE`]) and why the unit's env file pins a `PATH` that leads with
+/// it. Testing this path explicitly is what keeps [`probe_script`] — a separate
+/// round trip, with no preamble of its own — from missing the copy the previous
+/// deploy installed; and since deploy is the start path, missing it would make
+/// every agent start re-stream tens of megabytes and swap the binary underneath
+/// a running fleet.
 fn install_path(tool: Tool) -> String {
     format!("{INSTALL_DIR}/{}", tool.name)
 }
