@@ -65,7 +65,7 @@ platform/bin/create-public-agent \
   --channel <channel-uuid> \
   [--channel <channel-uuid>] \
   [--model <model>] \
-  [--workdir <absolute-or-poc-relative-path>] \
+  [--workdir <poc-relative-path>] \
   [--system-prompt-file <path>]
 ```
 
@@ -240,6 +240,7 @@ platform/bin/resume-public-agent --id research
 - identity 文件必须为 `0600`；包含身份目录的父目录不得对其他用户开放写权限。
 - CLI 输出只显示 Agent ID、名称、公钥、Channel、状态和非敏感路径。
 - 工作目录默认位于专用 Runner 根目录；自定义路径必须通过拒绝列表和规范化路径校验。
+- 自定义工作目录必须位于 PoC 根目录内且不得位于 `platform/` 下；system prompt 文件不得逃逸 PoC 根目录，也不得读取 `platform/env/`。
 - Runner 不获得 Docker Socket、生产凭据、敏感用户目录或主干合并/发布权限。
 - Channel 授权以 Relay 实际结果为准，本地注册表不能提升 Relay 权限。
 - Desktop Tauri 命令只读取固定应用数据文件，不接受路径参数。

@@ -424,11 +424,12 @@ Use a temporary PoC root and executable fake `buzz`, `buzz-local`, and `start-ag
 
 1. no `--channel` exits `2` and creates nothing;
 2. invalid Channel fails before identity generation;
-3. successful create writes a `0600` identity, non-secret Agent config, workdir, `provisioning -> active` registry transition, member-role calls, Desktop projection, and start call;
-4. only repeated `--channel` values are joined;
-5. second Channel failure removes the first Channel and cleans local artifacts;
-6. Runner failure retains identity/membership and writes `state: "failed"`;
-7. identical rerun and `resume-public-agent --id` do not rotate identity.
+3. protected or out-of-root workdirs and system prompt files fail before identity generation;
+4. successful create writes a `0600` identity, non-secret Agent config, workdir, `provisioning -> active` registry transition, member-role calls, Desktop projection, and start call;
+5. only repeated `--channel` values are joined;
+6. second Channel failure removes the first Channel and cleans local artifacts;
+7. Runner failure retains identity/membership and writes `state: "failed"`;
+8. identical rerun and `resume-public-agent --id` do not rotate identity.
 
 - [ ] **Step 2: Run provisioner tests and verify RED**
 
@@ -453,7 +454,7 @@ Accept:
 --system-prompt-file <path>  # optional
 ```
 
-Validate every Channel with owner credentials using `buzz channels get --channel <uuid>` before `buzz-admin generate-key`. Normalize paths and reject the home directory, `/`, the PoC root, identity/config roots, and paths outside the PoC unless the explicit override is an already existing non-sensitive directory.
+Validate every Channel with owner credentials using `buzz channels get --channel <uuid>` before `buzz-admin generate-key`. Normalize paths and reject the home directory, `/`, the PoC root, all paths under `platform/`, and every workdir outside the PoC. System prompt files must also remain inside the PoC and outside `platform/env/`.
 
 - [ ] **Step 4: Implement provisioning and rollback**
 
