@@ -9,8 +9,7 @@ use url::Url;
 
 use super::{
     consume_agent_snapshot_handoff_from_dir, parse_agent_snapshot_handoff_id,
-    read_agent_snapshot_handoff_from_dir, PendingAgentSnapshotImport,
-    PendingAgentSnapshotImports,
+    read_agent_snapshot_handoff_from_dir, PendingAgentSnapshotImport, PendingAgentSnapshotImports,
 };
 #[cfg(target_os = "macos")]
 use super::{
@@ -121,11 +120,7 @@ fn secure_handoff_read_rejects_symlinked_staging_directory() {
 #[test]
 fn secure_handoff_read_rejects_hard_linked_payload() {
     let dir = tempfile::tempdir().unwrap();
-    let path = stage_handoff(
-        dir.path(),
-        &config_only_snapshot_bytes("hermes"),
-        0o600,
-    );
+    let path = stage_handoff(dir.path(), &config_only_snapshot_bytes("hermes"), 0o600);
     let second_link = dir.path().join("second-link.agent.json");
     std::fs::hard_link(&path, &second_link).unwrap();
 
@@ -200,11 +195,7 @@ fn secure_handoff_read_rejects_fields_outside_the_coagent_contract() {
 #[test]
 fn secure_handoff_read_requires_the_hermes_runtime() {
     let dir = tempfile::tempdir().unwrap();
-    let path = stage_handoff(
-        dir.path(),
-        &config_only_snapshot_bytes("buzz-agent"),
-        0o600,
-    );
+    let path = stage_handoff(dir.path(), &config_only_snapshot_bytes("buzz-agent"), 0o600);
     assert!(read_agent_snapshot_handoff_from_dir(dir.path(), HANDOFF_ID).is_err());
     assert!(
         path.exists(),

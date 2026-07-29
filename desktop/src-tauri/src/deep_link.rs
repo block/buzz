@@ -1,7 +1,4 @@
-use std::{
-    collections::VecDeque,
-    sync::Mutex,
-};
+use std::{collections::VecDeque, sync::Mutex};
 
 use serde::Serialize;
 use tauri::{Emitter, Manager, State};
@@ -17,8 +14,8 @@ use agent_snapshot_handoff_security::{
 };
 #[cfg(test)]
 use agent_snapshot_handoff_security::{
-    validate_agent_snapshot_handoff_directory_metadata,
-    validate_agent_snapshot_handoff_metadata, AGENT_SNAPSHOT_HANDOFF_MAX_AGE,
+    validate_agent_snapshot_handoff_directory_metadata, validate_agent_snapshot_handoff_metadata,
+    AGENT_SNAPSHOT_HANDOFF_MAX_AGE,
 };
 
 const AGENT_SNAPSHOT_HANDOFF_EVENT: &str = "agent-snapshot-import-available";

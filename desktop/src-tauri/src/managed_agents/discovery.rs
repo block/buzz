@@ -405,7 +405,6 @@ pub(crate) fn dangling_harness_display(id: &str) -> String {
     format!("harness (deleted): {id}")
 }
 
-
 /// Spawn-time variant of `record_agent_command` that returns a typed error when
 /// a record's `runtime` id or its persona's `runtime` id is set but cannot be
 /// resolved (i.e. the definition was deleted after the agent was created).
@@ -462,7 +461,6 @@ pub fn try_record_agent_command(
     // No runtime id set — legacy agent; use the safe default.
     Ok(default_agent_command())
 }
-
 
 pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<String> {
     let normalized = agent_args
