@@ -36,6 +36,10 @@ import {
   readChannelSnapshot,
   writeChannelSnapshot,
 } from "@/features/channels/channelSnapshot";
+import {
+  applySubChannelRenames,
+  planSubChannelRenames,
+} from "@/features/dev-mode/lib/subChannels";
 
 export const channelsQueryKey = ["channels"] as const;
 const channelDetailQueryKey = (channelId: string) =>
@@ -341,12 +345,41 @@ export function useUpdateChannelMutation(channelId: string | null) {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: (input: Omit<UpdateChannelInput, "channelId">) => {
+    mutationFn: async (input: Omit<UpdateChannelInput, "channelId">) => {
       if (!channelId) {
         throw new Error("No channel selected.");
       }
 
-      return updateChannel({ ...input, channelId });
+      const previousName = queryClient
+        .getQueryData<Channel[]>(channelsQueryKey)
+        ?.find((channel) => channel.id === channelId)?.name;
+      const updated = await updateChannel({ ...input, channelId });
+
+      // A `parent--sub` channel is linked to its parent purely by name, so
+      // renaming a parent must rename every sub or the family falls apart.
+      // Best-effort, bounded concurrency — a parent can have hundreds.
+      if (previousName && previousName !== updated.name) {
+        const plan = planSubChannelRenames(
+          queryClient.getQueryData<Channel[]>(channelsQueryKey) ?? [],
+          previousName,
+          updated.name,
+        );
+        if (plan.length > 0) {
+          const { failed } = await applySubChannelRenames(
+            plan,
+            async (subChannelId, newName) => {
+              await updateChannel({ channelId: subChannelId, name: newName });
+            },
+          );
+          if (failed.length > 0) {
+            console.warn(
+              `channel rename: ${failed.length} of ${plan.length} sub-channel(s) failed to follow "${previousName}" → "${updated.name}"`,
+            );
+          }
+        }
+      }
+
+      return updated;
     },
     onMutate: () => ({ channelId }),
     onSuccess: (updatedChannel) => {

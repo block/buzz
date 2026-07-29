@@ -29,6 +29,12 @@ test("sanitizeChannelName_truncatesSingleOversizedWord", () => {
   assert.equal(sanitizeChannelName("a".repeat(100)), "a".repeat(40));
 });
 
+test("sanitizeChannelName_neverEmitsDoubleHyphen", () => {
+  assert.equal(sanitizeChannelName("foo--bar"), "foo-bar");
+  assert.equal(sanitizeChannelName("foo - bar"), "foo-bar");
+  assert.equal(sanitizeChannelName("a -- b -- c"), "a-b-c");
+});
+
 test("sanitizeChannelName_emptyForSymbolOnlyInput", () => {
   assert.equal(sanitizeChannelName(""), "");
   assert.equal(sanitizeChannelName("!!! ???"), "");

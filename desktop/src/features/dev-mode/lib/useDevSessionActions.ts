@@ -8,13 +8,20 @@ import {
   useCreateChannelMutation,
 } from "@/features/channels/hooks";
 import { useSendMessageMutation } from "@/features/messages/hooks";
-import { addChannelMembers } from "@/shared/api/tauri";
+import { addChannelMembers, getCanvas, setCanvas } from "@/shared/api/tauri";
 import { updateChannel } from "@/shared/api/tauriChannels";
 import type { Channel, Identity } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { generateChannelTitle } from "@/features/dev-mode/lib/channelNaming";
 import type { MentionRecord } from "@/features/dev-mode/lib/mentionRecords";
 import { uniqueChannelName } from "@/features/dev-mode/lib/sessionNaming";
+import {
+  appendSubChannelToParentCanvas,
+  parseSubChannelName,
+  subChannelAnnouncement,
+  subChannelCanvasDoc,
+  subChannelName,
+} from "@/features/dev-mode/lib/subChannels";
 import type {
   DevAgentTarget,
   DevComposerMode,
@@ -143,6 +150,126 @@ export function useDevSessionActions(identity: Identity | undefined) {
     [createChannelMutation, namingAgentPubkey, queryClient],
   );
 
+  const cachedChannels = React.useCallback(
+    () => queryClient.getQueryData<Channel[]>(channelsQueryKey) ?? [],
+    [queryClient],
+  );
+
+  /** The parent channel when `channel` is a `parent--sub`, else null. */
+  const findParentChannel = React.useCallback(
+    (channel: Channel): Channel | null => {
+      const parsed = parseSubChannelName(channel.name);
+      if (!parsed) return null;
+      return (
+        cachedChannels().find(
+          (candidate) =>
+            candidate.name === parsed.parentName && candidate.id !== channel.id,
+        ) ?? null
+      );
+    },
+    [cachedChannels],
+  );
+
+  /**
+   * Spawn a sub-channel of `parent` for a task (mirrors `buzz channels
+   * create --parent`): the child inherits the parent's type/visibility and
+   * is named `parent--<slug>`. The channel opens immediately under a
+   * placeholder slug; naming, the parent announcement, and the
+   * relationship canvases follow best-effort in the background —
+   * announcement and canvases wait for the rename so they reference the
+   * final name.
+   */
+  const createSubChannel = React.useCallback(
+    async (
+      parent: Channel,
+      prompt: string,
+      mode?: DevComposerMode,
+    ): Promise<Channel> => {
+      const existingNames = new Set(
+        cachedChannels().map((channel) => channel.name),
+      );
+      const channel = await createChannelMutation.mutateAsync({
+        name: uniqueChannelName(
+          subChannelName(parent.name, "new-sub"),
+          existingNames,
+        ),
+        // Inherit the parent's type/visibility; DMs can't have subs, so
+        // anything non-forum becomes a stream (dev sessions are streams).
+        channelType: parent.channelType === "forum" ? "forum" : "stream",
+        visibility: parent.visibility,
+        description: prompt.length > 140 ? `${prompt.slice(0, 139)}…` : prompt,
+      });
+
+      void (async () => {
+        let finalName = channel.name;
+        const title = await generateChannelTitle(
+          prompt,
+          namingAgentPubkey(mode),
+        );
+        if (title) {
+          const currentNames = new Set(
+            cachedChannels()
+              .filter((candidate) => candidate.id !== channel.id)
+              .map((candidate) => candidate.name),
+          );
+          const candidate = uniqueChannelName(
+            subChannelName(parent.name, title),
+            currentNames,
+          );
+          try {
+            await updateChannel({ channelId: channel.id, name: candidate });
+            finalName = candidate;
+            await queryClient.invalidateQueries({ queryKey: channelsQueryKey });
+          } catch (error) {
+            console.warn(
+              `dev-mode: sub-channel rename failed for ${channel.id}`,
+              error,
+            );
+          }
+        }
+
+        try {
+          const announcement = await sendMessageMutation.mutateAsync({
+            targetChannel: parent,
+            content: subChannelAnnouncement(finalName, prompt),
+          });
+          await setCanvas({
+            channelId: channel.id,
+            content: subChannelCanvasDoc({
+              parentName: parent.name,
+              parentId: parent.id,
+              announcementEventId: announcement.id,
+              task: prompt,
+            }),
+          });
+          const parentCanvas = await getCanvas(parent.id);
+          await setCanvas({
+            channelId: parent.id,
+            content: appendSubChannelToParentCanvas(
+              parentCanvas.content,
+              finalName,
+              prompt,
+            ),
+          });
+        } catch (error) {
+          console.warn(
+            `dev-mode: sub-channel announcement/canvas setup failed for ${channel.id}`,
+            error,
+          );
+        }
+      })();
+
+      return channel;
+    },
+    [
+      cachedChannels,
+      createChannelMutation,
+      namingAgentPubkey,
+      queryClient,
+      sendMessageMutation,
+    ],
+  );
+
   /**
    * Send a prompt into a session, optionally as a reply inside an existing
    * thread (`parentEventId`). In an agent mode, the agent is attached first
@@ -158,10 +285,25 @@ export function useDevSessionActions(identity: Identity | undefined) {
       parentEventId?: string,
       mentions: MentionRecord[] = [],
     ) => {
+      // Sub-channel invariant (client-side; the relay knows nothing about
+      // sub-channels): everyone in `parent--sub` must belong to `parent`.
+      const parentChannel = findParentChannel(channel);
+      const parentMemberPubkeys = parentChannel
+        ? new Set(
+            parentChannel.memberPubkeys.map((pubkey) =>
+              normalizePubkey(pubkey),
+            ),
+          )
+        : null;
+
       if (mode.kind === "agent") {
+        const agentPubkey = normalizePubkey(mode.target.pubkey);
+        if (parentChannel && !parentMemberPubkeys?.has(agentPubkey)) {
+          await ensureAgentInChannel(parentChannel.id, mode.target);
+          parentMemberPubkeys?.add(agentPubkey);
+        }
         const isMember = channel.memberPubkeys.some(
-          (pubkey) =>
-            normalizePubkey(pubkey) === normalizePubkey(mode.target.pubkey),
+          (pubkey) => normalizePubkey(pubkey) === agentPubkey,
         );
         if (!isMember) {
           await ensureAgentInChannel(channel.id, mode.target);
@@ -177,9 +319,23 @@ export function useDevSessionActions(identity: Identity | undefined) {
       if (mode.kind === "agent") {
         memberPubkeys.add(normalizePubkey(mode.target.pubkey));
       }
-      const nonMembers = mentions.filter(
+      let nonMembers = mentions.filter(
         (mention) => !memberPubkeys.has(normalizePubkey(mention.pubkey)),
       );
+      if (parentMemberPubkeys) {
+        const outsiders = nonMembers.filter(
+          (mention) =>
+            !parentMemberPubkeys.has(normalizePubkey(mention.pubkey)),
+        );
+        if (outsiders.length > 0) {
+          console.warn(
+            `dev-mode: skipping auto-add of ${outsiders.length} mention(s) not in the parent channel of ${channel.name}`,
+          );
+          nonMembers = nonMembers.filter((mention) =>
+            parentMemberPubkeys.has(normalizePubkey(mention.pubkey)),
+          );
+        }
+      }
       for (const role of ["member", "bot"] as const) {
         const pubkeys = nonMembers
           .filter((mention) => (role === "bot") === mention.isAgent)
@@ -212,11 +368,12 @@ export function useDevSessionActions(identity: Identity | undefined) {
         parentEventId: parentEventId ?? null,
       });
     },
-    [sendMessageMutation],
+    [findParentChannel, sendMessageMutation],
   );
 
   return {
     createSessionChannel,
+    createSubChannel,
     sendToSession,
     isCreatingChannel: createChannelMutation.isPending,
   };

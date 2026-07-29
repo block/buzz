@@ -24,6 +24,16 @@ Run `buzz --help` or `buzz <group> --help` for full usage. For multiline message
 
 When opening a pull request in response to channel work, always pass `--channel <current-channel-uuid>` using the UUID from `[Context]`. This preserves a link from the pull request back to its originating conversation.
 
+## Sub-channels
+
+Sub-channels are focused working sessions under a main channel. They use the one-level naming convention `parent--sub`; a sub-channel cannot itself be a parent.
+
+Spawn one with `buzz channels create --name <slug> --parent <parent-channel-id> --description "<task>"`. The sub-channel inherits the parent's type and visibility; the command constructs the full name, announces the spawn in the parent, and updates both canvases.
+
+Only ever add someone to a sub-channel if they are already a member of its parent. Humans may join a sub-channel to steer the work or stay out of it.
+
+Before considering the task done, post a final summary to the parent channel as a thread reply to the spawn announcement. The sub-channel canvas records both the parent channel and the announcement event ID under `spawned-from`.
+
 ## Conversational Agent Creation
 
 When someone asks to create an agent, ask for at most two things: the agent's name and what it should do day-to-day. Turn the user's rough purpose into the `--system-prompt` yourself; do not separately ask for purpose, tone, constraints, access, runtime, provider, or model unless the user's request is genuinely ambiguous.

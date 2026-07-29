@@ -13,6 +13,11 @@ import {
 } from "@/features/dev-mode/lib/pinnedChannels";
 import { setDisplayStyle } from "@/features/dev-mode/lib/displayStylePreference";
 import type { MentionRecord } from "@/features/dev-mode/lib/mentionRecords";
+import {
+  aggregateLastActivity,
+  aggregateUnreadMains,
+  indexSubChannels,
+} from "@/features/dev-mode/lib/subChannels";
 import { selectRootEvents } from "@/features/dev-mode/lib/transcriptRoots";
 import {
   devComposerModeLabel,
@@ -22,6 +27,7 @@ import {
 import { useDevSessionActions } from "@/features/dev-mode/lib/useDevSessionActions";
 import { DevChannelMembers } from "@/features/dev-mode/ui/DevChannelMembers";
 import { DevChannelNavigator } from "@/features/dev-mode/ui/DevChannelNavigator";
+import { DevChannelTabs } from "@/features/dev-mode/ui/DevChannelTabs";
 import { DevCommandPalette } from "@/features/dev-mode/ui/DevCommandPalette";
 import { DevPromptComposer } from "@/features/dev-mode/ui/DevPromptComposer";
 import { DevSplitPane } from "@/features/dev-mode/ui/DevSplitPane";
@@ -67,9 +73,8 @@ export function DevModeShell({
   const channelsQuery = useChannelsQuery();
   const isFullscreen = useIsFullscreen();
   const modes = useDevComposerModes();
-  const { createSessionChannel, sendToSession } = useDevSessionActions(
-    identityQuery.data,
-  );
+  const { createSessionChannel, createSubChannel, sendToSession } =
+    useDevSessionActions(identityQuery.data);
 
   const [view, setView] = React.useState<ShellView>("fresh");
   const [input, setInput] = React.useState("");
@@ -83,6 +88,11 @@ export function DevModeShell({
   );
   const [threadOpen, setThreadOpen] = React.useState(false);
   const [activePane, setActivePane] = React.useState<"main" | "thread">("main");
+  // When set, the composer's next Enter spawns a sub-channel of this main
+  // channel instead of posting to the open channel.
+  const [subDraftParentId, setSubDraftParentId] = React.useState<string | null>(
+    null,
+  );
   const [paletteOpen, setPaletteOpen] = React.useState(false);
   const [focusSignal, setFocusSignal] = React.useState(0);
   const [busy, setBusy] = React.useState(false);
@@ -140,12 +150,34 @@ export function DevModeShell({
     [sessions],
   );
 
+  // `parent--sub` channels pair with their parents: only mains render in
+  // the left list; subs surface as tabs inside their parent.
+  const subIndex = React.useMemo(() => indexSubChannels(sessions), [sessions]);
+
+  // The left list orders mains by their whole family's latest activity, so
+  // a busy sub-channel floats its parent.
+  const listChannels = React.useMemo(() => {
+    const overrides = aggregateLastActivity(subIndex);
+    if (overrides.size === 0) return subIndex.mains;
+    return subIndex.mains.map((channel) => {
+      const latest = overrides.get(channel.id);
+      return latest && latest > (channel.lastMessageAt ?? "")
+        ? { ...channel, lastMessageAt: latest }
+        : channel;
+    });
+  }, [subIndex]);
+
+  const navigatorUnreadIds = React.useMemo(
+    () => aggregateUnreadMains(subIndex, unreadChannelIds),
+    [subIndex, unreadChannelIds],
+  );
+
   const pinnedIds = usePinnedChannels();
   // Pinned chats on top, everything else below — each newest-first; `flat`
   // matches the navigator's render order so ↑/↓ walk what is on screen.
   const { groups: channelGroups, flat: orderedChannels } = React.useMemo(
-    () => groupSessionChannels(sessions, pinnedIds),
-    [pinnedIds, sessions],
+    () => groupSessionChannels(listChannels, pinnedIds),
+    [pinnedIds, listChannels],
   );
 
   const findChannel = React.useCallback(
@@ -162,6 +194,23 @@ export function DevModeShell({
   // A stored id whose channel vanished (or is still propagating) renders as
   // the fresh-session state; navigation starts from what is actually shown.
   const effectiveSessionId = activeChannel?.id ?? null;
+
+  // Logical selection: the open channel's main. When a sub tab is active,
+  // the left list keeps highlighting the parent and ⌥↑↓/Escape navigate by
+  // parent; the transcript and composer stay on the physical channel.
+  const activeMainId = activeChannel
+    ? (subIndex.parentIdByChildId.get(activeChannel.id) ?? activeChannel.id)
+    : null;
+  const activeMainChannel = activeMainId ? findChannel(activeMainId) : null;
+  const activeSubChannels = React.useMemo(
+    () =>
+      activeMainId ? (subIndex.subsByParentId.get(activeMainId) ?? []) : [],
+    [activeMainId, subIndex],
+  );
+  const subDraftActive =
+    view === "channel" &&
+    subDraftParentId !== null &&
+    subDraftParentId === activeMainId;
 
   // Shares the transcript's query cache — used only for card navigation.
   const messagesQuery = useChannelMessagesQuery(activeChannel);
@@ -198,6 +247,7 @@ export function DevModeShell({
     setSelectedRootId(null);
     setThreadOpen(false);
     setActivePane("main");
+    setSubDraftParentId(null);
   }, [effectiveSessionId]);
 
   // Ctrl+O opens the palette from anywhere in the shell.
@@ -299,11 +349,13 @@ export function DevModeShell({
   const openChannel = React.useCallback(
     (channelId: string) => {
       setActiveSessionId(channelId);
-      setNavigatorId(channelId);
+      // The left list only shows mains — highlight the family's parent when
+      // a sub tab is opened directly (palette, #ref link, tab click).
+      setNavigatorId(subIndex.parentIdByChildId.get(channelId) ?? channelId);
       setView("channel");
       focusComposer();
     },
-    [focusComposer],
+    [focusComposer, subIndex],
   );
 
   const goToFresh = React.useCallback(() => {
@@ -311,6 +363,7 @@ export function DevModeShell({
     setActiveSessionId(null);
     setThreadOpen(false);
     setSelectedRootId(null);
+    setSubDraftParentId(null);
     focusComposer();
   }, [focusComposer]);
 
@@ -319,6 +372,12 @@ export function DevModeShell({
   // it); with nowhere to go, fall back to the fresh composer.
   const handleChannelLeft = React.useCallback(
     (leftChannelId: string) => {
+      // Leaving a sub tab returns to its parent's main tab.
+      const parentId = subIndex.parentIdByChildId.get(leftChannelId);
+      if (parentId) {
+        openChannel(parentId);
+        return;
+      }
       const next = channelGroups
         .find((group) => !group.pinned)
         ?.channels.find((channel) => channel.id !== leftChannelId);
@@ -328,7 +387,7 @@ export function DevModeShell({
         goToFresh();
       }
     },
-    [channelGroups, goToFresh, openChannel],
+    [channelGroups, goToFresh, openChannel, subIndex],
   );
 
   // ⌘N: new channel (fresh composer). ⌘T: draft side chat in the open
@@ -389,7 +448,7 @@ export function DevModeShell({
   const stepChannel = React.useCallback(
     (direction: 1 | -1) => {
       if (orderedChannels.length === 0) return;
-      const referenceId = view === "channel" ? activeSessionId : navigatorId;
+      const referenceId = view === "channel" ? activeMainId : navigatorId;
       const currentIndex = orderedChannels.findIndex(
         (session) => session.id === referenceId,
       );
@@ -407,7 +466,7 @@ export function DevModeShell({
       if (nextIndex === currentIndex) return;
       openChannel(orderedChannels[nextIndex].id);
     },
-    [activeSessionId, navigatorId, openChannel, orderedChannels, view],
+    [activeMainId, navigatorId, openChannel, orderedChannels, view],
   );
 
   const navigateCards = React.useCallback(
@@ -475,6 +534,11 @@ export function DevModeShell({
 
   const handleEscape = React.useCallback(() => {
     if (view === "channel") {
+      if (subDraftActive) {
+        setSubDraftParentId(null);
+        focusComposer();
+        return;
+      }
       if (threadOpen) {
         setThreadOpen(false);
         setActivePane("main");
@@ -485,8 +549,9 @@ export function DevModeShell({
         setSelectedRootId(null);
         return;
       }
-      // Back out to the navigator with the current channel highlighted.
-      setNavigatorId(activeSessionId);
+      // Back out to the navigator with the current channel's main
+      // highlighted (subs have no row of their own).
+      setNavigatorId(activeMainId);
       setActiveSessionId(null);
       setView("navigator");
       return;
@@ -495,10 +560,11 @@ export function DevModeShell({
       goToFresh();
     }
   }, [
-    activeSessionId,
+    activeMainId,
     focusComposer,
     goToFresh,
     selectedRootId,
+    subDraftActive,
     threadOpen,
     view,
   ]);
@@ -519,6 +585,17 @@ export function DevModeShell({
     setThreadOpen(true);
     setActivePane("thread");
   }, []);
+
+  // "+ sub" (tab strip or palette): the composer's next Enter spawns a
+  // sub-channel of the open main instead of posting to the channel.
+  const startSubChannelDraft = React.useCallback(() => {
+    if (!activeMainId) return;
+    setSubDraftParentId(activeMainId);
+    setSelectedRootId(null);
+    setThreadOpen(false);
+    setActivePane("main");
+    focusComposer();
+  }, [activeMainId, focusComposer]);
 
   const handleSubmit = React.useCallback(
     (mentions: MentionRecord[] = []) => {
@@ -547,6 +624,12 @@ export function DevModeShell({
             setActiveSessionId(channel.id);
             setNavigatorId(channel.id);
             setView("channel");
+          } else if (subDraftActive && activeMainChannel) {
+            // "+ sub" draft: spawn a sub-channel of the open main and land
+            // on its tab; the prompt goes to the new sub, not the main.
+            channel = await createSubChannel(activeMainChannel, prompt, mode);
+            setSubDraftParentId(null);
+            setActiveSessionId(channel.id);
           }
           await sendToSession(channel, prompt, mode, undefined, mentions);
           // The conversation moved to the new prompt at the bottom.
@@ -566,8 +649,10 @@ export function DevModeShell({
     },
     [
       activeChannel,
+      activeMainChannel,
       busy,
       createSessionChannel,
+      createSubChannel,
       handleOpenThread,
       input,
       mode,
@@ -575,6 +660,7 @@ export function DevModeShell({
       openChannel,
       selectedRootId,
       sendToSession,
+      subDraftActive,
       view,
     ],
   );
@@ -609,23 +695,27 @@ export function DevModeShell({
     [activeChannel, mode, selectedRoot, sendToSession],
   );
 
-  const placeholder = activeChannel
-    ? mode?.kind === "agent"
-      ? `Message # ${activeChannel.name} and put ${devComposerModeLabel(mode)} to work…`
-      : `Message # ${activeChannel.name}…`
-    : mode?.kind === "agent"
-      ? `Prompt ${devComposerModeLabel(mode)} — spawns a new channel where it works…`
-      : "Start a discussion — spawns a new channel for humans…";
+  const placeholder = subDraftActive
+    ? `Prompt spawns a sub-channel of # ${activeMainChannel?.name ?? ""}…`
+    : activeChannel
+      ? mode?.kind === "agent"
+        ? `Message # ${activeChannel.name} and put ${devComposerModeLabel(mode)} to work…`
+        : `Message # ${activeChannel.name}…`
+      : mode?.kind === "agent"
+        ? `Prompt ${devComposerModeLabel(mode)} — spawns a new channel where it works…`
+        : "Start a discussion — spawns a new channel for humans…";
 
   const hint =
     view === "navigator"
       ? "↑↓: preview channels · enter: open · esc: back · ⌃O: palette"
       : view === "channel"
-        ? threadOpen
-          ? "←→: switch pane · tab: target · esc: close side chat"
-          : selectedRootId
-            ? "↑↓: prompts · enter: side chat · esc: back"
-            : "tab: target · enter: send · ↑↓: prompts · ⌥↑↓: channels · esc: channels"
+        ? subDraftActive
+          ? "tab: target · enter: spawn sub-channel · esc: cancel"
+          : threadOpen
+            ? "←→: switch pane · tab: target · esc: close side chat"
+            : selectedRootId
+              ? "↑↓: prompts · enter: side chat · esc: back"
+              : "tab: target · enter: send · ↑↓: prompts · ⌥↑↓: channels · esc: channels"
         : "tab: target · enter: send · ↑: channels · /: palette";
 
   const composerActive =
@@ -781,10 +871,20 @@ export function DevModeShell({
             highlightedId={view === "fresh" ? null : navigatorId}
             onHighlight={handleHighlight}
             onOpen={openChannel}
-            unreadChannelIds={unreadChannelIds}
+            unreadChannelIds={navigatorUnreadIds}
           />
 
           <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+            {view === "channel" && activeChannel && activeMainChannel ? (
+              <DevChannelTabs
+                activeId={activeChannel.id}
+                main={activeMainChannel}
+                onNewSubChannel={startSubChannelDraft}
+                onSelect={openChannel}
+                subs={activeSubChannels}
+                unreadChannelIds={unreadChannelIds}
+              />
+            ) : null}
             {view === "navigator" && previewChannel ? (
               <div className="pointer-events-none flex min-h-0 min-w-0 flex-1 flex-col opacity-70">
                 <div className="shrink-0 border-b border-border/60 px-4 py-1 font-mono text-xs text-muted-foreground/60">
@@ -864,7 +964,19 @@ export function DevModeShell({
             onChannelLeft={handleChannelLeft}
             onClose={closePalette}
             onNewSession={goToFresh}
+            onNewSubChannel={
+              view === "channel" && activeMainChannel
+                ? startSubChannelDraft
+                : null
+            }
             onOpenChannel={openChannel}
+            parentOfActive={
+              topBarChannel
+                ? (findChannel(
+                    subIndex.parentIdByChildId.get(topBarChannel.id) ?? null,
+                  ) ?? null)
+                : null
+            }
           />
         ) : null}
       </div>

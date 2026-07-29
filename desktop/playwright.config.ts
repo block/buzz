@@ -33,6 +33,7 @@ export default defineConfig({
         "**/dev-mode-palette.spec.ts",
         "**/dev-mode-composer-default.spec.ts",
         "**/dev-mode-first-reply.spec.ts",
+        "**/dev-mode-sub-channels.spec.ts",
         "**/badge.spec.ts",
         "**/channel-browser.spec.ts",
         "**/channel-add-screenshots.spec.ts",

@@ -1,12 +1,17 @@
 const MAX_SLUG_LENGTH = 40;
 
-/** Reduce arbitrary text to channel-name form: lowercase kebab-case. */
+/**
+ * Reduce arbitrary text to channel-name form: lowercase kebab-case.
+ * Splitting on hyphens as well as whitespace guarantees the result never
+ * contains `--`, which would make it parse as a sub-channel name
+ * (see subChannels.ts).
+ */
 export function sanitizeChannelName(text: string): string {
   return text
     .toLowerCase()
     .replace(/[^a-z0-9\s-]/g, "")
     .trim()
-    .split(/\s+/)
+    .split(/[\s-]+/)
     .reduce((slug, word) => {
       if (word.length === 0) return slug;
       if (slug.length === 0) return word.slice(0, MAX_SLUG_LENGTH);

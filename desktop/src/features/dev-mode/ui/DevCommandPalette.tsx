@@ -71,9 +71,11 @@ const SETTINGS_ENTRIES: { section: SettingsSection; label: string }[] = [
 export function DevCommandPalette({
   channels,
   activeChannel,
+  parentOfActive,
   myPubkey,
   onOpenChannel,
   onNewSession,
+  onNewSubChannel,
   onChannelLeft,
   onClose,
 }: {
@@ -81,9 +83,13 @@ export function DevCommandPalette({
   channels: Channel[];
   /** Channel that add-member/leave actions apply to (focused or previewed). */
   activeChannel: Channel | null;
+  /** Set when the active channel is a `parent--sub` of an existing parent. */
+  parentOfActive: Channel | null;
   myPubkey: string | null;
   onOpenChannel: (channelId: string) => void;
   onNewSession: () => void;
+  /** Starts a sub-channel draft in the open channel; null when unavailable. */
+  onNewSubChannel: (() => void) | null;
   onChannelLeft: (channelId: string) => void;
   onClose: () => void;
 }) {
@@ -267,11 +273,20 @@ export function DevCommandPalette({
           normalizePubkey(member.pubkey),
         ),
       );
+      // Sub-channel invariant: only parent members may join `parent--sub`.
+      const parentMemberPubkeys = parentOfActive
+        ? new Set(
+            parentOfActive.memberPubkeys.map((pubkey) =>
+              normalizePubkey(pubkey),
+            ),
+          )
+        : null;
       return userSearchResults
         .filter(
           (user) =>
             !memberPubkeys.has(normalizePubkey(user.pubkey)) &&
-            normalizePubkey(user.pubkey) !== normalizePubkey(myPubkey ?? ""),
+            normalizePubkey(user.pubkey) !== normalizePubkey(myPubkey ?? "") &&
+            (parentMemberPubkeys?.has(normalizePubkey(user.pubkey)) ?? true),
         )
         .map((user) => ({
           id: `add-${user.pubkey}`,
@@ -288,26 +303,46 @@ export function DevCommandPalette({
           {
             id: "add-member",
             label: `add someone to # ${activeChannel.name}`,
-            detail: "people & agents",
+            detail: parentOfActive
+              ? `members of # ${parentOfActive.name} only`
+              : "people & agents",
             run: () => {
               setMode("add-member");
               setQuery("");
               setSelectedIndex(0);
             },
           },
-          {
-            id: "pin-channel",
-            label: pinnedIds.has(activeChannel.id)
-              ? `unpin # ${activeChannel.name}`
-              : `pin # ${activeChannel.name}`,
-            detail: pinnedIds.has(activeChannel.id)
-              ? "remove from pinned section"
-              : "keep at the top of the channel list",
-            run: () => {
-              toggleChannelPinned(activeChannel.id);
-              onClose();
-            },
-          },
+          ...(onNewSubChannel
+            ? [
+                {
+                  id: "new-sub-channel",
+                  label: `new sub-channel of # ${parentOfActive?.name ?? activeChannel.name}`,
+                  detail: "spawn a focused agent session",
+                  run: () => {
+                    onNewSubChannel();
+                    onClose();
+                  },
+                } satisfies PaletteEntry,
+              ]
+            : []),
+          // Subs never appear in the left list, so pinning one is meaningless.
+          ...(parentOfActive
+            ? []
+            : [
+                {
+                  id: "pin-channel",
+                  label: pinnedIds.has(activeChannel.id)
+                    ? `unpin # ${activeChannel.name}`
+                    : `pin # ${activeChannel.name}`,
+                  detail: pinnedIds.has(activeChannel.id)
+                    ? "remove from pinned section"
+                    : "keep at the top of the channel list",
+                  run: () => {
+                    toggleChannelPinned(activeChannel.id);
+                    onClose();
+                  },
+                } satisfies PaletteEntry,
+              ]),
           {
             id: "leave-channel",
             label: `leave # ${activeChannel.name}`,
@@ -401,8 +436,10 @@ export function DevCommandPalette({
     myPubkey,
     onClose,
     onNewSession,
+    onNewSubChannel,
     onOpenChannel,
     openSettings,
+    parentOfActive,
     pinnedIds,
     query,
     userSearchResults,

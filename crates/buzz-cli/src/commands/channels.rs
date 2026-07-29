@@ -328,6 +328,253 @@ pub async fn cmd_create_channel(
     Ok(())
 }
 
+fn sanitize_sub_channel_name(name: &str) -> Result<String, CliError> {
+    let mut sanitized = String::new();
+    let mut previous_hyphen = false;
+    for ch in name.to_ascii_lowercase().chars() {
+        if ch.is_ascii_alphanumeric() {
+            sanitized.push(ch);
+            previous_hyphen = false;
+        } else if !previous_hyphen && !sanitized.is_empty() {
+            sanitized.push('-');
+            previous_hyphen = true;
+        }
+    }
+    let sanitized = sanitized.trim_matches('-').to_string();
+    if sanitized.is_empty() {
+        return Err(CliError::Usage(
+            "--name is empty after sub-channel name sanitization".into(),
+        ));
+    }
+    Ok(sanitized)
+}
+
+fn construct_sub_channel_name(parent_name: &str, name: &str) -> Result<String, CliError> {
+    if parent_name.contains("--") {
+        return Err(CliError::Usage(
+            "sub-channels support one nesting level; the parent name cannot contain '--'".into(),
+        ));
+    }
+    Ok(format!(
+        "{parent_name}--{}",
+        sanitize_sub_channel_name(name)?
+    ))
+}
+
+fn append_sub_channel_to_canvas(canvas: &str, sub_name: &str, task: &str) -> String {
+    let bullet = format!("- #{sub_name} — {}", task.lines().next().unwrap_or(task));
+    let heading = "## Sub-channels";
+    let mut canvas = canvas.to_string();
+    let Some(heading_start) = canvas.lines().position(|line| line.trim() == heading) else {
+        canvas.push_str("\n\n## Sub-channels\n");
+        canvas.push_str(&bullet);
+        canvas.push('\n');
+        return canvas;
+    };
+
+    let lines: Vec<&str> = canvas.lines().collect();
+    let section_end = lines[heading_start + 1..]
+        .iter()
+        .position(|line| line.starts_with("## "))
+        .map(|offset| heading_start + 1 + offset)
+        .unwrap_or(lines.len());
+    let insert_line = (heading_start + 1..section_end)
+        .rfind(|&index| lines[index].starts_with("- #"))
+        .map(|index| index + 1)
+        .unwrap_or(heading_start + 1);
+    let mut output = lines[..insert_line].join("\n");
+    if !output.is_empty() {
+        output.push('\n');
+    }
+    output.push_str(&bullet);
+    if insert_line < lines.len() {
+        output.push('\n');
+        output.push_str(&lines[insert_line..].join("\n"));
+    } else {
+        output.push('\n');
+    }
+    output
+}
+
+async fn resolve_parent_channel(
+    client: &BuzzClient,
+    parent: &str,
+) -> Result<ChannelSummary, CliError> {
+    let filter = if Uuid::parse_str(parent).is_ok() {
+        serde_json::json!({"kinds": [39000], "#d": [parent], "limit": 1})
+    } else {
+        serde_json::json!({"kinds": [39000]})
+    };
+    let matches: Vec<ChannelSummary> = client
+        .query_paginated(filter, 1000)
+        .await?
+        .iter()
+        .filter_map(ChannelSummary::from_event)
+        .filter(|channel| channel.channel_id == parent || channel.name.eq_ignore_ascii_case(parent))
+        .collect();
+    match matches.as_slice() {
+        [channel] => Ok(ChannelSummary {
+            channel_id: channel.channel_id.clone(),
+            name: channel.name.clone(),
+            channel_type: channel.channel_type.clone(),
+            visibility: channel.visibility.clone(),
+            archived: channel.archived,
+            about: channel.about.clone(),
+            topic: channel.topic.clone(),
+            purpose: channel.purpose.clone(),
+        }),
+        [] => Err(CliError::Usage(format!(
+            "parent channel '{parent}' not found"
+        ))),
+        _ => Err(CliError::Usage(format!(
+            "multiple channels are named '{parent}'; use the parent channel UUID"
+        ))),
+    }
+}
+
+async fn cmd_create_sub_channel(
+    client: &BuzzClient,
+    parent_ref: &str,
+    name: &str,
+    channel_type: Option<&str>,
+    visibility: Option<&str>,
+    description: Option<&str>,
+    ttl: Option<i64>,
+) -> Result<(), CliError> {
+    let parent = resolve_parent_channel(client, parent_ref).await?;
+    let parent_uuid = parse_uuid(&parent.channel_id)?;
+    let member_filter =
+        serde_json::json!({"kinds": [39002], "#d": [&parent.channel_id], "limit": 1});
+    let member_events = client.query_paginated(member_filter, 1).await?;
+    let caller = client.keys().public_key().to_hex();
+    if !member_events
+        .first()
+        .map(extract_p_tags)
+        .unwrap_or_default()
+        .iter()
+        .any(|member| member == &caller)
+    {
+        return Err(CliError::Usage(
+            "sub-channel members must be members of the parent; the caller is not a parent member"
+                .into(),
+        ));
+    }
+
+    let final_name = construct_sub_channel_name(&parent.name, name)?;
+    let channel_type = channel_type
+        .or(parent.channel_type.as_deref())
+        .ok_or_else(|| CliError::Other("parent channel has no type".into()))?;
+    let visibility = visibility
+        .or(parent.visibility.as_deref())
+        .map(|value| if value == "public" { "open" } else { value })
+        .ok_or_else(|| CliError::Other("parent channel has no visibility".into()))?;
+    let ttl = ttl.map(validate_ttl_seconds).transpose()?;
+    let sub_uuid = Uuid::new_v4();
+    let vis = match visibility {
+        "open" => buzz_sdk::Visibility::Open,
+        "private" => buzz_sdk::Visibility::Private,
+        other => {
+            return Err(CliError::Other(format!(
+                "invalid parent visibility: {other}"
+            )))
+        }
+    };
+    let kind = match channel_type {
+        "stream" => buzz_sdk::ChannelKind::Stream,
+        "forum" => buzz_sdk::ChannelKind::Forum,
+        other => {
+            return Err(CliError::Other(format!(
+                "invalid parent channel type: {other}"
+            )))
+        }
+    };
+    let builder = buzz_sdk::build_create_channel(
+        sub_uuid,
+        &final_name,
+        Some(vis),
+        Some(kind),
+        description,
+        ttl,
+    )
+    .map_err(|e| CliError::Other(format!("build_create_channel failed: {e}")))?;
+    let create_response = client.submit_event(client.sign_event(builder)?).await?;
+    let task = description.unwrap_or(&final_name);
+
+    let announcement = format!("→ spawned #{final_name} — {task}");
+    let announcement_result: Result<String, CliError> = async {
+        let builder = buzz_sdk::build_message(parent_uuid, &announcement, None, &[], false, &[])
+            .map_err(|e| CliError::Other(format!("build_message failed: {e}")))?;
+        let response = client.submit_event(client.sign_event(builder)?).await?;
+        serde_json::from_str::<serde_json::Value>(&response)
+            .ok()
+            .and_then(|value| value["event_id"].as_str().map(str::to_string))
+            .ok_or_else(|| CliError::Other("announcement response omitted event_id".into()))
+    }
+    .await;
+
+    let announcement_id = match announcement_result {
+        Ok(id) => id,
+        Err(error) => {
+            eprintln!("warning: channel created, but parent announcement failed: {error}");
+            print_sub_channel_response(&create_response, &sub_uuid, &final_name, None);
+            return Ok(());
+        }
+    };
+
+    let sub_canvas = format!(
+        "# Sub-channel of #{}\n\n- parent: #{} ({})\n- spawned-from: {}\n- task: {}\n\nWhen the work here is complete, post a summary to #{} as a thread reply to the spawn announcement (event {}). Every member of this sub-channel must be a member of #{}.",
+        parent.name, parent.name, parent.channel_id, announcement_id, task, parent.name, announcement_id, parent.name
+    );
+    if let Err(error) = set_canvas(client, sub_uuid, &sub_canvas).await {
+        eprintln!("warning: channel created, but sub-channel canvas setup failed: {error}");
+    }
+
+    let parent_canvas_result: Result<(), CliError> = async {
+        let filter = serde_json::json!({"kinds": [40100], "#h": [&parent.channel_id], "limit": 1});
+        let events = client.query_paginated(filter, 1).await?;
+        let current = events
+            .first()
+            .and_then(|event| event.get("content"))
+            .and_then(|content| content.as_str())
+            .unwrap_or("");
+        let updated = append_sub_channel_to_canvas(current, &final_name, task);
+        set_canvas(client, parent_uuid, &updated).await
+    }
+    .await;
+    if let Err(error) = parent_canvas_result {
+        eprintln!("warning: channel created, but parent canvas update failed: {error}");
+    }
+    print_sub_channel_response(
+        &create_response,
+        &sub_uuid,
+        &final_name,
+        Some(&announcement_id),
+    );
+    Ok(())
+}
+
+async fn set_canvas(client: &BuzzClient, channel: Uuid, content: &str) -> Result<(), CliError> {
+    let builder = buzz_sdk::build_set_canvas(channel, content)
+        .map_err(|e| CliError::Other(format!("build_set_canvas failed: {e}")))?;
+    client.submit_event(client.sign_event(builder)?).await?;
+    Ok(())
+}
+
+fn print_sub_channel_response(
+    response: &str,
+    channel_id: &Uuid,
+    name: &str,
+    announcement_event_id: Option<&str>,
+) {
+    let normalized = normalize_write_response(response);
+    let mut output: serde_json::Value =
+        serde_json::from_str(&normalized).unwrap_or_else(|_| serde_json::json!({}));
+    output["channel_id"] = serde_json::json!(channel_id);
+    output["name"] = serde_json::json!(name);
+    output["announcement_event_id"] = serde_json::json!(announcement_event_id);
+    println!("{output}");
+}
+
 /// A resolved live managed-agent instance backing a template persona slug.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct ResolvedAgent {
@@ -1092,6 +1339,7 @@ pub async fn dispatch(
             description,
             ttl,
             template,
+            parent,
             templates_file,
         } => {
             if let Some(template_name) = template {
@@ -1102,6 +1350,23 @@ pub async fn dispatch(
                     templates_file.as_deref(),
                     channel_type.as_ref().map(|t| t.to_string()).as_deref(),
                     visibility.as_ref().map(|v| v.to_string()).as_deref(),
+                    description.as_deref(),
+                    ttl,
+                )
+                .await
+            } else if let Some(parent) = parent {
+                cmd_create_sub_channel(
+                    client,
+                    &parent,
+                    &name,
+                    channel_type
+                        .as_ref()
+                        .map(|value| value.to_string())
+                        .as_deref(),
+                    visibility
+                        .as_ref()
+                        .map(|value| value.to_string())
+                        .as_deref(),
                     description.as_deref(),
                     ttl,
                 )
@@ -1176,10 +1441,10 @@ pub async fn dispatch_canvas(cmd: crate::CanvasCmd, client: &BuzzClient) -> Resu
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_cardinality_rule, build_template_report, cmd_set_add_policy,
-        finalize_roster_resolution, name_matches, resolve_roster_with_archive_filter,
-        validate_ttl_seconds, ArchivedExclusion, ChannelSummary, ResolvedAgent, RosterResolution,
-        SkippedSlug,
+        append_sub_channel_to_canvas, apply_cardinality_rule, build_template_report,
+        cmd_set_add_policy, construct_sub_channel_name, finalize_roster_resolution, name_matches,
+        resolve_roster_with_archive_filter, validate_ttl_seconds, ArchivedExclusion,
+        ChannelSummary, ResolvedAgent, RosterResolution, SkippedSlug,
     };
     use crate::client::BuzzClient;
     use crate::CliError;
@@ -1187,6 +1452,34 @@ mod tests {
 
     fn event(tags: serde_json::Value) -> serde_json::Value {
         json!({ "tags": tags })
+    }
+
+    #[test]
+    fn sanitizes_and_constructs_sub_channel_names() {
+        assert_eq!(
+            construct_sub_channel_name("engineering", "  API / Client---Work! ").unwrap(),
+            "engineering--api-client-work"
+        );
+        assert!(construct_sub_channel_name("engineering", "💥").is_err());
+        assert!(construct_sub_channel_name("engineering--api", "work").is_err());
+    }
+
+    #[test]
+    fn appends_sub_channel_section_and_uses_first_task_line() {
+        assert_eq!(
+            append_sub_channel_to_canvas("# Parent", "parent--api", "Build API\nDetails"),
+            "# Parent\n\n## Sub-channels\n- #parent--api — Build API\n"
+        );
+    }
+
+    #[test]
+    fn appends_sub_channel_bullet_after_existing_bullets() {
+        let canvas =
+            "# Parent\n\n## Sub-channels\n- #parent--one — One\n\nNotes\n\n## Links\n- link";
+        assert_eq!(
+            append_sub_channel_to_canvas(canvas, "parent--two", "Two"),
+            "# Parent\n\n## Sub-channels\n- #parent--one — One\n- #parent--two — Two\n\nNotes\n\n## Links\n- link"
+        );
     }
 
     #[test]
