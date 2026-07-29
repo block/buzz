@@ -62,14 +62,38 @@ OPEN_EVENT_ID="$(printf '%s' "$OPEN_EVENT_ID" | tr '[:upper:]' '[:lower:]')"
 case "$ISOLATION" in
   host) ;;
   podman)
-    die "podman isolation is a future contract: it requires a digest-pinned OCI image, a read-only rootfs, dropped capabilities, and no node or agent keys inside the container"
+    PODMAN_IMAGE="${BUZZ_RUNNER_IMAGE:-}"
+    PODMAN_NETWORK="${BUZZ_RUNNER_NETWORK:-none}"
+    PODMAN_CPUS="${BUZZ_RUNNER_CPUS:-2}"
+    PODMAN_MEMORY="${BUZZ_RUNNER_MEMORY:-4g}"
+    PODMAN_PIDS="${BUZZ_RUNNER_PIDS:-256}"
+    PODMAN_TIMEOUT="${BUZZ_RUNNER_TIMEOUT_SECS:-3600}"
+    [[ "$PODMAN_IMAGE" =~ @sha256:[0-9a-f]{64}$ ]] \
+      || die "BUZZ_RUNNER_IMAGE must be digest-pinned as image@sha256:<64 lowercase hex>"
+    [ "$PODMAN_NETWORK" = "none" ] \
+      || die "only the explicit no-network Podman policy is currently supported"
+    [[ "$PODMAN_CPUS" =~ ^[1-9][0-9]*$ ]] \
+      || die "BUZZ_RUNNER_CPUS must be a positive integer"
+    [[ "$PODMAN_MEMORY" =~ ^[1-9][0-9]*[mMgG]$ ]] \
+      || die "BUZZ_RUNNER_MEMORY must be an integer MiB/GiB value such as 4g"
+    [[ "$PODMAN_PIDS" =~ ^[1-9][0-9]*$ ]] \
+      || die "BUZZ_RUNNER_PIDS must be a positive integer"
+    [[ "$PODMAN_TIMEOUT" =~ ^[1-9][0-9]*$ ]] \
+      || die "BUZZ_RUNNER_TIMEOUT_SECS must be a positive integer"
     ;;
   *) die "unsupported isolation backend '$ISOLATION' (expected host or podman)" ;;
 esac
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SOURCE_ROOT="$(git -C "$SCRIPT_DIR/.." rev-parse --show-toplevel 2>/dev/null)" \
-  || die "scripts/buzz-runner must be run from a git repository"
+if [ -n "${BUZZ_RUNNER_REPOSITORY:-}" ]; then
+  SOURCE_ROOT="$(git -C "$BUZZ_RUNNER_REPOSITORY" rev-parse --show-toplevel 2>/dev/null)" \
+    || die "BUZZ_RUNNER_REPOSITORY is not a trusted git checkout: $BUZZ_RUNNER_REPOSITORY"
+else
+  SOURCE_ROOT="$(git -C "$SCRIPT_DIR/.." rev-parse --show-toplevel 2>/dev/null)" \
+    || die "installed copies require BUZZ_RUNNER_REPOSITORY=/absolute/trusted/checkout"
+fi
+SOURCE_ROOT="$(cd "$SOURCE_ROOT" && pwd)" \
+  || die "could not canonicalize the trusted repository path"
 COMMON_GIT_DIR="$(git -C "$SOURCE_ROOT" rev-parse --git-common-dir 2>/dev/null)" \
   || die "could not resolve the repository's common git directory"
 case "$COMMON_GIT_DIR" in
@@ -102,33 +126,38 @@ CLOUD_URL="${BUZZ_CTX_CLOUD:-https://buzz-portable-relay.ted-slusser-a00.workers
 RUNNER_AGENT="${BUZZ_CTX_AGENT:-unattributed}"
 SOVEREIGN_CLIENT="$CTX_HOME/bin/sovereign-client"
 KEY_PATH="${BUZZ_CTX_KEY:-$CTX_HOME/node.key}"
+HANDOFF_STATE="${BUZZ_HANDOFF_STATE:-$CTX_HOME/bin/buzz-handoff-state}"
+TRUSTED_REF="${BUZZ_RUNNER_TRUSTED_REF:-}"
 
 [ -x "$SOVEREIGN_CLIENT" ] \
   || die "missing sovereign client at $SOVEREIGN_CLIENT"
 [ -f "$KEY_PATH" ] || die "missing node key at $KEY_PATH"
+[ -x "$HANDOFF_STATE" ] \
+  || die "missing signature-aware handoff reducer at $HANDOFF_STATE"
+[ -n "$TRUSTED_REF" ] \
+  || die "BUZZ_RUNNER_TRUSTED_REF must name the configured trusted repository base"
 
-relay_for_read() {
-  if curl -sf --max-time 2 "$LOCAL_URL/health" >/dev/null; then
-    printf '%s\n' "$LOCAL_URL"
-  else
-    echo "buzz-runner: cloud fallback: local node unreachable, reading $CLOUD_URL" >&2
-    printf '%s\n' "$CLOUD_URL"
-  fi
-}
-
-query_events() {
-  local filter="$1"
-  local relay result
-  relay="$(relay_for_read)" || return 1
-  result="$("$SOVEREIGN_CLIENT" query "$KEY_PATH" "$relay" "$filter")" \
+query_events_at() {
+  local relay="$1" filter="$2" result
+  result="$("$SOVEREIGN_CLIENT" query "$KEY_PATH" "$relay" "$filter" 2>/dev/null)" \
     || return 1
   printf '%s' "$result" | sed 's/^200 //'
+}
+
+query_events_both() {
+  local filter="$1" local_events cloud_events
+  local_events="$(query_events_at "$LOCAL_URL" "$filter")" \
+    || die "could not read the local lifecycle view"
+  cloud_events="$(query_events_at "$CLOUD_URL" "$filter")" \
+    || die "could not read the rendezvous lifecycle view"
+  jq -cn --argjson local "$local_events" --argjson cloud "$cloud_events" \
+    '$local + $cloud | unique_by(.id)'
 }
 
 OPEN_FILTER="$(jq -cn --arg id "$OPEN_EVENT_ID" \
   '[{kinds:[1], ids:[$id]}]')" \
   || die "could not build the handoff:open query"
-OPEN_RESULTS="$(query_events "$OPEN_FILTER")" \
+OPEN_RESULTS="$(query_events_both "$OPEN_FILTER")" \
   || die "handoff:open event query failed"
 printf '%s' "$OPEN_RESULTS" | jq -e 'type == "array"' >/dev/null \
   || die "handoff:open query returned invalid event data"
@@ -178,41 +207,47 @@ TITLE="$(printf '%s' "$HANDOFF_SPEC" | jq -r '.title')"
 SCOPE="$(printf '%s' "$HANDOFF_SPEC" | jq -r '.scope')"
 ACCEPTANCE="$(printf '%s' "$HANDOFF_SPEC" | jq -r '.acceptance')"
 BASE_COMMIT="$(printf '%s' "$HANDOFF_SPEC" | jq -r '.base_commit')"
+[[ "$BASE_COMMIT" =~ ^[0-9a-f]{40}$ ]] \
+  || die "base_commit must be a canonical lowercase 40-character object id"
 RESOLVED_COMMIT="$(git -C "$SOURCE_ROOT" rev-parse --verify \
   "${BASE_COMMIT}^{commit}" 2>/dev/null)" \
   || die "base_commit does not resolve to a local commit: $BASE_COMMIT"
+[ "$RESOLVED_COMMIT" = "$BASE_COMMIT" ] \
+  || die "base_commit resolution changed identity: $BASE_COMMIT -> $RESOLVED_COMMIT"
+TRUSTED_COMMIT="$(git -C "$SOURCE_ROOT" rev-parse --verify \
+  "${TRUSTED_REF}^{commit}" 2>/dev/null)" \
+  || die "trusted repository base does not resolve: $TRUSTED_REF"
+git -C "$SOURCE_ROOT" merge-base --is-ancestor "$BASE_COMMIT" "$TRUSTED_COMMIT" \
+  || die "base_commit is not reachable from trusted base $TRUSTED_REF ($TRUSTED_COMMIT)"
 
-CLAIM_FILTER="$(jq -cn --arg id "$OPEN_EVENT_ID" \
-  '[{kinds:[1], "#t":["handoff:claim"], "#e":[$id]}]')" \
-  || die "could not build the handoff:claim query"
-CLAIM_RESULTS="$(query_events "$CLAIM_FILTER")" \
-  || die "handoff:claim query failed"
-printf '%s' "$CLAIM_RESULTS" | jq -e 'type == "array"' >/dev/null \
-  || die "handoff:claim query returned invalid event data"
-OTHER_CLAIM="$(printf '%s' "$CLAIM_RESULTS" | jq -cr \
-  --arg id "$OPEN_EVENT_ID" --arg runner "$RUNNER_AGENT" '
-    [
-      .[]
-      | select(
-          .kind == 1
-          and any(.tags[]?; length >= 2 and .[0] == "t" and .[1] == "handoff:claim")
-          and any(.tags[]?; length >= 2 and .[0] == "e" and ((.[1] | ascii_downcase) == $id))
-        )
-      | . as $claim
-      | (try (.content | fromjson | .runner) catch null) as $claim_runner
-      | select($claim_runner != $runner)
-      | {
-          id: ($claim.id // "unknown"),
-          runner: ($claim_runner // "(missing runner identity)")
-        }
-    ]
-    | if length == 0 then empty else .[0] | @json end
-  ')" || die "could not evaluate existing handoff claims"
-if [ -n "$OTHER_CLAIM" ]; then
-  CLAIMANT="$(printf '%s' "$OTHER_CLAIM" | jq -r '.runner')"
-  CLAIM_ID="$(printf '%s' "$OTHER_CLAIM" | jq -r '.id')"
-  die "handoff is already claimed by another runner: $CLAIMANT (claim $CLAIM_ID)"
+LIFECYCLE_FILTER='[{"kinds":[1],"#t":["handoff:open","handoff:claim","handoff:return","handoff:close"]}]'
+LIFECYCLE_EVENTS="$(query_events_both "$LIFECYCLE_FILTER")"
+HANDOFF_STATE_JSON="$(printf '%s' "$LIFECYCLE_EVENTS" \
+  | "$HANDOFF_STATE" --open "$OPEN_EVENT_ID")" \
+  || die "could not reduce handoff lifecycle"
+RUNNER_SIGNER_KEY="$KEY_PATH"
+if [ -f "$CTX_HOME/agents/$RUNNER_AGENT.key" ]; then
+  RUNNER_SIGNER_KEY="$CTX_HOME/agents/$RUNNER_AGENT.key"
 fi
+RUNNER_PUBKEY="$("$SOVEREIGN_CLIENT" pubkey "$RUNNER_SIGNER_KEY")" \
+  || die "could not resolve runner signing identity"
+LIFECYCLE_STATE="$(printf '%s' "$HANDOFF_STATE_JSON" | jq -r '.state')"
+CLAIMANT_PUBKEY="$(printf '%s' "$HANDOFF_STATE_JSON" | jq -r '.claimant_pubkey // empty')"
+CLAIM_NEEDED=0
+case "$LIFECYCLE_STATE" in
+  OPEN)
+    printf '%s' "$HANDOFF_STATE_JSON" | jq -e --arg signer "$RUNNER_PUBKEY" \
+      '.allowed_claimants | index($signer) != null' >/dev/null \
+      || die "runner key $RUNNER_PUBKEY is not an allowed claimant"
+    CLAIM_NEEDED=1
+    ;;
+  CLAIMED)
+    [ "$CLAIMANT_PUBKEY" = "$RUNNER_PUBKEY" ] \
+      || die "handoff is claimed by another signer: $CLAIMANT_PUBKEY"
+    ;;
+  CONFLICT) die "handoff has a deterministic multi-signer claim conflict" ;;
+  *) die "handoff is not executable from lifecycle state $LIFECYCLE_STATE" ;;
+esac
 
 EVENT_PREFIX="${OPEN_EVENT_ID:0:12}"
 WORKTREE_PATH="$REPOSITORY_HOME/.claude/worktrees/runner-$EVENT_PREFIX"
@@ -225,26 +260,25 @@ if [ "$DRY_RUN" -eq 1 ]; then
 buzz-runner dry run
   event:      $OPEN_EVENT_ID
   title:      $TITLE
-  runner:     $RUNNER_AGENT
-  isolation:  host
+  runner:     $RUNNER_AGENT (${RUNNER_PUBKEY:0:12}…)
+  isolation:  $ISOLATION
   base:       $BASE_COMMIT ($RESOLVED_COMMIT)
+  trusted:    $TRUSTED_REF ($TRUSTED_COMMIT)
   worktree:   $WORKTREE_PATH
   artifacts:  $ARTIFACT_COUNT
+  lifecycle:  $LIFECYCLE_STATE
 
 Plan:
   1. Create a detached worktree at the resolved base commit.
   2. Generate HANDOFF.md and fetch x-tag artifacts through buzz-ctx.
-  3. Claim the handoff through buzz-ctx.
-  4. Run codex exec with stdin closed and workspace-write sandboxing.
+  3. Claim the handoff through buzz-ctx only if it remains unclaimed.
+  4. Run the agent only after exclusive relay claiming and Podman gates ship.
   5. Capture git diff, announce it through buzz-ctx, and post handoff:return.
 
 No worktree, artifact fetch, lifecycle post, or codex execution was performed.
 EOF
   exit 0
 fi
-
-command -v codex >/dev/null 2>&1 \
-  || die "required command not found on PATH: codex"
 
 STATE_DIR=""
 PROMPT_FILE=""
@@ -270,6 +304,14 @@ cleanup_state() {
   rm -f -- "$PROMPT_FILE" "$LAST_MESSAGE_FILE" "$RETURN_SPEC_FILE" \
     "$TEMP_INDEX_FILE" "$STATE_DIR/emergency-return.json"
   rmdir "$STATE_DIR" 2>/dev/null || true
+}
+
+cleanup_preclaim_worktree() {
+  if [ "$WORKTREE_CREATED" -eq 1 ] && [ "$CLAIM_MAY_EXIST" -eq 0 ]; then
+    git -C "$SOURCE_ROOT" worktree remove --force "$WORKTREE_PATH" \
+      || echo "buzz-runner: could not remove pre-claim worktree $WORKTREE_PATH" >&2
+    WORKTREE_CREATED=0
+  fi
 }
 
 evidence_json() {
@@ -336,6 +378,7 @@ on_exit() {
     emergency_failed_return || true
   fi
   cleanup_state
+  cleanup_preclaim_worktree
   report_worktree
   exit "$exit_status"
 }
@@ -349,6 +392,15 @@ mkdir -p "$REPOSITORY_HOME/.claude/worktrees" \
 git -C "$SOURCE_ROOT" worktree add --detach "$WORKTREE_PATH" "$RESOLVED_COMMIT" \
   >/dev/null || die "could not create runner worktree at $WORKTREE_PATH"
 WORKTREE_CREATED=1
+
+case "$ISOLATION" in
+  host)
+    die "unattended host execution is disabled; use a manually supervised checkout or --dry-run"
+    ;;
+  podman)
+    die "unattended execution remains disabled until relay-enforced exclusive claims exist; Podman contract may be inspected with --dry-run"
+    ;;
+esac
 
 [ ! -e "$WORKTREE_PATH/HANDOFF.md" ] \
   || die "base worktree already contains HANDOFF.md; refusing to overwrite it"
@@ -395,16 +447,17 @@ CODEX_PROMPT="$(cat "$PROMPT_FILE")" \
 
 FAILURE_REASON="handoff claim command failed; claim acceptance is unknown"
 CLAIM_MAY_EXIST=1
-"$BUZZ_CTX_BIN" handoff claim "$OPEN_EVENT_ID" \
-  "host worktree $WORKTREE_PATH at $RESOLVED_COMMIT" \
-  || die "handoff claim failed"
+if [ "$CLAIM_NEEDED" -eq 1 ]; then
+  "$BUZZ_CTX_BIN" handoff claim "$OPEN_EVENT_ID" \
+    "$ISOLATION worktree $WORKTREE_PATH at $RESOLVED_COMMIT" \
+    || die "handoff claim failed"
+fi
 FAILURE_REASON="unexpected failure after the handoff was claimed"
 
 set +e
 (
   cd "$WORKTREE_PATH" || exit 125
-  env -u BUZZ_CTX_KEY -u BUZZ_PRIVATE_KEY -u BUZZ_AGENT_PRIVATE_KEY \
-    -u NOSTR_PRIVATE_KEY \
+  env -i PATH="/usr/bin:/bin:/usr/sbin:/sbin" LANG="C.UTF-8" \
     codex exec --skip-git-repo-check --sandbox workspace-write \
       --output-last-message "$LAST_MESSAGE_FILE" "$CODEX_PROMPT" < /dev/null
 )

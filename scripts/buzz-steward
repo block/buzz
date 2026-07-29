@@ -26,15 +26,18 @@ HOME_DIR="${BUZZ_CTX_HOME:-$HOME/.buzz-local}"
 LOCAL_URL="${BUZZ_CTX_LOCAL:-http://127.0.0.1:7777}"
 CLOUD_URL="${BUZZ_CTX_CLOUD:-https://buzz-portable-relay.ted-slusser-a00.workers.dev}"
 CLIENT="$HOME_DIR/bin/sovereign-client"
+HANDOFF_STATE="${BUZZ_HANDOFF_STATE:-$HOME_DIR/bin/buzz-handoff-state}"
 STEWARD_KEY="$HOME_DIR/agents/steward.key"
 STEWARD_AUTH="$HOME_DIR/agents/steward.auth"
 STATE_DIR="$HOME_DIR/steward"
 OWNER_KEY="$HOME_DIR/node.key"
 MACHINE="$(hostname -s)"
 HANDOFF_AGE_HOURS="${BUZZ_STEWARD_HANDOFF_AGE_HOURS:-24}"
+DRY_RUN="${BUZZ_STEWARD_DRY_RUN:-0}"
 
 die() { echo "buzz-steward: $*" >&2; exit 1; }
 [ -x "$CLIENT" ] || die "missing client at $CLIENT"
+[ -x "$HANDOFF_STATE" ] || die "missing signature-aware handoff reducer at $HANDOFF_STATE"
 [ -f "$STEWARD_KEY" ] || die "no steward key — commission first: buzz-ctx bind-agent steward"
 [ -f "$OWNER_KEY" ] || die "missing owner key at $OWNER_KEY (needed to identify the owner, never to sign)"
 [[ "$HANDOFF_AGE_HOURS" =~ ^[0-9]+$ ]] \
@@ -51,10 +54,10 @@ query_heads() { # $1 = relay URL; empty output on failure
   "$CLIENT" query "$STEWARD_KEY" "$1" '[{"kinds":[30700]}]' 2>/dev/null \
     | sed 's/^200 //' || true
 }
-query_handoffs() { # $1 = relay URL; empty output on failure
+query_handoffs() { # $1 = relay URL
   "$CLIENT" query "$STEWARD_KEY" "$1" \
     '[{"kinds":[1],"#t":["handoff:open","handoff:claim","handoff:return","handoff:close"]}]' \
-    2>/dev/null | sed 's/^200 //' || true
+    2>/dev/null | sed 's/^200 //'
 }
 HEADS="$({ query_heads "$LOCAL_URL"; echo; query_heads "$CLOUD_URL"; } \
   | jq -cs 'map(select(type == "array")) | add
@@ -85,8 +88,14 @@ CONTEXT_H="$(printf '%s' "$MANDATE_HEADS" | jq -r '[.[] | .h | select(. != null)
 # ── Observe ────────────────────────────────────────────────────────────────
 # Handoffs are append-only kind-1 events, not addressable heads. Merge both
 # journals by event id only so every lifecycle transition remains visible.
-HANDOFFS="$({ query_handoffs "$LOCAL_URL"; echo; query_handoffs "$CLOUD_URL"; } \
-  | jq -cs 'map(select(type == "array")) | add | unique_by(.id)')"
+LOCAL_HANDOFFS="$(query_handoffs "$LOCAL_URL")" \
+  || die "could not read the local handoff view"
+CLOUD_HANDOFFS="$(query_handoffs "$CLOUD_URL")" \
+  || die "could not read the rendezvous handoff view"
+HANDOFFS="$(jq -cn --argjson local "$LOCAL_HANDOFFS" --argjson cloud "$CLOUD_HANDOFFS" \
+  '$local + $cloud | unique_by(.id)')"
+HANDOFF_STATES="$(printf '%s' "$HANDOFFS" | "$HANDOFF_STATE")" \
+  || die "could not reduce signed handoff lifecycles"
 
 health_line() { # $1 label, $2 url
   if curl -sf --max-time 4 "$2/health" >/dev/null; then
@@ -103,46 +112,15 @@ FINDINGS="$(mktemp)"
   health_line "cf-rendezvous" "$CLOUD_URL"
   echo
   printf '%s' "$HEADS" | jq -r --arg owner "$OWNER_PUB" \
-    --argjson nodes "$MANDATES" --argjson handoffs "$HANDOFFS" \
+    --argjson nodes "$MANDATES" --argjson delegations "$HANDOFF_STATES" \
     --argjson now "$(date +%s)" --argjson handoff_hours "$HANDOFF_AGE_HOURS" '
     def tag(e; k): [e.tags[] | select(.[0]==k) | .[1]][0];
     def st(e): ((e.content | fromjson).status // "active");
     def role(e): (tag(e;"d") // "") | split("/")[0];
     def stream(e): (tag(e;"d") // "") as $d | $d | ltrimstr(($d | split("/")[0]) + "/");
-    def body(e): try (e.content | fromjson) catch {};
-    def lifecycle(e): tag(e;"t");
-    def parent(e): tag(e;"e");
     [.[] | select(tag(.;"d") != null)] as $all
     | [$all[] | select(.pubkey == $owner)] as $mine
     | [$all[] | select(.pubkey != $owner)] as $foreign
-    | [$handoffs[] | select(lifecycle(.) == "handoff:open")] as $opens
-    | [$handoffs[] | select(lifecycle(.) == "handoff:claim")] as $claims
-    | [$handoffs[] | select(lifecycle(.) == "handoff:return")] as $returns
-    | [$handoffs[] | select(lifecycle(.) == "handoff:close")] as $closes
-    | [ $opens[]
-        | . as $open
-        | [$claims[] | select(parent(.) == $open.id)] as $mine_claims
-        | [$returns[] | select(parent(.) == $open.id)] as $mine_returns
-        | [$closes[] | select(parent(.) == $open.id)] as $mine_closes
-        | ($mine_claims | sort_by([.created_at, .id]) | last) as $claim
-        | ($mine_returns | sort_by([.created_at, .id]) | last) as $return
-        | {open: $open,
-           claim: $claim,
-           claimant:
-             (if $claim != null then
-                (body($claim).runner // tag($claim;"agent")
-                 // ($claim.pubkey[0:8] + "…"))
-              elif $return != null then
-                (tag($return;"agent") // ($return.pubkey[0:8] + "…"))
-              else "unknown"
-              end),
-           state:
-             (if ($mine_closes | length) > 0 then "CLOSED"
-              elif ($mine_returns | length) > 0 then "RETURNED"
-              elif ($mine_claims | length) > 0 then "CLAIMED"
-              else "OPEN"
-              end)}
-      ] as $delegations
     | "## Governance",
       # Per-domain, per the adapters actual evaluation: a domain with no
       # owner-signed head for the node is unclaimed (bootstrap governs).
@@ -200,23 +178,31 @@ FINDINGS="$(mktemp)"
           | "- UNSCOPED: \(tag(.;"d")) governs no node (missing n tag)" ]
         | .[] ),
       "",
-      ( if ($handoffs | length) == 0 then empty else
+      ( if ($delegations | length) == 0 then empty else
           "## Delegation",
           ( [ $delegations[]
               | select(.state == "OPEN")
-              | select(($now - .open.created_at) > ($handoff_hours * 3600))
-              | "- STALE OPEN: \(body(.open).title // "(untitled)") (\(.open.id[0:8])…) unclaimed >\($handoff_hours)h" ]
+              | select(($now - .created_at) > ($handoff_hours * 3600))
+              | "- STALE OPEN: \(.title) (\(.open_id[0:8])…) unclaimed >\($handoff_hours)h" ]
             | .[] ),
           ( [ $delegations[]
               | select(.state == "CLAIMED")
-              | select(($now - .claim.created_at) > ($handoff_hours * 3600))
-              | "- STALE CLAIM: \(body(.open).title // "(untitled)") (\(.open.id[0:8])…) by \(.claimant) >\($handoff_hours)h without return" ]
+              | select(($now - .claim_created_at) > ($handoff_hours * 3600))
+              | "- STALE CLAIM: \(.title) (\(.open_id[0:8])…) by \(.claimant_pubkey[0:12])… >\($handoff_hours)h without return" ]
             | .[] ),
           ( [ $delegations[]
               | select(.state == "RETURNED")
-              | "- AWAITING VERIFY: \(body(.open).title // "(untitled)") (\(.open.id[0:8])…) returned by \(.claimant)" ]
+              | "- AWAITING VERIFY: \(.title) (\(.open_id[0:8])…) returned by \(.claimant_pubkey[0:12])…" ]
             | .[] ),
-          "- handoffs: \([$delegations[] | select(.state == "OPEN")] | length) open, \([$delegations[] | select(.state == "CLAIMED")] | length) claimed, \([$delegations[] | select(.state == "RETURNED")] | length) returned-unverified",
+          ( [ $delegations[]
+              | select(.state == "CONFLICT")
+              | "- CLAIM CONFLICT: \(.title) (\(.open_id[0:8])…) has \(.conflicting_claims | length) authorized claimant keys" ]
+            | .[] ),
+          ( [ $delegations[]
+              | select(.state == "INVALID")
+              | "- INVALID LIFECYCLE: \(.title) (\(.open_id[0:8])…) — \(.ignored[0].reason // "invalid open")" ]
+            | .[] ),
+          "- handoffs: \([$delegations[] | select(.state == "OPEN")] | length) open, \([$delegations[] | select(.state == "CLAIMED")] | length) claimed, \([$delegations[] | select(.state == "CONFLICT")] | length) conflicted, \([$delegations[] | select(.state == "RETURNED")] | length) returned-unverified, \([$delegations[] | select(.state == "INVALID")] | length) invalid",
           ""
         end ),
       "## Custody exposure",
@@ -229,6 +215,12 @@ FINDINGS="$(mktemp)"
 } > "$FINDINGS"
 
 # ── Report (deduped, powers-gated) ─────────────────────────────────────────
+if [ "$DRY_RUN" = "1" ]; then
+  echo "steward: dry run — findings were not published"
+  cat "$FINDINGS"
+  rm -f "$FINDINGS"
+  exit 0
+fi
 if [ "$MAY_REPORT" != "true" ]; then
   echo "steward: no mandate grants report power — observing only, nothing published"
   cat "$FINDINGS"

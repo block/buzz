@@ -22,7 +22,8 @@
 #   buzz-ctx handoff open <spec-file|->  # open a journal-native hand-off
 #   buzz-ctx handoff claim <event-id> [note]  # claim an open hand-off
 #   buzz-ctx handoff return <event-id> <spec-file|->  # return results
-#   buzz-ctx handoff close <open-event-id> [note]  # verify and close a hand-off
+#   buzz-ctx handoff close <open-id> <return-id> [note]  # verify exact return
+#   buzz-ctx handoff verify-artifacts <return-id>  # independently fetch + hash
 #   buzz-ctx handoff list                # list hand-offs and lifecycle state
 #   buzz-ctx agreement export <stream> <reader-pubkey>...  # declare (offer)
 #   buzz-ctx agreement admit <source> <principal> <pubkey>...  # sink trust half
@@ -48,6 +49,7 @@ CLOUD_URL="${BUZZ_CTX_CLOUD:-https://buzz-portable-relay.ted-slusser-a00.workers
 AGENT="${BUZZ_CTX_AGENT:-unattributed}"
 CLIENT="$HOME_DIR/bin/sovereign-client"
 GRAPH="${BUZZ_CTX_GRAPH:-$HOME_DIR/bin/buzz-ctx-graph}"
+HANDOFF_STATE="${BUZZ_HANDOFF_STATE:-$HOME_DIR/bin/buzz-handoff-state}"
 # Signing identity. On a solo node this is the node key (owner, transport,
 # and signer collapsed — legitimate for one-operator hosts). Hosts that
 # separate transport from application identity (e.g. enterprise nodes with
@@ -73,6 +75,44 @@ relay_for_read() {
     echo "cloud fallback: local node unreachable, reading $CLOUD_URL" >&2
     echo "$CLOUD_URL"
   fi
+}
+
+handoff_events_all() {
+  local filter local_events cloud_events
+  [ -x "$HANDOFF_STATE" ] \
+    || die "missing signature-aware handoff reducer at $HANDOFF_STATE"
+  filter='[{"kinds":[1],"#t":["handoff:open","handoff:claim","handoff:return","handoff:close"]}]'
+  local_events="$("$CLIENT" query "$KEY" "$LOCAL_URL" "$filter" 2>/dev/null | sed 's/^200 //')" \
+    || die "could not read the local handoff view"
+  cloud_events="$("$CLIENT" query "$KEY" "$CLOUD_URL" "$filter" 2>/dev/null | sed 's/^200 //')" \
+    || die "could not read the rendezvous handoff view"
+  jq -cn --argjson local "$local_events" --argjson cloud "$cloud_events" \
+    '$local + $cloud | unique_by(.id)'
+}
+
+handoff_state_for() { # $1 = open event id
+  handoff_events_all | "$HANDOFF_STATE" --open "$1" \
+    || die "could not reduce handoff lifecycle $1"
+}
+
+verify_rendezvous_artifact() { # $1 = sha256, $2 = handoff context
+  local sha="$1" context="$2" filter manifests tmp actual
+  filter="$(jq -cn --arg sha "$sha" --arg context "$context" \
+    '[{kinds:[1], "#x":[$sha], "#h":[$context]}]')" \
+    || die "could not build rendezvous artifact-manifest query"
+  manifests="$("$CLIENT" query "$KEY" "$CLOUD_URL" "$filter" 2>/dev/null | sed 's/^200 //')" \
+    || die "could not query rendezvous artifact manifest for $sha"
+  [ "$(printf '%s' "$manifests" | jq 'length')" -gt 0 ] \
+    || die "artifact $sha has no rendezvous-custodied manifest in context $context"
+  tmp="$(mktemp)" || die "could not create artifact verification file"
+  if ! "$CLIENT" fetch "$KEY" "$CLOUD_URL" "$sha" "$tmp" >/dev/null; then
+    rm -f "$tmp"
+    die "artifact $sha is not readable from the rendezvous"
+  fi
+  actual="$(shasum -a 256 "$tmp" | awk '{print $1}')"
+  rm -f "$tmp"
+  [ "$actual" = "$sha" ] \
+    || die "rendezvous returned bytes $actual for artifact $sha"
 }
 
 post_event() { # $1 = unsigned event JSON
@@ -155,6 +195,13 @@ case "${1:-}" in
       || die "could not compute sha256 for $file; manifest not posted"
     [ "$local_sha" = "$receipt_sha" ] \
       || die "artifact sha256 mismatch (local $local_sha, receipt $receipt_sha); manifest not posted"
+    cloud_upload_result="$("$CLIENT" upload "$KEY" "$CLOUD_URL" "$file")" \
+      || die "rendezvous artifact upload failed for $file; manifest not posted"
+    cloud_receipt_sha="$(printf '%s' "$cloud_upload_result" | sed 's/^200 //' \
+      | jq -er '.sha256 | select(type == "string")')" \
+      || die "rendezvous artifact upload returned an invalid receipt; manifest not posted"
+    [ "$cloud_receipt_sha" = "$receipt_sha" ] \
+      || die "rendezvous stored $cloud_receipt_sha for local artifact $receipt_sha"
     message="${3:-artifact $(basename "$file") ($receipt_size bytes)}"
     signer_key="$KEY"
     signer_pub="$PUBKEY"
@@ -188,12 +235,20 @@ case "${1:-}" in
       true\ *) ;;
       *) die "manifest event rejected: $acceptance" ;;
     esac
+    "$HOME_DIR/bin/buzz-relay-push" \
+      --data "$HOME_DIR/sovereign.ndjson" \
+      --to "$CLOUD_URL" \
+      --source ted-laptop/sovereign \
+      --key "$KEY" >/dev/null \
+      || die "manifest accepted locally but rendezvous synchronization failed"
+    verify_rendezvous_artifact "$receipt_sha" "$CONTEXT"
     echo "sha256: $receipt_sha"
     echo "manifest accepted: $acceptance"
+    echo "rendezvous custody: verified"
     echo "context: $CONTEXT"
     ;;
   handoff)
-    sub="${2:?usage: buzz-ctx handoff open|claim|return|close|list ...}"
+    sub="${2:?usage: buzz-ctx handoff open|claim|return|close|verify-artifacts|list ...}"
     CONTEXT="${BUZZ_CTX_CONTEXT:-5b2ab726-c2b0-4bce-bcb9-bf5f7f883f0b}"
     case "$sub" in
       open)
@@ -212,6 +267,12 @@ case "${1:-}" in
             || die "handoff open spec missing required field: $field"
         done
         printf '%s' "$content" | jq -e \
+          '.base_commit | type == "string" and test("^[0-9a-f]{40}$")' >/dev/null \
+          || die "handoff open base_commit must be a canonical lowercase 40-character object id"
+        target_pubkey="$(printf '%s' "$content" | jq -er \
+          '.target.pubkey | select(type == "string" and test("^[0-9a-f]{64}$"))')" \
+          || die "handoff open target.pubkey must be a lowercase 64-character public key"
+        printf '%s' "$content" | jq -e \
           '.embodiment | type == "object"' >/dev/null \
           || die "handoff open field embodiment must be a JSON object"
         for field in stdin network trust tooling; do
@@ -222,7 +283,7 @@ case "${1:-}" in
         artifacts="$(printf '%s' "$content" | jq -e \
           '(if has("artifacts") then .artifacts else [] end) |
            select(type == "array" and
-                  all(.[]; type == "string" and test("^[0-9a-fA-F]{64}$")))')" \
+                  all(.[]; type == "string" and test("^[0-9a-f]{64}$")))')" \
           || die "handoff open artifacts must be an array of 64-hex sha256 strings"
         x_tags="$(printf '%s' "$artifacts" | jq 'map(["x", .])')" \
           || die "could not build handoff open artifact tags"
@@ -236,10 +297,11 @@ case "${1:-}" in
         fi
         event="$(jq -n --arg pk "$signer_pub" --arg c "$content" \
           --arg context "$CONTEXT" --arg agent "$AGENT" \
-          --arg machine "$MACHINE" --arg ts "$(date +%s)" \
+          --arg machine "$MACHINE" --arg target "$target_pubkey" \
+          --arg ts "$(date +%s)" \
           --argjson x_tags "$x_tags" --argjson auth "$auth_tag" \
           '{pubkey:$pk, created_at:($ts|tonumber), kind:1,
-            tags:([["t","handoff:open"],["h",$context],
+            tags:([["t","handoff:open"],["h",$context],["p",$target],
                    ["agent",$agent],["machine",$machine]]
                   + $x_tags
                   + (if $auth == null then [] else [$auth] end)),
@@ -270,14 +332,9 @@ case "${1:-}" in
         ;;
       claim)
         open_event_id="${3:?usage: buzz-ctx handoff claim <open-event-id> [note]}"
-        [[ "$open_event_id" =~ ^[0-9a-fA-F]{64}$ ]] \
-          || die "open event id must be 64 hex characters"
+        [[ "$open_event_id" =~ ^[0-9a-f]{64}$ ]] \
+          || die "open event id must be 64 lowercase hex characters"
         note="${4:-}"
-        content="$(jq -n --arg runner "$AGENT" --arg host "$MACHINE" \
-          --arg note "$note" \
-          '{runner:$runner, host:$host}
-           + (if $note == "" then {} else {note:$note} end)')" \
-          || die "could not build handoff claim content"
         signer_key="$KEY"
         signer_pub="$PUBKEY"
         auth_tag="null"
@@ -286,13 +343,45 @@ case "${1:-}" in
           signer_pub="$("$CLIENT" pubkey "$signer_key")"
           auth_tag="$(cat "$HOME_DIR/agents/$AGENT.auth" 2>/dev/null || echo null)"
         fi
+        state="$(handoff_state_for "$open_event_id")"
+        lifecycle="$(printf '%s' "$state" | jq -r '.state')"
+        claimant="$(printf '%s' "$state" | jq -r '.claimant_pubkey // empty')"
+        case "$lifecycle" in
+          OPEN)
+            printf '%s' "$state" | jq -e --arg signer "$signer_pub" \
+              '.allowed_claimants | index($signer) != null' >/dev/null \
+              || die "signer $signer_pub is not authorized to claim this handoff"
+            ;;
+          CLAIMED)
+            if [ "$claimant" = "$signer_pub" ]; then
+              echo "handoff already claimed: ${open_event_id:0:12}… by ${signer_pub:0:12}…"
+              echo "claim event: $(printf '%s' "$state" | jq -r '.claim_id')"
+              exit 0
+            fi
+            die "handoff is already claimed by ${claimant:0:12}…"
+            ;;
+          CONFLICT) die "handoff has conflicting authorized claims; manual resolution required" ;;
+          *) die "handoff cannot be claimed from lifecycle state $lifecycle" ;;
+        esac
+        CONTEXT="$(printf '%s' "$state" | jq -r '.context')"
+        predecessor_at="$(printf '%s' "$state" | jq -er '.created_at')"
+        now="$(date +%s)"
+        event_ts="$now"
+        [ "$event_ts" -gt "$predecessor_at" ] \
+          || event_ts=$((predecessor_at + 1))
+        content="$(jq -n --arg runner "$AGENT" --arg host "$MACHINE" \
+          --arg note "$note" \
+          '{runner:$runner, host:$host}
+           + (if $note == "" then {} else {note:$note} end)')" \
+          || die "could not build handoff claim content"
         event="$(jq -n --arg pk "$signer_pub" --arg c "$content" \
           --arg context "$CONTEXT" --arg open "$open_event_id" \
           --arg agent "$AGENT" --arg machine "$MACHINE" \
-          --arg ts "$(date +%s)" --argjson auth "$auth_tag" \
+          --arg ts "$event_ts" --argjson auth "$auth_tag" \
           '{pubkey:$pk, created_at:($ts|tonumber), kind:1,
             tags:([["t","handoff:claim"],["h",$context],
-                   ["agent",$agent],["machine",$machine],["e",$open]]
+                   ["agent",$agent],["machine",$machine],
+                   ["e",$open,"","root"]]
                   + (if $auth == null then [] else [$auth] end)),
             content:$c}')" \
           || die "could not build handoff claim event"
@@ -321,8 +410,8 @@ case "${1:-}" in
         ;;
       return)
         open_event_id="${3:?usage: buzz-ctx handoff return <open-event-id> <spec-file|->}"
-        [[ "$open_event_id" =~ ^[0-9a-fA-F]{64}$ ]] \
-          || die "open event id must be 64 hex characters"
+        [[ "$open_event_id" =~ ^[0-9a-f]{64}$ ]] \
+          || die "open event id must be 64 lowercase hex characters"
         spec_file="${4:?usage: buzz-ctx handoff return <open-event-id> <spec-file|->}"
         if [ "$spec_file" = "-" ]; then
           content="$(cat)" || die "could not read handoff return spec from stdin"
@@ -344,7 +433,7 @@ case "${1:-}" in
         artifacts="$(printf '%s' "$content" | jq -e \
           '(if has("artifacts") then .artifacts else [] end) |
            select(type == "array" and
-                  all(.[]; type == "string" and test("^[0-9a-fA-F]{64}$")))')" \
+                  all(.[]; type == "string" and test("^[0-9a-f]{64}$")))')" \
           || die "handoff return artifacts must be an array of 64-hex sha256 strings"
         x_tags="$(printf '%s' "$artifacts" | jq 'map(["x", .])')" \
           || die "could not build handoff return artifact tags"
@@ -356,14 +445,37 @@ case "${1:-}" in
           signer_pub="$("$CLIENT" pubkey "$signer_key")"
           auth_tag="$(cat "$HOME_DIR/agents/$AGENT.auth" 2>/dev/null || echo null)"
         fi
+        state="$(handoff_state_for "$open_event_id")"
+        lifecycle="$(printf '%s' "$state" | jq -r '.state')"
+        [ "$lifecycle" = "CLAIMED" ] \
+          || die "handoff return requires CLAIMED state, found $lifecycle"
+        claimant="$(printf '%s' "$state" | jq -r '.claimant_pubkey')"
+        [ "$claimant" = "$signer_pub" ] \
+          || die "return signer ${signer_pub:0:12}… is not claimant ${claimant:0:12}…"
+        claim_event_id="$(printf '%s' "$state" | jq -r '.claim_id')"
+        CONTEXT="$(printf '%s' "$state" | jq -r '.context')"
+        predecessor_at="$(printf '%s' "$state" | jq -er '.claim_created_at')"
+        now="$(date +%s)"
+        event_ts="$now"
+        [ "$event_ts" -gt "$predecessor_at" ] \
+          || event_ts=$((predecessor_at + 1))
+        content="$(printf '%s' "$content" | jq -c --arg claim "$claim_event_id" \
+          '. + {claim_id:$claim}')" \
+          || die "could not bind handoff return content to its claim"
+        while IFS= read -r artifact_sha; do
+          [ -n "$artifact_sha" ] || continue
+          verify_rendezvous_artifact "$artifact_sha" "$CONTEXT"
+        done < <(printf '%s' "$artifacts" | jq -r '.[]')
         event="$(jq -n --arg pk "$signer_pub" --arg c "$content" \
           --arg context "$CONTEXT" --arg open "$open_event_id" \
+          --arg claim "$claim_event_id" \
           --arg agent "$AGENT" --arg machine "$MACHINE" \
-          --arg ts "$(date +%s)" --argjson x_tags "$x_tags" \
+          --arg ts "$event_ts" --argjson x_tags "$x_tags" \
           --argjson auth "$auth_tag" \
           '{pubkey:$pk, created_at:($ts|tonumber), kind:1,
             tags:([["t","handoff:return"],["h",$context],
-                   ["agent",$agent],["machine",$machine],["e",$open]]
+                   ["agent",$agent],["machine",$machine],
+                   ["e",$open,"","root"],["e",$claim,"","claim"]]
                   + $x_tags
                   + (if $auth == null then [] else [$auth] end)),
             content:$c}')" \
@@ -393,30 +505,56 @@ case "${1:-}" in
         echo "accepted: $acceptance"
         ;;
       close)
-        open_event_id="${3:?usage: buzz-ctx handoff close <open-event-id> [note]}"
-        [[ "$open_event_id" =~ ^[0-9a-fA-F]{64}$ ]] \
-          || die "open event id must be 64 hex characters"
-        note="${4:-}"
-        content="$(jq -n --arg verifier "$AGENT" --arg host "$MACHINE" \
-          --arg note "$note" \
-          '{verifier:$verifier, host:$host}
-           + (if $note == "" then {} else {note:$note} end)')" \
-          || die "could not build handoff close content"
+        open_event_id="${3:?usage: buzz-ctx handoff close <open-event-id> <return-event-id> [note]}"
+        return_event_id="${4:?usage: buzz-ctx handoff close <open-event-id> <return-event-id> [note]}"
+        [[ "$open_event_id" =~ ^[0-9a-f]{64}$ ]] \
+          || die "open event id must be 64 lowercase hex characters"
+        [[ "$return_event_id" =~ ^[0-9a-f]{64}$ ]] \
+          || die "return event id must be 64 lowercase hex characters"
+        note="${5:-}"
         signer_key="$KEY"
         signer_pub="$PUBKEY"
         auth_tag="null"
+        signer_owner="$signer_pub"
         if [ -f "$HOME_DIR/agents/$AGENT.key" ]; then
           signer_key="$HOME_DIR/agents/$AGENT.key"
           signer_pub="$("$CLIENT" pubkey "$signer_key")"
           auth_tag="$(cat "$HOME_DIR/agents/$AGENT.auth" 2>/dev/null || echo null)"
+          signer_owner="$(printf '%s' "$auth_tag" | jq -er '.[1]')" \
+            || die "agent owner-attestation is malformed"
         fi
+        state="$(handoff_state_for "$open_event_id")"
+        lifecycle="$(printf '%s' "$state" | jq -r '.state')"
+        [ "$lifecycle" = "RETURNED" ] \
+          || die "handoff close requires RETURNED state, found $lifecycle"
+        current_return="$(printf '%s' "$state" | jq -r '.return_id')"
+        [ "$current_return" = "$return_event_id" ] \
+          || die "close targets $return_event_id but current return is $current_return"
+        opener_owner="$(printf '%s' "$state" | jq -r '.opener_owner_pubkey')"
+        [ "$signer_owner" = "$opener_owner" ] \
+          || die "close signer owner ${signer_owner:0:12}… is not opener owner ${opener_owner:0:12}…"
+        "$0" handoff verify-artifacts "$return_event_id" \
+          || die "independent rendezvous verification failed; handoff remains open"
+        CONTEXT="$(printf '%s' "$state" | jq -r '.context')"
+        predecessor_at="$(printf '%s' "$state" | jq -er '.return_created_at')"
+        now="$(date +%s)"
+        event_ts="$now"
+        [ "$event_ts" -gt "$predecessor_at" ] \
+          || event_ts=$((predecessor_at + 1))
+        content="$(jq -n --arg verifier "$AGENT" --arg host "$MACHINE" \
+          --arg return_id "$return_event_id" --arg note "$note" \
+          '{verifier:$verifier, host:$host, return_id:$return_id}
+           + (if $note == "" then {} else {note:$note} end)')" \
+          || die "could not build handoff close content"
         event="$(jq -n --arg pk "$signer_pub" --arg c "$content" \
           --arg context "$CONTEXT" --arg open "$open_event_id" \
+          --arg return_id "$return_event_id" \
           --arg agent "$AGENT" --arg machine "$MACHINE" \
-          --arg ts "$(date +%s)" --argjson auth "$auth_tag" \
+          --arg ts "$event_ts" --argjson auth "$auth_tag" \
           '{pubkey:$pk, created_at:($ts|tonumber), kind:1,
             tags:([["t","handoff:close"],["h",$context],
-                   ["agent",$agent],["machine",$machine],["e",$open]]
+                   ["agent",$agent],["machine",$machine],
+                   ["e",$open,"","root"],["e",$return_id,"","return"]]
                   + (if $auth == null then [] else [$auth] end)),
             content:$c}')" \
           || die "could not build handoff close event"
@@ -443,18 +581,56 @@ case "${1:-}" in
         echo "close event: $event_id"
         echo "accepted: $acceptance"
         ;;
+      verify-artifacts)
+        return_event_id="${3:?usage: buzz-ctx handoff verify-artifacts <return-event-id>}"
+        [[ "$return_event_id" =~ ^[0-9a-f]{64}$ ]] \
+          || die "return event id must be 64 lowercase hex characters"
+        [ -x "$HANDOFF_STATE" ] \
+          || die "missing signature-aware handoff reducer at $HANDOFF_STATE"
+        filter='[{"kinds":[1],"#t":["handoff:open","handoff:claim","handoff:return","handoff:close"]}]'
+        result="$("$CLIENT" query "$KEY" "$CLOUD_URL" "$filter" 2>/dev/null \
+          | sed 's/^200 //')" \
+          || die "could not query the rendezvous handoff lifecycle"
+        verified_state="$(printf '%s' "$result" | "$HANDOFF_STATE" \
+          | jq -ce --arg id "$return_event_id" '
+              [.[] | select(
+                (.state == "RETURNED" or .state == "CLOSED")
+                and .return_id == $id
+              )]
+              | select(length == 1) | .[0]
+            ')" \
+          || die "return $return_event_id is not cryptographically and causally valid in the rendezvous view"
+        returned="$(printf '%s' "$result" | jq -ce --arg id "$return_event_id" '
+          [.[] | select(.id == $id
+             and .kind == 1
+             and any(.tags[]?; .[0] == "t" and .[1] == "handoff:return"))]
+          | select(length == 1) | .[0]
+        ')" || die "rendezvous did not return exactly one handoff:return $return_event_id"
+        CONTEXT="$(printf '%s' "$verified_state" | jq -er '.context')" \
+          || die "verified return state has no handoff context"
+        content_artifacts="$(printf '%s' "$returned" | jq -ce '
+          .content | fromjson
+          | (.artifacts // [])
+          | select(type == "array"
+              and all(.[]; type == "string" and test("^[0-9a-f]{64}$")))
+        ')" || die "return content has an invalid artifacts list"
+        tagged_artifacts="$(printf '%s' "$returned" | jq -ce '
+          [.tags[] | select(.[0] == "x") | .[1]]
+          | select(all(.[]; type == "string" and test("^[0-9a-f]{64}$")))
+        ')" || die "return event has an invalid artifact x tag"
+        jq -en --argjson content "$content_artifacts" --argjson tags "$tagged_artifacts" \
+          '($content | sort) == ($tags | sort)' >/dev/null \
+          || die "return content artifacts do not match its x tags"
+        while IFS= read -r artifact_sha; do
+          [ -n "$artifact_sha" ] || continue
+          verify_rendezvous_artifact "$artifact_sha" "$CONTEXT"
+          echo "verified artifact: $artifact_sha"
+        done < <(printf '%s' "$content_artifacts" | jq -r '.[]')
+        echo "return custody verified: $return_event_id"
+        ;;
       list)
-        relay="$(relay_for_read)"
-        result="$("$CLIENT" query "$KEY" "$relay" \
-          '[{"kinds":[1],"#t":["handoff:open","handoff:claim","handoff:return","handoff:close"]}]')" \
-          || die "handoff lifecycle query failed"
-        printf '%s' "$result" | sed 's/^200 //' \
+        handoff_events_all | "$HANDOFF_STATE" \
           | jq -r --argjson now "$(date +%s)" '
-            def tag(e; name):
-              [e.tags[] | select(.[0] == name) | .[1]][0];
-            def lifecycle(e): tag(e; "t");
-            def parent(e): tag(e; "e");
-            def body(e): try (e.content | fromjson) catch {};
             def age(created):
               ([0, ($now - created)] | max) as $seconds
               | if $seconds < 60 then "\($seconds)s ago"
@@ -462,27 +638,16 @@ case "${1:-}" in
                 elif $seconds < 86400 then "\(($seconds / 3600) | floor)h ago"
                 else "\(($seconds / 86400) | floor)d ago"
                 end;
-            [.[] | select(lifecycle(.) == "handoff:open")] as $opens
-            | [.[] | select(lifecycle(.) == "handoff:claim")] as $claims
-            | [.[] | select(lifecycle(.) == "handoff:return")] as $returns
-            | [.[] | select(lifecycle(.) == "handoff:close")] as $closes
-            | $opens
-            | sort_by(.created_at)
-            | reverse[]
-            | . as $open
-            | [$claims[] | select(parent(.) == $open.id)] as $mine_claims
-            | [$returns[] | select(parent(.) == $open.id)] as $mine_returns
-            | [$closes[] | select(parent(.) == $open.id)] as $mine_closes
-            | ([$open] + $mine_claims + $mine_returns + $mine_closes
-               | max_by(.created_at)) as $latest
-            | ($mine_claims | sort_by(.created_at) | last | body(.).runner) as $claimant
-            | ($mine_closes | sort_by(.created_at) | last | body(.).verifier) as $verifier
-            | (if ($mine_closes | length) > 0 then "CLOSED"
-               elif ($mine_returns | length) > 0 then "RETURNED"
-               elif ($mine_claims | length) > 0 then "CLAIMED"
-               else "OPEN"
-               end) as $state
-            | "\($state)  \(age($latest.created_at))  \(body($open).title // "(untitled)")  \($open.id[0:12])…\(if $state == "CLOSED" then "  verified by \($verifier)" elif $claimant == null then "" else "  \($claimant)" end)"
+            .[]
+            | "\(.state)  \(age(.updated_at))  \(.title)  \(.open_id[0:12])…"
+              + (if .state == "CLOSED" then "  cryptographically verified"
+                 elif .state == "CONFLICT" then
+                   "  claims=" + (.conflicting_claims | map(.[0:12] + "…") | join(","))
+                 elif .claimant_pubkey != null then
+                   "  claimant=" + .claimant_pubkey[0:12] + "…"
+                 elif .state == "INVALID" then
+                   "  " + (.ignored[0].reason // "invalid open")
+                 else "" end)
           ' \
           || die "handoff lifecycle query returned invalid event data"
         ;;

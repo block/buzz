@@ -92,7 +92,7 @@ build-release:
     cargo build --workspace --release
 
 # Run repo lint and formatting checks
-check: fmt-check clippy desktop-check desktop-tauri-fmt-check desktop-tauri-clippy web-check mobile-check cloudflare-check
+check: fmt-check clippy desktop-check desktop-tauri-fmt-check desktop-tauri-clippy web-check mobile-check cloudflare-check handoff-check
 
 # Format all Rust code
 fmt:
@@ -610,6 +610,10 @@ cloudflare_dir := "cloudflare/portable-relay"
 # Run Cloudflare portable-relay checks (binding types, typecheck, lint, tests)
 cloudflare-check:
     cd {{cloudflare_dir}} && pnpm run check
+
+# Journal handoff lifecycle, custody, and runner safety contract
+handoff-check:
+    ./scripts/test-buzz-handoff-contract.sh
 
 # ─── Mobile ──────────────────────────────────────────────────────────────────
 
