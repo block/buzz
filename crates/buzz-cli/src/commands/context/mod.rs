@@ -1,3 +1,4 @@
+mod artifact_sync;
 mod doctor;
 mod migrate;
 pub(crate) mod profile;
@@ -37,6 +38,16 @@ pub async fn dispatch(command: &ContextCmd) -> Result<(), CliError> {
                 &environment,
             )?;
             migrate::print_report(&report, *json)
+        }
+        ContextSubcommand::Artifact(subcommand) => {
+            let environment = profile::ProfileEnvironment::from_process()?;
+            let profile = profile::resolve_profile(&command.profile, &environment)?;
+            match subcommand {
+                crate::ContextArtifactSubcommand::Sync { dry_run, json } => {
+                    let report = artifact_sync::sync(&profile, &environment, *dry_run).await?;
+                    artifact_sync::print_report(&report, *json)
+                }
+            }
         }
     }
 }

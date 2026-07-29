@@ -291,6 +291,22 @@ pub enum ContextSubcommand {
         #[arg(long)]
         json: bool,
     },
+    /// Synchronize content-addressed artifacts using profile identity roles.
+    #[command(subcommand)]
+    Artifact(ContextArtifactSubcommand),
+}
+
+#[derive(Subcommand)]
+pub enum ContextArtifactSubcommand {
+    /// Fetch referenced artifacts from the rendezvous into the local store.
+    Sync {
+        /// Report the missing set without fetching or uploading bytes.
+        #[arg(long)]
+        dry_run: bool,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -2084,7 +2100,7 @@ mod tests {
         let expected: Vec<(&str, usize)> = vec![
             ("agents", 5),
             ("artifact", 3),
-            ("context", 3),
+            ("context", 4),
             ("canvas", 2),
             ("channels", 16),
             ("dms", 4),

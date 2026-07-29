@@ -25,24 +25,39 @@ struct Config {
     data: PathBuf,
     from: String,
     to: String,
-    key_file: PathBuf,
+    source_key_file: PathBuf,
+    destination_key_file: PathBuf,
     dry_run: bool,
 }
 
 impl Config {
     fn from_args() -> anyhow::Result<Self> {
+        Self::from_iter(std::env::args().skip(1))
+    }
+
+    fn from_iter(mut args: impl Iterator<Item = String>) -> anyhow::Result<Self> {
         let mut data = None;
         let mut from = None;
         let mut to = None;
-        let mut key_file = None;
+        let mut collapsed_key_file = None;
+        let mut source_key_file = None;
+        let mut destination_key_file = None;
         let mut dry_run = false;
-        let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--data" => data = Some(PathBuf::from(next(&mut args, "--data")?)),
                 "--from" => from = Some(next(&mut args, "--from")?),
                 "--to" => to = Some(next(&mut args, "--to")?),
-                "--key" => key_file = Some(PathBuf::from(next(&mut args, "--key")?)),
+                "--key" => {
+                    collapsed_key_file = Some(PathBuf::from(next(&mut args, "--key")?));
+                }
+                "--source-key" => {
+                    source_key_file = Some(PathBuf::from(next(&mut args, "--source-key")?));
+                }
+                "--destination-key" => {
+                    destination_key_file =
+                        Some(PathBuf::from(next(&mut args, "--destination-key")?));
+                }
                 "--dry-run" => dry_run = true,
                 "-h" | "--help" => {
                     print_help();
@@ -51,6 +66,20 @@ impl Config {
                 other => bail!("unknown argument: {other}"),
             }
         }
+        let (source_key_file, destination_key_file) =
+            match (collapsed_key_file, source_key_file, destination_key_file) {
+                (Some(key), None, None) => (key.clone(), key),
+                (None, Some(source), Some(destination)) => (source, destination),
+                (Some(_), Some(_), _) | (Some(_), _, Some(_)) => {
+                    bail!("--key cannot be combined with --source-key or --destination-key")
+                }
+                (None, Some(_), None) | (None, None, Some(_)) => {
+                    bail!("--source-key and --destination-key must be provided together")
+                }
+                (None, None, None) => {
+                    bail!("provide --source-key and --destination-key (or legacy --key)")
+                }
+            };
         Ok(Self {
             data: data.context("--data <journal path> is required")?,
             from: from
@@ -61,7 +90,8 @@ impl Config {
                 .context("--to <local base URL> is required")?
                 .trim_end_matches('/')
                 .to_string(),
-            key_file: key_file.context("--key <nsec hex file> is required")?,
+            source_key_file,
+            destination_key_file,
             dry_run,
         })
     }
@@ -77,14 +107,18 @@ fn print_help() {
         "buzz-artifact-sync — fetch blobs referenced by events this node holds
 
 Usage:
+  buzz-artifact-sync --data PATH --from URL --to URL \
+    --source-key PATH --destination-key PATH [--dry-run]
   buzz-artifact-sync --data PATH --from URL --to URL --key PATH [--dry-run]
 
 Options:
   --data PATH   Local durable journal to walk for x-tag references
   --from URL    Peer whose artifact store serves the missing blobs
   --to URL      Local relay whose artifact store receives them
-  --key PATH    Node secret key (hex) for NIP-98 on both sides
-  --dry-run     Report the missing set without fetching"
+  --source-key PATH       Source-reader credential for peer GET
+  --destination-key PATH  Destination-owner credential for local HEAD/POST
+  --key PATH              Legacy explicit collapsed-role compatibility
+  --dry-run               Report the missing set without fetching"
     );
 }
 
@@ -125,9 +159,8 @@ fn referenced_hashes(journal: &str) -> BTreeSet<String> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let config = Config::from_args()?;
-    let secret = std::fs::read_to_string(&config.key_file)
-        .with_context(|| format!("failed to read key file {}", config.key_file.display()))?;
-    let keys = Keys::new(SecretKey::from_hex(secret.trim()).context("invalid secret key")?);
+    let source_keys = read_keys(&config.source_key_file, "source reader")?;
+    let destination_keys = read_keys(&config.destination_key_file, "destination owner")?;
     let journal = std::fs::read_to_string(&config.data)
         .with_context(|| format!("failed to read journal {}", config.data.display()))?;
     let referenced = referenced_hashes(&journal);
@@ -141,7 +174,7 @@ async fn main() -> anyhow::Result<()> {
             .head(&local_url)
             .header(
                 "authorization",
-                header(&keys, HttpMethod::GET, &local_url, b"")?,
+                header(&destination_keys, HttpMethod::GET, &local_url, b"")?,
             )
             .send()
             .await
@@ -160,7 +193,7 @@ async fn main() -> anyhow::Result<()> {
             .get(&remote_url)
             .header(
                 "authorization",
-                header(&keys, HttpMethod::GET, &remote_url, b"")?,
+                header(&source_keys, HttpMethod::GET, &remote_url, b"")?,
             )
             .send()
             .await
@@ -180,7 +213,7 @@ async fn main() -> anyhow::Result<()> {
             .post(&upload_url)
             .header(
                 "authorization",
-                header(&keys, HttpMethod::POST, &upload_url, &bytes)?,
+                header(&destination_keys, HttpMethod::POST, &upload_url, &bytes)?,
             )
             .header("content-type", "application/octet-stream")
             .body(bytes)
@@ -199,4 +232,84 @@ async fn main() -> anyhow::Result<()> {
         referenced.len()
     );
     Ok(())
+}
+
+fn read_keys(path: &PathBuf, role: &str) -> anyhow::Result<Keys> {
+    let secret = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read {role} key file {}", path.display()))?;
+    Ok(Keys::new(
+        SecretKey::from_hex(secret.trim()).with_context(|| format!("invalid {role} secret key"))?,
+    ))
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+
+    fn args<'a>(values: &'a [&'a str]) -> impl Iterator<Item = String> + 'a {
+        values.iter().map(|value| (*value).to_string())
+    }
+
+    #[test]
+    fn split_credentials_are_kept_distinct() {
+        let config = Config::from_iter(args(&[
+            "--data",
+            "journal",
+            "--from",
+            "https://source.example",
+            "--to",
+            "http://destination.example",
+            "--source-key",
+            "reader.key",
+            "--destination-key",
+            "owner.key",
+        ]))
+        .expect("config parses");
+        assert_eq!(config.source_key_file, PathBuf::from("reader.key"));
+        assert_eq!(config.destination_key_file, PathBuf::from("owner.key"));
+    }
+
+    #[test]
+    fn legacy_key_is_an_explicit_collapsed_role() {
+        let config = Config::from_iter(args(&[
+            "--data",
+            "journal",
+            "--from",
+            "https://source.example",
+            "--to",
+            "http://destination.example",
+            "--key",
+            "node.key",
+        ]))
+        .expect("config parses");
+        assert_eq!(config.source_key_file, PathBuf::from("node.key"));
+        assert_eq!(config.destination_key_file, PathBuf::from("node.key"));
+    }
+
+    #[test]
+    fn partial_or_mixed_credentials_are_rejected() {
+        for credentials in [
+            vec!["--source-key", "reader.key"],
+            vec!["--destination-key", "owner.key"],
+            vec![
+                "--key",
+                "node.key",
+                "--source-key",
+                "reader.key",
+                "--destination-key",
+                "owner.key",
+            ],
+        ] {
+            let mut base = vec![
+                "--data",
+                "journal",
+                "--from",
+                "https://source.example",
+                "--to",
+                "http://destination.example",
+            ];
+            base.extend(credentials);
+            assert!(Config::from_iter(args(&base)).is_err());
+        }
+    }
 }

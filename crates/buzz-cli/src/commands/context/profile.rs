@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use nostr::Keys;
 use serde::{Deserialize, Serialize};
 
+use crate::client::BuzzClient;
 use crate::error::CliError;
 
 pub const PROFILE_SCHEMA_VERSION: u32 = 1;
@@ -241,6 +242,14 @@ pub fn resolve_profile(
         .cloned()
         .unwrap_or_else(|| environment.data_home.join("buzz-local-relay").join(name));
 
+    let compatibility_local = environment
+        .variables
+        .get("BUZZ_CTX_LOCAL")
+        .cloned()
+        .unwrap_or_else(default_local_relay);
+    let compatibility_rendezvous = environment.variables.get("BUZZ_CTX_CLOUD").cloned();
+    let compatibility_context = environment.variables.get("BUZZ_CTX_CONTEXT").cloned();
+
     let (mut file, source) = if config_path.is_file() {
         (
             parse_profile(&config_path)?,
@@ -252,12 +261,22 @@ pub fn resolve_profile(
         )
     } else if let Some(root) = explicit {
         (
-            legacy_profile(root, default_local_relay(), None, None),
+            legacy_profile(
+                root,
+                compatibility_local.clone(),
+                compatibility_rendezvous.clone(),
+                compatibility_context.clone(),
+            ),
             ProfileSource::ExplicitOverride,
         )
     } else if path_has_entries(&legacy_root)? {
         (
-            legacy_profile(&legacy_root, default_local_relay(), None, None),
+            legacy_profile(
+                &legacy_root,
+                compatibility_local,
+                compatibility_rendezvous,
+                compatibility_context,
+            ),
             ProfileSource::LegacyDetected,
         )
     } else {
@@ -468,6 +487,26 @@ fn default_local_relay() -> String {
 }
 
 impl ResolvedProfile {
+    pub fn require_ready(&self) -> Result<(), CliError> {
+        match self.layout {
+            LayoutStatus::Ready => Ok(()),
+            LayoutStatus::LegacyUnmigrated => Err(CliError::Usage(format!(
+                "legacy state detected at {}; run `buzz context --profile {} migrate` first or set BUZZ_CTX_HOME explicitly",
+                self.legacy_root.display(),
+                self.name
+            ))),
+            LayoutStatus::FreshUnconfigured => Err(CliError::Usage(format!(
+                "profile {} is not configured; create {} or run context migrate",
+                self.name,
+                self.config_path.display()
+            ))),
+            LayoutStatus::Conflicting => Err(CliError::Conflict(format!(
+                "legacy and profile-managed state both exist; refusing ambiguous layout for profile {}",
+                self.name
+            ))),
+        }
+    }
+
     pub fn identity(&self, role: &str) -> Option<&IdentityRef> {
         match role {
             "journal_author" => self.file.identities.journal_author.as_ref(),
@@ -540,6 +579,45 @@ impl ResolvedProfile {
             return Ok(identity.reference.to_ascii_lowercase());
         }
         Ok(self.keys_for(role, environment)?.public_key().to_hex())
+    }
+
+    pub fn client_for(
+        &self,
+        role: &str,
+        relay: &str,
+        environment: &ProfileEnvironment,
+    ) -> Result<BuzzClient, CliError> {
+        let keys = self.keys_for(role, environment)?;
+        let identity = self.identity(role).ok_or_else(|| {
+            CliError::Auth(format!(
+                "profile {} does not configure role {role}",
+                self.name
+            ))
+        })?;
+        let (auth_tag, auth_tag_json) = match identity.auth_tag.as_deref() {
+            Some(path) => {
+                let json = std::fs::read_to_string(path).map_err(|error| {
+                    CliError::Auth(format!(
+                        "could not read owner attestation for role {role} from {}: {error}",
+                        path.display()
+                    ))
+                })?;
+                let json = json.trim().to_string();
+                let tag = buzz_sdk::nip_oa::parse_auth_tag(&json).map_err(|error| {
+                    CliError::Auth(format!(
+                        "owner attestation for role {role} is malformed: {error}"
+                    ))
+                })?;
+                buzz_sdk::nip_oa::verify_auth_tag(&json, &keys.public_key()).map_err(|error| {
+                    CliError::Auth(format!(
+                        "owner attestation for role {role} is invalid: {error}"
+                    ))
+                })?;
+                (Some(tag), Some(json))
+            }
+            None => (None, None),
+        };
+        BuzzClient::new(relay.to_string(), keys, auth_tag, auth_tag_json)
     }
 }
 
