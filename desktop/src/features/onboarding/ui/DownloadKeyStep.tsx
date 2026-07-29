@@ -32,6 +32,9 @@ export function DownloadKeyStep({
   // True once the encrypted payload exists — the create button (living in the
   // footer's primary slot) disappears with the form, so Next takes its place.
   const [hasCreated, setHasCreated] = React.useState(false);
+  // True once the user has passed the backup test — until then Next stays
+  // disabled and "Skip for now" remains the escape hatch.
+  const [hasVerified, setHasVerified] = React.useState(false);
   // Footer slot the creator portals its "Download" button into.
   const [createButtonSlot, setCreateButtonSlot] =
     React.useState<HTMLElement | null>(null);
@@ -47,7 +50,9 @@ export function DownloadKeyStep({
         {/* Plain string concat: cn()'s tailwind-merge misreads the custom
             text-title size token as conflicting with text-foreground. */}
         <h1 className="text-title font-normal text-foreground">
-          {hasCreated ? "Test your backup" : "Backup your key with a password"}
+          {hasCreated
+            ? "Now, test your backup"
+            : "Backup your key with a password"}
         </h1>
         <p className="mt-5 text-sm leading-6 text-foreground/80">
           {hasCreated
@@ -69,6 +74,7 @@ export function DownloadKeyStep({
                   createButtonClassName={ONBOARDING_PRIMARY_CTA_CLASS}
                   createButtonPortal={createButtonSlot}
                   onCreated={() => setHasCreated(true)}
+                  onVerified={() => setHasVerified(true)}
                   variant="spotlight"
                 />
               </div>
@@ -79,14 +85,30 @@ export function DownloadKeyStep({
 
       <OnboardingFooter>
         {hasCreated ? (
-          <Button
-            className={ONBOARDING_PRIMARY_CTA_CLASS}
-            data-testid="onboarding-next"
-            onClick={onNext}
-            type="button"
-          >
-            Next
-          </Button>
+          /* Relative row keeps Next truly centered while Skip hangs off its
+             right edge without shifting the center. */
+          <div className="relative flex items-center justify-center">
+            <Button
+              className={ONBOARDING_PRIMARY_CTA_CLASS}
+              data-testid="onboarding-next"
+              disabled={!hasVerified}
+              onClick={onNext}
+              type="button"
+            >
+              Next
+            </Button>
+            {hasVerified ? null : (
+              <Button
+                className="absolute left-full ml-3 h-9 animate-in whitespace-nowrap rounded-full px-6 fade-in fill-mode-backwards [animation-delay:1000ms] animation-duration-[500ms] hover:bg-foreground/10 motion-reduce:animate-none"
+                data-testid="onboarding-skip"
+                onClick={onNext}
+                type="button"
+                variant="ghost"
+              >
+                Skip for now
+              </Button>
+            )}
+          </div>
         ) : (
           /* Relative row keeps the Download CTA truly centered while Skip
              hangs off its right edge without shifting the center. */

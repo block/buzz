@@ -148,16 +148,22 @@ test("download happy path: generated password, encrypt, native save, Next", asyn
 
   await page.getByTestId("encrypted-backup-create").click();
 
-  // Download commits the blob and hands over to the "Test your backup"
-  // flow: a dropzone for the saved file, then the password to unlock it.
+  // Download commits the blob and hands over to the "Now, test your backup"
+  // flow: a select-file button (dropzone while dragging) for the saved file,
+  // then the password to unlock it.
   await expect(
-    page.getByRole("heading", { name: "Test your backup" }),
+    page.getByRole("heading", { name: "Now, test your backup" }),
   ).toBeVisible();
   const dropzone = page.getByTestId("backup-test-dropzone");
   await expect(dropzone).toBeVisible();
   await expect(page.getByTestId("encrypted-backup-saved-path")).toContainText(
     "identity.ncryptsec",
   );
+
+  // Until the test passes, Next stays disabled and Skip remains the escape
+  // hatch.
+  await expect(page.getByTestId("onboarding-next")).toBeDisabled();
+  await expect(page.getByTestId("onboarding-skip")).toBeVisible();
 
   await waitForAnimations(page);
   await page.screenshot({ path: `${SHOTS}/04-backup-test-dropzone.png` });
@@ -203,7 +209,9 @@ test("download happy path: generated password, encrypt, native save, Next", asyn
   expect(commands).not.toContain("get_nsec");
   expect(commands).toContain("create_ncryptsec_backup");
 
+  // A passed test unlocks Next and retires the Skip escape hatch.
   await expect(page.getByTestId("onboarding-next")).toBeEnabled();
+  await expect(page.getByTestId("onboarding-skip")).toHaveCount(0);
   await page.getByTestId("onboarding-next").click();
   await expect(page.getByTestId("onboarding-page-2")).toBeVisible();
 });

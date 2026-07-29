@@ -113,6 +113,38 @@ export function BackupTestFlow({
   const reduceMotion = useReducedMotion() ?? false;
   const [stage, setStage] = React.useState<BackupTestStage>("drop");
   const [isDragActive, setIsDragActive] = React.useState(false);
+  // True while a file drag is anywhere over the window — the select button
+  // renders as a dropzone only for the duration of the drag.
+  const [isWindowDragging, setIsWindowDragging] = React.useState(false);
+  const dragDepthRef = React.useRef(0);
+
+  React.useEffect(() => {
+    // dragenter/dragleave fire per nested element, so track depth to know
+    // when the drag has actually left the window.
+    const handleDragEnter = (event: DragEvent) => {
+      if (!event.dataTransfer?.types.includes("Files")) return;
+      dragDepthRef.current += 1;
+      setIsWindowDragging(true);
+    };
+    const handleDragLeave = () => {
+      dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+      if (dragDepthRef.current === 0) setIsWindowDragging(false);
+    };
+    const handleDragEnd = () => {
+      dragDepthRef.current = 0;
+      setIsWindowDragging(false);
+    };
+    window.addEventListener("dragenter", handleDragEnter);
+    window.addEventListener("dragleave", handleDragLeave);
+    window.addEventListener("drop", handleDragEnd);
+    window.addEventListener("dragend", handleDragEnd);
+    return () => {
+      window.removeEventListener("dragenter", handleDragEnter);
+      window.removeEventListener("dragleave", handleDragLeave);
+      window.removeEventListener("drop", handleDragEnd);
+      window.removeEventListener("dragend", handleDragEnd);
+    };
+  }, []);
   const [fileName, setFileName] = React.useState<string | null>(null);
   const [fileError, setFileError] = React.useState<string | null>(null);
   const [attempt, setAttempt] = React.useState("");
@@ -249,11 +281,16 @@ export function BackupTestFlow({
           />
           <button
             className={cn(
-              "flex w-full flex-col items-center justify-center gap-2 rounded-2xl border-2 border-dashed px-6 text-center transition-colors",
-              isSpotlight ? "h-44" : "h-32",
-              isDragActive
-                ? "border-primary bg-primary/10"
-                : "border-foreground/25 bg-background/40 hover:border-foreground/40 hover:bg-background/70",
+              "flex flex-col items-center justify-center gap-2 text-center transition-all",
+              isWindowDragging
+                ? cn(
+                    "w-full rounded-2xl border-2 border-dashed px-6",
+                    isSpotlight ? "h-44" : "h-32",
+                    isDragActive
+                      ? "border-primary bg-primary/10"
+                      : "border-foreground/25 bg-background/40",
+                  )
+                : "mx-auto h-14 rounded-full bg-primary px-12 text-(--buzz-onboarding-cta-label) shadow hover:bg-primary/90",
             )}
             data-testid="backup-test-dropzone"
             onClick={() => fileInputRef.current?.click()}
@@ -270,19 +307,24 @@ export function BackupTestFlow({
             }}
             type="button"
           >
-            <FileUp
-              aria-hidden="true"
-              className={cn(
-                "h-8 w-8 transition-colors",
-                isDragActive ? "text-primary" : "text-muted-foreground",
-              )}
-            />
-            <span className="text-sm font-medium text-foreground">
-              Drop your backup file here
-            </span>
-            <span className="text-xs text-muted-foreground">
-              or click to browse for it
-            </span>
+            {isWindowDragging ? (
+              <>
+                <FileUp
+                  aria-hidden="true"
+                  className={cn(
+                    "h-8 w-8 transition-colors",
+                    isDragActive ? "text-primary" : "text-muted-foreground",
+                  )}
+                />
+                <span className="text-sm font-medium text-foreground">
+                  Drop your backup file here
+                </span>
+              </>
+            ) : (
+              <span className="text-base font-medium">
+                Select your backup file
+              </span>
+            )}
           </button>
           {fileError ? (
             <p
@@ -294,15 +336,14 @@ export function BackupTestFlow({
           ) : null}
           <div className="flex flex-col items-center gap-2">
             <Button
-              className="h-8 gap-1.5 text-sm"
+              className="h-12 gap-1.5 rounded-full bg-foreground/10 px-10 text-base hover:bg-foreground/15"
               data-testid="encrypted-backup-save-copy"
               disabled={isSaving}
               onClick={onSaveCopy}
-              size="sm"
               type="button"
-              variant="outline"
+              variant="ghost"
             >
-              {isSaving ? <Spinner className="h-3.5 w-3.5 border-2" /> : null}
+              {isSaving ? <Spinner className="h-4 w-4 border-2" /> : null}
               Re-download backup
             </Button>
             {savedPath ? (

@@ -144,6 +144,8 @@ type EncryptedBackupCreatorProps = {
   onCreated?: () => void;
   /** Fired only after the encrypted key file has been saved successfully. */
   onSaved?: (path: string) => void;
+  /** Fired once when the user completes the backup test successfully. */
+  onVerified?: () => void;
 };
 
 /**
@@ -324,6 +326,7 @@ export function EncryptedBackupCreator({
   createButtonClassName,
   onCreated,
   onSaved,
+  onVerified,
 }: EncryptedBackupCreatorProps) {
   const [state, dispatch] = React.useReducer(
     encryptedBackupReducer,
@@ -449,6 +452,7 @@ export function EncryptedBackupCreator({
           isSaving={isSaving}
           ncryptsec={state.ncryptsec}
           onSaveCopy={() => void handleSaveCopy()}
+          onVerified={onVerified}
           passphrase={state.passphrase}
           saveError={saveError}
           savedPath={savedPath}
