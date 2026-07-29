@@ -5,11 +5,15 @@ import {
   invalidateChannelState,
   useAddChannelMembersMutation,
   useChannelMembersQuery,
+  useChannelsQuery,
 } from "@/features/channels/hooks";
 import { attachManagedAgentToChannel } from "@/features/agents/channelAgents";
 import {
   coalesceAgentAutocompleteCandidates,
+  getMentionableAgentPubkeys,
+  getSharedChannelIds,
   isAgentIdentityInManagedList,
+  isOwnAgentCandidate,
 } from "@/features/agents/lib/agentAutocompleteEligibility";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import { useClassifiedMembers } from "@/features/channels/lib/useClassifiedMembers";
@@ -253,6 +257,11 @@ export function MembersSidebar({
   });
   const userSearchResults = useFlattenedUserSearchResults(userSearchQuery.data);
   const isArchivedDiscovery = useIsArchivedPredicate();
+  const channelsQuery = useChannelsQuery();
+  const sharedChannelIds = React.useMemo(
+    () => getSharedChannelIds(channelsQuery.data),
+    [channelsQuery.data],
+  );
   const addSearchResults = React.useMemo(() => {
     if (!canAddMembers || normalizedDeferredSearchQuery.length === 0) {
       return [];
@@ -272,6 +281,17 @@ export function MembersSidebar({
         .filter((label): label is string => Boolean(label)),
     );
     const managedAgentPubkeys = new Set(managedAgentsByPubkey.keys());
+    // Directory-eligible external agents (respond_to anyone/allowlist,
+    // verified via a shared channel or the allowlist) count alongside the
+    // local managed list — otherwise an externally-hosted agent can never
+    // be added to a channel from this picker (buzz#2987). `isAgentIdentityInManagedList`
+    // alone only recognizes agents THIS desktop spawns.
+    const mentionableAgentPubkeys = getMentionableAgentPubkeys({
+      currentPubkey,
+      managedAgentPubkeys,
+      relayAgents: relayAgentsQuery.data,
+      sharedChannelIds,
+    });
 
     const addCandidate = (candidate: AddMemberSearchCandidate) => {
       const pubkey = normalizePubkey(candidate.pubkey);
@@ -282,7 +302,9 @@ export function MembersSidebar({
           )) ||
         memberPubkeys.has(pubkey) ||
         isArchivedDiscovery(pubkey) ||
-        !isAgentIdentityInManagedList(candidate, managedAgentPubkeys)
+        (!isAgentIdentityInManagedList(candidate, managedAgentPubkeys) &&
+          !mentionableAgentPubkeys.has(pubkey) &&
+          !isOwnAgentCandidate(candidate, currentPubkey))
       ) {
         return;
       }
@@ -367,6 +389,7 @@ export function MembersSidebar({
     memberPubkeys,
     normalizedDeferredSearchQuery,
     relayAgentsQuery.data,
+    sharedChannelIds,
     userSearchResults,
     rawMembers,
   ]);

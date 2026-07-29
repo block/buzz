@@ -666,12 +666,18 @@ pub enum ChannelsCmd {
         #[arg(long)]
         pubkey: String,
     },
-    /// Set your channel addition policy
+    /// Set your channel addition policy and/or agent respond-to gate
     #[command(name = "set-add-policy")]
     SetAddPolicy {
         /// Policy: anyone | owner_only | nobody
         #[arg(long)]
-        policy: String,
+        policy: Option<String>,
+        /// Who can @mention/address this agent: owner-only | anyone | allowlist
+        #[arg(long = "respond-to")]
+        respond_to: Option<String>,
+        /// Comma-separated allowlist of 64-char hex pubkeys (used with --respond-to allowlist)
+        #[arg(long = "respond-to-allowlist", value_delimiter = ',')]
+        respond_to_allowlist: Option<Vec<String>>,
     },
 }
 

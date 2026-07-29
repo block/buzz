@@ -16,7 +16,7 @@ import {
   coalesceAutocompleteCandidatesByKey,
   getMentionableAgentPubkeys,
   getSharedChannelIds,
-  isAgentIdentityInManagedList,
+  isOwnAgentCandidate,
   shouldHideAgentFromMentions,
 } from "@/features/agents/lib/agentAutocompleteEligibility";
 import {
@@ -246,13 +246,14 @@ export function useMentions(
       if (isArchivedDiscovery(pubkey)) {
         return;
       }
-      if (!isAgentIdentityInManagedList(candidate, managedAgentPubkeys)) {
-        return;
-      }
+      // Dropped the local-managed-list pre-gate here: it silently rejected
+      // externally-hosted agents before `shouldHideAgentFromMentions` (below)
+      // ever ran its real respond_to/allowlist/ownership check (buzz#2987).
       if (
         shouldHideAgentFromMentions({
           isAgent: candidate.isAgent === true,
           isMember: candidate.isMember === true,
+          isOwnAgent: isOwnAgentCandidate(candidate, currentPubkey),
           pubkey,
           mentionableAgentPubkeys,
           directoryAgentPubkeys,
@@ -420,7 +421,6 @@ export function useMentions(
     managedAgentNamesByPubkey,
     managedAgentPersonaIds,
     managedAgentPersonaIdsByPubkey,
-    managedAgentPubkeys,
     managedAgentsQuery.data,
     memberPubkeys,
     members,

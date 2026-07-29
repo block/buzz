@@ -64,20 +64,42 @@ export function isAgentIdentityInManagedList(
   );
 }
 
+export function isOwnAgentCandidate(
+  candidate: { ownerPubkey?: string | null },
+  currentPubkey: string | null | undefined,
+) {
+  return (
+    candidate.ownerPubkey != null &&
+    currentPubkey != null &&
+    normalizePubkey(candidate.ownerPubkey) === normalizePubkey(currentPubkey)
+  );
+}
+
 export function shouldHideAgentFromMentions({
   isAgent,
   isMember,
+  isOwnAgent = false,
   pubkey,
   mentionableAgentPubkeys,
   directoryAgentPubkeys,
 }: {
   isAgent: boolean;
   isMember: boolean;
+  /**
+   * Cryptographically verified (NIP-OA) ownership: the candidate's kind:0
+   * `auth` tag names the current user as owner. `respond_to: "owner-only"`
+   * can never satisfy `relayAgentIsSharedWithUser` (it only matches
+   * `anyone`/`allowlist`), so without this escape the literal owner of a
+   * remotely-hosted owner-only agent could never mention their own agent
+   * once it published a directory entry (buzz#2987).
+   */
+  isOwnAgent?: boolean;
   pubkey: string;
   mentionableAgentPubkeys: ReadonlySet<string>;
   directoryAgentPubkeys: ReadonlySet<string>;
 }) {
   if (!isAgent) return false;
+  if (isOwnAgent) return false;
   const normalized = normalizePubkey(pubkey);
   // Invocable => always show.
   if (mentionableAgentPubkeys.has(normalized)) return false;
