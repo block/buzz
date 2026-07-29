@@ -3,11 +3,13 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Buzz UI Preview · BC home / Raft theme</title>
+  <title>Buzz · 样式预览切换</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700;800&display=swap" rel="stylesheet" />
   <style>
-    :root, html[data-theme="raft"] {
+    /* ===== Theme packs (home_portal inspired) ===== */
+    html[data-theme="raft"] {
       --bg: #fff8f0;
       --paper: #ffffff;
       --ink: #1c1917;
@@ -15,232 +17,566 @@
       --line: #1c1917;
       --accent: #fbbf24;
       --accent-soft: #fef3c7;
-      --ok: #15803d;
-      --ok-soft: #dcfce7;
-      --bad: #e11d48;
       --side: #292524;
+      --side-2: #1c1917;
+      --side-text: #fafaf9;
+      --side-muted: #d6d3d1;
+      --side-hover: #44403c;
+      --outer: #fbbf24;          /* 最外层黄圈 — Owner 指定 */
+      --outer-w: 6px;
+      --radius: 0px;
+      --avatar-r: 0px;          /* 方形头像 */
+      --shadow: #292524;
+      --msg-me: #fbbf24;
+      --banner-bg: #fef9c3;
+      --font: "Space Grotesk", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+    /* Raft soft: 仍黄外框，略圆角 */
+    html[data-theme="raft-soft"] {
+      --bg: #fff8f0;
+      --paper: #ffffff;
+      --ink: #1c1917;
+      --muted: #57534e;
+      --line: #292524;
+      --accent: #fbbf24;
+      --accent-soft: #fef3c7;
+      --side: #292524;
+      --side-2: #1c1917;
+      --side-text: #fafaf9;
+      --side-muted: #d6d3d1;
+      --side-hover: #44403c;
+      --outer: #fbbf24;
+      --outer-w: 5px;
+      --radius: 10px;
+      --avatar-r: 4px;
+      --shadow: #292524;
+      --msg-me: #fbbf24;
+      --banner-bg: #fef9c3;
+      --font: "Space Grotesk", "Segoe UI", "PingFang SC", sans-serif;
+    }
+    /* Ruff dark */
+    html[data-theme="ruff"] {
+      --bg: #1c1917;
+      --paper: #292524;
+      --ink: #fafaf9;
+      --muted: #a8a29e;
+      --line: #57534e;
+      --accent: #e0571d;
+      --accent-soft: #431407;
+      --side: #0c0a09;
+      --side-2: #000;
       --side-text: #fafaf9;
       --side-muted: #a8a29e;
-      --side-accent: #fbbf24;
-      --radius: 0px;
-      --border-w: 3px;
-      --font: "Space Grotesk", "Segoe UI", "PingFang SC", "Helvetica Neue", sans-serif;
+      --side-hover: #292524;
+      --outer: #e0571d;
+      --outer-w: 5px;
+      --radius: 8px;
+      --avatar-r: 0px;
+      --shadow: #000;
+      --msg-me: #e0571d;
+      --banner-bg: #292524;
+      --font: "Space Grotesk", "Segoe UI", sans-serif;
     }
+    /* Mist 雾蓝 */
+    html[data-theme="mist"] {
+      --bg: #eef2f6;
+      --paper: #fbfcfe;
+      --ink: #2c333a;
+      --muted: #6b7680;
+      --line: #7ba3c9;
+      --accent: #7ba3c9;
+      --accent-soft: #e4eef6;
+      --side: #2c3a4a;
+      --side-2: #1e2a36;
+      --side-text: #f5f8fb;
+      --side-muted: #b6c5d4;
+      --side-hover: #3a4b5c;
+      --outer: #7ba3c9;
+      --outer-w: 5px;
+      --radius: 12px;
+      --avatar-r: 0px;
+      --shadow: #cfd8e0;
+      --msg-me: #7ba3c9;
+      --banner-bg: #e4eef6;
+      --font: "Space Grotesk", "Segoe UI", "PingFang SC", sans-serif;
+    }
+    /* High contrast 高对比纸张 */
+    html[data-theme="paper"] {
+      --bg: #fffdf7;
+      --paper: #ffffff;
+      --ink: #111;
+      --muted: #444;
+      --line: #111;
+      --accent: #ffcc00;
+      --accent-soft: #fff3b0;
+      --side: #111;
+      --side-2: #000;
+      --side-text: #fff;
+      --side-muted: #ddd;
+      --side-hover: #333;
+      --outer: #ffcc00;
+      --outer-w: 8px;
+      --radius: 0px;
+      --avatar-r: 0px;
+      --shadow: #111;
+      --msg-me: #ffcc00;
+      --banner-bg: #fff3b0;
+      --font: "Space Grotesk", "Segoe UI", "PingFang SC", sans-serif;
+    }
+
     * { box-sizing: border-box; }
     html, body { height: 100%; margin: 0; }
     body {
       font-family: var(--font);
-      background: var(--bg);
-      color: var(--ink);
+      font-weight: 600;
       letter-spacing: -0.01em;
+      background: #e7e5e4;
+      color: var(--ink);
+      font-size: 15px;
     }
-    .shell { display: flex; height: 100%; min-height: 100vh; }
-    .side {
-      width: 280px; flex-shrink: 0;
-      background: var(--side); color: var(--side-text);
-      border-right: var(--border-w) solid var(--line);
-      display: flex; flex-direction: column;
+
+    .page {
+      max-width: 1280px;
+      margin: 0 auto;
+      padding: 14px 14px 28px;
     }
-    .brand {
-      padding: 18px 16px; font-weight: 800; font-size: 1.15rem;
-      border-bottom: var(--border-w) solid #44403c;
-      display: flex; align-items: center; gap: 10px;
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 12px;
+      padding: 10px 12px;
+      background: #fff;
+      border: 3px solid #1c1917;
+      box-shadow: 4px 4px 0 #1c1917;
     }
-    .mark {
-      width: 36px; height: 36px; background: var(--accent); color: var(--ink);
-      display: grid; place-items: center; font-weight: 900; border: 2px solid var(--ink);
+    .controls strong { font-weight: 800; margin-right: 6px; }
+    .theme-btn {
+      border: 2px solid #1c1917;
+      background: #fafaf9;
+      color: #1c1917;
+      font: inherit;
+      font-weight: 800;
+      font-size: 13px;
+      padding: 8px 12px;
+      cursor: pointer;
     }
-    .nav { padding: 12px; display: flex; flex-direction: column; gap: 6px; flex: 1; overflow: auto; }
-    .nav a {
-      color: var(--side-text); text-decoration: none; padding: 10px 12px;
-      border: 2px solid transparent; font-weight: 600;
+    .theme-btn.on {
+      background: #fbbf24;
+      box-shadow: 2px 2px 0 #1c1917;
     }
-    .nav a:hover, .nav a.on {
-      background: color-mix(in srgb, var(--side) 70%, #fff 12%);
-      border-color: var(--side-accent);
+    .hint {
+      width: 100%;
+      font-size: 12.5px;
+      color: #57534e;
+      font-weight: 600;
     }
-    .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 8px; background: #71717a; }
-    .dot.ok { background: #22c55e; }
-    .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
-    .top {
-      display: flex; align-items: center; justify-content: space-between; gap: 12px;
-      padding: 12px 16px; background: var(--paper);
-      border-bottom: var(--border-w) solid var(--line);
+    .hint code {
+      background: #f5f5f4;
+      border: 1px solid #d6d3d1;
+      padding: 1px 5px;
+      font-size: 12px;
     }
-    .top h1 { margin: 0; font-size: 1.1rem; font-weight: 800; }
-    .actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-    .btn {
-      border: var(--border-w) solid var(--line); background: var(--ink); color: var(--side-text);
-      padding: 8px 14px; font: inherit; font-weight: 700; cursor: pointer; border-radius: var(--radius);
+
+    /* ===== App shell with yellow outer ring ===== */
+    .shell-wrap {
+      background: var(--outer);
+      padding: var(--outer-w);
+      box-shadow: 8px 8px 0 #1c1917;
     }
-    .btn.ghost { background: var(--paper); color: var(--ink); }
-    .btn.primary { background: var(--accent); color: var(--ink); }
-    .btn.on { outline: 3px solid var(--accent); outline-offset: 1px; }
-    .content { flex: 1; display: grid; grid-template-columns: 1fr 320px; min-height: 0; }
-    .chat {
-      border-right: var(--border-w) solid var(--line); display: flex; flex-direction: column;
-      background: var(--paper);
-    }
-    .msgs { flex: 1; overflow: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
-    .msg {
-      border: var(--border-w) solid var(--line); padding: 12px 14px; background: var(--bg);
-      max-width: 85%;
-    }
-    .msg.me { align-self: flex-end; background: var(--accent-soft); }
-    .msg .who { font-size: 0.8rem; color: var(--muted); font-weight: 700; margin-bottom: 4px; }
-    .composer {
-      border-top: var(--border-w) solid var(--line); padding: 12px; display: flex; gap: 8px;
-    }
-    .composer input {
-      flex: 1; border: var(--border-w) solid var(--line); padding: 10px 12px; font: inherit;
-      background: #fff; border-radius: var(--radius);
-    }
-    .panel { padding: 16px; overflow: auto; background: var(--bg); }
-    .card {
-      background: var(--paper); border: var(--border-w) solid var(--line);
-      padding: 14px; margin-bottom: 12px;
-      box-shadow: 5px 5px 0 var(--ink);
-    }
-    .card.ok { background: var(--ok-soft); }
-    .card h3 { margin: 0 0 6px; font-size: 0.95rem; font-weight: 800; }
-    .card p { margin: 0; color: var(--muted); font-size: 0.88rem; font-weight: 600; }
-    .banner {
-      margin: 12px 16px 0; padding: 10px 12px; border: var(--border-w) solid var(--line);
-      background: var(--accent-soft); font-weight: 700; font-size: 0.9rem;
+    .app {
+      display: grid;
+      grid-template-columns: 56px 260px 1fr;
+      height: min(720px, calc(100vh - 160px));
+      background: var(--bg);
+      border: 3px solid var(--line);
+      border-radius: var(--radius);
+      overflow: hidden;
+      color: var(--ink);
     }
     @media (max-width: 900px) {
-      .content { grid-template-columns: 1fr; }
-      .side { width: 72px; }
-      .side .label { display: none; }
+      .app { grid-template-columns: 1fr; height: auto; min-height: 70vh; }
+      .rail, .sidebar { display: none; }
+      .content { grid-template-columns: 1fr !important; }
+    }
+
+    /* 最左社区栏也在黄外框内；B/W/R 用黄框方钮（Owner） */
+    .rail {
+      background: var(--side-2);
+      border-right: 3px solid var(--accent);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+      padding: 48px 8px 16px;
+    }
+    .rail .dot {
+      width: 40px; height: 40px;
+      border-radius: var(--avatar-r); /* 方形 */
+      background: var(--side);
+      color: var(--side-text);
+      display: grid; place-items: center;
+      font-weight: 800;
+      font-size: 14px;
+      border: 3px solid var(--accent); /* 黄框 */
+      box-shadow: 3px 3px 0 #000;
+      cursor: pointer;
+    }
+    .rail .dot.on, .rail .dot:first-child {
+      background: var(--accent);
+      color: var(--ink);
+      border-color: var(--line);
+    }
+    .rail .dot.idle {
+      background: var(--side);
+      color: var(--side-text);
+      border-color: var(--accent);
+      box-shadow: 2px 2px 0 #000;
+    }
+    .rail .plus {
+      margin-top: auto;
+      width: 40px; height: 40px;
+      border-radius: var(--avatar-r);
+      border: 3px solid var(--accent);
+      background: transparent;
+      color: var(--accent);
+      display: grid; place-items: center;
+      font-size: 22px;
+      font-weight: 800;
+      box-shadow: 2px 2px 0 #000;
+    }
+
+    .sidebar {
+      background: var(--side);
+      color: var(--side-text);
+      border-right: 3px solid var(--line);
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+    }
+    .side-top {
+      padding: 14px 14px 10px;
+      border-bottom: 2px solid color-mix(in srgb, var(--side-text) 18%, transparent);
+    }
+    .brand { font-weight: 800; font-size: 18px; letter-spacing: -0.02em; }
+    .brand span { color: var(--accent); }
+    .side-sub { color: var(--side-muted); font-size: 12px; font-weight: 600; margin-top: 2px; }
+    .nav { padding: 12px 10px; display: flex; flex-direction: column; gap: 4px; flex: 1; overflow: auto; }
+    .nav-item {
+      display: flex; align-items: center; gap: 10px;
+      padding: 10px 12px;
+      border: 2px solid var(--accent); /* 侧栏菜单也黄描边 */
+      color: var(--side-text);
+      font-weight: 700; font-size: 14px;
+      cursor: pointer; user-select: none;
+      border-radius: var(--radius);
+      background: transparent;
+      box-shadow: 2px 2px 0 #000;
+    }
+    .nav-item:hover { background: var(--side-hover); border-color: var(--accent); }
+    .nav-item.on {
+      background: var(--accent);
+      color: var(--ink);
+      border-color: var(--line);
+      box-shadow: 3px 3px 0 #000;
+    }
+    .nav-item .badge {
+      margin-left: auto;
+      background: var(--side-2);
+      color: var(--accent);
+      border: 1px solid var(--accent);
+      font-size: 11px; padding: 1px 6px; font-weight: 800;
+      border-radius: var(--radius);
+    }
+    .section-label {
+      margin: 14px 12px 6px;
+      color: var(--side-muted);
+      font-size: 11px; font-weight: 800;
+      letter-spacing: .06em; text-transform: uppercase;
+    }
+    .ch {
+      display: flex; align-items: center; gap: 8px;
+      padding: 8px 12px;
+      color: var(--side-text);
+      font-weight: 600; font-size: 13.5px;
+      cursor: pointer; border-radius: var(--radius);
+    }
+    .ch:hover { background: var(--side-hover); }
+    .ch .hash { color: var(--accent); font-weight: 800; }
+    .side-foot {
+      border-top: 2px solid color-mix(in srgb, var(--side-text) 18%, transparent);
+      padding: 12px 14px;
+      font-size: 12px; color: var(--side-muted); font-weight: 600;
+    }
+
+    .main { background: var(--bg); display: flex; flex-direction: column; min-width: 0; }
+    .topbar {
+      display: flex; align-items: center; gap: 12px;
+      padding: 12px 16px;
+      background: var(--paper);
+      border-bottom: 3px solid var(--line);
+    }
+    .topbar h1 { margin: 0; font-size: 18px; font-weight: 800; }
+    .pill {
+      border: 2px solid var(--line);
+      background: var(--accent-soft);
+      color: var(--ink);
+      padding: 3px 10px;
+      font-size: 12px; font-weight: 800;
+      box-shadow: 2px 2px 0 var(--shadow);
+      border-radius: var(--radius);
+    }
+    .pill.dark { background: var(--ink); color: var(--accent); }
+    .spacer { flex: 1; }
+    .search {
+      border: 3px solid var(--line);
+      background: var(--paper);
+      color: var(--ink);
+      padding: 8px 12px;
+      min-width: 200px;
+      font: inherit; font-weight: 600;
+      box-shadow: 3px 3px 0 var(--shadow);
+      border-radius: var(--radius);
+    }
+    .content {
+      padding: 16px;
+      overflow: auto;
+      display: grid;
+      grid-template-columns: 320px 1fr;
+      gap: 14px;
+      flex: 1;
+    }
+    .card {
+      background: var(--paper);
+      border: 3px solid var(--line);
+      box-shadow: 5px 5px 0 var(--shadow);
+      padding: 12px;
+      border-radius: var(--radius);
+    }
+    .card h2 {
+      margin: 0 0 10px;
+      font-size: 14px; font-weight: 800;
+      letter-spacing: .04em; text-transform: uppercase;
+    }
+    .row {
+      display: flex; gap: 10px;
+      padding: 10px 8px;
+      border-bottom: 2px solid color-mix(in srgb, var(--line) 12%, transparent);
+      cursor: pointer;
+      border-radius: var(--radius);
+    }
+    .row:hover { background: var(--accent-soft); }
+    /* 方形头像 — Owner 要求 */
+    .av {
+      width: 36px; height: 36px;
+      border-radius: var(--avatar-r) !important;
+      background: var(--ink);
+      color: var(--accent);
+      display: grid; place-items: center;
+      font-weight: 800;
+      border: 2px solid var(--line);
+      flex-shrink: 0;
+      overflow: hidden;
+    }
+    .row .t { font-weight: 800; font-size: 14px; }
+    .row .s { color: var(--muted); font-size: 12.5px; font-weight: 600; margin-top: 2px; }
+    .msg {
+      border: 3px solid var(--line);
+      background: var(--paper);
+      box-shadow: 5px 5px 0 var(--shadow);
+      display: flex; flex-direction: column;
+      min-height: 420px;
+      border-radius: var(--radius);
+    }
+    .msg-h {
+      padding: 12px 14px;
+      border-bottom: 3px solid var(--line);
+      font-weight: 800;
+      background: var(--accent-soft);
+      display: flex; align-items: center; gap: 10px;
+    }
+    .msg-b {
+      padding: 14px; flex: 1;
+      display: flex; flex-direction: column; gap: 12px;
+    }
+    .bubble {
+      max-width: 78%;
+      border: 2px solid var(--line);
+      padding: 10px 12px;
+      font-weight: 600; font-size: 14px; line-height: 1.45;
+      box-shadow: 2px 2px 0 color-mix(in srgb, var(--shadow) 40%, transparent);
+      border-radius: var(--radius);
+    }
+    .bubble.me { align-self: flex-end; background: var(--msg-me); color: var(--ink); }
+    .bubble.them { align-self: flex-start; background: var(--paper); color: var(--ink); }
+    .composer {
+      border-top: 3px solid var(--line);
+      padding: 10px;
+      display: flex; gap: 8px;
+    }
+    .composer input {
+      flex: 1;
+      border: 3px solid var(--line);
+      padding: 10px;
+      font: inherit; font-weight: 600;
+      background: var(--paper); color: var(--ink);
+      border-radius: var(--radius);
+    }
+    .composer button {
+      border: 3px solid var(--line);
+      background: var(--ink);
+      color: var(--accent);
+      font: inherit; font-weight: 800;
+      padding: 10px 16px;
+      cursor: pointer;
+      box-shadow: 3px 3px 0 var(--shadow);
+      border-radius: var(--radius);
+    }
+    .legend {
+      margin-top: 12px;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 8px;
+    }
+    .legend .box {
+      border: 2px solid #1c1917;
+      background: #fff;
+      padding: 8px 10px;
+      font-size: 12px;
+      font-weight: 700;
     }
   </style>
 </head>
 <body>
-  <div class="shell">
-    <aside class="side">
-      <div class="brand"><span class="mark">B</span><span class="label" data-i18n="brand">Buzz · Raft skin</span></div>
-      <nav class="nav">
-        <a class="on" href="#"><span class="dot ok"></span><span class="label" data-i18n="nav_channels">Channels</span></a>
-        <a href="#"><span class="dot"></span><span class="label" data-i18n="nav_dms">DMs</span></a>
-        <a href="#"><span class="dot ok"></span><span class="label" data-i18n="nav_agents">Agents</span></a>
-        <a href="#"><span class="dot"></span><span class="label" data-i18n="nav_settings">Settings</span></a>
-      </nav>
-    </aside>
-    <div class="main">
-      <header class="top">
-        <h1 data-i18n="title">#WORK总控 · UI preview</h1>
-        <div class="actions">
-          <button type="button" class="btn ghost" id="btn-en" onclick="setLang('en')">EN</button>
-          <button type="button" class="btn ghost" id="btn-zh" onclick="setLang('zh')">中文</button>
-          <button type="button" class="btn primary" data-i18n="btn_theme">BC home theme</button>
-        </div>
-      </header>
-      <div class="banner" data-i18n="banner">
-        Preview only — theme tokens from BC home_portal (raft). Not production :3000 yet.
-      </div>
-      <div class="content">
-        <section class="chat">
-          <div class="msgs">
-            <div class="msg">
-              <div class="who">@Cindy</div>
-              <div data-i18n="msg1">Theme aligned to BC home: cream paper, charcoal sidebar, amber accent, hard borders.</div>
-            </div>
-            <div class="msg me">
-              <div class="who" data-i18n="you">You</div>
-              <div data-i18n="msg2">Also want Chinese / English switch.</div>
-            </div>
-            <div class="msg">
-              <div class="who">@Cindy</div>
-              <div data-i18n="msg3">Language toggle is live in this preview (top-right EN / 中文).</div>
-            </div>
-          </div>
-          <div class="composer">
-            <input id="composer" data-i18n-placeholder="ph_composer" placeholder="Message…" />
-            <button type="button" class="btn" data-i18n="send">Send</button>
-          </div>
-        </section>
-        <aside class="panel">
-          <div class="card ok">
-            <h3 data-i18n="card_status">Service status</h3>
-            <p data-i18n="card_status_body">Preview shell · theme OK · i18n OK</p>
-          </div>
-          <div class="card">
-            <h3 data-i18n="card_next">Next</h3>
-            <p data-i18n="card_next_body">Wire same tokens into desktop/web builds; ship language preference to settings.</p>
-          </div>
-          <div class="card">
-            <h3 data-i18n="card_note">Note</h3>
-            <p data-i18n="card_note_body">Production Buzz still old skin until image rebuild / mount.</p>
-          </div>
-        </aside>
+  <div class="page">
+    <div class="controls">
+      <strong>样式切换</strong>
+      <button type="button" class="theme-btn on" data-theme="raft">1 · Raft 黄框</button>
+      <button type="button" class="theme-btn" data-theme="raft-soft">2 · Raft 软角</button>
+      <button type="button" class="theme-btn" data-theme="paper">3 · 高对比纸</button>
+      <button type="button" class="theme-btn" data-theme="mist">4 · 雾蓝</button>
+      <button type="button" class="theme-btn" data-theme="ruff">5 · Ruff 暗</button>
+      <div class="hint">
+        Owner：<b>最外层黄圈</b>含侧栏；<b>B/W/R 也是黄框方钮</b> · 头像方形 · 多套切换。
+        对照真 home：<code>http://192.168.50.135:38081/</code>
+        · 满意回 <code>选 N</code>（如 选 1）→ 我按该套改桌面再打 Windows。
       </div>
     </div>
+
+    <div class="shell-wrap" id="shell">
+      <div class="app">
+        <aside class="rail" title="社区栏 · 黄框方钮">
+          <div class="dot on">B</div>
+          <div class="dot idle">W</div>
+          <div class="dot idle">R</div>
+          <div class="plus">+</div>
+        </aside>
+
+        <aside class="sidebar">
+          <div class="side-top">
+            <div class="brand">Buzz <span>Raft</span></div>
+            <div class="side-sub">预览 · 外框黄 · BWR 黄框方钮 · 方头像</div>
+          </div>
+          <div class="nav">
+            <div class="nav-item on"><span>📥</span> 收件箱 <span class="badge">3</span></div>
+            <div class="nav-item"><span>💬</span> 私信</div>
+            <div class="nav-item"><span>🤖</span> Agents</div>
+            <div class="nav-item"><span>⚡</span> 工作流</div>
+            <div class="section-label">频道</div>
+            <div class="ch"><span class="hash">#</span> WORK总控</div>
+            <div class="ch"><span class="hash">#</span> 体育滚球延迟</div>
+            <div class="ch"><span class="hash">#</span> 自媒体频道</div>
+            <div class="ch"><span class="hash">#</span> BC2</div>
+          </div>
+          <div class="side-foot">侧栏炭灰 + 近白字<br>头像 radius=0 方形</div>
+        </aside>
+
+        <main class="main">
+          <div class="topbar">
+            <h1>收件箱</h1>
+            <span class="pill" id="themePill">样式 1 · Raft 黄框</span>
+            <span class="pill dark">方头像</span>
+            <div class="spacer"></div>
+            <input class="search" placeholder="搜索…" />
+          </div>
+          <div class="content">
+            <section class="card">
+              <h2>会话</h2>
+              <div class="row">
+                <div class="av">C</div>
+                <div>
+                  <div class="t">Cindy · 总控</div>
+                  <div class="s">外层黄框 + 多套样式…</div>
+                </div>
+              </div>
+              <div class="row">
+                <div class="av">V</div>
+                <div>
+                  <div class="t">#WORK总控</div>
+                  <div class="s">头像必须是方形…</div>
+                </div>
+              </div>
+              <div class="row">
+                <div class="av">L</div>
+                <div>
+                  <div class="t">延迟雷达</div>
+                  <div class="s">持续 live 对齐文档…</div>
+                </div>
+              </div>
+            </section>
+            <section class="msg">
+              <div class="msg-h">
+                <div class="av" style="width:28px;height:28px;font-size:12px">V</div>
+                #技术知识收集 · 预览
+              </div>
+              <div class="msg-b">
+                <div class="bubble them">最外层那一圈按 Raft 应该是黄色的；头像方形；多搞几套切换。</div>
+                <div class="bubble me">已改：黄外框 + 方头像 + 5 套主题顶部切换。</div>
+              </div>
+              <div class="composer">
+                <input placeholder="写一条（示意）…" />
+                <button type="button">发送</button>
+              </div>
+            </section>
+          </div>
+        </main>
+      </div>
+    </div>
+
+    <div class="legend">
+      <div class="box">1 Raft 黄框 — home_portal 默认（推荐）</div>
+      <div class="box">2 Raft 软角 — 同色略圆</div>
+      <div class="box">3 高对比纸 — 更粗黄框</div>
+      <div class="box">4 雾蓝 — 偏办公</div>
+      <div class="box">5 Ruff 暗 — 全暗橙强调</div>
+    </div>
   </div>
-  <script>
-    const dict = {
-      en: {
-        brand: "Buzz · Raft skin",
-        nav_channels: "Channels",
-        nav_dms: "DMs",
-        nav_agents: "Agents",
-        nav_settings: "Settings",
-        title: "#WORK总控 · UI preview",
-        btn_theme: "BC home theme",
-        banner: "Preview only — theme tokens from BC home_portal (raft). Not production :3000 yet.",
-        msg1: "Theme aligned to BC home: cream paper, charcoal sidebar, amber accent, hard borders.",
-        msg2: "Also want Chinese / English switch.",
-        msg3: "Language toggle is live in this preview (top-right EN / 中文).",
-        you: "You",
-        ph_composer: "Message…",
-        send: "Send",
-        card_status: "Service status",
-        card_status_body: "Preview shell · theme OK · i18n OK",
-        card_next: "Next",
-        card_next_body: "Wire same tokens into desktop/web builds; ship language preference to settings.",
-        card_note: "Note",
-        card_note_body: "Production Buzz still old skin until image rebuild / mount.",
-      },
-      zh: {
-        brand: "Buzz · Raft 皮",
-        nav_channels: "频道",
-        nav_dms: "私信",
-        nav_agents: "Agent",
-        nav_settings: "设置",
-        title: "#WORK总控 · UI 预览",
-        btn_theme: "BC 总控主题",
-        banner: "仅预览 — 主题来自 BC home_portal（raft）。生产 :3000 尚未更换。",
-        msg1: "主题已对齐 BC home：奶油纸、炭灰侧栏、琥珀强调、硬边框。",
-        msg2: "还要中英文切换。",
-        msg3: "本预览右上角 EN / 中文 可切换语言。",
-        you: "你",
-        ph_composer: "输入消息…",
-        send: "发送",
-        card_status: "服务状态",
-        card_status_body: "预览壳 · 主题 OK · 中英切换 OK",
-        card_next: "下一步",
-        card_next_body: "把同套 token 接到 desktop/web 构建；语言偏好写入设置。",
-        card_note: "说明",
-        card_note_body: "生产 Buzz 仍是旧皮，需重建镜像或挂载后才变。",
-      },
-    };
 
-    function setLang(lang) {
-      const t = dict[lang] || dict.zh;
-      document.documentElement.lang = lang === "zh" ? "zh-CN" : "en";
-      document.querySelectorAll("[data-i18n]").forEach((el) => {
-        const k = el.getAttribute("data-i18n");
-        if (t[k] != null) el.textContent = t[k];
-      });
-      document.querySelectorAll("[data-i18n-placeholder]").forEach((el) => {
-        const k = el.getAttribute("data-i18n-placeholder");
-        if (t[k] != null) el.setAttribute("placeholder", t[k]);
-      });
-      document.getElementById("btn-en").classList.toggle("on", lang === "en");
-      document.getElementById("btn-zh").classList.toggle("on", lang === "zh");
-      localStorage.setItem("buzz-preview-lang", lang);
-    }
-
-    setLang(localStorage.getItem("buzz-preview-lang") || "zh");
-  </script>
+<script>
+const names = {
+  raft: '样式 1 · Raft 黄框',
+  'raft-soft': '样式 2 · Raft 软角',
+  paper: '样式 3 · 高对比纸',
+  mist: '样式 4 · 雾蓝',
+  ruff: '样式 5 · Ruff 暗',
+};
+function setTheme(id) {
+  document.documentElement.setAttribute('data-theme', id);
+  document.querySelectorAll('.theme-btn').forEach(b => {
+    b.classList.toggle('on', b.getAttribute('data-theme') === id);
+  });
+  const p = document.getElementById('themePill');
+  if (p) p.textContent = names[id] || id;
+  try { localStorage.setItem('buzz_preview_theme', id); } catch (e) {}
+  history.replaceState(null, '', '#' + id);
+}
+document.querySelectorAll('.theme-btn').forEach(b => {
+  b.addEventListener('click', () => setTheme(b.getAttribute('data-theme')));
+});
+const fromHash = (location.hash || '').replace('#', '');
+const saved = (() => { try { return localStorage.getItem('buzz_preview_theme'); } catch (e) { return null; } })();
+setTheme(fromHash && names[fromHash] ? fromHash : (saved && names[saved] ? saved : 'raft'));
+</script>
 </body>
 </html>

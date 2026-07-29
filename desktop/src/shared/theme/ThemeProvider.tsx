@@ -12,7 +12,15 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invokeTauri } from "@/shared/api/tauri";
 import { isMacPlatform } from "@/shared/lib/platform";
 import { createThemeVars, hexToHsl } from "./adaptive-theme";
-import { RAFT_ACCENT_HEX, getRaftShellVars } from "./raft-shell";
+import { RAFT_ACCENT_HEX } from "./raft-shell";
+import {
+  DEFAULT_SHELL_STYLE,
+  type ShellStyleId,
+  SHELL_STYLE_STORAGE_KEY,
+  getShellStyle,
+  getShellStyleVars,
+  isShellStyleId,
+} from "./shell-styles";
 import {
   SYNTAX_THEMES,
   type SyntaxThemeName,
@@ -22,9 +30,11 @@ import {
   resolveSystemTheme,
 } from "./theme-loader";
 
+export { SHELL_STYLES, type ShellStyleId } from "./shell-styles";
+
 export const THEME_STORAGE_KEY = "buzz-theme";
 /** Bumped when Buzz shell palette changes so FOUC cache cannot pin stale GitHub-derived chrome. */
-const CACHE_KEY = "buzz-theme-cache.v2-raft";
+const CACHE_KEY = "buzz-theme-cache.v3-shell";
 export const ACCENT_STORAGE_KEY = "buzz-accent-color";
 export const NEUTRAL_ACCENT = "neutral";
 const FOLLOW_SYSTEM_KEY = "buzz-follow-system";
@@ -55,10 +65,13 @@ type ThemeContextValue = {
   isDark: boolean;
   isLoading: boolean;
   accentColor: string;
+  /** App chrome style (Raft / Persona5 / …). Applies on Buzz themes. */
+  shellStyle: ShellStyleId;
   followSystem: boolean;
   hasPair: boolean;
   setTheme: (name: string) => void;
   setAccentColor: (color: string) => void;
+  setShellStyle: (id: ShellStyleId) => void;
   setFollowSystem: (enabled: boolean) => void;
 };
 
@@ -214,25 +227,44 @@ function applyAccentColor(value: string) {
 }
 
 /**
- * The Buzz themes ship with a fixed Raft amber accent rather than a
- * user-selectable accent color. When a Buzz theme is active we force
- * {@link RAFT_ACCENT_HEX} regardless of the stored preference, and the
- * appearance panel hides the accent picker. The user's chosen accent is left
- * untouched in storage so it returns when they switch back to another theme.
+ * The Buzz themes ship with shell-style chrome (Raft amber by default, or
+ * Persona5 / other presets). When a Buzz theme is active we force the shell
+ * accent rather than the free accent picker; the appearance panel shows a
+ * **风格** picker instead. The user's free accent is left in storage for
+ * non-Buzz themes.
  */
 export function isBuzzTheme(themeName: string): boolean {
   return themeName === "buzz" || themeName === "buzz-dark";
 }
 
+export function readStoredShellStyle(): ShellStyleId {
+  try {
+    const stored = window.localStorage.getItem(SHELL_STYLE_STORAGE_KEY);
+    if (stored && isShellStyleId(stored)) return stored;
+  } catch {
+    // ignore
+  }
+  return DEFAULT_SHELL_STYLE;
+}
+
 /**
- * Resolve the accent to actually apply for a theme: Buzz (Raft) themes pin
- * amber primary; every other theme uses the stored/selected accent.
+ * Resolve the accent to actually apply for a theme: Buzz themes pin the
+ * active shell style accent; every other theme uses the stored/selected accent.
  */
 function resolveEffectiveAccent(
   themeName: string,
   accentColor: string,
+  shellStyle: ShellStyleId = readStoredShellStyle(),
 ): string {
-  return isBuzzTheme(themeName) ? RAFT_ACCENT_HEX : accentColor;
+  if (isBuzzTheme(themeName)) {
+    return getShellStyle(shellStyle).accentHex || RAFT_ACCENT_HEX;
+  }
+  return accentColor;
+}
+
+function applyShellStyleAttr(shellStyle: ShellStyleId) {
+  const root = document.documentElement;
+  root.setAttribute("data-shell-style", shellStyle);
 }
 
 /**
@@ -413,10 +445,12 @@ function applyCachedVars(): string | null {
 
     const accent =
       window.localStorage.getItem(ACCENT_STORAGE_KEY) ?? DEFAULT_ACCENT;
-    // Pin Buzz themes to the neutral accent here too, matching applyTheme.
+    const shellStyle = readStoredShellStyle();
+    applyShellStyleAttr(shellStyle);
+    // Pin Buzz themes to the shell accent here too, matching applyTheme.
     // Otherwise a cached Buzz theme + non-neutral stored accent flashes the
     // old accent on reload until the async applyTheme effect runs.
-    applyAccentColor(resolveEffectiveAccent(themeName, accent));
+    applyAccentColor(resolveEffectiveAccent(themeName, accent, shellStyle));
 
     return themeName;
   } catch {
@@ -443,11 +477,13 @@ async function applyTheme(
   });
 
   // Buzz themes keep Shiki syntax colors from github-light/dark, but the app
-  // chrome must use Raft shell tokens (cream/charcoal/amber). Overlay after
+  // chrome uses the selected shell style (Raft / Persona5 / …). Overlay after
   // createThemeVars so inline styles do not pin the old GitHub-derived chrome.
+  const shellStyle = readStoredShellStyle();
   if (isBuzzTheme(name)) {
-    isDark = name === "buzz-dark";
-    vars = { ...vars, ...getRaftShellVars(isDark) };
+    const shell = getShellStyle(shellStyle);
+    isDark = shell.forceDark ? true : name === "buzz-dark";
+    vars = { ...vars, ...getShellStyleVars(shellStyle, isDark) };
   }
 
   const root = document.documentElement;
@@ -457,6 +493,7 @@ async function applyTheme(
 
   root.classList.remove("light", "dark");
   root.classList.add(isDark ? "dark" : "light");
+  applyShellStyleAttr(shellStyle);
   applyBuzzSidebar(name);
   // The Buzz gradient vars are now installed. If the vibrancy layer already
   // resolved for the current request (the IPC won the race against this theme
@@ -469,11 +506,12 @@ async function applyTheme(
   // browser paints the new theme + accent together. Doing this in a later
   // microtask (e.g. the caller's `.then`) let the previous accent flash on the
   // new theme for a frame — the flicker seen when switching to Buzz. Buzz
-  // (Raft) themes resolve to amber primary regardless of the stored value.
+  // themes resolve to the active shell style accent.
   applyAccentColor(
     resolveEffectiveAccent(
       name,
       window.localStorage.getItem(ACCENT_STORAGE_KEY) ?? DEFAULT_ACCENT,
+      shellStyle,
     ),
   );
 
@@ -506,6 +544,9 @@ export function ThemeProvider({
   const loadingRef = useRef<string | null>(null);
   const [accentColor, setAccentColorState] = useState<string>(() => {
     return window.localStorage.getItem(ACCENT_STORAGE_KEY) ?? DEFAULT_ACCENT;
+  });
+  const [shellStyle, setShellStyleState] = useState<ShellStyleId>(() => {
+    return readStoredShellStyle();
   });
   const [followSystem, setFollowSystemState] = useState<boolean>(() => {
     const stored = window.localStorage.getItem(FOLLOW_SYSTEM_KEY);
@@ -597,13 +638,50 @@ export function ThemeProvider({
     };
   }, [followSystem]);
 
-  // Re-apply the accent when the user picks a new swatch or the effective theme
-  // changes. applyTheme already applies the (Buzz-neutral-aware) accent in the
-  // same synchronous batch as the theme vars — the flicker fix — so this effect
-  // is idempotent on theme changes and simply covers accent-only changes.
+  // Re-apply chrome when accent, shell style, or effective theme changes.
+  // applyTheme already batches shell vars + accent on theme load; this covers
+  // shell/accent-only changes without a full Shiki reload when possible.
   useEffect(() => {
-    applyAccentColor(resolveEffectiveAccent(effectiveTheme, accentColor));
-  }, [accentColor, effectiveTheme]);
+    applyShellStyleAttr(shellStyle);
+    if (isBuzzTheme(effectiveTheme)) {
+      const shell = getShellStyle(shellStyle);
+      const dark = shell.forceDark ? true : effectiveTheme === "buzz-dark";
+      const shellVars = getShellStyleVars(shellStyle, dark);
+      const root = document.documentElement;
+      for (const [key, value] of Object.entries(shellVars)) {
+        root.style.setProperty(key, value);
+      }
+      root.classList.remove("light", "dark");
+      root.classList.add(dark ? "dark" : "light");
+      setIsDark(dark);
+      // Keep FOUC cache in sync so refresh retains the selected shell chrome.
+      try {
+        const cachedRaw = window.localStorage.getItem(CACHE_KEY);
+        const cached = cachedRaw ? JSON.parse(cachedRaw) : null;
+        const baseVars =
+          cached &&
+          typeof cached === "object" &&
+          cached.themeName === effectiveTheme &&
+          cached.vars &&
+          typeof cached.vars === "object"
+            ? cached.vars
+            : {};
+        window.localStorage.setItem(
+          CACHE_KEY,
+          JSON.stringify({
+            themeName: effectiveTheme,
+            vars: { ...baseVars, ...shellVars },
+            isDark: dark,
+          }),
+        );
+      } catch {
+        // Storage full — non-critical
+      }
+    }
+    applyAccentColor(
+      resolveEffectiveAccent(effectiveTheme, accentColor, shellStyle),
+    );
+  }, [accentColor, effectiveTheme, shellStyle]);
 
   const setTheme = useCallback((name: string) => {
     if (!isValidThemeName(name)) return;
@@ -614,6 +692,12 @@ export function ThemeProvider({
   const setAccentColor = useCallback((color: string) => {
     window.localStorage.setItem(ACCENT_STORAGE_KEY, color);
     setAccentColorState(color);
+  }, []);
+
+  const setShellStyle = useCallback((id: ShellStyleId) => {
+    if (!isShellStyleId(id)) return;
+    window.localStorage.setItem(SHELL_STYLE_STORAGE_KEY, id);
+    setShellStyleState(id);
   }, []);
 
   const setFollowSystem = useCallback((enabled: boolean) => {
@@ -627,10 +711,12 @@ export function ThemeProvider({
     isDark,
     isLoading,
     accentColor,
+    shellStyle,
     followSystem,
     hasPair,
     setTheme,
     setAccentColor,
+    setShellStyle,
     setFollowSystem,
   };
 

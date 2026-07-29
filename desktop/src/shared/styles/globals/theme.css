@@ -890,3 +890,55 @@
   --buzz-chrome-foreground: rgb(250 250 249 / 88%);
   --buzz-nav-fg: rgb(250 250 249 / 90%);
 }
+
+/*
+ * Shell styles (Settings → Appearance): chrome only — frame / primary / rail.
+ * ThemeProvider sets `data-shell-style` on <html>. Persona 5 variants force a
+ * dark class and recolor the Buzz gradient stops so the warm cream/stone ramp
+ * does not clash with red/black chrome.
+ */
+:root[data-buzz-sidebar][data-shell-style="persona5"],
+:root[data-buzz-sidebar][data-shell-style="persona5max"] {
+  --buzz-gradient-light-top: #1a0003;
+  --buzz-gradient-light-bottom: #0a0a0a;
+  --buzz-gradient-dark-top: #1a0003;
+  --buzz-gradient-dark-bottom: #000000;
+  --buzz-muted-foreground: rgb(255 255 255 / 72%);
+  --buzz-chrome-foreground: rgb(255 255 255 / 90%);
+  --buzz-nav-fg: rgb(255 255 255 / 92%);
+  --buzz-hover-surface: rgb(230 0 18 / 18%);
+  --buzz-active-surface: rgb(230 0 18 / 28%);
+  --radius: 0rem;
+}
+
+:root[data-buzz-sidebar][data-shell-style="persona5max"] {
+  --buzz-gradient-light-top: #2a0010;
+  --buzz-gradient-light-bottom: #000000;
+  --buzz-gradient-dark-top: #330014;
+  --buzz-gradient-dark-bottom: #000000;
+  --buzz-hover-surface: rgb(255 0 51 / 22%);
+  --buzz-active-surface: rgb(255 0 51 / 36%);
+}
+
+/* Max: thicker primary edge on main sidebars (manga-panel feel). */
+:root[data-buzz-sidebar][data-shell-style="persona5max"] [data-testid="app-sidebar"],
+:root[data-buzz-sidebar][data-shell-style="persona5max"] [data-testid="settings-sidebar"] {
+  box-shadow: inset -4px 0 0 0 hsl(var(--primary));
+}
+
+:root[data-buzz-sidebar][data-shell-style="persona5"] [data-testid="app-sidebar"] [data-active="true"],
+:root[data-buzz-sidebar][data-shell-style="persona5max"] [data-testid="app-sidebar"] [data-active="true"],
+:root[data-buzz-sidebar][data-shell-style="persona5"] [data-testid="settings-sidebar"] [data-active="true"],
+:root[data-buzz-sidebar][data-shell-style="persona5max"] [data-testid="settings-sidebar"] [data-active="true"] {
+  background-color: hsl(var(--primary)) !important;
+  color: hsl(var(--primary-foreground)) !important;
+  clip-path: polygon(0 0, 100% 0, 96% 100%, 0 100%);
+}
+
+:root[data-buzz-sidebar][data-shell-style="persona5max"] [data-testid="app-sidebar"] [data-active="true"],
+:root[data-buzz-sidebar][data-shell-style="persona5max"] [data-testid="settings-sidebar"] [data-active="true"] {
+  clip-path: polygon(0 8%, 100% 0, 100% 92%, 0 100%);
+  font-style: italic;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+}

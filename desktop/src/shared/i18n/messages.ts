@@ -95,6 +95,9 @@ const en = {
     "Interface language for the desktop app. Saved on this device.",
   "appearance.language.zh": "中文",
   "appearance.language.en": "English",
+  "appearance.shellStyle.title": "Shell style",
+  "appearance.shellStyle.description":
+    "Chrome palette for Buzz themes (sidebar, primary, borders). Saved on this device.",
 
   // Common actions
   "common.retry": "Retry",
@@ -194,6 +197,9 @@ const zh: Record<MsgKey, string> = {
   "appearance.language.description": "桌面端界面语言，保存在本机。",
   "appearance.language.zh": "中文",
   "appearance.language.en": "English",
+  "appearance.shellStyle.title": "壳层风格",
+  "appearance.shellStyle.description":
+    "Buzz 主题的界面外框/主色/侧栏配色，保存在本机。",
 
   "common.retry": "重试",
   "common.cancel": "取消",
