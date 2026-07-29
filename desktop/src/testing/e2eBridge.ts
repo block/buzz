@@ -1067,6 +1067,8 @@ declare global {
     };
     /** Overrides the first mock repository owner for delegated-owner tests. */
     __BUZZ_E2E_PROJECT_OWNER_OVERRIDE__?: string;
+    /** Suppresses all mock project seeds for zero-projects empty-state tests. */
+    __BUZZ_E2E_HIDE_MOCK_PROJECTS__?: boolean;
     /** Project history kinds rejected with CLOSED for aggregate-query tests. */
     __BUZZ_E2E_REJECT_PROJECT_QUERY_KINDS__?: number[];
     /** Captured aggregate project-history filters for request-count assertions. */
@@ -4988,6 +4990,10 @@ function writeMockProjectBranch(
 }
 
 function buildMockProjectEvents(): RelayEvent[] {
+  if (window.__BUZZ_E2E_HIDE_MOCK_PROJECTS__) {
+    return [];
+  }
+
   const events: RelayEvent[] = [];
   const daySeconds = 86_400;
   const now = Math.floor(Date.now() / 1000);
