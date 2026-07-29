@@ -99,6 +99,40 @@ fn secure_handoff_read_rejects_symlink_and_leaves_target_untouched() {
 
 #[cfg(unix)]
 #[test]
+fn secure_handoff_read_rejects_symlinked_staging_directory() {
+    let real_dir = tempfile::tempdir().unwrap();
+    let path = stage_handoff(
+        real_dir.path(),
+        &config_only_snapshot_bytes("hermes"),
+        0o600,
+    );
+    let parent = tempfile::tempdir().unwrap();
+    let linked_dir = parent.path().join("buzz-handoffs");
+    symlink(real_dir.path(), &linked_dir).unwrap();
+
+    assert!(read_agent_snapshot_handoff_from_dir(&linked_dir, HANDOFF_ID).is_err());
+    assert!(path.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn secure_handoff_read_rejects_hard_linked_payload() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = stage_handoff(
+        dir.path(),
+        &config_only_snapshot_bytes("hermes"),
+        0o600,
+    );
+    let second_link = dir.path().join("second-link.agent.json");
+    std::fs::hard_link(&path, &second_link).unwrap();
+
+    assert!(read_agent_snapshot_handoff_from_dir(dir.path(), HANDOFF_ID).is_err());
+    assert!(path.exists());
+    assert!(second_link.exists());
+}
+
+#[cfg(unix)]
+#[test]
 fn secure_handoff_read_rejects_non_regular_permissive_oversize_and_invalid_files() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join(format!("{HANDOFF_ID}.agent.json"));

@@ -7,6 +7,10 @@ use std::{
 };
 
 #[cfg(unix)]
+use std::ffi::CString;
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, FromRawFd};
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
 use serde::Serialize;
@@ -124,6 +128,9 @@ fn validate_agent_snapshot_handoff_metadata(
     if metadata.mode() & 0o077 != 0 {
         return Err("handoff has group or world permissions".to_string());
     }
+    if metadata.nlink() != 1 {
+        return Err("handoff must have exactly one filesystem link".to_string());
+    }
     if metadata.len() > MAX_SNAPSHOT_JSON_BYTES as u64 {
         return Err("handoff exceeds the agent JSON snapshot size limit".to_string());
     }
@@ -211,16 +218,36 @@ fn read_agent_snapshot_handoff_from_dir(dir: &Path, handoff_id: &str) -> Result<
         .metadata()
         .map_err(|error| format!("cannot inspect the current user's home directory: {error}"))?
         .uid();
-    let dir_metadata = std::fs::symlink_metadata(dir)
-        .map_err(|error| format!("cannot inspect handoff directory: {error}"))?;
+    let directory = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(dir)
+        .map_err(|error| format!("cannot securely open handoff directory: {error}"))?;
+    let dir_metadata = directory
+        .metadata()
+        .map_err(|error| format!("cannot inspect open handoff directory: {error}"))?;
     validate_agent_snapshot_handoff_directory_metadata(&dir_metadata, expected_uid)?;
 
-    let path = dir.join(format!("{handoff_id}.agent.json"));
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(&path)
-        .map_err(|error| format!("cannot securely open handoff: {error}"))?;
+    let file_name = format!("{handoff_id}.agent.json");
+    let file_name_c = CString::new(file_name.as_bytes())
+        .map_err(|_| "handoff filename contains a NUL byte".to_string())?;
+    // Resolve the child relative to the already validated directory descriptor.
+    // A pathname rename or symlink substitution cannot redirect this open into a
+    // replacement directory after the directory metadata check.
+    let file_fd = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            file_name_c.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if file_fd < 0 {
+        return Err(format!(
+            "cannot securely open handoff: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let mut file = unsafe { std::fs::File::from_raw_fd(file_fd) };
     let opened_metadata = file
         .metadata()
         .map_err(|error| format!("cannot inspect open handoff: {error}"))?;
@@ -245,16 +272,34 @@ fn read_agent_snapshot_handoff_from_dir(dir: &Path, handoff_id: &str) -> Result<
         return Err("agent snapshot handoff must be config-only".to_string());
     }
 
-    let current_metadata = std::fs::symlink_metadata(&path)
-        .map_err(|error| format!("cannot re-inspect handoff before deletion: {error}"))?;
-    if current_metadata.file_type().is_symlink()
-        || current_metadata.dev() != opened_metadata.dev()
-        || current_metadata.ino() != opened_metadata.ino()
+    let mut current_metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let stat_result = unsafe {
+        libc::fstatat(
+            directory.as_raw_fd(),
+            file_name_c.as_ptr(),
+            current_metadata.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if stat_result != 0 {
+        return Err(format!(
+            "cannot re-inspect handoff before deletion: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let current_metadata = unsafe { current_metadata.assume_init() };
+    if current_metadata.st_dev != opened_metadata.dev() as libc::dev_t
+        || current_metadata.st_ino != opened_metadata.ino() as libc::ino_t
     {
         return Err("handoff changed while it was being read".to_string());
     }
-    std::fs::remove_file(&path)
-        .map_err(|error| format!("cannot delete accepted handoff: {error}"))?;
+    let unlink_result = unsafe { libc::unlinkat(directory.as_raw_fd(), file_name_c.as_ptr(), 0) };
+    if unlink_result != 0 {
+        return Err(format!(
+            "cannot delete accepted handoff: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
     Ok(bytes)
 }
 
