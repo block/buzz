@@ -44,6 +44,19 @@ pub(crate) fn buzz_managed_node_bin_path() -> Option<PathBuf> {
     })
 }
 
+pub(crate) fn buzz_managed_node_npm_path() -> Option<PathBuf> {
+    buzz_managed_node_bin_dir().map(|bin| {
+        #[cfg(windows)]
+        {
+            bin.join("npm.cmd")
+        }
+        #[cfg(not(windows))]
+        {
+            bin.join("npm")
+        }
+    })
+}
+
 pub(crate) fn buzz_managed_npm_bin_dir() -> Option<PathBuf> {
     buzz_managed_npm_prefix().map(|prefix| {
         #[cfg(windows)]

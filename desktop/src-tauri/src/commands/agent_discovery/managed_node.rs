@@ -501,17 +501,36 @@ pub(super) fn managed_npm_command(command: &str) -> Result<Option<String>, Box<I
     }
 
     let prefix_arg = shell_quote(&prefix);
-    Ok(Some(rewrite_npm_global_install(command, &prefix_arg)))
+    let npm_arg = managed_npm_executable_arg();
+    Ok(Some(rewrite_npm_global_install(
+        command,
+        &npm_arg,
+        &prefix_arg,
+    )))
 }
 
-fn rewrite_npm_global_install(command: &str, quoted_prefix: &str) -> String {
+fn managed_npm_executable_arg() -> String {
+    #[cfg(not(windows))]
+    {
+        if let Some(npm) = crate::managed_agents::buzz_managed_node_npm_path() {
+            return shell_quote(&npm);
+        }
+    }
+    // Windows npm adapter installs still run under Git Bash, where a native
+    // `C:\...\npm.cmd` path is not a valid shell command. Keep resolving npm
+    // through the composed PATH there; on Unix use the absolute managed npm so
+    // login startup files cannot shadow it with a broken system/Homebrew npm.
+    "npm".to_string()
+}
+
+fn rewrite_npm_global_install(command: &str, npm_executable: &str, quoted_prefix: &str) -> String {
     let trimmed = command.trim_start();
     if let Some(rest) = trimmed.strip_prefix("npm install -g ") {
-        format!("npm install --global --prefix {quoted_prefix} {rest}")
+        format!("{npm_executable} install --global --prefix {quoted_prefix} {rest}")
     } else if let Some(rest) = trimmed.strip_prefix("npm i -g ") {
-        format!("npm i --global --prefix {quoted_prefix} {rest}")
+        format!("{npm_executable} i --global --prefix {quoted_prefix} {rest}")
     } else if let Some(rest) = trimmed.strip_prefix("npm uninstall -g ") {
-        format!("npm uninstall --global --prefix {quoted_prefix} {rest}")
+        format!("{npm_executable} uninstall --global --prefix {quoted_prefix} {rest}")
     } else {
         trimmed.to_string()
     }
@@ -555,33 +574,56 @@ mod tests {
         assert_eq!(
             rewrite_npm_global_install(
                 "npm install -g @agentclientprotocol/codex-acp",
+                "'/tmp/Buzz Node/bin/npm'",
                 "'/tmp/Buzz Node'"
             ),
-            "npm install --global --prefix '/tmp/Buzz Node' @agentclientprotocol/codex-acp"
+            "'/tmp/Buzz Node/bin/npm' install --global --prefix '/tmp/Buzz Node' @agentclientprotocol/codex-acp"
         );
     }
 
     #[test]
     fn test_rewrite_npm_i_uses_private_prefix() {
         assert_eq!(
-            rewrite_npm_global_install("npm i -g some-package", "'/tmp/buzz'"),
-            "npm i --global --prefix '/tmp/buzz' some-package"
+            rewrite_npm_global_install(
+                "npm i -g some-package",
+                "'/tmp/node/bin/npm'",
+                "'/tmp/buzz'"
+            ),
+            "'/tmp/node/bin/npm' i --global --prefix '/tmp/buzz' some-package"
         );
     }
 
     #[test]
     fn test_rewrite_npm_uninstall_uses_private_prefix() {
         assert_eq!(
-            rewrite_npm_global_install("npm uninstall -g @zed-industries/codex-acp", "'/tmp/buzz'"),
-            "npm uninstall --global --prefix '/tmp/buzz' @zed-industries/codex-acp"
+            rewrite_npm_global_install(
+                "npm uninstall -g @zed-industries/codex-acp",
+                "'/tmp/node/bin/npm'",
+                "'/tmp/buzz'"
+            ),
+            "'/tmp/node/bin/npm' uninstall --global --prefix '/tmp/buzz' @zed-industries/codex-acp"
         );
     }
 
     #[test]
     fn test_rewrite_ignores_non_global_command() {
         assert_eq!(
-            rewrite_npm_global_install("npm install foo", "'/tmp/buzz'"),
+            rewrite_npm_global_install("npm install foo", "'/tmp/node/bin/npm'", "'/tmp/buzz'"),
             "npm install foo"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn test_managed_npm_executable_arg_uses_absolute_managed_npm_on_unix() {
+        let npm = managed_npm_executable_arg();
+        assert!(
+            npm.starts_with('\''),
+            "managed npm path must be shell quoted: {npm}"
+        );
+        assert!(
+            npm.ends_with("/bin/npm'"),
+            "managed npm path must name bin/npm: {npm}"
         );
     }
 
