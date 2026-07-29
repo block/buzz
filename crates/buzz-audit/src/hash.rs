@@ -269,4 +269,143 @@ mod tests {
         let b = serde_json::json!({"a": 2, "m": 3, "z": 1});
         assert_eq!(canonical_json(&a).unwrap(), canonical_json(&b).unwrap());
     }
+
+    #[test]
+    fn canonical_json_sorts_nested_object_keys() {
+        // Key sorting must recurse into nested objects, not just the top level.
+        let a = serde_json::json!({"outer": {"z": 1, "a": 2}});
+        let b = serde_json::json!({"outer": {"a": 2, "z": 1}});
+        assert_eq!(canonical_json(&a).unwrap(), canonical_json(&b).unwrap());
+        // Verify the nested keys are actually in sorted order in the output.
+        let rendered = canonical_json(&a).unwrap();
+        let a_pos = rendered.find("\"a\"").unwrap();
+        let z_pos = rendered.find("\"z\"").unwrap();
+        assert!(a_pos < z_pos, "nested keys must be sorted: {rendered}");
+    }
+
+    #[test]
+    fn canonical_json_preserves_array_order() {
+        // Arrays are order-sensitive by design (they represent sequences, not
+        // sets). Two arrays with the same elements in different order must
+        // produce different canonical strings.
+        let a = serde_json::json!([1, 2, 3]);
+        let b = serde_json::json!([3, 2, 1]);
+        assert_ne!(canonical_json(&a).unwrap(), canonical_json(&b).unwrap());
+    }
+
+    #[test]
+    fn canonical_json_handles_empty_and_scalars() {
+        assert_eq!(canonical_json(&serde_json::json!({})).unwrap(), "{}");
+        assert_eq!(canonical_json(&serde_json::json!([])).unwrap(), "[]");
+        assert_eq!(canonical_json(&serde_json::json!(null)).unwrap(), "null");
+        assert_eq!(canonical_json(&serde_json::json!(42)).unwrap(), "42");
+        assert_eq!(
+            canonical_json(&serde_json::json!("hello")).unwrap(),
+            "\"hello\""
+        );
+    }
+
+    #[test]
+    fn canonical_json_escapes_special_characters() {
+        // A key or value containing characters that need JSON escaping must
+        // survive canonicalization unchanged — the hash must not depend on
+        // whether serde or our manual serializer handles them.
+        let val = serde_json::json!({"path": "C:\\temp", "quote": "say \"hi\""});
+        let rendered = canonical_json(&val).unwrap();
+        // Round-trip: parsing the canonical form must reproduce the value.
+        let parsed: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        assert_eq!(val, parsed);
+    }
+
+    #[test]
+    fn compute_hash_distinguishes_none_from_empty_for_object_id() {
+        // Same presence-tag invariant as actor_pubkey, applied to object_id.
+        let mut none = sample_entry();
+        none.object_id = None;
+        let mut empty = sample_entry();
+        empty.object_id = Some(String::new());
+        assert_ne!(compute_hash(&none).unwrap(), compute_hash(&empty).unwrap());
+    }
+
+    #[test]
+    fn compute_hash_distinguishes_none_from_empty_for_detail() {
+        // `detail` is canonical_json'd; Null vs empty-object must differ.
+        let mut null_detail = sample_entry();
+        null_detail.detail = serde_json::Value::Null;
+        let mut empty_obj = sample_entry();
+        empty_obj.detail = serde_json::json!({});
+        assert_ne!(
+            compute_hash(&null_detail).unwrap(),
+            compute_hash(&empty_obj).unwrap()
+        );
+    }
+
+    #[test]
+    fn compute_hash_distinguishes_detail_key_order() {
+        // The whole point of canonical_json: different key order, same hash.
+        let mut a = sample_entry();
+        a.detail = serde_json::json!({"z": 1, "a": 2});
+        let mut b = sample_entry();
+        b.detail = serde_json::json!({"a": 2, "z": 1});
+        assert_eq!(compute_hash(&a).unwrap(), compute_hash(&b).unwrap());
+    }
+
+    #[test]
+    fn compute_hash_distinguishes_detail_value() {
+        // Same keys, different values → different hash.
+        let mut a = sample_entry();
+        a.detail = serde_json::json!({"key": "value1"});
+        let mut b = sample_entry();
+        b.detail = serde_json::json!({"key": "value2"});
+        assert_ne!(compute_hash(&a).unwrap(), compute_hash(&b).unwrap());
+    }
+
+    #[test]
+    fn compute_hash_sensitive_to_created_at() {
+        // The field-sensitivity test covers seq/action/pubkey/etc. but not
+        // created_at directly. A one-nanosecond difference at storage precision
+        // (microsecond) must change the hash.
+        let base = sample_entry();
+        let h0 = compute_hash(&base).unwrap();
+
+        let mut shifted = base.clone();
+        shifted.created_at = base.created_at + chrono::Duration::microseconds(1);
+        assert_ne!(h0, compute_hash(&shifted).unwrap());
+    }
+
+    #[test]
+    fn compute_hash_invariant_under_sub_microsecond_jitter() {
+        // Truncation to microsecond precision means sub-microsecond jitter
+        // does not change the hash — the whole reason to_storage_precision exists.
+        let base = sample_entry();
+        let h0 = compute_hash(&base).unwrap();
+
+        let mut jittered = base.clone();
+        // Add 500 nanoseconds — below the microsecond floor, so it truncates away.
+        jittered.created_at =
+            to_storage_precision(base.created_at + chrono::Duration::nanoseconds(500));
+        assert_eq!(h0, compute_hash(&jittered).unwrap());
+    }
+
+    #[test]
+    fn genesis_hash_is_all_zero() {
+        // The sentinel for "no previous entry" is documented as all-zero.
+        // Pin it: changing this constant invalidates every existing genesis entry.
+        assert_eq!(GENESIS_HASH, [0u8; 32]);
+    }
+
+    #[test]
+    fn compute_hash_uses_genesis_for_none_prev() {
+        // An entry with prev_hash=None must hash identically to one whose
+        // prev_hash is explicitly the genesis sentinel — the None branch
+        // substitutes GENESIS_HASH into the hasher.
+        let mut none_prev = sample_entry();
+        none_prev.prev_hash = None;
+        let mut genesis_prev = sample_entry();
+        genesis_prev.prev_hash = Some(GENESIS_HASH.to_vec());
+        assert_eq!(
+            compute_hash(&none_prev).unwrap(),
+            compute_hash(&genesis_prev).unwrap()
+        );
+    }
 }

@@ -97,4 +97,50 @@ mod tests {
     fn unknown_action_returns_err() {
         assert!("totally_bogus".parse::<AuditAction>().is_err());
     }
+
+    #[test]
+    fn serde_json_roundtrip_all_variants() {
+        // The action is stored as a string column and deserialized from DB
+        // rows; the serde representation must match as_str/FromStr exactly.
+        for action in AuditAction::ALL {
+            let json = serde_json::to_string(action).unwrap();
+            let back: AuditAction = serde_json::from_str(&json).unwrap();
+            assert_eq!(action, &back);
+        }
+    }
+
+    #[test]
+    fn serde_uses_snake_case() {
+        // The serde rename_all = "snake_case" must agree with as_str().
+        // If someone adds a variant but forgets to update as_str(), or vice
+        // versa, this catches the drift.
+        for action in AuditAction::ALL {
+            let json = serde_json::to_string(action).unwrap();
+            // serde produces a quoted string like "\"event_created\"".
+            let expected = format!("\"{}\"", action.as_str());
+            assert_eq!(
+                json, expected,
+                "serde representation differs from as_str() for {action:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn as_str_values_are_unique() {
+        // Two variants sharing the same as_str() would be ambiguous on parse
+        // and on DB read — this is a silent correctness bug.
+        let strs: Vec<&str> = AuditAction::ALL.iter().map(|a| a.as_str()).collect();
+        let unique: std::collections::HashSet<&str> = strs.iter().copied().collect();
+        assert_eq!(strs.len(), unique.len(), "duplicate as_str() values");
+    }
+
+    #[test]
+    fn as_str_and_from_str_are_inverses() {
+        // Round-trip through the string representation used in DB storage.
+        for action in AuditAction::ALL {
+            let s = action.as_str();
+            let parsed: AuditAction = s.parse().unwrap();
+            assert_eq!(&parsed, action);
+        }
+    }
 }
