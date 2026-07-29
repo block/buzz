@@ -12,6 +12,7 @@
 export type PendingSnapshotImport = {
   fileBytes: number[];
   fileName: string;
+  onPreviewSettled?: () => Promise<void>;
   snapshotKind: "agent" | "team";
 };
 
@@ -28,6 +29,7 @@ export function requestOpenSnapshotImport(payload: PendingSnapshotImport) {
   pendingImport = {
     fileBytes: payload.fileBytes,
     fileName: payload.fileName,
+    onPreviewSettled: payload.onPreviewSettled,
     snapshotKind: payload.snapshotKind,
   };
   if (typeof window !== "undefined") {

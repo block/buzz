@@ -3,6 +3,7 @@ import { OctagonX, Settings2 } from "lucide-react";
 import {
   consumePendingSnapshotImport,
   subscribeSnapshotImport,
+  type PendingSnapshotImport,
 } from "@/features/agents/openSnapshotImportFromUrlEvent";
 import { AddAgentToChannelDialog } from "./AddAgentToChannelDialog";
 import { AddTeamToChannelDialog } from "./AddTeamToChannelDialog";
@@ -83,29 +84,32 @@ export function AgentsView() {
   );
   // biome-ignore lint/correctness/useExhaustiveDependencies: mount-only; personas.handleImportSnapshotFile and teamActions.handleImportTeamSnapshotFile are stable
   React.useEffect(() => {
+    const openPendingSnapshot = async (pending: PendingSnapshotImport) => {
+      try {
+        if (pending.snapshotKind === "team") {
+          await teamActions.handleImportTeamSnapshotFile(
+            pending.fileBytes,
+            pending.fileName,
+          );
+        } else {
+          await personas.handleImportSnapshotFile(
+            pending.fileBytes,
+            pending.fileName,
+          );
+        }
+      } finally {
+        await pending.onPreviewSettled?.();
+      }
+    };
     // Consume a snapshot import that was enqueued before navigation (e.g. from
     // a timeline AgentSnapshotCard click that navigated here).
     const pending = consumePendingSnapshotImport();
     if (pending) {
-      if (pending.snapshotKind === "team") {
-        void teamActions.handleImportTeamSnapshotFile(
-          pending.fileBytes,
-          pending.fileName,
-        );
-      } else {
-        void personas.handleImportSnapshotFile(
-          pending.fileBytes,
-          pending.fileName,
-        );
-      }
+      void openPendingSnapshot(pending);
     }
 
-    return subscribeSnapshotImport(({ fileBytes, fileName, snapshotKind }) => {
-      if (snapshotKind === "team") {
-        void teamActions.handleImportTeamSnapshotFile(fileBytes, fileName);
-      } else {
-        void personas.handleImportSnapshotFile(fileBytes, fileName);
-      }
+    return subscribeSnapshotImport((next) => {
+      void openPendingSnapshot(next);
     });
   }, []);
 

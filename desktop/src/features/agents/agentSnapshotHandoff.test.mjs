@@ -11,6 +11,7 @@ test("handoff drain routes accepted bytes through the existing preview flow", as
     fileName: "550e8400-e29b-41d4-a716-446655440000.agent.json",
     snapshotKind: "agent",
   };
+  let routedPayload;
 
   const accepted = await drainPendingAgentSnapshotImport({
     take: async () => pending,
@@ -18,7 +19,17 @@ test("handoff drain routes accepted bytes through the existing preview flow", as
       calls.push(["ack", id]);
       return true;
     },
-    requestOpen: (payload) => calls.push(["open", payload]),
+    requestOpen: (payload) => {
+      routedPayload = payload;
+      calls.push([
+        "open",
+        {
+          fileBytes: payload.fileBytes,
+          fileName: payload.fileName,
+          snapshotKind: payload.snapshotKind,
+        },
+      ]);
+    },
     goAgents: () => calls.push(["navigate"]),
   });
 
@@ -33,8 +44,10 @@ test("handoff drain routes accepted bytes through the existing preview flow", as
       },
     ],
     ["navigate"],
-    ["ack", pending.id],
   ]);
+  assert.equal(typeof routedPayload.onPreviewSettled, "function");
+  await routedPayload.onPreviewSettled();
+  assert.deepEqual(calls.at(-1), ["ack", pending.id]);
 });
 
 test("handoff drain does nothing when no import is pending", async () => {

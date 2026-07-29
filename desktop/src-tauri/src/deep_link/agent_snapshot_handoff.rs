@@ -1,17 +1,18 @@
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 use std::path::{Path, PathBuf};
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 use std::time::{Duration, SystemTime};
 
 use url::Url;
 
 use super::{
-    parse_agent_snapshot_handoff_id, read_agent_snapshot_handoff_from_dir,
-    PendingAgentSnapshotImport, PendingAgentSnapshotImports,
+    consume_agent_snapshot_handoff_from_dir, parse_agent_snapshot_handoff_id,
+    read_agent_snapshot_handoff_from_dir, PendingAgentSnapshotImport,
+    PendingAgentSnapshotImports,
 };
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 use super::{
     validate_agent_snapshot_handoff_directory_metadata, validate_agent_snapshot_handoff_metadata,
     AGENT_SNAPSHOT_HANDOFF_MAX_AGE,
@@ -60,7 +61,7 @@ fn agent_snapshot_handoff_requires_one_canonical_lowercase_uuid() {
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn stage_handoff(dir: &Path, bytes: &[u8], mode: u32) -> PathBuf {
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
     let path = dir.join(format!("{HANDOFF_ID}.agent.json"));
@@ -69,9 +70,9 @@ fn stage_handoff(dir: &Path, bytes: &[u8], mode: u32) -> PathBuf {
     path
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 #[test]
-fn secure_handoff_read_accepts_valid_snapshot_and_deletes_staged_file() {
+fn secure_handoff_read_retains_source_until_preview_acknowledgement() {
     let dir = tempfile::tempdir().unwrap();
     let expected = config_only_snapshot_bytes("hermes");
     let path = stage_handoff(dir.path(), &expected, 0o600);
@@ -79,10 +80,12 @@ fn secure_handoff_read_accepts_valid_snapshot_and_deletes_staged_file() {
     let bytes = read_agent_snapshot_handoff_from_dir(dir.path(), HANDOFF_ID).unwrap();
 
     assert_eq!(bytes, expected);
-    assert!(!path.exists(), "accepted staged file must be deleted");
+    assert!(path.exists(), "source must remain until preview settles");
+    consume_agent_snapshot_handoff_from_dir(dir.path(), HANDOFF_ID, &bytes).unwrap();
+    assert!(!path.exists(), "acknowledged source must be deleted");
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 #[test]
 fn secure_handoff_read_rejects_symlink_and_leaves_target_untouched() {
     let dir = tempfile::tempdir().unwrap();
@@ -97,7 +100,7 @@ fn secure_handoff_read_rejects_symlink_and_leaves_target_untouched() {
     assert!(link.symlink_metadata().is_ok());
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 #[test]
 fn secure_handoff_read_rejects_symlinked_staging_directory() {
     let real_dir = tempfile::tempdir().unwrap();
@@ -114,7 +117,7 @@ fn secure_handoff_read_rejects_symlinked_staging_directory() {
     assert!(path.exists());
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 #[test]
 fn secure_handoff_read_rejects_hard_linked_payload() {
     let dir = tempfile::tempdir().unwrap();
@@ -131,7 +134,7 @@ fn secure_handoff_read_rejects_hard_linked_payload() {
     assert!(second_link.exists());
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 #[test]
 fn secure_handoff_read_rejects_non_regular_permissive_oversize_and_invalid_files() {
     let dir = tempfile::tempdir().unwrap();
@@ -159,7 +162,7 @@ fn secure_handoff_read_rejects_non_regular_permissive_oversize_and_invalid_files
     );
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 #[test]
 fn secure_handoff_read_rejects_fields_outside_the_coagent_contract() {
     let dir = tempfile::tempdir().unwrap();
@@ -193,7 +196,7 @@ fn secure_handoff_read_rejects_fields_outside_the_coagent_contract() {
     assert!(read_agent_snapshot_handoff_from_dir(dir.path(), HANDOFF_ID).is_err());
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 #[test]
 fn secure_handoff_read_requires_the_hermes_runtime() {
     let dir = tempfile::tempdir().unwrap();
@@ -209,7 +212,7 @@ fn secure_handoff_read_requires_the_hermes_runtime() {
     );
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 #[test]
 fn secure_handoff_metadata_rejects_wrong_owner() {
     let dir = tempfile::tempdir().unwrap();
@@ -223,7 +226,7 @@ fn secure_handoff_metadata_rejects_wrong_owner() {
     .is_err());
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 #[test]
 fn secure_handoff_metadata_rejects_expired_and_far_future_files() {
     let dir = tempfile::tempdir().unwrap();
@@ -245,7 +248,7 @@ fn secure_handoff_metadata_rejects_expired_and_far_future_files() {
     .is_err());
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 #[test]
 fn secure_handoff_directory_requires_owner_only_permissions() {
     let dir = tempfile::tempdir().unwrap();
@@ -264,7 +267,7 @@ fn secure_handoff_directory_requires_owner_only_permissions() {
     );
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 #[test]
 fn secure_handoff_read_rejects_snapshot_with_memory() {
     let dir = tempfile::tempdir().unwrap();
@@ -283,12 +286,19 @@ fn secure_handoff_read_rejects_snapshot_with_memory() {
 #[test]
 fn pending_agent_snapshot_import_is_peeked_then_acknowledged() {
     let queue = PendingAgentSnapshotImports::default();
-    queue.enqueue(PendingAgentSnapshotImport {
+    assert!(queue.enqueue(PendingAgentSnapshotImport {
         id: HANDOFF_ID.to_owned(),
         file_bytes: vec![1, 2, 3],
         file_name: format!("{HANDOFF_ID}.agent.json"),
         snapshot_kind: "agent".to_owned(),
-    });
+    }));
+
+    assert!(!queue.enqueue(PendingAgentSnapshotImport {
+        id: "550e8400-e29b-41d4-a716-446655440001".to_owned(),
+        file_bytes: vec![4, 5, 6],
+        file_name: "second.agent.json".to_owned(),
+        snapshot_kind: "agent".to_owned(),
+    }));
 
     assert_eq!(queue.first().unwrap().file_bytes, vec![1, 2, 3]);
     assert!(!queue.acknowledge("other"));

@@ -10,8 +10,10 @@ use crate::managed_agents::{
     HarnessSource,
 };
 
+mod command_resolution;
 mod runtime_metadata;
 
+use command_resolution::{available_harness_command, default_agent_args, resolve_preset_command};
 pub(crate) use runtime_metadata::KnownAcpRuntime;
 
 const GOOSE_AVATAR_URL: &str = "https://goose-docs.ai/img/logo_dark.png";
@@ -403,6 +405,7 @@ pub(crate) fn dangling_harness_display(id: &str) -> String {
     format!("harness (deleted): {id}")
 }
 
+
 /// Spawn-time variant of `record_agent_command` that returns a typed error when
 /// a record's `runtime` id or its persona's `runtime` id is set but cannot be
 /// resolved (i.e. the definition was deleted after the agent was created).
@@ -432,7 +435,7 @@ pub fn try_record_agent_command(
         }
         if let Some(def) = crate::managed_agents::custom_harnesses::lookup_loaded_harness_by_id(id)
         {
-            return Ok(def.command.clone());
+            return Ok(available_harness_command(id, &def.command));
         }
         return Err(format!("DANGLING_HARNESS_ID:{id}"));
     }
@@ -449,7 +452,7 @@ pub fn try_record_agent_command(
                 if let Some(def) =
                     crate::managed_agents::custom_harnesses::lookup_loaded_harness_by_id(id)
                 {
-                    return Ok(def.command.clone());
+                    return Ok(available_harness_command(id, &def.command));
                 }
                 return Err(format!("DANGLING_HARNESS_ID:{id}"));
             }
@@ -460,14 +463,6 @@ pub fn try_record_agent_command(
     Ok(default_agent_command())
 }
 
-fn default_agent_args(command: &str) -> Option<Vec<String>> {
-    match normalize_command_identity(command).as_str() {
-        "goose" => Some(vec!["acp".to_string()]),
-        "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
-        | "claudecode" | "buzz-agent" => Some(Vec::new()),
-        _ => None,
-    }
-}
 
 pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<String> {
     let normalized = agent_args
@@ -1477,10 +1472,11 @@ fn preset_catalog_entry(
     def: &PresetHarness,
     resolve: impl Fn(&str) -> Option<PathBuf>,
 ) -> AcpRuntimeCatalogEntry {
-    let (availability, command, binary_path) = match resolve(def.command) {
-        Some(path) => (
+    let resolved = resolve_preset_command(def.id, def.command, &resolve);
+    let (availability, command, binary_path) = match resolved {
+        Some((resolved_command, path)) => (
             AcpAvailabilityStatus::Available,
-            Some(def.command.to_string()),
+            Some(resolved_command.to_string()),
             Some(path.display().to_string()),
         ),
         None => {
@@ -1501,7 +1497,7 @@ fn preset_catalog_entry(
         .map(|p| p.display().to_string());
 
     let default_args = normalize_agent_args(
-        def.command,
+        command.as_deref().unwrap_or(def.command),
         def.args.iter().map(|s| s.to_string()).collect(),
     );
 

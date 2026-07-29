@@ -28,10 +28,13 @@ export async function drainPendingAgentSnapshotImport(
   deps.requestOpen({
     fileBytes: pending.fileBytes,
     fileName: pending.fileName,
+    onPreviewSettled: async () => {
+      await deps.acknowledge(pending.id);
+    },
     snapshotKind: "agent",
   });
   await deps.goAgents();
-  return deps.acknowledge(pending.id);
+  return true;
 }
 
 export async function listenForAgentSnapshotHandoffs(
