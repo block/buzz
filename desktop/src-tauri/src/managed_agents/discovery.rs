@@ -1593,6 +1593,18 @@ const PRESET_HARNESSES: &[PresetHarness] = &[
         underlying_cli: Some("amp"),
     },
     PresetHarness {
+        id: "letta",
+        label: "Letta",
+        command: "letta-acp",
+        args: &[],
+        install_instructions_url: "https://github.com/letta-ai/letta-acp",
+        install_hint: "Buzz talks to Letta through the letta-acp adapter \
+            (npm install -g @letta-ai/letta-acp). Set LETTA_AGENT_ID in the \
+            agent's env vars to pin one persistent Letta agent — the adapter \
+            creates one and logs its id on first run otherwise.",
+        underlying_cli: None,
+    },
+    PresetHarness {
         id: "hermes",
         label: "Hermes Agent",
         command: "hermes-acp",

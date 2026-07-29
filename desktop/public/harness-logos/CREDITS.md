@@ -25,6 +25,7 @@ Monochrome marks inlined as `currentColor` paths in
 |---|---|---|---|---|---|
 | Goose | [block/goose](https://github.com/block/goose) | `305849b71709b95b86ed9f11bd3bc939899c0aab` | Apache-2.0 © Block, Inc. | `documentation/static/img/goose.svg` | `fill="#101010"` → `currentColor`; dropped the redundant clipPath wrapper |
 | Cursor | [simple-icons](https://github.com/simple-icons/simple-icons) | `16.27.1` (slug `cursor`) | CC0-1.0 (path data); nominative use of the Cursor mark to identify Cursor's harness | `icons/cursor.svg` | `fill` → `currentColor` |
+| Letta | [letta-ai/letta-evals](https://github.com/letta-ai/letta-evals) | `2daaf0c598780b6fa2edc26de52348de127f88a5` | Apache-2.0 © Letta | `leaderboard_site/src/letta-logo.svg` | Dropped the per-path `fill` attributes (the root `fill="currentColor"` already carries them) and the fixed `width`/`height` |
 
 Codex deliberately has **no** bundled mark: the OpenAI blossom was removed
 from simple-icons in v16 at the vendor's request, so we do not ship it —

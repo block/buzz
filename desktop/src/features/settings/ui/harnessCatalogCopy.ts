@@ -37,6 +37,9 @@ const HARNESS_DESCRIPTIONS: Record<string, string> = {
   kimi: "A terminal coding agent for software development and command-line tasks.",
   // Sources: https://ampcode.com, https://ampcode.com/manual
   amp: "A coding agent from Sourcegraph.",
+  // Sources: https://github.com/letta-ai/letta-acp,
+  // https://docs.letta.com/overview
+  letta: "A stateful agent with memory that learns and evolves.",
   // Sources: https://github.com/NousResearch/hermes-agent,
   // https://hermes-agent.nousresearch.com/docs/
   hermes: "A general-purpose AI agent from Nous Research.",

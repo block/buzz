@@ -9,7 +9,7 @@ Buzz Relay ──WS──→ buzz-acp ──stdio──→ Your Agent
                                        (send_message, etc.)
 ```
 
-Supports any agent that speaks [ACP](https://agentclientprotocol.com/) over stdio: **goose**, **codex** (via [codex-acp](https://github.com/agentclientprotocol/codex-acp)), and **claude code** (via [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)).
+Supports any agent that speaks [ACP](https://agentclientprotocol.com/) over stdio: **goose**, **codex** (via [codex-acp](https://github.com/agentclientprotocol/codex-acp)), **claude code** (via [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)), and **letta** (via [letta-acp](https://github.com/letta-ai/letta-acp)).
 
 ## Prerequisites
 
@@ -97,6 +97,47 @@ buzz-acp
 
 Older installs that still expose `claude-code-acp` are also supported. `buzz-acp`
 treats both Claude ACP command names as the same zero-arg runtime.
+
+## Running with Letta
+
+[letta-acp](https://github.com/letta-ai/letta-acp) exposes a [Letta](https://docs.letta.com)
+agent over ACP. Letta agents are stateful: memory persists across sessions, so
+the same agent carries context between channels and across harness restarts.
+
+```bash
+# Install the adapter (npm package — no Rust build required)
+npm install -g @letta-ai/letta-acp
+
+# Run
+export LETTA_AGENT_ID="agent-..."   # optional: pin one persistent agent
+export BUZZ_ACP_AGENT_COMMAND="letta-acp"
+
+buzz-acp
+```
+
+Without `LETTA_AGENT_ID` the adapter creates an agent on first use and logs its
+id to stderr; set the variable to that value to keep every run on the same
+agent. Each channel session becomes its own conversation on that one agent.
+
+### Letta backends
+
+`LETTA_ACP_BACKEND` selects where the agent lives and where its tools run.
+Since the agent answers Buzz by shelling out to the `buzz` CLI, the CLI and
+the `BUZZ_*` environment have to be wherever the tools run:
+
+| `LETTA_ACP_BACKEND` | Agent state | Tools run | Extra config |
+|---|---|---|---|
+| `local` (default) | this machine | this machine | `letta login`, or `letta --backend local connect anthropic --api-key ...` for model access |
+| `cloud-oauth` | Letta Cloud | this machine | `letta login` once; no key in the harness env |
+| `remote` | your app server | the app server | `LETTA_APP_SERVER_URL`, `LETTA_APP_SERVER_TOKEN`; install the `buzz` CLI there |
+| `cloud` | Letta Cloud | Letta's sandbox | not usable from Buzz — the sandbox has no `buzz` CLI |
+
+`local` and `cloud-oauth` need nothing beyond the harness environment they
+already inherit; `cloud-oauth` is the way to run a cloud-hosted agent whose
+tools still execute here. Plain `cloud` puts tool execution in Letta's
+sandbox, out of reach of the `buzz` CLI, and MCP servers passed through
+`BUZZ_ACP_MCP_COMMAND` do not close the gap: the sandbox has no executor for
+adapter-side tools.
 
 ## Configuration
 
@@ -269,7 +310,7 @@ Buzz Desktop supports registering any ACP-speaking agent tool as a selectable ru
 
 **Tier-1 — compiled-in runtimes** (Goose, Claude Code, Codex, Buzz Agent): have auto-installers, auth probes, and first-class onboarding. Their IDs (`goose`, `claude`, `codex`, `buzz-agent`) are reserved and cannot be overridden.
 
-**Tier-2 — preset catalog** (Cursor, Oh My Pi, Grok Build, OpenCode, Kimi Code, Amp, Hermes Agent, OpenClaw): static `HarnessDefinition` entries in `desktop/src-tauri/src/managed_agents/discovery.rs` (`PRESET_HARNESSES`). They are always present in the runtime catalog, PATH-probed for availability, not editable or deletable by the user. Displayed with bundled logos; if not installed, a docs link appears instead.
+**Tier-2 — preset catalog** (Cursor, Oh My Pi, Grok Build, OpenCode, Kimi Code, Amp, Letta, Hermes Agent, OpenClaw): static `HarnessDefinition` entries in `desktop/src-tauri/src/managed_agents/discovery.rs` (`PRESET_HARNESSES`). They are always present in the runtime catalog, PATH-probed for availability, not editable or deletable by the user. Displayed with bundled logos; if not installed, a docs link appears instead.
 
 > **Note — OpenClaw:** `openclaw acp` is a Gateway-backed bridge; PATH availability shows "Available" even when the OpenClaw Gateway daemon is not running. This is expected tier-2 semantics (same class as a preset with unconfigured auth). The Gateway URL is configured via `OPENCLAW_GATEWAY_URL` (or the equivalent env var from OpenClaw's docs) — set it in the agent's **env vars** in Edit Agent, not in the definition env (the preset definition carries no env entries). Note that `openclaw acp` executes tools inside the Gateway daemon, not the Desktop process, so Desktop-injected `BUZZ_*` env vars do NOT reach the execution locus unless you also set them on the Gateway's own environment.
 
