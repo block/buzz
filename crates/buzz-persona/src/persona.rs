@@ -23,26 +23,34 @@ pub const MAX_FRONTMATTER_BYTES: usize = 1_048_576;
 /// Maximum persona prompt (markdown body) size in bytes (256 KiB).
 pub const MAX_BODY_BYTES: usize = 262_144;
 
+/// Errors returned while parsing a `.persona.md` file.
 #[derive(Debug, thiserror::Error)]
 pub enum PersonaError {
+    /// Failed to read the persona file from disk.
     #[error("failed to read file: {0}")]
     Io(#[from] std::io::Error),
 
+    /// The file is missing the `---` frontmatter delimiters.
     #[error("missing `---` frontmatter delimiters")]
     NoFrontmatter,
 
+    /// The frontmatter exceeds the maximum allowed size.
     #[error("frontmatter exceeds {MAX_FRONTMATTER_BYTES} bytes")]
     FrontmatterTooLarge,
 
+    /// The prompt body exceeds the maximum allowed size.
     #[error("body exceeds {MAX_BODY_BYTES} bytes")]
     BodyTooLarge,
 
+    /// The file as a whole exceeds the maximum allowed size.
     #[error("file too large: {0}")]
     TooLarge(String),
 
+    /// Failed to parse the YAML frontmatter.
     #[error("failed to parse YAML frontmatter: {0}")]
     Yaml(#[from] serde_yaml::Error),
 
+    /// A required frontmatter field was missing or empty.
     #[error("missing required field: {0}")]
     MissingField(String),
 }
@@ -68,12 +76,16 @@ pub struct RespondTo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct McpServerConfig {
+    /// Server identifier.
     pub name: String,
+    /// Executable command to launch the server.
     pub command: String,
 
+    /// Command-line arguments.
     #[serde(default)]
     pub args: Vec<String>,
 
+    /// Environment variables for the subprocess.
     #[serde(default)]
     pub env: HashMap<String, String>,
 }
@@ -82,12 +94,15 @@ pub struct McpServerConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct Hooks {
+    /// Hook invoked when the persona starts.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub on_start: Option<String>,
 
+    /// Hook invoked when the persona stops.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub on_stop: Option<String>,
 
+    /// Hook invoked on each incoming message.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub on_message: Option<String>,
 }
@@ -112,9 +127,11 @@ pub struct PersonaConfig {
     /// One-line description. Required.
     pub description: String,
 
+    /// Optional persona version string.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
 
+    /// Optional persona author.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub author: Option<String>,
 
@@ -147,9 +164,11 @@ pub struct PersonaConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
 
+    /// Sampling temperature.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
 
+    /// Maximum context window in tokens.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_context_tokens: Option<u64>,
 
@@ -161,6 +180,7 @@ pub struct PersonaConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub broadcast_replies: Option<bool>,
 
+    /// Lifecycle hooks (pack-relative paths).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hooks: Option<Hooks>,
 

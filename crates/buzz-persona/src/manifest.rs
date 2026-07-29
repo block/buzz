@@ -19,14 +19,18 @@ use serde::{Deserialize, Serialize};
 
 use crate::persona::RespondTo;
 
+/// Errors returned while reading or parsing a pack manifest.
 #[derive(Debug, thiserror::Error)]
 pub enum ManifestError {
+    /// Failed to read the manifest file from disk.
     #[error("failed to read file: {0}")]
     Io(#[from] std::io::Error),
 
+    /// Failed to parse the manifest JSON.
     #[error("failed to parse JSON: {0}")]
     Json(#[from] serde_json::Error),
 
+    /// A required manifest field was missing or empty.
     #[error("missing required field: {0}")]
     MissingField(String),
 }
@@ -47,24 +51,31 @@ pub struct Engines {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct BehavioralDefaults {
+    /// Default model string in `"provider:model-id"` format.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
 
+    /// Default sampling temperature.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
 
+    /// Default maximum context window in tokens.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_context_tokens: Option<u64>,
 
+    /// Default channels to monitor.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subscribe: Option<Vec<String>>,
 
+    /// Default message matching triggers (legacy alias: `respond_to`).
     #[serde(skip_serializing_if = "Option::is_none", alias = "respond_to")]
     pub triggers: Option<RespondTo>,
 
+    /// Default reply-in-thread behavior.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thread_replies: Option<bool>,
 
+    /// Default broadcast-replies behavior.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub broadcast_replies: Option<bool>,
 }
@@ -77,25 +88,34 @@ pub struct BehavioralDefaults {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct PackManifest {
+    /// Unique pack identifier (slug).
     pub id: String,
+    /// Human-readable pack name.
     pub name: String,
+    /// Semver version string.
     pub version: String,
 
+    /// Optional short description of the pack.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 
+    /// Optional pack author.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub author: Option<String>,
 
+    /// Optional SPDX license identifier.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub license: Option<String>,
 
+    /// Optional homepage URL.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub homepage: Option<String>,
 
+    /// Discovery keywords.
     #[serde(default)]
     pub keywords: Vec<String>,
 
+    /// Runtime engine constraints.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub engines: Option<Engines>,
 
