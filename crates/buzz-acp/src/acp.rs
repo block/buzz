@@ -215,6 +215,10 @@ pub struct AcpClient {
     /// deltas. Both goose and buzz-agent emit this notification; goose gates
     /// on client capability advertisement, buzz-agent emits unconditionally.
     goose_usage: UsageTracker,
+    /// Accumulates `agent_message_chunk` text while a one-shot helper (the
+    /// `complete` subcommand) is capturing the agent's reply. `None` disables
+    /// capture — the normal harness path never allocates here.
+    captured_agent_text: Option<String>,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -554,7 +558,21 @@ impl AcpClient {
             steering_supported: false,
             steer_rx: None,
             goose_usage: UsageTracker::default(),
+            captured_agent_text: None,
         })
+    }
+
+    /// Start capturing `agent_message_chunk` text from `session/update`
+    /// notifications. Used by the one-shot `complete` subcommand to collect
+    /// the agent's reply text; the harness path never enables this.
+    pub fn begin_text_capture(&mut self) {
+        self.captured_agent_text = Some(String::new());
+    }
+
+    /// Take the text captured since [`begin_text_capture`](Self::begin_text_capture)
+    /// and disable capture.
+    pub fn take_captured_text(&mut self) -> String {
+        self.captured_agent_text.take().unwrap_or_default()
     }
 
     /// Attach a local observer feed to this ACP client.
@@ -1719,6 +1737,9 @@ impl AcpClient {
             "agent_message_chunk" => {
                 if let Some(text) = update["content"]["text"].as_str() {
                     tracing::info!(target: "acp::stream", "{text}");
+                    if let Some(buffer) = self.captured_agent_text.as_mut() {
+                        buffer.push_str(text);
+                    }
                 }
                 false
             }

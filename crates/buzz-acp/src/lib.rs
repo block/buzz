@@ -30,7 +30,7 @@ use buzz_core::observer::{
 };
 use clap::Parser;
 use config::{
-    AuthAgentArgs, AuthMethodsArgs, AuthenticateArgs, Config, DedupMode, ModelsArgs,
+    AuthAgentArgs, AuthMethodsArgs, AuthenticateArgs, CompleteArgs, Config, DedupMode, ModelsArgs,
     MultipleEventHandling, RespondTo, SubscribeMode,
 };
 use filter::SubscriptionRule;
@@ -1249,6 +1249,16 @@ async fn tokio_main() -> Result<()> {
             .collect();
         let args = ModelsArgs::parse_from(&filtered);
         return run_models(args).await;
+    }
+
+    if is_subcommand("complete") {
+        let filtered: Vec<String> = std::env::args()
+            .enumerate()
+            .filter(|(i, _)| *i != 1)
+            .map(|(_, a)| a)
+            .collect();
+        let args = CompleteArgs::parse_from(&filtered);
+        return run_complete(args).await;
     }
 
     if is_subcommand("auth-methods") {
@@ -4157,6 +4167,98 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
     }
 
     client.shutdown().await;
+    Ok(())
+}
+
+/// Setup timeout for `buzz-acp complete` (spawn + initialize + session/new).
+/// Longer than [`MODELS_TIMEOUT`] because agents cold-start here (goose can
+/// take >10s to initialize its first session).
+const COMPLETE_SETUP_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Idle timeout for `buzz-acp complete` — resets on any agent stdout activity.
+const COMPLETE_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Hard wall-clock cap for `buzz-acp complete`.
+const COMPLETE_MAX_DURATION: Duration = Duration::from_secs(90);
+
+/// Flow: spawn → initialize → session/new → session/prompt → print captured
+/// agent text → shutdown. No relay connection, no MCP servers.
+///
+/// Powers desktop features that need a bounded request/response completion
+/// from the configured agent (e.g. Developer Mode channel naming).
+async fn run_complete(args: CompleteArgs) -> Result<()> {
+    let agent_args = config::normalize_agent_args(&args.agent.agent_command, args.agent.agent_args);
+    let cwd = std::env::current_dir()
+        .unwrap_or_else(|_| std::path::PathBuf::from("/"))
+        .to_string_lossy()
+        .to_string();
+
+    // Spawn outside the timeout so we always own the child for cleanup.
+    let mut client =
+        match AcpClient::spawn(&args.agent.agent_command, &agent_args, &[], false).await {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("error: failed to spawn agent: {e}");
+                std::process::exit(1);
+            }
+        };
+
+    let setup_result = tokio::time::timeout(COMPLETE_SETUP_TIMEOUT, async {
+        client.initialize().await?;
+        let session = client
+            .session_new_full(&cwd, vec![], args.system_prompt.as_deref(), None)
+            .await?;
+        Ok::<_, acp::AcpError>(session.session_id)
+    })
+    .await;
+
+    let session_id = match setup_result {
+        Ok(Ok(id)) => id,
+        Ok(Err(e)) => {
+            client.shutdown().await;
+            eprintln!("error: agent communication failed: {e}");
+            std::process::exit(1);
+        }
+        Err(_) => {
+            client.shutdown().await;
+            eprintln!("error: agent timed out ({COMPLETE_SETUP_TIMEOUT:?})");
+            std::process::exit(1);
+        }
+    };
+
+    // Best-effort model selection — not all agents support session/set_model.
+    if let Some(model) = &args.model {
+        let _ = client.session_set_model(&session_id, model).await;
+    }
+
+    client.begin_text_capture();
+    let prompt_result = client
+        .session_prompt_with_idle_timeout(
+            &session_id,
+            &args.prompt,
+            COMPLETE_IDLE_TIMEOUT,
+            COMPLETE_MAX_DURATION,
+        )
+        .await;
+    let text = client.take_captured_text();
+    client.shutdown().await;
+
+    if let Err(e) = prompt_result {
+        eprintln!("error: prompt failed: {e}");
+        std::process::exit(1);
+    }
+
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        eprintln!("error: agent returned no message text");
+        std::process::exit(1);
+    }
+
+    if args.json {
+        println!("{}", serde_json::json!({ "text": trimmed }));
+    } else {
+        println!("{trimmed}");
+    }
     Ok(())
 }
 

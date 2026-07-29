@@ -158,23 +158,23 @@ fn model_discovery_error(pubkey: &str, error: &str) -> String {
 /// one pure step so the linked-agent regression test can bind the exact values
 /// the command consumes.
 #[derive(Debug, PartialEq, Eq)]
-struct AgentModelDiscoveryConfig {
+pub(super) struct AgentModelDiscoveryConfig {
     /// Effective harness command (descriptor-resolved), for `resolve_command`.
-    command: String,
+    pub(super) command: String,
     /// Effective harness args (descriptor-resolved).
-    args: Vec<String>,
+    pub(super) args: Vec<String>,
     /// Model from the authoritative resolver spawn uses — linked instances
     /// read their definition, never stale `record.model` bytes.
-    model: Option<String>,
+    pub(super) model: Option<String>,
     /// Provider from the same authoritative resolver — never stale
     /// `record.provider` bytes for linked instances.
-    provider: Option<String>,
+    pub(super) provider: Option<String>,
     /// The runtime's provider env var (e.g. `GOOSE_PROVIDER`), so discovery
     /// can recover the provider from the env when the resolver yields none.
     /// `None` for runtimes that do not take a provider, or an unknown command.
-    provider_env_var: Option<&'static str>,
+    pub(super) provider_env_var: Option<&'static str>,
     /// The descriptor's fully layered env (definition/persona/global/agent).
-    env: BTreeMap<String, String>,
+    pub(super) env: BTreeMap<String, String>,
 }
 
 /// Resolve the model-discovery config for a saved agent — the descriptor-backed
@@ -196,7 +196,7 @@ struct AgentModelDiscoveryConfig {
 /// Returns `Err("DANGLING_HARNESS_ID:<id>")` from the descriptor resolver when
 /// the harness id no longer exists; the caller routes it through
 /// `model_discovery_error`.
-fn agent_model_discovery_config(
+pub(super) fn agent_model_discovery_config(
     record: &crate::managed_agents::ManagedAgentRecord,
     personas: &[crate::managed_agents::AgentDefinition],
     global: &crate::managed_agents::GlobalAgentConfig,

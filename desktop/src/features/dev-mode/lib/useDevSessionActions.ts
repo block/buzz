@@ -2,6 +2,7 @@ import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
 import { attachManagedAgentToChannel } from "@/features/agents/channelAgents";
+import { useManagedAgentsQuery } from "@/features/agents/hooks";
 import {
   channelsQueryKey,
   useCreateChannelMutation,
@@ -12,10 +13,7 @@ import { updateChannel } from "@/shared/api/tauriChannels";
 import type { Channel, Identity } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { generateChannelTitle } from "@/features/dev-mode/lib/channelNaming";
-import {
-  slugifyPrompt,
-  uniqueChannelName,
-} from "@/features/dev-mode/lib/sessionNaming";
+import { uniqueChannelName } from "@/features/dev-mode/lib/sessionNaming";
 import type {
   DevAgentTarget,
   DevComposerMode,
@@ -60,6 +58,24 @@ export function useDevSessionActions(identity: Identity | undefined) {
   const queryClient = useQueryClient();
   const createChannelMutation = useCreateChannelMutation();
   const sendMessageMutation = useSendMessageMutation(null, identity);
+  const managedAgentsQuery = useManagedAgentsQuery();
+  const managedAgents = managedAgentsQuery.data;
+
+  /**
+   * The managed agent whose harness runs the one-shot naming completion:
+   * the agent tagged in the composer when it is a managed one, otherwise any
+   * configured managed agent. Relay agents and plain chat can't run local
+   * completions, so they borrow the first managed agent's harness.
+   */
+  const namingAgentPubkey = React.useCallback(
+    (mode: DevComposerMode | undefined): string | null => {
+      if (mode?.kind === "agent" && mode.target.source === "managed") {
+        return mode.target.pubkey;
+      }
+      return managedAgents?.[0]?.pubkey ?? null;
+    },
+    [managedAgents],
+  );
 
   /**
    * Create the channel for a new session, named and described from the
@@ -68,25 +84,37 @@ export function useDevSessionActions(identity: Identity | undefined) {
    * on retry.
    */
   const createSessionChannel = React.useCallback(
-    async (prompt: string): Promise<Channel> => {
+    async (prompt: string, mode?: DevComposerMode): Promise<Channel> => {
       const existingNames = new Set(
         (queryClient.getQueryData<Channel[]>(channelsQueryKey) ?? []).map(
           (channel) => channel.name,
         ),
       );
 
+      // Neutral placeholder, never a prompt slug: the name is replaced by an
+      // agent-generated title, and a lingering "new-session" makes a naming
+      // failure visible instead of masquerading as a generated title.
       const channel = await createChannelMutation.mutateAsync({
-        name: slugifyPrompt(prompt, existingNames),
+        name: uniqueChannelName("new-session", existingNames),
         channelType: "stream",
         visibility: "open",
         description: prompt.length > 140 ? `${prompt.slice(0, 139)}…` : prompt,
       });
 
       // LLM naming is best-effort and never blocks the session: the channel
-      // opens under its slug name and is renamed when a title arrives.
+      // opens under its placeholder name and is renamed when a title arrives.
       void (async () => {
-        const title = await generateChannelTitle(prompt);
-        if (!title || title === channel.name) return;
+        const title = await generateChannelTitle(
+          prompt,
+          namingAgentPubkey(mode),
+        );
+        if (!title) {
+          console.warn(
+            `dev-mode: channel naming failed for ${channel.id}; keeping placeholder`,
+          );
+          return;
+        }
+        if (title === channel.name) return;
         const currentNames = new Set(
           (queryClient.getQueryData<Channel[]>(channelsQueryKey) ?? [])
             .filter((candidate) => candidate.id !== channel.id)
@@ -98,14 +126,18 @@ export function useDevSessionActions(identity: Identity | undefined) {
             name: uniqueChannelName(title, currentNames),
           });
           await queryClient.invalidateQueries({ queryKey: channelsQueryKey });
-        } catch {
-          // Rename failing leaves the slug name, which is already valid.
+        } catch (error) {
+          // Rename failing leaves the placeholder name, which is still valid.
+          console.warn(
+            `dev-mode: channel rename failed for ${channel.id}`,
+            error,
+          );
         }
       })();
 
       return channel;
     },
-    [createChannelMutation, queryClient],
+    [createChannelMutation, namingAgentPubkey, queryClient],
   );
 
   /**

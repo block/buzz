@@ -786,6 +786,7 @@ pub fn run() {
             get_managed_agent_log,
             get_agent_models,
             discover_agent_models,
+            generate_agent_completion,
             get_agent_config_surface,
             get_runtime_file_config,
             get_baked_build_env_keys,

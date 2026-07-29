@@ -391,7 +391,7 @@ export function DevModeShell() {
       try {
         let channel = activeChannel;
         if (!channel) {
-          channel = await createSessionChannel(prompt);
+          channel = await createSessionChannel(prompt, mode);
           setActiveSessionId(channel.id);
           setNavigatorId(channel.id);
           setView("channel");

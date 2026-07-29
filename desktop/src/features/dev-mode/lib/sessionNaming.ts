@@ -26,14 +26,3 @@ export function uniqueChannelName(
     if (!existingNames.has(candidate)) return candidate;
   }
 }
-
-/** Derive a channel name from the first words of a prompt. */
-export function slugifyPrompt(
-  prompt: string,
-  existingNames: ReadonlySet<string>,
-): string {
-  return uniqueChannelName(
-    sanitizeChannelName(prompt) || "session",
-    existingNames,
-  );
-}
