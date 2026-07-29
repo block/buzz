@@ -682,6 +682,7 @@ pub fn run() {
             get_nsec,
             generate_backup_passphrase,
             create_ncryptsec_backup,
+            verify_ncryptsec_backup,
             save_ncryptsec_copy,
             import_identity,
             persist_current_identity,

@@ -95,3 +95,20 @@ export async function persistCurrentIdentity(): Promise<Identity> {
 export async function signOut(): Promise<void> {
   await invokeTauri("sign_out");
 }
+
+export type BackupVerification = {
+  pubkey: string;
+  npub: string;
+  matchesCurrentIdentity: boolean;
+};
+
+/** Decrypt a NIP-49 backup in Rust and return only its public identity. */
+export async function verifyNcryptsecBackup(
+  ncryptsec: string,
+  password: string,
+): Promise<BackupVerification> {
+  return invokeTauri<BackupVerification>("verify_ncryptsec_backup", {
+    ncryptsec,
+    password,
+  });
+}

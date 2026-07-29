@@ -5,7 +5,6 @@
 import { expect, test } from "@playwright/test";
 import { installMockBridge } from "../helpers/bridge";
 import { openSettings } from "../helpers/settings";
-import { endWindowFileDrag, startWindowFileDrag } from "../helpers/fileDrag";
 
 /** Expand the identity details section if it is not already open. */
 async function expandIdentity(page: import("@playwright/test").Page) {
@@ -65,32 +64,18 @@ test("reveal shows error when get_nsec fails", async ({ page }) => {
   );
 });
 
-test("settings creates and tests a password-protected key backup", async ({
+test("settings separates backup creation from general NIP-49 testing", async ({
   page,
 }) => {
   await installMockBridge(page);
   await page.goto("/");
   await openSettings(page, "profile");
   await expandIdentity(page);
-
-  const row = page.getByTestId("profile-encrypted-backup-row");
-  await expect(row).toContainText("Password-protected key backup");
-  await page.getByTestId("profile-encrypted-backup-toggle").click();
-
-  await page
-    .getByTestId("backup-passphrase-input")
-    .fill("mock horse battery staple");
-  await page.getByTestId("encrypted-backup-create").click();
-  await expect(page.getByTestId("backup-test-dropzone")).toBeVisible();
-
-  // A file drag over the window swaps in a drop overlay covering the backup
-  // row (composer-style takeover); leaving restores the select button.
-  const dropOverlay = page.getByTestId("backup-test-drop-overlay");
-  await startWindowFileDrag(page);
-  await expect(dropOverlay).toBeVisible();
-  await endWindowFileDrag(page);
-  await expect(dropOverlay).toHaveCount(0);
-
+  const createRow = page.getByTestId("profile-encrypted-backup-row");
+  const testRow = page.getByTestId("profile-backup-test-row");
+  await expect(createRow).toContainText("Create a key backup");
+  await expect(testRow).toContainText("Test a key backup");
+  await page.getByTestId("profile-backup-test-row-toggle").click();
   await page.getByTestId("backup-test-file-input").setInputFiles({
     name: "identity.ncryptsec",
     mimeType: "text/plain",
@@ -100,8 +85,13 @@ test("settings creates and tests a password-protected key backup", async ({
   });
   await page
     .getByTestId("backup-test-password")
-    .fill("mock horse battery staple");
+    .fill("mock horse battery staple lake orbit");
+  await page.getByTestId("backup-test-verify").click();
   await expect(page.getByTestId("backup-test-success")).toContainText(
-    "Your backup works!",
+    "Valid backup",
   );
+  await expect(page.getByTestId("backup-test-success")).toContainText(
+    "Matches your current Buzz identity",
+  );
+  await expect(page.getByTestId("backup-test-npub")).toBeVisible();
 });

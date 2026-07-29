@@ -13,6 +13,16 @@ import { Input } from "@/shared/ui/input";
 import { Popover, PopoverAnchor, PopoverContent } from "@/shared/ui/popover";
 import { Spinner } from "@/shared/ui/spinner";
 import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/shared/ui/alert-dialog";
+import {
   downloadDisabled,
   isEncrypting,
   passphraseIssue,
@@ -138,7 +148,7 @@ function PendingDownloadTicker() {
 
 /**
  * Everything about an in-progress backup that must survive this component
- * unmounting: the reducer state (passphrase + committed blob), whether the
+ * unmounting: the reducer state (short-lived passphrase + encrypted blob), whether the
  * backup test passed, where the file was saved, the save-once guard, and the
  * test-flow progress. Hosts that need the state to outlive the creator (the
  * onboarding flow, where Back unmounts the step) call
@@ -195,11 +205,8 @@ export function useEncryptedBackupSession(): EncryptedBackupSession {
 }
 
 /**
- * Roll a session back from the post-download test view to the password form
- * (onboarding Back on "Now, test your backup"). The passphrase and its cached
- * encryption result survive, so re-downloading is instant; the committed
- * blob, test progress, verification, and save bookkeeping are discarded so a
- * re-download runs the full save + test ceremony again.
+ * Return to a secure saved-password placeholder. The encrypted blob survives
+ * for instant re-download, while no password or test attempt is retained.
  */
 export function backupSessionToPasswordEntry(
   session: EncryptedBackupSession,
@@ -207,7 +214,6 @@ export function backupSessionToPasswordEntry(
   session.dispatch({ type: "back-to-password" });
   session.setVerified(false);
   session.setSavedPath(null);
-  session.savedForRef.current = null;
   session.setTest(initialBackupTestProgress);
 }
 
@@ -230,6 +236,8 @@ type EncryptedBackupCreatorProps = {
   onCreated?: () => void;
   /** Fired only after the encrypted key file has been saved successfully. */
   onSaved?: (path: string) => void;
+  /** Whether creation continues into onboarding's guided test ceremony. */
+  guidedTest?: boolean;
   /** Fired once when the user completes the backup test successfully. */
   onVerified?: () => void;
 };
@@ -245,9 +253,11 @@ type EncryptedBackupCreatorProps = {
  */
 function PassphraseGeneratorPopover({
   disabled = false,
+  onRequestGenerate,
   onGenerated,
 }: {
   disabled?: boolean;
+  onRequestGenerate?: () => void;
   onGenerated: (value: string) => void;
 }) {
   const [open, setOpen] = React.useState(false);
@@ -308,6 +318,10 @@ function PassphraseGeneratorPopover({
           onClick={() => {
             // The open effect below generates the first password; later
             // clicks re-roll with the current controls.
+            if (onRequestGenerate) {
+              onRequestGenerate();
+              return;
+            }
             if (!open) setOpen(true);
             else void generate(words, separator);
           }}
@@ -413,6 +427,7 @@ export function EncryptedBackupCreator({
   session: sessionProp,
   onCreated,
   onSaved,
+  guidedTest = true,
   onVerified,
 }: EncryptedBackupCreatorProps) {
   // Hosts without a longer-lived session get a private one (settings card).
@@ -422,6 +437,7 @@ export function EncryptedBackupCreator({
   const [isRevealed, setIsRevealed] = React.useState(false);
   const [saveError, setSaveError] = React.useState<string | null>(null);
   const [isSaving, setIsSaving] = React.useState(false);
+  const [confirmNewPassword, setConfirmNewPassword] = React.useState(false);
   const mountedRef = React.useRef(true);
 
   React.useEffect(() => {
@@ -437,39 +453,32 @@ export function EncryptedBackupCreator({
     if (state.downloadPending) setIsRevealed(false);
   }, [state.downloadPending]);
 
-  // Eager background encryption: start the KDF as soon as the passphrase is
-  // valid (debounced against typing). Results are keyed by passphrase in the
-  // reducer, so a completion for an edited passphrase is dropped there.
+  // Correlate KDF completion by an opaque request id. The password exists only
+  // in this short-lived effect closure and is cleared from reducer state once
+  // Rust returns; stale completions cannot commit.
   const pendingPassphrase = pendingEncryptPassphrase(state);
   const skipDebounce = state.downloadPending;
   React.useEffect(() => {
     if (!pendingPassphrase) return;
     let cancelled = false;
+    const requestId = state.nextRequestId;
     const start = () => {
       if (cancelled) return;
-      // Completions dispatch unguarded: with a host-owned session the KDF
-      // may finish while this component is unmounted (user navigated Back),
-      // and the result must still land in the session. Dispatching to an
-      // unmounted private session is a safe no-op.
-      dispatch({ type: "encrypt-started", passphrase: pendingPassphrase });
+      dispatch({ type: "encrypt-started", requestId });
       void createNcryptsecBackup(pendingPassphrase)
-        .then((ncryptsec) => {
-          dispatch({
-            type: "encrypt-succeeded",
-            passphrase: pendingPassphrase,
-            ncryptsec,
-          });
-        })
-        .catch((err: unknown) => {
+        .then((ncryptsec) =>
+          dispatch({ type: "encrypt-succeeded", requestId, ncryptsec }),
+        )
+        .catch((err: unknown) =>
           dispatch({
             type: "encrypt-failed",
-            passphrase: pendingPassphrase,
+            requestId,
             message:
               err instanceof Error
                 ? err.message
                 : "Failed to encrypt your key.",
-          });
-        });
+          }),
+        );
     };
     const timer = window.setTimeout(
       start,
@@ -479,7 +488,7 @@ export function EncryptedBackupCreator({
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [dispatch, pendingPassphrase, skipDebounce]);
+  }, [dispatch, pendingPassphrase, skipDebounce, state.nextRequestId]);
 
   // Download commit: fires once per committed blob, whether the commit was
   // instant (encryption already done) or resolved a queued download. The flow
@@ -556,21 +565,45 @@ export function EncryptedBackupCreator({
 
   // The test view requires a successful save, not just a committed blob —
   // while the native save dialog is open the password form stays put.
-  if (state.ncryptsec && savedPath) {
+  if (state.ncryptsec && savedPath && guidedTest) {
     return (
       <div data-testid="encrypted-backup-result">
         <BackupTestFlow
           isSaving={isSaving}
-          ncryptsec={state.ncryptsec}
+          expectedNcryptsec={state.ncryptsec}
           onProgressChange={setTest}
           onSaveCopy={() => void handleSaveCopy()}
           onVerified={handleVerified}
-          passphrase={state.passphrase}
           progress={test}
           saveError={saveError}
           savedPath={savedPath}
           variant={variant}
         />
+      </div>
+    );
+  }
+  if (state.ncryptsec && savedPath) {
+    return (
+      <div
+        className="space-y-3 text-center"
+        data-testid="encrypted-backup-created"
+      >
+        <p className="font-medium">Backup downloaded</p>
+        <p className="text-sm text-muted-foreground">
+          Buzz cleared the password from this session. You can download another
+          copy without entering it again.
+        </p>
+        <Button
+          data-testid="encrypted-backup-save-copy"
+          disabled={isSaving}
+          onClick={() => void handleSaveCopy()}
+        >
+          {isSaving ? <Spinner className="mr-2 size-4 border-2" /> : null}
+          Download another copy
+        </Button>
+        {saveError ? (
+          <p className="text-sm text-destructive">{saveError}</p>
+        ) : null}
       </div>
     );
   }
@@ -587,19 +620,65 @@ export function EncryptedBackupCreator({
           className="h-10 bg-background pr-19 font-mono"
           data-testid="backup-passphrase-input"
           disabled={state.downloadPending}
+          readOnly={state.savedPassword}
+          aria-describedby={
+            state.savedPassword
+              ? "backup-saved-password-description"
+              : undefined
+          }
+          onBeforeInput={(event) => {
+            if (state.savedPassword) {
+              event.preventDefault();
+              setConfirmNewPassword(true);
+            }
+          }}
+          onPaste={(event) => {
+            if (state.savedPassword) {
+              event.preventDefault();
+              setConfirmNewPassword(true);
+            }
+          }}
           onChange={(event) =>
             dispatch({ type: "set-passphrase", value: event.target.value })
           }
-          placeholder={`Password (min ${MIN_PASSPHRASE_LEN} characters)`}
+          placeholder={
+            state.savedPassword
+              ? ""
+              : `Password (min ${MIN_PASSPHRASE_LEN} characters)`
+          }
           type={isRevealed ? "text" : "password"}
           value={state.passphrase}
         />
+        {state.savedPassword ? (
+          <div
+            aria-hidden
+            className="pointer-events-none absolute inset-y-0 left-3 flex items-center font-mono tracking-widest text-foreground"
+            data-testid="backup-saved-password-mask"
+          >
+            ••••••••••••••••••••••••••••••••
+          </div>
+        ) : null}
+        {state.savedPassword ? (
+          <span className="sr-only" id="backup-saved-password-description">
+            Backup password saved; hidden for security.
+          </span>
+        ) : null}
         <Button
-          aria-label={isRevealed ? "Hide password" : "Reveal password"}
+          aria-label={
+            state.savedPassword
+              ? "Change saved backup password"
+              : isRevealed
+                ? "Hide password"
+                : "Reveal password"
+          }
           className="absolute right-1 top-1/2 h-8 w-8 -translate-y-1/2 text-muted-foreground hover:text-foreground"
           data-testid="backup-passphrase-reveal-toggle"
           disabled={state.downloadPending}
-          onClick={() => setIsRevealed((revealed) => !revealed)}
+          onClick={() =>
+            state.savedPassword
+              ? setConfirmNewPassword(true)
+              : setIsRevealed((revealed) => !revealed)
+          }
           size="icon"
           type="button"
           variant="ghost"
@@ -612,6 +691,9 @@ export function EncryptedBackupCreator({
         </Button>
         <PassphraseGeneratorPopover
           disabled={state.downloadPending}
+          onRequestGenerate={
+            state.savedPassword ? () => setConfirmNewPassword(true) : undefined
+          }
           onGenerated={(value) => {
             dispatch({ type: "set-passphrase", value });
             // A generated password must be visible so the user can save it.
@@ -662,13 +744,19 @@ export function EncryptedBackupCreator({
               className={cn("h-9 rounded-full px-6", createButtonClassName)}
               data-testid="encrypted-backup-create"
               disabled={downloadDisabled(state) || isSaving}
-              onClick={() => dispatch({ type: "download-clicked" })}
+              onClick={() =>
+                state.savedPassword && state.ncryptsec
+                  ? void handleSaveCopy()
+                  : dispatch({ type: "download-clicked" })
+              }
               type="button"
             >
               {state.downloadPending ? (
                 <PendingDownloadTicker />
+              ) : state.savedPassword ? (
+                "Download backup again"
               ) : (
-                "Download backup"
+                "Backup key"
               )}
             </Button>
           </div>
@@ -681,6 +769,36 @@ export function EncryptedBackupCreator({
           ? createPortal(createButton, createButtonPortal)
           : null;
       })()}
+      <AlertDialog
+        open={confirmNewPassword}
+        onOpenChange={setConfirmNewPassword}
+      >
+        <AlertDialogContent data-testid="backup-change-password-dialog">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Create a new backup password?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Buzz no longer keeps the password for this backup. Starting over
+              creates a new backup; copies you already saved will keep working
+              with their original password.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Keep current backup</AlertDialogCancel>
+            <AlertDialogAction
+              data-testid="backup-start-new-password"
+              onClick={() => {
+                dispatch({ type: "start-new-backup" });
+                setSavedPath(null);
+                savedForRef.current = null;
+                setTest(initialBackupTestProgress);
+                setIsRevealed(false);
+              }}
+            >
+              Start with a new password
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

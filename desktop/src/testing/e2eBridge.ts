@@ -9628,6 +9628,25 @@ export function maybeInstallE2eTauriMocks() {
         }
         return MOCK_NCRYPTSEC;
       }
+      case "verify_ncryptsec_backup": {
+        const request = payload as {
+          ncryptsec?: string;
+          password?: string;
+        } | null;
+        if (
+          request?.password !== MOCK_BACKUP_PASSPHRASE ||
+          !request.ncryptsec?.startsWith("ncryptsec1")
+        )
+          throw new Error("Wrong backup password or damaged key backup.");
+        const different = request.ncryptsec !== MOCK_NCRYPTSEC;
+        return {
+          pubkey: different ? "f".repeat(64) : DEFAULT_MOCK_IDENTITY.pubkey,
+          npub: different
+            ? "npub1differentmockidentity000000000000000000000000000000000"
+            : "npub1mockcurrentidentity0000000000000000000000000000000000",
+          matchesCurrentIdentity: !different,
+        };
+      }
       case "save_ncryptsec_copy": {
         const blob = (payload as { ncryptsec?: string } | null)?.ncryptsec;
         if (!blob?.startsWith("ncryptsec1")) {

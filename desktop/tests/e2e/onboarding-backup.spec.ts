@@ -146,11 +146,17 @@ test("download happy path: generated password, encrypt, native save, Next", asyn
   await waitForAnimations(page);
   await page.screenshot({ path: `${SHOTS}/03-backup-download-passphrase.png` });
 
-  // Esc closes the popover; the generated password stays in the field.
+  // Encryption may finish while the generator popover is still open. Once it
+  // does, the real password is cleared and only the fixed saved-password mask
+  // remains over an empty read-only input.
   await page.keyboard.press("Escape");
   await expect(page.getByTestId("backup-passphrase-separator")).toHaveCount(0);
-  await expect(input).toHaveValue("mock-horse-battery-staple");
+  await expect(input).toHaveValue("");
+  await expect(input).toHaveAttribute("readonly", "");
+  await expect(page.getByTestId("backup-saved-password-mask")).toBeVisible();
 
+  // Saving uses the retained encrypted blob; it does not re-encrypt or need
+  // the cleared password.
   await page.getByTestId("encrypted-backup-create").click();
 
   // Only a successful save (the mock "picks" a path) advances to the
@@ -180,7 +186,7 @@ test("download happy path: generated password, encrypt, native save, Next", asyn
     mimeType: "text/plain",
     buffer: Buffer.from("not a key backup"),
   });
-  await expect(page.getByTestId("backup-test-file-error")).toBeVisible();
+  await expect(page.getByTestId("backup-test-error")).toBeVisible();
 
   // A file drag over the window swaps in the drop overlay; leaving without
   // dropping restores the select button.
@@ -204,13 +210,14 @@ test("download happy path: generated password, encrypt, native save, Next", asyn
   await waitForAnimations(page);
   await page.screenshot({ path: `${SHOTS}/05-backup-test-password.png` });
 
-  // A full-length wrong password shows the mismatch hint, never success.
+  // Verification is explicit and clears every submitted attempt.
   await password.fill("mock-horse-battery-staplX");
-  await expect(page.getByTestId("backup-test-password-mismatch")).toBeVisible();
-  await expect(page.getByTestId("backup-test-success")).toHaveCount(0);
+  await page.getByTestId("backup-test-verify").click();
+  await expect(page.getByTestId("backup-test-error")).toBeVisible();
+  await expect(password).toHaveValue("");
 
-  // Typing the password completely succeeds without any extra click.
-  await password.fill("mock-horse-battery-staple");
+  await password.fill("mock horse battery staple lake orbit");
+  await page.getByTestId("backup-test-verify").click();
   await expect(page.getByTestId("backup-test-success")).toBeVisible();
 
   // The celebration is driven by motion's rAF loop, which
@@ -248,7 +255,7 @@ test("download step Back returns to the backup chooser", async ({ page }) => {
   await expect(page.getByTestId("onboarding-next")).toBeVisible();
 });
 
-test("test-view Back returns to the password form with the password intact", async ({
+test("test-view Back returns to a secure saved-password placeholder", async ({
   page,
 }) => {
   await enterMachineBackup(page);
@@ -262,17 +269,17 @@ test("test-view Back returns to the password form with the password intact", asy
     page.getByRole("heading", { name: "Now, test your backup" }),
   ).toBeVisible();
 
-  // Back from the test view rolls back to the password form (same step),
-  // keeping the entered password; only from the form does Back leave the
-  // step.
+  // Back retains only the encrypted blob and renders a fixed visual mask over
+  // an empty readonly input.
   await page.getByTestId("onboarding-back").click();
   await expect(
     page.getByRole("heading", { name: "Backup your key with a password" }),
   ).toBeVisible();
-  await expect(input).toHaveValue("mock-horse-battery-staple");
+  await expect(input).toHaveValue("");
+  await expect(input).toHaveAttribute("readonly", "");
+  await expect(page.getByTestId("backup-saved-password-mask")).toBeVisible();
 
-  // Re-downloading runs the ceremony again instantly from the cached
-  // encryption.
+  // Re-downloading needs no password or re-encryption.
   await page.getByTestId("encrypted-backup-create").click();
   await expect(
     page.getByRole("heading", { name: "Now, test your backup" }),

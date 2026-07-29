@@ -1,476 +1,335 @@
-import { Check, Eye, EyeOff, FileKey2, FileUp } from "lucide-react";
-import { motion, useReducedMotion } from "motion/react";
+import { Check, Copy, Eye, EyeOff, FileKey2, FileUp } from "lucide-react";
 import * as React from "react";
+import { toast } from "sonner";
 
+import {
+  verifyNcryptsecBackup,
+  type BackupVerification,
+} from "@/shared/api/tauriIdentity";
+import { writeTextToClipboard } from "@/shared/lib/clipboard";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { Spinner } from "@/shared/ui/spinner";
 
-type BackupTestStage = "drop" | "password" | "success";
-
-/**
- * Durable progress through the test flow. Owned by the host so navigating
- * away (e.g. onboarding Back) and returning doesn't force the user to
- * re-drop the file or retype their attempt.
- */
 export type BackupTestProgress = {
-  stage: BackupTestStage;
-  /** Name of the accepted file once the drop check passed. */
+  stage: "drop" | "password" | "success";
   fileName: string | null;
-  /** The password attempt typed so far. */
-  attempt: string;
+  ncryptsec: string | null;
+  result: BackupVerification | null;
 };
-
 export const initialBackupTestProgress: BackupTestProgress = {
   stage: "drop",
   fileName: null,
-  attempt: "",
+  ncryptsec: null,
+  result: null,
 };
 
-type BackupTestFlowProps = {
-  /** "spotlight" is the onboarding treatment; "boxed" fits settings cards. */
+type Props = {
   variant?: "spotlight" | "boxed";
-  /** The exact committed `ncryptsec1…` blob the downloaded file contains. */
-  ncryptsec: string;
-  /** The passphrase the backup was encrypted under. */
-  passphrase: string;
-  /** Re-open the native save dialog for another copy of the backup file. */
-  onSaveCopy: () => void;
-  isSaving: boolean;
-  savedPath: string | null;
-  saveError: string | null;
-  /** Host-owned progress so it survives this component unmounting. */
+  /** When supplied, only this exact just-created file can complete onboarding. */
+  expectedNcryptsec?: string;
+  onSaveCopy?: () => void;
+  isSaving?: boolean;
+  savedPath?: string | null;
+  saveError?: string | null;
   progress: BackupTestProgress;
   onProgressChange: React.Dispatch<React.SetStateAction<BackupTestProgress>>;
-  /** Fired once when the user completes the test successfully. */
   onVerified?: () => void;
 };
 
-/**
- * How long after the last keystroke before a wrong attempt is called out.
- * Verification itself is instant on match; this only delays the scolding.
- */
-const MISMATCH_HINT_PAUSE_MS = 900;
-
-const BURST_EMOJIS = ["🎉", "✨", "🐝", "🍯", "🔑", "💛"] as const;
-const BURST_PARTICLE_COUNT = 18;
-
-type BurstParticle = {
-  id: number;
-  x: number;
-  y: number;
-  emoji: string;
-  delay: number;
-  scale: number;
-  rotate: number;
-};
-
-/**
- * One-shot radial emoji burst behind the success badge. Purely decorative —
- * skipped entirely under reduced motion.
- */
-function SuccessBurst() {
-  const particles = React.useMemo<BurstParticle[]>(
-    () =>
-      Array.from({ length: BURST_PARTICLE_COUNT }, (_, i) => {
-        const angle =
-          (i / BURST_PARTICLE_COUNT) * Math.PI * 2 + Math.random() * 0.5;
-        const distance = 70 + Math.random() * 80;
-        return {
-          id: i,
-          x: Math.cos(angle) * distance,
-          y: Math.sin(angle) * distance,
-          emoji: BURST_EMOJIS[i % BURST_EMOJIS.length],
-          delay: Math.random() * 0.18,
-          scale: 0.8 + Math.random() * 0.7,
-          rotate: -120 + Math.random() * 240,
-        };
-      }),
-    [],
-  );
-
-  return (
-    <div
-      aria-hidden
-      className="pointer-events-none absolute inset-0 flex items-center justify-center overflow-visible"
-    >
-      {particles.map((particle) => (
-        <motion.span
-          animate={{
-            x: particle.x,
-            y: particle.y,
-            opacity: 0,
-            scale: particle.scale,
-            rotate: particle.rotate,
-          }}
-          className="absolute text-xl"
-          initial={{ x: 0, y: 0, opacity: 1, scale: 0.3, rotate: 0 }}
-          key={particle.id}
-          transition={{
-            duration: 0.9,
-            delay: particle.delay,
-            ease: "easeOut",
-          }}
-        >
-          {particle.emoji}
-        </motion.span>
-      ))}
-    </div>
-  );
-}
-
-/**
- * Post-download "Test your backup" flow: the user drops the file they just
- * downloaded onto a large dropzone, then retypes their password. Both checks
- * run instantly in memory — the dropped file's bytes must equal the committed
- * blob and the typed password must equal the passphrase that encrypted it —
- * so there is no second KDF run and no key material beyond what the creator
- * already held.
- */
 export function BackupTestFlow({
   variant = "spotlight",
-  ncryptsec,
-  passphrase,
+  expectedNcryptsec,
   onSaveCopy,
-  isSaving,
+  isSaving = false,
   savedPath,
   saveError,
   progress,
   onProgressChange,
   onVerified,
-}: BackupTestFlowProps) {
-  const reduceMotion = useReducedMotion() ?? false;
-  const { stage, fileName, attempt } = progress;
-  // True while a file drag is anywhere over the window — the drop overlay
-  // takes over the host surface only for the duration of the drag.
-  const [isWindowDragging, setIsWindowDragging] = React.useState(false);
-  const dragDepthRef = React.useRef(0);
+}: Props) {
+  const { stage, fileName, ncryptsec, result } = progress;
+  const [attempt, setAttempt] = React.useState("");
+  const [error, setError] = React.useState<string | null>(null);
+  const [verifying, setVerifying] = React.useState(false);
+  const [revealed, setRevealed] = React.useState(false);
+  const [dragging, setDragging] = React.useState(false);
+  const fileRef = React.useRef<HTMLInputElement>(null);
+  const mounted = React.useRef(true);
+  const requestRef = React.useRef(0);
+  React.useEffect(
+    () => () => {
+      mounted.current = false;
+      requestRef.current += 1;
+      setAttempt("");
+    },
+    [],
+  );
 
   React.useEffect(() => {
-    // dragenter/dragleave fire per nested element, so track depth to know
-    // when the drag has actually left the window.
-    const handleDragEnter = (event: DragEvent) => {
-      if (!event.dataTransfer?.types.includes("Files")) return;
-      dragDepthRef.current += 1;
-      setIsWindowDragging(true);
+    const enter = (event: DragEvent) => {
+      if (event.dataTransfer?.types.includes("Files")) setDragging(true);
     };
-    const handleDragLeave = () => {
-      dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
-      if (dragDepthRef.current === 0) setIsWindowDragging(false);
+    const leave = (event: DragEvent) => {
+      if (event.clientX === 0 && event.clientY === 0) setDragging(false);
     };
-    const handleDragEnd = () => {
-      dragDepthRef.current = 0;
-      setIsWindowDragging(false);
-    };
-    window.addEventListener("dragenter", handleDragEnter);
-    window.addEventListener("dragleave", handleDragLeave);
-    window.addEventListener("drop", handleDragEnd);
-    window.addEventListener("dragend", handleDragEnd);
+    const end = () => setDragging(false);
+    window.addEventListener("dragenter", enter);
+    window.addEventListener("dragleave", leave);
+    window.addEventListener("drop", end);
+    window.addEventListener("dragend", end);
     return () => {
-      window.removeEventListener("dragenter", handleDragEnter);
-      window.removeEventListener("dragleave", handleDragLeave);
-      window.removeEventListener("drop", handleDragEnd);
-      window.removeEventListener("dragend", handleDragEnd);
-    };
-  }, []);
-  const [fileError, setFileError] = React.useState<string | null>(null);
-  const [isRevealed, setIsRevealed] = React.useState(false);
-  const fileInputRef = React.useRef<HTMLInputElement | null>(null);
-  const passwordInputRef = React.useRef<HTMLInputElement | null>(null);
-  const mountedRef = React.useRef(true);
-  const verifiedFiredRef = React.useRef(false);
-
-  React.useEffect(() => {
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
+      window.removeEventListener("dragenter", enter);
+      window.removeEventListener("dragleave", leave);
+      window.removeEventListener("drop", end);
+      window.removeEventListener("dragend", end);
     };
   }, []);
 
-  React.useEffect(() => {
-    if (stage === "password") passwordInputRef.current?.focus();
-  }, [stage]);
-
-  const succeed = React.useCallback(() => {
-    onProgressChange((prev) => ({ ...prev, stage: "success" }));
-    if (!verifiedFiredRef.current) {
-      verifiedFiredRef.current = true;
-      onVerified?.();
-    }
-  }, [onProgressChange, onVerified]);
-
-  const handleFile = React.useCallback(
-    async (file: File) => {
-      let text: string;
-      try {
-        text = await file.text();
-      } catch {
-        if (mountedRef.current) setFileError("Could not read that file.");
-        return;
-      }
-      if (!mountedRef.current) return;
-      const trimmed = text.trim();
-      if (trimmed === ncryptsec.trim()) {
-        setFileError(null);
-        onProgressChange((prev) => ({
-          ...prev,
-          stage: "password",
-          fileName: file.name,
-        }));
-      } else if (trimmed.toLowerCase().startsWith("ncryptsec1")) {
-        setFileError(
+  async function choose(file: File) {
+    try {
+      const text = (await file.text()).trim();
+      if (!text.toLowerCase().startsWith("ncryptsec1"))
+        throw new Error("That doesn't look like a NIP-49 key backup.");
+      if (expectedNcryptsec && text !== expectedNcryptsec.trim())
+        throw new Error(
           "That's a key backup, but not the one you just downloaded.",
         );
-      } else {
-        setFileError(
-          "That doesn't look like your key backup. Choose the file you just downloaded.",
+      setError(null);
+      setAttempt("");
+      onProgressChange({
+        stage: "password",
+        fileName: file.name,
+        ncryptsec: text,
+        result: null,
+      });
+    } catch (err) {
+      if (mounted.current)
+        setError(
+          err instanceof Error ? err.message : "Could not read that file.",
         );
-      }
-    },
-    [ncryptsec, onProgressChange],
-  );
-
-  const handlePasswordChange = React.useCallback(
-    (value: string) => {
-      onProgressChange((prev) => ({ ...prev, attempt: value }));
-      if (value === passphrase) succeed();
-    },
-    [onProgressChange, passphrase, succeed],
-  );
-
-  // Only scold after the user pauses (or presses Enter), never mid-typing —
-  // and never based on the attempt's length, which would leak how long the
-  // real password is.
-  const [mismatchVisible, setMismatchVisible] = React.useState(false);
-  React.useEffect(() => {
-    setMismatchVisible(false);
-    if (stage !== "password" || attempt.length === 0 || attempt === passphrase)
-      return;
-    const timer = window.setTimeout(
-      () => setMismatchVisible(true),
-      MISMATCH_HINT_PAUSE_MS,
-    );
-    return () => window.clearTimeout(timer);
-  }, [stage, attempt, passphrase]);
-
-  const isSpotlight = variant === "spotlight";
-  const attemptWrong = stage === "password" && mismatchVisible;
-
-  if (stage === "success") {
-    return (
-      <div
-        className="relative flex flex-col items-center gap-4 py-4 text-center"
-        data-testid="backup-test-success"
-      >
-        {reduceMotion ? null : <SuccessBurst />}
-        <motion.div
-          animate={{ scale: 1, opacity: 1 }}
-          className="flex h-16 w-16 items-center justify-center rounded-full bg-primary text-primary-foreground"
-          initial={reduceMotion ? false : { scale: 0, opacity: 0 }}
-          transition={
-            reduceMotion
-              ? { duration: 0 }
-              : { type: "spring", stiffness: 380, damping: 18 }
-          }
-        >
-          <Check aria-hidden="true" className="h-8 w-8" strokeWidth={3} />
-        </motion.div>
-        <motion.div
-          animate={{ opacity: 1, y: 0 }}
-          initial={reduceMotion ? false : { opacity: 0, y: 8 }}
-          transition={
-            reduceMotion ? { duration: 0 } : { delay: 0.15, duration: 0.35 }
-          }
-        >
-          <p className="text-lg font-medium text-foreground">
-            Your backup works!
-          </p>
-          <p className="mt-1.5 text-sm leading-6 text-muted-foreground">
-            File and password verified. Keep them both somewhere safe — that's
-            all you need to restore your identity.
-          </p>
-        </motion.div>
-      </div>
-    );
+    }
   }
 
+  async function verify() {
+    if (!ncryptsec || !attempt || verifying) return;
+    const password = attempt;
+    const id = ++requestRef.current;
+    setVerifying(true);
+    setError(null);
+    setRevealed(false);
+    setAttempt("");
+    try {
+      const verified = await verifyNcryptsecBackup(ncryptsec, password);
+      if (!mounted.current || id !== requestRef.current) return;
+      onProgressChange({ ...progress, stage: "success", result: verified });
+      onVerified?.();
+    } catch (err) {
+      if (mounted.current && id === requestRef.current)
+        setError(
+          err instanceof Error ? err.message : "Could not verify this backup.",
+        );
+    } finally {
+      if (mounted.current && id === requestRef.current) setVerifying(false);
+    }
+  }
+
+  if (stage === "success" && result)
+    return (
+      <div
+        className="space-y-4 py-3 text-center"
+        data-testid="backup-test-success"
+      >
+        <div className="mx-auto flex size-14 items-center justify-center rounded-full bg-primary text-primary-foreground">
+          <Check className="size-7" aria-hidden />
+        </div>
+        <div>
+          <p className="text-lg font-medium">Valid backup</p>
+          <p className="mt-1 text-sm text-muted-foreground">
+            {result.matchesCurrentIdentity
+              ? "Matches your current Buzz identity."
+              : "Belongs to a different identity."}
+          </p>
+        </div>
+        <div className="mx-auto flex max-w-md items-center gap-2 rounded-lg bg-muted px-3 py-2">
+          <code
+            className="min-w-0 flex-1 truncate text-xs"
+            title={result.npub}
+            data-testid="backup-test-npub"
+          >
+            {result.npub}
+          </code>
+          <Button
+            aria-label="Copy backup identity"
+            data-testid="backup-test-copy-npub"
+            onClick={async () => {
+              await writeTextToClipboard(result.npub);
+              toast.success("Copied to clipboard");
+            }}
+            size="icon"
+            variant="ghost"
+          >
+            <Copy className="size-4" />
+          </Button>
+        </div>
+        {!expectedNcryptsec ? (
+          <Button
+            data-testid="backup-test-another"
+            onClick={() => {
+              setError(null);
+              onProgressChange(initialBackupTestProgress);
+            }}
+            variant="ghost"
+          >
+            Test another backup
+          </Button>
+        ) : null}
+      </div>
+    );
+
+  const spotlight = variant === "spotlight";
   return (
     <div
       className={cn(
         "mx-auto w-full space-y-4",
-        isSpotlight ? "max-w-140" : "max-w-125",
+        spotlight ? "max-w-140" : "max-w-125",
       )}
       data-testid="backup-test-flow"
     >
       {stage === "drop" ? (
         <>
           <input
-            accept=".ncryptsec,text/plain"
+            ref={fileRef}
             className="sr-only"
             data-testid="backup-test-file-input"
-            onChange={(event) => {
-              const file = event.target.files?.[0];
-              // Allow re-selecting the same file after an error.
-              event.target.value = "";
-              if (file) void handleFile(file);
-            }}
-            ref={fileInputRef}
-            tabIndex={-1}
             type="file"
+            accept=".ncryptsec,text/plain"
+            tabIndex={-1}
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              e.target.value = "";
+              if (file) void choose(file);
+            }}
           />
           <button
-            className={cn(
-              "mx-auto flex items-center justify-center rounded-full bg-primary text-center shadow transition-colors hover:bg-primary/90",
-              // The CTA-label variable only exists inside the onboarding
-              // theme; elsewhere fall back to the standard primary pair.
-              isSpotlight
-                ? "h-14 px-12 text-(--buzz-onboarding-cta-label)"
-                : "h-9 px-6 text-primary-foreground",
-            )}
-            data-testid="backup-test-dropzone"
-            onClick={() => fileInputRef.current?.click()}
             type="button"
+            data-testid="backup-test-dropzone"
+            className={cn(
+              "mx-auto flex items-center justify-center rounded-full bg-primary font-medium text-primary-foreground",
+              spotlight ? "h-14 px-12" : "h-9 px-6 text-sm",
+            )}
+            onClick={() => fileRef.current?.click()}
           >
-            <span
-              className={cn(
-                "font-medium",
-                isSpotlight ? "text-base" : "text-sm",
-              )}
-            >
-              Select your backup file
-            </span>
+            Select a backup file
           </button>
-          {isWindowDragging ? (
-            /*
-             * Composer-style takeover: fills the nearest positioned host
-             * surface (the onboarding card / the settings backup row) and is
-             * itself the drop target, so anywhere on that surface accepts
-             * the file.
-             */
-            // biome-ignore lint/a11y/noStaticElementInteractions: pointer-only drop target; the select button is the keyboard-accessible path
-            <div
+          {dragging ? (
+            <section
+              aria-label="Drop your key backup here"
               className="absolute inset-2 z-10 mt-0! flex items-center justify-center rounded-2xl border-2 border-dashed border-primary bg-primary/10 backdrop-blur-sm"
               data-testid="backup-test-drop-overlay"
-              onDragOver={(event) => event.preventDefault()}
-              onDrop={(event) => {
-                event.preventDefault();
-                const file = event.dataTransfer.files?.[0];
-                if (file) void handleFile(file);
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={(e) => {
+                e.preventDefault();
+                const f = e.dataTransfer.files?.[0];
+                if (f) void choose(f);
               }}
             >
-              <span className="flex items-center gap-2 rounded-full bg-foreground px-4 py-2 text-sm font-semibold text-background shadow-sm ring-1 ring-background/15">
-                <FileUp aria-hidden="true" className="size-4" />
-                <span>Drop your backup file here</span>
+              <span className="flex items-center gap-2 rounded-full bg-foreground px-4 py-2 text-sm font-semibold text-background">
+                <FileUp className="size-4" />
+                Drop your backup file here
               </span>
-            </div>
+            </section>
           ) : null}
-          {fileError ? (
-            <p
-              className="text-center text-sm text-destructive"
-              data-testid="backup-test-file-error"
-            >
-              {fileError}
-            </p>
-          ) : null}
-          <div className="flex flex-col items-center gap-2">
-            <Button
-              className={cn(
-                "gap-1.5 rounded-full bg-foreground/10 hover:bg-foreground/15",
-                isSpotlight ? "h-12 px-10 text-base" : "h-9 px-6 text-sm",
-              )}
-              data-testid="encrypted-backup-save-copy"
-              disabled={isSaving}
-              onClick={onSaveCopy}
-              type="button"
-              variant="ghost"
-            >
-              {isSaving ? <Spinner className="h-4 w-4 border-2" /> : null}
-              Re-download backup
-            </Button>
-            {savedPath ? (
-              <p
-                className="text-center text-xs text-muted-foreground"
-                data-testid="encrypted-backup-saved-path"
+          {onSaveCopy ? (
+            <div className="text-center">
+              <Button
+                data-testid="encrypted-backup-save-copy"
+                disabled={isSaving}
+                onClick={onSaveCopy}
+                variant="ghost"
               >
-                Saved to {savedPath}
-              </p>
-            ) : null}
-          </div>
-          {saveError ? (
-            <p className="text-center text-sm text-destructive">{saveError}</p>
+                {isSaving ? <Spinner className="mr-2 size-4 border-2" /> : null}
+                Re-download backup
+              </Button>
+              {savedPath ? (
+                <p
+                  className="text-xs text-muted-foreground"
+                  data-testid="encrypted-backup-saved-path"
+                >
+                  Saved to {savedPath}
+                </p>
+              ) : null}
+            </div>
           ) : null}
         </>
       ) : (
         <>
           <div
-            className="flex items-center justify-center gap-2 text-sm text-foreground animate-in fade-in slide-in-from-bottom-1 duration-300 motion-reduce:animate-none"
+            className="flex items-center justify-center gap-2 text-sm"
             data-testid="backup-test-file-accepted"
           >
-            <FileKey2
-              aria-hidden="true"
-              className="h-4 w-4 text-muted-foreground"
-            />
+            <FileKey2 className="size-4" />
             <span className="max-w-70 truncate font-mono text-xs">
               {fileName}
             </span>
-            <Check aria-hidden="true" className="h-4 w-4 text-primary" />
+            <Check className="size-4 text-primary" />
           </div>
-          <p className="text-center text-sm leading-6 text-muted-foreground">
-            That's the one. Now type your password to prove you can unlock it.
+          <p className="text-center text-sm text-muted-foreground">
+            Enter its password, then verify it with real NIP-49 decryption.
           </p>
           <div className="relative">
             <Input
               aria-label="Backup password"
               autoComplete="off"
-              className="h-10 bg-background pr-10 font-mono"
               data-testid="backup-test-password"
-              onChange={(event) => handlePasswordChange(event.target.value)}
-              onKeyDown={(event) => {
-                // Enter is an explicit "check it" — no need to wait out the
-                // typing pause before calling out a mismatch.
-                if (event.key === "Enter" && attempt.length > 0)
-                  setMismatchVisible(attempt !== passphrase);
-              }}
-              placeholder="Your backup password"
-              ref={passwordInputRef}
-              type={isRevealed ? "text" : "password"}
+              disabled={verifying}
+              type={revealed ? "text" : "password"}
               value={attempt}
+              onChange={(e) => setAttempt(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  void verify();
+                }
+              }}
+              className="pr-10 font-mono"
             />
             <Button
-              aria-label={isRevealed ? "Hide password" : "Reveal password"}
-              className="absolute right-1 top-1/2 h-8 w-8 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+              aria-label={revealed ? "Hide password" : "Reveal password"}
               data-testid="backup-test-password-reveal-toggle"
-              onClick={() => setIsRevealed((revealed) => !revealed)}
+              disabled={verifying}
+              onClick={() => setRevealed((v) => !v)}
               size="icon"
               type="button"
               variant="ghost"
+              className="absolute right-1 top-1/2 -translate-y-1/2"
             >
-              {isRevealed ? (
-                <EyeOff aria-hidden="true" className="h-4 w-4" />
+              {revealed ? (
+                <EyeOff className="size-4" />
               ) : (
-                <Eye aria-hidden="true" className="h-4 w-4" />
+                <Eye className="size-4" />
               )}
             </Button>
-            {attemptWrong ? (
-              <p
-                className="absolute left-1 top-full mt-1 text-xs text-destructive animate-in fade-in duration-200 motion-reduce:animate-none"
-                data-testid="backup-test-password-mismatch"
-              >
-                Not quite — check the password you saved.
-              </p>
-            ) : null}
           </div>
-          <div className="flex justify-center pt-2">
+          <div className="flex justify-center gap-2">
             <Button
-              className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground"
+              data-testid="backup-test-verify"
+              disabled={!attempt || verifying}
+              onClick={() => void verify()}
+            >
+              {verifying ? <Spinner className="mr-2 size-4 border-2" /> : null}
+              Verify backup
+            </Button>
+            <Button
               data-testid="backup-test-use-different-file"
+              disabled={verifying}
               onClick={() => {
+                requestRef.current += 1;
+                setAttempt("");
+                setError(null);
                 onProgressChange(initialBackupTestProgress);
-                setIsRevealed(false);
               }}
-              size="sm"
-              type="button"
               variant="ghost"
             >
               Use a different file
@@ -478,6 +337,15 @@ export function BackupTestFlow({
           </div>
         </>
       )}
+      {error || saveError ? (
+        <p
+          role="alert"
+          className="text-center text-sm text-destructive"
+          data-testid="backup-test-error"
+        >
+          {error ?? saveError}
+        </p>
+      ) : null}
     </div>
   );
 }
