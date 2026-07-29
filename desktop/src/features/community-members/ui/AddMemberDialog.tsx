@@ -7,6 +7,7 @@ import {
 } from "@/features/community-members/hooks";
 import type { RelayMemberRole } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
+import { parsePubkeyInput } from "@/shared/lib/nostrUtils";
 import { Button } from "@/shared/ui/button";
 import {
   Dialog,
@@ -16,8 +17,6 @@ import {
   DialogTitle,
 } from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
-
-const PUBKEY_REGEX = /^[0-9a-f]{64}$/;
 
 const ROLE_OPTIONS: Array<{ value: RelayMemberRole; label: string }> = [
   { value: "member", label: "Member" },
@@ -38,8 +37,8 @@ export function AddMemberDialog({
   const [pubkey, setPubkey] = React.useState("");
   const [role, setRole] = React.useState<RelayMemberRole>("member");
 
-  const normalizedPubkey = pubkey.trim().toLowerCase();
-  const isValidPubkey = PUBKEY_REGEX.test(normalizedPubkey);
+  const normalizedPubkey = parsePubkeyInput(pubkey);
+  const isValidPubkey = normalizedPubkey !== null;
   const isAlreadyMember =
     isValidPubkey &&
     !addMutation.isPending &&
@@ -62,7 +61,7 @@ export function AddMemberDialog({
   }
 
   function handleAdd() {
-    if (!canAdd) return;
+    if (!canAdd || normalizedPubkey === null) return;
     addMutation.mutate(
       { pubkey: normalizedPubkey, role },
       {
@@ -109,15 +108,14 @@ export function AddMemberDialog({
                     autoCorrect="off"
                     data-testid="member-pubkey-input"
                     id="member-pubkey"
-                    maxLength={64}
                     onChange={(e) => setPubkey(e.target.value)}
-                    placeholder="64-character hex pubkey"
+                    placeholder="npub1… or 64-character hex pubkey"
                     spellCheck={false}
                     value={pubkey}
                   />
                   {pubkey.trim().length > 0 && !isValidPubkey ? (
                     <p className="text-xs text-destructive">
-                      Must be exactly 64 lowercase hex characters.
+                      Must be an npub1… key or 64 hex characters.
                     </p>
                   ) : null}
                   {isAlreadyMember ? (
