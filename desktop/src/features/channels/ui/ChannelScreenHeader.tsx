@@ -4,6 +4,7 @@ import type * as React from "react";
 import { ChatHeader } from "@/features/chat/ui/ChatHeader";
 import type { EphemeralChannelDisplay } from "@/features/channels/lib/ephemeralChannel";
 import type { ActiveDmHeaderParticipant } from "@/features/channels/useActiveChannelHeader";
+import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { getChannelDescription } from "@/features/channels/lib/channelDescription";
 import { getDmParticipantPreview } from "@/features/channels/lib/dmParticipantDisplay";
 import { ChannelHeaderStatusBadge } from "@/features/channels/ui/ChannelHeaderStatusBadge";
@@ -113,6 +114,30 @@ export function ChannelScreenHeader({
             <DmHeaderParticipantStack
               participants={activeDmHeaderParticipants}
             />
+          ) : activeDmHeaderParticipants.length === 1 ? (
+            <UserProfilePopover
+              pubkey={activeDmHeaderParticipants[0].pubkey}
+              hideMessageAction
+            >
+              <button
+                className="flex shrink-0 items-start focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring rounded-full"
+                type="button"
+                data-testid="chat-header-dm-avatar-button"
+              >
+                <ProfileAvatarWithStatus
+                  avatarClassName="text-xs"
+                  avatarUrl={activeDmAvatarUrl}
+                  className="mr-1.5 h-8 w-8"
+                  geometry={DM_HEADER_AVATAR_STATUS_GEOMETRY}
+                  iconClassName="h-4 w-4"
+                  label={activeChannelTitle}
+                  size={DM_HEADER_AVATAR_SIZE}
+                  status={activeDmPresenceStatus ?? "offline"}
+                  statusTestId="chat-presence-badge"
+                  testId="chat-header-dm-avatar"
+                />
+              </button>
+            </UserProfilePopover>
           ) : (
             <ProfileAvatarWithStatus
               avatarClassName="text-xs"
@@ -137,6 +162,12 @@ export function ChannelScreenHeader({
       title={activeChannelTitle}
       transparentChrome={transparentChrome}
       visibility={activeChannel?.visibility}
+      dmUserPubkey={
+        activeChannel?.channelType === "dm" &&
+        activeDmHeaderParticipants.length === 1
+          ? activeDmHeaderParticipants[0].pubkey
+          : undefined
+      }
     />
   );
 }
@@ -170,12 +201,23 @@ function DmHeaderParticipantStack({
             }),
           }}
         >
-          <UserAvatar
-            avatarUrl={participant.avatarUrl}
-            className="h-8 w-8 text-xs"
-            displayName={participant.displayName}
-            size="sm"
-          />
+          <UserProfilePopover
+            pubkey={participant.pubkey}
+            hideMessageAction
+            triggerElement="span"
+          >
+            <button
+              className="flex shrink-0 items-start focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring rounded-full"
+              type="button"
+            >
+              <UserAvatar
+                avatarUrl={participant.avatarUrl}
+                className="h-8 w-8 text-xs"
+                displayName={participant.displayName}
+                size="sm"
+              />
+            </button>
+          </UserProfilePopover>
         </div>
       ))}
       {hiddenCount > 0 ? (
