@@ -95,6 +95,7 @@ import {
   runtimeDropdownAction,
   usePendingHarnessSelection,
 } from "./addCustomHarness";
+import { useAgentRelink } from "./OrphanedAgentRelinkField";
 
 export function AgentInstanceEditDialog({
   agent,
@@ -146,13 +147,9 @@ export function AgentInstanceEditDialog({
   const [autoRestartOnConfigChange, setAutoRestartOnConfigChange] =
     React.useState(agent.autoRestartOnConfigChange);
   const personasQuery = usePersonasQuery();
-  const linkedPersona = React.useMemo(
-    () =>
-      agent.personaId
-        ? (personasQuery.data?.find((p) => p.id === agent.personaId) ?? null)
-        : null,
-    [agent.personaId, personasQuery.data],
-  );
+  const personas = personasQuery.data ?? [];
+  const orphanRelink = useAgentRelink(agent, open, personas, setInheritHarness);
+  const linkedPersona = orphanRelink.linkedPersona;
   const inheritedEnvVars = linkedPersona?.envVars ?? {};
   const [respondTo, setRespondTo] = React.useState<RespondToMode>(
     agent.respondTo,
@@ -658,6 +655,7 @@ export function AgentInstanceEditDialog({
       const submitEnvVars = inheritedSubmission.envVars;
       const input: UpdateManagedAgentInput = {
         pubkey: agent.pubkey,
+        personaId: orphanRelink.inputPersonaId,
         name: name.trim() !== agent.name ? name.trim() : undefined,
         // relayUrl deliberately never submitted: the legacy per-record pin is
         // ignored (#2122) and the stored value is preserved as-is.
@@ -936,6 +934,8 @@ export function AgentInstanceEditDialog({
                 />
               </div>
             </div>
+            {orphanRelink.renderField(updateMutation.isPending)}
+
             <OwnerOnlyAccessField
               accessLocked={agentAccessOwnerOnly === true}
               allowlist={respondToAllowlist}

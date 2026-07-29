@@ -200,6 +200,10 @@ pub struct CreateManagedAgentRequest {
 #[serde(rename_all = "camelCase")]
 pub struct UpdateManagedAgentRequest {
     pub pubkey: String,
+    /// Absent = don't touch. null = detach into a standalone agent.
+    /// "id" = link (or relink) to that active definition.
+    #[serde(default, deserialize_with = "crate::util::double_option")]
+    pub persona_id: Option<Option<String>>,
     /// Absent = don't touch. Present = rename the agent.
     #[serde(default)]
     pub name: Option<String>,
@@ -290,6 +294,20 @@ mod tests {
             created_at: "2026-01-01T00:00:00Z".to_string(),
             updated_at: "2026-01-01T00:00:00Z".to_string(),
         }
+    }
+
+    #[test]
+    fn managed_agent_persona_update_has_tri_state_semantics() {
+        let absent: UpdateManagedAgentRequest = serde_json::from_str(r#"{"pubkey":"pk"}"#).unwrap();
+        assert_eq!(absent.persona_id, None);
+
+        let detach: UpdateManagedAgentRequest =
+            serde_json::from_str(r#"{"pubkey":"pk","personaId":null}"#).unwrap();
+        assert_eq!(detach.persona_id, Some(None));
+
+        let relink: UpdateManagedAgentRequest =
+            serde_json::from_str(r#"{"pubkey":"pk","personaId":"persona-2"}"#).unwrap();
+        assert_eq!(relink.persona_id, Some(Some("persona-2".to_string())));
     }
 
     /// The anchor regression row: an absent behavior group must leave a

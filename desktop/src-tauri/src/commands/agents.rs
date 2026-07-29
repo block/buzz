@@ -1,22 +1,25 @@
 use nostr::{Keys, ToBech32};
 use tauri::{AppHandle, State};
 
+use super::agent_references::prepare_managed_agent_key_mint;
+#[path = "agents_create.rs"]
+mod create;
 use crate::{
     app_state::AppState,
     managed_agents::{
         build_managed_agent_summary, current_instance_id, discover_provider_candidates,
-        ensure_persona_is_active, find_managed_agent_mut, load_managed_agents, load_personas,
-        load_teams, managed_agent_avatar_url, normalize_agent_args, provider_deploy,
-        resolve_provider_binary, save_managed_agents, start_managed_agent_process,
-        stop_managed_agent_process, stop_managed_agent_workspace_pair,
-        sync_managed_agent_processes, try_regenerate_nest, validate_provider_config, BackendKind,
-        CreateManagedAgentRequest, CreateManagedAgentResponse, ManagedAgentRecord,
-        ManagedAgentSummary, RelayMeshConfig, DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM,
-        DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
+        find_managed_agent_mut, load_managed_agents, load_personas, load_teams,
+        managed_agent_avatar_url, normalize_agent_args, provider_deploy, resolve_provider_binary,
+        save_managed_agents, start_managed_agent_process, stop_managed_agent_process,
+        stop_managed_agent_workspace_pair, sync_managed_agent_processes, try_regenerate_nest,
+        validate_provider_config, BackendKind, CreateManagedAgentRequest,
+        CreateManagedAgentResponse, ManagedAgentRecord, ManagedAgentSummary, RelayMeshConfig,
+        DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM, DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
     },
     relay::{relay_ws_url_with_override, sync_managed_agent_profile},
     util::now_iso,
 };
+use create::{normalize_relay_mesh, trim_to_optional_string};
 
 /// Read the workspace owner pubkey without holding the lock. Used to populate `BUZZ_ACP_AGENT_OWNER`
 /// as a fallback for legacy agent records that have no NIP-OA `auth_tag`.
@@ -198,36 +201,6 @@ pub(super) fn archive_managed_agent_pending(app: &AppHandle, state: &AppState, a
     })();
     if let Err(e) = result {
         eprintln!("buzz-desktop: agent-archive: {e}");
-    }
-}
-
-fn normalize_relay_mesh(
-    config: Option<&RelayMeshConfig>,
-    backend: &BackendKind,
-) -> Result<Option<RelayMeshConfig>, String> {
-    let Some(config) = config else {
-        return Ok(None);
-    };
-
-    let model_ref = config.model_ref.trim();
-    if model_ref.is_empty() {
-        return Err("Buzz shared compute model is required".to_string());
-    }
-    if backend != &BackendKind::Local {
-        return Err("Buzz shared compute agents must use the local backend".to_string());
-    }
-
-    Ok(Some(RelayMeshConfig {
-        model_ref: model_ref.to_string(),
-    }))
-}
-
-fn trim_to_optional_string(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
     }
 }
 
@@ -606,7 +579,7 @@ pub async fn create_managed_agent(
     let owner_hex = workspace_owner_hex(&state)?;
 
     // ── Phase 1: generate keys (sync lock) ────────────────────────────────────
-    let (agent_keys, private_key_nsec, pubkey, resolved_relay_url, input) = {
+    let (agent_keys, private_key_nsec, pubkey, resolved_relay_url, input, persona_mint_reservation) = {
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
@@ -625,11 +598,12 @@ pub async fn create_managed_agent(
         for pubkey in &exited_pubkeys {
             state.clear_agent_session_caches(pubkey);
         }
-        if let Some(persona_id) = requested_persona_id.as_deref() {
-            let personas = load_personas(&app)?;
-            ensure_persona_is_active(&personas, persona_id)?;
-        }
-        let keys = Keys::generate();
+        let (keys, persona_mint_reservation) = prepare_managed_agent_key_mint(
+            &app,
+            &state,
+            &records,
+            requested_persona_id.as_deref(),
+        )?;
         let pubkey = keys.public_key().to_hex();
         if records.iter().any(|record| record.pubkey == pubkey) {
             return Err(format!("agent {pubkey} already exists"));
@@ -649,7 +623,14 @@ pub async fn create_managed_agent(
             .unwrap_or("")
             .to_string();
 
-        (keys, private_key_nsec, pubkey, resolved_relay_url, input)
+        (
+            keys,
+            private_key_nsec,
+            pubkey,
+            resolved_relay_url,
+            input,
+            persona_mint_reservation,
+        )
     };
 
     // ── Pre-Phase 2: validate provider config BEFORE any side effects ────────
@@ -939,6 +920,7 @@ pub async fn create_managed_agent(
             resolved_avatar_url,
         )
     };
+    drop(persona_mint_reservation);
 
     // ── Phase 3b: local spawn (async preflight outside store lock) ───────────
     let mut spawn_error = None;

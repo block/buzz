@@ -298,6 +298,17 @@ pub fn validate_persona_deletion(
     Ok(())
 }
 
+/// Whether this install learned the definition from the owner's relay rather
+/// than authoring it locally.
+///
+/// Locally-created definitions keep `source_team_persona_slug = None`; the
+/// inbound kind:30175 parser records the relay d-tag there. Team definitions
+/// also carry a slug, but have `source_team = Some` and are handled by the
+/// existing team deletion guard.
+pub fn is_relay_synced_persona(persona: &AgentDefinition) -> bool {
+    persona.source_team.is_none() && persona.source_team_persona_slug.is_some()
+}
+
 pub fn validate_persona_activation_change(
     persona: &AgentDefinition,
     active: bool,
