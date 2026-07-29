@@ -128,7 +128,8 @@ user-editable environment variables on an agent:
 | Variable | Supplied by | Description |
 |----------|-------------|-------------|
 | `BUZZ_AUTH_TAG` | Buzz Desktop or a trusted backend provider | JSON-encoded NIP-OA owner attestation. The harness uses it to resolve the owner and forwards it to the `buzz` CLI. It is delegated authority, not general deploy, database, or infrastructure access. |
-| `BUZZ_ACP_TEAM_INSTRUCTIONS` | Buzz Desktop or the service operator | Inline team-owned instruction text, layered after the system prompt and before agent memory. The value is the instruction text itself, not a filename. |
+| `BUZZ_ACP_TEAM_INSTRUCTIONS` | Buzz Desktop or the service operator | Inline team-owned instruction text, layered after the system prompt and before agent memory. |
+| `BUZZ_ACP_TEAM_INSTRUCTIONS_FILE` | Service operator | Path to a file containing team-owned instructions. Mutually exclusive with the inline value. |
 
 Buzz Desktop strips user-supplied values for reserved identity keys such as
 `BUZZ_PRIVATE_KEY` and `BUZZ_AUTH_TAG`, then injects the values it owns when it
@@ -141,10 +142,14 @@ the owner's private key, put it on a process command line, commit it, or print i
 to logs. Store it with the same protections as the agent private key and replace
 the old value when rotating the authorization.
 
-`BUZZ_ACP_TEAM_INSTRUCTIONS` is not secret-bearing storage. Operators using a
-file as their source of truth must read that file and pass its contents to the
-harness; setting the variable to `/path/to/instructions.md` would inject that
-literal path into the prompt.
+Team instructions are not secret-bearing storage. For a durable file-backed
+source, set `BUZZ_ACP_TEAM_INSTRUCTIONS_FILE=/path/to/instructions.md`; setting
+the inline `BUZZ_ACP_TEAM_INSTRUCTIONS` variable to that path would inject the
+literal path into the prompt. The harness validates the file at startup, caps it
+at 64 KiB, and re-reads it for every new ACP session. Legacy adapters that cannot
+accept a system prompt at session creation re-read it before every prompt. If
+the file becomes unreadable or oversized, the affected prompt fails closed
+without sending partial or stale instructions to the adapter.
 
 ### Parallel Agents & Heartbeat
 

@@ -494,6 +494,10 @@ pub struct PromptContext {
     /// on `session/new`. Never part of the prompt.
     pub session_title: Option<String>,
     pub team_instructions: Option<String>,
+    /// File-backed instructions are re-read for every new ACP session (and
+    /// before legacy per-turn prompt framing) so updates do not require a
+    /// harness restart.
+    pub team_instructions_file: Option<std::path::PathBuf>,
     pub heartbeat_prompt: Option<String>,
     /// Base prompt content, or `None` if `--no-base-prompt` was passed.
     ///
@@ -841,6 +845,18 @@ async fn resolve_new_session_channel_context(
     (is_dm, title_channel)
 }
 
+fn current_team_instructions(ctx: &PromptContext) -> Result<Option<String>, AcpError> {
+    match ctx.team_instructions_file.as_deref() {
+        Some(path) => crate::config::read_team_instructions_file(path).map_err(|error| {
+            AcpError::Protocol(format!(
+                "failed to reload team instructions file {}: {error}",
+                path.display()
+            ))
+        }),
+        None => Ok(ctx.team_instructions.clone()),
+    }
+}
+
 /// Create a new ACP session via `session_new_full()`, populate model capabilities
 /// on the agent (first session only), and apply `desired_model` if set.
 ///
@@ -861,11 +877,12 @@ async fn create_session_and_apply_model(
     // its own `[Agent Memory — core]` header, and canvas carries its own
     // `[Channel Canvas]` header; both are appended with a blank-line separator.
     let is_goose = agent.agent_name == "goose";
+    let team_instructions = current_team_instructions(ctx)?;
     let combined_system_prompt = with_canvas(
         with_core(
             with_team(
                 framed_system_prompt(&ctx.cwd, ctx.base_prompt, ctx.system_prompt.as_deref()),
-                ctx.team_instructions.as_deref(),
+                team_instructions.as_deref(),
             ),
             agent_core,
         ),
@@ -1784,6 +1801,28 @@ pub async fn run_prompt_task(
     // (`prompt[0].text.startsWith("/")`) fires; the wrapped Buzz context
     // follows as a second block.
     let mut slash_command: Option<String> = None;
+    let legacy_team_instructions = if agent.has_system_prompt_support() {
+        None
+    } else {
+        match current_team_instructions(&ctx) {
+            Ok(instructions) => instructions,
+            Err(error) => {
+                tracing::error!(
+                    target: "pool::prompt",
+                    "refusing prompt with unavailable team instructions: {error}"
+                );
+                send_prompt_result(
+                    &result_tx,
+                    &turn_id,
+                    agent,
+                    source,
+                    PromptOutcome::Error(error),
+                    None,
+                );
+                return;
+            }
+        }
+    };
     let prompt_sections: Vec<String> = if let Some(text) = prompt_text {
         // Heartbeats create their session before this point, so a Goose method-not-found
         // probe has already selected the correct framing for this process.
@@ -1837,7 +1876,7 @@ pub async fn run_prompt_task(
                 has_system_prompt_support: agent.has_system_prompt_support(),
                 base_prompt: ctx.base_prompt,
                 system_prompt: ctx.system_prompt.as_deref(),
-                team_instructions: ctx.team_instructions.as_deref(),
+                team_instructions: legacy_team_instructions.as_deref(),
                 agent_canvas: agent_canvas.as_deref(),
             },
         )
@@ -5344,6 +5383,7 @@ mod tests {
             system_prompt: None,
             session_title: None,
             team_instructions: None,
+            team_instructions_file: None,
             heartbeat_prompt: None,
             base_prompt: None,
             cwd: ".".to_string(),
@@ -5370,6 +5410,101 @@ mod tests {
             memory_enabled: false,
             harness_name: "goose".to_string(),
             relay_url: "ws://127.0.0.1:3000".to_string(),
+        }
+    }
+
+    #[test]
+    fn team_instructions_file_is_reloaded_after_context_creation() {
+        let path = std::env::temp_dir().join(format!(
+            "buzz-acp-reload-team-instructions-{}.md",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&path, "first rule").unwrap();
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.team_instructions = Some("startup snapshot".into());
+        ctx.team_instructions_file = Some(path.clone());
+
+        assert_eq!(
+            current_team_instructions(&ctx).unwrap().as_deref(),
+            Some("first rule")
+        );
+        std::fs::write(&path, "second rule").unwrap();
+        assert_eq!(
+            current_team_instructions(&ctx).unwrap().as_deref(),
+            Some("second rule")
+        );
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn legacy_prompt_refuses_when_team_instructions_file_disappears() {
+        let path = std::env::temp_dir().join(format!(
+            "buzz-acp-missing-live-team-instructions-{}.md",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&path, "required rule").unwrap();
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.team_instructions_file = Some(path.clone());
+        std::fs::remove_file(&path).unwrap();
+
+        let acp = AcpClient::spawn(
+            "bash",
+            &["-c".to_string(), "sleep 10".to_string()],
+            &[],
+            false,
+        )
+        .await
+        .expect("failed to spawn test agent");
+        let state = SessionState {
+            heartbeat_session: Some("existing-session".into()),
+            ..SessionState::default()
+        };
+        let agent = OwnedAgent {
+            index: 0,
+            acp,
+            state,
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            agent_name: "legacy-test".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 1,
+        };
+        let (result_tx, mut result_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        run_prompt_task(
+            agent,
+            None,
+            Some("must not reach the adapter".into()),
+            Arc::new(ctx),
+            result_tx,
+            None,
+            "missing-team-instructions".into(),
+        )
+        .await;
+
+        let result = result_rx.recv().await.expect("prompt result");
+        match result.outcome {
+            PromptOutcome::Error(error) => {
+                assert!(
+                    error
+                        .to_string()
+                        .contains("failed to reload team instructions file"),
+                    "got: {error}"
+                );
+            }
+            other => panic!(
+                "missing team instructions must refuse the prompt, got {}",
+                match other {
+                    PromptOutcome::AgentExited => "AgentExited",
+                    PromptOutcome::Timeout(_) => "Timeout",
+                    PromptOutcome::CancelDrainTimeout(_) => "CancelDrainTimeout",
+                    PromptOutcome::Cancelled => "Cancelled",
+                    PromptOutcome::Ok(_) => "Ok",
+                    PromptOutcome::Error(_) => unreachable!(),
+                }
+            ),
         }
     }
 
