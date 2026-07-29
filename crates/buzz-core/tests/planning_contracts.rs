@@ -1,4 +1,11 @@
-use buzz_core::planning::{MissionConstraintV1, PlanningProjectV1, PlanningTaskV1};
+use buzz_core::kind::{
+    KIND_PLANNING_PLAYBOOK, KIND_PLANNING_TASK, KIND_PLANNING_TASK_ARTIFACT,
+    KIND_PLANNING_TASK_DETAILS, KIND_PLANNING_TASK_EXECUTION,
+};
+use buzz_core::planning::{
+    MissionConstraintV1, PlanningPlaybookV1, PlanningProjectV1, PlanningTaskArtifactV1,
+    PlanningTaskDetailsV1, PlanningTaskExecutionV1, PlanningTaskV1,
+};
 use serde_json::json;
 
 fn project() -> serde_json::Value {
@@ -66,6 +73,100 @@ fn constraint() -> serde_json::Value {
     })
 }
 
+fn task_details() -> serde_json::Value {
+    json!({
+        "schemaVersion": 1,
+        "id": "details:task-a",
+        "projectId": "deployment-1",
+        "taskId": "task-a",
+        "department": "MEO",
+        "position": "Marine Engineering Officer",
+        "individual": null,
+        "agentId": "operations",
+        "dueTime": "16:00",
+        "executionMode": "hybrid",
+        "outputType": "docx",
+        "playbookId": null,
+        "playbookRevisionId": null,
+        "locked": false,
+        "createdAt": "2026-07-29T00:00:00Z",
+        "updatedAt": "2026-07-29T00:00:00Z"
+    })
+}
+
+fn playbook() -> serde_json::Value {
+    json!({
+        "schemaVersion": 1,
+        "id": "pre-departure",
+        "title": "Pre-Departure",
+        "description": "Prepare the ship for sailing.",
+        "status": "active",
+        "revisionId": "revision-1",
+        "taskTemplates": [{
+            "id": "navigation-plan",
+            "title": "Navigation plan briefed",
+            "instructions": "Brief the approved navigation plan.",
+            "timing": "before",
+            "offsetMinutes": 1440,
+            "durationMinutes": 60,
+            "dependencyIds": [],
+            "department": "Navigation",
+            "position": "Navigation Officer",
+            "agentId": "navigation",
+            "outputType": "response",
+            "reschedulable": true,
+            "locked": false,
+            "linkedCapabilityId": null,
+            "linkedMissionRequirementId": null
+        }],
+        "createdAt": "2026-07-29T00:00:00Z",
+        "updatedAt": "2026-07-29T00:00:00Z"
+    })
+}
+
+fn execution() -> serde_json::Value {
+    json!({
+        "schemaVersion": 1,
+        "id": "execution-1",
+        "projectId": "deployment-1",
+        "taskId": "task-a",
+        "status": "forReview",
+        "mode": "hybrid",
+        "summary": "Draft logistics plan prepared.",
+        "body": "The plan uses the evidence available at execution time.",
+        "missingInputs": ["MEO defect update"],
+        "assumptions": ["Port services remain available"],
+        "provider": "litellm",
+        "model": "gpt-5.4",
+        "startedAt": "2026-07-29T00:00:00Z",
+        "completedAt": "2026-07-29T00:05:00Z",
+        "error": null,
+        "lateStart": false
+    })
+}
+
+fn artifact() -> serde_json::Value {
+    json!({
+        "schemaVersion": 1,
+        "id": "artifact-1",
+        "projectId": "deployment-1",
+        "taskId": "task-a",
+        "executionId": "execution-1",
+        "fileName": "logistics-support-plan.docx",
+        "path": "/Users/test/Command Adviser/logistics-support-plan.docx",
+        "format": "docx",
+        "storageState": "icloud",
+        "agentId": "operations",
+        "provider": "litellm",
+        "model": "gpt-5.4",
+        "summary": "Draft logistics plan.",
+        "missingInputWarning": "MEO defect update",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "sizeBytes": 2048,
+        "createdAt": "2026-07-29T00:00:00Z"
+    })
+}
+
 #[test]
 fn accepts_exact_planning_contracts() {
     serde_json::from_value::<PlanningProjectV1>(project()).unwrap();
@@ -105,4 +206,53 @@ fn candidate_constraints_require_a_disposition_note_and_link() {
     unlinked["linkedCapabilityId"] = json!(null);
     unlinked["linkedTaskId"] = json!(null);
     assert!(serde_json::from_value::<MissionConstraintV1>(unlinked).is_err());
+}
+
+#[test]
+fn accepts_project_execution_companion_contracts_and_for_review_tasks() {
+    serde_json::from_value::<PlanningTaskDetailsV1>(task_details()).unwrap();
+    serde_json::from_value::<PlanningPlaybookV1>(playbook()).unwrap();
+    serde_json::from_value::<PlanningTaskExecutionV1>(execution()).unwrap();
+    serde_json::from_value::<PlanningTaskArtifactV1>(artifact()).unwrap();
+
+    let mut review = task();
+    review["status"] = json!("forReview");
+    serde_json::from_value::<PlanningTaskV1>(review).unwrap();
+}
+
+#[test]
+fn rejects_invalid_project_execution_contracts() {
+    let mut bad_time = task_details();
+    bad_time["dueTime"] = json!("4pm");
+    assert!(serde_json::from_value::<PlanningTaskDetailsV1>(bad_time).is_err());
+
+    let mut relative = artifact();
+    relative["path"] = json!("relative/file.docx");
+    assert!(serde_json::from_value::<PlanningTaskArtifactV1>(relative).is_err());
+
+    let mut self_dependency = playbook();
+    self_dependency["taskTemplates"][0]["dependencyIds"] = json!(["navigation-plan"]);
+    assert!(serde_json::from_value::<PlanningPlaybookV1>(self_dependency).is_err());
+
+    let mut too_many = execution();
+    too_many["missingInputs"] = json!((0..129)
+        .map(|index| format!("input-{index}"))
+        .collect::<Vec<_>>());
+    assert!(serde_json::from_value::<PlanningTaskExecutionV1>(too_many).is_err());
+}
+
+#[test]
+fn project_execution_kinds_are_unique_parameterized_replaceable_values() {
+    let values = [
+        KIND_PLANNING_TASK,
+        KIND_PLANNING_TASK_DETAILS,
+        KIND_PLANNING_PLAYBOOK,
+        KIND_PLANNING_TASK_EXECUTION,
+        KIND_PLANNING_TASK_ARTIFACT,
+    ];
+    let unique = values
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(unique.len(), values.len());
+    assert!(values.iter().all(|kind| (30_000..=39_999).contains(kind)));
 }

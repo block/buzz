@@ -14,6 +14,10 @@ import {
 test("accepts the exact immutable planning contracts", () => {
   assert.deepEqual(parsePlanningProject(planningProject), planningProject);
   assert.deepEqual(parsePlanningTask(planningTask), planningTask);
+  assert.equal(
+    parsePlanningTask({ ...planningTask, status: "forReview" }).status,
+    "forReview",
+  );
   assert.deepEqual(
     parseMissionConstraint(missionConstraint),
     missionConstraint,

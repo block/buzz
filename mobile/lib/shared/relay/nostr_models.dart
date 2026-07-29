@@ -25,6 +25,10 @@ abstract final class EventKind {
   static const planningProject = 30632;
   static const planningTask = 30633;
   static const missionConstraint = 30634;
+  static const planningTaskDetails = 30635;
+  static const planningPlaybook = 30636;
+  static const planningTaskExecution = 30637;
+  static const planningTaskArtifact = 30638;
   static const battleRhythmRevision = 46310;
   static const streamMessageV2 = 40002;
   static const channelThreadSummary = 39005;

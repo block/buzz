@@ -30,6 +30,8 @@ pub enum TaskStatus {
     InProgress,
     /// Work cannot progress.
     Blocked,
+    /// Work or an agent-produced output awaits human review.
+    ForReview,
     /// Work is complete.
     Complete,
     /// Work is no longer required.
@@ -213,6 +215,386 @@ struct PlanningTaskWire {
     updated_at: String,
 }
 
+/// How an adviser-assigned planning task is commissioned.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum TaskExecutionMode {
+    /// The user starts the task.
+    Manual,
+    /// The scheduler starts the task.
+    Scheduled,
+    /// The user may start the task, otherwise the scheduler starts it.
+    Hybrid,
+}
+
+/// Requested output form for an adviser-assigned planning task.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TaskOutputType {
+    /// In-application response only.
+    Response,
+    /// Word Open XML document.
+    Docx,
+    /// PowerPoint Open XML presentation.
+    Pptx,
+    /// Excel Open XML workbook.
+    Xlsx,
+    /// Printable PDF.
+    Pdf,
+}
+
+/// Durable assignment and execution details for an existing planning task.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(
+    rename_all = "camelCase",
+    deny_unknown_fields,
+    try_from = "PlanningTaskDetailsWire"
+)]
+pub struct PlanningTaskDetailsV1 {
+    /// Contract version.
+    pub schema_version: u8,
+    /// Stable companion record identifier.
+    pub id: String,
+    /// Parent project identifier.
+    pub project_id: String,
+    /// Planning task identifier.
+    pub task_id: String,
+    /// Default responsible department.
+    pub department: String,
+    /// Default responsible position.
+    pub position: String,
+    /// Optional specifically assigned individual.
+    pub individual: Option<String>,
+    /// Optional adviser identifier.
+    pub agent_id: Option<String>,
+    /// Optional due time in Ship Time.
+    pub due_time: Option<String>,
+    /// Adviser commissioning mode.
+    pub execution_mode: TaskExecutionMode,
+    /// Requested output type.
+    pub output_type: TaskOutputType,
+    /// Optional source playbook identifier.
+    pub playbook_id: Option<String>,
+    /// Optional immutable source playbook revision.
+    pub playbook_revision_id: Option<String>,
+    /// Whether schedule movement is prohibited.
+    pub locked: bool,
+    /// Record creation time.
+    pub created_at: String,
+    /// Last update time.
+    pub updated_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PlanningTaskDetailsWire {
+    schema_version: u8,
+    id: String,
+    project_id: String,
+    task_id: String,
+    department: String,
+    position: String,
+    individual: Option<String>,
+    agent_id: Option<String>,
+    due_time: Option<String>,
+    execution_mode: TaskExecutionMode,
+    output_type: TaskOutputType,
+    playbook_id: Option<String>,
+    playbook_revision_id: Option<String>,
+    locked: bool,
+    created_at: String,
+    updated_at: String,
+}
+
+/// Lifecycle of a reusable operational playbook.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum PlaybookStatus {
+    /// Available for new projects.
+    Active,
+    /// Retained for existing projects but hidden from new application.
+    Retired,
+}
+
+/// Direction of a template task relative to its anchor.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum PlaybookTiming {
+    /// Task occurs before the anchor.
+    Before,
+    /// Task occurs after the anchor.
+    After,
+}
+
+/// One reusable task inside a playbook revision.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(
+    rename_all = "camelCase",
+    deny_unknown_fields,
+    try_from = "PlaybookTaskTemplateWire"
+)]
+pub struct PlaybookTaskTemplateV1 {
+    /// Stable template-local identifier.
+    pub id: String,
+    /// Task title.
+    pub title: String,
+    /// Task instructions.
+    pub instructions: String,
+    /// Direction relative to the anchor.
+    pub timing: PlaybookTiming,
+    /// Requested separation from the anchor.
+    pub offset_minutes: u32,
+    /// Required working duration.
+    pub duration_minutes: u32,
+    /// Template-local predecessor identifiers.
+    pub dependency_ids: Vec<String>,
+    /// Default department.
+    pub department: String,
+    /// Default position.
+    pub position: String,
+    /// Optional adviser.
+    pub agent_id: Option<String>,
+    /// Requested output.
+    pub output_type: TaskOutputType,
+    /// Whether future anchor movement may move this task.
+    pub reschedulable: bool,
+    /// Whether the placed task starts locked.
+    pub locked: bool,
+    /// Optional linked capability.
+    pub linked_capability_id: Option<String>,
+    /// Optional linked mission requirement.
+    pub linked_mission_requirement_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PlaybookTaskTemplateWire {
+    id: String,
+    title: String,
+    instructions: String,
+    timing: PlaybookTiming,
+    offset_minutes: u32,
+    duration_minutes: u32,
+    dependency_ids: Vec<String>,
+    department: String,
+    position: String,
+    agent_id: Option<String>,
+    output_type: TaskOutputType,
+    reschedulable: bool,
+    locked: bool,
+    linked_capability_id: Option<String>,
+    linked_mission_requirement_id: Option<String>,
+}
+
+/// Versioned reusable operational preparation template.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(
+    rename_all = "camelCase",
+    deny_unknown_fields,
+    try_from = "PlanningPlaybookWire"
+)]
+pub struct PlanningPlaybookV1 {
+    /// Contract version.
+    pub schema_version: u8,
+    /// Stable playbook identifier.
+    pub id: String,
+    /// Human-readable title.
+    pub title: String,
+    /// Purpose and usage guidance.
+    pub description: String,
+    /// Current lifecycle.
+    pub status: PlaybookStatus,
+    /// Immutable revision identifier.
+    pub revision_id: String,
+    /// Ordered reusable task templates.
+    pub task_templates: Vec<PlaybookTaskTemplateV1>,
+    /// Record creation time.
+    pub created_at: String,
+    /// Last update time.
+    pub updated_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PlanningPlaybookWire {
+    schema_version: u8,
+    id: String,
+    title: String,
+    description: String,
+    status: PlaybookStatus,
+    revision_id: String,
+    task_templates: Vec<PlaybookTaskTemplateV1>,
+    created_at: String,
+    updated_at: String,
+}
+
+/// Lifecycle state for one scheduled or manual adviser execution.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum TaskExecutionStatus {
+    /// Claimed and waiting for a model route.
+    Queued,
+    /// Model execution is in progress.
+    Running,
+    /// An output awaits human review.
+    ForReview,
+    /// Execution failed and may be retried.
+    Failed,
+}
+
+/// Durable adviser execution record.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(
+    rename_all = "camelCase",
+    deny_unknown_fields,
+    try_from = "PlanningTaskExecutionWire"
+)]
+pub struct PlanningTaskExecutionV1 {
+    /// Contract version.
+    pub schema_version: u8,
+    /// Stable execution identifier.
+    pub id: String,
+    /// Parent project.
+    pub project_id: String,
+    /// Source task.
+    pub task_id: String,
+    /// Current execution state.
+    pub status: TaskExecutionStatus,
+    /// Commissioning mode.
+    pub mode: TaskExecutionMode,
+    /// Bounded result summary.
+    pub summary: Option<String>,
+    /// Bounded result body.
+    pub body: Option<String>,
+    /// Inputs known to be incomplete.
+    pub missing_inputs: Vec<String>,
+    /// Explicit execution assumptions.
+    pub assumptions: Vec<String>,
+    /// Model provider used.
+    pub provider: Option<String>,
+    /// Model identifier used.
+    pub model: Option<String>,
+    /// Start or claim time.
+    pub started_at: String,
+    /// Completion time.
+    pub completed_at: Option<String>,
+    /// Retryable failure detail.
+    pub error: Option<String>,
+    /// True when catch-up occurred after the planned start.
+    pub late_start: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PlanningTaskExecutionWire {
+    schema_version: u8,
+    id: String,
+    project_id: String,
+    task_id: String,
+    status: TaskExecutionStatus,
+    mode: TaskExecutionMode,
+    summary: Option<String>,
+    body: Option<String>,
+    missing_inputs: Vec<String>,
+    assumptions: Vec<String>,
+    provider: Option<String>,
+    model: Option<String>,
+    started_at: String,
+    completed_at: Option<String>,
+    error: Option<String>,
+    late_start: bool,
+}
+
+/// iCloud publication state for an artefact.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactStorageState {
+    /// Saved to the preferred iCloud folder.
+    Icloud,
+    /// Saved locally and awaiting an iCloud retry.
+    LocalPendingIcloud,
+}
+
+/// File type for a generated planning artefact.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ArtifactFormat {
+    /// Word Open XML document.
+    Docx,
+    /// PowerPoint Open XML presentation.
+    Pptx,
+    /// Excel Open XML workbook.
+    Xlsx,
+    /// Printable PDF.
+    Pdf,
+}
+
+/// Durable record linking a generated file to a planning execution.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(
+    rename_all = "camelCase",
+    deny_unknown_fields,
+    try_from = "PlanningTaskArtifactWire"
+)]
+pub struct PlanningTaskArtifactV1 {
+    /// Contract version.
+    pub schema_version: u8,
+    /// Stable artefact identifier.
+    pub id: String,
+    /// Parent project.
+    pub project_id: String,
+    /// Source task.
+    pub task_id: String,
+    /// Producing execution.
+    pub execution_id: String,
+    /// Display filename.
+    pub file_name: String,
+    /// Absolute local filesystem path.
+    pub path: String,
+    /// Generated file type.
+    pub format: ArtifactFormat,
+    /// iCloud publication state.
+    pub storage_state: ArtifactStorageState,
+    /// Producing adviser.
+    pub agent_id: Option<String>,
+    /// Model provider used.
+    pub provider: Option<String>,
+    /// Model used.
+    pub model: Option<String>,
+    /// Short output summary.
+    pub summary: String,
+    /// Visible missing-input warning.
+    pub missing_input_warning: Option<String>,
+    /// Lowercase SHA-256 digest.
+    pub sha256: String,
+    /// File size in bytes.
+    pub size_bytes: u64,
+    /// File creation time.
+    pub created_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PlanningTaskArtifactWire {
+    schema_version: u8,
+    id: String,
+    project_id: String,
+    task_id: String,
+    execution_id: String,
+    file_name: String,
+    path: String,
+    format: ArtifactFormat,
+    storage_state: ArtifactStorageState,
+    agent_id: Option<String>,
+    provider: Option<String>,
+    model: Option<String>,
+    summary: String,
+    missing_input_warning: Option<String>,
+    sha256: String,
+    size_bytes: u64,
+    created_at: String,
+}
+
 /// Owner-authored condition that can affect mission achievement.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(
@@ -297,6 +679,23 @@ fn timestamp(value: &str, field: &str) -> Result<(), String> {
     chrono::DateTime::parse_from_rfc3339(value)
         .map(|_| ())
         .map_err(|_| format!("{field} must be RFC3339"))
+}
+
+fn optional_bounded(value: Option<&str>, field: &str, max: usize) -> Result<(), String> {
+    if let Some(value) = value {
+        bounded(value, field, max)?;
+    }
+    Ok(())
+}
+
+fn bounded_strings(values: &[String], field: &str, max_items: usize) -> Result<(), String> {
+    if values.len() > max_items {
+        return Err(format!("{field} must be a bounded text array"));
+    }
+    for value in values {
+        bounded(value, field, 2_048)?;
+    }
+    Ok(())
 }
 
 impl TryFrom<PlanningProjectWire> for PlanningProjectV1 {
@@ -391,6 +790,273 @@ impl TryFrom<PlanningTaskWire> for PlanningTaskV1 {
             is_summary: value.is_summary,
             created_at: value.created_at,
             updated_at: value.updated_at,
+        })
+    }
+}
+
+impl TryFrom<PlanningTaskDetailsWire> for PlanningTaskDetailsV1 {
+    type Error = String;
+
+    fn try_from(value: PlanningTaskDetailsWire) -> Result<Self, Self::Error> {
+        if value.schema_version != 1 {
+            return Err("invalid task details version".to_owned());
+        }
+        for (field, item, max) in [
+            ("id", value.id.as_str(), 256),
+            ("projectId", value.project_id.as_str(), 256),
+            ("taskId", value.task_id.as_str(), 256),
+            ("department", value.department.as_str(), 256),
+            ("position", value.position.as_str(), 512),
+        ] {
+            bounded(item, field, max)?;
+        }
+        optional_bounded(value.individual.as_deref(), "individual", 512)?;
+        optional_bounded(value.agent_id.as_deref(), "agentId", 256)?;
+        optional_bounded(value.playbook_id.as_deref(), "playbookId", 256)?;
+        optional_bounded(
+            value.playbook_revision_id.as_deref(),
+            "playbookRevisionId",
+            256,
+        )?;
+        if value.due_time.as_deref().is_some_and(|time| {
+            time.len() != 5
+                || !time.as_bytes().iter().enumerate().all(|(index, byte)| {
+                    index == 2 && *byte == b':' || index != 2 && byte.is_ascii_digit()
+                })
+                || time[..2].parse::<u8>().map_or(true, |hour| hour > 23)
+                || time[3..].parse::<u8>().map_or(true, |minute| minute > 59)
+        }) {
+            return Err("dueTime must be HH:mm".to_owned());
+        }
+        timestamp(&value.created_at, "createdAt")?;
+        timestamp(&value.updated_at, "updatedAt")?;
+        Ok(Self {
+            schema_version: value.schema_version,
+            id: value.id,
+            project_id: value.project_id,
+            task_id: value.task_id,
+            department: value.department,
+            position: value.position,
+            individual: value.individual,
+            agent_id: value.agent_id,
+            due_time: value.due_time,
+            execution_mode: value.execution_mode,
+            output_type: value.output_type,
+            playbook_id: value.playbook_id,
+            playbook_revision_id: value.playbook_revision_id,
+            locked: value.locked,
+            created_at: value.created_at,
+            updated_at: value.updated_at,
+        })
+    }
+}
+
+impl TryFrom<PlaybookTaskTemplateWire> for PlaybookTaskTemplateV1 {
+    type Error = String;
+
+    fn try_from(value: PlaybookTaskTemplateWire) -> Result<Self, Self::Error> {
+        for (field, item, max) in [
+            ("id", value.id.as_str(), 256),
+            ("title", value.title.as_str(), 512),
+            ("instructions", value.instructions.as_str(), 8_192),
+            ("department", value.department.as_str(), 256),
+            ("position", value.position.as_str(), 512),
+        ] {
+            bounded(item, field, max)?;
+        }
+        if value.duration_minutes == 0 || value.duration_minutes > 525_600 {
+            return Err("durationMinutes must be between 1 and 525600".to_owned());
+        }
+        if value.offset_minutes > 5_256_000 {
+            return Err("offsetMinutes is outside the supported horizon".to_owned());
+        }
+        bounded_strings(&value.dependency_ids, "dependencyIds", 128)?;
+        if value.dependency_ids.iter().any(|id| id == &value.id) {
+            return Err("template cannot depend on itself".to_owned());
+        }
+        optional_bounded(value.agent_id.as_deref(), "agentId", 256)?;
+        optional_bounded(
+            value.linked_capability_id.as_deref(),
+            "linkedCapabilityId",
+            256,
+        )?;
+        optional_bounded(
+            value.linked_mission_requirement_id.as_deref(),
+            "linkedMissionRequirementId",
+            256,
+        )?;
+        Ok(Self {
+            id: value.id,
+            title: value.title,
+            instructions: value.instructions,
+            timing: value.timing,
+            offset_minutes: value.offset_minutes,
+            duration_minutes: value.duration_minutes,
+            dependency_ids: value.dependency_ids,
+            department: value.department,
+            position: value.position,
+            agent_id: value.agent_id,
+            output_type: value.output_type,
+            reschedulable: value.reschedulable,
+            locked: value.locked,
+            linked_capability_id: value.linked_capability_id,
+            linked_mission_requirement_id: value.linked_mission_requirement_id,
+        })
+    }
+}
+
+impl TryFrom<PlanningPlaybookWire> for PlanningPlaybookV1 {
+    type Error = String;
+
+    fn try_from(value: PlanningPlaybookWire) -> Result<Self, Self::Error> {
+        if value.schema_version != 1 || value.task_templates.len() > 256 {
+            return Err("invalid playbook version or task count".to_owned());
+        }
+        for (field, item, max) in [
+            ("id", value.id.as_str(), 256),
+            ("title", value.title.as_str(), 512),
+            ("description", value.description.as_str(), 8_192),
+            ("revisionId", value.revision_id.as_str(), 256),
+        ] {
+            bounded(item, field, max)?;
+        }
+        let ids: BTreeSet<&str> = value
+            .task_templates
+            .iter()
+            .map(|template| template.id.as_str())
+            .collect();
+        if ids.len() != value.task_templates.len() {
+            return Err("template IDs must be unique".to_owned());
+        }
+        if value.task_templates.iter().any(|template| {
+            template
+                .dependency_ids
+                .iter()
+                .any(|dependency| !ids.contains(dependency.as_str()))
+        }) {
+            return Err("template dependency must reference the same playbook".to_owned());
+        }
+        timestamp(&value.created_at, "createdAt")?;
+        timestamp(&value.updated_at, "updatedAt")?;
+        Ok(Self {
+            schema_version: value.schema_version,
+            id: value.id,
+            title: value.title,
+            description: value.description,
+            status: value.status,
+            revision_id: value.revision_id,
+            task_templates: value.task_templates,
+            created_at: value.created_at,
+            updated_at: value.updated_at,
+        })
+    }
+}
+
+impl TryFrom<PlanningTaskExecutionWire> for PlanningTaskExecutionV1 {
+    type Error = String;
+
+    fn try_from(value: PlanningTaskExecutionWire) -> Result<Self, Self::Error> {
+        if value.schema_version != 1 {
+            return Err("invalid task execution version".to_owned());
+        }
+        for (field, item) in [
+            ("id", value.id.as_str()),
+            ("projectId", value.project_id.as_str()),
+            ("taskId", value.task_id.as_str()),
+        ] {
+            bounded(item, field, 256)?;
+        }
+        optional_bounded(value.summary.as_deref(), "summary", 8_192)?;
+        optional_bounded(value.body.as_deref(), "body", 262_144)?;
+        optional_bounded(value.provider.as_deref(), "provider", 256)?;
+        optional_bounded(value.model.as_deref(), "model", 256)?;
+        optional_bounded(value.error.as_deref(), "error", 8_192)?;
+        bounded_strings(&value.missing_inputs, "missingInputs", 128)?;
+        bounded_strings(&value.assumptions, "assumptions", 128)?;
+        timestamp(&value.started_at, "startedAt")?;
+        if let Some(completed_at) = value.completed_at.as_deref() {
+            timestamp(completed_at, "completedAt")?;
+        }
+        Ok(Self {
+            schema_version: value.schema_version,
+            id: value.id,
+            project_id: value.project_id,
+            task_id: value.task_id,
+            status: value.status,
+            mode: value.mode,
+            summary: value.summary,
+            body: value.body,
+            missing_inputs: value.missing_inputs,
+            assumptions: value.assumptions,
+            provider: value.provider,
+            model: value.model,
+            started_at: value.started_at,
+            completed_at: value.completed_at,
+            error: value.error,
+            late_start: value.late_start,
+        })
+    }
+}
+
+impl TryFrom<PlanningTaskArtifactWire> for PlanningTaskArtifactV1 {
+    type Error = String;
+
+    fn try_from(value: PlanningTaskArtifactWire) -> Result<Self, Self::Error> {
+        if value.schema_version != 1 {
+            return Err("invalid task artefact version".to_owned());
+        }
+        for (field, item, max) in [
+            ("id", value.id.as_str(), 256),
+            ("projectId", value.project_id.as_str(), 256),
+            ("taskId", value.task_id.as_str(), 256),
+            ("executionId", value.execution_id.as_str(), 256),
+            ("fileName", value.file_name.as_str(), 512),
+            ("path", value.path.as_str(), 4_096),
+            ("summary", value.summary.as_str(), 8_192),
+        ] {
+            bounded(item, field, max)?;
+        }
+        if !std::path::Path::new(&value.path).is_absolute() {
+            return Err("path must be absolute".to_owned());
+        }
+        if value.sha256.len() != 64
+            || !value
+                .sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err("sha256 must be lowercase hex".to_owned());
+        }
+        if value.size_bytes > 25 * 1_024 * 1_024 {
+            return Err("sizeBytes exceeds the supported limit".to_owned());
+        }
+        optional_bounded(value.agent_id.as_deref(), "agentId", 256)?;
+        optional_bounded(value.provider.as_deref(), "provider", 256)?;
+        optional_bounded(value.model.as_deref(), "model", 256)?;
+        optional_bounded(
+            value.missing_input_warning.as_deref(),
+            "missingInputWarning",
+            8_192,
+        )?;
+        timestamp(&value.created_at, "createdAt")?;
+        Ok(Self {
+            schema_version: value.schema_version,
+            id: value.id,
+            project_id: value.project_id,
+            task_id: value.task_id,
+            execution_id: value.execution_id,
+            file_name: value.file_name,
+            path: value.path,
+            format: value.format,
+            storage_state: value.storage_state,
+            agent_id: value.agent_id,
+            provider: value.provider,
+            model: value.model,
+            summary: value.summary,
+            missing_input_warning: value.missing_input_warning,
+            sha256: value.sha256,
+            size_bytes: value.size_bytes,
+            created_at: value.created_at,
         })
     }
 }

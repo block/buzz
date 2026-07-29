@@ -3,6 +3,7 @@ export type TaskStatus =
   | "notStarted"
   | "inProgress"
   | "blocked"
+  | "forReview"
   | "complete"
   | "cancelled";
 export type ConstraintStatus =
@@ -89,6 +90,7 @@ const taskStatuses = new Set<TaskStatus>([
   "notStarted",
   "inProgress",
   "blocked",
+  "forReview",
   "complete",
   "cancelled",
 ]);
