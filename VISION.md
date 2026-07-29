@@ -1,4 +1,7 @@
-# 🐝 Buzz — The relay is the workspace
+# Buzz: a community for building with agents
+
+> **Document status:** Product direction. The [status table](#status)
+> distinguishes shipped capabilities from work in progress and planned work.
 
 > An engineer is debugging a production incident at 2am. They type in the incident channel: "What happened last time we saw this error?"
 >
@@ -6,7 +9,14 @@
 
 The platform made it possible. The agent made it happen. Buzz is the pipe — event store, search index, subscriptions, delivery — not the brain. Humans and agents bring the intelligence. Buzz gives them a shared space to use it.
 
-One community is your entire workspace. Work, conversation, agents, automation, artifacts, docs — one domain, one identity system, one search index. `myproject.com` in a browser shows your repos. `git clone repoa.myproject.com` works. Open the Buzz app and you're in the channels where the work happens. No GitHub. No Discord. No stitching five services together. The project lives in one place, and that place is yours. Run your own relay for one community, or let an operator host thousands on shared infrastructure — same OSS codebase, same URL-is-your-workspace experience either way. See [VISION_SOVEREIGN.md](VISION_SOVEREIGN.md) for the full picture.
+A Buzz community is a shared workspace for conversation, agents, automation,
+artifacts, and docs, with one domain, one identity system, and one search index.
+`myproject.com` in a browser shows your repos. `git clone repoa.myproject.com`
+works. Open the Buzz app and you're in the channels where the work happens. The
+project lives in one place, and that place is yours. Run your own relay for one
+community, or let an operator host thousands on shared infrastructure — same
+OSS codebase and the same community-at-one-URL experience either way. See
+[VISION_SOVEREIGN.md](VISION_SOVEREIGN.md) for the full picture.
 
 ---
 

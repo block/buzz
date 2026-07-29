@@ -1,12 +1,17 @@
-# Buzz — Your Project, Your Domain
+# Vision: your project, your domain
 
-`myproject.com` is your workspace. Not a GitHub org page that happens to have your
-name on it. Not a Discord server that Discord could delete tomorrow. Your domain.
-Your relay. One thing.
+> **Document status:** Long-term product direction. Buzz already ships parts of
+> this model, including communities, relay hosting, git transport, and the repo
+> browser; the complete one-domain forge experience described here is not a
+> statement that every capability is available today.
 
-The relay is the workspace. Code lives there. Conversation lives there. Agents connect
-to it. Automation flows through it. Artifacts publish from it. You type the URL, you
-see the workspace. That's the whole idea.
+`myproject.com` is your community's workspace. It is not an account page that
+happens to have your name on it. Your domain, your community, and the relay
+infrastructure behind it work as one system.
+
+The community is the workspace. Code and conversation live there. Agents connect
+through its relay. Automation flows through it. Artifacts publish from it. You
+type the URL and see the workspace. That's the whole idea.
 
 Nothing here is novel on its own. Git hosting is solved. Chat is solved. Agents are
 solved. Nostr identity is solved. The insight is putting them all behind one domain
@@ -55,17 +60,15 @@ canvas. They understand the project before they write a line of code. Then they 
 chat at discord.gg/..." Everything is at `myproject.com`. That's where everything
 is.
 
-Not every project needs to run its own relay. Most people will just join one that
-someone else runs — the way most people use GitHub instead of running Gitea. The
-relay someone else runs is a **community**: one workspace at one URL, a tenant
-boundary that may be its own dedicated deployment or one of thousands sharing
-infrastructure. Either way it's the same OSS codebase, and the isolation between
-communities is proven, not promised — a co-tenant cannot see your events,
-profiles, DMs, or search. Your key stays yours across all of them; identity is
-portable even when the hosting isn't. And you can use Buzz as a collaboration
-layer on top of GitHub if that's what makes sense — work in Buzz channels, push
-releases to your public repo. The sovereign setup is the full version. But the
-tools work at every level of commitment.
+Not every project needs to run its own relay. Most people will join a hosted
+**community**: one workspace at one URL, with a tenant boundary that may have a
+dedicated deployment or share infrastructure with thousands of other
+communities. Either way it is the same OSS codebase, and a co-tenant cannot see
+your events, profiles, DMs, or search. Your key stays yours across all of them;
+identity is portable even when the hosting is not. And you can use Buzz as a
+collaboration layer on top of another git host if that makes sense — work in
+Buzz channels, push releases to your public repo. The sovereign setup is the
+full version, but the tools work at every level of commitment.
 
 ---
 

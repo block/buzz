@@ -1,16 +1,30 @@
-# 🐝 Buzz Projects — A Nostr-Native Forge
+# Vision: Buzz projects
+
+> **Document status:** Shipped foundation and planned forge work. The
+> [status table](#status) identifies which capabilities exist today.
 
 > Someone pushes a fix. Buzz creates a channel for the branch. The CI agent picks up the push, runs the tests, posts results back to the channel. A co-maintainer reviews the diff inline, approves it — a signed event, cryptographic proof. Merge. The workflow runs the integration. The channel archives into a permanent record of why that code exists.
 >
 > Bug report to merged patch. One place. One search index. One identity system. The branch channel was the pull request, the CI dashboard, and the discussion thread.
 
-This document is the software-forge slice of the broader Buzz platform. [VISION.md](VISION.md) covers the platform. [VISION_SOVEREIGN.md](VISION_SOVEREIGN.md) covers the sovereign relay story — one domain, one relay, one project. This doc zooms in on what it looks like when that relay hosts code. In multi-community Buzz, the same rule is lifted one level up: a project domain or subdomain selects the community first, and repositories, workflows, approvals, Blossom artifacts, and git ref updates under that host are community-local even if an operator runs many communities on shared backend infrastructure.
+This document is the software-forge slice of the broader Buzz platform.
+[VISION.md](VISION.md) covers the platform.
+[VISION_SOVEREIGN.md](VISION_SOVEREIGN.md) covers the sovereign community story
+— one domain, one community, one project. This document zooms in on what it
+looks like when a Buzz community hosts code. A project domain or subdomain
+selects the community first, and repositories, workflows, approvals, Blossom
+artifacts, and git ref updates under that host stay community-local even when
+an operator hosts many communities on shared relay infrastructure.
 
 ---
 
 ## The Project Model
 
-A project lives on the relay. `myproject.com` in a browser shows the project home. Click a repo and you're at `repoa.myproject.com` — README rendered, file tree navigable, code syntax-highlighted, clone URL at the top. The same URL serves HTML to a browser and git protocol to `git clone`. Content negotiation. One URL, two audiences.
+A project lives in a community, with the relay storing and serving its signed
+state. `myproject.com` in a browser shows the project home. Click a repo and
+you're at `repoa.myproject.com` — README rendered, file tree navigable, code
+syntax-highlighted, clone URL at the top. The same URL serves HTML to a browser
+and git protocol to `git clone`. Content negotiation. One URL, two audiences.
 
 Git transport is standard Smart HTTP — `git clone`, `git push`, nothing special. Your npub signs pushes. Same domain, same auth, same identity as everything else on the relay. The host in the clone/push URL is also the community selector: the same `owner/repo` name may exist in two communities without sharing refs, branch protections, workflow runs, approvals, or repo announcements.
 
@@ -134,11 +148,11 @@ trigger:
 steps:
   - id: build
     action: call_webhook
-    url: "https://ci.internal/build"
+    url: "https://ci.example.com/build"
     body: '{"commit": "{{trigger.commit}}"}'
   - id: test
     action: call_webhook
-    url: "https://ci.internal/test"
+    url: "https://ci.example.com/test"
     if: "steps.build.output.status == 'success'"
   - id: gate
     action: request_approval

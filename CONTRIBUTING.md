@@ -28,8 +28,9 @@ If you have questions that aren't answered here, [open an issue](https://github.
 ## Code of Conduct
 
 This project follows the [Contributor Covenant v2.1](CODE_OF_CONDUCT.md).
-By participating you agree to uphold these standards. Please report
-unacceptable behavior to **conduct@buzz-relay.org**.
+By participating you agree to uphold these standards. Report unacceptable
+behavior to the Block Open Source Governance Committee at
+`open-source-governance@block.xyz`.
 
 ---
 
@@ -390,21 +391,14 @@ to existing clients.
 
 ## Ecosystem
 
-Buzz is developed across multiple repositories. This repo (`block/buzz`)
-is the open-source home for all application code — the relay, desktop app,
-mobile app, CLI, and agent harness. Internal repositories handle
-enterprise-signed builds and infrastructure deployment.
+This repository (`block/buzz`) contains the public source for the relay,
+desktop and mobile apps, web client, CLI, agent harness, deployment manifests,
+and release automation. Contributors do not need access to another repository
+to build, test, or propose changes.
 
-See [AGENTS.md § Ecosystem](AGENTS.md#ecosystem) for the full repo table and
-dependency diagram.
-
-**External contributors:** Fork `block/buzz`, open a PR, and CI runs
-automatically. No special access is required.
-
-**Block team members:** See the internal
-[sprout-releases CONTRIBUTING.md](https://github.com/squareup/sprout-releases/blob/main/CONTRIBUTING.md)
-for team access setup, onboarding, and the full repo inventory. See
-[RELEASING.md](RELEASING.md) for the release process.
+Fork `block/buzz`, open a pull request, and the public CI workflows run
+automatically. See [RELEASING.md](RELEASING.md) for the maintainer release
+process and [`deploy/`](deploy/) for the supported self-hosting configurations.
 
 ---
 

@@ -24,7 +24,7 @@
                                   Anthropic Messages API
                                    or any OpenAI-compat
                                   (vLLM, llama.cpp, OpenRouter,
-                                   Block Gateway, Ollama, …)
+                                   self-hosted gateways, Ollama, …)
 ```
 
 A client sends `session/prompt`. The agent loops: call the LLM → get tool calls → run them via MCP → feed results back → repeat. The loop terminates when the LLM stops asking for tools, the round cap is hit, or the client cancels.
@@ -168,7 +168,7 @@ Everything is environment variables. No flags, no config files. (We are a subpro
 | llama.cpp | `openai` | `POST {base}/chat/completions` | any tool-calling GGUF |
 | Ollama | `openai` | `POST {base}/chat/completions` | llama3.1, qwen2.5-coder |
 | OpenRouter | `openai` | `POST {base}/chat/completions` | anything they route |
-| Block Gateway | `openai` | `POST {base}/chat/completions` | gpt-5, claude |
+| OpenAI-compatible gateway | `openai` | `POST {base}/chat/completions` | provider-dependent |
 | Databricks | `databricks` | `POST {host}/serving-endpoints/{model}/invocations` | goose-claude-4-6-sonnet |
 | Databricks AI Gateway v2 | `databricks_v2` | `POST {host}/ai-gateway/{provider}/v1/...` | databricks-gpt-5-5, databricks-claude-opus-4-7 |
 

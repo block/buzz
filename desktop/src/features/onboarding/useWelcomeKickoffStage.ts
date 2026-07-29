@@ -20,8 +20,7 @@ import type { Channel } from "@/shared/api/types";
  * `timed-out` is a real, user-visible resolution, not a bookkeeping flag: the
  * characters leave and the banner stops claiming setup is in progress, so a
  * failed kickoff degrades to an ordinary empty channel the user can type in.
- * Explaining *why* it failed is follow-up work — see
- * docs/welcome-kickoff-silent-failures.md.
+ * Explaining *why* it failed remains follow-up work.
  */
 export type WelcomeKickoffStagePhase =
   | "hidden"

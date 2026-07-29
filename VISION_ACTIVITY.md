@@ -1,4 +1,8 @@
-# Vision: The Agent Activity Feed
+# Vision: agent activity feed
+
+> **Document status:** Product design direction. Buzz ships an agent activity
+> feed today; this document describes the intended information hierarchy and
+> rendering model rather than a compatibility contract.
 
 ## The Problem
 
