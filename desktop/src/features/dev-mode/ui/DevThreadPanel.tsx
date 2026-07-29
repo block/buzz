@@ -14,6 +14,7 @@ import {
 import { useChannelRefAutocomplete } from "@/features/dev-mode/lib/useChannelRefAutocomplete";
 import { useComposerAutoGrow } from "@/features/dev-mode/lib/useComposerAutoGrow";
 import {
+  useMemberAgentResolver,
   useMemberNameResolver,
   type NameResolver,
 } from "@/features/dev-mode/lib/useMemberNameResolver";
@@ -68,6 +69,7 @@ export function DevThreadPanel({
   const repliesQuery = useThreadReplies(channel, root?.id ?? null);
   const resolveName = useMemberNameResolver(channel.id);
   const resolveColor = useAuthorColorResolver();
+  const resolveIsAgent = useMemberAgentResolver(channel.id);
   const { scrollRef, contentRef, handleScroll } = usePinnedScroll(
     root?.id ?? "draft",
   );
@@ -187,6 +189,7 @@ export function DevThreadPanel({
                 isSelf={root.pubkey === currentPubkey}
                 reactions={reactions.get(root.id)}
                 resolveColor={resolveColor}
+                resolveIsAgent={resolveIsAgent}
                 resolveName={resolveName}
               />
               <div className="my-1 border-t border-border/40" />
@@ -204,6 +207,7 @@ export function DevThreadPanel({
               isSelf={reply.pubkey === currentPubkey}
               reactions={reactions.get(reply.id)}
               resolveColor={resolveColor}
+              resolveIsAgent={resolveIsAgent}
               resolveName={resolveName}
             />
           ))}

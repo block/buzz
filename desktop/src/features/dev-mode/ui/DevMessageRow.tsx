@@ -5,7 +5,10 @@ import {
   matchLeadingMention,
   type MentionStyle,
 } from "@/features/dev-mode/lib/highlightContent";
-import type { NameResolver } from "@/features/dev-mode/lib/useMemberNameResolver";
+import type {
+  AgentResolver,
+  NameResolver,
+} from "@/features/dev-mode/lib/useMemberNameResolver";
 import type { RelayEvent } from "@/shared/api/types";
 import { KIND_SYSTEM_MESSAGE } from "@/shared/constants/kinds";
 import { cn } from "@/shared/lib/cn";
@@ -43,6 +46,7 @@ export function DevMessageRow({
   reactions,
   resolveName,
   resolveColor,
+  resolveIsAgent,
 }: {
   event: RelayEvent;
   isSelf: boolean;
@@ -50,6 +54,7 @@ export function DevMessageRow({
   reactions?: string[];
   resolveName: NameResolver;
   resolveColor: AuthorColorResolver;
+  resolveIsAgent: AgentResolver;
 }) {
   const { channels, openChannel } = useChannelRefs();
 
@@ -67,9 +72,12 @@ export function DevMessageRow({
     mentionStyles.push({ name, color: resolveColor(tag[1]) });
   }
 
-  // A leading `@Name` mention is direction, not prose: it renders as a
-  // "to Name" line under the author instead of inside the message body.
-  const directed = matchLeadingMention(event.content, mentionStyles);
+  // A leading `@Name` mention on a human message is direction, not prose:
+  // it renders as a "to Name" line under the author instead of inside the
+  // message body. Agent replies keep their mentions inline as normal text.
+  const directed = resolveIsAgent(event.pubkey)
+    ? null
+    : matchLeadingMention(event.content, mentionStyles);
   const bodyContent = directed
     ? event.content.slice(directed.end)
     : event.content;

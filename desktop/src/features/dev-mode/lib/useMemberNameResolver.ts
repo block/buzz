@@ -6,6 +6,22 @@ import { truncatePubkey } from "@/shared/lib/pubkey";
 
 export type NameResolver = (pubkey: string) => string;
 
+export type AgentResolver = (pubkey: string) => boolean;
+
+/** Whether a pubkey belongs to an agent member of the channel. */
+export function useMemberAgentResolver(channelId: string): AgentResolver {
+  const membersQuery = useChannelMembersQuery(channelId);
+  return React.useCallback<AgentResolver>(
+    (pubkey) =>
+      membersQuery.data?.some(
+        (candidate) =>
+          candidate.pubkey === pubkey &&
+          (candidate.isAgent || candidate.role === "bot"),
+      ) ?? false,
+    [membersQuery.data],
+  );
+}
+
 /**
  * Resolves names from the channel's member list, with a batch profile
  * lookup as fallback for `extraPubkeys` that are no longer members —

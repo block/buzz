@@ -14,8 +14,14 @@ import {
   DEV_MESSAGE_KINDS,
   selectRootEvents,
 } from "@/features/dev-mode/lib/transcriptRoots";
-import type { NameResolver } from "@/features/dev-mode/lib/useMemberNameResolver";
-import { useMemberNameResolver } from "@/features/dev-mode/lib/useMemberNameResolver";
+import type {
+  AgentResolver,
+  NameResolver,
+} from "@/features/dev-mode/lib/useMemberNameResolver";
+import {
+  useMemberAgentResolver,
+  useMemberNameResolver,
+} from "@/features/dev-mode/lib/useMemberNameResolver";
 import { usePinnedScroll } from "@/features/dev-mode/lib/usePinnedScroll";
 import { DevMessageRow } from "@/features/dev-mode/ui/DevMessageRow";
 import {
@@ -37,12 +43,14 @@ function ThreadReplies({
   currentPubkey,
   resolveName,
   resolveColor,
+  resolveIsAgent,
 }: {
   channel: Channel;
   rootId: string;
   currentPubkey: string | null;
   resolveName: NameResolver;
   resolveColor: AuthorColorResolver;
+  resolveIsAgent: AgentResolver;
 }) {
   const repliesQuery = useThreadReplies(channel, rootId);
   const replies = React.useMemo(
@@ -68,6 +76,7 @@ function ThreadReplies({
           isSelf={reply.pubkey === currentPubkey}
           reactions={reactions.get(reply.id)}
           resolveColor={resolveColor}
+          resolveIsAgent={resolveIsAgent}
           resolveName={resolveName}
         />
       ))}
@@ -135,6 +144,7 @@ function PromptCard({
   currentPubkey,
   resolveName,
   resolveColor,
+  resolveIsAgent,
   onOpenThread,
 }: {
   channel: Channel;
@@ -146,6 +156,7 @@ function PromptCard({
   currentPubkey: string | null;
   resolveName: NameResolver;
   resolveColor: AuthorColorResolver;
+  resolveIsAgent: AgentResolver;
   onOpenThread: () => void;
 }) {
   // Callback ref mounts only on the selected card, so keyboard navigation
@@ -182,6 +193,7 @@ function PromptCard({
         isSelf={root.pubkey === currentPubkey}
         reactions={rootReactions}
         resolveColor={resolveColor}
+        resolveIsAgent={resolveIsAgent}
         resolveName={resolveName}
       />
       {autoExpand && replyCount > 0 ? (
@@ -189,6 +201,7 @@ function PromptCard({
           channel={channel}
           currentPubkey={currentPubkey}
           resolveColor={resolveColor}
+          resolveIsAgent={resolveIsAgent}
           resolveName={resolveName}
           rootId={root.id}
         />
@@ -248,6 +261,7 @@ export function DevTranscript({
   );
   const resolveName = useMemberNameResolver(channel.id, membershipPubkeys);
   const resolveColor = useAuthorColorResolver();
+  const resolveIsAgent = useMemberAgentResolver(channel.id);
 
   // Prompt cards and member join/leave rows share one chronological flow;
   // membership rows are narration only — ↑/↓ card navigation skips them.
@@ -328,6 +342,7 @@ export function DevTranscript({
               onOpenThread={() => onOpenThread(item.root.id)}
               replyCount={replyCounts.get(item.root.id) ?? 0}
               resolveColor={resolveColor}
+              resolveIsAgent={resolveIsAgent}
               resolveName={resolveName}
               root={item.root}
               rootReactions={rootReactions.get(item.root.id)}

@@ -154,12 +154,13 @@ export function renderHighlightedContent(
       const known = matchKnownMention(content, index, mentions);
       if (known) {
         const end = index + 1 + known.name.length;
-        // Matches the composer's mode pill: bordered box in the agent's color.
+        // Colored text only — the composer's mode pill is the one boxed
+        // mention; in-message mentions render unboxed.
         nodes.push(
           <span
             key={`${index}-mention`}
-            className="rounded-none border px-1 font-medium"
-            style={{ color: known.color, borderColor: `${known.color}80` }}
+            className="font-medium"
+            style={{ color: known.color }}
           >
             {content.slice(index, end)}
           </span>,
