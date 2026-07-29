@@ -1897,6 +1897,18 @@ pub async fn run_prompt_task(
         None => prompt_sections.iter().map(String::as_str).collect(),
     };
 
+    // Turn start, labelled exactly as `log_stop_reason` labels the end, so a
+    // log reads as start/stop pairs. Purely observational: an unpaired start is
+    // the only durable evidence that a turn was entered and never returned, and
+    // without it a stalled agent and an agent nobody woke leave identical logs —
+    // zero completions either way, so anything reading them afterwards has to
+    // guess which happened.
+    tracing::info!(
+        target: "pool::prompt",
+        "turn starting for {}",
+        prompt_label(&source)
+    );
+
     // When control_rx is Some (channel tasks), wrap the prompt in select! so
     // the main loop can cancel, interrupt, or rotate it. Heartbeats
     // (control_rx=None) take the simple await path — they are not controllable.
@@ -3131,12 +3143,19 @@ fn classify_control_cancel_failure(
     }
 }
 
-/// Log a stop reason at the appropriate tracing level.
-fn log_stop_reason(source: &PromptSource, stop_reason: &StopReason) {
-    let label = match source {
+/// How a turn's source is named in the `pool::prompt` log lines.
+///
+/// Shared by the turn-start and turn-stop lines so a log can be read as pairs.
+fn prompt_label(source: &PromptSource) -> String {
+    match source {
         PromptSource::Channel(cid) => format!("channel {cid}"),
         PromptSource::Heartbeat => "heartbeat".to_string(),
-    };
+    }
+}
+
+/// Log a stop reason at the appropriate tracing level.
+fn log_stop_reason(source: &PromptSource, stop_reason: &StopReason) {
+    let label = prompt_label(source);
     match stop_reason {
         StopReason::EndTurn => {
             tracing::info!(target: "pool::prompt", "turn complete for {label}: end_turn");

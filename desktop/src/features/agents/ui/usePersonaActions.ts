@@ -99,10 +99,12 @@ export function usePersonaActions() {
   const [personaToShare, setPersonaToShare] = React.useState<{
     persona: AgentPersona;
     linkedAgentPubkey: string | null;
+    effectiveAvatarUrl: string | null;
   } | null>(null);
   const [personaToExportSnapshot, setPersonaToExportSnapshot] = React.useState<{
     persona: AgentPersona;
     linkedAgentPubkey: string | null;
+    effectiveAvatarUrl: string | null;
   } | null>(null);
   const [snapshotImportState, setSnapshotImportState] = React.useState<{
     fileBytes: number[];
@@ -447,17 +449,20 @@ export function usePersonaActions() {
   function openShare(
     persona: AgentPersona,
     linkedAgent: ManagedAgent | undefined,
+    effectiveAvatarUrl: string | null,
   ) {
     clearFeedback("library");
     setPersonaToShare({
       persona,
       linkedAgentPubkey: linkedAgent?.pubkey ?? null,
+      effectiveAvatarUrl,
     });
   }
 
   function handleExportSnapshot(
     persona: AgentPersona,
     linkedAgentPubkey: string | null,
+    effectiveAvatarUrl: string | null,
     memoryLevel: SnapshotMemoryLevel,
     format: SnapshotFormat,
   ) {
@@ -469,7 +474,7 @@ export function usePersonaActions() {
         memoryLevel,
         format,
         memorySourcePubkey: linkedAgentPubkey,
-        avatarUrl: persona.avatarUrl,
+        avatarUrl: effectiveAvatarUrl,
       },
       {
         onSuccess: (saved) => {
