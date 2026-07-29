@@ -9,7 +9,7 @@ use crate::{
         append_log_marker, known_acp_runtime, login_shell_path, managed_agent_log_path,
         missing_command_message, normalize_agent_args, open_log_file, resolve_command,
         spawn_key_refusal, KnownAcpRuntime, ManagedAgentPairRuntime, ManagedAgentRecord,
-        ManagedAgentRuntimeKey, ManagedAgentSummary,
+        ManagedAgentRuntimeKey, ManagedAgentRuntimeTarget, ManagedAgentSummary,
     },
     util::now_iso,
 };
@@ -461,7 +461,10 @@ pub fn spawn_agent_child(
     if let Some(error) = spawn_key_refusal(record) {
         return Err(error);
     }
-    let runtime_key = ManagedAgentRuntimeKey::new(record.pubkey.clone(), relay_url)?;
+    let ManagedAgentRuntimeTarget {
+        key: runtime_key,
+        connection_url,
+    } = ManagedAgentRuntimeTarget::new(record.pubkey.clone(), relay_url)?;
     // Resolve the effective harness (agent command) from the linked persona, so
     // persona harness edits propagate on the next spawn; an explicit per-agent
     // override wins. `agent_args` and `mcp_command` are pure derivations of the
@@ -545,9 +548,14 @@ pub fn spawn_agent_child(
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| effective_command.clone());
 
-    // The caller supplies the explicit canonical pair relay. This is the only
-    // relay this child may connect to, regardless of the record/workspace default.
-    let effective_relay_url = runtime_key.relay_url.clone();
+    // The caller supplies the explicit pair relay. This is the only relay this
+    // child may connect to, regardless of the record/workspace default.
+    //
+    // Use the *connection* authority, not the canonicalized identity one: the
+    // relay resolves the community from the request host, so connecting on a
+    // rewritten host (`localhost` -> `127.0.0.1`) would place the agent in a
+    // different, empty tenant than the app it is meant to serve.
+    let effective_relay_url = connection_url;
 
     // Augment PATH for DMG launches so child processes can find:
     //   - bundled CLI via ~/.local/bin symlink

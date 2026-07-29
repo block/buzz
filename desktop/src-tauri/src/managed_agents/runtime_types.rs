@@ -31,6 +31,31 @@ impl ManagedAgentRuntimeKey {
     }
 }
 
+/// Canonical process identity paired with the exact relay URL used for I/O.
+///
+/// `normalize_relay_url` rewrites `localhost` to `127.0.0.1` so that one agent on
+/// one relay always hashes to the same runtime id. That canonical form is right
+/// for identity and wrong for connecting: the relay derives the community from
+/// the request host, so `localhost:3000` and `127.0.0.1:3000` are *different
+/// tenants*. Connecting on the canonicalized host lands the agent in an empty
+/// community, where it discovers no channels and sits idle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedAgentRuntimeTarget {
+    pub key: ManagedAgentRuntimeKey,
+    pub connection_url: String,
+}
+
+impl ManagedAgentRuntimeTarget {
+    pub fn new(pubkey: impl Into<String>, relay_url: &str) -> Result<Self, String> {
+        let connection_url = relay_url.trim().trim_end_matches('/').to_string();
+        let key = ManagedAgentRuntimeKey::new(pubkey, &connection_url)?;
+        Ok(Self {
+            connection_url,
+            key,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ManagedAgentRuntimeLifecycle {
@@ -117,4 +142,35 @@ pub struct ManagedAgentRuntimeReceipt {
     pub pid: u32,
     pub desktop_instance_id: String,
     pub started_at: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn localhost_connection_authority_is_not_replaced_by_identity_canonicalization() {
+        let target =
+            ManagedAgentRuntimeTarget::new("aa".repeat(32), "ws://localhost:3000/").unwrap();
+
+        // Identity stays canonical so the runtime id is stable across spellings.
+        assert_eq!(target.key.relay_url, "ws://127.0.0.1:3000");
+        // The connection keeps the authority the operator configured, because the
+        // relay resolves the community from that host.
+        assert_eq!(target.connection_url, "ws://localhost:3000");
+    }
+
+    #[test]
+    fn explicit_loopback_authority_is_preserved_verbatim() {
+        let target =
+            ManagedAgentRuntimeTarget::new("bb".repeat(32), "ws://127.0.0.1:3000").unwrap();
+
+        assert_eq!(target.key.relay_url, "ws://127.0.0.1:3000");
+        assert_eq!(target.connection_url, "ws://127.0.0.1:3000");
+    }
+
+    #[test]
+    fn invalid_pubkey_is_rejected() {
+        assert!(ManagedAgentRuntimeTarget::new("../not-a-key", "ws://localhost:3000").is_err());
+    }
 }
