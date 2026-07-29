@@ -579,7 +579,7 @@ jobs:
             redis_url: redis://localhost:6379
           - backend: valkey
             container: buzz-valkey
-            redis_url: redis://:buzz_dev@localhost:6380
+            redis_url: redis://localhost:6380
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1

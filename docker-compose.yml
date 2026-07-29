@@ -54,25 +54,17 @@ services:
 
   # Opt-in BSD-3 alternative to Redis (drop-in RESP fork). Off by default; bring
   # it up with `docker compose --profile valkey up valkey` and point the relay at
-  # `REDIS_URL=redis://:${REDIS_PASSWORD}@localhost:6380`. On 6380 to coexist
-  # with redis on 6379. Uses auth to match deploy/compose/compose.valkey.yml so
-  # CI exercises authenticated connections.
+  # `REDIS_URL=redis://localhost:6380`. On 6380 to coexist with redis on 6379.
   valkey:
     image: valkey/valkey:8-alpine
     container_name: buzz-valkey
     profiles: ["valkey"]
-    # Default rather than `:?` — compose interpolates the whole file even when
-    # starting unrelated services, so a required-variable check here would break
-    # `docker compose up postgres redis ...` for anyone without REDIS_PASSWORD set.
-    command: ["valkey-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:-buzz_dev}"]
     ports:
       - "6380:6379"
-    environment:
-      REDIS_PASSWORD: ${REDIS_PASSWORD:-buzz_dev}
     networks:
       - buzz-net
     healthcheck:
-      test: ["CMD-SHELL", "valkey-cli -a \"$${REDIS_PASSWORD}\" ping | grep -q PONG"]
+      test: ["CMD", "valkey-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 10

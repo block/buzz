@@ -1,10 +1,10 @@
 dependencies:
 - name: postgres
   repository: oci://registry-1.docker.io/cloudpirates
-  version: 0.19.12
+  version: 0.19.5
 - name: redis
   repository: oci://registry-1.docker.io/cloudpirates
-  version: 0.30.8
+  version: 0.30.3
 - name: valkey
   repository: oci://registry-1.docker.io/cloudpirates
   version: 0.24.6
