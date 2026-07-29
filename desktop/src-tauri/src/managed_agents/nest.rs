@@ -356,7 +356,11 @@ pub fn cli_link_name(is_dev: bool) -> &'static str {
 ///
 /// On every boot: replaces any existing symlink unconditionally (the `buzz` /
 /// `buzz-dev` name is our namespace), creates a new one if absent, and leaves
-/// regular files alone to avoid clobbering a user-compiled binary.
+/// regular files alone to avoid clobbering a user-compiled binary. The one
+/// regular-file exception is the legacy Linux AppImage GUI launcher formerly
+/// installed as `~/.local/bin/buzz`: that wrapper shadows the bundled headless
+/// CLI and silently no-ops agent-facing commands like `buzz messages send`, so
+/// production boots migrate it to the real CLI symlink.
 ///
 /// Non-fatal: callers should ignore errors — the symlink is a convenience
 /// for human Terminal use; agents find the CLI via PATH augmentation.
@@ -371,20 +375,38 @@ pub fn ensure_cli_symlink(exe_parent: &Path, is_dev: bool) -> Result<(), String>
         .ok_or("cannot resolve home directory")?
         .join(".local")
         .join("bin");
-    fs::create_dir_all(&local_bin).map_err(|e| format!("create {}: {e}", local_bin.display()))?;
+
+    ensure_cli_symlink_in_local_bin(&local_bin, &buzz_bin, is_dev)
+}
+
+#[cfg(unix)]
+fn ensure_cli_symlink_in_local_bin(
+    local_bin: &Path,
+    buzz_bin: &Path,
+    is_dev: bool,
+) -> Result<(), String> {
+    fs::create_dir_all(local_bin).map_err(|e| format!("create {}: {e}", local_bin.display()))?;
 
     let link = local_bin.join(cli_link_name(is_dev));
     match link.symlink_metadata() {
         Ok(meta) if meta.file_type().is_symlink() => {
             let _ = fs::remove_file(&link);
-            create_symlink(&buzz_bin, &link)
+            create_symlink(buzz_bin, &link)
+                .map_err(|e| format!("symlink {}: {e}", link.display()))?;
+        }
+        Ok(meta)
+            if meta.file_type().is_file() && !is_dev && is_legacy_appimage_gui_wrapper(&link) =>
+        {
+            fs::remove_file(&link).map_err(|e| format!("remove {}: {e}", link.display()))?;
+            create_symlink(buzz_bin, &link)
                 .map_err(|e| format!("symlink {}: {e}", link.display()))?;
         }
         Ok(_) => {
-            // Regular file or directory — don't clobber.
+            // Regular user files/directories are preserved; only the known legacy
+            // AppImage GUI wrapper above is migrated.
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            create_symlink(&buzz_bin, &link)
+            create_symlink(buzz_bin, &link)
                 .map_err(|e| format!("symlink {}: {e}", link.display()))?;
         }
         Err(e) => {
@@ -393,6 +415,18 @@ pub fn ensure_cli_symlink(exe_parent: &Path, is_dev: bool) -> Result<(), String>
     }
 
     Ok(())
+}
+
+#[cfg(unix)]
+fn is_legacy_appimage_gui_wrapper(path: &Path) -> bool {
+    let Ok(script) = fs::read_to_string(path) else {
+        return false;
+    };
+
+    script.len() <= 16 * 1024
+        && script.contains("BUZZ_APPIMAGE")
+        && script.contains("buzz-browser")
+        && script.contains("exec \"$APPIMAGE\" \"$@\"")
 }
 
 /// No-op on non-Unix platforms — symlink management is macOS/Linux only.

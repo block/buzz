@@ -340,41 +340,39 @@ fn cli_link_name_dev_is_buzz_dev() {
 }
 
 #[cfg(unix)]
-#[test]
-fn ensure_cli_symlink_creates_symlink_prod() {
+fn cli_symlink_fixture() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
     let tmp = tempfile::tempdir().unwrap();
     let exe_parent = tmp.path().join("MacOS");
     fs::create_dir(&exe_parent).unwrap();
-    fs::write(exe_parent.join("buzz"), "binary").unwrap();
+    let buzz_bin = exe_parent.join("buzz");
+    fs::write(&buzz_bin, "binary").unwrap();
 
     let local_bin = tmp.path().join("local_bin");
-    fs::create_dir_all(&local_bin).unwrap();
+    (tmp, local_bin, buzz_bin)
+}
 
-    // Prod link name is "buzz"; simulate the symlink creation path.
+#[cfg(unix)]
+#[test]
+fn ensure_cli_symlink_creates_symlink_prod() {
+    let (_tmp, local_bin, buzz_bin) = cli_symlink_fixture();
+
+    ensure_cli_symlink_in_local_bin(&local_bin, &buzz_bin, false).unwrap();
+
     let link = local_bin.join(cli_link_name(false));
-    std::os::unix::fs::symlink(exe_parent.join("buzz"), &link).unwrap();
     assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
-    assert_eq!(fs::read_link(&link).unwrap(), exe_parent.join("buzz"));
+    assert_eq!(fs::read_link(&link).unwrap(), buzz_bin);
 }
 
 #[cfg(unix)]
 #[test]
 fn ensure_cli_symlink_creates_symlink_dev() {
-    let tmp = tempfile::tempdir().unwrap();
-    let exe_parent = tmp.path().join("MacOS");
-    fs::create_dir(&exe_parent).unwrap();
-    fs::write(exe_parent.join("buzz"), "binary").unwrap();
+    let (_tmp, local_bin, buzz_bin) = cli_symlink_fixture();
 
-    let local_bin = tmp.path().join("local_bin");
-    fs::create_dir_all(&local_bin).unwrap();
-
-    // Dev link must be "buzz-dev", never "buzz".
-    assert_eq!(cli_link_name(true), "buzz-dev");
+    ensure_cli_symlink_in_local_bin(&local_bin, &buzz_bin, true).unwrap();
 
     let link = local_bin.join(cli_link_name(true));
-    std::os::unix::fs::symlink(exe_parent.join("buzz"), &link).unwrap();
     assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
-    assert_eq!(fs::read_link(&link).unwrap(), exe_parent.join("buzz"));
+    assert_eq!(fs::read_link(&link).unwrap(), buzz_bin);
     // Prod link must not exist — the two builds don't touch each other.
     assert!(!local_bin.join("buzz").exists());
 }
@@ -382,13 +380,13 @@ fn ensure_cli_symlink_creates_symlink_dev() {
 #[cfg(unix)]
 #[test]
 fn ensure_cli_symlink_does_not_clobber_regular_file_prod() {
-    let tmp = tempfile::tempdir().unwrap();
-    let local_bin = tmp.path().join("local_bin");
+    let (_tmp, local_bin, buzz_bin) = cli_symlink_fixture();
     fs::create_dir_all(&local_bin).unwrap();
     let link = local_bin.join(cli_link_name(false));
     fs::write(&link, "user-installed binary").unwrap();
 
-    // Regular files are preserved — the Ok(_) branch skips them.
+    ensure_cli_symlink_in_local_bin(&local_bin, &buzz_bin, false).unwrap();
+
     assert!(link.symlink_metadata().unwrap().file_type().is_file());
     assert_eq!(fs::read_to_string(&link).unwrap(), "user-installed binary");
 }
@@ -396,18 +394,68 @@ fn ensure_cli_symlink_does_not_clobber_regular_file_prod() {
 #[cfg(unix)]
 #[test]
 fn ensure_cli_symlink_does_not_clobber_regular_file_dev() {
-    let tmp = tempfile::tempdir().unwrap();
-    let local_bin = tmp.path().join("local_bin");
+    let (_tmp, local_bin, buzz_bin) = cli_symlink_fixture();
     fs::create_dir_all(&local_bin).unwrap();
     let link = local_bin.join(cli_link_name(true));
     fs::write(&link, "user-installed buzz-dev binary").unwrap();
 
-    // Regular files at the dev path are also preserved.
+    ensure_cli_symlink_in_local_bin(&local_bin, &buzz_bin, true).unwrap();
+
     assert!(link.symlink_metadata().unwrap().file_type().is_file());
     assert_eq!(
         fs::read_to_string(&link).unwrap(),
         "user-installed buzz-dev binary"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn ensure_cli_symlink_replaces_legacy_prod_appimage_wrapper() {
+    let (_tmp, local_bin, buzz_bin) = cli_symlink_fixture();
+    fs::create_dir_all(&local_bin).unwrap();
+    let link = local_bin.join(cli_link_name(false));
+    fs::write(
+        &link,
+        r#"#!/usr/bin/env bash
+# Launch Buzz with a clean browser handoff for OAuth / external links.
+set -euo pipefail
+
+APPIMAGE="${BUZZ_APPIMAGE:-$HOME/Applications/Buzz.AppImage}"
+if [[ ! -e "$APPIMAGE" ]]; then
+  echo "buzz: AppImage not found at $APPIMAGE" >&2
+  exit 1
+fi
+
+export BROWSER="${HOME}/.local/bin/buzz-browser"
+
+exec "$APPIMAGE" "$@"
+"#,
+    )
+    .unwrap();
+
+    ensure_cli_symlink_in_local_bin(&local_bin, &buzz_bin, false).unwrap();
+
+    assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+    assert_eq!(fs::read_link(&link).unwrap(), buzz_bin);
+}
+
+#[cfg(unix)]
+#[test]
+fn ensure_cli_symlink_preserves_legacy_wrapper_name_for_dev() {
+    let (_tmp, local_bin, buzz_bin) = cli_symlink_fixture();
+    fs::create_dir_all(&local_bin).unwrap();
+    let link = local_bin.join(cli_link_name(true));
+    let wrapper = r#"#!/usr/bin/env bash
+APPIMAGE="${BUZZ_APPIMAGE:-$HOME/Applications/Buzz.AppImage}"
+export BROWSER="${HOME}/.local/bin/buzz-browser"
+exec "$APPIMAGE" "$@"
+"#;
+    fs::write(&link, wrapper).unwrap();
+
+    ensure_cli_symlink_in_local_bin(&local_bin, &buzz_bin, true).unwrap();
+
+    assert!(link.symlink_metadata().unwrap().file_type().is_file());
+    assert_eq!(fs::read_to_string(&link).unwrap(), wrapper);
 }
 
 fn make_persona(id: &str, display_name: &str) -> AgentDefinition {
