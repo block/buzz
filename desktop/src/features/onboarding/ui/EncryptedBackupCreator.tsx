@@ -43,6 +43,93 @@ const DEFAULT_SEPARATOR = SEPARATOR_OPTIONS[0].value;
  */
 const ENCRYPT_DEBOUNCE_MS = 400;
 
+const PENDING_TICKER_MESSAGES = [
+  "Downloading once finished",
+  "Encrypting your password",
+  "Just a bit longer...",
+] as const;
+
+/** How long each ticker message holds before sliding to the next. */
+const PENDING_TICKER_INTERVAL_MS = 2500;
+
+/** Matches the `duration-300` slide transition on the ticker column. */
+const PENDING_TICKER_SLIDE_MS = 300;
+
+/**
+ * Vertical ticker for the queued-download button label — cycles through the
+ * pending messages by sliding a stacked column inside a one-line viewport.
+ * The column ends with a clone of the first message, so the wrap-around
+ * slides up from the bottom like every other step; once the clone settles,
+ * the column snaps (transition disabled) back to the real first row. All
+ * lines render at all times, so the button keeps the width of the longest
+ * message instead of resizing on each swap.
+ */
+function PendingDownloadTicker() {
+  // Index into the rendered column (messages + trailing clone of the first).
+  const [position, setPosition] = React.useState(0);
+  const [snap, setSnap] = React.useState(false);
+
+  React.useEffect(() => {
+    const timer = window.setInterval(
+      () => setPosition((current) => current + 1),
+      PENDING_TICKER_INTERVAL_MS,
+    );
+    return () => window.clearInterval(timer);
+  }, []);
+
+  // The clone is visually identical to the first message: once its slide-in
+  // finishes, jump back to the real first row without animating.
+  React.useEffect(() => {
+    if (position !== PENDING_TICKER_MESSAGES.length) return;
+    const timer = window.setTimeout(() => {
+      setSnap(true);
+      setPosition(0);
+    }, PENDING_TICKER_SLIDE_MS);
+    return () => window.clearTimeout(timer);
+  }, [position]);
+
+  // Re-enable the transition one frame after the snap has painted.
+  React.useEffect(() => {
+    if (!snap) return;
+    const raf = window.requestAnimationFrame(() => setSnap(false));
+    return () => window.cancelAnimationFrame(raf);
+  }, [snap]);
+
+  // The clone row duplicates the first message's text, so it carries its own
+  // stable key.
+  const column = [
+    ...PENDING_TICKER_MESSAGES.map((message) => ({ key: message, message })),
+    { key: "wrap-clone", message: PENDING_TICKER_MESSAGES[0] },
+  ];
+
+  return (
+    <span
+      aria-live="polite"
+      className="relative block h-5 overflow-hidden"
+      data-testid="encrypted-backup-pending-ticker"
+    >
+      <span
+        className={cn(
+          "block ease-out",
+          snap
+            ? "transition-none"
+            : "transition-transform duration-300 motion-reduce:transition-none",
+        )}
+        style={{ transform: `translateY(-${position * 1.25}rem)` }}
+      >
+        {column.map((row) => (
+          <span
+            className="flex h-5 items-center justify-center whitespace-nowrap"
+            key={row.key}
+          >
+            {row.message}
+          </span>
+        ))}
+      </span>
+    </span>
+  );
+}
+
 type EncryptedBackupCreatorProps = {
   /** "spotlight" is the onboarding treatment; "boxed" fits settings cards. */
   variant?: "spotlight" | "boxed";
@@ -258,6 +345,12 @@ export function EncryptedBackupCreator({
     };
   }, []);
 
+  // A queued download locks the form — mask the password too so it isn't
+  // left readable on screen while the user waits for the save dialog.
+  React.useEffect(() => {
+    if (state.downloadPending) setIsRevealed(false);
+  }, [state.downloadPending]);
+
   // Eager background encryption: start the KDF as soon as the passphrase is
   // valid (debounced against typing). Results are keyed by passphrase in the
   // reducer, so a completion for an edited passphrase is dropped there.
@@ -414,6 +507,7 @@ export function EncryptedBackupCreator({
           aria-label={isRevealed ? "Hide password" : "Reveal password"}
           className="absolute right-1 top-1/2 h-8 w-8 -translate-y-1/2 text-muted-foreground hover:text-foreground"
           data-testid="backup-passphrase-reveal-toggle"
+          disabled={state.downloadPending}
           onClick={() => setIsRevealed((revealed) => !revealed)}
           size="icon"
           type="button"
@@ -471,7 +565,7 @@ export function EncryptedBackupCreator({
               onClick={() => dispatch({ type: "download-clicked" })}
               type="button"
             >
-              {state.downloadPending ? "Downloading once finished" : "Download"}
+              {state.downloadPending ? <PendingDownloadTicker /> : "Download"}
             </Button>
           </div>
         );
