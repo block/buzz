@@ -265,6 +265,18 @@ pub async fn inspect_mcp_app_resource(
         .map(|(_, policy)| policy)
 }
 
+pub(super) fn sandbox_url_for_platform(view_id: &str, use_windows_workaround: bool) -> String {
+    if use_windows_workaround {
+        format!("http://buzz-mcp-app.localhost/{view_id}")
+    } else {
+        format!("buzz-mcp-app://localhost/{view_id}")
+    }
+}
+
+fn sandbox_url(view_id: &str) -> String {
+    sandbox_url_for_platform(view_id, cfg!(target_os = "windows"))
+}
+
 /// Read and validate one UI resource, then register its CSP-bound sandbox URL.
 #[tauri::command]
 pub async fn prepare_mcp_app_view(
@@ -310,7 +322,7 @@ pub async fn prepare_mcp_app_view(
         },
     );
     Ok(PreparedMcpAppView {
-        sandbox_url: format!("buzz-mcp-app://localhost/{view_id}"),
+        sandbox_url: sandbox_url(&view_id),
         view_id,
         html,
         csp: policy.csp,

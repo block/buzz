@@ -82,6 +82,14 @@ pub(super) fn csp_origin(raw: &str) -> Option<String> {
         Host::Ipv4(address) => address.is_loopback(),
         Host::Ipv6(address) => address.is_loopback(),
     };
+    let private_ip_literal = match host {
+        Host::Domain(_) => false,
+        Host::Ipv4(address) => is_private_ip(address.into()),
+        Host::Ipv6(address) => is_private_ip(address.into()),
+    };
+    if private_ip_literal && !loopback {
+        return None;
+    }
     if !(matches!(url.scheme(), "https" | "wss")
         || matches!(url.scheme(), "http" | "ws") && loopback)
     {

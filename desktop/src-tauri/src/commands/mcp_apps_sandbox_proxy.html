@@ -89,6 +89,9 @@
         }
         return;
       }
+      // The resource document has an opaque origin, so postMessage cannot use
+      // a narrower target. The outer frame accepts messages only from Buzz's
+      // validated host origin and relays only to its own sandboxed child.
       inner.contentWindow?.postMessage(event.data, "*");
       return;
     }

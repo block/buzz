@@ -14,6 +14,7 @@ import {
   observeMcpAppHostContext,
   type McpAppBridgeCallbacks,
 } from "@/features/mcp-apps/lib/mcpAppBridge";
+import { mcpAppDisplayText } from "@/features/mcp-apps/lib/mcpAppMessage";
 
 const PROXY_READY_METHOD = "ui/notifications/sandbox-proxy-ready";
 
@@ -206,7 +207,7 @@ export function McpAppFrame({
         if (abortController.signal.aborted) return;
         const next =
           cause instanceof Error ? cause : new Error("MCP App failed to load");
-        setError(next.message);
+        setError(mcpAppDisplayText(next.message, "MCP App failed to load"));
         onError?.(next);
       }
     };

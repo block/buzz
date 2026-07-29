@@ -42,6 +42,7 @@ const MAX_SERVERS: usize = 16;
 const MAX_VIEWS: usize = 32;
 const MAX_TOOLS: usize = 256;
 const MAX_RESOURCES: usize = 256;
+const IPV4_TRANSLATED_PREFIX: [u8; 12] = [0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 0, 0];
 
 const SANDBOX_PROXY_HTML: &str = include_str!("mcp_apps_sandbox_proxy.html");
 
@@ -67,12 +68,26 @@ fn is_private_ipv4(ip: Ipv4Addr) -> bool {
         || ip.is_unspecified()
         || ip.is_multicast()
         || octets[0] == 0
+        // CGNAT, reserved, benchmarking, and IETF protocol assignments.
         || (octets[0] == 100 && (64..=127).contains(&octets[1]))
+        || octets[0] >= 240
+        || (octets[0] == 198 && (octets[1] & 0xfe) == 18)
+        || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0)
+}
+
+fn embedded_ipv4(ip: Ipv6Addr, prefix: &[u8; 12]) -> Option<Ipv4Addr> {
+    let octets = ip.octets();
+    octets
+        .starts_with(prefix)
+        .then(|| Ipv4Addr::new(octets[12], octets[13], octets[14], octets[15]))
 }
 
 fn is_private_ipv6(ip: Ipv6Addr) -> bool {
-    if let Some(mapped) = ip.to_ipv4_mapped() {
-        return is_private_ipv4(mapped);
+    if let Some(embedded) = ip.to_ipv4() {
+        return is_private_ipv4(embedded);
+    }
+    if let Some(translated) = embedded_ipv4(ip, &IPV4_TRANSLATED_PREFIX) {
+        return is_private_ipv4(translated);
     }
     let segments = ip.segments();
     ip.is_loopback()
@@ -80,9 +95,15 @@ fn is_private_ipv6(ip: Ipv6Addr) -> bool {
         || ip.is_multicast()
         || ip.is_unique_local()
         || ip.is_unicast_link_local()
+        // Discard-only, translation, transition, benchmarking, and documentation ranges.
+        || (segments[0] == 0x0100 && segments[1..4] == [0, 0, 0])
         || (segments[0] == 0x0064 && segments[1] == 0xff9b && segments[2..6] == [0, 0, 0, 0])
+        || (segments[0] == 0x0064 && segments[1] == 0xff9b && segments[2] == 1)
         || segments[0] == 0x2002
         || (segments[0] == 0x2001 && segments[1] == 0)
+        || (segments[0] == 0x2001 && segments[1] == 2 && segments[2] == 0)
+        || (segments[0] == 0x2001 && segments[1] == 0x0db8)
+        || (segments[0] == 0x3fff && (segments[1] & 0xf000) == 0)
 }
 
 fn is_private_ip(ip: IpAddr) -> bool {
@@ -838,7 +859,7 @@ async fn probe_modern(client: &Client, endpoint: &Url) -> Result<ModernProbe, St
 #[path = "mcp_apps_host.rs"]
 mod host;
 #[cfg(test)]
-use host::{app_tool_allowed, sandbox_proxy_html};
+use host::{app_tool_allowed, sandbox_proxy_html, sandbox_url_for_platform};
 pub use host::{
     call_mcp_app_tool, connect_mcp_app_server, disconnect_mcp_app_server, handle_mcp_app_protocol,
     inspect_mcp_app_resource, list_mcp_app_resources, list_mcp_app_tools, prepare_mcp_app_view,

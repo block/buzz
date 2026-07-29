@@ -2,6 +2,7 @@ import * as React from "react";
 
 import type { McpAppMessage } from "@/features/mcp-apps/lib/mcpAppBridge";
 import type { ChannelMcpAppInstallation } from "@/features/mcp-apps/lib/channelMcpAppStorage";
+import { mcpAppDisplayText } from "@/features/mcp-apps/lib/mcpAppMessage";
 import {
   McpAppFrame,
   type McpAppFrameProps,
@@ -72,9 +73,10 @@ export function ChannelMcpAppPane({
       .catch((cause) => {
         if (!active) return;
         setError(
-          cause instanceof Error
-            ? cause.message
-            : "The MCP App is unavailable.",
+          mcpAppDisplayText(
+            cause instanceof Error ? cause.message : "",
+            "The MCP App is unavailable.",
+          ),
         );
       });
     return () => {

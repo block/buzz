@@ -27,9 +27,21 @@ const HOST_INFO = { name: "Buzz Desktop", version: "1.0.0" };
 
 export function mcpAppSandboxOrigin(sandboxUrl: string): string {
   const url = new URL(sandboxUrl);
-  if (url.origin !== "null") return url.origin;
-  if (!url.host) throw new Error("MCP App sandbox URL has no origin");
-  return `${url.protocol}//${url.host}`;
+  if (
+    url.protocol === "buzz-mcp-app:" &&
+    url.hostname === "localhost" &&
+    !url.port
+  ) {
+    return "buzz-mcp-app://localhost";
+  }
+  if (
+    url.protocol === "http:" &&
+    url.hostname === "buzz-mcp-app.localhost" &&
+    !url.port
+  ) {
+    return "http://buzz-mcp-app.localhost";
+  }
+  throw new Error("MCP App sandbox URL does not use the trusted protocol");
 }
 
 class OriginValidatedPostMessageTransport implements Transport {

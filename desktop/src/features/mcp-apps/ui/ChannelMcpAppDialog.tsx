@@ -6,7 +6,10 @@ import {
   removeChannelMcpApp,
   type ChannelMcpAppInstallation,
 } from "@/features/mcp-apps/lib/channelMcpAppStorage";
-import { mcpAppDisplayLabel } from "@/features/mcp-apps/lib/mcpAppMessage";
+import {
+  mcpAppDisplayLabel,
+  mcpAppDisplayText,
+} from "@/features/mcp-apps/lib/mcpAppMessage";
 import {
   connectMcpAppServer,
   disconnectMcpAppServer,
@@ -170,9 +173,10 @@ export function ChannelMcpAppDialog({
       .catch((cause) => {
         if (inspectionAttemptRef.current !== attempt) return;
         setError(
-          cause instanceof Error
-            ? cause.message
-            : "Buzz could not inspect this MCP App resource.",
+          mcpAppDisplayText(
+            cause instanceof Error ? cause.message : "",
+            "Buzz could not inspect this MCP App resource.",
+          ),
         );
       })
       .finally(() => {
@@ -231,9 +235,10 @@ export function ChannelMcpAppDialog({
       if (connectionAttemptRef.current !== attempt) return;
       clearConnectedServer();
       setError(
-        cause instanceof Error
-          ? cause.message
-          : "Buzz could not connect to this MCP server.",
+        mcpAppDisplayText(
+          cause instanceof Error ? cause.message : "",
+          "Buzz could not connect to this MCP server.",
+        ),
       );
     } finally {
       if (connectionAttemptRef.current === attempt) setIsConnecting(false);

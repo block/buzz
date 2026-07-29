@@ -11,6 +11,22 @@ test("derives an exact origin for the custom sandbox protocol", () => {
     mcpAppSandboxOrigin("buzz-mcp-app://localhost/7f6d"),
     "buzz-mcp-app://localhost",
   );
+  assert.equal(
+    mcpAppSandboxOrigin("http://buzz-mcp-app.localhost/7f6d"),
+    "http://buzz-mcp-app.localhost",
+  );
+  assert.throws(
+    () => mcpAppSandboxOrigin("https://example.com/7f6d"),
+    /trusted protocol/,
+  );
+  assert.throws(
+    () => mcpAppSandboxOrigin("buzz-mcp-app://localhost:1337/7f6d"),
+    /trusted protocol/,
+  );
+  assert.throws(
+    () => mcpAppSandboxOrigin("http://buzz-mcp-app.localhost:1337/7f6d"),
+    /trusted protocol/,
+  );
 });
 
 test("default host context identifies Buzz as a desktop host", () => {

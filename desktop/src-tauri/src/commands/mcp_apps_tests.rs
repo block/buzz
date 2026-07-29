@@ -53,12 +53,22 @@ fn rejects_private_and_transitional_network_addresses() {
     for address in [
         "10.0.0.1",
         "100.64.0.1",
+        "192.0.0.1",
         "192.168.1.1",
+        "198.18.0.1",
+        "240.0.0.1",
+        "::127.0.0.1",
         "::ffff:127.0.0.1",
+        "::ffff:0:127.0.0.1",
         "::ffff:169.254.169.254",
+        "100::1",
         "64:ff9b::7f00:1",
+        "64:ff9b:1::7f00:1",
+        "2001:2::1",
+        "2001:db8::1",
         "2002:7f00:1::",
         "2001::1",
+        "3fff::1",
         "ff02::1",
     ] {
         assert!(
@@ -67,6 +77,7 @@ fn rejects_private_and_transitional_network_addresses() {
         );
     }
     assert!(!is_private_ip("2606:4700:4700::1111".parse().unwrap()));
+    assert!(!is_private_ip("3fff:1000::1".parse().unwrap()));
 }
 
 #[test]
@@ -112,6 +123,20 @@ fn csp_rejects_bare_wildcards_and_csp_delimiters() {
     assert_eq!(
         csp_origin("http://[::1]:1337").as_deref(),
         Some("http://[::1]:1337")
+    );
+    assert_eq!(csp_origin("https://10.0.0.1"), None);
+    assert_eq!(csp_origin("https://169.254.169.254"), None);
+    assert_eq!(csp_origin("https://192.0.0.1"), None);
+    assert_eq!(csp_origin("https://198.18.0.1"), None);
+    assert_eq!(csp_origin("https://240.0.0.1"), None);
+    assert_eq!(csp_origin("https://[fc00::1]"), None);
+    assert_eq!(csp_origin("https://[100::1]"), None);
+    assert_eq!(csp_origin("https://[64:ff9b:1::7f00:1]"), None);
+    assert_eq!(csp_origin("https://[2001:db8::1]"), None);
+    assert_eq!(csp_origin("https://[3fff::1]"), None);
+    assert_eq!(
+        csp_origin("http://127.0.0.1:1337").as_deref(),
+        Some("http://127.0.0.1:1337")
     );
 }
 
@@ -216,6 +241,18 @@ fn inner_app_frame_uses_an_opaque_origin_and_fixed_sandbox() {
     }
     assert!(!SANDBOX_PROXY_HTML.contains("allow-same-origin allow-forms"));
     assert!(!SANDBOX_PROXY_HTML.contains("inner.setAttribute(\"sandbox\", sandbox)"));
+}
+
+#[test]
+fn sandbox_url_uses_the_platform_custom_protocol_form() {
+    assert_eq!(
+        sandbox_url_for_platform("view-id", false),
+        "buzz-mcp-app://localhost/view-id"
+    );
+    assert_eq!(
+        sandbox_url_for_platform("view-id", true),
+        "http://buzz-mcp-app.localhost/view-id"
+    );
 }
 
 #[test]
