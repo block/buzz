@@ -169,7 +169,9 @@ final class NativeAttachmentPopoverCoordinator: NSObject {
           containerBounds: sourceView.bounds,
           safeAreaInsets: sourceView.safeAreaInsets,
           keyboardLayoutFrame: sourceView.keyboardLayoutGuide.layoutFrame,
-          menuHeight: NativeAttachmentMenuLayout.size.height
+          menuHeight: NativeAttachmentMenuLayout.size(
+            compatibleWith: sourceView.traitCollection
+          ).height
         )
       if keyboardDismissalOffset > 0 {
         NativeAttachmentExpandedSurfaceBehavior.dismissKeyboard(
@@ -264,15 +266,51 @@ final class NativeAttachmentPopoverCoordinator: NSObject {
 enum NativeAttachmentMenuLayout {
   static let itemCount: CGFloat = 4
   static let contentPadding: CGFloat = 16
-  static let itemHeight: CGFloat = 52
+  static let minimumItemHeight: CGFloat = 52
   static let itemSpacing: CGFloat = 8
+  static let itemVerticalPadding: CGFloat = 8
+  static let maximumHeight: CGFloat = 372
+  static let width: CGFloat = 216
   static let labelTextStyle: UIFont.TextStyle = .title3
-  static let size = CGSize(
-    width: 216,
-    height: (contentPadding * 2)
-      + (itemHeight * itemCount)
+
+  static func itemHeight(
+    compatibleWith traitCollection: UITraitCollection
+  ) -> CGFloat {
+    let labelHeight = UIFont.preferredFont(
+      forTextStyle: labelTextStyle,
+      compatibleWith: traitCollection
+    ).lineHeight
+    return max(
+      minimumItemHeight,
+      ceil(labelHeight + (itemVerticalPadding * 2))
+    )
+  }
+
+  static func itemsHeight(
+    compatibleWith traitCollection: UITraitCollection
+  ) -> CGFloat {
+    (itemHeight(compatibleWith: traitCollection) * itemCount)
       + (itemSpacing * (itemCount - 1))
-  )
+  }
+
+  static func contentHeight(
+    compatibleWith traitCollection: UITraitCollection
+  ) -> CGFloat {
+    (contentPadding * 2) + itemsHeight(compatibleWith: traitCollection)
+  }
+
+  static func size(
+    compatibleWith traitCollection: UITraitCollection,
+    maximumHeight: CGFloat = NativeAttachmentMenuLayout.maximumHeight
+  ) -> CGSize {
+    CGSize(
+      width: width,
+      height: min(
+        contentHeight(compatibleWith: traitCollection),
+        maximumHeight
+      )
+    )
+  }
 }
 
 func makeNativeAttachmentMenuButton(

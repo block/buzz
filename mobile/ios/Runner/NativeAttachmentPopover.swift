@@ -21,8 +21,8 @@ final class NativeAttachmentPopoverViewController:
 
   private let channel: FlutterMethodChannel
   private let expandedWidth: CGFloat
-  private let menuSize = NativeAttachmentMenuLayout.size
-  private let expandedHeight: CGFloat = 372
+  private let maximumMenuHeight: CGFloat
+  private let expandedHeight = NativeAttachmentMenuLayout.maximumHeight
   private let contentHost = UIView()
   private let cameraSession = AVCaptureSession()
   private let cameraOutput = AVCapturePhotoOutput()
@@ -51,14 +51,30 @@ final class NativeAttachmentPopoverViewController:
   private var isFinishing = false
   private var didNotifyDismissal = false
   private var keyboardDismissalOffset: CGFloat = 0
+  private var menuStackHeightConstraint: NSLayoutConstraint?
 
   var onDismiss: (() -> Void)?
 
-  init(channel: FlutterMethodChannel, expandedWidth: CGFloat) {
+  private var menuSize: CGSize {
+    NativeAttachmentMenuLayout.size(
+      compatibleWith: traitCollection,
+      maximumHeight: maximumMenuHeight
+    )
+  }
+
+  init(
+    channel: FlutterMethodChannel,
+    expandedWidth: CGFloat,
+    maximumMenuHeight: CGFloat = NativeAttachmentMenuLayout.maximumHeight
+  ) {
     self.channel = channel
     self.expandedWidth = expandedWidth
+    self.maximumMenuHeight = maximumMenuHeight
     super.init(nibName: nil, bundle: nil)
-    preferredContentSize = menuSize
+    preferredContentSize = NativeAttachmentMenuLayout.size(
+      compatibleWith: .current,
+      maximumHeight: maximumMenuHeight
+    )
   }
 
   @available(*, unavailable)
@@ -107,6 +123,20 @@ final class NativeAttachmentPopoverViewController:
     stopCamera()
   }
 
+  override func traitCollectionDidChange(
+    _ previousTraitCollection: UITraitCollection?
+  ) {
+    super.traitCollectionDidChange(previousTraitCollection)
+    guard
+      previousTraitCollection?.preferredContentSizeCategory
+        != traitCollection.preferredContentSizeCategory
+    else {
+      return
+    }
+
+    updateMenuLayout()
+  }
+
   func adaptivePresentationStyle(
     for controller: UIPresentationController
   ) -> UIModalPresentationStyle {
@@ -123,29 +153,45 @@ final class NativeAttachmentPopoverViewController:
     let container = UIView()
     container.translatesAutoresizingMaskIntoConstraints = false
 
+    let scrollView = UIScrollView()
+    scrollView.alwaysBounceVertical = false
+    scrollView.translatesAutoresizingMaskIntoConstraints = false
+    container.addSubview(scrollView)
+
     let stack = UIStackView()
     stack.axis = .vertical
     stack.distribution = .fillEqually
     stack.spacing = NativeAttachmentMenuLayout.itemSpacing
     stack.translatesAutoresizingMaskIntoConstraints = false
-    container.addSubview(stack)
+    scrollView.addSubview(stack)
+    let stackHeightConstraint = stack.heightAnchor.constraint(
+      equalToConstant: NativeAttachmentMenuLayout.itemsHeight(
+        compatibleWith: traitCollection
+      )
+    )
+    menuStackHeightConstraint = stackHeightConstraint
     NSLayoutConstraint.activate([
+      scrollView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+      scrollView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+      scrollView.topAnchor.constraint(equalTo: container.topAnchor),
+      scrollView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
       stack.leadingAnchor.constraint(
-        equalTo: container.leadingAnchor,
+        equalTo: scrollView.frameLayoutGuide.leadingAnchor,
         constant: NativeAttachmentMenuLayout.contentPadding
       ),
       stack.trailingAnchor.constraint(
-        equalTo: container.trailingAnchor,
+        equalTo: scrollView.frameLayoutGuide.trailingAnchor,
         constant: -NativeAttachmentMenuLayout.contentPadding
       ),
       stack.topAnchor.constraint(
-        equalTo: container.topAnchor,
+        equalTo: scrollView.contentLayoutGuide.topAnchor,
         constant: NativeAttachmentMenuLayout.contentPadding
       ),
       stack.bottomAnchor.constraint(
-        equalTo: container.bottomAnchor,
+        equalTo: scrollView.contentLayoutGuide.bottomAnchor,
         constant: -NativeAttachmentMenuLayout.contentPadding
       ),
+      stackHeightConstraint,
     ])
 
     stack.addArrangedSubview(
@@ -181,6 +227,16 @@ final class NativeAttachmentPopoverViewController:
       )
     )
     return container
+  }
+
+  private func updateMenuLayout() {
+    menuStackHeightConstraint?.constant =
+      NativeAttachmentMenuLayout.itemsHeight(
+        compatibleWith: traitCollection
+      )
+    if surface == .menu {
+      preferredContentSize = menuSize
+    }
   }
 
   private func showPhotos() {
@@ -332,9 +388,7 @@ final class NativeAttachmentPopoverViewController:
   }
 
   private func prepareForExpandedSurface() {
-    if
-      let sourceHost = popoverPresentationController?.sourceView?.superview
-    {
+    if let sourceHost = popoverPresentationController?.sourceView?.superview {
       keyboardDismissalOffset = max(
         keyboardDismissalOffset,
         NativeAttachmentExpandedSurfaceBehavior.keyboardOverlap(

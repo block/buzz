@@ -3,13 +3,51 @@ part of '../compose_bar.dart';
 enum _AttachmentSurface { closed, menu, camera, photos }
 
 const _attachmentMenuWidth = 216.0;
-const _attachmentMenuHeight = 264.0;
 const _attachmentMenuPadding = Grid.xs;
 const _attachmentMenuItemHeight = 52.0;
 const _attachmentMenuItemSpacing = Grid.xxs;
 const _attachmentMenuIconSize = 24.0;
 const _attachmentMenuIconSlotWidth = 28.0;
 const _attachmentExpandedHeight = 372.0;
+
+@immutable
+class _AttachmentMenuLayout {
+  final double itemHeight;
+  final double contentHeight;
+  final double height;
+
+  const _AttachmentMenuLayout({
+    required this.itemHeight,
+    required this.contentHeight,
+    required this.height,
+  });
+
+  factory _AttachmentMenuLayout.from(BuildContext context) {
+    final textPainter = TextPainter(
+      text: TextSpan(text: 'Camera', style: context.textTheme.titleMedium),
+      textDirection: Directionality.of(context),
+      textScaler: MediaQuery.textScalerOf(context),
+      maxLines: 1,
+    )..layout();
+    final itemHeight = math.max(
+      _attachmentMenuItemHeight,
+      textPainter.height + (Grid.xxs * 2),
+    );
+    textPainter.dispose();
+    final contentHeight =
+        (_attachmentMenuPadding * 2) +
+        (itemHeight * 4) +
+        (_attachmentMenuItemSpacing * 3);
+
+    return _AttachmentMenuLayout(
+      itemHeight: itemHeight,
+      contentHeight: contentHeight,
+      height: math.min(contentHeight, _attachmentExpandedHeight),
+    );
+  }
+
+  bool get isScrollable => contentHeight > height;
+}
 
 class _AttachmentSurfacePanel extends HookWidget {
   final _AttachmentSurface surface;
@@ -41,6 +79,7 @@ class _AttachmentSurfacePanel extends HookWidget {
   Widget build(BuildContext context) {
     if (surface == _AttachmentSurface.closed) return suggestionPanel;
 
+    final menuLayout = _AttachmentMenuLayout.from(context);
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
     final isExpanded =
         surface == _AttachmentSurface.camera ||
@@ -136,8 +175,8 @@ class _AttachmentSurfacePanel extends HookWidget {
             _attachmentMenuWidth +
             ((expandedWidth - _attachmentMenuWidth) * sizeProgress);
         final height =
-            _attachmentMenuHeight +
-            ((expandedHeight - _attachmentMenuHeight) * sizeProgress);
+            menuLayout.height +
+            ((expandedHeight - menuLayout.height) * sizeProgress);
         final baseColor = context.colors.surfaceContainerHighest;
         final expandedColor =
             visibleExpandedSurface == _AttachmentSurface.camera
@@ -170,12 +209,13 @@ class _AttachmentSurfacePanel extends HookWidget {
                         left: 0,
                         top: 0,
                         width: _attachmentMenuWidth,
-                        height: _attachmentMenuHeight,
+                        height: menuLayout.height,
                         child: IgnorePointer(
                           ignoring: surface != _AttachmentSurface.menu,
                           child: Opacity(
                             opacity: menuOpacity,
                             child: _AttachmentMenu(
+                              layout: menuLayout,
                               onCamera: onCamera,
                               onPhotos: onPhotos,
                               onVideo: onVideo,
@@ -308,12 +348,14 @@ class _AttachmentTrigger extends StatelessWidget {
 }
 
 class _AttachmentMenu extends StatelessWidget {
+  final _AttachmentMenuLayout layout;
   final VoidCallback onCamera;
   final VoidCallback onPhotos;
   final VoidCallback onVideo;
   final VoidCallback onFiles;
 
   const _AttachmentMenu({
+    required this.layout,
     required this.onCamera,
     required this.onPhotos,
     required this.onVideo,
@@ -325,48 +367,43 @@ class _AttachmentMenu extends StatelessWidget {
     return SizedBox(
       key: const ValueKey('attachment-menu'),
       width: _attachmentMenuWidth,
-      height: _attachmentMenuHeight,
-      child: Padding(
+      height: layout.height,
+      child: ListView.separated(
+        key: const ValueKey('attachment-menu-scroll'),
         padding: const EdgeInsets.all(_attachmentMenuPadding),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            _AttachmentMenuItem(
-              icon: LucideIcons.camera,
-              label: 'Camera',
-              onTap: onCamera,
-            ),
+        physics: layout.isScrollable
+            ? null
+            : const NeverScrollableScrollPhysics(),
+        itemCount: 4,
+        separatorBuilder: (_, _) =>
             const SizedBox(height: _attachmentMenuItemSpacing),
-            _AttachmentMenuItem(
-              icon: LucideIcons.images,
-              label: 'Photos',
-              onTap: onPhotos,
-            ),
-            const SizedBox(height: _attachmentMenuItemSpacing),
-            _AttachmentMenuItem(
-              icon: LucideIcons.video,
-              label: 'Video',
-              onTap: onVideo,
-            ),
-            const SizedBox(height: _attachmentMenuItemSpacing),
-            _AttachmentMenuItem(
-              icon: LucideIcons.file,
-              label: 'Files',
-              onTap: onFiles,
-            ),
-          ],
-        ),
+        itemBuilder: (context, index) {
+          final (icon, label, onTap) = switch (index) {
+            0 => (LucideIcons.camera, 'Camera', onCamera),
+            1 => (LucideIcons.images, 'Photos', onPhotos),
+            2 => (LucideIcons.video, 'Video', onVideo),
+            _ => (LucideIcons.file, 'Files', onFiles),
+          };
+          return _AttachmentMenuItem(
+            height: layout.itemHeight,
+            icon: icon,
+            label: label,
+            onTap: onTap,
+          );
+        },
       ),
     );
   }
 }
 
 class _AttachmentMenuItem extends StatelessWidget {
+  final double height;
   final IconData icon;
   final String label;
   final VoidCallback onTap;
 
   const _AttachmentMenuItem({
+    required this.height,
     required this.icon,
     required this.label,
     required this.onTap,
@@ -376,7 +413,7 @@ class _AttachmentMenuItem extends StatelessWidget {
   Widget build(BuildContext context) {
     return SizedBox(
       key: ValueKey('attachment-menu-item-${label.toLowerCase()}'),
-      height: _attachmentMenuItemHeight,
+      height: height,
       child: Tooltip(
         message: label,
         child: InkWell(

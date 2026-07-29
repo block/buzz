@@ -70,7 +70,11 @@ class RunnerTests: XCTestCase {
           width: 390,
           height: 300
         ),
-        menuHeight: NativeAttachmentMenuLayout.size.height
+        menuHeight: NativeAttachmentMenuLayout.size(
+          compatibleWith: UITraitCollection(
+            preferredContentSizeCategory: .large
+          )
+        ).height
       ),
       0
     )
@@ -89,7 +93,11 @@ class RunnerTests: XCTestCase {
           width: 844,
           height: 162
         ),
-        menuHeight: NativeAttachmentMenuLayout.size.height
+        menuHeight: NativeAttachmentMenuLayout.size(
+          compatibleWith: UITraitCollection(
+            preferredContentSizeCategory: .large
+          )
+        ).height
       )
 
     XCTAssertEqual(keyboardDismissalOffset, 162)
@@ -109,7 +117,11 @@ class RunnerTests: XCTestCase {
         containerBounds: CGRect(x: 0, y: 0, width: 844, height: 390),
         safeAreaInsets: UIEdgeInsets(top: 0, left: 59, bottom: 21, right: 59),
         keyboardLayoutFrame: CGRect(x: 0, y: 390, width: 844, height: 0),
-        menuHeight: NativeAttachmentMenuLayout.size.height
+        menuHeight: NativeAttachmentMenuLayout.size(
+          compatibleWith: UITraitCollection(
+            preferredContentSizeCategory: .large
+          )
+        ).height
       ),
       0
     )
@@ -129,12 +141,42 @@ class RunnerTests: XCTestCase {
   }
 
   func testNativeAttachmentMenuUsesRoomyRowsAndInsets() {
-    XCTAssertEqual(NativeAttachmentMenuLayout.size.width, 216)
-    XCTAssertEqual(NativeAttachmentMenuLayout.size.height, 264)
+    let traits = UITraitCollection(preferredContentSizeCategory: .large)
+    let size = NativeAttachmentMenuLayout.size(compatibleWith: traits)
+
+    XCTAssertEqual(size.width, 216)
+    XCTAssertEqual(size.height, 264)
     XCTAssertEqual(NativeAttachmentMenuLayout.contentPadding, 16)
-    XCTAssertEqual(NativeAttachmentMenuLayout.itemHeight, 52)
+    XCTAssertEqual(
+      NativeAttachmentMenuLayout.itemHeight(compatibleWith: traits),
+      52
+    )
     XCTAssertEqual(NativeAttachmentMenuLayout.itemSpacing, 8)
     XCTAssertEqual(NativeAttachmentMenuLayout.labelTextStyle, .title3)
+  }
+
+  func testNativeAttachmentMenuGrowsAndScrollsForAccessibilityText() {
+    let traits = UITraitCollection(
+      preferredContentSizeCategory: .accessibilityExtraExtraExtraLarge
+    )
+    let itemHeight = NativeAttachmentMenuLayout.itemHeight(
+      compatibleWith: traits
+    )
+    let contentHeight = NativeAttachmentMenuLayout.contentHeight(
+      compatibleWith: traits
+    )
+    let size = NativeAttachmentMenuLayout.size(compatibleWith: traits)
+
+    XCTAssertGreaterThan(itemHeight, 52)
+    XCTAssertGreaterThan(contentHeight, 264)
+    XCTAssertEqual(
+      size.height,
+      min(contentHeight, NativeAttachmentMenuLayout.maximumHeight)
+    )
+    XCTAssertLessThanOrEqual(
+      size.height,
+      NativeAttachmentMenuLayout.maximumHeight
+    )
   }
 
   func testDynamicIslandQrScannerRecognizesTallSafeAreas() {

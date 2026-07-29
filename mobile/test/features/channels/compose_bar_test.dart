@@ -1320,6 +1320,46 @@ void main() {
       }
     });
 
+    testWidgets(
+      'attachment menu grows rows and scrolls for accessibility text',
+      (tester) async {
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            textScaler: const TextScaler.linear(4),
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+
+        await _openAttachmentMenu(tester);
+
+        final menu = find.byKey(const ValueKey('attachment-menu'));
+        final rows = [
+          for (final label in ['camera', 'photos', 'video', 'files'])
+            find.byKey(ValueKey('attachment-menu-item-$label')),
+        ];
+        final scrollView = tester.widget<ListView>(
+          find.byKey(const ValueKey('attachment-menu-scroll')),
+        );
+
+        expect(tester.getSize(menu), const Size(216, 372));
+        expect(tester.getSize(rows.first).height, greaterThan(52));
+        expect(scrollView.physics, isA<AlwaysScrollableScrollPhysics>());
+        await tester.drag(
+          find.byKey(const ValueKey('attachment-menu-scroll')),
+          const Offset(0, -300),
+        );
+        await tester.pump();
+        expect(tester.getSize(rows.last).height, greaterThan(52));
+        expect(tester.takeException(), isNull);
+      },
+    );
+
     testWidgets('defers camera startup until the surface morph finishes', (
       tester,
     ) async {
