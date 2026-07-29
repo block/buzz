@@ -53,6 +53,26 @@ REST endpoints authenticate via
 the client signs a `kind:27235` event containing the request URL and method.
 The relay verifies the Schnorr signature and extracts the pubkey.
 
+Bridge endpoints (`/events`, `/query`, `/count`, and other REST routes) also
+reject a reused auth event id, to close replay: a duplicate id is refused even
+if it's still inside the timestamp window. Because a NIP-98 event is
+deterministic — kind, second-granularity `created_at`, `u`/`method`/`payload`
+tags — two distinct requests to the same URL within the same wall-clock second
+sign to the same event id, and the second one gets `401 replay detected`.
+Clients that may issue more than one request per second to the same endpoint
+**must** add a random `nonce` tag to keep each auth event unique; see
+`crates/buzz-cli/src/client.rs`'s `sign_nip98` for the reference
+implementation. Bumping `created_at` instead does not work as a substitute —
+it drifts the event outside the verifier's timestamp window under sustained
+bursts.
+
+The git smart-HTTP transport (`crates/buzz-relay/src/api/git/transport.rs`) is
+a deliberate exception: Git's credential protocol signs one token and reuses
+it across a session's requests (`info/refs` GET, then the pack POST), so that
+route does not dedup by event id — it relies on the timestamp window, URL
+scoping, and HTTPS instead. Don't add id-based replay rejection there; it
+would break normal clone/push.
+
 ### Authorization — Channel Membership as the Gate
 
 Channel membership is the **only** access control mechanism. There are no
