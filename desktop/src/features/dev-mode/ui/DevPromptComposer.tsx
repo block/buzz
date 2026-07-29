@@ -4,11 +4,9 @@ import { useAuthorColorResolver } from "@/features/dev-mode/lib/authorColors";
 import { cn } from "@/shared/lib/cn";
 import { useChannelRefAutocomplete } from "@/features/dev-mode/lib/useChannelRefAutocomplete";
 import { useComposerAutoGrow } from "@/features/dev-mode/lib/useComposerAutoGrow";
-import {
-  devComposerModeLabel,
-  type DevComposerMode,
-} from "@/features/dev-mode/lib/useDevComposerModes";
+import type { DevComposerMode } from "@/features/dev-mode/lib/useDevComposerModes";
 import { DevChannelSuggestions } from "@/features/dev-mode/ui/DevChannelSuggestions";
+import { DevComposerModeLine } from "@/features/dev-mode/ui/DevComposerModeLine";
 import { DevComposerResizeHandle } from "@/features/dev-mode/ui/DevComposerResizeHandle";
 
 type DevPromptComposerProps = {
@@ -148,7 +146,13 @@ export function DevPromptComposer({
         testId="dev-mode-composer-resize"
         {...resizeHandleProps}
       />
-      <div className="relative flex items-start gap-2 px-4 pt-2">
+      <DevComposerModeLine
+        agentColor={agentColor}
+        busy={busy}
+        className="pt-2 pl-10"
+        mode={mode}
+      />
+      <div className="relative flex items-start gap-2 px-4 pt-1">
         {active && autocomplete.open ? (
           <DevChannelSuggestions
             onAccept={autocomplete.accept}
@@ -187,21 +191,7 @@ export function DevPromptComposer({
           value={value}
         />
       </div>
-      <div className="mt-2 flex items-center justify-between pr-4 pb-3 pl-10 text-xs text-muted-foreground">
-        <span
-          className={cn(
-            "rounded-none border px-1.5 py-0.5 font-medium",
-            !agentColor && "border-border text-muted-foreground",
-          )}
-          data-testid="dev-mode-pill"
-          style={
-            agentColor
-              ? { color: agentColor, borderColor: `${agentColor}80` }
-              : undefined
-          }
-        >
-          {busy ? "working…" : devComposerModeLabel(mode)}
-        </span>
+      <div className="mt-2 flex items-center justify-end pr-4 pb-3 pl-10 text-xs text-muted-foreground">
         <span className="select-none">{hint}</span>
       </div>
     </div>

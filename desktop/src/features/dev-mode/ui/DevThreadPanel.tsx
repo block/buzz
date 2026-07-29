@@ -19,6 +19,7 @@ import {
 } from "@/features/dev-mode/lib/useMemberNameResolver";
 import { usePinnedScroll } from "@/features/dev-mode/lib/usePinnedScroll";
 import { DevChannelSuggestions } from "@/features/dev-mode/ui/DevChannelSuggestions";
+import { DevComposerModeLine } from "@/features/dev-mode/ui/DevComposerModeLine";
 import { DevComposerResizeHandle } from "@/features/dev-mode/ui/DevComposerResizeHandle";
 import { DevMessageRow } from "@/features/dev-mode/ui/DevMessageRow";
 import { useThreadReplies } from "@/features/messages/useThreadReplies";
@@ -235,6 +236,12 @@ export function DevThreadPanel({
           testId="dev-mode-thread-composer-resize"
           {...resizeHandleProps}
         />
+        <DevComposerModeLine
+          agentColor={agentColor}
+          busy={busy}
+          className="pt-1 pl-9"
+          mode={mode}
+        />
         <div className="relative flex items-start gap-2 px-3 pt-1">
           {active && autocomplete.open ? (
             <DevChannelSuggestions
@@ -278,20 +285,7 @@ export function DevThreadPanel({
             value={input}
           />
         </div>
-        <div className="mt-1 flex items-center justify-between pr-3 pb-2 pl-9 text-xs text-muted-foreground">
-          <span
-            className={cn(
-              "rounded-none border px-1.5 py-0.5 font-medium",
-              !agentColor && "border-border text-muted-foreground",
-            )}
-            style={
-              agentColor
-                ? { color: agentColor, borderColor: `${agentColor}80` }
-                : undefined
-            }
-          >
-            {busy ? "working…" : devComposerModeLabel(mode)}
-          </span>
+        <div className="mt-1 flex items-center justify-end pr-3 pb-2 pl-9 text-xs text-muted-foreground">
           <span className="select-none">
             {root ? "enter: reply" : "enter: start thread"} · ←: channel · esc:
             close
