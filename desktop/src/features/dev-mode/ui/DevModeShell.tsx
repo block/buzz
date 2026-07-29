@@ -645,9 +645,9 @@ export function DevModeShell() {
             </div>
           )}
 
-          {/* Inside a channel (or preview) the composer covers only this
-              pane; the fresh state's composer below spans the full shell. */}
-          {view !== "fresh" && !sideChatOpen ? (
+          {/* Inside a channel the composer covers only this pane; the fresh
+              and navigator states' composer below spans the full shell. */}
+          {view === "channel" && !sideChatOpen ? (
             <>
               {errorBar}
               {composer}
@@ -657,7 +657,7 @@ export function DevModeShell() {
         </div>
       </div>
 
-      {view === "fresh" ? (
+      {view !== "channel" ? (
         <>
           {errorBar}
           {composer}
