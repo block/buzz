@@ -324,3 +324,17 @@ export async function reconcileInboundPersonaEvent(
     arrivalRelayUrl,
   });
 }
+
+/**
+ * Allow persona-backed agent creation only after this exact owner/community
+ * has durably reconciled its retained managed-agent identity history.
+ */
+export async function markManagedAgentReferenceSyncReady(
+  ownerPubkey: string,
+  arrivalRelayUrl: string,
+): Promise<void> {
+  await invokeTauri("mark_managed_agent_reference_sync_ready", {
+    ownerPubkey,
+    arrivalRelayUrl,
+  });
+}

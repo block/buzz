@@ -3,6 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
 
 import {
+  managedAgentReferencesQueryKey,
   managedAgentsQueryKey,
   personasQueryKey,
   relayAgentsQueryKey,
@@ -43,6 +44,9 @@ export function useAgentsDataRefresh(): void {
         void queryClient.invalidateQueries({ queryKey: personasQueryKey });
         void queryClient.invalidateQueries({ queryKey: teamsQueryKey });
         void queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey });
+        void queryClient.invalidateQueries({
+          queryKey: managedAgentReferencesQueryKey,
+        });
         void queryClient.invalidateQueries({ queryKey: relayAgentsQueryKey });
       }, COALESCE_MS);
     });

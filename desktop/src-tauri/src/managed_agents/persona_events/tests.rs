@@ -164,6 +164,8 @@ fn sample_persona() -> AgentDefinition {
     }
 }
 
+mod identity_repair_tests;
+
 #[test]
 fn monotonic_created_at_bumps_past_head() {
     // No head: uses now (floor 0).

@@ -10875,6 +10875,20 @@ export function maybeInstallE2eTauriMocks() {
       }
       case "list_managed_agents":
         return handleListManagedAgents(activeConfig);
+      case "list_managed_agent_references":
+        return mockManagedAgents.flatMap((agent) =>
+          agent.persona_id
+            ? [
+                {
+                  pubkey: agent.pubkey,
+                  name: agent.name,
+                  persona_id: agent.persona_id,
+                },
+              ]
+            : [],
+        );
+      case "mark_managed_agent_reference_sync_ready":
+        return;
       case "get_agent_memory":
         return handleGetAgentMemory(
           (payload as Parameters<typeof handleGetAgentMemory>[0]) ?? {},

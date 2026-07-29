@@ -16,6 +16,8 @@ use crate::app_state::AppState;
 
 mod legacy_migration;
 pub use legacy_migration::migrate_legacy_retention_db;
+mod queries;
+pub use queries::{get_retained_events, retained_tombstone_covers};
 
 /// Durable event-retention scope for one community relay and owner identity.
 ///
@@ -310,31 +312,17 @@ pub fn get_retained_personas(
     conn: &Connection,
     pubkey: &str,
 ) -> Result<Vec<RetainedEvent>, String> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT kind, pubkey, d_tag, content, created_at, raw_event, pending_sync
-             FROM persona_events
-             WHERE pubkey = ?1
-             ORDER BY d_tag",
-        )
-        .map_err(|e| format!("failed to prepare query: {e}"))?;
-
-    let rows = stmt
-        .query_map(params![pubkey], |row| {
-            Ok(RetainedEvent {
-                kind: row.get(0)?,
-                pubkey: row.get(1)?,
-                d_tag: row.get(2)?,
-                content: row.get(3)?,
-                created_at: row.get(4)?,
-                raw_event: row.get(5)?,
-                pending_sync: row.get::<_, i32>(6)? != 0,
-            })
-        })
-        .map_err(|e| format!("failed to query retained events: {e}"))?;
-
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("failed to read retained event row: {e}"))
+    let mut rows = Vec::new();
+    for kind in [
+        buzz_core_pkg::kind::KIND_PERSONA,
+        buzz_core_pkg::kind::KIND_TEAM,
+        buzz_core_pkg::kind::KIND_MANAGED_AGENT,
+        5,
+    ] {
+        rows.extend(get_retained_events(conn, kind, pubkey)?);
+    }
+    rows.sort_by(|left, right| left.d_tag.cmp(&right.d_tag));
+    Ok(rows)
 }
 
 /// Get all events marked as pending sync (not yet confirmed on relay).

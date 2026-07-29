@@ -632,6 +632,39 @@ fn tombstone_removal_predicates_match_apply_fn_keys() {
     assert!(agents.is_empty(), "agent removed by pubkey");
 }
 
+#[test]
+fn persona_tombstone_detaches_linked_agents_without_changing_identity() {
+    let persona = local_in_app();
+    let mut linked = local_agent();
+    linked.persona_id = Some(persona.id.clone());
+    linked.system_prompt = Some("stale instance prompt".to_string());
+    let original_pubkey = linked.pubkey.clone();
+    let mut unrelated = local_agent();
+    unrelated.pubkey = "unrelated-agent-pubkey".to_string();
+    unrelated.persona_id = Some("another-persona".to_string());
+    let mut agents = vec![linked, unrelated];
+
+    let detached = detach_persona_agents(&mut agents, &persona);
+
+    assert_eq!(detached, vec![original_pubkey.clone()]);
+    let preserved = agents
+        .iter()
+        .find(|agent| agent.pubkey == original_pubkey)
+        .unwrap();
+    assert_eq!(preserved.persona_id, None);
+    assert_eq!(preserved.persona_source_version, None);
+    assert_eq!(
+        preserved.system_prompt.as_deref(),
+        Some("local prompt"),
+        "the disappearing definition is snapshotted before detachment"
+    );
+    assert_eq!(
+        agents[1].persona_id.as_deref(),
+        Some("another-persona"),
+        "unrelated links are untouched"
+    );
+}
+
 // ── Inbound signature gate ──────────────────────────────────────────────────
 
 #[test]

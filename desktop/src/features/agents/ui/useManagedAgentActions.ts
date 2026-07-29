@@ -5,6 +5,7 @@ import {
   useAvailableAcpRuntimes,
   useCreateManagedAgentMutation,
   useManagedAgentLogQuery,
+  useManagedAgentReferencesQuery,
   useManagedAgentsQuery,
   useRelayAgentsQuery,
   useSetManagedAgentStartOnAppLaunchMutation,
@@ -22,7 +23,7 @@ import type {
   ManagedAgent,
 } from "@/shared/api/types";
 import { removeChannelMember } from "@/shared/api/tauri";
-import { normalizePubkey } from "@/shared/lib/pubkey";
+import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 import {
   deleteManagedAgentWithRules,
   isManagedAgentActive,
@@ -35,11 +36,13 @@ import {
   buildInstanceInputForDefinition,
   resolveStartRuntimeForDefinition,
 } from "../lib/instanceInputForDefinition";
+import { findRemotePersonaAgent } from "../lib/managedAgentPersonaLinks";
 
 export function useManagedAgentActions() {
   const { globalConfig } = useGlobalAgentConfig();
   const relayAgentsQuery = useRelayAgentsQuery();
   const managedAgentsQuery = useManagedAgentsQuery();
+  const managedAgentReferencesQuery = useManagedAgentReferencesQuery();
   const [shouldLoadChannels, setShouldLoadChannels] = React.useState(false);
   const channelsQuery = useChannelsQuery({ enabled: shouldLoadChannels });
   const startMutation = useStartManagedAgentMutation();
@@ -192,6 +195,22 @@ export function useManagedAgentActions() {
     setPersonaStartPending(persona.id, true);
     clearFeedback();
     try {
+      const referenceResult = await managedAgentReferencesQuery.refetch();
+      if (referenceResult.isError) {
+        throw new Error(
+          `Could not verify whether ${persona.displayName} already has an agent identity. Wait for agent sync and try again.`,
+        );
+      }
+      const existingReference = findRemotePersonaAgent(
+        persona.id,
+        managedPubkeys,
+        referenceResult.data ?? [],
+      );
+      if (existingReference) {
+        throw new Error(
+          `${persona.displayName} already has an agent identity on another install (${truncatePubkey(existingReference.pubkey)}). Start it from the install that owns its key, or delete that instance before creating a replacement.`,
+        );
+      }
       const runtimes = await availableRuntimesForStart(availableRuntimesQuery);
       const { runtime, warnings } = resolveStartRuntimeForDefinition(
         persona,

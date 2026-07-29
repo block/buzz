@@ -164,6 +164,11 @@ pub async fn apply_workspace(
         };
 
         // ── Apply all state changes (nothing below can fail) ──────────────────
+        // A successful backfill belongs to the exact relay+owner scope that
+        // produced it. Clear the process-local readiness proof before either
+        // coordinate changes; AppShell will mark the new scope ready only
+        // after its retained-event backfill has been reconciled.
+        state.clear_managed_agent_reference_sync_ready()?;
         {
             let mut override_guard = state.relay_url_override.lock().map_err(|e| e.to_string())?;
             *override_guard = Some(relay_url);

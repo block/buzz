@@ -3,8 +3,8 @@ use tauri::AppHandle;
 use crate::{
     app_state::AppState,
     managed_agents::{
-        current_instance_id, delete_agent_key, load_managed_agents, load_personas, load_teams,
-        save_managed_agents, save_personas, stop_managed_agent_process,
+        current_instance_id, delete_agent_key, is_relay_synced_persona, load_managed_agents,
+        load_personas, load_teams, save_managed_agents, save_personas, stop_managed_agent_process,
         sync_managed_agent_processes, try_regenerate_nest, validate_persona_activation_change,
         validate_persona_deletion, AgentDefinition, ManagedAgentRecord,
     },
@@ -135,9 +135,10 @@ pub async fn delete_persona(id: String, app: AppHandle) -> Result<(), String> {
                     .any(|persona_id| persona_id == id.as_str())
             });
             validate_persona_deletion(persona, referenced_by_team)?;
-            // Capture the coordinate before the record might leave the list. Only
-            // reached for non-builtin, non-team personas (both rejected above),
-            // so every deleted persona here is one this owner published.
+            // A definition learned from the owner's relay belongs to another
+            // install. Removing its bodyless entry here is a local cleanup,
+            // never authority to delete the shared definition everywhere.
+            let relay_synced = is_relay_synced_persona(persona);
             let d_tag = crate::managed_agents::persona_events::persona_d_tag(persona);
 
             // ── Phase 1: Stage ─────────────────────────────────────────────
@@ -224,10 +225,22 @@ pub async fn delete_persona(id: String, app: AppHandle) -> Result<(), String> {
                 })?;
             }
 
-            let original_len = personas.len();
-            personas.retain(|record| record.id != id);
-            if personas.len() == original_len {
-                return Err(format!("persona {id} not found"));
+            if relay_synced {
+                let persona = personas
+                    .iter_mut()
+                    .find(|record| record.id == id)
+                    .ok_or_else(|| format!("persona {id} not found"))?;
+                // Keep a local inactive marker so a reconnecting relay upsert
+                // patches this row without making the removed entry visible
+                // again in My Agents.
+                persona.is_active = false;
+                persona.updated_at = now_iso();
+            } else {
+                let original_len = personas.len();
+                personas.retain(|record| record.id != id);
+                if personas.len() == original_len {
+                    return Err(format!("persona {id} not found"));
+                }
             }
             save_personas(&app, &personas)?;
 
@@ -239,7 +252,9 @@ pub async fn delete_persona(id: String, app: AppHandle) -> Result<(), String> {
                 super::agents::tombstone_managed_agent_pending(&app, &state, pk);
                 super::agents::archive_managed_agent_pending(&app, &state, pk);
             }
-            tombstone_persona_pending(&app, &state, &d_tag);
+            if !relay_synced {
+                tombstone_persona_pending(&app, &state, &d_tag);
+            }
 
             // _store_guard drops here, before try_regenerate_nest.
         }

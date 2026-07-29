@@ -708,9 +708,9 @@ export type RuntimeConfigSurface = {
   extensions: ExtensionEntry[];
   sources: ConfigSourceReport;
 };
-
 export type UpdateManagedAgentInput = {
   pubkey: string;
+  personaId?: string | null; // absent: unchanged; null: detach; ID: relink
   name?: string;
   model?: string | null;
   provider?: string | null;

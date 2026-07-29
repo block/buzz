@@ -73,7 +73,10 @@ fn reconcile_inbound_persona_event_blocking(
         agent_events::managed_agent_content_from_event,
         load_managed_agents, load_teams,
         persona_events::persona_from_event,
-        retention::{open_retention_db, retain_inbound_event, InboundOutcome, RetainedEvent},
+        retention::{
+            open_retention_db, retain_inbound_event, retained_tombstone_covers, InboundOutcome,
+            RetainedEvent,
+        },
         save_managed_agents, save_teams,
         team_events::team_content_from_event,
     };
@@ -131,6 +134,15 @@ fn reconcile_inbound_persona_event_blocking(
         return Ok(());
     };
     let conn = open_retention_db(&scope.db_path)?;
+    if retained_tombstone_covers(
+        &conn,
+        kind,
+        &event.pubkey.to_hex(),
+        &d_tag,
+        event.created_at.as_secs() as i64,
+    )? {
+        return Ok(());
+    }
     let outcome = retain_inbound_event(
         &conn,
         &RetainedEvent {
@@ -224,6 +236,26 @@ fn parse_deletion_coordinate(event: &nostr::Event) -> Option<(u32, String)> {
     })
 }
 
+/// Preserve local identities before an inbound shared-definition tombstone.
+///
+/// Returns the pubkeys whose kind:30177 projection must be republished after
+/// persistence.
+fn detach_persona_agents(
+    agents: &mut [ManagedAgentRecord],
+    persona: &AgentDefinition,
+) -> Vec<String> {
+    let mut detached = Vec::new();
+    for agent in agents
+        .iter_mut()
+        .filter(|agent| agent.persona_id.as_deref() == Some(persona.id.as_str()))
+    {
+        crate::managed_agents::persona_events::detach_persona(agent, persona);
+        agent.updated_at = now_iso();
+        detached.push(agent.pubkey.clone());
+    }
+    detached
+}
+
 /// Apply an inbound kind:5 NIP-09 deletion: remove the local record at the
 /// tombstone's target coordinate, scoped per-kind. Mirrors the upsert spine —
 /// arrival-scoped retention resolution under the store lock, then a per-kind
@@ -239,8 +271,8 @@ fn reconcile_inbound_tombstone(
     use crate::managed_agents::{
         load_managed_agents, load_teams,
         retention::{
-            open_retention_db, retain_inbound_event, tombstone_retention_d_tag, InboundOutcome,
-            RetainedEvent,
+            delete_retained_event, open_retention_db, retain_inbound_event,
+            tombstone_retention_d_tag, InboundOutcome, RetainedEvent,
         },
         save_managed_agents, save_teams,
     };
@@ -286,13 +318,34 @@ fn reconcile_inbound_tombstone(
         return Ok(());
     }
 
-    // Remove the local record using the SAME per-kind match rule the apply fns
-    // use: persona by `persona_d_tag`, team by `id`, managed-agent by `pubkey`.
+    // Purge the superseded upsert so the non-runnable identity index cannot
+    // resurrect a deleted reference.
+    delete_retained_event(&conn, target_kind, &event.pubkey.to_hex(), &target_d_tag)?;
+
     match target_kind {
         KIND_PERSONA => {
             let mut personas = load_personas(app)?;
+            let removed_persona = personas
+                .iter()
+                .find(|record| persona_d_tag(record) == target_d_tag)
+                .cloned();
+            let mut agents = load_managed_agents(app)?;
+            let detached_agents = removed_persona
+                .as_ref()
+                .map(|persona| detach_persona_agents(&mut agents, persona))
+                .unwrap_or_default();
+            if !detached_agents.is_empty() {
+                save_managed_agents(app, &agents)?;
+            }
+
             personas.retain(|record| persona_d_tag(record) != target_d_tag);
             save_personas(app, &personas)?;
+
+            for pubkey in &detached_agents {
+                if let Some(agent) = agents.iter().find(|agent| agent.pubkey == *pubkey) {
+                    crate::commands::agents::retain_managed_agent_pending(app, state, agent);
+                }
+            }
         }
         KIND_TEAM => {
             let mut teams = load_teams(app)?;

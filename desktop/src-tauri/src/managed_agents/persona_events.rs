@@ -521,5 +521,66 @@ pub fn preview_prospective_persona_snapshot(
     }
     preview
 }
+
+/// Link an existing local agent identity to a live definition and refresh its
+/// pinned runnable snapshot. Used by the edit surface to repair orphaned
+/// `persona_id` references without minting a replacement identity.
+pub fn relink_persona(record: &mut ManagedAgentRecord, persona: &AgentDefinition) {
+    record.persona_id = Some(persona.id.clone());
+    apply_persona_snapshot(record, persona);
+}
+
+/// Convert a definition-linked local agent into a standalone agent while the
+/// definition is still available.
+///
+/// A shared definition tombstone must not leave a live local identity pointing
+/// at a missing persona. Materialize the definition's effective config first,
+/// including inherited env vars, then clear the relationship and drift marker.
+/// The agent keeps its keypair and remains runnable from its own record.
+pub fn detach_persona(record: &mut ManagedAgentRecord, persona: &AgentDefinition) {
+    apply_persona_snapshot(record, persona);
+    for (key, value) in &persona.env_vars {
+        record
+            .env_vars
+            .entry(key.clone())
+            .or_insert_with(|| value.clone());
+    }
+    record.persona_id = None;
+    record.persona_source_version = None;
+}
+
+/// Apply the tri-state managed-agent definition update.
+///
+/// `Some(id)` relinks to an active definition, while `None` detaches. The
+/// caller distinguishes this from an absent request field.
+pub fn apply_persona_link_update(
+    record: &mut ManagedAgentRecord,
+    personas: &[AgentDefinition],
+    persona_update: Option<String>,
+) -> Result<(), String> {
+    match persona_update {
+        Some(persona_id) => {
+            super::ensure_persona_is_active(personas, &persona_id)?;
+            let persona = personas
+                .iter()
+                .find(|persona| persona.id == persona_id)
+                .ok_or_else(|| format!("persona {persona_id} not found"))?;
+            relink_persona(record, persona);
+        }
+        None => {
+            if let Some(persona) = record
+                .persona_id
+                .as_deref()
+                .and_then(|id| personas.iter().find(|persona| persona.id == id))
+            {
+                detach_persona(record, persona);
+            } else {
+                record.persona_id = None;
+                record.persona_source_version = None;
+            }
+        }
+    }
+    Ok(())
+}
 #[cfg(test)]
 mod tests;

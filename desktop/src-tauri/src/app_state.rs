@@ -1,6 +1,7 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::Write,
+    path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicU16},
         Arc, Mutex,
@@ -45,6 +46,15 @@ pub struct AppState {
     /// Never perform network I/O while holding this lock.
     pub managed_agent_runtime_transition: Mutex<()>,
     pub managed_agents_store_lock: Mutex<()>,
+    /// Retention scopes whose owner-authored persona/agent backfill completed
+    /// during this process. Persona-backed key generation fails closed until
+    /// its active scope is present, so an empty-but-not-yet-synced reference
+    /// store can never be mistaken for proof that no keypair exists.
+    managed_agent_reference_sync_ready: Mutex<HashSet<PathBuf>>,
+    /// Persona ids currently inside the key-generation/save critical section.
+    /// This closes the gap between checking the retained identity index and
+    /// saving the new local record when two create commands race.
+    managed_agent_persona_mints: Mutex<HashSet<String>>,
     pub channel_templates_store_lock: Mutex<()>,
     pub managed_agent_processes: Mutex<HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>>,
     pub huddle_state: Mutex<HuddleState>,
@@ -209,6 +219,8 @@ pub fn build_app_state() -> AppState {
         managed_agent_runtime_transition: Mutex::new(()),
         identity_mutation: Mutex::new(()),
         managed_agents_store_lock: Mutex::new(()),
+        managed_agent_reference_sync_ready: Mutex::new(HashSet::new()),
+        managed_agent_persona_mints: Mutex::new(HashSet::new()),
         channel_templates_store_lock: Mutex::new(()),
         managed_agent_processes: Mutex::new(HashMap::new()),
         session_config_cache: Mutex::new(HashMap::new()),
@@ -232,109 +244,9 @@ pub fn build_app_state() -> AppState {
     }
 }
 
-impl AppState {
-    /// Lock the huddle state mutex, converting a poisoned-lock error to a String.
-    ///
-    /// Convenience wrapper — replaces 15+ instances of
-    /// `state.huddle_state.lock().map_err(|e| e.to_string())?` throughout the
-    /// huddle module.
-    pub fn huddle(&self) -> Result<std::sync::MutexGuard<'_, crate::huddle::HuddleState>, String> {
-        self.huddle_state.lock().map_err(|e| e.to_string())
-    }
-
-    pub fn get_session_cache(&self, key: &ManagedAgentRuntimeKey) -> Option<SessionConfigCache> {
-        self.session_config_cache.lock().ok()?.get(key).cloned()
-    }
-
-    pub fn put_session_cache(&self, key: ManagedAgentRuntimeKey, cache: SessionConfigCache) {
-        if let Ok(mut map) = self.session_config_cache.lock() {
-            map.insert(key, cache);
-        }
-    }
-
-    pub fn clear_agent_session_cache(&self, key: &ManagedAgentRuntimeKey) {
-        if let Ok(mut map) = self.session_config_cache.lock() {
-            map.remove(key);
-        }
-    }
-
-    pub fn clear_agent_session_caches(&self, pubkey: &str) {
-        if let Ok(mut map) = self.session_config_cache.lock() {
-            map.retain(|key, _| key.pubkey != pubkey);
-        }
-    }
-
-    /// Record that `channel_id` was just created by `creator_pubkey` and its
-    /// kind:39002 owner membership has not yet been observed.
-    pub fn mark_pending_owned_channel(&self, creator_pubkey: &str, channel_id: &str) {
-        if let Ok(mut set) = self.pending_owned_channels.lock() {
-            set.insert((creator_pubkey.to_string(), channel_id.to_string()));
-        }
-    }
-
-    /// Whether `channel_id` is still awaiting `my_pubkey`'s kind:39002 entry.
-    /// Bound to `my_pubkey` so an in-process identity swap never inherits
-    /// another identity's pending-owner entry for the same channel id.
-    pub fn is_pending_owned_channel(&self, my_pubkey: &str, channel_id: &str) -> bool {
-        self.pending_owned_channels
-            .lock()
-            .map(|set| set.contains(&(my_pubkey.to_string(), channel_id.to_string())))
-            .unwrap_or(false)
-    }
-
-    /// Drop the `(my_pubkey, channel_id)` entry from the pending-owner
-    /// overlay once that identity's real kind:39002 membership has been
-    /// observed.
-    pub fn clear_pending_owned_channel(&self, my_pubkey: &str, channel_id: &str) {
-        if let Ok(mut set) = self.pending_owned_channels.lock() {
-            set.remove(&(my_pubkey.to_string(), channel_id.to_string()));
-        }
-    }
-
-    /// Return the active identity keys if they are in a signable state.
-    ///
-    /// Returns `Err` when the identity is in a lost state (`identity_lost`
-    /// — ephemeral key, user must re-import their nsec) or when the keyring
-    /// is locked (`keyring_locked` — key is held in a keyring that is
-    /// unavailable this boot). All signing and publish commands must call
-    /// this instead of locking `state.keys` directly, so that recovery mode
-    /// blocks publishing under an invalid or inaccessible identity.
-    pub fn signing_keys(&self) -> Result<Keys, String> {
-        if self
-            .identity_lost
-            .load(std::sync::atomic::Ordering::Acquire)
-            || self
-                .keyring_locked
-                .load(std::sync::atomic::Ordering::Acquire)
-        {
-            return Err("identity is in recovery mode; event signing is disabled \
-                 until the identity is restored and Buzz is relaunched"
-                .to_string());
-        }
-        self.keys
-            .lock()
-            .map_err(|e| e.to_string())
-            .map(|k| k.clone())
-    }
-
-    /// Emit the current huddle state to the frontend via Tauri event.
-    ///
-    /// Acquires both locks (app_handle + huddle_state), clones a snapshot,
-    /// releases both, then emits. Best-effort — no-op if either lock is
-    /// poisoned or the app_handle hasn't been set yet.
-    pub fn emit_huddle_state_changed(&self) {
-        let app = match self.app_handle.lock() {
-            Ok(guard) => guard.clone(),
-            Err(_) => return,
-        };
-        let Some(app) = app else { return };
-        let snapshot = match self.huddle_state.lock() {
-            Ok(hs) => hs.clone(),
-            Err(_) => return,
-        };
-        crate::huddle::state::emit_huddle_state(&app, &snapshot);
-    }
-}
+#[path = "app_state_methods.rs"]
+mod methods;
+pub(crate) use methods::ManagedAgentPersonaMintReservation;
 
 /// Resolve the user's identity key from the app data directory and wire
 /// the resulting [`RecoveryState`] into `AppState`.
