@@ -34,6 +34,7 @@ import {
   getRuntimeFileConfig,
   installAcpRuntime,
   listManagedAgents,
+  listPublicRelayAgents,
   listRelayAgents,
   saveCustomHarness,
   updateManagedAgent,
@@ -105,6 +106,7 @@ export type {
 } from "@/features/agents/channelAgents";
 
 export const relayAgentsQueryKey = ["relay-agents"] as const;
+export const publicRelayAgentsQueryKey = ["public-relay-agents"] as const;
 export const managedAgentsQueryKey = ["managed-agents"] as const;
 export const personasQueryKey = ["personas"] as const;
 export const acpRuntimesQueryKey = ["acp-runtimes"] as const;
@@ -336,6 +338,16 @@ export function useRelayAgentsQuery(options?: { enabled?: boolean }) {
     refetchInterval: 5 * 60_000,
     refetchIntervalInBackground: false,
     enabled: options?.enabled,
+  });
+}
+
+export function usePublicRelayAgentsQuery(options?: { enabled?: boolean }) {
+  return useQuery({
+    enabled: options?.enabled ?? true,
+    queryKey: publicRelayAgentsQueryKey,
+    queryFn: listPublicRelayAgents,
+    staleTime: 0,
+    refetchOnWindowFocus: true,
   });
 }
 

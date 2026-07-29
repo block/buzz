@@ -13,6 +13,7 @@ import type {
   HomeFeedResponse,
   ManagedAgent,
   ManagedAgentBackend,
+  PublicRelayAgentRegistration,
   RelayAgent,
   RelayMember,
   RelayMemberRole,
@@ -857,6 +858,14 @@ export async function changeRelayMemberRole(
 export async function listRelayAgents(): Promise<RelayAgent[]> {
   return (await invokeTauri<RawRelayAgent[]>("list_relay_agents")).map(
     fromRawRelayAgent,
+  );
+}
+
+export async function listPublicRelayAgents(): Promise<
+  PublicRelayAgentRegistration[]
+> {
+  return invokeTauri<PublicRelayAgentRegistration[]>(
+    "list_public_relay_agents",
   );
 }
 

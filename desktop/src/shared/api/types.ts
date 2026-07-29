@@ -295,6 +295,16 @@ export type RelayAgent = {
   status: "online" | "away" | "offline";
   respondTo: RespondToMode | null;
   respondToAllowlist: string[];
+  registryState?: "active" | "failed";
+};
+
+export type PublicRelayAgentRegistration = {
+  id: string;
+  name: string;
+  pubkey: string;
+  channelIds: string[];
+  state: "provisioning" | "active" | "failed";
+  enabled: boolean;
 };
 
 export type ManagedAgentRuntimeLifecycle =
