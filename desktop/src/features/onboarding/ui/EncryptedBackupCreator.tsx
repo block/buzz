@@ -582,31 +582,9 @@ export function EncryptedBackupCreator({
       </div>
     );
   }
-  if (state.ncryptsec && savedPath) {
-    return (
-      <div
-        className="space-y-3 text-center"
-        data-testid="encrypted-backup-created"
-      >
-        <p className="font-medium">Backup downloaded</p>
-        <p className="text-sm text-muted-foreground">
-          Buzz cleared the password from this session. You can download another
-          copy without entering it again.
-        </p>
-        <Button
-          data-testid="encrypted-backup-save-copy"
-          disabled={isSaving}
-          onClick={() => void handleSaveCopy()}
-        >
-          {isSaving ? <Spinner className="mr-2 size-4 border-2" /> : null}
-          Download another copy
-        </Button>
-        {saveError ? (
-          <p className="text-sm text-destructive">{saveError}</p>
-        ) : null}
-      </div>
-    );
-  }
+  // Without the guided test (settings), a completed save keeps the form
+  // visible in its saved-password state: masked input, instant re-download,
+  // and the change-password confirmation guarding any edit.
 
   return (
     <div
@@ -709,6 +687,24 @@ export function EncryptedBackupCreator({
           </p>
         ) : null}
       </div>
+
+      {state.savedPassword && state.ncryptsec && savedPath ? (
+        <div
+          className="space-y-1 text-center"
+          data-testid="encrypted-backup-created"
+        >
+          <p
+            className="text-xs text-muted-foreground"
+            data-testid="encrypted-backup-saved-path"
+          >
+            Backup saved to {savedPath}
+          </p>
+          <p className="text-xs leading-5 text-muted-foreground">
+            Your password isn't kept — download another copy anytime, or start
+            over to choose a new password.
+          </p>
+        </div>
+      ) : null}
 
       {state.createError ? (
         <p

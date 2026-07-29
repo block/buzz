@@ -88,10 +88,10 @@ test("settings separates backup creation from general NIP-49 testing", async ({
     .fill("mock horse battery staple lake orbit");
   await page.getByTestId("backup-test-verify").click();
   await expect(page.getByTestId("backup-test-success")).toContainText(
-    "Valid backup",
+    "This backup works",
   );
   await expect(page.getByTestId("backup-test-success")).toContainText(
-    "Matches your current Buzz identity",
+    "It restores your current Buzz identity",
   );
   await expect(page.getByTestId("backup-test-npub")).toBeVisible();
 });
