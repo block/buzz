@@ -666,8 +666,10 @@ export function DevModeShell() {
 
       {paletteOpen ? (
         <DevCommandPalette
+          activeChannel={topBarChannel}
           channels={[...sessions].reverse()}
           myPubkey={identityQuery.data?.pubkey ?? null}
+          onChannelLeft={goToFresh}
           onClose={closePalette}
           onNewSession={goToFresh}
           onOpenChannel={openChannel}

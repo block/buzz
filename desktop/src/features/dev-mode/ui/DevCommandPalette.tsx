@@ -1,6 +1,16 @@
 import * as React from "react";
 import { useNavigate } from "@tanstack/react-router";
 
+import { useQueryClient } from "@tanstack/react-query";
+
+import { attachManagedAgentToChannel } from "@/features/agents/channelAgents";
+import { useManagedAgentsQuery } from "@/features/agents/hooks";
+import {
+  invalidateChannelState,
+  useAddChannelMembersMutation,
+  useChannelMembersQuery,
+  useLeaveChannelMutation,
+} from "@/features/channels/hooks";
 import {
   AUTHOR_COLOR_PALETTE,
   defaultAuthorColor,
@@ -8,9 +18,14 @@ import {
   setNameColorOverride,
 } from "@/features/dev-mode/lib/authorColors";
 import { setDisplayStyle } from "@/features/dev-mode/lib/displayStylePreference";
+import {
+  useFlattenedUserSearchResults,
+  useInfiniteUserSearchQuery,
+} from "@/features/profile/hooks";
 import type { SettingsSection } from "@/features/settings/ui/SettingsPanels";
-import type { Channel } from "@/shared/api/types";
+import type { Channel, UserSearchResult } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
+import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 
 type PaletteEntry = {
   id: string;
@@ -21,7 +36,15 @@ type PaletteEntry = {
   run: () => void;
 };
 
-type PaletteMode = "root" | "color";
+type PaletteMode = "root" | "color" | "add-member";
+
+function formatCandidateName(user: UserSearchResult) {
+  return (
+    user.displayName?.trim() ||
+    user.nip05Handle?.trim() ||
+    truncatePubkey(user.pubkey)
+  );
+}
 
 const SETTINGS_ENTRIES: { section: SettingsSection; label: string }[] = [
   { section: "agents", label: "configure agents" },
@@ -42,27 +65,50 @@ const SETTINGS_ENTRIES: { section: SettingsSection; label: string }[] = [
  */
 export function DevCommandPalette({
   channels,
+  activeChannel,
   myPubkey,
   onOpenChannel,
   onNewSession,
+  onChannelLeft,
   onClose,
 }: {
   /** All session channels, newest first. */
   channels: Channel[];
+  /** Channel that add-member/leave actions apply to (focused or previewed). */
+  activeChannel: Channel | null;
   myPubkey: string | null;
   onOpenChannel: (channelId: string) => void;
   onNewSession: () => void;
+  onChannelLeft: () => void;
   onClose: () => void;
 }) {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const [query, setQuery] = React.useState("");
   const [mode, setMode] = React.useState<PaletteMode>("root");
   const [selectedIndex, setSelectedIndex] = React.useState(0);
+  const [actionError, setActionError] = React.useState<string | null>(null);
   const inputRef = React.useRef<HTMLInputElement>(null);
 
   React.useEffect(() => {
     inputRef.current?.focus();
   }, []);
+
+  const activeChannelId = activeChannel?.id ?? null;
+  const addMembersMutation = useAddChannelMembersMutation(activeChannelId);
+  const leaveMutation = useLeaveChannelMutation(activeChannelId);
+  const membersQuery = useChannelMembersQuery(
+    activeChannelId,
+    mode === "add-member",
+  );
+  const managedAgentsQuery = useManagedAgentsQuery({
+    enabled: mode === "add-member",
+  });
+  const userSearchQuery = useInfiniteUserSearchQuery(query, {
+    enabled: mode === "add-member" && query.trim().length >= 2,
+    limit: 20,
+  });
+  const userSearchResults = useFlattenedUserSearchResults(userSearchQuery.data);
 
   const openSettings = React.useCallback(
     (section: SettingsSection) => {
@@ -71,6 +117,62 @@ export function DevCommandPalette({
     },
     [navigate, onClose],
   );
+
+  const addUserToChannel = React.useCallback(
+    async (user: UserSearchResult) => {
+      if (!activeChannelId) return;
+      setActionError(null);
+      try {
+        // Local managed agents need a running harness pair, not just channel
+        // membership (see MembersSidebar) — route them through attach.
+        const managedAgent = (managedAgentsQuery.data ?? []).find(
+          (agent) =>
+            normalizePubkey(agent.pubkey) === normalizePubkey(user.pubkey),
+        );
+        if (managedAgent?.backend.type === "local") {
+          await attachManagedAgentToChannel(activeChannelId, {
+            agent: managedAgent,
+            ensureRunning: true,
+          });
+          await invalidateChannelState(queryClient, activeChannelId);
+        } else {
+          const result = await addMembersMutation.mutateAsync({
+            pubkeys: [user.pubkey],
+            role: user.isAgent ? "bot" : "member",
+          });
+          if (result.errors.length > 0) {
+            setActionError(result.errors[0]?.error ?? "Failed to add member.");
+            return;
+          }
+        }
+        onClose();
+      } catch (error) {
+        setActionError(
+          error instanceof Error ? error.message : "Failed to add member.",
+        );
+      }
+    },
+    [
+      activeChannelId,
+      addMembersMutation,
+      managedAgentsQuery.data,
+      onClose,
+      queryClient,
+    ],
+  );
+
+  const leaveChannel = React.useCallback(async () => {
+    setActionError(null);
+    try {
+      await leaveMutation.mutateAsync();
+      onClose();
+      onChannelLeft();
+    } catch (error) {
+      setActionError(
+        error instanceof Error ? error.message : "Failed to leave channel.",
+      );
+    }
+  }, [leaveMutation, onChannelLeft, onClose]);
 
   const entries = React.useMemo<PaletteEntry[]>(() => {
     const needle = query.trim().toLowerCase();
@@ -115,7 +217,51 @@ export function DevCommandPalette({
           );
     }
 
+    if (mode === "add-member") {
+      const memberPubkeys = new Set(
+        (membersQuery.data ?? []).map((member) =>
+          normalizePubkey(member.pubkey),
+        ),
+      );
+      return userSearchResults
+        .filter(
+          (user) =>
+            !memberPubkeys.has(normalizePubkey(user.pubkey)) &&
+            normalizePubkey(user.pubkey) !== normalizePubkey(myPubkey ?? ""),
+        )
+        .map((user) => ({
+          id: `add-${user.pubkey}`,
+          label: formatCandidateName(user),
+          detail: user.isAgent
+            ? "agent"
+            : (user.nip05Handle ?? truncatePubkey(user.pubkey)),
+          run: () => void addUserToChannel(user),
+        }));
+    }
+
+    const channelActions: PaletteEntry[] = activeChannel
+      ? [
+          {
+            id: "add-member",
+            label: `add someone to # ${activeChannel.name}`,
+            detail: "people & agents",
+            run: () => {
+              setMode("add-member");
+              setQuery("");
+              setSelectedIndex(0);
+            },
+          },
+          {
+            id: "leave-channel",
+            label: `leave # ${activeChannel.name}`,
+            detail: "remove yourself",
+            run: () => void leaveChannel(),
+          },
+        ]
+      : [];
+
     const actions: PaletteEntry[] = [
+      ...channelActions,
       {
         id: "new-session",
         label: "new session",
@@ -164,13 +310,17 @@ export function DevCommandPalette({
       },
     }));
 
-    const all = [...actions, ...channelEntries];
-    if (!needle) return all;
-    return all.filter((entry) =>
-      `${entry.label} ${entry.detail ?? ""}`.toLowerCase().includes(needle),
-    );
+    if (!needle) return [...actions, ...channelEntries];
+    const matches = (entry: PaletteEntry) =>
+      `${entry.label} ${entry.detail ?? ""}`.toLowerCase().includes(needle);
+    // Channels first while typing: a query is usually a channel lookup.
+    return [...channelEntries.filter(matches), ...actions.filter(matches)];
   }, [
+    activeChannel,
+    addUserToChannel,
     channels,
+    leaveChannel,
+    membersQuery.data,
     mode,
     myPubkey,
     onClose,
@@ -178,6 +328,7 @@ export function DevCommandPalette({
     onOpenChannel,
     openSettings,
     query,
+    userSearchResults,
   ]);
 
   const clampedIndex = Math.min(selectedIndex, Math.max(0, entries.length - 1));
@@ -192,10 +343,11 @@ export function DevCommandPalette({
   const handleKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
     if (event.key === "Escape") {
       event.preventDefault();
-      if (mode === "color") {
+      if (mode !== "root") {
         setMode("root");
         setQuery("");
         setSelectedIndex(0);
+        setActionError(null);
         return;
       }
       onClose();
@@ -240,15 +392,28 @@ export function DevCommandPalette({
           placeholder={
             mode === "color"
               ? "type a hex color or pick a preset…"
-              : "search channels and commands…"
+              : mode === "add-member"
+                ? `search people & agents to add to # ${activeChannel?.name ?? ""}…`
+                : "search channels and commands…"
           }
           spellCheck={false}
           value={query}
         />
+        {actionError ? (
+          <div className="shrink-0 border-b border-destructive/40 bg-destructive/10 px-3 py-1.5 text-xs text-destructive">
+            {actionError}
+          </div>
+        ) : null}
         <div className="min-h-0 flex-1 overflow-y-auto py-1">
           {entries.length === 0 ? (
             <div className="px-3 py-2 text-sm text-muted-foreground/60">
-              no matches
+              {mode === "add-member"
+                ? query.trim().length < 2
+                  ? "type at least 2 characters to search…"
+                  : userSearchQuery.isFetching
+                    ? "searching…"
+                    : "no matches"
+                : "no matches"}
             </div>
           ) : null}
           {entries.map((entry, index) => (
@@ -282,7 +447,7 @@ export function DevCommandPalette({
           ))}
         </div>
         <div className="shrink-0 border-t border-border/60 px-3 py-1.5 text-xs text-muted-foreground/60">
-          ↑↓: select · enter: run · esc: {mode === "color" ? "back" : "close"}
+          ↑↓: select · enter: run · esc: {mode === "root" ? "close" : "back"}
         </div>
       </div>
     </div>
