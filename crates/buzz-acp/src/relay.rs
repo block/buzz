@@ -75,6 +75,12 @@ const WS_SEND_TIMEOUT_SECS: u64 = 10;
 const STABLE_CONNECTION_SECS: u64 = 60;
 /// Seconds subtracted from `since` on resubscribe to tolerate clock skew.
 const SINCE_SKEW_SECS: u64 = 5;
+/// Maximum client clock lead accepted for ordinary channel messages.
+///
+/// Privileged controls still require a non-future timestamp. Accepted skew is
+/// clamped to the local clock before replay-watermark bookkeeping so a client
+/// cannot push reconnect state into the future.
+const CHANNEL_EVENT_FUTURE_SKEW_SECS: u64 = SINCE_SKEW_SECS;
 /// Timeout for the NIP-42 auth handshake steps.
 ///
 /// Raised from 5s to 20s (≈2 RTTs at the observed 10s max round-trip on degraded
@@ -1381,9 +1387,14 @@ impl BgState {
         }
     }
 
-    /// Record a received event for dedup and `since` tracking.
+    /// Record a received event for dedup and bounded `since` tracking.
     /// Returns `true` if the event is new (not a duplicate).
-    fn record_event(&mut self, channel_id: Uuid, event: &Event) -> bool {
+    fn record_event_with_watermark(
+        &mut self,
+        channel_id: Uuid,
+        event: &Event,
+        watermark_timestamp: u64,
+    ) -> bool {
         let id_hex = event.id.to_hex();
 
         // Two-generation dedup: no amnesia window on rotation.
@@ -1392,13 +1403,17 @@ impl BgState {
         }
 
         // Update last_seen timestamp.
-        let ts = event.created_at.as_secs();
         self.last_seen
             .entry(channel_id)
-            .and_modify(|t| *t = (*t).max(ts))
-            .or_insert(ts);
+            .and_modify(|t| *t = (*t).max(watermark_timestamp))
+            .or_insert(watermark_timestamp);
 
         true
+    }
+
+    #[cfg(test)]
+    fn record_event(&mut self, channel_id: Uuid, event: &Event) -> bool {
+        self.record_event_with_watermark(channel_id, event, event.created_at.as_secs())
     }
 
     /// Compute the `since` timestamp for a channel (re)subscribe.
@@ -3140,7 +3155,8 @@ async fn handle_ws_message(
                         let ts = event.created_at.as_secs();
                         let event_id_hex = event.id.to_hex();
                         let now = unix_now_secs();
-                        if ts > now {
+                        let future_skew = ts.saturating_sub(now);
+                        if future_skew > CHANNEL_EVENT_FUTURE_SKEW_SECS {
                             warn!(
                                 channel_id = %channel_id,
                                 event_id = %event.id,
@@ -3162,6 +3178,15 @@ async fn handle_ws_message(
                                 },
                             );
                         let privileged_control_admitted = if !is_privileged_control_candidate {
+                            false
+                        } else if ts > now {
+                            warn!(
+                                channel_id = %channel_id,
+                                event_id = %event.id,
+                                event_ts = ts,
+                                now,
+                                "future-skewed owner control — forwarding without execution authority"
+                            );
                             false
                         } else if privileged_control_boundary.is_none() {
                             warn!(
@@ -3216,7 +3241,8 @@ async fn handle_ws_message(
                                 }
                             }
                         };
-                        if state.record_event(channel_id, &event) {
+                        let replay_timestamp = ts.min(now);
+                        if state.record_event_with_watermark(channel_id, &event, replay_timestamp) {
                             let buzz_event = BuzzEvent {
                                 channel_id,
                                 event: *event,
@@ -3248,13 +3274,14 @@ async fn handle_ws_message(
                                     state
                                         .channel_dropped_since
                                         .entry(channel_id)
-                                        .and_modify(|d| *d = (*d).min(ts))
-                                        .or_insert(ts);
+                                        .and_modify(|d| *d = (*d).min(replay_timestamp))
+                                        .or_insert(replay_timestamp);
                                     // Proactively trigger resubscribe without waiting for a disconnect.
                                     state.proactive_resubscribe_needed = true;
                                     warn!(
                                         channel_id = %channel_id,
-                                        ts,
+                                        event_ts = ts,
+                                        replay_timestamp,
                                         "event channel full — dropping event for channel {channel_id} — proactive resubscribe queued"
                                     );
                                 }
@@ -6329,6 +6356,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bounded_future_skew_forwards_ordinary_event_without_future_watermark() {
+        let (mut ws, _server) = test_ws_pair().await;
+        let (event_tx, mut event_rx) = mpsc::channel(1);
+        let (observer_control_tx, _observer_control_rx) = mpsc::channel(1);
+        let mut state = BgState::new();
+        let channel_id = Uuid::new_v4();
+        let agent_keys = Keys::generate();
+        let sender_keys = Keys::generate();
+        let agent_pubkey_hex = agent_keys.public_key().to_hex();
+        seed_test_subscription(&mut state, channel_id);
+        let now = unix_now_secs();
+        let event = make_test_channel_event(
+            &sender_keys,
+            channel_id,
+            9,
+            "slightly ahead",
+            None,
+            now + CHANNEL_EVENT_FUTURE_SKEW_SECS,
+        );
+        let event_id = event.id.to_hex();
+        let frame = Message::Text(
+            serde_json::to_string(&json!(["EVENT", channel_sub_id(channel_id), event]))
+                .expect("serialize slightly future ordinary event")
+                .into(),
+        );
+
+        assert!(
+            handle_ws_message(
+                frame,
+                &mut ws,
+                &event_tx,
+                &observer_control_tx,
+                &mut state,
+                &agent_keys,
+                "ws://localhost:3000",
+                &agent_pubkey_hex,
+                None,
+            )
+            .await
+        );
+        let forwarded = event_rx
+            .try_recv()
+            .expect("bounded client clock skew should remain deliverable")
+            .expect("ordinary event payload");
+        assert_eq!(forwarded.event.id.to_hex(), event_id);
+        assert!(!forwarded.privileged_control_admitted);
+        assert!(
+            state
+                .last_seen
+                .get(&channel_id)
+                .is_some_and(|watermark| *watermark <= unix_now_secs()),
+            "accepted future skew must not move replay watermarks into the future"
+        );
+    }
+
+    #[tokio::test]
     async fn future_membership_event_cannot_poison_replay_state() {
         let (mut ws, _server) = test_ws_pair().await;
         let (event_tx, mut event_rx) = mpsc::channel(2);
@@ -6803,6 +6886,51 @@ mod tests {
         assert!(
             !boundary_forwarded.privileged_control_admitted,
             "second-granularity equality with startup must fail closed for execution"
+        );
+
+        let skewed_future = make_test_channel_event(
+            &owner_keys,
+            channel_id,
+            9,
+            "!cancel",
+            Some(&agent_pubkey_hex),
+            now.saturating_add(CHANNEL_EVENT_FUTURE_SKEW_SECS),
+        );
+        let skewed_future_id = skewed_future.id.to_hex();
+        let skewed_future_frame = Message::Text(
+            serde_json::to_string(&json!(["EVENT", channel_sub_id(channel_id), skewed_future]))
+                .expect("serialize skewed future control")
+                .into(),
+        );
+        assert!(
+            handle_ws_message(
+                skewed_future_frame,
+                &mut ws,
+                &event_tx,
+                &observer_control_tx,
+                &mut state,
+                &agent_keys,
+                "ws://localhost:3000",
+                &agent_pubkey_hex,
+                None,
+            )
+            .await
+        );
+        assert!(state.seen_ids.contains(&skewed_future_id));
+        let skewed_forwarded = event_rx
+            .try_recv()
+            .expect("bounded future owner text remains an ordinary message")
+            .expect("ordinary event payload");
+        assert!(
+            !skewed_forwarded.privileged_control_admitted,
+            "future-skewed owner text must never gain execution authority"
+        );
+        assert!(
+            state
+                .last_seen
+                .get(&channel_id)
+                .is_some_and(|watermark| *watermark <= unix_now_secs()),
+            "future-skewed owner text must clamp its replay watermark"
         );
 
         let future = make_test_channel_event(
