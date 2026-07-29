@@ -302,15 +302,26 @@ pub async fn hook_policy_check(
 
     // 6. Resolve channel binding via the shared resolver (same first-tag,
     // fail-closed semantics as the read gate) and check archived state
-    // (applies to ALL pushers including owner). On the push side, NotBound
-    // and Broken collapse into the same bucket — both historically produced
-    // the "no channel binding" denial for non-owners, and a pusher is past
-    // NIP-98 auth so the body leaks nothing new. Only the read gate
-    // distinguishes them (author remediation is NotBound-only).
+    // (applies to ALL pushers including owner).
+    //
+    // `Broken` denies HERE, before owner resolution: a malformed or
+    // ambiguous first binding fails closed for *everyone*, exactly like the
+    // read gate. Letting it fall through as "unbound" would hand the owner
+    // short-circuit below a push path through a binding the read gate
+    // refuses to honor — the tri-state exists precisely so Broken and
+    // NotBound cannot collapse. Only genuinely-NotBound repos proceed, and
+    // only they may earn the remediation-token denial.
     let channel_id = match crate::api::git::binding::resolve_repo_binding(&repo_event.event) {
         crate::api::git::binding::RepoBinding::Bound(id) => Some(id),
-        crate::api::git::binding::RepoBinding::NotBound
-        | crate::api::git::binding::RepoBinding::Broken => None,
+        crate::api::git::binding::RepoBinding::NotBound => None,
+        crate::api::git::binding::RepoBinding::Broken => {
+            warn!(repo = %req.repo_id, "hook callback: broken buzz-channel binding");
+            // Deliberately NOT the no_channel_binding token body: the
+            // remediation contract is NotBound-only. A broken binding is
+            // ambiguity, and ambiguity gets a generic denial (matching the
+            // read gate's posture for the same announcement).
+            return (StatusCode::FORBIDDEN, "invalid channel binding").into_response();
+        }
     };
 
     if let Some(ch_id) = channel_id {
@@ -806,6 +817,171 @@ printf '%s' "$HMAC_INPUT" | openssl dgst -sha256 -hmac "{secret}" -hex 2>/dev/nu
         assert_eq!(
             rust_sig, bash_sig,
             "Single-ref HMAC mismatch!\n  Rust: {rust_sig}\n  Bash: {bash_sig}"
+        );
+    }
+
+    // ── hook_policy_check binding gate (requires Postgres) ──────────────
+
+    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
+
+    async fn policy_test_state() -> Arc<AppState> {
+        let mut config = crate::config::Config::from_env().expect("default config loads");
+        config.require_relay_membership = false;
+        config.redis_url = "redis://127.0.0.1:1".to_string();
+        config.database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| TEST_DB_URL.to_string());
+        let pool = sqlx::PgPool::connect(&config.database_url)
+            .await
+            .expect("connect test DB");
+        let db = buzz_db::Db::from_pool(pool.clone());
+        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
+        let pubsub = Arc::new(
+            buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                .await
+                .expect("pubsub manager"),
+        );
+        let audit = buzz_audit::AuditService::new(pool.clone());
+        let auth = buzz_auth::AuthService::new(config.auth.clone());
+        let search = buzz_search::SearchService::new(pool.clone());
+        let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+            db.clone(),
+            buzz_workflow::WorkflowConfig::default(),
+        ));
+        let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
+        let (state, _audit_shutdown) = AppState::new(
+            config,
+            db,
+            redis_pool,
+            audit,
+            pubsub,
+            auth,
+            search,
+            workflow_engine,
+            nostr::Keys::generate(),
+            media_storage,
+        );
+        Arc::new(state)
+    }
+
+    /// Announce `repo_id` with the given tags, then push to it as its own
+    /// announcement author and return the response.
+    async fn owner_push_response(
+        state: &Arc<AppState>,
+        community: buzz_core::CommunityId,
+        keys: &nostr::Keys,
+        repo_id: &str,
+        binding_tags: Vec<nostr::Tag>,
+    ) -> axum::response::Response {
+        use nostr::{EventBuilder, Kind, Tag};
+
+        let mut tags = vec![Tag::parse(["d", repo_id]).unwrap()];
+        tags.extend(binding_tags);
+        let event = EventBuilder::new(Kind::Custom(30617), "")
+            .tags(tags)
+            .sign_with_keys(keys)
+            .expect("sign 30617");
+        state
+            .db
+            .insert_event(community, &event, None)
+            .await
+            .expect("insert 30617");
+
+        let owner_hex = keys.public_key().to_hex();
+        let mut req = HookCallbackRequest {
+            repo_id: repo_id.to_string(),
+            repo_owner: owner_hex.clone(),
+            community_id: community.as_uuid().to_string(),
+            pusher_pubkey: owner_hex,
+            ref_updates: vec![HookRefUpdate {
+                old_oid: "0".repeat(40),
+                new_oid: "2".repeat(40),
+                ref_name: "refs/heads/main".to_string(),
+                is_ancestor: false,
+            }],
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            signature: String::new(),
+        };
+        let secret = state.config.git_hook_hmac_secret.clone();
+        sign_request(&mut req, secret.as_bytes());
+        hook_policy_check(State(Arc::clone(state)), Json(req)).await
+    }
+
+    async fn body_string(response: axum::response::Response) -> (StatusCode, String) {
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        (status, String::from_utf8(bytes.to_vec()).expect("utf-8"))
+    }
+
+    /// The tri-state trap the resolver exists to prevent: a broken (malformed
+    /// or ambiguous-first) binding must fail closed for EVERYONE on push —
+    /// including the announcement author — *before* the owner short-circuit
+    /// grants `MemberRole::Owner`. Collapsing `Broken` into "unbound" hands
+    /// the owner a push path through a binding the read gate refuses to
+    /// honor. The remediation token stays reserved for genuinely NotBound.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn push_gate_denies_owner_through_broken_binding() {
+        use nostr::{Keys, Tag};
+
+        let state = policy_test_state().await;
+        let host = format!("policy-{}.example", uuid::Uuid::new_v4().simple());
+        let community = state
+            .db
+            .ensure_configured_community(&host)
+            .await
+            .expect("community")
+            .id;
+        let keys = Keys::generate();
+
+        // Malformed first + valid-looking second: the ambiguity must deny,
+        // and the parseable duplicate must not rescue the push.
+        let response = owner_push_response(
+            &state,
+            community,
+            &keys,
+            &format!("repo-{}", uuid::Uuid::new_v4().simple()),
+            vec![
+                Tag::parse(["buzz-channel", "not-a-uuid"]).unwrap(),
+                Tag::parse(["buzz-channel", &uuid::Uuid::new_v4().to_string()]).unwrap(),
+            ],
+        )
+        .await;
+        let (status, body) = body_string(response).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            body, "invalid channel binding",
+            "owner pushing through a broken binding must be denied generically"
+        );
+        assert!(
+            !body.contains(buzz_core::git_perms::GIT_NO_CHANNEL_BINDING_TOKEN),
+            "remediation token is NotBound-only; Broken must never earn it"
+        );
+
+        // Control: the same owner pushing a genuinely NEVER-BOUND repo is
+        // allowed (owner authority over an unbound announcement is the
+        // long-standing push semantics). This pins the denial above to
+        // Broken specifically, not to some broader regression.
+        let response = owner_push_response(
+            &state,
+            community,
+            &keys,
+            &format!("repo-{}", uuid::Uuid::new_v4().simple()),
+            vec![],
+        )
+        .await;
+        let (status, body) = body_string(response).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "owner push to a never-bound repo must remain allowed (got body: {body})"
         );
     }
 }

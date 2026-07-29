@@ -214,21 +214,30 @@ async fn submit_repo_update(client: &BuzzClient, builder: EventBuilder) -> Resul
     Ok(())
 }
 
-pub async fn cmd_create_repo(
-    client: &BuzzClient,
+/// Build the kind:30617 announcement for `repos create`, including the
+/// `buzz-channel` binding when requested.
+///
+/// Pure (no I/O) so the emitted tags are unit-testable. Exactly one
+/// validated `buzz-channel` tag is appended — the tag is the git ACL
+/// (issue #3527: without it the relay 404s every clone/fetch/push), so the
+/// UUID is shape-validated here and its existence/membership is the relay's
+/// authority at git-access time, same posture as `repos bind`.
+#[allow(clippy::too_many_arguments)]
+fn build_create_announcement(
     repo_id: &str,
     name: Option<&str>,
     description: Option<&str>,
     clone_urls: &[String],
     web_url: Option<&str>,
     relays: &[String],
-) -> Result<(), CliError> {
+    channel: Option<&str>,
+) -> Result<EventBuilder, CliError> {
     validate_repo_id(repo_id)?;
 
     let clone_refs: Vec<&str> = clone_urls.iter().map(|s| s.as_str()).collect();
     let relay_refs: Vec<&str> = relays.iter().map(|s| s.as_str()).collect();
 
-    let builder = buzz_sdk::build_repo_announcement(
+    let mut builder = buzz_sdk::build_repo_announcement(
         repo_id,
         name,
         description,
@@ -238,6 +247,33 @@ pub async fn cmd_create_repo(
     )
     .map_err(|e| CliError::Other(format!("build_repo_announcement failed: {e}")))?;
 
+    if let Some(channel) = channel {
+        crate::validate::validate_uuid(channel)?;
+        builder = builder.tag(Tag::parse(["buzz-channel", channel]).map_err(tag_error)?);
+    }
+    Ok(builder)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn cmd_create_repo(
+    client: &BuzzClient,
+    repo_id: &str,
+    name: Option<&str>,
+    description: Option<&str>,
+    clone_urls: &[String],
+    web_url: Option<&str>,
+    relays: &[String],
+    channel: Option<&str>,
+) -> Result<(), CliError> {
+    let builder = build_create_announcement(
+        repo_id,
+        name,
+        description,
+        clone_urls,
+        web_url,
+        relays,
+        channel,
+    )?;
     let event = client.sign_event(builder)?;
     let resp = client.submit_event(event).await?;
     println!("{resp}");
@@ -391,6 +427,7 @@ pub async fn dispatch(cmd: crate::ReposCmd, client: &BuzzClient) -> Result<(), C
             clone_urls,
             web,
             relays,
+            channel,
         } => {
             cmd_create_repo(
                 client,
@@ -400,6 +437,7 @@ pub async fn dispatch(cmd: crate::ReposCmd, client: &BuzzClient) -> Result<(), C
                 &clone_urls,
                 web.as_deref(),
                 &relays,
+                channel.as_deref(),
             )
             .await
         }
@@ -439,8 +477,8 @@ mod tests {
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 
     use super::{
-        build_protection_tag, build_updated_repo_announcement, protection_rules_json,
-        validate_write_response, RepoChange,
+        build_create_announcement, build_protection_tag, build_updated_repo_announcement,
+        protection_rules_json, validate_write_response, RepoChange,
     };
 
     fn signed_repo(tags: Vec<Tag>, content: &str, created_at: u64) -> nostr::Event {
@@ -729,6 +767,64 @@ mod tests {
             build_updated_repo_announcement(&existing, RepoChange::BindChannel("nope".into()))
                 .expect_err("malformed channel id must not build an update");
 
+        assert!(matches!(error, crate::error::CliError::Usage(_)));
+    }
+
+    /// Issue #3527: `repos create --channel` must emit exactly one
+    /// `buzz-channel` tag so the primary create command stops producing
+    /// repos the relay 404s forever.
+    #[test]
+    fn create_with_channel_emits_exactly_one_binding_tag() {
+        let channel = uuid::Uuid::new_v4().to_string();
+        let event = build_create_announcement(
+            "demo",
+            Some("Demo"),
+            None,
+            &["https://relay.example/git/owner/demo".to_string()],
+            None,
+            &[],
+            Some(&channel),
+        )
+        .expect("build create announcement")
+        .sign_with_keys(&Keys::generate())
+        .expect("sign create announcement");
+
+        assert_eq!(event.kind, Kind::Custom(30617));
+        let bindings: Vec<_> = event
+            .tags
+            .iter()
+            .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("buzz-channel"))
+            .collect();
+        assert_eq!(bindings.len(), 1, "exactly one buzz-channel tag");
+        assert_eq!(bindings[0].as_slice(), ["buzz-channel", channel.as_str()]);
+        // The standard metadata still rides along.
+        assert!(event.tags.iter().any(|tag| tag.as_slice() == ["d", "demo"]));
+        assert!(event
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["name", "Demo"]));
+    }
+
+    #[test]
+    fn create_without_channel_emits_no_binding_tag() {
+        let event = build_create_announcement("demo", None, None, &[], None, &[], None)
+            .expect("build create announcement")
+            .sign_with_keys(&Keys::generate())
+            .expect("sign create announcement");
+
+        assert!(
+            !event
+                .tags
+                .iter()
+                .any(|tag| tag.as_slice().first().map(String::as_str) == Some("buzz-channel")),
+            "no --channel means no binding tag (vanilla NIP-34 stays possible)"
+        );
+    }
+
+    #[test]
+    fn create_rejects_malformed_channel_uuid() {
+        let error = build_create_announcement("demo", None, None, &[], None, &[], Some("nope"))
+            .expect_err("malformed channel id must not build an announcement");
         assert!(matches!(error, crate::error::CliError::Usage(_)));
     }
 
