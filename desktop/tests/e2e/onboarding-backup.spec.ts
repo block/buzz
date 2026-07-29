@@ -21,6 +21,12 @@ async function invokedCommands(page: import("@playwright/test").Page) {
 
 const SHOTS = "test-results/screenshots-onboarding";
 
+// Mirrors the mock bridge's MOCK_NCRYPTSEC (e2eBridge.ts): the blob the
+// mocked `create_ncryptsec_backup` returns, i.e. the "downloaded file"
+// contents the test-your-backup dropzone expects.
+const MOCK_NCRYPTSEC =
+  "ncryptsec1qgg9947rlpvqu76pj5ecreduf9jxhselq2nae2kghhvd5g7dgjtcxfqtd67p9m0w57lspw8gsq6yphnm8623nsl8xn9j4jdzz84zm3frztj3z7s35vpzmqf6ksu8r89qk5z2zxfmu5gv8th8wclt0h4p";
+
 test("backup step appears on fresh-key path after profile submit", async ({
   page,
 }) => {
@@ -142,19 +148,55 @@ test("download happy path: generated password, encrypt, native save, Next", asyn
 
   await page.getByTestId("encrypted-backup-create").click();
 
-  // The locally created blob stays masked; the portable save action is explicit.
-  const blob = page.getByTestId("ncryptsec-value");
-  await expect(blob).toBeVisible();
-  await expect(blob).toHaveCSS("filter", /blur/);
-  await page.getByTestId("ncryptsec-reveal-toggle").click();
-  await expect(blob).toContainText("ncryptsec1");
-
-  await waitForAnimations(page);
-  await page.screenshot({ path: `${SHOTS}/04-backup-download-encrypted.png` });
-
+  // Download commits the blob and hands over to the "Test your backup"
+  // flow: a dropzone for the saved file, then the password to unlock it.
+  await expect(
+    page.getByRole("heading", { name: "Test your backup" }),
+  ).toBeVisible();
+  const dropzone = page.getByTestId("backup-test-dropzone");
+  await expect(dropzone).toBeVisible();
   await expect(page.getByTestId("encrypted-backup-saved-path")).toContainText(
     "identity.ncryptsec",
   );
+
+  await waitForAnimations(page);
+  await page.screenshot({ path: `${SHOTS}/04-backup-test-dropzone.png` });
+
+  // A wrong file is rejected with an inline error; the dropzone stays.
+  await page.getByTestId("backup-test-file-input").setInputFiles({
+    name: "notes.txt",
+    mimeType: "text/plain",
+    buffer: Buffer.from("not a keycase"),
+  });
+  await expect(page.getByTestId("backup-test-file-error")).toBeVisible();
+
+  // The freshly downloaded file advances to the password check.
+  await page.getByTestId("backup-test-file-input").setInputFiles({
+    name: "identity.ncryptsec",
+    mimeType: "text/plain",
+    buffer: Buffer.from(MOCK_NCRYPTSEC),
+  });
+  const password = page.getByTestId("backup-test-password");
+  await expect(password).toBeVisible();
+
+  await waitForAnimations(page);
+  await page.screenshot({ path: `${SHOTS}/05-backup-test-password.png` });
+
+  // A full-length wrong password shows the mismatch hint, never success.
+  await password.fill("mock-horse-battery-staplX");
+  await expect(page.getByTestId("backup-test-password-mismatch")).toBeVisible();
+  await expect(page.getByTestId("backup-test-success")).toHaveCount(0);
+
+  // Typing the password completely succeeds without any extra click.
+  await password.fill("mock-horse-battery-staple");
+  await expect(page.getByTestId("backup-test-success")).toBeVisible();
+
+  // The celebration is driven by motion's rAF loop, which
+  // `waitForAnimations` (WAAPI-only) cannot observe — hold until the badge
+  // and copy have faded in before capturing.
+  await page.waitForTimeout(1200);
+  await waitForAnimations(page);
+  await page.screenshot({ path: `${SHOTS}/06-backup-test-success.png` });
 
   // The download path must never have fetched the raw key.
   const commands = await invokedCommands(page);

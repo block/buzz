@@ -26,6 +26,7 @@ const ALLOWLIST = [
   "features/onboarding/lib/keyImportInput.ts",
   "features/onboarding/lib/keyImportInput.test.mjs",
   "features/onboarding/ui/BackupStep.tsx",
+  "features/onboarding/ui/BackupTestFlow.tsx",
   "features/onboarding/ui/EncryptedBackupCreator.tsx",
   "features/onboarding/ui/NostrKeyImportForm.tsx",
   "features/onboarding/ui/NsecMaskedDisplay.tsx",

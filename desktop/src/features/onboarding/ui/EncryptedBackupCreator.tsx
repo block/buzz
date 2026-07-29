@@ -21,7 +21,7 @@ import {
   initialEncryptedBackupState,
   MIN_PASSPHRASE_LEN,
 } from "../lib/encryptedBackup";
-import { NsecMaskedDisplay } from "./NsecMaskedDisplay";
+import { BackupTestFlow } from "./BackupTestFlow";
 
 /** Word-count bounds mirroring `key_backup.rs` (Rust clamps regardless). */
 const MIN_GENERATED_WORDS = 3;
@@ -440,46 +440,20 @@ export function EncryptedBackupCreator({
     }
   }, [isSaving, onSaved, state.ncryptsec]);
 
-  const isSpotlight = variant === "spotlight";
   const issue = passphraseIssue(state.passphrase);
 
   if (state.ncryptsec) {
     return (
-      <div className="space-y-4" data-testid="encrypted-backup-result">
-        <NsecMaskedDisplay
-          kind="ncryptsec"
-          nsec={state.ncryptsec}
-          variant={isSpotlight ? "bare" : "boxed"}
+      <div data-testid="encrypted-backup-result">
+        <BackupTestFlow
+          isSaving={isSaving}
+          ncryptsec={state.ncryptsec}
+          onSaveCopy={() => void handleSaveCopy()}
+          passphrase={state.passphrase}
+          saveError={saveError}
+          savedPath={savedPath}
+          variant={variant}
         />
-        <div className="flex flex-wrap items-center justify-center gap-3">
-          <Button
-            className="h-8 gap-1.5 text-sm"
-            data-testid="encrypted-backup-save-copy"
-            disabled={isSaving}
-            onClick={() => void handleSaveCopy()}
-            size="sm"
-            type="button"
-            variant="outline"
-          >
-            {isSaving ? <Spinner className="h-3.5 w-3.5 border-2" /> : null}
-            Save a copy…
-          </Button>
-          {savedPath ? (
-            <p
-              className="text-xs text-muted-foreground"
-              data-testid="encrypted-backup-saved-path"
-            >
-              Saved to {savedPath}
-            </p>
-          ) : null}
-        </div>
-        {saveError ? (
-          <p className="text-center text-sm text-destructive">{saveError}</p>
-        ) : null}
-        <p className="text-center text-xs leading-5 text-muted-foreground">
-          Keep this file private. You need both the file and its password to
-          restore your identity. Buzz cannot reset the password.
-        </p>
       </div>
     );
   }
