@@ -98,6 +98,8 @@ export function AgentsView() {
         )
       ) {
         await pending.onPreviewAccepted?.();
+      } else {
+        await pending.onPreviewRejected?.();
       }
     };
     // Consume a snapshot import that was enqueued before navigation (e.g. from

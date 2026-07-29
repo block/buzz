@@ -104,6 +104,14 @@ pub(crate) fn acknowledge_pending_agent_snapshot_import(
     acknowledged
 }
 
+#[tauri::command]
+pub(crate) fn reject_pending_agent_snapshot_import(
+    id: String,
+    pending: State<'_, PendingAgentSnapshotImports>,
+) -> bool {
+    pending.acknowledge(&id)
+}
+
 fn queue_agent_snapshot_handoff(app: &tauri::AppHandle, handoff_id: String) -> Result<(), String> {
     let bytes = read_agent_snapshot_handoff_from_dir(&agent_snapshot_handoff_dir()?, &handoff_id)?;
     if !app

@@ -36,8 +36,8 @@ use builderlab::*;
 use commands::*;
 use deep_link::{
     acknowledge_pending_agent_snapshot_import, acknowledge_pending_community_deep_link,
-    handle_deep_link_url, take_pending_agent_snapshot_import, take_pending_community_deep_link,
-    PendingAgentSnapshotImports, PendingCommunityDeepLinks,
+    handle_deep_link_url, reject_pending_agent_snapshot_import, take_pending_agent_snapshot_import,
+    take_pending_community_deep_link, PendingAgentSnapshotImports, PendingCommunityDeepLinks,
 };
 use huddle::audio_output::{
     get_audio_output_device, list_audio_output_devices, set_audio_output_device,
@@ -654,6 +654,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             take_pending_agent_snapshot_import,
             acknowledge_pending_agent_snapshot_import,
+            reject_pending_agent_snapshot_import,
             take_pending_community_deep_link,
             acknowledge_pending_community_deep_link,
             start_builderlab_login,

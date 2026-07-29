@@ -19,6 +19,10 @@ test("handoff drain routes accepted bytes through the existing preview flow", as
       calls.push(["ack", id]);
       return true;
     },
+    reject: async (id) => {
+      calls.push(["reject", id]);
+      return true;
+    },
     requestOpen: (payload) => {
       routedPayload = payload;
       calls.push([
@@ -46,8 +50,37 @@ test("handoff drain routes accepted bytes through the existing preview flow", as
     ["navigate"],
   ]);
   assert.equal(typeof routedPayload.onPreviewAccepted, "function");
+  assert.equal(typeof routedPayload.onPreviewRejected, "function");
   await routedPayload.onPreviewAccepted();
   assert.deepEqual(calls.at(-1), ["ack", pending.id]);
+});
+
+test("preview rejection releases the queue without accepting the source", async () => {
+  const calls = [];
+  let routedPayload;
+  await drainPendingAgentSnapshotImport({
+    take: async () => ({
+      id: "550e8400-e29b-41d4-a716-446655440000",
+      fileBytes: [1],
+      fileName: "snapshot.agent.json",
+      snapshotKind: "agent",
+    }),
+    acknowledge: async (id) => {
+      calls.push(["ack", id]);
+      return true;
+    },
+    reject: async (id) => {
+      calls.push(["reject", id]);
+      return true;
+    },
+    requestOpen: (payload) => {
+      routedPayload = payload;
+    },
+    goAgents: () => {},
+  });
+
+  await routedPayload.onPreviewRejected();
+  assert.deepEqual(calls, [["reject", "550e8400-e29b-41d4-a716-446655440000"]]);
 });
 
 test("handoff drain does nothing when no import is pending", async () => {
@@ -55,6 +88,10 @@ test("handoff drain does nothing when no import is pending", async () => {
   const accepted = await drainPendingAgentSnapshotImport({
     take: async () => null,
     acknowledge: async () => {
+      touched = true;
+      return true;
+    },
+    reject: async () => {
       touched = true;
       return true;
     },
@@ -81,6 +118,10 @@ test("handoff drain does not acknowledge when preview routing throws", async () 
         snapshotKind: "agent",
       }),
       acknowledge: async () => {
+        acknowledged = true;
+        return true;
+      },
+      reject: async () => {
         acknowledged = true;
         return true;
       },

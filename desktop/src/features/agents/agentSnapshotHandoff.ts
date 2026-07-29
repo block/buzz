@@ -15,6 +15,7 @@ type PendingAgentSnapshotImport = PendingSnapshotImport & {
 type AgentSnapshotHandoffDeps = {
   take: () => Promise<PendingAgentSnapshotImport | null>;
   acknowledge: (id: string) => Promise<boolean>;
+  reject: (id: string) => Promise<boolean>;
   requestOpen: (payload: PendingSnapshotImport) => void;
   goAgents: () => unknown;
 };
@@ -30,6 +31,9 @@ export async function drainPendingAgentSnapshotImport(
     fileName: pending.fileName,
     onPreviewAccepted: async () => {
       await deps.acknowledge(pending.id);
+    },
+    onPreviewRejected: async () => {
+      await deps.reject(pending.id);
     },
     snapshotKind: "agent",
   });
@@ -59,6 +63,8 @@ export async function listenForAgentSnapshotHandoffs(
               invoke<boolean>("acknowledge_pending_agent_snapshot_import", {
                 id,
               }),
+            reject: (id) =>
+              invoke<boolean>("reject_pending_agent_snapshot_import", { id }),
             requestOpen: requestOpenSnapshotImport,
             goAgents,
           });
