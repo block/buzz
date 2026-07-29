@@ -152,14 +152,17 @@ class _CustomSectionHeader extends ConsumerWidget {
               ),
             ),
             const SizedBox(width: _kChannelLabelGap),
-            Text(
-              section.name,
-              style: contentListTitleTextStyle.copyWith(
-                color: sectionColor,
-                fontWeight: FontWeight.w600,
+            Expanded(
+              child: Text(
+                section.name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: contentListTitleTextStyle.copyWith(
+                  color: sectionColor,
+                  fontWeight: FontWeight.w600,
+                ),
               ),
             ),
-            const Spacer(),
             Builder(
               builder: (buttonContext) => IconButton(
                 key: ValueKey('section-menu-${section.id}'),
