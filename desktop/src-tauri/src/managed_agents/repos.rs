@@ -9,8 +9,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-#[cfg(unix)]
-use crate::util::{create_symlink, symlink_points_to};
+use crate::util::{create_dir_link, dir_link_points_to, remove_dir_link};
 
 /// Validate a user-supplied `repos_dir`, returning the canonical target path.
 ///
@@ -72,7 +71,6 @@ pub fn validate_repos_dir(nest_root: &Path, repos_dir: &str) -> Result<PathBuf, 
 ///
 /// Validation (`validate_repos_dir`) runs before any filesystem mutation, so
 /// an invalid path returns `Err` with `REPOS` left exactly as it was.
-#[cfg(unix)]
 pub fn ensure_repos_symlink(nest_root: &Path, repos_dir: Option<&str>) -> Result<(), String> {
     let repos_path = nest_root.join("REPOS");
 
@@ -88,7 +86,7 @@ pub fn ensure_repos_symlink(nest_root: &Path, repos_dir: Option<&str>) -> Result
         // place. remove_file never touches the link's target.
         if let Ok(meta) = repos_path.symlink_metadata() {
             if meta.file_type().is_symlink() {
-                fs::remove_file(&repos_path)
+                remove_dir_link(&repos_path)
                     .map_err(|e| format!("remove symlink {}: {e}", repos_path.display()))?;
             }
         }
@@ -101,10 +99,10 @@ pub fn ensure_repos_symlink(nest_root: &Path, repos_dir: Option<&str>) -> Result
         // Existing symlink → replace it if it points elsewhere. Re-pointing a
         // symlink is data-safe; remove_file never follows the link.
         Ok(meta) if meta.file_type().is_symlink() => {
-            if symlink_points_to(&repos_path, &target) {
+            if dir_link_points_to(&repos_path, &target) {
                 return Ok(()); // already correct
             }
-            fs::remove_file(&repos_path)
+            remove_dir_link(&repos_path)
                 .map_err(|e| format!("remove symlink {}: {e}", repos_path.display()))?;
             symlink_repos(&target, &repos_path)
         }
@@ -135,16 +133,9 @@ pub fn ensure_repos_symlink(nest_root: &Path, repos_dir: Option<&str>) -> Result
     }
 }
 
-#[cfg(unix)]
 fn symlink_repos(target: &Path, link: &Path) -> Result<(), String> {
-    create_symlink(target, link)
+    create_dir_link(target, link)
         .map_err(|e| format!("symlink {} → {}: {e}", link.display(), target.display()))
-}
-
-#[cfg(not(unix))]
-pub fn ensure_repos_symlink(nest_root: &Path, _repos_dir: Option<&str>) -> Result<(), String> {
-    let repos_path = nest_root.join("REPOS");
-    fs::create_dir_all(&repos_path).map_err(|e| format!("create {}: {e}", repos_path.display()))
 }
 
 /// Provision `REPOS` at nest setup, before any configured `repos_dir` is known.
@@ -284,7 +275,6 @@ mod tests {
 
     // ── ensure_repos_symlink ──────────────────────────────────────────────
 
-    #[cfg(unix)]
     #[test]
     fn ensure_repos_symlink_none_creates_real_dir() {
         let tmp = tempfile::tempdir().unwrap();
@@ -301,7 +291,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn ensure_repos_symlink_none_reverts_existing_symlink_to_real_dir() {
         let tmp = tempfile::tempdir().unwrap();
@@ -331,7 +320,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn ensure_repos_symlink_absent_creates_symlink() {
         let tmp = tempfile::tempdir().unwrap();
@@ -344,10 +332,9 @@ mod tests {
 
         let repos = root.join("REPOS");
         assert!(repos.symlink_metadata().unwrap().file_type().is_symlink());
-        assert_eq!(repos.read_link().unwrap(), external.canonicalize().unwrap());
+        assert!(dir_link_points_to(&repos, &external));
     }
 
-    #[cfg(unix)]
     #[test]
     fn ensure_repos_symlink_repoints_existing_wrong_symlink() {
         let tmp = tempfile::tempdir().unwrap();
@@ -364,14 +351,13 @@ mod tests {
         ensure_repos_symlink(&root, Some(new.to_str().unwrap())).unwrap();
 
         let repos = root.join("REPOS");
-        assert_eq!(repos.read_link().unwrap(), new.canonicalize().unwrap());
+        assert!(dir_link_points_to(&repos, &new));
         assert!(
             payload.exists(),
             "re-pointing a symlink must not touch the old target's contents"
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn ensure_repos_symlink_correct_symlink_is_noop() {
         let tmp = tempfile::tempdir().unwrap();
@@ -383,10 +369,9 @@ mod tests {
         ensure_repos_symlink(&root, Some(external.to_str().unwrap())).unwrap();
 
         let repos = root.join("REPOS");
-        assert_eq!(repos.read_link().unwrap(), external);
+        assert!(dir_link_points_to(&repos, &external));
     }
 
-    #[cfg(unix)]
     #[test]
     fn ensure_repos_symlink_empty_real_dir_converts() {
         let tmp = tempfile::tempdir().unwrap();
@@ -404,7 +389,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn ensure_repos_symlink_nonempty_real_dir_refuses_and_preserves() {
         let tmp = tempfile::tempdir().unwrap();
@@ -435,7 +419,6 @@ mod tests {
     // call used to remove a configured symlink and mint an empty real REPOS,
     // which async-restored agents could write into — the FE re-point then
     // refused the now-non-empty dir, silently breaking a configured repos_dir.
-    #[cfg(unix)]
     #[test]
     fn ensure_nest_startup_preserves_existing_repos_symlink() {
         let tmp = tempfile::tempdir().unwrap();
@@ -450,7 +433,7 @@ mod tests {
         fs::create_dir(&external).unwrap();
         fs::write(external.join("KEEP.md"), "data").unwrap();
         fs::remove_dir(root.join("REPOS")).unwrap();
-        std::os::unix::fs::symlink(&external, root.join("REPOS")).unwrap();
+        create_dir_link(&external, &root.join("REPOS")).unwrap();
 
         // Next launch must leave the configured symlink intact.
         crate::managed_agents::ensure_nest_at(&root).unwrap();
@@ -460,14 +443,13 @@ mod tests {
             repos.symlink_metadata().unwrap().file_type().is_symlink(),
             "an existing REPOS symlink must survive startup"
         );
-        assert_eq!(repos.read_link().unwrap(), external);
+        assert!(dir_link_points_to(&repos, &external));
         assert!(
             external.join("KEEP.md").exists(),
             "the symlink's target contents must be untouched"
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn validate_repos_dir_rejects_tilde_relative_and_missing() {
         let tmp = tempfile::tempdir().unwrap();
@@ -483,7 +465,6 @@ mod tests {
         assert!(validate_repos_dir(&root, file.to_str().unwrap()).is_err());
     }
 
-    #[cfg(unix)]
     #[test]
     fn validate_repos_dir_rejects_nest_ancestor() {
         let tmp = tempfile::tempdir().unwrap();
@@ -546,7 +527,6 @@ mod tests {
         write_persisted_repos_dir(&root, None).expect("clearing an absent dotfile is not an error");
     }
 
-    #[cfg(unix)]
     #[test]
     fn boot_resolves_symlink_from_persisted_value_into_empty_repos() {
         // Mirrors the boot sequence: ensure_nest leaves REPOS an empty real
@@ -566,10 +546,9 @@ mod tests {
             repos.symlink_metadata().unwrap().file_type().is_symlink(),
             "boot must convert the empty real REPOS into a symlink"
         );
-        assert_eq!(repos.read_link().unwrap(), external.canonicalize().unwrap());
+        assert!(dir_link_points_to(&repos, &external));
     }
 
-    #[cfg(unix)]
     #[test]
     fn boot_leaves_already_correct_symlink_untouched() {
         let tmp = tempfile::tempdir().unwrap();
@@ -586,10 +565,9 @@ mod tests {
 
         let repos = root.join("REPOS");
         assert!(repos.symlink_metadata().unwrap().file_type().is_symlink());
-        assert_eq!(repos.read_link().unwrap(), external.canonicalize().unwrap());
+        assert!(dir_link_points_to(&repos, &external));
     }
 
-    #[cfg(unix)]
     #[test]
     fn boot_with_cleared_value_reverts_symlink_to_real_dir() {
         let tmp = tempfile::tempdir().unwrap();
@@ -618,7 +596,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn effective_repos_dir_drives_persisted_dotfile_for_all_three_cases() {
         // Pins the CRITICAL persist decision on `.repos-dir` CONTENTS, not just
@@ -681,7 +658,6 @@ mod tests {
 
     // ── resolve_repos_at_boot (boot sequence + fail-closed gate) ──────────
 
-    #[cfg(unix)]
     #[test]
     fn resolve_repos_at_boot_converts_empty_real_repos_and_allows_restore() {
         // Drives the real boot sequence: ensure_repos_setup_default (called by
@@ -709,10 +685,9 @@ mod tests {
             repos.symlink_metadata().unwrap().file_type().is_symlink(),
             "boot resolve converts the empty real REPOS into the configured symlink"
         );
-        assert_eq!(repos.read_link().unwrap(), external.canonicalize().unwrap());
+        assert!(dir_link_points_to(&repos, &external));
     }
 
-    #[cfg(unix)]
     #[test]
     fn resolve_repos_at_boot_fails_closed_when_target_unresolvable() {
         // Persisted repos_dir whose target does not exist at boot (transiently
@@ -739,7 +714,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn resolve_repos_at_boot_allows_restore_with_no_repos_dir() {
         // No configured repos_dir → the real in-nest REPOS default is correct,
@@ -776,11 +750,9 @@ mod tests {
     }
 
     /// Test helper: canonicalize a path, creating it as a directory first.
-    #[cfg(unix)]
     trait CanonicalizeOrMake {
         fn canonicalize_or_make(&self) -> PathBuf;
     }
-    #[cfg(unix)]
     impl CanonicalizeOrMake for PathBuf {
         fn canonicalize_or_make(&self) -> PathBuf {
             fs::create_dir_all(self).unwrap();
