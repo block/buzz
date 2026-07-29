@@ -331,7 +331,14 @@ export function BackupTestFlow({
                       ? "border-primary bg-primary/10"
                       : "border-foreground/25 bg-background/40",
                   )
-                : "mx-auto h-14 rounded-full bg-primary px-12 text-(--buzz-onboarding-cta-label) shadow hover:bg-primary/90",
+                : cn(
+                    "mx-auto rounded-full bg-primary shadow hover:bg-primary/90",
+                    // The CTA-label variable only exists inside the onboarding
+                    // theme; elsewhere fall back to the standard primary pair.
+                    isSpotlight
+                      ? "h-14 px-12 text-(--buzz-onboarding-cta-label)"
+                      : "h-9 px-6 text-primary-foreground",
+                  ),
             )}
             data-testid="backup-test-dropzone"
             onClick={() => fileInputRef.current?.click()}
@@ -362,7 +369,12 @@ export function BackupTestFlow({
                 </span>
               </>
             ) : (
-              <span className="text-base font-medium">
+              <span
+                className={cn(
+                  "font-medium",
+                  isSpotlight ? "text-base" : "text-sm",
+                )}
+              >
                 Select your backup file
               </span>
             )}
@@ -377,7 +389,10 @@ export function BackupTestFlow({
           ) : null}
           <div className="flex flex-col items-center gap-2">
             <Button
-              className="h-12 gap-1.5 rounded-full bg-foreground/10 px-10 text-base hover:bg-foreground/15"
+              className={cn(
+                "gap-1.5 rounded-full bg-foreground/10 hover:bg-foreground/15",
+                isSpotlight ? "h-12 px-10 text-base" : "h-9 px-6 text-sm",
+              )}
               data-testid="encrypted-backup-save-copy"
               disabled={isSaving}
               onClick={onSaveCopy}
