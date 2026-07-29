@@ -461,7 +461,7 @@ async fn run_relay_observer_publisher(
     owner_pubkey_hex: String,
     owner_pubkey: PublicKey,
 ) -> bool {
-    let mut terminal_delivery_ok = true;
+    let mut terminal_delivery_ok = !rx.control_result_admission_failed();
     let mut coalescer = ObserverChunkCoalescer::default();
     let mut pacer = ObserverPublishPacer::new();
     let snapshot_seqs: HashSet<_> = snapshot.iter().map(|event| event.seq).collect();
@@ -475,7 +475,6 @@ async fn run_relay_observer_publisher(
                 &owner_pubkey,
                 &mut pacer,
                 &mut rx,
-                &snapshot_seqs,
                 event,
             )
             .await;
@@ -489,45 +488,49 @@ async fn run_relay_observer_publisher(
             result = rx.recv() => {
                 match result {
                     Ok(event) => {
-                        // Skip live events already delivered via the snapshot
-                        // (the subscribe-before-snapshot overlap).
-                        if snapshot_seqs.contains(&event.seq) {
-                            continue;
-                        }
                         if event.kind == "control_result" {
-                            // A terminal result received while chunks are
-                            // coalescing must not be appended behind the
-                            // coalescer's pending flush.
-                            terminal_delivery_ok &= publish_relay_observer_event(
+                            // A terminal result returned by ObserverReceiver is
+                            // still retained and unacknowledged. Publish it even
+                            // when its sequence was captured in the snapshot:
+                            // the snapshot attempt may have failed, and static
+                            // membership is not delivery proof.
+                            terminal_delivery_ok &= publish_relay_terminal_observer_event(
                                 &publisher,
                                 &keys,
                                 &agent_pubkey_hex,
                                 &owner_pubkey_hex,
                                 &owner_pubkey,
                                 &mut pacer,
+                                &mut rx,
                                 event,
                             )
                             .await;
+                            continue;
+                        }
+                        // Ordinary live telemetry already delivered via the
+                        // snapshot is the subscribe-before-snapshot overlap.
+                        if snapshot_seqs.contains(&event.seq) {
                             continue;
                         }
                         for event in coalescer.ingest(event) {
                             terminal_delivery_ok &= publish_relay_observer_event_preemptible(
                                 &publisher, &keys, &agent_pubkey_hex,
                                 &owner_pubkey_hex, &owner_pubkey, &mut pacer,
-                                &mut rx, &snapshot_seqs, event,
+                                &mut rx, event,
                             ).await;
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
-                        // This merged receiver can lag because either lane
-                        // overflowed. Treat it as terminal-delivery uncertainty
-                        // so shutdown cannot report verified proof delivery.
+                        // Terminal-lane lag is recovered from the acknowledged
+                        // sequence ledger inside ObserverReceiver, so only
+                        // telemetry overflow reaches this branch. Preserve the
+                        // conservative overall proof verdict for that loss.
                         terminal_delivery_ok = false;
                         for event in coalescer.flush() {
                             terminal_delivery_ok &= publish_relay_observer_event_preemptible(
                                 &publisher, &keys, &agent_pubkey_hex,
                                 &owner_pubkey_hex, &owner_pubkey, &mut pacer,
-                                &mut rx, &snapshot_seqs, event,
+                                &mut rx, event,
                             ).await;
                         }
                         tracing::warn!(dropped = count, "relay observer publisher lagged");
@@ -537,7 +540,7 @@ async fn run_relay_observer_publisher(
                             terminal_delivery_ok &= publish_relay_observer_event_preemptible(
                                 &publisher, &keys, &agent_pubkey_hex,
                                 &owner_pubkey_hex, &owner_pubkey, &mut pacer,
-                                &mut rx, &snapshot_seqs, event,
+                                &mut rx, event,
                             ).await;
                         }
                         break;
@@ -550,13 +553,13 @@ async fn run_relay_observer_publisher(
                     terminal_delivery_ok &= publish_relay_observer_event_preemptible(
                         &publisher, &keys, &agent_pubkey_hex,
                         &owner_pubkey_hex, &owner_pubkey, &mut pacer,
-                        &mut rx, &snapshot_seqs, event,
+                        &mut rx, event,
                     ).await;
                 }
             }
         }
     }
-    terminal_delivery_ok
+    terminal_delivery_ok && !rx.control_result_admission_failed()
 }
 
 #[derive(Default)]
@@ -858,6 +861,40 @@ async fn publish_relay_observer_event(
 }
 
 #[allow(clippy::too_many_arguments)]
+async fn publish_relay_terminal_observer_event(
+    publisher: &RelayEventPublisher,
+    keys: &nostr::Keys,
+    agent_pubkey_hex: &str,
+    owner_pubkey_hex: &str,
+    owner_pubkey: &PublicKey,
+    pacer: &mut ObserverPublishPacer,
+    rx: &mut observer::ObserverReceiver,
+    event: observer::ObserverEvent,
+) -> bool {
+    let seq = event.seq;
+    let delivered = publish_relay_observer_event(
+        publisher,
+        keys,
+        agent_pubkey_hex,
+        owner_pubkey_hex,
+        owner_pubkey,
+        pacer,
+        event,
+    )
+    .await;
+    if delivered {
+        rx.acknowledge_control_result(seq);
+        true
+    } else {
+        // The relay publisher already performed its bounded reconnect and
+        // rate-gate wait. Release the ledger claim for one end-to-end retry;
+        // a second failure stays retained/in-flight and makes shutdown proof
+        // fail without an unbounded retry loop.
+        rx.retry_control_result(seq)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn publish_relay_observer_event_preemptible(
     publisher: &RelayEventPublisher,
     keys: &nostr::Keys,
@@ -866,17 +903,17 @@ async fn publish_relay_observer_event_preemptible(
     owner_pubkey: &PublicKey,
     pacer: &mut ObserverPublishPacer,
     rx: &mut observer::ObserverReceiver,
-    snapshot_seqs: &HashSet<u64>,
     event: observer::ObserverEvent,
 ) -> bool {
     if event.kind == "control_result" {
-        return publish_relay_observer_event(
+        return publish_relay_terminal_observer_event(
             publisher,
             keys,
             agent_pubkey_hex,
             owner_pubkey_hex,
             owner_pubkey,
             pacer,
+            rx,
             event,
         )
         .await;
@@ -889,16 +926,18 @@ async fn publish_relay_observer_event_preemptible(
             result = rx.recv_control_result() => {
                 match result {
                     Ok(priority) => {
-                        // The subscribe-before-snapshot overlap can put a
-                        // captured terminal result in both lanes.
-                        if !snapshot_seqs.contains(&priority.seq)
-                            && !publish_relay_observer_event(
+                        // ObserverReceiver returns only retained terminal
+                        // results. Snapshot membership alone is never an ACK:
+                        // a captured publication may have failed before this
+                        // overlapping wake-up was consumed.
+                        if !publish_relay_terminal_observer_event(
                                 publisher,
                                 keys,
                                 agent_pubkey_hex,
                                 owner_pubkey_hex,
                                 owner_pubkey,
                                 pacer,
+                                rx,
                                 priority,
                             )
                             .await
@@ -7732,28 +7771,25 @@ mod observer_snapshot_race_tests {
     }
 
     #[tokio::test]
-    async fn control_result_broadcast_lag_fails_shutdown_delivery_verification() {
+    async fn failed_snapshot_terminal_publish_retries_live_overlap_before_acknowledgement() {
         let observer = observer::ObserverHandle::in_process();
         let agent_keys = Keys::generate();
         let owner_keys = Keys::generate();
-        let (publisher, _published_rx) = RelayEventPublisher::test_pair();
+        let (publisher, mut published_rx) =
+            RelayEventPublisher::test_pair_dropping_first_terminal_confirmation();
         let rx = observer.subscribe();
 
-        // The reserved lane holds 64 results. A subscribed receiver that does
-        // not poll until the 65th result must report Lagged(1), and that
-        // uncertainty must survive the remaining drain as a false verdict.
-        for marker in 0..65 {
-            observer.emit(
-                "control_result",
-                None,
-                &observer::context_for(None, None, None),
-                serde_json::json!({ "marker": marker }),
-            );
-        }
+        observer.emit(
+            "control_result",
+            None,
+            &observer::context_for(None, None, None),
+            serde_json::json!({ "status": "retry-me" }),
+        );
+        let snapshot = observer.snapshot();
         drop(observer);
 
         let terminal_delivery_ok = run_relay_observer_publisher(
-            Vec::new(),
+            snapshot,
             rx,
             publisher,
             agent_keys.clone(),
@@ -7763,9 +7799,67 @@ mod observer_snapshot_race_tests {
         )
         .await;
 
+        let mut delivered_seqs = Vec::new();
+        while let Some(event) = published_rx.recv().await {
+            let payload: serde_json::Value =
+                decrypt_observer_payload(&owner_keys, &event).expect("decrypt published frame");
+            delivered_seqs.push(payload["seq"].as_u64().expect("observer sequence"));
+        }
+        assert_eq!(
+            delivered_seqs,
+            [1, 1],
+            "the unconfirmed snapshot attempt must release the same retained result for one retry"
+        );
         assert!(
-            !terminal_delivery_ok,
-            "priority-lane loss must fail closed even when the remaining results drain"
+            terminal_delivery_ok,
+            "a later relay-confirmed retry must restore verified terminal delivery"
+        );
+    }
+
+    #[tokio::test]
+    async fn control_result_broadcast_lag_replays_every_terminal_result() {
+        let observer = observer::ObserverHandle::in_process();
+        let agent_keys = Keys::generate();
+        let owner_keys = Keys::generate();
+        let (publisher, mut published_rx) = RelayEventPublisher::test_pair();
+        let rx = observer.subscribe();
+
+        let burst = 64 + 17;
+        for marker in 0..burst {
+            observer.emit(
+                "control_result",
+                None,
+                &observer::context_for(None, None, None),
+                serde_json::json!({ "marker": marker }),
+            );
+        }
+        drop(observer);
+
+        let publisher_task = tokio::spawn(run_relay_observer_publisher(
+            Vec::new(),
+            rx,
+            publisher,
+            agent_keys.clone(),
+            agent_keys.public_key().to_hex(),
+            owner_keys.public_key().to_hex(),
+            owner_keys.public_key(),
+        ));
+
+        let mut markers = Vec::new();
+        while let Some(event) = published_rx.recv().await {
+            let payload: serde_json::Value =
+                decrypt_observer_payload(&owner_keys, &event).expect("decrypt published frame");
+            markers.push(payload["payload"]["marker"].as_u64().unwrap() as usize);
+        }
+        let terminal_delivery_ok = publisher_task.await.expect("publisher must not panic");
+        assert_eq!(
+            markers,
+            (0..burst).collect::<Vec<_>>(),
+            "lag recovery must publish every accepted terminal result exactly once"
+        );
+        assert!(
+            terminal_delivery_ok,
+            "replayed and acknowledged terminal results preserve verified delivery"
         );
     }
 

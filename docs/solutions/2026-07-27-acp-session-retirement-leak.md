@@ -155,9 +155,15 @@ before queueing or writing, preserving the first publisher's exact confirmation
 ownership, and the publisher treats any local priority-lane lag as delivery
 uncertainty.
 Terminal publication completes only after the exact relay event receives
-`OK accepted=true`; a local socket write or queue admission is not proof. An exact transient
-rate-limit rejection requeues the same frame with pacing, while terminal
-denials are counted and surfaced without an unbounded retry loop. Graceful
+`OK accepted=true`; a local socket write or queue admission is not proof. An
+exact transient rate-limit rejection requeues the same frame with pacing. The
+client honors the relay's full sixty-second reset hint, adds only positive
+desynchronization, and keeps the exact confirmation owner alive for ninety
+seconds. If that complete relay attempt still fails, the process-local
+acknowledgement ledger releases the result for one bounded end-to-end replay.
+Terminal denials remain counted and surfaced without an unbounded retry loop.
+The ledger retains at most 1,024 accepted results, rejects newest overflow
+without evicting older proof, and marks delivery verification failed. Graceful
 shutdown closes the observer source and waits a bounded interval for the
 publisher; a rejection, missing relay acknowledgement, lag, join failure, or
 timeout fails shutdown verification rather than silently discarding an
@@ -245,7 +251,9 @@ and asserts:
 16. observer control results retain protected priority FIFO delivery under
     concurrent relay traffic and ordinary telemetry saturation; only
     `accepted=true` acknowledges a frame, exact rate-limit rejections requeue
-    with pacing, and terminal denials are visible without retry spin;
+    no earlier than the advertised reset, one failed complete publication gets
+    one bounded ledger replay, retained proof rejects newest at its hard cap,
+    and terminal denials are visible without retry spin;
 17. pre-loop and automatic-exit cleanup failures remain in non-spawning
     quarantine until explicit shutdown; graceful shutdown recovers checked-out
     owners for bounded reap/probe, and unavailable descendant containment

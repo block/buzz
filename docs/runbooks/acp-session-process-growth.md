@@ -144,8 +144,13 @@ After the operator-approved restart:
     confirm observer control results still drain first from their protected
     FIFO without starving relay reads or pings. Confirm only `accepted=true`
     acknowledges a durable frame, exact rate-limit rejections requeue with
-    pacing, terminal denials are surfaced without retry spin, and bounded loss
-    remains visible;
+    pacing no earlier than an advertised sixty-second reset, the ninety-second
+    confirmation window covers that reset plus positive jitter, one failed
+    complete publication gets one bounded ledger replay, terminal denials are
+    surfaced without retry spin, and bounded loss remains visible. Fill the
+    retained terminal ledger to 1,024 results and verify the newest overflow is
+    rejected without evicting older proof and forces failed shutdown
+    verification;
 14. sample the service cgroup's full descendant count and memory over a duration
    longer than the original reproduction window; process-group proof cannot
    detect a descendant that deliberately escaped with `setsid(2)`;

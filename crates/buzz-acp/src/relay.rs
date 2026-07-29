@@ -130,9 +130,21 @@ const DRAIN_BUDGET_PER_ITER: usize = 1;
 const GATED_OBSERVER_QUEUE_CAP: usize = 256;
 /// Reserved relay-gate capacity for terminal observer control results.
 const GATED_OBSERVER_PRIORITY_CAP: usize = 64;
+/// Largest relay retry hint accepted into the local admission gate.
+///
+/// The production relay's fixed message window is sixty seconds, so the client
+/// must honor that full reset horizon. Larger, malformed hints are bounded here
+/// so they cannot park all local relay traffic indefinitely.
+const MAX_RATE_LIMIT_RETRY_SECS: u64 = 60;
 /// Maximum time a terminal observer publisher waits for the relay's exact
 /// `OK accepted=true` admission proof.
-const TERMINAL_OBSERVER_ACK_TIMEOUT: Duration = Duration::from_secs(5);
+///
+/// Ninety seconds is longer than the full sixty-second relay window plus its
+/// positive-only twenty-percent desynchronization (72 s), with room for the
+/// paced resend and relay OK. A later independent rate-limit response can still
+/// exhaust this bounded attempt; the observer ledger then performs one bounded
+/// end-to-end retry rather than silently discarding the terminal result.
+const TERMINAL_OBSERVER_ACK_TIMEOUT: Duration = Duration::from_secs(90);
 /// Cleartext marker added only to encrypted terminal control-result frames.
 pub(crate) const OBSERVER_PRIORITY_TAG: &str = "priority";
 pub(crate) const OBSERVER_CONTROL_RESULT_PRIORITY: &str = "control-result";
@@ -665,6 +677,12 @@ impl RelayEventPublisher {
         event: Event,
         ack_timeout: Duration,
     ) -> Result<(), RelayError> {
+        if !is_exact_terminal_observer_frame(&event) {
+            return Err(RelayError::Http(
+                "terminal observer event must be kind 24200 with exactly one control-result priority marker"
+                    .to_string(),
+            ));
+        }
         let deadline = tokio::time::Instant::now() + ack_timeout;
         let (admission_tx, admission_rx) = oneshot::channel();
         match tokio::time::timeout_at(
@@ -709,6 +727,34 @@ impl RelayEventPublisher {
                     }
                     if let Some(admission) = admission {
                         let _ = admission.send(Ok(()));
+                    }
+                }
+            }
+        });
+        (Self { cmd_tx }, event_rx)
+    }
+
+    /// Test-only publisher that drops the first terminal admission sender,
+    /// then confirms every later publication.
+    #[cfg(test)]
+    pub(crate) fn test_pair_dropping_first_terminal_confirmation() -> (Self, mpsc::Receiver<Event>)
+    {
+        let (cmd_tx, mut cmd_rx) = mpsc::channel::<RelayCommand>(64);
+        let (event_tx, event_rx) = mpsc::channel(64);
+        tokio::spawn(async move {
+            let mut drop_first = true;
+            while let Some(cmd) = cmd_rx.recv().await {
+                if let RelayCommand::PublishEvent { event, admission } = cmd {
+                    if event_tx.send(*event).await.is_err() {
+                        break;
+                    }
+                    if let Some(admission) = admission {
+                        if drop_first {
+                            drop_first = false;
+                            drop(admission);
+                        } else {
+                            let _ = admission.send(Ok(()));
+                        }
                     }
                 }
             }
@@ -1396,17 +1442,25 @@ impl BgState {
     /// low-quality hints from dropping the gate so short that re-queued REQs
     /// immediately re-trigger rate limiting. Note the deliberate asymmetry with
     /// the desktop TypeScript client, which uses a 10s no-hint default — both
-    /// values are conservative enough; the relay hint wins when present.
+    /// values are conservative enough. Relay hints win when present, up to the
+    /// bounded [`MAX_RATE_LIMIT_RETRY_SECS`] contract that keeps terminal
+    /// confirmation alive through the retry window.
     ///
     /// The gate takes the **maximum** of any existing deadline and the newly
     /// computed one so overlapping CLOSED/NOTICE messages can't shorten a gate
     /// that is already set further out.
     ///
-    /// Returns the gate deadline that was set.
+    /// Explicit reset hints use positive-only jitter: retrying before the
+    /// advertised reset can create a self-sustaining rate-limit loop. Returns
+    /// the gate deadline that was set.
     fn set_rate_limit_gate(&mut self, retry_secs: u64) -> tokio::time::Instant {
-        let secs = if retry_secs < 2 { 5 } else { retry_secs };
+        let secs = if retry_secs < 2 {
+            5
+        } else {
+            retry_secs.min(MAX_RATE_LIMIT_RETRY_SECS)
+        };
         let base = Duration::from_secs(secs);
-        let deadline = tokio::time::Instant::now() + jittered_duration(base);
+        let deadline = tokio::time::Instant::now() + rate_limit_retry_duration(base);
         let gate = match self.rate_limit_gate {
             Some(existing) if existing > deadline => existing,
             _ => deadline,
@@ -1476,6 +1530,14 @@ impl BgState {
             self.gated_observer_pending.pop_front();
             self.gated_observer_dropped += 1;
         }
+    }
+
+    /// Retire authority belonging to one failed replacement socket while
+    /// preserving all unresolved observer delivery intent for the next one.
+    fn abandon_failed_reconnect_candidate(&mut self) {
+        self.requeue_observer_in_flight();
+        self.observer_control_subscribed_at = None;
+        self.channel_subscribed_at.clear();
     }
 
     fn track_observer_in_flight(&mut self, event: Box<Event>) -> bool {
@@ -1586,28 +1648,16 @@ impl BgState {
     }
 
     fn acknowledge_observer_frame(&mut self, event_id: &str) {
-        if let Some(index) = self
-            .observer_priority_in_flight
-            .iter()
-            .position(|event| event.id.to_hex() == event_id)
-        {
-            self.observer_priority_in_flight.remove(index);
+        if self.take_unresolved_observer_frame(event_id).is_some() {
             if let Some(confirmation) = self.observer_priority_confirmations.remove(event_id) {
                 let _ = confirmation.send(Ok(()));
             }
-            return;
-        }
-        if let Some(index) = self
-            .observer_in_flight
-            .iter()
-            .position(|event| event.id.to_hex() == event_id)
-        {
-            self.observer_in_flight.remove(index);
         }
     }
 
-    /// Remove and return the exact unresolved observer write named by an OK.
-    fn take_observer_in_flight(&mut self, event_id: &str) -> Option<Box<Event>> {
+    /// Remove and return an exact unresolved observer write from either its
+    /// socket-bound acknowledgement window or its rate-gated retry FIFO.
+    fn take_unresolved_observer_frame(&mut self, event_id: &str) -> Option<Box<Event>> {
         if let Some(index) = self
             .observer_priority_in_flight
             .iter()
@@ -1615,17 +1665,39 @@ impl BgState {
         {
             return self.observer_priority_in_flight.remove(index);
         }
-        let index = self
+        if let Some(index) = self
+            .gated_observer_priority_pending
+            .iter()
+            .position(|event| event.id.to_hex() == event_id)
+        {
+            return self.gated_observer_priority_pending.remove(index);
+        }
+        if let Some(index) = self
             .observer_in_flight
             .iter()
+            .position(|event| event.id.to_hex() == event_id)
+        {
+            return self.observer_in_flight.remove(index);
+        }
+        let index = self
+            .gated_observer_pending
+            .iter()
             .position(|event| event.id.to_hex() == event_id)?;
-        self.observer_in_flight.remove(index)
+        self.gated_observer_pending.remove(index)
     }
 
     /// Retry the exact rate-limited observer frame ahead of telemetry that was
     /// parked after it was first written.
     fn requeue_rate_limited_observer_frame(&mut self, event_id: &str) -> bool {
-        let Some(event) = self.take_observer_in_flight(event_id) else {
+        if self
+            .gated_observer_priority_pending
+            .iter()
+            .chain(self.gated_observer_pending.iter())
+            .any(|event| event.id.to_hex() == event_id)
+        {
+            return true;
+        }
+        let Some(event) = self.take_unresolved_observer_frame(event_id) else {
             return false;
         };
         if is_priority_observer_frame(&event) {
@@ -1644,7 +1716,7 @@ impl BgState {
     /// The caller logs the exact relay denial; the counter preserves a bounded
     /// summary signal even after the frame leaves the acknowledgement window.
     fn record_terminal_observer_denial(&mut self, event_id: &str, denial: &str) -> bool {
-        if self.take_observer_in_flight(event_id).is_none() {
+        if self.take_unresolved_observer_frame(event_id).is_none() {
             return false;
         }
         if let Some(confirmation) = self.observer_priority_confirmations.remove(event_id) {
@@ -4231,6 +4303,11 @@ async fn try_autonomous_reconnect(
             }
         }
 
+        // Any writes and subscription timestamps created on this failed
+        // candidate belong to that socket. Preserve unresolved publications,
+        // but never let its socket-bound authority reach the next candidate.
+        state.abandon_failed_reconnect_candidate();
+
         // Backoff sleep between ladder attempts (shared by handshake-drop and connect-error).
         // Skip sleep on the final attempt — we'll fall through to the caller.
         // Use select! so Shutdown commands are honoured during sleep.
@@ -4381,6 +4458,11 @@ async fn wait_for_reconnect(
                 warn!("relay reconnect failed: {e}");
             }
         }
+
+        // A failed candidate may have written observer frames during replay or
+        // command drain. Requeue every unresolved frame and revoke timestamps
+        // that were authoritative only for that discarded socket.
+        state.abandon_failed_reconnect_candidate();
 
         // Persist ladder position before sleeping — if shutdown arrives mid-sleep,
         // the next session resumes from here rather than restarting at 0.
@@ -4619,6 +4701,21 @@ fn jittered_duration(base: Duration) -> Duration {
     base.mul_f64(factor)
 }
 
+/// Add 0–20% positive jitter to an explicit relay reset horizon.
+///
+/// Backoff attempts may safely jitter earlier, but a server-provided
+/// `retry in Ns` value is a lower bound: retrying before it expires only
+/// consumes another denied attempt and can perpetuate the shared gate.
+fn rate_limit_retry_duration(base: Duration) -> Duration {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos();
+    // factor ∈ [1.0, 1.2)
+    let factor = 1.0 + (nanos as f64 / u32::MAX as f64) * 0.2;
+    base.mul_f64(factor)
+}
+
 /// Classify a `RelayError` as a DNS resolution failure.
 ///
 /// Matches the OS-level "name not found" strings surfaced by the platform's
@@ -4725,6 +4822,20 @@ fn is_priority_observer_frame(event: &Event) -> bool {
             OBSERVER_PRIORITY_TAG,
             OBSERVER_CONTROL_RESULT_PRIORITY,
         )
+}
+
+fn is_exact_terminal_observer_frame(event: &Event) -> bool {
+    if event.kind.as_u16() as u32 != KIND_AGENT_OBSERVER_FRAME {
+        return false;
+    }
+    let mut priority_tags = event
+        .tags
+        .iter()
+        .filter(|tag| tag.as_slice().first().map(String::as_str) == Some(OBSERVER_PRIORITY_TAG));
+    priority_tags.next().is_some_and(|tag| {
+        tag.as_slice().len() == 2
+            && tag.as_slice().get(1).map(String::as_str) == Some(OBSERVER_CONTROL_RESULT_PRIORITY)
+    }) && priority_tags.next().is_none()
 }
 
 fn event_has_single_tag_value(event: &nostr::Event, tag_name: &str, expected: &str) -> bool {
@@ -8279,6 +8390,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn terminal_confirmation_window_outlives_maximum_accepted_rate_limit_gate() {
+        assert!(
+            TERMINAL_OBSERVER_ACK_TIMEOUT
+                > Duration::from_secs(MAX_RATE_LIMIT_RETRY_SECS).mul_f64(1.2),
+            "terminal confirmation must remain live beyond the largest accepted retry hint plus maximum jitter"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn oversized_rate_limit_hint_is_bounded_below_terminal_confirmation_window() {
+        let mut state = BgState::new();
+        let now = tokio::time::Instant::now();
+        let deadline = state.set_rate_limit_gate(u64::MAX);
+        assert!(
+            deadline.duration_since(now) >= Duration::from_secs(MAX_RATE_LIMIT_RETRY_SECS),
+            "an explicit reset hint must never be retried before its advertised window"
+        );
+        assert!(
+            deadline.duration_since(now)
+                <= Duration::from_secs(MAX_RATE_LIMIT_RETRY_SECS).mul_f64(1.2),
+            "untrusted retry hints must not extend the local gate beyond its bounded contract"
+        );
+        assert!(
+            deadline.duration_since(now) < TERMINAL_OBSERVER_ACK_TIMEOUT,
+            "the accepted gate must expire while the terminal publisher is still awaiting proof"
+        );
+    }
+
     /// Build a signed observer telemetry frame (kind 24200) for gate tests.
     fn make_observer_frame(keys: &Keys) -> Event {
         let recipient = Keys::generate();
@@ -8751,6 +8891,101 @@ mod tests {
         assert!(state.observer_in_flight.is_empty());
     }
 
+    #[test]
+    fn failed_reconnect_candidate_requeues_all_observer_writes_and_clears_socket_authority() {
+        let mut state = BgState::new();
+        let keys = Keys::generate();
+        let ordinary = make_observer_frame(&keys);
+        let terminal = make_priority_observer_frame(&keys);
+        let channel_id = Uuid::new_v4();
+
+        state.track_observer_in_flight(Box::new(ordinary.clone()));
+        state.track_observer_in_flight(Box::new(terminal.clone()));
+        state.observer_control_subscribed_at = Some(unix_now_secs());
+        state
+            .channel_subscribed_at
+            .insert(channel_id, unix_now_secs());
+
+        state.abandon_failed_reconnect_candidate();
+
+        assert_eq!(
+            state
+                .gated_observer_pending
+                .iter()
+                .map(|event| event.id)
+                .collect::<Vec<_>>(),
+            [ordinary.id]
+        );
+        assert_eq!(
+            state
+                .gated_observer_priority_pending
+                .iter()
+                .map(|event| event.id)
+                .collect::<Vec<_>>(),
+            [terminal.id]
+        );
+        assert!(state.observer_in_flight.is_empty());
+        assert!(state.observer_priority_in_flight.is_empty());
+        assert!(state.observer_control_subscribed_at.is_none());
+        assert!(state.channel_subscribed_at.is_empty());
+    }
+
+    #[test]
+    fn delayed_ok_after_notice_resolves_terminal_confirmation_exactly_once() {
+        let mut state = BgState::new();
+        let terminal = make_priority_observer_frame(&Keys::generate());
+        let terminal_id = terminal.id.to_hex();
+        let (confirmation_tx, mut confirmation_rx) = oneshot::channel();
+
+        assert!(state.track_observer_in_flight(Box::new(terminal.clone())));
+        state.record_observer_confirmation(terminal_id.clone(), true, Some(confirmation_tx), true);
+        state.requeue_observer_in_flight();
+
+        state.acknowledge_observer_frame(&terminal_id);
+        assert_eq!(
+            confirmation_rx.try_recv(),
+            Ok(Ok(())),
+            "the delayed accepted OK must resolve the original publisher"
+        );
+        assert!(
+            !state.contains_observer_priority_event(&terminal_id),
+            "accepted terminal proof must not remain queued for duplicate resend"
+        );
+        state.acknowledge_observer_frame(&terminal_id);
+        assert_eq!(
+            confirmation_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Closed),
+            "a duplicate OK cannot resolve the publisher twice"
+        );
+    }
+
+    #[test]
+    fn delayed_terminal_denial_after_notice_resolves_confirmation_without_resend() {
+        let mut state = BgState::new();
+        let terminal = make_priority_observer_frame(&Keys::generate());
+        let terminal_id = terminal.id.to_hex();
+        let (confirmation_tx, mut confirmation_rx) = oneshot::channel();
+
+        assert!(state.track_observer_in_flight(Box::new(terminal)));
+        state.record_observer_confirmation(terminal_id.clone(), true, Some(confirmation_tx), true);
+        state.requeue_observer_in_flight();
+
+        assert!(state.record_terminal_observer_denial(&terminal_id, "blocked: policy denied"));
+        assert_eq!(
+            confirmation_rx.try_recv(),
+            Ok(Err(
+                "relay denied terminal observer frame: blocked: policy denied".to_string()
+            ))
+        );
+        assert!(!state.contains_observer_priority_event(&terminal_id));
+        assert_eq!(state.observer_terminal_denied, 1);
+        assert!(
+            !state.record_terminal_observer_denial(&terminal_id, "blocked: policy denied"),
+            "a duplicate denial must not retire or count the same event twice"
+        );
+        assert_eq!(state.observer_terminal_denied, 1);
+    }
+
     #[tokio::test]
     async fn rate_limited_ok_false_requeues_exact_observer_frame_and_arms_gate() {
         let (mut ws, _server) = test_ws_pair().await;
@@ -8808,6 +9043,96 @@ mod tests {
                 .collect::<Vec<_>>(),
             [first.id],
             "unrelated in-flight frames stay pending their own OK"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sixty_second_terminal_quota_waits_for_reset_then_accepts_delayed_ok() {
+        let (mut ws, mut server) = test_ws_pair().await;
+        let (event_tx, _event_rx) = mpsc::channel(1);
+        let (observer_control_tx, _observer_control_rx) = mpsc::channel(1);
+        let mut state = BgState::new();
+        let keys = Keys::generate();
+        let terminal = make_priority_observer_frame(&keys);
+        let terminal_id = terminal.id.to_hex();
+        let (confirmation_tx, mut confirmation_rx) = oneshot::channel();
+
+        // Socket readiness uses wall-clock I/O; pause only the quota interval
+        // whose lower bound this test proves.
+        tokio::time::resume();
+        assert!(
+            execute_connected_command(
+                &mut ws,
+                &mut state,
+                "agent-pubkey",
+                RelayCommand::PublishEvent {
+                    event: Box::new(terminal),
+                    admission: Some(confirmation_tx),
+                },
+            )
+            .await
+        );
+        assert_eq!(next_test_frame(&mut server).await[0], "EVENT");
+        tokio::time::pause();
+
+        let ok_false = Message::Text(
+            serde_json::to_string(&json!([
+                "OK",
+                terminal_id,
+                false,
+                "rate-limited: quota exceeded; retry in 60s"
+            ]))
+            .expect("serialize OK false")
+            .into(),
+        );
+        assert!(
+            handle_ws_message(
+                ok_false,
+                &mut ws,
+                &event_tx,
+                &observer_control_tx,
+                &mut state,
+                &keys,
+                "ws://localhost:3000",
+                &keys.public_key().to_hex(),
+                None,
+            )
+            .await
+        );
+        let gate = state.rate_limit_gate.expect("sixty-second gate");
+        let remaining = gate.duration_since(tokio::time::Instant::now());
+        assert!(
+            remaining >= Duration::from_secs(60),
+            "the client must never retry before the relay's honest reset horizon"
+        );
+        assert!(
+            remaining < TERMINAL_OBSERVER_ACK_TIMEOUT,
+            "the original confirmation owner must outlive the full retry gate"
+        );
+
+        tokio::time::advance(Duration::from_secs(59)).await;
+        assert!(state.check_rate_gate().is_some());
+        assert_eq!(
+            drain_gated_observer_pending(&mut ws, &mut state, 1).await,
+            GatedObserverDrainOutcome::Sent(0),
+            "no terminal resend is allowed before the advertised reset"
+        );
+
+        tokio::time::advance(Duration::from_secs(14)).await;
+        assert!(state.check_rate_gate().is_none());
+        tokio::time::resume();
+        assert_eq!(
+            drain_gated_observer_pending(&mut ws, &mut state, 1).await,
+            GatedObserverDrainOutcome::Sent(1)
+        );
+        tokio::task::yield_now().await;
+        assert_eq!(next_test_frame(&mut server).await[0], "EVENT");
+
+        state.acknowledge_observer_frame(&terminal_id);
+        assert_eq!(
+            confirmation_rx.try_recv(),
+            Ok(Ok(())),
+            "the delayed accepted OK must resolve the original terminal publication"
         );
     }
 
@@ -8957,6 +9282,92 @@ mod tests {
             Err(RelayError::Http(message))
                 if message == "terminal observer priority state is full"
         ));
+    }
+
+    #[tokio::test]
+    async fn terminal_publisher_rejects_non_terminal_shape_before_queue_admission() {
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(4);
+        let publisher = RelayEventPublisher { cmd_tx };
+        let ordinary = make_observer_frame(&Keys::generate());
+
+        assert!(matches!(
+            publisher.publish_terminal_event(ordinary).await,
+            Err(RelayError::Http(message))
+                if message == "terminal observer event must be kind 24200 with exactly one control-result priority marker"
+        ));
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "invalid terminal shape must never enter the relay command queue"
+        );
+
+        let terminal = make_priority_observer_frame(&Keys::generate());
+        let mut wrong_kind_value = serde_json::to_value(terminal).expect("serialize terminal");
+        wrong_kind_value["kind"] = json!(KIND_TYPING_INDICATOR);
+        let wrong_kind: Event =
+            serde_json::from_value(wrong_kind_value).expect("deserialize wrong-kind event");
+        assert!(matches!(
+            publisher.publish_terminal_event(wrong_kind).await,
+            Err(RelayError::Http(message))
+                if message == "terminal observer event must be kind 24200 with exactly one control-result priority marker"
+        ));
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "a priority marker on the wrong event kind must never reach a socket"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_publisher_rejects_duplicate_priority_marker_before_queue_admission() {
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(4);
+        let publisher = RelayEventPublisher { cmd_tx };
+        let terminal = make_priority_observer_frame(&Keys::generate());
+        let mut value = serde_json::to_value(terminal).expect("serialize terminal");
+        value["tags"]
+            .as_array_mut()
+            .expect("terminal tags")
+            .push(json!([
+                OBSERVER_PRIORITY_TAG,
+                OBSERVER_CONTROL_RESULT_PRIORITY
+            ]));
+        let duplicate_marker: Event =
+            serde_json::from_value(value).expect("deserialize duplicate marker event");
+
+        assert!(matches!(
+            publisher.publish_terminal_event(duplicate_marker).await,
+            Err(RelayError::Http(message))
+                if message == "terminal observer event must be kind 24200 with exactly one control-result priority marker"
+        ));
+        assert!(cmd_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn terminal_publisher_rejects_extended_priority_marker_before_queue_admission() {
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(4);
+        let publisher = RelayEventPublisher { cmd_tx };
+        let terminal = make_priority_observer_frame(&Keys::generate());
+        let mut value = serde_json::to_value(terminal).expect("serialize terminal");
+        let priority = value["tags"]
+            .as_array_mut()
+            .expect("terminal tags")
+            .iter_mut()
+            .find(|tag| tag[0] == OBSERVER_PRIORITY_TAG)
+            .expect("priority marker");
+        priority
+            .as_array_mut()
+            .expect("priority tag")
+            .push(json!("extra"));
+        let extended_marker: Event =
+            serde_json::from_value(value).expect("deserialize extended marker event");
+
+        assert!(matches!(
+            publisher.publish_terminal_event(extended_marker).await,
+            Err(RelayError::Http(message))
+                if message == "terminal observer event must be kind 24200 with exactly one control-result priority marker"
+        ));
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "an extended marker must not weaken the exact terminal frame contract"
+        );
     }
 
     #[tokio::test]
