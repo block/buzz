@@ -64,7 +64,7 @@ function devComposerModeKey(mode: DevComposerMode): string {
  *   opens the split-screen side chat; Escape unwinds side chat → card →
  *   navigator.
  *
- * Ctrl+O (anywhere) or `/` (empty composer) opens the command palette.
+ * ⌘K (anywhere) or `/` (empty composer) opens the command palette.
  */
 type ShellView = "fresh" | "navigator" | "channel";
 
@@ -680,7 +680,7 @@ export function DevModeShell({
 
   const hint =
     view === "navigator"
-      ? "↑↓: preview channels · enter: open · esc: back · ⌃O: palette"
+      ? "↑↓: preview channels · enter: open · esc: back · ⌘K: palette"
       : view === "channel"
         ? subDraftActive
           ? "tab: target · enter: spawn new tab · esc: cancel"
@@ -835,7 +835,7 @@ export function DevModeShell({
               onClick={() => openPalette()}
               type="button"
             >
-              palette ⌃O
+              palette ⌘K
             </button>
             <button
               className="cursor-pointer hover:text-foreground"
@@ -918,7 +918,7 @@ export function DevModeShell({
                     Type a prompt and hit enter — it spawns a channel and puts
                     the selected target to work. Tab cycles between chat and{" "}
                     {modes.length - 1} agent{modes.length === 2 ? "" : "s"}.
-                    Press ⌃O for the command palette.
+                    Press ⌘K for the command palette.
                   </div>
                 </div>
               </div>

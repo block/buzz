@@ -5,7 +5,7 @@ import type { Channel } from "@/shared/api/types";
 /**
  * Window-level developer mode shortcuts:
  *
- * - ⌃O toggles the command palette
+ * - ⌘K toggles the command palette
  * - ⌘N jumps to the fresh composer (new channel)
  * - ⌘T drafts a side chat in the open channel
  * - ⌘⇧T drafts a new tab (sub-channel) of the open main
@@ -35,12 +35,22 @@ export function useDevModeShortcuts({
   onOpenChannel: (channelId: string) => void;
 }) {
   React.useEffect(() => {
-    const handleWindowKeyDown = (event: KeyboardEvent) => {
-      if (event.ctrlKey && !event.metaKey && event.key.toLowerCase() === "o") {
+    // ⌘K must beat the standard UI's global ⌘K search binding (a window
+    // bubble listener that yields when `event.defaultPrevented`), so the
+    // palette toggle listens in the capture phase.
+    const handlePaletteKeyDown = (event: KeyboardEvent) => {
+      if (
+        event.metaKey &&
+        !event.ctrlKey &&
+        !event.altKey &&
+        !event.shiftKey &&
+        event.key.toLowerCase() === "k"
+      ) {
         event.preventDefault();
         onTogglePalette();
-        return;
       }
+    };
+    const handleWindowKeyDown = (event: KeyboardEvent) => {
       if (!event.metaKey || event.ctrlKey || event.altKey) return;
       const key = event.key.toLowerCase();
       if (event.shiftKey) {
@@ -70,8 +80,12 @@ export function useDevModeShortcuts({
         onOpenChannel(tabs[(index + direction + tabs.length) % tabs.length].id);
       }
     };
+    window.addEventListener("keydown", handlePaletteKeyDown, true);
     window.addEventListener("keydown", handleWindowKeyDown);
-    return () => window.removeEventListener("keydown", handleWindowKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handlePaletteKeyDown, true);
+      window.removeEventListener("keydown", handleWindowKeyDown);
+    };
   }, [
     activeChannel,
     activeMainChannel,

@@ -82,7 +82,7 @@ const SETTINGS_ENTRIES: { section: SettingsSection; label: string }[] = [
 
 /**
  * Amp-style command palette for developer mode: channel search across every
- * session plus management/configuration actions. Opened with Ctrl+O anywhere
+ * session plus management/configuration actions. Opened with ⌘K anywhere
  * in the shell, or `/` in an empty composer.
  */
 export function DevCommandPalette({

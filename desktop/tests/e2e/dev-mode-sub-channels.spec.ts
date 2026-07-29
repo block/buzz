@@ -129,7 +129,7 @@ test("+ tab drafts a prompt that spawns and announces a sub-channel", async ({
 test("palette offers a new tab action inside a channel", async ({ page }) => {
   await openDevModeChannel(page, "general");
 
-  await page.keyboard.press("Control+o");
+  await page.keyboard.press("Meta+k");
   await page.getByTestId("dev-mode-palette-input").pressSequentially("new tab");
   const entries = page.getByTestId("dev-mode-palette-entry");
   await expect(entries.first()).toContainText("new tab in # general");
@@ -172,7 +172,7 @@ test("palette rename edits a tab's suffix and cascades from the parent", async (
   // Renaming a tab only edits its suffix — the parent prefix is the link.
   const tabs = page.getByTestId("dev-mode-channel-tab");
   await tabs.nth(1).click();
-  await page.keyboard.press("Control+o");
+  await page.keyboard.press("Meta+k");
   const input = page.getByTestId("dev-mode-palette-input");
   await input.pressSequentially("rename");
   const entries = page.getByTestId("dev-mode-palette-entry");
@@ -189,7 +189,7 @@ test("palette rename edits a tab's suffix and cascades from the parent", async (
 
   // Renaming the parent cascades: the sub follows and stays a tab.
   await tabs.nth(0).click();
-  await page.keyboard.press("Control+o");
+  await page.keyboard.press("Meta+k");
   await input.pressSequentially("rename");
   await expect(entries.first()).toContainText("rename # general");
   await page.keyboard.press("Enter");

@@ -54,7 +54,7 @@ test("typed action verb outranks channel-name matches in the palette", async ({
     await w.__BUZZ_E2E_INVALIDATE_CHANNELS__?.();
   });
 
-  await page.keyboard.press("Control+o");
+  await page.keyboard.press("Meta+k");
   const palette = page.getByTestId("dev-mode-palette");
   await expect(palette).toBeVisible();
   await page.getByTestId("dev-mode-palette-input").pressSequentially("archiv");
@@ -91,7 +91,7 @@ test("palette searches open channels the user hasn't joined and joins on enter",
     await w.__BUZZ_E2E_INVALIDATE_CHANNELS__?.();
   });
 
-  await page.keyboard.press("Control+o");
+  await page.keyboard.press("Meta+k");
   const palette = page.getByTestId("dev-mode-palette");
   await expect(palette).toBeVisible();
   await page.getByTestId("dev-mode-palette-input").pressSequentially("growth");
@@ -115,7 +115,7 @@ test("archiving a chat lands on the most recent non-pinned chat", async ({
 }) => {
   await openDevModeChannel(page, "general");
 
-  await page.keyboard.press("Control+o");
+  await page.keyboard.press("Meta+k");
   await page.getByTestId("dev-mode-palette-input").pressSequentially("archive");
   const entries = page.getByTestId("dev-mode-palette-entry");
   await expect(entries.first()).toContainText("archive # general");
