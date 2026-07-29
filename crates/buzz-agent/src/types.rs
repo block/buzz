@@ -226,6 +226,19 @@ pub enum TurnTotalState {
 }
 
 impl TurnTotalState {
+    /// Add two exact token counts with overflow protection.
+    ///
+    /// Returns `Exact(acc + n)` on success or `Unknown` on overflow.
+    /// This is the single implementation of the checked-add / overflow-poisons
+    /// contract; both `fold()` and `merge_session()` call this helper so a
+    /// change to overflow semantics needs to be made in exactly one place.
+    fn checked_exact_sum(acc: u64, n: u64) -> TurnTotalState {
+        match acc.checked_add(n) {
+            Some(sum) => TurnTotalState::Exact(sum),
+            None => TurnTotalState::Unknown,
+        }
+    }
+
     /// Fold one provider-reported total into the current state.
     ///
     /// `total`: `Some(n)` when the provider included a genuine total on this
@@ -233,9 +246,8 @@ impl TurnTotalState {
     /// response that omits usage). Absence of a total on any usage-bearing
     /// response poisons the whole turn.
     ///
-    /// Uses checked addition: overflow is treated the same as a missing total
-    /// (i.e. the state transitions to `Unknown`) because a saturated value
-    /// would not be a genuine provider-reported total.
+    /// Overflow is handled by `checked_exact_sum`: a saturated value would
+    /// not be a genuine provider-reported total, so overflow → `Unknown`.
     pub fn fold(self, total: Option<u64>) -> TurnTotalState {
         match (self, total) {
             // Already poisoned — stays Unknown regardless.
@@ -244,24 +256,20 @@ impl TurnTotalState {
             (_, None) => TurnTotalState::Unknown,
             // First response with a total.
             (TurnTotalState::Unseen, Some(n)) => TurnTotalState::Exact(n),
-            // Subsequent response — checked add; overflow poisons rather than saturates.
-            (TurnTotalState::Exact(acc), Some(n)) => match acc.checked_add(n) {
-                Some(sum) => TurnTotalState::Exact(sum),
-                None => TurnTotalState::Unknown,
-            },
+            // Subsequent response — delegate to the shared checked-sum helper.
+            (TurnTotalState::Exact(acc), Some(n)) => Self::checked_exact_sum(acc, n),
         }
     }
 
     /// Merge a completed turn's total state into the session-cumulative state.
     ///
-    /// This is the turn→session boundary accumulation. It follows the same
-    /// checked-add / overflow-poisons contract as `fold()`:
+    /// This is the turn→session boundary accumulation:
     /// - An `Unseen` turn (no usage-bearing responses) leaves the cumulative unchanged.
     /// - Any `Unknown` side poisons the session permanently.
-    /// - Two `Exact` values are added with overflow → `Unknown`.
+    /// - Two `Exact` values are summed via `checked_exact_sum`; overflow → `Unknown`.
     ///
-    /// Centralizing here ensures both the per-response fold and the turn→session
-    /// merge share one implementation of the exact-only invariant.
+    /// The checked-add logic lives in `checked_exact_sum`; both this function and
+    /// `fold()` call that helper so overflow semantics are defined once.
     pub fn merge_session(self, turn: TurnTotalState) -> TurnTotalState {
         match (self, turn) {
             // Either side poisoned → session is poisoned.
@@ -270,11 +278,10 @@ impl TurnTotalState {
             (acc, TurnTotalState::Unseen) => acc,
             // First exact turn — adopt its value.
             (TurnTotalState::Unseen, TurnTotalState::Exact(n)) => TurnTotalState::Exact(n),
-            // Add to running exact sum; overflow poisons.
-            (TurnTotalState::Exact(acc), TurnTotalState::Exact(n)) => match acc.checked_add(n) {
-                Some(sum) => TurnTotalState::Exact(sum),
-                None => TurnTotalState::Unknown,
-            },
+            // Add to running exact sum — delegate to the shared checked-sum helper.
+            (TurnTotalState::Exact(acc), TurnTotalState::Exact(n)) => {
+                Self::checked_exact_sum(acc, n)
+            }
         }
     }
 
