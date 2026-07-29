@@ -122,6 +122,7 @@ export function DevModeShell() {
   const activeChannel =
     view === "channel" ? findChannel(activeSessionId) : null;
   const previewChannel = view === "navigator" ? findChannel(navigatorId) : null;
+  const topBarChannel = activeChannel ?? previewChannel;
   // A stored id whose channel vanished (or is still propagating) renders as
   // the fresh-session state; navigation starts from what is actually shown.
   const effectiveSessionId = activeChannel?.id ?? null;
@@ -512,12 +513,29 @@ export function DevModeShell() {
       <div
         className={cn(
           "flex h-[40px] shrink-0 cursor-default select-none items-center justify-between border-b border-border/60 pr-4 font-mono text-xs text-muted-foreground",
-          macChrome ? "pl-[80px]" : "pl-4",
+          macChrome ? "pl-[88px]" : "pl-4",
         )}
         data-tauri-drag-region
       >
-        <span className="pointer-events-none">buzz · developer mode</span>
-        <div className="flex items-center gap-3">
+        <span
+          className={cn(
+            "pointer-events-none flex min-w-0 items-baseline gap-2 whitespace-nowrap",
+            macChrome && "translate-y-[3px]",
+          )}
+        >
+          buzz · developer mode
+          {topBarChannel ? (
+            <span className="truncate text-foreground">
+              # {topBarChannel.name}
+            </span>
+          ) : null}
+        </span>
+        <div
+          className={cn(
+            "flex shrink-0 items-center gap-3",
+            macChrome && "translate-y-[3px]",
+          )}
+        >
           <button
             className="cursor-pointer hover:text-foreground"
             onClick={() => setPaletteOpen(true)}
