@@ -6,6 +6,8 @@ import {
   type MentionStyle,
 } from "@/features/dev-mode/lib/highlightContent";
 import { cn } from "@/shared/lib/cn";
+import { Markdown } from "@/shared/ui/markdown";
+import type { ImetaLookup } from "@/shared/ui/markdown/types";
 
 /**
  * Block-level markdown for developer-mode transcripts, layered over the
@@ -21,11 +23,34 @@ const HEADING_RE = /^(#{1,6})\s+(.+)$/;
 const LIST_ITEM_RE = /^(\s*)(?:([-*+])|(\d{1,3})[.)])\s+(.+)$/;
 const HR_RE = /^ {0,3}([-*_])\s*(?:\1\s*){2,}$/;
 const QUOTE_RE = /^ {0,3}>\s?(.*)$/;
+/** A standalone `![alt](url)` line — the shape `buildOutgoingMessage` emits
+ * for image/video attachments (URLs are paren- and space-free). */
+const MEDIA_LINE_RE = /^!\[([^\]]*)\]\((\S+)\)\s*$/;
+
+/**
+ * One attached image or video in a dev-mode transcript, rendered through the
+ * standard `Markdown` component so developer mode inherits the lightbox,
+ * context menus, video controls, and relay URL handling.
+ */
+function DevMediaBlock({
+  line,
+  imetaByUrl,
+}: {
+  line: string;
+  imetaByUrl: ImetaLookup | undefined;
+}) {
+  return (
+    <div className="my-1 min-w-0 max-w-md" data-block-media="">
+      <Markdown content={line} imetaByUrl={imetaByUrl} />
+    </div>
+  );
+}
 
 export function renderDevMarkdown(
   content: string,
   mentions: MentionStyle[] = [],
   channelRefs?: ChannelRefOptions,
+  imetaByUrl?: ImetaLookup,
 ): React.ReactNode[] {
   const inline = (text: string) =>
     renderHighlightedContent(text, mentions, channelRefs);
@@ -124,6 +149,20 @@ export function renderDevMarkdown(
         >
           {inline(heading[2])}
         </div>,
+      );
+      i += 1;
+      continue;
+    }
+
+    const media = MEDIA_LINE_RE.exec(line.trim());
+    if (media) {
+      flushParagraph();
+      nodes.push(
+        <DevMediaBlock
+          key={`m${nodes.length}`}
+          imetaByUrl={imetaByUrl}
+          line={line.trim()}
+        />,
       );
       i += 1;
       continue;

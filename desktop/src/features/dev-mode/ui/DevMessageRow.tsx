@@ -1,3 +1,5 @@
+import * as React from "react";
+
 import type { AuthorColorResolver } from "@/features/dev-mode/lib/authorColors";
 import { useChannelRefs } from "@/features/dev-mode/lib/channelRefs";
 import { renderDevMarkdown } from "@/features/dev-mode/lib/devMarkdown";
@@ -13,6 +15,7 @@ import type {
 import type { RelayEvent } from "@/shared/api/types";
 import { KIND_SYSTEM_MESSAGE } from "@/shared/constants/kinds";
 import { cn } from "@/shared/lib/cn";
+import { parseImetaTags } from "@/shared/ui/markdown/parseImeta";
 
 function formatTime(createdAt: number) {
   return new Date(createdAt * 1_000).toLocaleTimeString([], {
@@ -70,6 +73,11 @@ export function DevMessageRow({
   resolveIsAgent: AgentResolver;
 }) {
   const { channels, openChannel } = useChannelRefs();
+  // Stable per-event identity so the media renderer's memo holds.
+  const imetaByUrl = React.useMemo(
+    () => parseImetaTags(event.tags),
+    [event.tags],
+  );
 
   if (event.kind === KIND_SYSTEM_MESSAGE) {
     return null;
@@ -128,10 +136,12 @@ export function DevMessageRow({
           event.pending && "text-muted-foreground",
         )}
       >
-        {renderDevMarkdown(bodyContent, mentionStyles, {
-          channels,
-          onOpen: openChannel,
-        })}
+        {renderDevMarkdown(
+          bodyContent,
+          mentionStyles,
+          { channels, onOpen: openChannel },
+          imetaByUrl,
+        )}
       </div>
     </div>
   );

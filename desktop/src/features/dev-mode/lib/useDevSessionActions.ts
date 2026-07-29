@@ -8,6 +8,10 @@ import {
   useCreateChannelMutation,
 } from "@/features/channels/hooks";
 import { useSendMessageMutation } from "@/features/messages/hooks";
+import {
+  buildOutgoingMessage,
+  type ImetaMedia,
+} from "@/features/messages/lib/imetaMediaMarkdown";
 import { addChannelMembers, getCanvas, setCanvas } from "@/shared/api/tauri";
 import { updateChannel } from "@/shared/api/tauriChannels";
 import type { Channel, Identity } from "@/shared/api/types";
@@ -59,7 +63,9 @@ async function ensureAgentInChannel(channelId: string, target: DevAgentTarget) {
   const failure = result.errors.find(
     (error) => normalizePubkey(error.pubkey) === normalizePubkey(target.pubkey),
   );
-  if (failure) {
+  // "Already a member" satisfies the goal — the membership snapshot this
+  // check ran against can be stale right after a prior send added the agent.
+  if (failure && !/already a member/i.test(failure.error)) {
     throw new Error(failure.error);
   }
 }
@@ -284,6 +290,7 @@ export function useDevSessionActions(identity: Identity | undefined) {
       mode: DevComposerMode,
       parentEventId?: string,
       mentions: MentionRecord[] = [],
+      media: ImetaMedia[] = [],
     ) => {
       // Sub-channel invariant (client-side; the relay knows nothing about
       // sub-channels): everyone in `parent--sub` must belong to `parent`.
@@ -358,14 +365,22 @@ export function useDevSessionActions(identity: Identity | undefined) {
         ]),
       ];
 
+      // Attachments append `![image|video](url)` lines to the body (the
+      // renderer keys on URLs literally present in the content) and ride as
+      // NIP-92 imeta tags — the same wire shape the standard composer sends.
+      const { content, mediaTags } = buildOutgoingMessage(
+        mode.kind === "agent"
+          ? withAgentMention(prompt, mode.target.name)
+          : prompt,
+        media,
+      );
+
       return await sendMessageMutation.mutateAsync({
         targetChannel: channel,
-        content:
-          mode.kind === "agent"
-            ? withAgentMention(prompt, mode.target.name)
-            : prompt,
+        content,
         mentionPubkeys: mentionPubkeys.length > 0 ? mentionPubkeys : undefined,
         parentEventId: parentEventId ?? null,
+        mediaTags,
       });
     },
     [findParentChannel, sendMessageMutation],

@@ -9,8 +9,11 @@ import type { DevComposerMode } from "@/features/dev-mode/lib/useDevComposerMode
 import { useMentionAutocomplete } from "@/features/dev-mode/lib/useMentionAutocomplete";
 import { DevChannelSuggestions } from "@/features/dev-mode/ui/DevChannelSuggestions";
 import { DevMentionSuggestions } from "@/features/dev-mode/ui/DevMentionSuggestions";
+import { DevComposerAttachments } from "@/features/dev-mode/ui/DevComposerAttachments";
 import { DevComposerModeLine } from "@/features/dev-mode/ui/DevComposerModeLine";
 import { DevComposerResizeHandle } from "@/features/dev-mode/ui/DevComposerResizeHandle";
+import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
+import { useMediaUpload } from "@/features/messages/lib/useMediaUpload";
 
 type DevPromptComposerProps = {
   value: string;
@@ -35,7 +38,7 @@ type DevPromptComposerProps = {
   selfPubkey: string | null;
   onChange: (value: string) => void;
   /** Mentions are the `@Name`s still present in the submitted text. */
-  onSubmit: (mentions: MentionRecord[]) => void;
+  onSubmit: (mentions: MentionRecord[], media: ImetaMedia[]) => void;
   /** Tab / Shift+Tab. */
   onCycleMode: (direction: 1 | -1) => void;
   /** ArrowUp / ArrowDown while the input is empty — channels or prompt cards. */
@@ -93,6 +96,17 @@ export function DevPromptComposer({
   const agentColor =
     mode.kind === "agent" ? resolveColor(mode.target.pubkey) : null;
 
+  // Pasted images/videos upload immediately and attach to the next send.
+  const {
+    handlePaste,
+    isUploading,
+    pendingImeta,
+    removeAttachment,
+    setPendingImeta,
+    uploadingPreviews,
+    uploadState,
+  } = useMediaUpload();
+
   // biome-ignore lint/correctness/useExhaustiveDependencies: focusSignal is an intentional focus-pull trigger
   React.useEffect(() => {
     if (active) {
@@ -121,10 +135,14 @@ export function DevPromptComposer({
 
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
+      // An upload still in flight would silently miss the send — hold Enter
+      // until the attachment chips settle.
+      if (isUploading) return;
       // Empty-input Enter is also meaningful (opens the highlighted channel
       // or the selected card's side chat), so the shell decides; busy only
       // blocks actual sends there.
-      onSubmit(mentionAutocomplete.extract(value));
+      onSubmit(mentionAutocomplete.extract(value), pendingImeta);
+      if (pendingImeta.length > 0) setPendingImeta([]);
       return;
     }
 
@@ -198,6 +216,16 @@ export function DevPromptComposer({
           />
         )}
       </div>
+      <DevComposerAttachments
+        errorMessage={
+          uploadState.status === "error"
+            ? (uploadState.message ?? "upload failed")
+            : null
+        }
+        onRemove={removeAttachment}
+        pendingImeta={pendingImeta}
+        uploadingPreviews={uploadingPreviews}
+      />
       <div className="relative flex items-start gap-2 px-4 pt-1">
         {active && autocomplete.open ? (
           <DevChannelSuggestions
@@ -235,6 +263,9 @@ export function DevPromptComposer({
           onKeyDown={handleKeyDown}
           onMouseDown={() => {
             if (!active) onReactivate?.();
+          }}
+          onPaste={(event) => {
+            if (event.clipboardData) void handlePaste(event);
           }}
           onSelect={(event) => {
             autocomplete.syncCursor(event.currentTarget);

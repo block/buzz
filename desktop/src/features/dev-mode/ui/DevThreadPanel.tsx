@@ -24,9 +24,12 @@ import {
 import { usePinnedScroll } from "@/features/dev-mode/lib/usePinnedScroll";
 import { DevChannelSuggestions } from "@/features/dev-mode/ui/DevChannelSuggestions";
 import { DevMentionSuggestions } from "@/features/dev-mode/ui/DevMentionSuggestions";
+import { DevComposerAttachments } from "@/features/dev-mode/ui/DevComposerAttachments";
 import { DevComposerModeLine } from "@/features/dev-mode/ui/DevComposerModeLine";
 import { DevComposerResizeHandle } from "@/features/dev-mode/ui/DevComposerResizeHandle";
 import { DevMessageRow } from "@/features/dev-mode/ui/DevMessageRow";
+import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
+import { useMediaUpload } from "@/features/messages/lib/useMediaUpload";
 import { useThreadReplies } from "@/features/messages/useThreadReplies";
 import type { Channel, RelayEvent } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
@@ -68,7 +71,11 @@ export function DevThreadPanel({
   /** ArrowLeft / ArrowRight while the input is empty. */
   onSwitchPane: (pane: "main" | "thread") => void;
   /** Mentions are the `@Name`s still present in the sent text. */
-  onSend: (prompt: string, mentions: MentionRecord[]) => Promise<void>;
+  onSend: (
+    prompt: string,
+    mentions: MentionRecord[],
+    media: ImetaMedia[],
+  ) => Promise<void>;
   onClose: () => void;
 }) {
   const repliesQuery = useThreadReplies(channel, root?.id ?? null);
@@ -141,16 +148,29 @@ export function DevThreadPanel({
     }
   }, [channelId, getThreadReadAt, latestVisibleAt, markThreadRead, rootId]);
 
+  // Pasted images/videos upload immediately and attach to the next send.
+  const {
+    handlePaste,
+    isUploading,
+    pendingImeta,
+    removeAttachment,
+    setPendingImeta,
+    uploadingPreviews,
+    uploadState,
+  } = useMediaUpload();
+
   const handleSubmit = () => {
     const prompt = input.trim();
-    if (!prompt || busy) return;
+    if ((!prompt && pendingImeta.length === 0) || busy || isUploading) return;
     const mentions = mentionAutocomplete.extract(prompt);
+    const media = pendingImeta;
     setBusy(true);
     setError(null);
     setInput("");
+    setPendingImeta([]);
     void (async () => {
       try {
-        await onSend(prompt, mentions);
+        await onSend(prompt, mentions, media);
       } catch (submitError) {
         setError(
           submitError instanceof Error
@@ -158,6 +178,7 @@ export function DevThreadPanel({
             : "Failed to send reply.",
         );
         setInput((current) => (current === "" ? prompt : current));
+        setPendingImeta((current) => (current.length === 0 ? media : current));
       } finally {
         setBusy(false);
       }
@@ -289,6 +310,16 @@ export function DevThreadPanel({
             mode={mode}
           />
         </div>
+        <DevComposerAttachments
+          errorMessage={
+            uploadState.status === "error"
+              ? (uploadState.message ?? "upload failed")
+              : null
+          }
+          onRemove={removeAttachment}
+          pendingImeta={pendingImeta}
+          uploadingPreviews={uploadingPreviews}
+        />
         <div className="relative flex items-start gap-2 px-3 pt-1">
           {active && autocomplete.open ? (
             <DevChannelSuggestions
@@ -324,6 +355,7 @@ export function DevThreadPanel({
             }}
             onFocus={() => onSwitchPane("thread")}
             onKeyDown={handleKeyDown}
+            onPaste={handlePaste}
             onSelect={(event) => {
               autocomplete.syncCursor(event.currentTarget);
               mentionAutocomplete.syncCursor(event.currentTarget);

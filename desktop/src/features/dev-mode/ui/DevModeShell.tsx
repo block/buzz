@@ -37,6 +37,7 @@ import { DevSplitPane } from "@/features/dev-mode/ui/DevSplitPane";
 import { DevThreadPanel } from "@/features/dev-mode/ui/DevThreadPanel";
 import { DevTranscript } from "@/features/dev-mode/ui/DevTranscript";
 import { useChannelMessagesQuery } from "@/features/messages/hooks";
+import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { cn } from "@/shared/lib/cn";
 import { isMacPlatform } from "@/shared/lib/platform";
@@ -542,9 +543,14 @@ export function DevModeShell({
   );
 
   const handleSubmit = React.useCallback(
-    (mentions: MentionRecord[] = []) => {
+    (mentions: MentionRecord[] = [], media: ImetaMedia[] = []) => {
       const prompt = input.trim();
-      if (!prompt) {
+      // A media-only send is a real send inside a channel; elsewhere the
+      // empty-input Enter keeps its navigation meaning (a fresh-composer
+      // channel needs prompt text for naming anyway).
+      const mediaOnlySend =
+        !prompt && media.length > 0 && view === "channel" && activeChannel;
+      if (!prompt && !mediaOnlySend) {
         if (view === "navigator" && navigatorId) {
           openChannelAtUnread(navigatorId);
           return;
@@ -575,7 +581,14 @@ export function DevModeShell({
             setSubDraftParentId(null);
             setActiveSessionId(channel.id);
           }
-          await sendToSession(channel, prompt, mode, undefined, mentions);
+          await sendToSession(
+            channel,
+            prompt,
+            mode,
+            undefined,
+            mentions,
+            media,
+          );
           // The conversation moved to the new prompt at the bottom.
           setSelectedRootId(null);
         } catch (submitError) {
@@ -610,7 +623,7 @@ export function DevModeShell({
   );
 
   const handleThreadSend = React.useCallback(
-    async (prompt: string, mentions: MentionRecord[]) => {
+    async (prompt: string, mentions: MentionRecord[], media: ImetaMedia[]) => {
       if (!activeChannel || !mode) {
         throw new Error("Thread is no longer available.");
       }
@@ -621,6 +634,7 @@ export function DevModeShell({
           mode,
           selectedRoot.id,
           mentions,
+          media,
         );
         return;
       }
@@ -633,6 +647,7 @@ export function DevModeShell({
         mode,
         undefined,
         mentions,
+        media,
       );
       setSelectedRootId(newRoot.id);
     },
