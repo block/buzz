@@ -215,13 +215,22 @@ echo 'Body with `backticks` and $vars stays literal.' \
 # messages get
 buzz messages get --channel "$CHANNEL_ID" | jq .
 buzz messages get --channel "$CHANNEL_ID" --limit 5 | jq .
+# Opt-in proof mode verifies each relay event before returning its full signed
+# envelope. The default read above remains sig-stripped.
+buzz messages get --channel "$CHANNEL_ID" --include-signatures \
+  | jq -e 'all(.[]; has("id") and has("pubkey") and has("kind") and
+    has("content") and has("created_at") and has("tags") and has("sig"))'
 
 # messages thread
 buzz messages thread --channel "$CHANNEL_ID" --event "$EVENT_ID" | jq .
+buzz messages thread --channel "$CHANNEL_ID" --event "$EVENT_ID" \
+  --include-signatures | jq -e 'all(.[]; has("sig"))'
 
 # messages search
 buzz messages search --query "Hello" | jq .
 buzz messages search --query "CLI test" --limit 5 | jq .
+buzz messages search --query "Hello" --include-signatures \
+  | jq -e 'all(.[]; has("sig"))'
 
 # messages edit
 buzz messages edit --event "$EVENT_ID" --content "Edited by CLI test" | jq .

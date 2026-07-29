@@ -1321,6 +1321,44 @@ pub fn normalize_events(events: &[serde_json::Value]) -> String {
     serde_json::to_string(&normalized).unwrap_or_default()
 }
 
+/// Verify and normalize raw event JSON into a complete signed Nostr envelope.
+///
+/// Unlike [`normalize_events`], this path fails closed when any event is
+/// malformed or its id/signature does not verify. The selected fields are the
+/// complete NIP-01 event needed by an external verifier; relay-only projection
+/// fields are intentionally omitted.
+pub fn normalize_verified_events(events: &[serde_json::Value]) -> Result<String, CliError> {
+    let mut normalized = Vec::with_capacity(events.len());
+    for raw in events {
+        let event_id = raw
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("<unknown>");
+        let event = serde_json::from_value::<nostr::Event>(raw.clone()).map_err(|error| {
+            CliError::Other(format!(
+                "relay returned malformed signed event {event_id}: {error}"
+            ))
+        })?;
+        event.verify().map_err(|error| {
+            CliError::Other(format!(
+                "relay returned unverifiable signed event {event_id}: {error}"
+            ))
+        })?;
+
+        normalized.push(serde_json::json!({
+            "id": raw.get("id").cloned().unwrap_or(serde_json::Value::Null),
+            "pubkey": raw.get("pubkey").cloned().unwrap_or(serde_json::Value::Null),
+            "kind": raw.get("kind").cloned().unwrap_or(serde_json::Value::Null),
+            "content": raw.get("content").cloned().unwrap_or(serde_json::Value::Null),
+            "created_at": raw.get("created_at").cloned().unwrap_or(serde_json::Value::Null),
+            "tags": raw.get("tags").cloned().unwrap_or(serde_json::Value::Null),
+            "sig": raw.get("sig").cloned().unwrap_or(serde_json::Value::Null),
+        }));
+    }
+    serde_json::to_string(&normalized)
+        .map_err(|error| CliError::Other(format!("failed to serialize signed events: {error}")))
+}
+
 /// Extract the d-tag value from a Nostr event JSON object.
 pub fn extract_d_tag(event: &serde_json::Value) -> String {
     event

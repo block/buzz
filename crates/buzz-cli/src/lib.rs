@@ -435,7 +435,7 @@ pub enum MessagesCmd {
     },
     /// Retrieve messages from a channel
     #[command(
-        after_help = "Examples:\n  buzz messages get --channel <UUID>\n  buzz messages get --channel <UUID> --limit 50 --kinds 1,1984"
+        after_help = "Examples:\n  buzz messages get --channel <UUID>\n  buzz messages get --channel <UUID> --limit 50 --kinds 1,1984\n  buzz messages get --channel <UUID> --include-signatures"
     )]
     Get {
         /// Channel UUID
@@ -453,6 +453,9 @@ pub enum MessagesCmd {
         /// Comma-separated event kinds to filter (e.g. 1,1984)
         #[arg(long)]
         kinds: Option<String>,
+        /// Verify and include the complete signed Nostr event envelope
+        #[arg(long, default_value_t = false)]
+        include_signatures: bool,
     },
     /// Get a message thread (replies to a root message)
     Thread {
@@ -468,6 +471,9 @@ pub enum MessagesCmd {
         /// Maximum reply nesting depth to include
         #[arg(long)]
         depth_limit: Option<u32>,
+        /// Verify and include the complete signed Nostr event envelope
+        #[arg(long, default_value_t = false)]
+        include_signatures: bool,
     },
     /// Full-text search across messages
     #[command(
@@ -486,6 +492,9 @@ pub enum MessagesCmd {
         /// Maximum number of results to return
         #[arg(long)]
         limit: Option<u32>,
+        /// Verify and include the complete signed Nostr event envelope
+        #[arg(long, default_value_t = false)]
+        include_signatures: bool,
     },
     /// Upvote or downvote a forum post
     Vote {
