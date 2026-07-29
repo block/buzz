@@ -20,6 +20,7 @@ import {
   sortChannelsForSidebar,
 } from "@/features/sidebar/lib/channelSortPreference";
 import { useChannelSortPreference } from "@/features/sidebar/lib/useChannelSortPreference";
+import { buildSidebarChannelGroups } from "@/features/sidebar/lib/sidebarChannelOrder";
 import { useSidebarScrollLock } from "@/features/sidebar/lib/useSidebarScrollLock";
 import { isSidebarBackgroundTarget } from "@/features/sidebar/lib/sidebarBackgroundTarget";
 import { useUnreadOverflow } from "@/features/sidebar/lib/useUnreadOverflow";
@@ -388,50 +389,26 @@ export function AppSidebar({
     [channels],
   );
 
-  const sectionBuckets = React.useMemo(() => {
-    const bySection: Record<string, Channel[]> = {};
-    const unassigned: Channel[] = [];
-    const sectionIds = new Set(channelSections.map((s) => s.id));
-
-    for (const channel of streamChannels) {
-      if (starredChannelIds?.has(channel.id)) continue;
-      const sectionId = channelAssignments[channel.id];
-      if (sectionId && sectionIds.has(sectionId)) {
-        if (!bySection[sectionId]) {
-          bySection[sectionId] = [];
-        }
-        bySection[sectionId].push(channel);
-      } else {
-        unassigned.push(channel);
-      }
-    }
-    // Apply each grouping's own sort preference; section membership itself
-    // is untouched.
-    for (const sectionId of Object.keys(bySection)) {
-      bySection[sectionId] = sortChannelsForSidebar(
-        bySection[sectionId],
-        sortModeFor(sectionSortGroupKey(sectionId)),
-      );
-    }
-    return {
-      bySection,
-      unassigned: sortChannelsForSidebar(unassigned, sortModeFor("channels")),
-    };
-  }, [
-    streamChannels,
-    channelSections,
-    channelAssignments,
-    starredChannelIds,
-    sortModeFor,
-  ]);
-
-  const starredChannels = React.useMemo(() => {
-    if (!starredChannelIds || starredChannelIds.size === 0) return [];
-    return sortChannelsForSidebar(
-      streamChannels.filter((channel) => starredChannelIds.has(channel.id)),
-      sortModeFor("starred"),
-    );
-  }, [streamChannels, starredChannelIds, sortModeFor]);
+  // Shared with keyboard channel navigation (useChannelNavigationShortcuts)
+  // so the shortcut steps through exactly the order the sidebar displays.
+  const sectionBuckets = React.useMemo(
+    () =>
+      buildSidebarChannelGroups({
+        streamChannels,
+        starredChannelIds,
+        sections: channelSections,
+        assignments: channelAssignments,
+        sortModeFor,
+      }),
+    [
+      streamChannels,
+      channelSections,
+      channelAssignments,
+      starredChannelIds,
+      sortModeFor,
+    ],
+  );
+  const starredChannels = sectionBuckets.starred;
 
   const handleCreateSectionForChannel = React.useCallback(
     (channelId: string) => {

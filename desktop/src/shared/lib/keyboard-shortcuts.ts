@@ -74,6 +74,22 @@ export const KEYBOARD_SHORTCUTS: KeyboardShortcut[] = [
     category: "Navigation",
   },
   {
+    id: "next-channel",
+    label: "Next channel",
+    description: "Go to the next channel in the sidebar",
+    keys: "⌥↓",
+    keysWindows: "Ctrl+Alt+↓",
+    category: "Navigation",
+  },
+  {
+    id: "previous-channel",
+    label: "Previous channel",
+    description: "Go to the previous channel in the sidebar",
+    keys: "⌥↑",
+    keysWindows: "Ctrl+Alt+↑",
+    category: "Navigation",
+  },
+  {
     id: "find-in-channel",
     label: "Find in channel",
     description: "Search messages in current channel",
