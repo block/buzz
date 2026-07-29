@@ -375,7 +375,9 @@ The per-event admin exemption above covers the practical cases today.
   metadata, membership, message, or reaction write and restored to archived
   after the backfill. If a later export adds messages, the state ledger causes
   the same reopen/backfill/restore sequence. The relay rejects mutations on an
-  archived channel, so this is required for pre-created channel shells.
+  archived channel, so this is required for pre-created channel shells. If the
+  process stops after reopening an adopted channel, that channel may remain
+  unarchived until the next run resumes the backfill and restores it.
 - A state file (default `<export-dir>/buzz-import-state.json`) records
   `Slack conversation id → Buzz channel UUID` (including relay-assigned native
   DM UUIDs), private-visibility repair, mapped membership writes, and

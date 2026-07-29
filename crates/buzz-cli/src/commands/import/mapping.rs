@@ -59,13 +59,16 @@ pub(super) fn load_channel_map(path: &Path) -> Result<HashMap<String, String>, C
                 ))
             })?
             .to_string();
-        if let Some(previous) = result.insert(slack_id.to_string(), buzz_id.clone()) {
-            if previous != buzz_id {
-                return Err(CliError::Usage(format!(
-                    "channel map {} maps Slack channel {slack_id} to two Buzz UUIDs",
-                    path.display()
-                )));
-            }
+        if let Some(previous) = result.get(slack_id) {
+            let detail = if previous == &buzz_id {
+                "appears more than once"
+            } else {
+                "maps to two Buzz UUIDs"
+            };
+            return Err(CliError::Usage(format!(
+                "channel map {} Slack channel {slack_id} {detail}",
+                path.display()
+            )));
         }
         if !buzz_ids.insert(buzz_id.clone()) {
             return Err(CliError::Usage(format!(
@@ -73,6 +76,7 @@ pub(super) fn load_channel_map(path: &Path) -> Result<HashMap<String, String>, C
                 path.display()
             )));
         }
+        result.insert(slack_id.to_string(), buzz_id);
     }
     if result.is_empty() {
         return Err(CliError::Usage(format!(
@@ -157,9 +161,15 @@ fn parse_csv_records(raw: &str) -> Result<Vec<Vec<String>>, &'static str> {
         }
 
         match ch {
-            '"' if field.is_empty() => quoted = true,
+            '"' if field.chars().all(char::is_whitespace) => {
+                field.clear();
+                quoted = true;
+            }
             ',' => record.push(std::mem::take(&mut field)),
-            '\n' => {
+            '\n' | '\r' => {
+                if ch == '\r' && chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
                 record.push(std::mem::take(&mut field));
                 if !record.iter().all(String::is_empty) {
                     records.push(std::mem::take(&mut record));
@@ -167,7 +177,6 @@ fn parse_csv_records(raw: &str) -> Result<Vec<Vec<String>>, &'static str> {
                     record.clear();
                 }
             }
-            '\r' if chars.peek() == Some(&'\n') => {}
             _ => field.push(ch),
         }
     }
@@ -225,6 +234,60 @@ mod tests {
         )
         .expect("write map");
         assert!(load_channel_map(&path).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rejects_duplicate_slack_id_before_target_reuse_diagnostics() {
+        let id_a = Uuid::new_v4();
+        let id_b = Uuid::new_v4();
+        let dir = std::env::temp_dir().join(format!("buzz-channel-map-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("map.json");
+
+        std::fs::write(
+            &path,
+            serde_json::json!([
+                {"slack_channel_id": "C1", "buzz_channel_id": id_a},
+                {"slack_channel_id": "C1", "buzz_channel_id": id_a},
+            ])
+            .to_string(),
+        )
+        .expect("write exact duplicate");
+        let exact = load_channel_map(&path).expect_err("exact duplicate must fail");
+        assert!(exact.to_string().contains("appears more than once"));
+
+        std::fs::write(
+            &path,
+            serde_json::json!([
+                {"slack_channel_id": "C1", "buzz_channel_id": id_a},
+                {"slack_channel_id": "C1", "buzz_channel_id": id_b},
+            ])
+            .to_string(),
+        )
+        .expect("write conflicting duplicate");
+        let conflicting = load_channel_map(&path).expect_err("conflicting duplicate must fail");
+        assert!(conflicting.to_string().contains("maps to two Buzz UUIDs"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn csv_parser_accepts_leading_space_before_quotes_and_bare_cr_records() {
+        let id = Uuid::new_v4();
+        let dir = std::env::temp_dir().join(format!("buzz-channel-map-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("map.csv");
+        std::fs::write(
+            &path,
+            format!(
+                "  \"slack_channel_id\",  \"name\",  \"buzz_channel_id\"\r\
+                   \"C1\",  \"name, with comma\",  \"{id}\"\r"
+            ),
+        )
+        .expect("write map");
+
+        let map = load_channel_map(&path).expect("load map");
+        assert_eq!(map["C1"], id.to_string());
         std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use nostr::{EventBuilder, EventId, Kind, Tag, Timestamp};
+use nostr::{EventBuilder, EventId, Tag, Timestamp};
 use uuid::Uuid;
 
 use super::export::{ts_seconds, SlackAttachment, SlackChannel, SlackExport, SlackMessage};
@@ -199,21 +199,24 @@ impl<'a> Importer<'a> {
             .map(|state| (state.prepared_for_import, state.archived_done))
             .unwrap_or((true, false));
         if !prepared_for_import || (channel.is_archived && archived_done && needs_writes) {
-            if channel.is_archived {
-                let builder = buzz_sdk::build_unarchive(uuid)
-                    .map_err(|e| CliError::Other(format!("build_unarchive failed: {e}")))?;
-                submit(self.client, builder).await.map_err(|e| {
-                    CliError::Other(format!(
-                        "could not prepare archived conversation {} for history import: {e}",
+            // The crosswalk says which channel to adopt, but not whether that
+            // Buzz channel is currently archived. Attempt the transition on
+            // every first adoption, even when Slack says the source is active.
+            // The relay's "not archived" rejection is the successful no-op
+            // case; every other failure must stop the import before writes.
+            let builder = buzz_sdk::build_unarchive(uuid)
+                .map_err(|e| CliError::Other(format!("build_unarchive failed: {e}")))?;
+            if let Err(error) = submit(self.client, builder).await {
+                if !is_already_unarchived(&error) {
+                    return Err(CliError::Other(format!(
+                        "could not prepare conversation {} for history import: {error}",
                         channel.id
-                    ))
-                })?;
+                    )));
+                }
             }
             if let Some(state) = self.state.channels.get_mut(&channel.id) {
                 state.prepared_for_import = true;
-                if channel.is_archived {
-                    state.archived_done = false;
-                }
+                state.archived_done = false;
             }
             self.flush()?;
         }
@@ -277,8 +280,10 @@ impl<'a> Importer<'a> {
     /// DM participant-set rule splitting later history across two DMs.
     async fn ensure_dm(&mut self, channel: &SlackChannel) -> Result<Uuid, CliError> {
         if let Some(state) = self.state.channels.get(&channel.id) {
-            return Uuid::parse_str(&state.uuid)
-                .map_err(|e| CliError::Other(format!("state file holds invalid UUID: {e}")));
+            let uuid = Uuid::parse_str(&state.uuid)
+                .map_err(|e| CliError::Other(format!("state file holds invalid UUID: {e}")))?;
+            ensure_dm_uuid_unclaimed(&self.state, channel, uuid)?;
+            return Ok(uuid);
         }
 
         let importer_pubkey = self.client.keys().public_key().to_hex();
@@ -315,6 +320,7 @@ impl<'a> Importer<'a> {
             })?;
         let uuid = Uuid::parse_str(channel_id)
             .map_err(|e| CliError::Other(format!("relay returned invalid DM UUID: {e}")))?;
+        ensure_dm_uuid_unclaimed(&self.state, channel, uuid)?;
         let created = payload
             .get("created")
             .and_then(serde_json::Value::as_bool)
@@ -740,7 +746,8 @@ pub(super) fn build_imported_message(
     // The prefix keeps imported history readable in clients that do not
     // understand identity-binding events. Buzz Desktop removes the redundant
     // prefix when rendering the provenance-aware message.
-    let content = format!("**{author_name}**: {}", content.trim());
+    let escaped_author_name = escape_markdown_emphasis(&author_name);
+    let content = format!("**{escaped_author_name}**: {}", content.trim());
 
     let broadcast = matches!(
         msg.subtype.as_deref(),
@@ -762,6 +769,20 @@ pub(super) fn build_imported_message(
                 .custom_created_at(Timestamp::from(ts_seconds(&msg.ts)?))
                 .tags(import_tags))
         })
+}
+
+fn escape_markdown_emphasis(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        if matches!(
+            character,
+            '\\' | '*' | '_' | '`' | '[' | ']' | '(' | ')' | '~'
+        ) {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
 }
 
 /// Sign with `client` and submit, returning the locally computed event id.
@@ -887,14 +908,12 @@ pub(super) fn build_import_dm_open(
     participant_pubkeys: &[String],
     importer_pubkey: &str,
 ) -> Result<EventBuilder, CliError> {
-    let mut tags: Vec<Tag> = participant_pubkeys
+    let participant_refs: Vec<&str> = participant_pubkeys
         .iter()
         .filter(|pubkey| pubkey.as_str() != importer_pubkey)
-        .map(|pubkey| {
-            Tag::parse(["p", pubkey.as_str()])
-                .map_err(|e| CliError::Other(format!("invalid DM participant tag: {e}")))
-        })
-        .collect::<Result<_, _>>()?;
+        .map(String::as_str)
+        .collect();
+    let mut tags = Vec::new();
     let import_id = format!("slack:{team_id}:{}", channel.id);
     tags.push(
         Tag::parse(["d", import_id.as_str()])
@@ -913,7 +932,42 @@ pub(super) fn build_import_dm_open(
         ])
         .map_err(|e| CliError::Other(format!("invalid conversation provenance tag: {e}")))?,
     );
-    Ok(EventBuilder::new(Kind::Custom(41010), "").tags(tags))
+    buzz_sdk::build_dm_open(&participant_refs)
+        .map_err(|e| CliError::Other(format!("build_dm_open failed: {e}")))
+        .map(|builder| builder.tags(tags))
+}
+
+/// Reject a relay-assigned native DM UUID that is already owned by another
+/// Slack conversation in the resume ledger. Buzz intentionally reuses a DM
+/// for the same participant set, whereas Slack exports may contain multiple
+/// distinct D/MPIM ids for that set; merging their histories is never safe.
+pub(super) fn ensure_dm_uuid_unclaimed(
+    state: &ImportState,
+    channel: &SlackChannel,
+    uuid: Uuid,
+) -> Result<(), CliError> {
+    let uuid = uuid.to_string();
+    if let Some((other, _)) = state
+        .channels
+        .iter()
+        .find(|(id, saved)| id.as_str() != channel.id && saved.uuid == uuid)
+    {
+        return Err(CliError::Usage(format!(
+            "Slack {} {} resolves to the Buzz DM already imported for {other}; \
+             refusing to merge separate histories",
+            channel.kind.as_str(),
+            channel.id
+        )));
+    }
+    Ok(())
+}
+
+pub(super) fn is_already_unarchived(error: &CliError) -> bool {
+    match error {
+        CliError::Other(message) => message.contains("channel is not archived"),
+        CliError::Relay { body, .. } => body.contains("channel is not archived"),
+        _ => false,
+    }
 }
 
 /// Deterministic Buzz channel UUID for a Slack channel, derived from the

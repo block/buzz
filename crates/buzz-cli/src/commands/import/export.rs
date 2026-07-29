@@ -1,9 +1,9 @@
 //! Slack workspace export parsing.
 //!
-//! A Slack export is a directory containing `channels.json`, `users.json`
-//! (or the Enterprise `org_users.json`), optional `groups.json`, `dms.json`,
-//! and `mpims.json`, plus one subdirectory per conversation holding
-//! `YYYY-MM-DD.json` message arrays.
+//! A Slack import accepts one or more directories that collectively contain
+//! `users.json` (or the Enterprise `org_users.json`), optional `channels.json`,
+//! `groups.json`, `dms.json`, and `mpims.json`, plus one subdirectory per
+//! conversation holding `YYYY-MM-DD.json` message arrays.
 //!
 //! Slackdump deliberately follows that native layout. It may emit public and
 //! private conversations into separate export roots, so [`SlackExport`] can
@@ -411,7 +411,7 @@ impl SlackExport {
         for dir in dirs {
             let mut records = Vec::new();
             records.extend(
-                read_json::<Vec<SlackChannel>>(&dir.join("channels.json"))?
+                read_optional_json::<Vec<SlackChannel>>(&dir.join("channels.json"))?
                     .into_iter()
                     .map(|channel| normalize_channel(channel, None, &users))
                     .collect::<Result<Vec<_>, _>>()?,
@@ -1190,6 +1190,36 @@ mod tests {
         assert!(archived.is_archived);
         assert!(archived.kind.is_private());
 
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn split_private_root_may_omit_channels_json() {
+        let base = std::env::temp_dir().join(format!(
+            "buzz-slackdump-optional-channels-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let public = base.join("public");
+        let private = base.join("private");
+        std::fs::create_dir_all(&public).expect("public dir");
+        std::fs::create_dir_all(&private).expect("private dir");
+        std::fs::write(public.join("users.json"), "[]").expect("users");
+        std::fs::write(
+            public.join("channels.json"),
+            r#"[{"id":"C1","name":"general"}]"#,
+        )
+        .expect("public channels");
+        std::fs::write(
+            private.join("groups.json"),
+            r#"[{"id":"G1","name":"secret"}]"#,
+        )
+        .expect("private groups");
+
+        let export =
+            SlackExport::load_many(&[private.clone(), public.clone()]).expect("merged export");
+        assert_eq!(export.channels.len(), 2);
+        assert!(export.channels.iter().any(|channel| channel.id == "C1"));
+        assert!(export.channels.iter().any(|channel| channel.id == "G1"));
         std::fs::remove_dir_all(&base).ok();
     }
 

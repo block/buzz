@@ -618,8 +618,8 @@ pub async fn dispatch(cmd: crate::ImportCmd, client: &BuzzClient) -> Result<(), 
 mod tests {
     use super::importer::{
         author_display, author_id, build_import_dm_open, build_imported_message, channel_uuid,
-        mapped_dm_participants, provenance_tags, render_attachment, render_slack_blocks,
-        response_payload, thread_root_key,
+        ensure_dm_uuid_unclaimed, is_already_unarchived, mapped_dm_participants, provenance_tags,
+        render_attachment, render_slack_blocks, response_payload, thread_root_key,
     };
     use super::*;
     use nostr::{EventId, Keys};
@@ -804,6 +804,46 @@ mod tests {
     }
 
     #[test]
+    fn resumed_dm_cannot_reuse_another_slack_conversations_buzz_uuid() {
+        let uuid = Uuid::new_v4();
+        let mut state = ImportState::default();
+        state.channels.insert(
+            "D1".into(),
+            ChannelState {
+                uuid: uuid.to_string(),
+                metadata_done: true,
+                archived_done: true,
+                private_visibility_done: true,
+                prepared_for_import: true,
+                members_added: HashSet::new(),
+            },
+        );
+        let mut d2 = channel();
+        d2.id = "D2".into();
+        d2.name = "dm-two".into();
+        d2.kind = SlackConversationKind::DirectMessage;
+
+        let error = ensure_dm_uuid_unclaimed(&state, &d2, uuid)
+            .expect_err("different Slack DM must not claim an existing Buzz DM");
+        assert!(error.to_string().contains("already imported for D1"));
+        assert!(error.to_string().contains("merge separate histories"));
+    }
+
+    #[test]
+    fn active_channel_unarchive_rejection_is_the_only_accepted_no_op() {
+        assert!(is_already_unarchived(&CliError::Other(
+            "relay rejected event: channel is not archived".into()
+        )));
+        assert!(is_already_unarchived(&CliError::Relay {
+            status: 409,
+            body: "channel is not archived".into(),
+        }));
+        assert!(!is_already_unarchived(&CliError::Other(
+            "channel does not exist".into()
+        )));
+    }
+
+    #[test]
     fn author_resolution() {
         let user_msg = msg(r#"{"type":"message","user":"U1","text":"x","ts":"1.0"}"#);
         assert_eq!(author_id(&user_msg).as_deref(), Some("U1"));
@@ -817,6 +857,19 @@ mod tests {
         names.insert("U1".to_string(), "alice".to_string());
         assert_eq!(author_display(&user_msg, &names), "alice");
         assert_eq!(author_display(&bot_msg, &names), "CI");
+    }
+
+    #[test]
+    fn imported_message_escapes_markdown_in_the_author_prefix() {
+        let message = msg(r#"{"type":"message","user":"U1","text":"hello","ts":"100.0"}"#);
+        let names = HashMap::from([("U1".to_string(), r"A*B_C\D[bot]`".to_string())]);
+        let event =
+            build_imported_message(&channel(), Uuid::new_v4(), &message, &names, "T1", None)
+                .expect("builder")
+                .sign_with_keys(&Keys::generate())
+                .expect("signs");
+
+        assert_eq!(event.content, r"**A\*B\_C\\D\[bot\]\`**: hello");
     }
 
     #[test]
