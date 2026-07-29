@@ -193,6 +193,34 @@ fn auth_tag_values(event: &serde_json::Value) -> Vec<&serde_json::Value> {
         .collect()
 }
 
+fn auth_conditions_apply(auth_tag: &serde_json::Value, event: &serde_json::Value) -> bool {
+    let Some(conditions) = auth_tag
+        .as_array()
+        .and_then(|values| values.get(2))
+        .and_then(|value| value.as_str())
+    else {
+        return false;
+    };
+    let Some(kind) = event.get("kind").and_then(|value| value.as_u64()) else {
+        return false;
+    };
+    let Some(created_at) = event.get("created_at").and_then(|value| value.as_u64()) else {
+        return false;
+    };
+
+    conditions.split('&').all(|clause| {
+        if let Some(value) = clause.strip_prefix("kind=") {
+            value.parse::<u64>() == Ok(kind)
+        } else if let Some(value) = clause.strip_prefix("created_at<") {
+            value.parse::<u64>().is_ok_and(|bound| created_at < bound)
+        } else if let Some(value) = clause.strip_prefix("created_at>") {
+            value.parse::<u64>().is_ok_and(|bound| created_at > bound)
+        } else {
+            clause.is_empty()
+        }
+    })
+}
+
 fn owner_verification(event: &serde_json::Value, expected_owner: &str) -> &'static str {
     let Some(agent_pubkey) = event
         .get("pubkey")
@@ -213,8 +241,9 @@ fn owner_verification(event: &serde_json::Value, expected_owner: &str) -> &'stat
         return "invalid_auth";
     };
     match buzz_sdk::nip_oa::verify_auth_tag(&auth_tag_json, &agent_pubkey) {
-        Ok(owner) if owner.to_hex() == expected_owner => "verified",
-        Ok(_) => "owner_mismatch",
+        Ok(owner) if owner.to_hex() != expected_owner => "owner_mismatch",
+        Ok(_) if !auth_conditions_apply(auth_tag, event) => "condition_mismatch",
+        Ok(_) => "verified",
         Err(_) => "invalid_auth",
     }
 }
@@ -550,6 +579,8 @@ mod tests {
     fn profile_event(agent_keys: &Keys, auth_tags: Vec<serde_json::Value>) -> serde_json::Value {
         json!({
             "pubkey": agent_keys.public_key().to_hex(),
+            "kind": 0,
+            "created_at": 100,
             "content": r#"{"display_name":"Renamed Honey"}"#,
             "tags": auth_tags,
         })
@@ -561,7 +592,7 @@ mod tests {
         let agent_keys = Keys::generate();
         let foreign_owner_keys = Keys::generate();
         let valid_tag: serde_json::Value = serde_json::from_str(
-            &buzz_sdk::nip_oa::compute_auth_tag(&owner_keys, &agent_keys.public_key(), "kind=9")
+            &buzz_sdk::nip_oa::compute_auth_tag(&owner_keys, &agent_keys.public_key(), "kind=0")
                 .unwrap(),
         )
         .unwrap();
@@ -621,12 +652,41 @@ mod tests {
     }
 
     #[test]
+    fn owner_verification_requires_conditions_to_apply_to_profile_event() {
+        let owner_keys = Keys::generate();
+        let agent_keys = Keys::generate();
+        let verification = |conditions: &str| {
+            let auth_tag: serde_json::Value = serde_json::from_str(
+                &buzz_sdk::nip_oa::compute_auth_tag(
+                    &owner_keys,
+                    &agent_keys.public_key(),
+                    conditions,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            owner_verification(
+                &profile_event(&agent_keys, vec![auth_tag]),
+                &owner_keys.public_key().to_hex(),
+            )
+        };
+
+        assert_eq!(verification("kind=9"), "condition_mismatch");
+        assert_eq!(verification("created_at<100"), "condition_mismatch");
+        assert_eq!(verification("created_at>100"), "condition_mismatch");
+        assert_eq!(
+            verification("kind=0&created_at>99&created_at<101"),
+            "verified"
+        );
+    }
+
+    #[test]
     fn owner_scoped_profiles_keep_drifted_and_missing_profiles_without_claiming_ownership() {
         let owner_keys = Keys::generate();
         let agent_keys = Keys::generate();
         let missing_keys = Keys::generate();
         let auth_tag: serde_json::Value = serde_json::from_str(
-            &buzz_sdk::nip_oa::compute_auth_tag(&owner_keys, &agent_keys.public_key(), "kind=9")
+            &buzz_sdk::nip_oa::compute_auth_tag(&owner_keys, &agent_keys.public_key(), "kind=0")
                 .unwrap(),
         )
         .unwrap();
