@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
+import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/send_message_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
@@ -90,6 +91,135 @@ void main() {
         ),
       ),
     );
+  });
+
+  test('plain DM messages p-tag every participant except the sender', () async {
+    final session = _PendingPublishRelaySession();
+    final senderKeys = nostr.Keys.generate();
+    final agentPubkey = nostr.Keys.generate().public;
+    final humanPubkey = nostr.Keys.generate().public;
+    final send = SendMessage(
+      signedEventRelay: SignedEventRelay(
+        session: session,
+        nsec: senderKeys.nsec,
+      ),
+      fetchMembers: (_) async => [
+        ChannelMember(
+          pubkey: senderKeys.public,
+          role: 'owner',
+          joinedAt: DateTime.utc(2026),
+        ),
+        ChannelMember(
+          pubkey: agentPubkey.toUpperCase(),
+          role: 'bot',
+          joinedAt: DateTime.utc(2026),
+        ),
+        ChannelMember(
+          pubkey: humanPubkey,
+          role: 'member',
+          joinedAt: DateTime.utc(2026),
+        ),
+      ],
+      readUserCache: () => const {},
+      addLocalMessage: (_, _) {},
+      completeLocalMessage: (_, _) {},
+      removeLocalMessage: (_, _) {},
+    );
+
+    final result = send(
+      channelId: _channelId,
+      content: 'hello',
+      isDirectMessage: true,
+    );
+    await session.published;
+
+    final pTags = session.event.tags
+        .where((tag) => tag.length >= 2 && tag[0] == 'p')
+        .map((tag) => tag[1])
+        .toList();
+    expect(pTags, [agentPubkey, humanPubkey]);
+
+    session.accept();
+    await result;
+  });
+
+  test('DM thread replies p-tag every participant', () async {
+    final session = _PendingPublishRelaySession();
+    final senderKeys = nostr.Keys.generate();
+    final recipientPubkey = nostr.Keys.generate().public;
+    final send = SendMessage(
+      signedEventRelay: SignedEventRelay(
+        session: session,
+        nsec: senderKeys.nsec,
+      ),
+      fetchMembers: (_) async => [
+        ChannelMember(
+          pubkey: senderKeys.public,
+          role: 'owner',
+          joinedAt: DateTime.utc(2026),
+        ),
+        ChannelMember(
+          pubkey: recipientPubkey,
+          role: 'bot',
+          joinedAt: DateTime.utc(2026),
+        ),
+      ],
+      readUserCache: () => const {},
+      addLocalMessage: (_, _) {},
+      completeLocalMessage: (_, _) {},
+      removeLocalMessage: (_, _) {},
+    );
+
+    final result = send(
+      channelId: _channelId,
+      content: 'thread reply',
+      parentEventId: 'a' * 64,
+      rootEventId: 'b' * 64,
+      isDirectMessage: true,
+    );
+    await session.published;
+
+    expect(session.event.tags.where((tag) => tag.firstOrNull == 'p').toList(), [
+      ['p', recipientPubkey],
+    ]);
+
+    session.accept();
+    await result;
+  });
+
+  test('stream messages preserve explicit-mention behavior', () async {
+    final session = _PendingPublishRelaySession();
+    final recipientPubkey = nostr.Keys.generate().public;
+    var fetchedMembers = false;
+    final send = SendMessage(
+      signedEventRelay: SignedEventRelay(
+        session: session,
+        nsec: nostr.Keys.generate().nsec,
+      ),
+      fetchMembers: (_) async {
+        fetchedMembers = true;
+        return const [];
+      },
+      readUserCache: () => const {},
+      addLocalMessage: (_, _) {},
+      completeLocalMessage: (_, _) {},
+      removeLocalMessage: (_, _) {},
+    );
+
+    final result = send(
+      channelId: _channelId,
+      content: 'hello agent',
+      mentionPubkeys: [recipientPubkey.toUpperCase(), recipientPubkey],
+    );
+    await session.published;
+
+    expect(fetchedMembers, isFalse);
+    expect(session.event.tags.where((tag) => tag.firstOrNull == 'p').toList(), [
+      ['p', recipientPubkey],
+    ]);
+
+    session.accept();
+    await result;
   });
 }
 

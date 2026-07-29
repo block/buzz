@@ -48,6 +48,7 @@ class SendMessage {
     String? parentEventId,
     String? rootEventId,
     List<String>? mentionPubkeys,
+    bool isDirectMessage = false,
     List<List<String>> mediaTags = const [],
   }) async {
     _ensureDeliveryValid();
@@ -55,15 +56,23 @@ class SendMessage {
     // channel members to avoid matching the wrong user.
     final resolvedMentions =
         mentionPubkeys ?? await _resolveMentions(content, channelId);
+    final recipients = [...resolvedMentions];
+    if (isDirectMessage) {
+      // A DM addresses every other participant even when its text contains no
+      // explicit @mention. Agent harnesses and human notification
+      // subscriptions both rely on these p-tags to wake reliably.
+      final members = await _fetchMembers(channelId);
+      recipients.addAll(members.map((member) => member.pubkey));
+    }
     final authorPubkey = _signedEventRelay.pubkey;
 
-    // Normalize mentions: lowercase, deduplicate, exclude self (matching
-    // the desktop's normalizeMentionPubkeys).
+    // Normalize recipients: lowercase, deduplicate, exclude self (matching
+    // the desktop's messageMentionPubkeys).
     final selfLower = authorPubkey?.toLowerCase();
     final seenMentions = <String>{?selfLower};
     final normalizedMentions = <String>[
-      for (final pk in resolvedMentions)
-        if (seenMentions.add(pk.toLowerCase())) pk,
+      for (final pk in recipients)
+        if (seenMentions.add(pk.toLowerCase())) pk.toLowerCase(),
     ];
 
     final tags = <List<String>>[

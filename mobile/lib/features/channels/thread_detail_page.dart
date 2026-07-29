@@ -330,9 +330,13 @@ class ThreadDetailPage extends HookConsumerWidget {
     // Channel names for message content rendering.
     final channelsAsync = ref.watch(channelsProvider);
     final channelNamesMap = <String, String>{};
+    var isDirectMessage = false;
     channelsAsync.whenData((channels) {
       for (final ch in channels) {
         channelNamesMap[ch.name.toLowerCase()] = ch.id;
+        if (ch.id == channelId) {
+          isDirectMessage = ch.isDm;
+        }
       }
     });
 
@@ -540,6 +544,7 @@ class ThreadDetailPage extends HookConsumerWidget {
                             mentionPubkeys: mentionPubkeys,
                             parentEventId: threadHead.id,
                             rootEventId: effectiveRootId,
+                            isDirectMessage: isDirectMessage,
                             mediaTags: mediaTags,
                           ),
                     ),
