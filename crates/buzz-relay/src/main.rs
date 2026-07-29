@@ -102,6 +102,7 @@ async fn main() -> anyhow::Result<()> {
     // spans under the correct service identity.
     let resource = telemetry::service_resource();
     let tracer_init = telemetry::try_init_tracer(resource.clone());
+    let otel_enabled = matches!(&tracer_init, telemetry::TracerInit::Enabled(_));
     let otel_layer = match &tracer_init {
         telemetry::TracerInit::Enabled(p) => {
             use opentelemetry::trace::TracerProvider as _;
@@ -109,12 +110,18 @@ async fn main() -> anyhow::Result<()> {
         }
         _ => None,
     };
+    let trace_context_lookup = telemetry::TraceContextLookup::default();
+    let trace_context_lookup_layer = otel_enabled.then(|| {
+        trace_context_lookup
+            .clone()
+            .with_filter(tracing_subscriber::filter::LevelFilter::OFF)
+    });
 
     tracing_subscriber::registry()
         .with(
             fmt::layer()
                 .json()
-                .flatten_event(true)
+                .event_format(trace_context_lookup.json_formatter(otel_enabled))
                 .with_filter(log_env_filter(std::env::var("RUST_LOG").ok().as_deref())),
         )
         .with(otel_layer.map(|layer| {
@@ -122,6 +129,7 @@ async fn main() -> anyhow::Result<()> {
                 std::env::var("BUZZ_OTEL_FILTER").ok().as_deref(),
             ))
         }))
+        .with(trace_context_lookup_layer)
         .init();
 
     // Log any exporter-build failure now that the subscriber is installed.
