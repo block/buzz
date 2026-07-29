@@ -425,9 +425,14 @@ pub fn resolve_step_templates(
     };
 
     match &step.action {
-        SendMessage { text, channel } => Ok(SendMessage {
+        SendMessage {
+            text,
+            channel,
+            thread_root,
+        } => Ok(SendMessage {
             text: t(text)?,
             channel: t_opt(channel)?,
+            thread_root: t_opt(thread_root)?,
         }),
         SendDm { to, text } => Ok(SendDm {
             to: t(to)?,
@@ -549,7 +554,11 @@ pub async fn dispatch_action(
     use ActionDef::*;
 
     match action {
-        SendMessage { text, channel } => {
+        SendMessage {
+            text,
+            channel,
+            thread_root,
+        } => {
             // Look up workflow metadata for destination validation and
             // attribution, scoped to the run's community — the same run/workflow
             // UUID may exist in another community, so a bare-id lookup could
@@ -589,7 +598,13 @@ pub async fn dispatch_action(
 
             let event_id = engine
                 .action_sink()?
-                .send_message(community_id, &channel_id, text, &owner_pubkey_hex)
+                .send_message(
+                    community_id,
+                    &channel_id,
+                    text,
+                    &owner_pubkey_hex,
+                    thread_root.as_deref(),
+                )
                 .await
                 .map_err(WorkflowError::from)?;
 
@@ -1281,6 +1296,33 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out, "root-event-id-hex/parent-event-id-hex");
+    }
+
+    #[test]
+    fn resolve_send_message_thread_root_template() {
+        let step = Step {
+            id: "reply".to_owned(),
+            name: None,
+            if_expr: None,
+            timeout_secs: None,
+            action: ActionDef::SendMessage {
+                text: "{{trigger.text}}".to_owned(),
+                channel: None,
+                thread_root: Some("{{trigger.root_message_id}}".to_owned()),
+            },
+        };
+
+        let resolved = resolve_step_templates(&step, &make_trigger(), &HashMap::new()).unwrap();
+
+        match resolved {
+            ActionDef::SendMessage {
+                text, thread_root, ..
+            } => {
+                assert_eq!(text, "P1 incident in production");
+                assert_eq!(thread_root.as_deref(), Some("root-event-id-hex"));
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
     }
 
     #[test]

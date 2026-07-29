@@ -97,6 +97,9 @@ pub enum ActionDef {
         /// Optional channel UUID override. Must be a valid UUID string.
         #[serde(default)]
         channel: Option<String>,
+        /// Optional top-level event ID. When set, post directly into that thread.
+        #[serde(default)]
+        thread_root: Option<String>,
     },
     /// Send a direct message to a user.
     SendDm {
@@ -296,6 +299,19 @@ mod tests {
 
         let reparsed: WorkflowDef = serde_json::from_str(&json).expect("json round-trip");
         assert_eq!(reparsed.name, def.name);
+    }
+
+    #[test]
+    fn parse_send_message_thread_root() {
+        let yaml = "name: Thread reply\ntrigger:\n  on: webhook\nsteps:\n  - id: reply\n    action: send_message\n    text: '{{trigger.message}}'\n    thread_root: '{{trigger.root_message_id}}'\n";
+        let (def, _) = parse_yaml(yaml).expect("parse failed");
+
+        match &def.steps[0].action {
+            ActionDef::SendMessage { thread_root, .. } => {
+                assert_eq!(thread_root.as_deref(), Some("{{trigger.root_message_id}}"));
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
     }
 
     #[test]

@@ -176,10 +176,12 @@ impl ActionSink for RelayActionSink {
         channel_id: &str,
         text: &str,
         author_pubkey: &str,
+        thread_root: Option<&str>,
     ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>> {
         let channel_id = channel_id.to_owned();
         let text = text.to_owned();
         let author_pubkey = author_pubkey.to_owned();
+        let thread_root = thread_root.map(str::to_owned);
 
         Box::pin(async move {
             // 0. Upgrade weak reference — fails only during shutdown.
@@ -235,6 +237,46 @@ impl ActionSink for RelayActionSink {
                 ));
             }
 
+            let thread_root = if let Some(root_hex) = thread_root {
+                let root_id = nostr::EventId::from_hex(&root_hex).map_err(|e| {
+                    ActionSinkError::InvalidInput(format!("invalid thread root event ID: {e}"))
+                })?;
+                let root_bytes = root_id.as_bytes().to_vec();
+                let root_event = state
+                    .db
+                    .get_event_by_id(tenant.community(), &root_bytes)
+                    .await
+                    .map_err(|e| ActionSinkError::Database(e.to_string()))?
+                    .ok_or_else(|| {
+                        ActionSinkError::InvalidInput(format!(
+                            "thread root event {root_hex} was not found"
+                        ))
+                    })?;
+                if root_event.channel_id != Some(channel_uuid) {
+                    return Err(ActionSinkError::InvalidInput(
+                        "thread root belongs to a different channel".into(),
+                    ));
+                }
+                let root_meta = state
+                    .db
+                    .get_thread_metadata_by_event(tenant.community(), &root_bytes)
+                    .await
+                    .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+                if root_meta.is_some_and(|meta| meta.parent_event_id.is_some()) {
+                    return Err(ActionSinkError::InvalidInput(
+                        "thread_root must identify a top-level message".into(),
+                    ));
+                }
+                let root_created = chrono::DateTime::from_timestamp(
+                    root_event.event.created_at.as_secs() as i64,
+                    0,
+                )
+                .unwrap_or_else(Utc::now);
+                Some((root_id.to_hex(), root_bytes, root_created))
+            } else {
+                None
+            };
+
             let author_pubkey = nostr::PublicKey::from_hex(&author_pubkey).map_err(|e| {
                 ActionSinkError::InvalidInput(format!("invalid author pubkey: {e}"))
             })?;
@@ -265,6 +307,12 @@ impl ActionSink for RelayActionSink {
                 Tag::parse(["buzz:workflow", "true"])
                     .map_err(|e| ActionSinkError::EventBuild(format!("workflow tag: {e}")))?,
             ];
+            if let Some((root_hex, _, _)) = &thread_root {
+                tags.push(
+                    Tag::parse(["e", root_hex, "", "reply"])
+                        .map_err(|e| ActionSinkError::EventBuild(format!("thread tag: {e}")))?,
+                );
+            }
 
             // Resolve `@Name` mentions to channel-member pubkeys and append a
             // `p` tag for each (skipping the author, already tagged above). A
@@ -321,16 +369,17 @@ impl ActionSink for RelayActionSink {
             );
 
             // 4. Persist event with thread metadata (matches REST handler path).
-            //    Workflow messages are always top-level: depth=0, no parent/root.
+            let parent_event_id = thread_root.as_ref().map(|(_, bytes, _)| bytes.as_slice());
+            let parent_created_at = thread_root.as_ref().map(|(_, _, created)| *created);
             let thread_meta = Some(buzz_db::event::ThreadMetadataParams {
                 event_id: &event_id_bytes,
                 event_created_at,
                 channel_id: channel_uuid,
-                parent_event_id: None,
-                parent_event_created_at: None,
-                root_event_id: None,
-                root_event_created_at: None,
-                depth: 0,
+                parent_event_id,
+                parent_event_created_at: parent_created_at,
+                root_event_id: parent_event_id,
+                root_event_created_at: parent_created_at,
+                depth: i32::from(parent_event_id.is_some()),
                 broadcast: false,
             });
 
@@ -676,6 +725,7 @@ mod integration_tests {
                 &channel.id.to_string(),
                 "heads up @Robby — please take a look",
                 &author_hex,
+                None,
             )
             .await
             .expect("send_message");

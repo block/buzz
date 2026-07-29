@@ -57,6 +57,7 @@ pub trait ActionSink: Send + Sync {
     /// - `text`: message body (must not be empty/whitespace-only)
     /// - `author_pubkey`: hex-encoded pubkey of the workflow owner (used for
     ///   the `p` attribution tag; the relay keypair signs the event)
+    /// - `thread_root`: optional top-level event ID to post a direct reply under
     ///
     /// Returns the event ID hex string on success.
     fn send_message(
@@ -65,5 +66,6 @@ pub trait ActionSink: Send + Sync {
         channel_id: &str,
         text: &str,
         author_pubkey: &str,
+        thread_root: Option<&str>,
     ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>>;
 }
