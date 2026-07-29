@@ -6,11 +6,11 @@ import { usePageTitle } from "@/features/dev-mode/lib/usePageTitle";
 
 /**
  * Clickable transcript link: opens in the system browser and renders
- * Slack-style — link icon plus the fetched page title when available,
- * otherwise the cleaned URL.
+ * Slack-style — link icon plus an explicit markdown label when one was
+ * written, else the fetched page title, else the cleaned URL.
  */
-export function DevLink({ href }: { href: string }) {
-  const title = usePageTitle(href);
+export function DevLink({ href, label }: { href: string; label?: string }) {
+  const title = usePageTitle(label ? null : href);
 
   return (
     <a
@@ -24,7 +24,9 @@ export function DevLink({ href }: { href: string }) {
       title={href}
     >
       <LinkIcon aria-hidden className="size-3.5 shrink-0 self-center" />
-      <span className="truncate">{title ?? linkDisplayText(href)}</span>
+      <span className="truncate">
+        {label ?? title ?? linkDisplayText(href)}
+      </span>
     </a>
   );
 }

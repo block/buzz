@@ -6,11 +6,19 @@ import { DevLink } from "@/features/dev-mode/ui/DevLink";
 /**
  * Conservative keyword highlighting for developer-mode transcripts. Message
  * text is tokenized into React spans — never HTML — so arbitrary content
- * stays inert. Highlighted tokens: `inline code`, URLs, @mentions, and
- * #channel references to known channels.
+ * stays inert. Highlighted tokens: `inline code`, markdown emphasis
+ * (**bold**, *italic*, _italic_, ~~strike~~), [label](url) links, bare URLs,
+ * @mentions, and #channel references to known channels.
+ *
+ * Emphasis delimiters are deliberately strict — no space just inside the
+ * markers, and `*`/`_`/`~` openers can't start mid-word — so snake_case and
+ * arithmetic like `2*3*4` stay plain prose.
  */
 
-const TOKEN_RE = /(`[^`\n]+`|https?:\/\/[^\s<>"')\]]+|@[\w./-]+|#[\w./-]+)/g;
+const TOKEN_RE =
+  /(`[^`\n]+`|\[[^\]\n]+\]\(https?:\/\/[^\s)]+\)|\*\*(?!\s)[^\n]+?(?<=\S)\*\*|(?<![\w*])\*(?![\s*])[^*\n]+?(?<=\S)\*|(?<![\w~])~~(?!\s)[^\n]+?(?<=\S)~~|(?<![\w_])_(?![\s_])[^_\n]+?(?<=\S)_|https?:\/\/[^\s<>"')\]]+|@[\w./-]+|#[\w./-]+)/g;
+
+const MD_LINK_RE = /^\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)$/;
 
 /** Same boundary the composer's mention-prefix check uses. */
 const MENTION_BOUNDARY_RE = /[\s,.;:!?)\]]/;
@@ -109,6 +117,37 @@ export function renderHighlightedContent(
         >
           {token.slice(1, -1)}
         </span>,
+      );
+      lastIndex = index + token.length;
+    } else if (token.startsWith("[")) {
+      const link = MD_LINK_RE.exec(token);
+      if (link) {
+        nodes.push(
+          <DevLink href={link[2]} key={`${index}-mdlink`} label={link[1]} />,
+        );
+      } else {
+        nodes.push(token);
+      }
+      lastIndex = index + token.length;
+    } else if (token.startsWith("**")) {
+      nodes.push(
+        <strong className="font-semibold" key={`${index}-bold`}>
+          {renderHighlightedContent(token.slice(2, -2), mentions, channelRefs)}
+        </strong>,
+      );
+      lastIndex = index + token.length;
+    } else if (token.startsWith("~~")) {
+      nodes.push(
+        <del className="line-through" key={`${index}-strike`}>
+          {renderHighlightedContent(token.slice(2, -2), mentions, channelRefs)}
+        </del>,
+      );
+      lastIndex = index + token.length;
+    } else if (token.startsWith("*") || token.startsWith("_")) {
+      nodes.push(
+        <em className="italic" key={`${index}-em`}>
+          {renderHighlightedContent(token.slice(1, -1), mentions, channelRefs)}
+        </em>,
       );
       lastIndex = index + token.length;
     } else if (token.startsWith("@")) {

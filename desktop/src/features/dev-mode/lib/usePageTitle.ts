@@ -28,15 +28,17 @@ function cacheTitle(href: string): Promise<string | null> {
 
 /**
  * Best-effort page title for a URL, or null while loading / when the page
- * can't be fetched (auth walls, non-HTML, timeouts).
+ * can't be fetched (auth walls, non-HTML, timeouts). A null href skips the
+ * fetch entirely (the caller already has display text).
  */
-export function usePageTitle(href: string): string | null {
-  const cached = titleCache.get(href);
+export function usePageTitle(href: string | null): string | null {
+  const cached = href === null ? undefined : titleCache.get(href);
   const [title, setTitle] = React.useState<string | null>(
     typeof cached === "string" ? cached : null,
   );
 
   React.useEffect(() => {
+    if (href === null) return;
     let cancelled = false;
     void cacheTitle(href).then((resolved) => {
       if (!cancelled && resolved) setTitle(resolved);

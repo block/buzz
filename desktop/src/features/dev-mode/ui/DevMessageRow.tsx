@@ -1,8 +1,8 @@
 import type { AuthorColorResolver } from "@/features/dev-mode/lib/authorColors";
 import { useChannelRefs } from "@/features/dev-mode/lib/channelRefs";
+import { renderDevMarkdown } from "@/features/dev-mode/lib/devMarkdown";
 import {
   matchLeadingMention,
-  renderHighlightedContent,
   type MentionStyle,
 } from "@/features/dev-mode/lib/highlightContent";
 import type { NameResolver } from "@/features/dev-mode/lib/useMemberNameResolver";
@@ -103,11 +103,11 @@ export function DevMessageRow({
       ) : null}
       <div
         className={cn(
-          "min-w-0 whitespace-pre-wrap break-words [overflow-wrap:anywhere]",
+          "min-w-0 space-y-1 break-words [overflow-wrap:anywhere]",
           event.pending && "text-muted-foreground",
         )}
       >
-        {renderHighlightedContent(bodyContent, mentionStyles, {
+        {renderDevMarkdown(bodyContent, mentionStyles, {
           channels,
           onOpen: openChannel,
         })}
