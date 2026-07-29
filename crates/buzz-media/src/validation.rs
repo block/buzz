@@ -601,8 +601,9 @@ fn validate_png_metadata_free(bytes: &[u8]) -> Result<(), MediaError> {
         if i + 12 > bytes.len() {
             return Err(MediaError::InvalidImage);
         }
-        let len = u32::from_be_bytes(bytes[i..i + 4].try_into().unwrap()) as usize;
-        let kind: [u8; 4] = bytes[i + 4..i + 8].try_into().unwrap();
+        // Safe: the bounds check above guarantees at least 12 bytes from `i`.
+        let len = u32::from_be_bytes(bytes[i..i + 4].try_into().expect("bounds checked")) as usize;
+        let kind: [u8; 4] = bytes[i + 4..i + 8].try_into().expect("bounds checked");
         let end = i
             .checked_add(12)
             .and_then(|v| v.checked_add(len))
@@ -670,8 +671,10 @@ fn validate_webp_metadata_free(bytes: &[u8]) -> Result<(), MediaError> {
             if i + 8 > payload.len() {
                 return Err(MediaError::InvalidImage);
             }
-            let kind: [u8; 4] = payload[i..i + 4].try_into().unwrap();
-            let len = u32::from_le_bytes(payload[i + 4..i + 8].try_into().unwrap()) as usize;
+            // Safe: the bounds check above guarantees at least 8 bytes from `i`.
+            let kind: [u8; 4] = payload[i..i + 4].try_into().expect("bounds checked");
+            let len = u32::from_le_bytes(payload[i + 4..i + 8].try_into().expect("bounds checked"))
+                as usize;
             let padded = len.checked_add(len & 1).ok_or(MediaError::InvalidImage)?;
             i = i
                 .checked_add(8)
@@ -694,7 +697,7 @@ fn validate_webp_metadata_free(bytes: &[u8]) -> Result<(), MediaError> {
     if bytes.len() < 12 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WEBP" {
         return Err(MediaError::InvalidImage);
     }
-    let declared = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
+    let declared = u32::from_le_bytes(bytes[4..8].try_into().expect("len >= 12 checked")) as usize;
     if declared.checked_add(8) != Some(bytes.len()) {
         return Err(MediaError::MetadataForbidden);
     }
@@ -703,8 +706,10 @@ fn validate_webp_metadata_free(bytes: &[u8]) -> Result<(), MediaError> {
         if i + 8 > bytes.len() {
             return Err(MediaError::InvalidImage);
         }
-        let kind: [u8; 4] = bytes[i..i + 4].try_into().unwrap();
-        let len = u32::from_le_bytes(bytes[i + 4..i + 8].try_into().unwrap()) as usize;
+        // Safe: the bounds check above guarantees at least 8 bytes from `i`.
+        let kind: [u8; 4] = bytes[i..i + 4].try_into().expect("bounds checked");
+        let len =
+            u32::from_le_bytes(bytes[i + 4..i + 8].try_into().expect("bounds checked")) as usize;
         let payload_start = i + 8;
         let padded = len.checked_add(len & 1).ok_or(MediaError::InvalidImage)?;
         i = payload_start
@@ -882,8 +887,9 @@ fn validate_mp4_metadata_free(path: &Path) -> Result<(), MediaError> {
             let mut h = [0u8; 8];
             file.read_exact(&mut h)
                 .map_err(|_| MediaError::InvalidVideo)?;
-            let compact = u32::from_be_bytes(h[..4].try_into().unwrap()) as u64;
-            let kind: [u8; 4] = h[4..8].try_into().unwrap();
+            // `h` is a fixed [u8; 8]; these slices are always exactly 4 bytes.
+            let compact = u32::from_be_bytes(h[..4].try_into().expect("fixed 8-byte array")) as u64;
+            let kind: [u8; 4] = h[4..8].try_into().expect("fixed 8-byte array");
             let (size, header) = if compact == 1 {
                 let mut ext = [0u8; 8];
                 file.read_exact(&mut ext)
