@@ -1,25 +1,32 @@
 //! Native desktop-notification workarounds.
 //!
-//! On Linux, `tauri-plugin-notification` posts a notification by calling
-//! `notify_rust`'s `show()` and immediately dropping the returned
-//! `NotificationHandle`. That handle owns the D-Bus connection used to post the
-//! notification, and on GNOME 46+ (Ubuntu 24.04+, Fedora 41+) tearing that
-//! connection down dismisses the notification the instant it appears. See
-//! tauri-apps/plugins-workspace#2566 and hoodie/notify-rust#218.
+//! `tauri-plugin-notification` posts a notification by calling `notify_rust`'s
+//! `show()` and then immediately dropping the returned `NotificationHandle`.
+//! That handle owns the D-Bus connection used to post the notification, and on
+//! GNOME 46+ (Ubuntu 24.04+, Fedora 41+) tearing that connection down dismisses
+//! the notification the instant it appears — so notifications never show.
+//! See tauri-apps/plugins-workspace#2566 and hoodie/notify-rust#218.
 //!
-//! We side-step the plugin on Linux by holding the connection open in a
-//! dedicated thread until the notification closes. On macOS, the plugin does
-//! not deliver desktop click actions or preserve their routing metadata, so
-//! targeted notifications use the native callback and forward their target to
-//! the frontend.
+//! We side-step the plugin on Linux by posting the notification from a
+//! dedicated thread that holds the connection open (via `wait_for_action`)
+//! until the notification is closed. The same wait surfaces the default click
+//! action, which we forward to the frontend so it can focus the window and
+//! route to the notification target.
+//!
+//! On macOS, the plugin does not deliver desktop click actions or preserve
+//! their routing metadata. Targeted notifications use the native response path
+//! and forward their target to the frontend.
 
+/// Emitted to the frontend when the user clicks a native notification. The
+/// payload is the opaque target object the frontend passed in.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 const ACTIVATE_EVENT: &str = "native-notification-activated";
 
-/// Show a desktop notification through the platform's native workaround.
+/// Show a desktop notification natively.
 ///
-/// Linux uses the connection-preserving path described above. macOS uses a
-/// native click callback so the frontend receives the notification target.
+/// On Linux this uses the connection-preserving path described above. On
+/// macOS, targeted notifications use the native response path. Other platforms
+/// continue to use the bundled notification plugin.
 #[tauri::command]
 pub fn show_native_notification(
     app: tauri::AppHandle,
@@ -176,8 +183,8 @@ mod macos {
             return;
         };
 
-        // mac-notification-sys 0.6.15 returns after click or OS dismissal and
-        // drops its internal pending entry. The guard then releases this slot.
+        // `send` clears the crate's pending entry after click or dismissal.
+        // Dropping the guard then releases this slot.
         let spawn_result = thread::Builder::new()
             .name("buzz-macos-notification".to_string())
             .spawn(move || {

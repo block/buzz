@@ -204,8 +204,10 @@ export async function listenForDesktopNotificationActions(
       pluginListener = null;
     }
 
-    // Clicks on native Linux and targeted macOS notifications come back via
-    // a backend event rather than the plugin's onAction.
+    // Clicks on Linux notifications come back via a backend event rather than
+    // the plugin's onAction (whose connection is torn down before it can fire).
+    // Targeted macOS clicks use the same event because the plugin drops the
+    // target metadata.
     try {
       nativeUnlisten = await listen<unknown>(
         NATIVE_NOTIFICATION_ACTIVATED_EVENT,
@@ -302,8 +304,11 @@ export async function sendDesktopNotification(
     return false;
   }
 
-  // Linux needs a long-lived D-Bus connection. Targeted macOS notifications
-  // need a native click callback because the plugin drops their routing data.
+  // On Linux the bundled notification plugin posts via a D-Bus connection that
+  // it drops immediately; GNOME 46+ then dismisses the notification before it
+  // is seen. Route through a backend command that keeps the connection alive.
+  // Targeted macOS notifications use the same command because the plugin drops
+  // their routing data when clicked.
   // See src-tauri/src/commands/notifications.rs.
   if (
     shouldUseNativeNotification(
