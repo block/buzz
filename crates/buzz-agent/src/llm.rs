@@ -1019,13 +1019,31 @@ fn is_responses_required_error(body: &str) -> bool {
         || b.contains("use the responses api")
 }
 
+/// Substrings identifying an OpenAI-shaped model in a Databricks v2 catalog
+/// name. Covers the `gpt` family plus Databricks' GPT-5 launch code names
+/// (`sol`, `luna`, `terra`). Matched case-insensitively.
+const DATABRICKS_V2_OPENAI_MARKERS: &[&str] = &["gpt", "sol", "luna", "terra"];
+
+/// Substrings identifying an Anthropic-shaped (Claude) model in a Databricks v2
+/// catalog name. Covers the `claude` prefix, the Claude family names (`opus`,
+/// `sonnet`, `haiku`), and the release code names (`mythos`, `fable`). Matched
+/// case-insensitively. Getting a Claude model onto this route is what lets it
+/// carry a `cache_control` breakpoint — an endpoint whose name matches none of
+/// these falls through to the MLflow (OpenAI-wire) path, where Anthropic prompt
+/// caching is structurally impossible, so the discount is silently lost.
+const DATABRICKS_V2_CLAUDE_MARKERS: &[&str] =
+    &["claude", "opus", "sonnet", "haiku", "mythos", "fable"];
+
 fn databricks_v2_route_for_model(model: &str) -> DatabricksV2Route {
-    // Databricks v2 catalog names currently identify OpenAI-shaped GPT-5
-    // models and Anthropic-shaped Claude models by these substrings.
+    // Databricks v2 catalog names identify the wire format only by these
+    // substrings — there is no explicit family field on the endpoint. OpenAI
+    // markers are checked first so a name carrying both resolves to the OpenAI
+    // wire (preserving the prior `gpt-5`-first behaviour).
     let lower = model.to_ascii_lowercase();
-    if lower.contains("gpt-5") || lower.contains("gpt5") {
+    let matches_any = |markers: &[&str]| markers.iter().any(|m| lower.contains(m));
+    if matches_any(DATABRICKS_V2_OPENAI_MARKERS) {
         DatabricksV2Route::OpenAiResponses
-    } else if lower.contains("claude") {
+    } else if matches_any(DATABRICKS_V2_CLAUDE_MARKERS) {
         DatabricksV2Route::AnthropicMessages
     } else {
         DatabricksV2Route::MlflowChatCompletions
@@ -2579,20 +2597,78 @@ mod tests {
 
     #[test]
     fn databricks_v2_routes_by_model_family() {
+        use DatabricksV2Route::{AnthropicMessages, MlflowChatCompletions, OpenAiResponses};
         for (model, route, path) in [
+            // OpenAI-shaped: the gpt family plus the GPT-5 code names.
             (
                 "databricks-gpt-5-5",
-                DatabricksV2Route::OpenAiResponses,
+                OpenAiResponses,
+                "/ai-gateway/openai/v1/responses",
+            ),
+            ("gpt-4o", OpenAiResponses, "/ai-gateway/openai/v1/responses"),
+            (
+                "databricks-gpt-5-6-luna",
+                OpenAiResponses,
                 "/ai-gateway/openai/v1/responses",
             ),
             (
+                "databricks-gpt-5-6-sol",
+                OpenAiResponses,
+                "/ai-gateway/openai/v1/responses",
+            ),
+            (
+                "databricks-terra",
+                OpenAiResponses,
+                "/ai-gateway/openai/v1/responses",
+            ),
+            // Anthropic-shaped: the claude prefix, the family names, and the
+            // release code names — each must reach the cache-capable route even
+            // when the endpoint name omits the literal "claude".
+            (
                 "databricks-claude-opus-4-7",
-                DatabricksV2Route::AnthropicMessages,
+                AnthropicMessages,
                 "/ai-gateway/anthropic/v1/messages",
             ),
             (
+                "goose-opus-5",
+                AnthropicMessages,
+                "/ai-gateway/anthropic/v1/messages",
+            ),
+            (
+                "databricks-sonnet-5",
+                AnthropicMessages,
+                "/ai-gateway/anthropic/v1/messages",
+            ),
+            (
+                "databricks-haiku-4-5",
+                AnthropicMessages,
+                "/ai-gateway/anthropic/v1/messages",
+            ),
+            (
+                "databricks-mythos-5",
+                AnthropicMessages,
+                "/ai-gateway/anthropic/v1/messages",
+            ),
+            (
+                "databricks-fable-5",
+                AnthropicMessages,
+                "/ai-gateway/anthropic/v1/messages",
+            ),
+            // Case-insensitive.
+            (
+                "Databricks-Claude-Opus-5",
+                AnthropicMessages,
+                "/ai-gateway/anthropic/v1/messages",
+            ),
+            // Unrecognised names still fall through to the MLflow chat route.
+            (
                 "custom-tool-model",
-                DatabricksV2Route::MlflowChatCompletions,
+                MlflowChatCompletions,
+                "/ai-gateway/mlflow/v1/chat/completions",
+            ),
+            (
+                "databricks-gemini-3-pro",
+                MlflowChatCompletions,
                 "/ai-gateway/mlflow/v1/chat/completions",
             ),
         ] {
