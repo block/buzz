@@ -106,6 +106,14 @@ with a TypeScript lookup table or an id comparison in a component.
    Edit. In Edit,
    selecting Custom command keeps its required command field beside the harness
    picker rather than hiding it in Advanced.
+10. **Catalog visibility is community-scoped relay state, never a global
+    definition field.** `AgentDefinition.shared` is only the active
+    relay+owner projection returned to the UI. Durable heads and pending
+    publications live in the scoped retention database, and explicit share
+    toggles await relay acceptance before the UI claims that an agent was
+    published or removed. A queued update must stay visibly queued, and the
+    catalog itself must render only relay-confirmed publications — never an
+    optimistic local persona.
 
 ## The tests that enforce this
 
@@ -124,6 +132,8 @@ with a TypeScript lookup table or an id comparison in a component.
   acceptance coverage for readiness, failure states, defaults, navigation,
   successful-empty vs failed optional-model discovery, and persistence races.
 - Rust: `runtime_metadata_env_vars` tests pin spawn-time key application.
+- Rust: persona sharing/retention tests pin relay+owner scoping, durable
+  enqueue errors, relay rejection/unavailability, and accepted publication.
 
 ## Keep this file true
 

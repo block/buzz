@@ -720,6 +720,12 @@ fn anthropic_body(
         }
     }
     flush(&mut messages, &mut pending);
+    // Rolling cache breakpoint: mark the tail of the (append-only) conversation
+    // so the next turn re-reads this whole prefix from cache instead of paying
+    // full input price for it. See `stamp_rolling_cache_breakpoint`.
+    if cfg.prompt_caching {
+        stamp_rolling_cache_breakpoint(&mut messages);
+    }
     let tools_json: Vec<Value> = tools
         .iter()
         .map(|t| {
@@ -727,8 +733,19 @@ fn anthropic_body(
         "name": t.name, "description": t.description, "input_schema": t.input_schema })
         })
         .collect();
+    // Static prefix breakpoint: caching the `system` block caches the whole
+    // prefix up to and including it — and the prefix order is
+    // `tools -> system -> messages`, so this single marker caches tools +
+    // system together. Requires the structured (array) form of `system`; skip
+    // it for an empty prompt since Anthropic rejects empty text blocks.
+    let system_value = if cfg.prompt_caching && !system_prompt.is_empty() {
+        json!([{ "type": "text", "text": system_prompt,
+            "cache_control": { "type": "ephemeral" } }])
+    } else {
+        json!(system_prompt)
+    };
     let mut body = json!({ "model": effective_model, "max_tokens": cfg.max_output_tokens,
-        "system": system_prompt, "messages": messages });
+        "system": system_value, "messages": messages });
     if let Some(e) = effort {
         let (thinking, output_config) =
             crate::config::anthropic_thinking_config(effective_model, e, cfg.max_output_tokens);
@@ -743,6 +760,41 @@ fn anthropic_body(
         body["tools"] = Value::Array(tools_json);
     }
     body
+}
+
+/// Attach ephemeral `cache_control` markers to the tail of the conversation so
+/// the next turn re-reads the whole prior prefix from cache (~0.1x input price)
+/// rather than re-billing it as fresh input. Anthropic caches the prefix up to
+/// and including each marked block.
+///
+/// We mark the last content block of the last *two* messages, not just the
+/// final one. Each Anthropic breakpoint walks back at most 20 content blocks to
+/// find a prior cache entry, and one agentic turn can append ~17 blocks at the
+/// default `max_parallel_tools` (1 assistant text + N `tool_use` +
+/// N `tool_result`). With only a tail marker, consecutive breakpoints sit a
+/// full turn apart, which slips past the 20-block window as soon as parallelism
+/// rises or a turn carries extra blocks — and the miss is silent. Marking the
+/// last two messages halves the gap (to ~N+1 blocks), keeping a live cache
+/// entry comfortably within reach. Uses 2 of the 4 allowed breakpoints; the
+/// static `system` marker is the third.
+///
+/// A no-op for messages whose content is empty or whose tail block is not a
+/// JSON object.
+fn stamp_rolling_cache_breakpoint(messages: &mut [Value]) {
+    let n = messages.len();
+    // The two most-recently-appended messages (the current turn's tool results
+    // and the assistant turn before them). `checked_sub` + `flatten` skips the
+    // second index when there is only one message.
+    for idx in [n.checked_sub(1), n.checked_sub(2)].into_iter().flatten() {
+        if let Some(block) = messages[idx]
+            .get_mut("content")
+            .and_then(Value::as_array_mut)
+            .and_then(|c| c.last_mut())
+            .and_then(Value::as_object_mut)
+        {
+            block.insert("cache_control".into(), json!({ "type": "ephemeral" }));
+        }
+    }
 }
 
 fn anthropic_tool_result_content(content: &[ToolResultContent]) -> Vec<Value> {
@@ -1079,11 +1131,18 @@ fn parse_responses(v: Value) -> Result<LlmResponse, AgentError> {
     };
     let input_tokens = sum_usage(&v, &["input_tokens"]);
     let output_tokens = sum_usage(&v, &["output_tokens"]);
+    // The Responses API nests the cache split under `input_tokens_details`.
+    let cached_input_tokens = usage_first(
+        &v,
+        &["cache_read_input_tokens"],
+        &[("input_tokens_details", "cached_tokens")],
+    );
     Ok(LlmResponse {
         text,
         tool_calls,
         stop,
         input_tokens,
+        cached_input_tokens,
         output_tokens,
         reasoning,
     })
@@ -1131,19 +1190,70 @@ fn anthropic_input_tokens(v: &Value) -> Option<u64> {
     )
 }
 
-/// Input-token total for OpenAI Chat Completions and Databricks responses.
-/// OpenAI's `prompt_tokens` is already inclusive. Databricks uses the same
-/// `prompt_tokens` wire field but ALSO reports Anthropic-style cache fields
-/// alongside it, so we sum them; the cache fields are simply absent (and
-/// contribute 0) for vanilla OpenAI.
+/// Input-token total for OpenAI Chat Completions and Databricks MLflow-route
+/// responses. `prompt_tokens` is already the inclusive input total on both, so
+/// it is read alone and never summed with the cache fields.
+///
+/// Vanilla OpenAI nests the cache split under `prompt_tokens_details` and
+/// `prompt_tokens` includes it. The Databricks MLflow route reports the split
+/// with the flat Anthropic spelling (`cache_read_input_tokens`) *alongside* an
+/// already-inclusive `prompt_tokens` — so summing double-counts. Verified on
+/// `databricks-glm-5-2` (2026-07-28): `prompt_tokens 13320`,
+/// `cache_read_input_tokens 13312`, `completion_tokens 30`, `total_tokens
+/// 13350`; since `prompt_tokens + completion_tokens == total_tokens`, the 13312
+/// cached tokens are contained in the 13320, not additional to it. Summing gave
+/// 26632 — nearly double — inflating both the context-budget gate and cost.
+///
+/// This differs from Anthropic's native route (see [`anthropic_input_tokens`]),
+/// where `input_tokens` genuinely EXCLUDES the cache fields and must be summed.
+/// The two never collide here: the router sends `claude*` models to the
+/// Anthropic route, so `parse_openai` only ever sees inclusive `prompt_tokens`.
 fn openai_chat_input_tokens(v: &Value) -> Option<u64> {
-    sum_usage(
+    sum_usage(v, &["prompt_tokens"])
+}
+
+/// First present value among `usage.<field>` and `usage.<nested>.<leaf>` pairs.
+///
+/// Cache counts are the one usage figure providers do not agree on the shape of.
+/// Anthropic puts `cache_read_input_tokens` flat on `usage`; OpenAI nests the
+/// same quantity one level down, under `prompt_tokens_details` on
+/// `/chat/completions` and `input_tokens_details` on `/responses`. [`sum_usage`]
+/// only reads flat keys, which is why the OpenAI split was invisible for so
+/// long: `prompt_tokens` is already inclusive, so the *total* was right and
+/// nothing looked broken while the discount silently went unclaimed.
+///
+/// Returns the first candidate that resolves, not a sum — these are alternative
+/// spellings of one number, so adding them would double-count on Databricks,
+/// which reports both shapes.
+fn usage_first(v: &Value, flat: &[&str], nested: &[(&str, &str)]) -> Option<u64> {
+    let usage = v.get("usage")?;
+    for f in flat {
+        if let Some(n) = usage.get(*f).and_then(Value::as_u64) {
+            return Some(n);
+        }
+    }
+    for (outer, leaf) in nested {
+        if let Some(n) = usage
+            .get(*outer)
+            .and_then(|o| o.get(*leaf))
+            .and_then(Value::as_u64)
+        {
+            return Some(n);
+        }
+    }
+    None
+}
+
+/// Cache-read tokens for an OpenAI Chat Completions response.
+///
+/// `prompt_tokens_details.cached_tokens` is where vanilla OpenAI reports it.
+/// The flat Anthropic spelling is checked first for Databricks, which routes
+/// Anthropic models through an OpenAI-shaped envelope.
+fn openai_chat_cached_tokens(v: &Value) -> Option<u64> {
+    usage_first(
         v,
-        &[
-            "prompt_tokens",
-            "cache_read_input_tokens",
-            "cache_creation_input_tokens",
-        ],
+        &["cache_read_input_tokens"],
+        &[("prompt_tokens_details", "cached_tokens")],
     )
 }
 
@@ -1184,11 +1294,15 @@ fn parse_anthropic(v: Value) -> Result<LlmResponse, AgentError> {
     }
     let input_tokens = anthropic_input_tokens(&v);
     let output_tokens = sum_usage(&v, &["output_tokens"]);
+    // Anthropic reports the cache split flat on `usage`. Note this is already
+    // part of `input_tokens` above, which sums it in deliberately.
+    let cached_input_tokens = usage_first(&v, &["cache_read_input_tokens"], &[]);
     Ok(LlmResponse {
         text,
         tool_calls,
         stop,
         input_tokens,
+        cached_input_tokens,
         output_tokens,
         reasoning,
     })
@@ -1235,11 +1349,13 @@ fn parse_openai(v: Value) -> Result<LlmResponse, AgentError> {
     }
     let input_tokens = openai_chat_input_tokens(&v);
     let output_tokens = sum_usage(&v, &["completion_tokens"]);
+    let cached_input_tokens = openai_chat_cached_tokens(&v);
     Ok(LlmResponse {
         text,
         tool_calls,
         stop,
         input_tokens,
+        cached_input_tokens,
         output_tokens,
         reasoning,
     })
@@ -1606,6 +1722,7 @@ mod tests {
             prefer_mesh_for_auto: false,
             hints_enabled: true,
             thinking_effort: None,
+            prompt_caching: true,
         }
     }
 
@@ -2604,6 +2721,100 @@ mod tests {
         assert_eq!(imgs[1]["image_url"]["url"], "data:image/png;base64,bbb");
     }
 
+    // ---- prompt caching (cache_control) body-shape tests ----
+
+    #[test]
+    fn anthropic_body_stamps_cache_control_when_enabled() {
+        let body = anthropic_body(
+            &cfg(Provider::DatabricksV2),
+            "sys",
+            &[
+                HistoryItem::User("hello".into()),
+                HistoryItem::Assistant {
+                    text: "hi".into(),
+                    tool_calls: vec![],
+                },
+                HistoryItem::User("more".into()),
+            ],
+            &[],
+            "databricks-claude-opus-5",
+            None,
+        );
+        // Static prefix: system promoted to a structured block carrying the marker.
+        assert_eq!(body["system"][0]["type"], "text");
+        assert_eq!(body["system"][0]["text"], "sys");
+        assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
+        // Leapfrog: the last block of the last TWO messages is marked; earlier
+        // ones are not. Three distinct user/assistant/user turns → messages[1]
+        // and messages[2] marked, messages[0] clean.
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 3);
+        let tail_block = |m: &Value| m["content"].as_array().unwrap().last().unwrap().clone();
+        assert_eq!(tail_block(&msgs[2])["cache_control"]["type"], "ephemeral");
+        assert_eq!(tail_block(&msgs[1])["cache_control"]["type"], "ephemeral");
+        assert!(
+            tail_block(&msgs[0]).get("cache_control").is_none(),
+            "only the last two messages carry a breakpoint"
+        );
+    }
+
+    #[test]
+    fn anthropic_body_single_message_stamps_only_one_breakpoint() {
+        // With a single message there is no second turn to leapfrog to; the
+        // checked_sub(2) index is skipped rather than panicking.
+        let body = anthropic_body(
+            &cfg(Provider::DatabricksV2),
+            "sys",
+            &[HistoryItem::User("hello".into())],
+            &[],
+            "databricks-claude-opus-5",
+            None,
+        );
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(
+            msgs[0]["content"].as_array().unwrap().last().unwrap()["cache_control"]["type"],
+            "ephemeral"
+        );
+    }
+
+    #[test]
+    fn anthropic_body_no_cache_control_when_disabled() {
+        let mut c = cfg(Provider::DatabricksV2);
+        c.prompt_caching = false;
+        let body = anthropic_body(
+            &c,
+            "sys",
+            &[HistoryItem::User("hello".into())],
+            &[],
+            "databricks-claude-opus-5",
+            None,
+        );
+        // system stays a bare string; no marker anywhere.
+        assert_eq!(body["system"], "sys");
+        let last_block = &body["messages"][0]["content"][0];
+        assert!(last_block.get("cache_control").is_none());
+    }
+
+    #[test]
+    fn anthropic_body_empty_system_stays_string_even_when_caching() {
+        // An empty system prompt must not become an empty text block —
+        // Anthropic rejects those. Caching is still applied to the tail.
+        let body = anthropic_body(
+            &cfg(Provider::DatabricksV2),
+            "",
+            &[HistoryItem::User("hello".into())],
+            &[],
+            "databricks-claude-opus-5",
+            None,
+        );
+        assert_eq!(body["system"], "");
+        assert_eq!(
+            body["messages"][0]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+    }
+
     // ---- ThinkingEffort body-shape tests ----
 
     #[test]
@@ -3493,20 +3704,34 @@ mod tests {
     }
 
     #[test]
-    fn parse_openai_databricks_sums_cache_fields() {
-        // Databricks uses the OpenAI chat wire format (prompt_tokens) but also
-        // reports Anthropic-style cache fields; the inclusive total sums them.
+    fn parse_openai_databricks_prompt_tokens_already_inclusive() {
+        // Databricks' MLflow route uses the OpenAI chat wire format
+        // (prompt_tokens) but ALSO reports the flat Anthropic-style
+        // cache_read_input_tokens. prompt_tokens is already inclusive of that
+        // slice, so the total is prompt_tokens alone — summing double-counts.
+        // Values are the live databricks-glm-5-2 response (2026-07-28), where
+        // prompt_tokens + completion_tokens == total_tokens proves inclusivity.
         let v = serde_json::json!({
             "choices": [{"finish_reason": "stop", "message": {"content": "hi"}}],
             "usage": {
-                "prompt_tokens": 200,
-                "completion_tokens": 4,
-                "total_tokens": 204,
-                "cache_read_input_tokens": 800,
-                "cache_creation_input_tokens": 0
+                "prompt_tokens": 13320,
+                "completion_tokens": 30,
+                "total_tokens": 13350,
+                "cache_read_input_tokens": 13312,
+                "prompt_tokens_details": {"cached_tokens": 13312}
             }
         });
-        assert_eq!(parse_openai(v).unwrap().input_tokens, Some(1000));
+        let r = parse_openai(v).unwrap();
+        assert_eq!(
+            r.input_tokens,
+            Some(13320),
+            "prompt_tokens is the inclusive total"
+        );
+        assert_eq!(r.cached_input_tokens, Some(13312));
+        assert!(
+            r.cached_input_tokens.unwrap() <= r.input_tokens.unwrap(),
+            "the cached slice is a subset of the input total"
+        );
     }
 
     #[test]
@@ -3515,6 +3740,115 @@ mod tests {
             "choices": [{"finish_reason": "stop", "message": {"content": "hi"}}]
         });
         assert_eq!(parse_openai(v).unwrap().input_tokens, None);
+    }
+
+    #[test]
+    fn parse_openai_reads_nested_cached_tokens() {
+        // The shape vanilla OpenAI actually returns, captured from a live
+        // /chat/completions probe on gpt-5.6-luna: `prompt_tokens` is already
+        // inclusive and the cache split is nested one level down. Reading only
+        // flat keys left the discount unclaimed while the total looked correct,
+        // which is why this went unnoticed.
+        let v = serde_json::json!({
+            "choices": [{"finish_reason": "stop", "message": {"content": "OK"}}],
+            "usage": {
+                "prompt_tokens": 5229,
+                "completion_tokens": 4,
+                "total_tokens": 5233,
+                "prompt_tokens_details": {"audio_tokens": 0, "cached_tokens": 5226,
+                                          "cache_write_tokens": 0}
+            }
+        });
+        let r = parse_openai(v).unwrap();
+        assert_eq!(r.input_tokens, Some(5229), "total must stay inclusive");
+        assert_eq!(r.cached_input_tokens, Some(5226));
+    }
+
+    #[test]
+    fn parse_openai_cache_write_round_reports_zero_cached() {
+        // First request of a cold prefix: the provider writes the cache and
+        // serves nothing from it. `Some(0)` not `None` — the split was reported,
+        // it was simply zero, and a consumer must be able to tell the two apart.
+        let v = serde_json::json!({
+            "choices": [{"finish_reason": "stop", "message": {"content": "OK"}}],
+            "usage": {
+                "prompt_tokens": 5229,
+                "completion_tokens": 4,
+                "prompt_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 5226}
+            }
+        });
+        assert_eq!(parse_openai(v).unwrap().cached_input_tokens, Some(0));
+    }
+
+    #[test]
+    fn parse_openai_no_cache_detail_is_none() {
+        let v = serde_json::json!({
+            "choices": [{"finish_reason": "stop", "message": {"content": "hi"}}],
+            "usage": {"prompt_tokens": 123, "completion_tokens": 4}
+        });
+        assert_eq!(parse_openai(v).unwrap().cached_input_tokens, None);
+    }
+
+    #[test]
+    fn parse_openai_prefers_flat_anthropic_spelling_over_nested() {
+        // Databricks reports both shapes for the same quantity. Take one, never
+        // the sum, or the cached slice double-counts. cache_read (800) is a
+        // subset of the inclusive prompt_tokens (1000), as it must be.
+        let v = serde_json::json!({
+            "choices": [{"finish_reason": "stop", "message": {"content": "hi"}}],
+            "usage": {
+                "prompt_tokens": 1000,
+                "completion_tokens": 4,
+                "cache_read_input_tokens": 800,
+                "prompt_tokens_details": {"cached_tokens": 800}
+            }
+        });
+        let r = parse_openai(v).unwrap();
+        assert_eq!(r.input_tokens, Some(1000));
+        assert_eq!(r.cached_input_tokens, Some(800));
+        assert!(r.cached_input_tokens.unwrap() <= r.input_tokens.unwrap());
+    }
+
+    #[test]
+    fn parse_anthropic_reports_cache_read_as_cached() {
+        // Anthropic's `input_tokens` EXCLUDES cached, so the inclusive total is
+        // a sum -- but the cached slice must still be a subset of that total.
+        let v = serde_json::json!({
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "hi"}],
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 7,
+                "cache_read_input_tokens": 900,
+                "cache_creation_input_tokens": 50
+            }
+        });
+        let r = parse_anthropic(v).unwrap();
+        assert_eq!(r.input_tokens, Some(1050));
+        assert_eq!(r.cached_input_tokens, Some(900));
+        assert!(r.cached_input_tokens.unwrap() <= r.input_tokens.unwrap());
+    }
+
+    #[test]
+    fn parse_responses_reads_nested_cached_tokens() {
+        // The Responses API nests the same figure under a different key than
+        // /chat/completions does.
+        let v = serde_json::json!({
+            "status": "completed",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "hi"}]
+            }],
+            "usage": {
+                "input_tokens": 4000,
+                "output_tokens": 9,
+                "input_tokens_details": {"cached_tokens": 3584}
+            }
+        });
+        let r = parse_responses(v).unwrap();
+        assert_eq!(r.input_tokens, Some(4000));
+        assert_eq!(r.cached_input_tokens, Some(3584));
     }
 
     #[test]

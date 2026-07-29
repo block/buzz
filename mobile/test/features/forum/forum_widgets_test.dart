@@ -61,6 +61,7 @@ Widget _buildPostCard({
   Map<String, UserProfile> users = const {},
   VoidCallback? onTap,
   void Function(String)? onDelete,
+  TextScaler textScaler = TextScaler.noScaling,
 }) {
   return ProviderScope(
     overrides: [
@@ -68,12 +69,17 @@ Widget _buildPostCard({
     ],
     child: MaterialApp(
       theme: AppTheme.light(),
-      home: Scaffold(
-        body: ForumPostCard(
-          post: post,
-          currentPubkey: currentPubkey,
-          onTap: onTap ?? () {},
-          onDelete: onDelete,
+      home: Builder(
+        builder: (context) => MediaQuery(
+          data: MediaQuery.of(context).copyWith(textScaler: textScaler),
+          child: Scaffold(
+            body: ForumPostCard(
+              post: post,
+              currentPubkey: currentPubkey,
+              onTap: onTap ?? () {},
+              onDelete: onDelete,
+            ),
+          ),
         ),
       ),
     ),
@@ -115,6 +121,7 @@ Widget _buildThreadPage({
   bool isMember = true,
   bool isArchived = false,
   Map<String, UserProfile> users = const {},
+  TextScaler textScaler = TextScaler.noScaling,
 }) {
   return ProviderScope(
     overrides: [
@@ -131,12 +138,17 @@ Widget _buildThreadPage({
     ],
     child: MaterialApp(
       theme: AppTheme.light(),
-      home: ForumThreadPage(
-        channelId: _channelId,
-        postEventId: postEventId,
-        currentPubkey: currentPubkey,
-        isMember: isMember,
-        isArchived: isArchived,
+      home: Builder(
+        builder: (context) => MediaQuery(
+          data: MediaQuery.of(context).copyWith(textScaler: textScaler),
+          child: ForumThreadPage(
+            channelId: _channelId,
+            postEventId: postEventId,
+            currentPubkey: currentPubkey,
+            isMember: isMember,
+            isArchived: isArchived,
+          ),
+        ),
       ),
     ),
   );
@@ -169,6 +181,63 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('abcdef12\u2026'), findsOneWidget);
+    });
+
+    testWidgets(
+      'constrains an older timestamp at large accessible text sizes',
+      (tester) async {
+        _setSurfaceSize(tester, const Size(240, 600));
+        addTearDown(() {
+          tester.view.resetPhysicalSize();
+          tester.view.resetDevicePixelRatio();
+        });
+
+        await tester.pumpWidget(
+          _buildPostCard(
+            post: _makePost(
+              createdAt:
+                  DateTime.utc(2025, 12, 31, 12).millisecondsSinceEpoch ~/ 1000,
+            ),
+            users: const {
+              'alice': UserProfile(
+                pubkey: 'alice',
+                displayName: 'A very long display name',
+              ),
+            },
+            textScaler: const TextScaler.linear(2),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final timestamp = tester.widget<Text>(find.text('12/31/2025'));
+        expect(timestamp.maxLines, 1);
+        expect(timestamp.overflow, TextOverflow.ellipsis);
+        expect(tester.takeException(), isNull);
+      },
+    );
+
+    testWidgets('gives the author unused timestamp width', (tester) async {
+      _setSurfaceSize(tester, const Size(320, 600));
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+      final createdAt = DateTime.now().millisecondsSinceEpoch ~/ 1000 - 120;
+      const displayName = 'A moderately long forum author name';
+
+      await tester.pumpWidget(
+        _buildPostCard(
+          post: _makePost(createdAt: createdAt),
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: displayName),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(tester.getSize(find.text(displayName)).width, greaterThan(150));
+      expect(find.text('2m ago'), findsOneWidget);
+      expect(tester.takeException(), isNull);
     });
 
     testWidgets('truncates long content', (tester) async {
@@ -493,6 +562,97 @@ void main() {
 
       expect(find.text('1 reply'), findsOneWidget);
       expect(find.text('Bob'), findsOneWidget);
+    });
+
+    testWidgets('constrains post and reply timestamps at large text sizes', (
+      tester,
+    ) async {
+      final oldTimestamp =
+          DateTime.utc(2025, 12, 31, 12).millisecondsSinceEpoch ~/ 1000;
+
+      await tester.pumpWidget(
+        _buildThreadPage(
+          threadResponse: ForumThreadResponse(
+            post: _makePost(createdAt: oldTimestamp),
+            replies: [
+              ThreadReply(
+                eventId: 'old-reply',
+                pubkey: 'bob',
+                content: 'An older reply',
+                kind: 45003,
+                createdAt: oldTimestamp,
+                channelId: _channelId,
+                tags: const [
+                  ['h', _channelId],
+                ],
+                depth: 1,
+              ),
+            ],
+            totalReplies: 1,
+          ),
+          users: const {
+            'alice': _aliceProfile,
+            'bob': UserProfile(
+              pubkey: 'bob',
+              displayName: 'A very long reply author name',
+            ),
+          },
+          textScaler: const TextScaler.linear(2),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final timestamps = tester.widgetList<Text>(find.text('12/31/2025'));
+      expect(timestamps, hasLength(2));
+      for (final timestamp in timestamps) {
+        expect(timestamp.maxLines, 1);
+        expect(timestamp.overflow, TextOverflow.ellipsis);
+      }
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('gives thread authors unused timestamp width', (tester) async {
+      _setSurfaceSize(tester, const Size(320, 800));
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+      final createdAt = DateTime.now().millisecondsSinceEpoch ~/ 1000 - 120;
+      const postAuthor = 'A moderately long original author';
+      const replyAuthor = 'A moderately long reply author';
+
+      await tester.pumpWidget(
+        _buildThreadPage(
+          threadResponse: ForumThreadResponse(
+            post: _makePost(createdAt: createdAt),
+            replies: [
+              ThreadReply(
+                eventId: 'reply',
+                pubkey: 'bob',
+                content: 'A reply',
+                kind: 45003,
+                createdAt: createdAt,
+                channelId: _channelId,
+                tags: const [
+                  ['h', _channelId],
+                ],
+                depth: 1,
+              ),
+            ],
+            totalReplies: 1,
+          ),
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: postAuthor),
+            'bob': UserProfile(pubkey: 'bob', displayName: replyAuthor),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(tester.getSize(find.text(postAuthor)).width, greaterThan(150));
+      expect(tester.getSize(find.text(replyAuthor)).width, greaterThan(140));
+      expect(find.text('2m ago'), findsNWidgets(2));
+      expect(tester.takeException(), isNull);
     });
 
     testWidgets('shows compose bar for members', (tester) async {

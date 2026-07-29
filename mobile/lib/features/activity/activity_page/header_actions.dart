@@ -28,64 +28,101 @@ class _FilterMenuButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return PopupMenuButton<InboxFilter>(
-      key: const ValueKey('activity-filter-menu'),
-      onSelected: onChanged,
-      itemBuilder: (context) => [
-        for (final entry in _filterLabels.entries)
-          PopupMenuItem(
-            value: entry.key,
-            child: Row(
-              children: [
-                SizedBox(
-                  width: Grid.sm,
-                  child: entry.key == filter
-                      ? Icon(
-                          LucideIcons.check,
-                          size: 16,
-                          color: context.colors.primary,
-                        )
-                      : null,
+    return Builder(
+      builder: (buttonContext) => InkWell(
+        key: const ValueKey('activity-filter-menu'),
+        borderRadius: BorderRadius.circular(Radii.md),
+        onTap: () async {
+          final selected = await _showActivityPopover<InboxFilter>(
+            context: buttonContext,
+            width: 240,
+            alignment: _ActivityPopoverAlignment.start,
+            offset: const Offset(0, Grid.half),
+            menuPadding: const EdgeInsets.symmetric(vertical: Grid.half),
+            color: context.colors.surface.withValues(alpha: 0.98),
+            elevation: 8,
+            shadowColor: context.colors.shadow.withValues(alpha: 0.18),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(Radii.card),
+              side: BorderSide(
+                color: context.colors.outlineVariant.withValues(alpha: 0.45),
+              ),
+            ),
+            surfaceKey: const ValueKey('activity-filter-popover'),
+            items: [
+              for (final entry in _filterLabels.entries)
+                PopupMenuItem(
+                  value: entry.key,
+                  height: Grid.xl,
+                  padding: const EdgeInsets.symmetric(horizontal: Grid.twelve),
+                  child: Row(
+                    children: [
+                      SizedBox(
+                        width: Grid.sm,
+                        child: entry.key == filter
+                            ? Icon(
+                                LucideIcons.check,
+                                size: 16,
+                                color: context.colors.primary,
+                              )
+                            : null,
+                      ),
+                      Expanded(
+                        child: Text(
+                          entry.value,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: context.textTheme.labelLarge?.copyWith(
+                            color: context.colors.onSurface,
+                          ),
+                        ),
+                      ),
+                      if (entry.key == InboxFilter.reminders &&
+                          dueReminderCount > 0)
+                        _CountBadge(count: dueReminderCount)
+                      else if (entry.key == InboxFilter.drafts &&
+                          draftCount > 0)
+                        _CountBadge(count: draftCount),
+                    ],
+                  ),
                 ),
-                Text(entry.value),
-                const Spacer(),
-                if (entry.key == InboxFilter.reminders && dueReminderCount > 0)
-                  _CountBadge(count: dueReminderCount)
-                else if (entry.key == InboxFilter.drafts && draftCount > 0)
-                  _CountBadge(count: draftCount),
+            ],
+          );
+          if (buttonContext.mounted && selected != null) onChanged(selected);
+        },
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: Grid.xl),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: Grid.xxs),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  _filterLabels[filter]!,
+                  style: context.textTheme.labelLarge?.copyWith(
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(width: Grid.quarter),
+                Icon(
+                  LucideIcons.chevronDown,
+                  size: 16,
+                  color: context.colors.onSurfaceVariant,
+                ),
+                if (dueReminderCount > 0 || draftCount > 0) ...[
+                  const SizedBox(width: Grid.quarter),
+                  Container(
+                    width: 6,
+                    height: 6,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: context.colors.primary,
+                    ),
+                  ),
+                ],
               ],
             ),
           ),
-      ],
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: Grid.xxs),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              _filterLabels[filter]!,
-              style: context.textTheme.labelLarge?.copyWith(
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-            const SizedBox(width: Grid.quarter),
-            Icon(
-              LucideIcons.chevronDown,
-              size: 16,
-              color: context.colors.onSurfaceVariant,
-            ),
-            if (dueReminderCount > 0 || draftCount > 0) ...[
-              const SizedBox(width: Grid.quarter),
-              Container(
-                width: 6,
-                height: 6,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: context.colors.primary,
-                ),
-              ),
-            ],
-          ],
         ),
       ),
     );
@@ -136,45 +173,64 @@ class _InboxOptionsButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return PopupMenuButton<String>(
-      key: const ValueKey('activity-options-menu'),
-      icon: const Icon(LucideIcons.ellipsis, size: 20),
-      onSelected: (value) {
-        if (value == 'unread-only') onUnreadOnlyChanged(!unreadOnly);
-        if (value == 'mark-all-read') onMarkAllRead();
-      },
-      itemBuilder: (context) => [
-        PopupMenuItem(
-          value: 'unread-only',
-          child: Row(
-            children: [
-              Expanded(child: Text(unreadOnly ? 'Show all' : 'Show unread')),
-              if (unreadOnly)
-                Icon(
-                  LucideIcons.check,
-                  size: 16,
-                  color: context.colors.primary,
+    return Builder(
+      builder: (buttonContext) => IconButton(
+        key: const ValueKey('activity-options-menu'),
+        tooltip: 'Activity options',
+        icon: const Icon(LucideIcons.ellipsis, size: 20),
+        onPressed: () async {
+          final selected = await _showActivityPopover<String>(
+            context: buttonContext,
+            width: 216,
+            alignment: _ActivityPopoverAlignment.end,
+            color: context.colors.surface,
+            elevation: 4,
+            shadowColor: context.colors.shadow.withValues(alpha: 0.18),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(Radii.md),
+              side: BorderSide(color: context.colors.outline),
+            ),
+            surfaceKey: const ValueKey('activity-options-popover'),
+            items: [
+              PopupMenuItem(
+                value: 'unread-only',
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(unreadOnly ? 'Show all' : 'Show unread'),
+                    ),
+                    if (unreadOnly)
+                      Icon(
+                        LucideIcons.check,
+                        size: 16,
+                        color: context.colors.primary,
+                      ),
+                  ],
                 ),
-            ],
-          ),
-        ),
-        PopupMenuItem(
-          value: 'mark-all-read',
-          enabled: unreadCount > 0,
-          child: Row(
-            children: [
-              const Expanded(child: Text('Mark all as read')),
-              if (unreadCount > 0)
-                Text(
-                  '$unreadCount',
-                  style: context.textTheme.labelSmall?.copyWith(
-                    color: context.colors.onSurfaceVariant,
-                  ),
+              ),
+              PopupMenuItem(
+                value: 'mark-all-read',
+                enabled: unreadCount > 0,
+                child: Row(
+                  children: [
+                    const Expanded(child: Text('Mark all as read')),
+                    if (unreadCount > 0)
+                      Text(
+                        '$unreadCount',
+                        style: context.textTheme.labelSmall?.copyWith(
+                          color: context.colors.onSurfaceVariant,
+                        ),
+                      ),
+                  ],
                 ),
+              ),
             ],
-          ),
-        ),
-      ],
+          );
+          if (!buttonContext.mounted || selected == null) return;
+          if (selected == 'unread-only') onUnreadOnlyChanged(!unreadOnly);
+          if (selected == 'mark-all-read') onMarkAllRead();
+        },
+      ),
     );
   }
 }

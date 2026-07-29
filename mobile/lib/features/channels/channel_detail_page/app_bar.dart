@@ -8,9 +8,9 @@ double _scaledTextHeight(BuildContext context, TextStyle style) {
 }
 
 double _dmAppBarTitleContentHeight(BuildContext context) {
-  final titleStyle = context.textTheme.titleSmall;
+  const titleStyle = channelTitleTextStyle;
   final presenceStyle = context.textTheme.bodySmall;
-  if (titleStyle == null || presenceStyle == null) {
+  if (presenceStyle == null) {
     return 30;
   }
   final textHeight =
@@ -240,7 +240,7 @@ class _DmAppBarTitle extends ConsumerWidget {
                       ),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: context.textTheme.titleSmall,
+                      style: channelTitleTextStyle,
                     ),
                   ),
                   if (channel.isEphemeral) ...[

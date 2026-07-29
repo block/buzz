@@ -85,6 +85,12 @@ pub(crate) struct UsageUpdatePayload {
     pub context_limit: u64,
     pub accumulated_input_tokens: u64,
     pub accumulated_output_tokens: u64,
+    /// The cache-served subset of `accumulated_input_tokens`. Optional — goose
+    /// does not send it, and buzz-agent only reports a non-zero value when the
+    /// provider returned a cache split, so `0` legitimately means either "no
+    /// cache hits" or "provider reported none".
+    #[serde(default)]
+    pub accumulated_cached_input_tokens: u64,
     pub accumulated_cost: Option<f64>,
     /// Effective model id for this turn. Optional — goose payloads that
     /// predate this field deserialize cleanly as `None`.
@@ -323,12 +329,44 @@ impl UsageTracker {
 mod tests {
     use super::*;
 
+    /// The camelCase key buzz-agent actually puts on the wire must land on the
+    /// field. A rename mismatch here would deserialize to the serde default of
+    /// 0, and every trial would price as if nothing had ever been cached — the
+    /// exact silent failure this field was added to remove.
+    #[test]
+    fn cached_input_tokens_deserialize_from_the_wire_key() {
+        let p: UsageUpdatePayload = serde_json::from_value(serde_json::json!({
+            "used": 15_247,
+            "contextLimit": 0,
+            "accumulatedInputTokens": 15_091,
+            "accumulatedOutputTokens": 156,
+            "accumulatedCachedInputTokens": 5_033,
+        }))
+        .expect("payload must deserialize");
+        assert_eq!(p.accumulated_cached_input_tokens, 5_033);
+        assert!(p.accumulated_cached_input_tokens <= p.accumulated_input_tokens);
+    }
+
+    /// goose does not send the field; its payloads must still deserialize.
+    #[test]
+    fn a_payload_without_the_cache_field_defaults_to_zero() {
+        let p: UsageUpdatePayload = serde_json::from_value(serde_json::json!({
+            "used": 500,
+            "contextLimit": 200_000,
+            "accumulatedInputTokens": 400,
+            "accumulatedOutputTokens": 100,
+        }))
+        .expect("payload must deserialize without the cache field");
+        assert_eq!(p.accumulated_cached_input_tokens, 0);
+    }
+
     fn payload(input: u64, output: u64, cost: Option<f64>) -> UsageUpdatePayload {
         UsageUpdatePayload {
             used: input + output,
             context_limit: 200_000,
             accumulated_input_tokens: input,
             accumulated_output_tokens: output,
+            accumulated_cached_input_tokens: 0,
             accumulated_cost: cost,
             model: None,
         }
@@ -340,6 +378,7 @@ mod tests {
             context_limit: 0,
             accumulated_input_tokens: input,
             accumulated_output_tokens: output,
+            accumulated_cached_input_tokens: 0,
             accumulated_cost: cost,
             model: None,
         }
@@ -836,6 +875,7 @@ mod tests {
             context_limit: 200_000,
             accumulated_input_tokens: input,
             accumulated_output_tokens: output,
+            accumulated_cached_input_tokens: 0,
             accumulated_cost: cost,
             model: model.map(str::to_string),
         }
