@@ -40,9 +40,21 @@ export async function importIdentity(
   );
 }
 
-/** Generate a 6-word passphrase (EFF short wordlist, OS entropy) in Rust. */
-export async function generateBackupPassphrase(): Promise<string> {
-  return invokeTauri<string>("generate_backup_passphrase");
+export type GeneratePassphraseOptions = {
+  /** Word count; Rust clamps to its allowed range (currently 4–10). */
+  words?: number;
+  /** Separator joined between words. Defaults to a space in Rust. */
+  separator?: string;
+};
+
+/** Generate a word passphrase (EFF short wordlist, OS entropy) in Rust. */
+export async function generateBackupPassphrase(
+  options?: GeneratePassphraseOptions,
+): Promise<string> {
+  return invokeTauri<string>("generate_backup_passphrase", {
+    words: options?.words,
+    separator: options?.separator,
+  });
 }
 
 /**

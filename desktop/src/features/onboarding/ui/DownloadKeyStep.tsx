@@ -78,7 +78,7 @@ export function DownloadKeyStep({
   // True once the encrypted payload exists — the create button (living in the
   // footer's primary slot) disappears with the form, so Next takes its place.
   const [hasCreated, setHasCreated] = React.useState(false);
-  // Footer slot the creator portals its "Encrypt and download" button into.
+  // Footer slot the creator portals its "Download" button into.
   const [createButtonSlot, setCreateButtonSlot] =
     React.useState<HTMLElement | null>(null);
 
@@ -96,9 +96,9 @@ export function DownloadKeyStep({
           Backup your key
         </h1>
         <p className="mt-5 text-sm leading-6 text-foreground/80">
-          Your key is encrypted with your password before it downloads. Keep the
-          file private — you need both it and the password to restore your
-          identity.
+          Keep the downloaded file private — you need both it and your password
+          to restore your identity. Save the password somewhere safe; Buzz
+          cannot reset it if lost.
         </p>
       </div>
 

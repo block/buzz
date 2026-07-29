@@ -198,28 +198,42 @@ fn cleanup_stale_backup_removes_only_on_identity_change() {
 // ── Passphrase generation ─────────────────────────────────────────────────────
 
 #[test]
-fn generated_passphrase_is_six_known_words() {
+fn generated_passphrase_respects_word_count_and_separator() {
     let words: std::collections::HashSet<&str> =
         WORDLIST.lines().filter(|l| !l.is_empty()).collect();
     assert_eq!(words.len(), 1296, "EFF short wordlist 2.0 has 1296 words");
 
-    for _ in 0..8 {
-        let phrase = generate_passphrase().unwrap();
-        let parts: Vec<&str> = phrase.split(' ').collect();
-        assert_eq!(parts.len(), 6);
-        for w in &parts {
-            assert!(words.contains(w), "unknown word {w:?}");
+    for (count, separator) in [(3, "-"), (4, "-"), (6, " "), (5, "."), (10, "")] {
+        let phrase = generate_passphrase(count, separator).unwrap();
+        if separator.is_empty() {
+            // No separator to split on; length gate below still applies.
+        } else {
+            let parts: Vec<&str> = phrase.split(separator).collect();
+            assert_eq!(parts.len(), count);
+            for w in &parts {
+                assert!(words.contains(w), "unknown word {w:?}");
+            }
         }
         assert!(phrase.chars().count() >= MIN_PASSPHRASE_LEN);
     }
 }
 
 #[test]
+fn generated_passphrase_clamps_word_count() {
+    // Below the floor: clamped up to MIN_PASSPHRASE_WORDS, never shorter.
+    let phrase = generate_passphrase(1, "-").unwrap();
+    assert_eq!(phrase.split('-').count(), MIN_PASSPHRASE_WORDS);
+    // Above the ceiling: clamped down to MAX_PASSPHRASE_WORDS.
+    let phrase = generate_passphrase(50, "-").unwrap();
+    assert_eq!(phrase.split('-').count(), MAX_PASSPHRASE_WORDS);
+}
+
+#[test]
 fn generated_passphrases_are_not_repeated() {
-    // 6 words × ~10.3 bits each — a collision across 8 draws would indicate a
+    // 3 words × ~10.3 bits each — a collision across 8 draws would indicate a
     // broken entropy source, not bad luck.
     let mut seen = std::collections::HashSet::new();
     for _ in 0..8 {
-        assert!(seen.insert(generate_passphrase().unwrap()));
+        assert!(seen.insert(generate_passphrase(DEFAULT_PASSPHRASE_WORDS, "-").unwrap()));
     }
 }

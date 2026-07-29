@@ -7167,6 +7167,21 @@ const MOCK_NCRYPTSEC =
 // The single passphrase the mocked backup commands accept/emit.
 const MOCK_BACKUP_PASSPHRASE = "mock horse battery staple lake orbit";
 
+// Fixed word pool for the mocked passphrase generator (deterministic —
+// specs assert word count and separator, never entropy).
+const MOCK_PASSPHRASE_WORDS = [
+  "mock",
+  "horse",
+  "battery",
+  "staple",
+  "lake",
+  "orbit",
+  "cedar",
+  "plume",
+  "raven",
+  "tundra",
+];
+
 // Per-page confirm_team_snapshot_import call counter for sequenced error testing.
 let teamSnapshotConfirmCallCount = 0;
 
@@ -9589,11 +9604,19 @@ export function maybeInstallE2eTauriMocks() {
         }
         return "nsec1mock000000000000000000000000000000000000000000000000000000";
       }
-      case "generate_backup_passphrase":
-        // Deterministic mock: production generates 6 EFF short-wordlist words
-        // from OS entropy in Rust. Specs only assert display/flow, never
-        // entropy quality.
-        return MOCK_BACKUP_PASSPHRASE;
+      case "generate_backup_passphrase": {
+        // Deterministic mock: production draws EFF short-wordlist words from
+        // OS entropy in Rust. The mock honors the generator popover's word
+        // count and separator (clamped like Rust) so specs can assert the
+        // controls, but never entropy quality.
+        const request = payload as {
+          words?: number;
+          separator?: string;
+        } | null;
+        const wordCount = Math.min(Math.max(request?.words ?? 3, 3), 10);
+        const separator = request?.separator ?? " ";
+        return MOCK_PASSPHRASE_WORDS.slice(0, wordCount).join(separator);
+      }
       case "create_ncryptsec_backup": {
         // Production encrypts the live key under the passphrase, persists
         // `identity.ncryptsec`, and returns the exact persisted blob. The

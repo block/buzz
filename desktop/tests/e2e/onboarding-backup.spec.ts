@@ -104,13 +104,38 @@ test("download happy path: generated password, encrypt, native save, Next", asyn
   await page.getByTestId("backup-option-download").click();
   await expect(page.getByTestId("onboarding-page-download")).toBeVisible();
 
-  // Default mode: generated password shown; the create button sits in the
-  // footer's primary slot until the encrypted payload exists.
-  await expect(page.getByTestId("backup-passphrase-generated")).toBeVisible();
+  // The password field starts empty; the create button sits in the footer's
+  // primary slot and stays disabled until a valid password exists.
+  const input = page.getByTestId("backup-passphrase-input");
+  await expect(input).toHaveValue("");
+  await expect(page.getByTestId("encrypted-backup-create")).toBeDisabled();
   await expect(page.getByTestId("onboarding-next")).toHaveCount(0);
+
+  // The inset refresh icon opens the generator popover and immediately
+  // fills the field (mock default: 3 words, spaces).
+  await page.getByTestId("backup-passphrase-generate").click();
+  await expect(input).toHaveValue("mock horse battery");
+
+  // Popover controls regenerate in place: word count (slider) and separator.
+  await page.getByTestId("backup-passphrase-words").focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(input).toHaveValue("mock horse battery staple");
+  await page
+    .getByTestId("backup-passphrase-separator")
+    .selectOption({ label: "Hyphens" });
+  await expect(input).toHaveValue("mock-horse-battery-staple");
+
+  // Clicking the inset icon again re-rolls without closing the popover.
+  await page.getByTestId("backup-passphrase-generate").click();
+  await expect(page.getByTestId("backup-passphrase-separator")).toBeVisible();
 
   await waitForAnimations(page);
   await page.screenshot({ path: `${SHOTS}/03-backup-download-passphrase.png` });
+
+  // Esc closes the popover; the generated password stays in the field.
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("backup-passphrase-separator")).toHaveCount(0);
+  await expect(input).toHaveValue("mock-horse-battery-staple");
 
   await page.getByTestId("encrypted-backup-create").click();
 
@@ -143,7 +168,7 @@ test("download step Back returns to the backup chooser", async ({ page }) => {
 
   await page.getByTestId("backup-option-download").click();
   await expect(page.getByTestId("onboarding-page-download")).toBeVisible();
-  await expect(page.getByTestId("backup-passphrase-generated")).toBeVisible();
+  await expect(page.getByTestId("backup-passphrase-input")).toBeVisible();
   // The chooser's footer CTA belongs to the previous step.
   await expect(page.getByTestId("backup-option-download")).toHaveCount(0);
 
@@ -153,27 +178,21 @@ test("download step Back returns to the backup chooser", async ({ page }) => {
   await expect(page.getByTestId("backup-option-download")).toBeVisible();
 });
 
-test("custom passphrase requires 12 characters and confirmation", async ({
-  page,
-}) => {
+test("typed password requires 12 characters", async ({ page }) => {
   await enterMachineBackup(page);
   await page.getByTestId("backup-option-download").click();
 
-  await page.getByTestId("backup-passphrase-choose-own").click();
   const create = page.getByTestId("encrypted-backup-create");
+  await expect(create).toBeDisabled(); // empty field
 
-  await page.getByTestId("backup-passphrase-custom").fill("short");
+  await page.getByTestId("backup-passphrase-input").fill("short");
   await expect(page.getByTestId("backup-passphrase-issue")).toBeVisible();
   await expect(create).toBeDisabled();
 
   await page
-    .getByTestId("backup-passphrase-custom")
+    .getByTestId("backup-passphrase-input")
     .fill("a much longer passphrase");
-  await expect(create).toBeDisabled(); // confirm still empty
-
-  await page
-    .getByTestId("backup-passphrase-confirm")
-    .fill("a much longer passphrase");
+  await expect(page.getByTestId("backup-passphrase-issue")).toHaveCount(0);
   await expect(create).toBeEnabled();
 });
 

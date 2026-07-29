@@ -188,11 +188,18 @@ pub fn get_nsec(state: State<'_, AppState>) -> Result<String, String> {
         .map_err(|error| format!("encode nsec: {error}"))
 }
 
-/// Generate a 6-word passphrase for a new encrypted backup (EFF short
-/// wordlist, OS entropy, ≈62 bits before the scrypt work factor).
+/// Generate a passphrase for a new encrypted backup (EFF short wordlist, OS
+/// entropy). `words` is clamped to the range allowed by `key_backup`;
+/// `separator` joins the words (defaults to a space).
 #[tauri::command]
-pub fn generate_backup_passphrase() -> Result<String, String> {
-    crate::key_backup::generate_passphrase()
+pub fn generate_backup_passphrase(
+    words: Option<u32>,
+    separator: Option<String>,
+) -> Result<String, String> {
+    crate::key_backup::generate_passphrase(
+        words.map_or(crate::key_backup::DEFAULT_PASSPHRASE_WORDS, |w| w as usize),
+        separator.as_deref().unwrap_or(" "),
+    )
 }
 
 /// Core of [`create_ncryptsec_backup`], factored so tests can drive it with a
