@@ -2,10 +2,13 @@ import * as React from "react";
 
 import { useAuthorColorResolver } from "@/features/dev-mode/lib/authorColors";
 import { cn } from "@/shared/lib/cn";
+import type { MentionRecord } from "@/features/dev-mode/lib/mentionRecords";
 import { useChannelRefAutocomplete } from "@/features/dev-mode/lib/useChannelRefAutocomplete";
 import { useComposerAutoGrow } from "@/features/dev-mode/lib/useComposerAutoGrow";
 import type { DevComposerMode } from "@/features/dev-mode/lib/useDevComposerModes";
+import { useMentionAutocomplete } from "@/features/dev-mode/lib/useMentionAutocomplete";
 import { DevChannelSuggestions } from "@/features/dev-mode/ui/DevChannelSuggestions";
+import { DevMentionSuggestions } from "@/features/dev-mode/ui/DevMentionSuggestions";
 import { DevComposerModeLine } from "@/features/dev-mode/ui/DevComposerModeLine";
 import { DevComposerResizeHandle } from "@/features/dev-mode/ui/DevComposerResizeHandle";
 
@@ -20,8 +23,13 @@ type DevPromptComposerProps = {
   active: boolean;
   /** Increment to pull focus back here (e.g. after the palette closes). */
   focusSignal: number;
+  /** Channel whose members rank first in `@` mention suggestions. */
+  channelId: string | null;
+  /** Excluded from mention suggestions. */
+  selfPubkey: string | null;
   onChange: (value: string) => void;
-  onSubmit: () => void;
+  /** Mentions are the `@Name`s still present in the submitted text. */
+  onSubmit: (mentions: MentionRecord[]) => void;
   /** Tab / Shift+Tab. */
   onCycleMode: (direction: 1 | -1) => void;
   /** ArrowUp / ArrowDown while the input is empty — channels or prompt cards. */
@@ -45,6 +53,8 @@ export function DevPromptComposer({
   busy,
   active,
   focusSignal,
+  channelId,
+  selfPubkey,
   onChange,
   onSubmit,
   onCycleMode,
@@ -60,6 +70,13 @@ export function DevPromptComposer({
     "buzz.devMode.composerHeight",
   );
   const autocomplete = useChannelRefAutocomplete({
+    value,
+    onChange,
+    textareaRef,
+  });
+  const mentionAutocomplete = useMentionAutocomplete({
+    channelId,
+    selfPubkey,
     value,
     onChange,
     textareaRef,
@@ -81,8 +98,11 @@ export function DevPromptComposer({
   }, [active, focusSignal]);
 
   const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    // Open `#channel` suggestions own Tab/Enter/arrows/Escape.
+    // Open `#channel` / `@user` suggestions own Tab/Enter/arrows/Escape.
     if (autocomplete.handleKeyDown(event)) {
+      return;
+    }
+    if (mentionAutocomplete.handleKeyDown(event)) {
       return;
     }
 
@@ -97,7 +117,7 @@ export function DevPromptComposer({
       // Empty-input Enter is also meaningful (opens the highlighted channel
       // or the selected card's side chat), so the shell decides; busy only
       // blocks actual sends there.
-      onSubmit();
+      onSubmit(mentionAutocomplete.extract(value));
       return;
     }
 
@@ -159,6 +179,12 @@ export function DevPromptComposer({
             selectedIndex={autocomplete.selectedIndex}
             suggestions={autocomplete.suggestions}
           />
+        ) : active && mentionAutocomplete.open ? (
+          <DevMentionSuggestions
+            onAccept={mentionAutocomplete.accept}
+            selectedIndex={mentionAutocomplete.selectedIndex}
+            suggestions={mentionAutocomplete.suggestions}
+          />
         ) : null}
         <span
           aria-hidden
@@ -177,13 +203,17 @@ export function DevPromptComposer({
           onChange={(event) => {
             onChange(event.target.value);
             autocomplete.syncCursor(event.target);
+            mentionAutocomplete.syncCursor(event.target);
           }}
           onFocus={() => onSwitchPane("main")}
           onKeyDown={handleKeyDown}
           onMouseDown={() => {
             if (!active) onReactivate?.();
           }}
-          onSelect={(event) => autocomplete.syncCursor(event.currentTarget)}
+          onSelect={(event) => {
+            autocomplete.syncCursor(event.currentTarget);
+            mentionAutocomplete.syncCursor(event.currentTarget);
+          }}
           placeholder={placeholder}
           readOnly={!active}
           rows={1}

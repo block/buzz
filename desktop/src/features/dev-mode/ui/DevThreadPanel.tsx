@@ -11,8 +11,10 @@ import {
   devComposerModeLabel,
   type DevComposerMode,
 } from "@/features/dev-mode/lib/useDevComposerModes";
+import type { MentionRecord } from "@/features/dev-mode/lib/mentionRecords";
 import { useChannelRefAutocomplete } from "@/features/dev-mode/lib/useChannelRefAutocomplete";
 import { useComposerAutoGrow } from "@/features/dev-mode/lib/useComposerAutoGrow";
+import { useMentionAutocomplete } from "@/features/dev-mode/lib/useMentionAutocomplete";
 import {
   useMemberAgentResolver,
   useMemberNameResolver,
@@ -20,6 +22,7 @@ import {
 } from "@/features/dev-mode/lib/useMemberNameResolver";
 import { usePinnedScroll } from "@/features/dev-mode/lib/usePinnedScroll";
 import { DevChannelSuggestions } from "@/features/dev-mode/ui/DevChannelSuggestions";
+import { DevMentionSuggestions } from "@/features/dev-mode/ui/DevMentionSuggestions";
 import { DevComposerModeLine } from "@/features/dev-mode/ui/DevComposerModeLine";
 import { DevComposerResizeHandle } from "@/features/dev-mode/ui/DevComposerResizeHandle";
 import { DevMessageRow } from "@/features/dev-mode/ui/DevMessageRow";
@@ -63,7 +66,8 @@ export function DevThreadPanel({
   onCycleMode: (direction: 1 | -1) => void;
   /** ArrowLeft / ArrowRight while the input is empty. */
   onSwitchPane: (pane: "main" | "thread") => void;
-  onSend: (prompt: string) => Promise<void>;
+  /** Mentions are the `@Name`s still present in the sent text. */
+  onSend: (prompt: string, mentions: MentionRecord[]) => Promise<void>;
   onClose: () => void;
 }) {
   const repliesQuery = useThreadReplies(channel, root?.id ?? null);
@@ -82,6 +86,13 @@ export function DevThreadPanel({
     "buzz.devMode.threadComposerHeight",
   );
   const autocomplete = useChannelRefAutocomplete({
+    value: input,
+    onChange: setInput,
+    textareaRef,
+  });
+  const mentionAutocomplete = useMentionAutocomplete({
+    channelId: channel.id,
+    selfPubkey: currentPubkey,
     value: input,
     onChange: setInput,
     textareaRef,
@@ -111,12 +122,13 @@ export function DevThreadPanel({
   const handleSubmit = () => {
     const prompt = input.trim();
     if (!prompt || busy) return;
+    const mentions = mentionAutocomplete.extract(prompt);
     setBusy(true);
     setError(null);
     setInput("");
     void (async () => {
       try {
-        await onSend(prompt);
+        await onSend(prompt, mentions);
       } catch (submitError) {
         setError(
           submitError instanceof Error
@@ -131,8 +143,11 @@ export function DevThreadPanel({
   };
 
   const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    // Open `#channel` suggestions own Tab/Enter/arrows/Escape.
+    // Open `#channel` / `@user` suggestions own Tab/Enter/arrows/Escape.
     if (autocomplete.handleKeyDown(event)) {
+      return;
+    }
+    if (mentionAutocomplete.handleKeyDown(event)) {
       return;
     }
 
@@ -253,6 +268,12 @@ export function DevThreadPanel({
               selectedIndex={autocomplete.selectedIndex}
               suggestions={autocomplete.suggestions}
             />
+          ) : active && mentionAutocomplete.open ? (
+            <DevMentionSuggestions
+              onAccept={mentionAutocomplete.accept}
+              selectedIndex={mentionAutocomplete.selectedIndex}
+              suggestions={mentionAutocomplete.suggestions}
+            />
           ) : null}
           <span
             aria-hidden
@@ -271,10 +292,14 @@ export function DevThreadPanel({
             onChange={(event) => {
               setInput(event.target.value);
               autocomplete.syncCursor(event.target);
+              mentionAutocomplete.syncCursor(event.target);
             }}
             onFocus={() => onSwitchPane("thread")}
             onKeyDown={handleKeyDown}
-            onSelect={(event) => autocomplete.syncCursor(event.currentTarget)}
+            onSelect={(event) => {
+              autocomplete.syncCursor(event.currentTarget);
+              mentionAutocomplete.syncCursor(event.currentTarget);
+            }}
             placeholder={
               root
                 ? mode.kind === "agent"

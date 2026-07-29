@@ -13,6 +13,7 @@ import { updateChannel } from "@/shared/api/tauriChannels";
 import type { Channel, Identity } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { generateChannelTitle } from "@/features/dev-mode/lib/channelNaming";
+import type { MentionRecord } from "@/features/dev-mode/lib/mentionRecords";
 import { uniqueChannelName } from "@/features/dev-mode/lib/sessionNaming";
 import type {
   DevAgentTarget,
@@ -155,6 +156,7 @@ export function useDevSessionActions(identity: Identity | undefined) {
       prompt: string,
       mode: DevComposerMode,
       parentEventId?: string,
+      mentions: MentionRecord[] = [],
     ) => {
       if (mode.kind === "agent") {
         const isMember = channel.memberPubkeys.some(
@@ -166,14 +168,47 @@ export function useDevSessionActions(identity: Identity | undefined) {
         }
       }
 
+      // Tagging someone pulls them into the channel (mirroring how the
+      // targeted agent is auto-attached); best-effort so a failed add never
+      // blocks the send — the p tag still goes out.
+      const memberPubkeys = new Set(
+        channel.memberPubkeys.map((pubkey) => normalizePubkey(pubkey)),
+      );
+      if (mode.kind === "agent") {
+        memberPubkeys.add(normalizePubkey(mode.target.pubkey));
+      }
+      const nonMembers = mentions.filter(
+        (mention) => !memberPubkeys.has(normalizePubkey(mention.pubkey)),
+      );
+      for (const role of ["member", "bot"] as const) {
+        const pubkeys = nonMembers
+          .filter((mention) => (role === "bot") === mention.isAgent)
+          .map((mention) => mention.pubkey);
+        if (pubkeys.length === 0) continue;
+        try {
+          await addChannelMembers({ channelId: channel.id, pubkeys, role });
+        } catch (addError) {
+          console.warn(
+            `dev-mode: failed to add mentioned ${role}s to ${channel.id}:`,
+            addError,
+          );
+        }
+      }
+
+      const mentionPubkeys = [
+        ...new Set([
+          ...(mode.kind === "agent" ? [mode.target.pubkey] : []),
+          ...mentions.map((mention) => mention.pubkey),
+        ]),
+      ];
+
       return await sendMessageMutation.mutateAsync({
         targetChannel: channel,
         content:
           mode.kind === "agent"
             ? withAgentMention(prompt, mode.target.name)
             : prompt,
-        mentionPubkeys:
-          mode.kind === "agent" ? [mode.target.pubkey] : undefined,
+        mentionPubkeys: mentionPubkeys.length > 0 ? mentionPubkeys : undefined,
         parentEventId: parentEventId ?? null,
       });
     },

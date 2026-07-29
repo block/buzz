@@ -12,6 +12,7 @@ import {
   usePinnedChannels,
 } from "@/features/dev-mode/lib/pinnedChannels";
 import { setDisplayStyle } from "@/features/dev-mode/lib/displayStylePreference";
+import type { MentionRecord } from "@/features/dev-mode/lib/mentionRecords";
 import { selectRootEvents } from "@/features/dev-mode/lib/transcriptRoots";
 import {
   devComposerModeLabel,
@@ -487,75 +488,90 @@ export function DevModeShell({
     setActivePane("thread");
   }, []);
 
-  const handleSubmit = React.useCallback(() => {
-    const prompt = input.trim();
-    if (!prompt) {
-      if (view === "navigator" && navigatorId) {
-        openChannel(navigatorId);
+  const handleSubmit = React.useCallback(
+    (mentions: MentionRecord[] = []) => {
+      const prompt = input.trim();
+      if (!prompt) {
+        if (view === "navigator" && navigatorId) {
+          openChannel(navigatorId);
+          return;
+        }
+        // Empty-input Enter opens the selected card's side chat.
+        if (view === "channel" && selectedRootId) {
+          handleOpenThread(selectedRootId);
+        }
         return;
       }
-      // Empty-input Enter opens the selected card's side chat.
-      if (view === "channel" && selectedRootId) {
-        handleOpenThread(selectedRootId);
-      }
-      return;
-    }
-    if (busy || !mode) return;
+      if (busy || !mode) return;
 
-    setBusy(true);
-    setError(null);
-    setInput("");
-    void (async () => {
-      try {
-        let channel = activeChannel;
-        if (!channel) {
-          channel = await createSessionChannel(prompt, mode);
-          setActiveSessionId(channel.id);
-          setNavigatorId(channel.id);
-          setView("channel");
+      setBusy(true);
+      setError(null);
+      setInput("");
+      void (async () => {
+        try {
+          let channel = activeChannel;
+          if (!channel) {
+            channel = await createSessionChannel(prompt, mode);
+            setActiveSessionId(channel.id);
+            setNavigatorId(channel.id);
+            setView("channel");
+          }
+          await sendToSession(channel, prompt, mode, undefined, mentions);
+          // The conversation moved to the new prompt at the bottom.
+          setSelectedRootId(null);
+        } catch (submitError) {
+          setError(
+            submitError instanceof Error
+              ? submitError.message
+              : "Failed to send prompt.",
+          );
+          // Restore the failed prompt unless the user already typed on.
+          setInput((current) => (current === "" ? prompt : current));
+        } finally {
+          setBusy(false);
         }
-        await sendToSession(channel, prompt, mode);
-        // The conversation moved to the new prompt at the bottom.
-        setSelectedRootId(null);
-      } catch (submitError) {
-        setError(
-          submitError instanceof Error
-            ? submitError.message
-            : "Failed to send prompt.",
-        );
-        // Restore the failed prompt unless the user already typed on.
-        setInput((current) => (current === "" ? prompt : current));
-      } finally {
-        setBusy(false);
-      }
-    })();
-  }, [
-    activeChannel,
-    busy,
-    createSessionChannel,
-    handleOpenThread,
-    input,
-    mode,
-    navigatorId,
-    openChannel,
-    selectedRootId,
-    sendToSession,
-    view,
-  ]);
+      })();
+    },
+    [
+      activeChannel,
+      busy,
+      createSessionChannel,
+      handleOpenThread,
+      input,
+      mode,
+      navigatorId,
+      openChannel,
+      selectedRootId,
+      sendToSession,
+      view,
+    ],
+  );
 
   const handleThreadSend = React.useCallback(
-    async (prompt: string) => {
+    async (prompt: string, mentions: MentionRecord[]) => {
       if (!activeChannel || !mode) {
         throw new Error("Thread is no longer available.");
       }
       if (selectedRoot) {
-        await sendToSession(activeChannel, prompt, mode, selectedRoot.id);
+        await sendToSession(
+          activeChannel,
+          prompt,
+          mode,
+          selectedRoot.id,
+          mentions,
+        );
         return;
       }
       // Draft side chat (⌘T): the first send posts a root message to the
       // channel exactly like the main composer, then the pane attaches to
       // that new thread.
-      const newRoot = await sendToSession(activeChannel, prompt, mode);
+      const newRoot = await sendToSession(
+        activeChannel,
+        prompt,
+        mode,
+        undefined,
+        mentions,
+      );
       setSelectedRootId(newRoot.id);
     },
     [activeChannel, mode, selectedRoot, sendToSession],
@@ -635,6 +651,7 @@ export function DevModeShell({
     <DevPromptComposer
       active={composerActive}
       busy={busy}
+      channelId={activeChannel?.id ?? null}
       focusSignal={focusSignal}
       hint={hint}
       mode={mode}
@@ -650,6 +667,7 @@ export function DevModeShell({
       onSubmit={handleSubmit}
       onSwitchPane={handleSwitchPane}
       placeholder={placeholder}
+      selfPubkey={identityQuery.data?.pubkey ?? null}
       value={input}
     />
   ) : null;
