@@ -558,7 +558,7 @@ pub fn render_dynamic_section(
             .to_string()
     } else {
         let mut table =
-            "## Active Agents\n\n| Name | Persona | How to address |\n|------|---------|----------------|"
+            "## Active Agents\n\n| Name | Persona | Instance pubkey | How to address |\n|------|---------|-----------------|----------------|"
                 .to_string();
         for agent in agents {
             let role = agent
@@ -569,7 +569,10 @@ pub fn render_dynamic_section(
                 .unwrap_or("—");
             let name = escape_md_cell(&agent.name);
             let role_escaped = escape_md_cell(role);
-            table.push_str(&format!("\n| {name} | {role_escaped} | @{name} |"));
+            let pubkey = escape_md_cell(&agent.pubkey);
+            table.push_str(&format!(
+                "\n| {name} | {role_escaped} | `{pubkey}` | @{name} |"
+            ));
         }
         table
     };

@@ -90,6 +90,64 @@ test("uses an agent's current name, never an internal profile ID", () => {
   assert.deepEqual(parseAgentManagementRequest(payload), payload);
 });
 
+test("uses instance pubkey when display name is ambiguous", () => {
+  const pubkey = "a".repeat(64);
+  const payload = {
+    type: AGENT_MANAGEMENT_REQUEST,
+    action: "update",
+    requestId: "request-pk",
+    request: {
+      channelId: CHANNEL_ID,
+      agentPubkey: pubkey,
+      systemPrompt: "Updated.",
+    },
+  };
+
+  assert.deepEqual(parseAgentManagementRequest(payload), {
+    ...payload,
+    request: { ...payload.request, agentName: "" },
+  });
+});
+
+test("findPersonaAgentInChannel: returns instance already in channel", async () => {
+  const { findPersonaAgentInChannel } = await import("./agentReuse.ts");
+  const PUB_A = "a".repeat(64);
+  const agent = {
+    id: "agent-1",
+    pubkey: PUB_A,
+    agentCommand: "goose",
+    status: "running",
+    personaId: "persona-1",
+    systemPrompt: null,
+    updatedAt: "2026-01-15T00:00:00Z",
+  };
+  const channelMembers = new Set([PUB_A]);
+  assert.equal(
+    findPersonaAgentInChannel([agent], "persona-1", channelMembers)?.id,
+    "agent-1",
+  );
+});
+
+test("findPersonaAgentInChannel: excludes agent not in channel", async () => {
+  const { findPersonaAgentInChannel } = await import("./agentReuse.ts");
+  const PUB_A = "a".repeat(64);
+  const PUB_B = "b".repeat(64);
+  const agent = {
+    id: "agent-1",
+    pubkey: PUB_A,
+    agentCommand: "goose",
+    status: "running",
+    personaId: "persona-1",
+    systemPrompt: null,
+    updatedAt: "2026-01-15T00:00:00Z",
+  };
+  const channelMembers = new Set([PUB_B]);
+  assert.equal(
+    findPersonaAgentInChannel([agent], "persona-1", channelMembers),
+    undefined,
+  );
+});
+
 test("allows agents to update only personal, editable profiles", () => {
   assert.equal(
     requestTargetsEditablePersona({ isBuiltIn: false, sourceTeam: null }),

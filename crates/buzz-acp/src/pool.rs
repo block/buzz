@@ -1845,6 +1845,9 @@ pub async fn run_prompt_task(
             );
         }
 
+        let agents_roster_refresh =
+            crate::agents_roster::poll_roster_update(std::path::Path::new(&ctx.cwd));
+
         crate::queue::format_prompt(
             b,
             &crate::queue::FormatPromptArgs {
@@ -1857,6 +1860,7 @@ pub async fn run_prompt_task(
                 system_prompt: ctx.system_prompt.as_deref(),
                 team_instructions: ctx.team_instructions.as_deref(),
                 agent_canvas: agent_canvas.as_deref(),
+                agents_roster_refresh: agents_roster_refresh.as_deref(),
             },
         )
     } else {
