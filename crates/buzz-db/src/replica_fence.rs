@@ -521,7 +521,11 @@ mod tests {
         assert!(fence.verified_through().is_none(), "must start closed");
         assert!(!fence.covers(Utc::now() - chrono::Duration::days(365)));
 
-        let ts = Utc::now();
+        // The fence stores unix micros, so a nanosecond-precision clock (as on
+        // Linux) does not round-trip through `advance`. Truncate to the
+        // fence's own precision before comparing.
+        let ts = DateTime::from_timestamp_micros(Utc::now().timestamp_micros())
+            .expect("now is representable in micros");
         fence.advance(ts);
         assert_eq!(fence.verified_through(), Some(ts));
         assert!(fence.covers(ts - chrono::Duration::seconds(1)));
