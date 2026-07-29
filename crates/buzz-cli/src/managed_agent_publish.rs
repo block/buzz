@@ -151,8 +151,8 @@ pub fn build_managed_agent_event(
         .map_err(|e| CliError::Usage(format!("invalid agent pubkey: {e}")))?;
     let body = serde_json::to_string(content)
         .map_err(|e| CliError::Other(format!("serialize 30177: {e}")))?;
-    let d = Tag::parse(["d", agent_pubkey_hex])
-        .map_err(|e| CliError::Other(format!("d-tag: {e}")))?;
+    let d =
+        Tag::parse(["d", agent_pubkey_hex]).map_err(|e| CliError::Other(format!("d-tag: {e}")))?;
     Ok(EventBuilder::new(Kind::Custom(KIND_MANAGED_AGENT as u16), body).tags([d]))
 }
 
