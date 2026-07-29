@@ -25,11 +25,11 @@ fn config_only_snapshot_bytes(runtime: &str) -> Vec<u8> {
         "version": 1,
         "definition": {
             "name": "Hermes helper",
-            "runtime": runtime,
-            "respondToAllowlist": []
+            "systemPrompt": "Be helpful.",
+            "runtime": runtime
         },
         "profile": { "displayName": "Hermes helper" },
-        "memory": { "level": "none", "entries": [] }
+        "memory": { "level": "none" }
     }))
     .unwrap()
 }
@@ -118,6 +118,56 @@ fn secure_handoff_read_rejects_non_regular_permissive_oversize_and_invalid_files
     std::fs::remove_file(&path).unwrap();
 
     stage_handoff(dir.path(), br#"{"not":"a snapshot"}"#, 0o600);
+    assert!(read_agent_snapshot_handoff_from_dir(dir.path(), HANDOFF_ID).is_err());
+    assert!(
+        path.exists(),
+        "rejected staged file must remain for diagnosis"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn secure_handoff_read_rejects_fields_outside_the_coagent_contract() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(format!("{HANDOFF_ID}.agent.json"));
+    for (section, field, value) in [
+        ("definition", "respondTo", serde_json::json!("anyone")),
+        ("definition", "respondToAllowlist", serde_json::json!([])),
+        ("definition", "model", serde_json::json!("remote-model")),
+        (
+            "profile",
+            "avatarUrl",
+            serde_json::json!("https://example.test/a.png"),
+        ),
+        ("memory", "entries", serde_json::json!([])),
+    ] {
+        let mut snapshot: serde_json::Value =
+            serde_json::from_slice(&config_only_snapshot_bytes("hermes")).unwrap();
+        snapshot[section][field] = value;
+        stage_handoff(dir.path(), &serde_json::to_vec(&snapshot).unwrap(), 0o600);
+        assert!(
+            read_agent_snapshot_handoff_from_dir(dir.path(), HANDOFF_ID).is_err(),
+            "accepted forbidden {section}.{field}"
+        );
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    let mut snapshot: serde_json::Value =
+        serde_json::from_slice(&config_only_snapshot_bytes("hermes")).unwrap();
+    snapshot["credentialRef"] = serde_json::json!("opaque-but-forbidden");
+    stage_handoff(dir.path(), &serde_json::to_vec(&snapshot).unwrap(), 0o600);
+    assert!(read_agent_snapshot_handoff_from_dir(dir.path(), HANDOFF_ID).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn secure_handoff_read_requires_the_hermes_runtime() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = stage_handoff(
+        dir.path(),
+        &config_only_snapshot_bytes("buzz-agent"),
+        0o600,
+    );
     assert!(read_agent_snapshot_handoff_from_dir(dir.path(), HANDOFF_ID).is_err());
     assert!(
         path.exists(),

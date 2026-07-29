@@ -160,6 +160,44 @@ fn validate_agent_snapshot_handoff_directory_metadata(
     Ok(())
 }
 
+fn validate_agent_snapshot_handoff_shape(bytes: &[u8]) -> Result<(), String> {
+    fn require_only_keys(
+        value: &serde_json::Value,
+        allowed: &[&str],
+        section: &str,
+    ) -> Result<(), String> {
+        let object = value
+            .as_object()
+            .ok_or_else(|| format!("handoff {section} must be a JSON object"))?;
+        if let Some(key) = object.keys().find(|key| !allowed.contains(&key.as_str())) {
+            return Err(format!("handoff {section} contains forbidden field {key}"));
+        }
+        Ok(())
+    }
+
+    let value: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|error| format!("invalid agent snapshot handoff JSON: {error}"))?;
+    require_only_keys(
+        &value,
+        &["format", "version", "definition", "profile", "memory"],
+        "root",
+    )?;
+    let root = value
+        .as_object()
+        .ok_or_else(|| "handoff root must be a JSON object".to_string())?;
+    for (section, allowed) in [
+        ("definition", &["name", "systemPrompt", "runtime"][..]),
+        ("profile", &["displayName"][..]),
+        ("memory", &["level"][..]),
+    ] {
+        let child = root
+            .get(section)
+            .ok_or_else(|| format!("handoff is missing {section}"))?;
+        require_only_keys(child, allowed, section)?;
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 fn read_agent_snapshot_handoff_from_dir(dir: &Path, handoff_id: &str) -> Result<Vec<u8>, String> {
     let parsed =
@@ -197,8 +235,12 @@ fn read_agent_snapshot_handoff_from_dir(dir: &Path, handoff_id: &str) -> Result<
         return Err("handoff exceeds the agent JSON snapshot size limit".to_string());
     }
 
+    validate_agent_snapshot_handoff_shape(&bytes)?;
     let snapshot = decode_snapshot_from_bytes(&bytes)
         .map_err(|error| format!("invalid agent snapshot handoff: {error}"))?;
+    if snapshot.definition.runtime.as_deref() != Some("hermes") {
+        return Err("agent snapshot handoff runtime must be hermes".to_string());
+    }
     if snapshot.memory.level != MemoryLevel::None || !snapshot.memory.entries.is_empty() {
         return Err("agent snapshot handoff must be config-only".to_string());
     }
