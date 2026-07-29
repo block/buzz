@@ -39,11 +39,12 @@ export function NonMemberMentionDialog({
       <AlertDialogContent>
         <AlertDialogHeader>
           <AlertDialogTitle>
-            Mention people outside this channel?
+            Mention someone outside this channel?
           </AlertDialogTitle>
           <AlertDialogDescription>
             {names.join(", ")} {names.length === 1 ? "is" : "are"} not in this
-            channel. Invite them to the channel, or send without inviting them.
+            channel. Invite them (this re-adds previously removed members), or
+            send without inviting them.
           </AlertDialogDescription>
         </AlertDialogHeader>
         {error ? (
